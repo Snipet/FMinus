@@ -1,0 +1,30 @@
+# FMinus's C++ style: Allman braces, 4-space indent, indented namespaces, 120 columns.
+BasedOnStyle: LLVM
+Language: Cpp
+Standard: Latest
+ColumnLimit: 120
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+BreakBeforeBraces: Allman
+NamespaceIndentation: All
+FixNamespaceComments: true
+AccessModifierOffset: -4
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLambdasOnASingleLine: Inline
+AllowShortLoopsOnASingleLine: false
+AlwaysBreakTemplateDeclarations: Yes
+BreakConstructorInitializers: BeforeComma
+PointerAlignment: Left
+ReferenceAlignment: Left
+SortIncludes: CaseInsensitive
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: '^"'                     # this project's headers
+    Priority: 1
+  - Regex: '^<(catch2|CLI|llvm|llvm-c)/' # dependencies
+    Priority: 2
+  - Regex: '^<'                     # the standard library
+    Priority: 3
+SpacesBeforeTrailingComments: 3

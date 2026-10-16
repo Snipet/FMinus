@@ -1,0 +1,4 @@
+# lit, FileCheck and `not` are wired: a match passes, a mismatch fails.
+# RUN: echo "fminus lit" | FileCheck %s
+# RUN: echo "something else" | not FileCheck %s
+# CHECK: fminus lit

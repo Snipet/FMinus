@@ -1,0 +1,18 @@
+# build trees (CMakePresets.json: build-<preset>) and the dependency cache (cmake/FMinusOptions.cmake)
+/build*/
+/.deps/
+# local CMake presets
+/CMakeUserPresets.json
+# clangd's index; compile_commands.json links
+/.cache/
+/compile_commands.json
+# Python
+__pycache__/
+*.pyc
+# macOS / editors
+.DS_Store
+.vscode/
+.idea/
+*.swp
+# local Claude settings
+.claude/settings.local.json

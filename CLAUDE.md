@@ -1,0 +1,18 @@
+# FMinus: notes for Claude sessions
+
+FMinus is the user's own research project: a JIT compiler for audio DSP (Flex + Bison front end, LLVM IR, ORC
+LLJIT, compiled on the user's machine). **The user writes the compiler.** Help when asked: explain, review, debug, fix
+the build or the toolchain. Do not write or rewrite code under `src/`, `include/` or `tools/fminus/` unless the user
+asks for that specific change, and ask before restructuring anything.
+
+- Build: `cmake --workflow --preset dev` (README.md has every preset). Build trees are `build-<preset>/`; the
+  dependency cache is `.deps/` (or `FMINUS_DEPS_DIR`). A first configure builds LLVM (10–30 min): say so before
+  starting one, and never delete `.deps/` without asking.
+- Dependencies come only through FetchContent, pinned in `cmake/FMinusPins.cmake` (version, URL, SHA-256). Keep it
+  that way; a new dependency gets a pin line and its own cmake/FMinus*.cmake.
+- Adding a source, grammar, tool or test edits no CMake (globs; see README.md "Layout").
+- `fminus_target_defaults()` gives every FMinus target C++23, the warnings (`-Werror` unless `FMINUS_WERROR=OFF`) and
+  the sanitizers. Dependencies keep their own flags.
+- The smoke tests (`tests/smoke/`, `tests/lit/smoke/`) prove the toolchain. Keep them passing until the user retires
+  them.
+- Commit, push or tag only when the user asks.

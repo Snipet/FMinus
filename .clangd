@@ -1,0 +1,3 @@
+# clangd reads the dev build's compile database (configure the dev preset once: cmake --preset dev).
+CompileFlags:
+  CompilationDatabase: build-dev

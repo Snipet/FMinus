@@ -1,0 +1,6 @@
+# FMinus's tools run under lit: fminus-hostinfo names what the JIT targets on this machine.
+# RUN: fminus-hostinfo | FileCheck %s
+# CHECK: fminus {{[0-9]+\.[0-9]+\.[0-9]+}} (LLVM {{[0-9]+\.[0-9]+\.[0-9]+}}
+# CHECK: triple: {{(aarch64|arm64|x86_64)}}-
+# CHECK: cpu: {{.+}}
+# CHECK: data layout: e-
