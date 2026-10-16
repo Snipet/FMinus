@@ -1,0 +1,174 @@
+// tools/fminus/main.cpp: the FMinus compiler driver. FMinus v0 source goes to its syntax tree, LLVM IR, assembly or an
+// object file, or is JIT-compiled and called:
+//     fminus gain.fm                        the optimised IR (-O2) on stdout
+//     fminus gain.fm -O0                    the IR as the code generator wrote it
+//     fminus gain.fm --emit ast             the syntax tree
+//     fminus gain.fm --emit asm -o -        this machine's assembly (--emit obj: an object file)
+//     fminus gain.fm --run gain 0.5 2       JIT-compiles the program, calls gain(0.5, 2) and prints the result
+// For an executable, emit the IR and use fminus-build (the program needs a C main for that).
+#include "frontend/Frontend.h"
+#include "ir/CodeGen.h"
+#include "jit/Jit.h"
+#include "support/Aot.h"
+#include "support/HostTarget.h"
+
+#include <CLI/CLI.hpp>
+
+#include <llvm/IR/LLVMContext.h>
+#include <llvm/IR/Module.h>
+#include <llvm/Support/Error.h>
+#include <llvm/Support/FileSystem.h>
+#include <llvm/Support/InitLLVM.h>
+#include <llvm/Support/MemoryBuffer.h>
+#include <llvm/Support/raw_ostream.h>
+#include <llvm/Target/TargetMachine.h>
+
+#include <array>
+#include <format>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace
+{
+    constexpr std::size_t kMaxRunArgs = 8;
+
+    int fail(const std::string& message)
+    {
+        llvm::errs() << "fminus: " << message << "\n";
+        return 1;
+    }
+
+    int fail(llvm::Error error)
+    {
+        return fail(llvm::toString(std::move(error)));
+    }
+
+    // Calls the JIT'd float(float, ...) at `address` with args.size() arguments.
+    template <std::size_t... I>
+    float callWith(llvm::orc::ExecutorAddr address, const std::vector<float>& args, std::index_sequence<I...>)
+    {
+        using Function = float (*)(decltype(static_cast<void>(I), 0.0f)...);
+        return address.toPtr<Function>()(args[I]...);
+    }
+
+    template <std::size_t... N>
+    float call(llvm::orc::ExecutorAddr address, const std::vector<float>& args, std::index_sequence<N...>)
+    {
+        float result = 0.0f;
+        static_cast<void>(((args.size() == N ? (result = callWith(address, args, std::make_index_sequence<N>{}), true)
+                                             : false)
+                           || ...));
+        return result;
+    }
+
+    int writeText(const std::string& path, const std::string& text)
+    {
+        std::error_code ec;
+        llvm::raw_fd_ostream out(path, ec, llvm::sys::fs::OF_Text);
+        if (ec)
+            return fail(llvm::createFileError(path, ec));
+        out << text;
+        return 0;
+    }
+} // namespace
+
+int main(int argc, char** argv)
+{
+    llvm::InitLLVM initLLVM(argc, argv);   // stack traces on a crash
+
+    CLI::App app{"The FMinus compiler: FMinus v0 source to its syntax tree, LLVM IR, assembly or an object file, or "
+                 "JIT-compiled and run.",
+                 "fminus"};
+    std::string input;
+    std::string output = "-";
+    std::string emit = "ll";
+    int level = 2;
+    std::string run;
+    std::vector<float> runArgs;
+    app.add_option("input", input, "FMinus source file ('-' for stdin)")->required();
+    app.add_option("args", runArgs, "The arguments of --run's function");
+    app.add_option("-o,--output", output, "The output file ('-' is stdout)")->capture_default_str();
+    app.add_option("--emit", emit, "What to write: ast, ll, asm or obj")
+        ->check(CLI::IsMember({"ast", "ll", "asm", "obj"}))
+        ->capture_default_str();
+    app.add_option("-O", level, "Optimisation level, 0 to 3")->check(CLI::Range(0, 3))->capture_default_str();
+    app.add_option("--run", run, "JIT-compile, call this function with the arguments and print its result");
+    CLI11_PARSE(app, argc, argv);
+
+    const std::array<llvm::OptimizationLevel, 4> levels{llvm::OptimizationLevel::O0, llvm::OptimizationLevel::O1,
+                                                        llvm::OptimizationLevel::O2, llvm::OptimizationLevel::O3};
+    const llvm::OptimizationLevel optimisation = levels[static_cast<std::size_t>(level)];
+
+    // Source -> syntax tree.
+    llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> source = llvm::MemoryBuffer::getFileOrSTDIN(input);
+    if (!source)
+        return fail("cannot read " + input + ": " + source.getError().message());
+    fminus::Diagnostics diagnostics(input == "-" ? "<stdin>" : input);
+    std::optional<fminus::ast::Program> program = fminus::frontend::parse((*source)->getBuffer(), diagnostics);
+    if (!program)
+    {
+        llvm::errs() << diagnostics.format();
+        return 1;
+    }
+    if (emit == "ast" && run.empty())
+        return writeText(output, fminus::ast::dump(*program));
+
+    // Syntax tree -> LLVM IR.
+    auto context = std::make_unique<llvm::LLVMContext>();
+    std::unique_ptr<llvm::Module> module = fminus::ir::lower(*program, *context, diagnostics);
+    if (!module)
+    {
+        llvm::errs() << diagnostics.format();
+        return 1;
+    }
+
+    // LLVM IR -> JIT -> a call.
+    if (!run.empty())
+    {
+        const fminus::ast::Function* function = nullptr;
+        for (const fminus::ast::Function& candidate : program->functions)
+        {
+            if (candidate.name == run)
+                function = &candidate;
+        }
+        if (function == nullptr)
+            return fail("--run: " + input + " has no function '" + run + "'");
+        if (function->params.size() != runArgs.size())
+            return fail(std::format("--run: '{}' takes {} arguments, not {}", run, function->params.size(),
+                                    runArgs.size()));
+        if (runArgs.size() > kMaxRunArgs)
+            return fail(std::format("--run: at most {} arguments", kMaxRunArgs));
+
+        auto jit = fminus::jit::Jit::create(optimisation);
+        if (!jit)
+            return fail(jit.takeError());
+        if (llvm::Error error = (*jit)->add(std::move(module), std::move(context)))
+            return fail(std::move(error));
+        auto address = (*jit)->lookup(run);
+        if (!address)
+            return fail(address.takeError());
+        const float result = call(*address, runArgs, std::make_index_sequence<kMaxRunArgs + 1>{});
+        llvm::outs() << std::format("{}\n", result);
+        return 0;
+    }
+
+    // LLVM IR -> optimised for this machine -> IR, assembly or an object file.
+    auto machine = fminus::hostTargetMachine(fminus::codeGenLevel(optimisation));
+    if (!machine)
+        return fail(machine.takeError());
+    fminus::prepareModule(*module, **machine);
+    fminus::optimiseModule(*module, **machine, optimisation);
+    if (emit == "ll")
+    {
+        std::string text;
+        llvm::raw_string_ostream os(text);
+        module->print(os, nullptr);
+        return writeText(output, text);
+    }
+    const auto kind = emit == "asm" ? fminus::aot::FileKind::Assembly : fminus::aot::FileKind::Object;
+    if (llvm::Error error = fminus::aot::emitFile(*module, **machine, output, kind))
+        return fail(std::move(error));
+    return 0;
+}

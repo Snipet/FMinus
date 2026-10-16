@@ -1,0 +1,8 @@
+// A syntax error stops the parse and says what was expected.
+// RUN: not fminus %s 2>&1 | FileCheck %s
+
+fn f(x: float) -> float {
+    return x + ;
+}
+
+// CHECK: syntax-error.fm:5:16: error: syntax error, unexpected ;, expecting - or ( or identifier or number

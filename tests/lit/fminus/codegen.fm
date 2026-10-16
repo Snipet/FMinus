@@ -1,0 +1,25 @@
+// The code generator's IR as written (-O0), then optimised (-O2: the calls are inlined).
+// RUN: fminus %s -O0 | FileCheck %s
+// RUN: fminus %s -O2 | FileCheck %s --check-prefix=OPT
+
+fn gain(x: float, g: float) -> float {
+    return x * g;
+}
+
+fn twice(x: float) -> float {
+    let doubled = gain(x, 2);
+    return -doubled;
+}
+
+// CHECK-LABEL: define float @gain(float %x, float %g) {
+// CHECK-NEXT:  entry:
+// CHECK-NEXT:    [[P:%.*]] = fmul float %x, %g
+// CHECK-NEXT:    ret float [[P]]
+// CHECK-LABEL: define float @twice(float %x) {
+// CHECK:         %doubled = call float @gain(float %x, float 2.000000e+00)
+// CHECK-NEXT:    [[N:%.*]] = fneg float %doubled
+// CHECK-NEXT:    ret float [[N]]
+
+// OPT-LABEL: define float @twice(
+// OPT-NOT:   call
+// OPT:       fmul float %x, -2.000000e+00

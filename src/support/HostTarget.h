@@ -22,6 +22,9 @@ namespace fminus
     llvm::Expected<std::unique_ptr<llvm::TargetMachine>>
     hostTargetMachine(llvm::CodeGenOptLevel level = llvm::CodeGenOptLevel::Aggressive);
 
+    // The code generation level that goes with an optimisation level (O0 None, O1 Less, O2 Default, O3 Aggressive).
+    llvm::CodeGenOptLevel codeGenLevel(llvm::OptimizationLevel level);
+
     // Gives `module` the machine's triple and data layout. Do it before optimising: the passes read both.
     void prepareModule(llvm::Module& module, const llvm::TargetMachine& machine);
 

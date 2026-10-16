@@ -1,11 +1,12 @@
-# src/CMakeLists.txt: the fminus library (FMinus::FMinus), the FMinus runtime (FMinus::Runtime), and FMinus::Internal
-# for this tree's tools and tests.
+# src/CMakeLists.txt: the fminus library (target fminus_lib, libfminus.a, FMinus::FMinus), the FMinus runtime
+# (FMinus::Runtime), and FMinus::Internal for this tree's tools and tests. (The library's target is fminus_lib so the
+# driver, tools/fminus/, can be the target fminus.)
 #
 # fminus_runtime: every .cpp under src/runtime/. It holds the C functions generated code calls, with no LLVM in it. A
 # process that JITs links it (through fminus), and executables from support/Aot.h link libfminus_runtime.a itself.
 #
-# fminus: every other .cpp under src/ (globbed: adding a file edits no CMake). Every directory holding a Bison grammar
-# (*.y) is a grammar: that .y, with every Flex scanner (*.l) beside it, is generated into the library through
+# fminus_lib: every other .cpp under src/ (globbed: adding a file edits no CMake). Every directory holding a Bison
+# grammar (*.y) is a grammar: that .y, with every Flex scanner (*.l) beside it, is generated into the library through
 # fminus_add_grammar. A scanner in a directory without a grammar is generated alone. Generated files land under
 # ${CMAKE_CURRENT_BINARY_DIR}/generated/<dir>/; include them as "<dir>/<stem>.tab.hpp" and "<dir>/<stem>.yy.hpp".
 #
@@ -29,15 +30,16 @@ fminus_target_defaults(fminus_runtime)
 target_include_directories(fminus_runtime PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 
 # ---- the library ----------------------------------------------------------------------------------------------------
-add_library(fminus STATIC ${_fminus_sources} ${_fminus_public_headers})
-add_library(FMinus::FMinus ALIAS fminus)
-fminus_target_defaults(fminus)
-target_include_directories(fminus
+add_library(fminus_lib STATIC ${_fminus_sources} ${_fminus_public_headers})
+add_library(FMinus::FMinus ALIAS fminus_lib)
+set_target_properties(fminus_lib PROPERTIES OUTPUT_NAME fminus)
+fminus_target_defaults(fminus_lib)
+target_include_directories(fminus_lib
   PUBLIC "${PROJECT_SOURCE_DIR}/include" "${PROJECT_BINARY_DIR}/include"
   PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
-target_link_libraries(fminus PUBLIC FMinus::LLVM fminus_runtime)
+target_link_libraries(fminus_lib PUBLIC FMinus::LLVM fminus_runtime)
 # What support/Aot.cpp links executables with: this tree's C++ compiler driver, runtime library and sanitizers.
-target_compile_definitions(fminus PRIVATE
+target_compile_definitions(fminus_lib PRIVATE
   "FMINUS_AOT_DRIVER=\"${CMAKE_CXX_COMPILER}\""
   "FMINUS_RUNTIME_LIBRARY=\"$<TARGET_FILE:fminus_runtime>\""
   "FMINUS_AOT_SANITIZE=\"${FMINUS_SANITIZE_ARG}\"")
@@ -58,18 +60,18 @@ foreach(_y IN LISTS _fminus_grammars)
       list(APPEND _lexers "${_l}")
     endif()
   endforeach()
-  fminus_add_grammar(fminus PARSER "${_y}" LEXERS ${_lexers} SCOPE PRIVATE)
+  fminus_add_grammar(fminus_lib PARSER "${_y}" LEXERS ${_lexers} SCOPE PRIVATE)
 endforeach()
 foreach(_l IN LISTS _fminus_scanners)
   cmake_path(GET _l PARENT_PATH _ldir)
   if(NOT _ldir IN_LIST _fminus_grammar_dirs)
-    fminus_add_grammar(fminus LEXERS "${_l}" SCOPE PRIVATE)
+    fminus_add_grammar(fminus_lib LEXERS "${_l}" SCOPE PRIVATE)
   endif()
 endforeach()
 
 # This tree's tools and tests see the library's internals too.
 add_library(fminus_internal INTERFACE)
 add_library(FMinus::Internal ALIAS fminus_internal)
-target_link_libraries(fminus_internal INTERFACE fminus)
+target_link_libraries(fminus_internal INTERFACE fminus_lib)
 target_include_directories(fminus_internal INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}"
                                                      "${CMAKE_CURRENT_BINARY_DIR}/generated")

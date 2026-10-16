@@ -20,6 +20,17 @@ namespace fminus
         return builder->createTargetMachine();
     }
 
+    llvm::CodeGenOptLevel codeGenLevel(llvm::OptimizationLevel level)
+    {
+        if (level == llvm::OptimizationLevel::O0)
+            return llvm::CodeGenOptLevel::None;
+        if (level == llvm::OptimizationLevel::O1)
+            return llvm::CodeGenOptLevel::Less;
+        if (level == llvm::OptimizationLevel::O2)
+            return llvm::CodeGenOptLevel::Default;
+        return llvm::CodeGenOptLevel::Aggressive;
+    }
+
     void prepareModule(llvm::Module& module, const llvm::TargetMachine& machine)
     {
         module.setTargetTriple(machine.getTargetTriple());

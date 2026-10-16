@@ -1,0 +1,17 @@
+// The driver JIT-compiles the program and calls a function.
+// RUN: fminus %s --run chain 1 | FileCheck %s --check-prefix=CHAIN
+// RUN: fminus %s --run softclip -2 1 | FileCheck %s --check-prefix=CLIP
+// RUN: not fminus %s --run softclip 1 2>&1 | FileCheck %s --check-prefix=ARITY
+
+fn softclip(x: float, drive: float) -> float {
+    let y = x * drive;
+    return y / (1.0 + abs(y));
+}
+
+fn chain(x: float) -> float {
+    return softclip(x * 0.5, 4.0);
+}
+
+// CHAIN: 0.6666667
+// CLIP: -0.6666667
+// ARITY: fminus: --run: 'softclip' takes 2 arguments, not 1

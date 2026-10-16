@@ -1,9 +1,11 @@
 # FMinus: notes for Claude sessions
 
 FMinus is the user's own research project: a JIT compiler for audio DSP (Flex + Bison front end, LLVM IR, ORC
-LLJIT, compiled on the user's machine). **The user writes the compiler.** Help when asked: explain, review, debug, fix
-the build or the toolchain. Do not write or rewrite code under `src/`, `include/` or `tools/fminus/` unless the user
-asks for that specific change, and ask before restructuring anything.
+LLJIT, compiled on the user's machine). **The user writes the compiler.** Claude wrote FMinus v0 at the user's request
+(2026-10-16): a minimal language that goes all the way through (src/frontend, src/ir, src/jit, tools/fminus), for the
+user to expand. Help when asked: explain, review, debug, fix the build or the toolchain. Do not write or rewrite code
+under `src/`, `include/` or `tools/fminus/` unless the user asks for that specific change, and ask before
+restructuring anything.
 
 - Build: `cmake --workflow --preset dev` (README.md has every preset). Build trees are `build-<preset>/`; the
   dependency cache is `.deps/` (or `FMINUS_DEPS_DIR`). A first configure builds LLVM (10–30 min): say so before

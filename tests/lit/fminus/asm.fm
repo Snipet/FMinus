@@ -1,0 +1,14 @@
+// The driver writes this machine's assembly.
+// REQUIRES: arm64
+// RUN: fminus %s --emit asm -o - | FileCheck %s
+
+fn softclip(x: float, drive: float) -> float {
+    let y = x * drive;
+    return y / (1.0 + abs(y));
+}
+
+// CHECK-LABEL: _softclip:
+// CHECK:       fmul s{{[0-9]+}}, s0, s1
+// CHECK:       fabs
+// CHECK:       fdiv
+// CHECK:       ret
