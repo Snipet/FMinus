@@ -49,6 +49,9 @@ add_custom_target(check-fminus
   USES_TERMINAL
   COMMENT "ctest")
 add_dependencies(check-fminus fminus-tests)
+if(FMINUS_EXAMPLE_TARGETS)
+  add_dependencies(check-fminus ${FMINUS_EXAMPLE_TARGETS})
+endif()
 if(TARGET fminus-lit-deps)
   add_dependencies(check-fminus fminus-lit-deps)
 endif()

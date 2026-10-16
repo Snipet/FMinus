@@ -10,8 +10,8 @@
 #
 # Layout (README.md): src/ is the fminus library: every .cpp under it is a source, and each Bison grammar there,
 # with the Flex scanners beside it, is generated into the library. include/fminus/ is its public API. tools/<name>/
-# holds one executable each. tests/ holds unit/ (Catch2), smoke/ (the toolchain's own checks) and lit/ (lit and
-# FileCheck). Adding a file edits no CMake.
+# holds one executable each, examples/<name>/ one example each (a program and its harness). tests/ holds unit/
+# (Catch2), smoke/ (the toolchain's own checks) and lit/ (lit and FileCheck). Adding a file edits no CMake.
 #
 # Use the presets: `cmake --workflow --preset dev` configures, builds and tests (CMakePresets.json lists the others).
 
@@ -47,14 +47,22 @@ else()
 endif()
 configure_file(cmake/templates/Config.h.in "${PROJECT_BINARY_DIR}/include/fminus/Config.h" @ONLY)
 
+if(FMINUS_BUILD_TESTS)
+  enable_testing()              # before the examples, which add their --check tests
+endif()
 add_subdirectory(src)
+if(FMINUS_BUILD_TOOLS OR FMINUS_BUILD_EXAMPLES)
+  include(FMinusCLI11)          # CLI11::CLI11, for the tools and the examples
+endif()
 set(FMINUS_TOOL_TARGETS "")
 if(FMINUS_BUILD_TOOLS)
-  include(FMinusCLI11)          # CLI11::CLI11, for the tools
   add_subdirectory(tools)
 endif()
+set(FMINUS_EXAMPLE_TARGETS "")
+if(FMINUS_BUILD_EXAMPLES)
+  add_subdirectory(examples)
+endif()
 if(FMINUS_BUILD_TESTS)
-  enable_testing()
   include(FMinusTesting)
   add_subdirectory(tests)
 endif()

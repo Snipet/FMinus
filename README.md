@@ -46,6 +46,8 @@ src/                    the fminus library: every .cpp is a source, every gramma
   opt/                  empty: for FMinus's own pass pipelines
 tools/<name>/           one executable per directory, with CLI11 for its command line: fminus (the driver),
                         fminus-build and fminus-hostinfo
+examples/<name>/        one example per directory: an FMinus program and its harness (bin/example-<name>):
+  biquad/               a biquad with per-sample coefficients, against C++, compared and timed; a plan to grow it
 tests/
   unit/                 your Catch2 tests
   smoke/                the toolchain's checks: LLJIT + O3 on the host, Bison + Flex (smoke/calc/)
@@ -161,6 +163,9 @@ How it fits together: `frontend::parse` (Lexer.l, then Parser.y) gives an `ast::
 4. Its tests: a dump in `tests/unit/FrontendTest.cpp`, a result in `tests/unit/CodeGenTest.cpp`, IR or errors in
    `tests/lit/fminus/*.fm` (`// RUN:` lines, checked by FileCheck).
 
+`examples/biquad/` is a kernel to grow the language around. It is a biquad low-pass with coefficients recomputed
+every sample, with a harness that compares it with C++ and times both, and a plan of features in its README.
+
 Bindings are SSA values because they never change. Assignment and loops need storage: allocas in the entry block,
 which the pipeline's mem2reg turns back into SSA.
 
@@ -196,9 +201,10 @@ build-dev/bin/fminus-lit -v tests/lit               # lit directly; a source pat
 - **Catch2** (`tests/unit/`, `tests/smoke/`): one executable, `fminus-tests`; ctest runs each `TEST_CASE` on its own.
   The smoke tests cover the JIT, an executable linked ahead of time and run, and the calculator grammar.
   Catch2's `BENCHMARK` is there for timing JIT'd kernels.
-- **lit** (`tests/lit/`): a file with `RUN:` lines, checked by FileCheck. `tests/lit/fminus/` drives `fminus`. FMinus's tools and LLVM's are on PATH;
-  `%host_triple` is substituted; the features for `REQUIRES:` are `asserts`, `asan`, `ubsan`, `tsan`, `arm64`, `x86_64`.
-  `.fm` is a placeholder extension for FMinus sources: change it in `tests/lit/lit.cfg.py`.
+- **lit** (`tests/lit/`): a file with `RUN:` lines, checked by FileCheck. `tests/lit/fminus/` drives `fminus`. FMinus's
+  tools and LLVM's are on PATH; `%host_triple` is substituted; the features for `REQUIRES:` are `asserts`, `asan`,
+  `ubsan`, `tsan`, `arm64`, `x86_64`. `.fm` is a placeholder extension for FMinus sources: change it in
+  `tests/lit/lit.cfg.py`.
 
 ## Presets
 

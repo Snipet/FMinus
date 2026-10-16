@@ -3,6 +3,7 @@
 
 option(FMINUS_BUILD_TESTS "Build the Catch2 and lit tests" ${PROJECT_IS_TOP_LEVEL})
 option(FMINUS_BUILD_TOOLS "Build the executables under tools/" ${PROJECT_IS_TOP_LEVEL})
+option(FMINUS_BUILD_EXAMPLES "Build the examples under examples/" ${PROJECT_IS_TOP_LEVEL})
 option(FMINUS_WERROR "Treat warnings in FMinus's own sources as errors" ON)
 set(FMINUS_CXX_STANDARD 23 CACHE STRING "C++ standard of FMinus's own targets")
 set(FMINUS_SANITIZERS "" CACHE STRING "Sanitizers for FMinus's own targets: a list of address, undefined, thread")
