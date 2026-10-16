@@ -8,6 +8,9 @@ the same IR can also be compiled ahead of time into a native executable.
 expand on. It has functions over `float`, `let`, `return`, arithmetic, calls and a few math builtins (below). The
 build, the dependencies and the toolchain's smoke tests are in place around it.
 
+Documentation: [docs/](docs/README.md). It covers the architecture, a guide to extending the compiler with worked
+recipes, the build, and testing and debugging.
+
 ## Quick start
 
 ```bash
@@ -53,7 +56,7 @@ tests/
   smoke/                the toolchain's checks: LLJIT + O3 on the host, Bison + Flex (smoke/calc/)
   lit/                  lit + FileCheck tests (*.test, *.fm, *.ll)
 Scripts/pin-llvm.sh     the pin lines for another LLVM release
-docs/                   research notes
+docs/                   the manual: architecture, extending, building, testing; recipes/ as patches
 ```
 
 Adding a source, a header, a grammar, a tool or a test edits no CMake: the globs pick it up when you build again.
@@ -152,7 +155,8 @@ How it fits together: `frontend::parse` (Lexer.l, then Parser.y) gives an `ast::
 (ir/CodeGen.cpp) gives an `llvm::Module`. From there, `jit::Jit` optimises and compiles it in memory, or
 `support/Aot.h` writes it to a file.
 
-**Adding a construct**, say comparisons and `if`:
+**Adding a construct**, say comparisons and `if`. [docs/extending.md](docs/extending.md) works through this one and
+five more:
 
 1. Its tokens: a rule in `src/frontend/Lexer.l` (keywords before `{IDENTIFIER}`), a `%token` in `Parser.y`.
 2. Its grammar: a rule in `Parser.y`, with precedence if it is an operator. Bison's report is

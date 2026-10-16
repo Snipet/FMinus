@@ -1,0 +1,274 @@
+diff --git a/src/ir/CodeGen.cpp b/src/ir/CodeGen.cpp
+index 101bc29..fb909cb 100644
+--- a/src/ir/CodeGen.cpp
++++ b/src/ir/CodeGen.cpp
+@@ -46,6 +46,28 @@ namespace fminus::ir
+             Builtin{"max", llvm::Intrinsic::maxnum, 2}, Builtin{"tanh", llvm::Intrinsic::tanh, 1},
+         };
+ 
++        // name -> a function of the FMinus runtime (runtime/Runtime.h), float(float, ...): JIT'd code finds it through
++        // support/JitRuntime.h, an executable links libfminus_runtime.a.
++        struct RuntimeFunction
++        {
++            std::string_view name;
++            std::string_view symbol;
++            unsigned arity;
++        };
++        constexpr std::array kRuntimeFunctions{
++            RuntimeFunction{"db_to_gain", "fminus_rt_db_to_gain", 1},
++        };
++
++        const RuntimeFunction* findRuntimeFunction(std::string_view name)
++        {
++            for (const RuntimeFunction& function : kRuntimeFunctions)
++            {
++                if (function.name == name)
++                    return &function;
++            }
++            return nullptr;
++        }
++
+         const Builtin* findBuiltin(std::string_view name)
+         {
+             for (const Builtin& builtin : kBuiltins)
+@@ -129,7 +151,7 @@ namespace fminus::ir
+             // ---- declarations -----------------------------------------------------------------------------------
+             void declare(const ast::Function& function)
+             {
+-                if (findBuiltin(function.name) != nullptr)
++                if (findBuiltin(function.name) != nullptr || findRuntimeFunction(function.name) != nullptr)
+                 {
+                     error(function.location, quoted(function.name) + " is a builtin and cannot be defined");
+                     return;
+@@ -428,6 +450,17 @@ namespace fminus::ir
+                         llvm::Intrinsic::getOrInsertDeclaration(&module_, builtin->intrinsic, {builder_.getFloatTy()});
+                     return builder_.CreateCall(intrinsic, args);
+                 }
++                if (const RuntimeFunction* runtime = findRuntimeFunction(call.callee))
++                {
++                    if (args.size() != runtime->arity)
++                        return wrongArity(location, call, runtime->arity, ast::Type::Float);
++                    for (llvm::Value*& arg : args)
++                        arg = expect(location, arg, ast::Type::Float, "an argument of " + quoted(call.callee));
++                    std::vector<llvm::Type*> params(runtime->arity, builder_.getFloatTy());
++                    llvm::FunctionCallee callee = module_.getOrInsertFunction(
++                        runtime->symbol, llvm::FunctionType::get(builder_.getFloatTy(), params, false));
++                    return builder_.CreateCall(callee, args);
++                }
+                 const auto found = functions_.find(call.callee);
+                 if (found == functions_.end())
+                 {
+diff --git a/src/opt/.gitkeep b/src/opt/.gitkeep
+deleted file mode 100644
+index e69de29..0000000
+diff --git a/src/opt/CountFlops.cpp b/src/opt/CountFlops.cpp
+new file mode 100644
+index 0000000..8eda020
+--- /dev/null
++++ b/src/opt/CountFlops.cpp
+@@ -0,0 +1,27 @@
++// src/opt/CountFlops.cpp
++#include "opt/CountFlops.h"
++
++#include <llvm/IR/Function.h>
++#include <llvm/IR/InstrTypes.h>
++#include <llvm/IR/Instructions.h>
++
++#include <string>
++
++namespace fminus::opt
++{
++    llvm::PreservedAnalyses CountFlopsPass::run(llvm::Function& function, llvm::FunctionAnalysisManager&)
++    {
++        unsigned flops = 0;
++        for (const llvm::BasicBlock& block : function)
++        {
++            for (const llvm::Instruction& instruction : block)
++            {
++                const bool arithmetic = llvm::isa<llvm::BinaryOperator, llvm::UnaryOperator, llvm::FCmpInst>(instruction);
++                if (arithmetic && instruction.getOperand(0)->getType()->isFPOrFPVectorTy())
++                    ++flops;
++            }
++        }
++        function.addFnAttr("fminus-flops", std::to_string(flops));
++        return llvm::PreservedAnalyses::all();   // a string attribute changes nothing an analysis computed
++    }
++} // namespace fminus::opt
+diff --git a/src/opt/CountFlops.h b/src/opt/CountFlops.h
+new file mode 100644
+index 0000000..3ccc3ea
+--- /dev/null
++++ b/src/opt/CountFlops.h
+@@ -0,0 +1,13 @@
++// src/opt/CountFlops.h: a function pass that counts a function's floating-point operations (arithmetic,
++// negations, comparisons) and records the count as the string attribute "fminus-flops", to read in the IR.
++#pragma once
++
++#include <llvm/IR/PassManager.h>
++
++namespace fminus::opt
++{
++    struct CountFlopsPass : llvm::PassInfoMixin<CountFlopsPass>
++    {
++        llvm::PreservedAnalyses run(llvm::Function& function, llvm::FunctionAnalysisManager& analyses);
++    };
++} // namespace fminus::opt
+diff --git a/src/opt/Passes.cpp b/src/opt/Passes.cpp
+new file mode 100644
+index 0000000..c63596b
+--- /dev/null
++++ b/src/opt/Passes.cpp
+@@ -0,0 +1,20 @@
++// src/opt/Passes.cpp
++#include "opt/Passes.h"
++
++#include "opt/CountFlops.h"
++
++#include <llvm/Passes/PassBuilder.h>
++
++namespace fminus::opt
++{
++    void registerPasses(llvm::PassBuilder& passes)
++    {
++        // Last, so it counts what the optimiser left. Other extension points: registerPipelineStartEPCallback (before
++        // everything), registerPeepholeEPCallback (after each instruction combining), registerVectorizerStartEPCallback
++        // (just before the loop vectoriser), ...
++        passes.registerOptimizerLastEPCallback(
++            [](llvm::ModulePassManager& modules, llvm::OptimizationLevel, llvm::ThinOrFullLTOPhase) {
++                modules.addPass(llvm::createModuleToFunctionPassAdaptor(CountFlopsPass()));
++            });
++    }
++} // namespace fminus::opt
+diff --git a/src/opt/Passes.h b/src/opt/Passes.h
+new file mode 100644
+index 0000000..bbd5aff
+--- /dev/null
++++ b/src/opt/Passes.h
+@@ -0,0 +1,13 @@
++// src/opt/Passes.h: FMinus's own passes, added to LLVM's default pipeline at its extension points.
++#pragma once
++
++namespace llvm
++{
++    class PassBuilder;
++} // namespace llvm
++
++namespace fminus::opt
++{
++    // Registers FMinus's passes with `passes`, before it builds a pipeline (support/HostTarget.cpp calls it).
++    void registerPasses(llvm::PassBuilder& passes);
++} // namespace fminus::opt
+diff --git a/src/runtime/Runtime.cpp b/src/runtime/Runtime.cpp
+index e880819..ef08e85 100644
+--- a/src/runtime/Runtime.cpp
++++ b/src/runtime/Runtime.cpp
+@@ -1,7 +1,14 @@
+ // src/runtime/Runtime.cpp
+ #include "runtime/Runtime.h"
+ 
++#include <cmath>
++
+ extern "C" std::int32_t fminus_rt_abi_version() noexcept
+ {
+     return 1;
+ }
++
++extern "C" float fminus_rt_db_to_gain(float db) noexcept
++{
++    return std::pow(10.0f, db / 20.0f);
++}
+diff --git a/src/runtime/Runtime.h b/src/runtime/Runtime.h
+index 87bf2ed..c5f6d71 100644
+--- a/src/runtime/Runtime.h
++++ b/src/runtime/Runtime.h
+@@ -13,4 +13,7 @@ extern "C"
+ {
+     // The runtime's ABI version, for generated code to check against the one it was compiled for.
+     std::int32_t fminus_rt_abi_version() noexcept;
++
++    // Decibels to a linear gain: 10^(db / 20). FMinus calls it as db_to_gain (ir/CodeGen.cpp).
++    float fminus_rt_db_to_gain(float db) noexcept;
+ }
+diff --git a/src/runtime/RuntimeSymbols.def b/src/runtime/RuntimeSymbols.def
+index 49c7f9e..b16928a 100644
+--- a/src/runtime/RuntimeSymbols.def
++++ b/src/runtime/RuntimeSymbols.def
+@@ -2,3 +2,4 @@
+ // FMINUS_RUNTIME_SYMBOL(name) each. support/JitRuntime.cpp defines them in a JIT by address; executables get them by
+ // linking libfminus_runtime.a. Add a line whenever Runtime.h gains a function.
+ FMINUS_RUNTIME_SYMBOL(fminus_rt_abi_version)
++FMINUS_RUNTIME_SYMBOL(fminus_rt_db_to_gain)
+diff --git a/src/support/HostTarget.cpp b/src/support/HostTarget.cpp
+index 43a1a21..9eae83f 100644
+--- a/src/support/HostTarget.cpp
++++ b/src/support/HostTarget.cpp
+@@ -1,6 +1,7 @@
+ // src/support/HostTarget.cpp
+ #include "support/HostTarget.h"
+ 
++#include "opt/Passes.h"
+ #include "support/LLVMInit.h"
+ 
+ #include <llvm/ExecutionEngine/Orc/JITTargetMachineBuilder.h>
+@@ -49,6 +50,7 @@ namespace fminus
+         tuning.LoopVectorization = true;
+         tuning.SLPVectorization = true;
+         llvm::PassBuilder passes(&machine, tuning);
++        opt::registerPasses(passes);
+         passes.registerModuleAnalyses(modules);
+         passes.registerCGSCCAnalyses(cgsccs);
+         passes.registerFunctionAnalyses(functions);
+diff --git a/tests/lit/fminus/codegen.fm b/tests/lit/fminus/codegen.fm
+index 7c5214c..0937d2a 100644
+--- a/tests/lit/fminus/codegen.fm
++++ b/tests/lit/fminus/codegen.fm
+@@ -11,11 +11,11 @@ fn twice(x: float) -> float {
+     return -doubled;
+ }
+ 
+-// CHECK-LABEL: define float @gain(float %x, float %g) {
++// CHECK-LABEL: define float @gain(float %x, float %g){{.*}} {
+ // CHECK-NEXT:  entry:
+ // CHECK-NEXT:    [[P:%.*]] = fmul float %x, %g
+ // CHECK-NEXT:    ret float [[P]]
+-// CHECK-LABEL: define float @twice(float %x) {
++// CHECK-LABEL: define float @twice(float %x){{.*}} {
+ // CHECK:         %doubled = call float @gain(float %x, float 2.000000e+00)
+ // CHECK-NEXT:    [[N:%.*]] = fneg float %doubled
+ // CHECK-NEXT:    ret float [[N]]
+diff --git a/tests/lit/fminus/flops.fm b/tests/lit/fminus/flops.fm
+new file mode 100644
+index 0000000..64c2fea
+--- /dev/null
++++ b/tests/lit/fminus/flops.fm
+@@ -0,0 +1,10 @@
++// recipe F: CountFlopsPass records each function's floating-point operations after optimisation.
++// RUN: fminus %s -O2 | FileCheck %s
++
++fn softclip(x: float, drive: float) -> float {
++    let y = x * drive;
++    return y / (1.0 + abs(y));
++}
++
++// CHECK: define float @softclip({{.*}} #[[ATTRS:[0-9]+]]
++// CHECK: attributes #[[ATTRS]] = { {{.*}}"fminus-flops"="3"
+diff --git a/tests/unit/RecipeTest.cpp b/tests/unit/RecipeTest.cpp
+index 7773a85..48d8c58 100644
+--- a/tests/unit/RecipeTest.cpp
++++ b/tests/unit/RecipeTest.cpp
+@@ -149,3 +149,15 @@ TEST_CASE("recipe D: var, assignment and while", "[recipe]")
+                     "test.fm:7:5: error: the condition of a while must be bool, not float\n"
+                     "test.fm:9:12: error: unknown variable 'inner'\n");
+ }
++
++TEST_CASE("recipe E: a runtime function", "[recipe]")
++{
++    std::string errors;
++    auto jit = build("fn f(db: float) -> float { return db_to_gain(db) * 2; }", errors);
++    INFO(errors);
++    REQUIRE(jit);
++    auto f = llvm::cantFail(jit->lookup("f")).toPtr<float (*)(float)>();
++    CHECK(f(20.0f) == 20.0f);
++    CHECK(f(0.0f) == 2.0f);
++    CHECK(build("fn db_to_gain(x: float) -> float { return x; }", errors) == nullptr);
++}

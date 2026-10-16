@@ -1,0 +1,168 @@
+# Testing and debugging
+
+The layers of tests, how to write each, and how to look at what the compiler did when something is off.
+
+## The layers
+
+| Layer | Where | Tests | Write one when |
+|---|---|---|---|
+| unit (Catch2) | `tests/unit/*.cpp` | the parser through `ast::dump`; the code generator by running JIT'd functions; error messages | you change the language |
+| smoke (Catch2) | `tests/smoke/` | the toolchain itself: LLJIT and O3 on the host, an AOT executable, Bison and Flex (the calculator) | rarely: they guard the integration |
+| lit + FileCheck | `tests/lit/**` | the tools end to end: `fminus` IR, assembly, runs and errors; `fminus-build`; LLVM's tools | you change output a tool prints |
+| examples | `examples/<name>/` (`--check`) | a real kernel against C++, bit for bit or within a tolerance | you change what a kernel computes or how fast |
+
+```bash
+cmake --build --preset dev --target check-fminus   # build what the tests need, then ctest
+ctest --preset dev                                 # everything
+ctest --preset dev -R calculator                   # tests whose name matches
+build-dev/bin/fminus-tests "[codegen]"             # one Catch2 tag
+build-dev/bin/fminus-tests "builtins*" -s          # matching test cases, printing every assertion
+build-dev/bin/fminus-lit -v tests/lit/fminus       # part of the lit suite; -a prints every test's output
+build-dev/bin/example-biquad --check               # one example's comparison
+```
+
+`ctest --preset asan` and `ctest --preset tsan` run the same tests under the sanitizers, after building those
+presets.
+
+## Unit tests (Catch2)
+
+Each file states what it tests in its first line, then has a few helpers and the `TEST_CASE`s. The helpers in
+`tests/unit/` are the place to start:
+
+- `parsed(source)` (`FrontendTest.cpp`) returns the dump of the parsed program, or its errors. Compare whole
+  strings, so a parser test reads as input → tree.
+- `compile(source, &errors)` (`CodeGenTest.cpp`) parses, lowers and JIT-compiles at -O2, and returns the `Jit`, or
+  null with the formatted errors. `lookup<float(float)>(*jit, "f")` gives a callable function.
+- `errorsOf(source)` returns the errors of a program that must fail.
+
+```cpp
+TEST_CASE("operators have the usual precedence and associativity", "[frontend]")
+{
+    CHECK(parsed("fn f(a: float, b: float) -> float { return -a * -(a + b); }")
+          == "(fn f ((a float) (b float)) float\n  (return (* (- a) (- (+ a b)))))\n");
+}
+
+TEST_CASE("functions compute what they say", "[codegen]")
+{
+    auto jit = compile("fn half(x: float) -> float { return x / 2; }");
+    REQUIRE(jit);
+    CHECK(lookup<float(float)>(*jit, "half")(3.0f) == 1.5f);
+}
+```
+
+- **Compare floats exactly** where the arithmetic is exact or IEEE-deterministic; FMinus fuses and reorders nothing.
+  Use a tolerance only around libm (`sin`, `exp`, ...).
+- **Error tests compare the whole formatted text**, locations included. A moved column is a real change.
+- **Tags**: `[frontend]`, `[codegen]`, `[smoke]`, `[jit]`, `[aot]`, `[grammar]`. Add new ones freely.
+- `INFO(errors)` before a `REQUIRE(jit)` prints the compiler's errors when the compile fails, and saves a debugging
+  round-trip.
+
+## lit and FileCheck
+
+A lit test is a file with `RUN:` lines. lit runs each line in its own shell (pipes, `not`, `env`), and a test
+passes when every line exits 0. FileCheck reads the test file itself for `CHECK:` lines and matches them, in order,
+against its input. FMinus files put both in `//` comments.
+
+```
+// The code generator's IR, as written and optimised.
+// RUN: fminus %s -O0 | FileCheck %s
+// RUN: fminus %s -O2 | FileCheck %s --check-prefix=OPT
+// RUN: not fminus %s --run gain 1 2>&1 | FileCheck %s --check-prefix=ARITY
+
+fn gain(x: float, g: float) -> float {
+    return x * g;
+}
+
+// CHECK-LABEL: define float @gain(float %x, float %g){{.*}} {
+// CHECK-NEXT:  entry:
+// CHECK-NEXT:    [[P:%.*]] = fmul float %x, %g
+// CHECK-NEXT:    ret float [[P]]
+// OPT-NOT:     call
+// ARITY: fminus: --run: 'gain' takes 2 arguments, not 1
+```
+
+| Directive | Meaning |
+|---|---|
+| `CHECK: text` | `text` appears, after the previous match |
+| `CHECK-NEXT:` | on the very next line |
+| `CHECK-SAME:` | on the same line as the previous match |
+| `CHECK-LABEL:` | a section boundary: later checks match only up to the next label, so one function's checks can't match in another |
+| `CHECK-NOT:` | does not appear between the surrounding matches |
+| `CHECK-DAG:` | these lines appear, in any order |
+| `{{regex}}` | a regular expression inside a literal line |
+| `[[NAME:regex]]`, `[[NAME]]` | capture, then reuse: value names like `%0` change, so capture them |
+| `--check-prefix=X` | use `X:` lines instead of `CHECK:`, so one file can check several runs |
+
+| Substitution | |
+|---|---|
+| `%s` | this test file |
+| `%t` | a temporary path for this test (`%t.o`, `%t.ll`, ...) |
+| `%S` | this test's directory |
+| `%host_triple` | the JIT's target triple |
+
+| Feature | |
+|---|---|
+| `REQUIRES: arm64` (or `x86_64`) | the host architecture, for assembly checks |
+| `REQUIRES: asserts` | LLVM built with assertions |
+| `REQUIRES: asan`, `ubsan`, `tsan` | the sanitizer build |
+
+On PATH: `fminus`, `fminus-build`, `fminus-hostinfo`, then `FileCheck`, `not`, `count`, `opt`, `llc`, `llvm-mca`,
+`llvm-objdump`, ... from the LLVM flavor. To check an error, send stderr to FileCheck and expect failure:
+`not fminus %s 2>&1 | FileCheck %s`.
+
+**Writing IR checks that last:**
+
+- Match the stable parts: names you gave (`%doubled`), opcodes, types, constants.
+- Capture the unstable ones (`[[V:%.*]]`) rather than writing `%0`.
+- End a `define` line with `{{.*}}`, since attributes come and go.
+- Use one `CHECK-LABEL` per function.
+- Prefer `CHECK-NOT: call` and similar properties over transcribing the whole function.
+
+## Example harnesses
+
+An example's `--check` compares the FMinus kernel against a C++ version of the same computation and fails beyond
+`--tolerance`. ctest runs it. When a change alters what the kernel computes on purpose, through new math or
+fast-math flags, change the C++ reference in the same commit. A tolerance is a statement about accuracy, so keep it
+as tight as the change allows.
+
+## Looking at what the compiler did
+
+| Question | Command |
+|---|---|
+| Did it parse the way I think? | `fminus x.fm --emit ast` |
+| What did my lowering write? | `fminus x.fm -O0` |
+| What did LLVM make of it? | `fminus x.fm` (-O2), `-O3` |
+| What does the CPU run? | `fminus x.fm --emit asm -o -` |
+| What does it return? | `fminus x.fm --run f 1 2` |
+| Which passes changed what? | `fminus x.fm -O0 -o x.ll` then `opt -passes='default<O2>' -print-changed=quiet -disable-output x.ll` |
+| Which passes ran? | `opt -passes='default<O2>' -debug-pass-manager -disable-output x.ll` |
+| The IR after one pass | `opt -passes='default<O2>' -print-after=loop-vectorize -disable-output x.ll` |
+| Why didn't the loop vectorise? | `opt -passes='default<O2>' -pass-remarks-missed=loop-vectorize -disable-output x.ll` |
+| How fast is the machine code? | `llc -O3 -mcpu=apple-m5 x-o2.ll -o x.s`, then `llvm-mca -mcpu=apple-m5` on the kernel's instructions |
+| What is this CPU? | `fminus-hostinfo --features` |
+| Is the parser's grammar what I think? | `build-dev/src/generated/frontend/Parser.output` (every state, and the conflicts) |
+
+`opt`, `llc`, `llvm-mca` and `llvm-objdump` are in the flavor's `bin/`
+(`.deps/install/llvm-23.1.3-Release-assert-*/bin`), and on lit's PATH. `-O0` IR is the input for `opt`: it's what
+the code generator wrote, before FMinus's own pipeline. Running `opt -passes='default<O2>'` on it reproduces
+`fminus -O2` closely, though not exactly, since `fminus` gives the pipeline its target machine. Add
+`-mtriple=$(fminus-hostinfo | sed -n 's/^triple: //p') -mcpu=apple-m5` for the same cost model.
+
+For `llvm-mca`, keep only the kernel's instructions: cut the function body out of the assembly and leave out calls
+and branches. It reports the throughput of one iteration (IPC, the block's reciprocal throughput) on the CPU's
+model.
+
+**In a debugger.** `lldb build-debug/bin/fminus -- x.fm -O0` steps through the front end and the code generator.
+Break in `Lowering::lower` to watch an expression lower. `value->dump()` and `module.dump()` print IR from inside
+lldb (`expr value->dump()`); LLVM is built with `LLVM_ENABLE_DUMP`, so they work without assertions too. To step
+into LLVM itself, use the `inline` preset, which builds LLVM with debug information in the tree.
+
+**When the verifier complains** ("internal error: the IR of 'f' is invalid: ..."), the message names the rule
+broken. The module is discarded, so `fminus` prints no IR. To see it, print the function just before the check in
+`Lowering::define` (`llvmFunction->print(llvm::errs())`), or break there in lldb and `expr llvmFunction->dump()`. A
+missing terminator, a phi that doesn't match its predecessors, and a use of a value that doesn't dominate it are
+the usual three (extending.md, the pitfalls).
+
+**When the JIT can't find a symbol**, the error lists the missing names. A builtin's libm function resolves from
+the process. A runtime function needs its `RuntimeSymbols.def` line. An FMinus function needs the exact name, with
+no mangling: `jit->lookup("gain")`.

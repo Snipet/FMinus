@@ -19,4 +19,6 @@ restructuring anything.
   into an executable (`support/Aot.h`, `tools/fminus-build`). Every runtime function goes in `RuntimeSymbols.def`.
 - The smoke tests (`tests/smoke/`, `tests/lit/smoke/`) prove the toolchain. Keep them passing until the user retires
   them.
+- `docs/` is the manual (architecture, extending, building, testing; `docs/recipes/` patches). Keep it in step with
+  the code it describes, and re-verify a recipe before changing it (apply, build, test).
 - Commit, push or tag only when the user asks.
