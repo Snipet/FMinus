@@ -1,7 +1,8 @@
 # FMinus
 
 A JIT compiler for audio DSP. FMinus source is lexed by Flex and parsed by Bison, then lowered to LLVM IR. LLVM
-optimises it for the CPU it is running on, and ORC's LLJIT compiles it, all on the user's machine.
+optimises it for the CPU it is running on, and ORC's LLJIT compiles it, all on the user's machine. For development,
+the same IR can also be compiled ahead of time into a native executable.
 
 **Status:** skeleton. The build, the dependencies and the toolchain's smoke tests are in place; the compiler is not
 written yet.
@@ -32,11 +33,14 @@ cmake/
   templates/Config.h.in   -> <build>/include/fminus/Config.h
 include/fminus/         the library's public API ("fminus/...")
 src/                    the fminus library: every .cpp is a source, every grammar is generated in
-  support/              LLVMInit: registers the host target (came with the skeleton)
-  frontend/ ir/ opt/ jit/ runtime/    empty: a suggested split (lexer/parser/AST, IR lowering, pass pipelines,
-                                      ORC, functions the JIT'd code calls)
-tools/<name>/           one executable per directory, with CLI11 for its command line: fminus-hostinfo (came with
-                        the skeleton; the CLI11 pattern), fminus (empty)
+  support/              integration helpers that came with the skeleton: LLVMInit, HostTarget (the host's
+                        TargetMachine and the O0-O3 pipeline), JitRuntime (the runtime, defined in an LLJIT),
+                        Aot (object and assembly files, linked executables)
+  runtime/              the FMinus runtime: its own library, libfminus_runtime.a, with no LLVM in it; the C
+                        functions generated code calls, listed in RuntimeSymbols.def (a placeholder ABI version)
+  frontend/ ir/ opt/ jit/    empty: a suggested split (lexer/parser/AST, IR lowering, pass pipelines, ORC)
+tools/<name>/           one executable per directory, with CLI11 for its command line: fminus-hostinfo and
+                        fminus-build (came with the skeleton), fminus (empty)
 tests/
   unit/                 your Catch2 tests
   smoke/                the toolchain's checks: LLJIT + O3 on the host, Bison + Flex (smoke/calc/)
@@ -65,8 +69,9 @@ tarball in the build tree that downloaded it (`_deps/<name>-tmp/`), so a second 
 in-tree dependencies again.
 `FMINUS_DEPS_DIR` (CMake or environment variable) moves it, for example to share one cache between checkouts.
 Of the llvm-project source, only what `llvm/` builds from is kept after extraction (`llvm/`, `cmake/`, `third-party/`,
-`libc/`); `FMINUS_LLVM_KEEP_ALL_SOURCES=ON` keeps it all (delete `.deps/src/llvm-project-*` to extract again). Deleting `.deps/build/` frees most of the space once
-everything is installed, and deleting `.deps/` entirely is safe: the next configure rebuilds what it needs.
+`libc/`); `FMINUS_LLVM_KEEP_ALL_SOURCES=ON` keeps it all (delete `.deps/src/llvm-project-*` to extract again). Deleting
+`.deps/build/` frees most of the space once everything is installed, and deleting `.deps/` entirely is safe: the next
+configure rebuilds what it needs.
 
 **LLVM modes** (`FMINUS_LLVM_MODE`):
 
@@ -99,6 +104,26 @@ Bison runs with `-Wall -Wcounterexamples` (`FMINUS_BISON_FLAGS`), so a conflict 
 locations and detailed errors, and a reentrant, prefixed Flex scanner reading from memory. `CalcScanner.h` is the glue
 between the two: `YY_DECL`, the scanner's state and the `yylex` the parser calls.
 
+## Executables (ahead of time)
+
+For development, a module can also be compiled ahead of time for this machine, into a native executable you can run
+under lldb or Instruments, or into an object or assembly file to read. Its machine code is what LLJIT generates for the
+same module, since both use the TargetMachine and pipeline in `support/HostTarget.h`.
+
+```bash
+build-dev/bin/fminus-build kernel.ll -o kernel              # an executable (the IR needs a main)
+build-dev/bin/fminus-build kernel.ll --emit asm -o -        # this machine's assembly, after -O3
+build-dev/bin/fminus-build kernel.ll --emit ll -O2 -o -     # the optimised IR; --emit obj for an object file
+build-dev/bin/fminus-build kernel.ll -o kernel --link-arg=-framework --link-arg=Accelerate
+```
+
+From code, it is `fminus::aot::emitFile`, `linkExecutable` and `emitExecutable` in `src/support/Aot.h`. Linking goes
+through the C++ compiler driver this build tree was configured with (Xcode's clang; `$FMINUS_LINK_DRIVER` overrides
+it), which brings the SDK, libSystem and the ad-hoc signature arm64 needs. It links this tree's `libfminus_runtime.a`,
+so JIT'd and ahead-of-time code call the same runtime. In the JIT, `fminus::defineRuntimeSymbols` defines every
+function listed in `src/runtime/RuntimeSymbols.def` by its address. Under the `asan` and `tsan` presets, the
+sanitizer runtimes are linked too. This is a development feature: inside a plugin, FMinus only ever JITs.
+
 ## Tests
 
 ```bash
@@ -109,6 +134,7 @@ build-dev/bin/fminus-lit -v tests/lit               # lit directly; a source pat
 ```
 
 - **Catch2** (`tests/unit/`, `tests/smoke/`): one executable, `fminus-tests`; ctest runs each `TEST_CASE` on its own.
+  The smoke tests cover the JIT, an executable linked ahead of time and run, and the calculator grammar.
   Catch2's `BENCHMARK` is there for timing JIT'd kernels.
 - **lit** (`tests/lit/`): a file with `RUN:` lines, checked by FileCheck. FMinus's tools and LLVM's are on PATH;
   `%host_triple` is substituted; the features for `REQUIRES:` are `asserts`, `asan`, `ubsan`, `tsan`, `arm64`, `x86_64`.
@@ -133,6 +159,7 @@ preset has a workflow (`cmake --workflow --preset <name>`) except `xcode`, which
 ## Handy
 
 - `build-dev/bin/fminus-hostinfo [--features]`: the triple, CPU, features and data layout the JIT targets here.
+- `build-dev/bin/fminus-build`: LLVM IR to an executable, object, assembly or optimised IR (above).
 - The LLVM tools of the flavor in use are in `.deps/install/llvm-…/bin`: `opt -passes='default<O3>' -S`,
   `llc -mcpu=native`, `llvm-mca` (throughput of a kernel's machine code), `llvm-objdump -d`.
 - LLVM is built with `LLVM_ENABLE_DUMP=ON`: `value->dump()` and `module->dump()` work without assertions too.

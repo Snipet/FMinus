@@ -13,6 +13,8 @@ asks for that specific change, and ask before restructuring anything.
 - Adding a source, grammar, tool or test edits no CMake (globs; see README.md "Layout").
 - `fminus_target_defaults()` gives every FMinus target C++23, the warnings (`-Werror` unless `FMINUS_WERROR=OFF`) and
   the sanitizers. Dependencies keep their own flags.
+- `src/runtime/` is its own library (no LLVM): what generated code calls, JIT'd (`support/JitRuntime.h`) or linked
+  into an executable (`support/Aot.h`, `tools/fminus-build`). Every runtime function goes in `RuntimeSymbols.def`.
 - The smoke tests (`tests/smoke/`, `tests/lit/smoke/`) prove the toolchain. Keep them passing until the user retires
   them.
 - Commit, push or tag only when the user asks.

@@ -1,0 +1,46 @@
+// src/support/Aot.h: ahead-of-time compilation, for development. It writes a module's machine code to an object or
+// assembly file, and links objects into a native executable with the FMinus runtime (runtime/Runtime.h).
+//
+// An executable built this way runs under lldb and Instruments like any program. For the same module, TargetMachine
+// (support/HostTarget.h) and pipeline, its code is what LLJIT would generate. Linking runs the C++ compiler driver this
+// build tree was configured with (Xcode's clang on macOS; $FMINUS_LINK_DRIVER overrides it) against this tree's
+// libfminus_runtime.a, so it only works on a development machine: FMinus inside a plugin only ever JITs. An integration
+// piece that came with the project skeleton.
+#pragma once
+
+#include <llvm/Support/Error.h>
+
+#include <string>
+#include <vector>
+
+namespace llvm
+{
+    class Module;
+    class TargetMachine;
+} // namespace llvm
+
+namespace fminus::aot
+{
+    enum class FileKind
+    {
+        Object,
+        Assembly,
+    };
+
+    // Generates machine code for `module`, which prepareModule set up for `machine`, into `path` ("-": stdout).
+    llvm::Error emitFile(llvm::Module& module, llvm::TargetMachine& machine, const std::string& path, FileKind kind);
+
+    struct LinkOptions
+    {
+        std::string output;                    // the executable
+        std::vector<std::string> objects;      // object files and archives, in link order
+        std::vector<std::string> driverArgs;   // to the driver as they are: -framework Accelerate, -lm, -v, ...
+        bool linkRuntime = true;               // libfminus_runtime.a (and this tree's sanitizer runtimes)
+    };
+
+    // Links `options.objects` into `options.output` through the compiler driver.
+    llvm::Error linkExecutable(const LinkOptions& options);
+
+    // Writes the module's object to a temporary file and links it, ahead of `options.objects`, into `options.output`.
+    llvm::Error emitExecutable(llvm::Module& module, llvm::TargetMachine& machine, LinkOptions options);
+} // namespace fminus::aot

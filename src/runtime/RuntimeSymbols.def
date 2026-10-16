@@ -1,0 +1,4 @@
+// src/runtime/RuntimeSymbols.def: every function of the FMinus runtime (Runtime.h) generated code may call, one
+// FMINUS_RUNTIME_SYMBOL(name) each. support/JitRuntime.cpp defines them in a JIT by address; executables get them by
+// linking libfminus_runtime.a. Add a line whenever Runtime.h gains a function.
+FMINUS_RUNTIME_SYMBOL(fminus_rt_abi_version)
