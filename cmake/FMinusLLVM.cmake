@@ -124,24 +124,38 @@ macro(_fminus_llvm_declare subdir)
     EXCLUDE_FROM_ALL)
 endmacro()
 
-# After the first extraction: drops the monorepo's other projects (clang, mlir, flang, lldb, the runtimes, ...; about
-# 1.5 GB) unless FMINUS_LLVM_KEEP_ALL_SOURCES, and marks the tree as complete. llvm/ builds from llvm/, cmake/,
-# third-party/ and (for shared headers) libc/. The tarball stays in the first build tree's _deps/fminus_llvm-tmp/.
+# What llvm/ builds from: llvm/ without its regression tests (llvm/test, about 1.2 GB, read only with
+# LLVM_INCLUDE_TESTS), cmake/, third-party/ and (for shared headers) libc/. The rest of the monorepo (clang, mlir,
+# flang, lldb, the runtimes, ...; about 1.5 GB) goes too, unless FMINUS_LLVM_KEEP_ALL_SOURCES. Every configure prunes
+# an extracted tree this way, so a tree extracted before a rule was added follows it. Getting a file back needs a
+# fresh extraction: delete ${FMINUS_LLVM_SOURCE_DIR}. The tarball stays in the first build tree's _deps/fminus_llvm-tmp/.
 option(FMINUS_LLVM_KEEP_ALL_SOURCES "Keep all of llvm-project's sources, not only what llvm/ builds from" OFF)
+function(_fminus_llvm_prune)
+  if(FMINUS_LLVM_KEEP_ALL_SOURCES OR NOT EXISTS "${FMINUS_LLVM_SOURCE_DIR}/.fminus-populated")
+    return()
+  endif()
+  file(GLOB _children LIST_DIRECTORIES true "${FMINUS_LLVM_SOURCE_DIR}/*")
+  foreach(_child IN LISTS _children)
+    cmake_path(GET _child FILENAME _name)
+    if(IS_DIRECTORY "${_child}" AND NOT _name MATCHES "^(llvm|cmake|third-party|libc)$")
+      message(STATUS "FMinus: pruning ${_child}")
+      file(REMOVE_RECURSE "${_child}")
+    endif()
+  endforeach()
+  if(EXISTS "${FMINUS_LLVM_SOURCE_DIR}/llvm/test" AND NOT FMINUS_LLVM_EXTRA_OPTIONS MATCHES "LLVM_INCLUDE_TESTS=ON")
+    message(STATUS "FMinus: pruning ${FMINUS_LLVM_SOURCE_DIR}/llvm/test")
+    file(REMOVE_RECURSE "${FMINUS_LLVM_SOURCE_DIR}/llvm/test")
+  endif()
+endfunction()
+
+# After the first extraction: marks the tree as complete (later configures use it as it is), then prunes it.
 macro(_fminus_llvm_mark_populated)
   if(NOT EXISTS "${FMINUS_LLVM_SOURCE_DIR}/.fminus-populated")
-    if(NOT FMINUS_LLVM_KEEP_ALL_SOURCES)
-      file(GLOB _fminus_llvm_children LIST_DIRECTORIES true "${FMINUS_LLVM_SOURCE_DIR}/*")
-      foreach(_child IN LISTS _fminus_llvm_children)
-        cmake_path(GET _child FILENAME _name)
-        if(IS_DIRECTORY "${_child}" AND NOT _name MATCHES "^(llvm|cmake|third-party|libc)$")
-          file(REMOVE_RECURSE "${_child}")
-        endif()
-      endforeach()
-    endif()
     file(WRITE "${FMINUS_LLVM_SOURCE_DIR}/.fminus-populated" "${FMINUS_LLVM_SHA256}")
   endif()
+  _fminus_llvm_prune()
 endmacro()
+_fminus_llvm_prune()   # a tree extracted by an earlier configure
 
 if(FMINUS_LLVM_MODE STREQUAL "cache")
   # ---- cache: build each flavor once, install it, find_package it ----------------------------------------------------

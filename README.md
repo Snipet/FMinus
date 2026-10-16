@@ -73,8 +73,9 @@ system unless an option asks for it.
 tarball in the build tree that downloaded it (`_deps/<name>-tmp/`), so a second build tree downloads only the small
 in-tree dependencies again.
 `FMINUS_DEPS_DIR` (CMake or environment variable) moves it, for example to share one cache between checkouts.
-Of the llvm-project source, only what `llvm/` builds from is kept after extraction (`llvm/`, `cmake/`, `third-party/`,
-`libc/`); `FMINUS_LLVM_KEEP_ALL_SOURCES=ON` keeps it all (delete `.deps/src/llvm-project-*` to extract again). Deleting
+Of the llvm-project source, only what `llvm/` builds from is kept after extraction: `llvm/` without its regression
+tests (`llvm/test`), `cmake/`, `third-party/` and `libc/`: about 300 MB of the 2.4 GB it unpacks to.
+`FMINUS_LLVM_KEEP_ALL_SOURCES=ON` keeps it all (delete `.deps/src/llvm-project-*` to extract again). Deleting
 `.deps/build/` frees most of the space once everything is installed, and deleting `.deps/` entirely is safe: the next
 configure rebuilds what it needs.
 
