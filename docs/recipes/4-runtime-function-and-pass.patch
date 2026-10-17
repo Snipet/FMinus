@@ -1,13 +1,13 @@
 diff --git a/src/ir/CodeGen.cpp b/src/ir/CodeGen.cpp
-index 101bc29..fb909cb 100644
+index e597f66..91b6eb9 100644
 --- a/src/ir/CodeGen.cpp
 +++ b/src/ir/CodeGen.cpp
-@@ -46,6 +46,28 @@ namespace fminus::ir
-             Builtin{"max", llvm::Intrinsic::maxnum, 2}, Builtin{"tanh", llvm::Intrinsic::tanh, 1},
+@@ -54,6 +54,28 @@ namespace fminus::ir
+             Builtin{"fmaxf", llvm::Intrinsic::maxnum, 2}, Builtin{"tanhf", llvm::Intrinsic::tanh, 1},
          };
  
-+        // name -> a function of the FMinus runtime (runtime/Runtime.h), float(float, ...): JIT'd code finds it through
-+        // support/JitRuntime.h, an executable links libfminus_runtime.a.
++        // name -> a function of the FMinus runtime (runtime/Runtime.h), float(float, ...), callable with no prototype:
++        // JIT'd code finds it through support/JitRuntime.h, an executable links libfminus_runtime.a.
 +        struct RuntimeFunction
 +        {
 +            std::string_view name;
@@ -31,25 +31,28 @@ index 101bc29..fb909cb 100644
          const Builtin* findBuiltin(std::string_view name)
          {
              for (const Builtin& builtin : kBuiltins)
-@@ -129,7 +151,7 @@ namespace fminus::ir
-             // ---- declarations -----------------------------------------------------------------------------------
+@@ -149,6 +171,11 @@ namespace fminus::ir
+ 
              void declare(const ast::Function& function)
              {
--                if (findBuiltin(function.name) != nullptr)
-+                if (findBuiltin(function.name) != nullptr || findRuntimeFunction(function.name) != nullptr)
++                if (findRuntimeFunction(function.name) != nullptr)
++                {
++                    error(function.location, quoted(function.name) + " is a builtin and cannot be redefined");
++                    return;
++                }
+                 if (const Builtin* builtin = findBuiltin(function.name))
                  {
-                     error(function.location, quoted(function.name) + " is a builtin and cannot be defined");
-                     return;
-@@ -428,6 +450,17 @@ namespace fminus::ir
+                     // A prototype of a builtin, as <math.h> has, declares nothing new; a definition is refused.
+@@ -663,6 +690,17 @@ namespace fminus::ir
                          llvm::Intrinsic::getOrInsertDeclaration(&module_, builtin->intrinsic, {builder_.getFloatTy()});
                      return builder_.CreateCall(intrinsic, args);
                  }
 +                if (const RuntimeFunction* runtime = findRuntimeFunction(call.callee))
 +                {
 +                    if (args.size() != runtime->arity)
-+                        return wrongArity(location, call, runtime->arity, ast::Type::Float);
++                        return wrongArity(location, call, runtime->arity);
 +                    for (llvm::Value*& arg : args)
-+                        arg = expect(location, arg, ast::Type::Float, "an argument of " + quoted(call.callee));
++                        arg = convert(arg, ast::Type::Float);
 +                    std::vector<llvm::Type*> params(runtime->arity, builder_.getFloatTy());
 +                    llvm::FunctionCallee callee = module_.getOrInsertFunction(
 +                        runtime->symbol, llvm::FunctionType::get(builder_.getFloatTy(), params, false));
@@ -63,10 +66,10 @@ deleted file mode 100644
 index e69de29..0000000
 diff --git a/src/opt/CountFlops.cpp b/src/opt/CountFlops.cpp
 new file mode 100644
-index 0000000..8eda020
+index 0000000..7c87262
 --- /dev/null
 +++ b/src/opt/CountFlops.cpp
-@@ -0,0 +1,27 @@
+@@ -0,0 +1,28 @@
 +// src/opt/CountFlops.cpp
 +#include "opt/CountFlops.h"
 +
@@ -85,7 +88,8 @@ index 0000000..8eda020
 +        {
 +            for (const llvm::Instruction& instruction : block)
 +            {
-+                const bool arithmetic = llvm::isa<llvm::BinaryOperator, llvm::UnaryOperator, llvm::FCmpInst>(instruction);
++                const bool arithmetic =
++                    llvm::isa<llvm::BinaryOperator, llvm::UnaryOperator, llvm::FCmpInst>(instruction);
 +                if (arithmetic && instruction.getOperand(0)->getType()->isFPOrFPVectorTy())
 +                    ++flops;
 +            }
@@ -178,15 +182,16 @@ index e880819..ef08e85 100644
 +    return std::pow(10.0f, db / 20.0f);
 +}
 diff --git a/src/runtime/Runtime.h b/src/runtime/Runtime.h
-index 87bf2ed..c5f6d71 100644
+index 87bf2ed..a8b50ed 100644
 --- a/src/runtime/Runtime.h
 +++ b/src/runtime/Runtime.h
-@@ -13,4 +13,7 @@ extern "C"
+@@ -13,4 +13,8 @@ extern "C"
  {
      // The runtime's ABI version, for generated code to check against the one it was compiled for.
      std::int32_t fminus_rt_abi_version() noexcept;
 +
-+    // Decibels to a linear gain: 10^(db / 20). FMinus calls it as db_to_gain (ir/CodeGen.cpp).
++    // Decibels to a linear gain: 10^(db / 20). FMinus code declares it (`float fminus_rt_db_to_gain(float db);`), or
++    // calls it as the builtin db_to_gain (ir/CodeGen.cpp).
 +    float fminus_rt_db_to_gain(float db) noexcept;
  }
 diff --git a/src/runtime/RuntimeSymbols.def b/src/runtime/RuntimeSymbols.def
@@ -218,57 +223,43 @@ index 43a1a21..9eae83f 100644
          passes.registerModuleAnalyses(modules);
          passes.registerCGSCCAnalyses(cgsccs);
          passes.registerFunctionAnalyses(functions);
-diff --git a/tests/lit/fminus/codegen.fm b/tests/lit/fminus/codegen.fm
-index 7c5214c..0937d2a 100644
---- a/tests/lit/fminus/codegen.fm
-+++ b/tests/lit/fminus/codegen.fm
-@@ -11,11 +11,11 @@ fn twice(x: float) -> float {
-     return -doubled;
- }
- 
--// CHECK-LABEL: define float @gain(float %x, float %g) {
-+// CHECK-LABEL: define float @gain(float %x, float %g){{.*}} {
- // CHECK-NEXT:  entry:
- // CHECK-NEXT:    [[P:%.*]] = fmul float %x, %g
- // CHECK-NEXT:    ret float [[P]]
--// CHECK-LABEL: define float @twice(float %x) {
-+// CHECK-LABEL: define float @twice(float %x){{.*}} {
- // CHECK:         %doubled = call float @gain(float %x, float 2.000000e+00)
- // CHECK-NEXT:    [[N:%.*]] = fneg float %doubled
- // CHECK-NEXT:    ret float [[N]]
 diff --git a/tests/lit/fminus/flops.fm b/tests/lit/fminus/flops.fm
 new file mode 100644
-index 0000000..64c2fea
+index 0000000..7a8a38a
 --- /dev/null
 +++ b/tests/lit/fminus/flops.fm
-@@ -0,0 +1,10 @@
-+// recipe F: CountFlopsPass records each function's floating-point operations after optimisation.
+@@ -0,0 +1,11 @@
++// recipe 6: CountFlopsPass records each function's floating-point operations after optimisation.
 +// RUN: fminus %s -O2 | FileCheck %s
 +
-+fn softclip(x: float, drive: float) -> float {
-+    let y = x * drive;
-+    return y / (1.0 + abs(y));
++float softclip(float x, float drive)
++{
++    const float y = x * drive;
++    return y / (1.0f + fabsf(y));
 +}
 +
 +// CHECK: define float @softclip({{.*}} #[[ATTRS:[0-9]+]]
 +// CHECK: attributes #[[ATTRS]] = { {{.*}}"fminus-flops"="3"
 diff --git a/tests/unit/RecipeTest.cpp b/tests/unit/RecipeTest.cpp
-index 7773a85..48d8c58 100644
+index 78acefa..7e29307 100644
 --- a/tests/unit/RecipeTest.cpp
 +++ b/tests/unit/RecipeTest.cpp
-@@ -149,3 +149,15 @@ TEST_CASE("recipe D: var, assignment and while", "[recipe]")
-                     "test.fm:7:5: error: the condition of a while must be bool, not float\n"
-                     "test.fm:9:12: error: unknown variable 'inner'\n");
+@@ -180,3 +180,18 @@ TEST_CASE("recipe 4: if, else, while, for, break and continue", "[recipe]")
+                     "test.fm:6:12: error: use of undeclared identifier 'i'\n"
+                     "test.fm:8:7: error: non-void function 'g' does not return a value\n");
  }
 +
-+TEST_CASE("recipe E: a runtime function", "[recipe]")
++TEST_CASE("recipe 5: a runtime function, through a prototype or as a builtin", "[recipe]")
 +{
 +    std::string errors;
-+    auto jit = build("fn f(db: float) -> float { return db_to_gain(db) * 2; }", errors);
++    auto jit = build("float fminus_rt_db_to_gain(float db);\n"   // C's way: declare it, call it
++                     "float f(float db) { return fminus_rt_db_to_gain(db) * 2; }\n"
++                     "float g(float db) { return db_to_gain(db); }\n",   // the language's way: a builtin name
++                     errors);
 +    INFO(errors);
 +    REQUIRE(jit);
-+    auto f = llvm::cantFail(jit->lookup("f")).toPtr<float (*)(float)>();
-+    CHECK(f(20.0f) == 20.0f);
-+    CHECK(f(0.0f) == 2.0f);
-+    CHECK(build("fn db_to_gain(x: float) -> float { return x; }", errors) == nullptr);
++    CHECK(lookup<float(float)>(*jit, "f")(20.0f) == 20.0f);
++    CHECK(lookup<float(float)>(*jit, "g")(0.0f) == 1.0f);
++    CHECK(build("float db_to_gain(float x) { return x; }", errors) == nullptr);
++    CHECK(errors == "test.fm:1:7: error: 'db_to_gain' is a builtin and cannot be redefined\n");
 +}

@@ -1,13 +1,22 @@
-// src/frontend/Parser.y: the grammar of FMinus v0 (Bison 3.8: C++, variant semantic values moved automatically,
-// token constructors, locations, detailed errors with LAC). It builds the syntax tree (Ast.h) into the ParseContext.
+// src/frontend/Parser.y: the grammar of FMinus v0, a subset of C (Bison 3.8: C++, variant semantic values moved
+// automatically, token constructors, locations, detailed errors with LAC). It builds the syntax tree (Ast.h) into the
+// ParseContext.
 //
-//     program    : function*
-//     function   : "fn" IDENTIFIER "(" (param ("," param)*)? ")" "->" type "{" statement* "}"
-//     param      : IDENTIFIER ":" type
-//     type       : "float"
-//     statement  : "let" IDENTIFIER "=" expr ";"  |  "return" expr ";"
-//     expr       : NUMBER | IDENTIFIER | IDENTIFIER "(" (expr ("," expr)*)? ")"
-//                | expr ("+" | "-" | "*" | "/") expr | "-" expr | "(" expr ")"
+//     program      : function*
+//     function     : type IDENTIFIER "(" (param ("," param)*)? ")" (block | ";")     a definition, or a prototype
+//     param        : "const"? type IDENTIFIER?                                       (a prototype may omit names)
+//     type         : "float"
+//     block        : "{" (declaration | statement)* "}"
+//     declaration  : "const"? type declarator ("," declarator)* ";"
+//     declarator   : IDENTIFIER ("=" expr)?
+//     statement    : block | expr ";" | "return" expr ";" | ";"
+//     expr         : NUMBER | IDENTIFIER | IDENTIFIER "(" (expr ("," expr)*)? ")" | "(" expr ")"
+//                  | ("-" | "+") expr | expr ("*" | "/") expr | expr ("+" | "-") expr
+//                  | expr ("=" | "+=" | "-=" | "*=" | "/=") expr
+//
+// Precedence and associativity are C's, from the loosest: assignment (right to left), additive, multiplicative, unary.
+// The grammar accepts any expression on the left of an assignment; the code generator rejects what is not a variable
+// ("expression is not assignable"), so buffer elements and fields can join it later.
 //
 // To add a construct: its tokens in Lexer.l and here, a rule here, a node in Ast.h, its dump in Ast.cpp and its
 // lowering in ir/CodeGen.cpp. Bison's report (build tree: src/generated/frontend/Parser.output) and -Wcounterexamples
@@ -41,6 +50,17 @@
     #define YY_TYPEDEF_YY_SCANNER_T
     typedef void* yyscan_t;
     #endif
+
+    namespace fminus::frontend
+    {
+        // One name of a declaration (`a = 1` in `float a = 1, b;`), before the declaration knows its type.
+        struct Declarator
+        {
+            SourceLocation location;
+            std::string name;
+            ast::ExprPtr init;   // null without an initialiser
+        };
+    } // namespace fminus::frontend
 }
 
 %code {
@@ -52,12 +72,25 @@
         {
             return {where.begin.line, where.begin.column};
         }
+
+        fminus::ast::ExprPtr binary(const fminus::frontend::location& where, fminus::ast::BinaryOp op,
+                                    fminus::ast::ExprPtr lhs, fminus::ast::ExprPtr rhs)
+        {
+            return fminus::ast::makeExpr(at(where), fminus::ast::BinaryExpr{op, std::move(lhs), std::move(rhs)});
+        }
+
+        fminus::ast::ExprPtr assign(const fminus::frontend::location& where, fminus::ast::AssignOp op,
+                                    fminus::ast::ExprPtr target, fminus::ast::ExprPtr value)
+        {
+            return fminus::ast::makeExpr(at(where), fminus::ast::AssignExpr{op, std::move(target), std::move(value)});
+        }
     } // namespace
 }
 
-%token FN "fn" LET "let" RETURN "return" FLOAT "float"
-%token ARROW "->" PLUS "+" MINUS "-" STAR "*" SLASH "/" ASSIGN "="
-%token LPAREN "(" RPAREN ")" LBRACE "{" RBRACE "}" COMMA "," COLON ":" SEMI ";"
+%token FLOAT "float" CONST "const" RETURN "return"
+%token PLUS "+" MINUS "-" STAR "*" SLASH "/"
+%token ASSIGN "=" PLUS_ASSIGN "+=" MINUS_ASSIGN "-=" STAR_ASSIGN "*=" SLASH_ASSIGN "/="
+%token LPAREN "(" RPAREN ")" LBRACE "{" RBRACE "}" COMMA "," SEMI ";"
 %token <std::string> IDENTIFIER "identifier"
 %token <std::string> NUMBER "number"
 
@@ -65,15 +98,19 @@
 %nterm <ast::Function> function
 %nterm <std::vector<ast::Param>> params param_list
 %nterm <ast::Param> param
+%nterm <bool> qualifier
 %nterm <ast::Type> type
-%nterm <std::vector<ast::Stmt>> statements
+%nterm <std::vector<ast::Stmt>> block block_items block_item declaration
 %nterm <ast::Stmt> statement
+%nterm <std::vector<Declarator>> declarators
+%nterm <Declarator> declarator
 %nterm <ast::ExprPtr> expr
 %nterm <std::vector<ast::ExprPtr>> args arg_list
 
+%right "=" "+=" "-=" "*=" "/="
 %left "+" "-"
 %left "*" "/"
-%precedence NEG
+%precedence UNARY
 
 %%
 
@@ -87,8 +124,8 @@ functions
     ;
 
 function
-    : "fn" IDENTIFIER "(" params ")" "->" type "{" statements "}"
-                                            { $$ = ast::Function{at(@1), $2, $4, $7, $9}; }
+    : type IDENTIFIER "(" params ")" block  { $$ = ast::Function{at(@2), $2, $4, $1, $6, true}; }
+    | type IDENTIFIER "(" params ")" ";"    { $$ = ast::Function{at(@2), $2, $4, $1, {}, false}; }
     ;
 
 params
@@ -102,33 +139,77 @@ param_list
     ;
 
 param
-    : IDENTIFIER ":" type                   { $$ = ast::Param{at(@1), $1, $3}; }
+    : qualifier type IDENTIFIER             { $$ = ast::Param{at(@3), $3, $2, $1}; }
+    | qualifier type                        { $$ = ast::Param{at(@2), "", $2, $1}; }
+    ;
+
+qualifier
+    : %empty                                { $$ = false; }
+    | "const"                               { $$ = true; }
     ;
 
 type
     : "float"                               { $$ = ast::Type::Float; }
     ;
 
-statements
+block
+    : "{" block_items "}"                   { $$ = $2; }
+    ;
+
+block_items
     : %empty                                {}
-    | statements statement                  { $$ = $1; $$.push_back($2); }
+    | block_items block_item                { $$ = $1; for (ast::Stmt& item : $2) $$.push_back(std::move(item)); }
+    ;
+
+// A block item is a list: a declaration gives one DeclStmt per declarator.
+block_item
+    : declaration                           { $$ = $1; }
+    | statement                             { $$.push_back($1); }
+    ;
+
+declaration
+    : qualifier type declarators ";"        {
+                                                const bool isConst = $1;
+                                                const ast::Type type = $2;
+                                                for (Declarator& d : $3)
+                                                    $$.push_back(ast::Stmt{d.location, ast::DeclStmt{isConst, type,
+                                                                           std::move(d.name), std::move(d.init)}});
+                                            }
+    ;
+
+declarators
+    : declarator                            { $$.push_back($1); }
+    | declarators "," declarator            { $$ = $1; $$.push_back($3); }
+    ;
+
+declarator
+    : IDENTIFIER                            { $$ = Declarator{at(@1), $1, nullptr}; }
+    | IDENTIFIER "=" expr                   { $$ = Declarator{at(@1), $1, $3}; }
     ;
 
 statement
-    : "let" IDENTIFIER "=" expr ";"         { $$ = ast::Stmt{at(@1), ast::LetStmt{$2, $4}}; }
+    : block                                 { $$ = ast::Stmt{at(@1), ast::BlockStmt{$1}}; }
+    | expr ";"                              { $$ = ast::Stmt{at(@1), ast::ExprStmt{$1}}; }
     | "return" expr ";"                     { $$ = ast::Stmt{at(@1), ast::ReturnStmt{$2}}; }
+    | ";"                                   { $$ = ast::Stmt{at(@1), ast::EmptyStmt{}}; }
     ;
 
 expr
     : NUMBER                                { $$ = ast::makeExpr(at(@1), ast::NumberExpr{$1}); }
     | IDENTIFIER                            { $$ = ast::makeExpr(at(@1), ast::VariableExpr{$1}); }
     | IDENTIFIER "(" args ")"               { $$ = ast::makeExpr(at(@1), ast::CallExpr{$1, $3}); }
-    | expr "+" expr                         { $$ = ast::makeExpr(at(@2), ast::BinaryExpr{ast::BinaryOp::Add, $1, $3}); }
-    | expr "-" expr                         { $$ = ast::makeExpr(at(@2), ast::BinaryExpr{ast::BinaryOp::Subtract, $1, $3}); }
-    | expr "*" expr                         { $$ = ast::makeExpr(at(@2), ast::BinaryExpr{ast::BinaryOp::Multiply, $1, $3}); }
-    | expr "/" expr                         { $$ = ast::makeExpr(at(@2), ast::BinaryExpr{ast::BinaryOp::Divide, $1, $3}); }
-    | "-" expr %prec NEG                    { $$ = ast::makeExpr(at(@1), ast::UnaryExpr{ast::UnaryOp::Negate, $2}); }
     | "(" expr ")"                          { $$ = $2; }
+    | "-" expr %prec UNARY                  { $$ = ast::makeExpr(at(@1), ast::UnaryExpr{ast::UnaryOp::Negate, $2}); }
+    | "+" expr %prec UNARY                  { $$ = ast::makeExpr(at(@1), ast::UnaryExpr{ast::UnaryOp::Plus, $2}); }
+    | expr "*" expr                         { $$ = binary(@2, ast::BinaryOp::Multiply, $1, $3); }
+    | expr "/" expr                         { $$ = binary(@2, ast::BinaryOp::Divide, $1, $3); }
+    | expr "+" expr                         { $$ = binary(@2, ast::BinaryOp::Add, $1, $3); }
+    | expr "-" expr                         { $$ = binary(@2, ast::BinaryOp::Subtract, $1, $3); }
+    | expr "=" expr                         { $$ = assign(@2, ast::AssignOp::Assign, $1, $3); }
+    | expr "+=" expr                        { $$ = assign(@2, ast::AssignOp::Add, $1, $3); }
+    | expr "-=" expr                        { $$ = assign(@2, ast::AssignOp::Subtract, $1, $3); }
+    | expr "*=" expr                        { $$ = assign(@2, ast::AssignOp::Multiply, $1, $3); }
+    | expr "/=" expr                        { $$ = assign(@2, ast::AssignOp::Divide, $1, $3); }
     ;
 
 args

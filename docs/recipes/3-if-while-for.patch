@@ -1,0 +1,385 @@
+diff --git a/src/frontend/Ast.cpp b/src/frontend/Ast.cpp
+index faa49f4..dfb0966 100644
+--- a/src/frontend/Ast.cpp
++++ b/src/frontend/Ast.cpp
+@@ -129,6 +129,28 @@ namespace fminus::ast
+                                       return text + ")";
+                                   },
+                                   [&](const EmptyStmt&) { return indent + "(empty)"; },
++                                  [&](const IfStmt& branch) {
++                                      std::string text = indent + "(if " + dump(*branch.condition) + "\n"
++                                                         + dump(*branch.thenBranch, indent + "  ");
++                                      if (branch.elseBranch)
++                                          text += "\n" + dump(*branch.elseBranch, indent + "  ");
++                                      return text + ")";
++                                  },
++                                  [&](const WhileStmt& loop) {
++                                      return indent + "(while " + dump(*loop.condition) + "\n"
++                                             + dump(*loop.body, indent + "  ") + ")";
++                                  },
++                                  [&](const ForStmt& loop) {
++                                      std::string init;
++                                      for (const Stmt& item : loop.init)
++                                          init += (init.empty() ? "" : " ") + dump(item, "");
++                                      return indent + "(for (" + init + ") "
++                                             + (loop.condition ? dump(*loop.condition) : "()") + " "
++                                             + (loop.step ? dump(*loop.step) : "()") + "\n"
++                                             + dump(*loop.body, indent + "  ") + ")";
++                                  },
++                                  [&](const BreakStmt&) { return indent + "(break)"; },
++                                  [&](const ContinueStmt&) { return indent + "(continue)"; },
+                               },
+                               stmt.node);
+         }
+diff --git a/src/frontend/Ast.h b/src/frontend/Ast.h
+index 65b314e..865d4ce 100644
+--- a/src/frontend/Ast.h
++++ b/src/frontend/Ast.h
+@@ -172,12 +172,53 @@ namespace fminus::ast
+     {
+     };
+ 
++    using StmtPtr = std::unique_ptr<Stmt>;
++
++    // `if (condition) thenBranch [else elseBranch]`. A float condition is `!= 0`, as in C.
++    struct IfStmt
++    {
++        ExprPtr condition;
++        StmtPtr thenBranch;
++        StmtPtr elseBranch;   // null without an else
++    };
++
++    struct WhileStmt
++    {
++        ExprPtr condition;
++        StmtPtr body;
++    };
++
++    // `for (init; condition; step) body`. The init's declarations are scoped to the loop; a missing condition is
++    // true, so the loop runs until a break or a return.
++    struct ForStmt
++    {
++        std::vector<Stmt> init;   // declarations, an expression statement, or nothing
++        ExprPtr condition;        // null when omitted
++        ExprPtr step;             // null when omitted
++        StmtPtr body;
++    };
++
++    struct BreakStmt
++    {
++    };
++
++    struct ContinueStmt
++    {
++    };
++
+     struct Stmt
+     {
+         SourceLocation location;
+-        std::variant<DeclStmt, ExprStmt, ReturnStmt, BlockStmt, EmptyStmt> node;
++        std::variant<DeclStmt, ExprStmt, ReturnStmt, BlockStmt, EmptyStmt, IfStmt, WhileStmt, ForStmt, BreakStmt,
++                     ContinueStmt>
++            node;
+     };
+ 
++    inline StmtPtr own(Stmt stmt)
++    {
++        return std::make_unique<Stmt>(std::move(stmt));
++    }
++
+     // A parameter is a variable of the function's outermost block, as in C: assignable unless const. A prototype may
+     // leave its name out (empty).
+     struct Param
+diff --git a/src/frontend/Lexer.l b/src/frontend/Lexer.l
+index ec7bed5..4c2302e 100644
+--- a/src/frontend/Lexer.l
++++ b/src/frontend/Lexer.l
+@@ -56,6 +56,12 @@ IDENTIFIER  [A-Za-z_][A-Za-z0-9_]*
+ "false"                     { return Parser::make_FALSE(yyextra->where); }
+ "const"                     { return Parser::make_CONST(yyextra->where); }
+ "return"                    { return Parser::make_RETURN(yyextra->where); }
++"if"                        { return Parser::make_IF(yyextra->where); }
++"else"                      { return Parser::make_ELSE(yyextra->where); }
++"while"                     { return Parser::make_WHILE(yyextra->where); }
++"for"                       { return Parser::make_FOR(yyextra->where); }
++"break"                     { return Parser::make_BREAK(yyextra->where); }
++"continue"                  { return Parser::make_CONTINUE(yyextra->where); }
+ 
+ {DIGITS}"."[0-9]*{EXPONENT}?[fF]?   |
+ "."{DIGITS}{EXPONENT}?[fF]?         |
+diff --git a/src/frontend/Parser.y b/src/frontend/Parser.y
+index 908545d..070f0ad 100644
+--- a/src/frontend/Parser.y
++++ b/src/frontend/Parser.y
+@@ -95,6 +95,7 @@
+ 
+ %token FLOAT "float" CONST "const" RETURN "return" BOOL "bool" TRUE "true" FALSE "false"
+ %token LT "<" LE "<=" GT ">" GE ">=" EQ "==" NE "!=" NOT "!" AND "&&" OR "||" QUESTION "?" COLON ":"
++%token IF "if" ELSE "else" WHILE "while" FOR "for" BREAK "break" CONTINUE "continue"
+ %token PLUS "+" MINUS "-" STAR "*" SLASH "/" PERCENT "%"
+ %token ASSIGN "=" PLUS_ASSIGN "+=" MINUS_ASSIGN "-=" STAR_ASSIGN "*=" SLASH_ASSIGN "/=" PERCENT_ASSIGN "%="
+ %token LPAREN "(" RPAREN ")" LBRACE "{" RBRACE "}" COMMA "," SEMI ";"
+@@ -109,11 +110,18 @@
+ %nterm <ast::Type> type
+ %nterm <std::vector<ast::Stmt>> block block_items block_item declaration
+ %nterm <ast::Stmt> statement
++%nterm <std::vector<ast::Stmt>> for_init
++%nterm <ast::ExprPtr> optional_expr
+ %nterm <std::vector<Declarator>> declarators
+ %nterm <Declarator> declarator
+ %nterm <ast::ExprPtr> expr
+ %nterm <std::vector<ast::ExprPtr>> args arg_list
+ 
++// The dangling else: in `if (a) if (b) s; else t;` the else could close either if. Giving it more precedence than the
++// shorter rule (THEN) makes Bison shift it, so it closes the nearest if, as in C.
++%precedence THEN
++%precedence "else"
++
+ %right "=" "+=" "-=" "*=" "/=" "%="
+ %right "?" ":"
+ %left "||"
+@@ -205,6 +213,27 @@ statement
+     | expr ";"                              { $$ = ast::Stmt{at(@1), ast::ExprStmt{$1}}; }
+     | "return" expr ";"                     { $$ = ast::Stmt{at(@1), ast::ReturnStmt{$2}}; }
+     | ";"                                   { $$ = ast::Stmt{at(@1), ast::EmptyStmt{}}; }
++    | "if" "(" expr ")" statement %prec THEN
++                                            { $$ = ast::Stmt{at(@1), ast::IfStmt{$3, ast::own($5), nullptr}}; }
++    | "if" "(" expr ")" statement "else" statement
++                                            { $$ = ast::Stmt{at(@1), ast::IfStmt{$3, ast::own($5), ast::own($7)}}; }
++    | "while" "(" expr ")" statement        { $$ = ast::Stmt{at(@1), ast::WhileStmt{$3, ast::own($5)}}; }
++    | "for" "(" for_init optional_expr ";" optional_expr ")" statement
++                                            { $$ = ast::Stmt{at(@1), ast::ForStmt{$3, $4, $6, ast::own($8)}}; }
++    | "break" ";"                           { $$ = ast::Stmt{at(@1), ast::BreakStmt{}}; }
++    | "continue" ";"                        { $$ = ast::Stmt{at(@1), ast::ContinueStmt{}}; }
++    ;
++
++// The first clause of a for: a declaration (its ; included), an expression and ;, or just ;.
++for_init
++    : declaration                           { $$ = $1; }
++    | expr ";"                              { $$.push_back(ast::Stmt{at(@1), ast::ExprStmt{$1}}); }
++    | ";"                                   {}
++    ;
++
++optional_expr
++    : %empty                                { $$ = nullptr; }
++    | expr                                  { $$ = $1; }
+     ;
+ 
+ expr
+diff --git a/src/ir/CodeGen.cpp b/src/ir/CodeGen.cpp
+index ffe3868..e597f66 100644
+--- a/src/ir/CodeGen.cpp
++++ b/src/ir/CodeGen.cpp
+@@ -303,10 +303,121 @@ namespace fminus::ir
+                                    scopes_.pop_back();
+                                },
+                                [&](const ast::EmptyStmt&) {},
++                               [&](const ast::IfStmt& branch) { lowerIf(branch); },
++                               [&](const ast::WhileStmt& loop) { lowerWhile(loop); },
++                               [&](const ast::ForStmt& loop) { lowerFor(loop); },
++                               [&](const ast::BreakStmt&) {
++                                   if (loops_.empty())
++                                       error(stmt.location, "'break' statement not in loop or switch statement");
++                                   else
++                                       builder_.CreateBr(loops_.back().breakTarget);
++                               },
++                               [&](const ast::ContinueStmt&) {
++                                   if (loops_.empty())
++                                       error(stmt.location, "'continue' statement not in loop statement");
++                                   else
++                                       builder_.CreateBr(loops_.back().continueTarget);
++                               },
+                            },
+                            stmt.node);
+             }
+ 
++            // A sub-statement (a branch, a loop body) has a scope of its own, as in C.
++            void lowerScoped(const ast::Stmt& stmt)
++            {
++                scopes_.emplace_back();
++                lowerStatement(stmt);
++                scopes_.pop_back();
++            }
++
++            llvm::BasicBlock* newBlock(const char* name)
++            {
++                return llvm::BasicBlock::Create(module_.getContext(), name, builder_.GetInsertBlock()->getParent());
++            }
++
++            // Branches to `target` unless the block already ends (a return, a break, a continue in it).
++            void fallThrough(llvm::BasicBlock* target)
++            {
++                if (!builder_.GetInsertBlock()->hasTerminator())
++                    builder_.CreateBr(target);
++            }
++
++            // if.then and if.else join at if.end. A branch that returns never gets there; when neither does, if.end
++            // is unreachable, and so is what follows.
++            void lowerIf(const ast::IfStmt& branch)
++            {
++                llvm::Value* condition = convert(lower(*branch.condition), ast::Type::Bool);
++                llvm::BasicBlock* thenBlock = newBlock("if.then");
++                llvm::BasicBlock* elseBlock = branch.elseBranch ? newBlock("if.else") : nullptr;
++                llvm::BasicBlock* endBlock = newBlock("if.end");
++                builder_.CreateCondBr(condition, thenBlock, elseBlock != nullptr ? elseBlock : endBlock);
++
++                builder_.SetInsertPoint(thenBlock);
++                lowerScoped(*branch.thenBranch);
++                fallThrough(endBlock);
++                if (elseBlock != nullptr)
++                {
++                    builder_.SetInsertPoint(elseBlock);
++                    lowerScoped(*branch.elseBranch);
++                    fallThrough(endBlock);
++                }
++                builder_.SetInsertPoint(endBlock);
++            }
++
++            // while.cond tests and branches to while.body or while.end; the body goes back to while.cond. break goes
++            // to while.end, continue to while.cond.
++            void lowerWhile(const ast::WhileStmt& loop)
++            {
++                llvm::BasicBlock* condBlock = newBlock("while.cond");
++                llvm::BasicBlock* bodyBlock = newBlock("while.body");
++                llvm::BasicBlock* endBlock = newBlock("while.end");
++                builder_.CreateBr(condBlock);
++
++                builder_.SetInsertPoint(condBlock);
++                builder_.CreateCondBr(convert(lower(*loop.condition), ast::Type::Bool), bodyBlock, endBlock);
++
++                builder_.SetInsertPoint(bodyBlock);
++                loops_.push_back({endBlock, condBlock});
++                lowerScoped(*loop.body);
++                loops_.pop_back();
++                fallThrough(condBlock);
++
++                builder_.SetInsertPoint(endBlock);
++            }
++
++            // for (init; cond; step) body: init, then for.cond -> for.body -> for.inc (the step) -> for.cond, until
++            // for.end. continue goes to for.inc, so the step still runs. The init's declarations are the loop's.
++            void lowerFor(const ast::ForStmt& loop)
++            {
++                scopes_.emplace_back();
++                lowerStatements(loop.init);
++                llvm::BasicBlock* condBlock = newBlock("for.cond");
++                llvm::BasicBlock* bodyBlock = newBlock("for.body");
++                llvm::BasicBlock* incBlock = newBlock("for.inc");
++                llvm::BasicBlock* endBlock = newBlock("for.end");
++                builder_.CreateBr(condBlock);
++
++                builder_.SetInsertPoint(condBlock);
++                if (loop.condition)
++                    builder_.CreateCondBr(convert(lower(*loop.condition), ast::Type::Bool), bodyBlock, endBlock);
++                else
++                    builder_.CreateBr(bodyBlock);   // no condition: until a break or a return
++
++                builder_.SetInsertPoint(bodyBlock);
++                loops_.push_back({endBlock, incBlock});
++                lowerScoped(*loop.body);
++                loops_.pop_back();
++                fallThrough(incBlock);
++
++                builder_.SetInsertPoint(incBlock);
++                if (loop.step)
++                    lower(*loop.step);
++                builder_.CreateBr(condBlock);
++
++                builder_.SetInsertPoint(endBlock);
++                scopes_.pop_back();
++            }
++
+             // The initialiser is lowered before the name is bound, so `float x = x;` reads an outer x. Without one,
+             // the variable starts at 0.
+             void declareVariable(SourceLocation location, const ast::DeclStmt& decl)
+@@ -580,6 +691,14 @@ namespace fminus::ir
+             std::unordered_map<std::string, const ast::Function*> functions_;   // the program's, by name
+             std::vector<std::unordered_map<std::string, Binding>> scopes_;     // the current function's, inner last
+             const ast::Function* function_ = nullptr;                          // the function being lowered
++
++            // The loops around the statement being lowered, innermost last: where break and continue go.
++            struct Loop
++            {
++                llvm::BasicBlock* breakTarget;
++                llvm::BasicBlock* continueTarget;
++            };
++            std::vector<Loop> loops_;
+         };
+     } // namespace
+ 
+diff --git a/tests/unit/RecipeTest.cpp b/tests/unit/RecipeTest.cpp
+index 5365114..78acefa 100644
+--- a/tests/unit/RecipeTest.cpp
++++ b/tests/unit/RecipeTest.cpp
+@@ -112,3 +112,71 @@ TEST_CASE("recipe 3: bool, comparisons, !, && and ||, ?:", "[recipe]")
+     CHECK(build("float f(float a, float b, float c) { (a ? b : c) = 1; return a; }", errors) == nullptr);
+     CHECK(errors == "test.fm:1:50: error: expression is not assignable\n");
+ }
++
++TEST_CASE("recipe 4: if, else, while, for, break and continue", "[recipe]")
++{
++    std::string errors;
++    auto jit = build("float sum_to(float n)\n"
++                     "{\n"
++                     "    float total = 0;\n"
++                     "    for (float i = 1; i <= n; i += 1)\n"
++                     "        total += i;\n"
++                     "    return total;\n"
++                     "}\n"
++                     "float classify(float x)\n"                 // the else binds to the nearest if
++                     "{\n"
++                     "    if (x > 0) if (x > 10) return 2; else return 1;\n"
++                     "    return 0;\n"
++                     "}\n"
++                     "float odd_sum(float n)\n"                  // continue runs the step
++                     "{\n"
++                     "    float total = 0;\n"
++                     "    for (float i = 0; i < n; i += 1) {\n"
++                     "        if (i % 2 == 0) continue;\n"
++                     "        total += i;\n"
++                     "    }\n"
++                     "    return total;\n"
++                     "}\n"
++                     "float first_square_above(float limit)\n"   // for (;;), break leaves the inner loop only
++                     "{\n"
++                     "    float found = 0;\n"
++                     "    for (float i = 1; ; i += 1) {\n"
++                     "        float j = 0;\n"
++                     "        while (1) { j += 1; if (j >= i) break; }\n"
++                     "        if (i * j > limit) { found = i * j; break; }\n"
++                     "    }\n"
++                     "    return found;\n"
++                     "}\n"
++                     "float halve_until(float x) { while (x > 1) x /= 2; return x; }\n"
++                     "float pick(bool c) { if (c) return 1; else return 2; }\n"   // both branches return: no end
++                     "float forever() { for (;;) { } }\n"                          // the end is unreachable
++                     "float dead(float x) { return x; if (x < 0) x = 1; }\n",     // an if in dead code
++                     errors);
++    INFO(errors);
++    REQUIRE(jit);
++    CHECK(lookup<float(float)>(*jit, "sum_to")(4.0f) == 10.0f);
++    CHECK(lookup<float(float)>(*jit, "sum_to")(0.0f) == 0.0f);
++    CHECK(lookup<float(float)>(*jit, "classify")(20.0f) == 2.0f);
++    CHECK(lookup<float(float)>(*jit, "classify")(5.0f) == 1.0f);
++    CHECK(lookup<float(float)>(*jit, "classify")(-5.0f) == 0.0f);
++    CHECK(lookup<float(float)>(*jit, "odd_sum")(6.0f) == 9.0f);
++    CHECK(lookup<float(float)>(*jit, "first_square_above")(10.0f) == 16.0f);
++    CHECK(lookup<float(float)>(*jit, "halve_until")(10.0f) == 0.625f);
++    CHECK(lookup<float(bool)>(*jit, "pick")(false) == 2.0f);
++    CHECK(lookup<float(float)>(*jit, "dead")(3.0f) == 3.0f);
++
++    CHECK(build("float f(float x)\n"
++                "{\n"
++                "    break;\n"
++                "    continue;\n"
++                "    for (float i = 0; i < 1; i += 1) { }\n"
++                "    return i;\n"
++                "}\n"
++                "float g(float x) { if (x > 0) return 1; }\n",
++                errors)
++          == nullptr);
++    CHECK(errors == "test.fm:3:5: error: 'break' statement not in loop or switch statement\n"
++                    "test.fm:4:5: error: 'continue' statement not in loop statement\n"
++                    "test.fm:6:12: error: use of undeclared identifier 'i'\n"
++                    "test.fm:8:7: error: non-void function 'g' does not return a value\n");
++}

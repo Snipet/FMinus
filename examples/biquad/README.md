@@ -15,39 +15,48 @@ build-dev/bin/fminus examples/biquad/biquad.fm --emit asm -o -  # what the JIT g
 
 ## Where v0 leaves it
 
-FMinus v0 has no state, no loops and a single result per function. So one sample is three calls from the harness
-(`lowpass_y`, `lowpass_s1`, `lowpass_s2`), and each call recomputes the coefficients, `sin` and `cos` included. The
-C++ version inlines all of it into one loop. In the dev build on an M5, FMinus takes 7.1 ns a sample and C++ takes
-2.9 ns (2.4×). Closing that gap is the point of the features below.
+FMinus v0 is a subset of C with no state, no loops and a single result per function. So one sample is three calls
+from the harness (`lowpass_y`, `lowpass_s1`, `lowpass_s2`), and each call recomputes the coefficients, `sinf` and
+`cosf` included. The C++ version inlines all of it into one loop. In the dev build on an M5, FMinus takes 6.3 ns a
+sample and C++ takes 2.7 ns (2.4×); expect a few tenths of noise between runs. Closing that gap is the point of the
+features below.
 
-At `-O2` the two outputs are bit-identical. Both compute the sine and cosine of the same angle with one call to
-Apple's `__sincosf_stret`, and neither fuses a multiply and an add: the harness is built with `-ffp-contract=off`,
-and FMinus's IR carries no `contract` flags. At `-O0`, FMinus calls `sinf` and `cosf` separately instead, and the
-outputs differ by about 3e-6. Float's own error, against the same filter in double, is about 7e-6.
+`biquad.fm` is also valid C: every constant carries the `f` suffix, and it compiles with `clang -std=c17 -Wall
+-Wextra -Werror` (with `<math.h>`). At `-O2` the two outputs are bit-identical. Both compute the sine and cosine of
+the same angle with one call to Apple's `__sincosf_stret`, and neither fuses a multiply and an add: the harness is
+built with `-ffp-contract=off`, and FMinus's IR carries no `contract` flags. At `-O0`, FMinus calls `sinf` and `cosf`
+separately instead, and the outputs differ by about 3e-6. Float's own error, against the same filter in double, is
+about 7e-6.
 
 ## A path through it
 
-Each step changes `biquad.fm` and the harness's `Kernel` a little. After each one, run `example-biquad` and read the
-IR and assembly.
+Each step brings FMinus closer to the C you would write for this filter. Each one changes `biquad.fm` and the
+harness's `Kernel` a little. After each one, run `example-biquad` and read the IR and assembly.
+[docs/extending.md](../../docs/extending.md) has worked recipes for the first pieces: comparisons and `?:`, `if`,
+`while` and `for`, runtime functions, and passes.
 
-1. **Constants** (`const pi = 3.14159...;`) replace `fn pi()`: a top-level declaration, folded or kept as a global.
-2. **Several results** (a struct or a tuple): `fn lowpass(cutoff, q, rate) -> Coefficients` computes `sin` and `cos`
-   once a sample instead of three times. Returning a struct through the C calling convention is a topic of its own.
-3. **State** (instance variables, or `inout` parameters) makes the whole TDF-II step one call:
-   `process(x, cutoff) -> float`. The harness then keeps only the buffers.
+1. **File-scope constants** (`const float pi = 3.14159265f;`) replace `float pi()`. That means a top-level
+   declaration, folded into its uses or kept as a global constant.
+2. **Several results**: a `struct` return, `struct coefficients lowpass(float cutoff, float q, float rate)`,
+   computes `sinf` and `cosf` once a sample instead of three times. Returning a struct through the C calling
+   convention is a topic of its own.
+3. **State**: a state struct the harness owns and passes by pointer
+   (`float process(struct biquad* state, float x, float cutoff)`), or file-scope `static` variables. The whole TDF-II
+   step becomes one call.
 4. **Integers, comparisons, loops and buffers**:
-   `fn process(input: buffer, cutoff: buffer, output: buffer, n: int)`. With the per-sample calls gone, the time
-   shows what the calls were costing, and the comparison with C++ becomes fair.
-5. **Cheaper transcendentals**: `sin` and `cos` written in FMinus, as polynomials with range reduction (`floor`,
-   `min` and `max` exist already). Accuracy becomes something to trade, and the harness prints the error against
-   double.
-6. **Fast-math flags** (`contract`, `reassoc`, `afn`, per function or per block) let AArch64 fuse multiplies and
-   adds. The output stops being bit-identical with C++, so `--tolerance` starts to matter.
+   `void process(const float* input, const float* cutoff, float* output, int n)`, with a `for` loop. With the
+   per-sample calls gone, the time shows what the calls were costing, and the comparison with C++ becomes fair.
+5. **Cheaper transcendentals**: `sinf` and `cosf` written in FMinus, as polynomials with range reduction (`floorf`,
+   `fminf` and `fmaxf` exist already). Accuracy becomes something to trade, and the harness prints the error
+   against double.
+6. **Contraction and fast-math**: C's `#pragma STDC FP_CONTRACT ON`, or flags per function (`contract`, `reassoc`,
+   `afn`), let AArch64 fuse multiplies and adds. The output stops being bit-identical with C++, so `--tolerance`
+   starts to matter.
 7. **Control-rate coefficients**: computed every 16 or 32 samples and interpolated in between. An algorithmic win
    that only state and loops can express.
 8. **Vectors**: several channels at once, or the coefficient math for a whole block. That needs a loop for the
-   vectoriser (step 4), and a vector `sin`/`cos`, for example Accelerate's vForce through TargetLibraryInfo's
-   vector library.
+   vectoriser (step 4), and a vector `sinf`/`cosf`, for example Accelerate's vForce through TargetLibraryInfo's
+   vector library. Clang's `ext_vector_type` is one model for vector types in a C-like language.
 
 Keep `example-biquad --check` passing (ctest runs it) as the kernel moves from the harness into FMinus. Its C++
 version is the reference to change in step with the FMinus one.

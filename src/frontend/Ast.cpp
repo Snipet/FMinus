@@ -27,18 +27,43 @@ namespace fminus::ast
             return "?";
         }
 
+        const char* opName(AssignOp op)
+        {
+            switch (op)
+            {
+            case AssignOp::Assign:
+                return "=";
+            case AssignOp::Add:
+                return "+=";
+            case AssignOp::Subtract:
+                return "-=";
+            case AssignOp::Multiply:
+                return "*=";
+            case AssignOp::Divide:
+                return "/=";
+            }
+            return "?";
+        }
+
+        const char* opName(UnaryOp op)
+        {
+            switch (op)
+            {
+            case UnaryOp::Negate:
+                return "-";
+            case UnaryOp::Plus:
+                return "+";
+            }
+            return "?";
+        }
+
         std::string dump(const Expr& expr)
         {
             return std::visit(Overloaded{
                                   [](const NumberExpr& number) { return number.spelling; },
                                   [](const VariableExpr& variable) { return variable.name; },
                                   [](const UnaryExpr& unary) {
-                                      switch (unary.op)
-                                      {
-                                      case UnaryOp::Negate:
-                                          return "(- " + dump(*unary.operand) + ")";
-                                      }
-                                      return std::string("(?)");
+                                      return std::string("(") + opName(unary.op) + " " + dump(*unary.operand) + ")";
                                   },
                                   [](const BinaryExpr& binary) {
                                       return std::string("(") + opName(binary.op) + " " + dump(*binary.lhs) + " "
@@ -50,15 +75,31 @@ namespace fminus::ast
                                           text += " " + dump(*arg);
                                       return text + ")";
                                   },
+                                  [](const AssignExpr& assign) {
+                                      return std::string("(") + opName(assign.op) + " " + dump(*assign.target) + " "
+                                             + dump(*assign.value) + ")";
+                                  },
                               },
                               expr.node);
         }
 
-        std::string dump(const Stmt& stmt)
+        // One statement per line, `indent` spaces in; a block's items one level further in.
+        std::string dump(const Stmt& stmt, const std::string& indent)
         {
             return std::visit(Overloaded{
-                                  [](const LetStmt& let) { return "(let " + let.name + " " + dump(*let.value) + ")"; },
-                                  [](const ReturnStmt& ret) { return "(return " + dump(*ret.value) + ")"; },
+                                  [&](const DeclStmt& decl) {
+                                      return indent + "(decl " + (decl.isConst ? "const " : "") + typeName(decl.type)
+                                             + " " + decl.name + (decl.init ? " " + dump(*decl.init) : "") + ")";
+                                  },
+                                  [&](const ExprStmt& statement) { return indent + dump(*statement.expr); },
+                                  [&](const ReturnStmt& ret) { return indent + "(return " + dump(*ret.value) + ")"; },
+                                  [&](const BlockStmt& block) {
+                                      std::string text = indent + "(block";
+                                      for (const Stmt& item : block.items)
+                                          text += "\n" + dump(item, indent + "  ");
+                                      return text + ")";
+                                  },
+                                  [&](const EmptyStmt&) { return indent + "(empty)"; },
                               },
                               stmt.node);
         }
@@ -79,15 +120,17 @@ namespace fminus::ast
         std::string text;
         for (const Function& function : program.functions)
         {
-            text += "(fn " + function.name + " (";
+            text += std::string(function.isDefinition ? "(function " : "(declare ") + typeName(function.returnType)
+                    + " " + function.name + " (";
             for (std::size_t i = 0; i < function.params.size(); ++i)
             {
                 const Param& param = function.params[i];
-                text += (i == 0 ? "(" : " (") + param.name + " " + typeName(param.type) + ")";
+                text += std::string(i == 0 ? "(" : " (") + (param.isConst ? "const " : "") + typeName(param.type)
+                        + (param.name.empty() ? "" : " " + param.name) + ")";
             }
-            text += std::string(") ") + typeName(function.returnType);
+            text += ")";
             for (const Stmt& stmt : function.body)
-                text += "\n  " + dump(stmt);
+                text += "\n" + dump(stmt, "  ");
             text += ")\n";
         }
         return text;

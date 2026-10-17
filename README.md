@@ -4,9 +4,10 @@ A JIT compiler for audio DSP. FMinus source is lexed by Flex and parsed by Bison
 optimises it for the CPU it is running on, and ORC's LLJIT compiles it, all on the user's machine. For development,
 the same IR can also be compiled ahead of time into a native executable.
 
-**Status:** FMinus v0, a deliberately small language that goes all the way through, from source to the JIT, to
-expand on. It has functions over `float`, `let`, `return`, arithmetic, calls and a few math builtins (below). The
-build, the dependencies and the toolchain's smoke tests are in place around it.
+**Status:** FMinus v0, a deliberately small subset of C that goes all the way through, from source to the JIT, to
+expand on. It has functions over `float`, declarations, assignments, blocks, `return`, arithmetic, calls and
+`<math.h>`'s float functions (below). The build, the dependencies and the toolchain's smoke tests are in place around
+it.
 
 Documentation: [docs/](docs/README.md). It covers the architecture, a guide to extending the compiler with worked
 recipes, the build, and testing and debugging.
@@ -117,61 +118,88 @@ between the two: `YY_DECL`, the scanner's state and the `yylex` the parser calls
 
 ## The language (v0)
 
-```
-// A soft clipper, in FMinus v0. Comments run to the end of the line.
-fn softclip(x: float, drive: float) -> float {
-    let y = x * drive;                  // bindings never change
-    return y / (1.0 + abs(y));
+FMinus v0 is a subset of C: C's syntax, and C's semantics where it has them.
+
+```c
+/* A soft clipper, in FMinus v0. */
+float half(float x);                     // a prototype: C needs one to call half before its definition (FMinus doesn't)
+
+float softclip(float x, const float drive)
+{
+    const float y = x * drive;           // const: never assigned
+    float out = y / (1.0f + fabsf(y));   // <math.h>'s float functions are builtins
+    out *= 0.5f;                         // locals and parameters are variables, as in C
+    return out;
 }
 
-fn chain(x: float) -> float {
-    return softclip(half(x), 4.0);      // functions may be called before they are defined
+float chain(float x)
+{
+    return softclip(half(x), 4.0f);      // a function may be called before it is defined
 }
 
-fn half(x: float) -> float { return x / 2; }
+float half(float x) { x /= 2; return x; }
 ```
 
 | | |
 |---|---|
-| program | functions: `fn name(param: float, ...) -> float { statement* }` |
-| statements | `let name = expr;` and `return expr;` (a function ends with a return) |
-| expressions | numbers (`1`, `0.5`, `.5`, `2e3`), names, calls, `+ - * /`, unary `-`, parentheses |
+| program | function definitions, `float name(float a, const float b) { ... }`, and prototypes, `float name(float);` |
+| declarations | `float x = e;`, `const float k = e;`, several at once (`float a = 1, b;`); block-scoped, shadowing allowed in an inner block |
+| statements | `{ ... }`, `e;`, `return e;`, `;` |
+| expressions | constants, names, calls, `( )`, unary `-` `+`, `* /`, `+ -`, and `= += -= *= /=` (right to left; an assignment's value is the one stored) |
+| constants | C's floating and integer forms: `1.5`, `1.`, `.5`, `2e3`, `1.5e-3f`, hex floats `0x1.8p1`, `0x1p-3f`, and `2` |
+| comments | `// ...` and `/* ... */` |
 | types | `float` (IEEE single precision) |
-| builtins | `abs sqrt sin cos exp log floor min max` (LLVM intrinsics) |
+| builtins | `fabsf sqrtf sinf cosf expf logf floorf fminf fmaxf` (LLVM intrinsics) |
+
+Where FMinus differs from C, it is on purpose:
+
+- **`float` is the only type, and every constant is a `float`.** In C an unsuffixed `1.5` is a `double`, and `x * 1.5`
+  is computed in double. Write the `f` suffix (`1.5f`) and a program means the same in both. Every example here does.
+- **A function may be called before its definition** without a prototype, because the compiler declares every
+  function first. A prototype with no definition declares an external C function, as in C: the JIT resolves it in
+  the process (`float tanhf(float x);` calls libm's), and the linker resolves it in an executable.
+- **A declaration without an initialiser starts at 0.** C leaves the variable indeterminate.
+- **A non-void function that can reach its end is an error**, as in C++. Clang only warns in C.
+- **Arithmetic is IEEE single precision**, with no contraction into fused multiply-adds (clang's
+  `-ffp-contract=off`).
+
+A v0 program with `f` suffixes, and with prototypes for calls ahead of a definition, is therefore also a valid C
+program with the same meaning, given `<math.h>` and `-ffp-contract=off`. The example above and
+`examples/biquad/biquad.fm` both compile as C under `-Wall -Wextra -Werror`.
 
 Every FMinus function becomes an external LLVM function of the same name with the C calling convention, so C++
-calls JIT'd code as `float(float, ...)`. The code generator reports every error it finds, in source order, as
-`file:line:column: error: message`; the parser stops at the first syntax error.
+calls JIT'd code as `float(float, ...)`. The code generator reports every error it finds, in source order and in
+clang's words, as `file:line:column: error: message`. The parser stops at the first syntax error.
 
 ```bash
 build-dev/bin/fminus chain.fm                      # the optimised IR (-O2)
 build-dev/bin/fminus chain.fm -O0                  # the IR as the code generator wrote it
 build-dev/bin/fminus chain.fm --emit ast           # the syntax tree, as s-expressions
 build-dev/bin/fminus chain.fm --emit asm -o -      # this machine's assembly (--emit obj: an object file)
-build-dev/bin/fminus chain.fm --run chain 1        # JIT-compiles, calls chain(1), prints 0.6666667
+build-dev/bin/fminus chain.fm --run chain 1        # JIT-compiles, calls chain(1), prints 0.33333334
 ```
 
 How it fits together: `frontend::parse` (Lexer.l, then Parser.y) gives an `ast::Program`, and `ir::lower`
 (ir/CodeGen.cpp) gives an `llvm::Module`. From there, `jit::Jit` optimises and compiles it in memory, or
 `support/Aot.h` writes it to a file.
 
-**Adding a construct**, say comparisons and `if`. [docs/extending.md](docs/extending.md) works through this one and
-five more:
+**Adding a construct**, say comparisons and `?:`. [docs/extending.md](docs/extending.md) works through this one and
+five more, all the way to C's `if`, `while` and `for`:
 
 1. Its tokens: a rule in `src/frontend/Lexer.l` (keywords before `{IDENTIFIER}`), a `%token` in `Parser.y`.
-2. Its grammar: a rule in `Parser.y`, with precedence if it is an operator. Bison's report is
+2. Its grammar: a rule in `Parser.y`, with C's precedence if it is an operator. Bison's report is
    `build-dev/src/generated/frontend/Parser.output`, and `-Wcounterexamples` shows an input for each conflict.
-3. Its node: an alternative of the `std::variant` in `src/frontend/Ast.h` (a new type: an enumerator of `ast::Type`).
-   Every `std::visit` over that variant now fails to compile until it handles the new node: `dump` in `Ast.cpp` and
-   the lowering in `src/ir/CodeGen.cpp`.
+3. Its node: an alternative of a `std::variant` in `src/frontend/Ast.h`, or an enumerator. Every `std::visit` and
+   every `switch` over it now fails to compile until it handles the new node: `dump` in `Ast.cpp`, and the lowering
+   in `src/ir/CodeGen.cpp`.
 4. Its tests: a dump in `tests/unit/FrontendTest.cpp`, a result in `tests/unit/CodeGenTest.cpp`, IR or errors in
    `tests/lit/fminus/*.fm` (`// RUN:` lines, checked by FileCheck).
 
 `examples/biquad/` is a kernel to grow the language around. It is a biquad low-pass with coefficients recomputed
 every sample, with a harness that compares it with C++ and times both, and a plan of features in its README.
 
-Bindings are SSA values because they never change. Assignment and loops need storage: allocas in the entry block,
-which the pipeline's mem2reg turns back into SSA.
+Each variable is a stack slot (an `alloca` in the entry block), read with loads and written with stores, so
+`fminus -O0` reads like `clang -O0`. From `-O1`, mem2reg promotes the slots back into registers.
 
 ## Executables (ahead of time)
 

@@ -3,13 +3,16 @@
 // RUN: fminus %s --run softclip -2 1 | FileCheck %s --check-prefix=CLIP
 // RUN: not fminus %s --run softclip 1 2>&1 | FileCheck %s --check-prefix=ARITY
 
-fn softclip(x: float, drive: float) -> float {
-    let y = x * drive;
-    return y / (1.0 + abs(y));
+float softclip(float x, float drive)
+{
+    const float y = x * drive;
+    return y / (1.0f + fabsf(y));
 }
 
-fn chain(x: float) -> float {
-    return softclip(x * 0.5, 4.0);
+float chain(float x)
+{
+    x *= 0.5f;
+    return softclip(x, 4.0f);
 }
 
 // CHAIN: 0.6666667

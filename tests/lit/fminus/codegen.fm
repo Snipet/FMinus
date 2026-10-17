@@ -1,25 +1,35 @@
-// The code generator's IR as written (-O0), then optimised (-O2: the calls are inlined).
+// The code generator's IR as written (-O0: a stack slot per variable, as clang -O0), then optimised (-O2: the slots
+// are promoted to registers and the calls inlined).
 // RUN: fminus %s -O0 | FileCheck %s
 // RUN: fminus %s -O2 | FileCheck %s --check-prefix=OPT
 
-fn gain(x: float, g: float) -> float {
+float gain(float x, float g)
+{
     return x * g;
 }
 
-fn twice(x: float) -> float {
-    let doubled = gain(x, 2);
-    return -doubled;
+float twice(float x)
+{
+    float doubled = gain(x, 2);
+    doubled = -doubled;
+    return doubled;
 }
 
-// CHECK-LABEL: define float @gain(float %x, float %g) {
+// CHECK-LABEL: define float @gain(float %x, float %g){{.*}} {
 // CHECK-NEXT:  entry:
-// CHECK-NEXT:    [[P:%.*]] = fmul float %x, %g
+// CHECK-DAG:     %x.addr = alloca float
+// CHECK-DAG:     %g.addr = alloca float
+// CHECK:         store float %x, ptr %x.addr
+// CHECK:         [[X:%.*]] = load float, ptr %x.addr
+// CHECK-NEXT:    [[G:%.*]] = load float, ptr %g.addr
+// CHECK-NEXT:    [[P:%.*]] = fmul float [[X]], [[G]]
 // CHECK-NEXT:    ret float [[P]]
-// CHECK-LABEL: define float @twice(float %x) {
-// CHECK:         %doubled = call float @gain(float %x, float 2.000000e+00)
-// CHECK-NEXT:    [[N:%.*]] = fneg float %doubled
-// CHECK-NEXT:    ret float [[N]]
+// CHECK-LABEL: define float @twice(float %x){{.*}} {
+// CHECK:         call float @gain(float {{%.*}}, float 2.000000e+00)
+// CHECK:         fneg float
+// CHECK:         store float {{%.*}}, ptr %doubled
 
 // OPT-LABEL: define float @twice(
+// OPT-NOT:   alloca
 // OPT-NOT:   call
 // OPT:       fmul float %x, -2.000000e+00

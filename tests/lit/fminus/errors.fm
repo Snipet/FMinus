@@ -1,10 +1,13 @@
-// Errors carry their file, line and column; one run reports every semantic error.
+// Errors carry their file, line and column; one run reports every semantic error, in clang's words.
 // RUN: not fminus %s 2>&1 | FileCheck %s
 
-fn f(x: float) -> float {
-    let y = x + z;
-    return nope(y);
+float f(float x)
+{
+    const float y = x + z;
+    y = nope(y);
+    return y;
 }
 
-// CHECK: errors.fm:5:17: error: unknown variable 'z'
-// CHECK: errors.fm:6:12: error: unknown function 'nope'
+// CHECK: errors.fm:6:25: error: use of undeclared identifier 'z'
+// CHECK: errors.fm:7:7: error: cannot assign to variable 'y' with const-qualified type 'const float'
+// CHECK: errors.fm:7:9: error: call to undeclared function 'nope'

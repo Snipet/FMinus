@@ -53,7 +53,7 @@ lists everything wrong with a program that parses.
 
 ## Scanning: `frontend/Lexer.l`
 
-Flex generates `Lexer.yy.cpp` and `Lexer.yy.hpp` into `build-*/src/generated/frontend/`.
+Flex generates `Lexer.yy.cpp` and `Lexer.yy.hpp` into `build-*/src/generated/frontend/`. The tokens are C's.
 
 - **Reentrant, prefixed, from memory.** `%option reentrant` keeps all state in a `yyscan_t` handle, so two
   compilations can run at once. `prefix="fminus"` renames Flex's API (`fminuslex_init_extra`, `fminus_scan_bytes`,
@@ -62,9 +62,15 @@ Flex generates `Lexer.yy.cpp` and `Lexer.yy.hpp` into `build-*/src/generated/fro
 - **Locations.** `%option extra-type` gives every scanner a `ScannerState` (`Scanner.h`), which holds Bison's
   `location`. `YY_USER_ACTION` advances it by each match's length. The block at the top of the rules section calls
   `step()` at the start of every token, and newlines call `lines()`.
-- **Rules.** Flex takes the longest match, and between matches of equal length, the earlier rule. Keywords
-  (`"fn"`, `"let"`, ...) therefore come before `{IDENTIFIER}`: `fn` is a keyword and `fnord` an identifier. A
-  number's token keeps its spelling (a `std::string`), so the code generator can round it once, to the right type.
+- **Comments.** `// ...` is skipped by one rule. A block comment switches to the exclusive start condition
+  `BLOCK_COMMENT` (`%x`), whose rules skip text and count lines until `*/`. At end of file, it reports clang's
+  "unterminated /* comment" at the location where the comment started.
+- **Constants.** C's floating constants (`1.5`, `1.`, `.5`, `2e3`, `1.5e-3f`, hex floats like `0x1.8p1`) and integer
+  constants (`2`) are all one `NUMBER` token. The token keeps its spelling, `f` suffix included, so the code generator
+  can round it once, to the right type. `2f` is clang's "invalid suffix 'f' on integer constant", as in C.
+- **Rules.** Flex takes the longest match, and between matches of equal length, the earlier rule. That makes
+  `+=` beat `+`, and `/*` beat `/`. Keywords (`float`, `const`, `return`) therefore come before `{IDENTIFIER}`:
+  `float` is a keyword and `floaty` an identifier.
 - **Errors.** An unexpected character throws `Parser::syntax_error`. The parser catches it and reports it through
   `Parser::error`, like any syntax error.
 
@@ -78,21 +84,32 @@ function actually named `yylex` would then be defined under one name and called 
 
 ## Parsing: `frontend/Parser.y`
 
-Bison generates `Parser.tab.cpp`, `Parser.tab.hpp`, `location.hh` and the report `Parser.output`. Its header
-comment holds the grammar in EBNF.
+Bison generates `Parser.tab.cpp`, `Parser.tab.hpp`, `location.hh` and the report `Parser.output`. The grammar, a
+subset of C's, is written out as EBNF in the file's header comment.
 
 - **C++ with variants.** `api.value.type variant` lets each symbol carry a real C++ type (`%token <std::string>
   IDENTIFIER`, `%nterm <ast::ExprPtr> expr`). `api.value.automove` moves `$1`, `$2`, ... into the action, which is
   what lets move-only types such as `std::unique_ptr` pass through. As a consequence, an action may use each `$n` only
-  once. `api.token.constructor` gives the scanner `Parser::make_FN(location)` and friends.
-- **Locations.** `%locations` gives every symbol an `@n`. `at(@n)` turns Bison's `location` into a
-  `SourceLocation`. Expressions take the location of their operator or first token, statements and functions that
-  of their first keyword.
-- **Precedence.** The `%left`, `%nonassoc` and `%precedence` lines resolve the expression grammar's ambiguity, from
-  the loosest binding at the top to the tightest at the bottom. `%prec NEG` gives unary minus its own level.
+  once. `api.token.constructor` gives the scanner `Parser::make_FLOAT(location)` and friends.
+- **C's precedence.** The `%right`, `%left` and `%precedence` lines give the operators C's precedence and
+  associativity, from the loosest at the top to the tightest at the bottom: assignment (right to left), additive,
+  multiplicative, unary (`%prec UNARY`). The small helpers in the `%code` block, `binary()` and `assign()`, keep each
+  operator's rule to one line.
+- **Assignment is an expression.** `expr "=" expr` (and `+=` ...) accepts any expression as its target, as C's
+  grammar does in effect. The code generator rejects what isn't a variable with clang's "expression is not
+  assignable". Array elements and struct fields can join the check later without touching the grammar.
+- **Declarations.** `const float a = 1, b;` is a qualifier, a type and a list of declarators. A declarator
+  (`Declarator`, defined in `%code requires`) doesn't know the declaration's type when it reduces, so the declaration
+  rule makes one `DeclStmt` per declarator. That is also why a block item is a *list* of statements.
+- **Functions** are a definition (`type name(params) { ... }`) or a prototype (`type name(params);`, in which
+  parameter names may be omitted). Both build an `ast::Function`, with `isDefinition` telling them apart.
+- **Locations.** `%locations` gives every symbol an `@n`. `at(@n)` turns Bison's `location` into a `SourceLocation`.
+  Expressions take the location of their operator or first token, declarations that of their name (as clang points
+  at the name), and functions that of their name.
 - **Results.** The parser builds into a `ParseContext` (`ParseContext.h`), which holds the program and the
-  `Diagnostics`. `Parser::error` (at the end of the file) reports syntax errors with `parse.error detailed`: "syntax
-  error, unexpected X, expecting Y or Z". LAC (`parse.lac full`) keeps that expected list accurate.
+  `Diagnostics`. `Parser::error` (at the end of the file) reports syntax errors with `parse.error detailed`, as
+  "syntax error, unexpected X, expecting Y or Z". The expected list appears only when it has at most four tokens.
+  LAC (`parse.lac full`) keeps that list accurate.
 - **Running it.** `frontend::parse` (`Frontend.cpp`) creates the scanner through an RAII `ScannerHandle` and runs
   `Parser::parse()`. It returns the program, or `std::nullopt` once anything has been reported.
 
@@ -104,38 +121,66 @@ nothing, but Bison prints it with an example input, and `Parser.output` lists ev
 The tree is plain data. It has no LLVM in it, so other passes (a type checker, a formatter, an interpreter) can work
 on it without the code generator.
 
-- **Nodes.** `Expr` and `Stmt` each pair a `SourceLocation` with a `std::variant` of node kinds (`NumberExpr`,
-  `VariableExpr`, `UnaryExpr`, `BinaryExpr`, `CallExpr`; `LetStmt`, `ReturnStmt`). Children are owned:
-  `ExprPtr = std::unique_ptr<Expr>`. `Function` and `Program` are aggregates of those.
+- **Nodes.** `Expr` and `Stmt` each pair a `SourceLocation` with a `std::variant` of node kinds:
+  - expressions: `NumberExpr`, `VariableExpr`, `UnaryExpr`, `BinaryExpr`, `CallExpr`, `AssignExpr`;
+  - statements: `DeclStmt`, `ExprStmt`, `ReturnStmt`, `BlockStmt`, `EmptyStmt`.
+- **Ownership.** Children are owned: `ExprPtr = std::unique_ptr<Expr>`, and a `BlockStmt` holds a
+  `std::vector<Stmt>`. `Param`, `Function` (definition or prototype) and `Program` are aggregates of those.
 - **Exhaustive walks.** Code that walks the tree uses `std::visit` with an `Overloaded{...}` set of lambdas and no
-  catch-all. Enums (`BinaryOp`, `Type`) are walked with `switch` and no `default:`. So adding a node kind or an
-  enumerator breaks the build at every walk that doesn't handle it, through `std::visit`'s exhaustiveness and
-  `-Wswitch` under `-Werror`. Keep it that way.
-- **`ast::dump`** prints the tree as s-expressions (`fminus --emit ast`). It is the parser's test oracle.
+  catch-all. Enums (`UnaryOp`, `BinaryOp`, `AssignOp`, `Type`) are walked with `switch` and no `default:`. So adding a
+  node kind or an enumerator breaks the build at every walk that doesn't handle it, through `std::visit`'s
+  exhaustiveness and `-Wswitch` under `-Werror`. Keep it that way.
+- **`ast::dump`** prints the tree as s-expressions, one statement per line (`fminus --emit ast`). It is the parser's
+  test oracle.
 
 ## Code generation: `ir/CodeGen.cpp`
 
 `ir::lower(program, context, diagnostics)` creates a module named after the file. A `Lowering` object then runs two
-passes over the program:
+passes over the program.
 
-1. **Declare.** Every function gets an `llvm::Function` with external linkage, its FMinus name and the C calling
-   convention (`float` is `f32`), so C++ calls the JIT'd code as `float(float, ...)` and functions may call each other
-   in any order. A name already used by a builtin or another function is reported here.
-2. **Define.** Each body is lowered with an `llvm::IRBuilder<>` into an `entry` block. Parameters and `let`s are
-   bound in `scope_`, a name-to-`llvm::Value*` map. Since bindings never change, a binding is just the SSA value of
-   its expression; no memory is involved. `return` emits `ret`. Afterwards `llvm::verifyFunction` checks the
-   function, and anything it rejects is reported as an internal error, because the IR is wrong rather than the
-   program.
+**Pass 1, declare.** Every function name gets one `llvm::Function`, with external linkage, its C name and the C
+calling convention (`float` is `f32`). C++ therefore calls JIT'd code as `float(float, ...)`, and functions may call
+each other in any order. The rules for a name's prototypes and definition are C's:
+
+- a prototype and a definition must agree ("conflicting types for 'f'");
+- a second definition is "redefinition of 'f'";
+- a prototype of a builtin, as `<math.h>` has, declares nothing new, but a definition of a builtin is refused;
+- a function with prototypes and no definition stays external, and is resolved when the code is linked. The JIT
+  looks in the process, so `float tanhf(float x);` calls libm's.
+
+**Pass 2, define.** Each definition's body is lowered with an `llvm::IRBuilder<>`:
+
+- **Variables are C's.** Every parameter and local gets a stack slot: an `alloca` at the top of the entry block
+  (`allocate`), which is where mem2reg looks. Reads are loads, writes are stores, and a parameter's incoming value is
+  stored to its slot (`x.addr`, as clang names it). So `fminus -O0` reads like `clang -O0`, and from `-O1` mem2reg
+  promotes the slots back into SSA values. A declaration without an initialiser stores 0. C leaves such a variable
+  indeterminate, and reading it undefined.
+- **Scopes are C's.** `scopes_` is a stack of name-to-slot maps. Parameters and the body's own declarations share the
+  outermost scope, so redeclaring a parameter is an error. Each `{ ... }` pushes a scope, in which an outer name may
+  be shadowed. A name is looked up innermost first.
+- **Assignment** (`lowerAssign`) checks its target: it must be a variable ("expression is not assignable") that isn't
+  `const` ("cannot assign to variable 'k' with const-qualified type 'const float'"). It stores the value, and returns
+  it as the expression's value, so `a = b = 0` works. A compound assignment loads, combines and stores.
+- **Statements after a `return`** are accepted, as C accepts them. They still lower, so their errors are found, into
+  a fresh block named `unreachable` that nothing branches to, and the optimiser deletes it. The terminator check is
+  `hasTerminator()`, not `getTerminator()`; see extending.md's pitfalls.
+- **The function's end.** If the last block can still be reached from the entry (`reachable`, a depth-first walk:
+  having predecessors isn't enough, because dead code can branch), the function falls off its end. That is "non-void
+  function 'g' does not return a value", an error as in C++. Otherwise the block gets an `unreachable` terminator.
+- **Verification.** `llvm::verifyFunction` checks each function, and anything it rejects is reported as an internal
+  error, because the IR is wrong rather than the program.
 
 Expressions lower recursively (`lower(const ast::Expr&)` returns an `llvm::Value*`):
 
-- **Numbers** go through `llvm::APFloat::convertFromString` straight to IEEE single, so they are rounded once. A
-  literal out of range for `float` is an error.
-- **Arithmetic** becomes `fneg`, `fadd`, `fsub`, `fmul` and `fdiv` with no fast-math flags, so it is IEEE exact.
-- **Calls** first try `kBuiltins`, a table from name to LLVM intrinsic (`abs` to `llvm.fabs`, `sin` to `llvm.sin`,
-  ...), declared with `Intrinsic::getOrInsertDeclaration`, then the program's own functions. The argument count is
-  checked against the callee.
-- **On an error**, the lowering reports it and returns `llvm::PoisonValue` of the expected type. The IR stays
+- **Constants** go through `llvm::APFloat::convertFromString`, after the `f` suffix is dropped, straight to IEEE
+  single, so they are rounded once. Hex floats are exact. A constant too large for `float` is clang's "magnitude of
+  floating-point constant too large for type 'float'".
+- **Arithmetic** becomes `fneg`, `fadd`, `fsub`, `fmul` and `fdiv` with no fast-math flags, so it is IEEE exact, as
+  clang does with `-ffp-contract=off`.
+- **Calls** first try `kBuiltins`, a table from `<math.h>`'s float names to LLVM intrinsics (`fabsf` to
+  `llvm.fabs`, `sinf` to `llvm.sin`, ...), declared with `Intrinsic::getOrInsertDeclaration`. Then they try the
+  program's functions. Argument counts are checked with clang's "too many/too few arguments to function call".
+- **On an error**, the lowering reports it, in clang's words, and returns `llvm::PoisonValue`. The IR stays
   well-formed, the next error is still found, and the module is thrown away at the end: `lower` returns null when
   `diagnostics.hasErrors()`.
 
@@ -165,7 +210,8 @@ Expressions lower recursively (`lower(const ast::Expr&)` returns an `llvm::Value
 - **`lookup(name)`** compiles what the symbol needs, on the calling thread, and returns its address. The caller casts
   the address to a function pointer (`address.toPtr<float (*)(float)>()`).
 - **Symbol resolution.** JIT'd code finds the FMinus runtime's functions by address (`defineRuntimeSymbols`), and
-  process symbols, such as libm's `sinf` behind the `sin` builtin, through LLJIT's default process-symbol link order.
+  process symbols through LLJIT's default process-symbol link order. These include libm's `sinf` behind the `sinf`
+  builtin, and any external function a prototype declares (`float tanhf(float x);`).
 - **Lifetimes.** The `Jit` owns its `TargetMachine` and `LLJIT` (destroyed in reverse order), and the `LLJIT` owns
   every module added. Function pointers stay valid as long as the `Jit` lives.
 
@@ -227,11 +273,16 @@ Because the JIT and executables share one runtime, the two compile the same prog
   compiler lists what to update" into silent bugs.
 - **Lowering reports and continues.** Return a poison value of the expected type, never a null pointer, and let
   `lower` discard the module at the end.
+- **Every variable lives in an entry-block `alloca`.** Allocate through `allocate()`, whatever block the builder is
+  in, and let mem2reg do the SSA construction.
 - **Every function is verified.** An invalid function is the compiler's bug: it is reported as an internal error
   instead of crashing in a later pass.
 - **Modules are prepared before they are optimised.** The pipeline's decisions depend on the triple and the data
   layout.
-- **Generated functions have the C calling convention and external linkage.** That is the contract with C++
-  callers, the JIT's `lookup` and the linker. A new type at the boundary needs its C ABI attributes (extending.md,
+- **Generated functions have the C calling convention, C names and external linkage.** That is the contract with
+  C++ callers, the JIT's `lookup` and the linker. A new type at the boundary needs its C ABI attributes (extending.md,
   recipe 3: `bool` is `zeroext`).
+- **Semantics follow C unless a deviation is documented.** The README lists the deviations: `float` is the only type,
+  constants are `float`, calls may precede definitions, uninitialised variables are 0, and falling off a non-void
+  function's end is an error.
 - **The runtime stays free of LLVM and real-time safe.** It runs inside the audio thread's call tree.

@@ -1,11 +1,16 @@
 // The driver prints the syntax tree.
 // RUN: fminus %s --emit ast | FileCheck %s
 
-fn softclip(x: float, drive: float) -> float {
-    let y = x * drive;
-    return y / (1.0 + abs(y));
+float softclip(float x, const float drive)
+{
+    const float y = x * drive;
+    float out = y / (1.0f + fabsf(y));
+    out *= 0.5f;
+    return out;
 }
 
-// CHECK:      (fn softclip ((x float) (drive float)) float
-// CHECK-NEXT:   (let y (* x drive))
-// CHECK-NEXT:   (return (/ y (+ 1.0 (call abs y)))))
+// CHECK:      (function float softclip ((float x) (const float drive))
+// CHECK-NEXT:   (decl const float y (* x drive))
+// CHECK-NEXT:   (decl float out (/ y (+ 1.0f (call fabsf y))))
+// CHECK-NEXT:   (*= out 0.5f)
+// CHECK-NEXT:   (return out))

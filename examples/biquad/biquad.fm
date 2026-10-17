@@ -2,55 +2,68 @@
 // Cookbook" low-pass, in transposed direct form II, in FMinus v0. The harness (bench.cpp) runs it over noise with the
 // cutoff swept every sample, compares it with a C++ version of the same formulas and times both.
 //
+// FMinus v0 is a subset of C, and with every constant written as a float (the f suffix) this file is also valid C with
+// the same meaning, given <math.h> and -ffp-contract=off.
+//
 // v0 has no state, no loops and a single result per function, so one sample is three calls from the harness, each
-// recomputing the coefficients (sin and cos included):
+// recomputing the coefficients (sinf and cosf included):
 //     y  = lowpass_y(x, s1, cutoff, q, rate)
 //     s1 = lowpass_s1(x, y, s2, cutoff, q, rate)
 //     s2 = lowpass_s2(x, y, cutoff, q, rate)
 // README.md, beside this file, suggests the features that shrink this to one call per buffer, in order.
 
-fn pi() -> float {
-    return 3.14159265358979323846;
+float pi()
+{
+    return 3.14159265358979323846f;
 }
 
 // The cookbook's intermediates: w0 = 2 pi f0 / Fs, and alpha = sin(w0) / (2 Q).
-fn omega(cutoff: float, rate: float) -> float {
-    return 2.0 * pi() * cutoff / rate;
+float omega(float cutoff, float rate)
+{
+    return 2.0f * pi() * cutoff / rate;
 }
 
-fn alpha(cutoff: float, q: float, rate: float) -> float {
-    return sin(omega(cutoff, rate)) / (2.0 * q);
+float alpha(float cutoff, float q, float rate)
+{
+    return sinf(omega(cutoff, rate)) / (2.0f * q);
 }
 
 // The low-pass coefficients, normalised by a0 = 1 + alpha. b2 is b0.
-fn lowpass_b0(cutoff: float, q: float, rate: float) -> float {
-    let c = cos(omega(cutoff, rate));
-    return (1.0 - c) / 2.0 / (1.0 + alpha(cutoff, q, rate));
+float lowpass_b0(float cutoff, float q, float rate)
+{
+    const float c = cosf(omega(cutoff, rate));
+    return (1.0f - c) / 2.0f / (1.0f + alpha(cutoff, q, rate));
 }
 
-fn lowpass_b1(cutoff: float, q: float, rate: float) -> float {
-    let c = cos(omega(cutoff, rate));
-    return (1.0 - c) / (1.0 + alpha(cutoff, q, rate));
+float lowpass_b1(float cutoff, float q, float rate)
+{
+    const float c = cosf(omega(cutoff, rate));
+    return (1.0f - c) / (1.0f + alpha(cutoff, q, rate));
 }
 
-fn lowpass_a1(cutoff: float, q: float, rate: float) -> float {
-    return -2.0 * cos(omega(cutoff, rate)) / (1.0 + alpha(cutoff, q, rate));
+float lowpass_a1(float cutoff, float q, float rate)
+{
+    return -2.0f * cosf(omega(cutoff, rate)) / (1.0f + alpha(cutoff, q, rate));
 }
 
-fn lowpass_a2(cutoff: float, q: float, rate: float) -> float {
-    let a = alpha(cutoff, q, rate);
-    return (1.0 - a) / (1.0 + a);
+float lowpass_a2(float cutoff, float q, float rate)
+{
+    const float a = alpha(cutoff, q, rate);
+    return (1.0f - a) / (1.0f + a);
 }
 
 // One sample of transposed direct form II, as its three results: the output, then the two new states.
-fn lowpass_y(x: float, s1: float, cutoff: float, q: float, rate: float) -> float {
+float lowpass_y(float x, float s1, float cutoff, float q, float rate)
+{
     return lowpass_b0(cutoff, q, rate) * x + s1;
 }
 
-fn lowpass_s1(x: float, y: float, s2: float, cutoff: float, q: float, rate: float) -> float {
+float lowpass_s1(float x, float y, float s2, float cutoff, float q, float rate)
+{
     return lowpass_b1(cutoff, q, rate) * x - lowpass_a1(cutoff, q, rate) * y + s2;
 }
 
-fn lowpass_s2(x: float, y: float, cutoff: float, q: float, rate: float) -> float {
+float lowpass_s2(float x, float y, float cutoff, float q, float rate)
+{
     return lowpass_b0(cutoff, q, rate) * x - lowpass_a2(cutoff, q, rate) * y;
 }

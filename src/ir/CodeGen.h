@@ -23,7 +23,8 @@ namespace fminus::ir
     std::unique_ptr<llvm::Module> lower(const ast::Program& program, llvm::LLVMContext& context,
                                         Diagnostics& diagnostics);
 
-    // The builtins a program can call (LLVM intrinsics: abs, sqrt, sin, ...), with their parameter counts.
+    // The builtins a program can call, with their parameter counts: <math.h>'s float functions (fabsf, sqrtf,
+    // sinf, ...), lowered to LLVM intrinsics.
     struct BuiltinInfo
     {
         std::string_view name;

@@ -1,11 +1,19 @@
 // src/ir/CodeGen.cpp
 //
-// Two passes over the program. The first declares every function, so calls may come before definitions. The second
-// lowers each body with an IRBuilder. A `let` binds the SSA value of its expression, since bindings never change. After
-// an error the lowering goes on with a poison value, so one run reports every error.
+// Two passes over the program. The first declares every function, from its prototypes and its definition, so calls
+// may come before definitions (C needs a prototype for that; FMinus does not). A function with prototypes and no
+// definition is external. The second pass lowers each body with an IRBuilder.
+//
+// Variables have C's semantics: every parameter and local is a stack slot (an alloca in the entry block), read with a
+// load and written with a store. The pipeline's mem2reg (-O1 and up) turns the slots back into SSA values, as for
+// clang's output, so `fminus -O0` looks like `clang -O0`. Scopes nest as C's do: parameters and the body's
+// declarations share the outermost scope, and a block may shadow an outer name. After an error the lowering goes on
+// with a poison value, so one run reports every error; the wording follows clang's.
 #include "ir/CodeGen.h"
 
 #include <llvm/ADT/APFloat.h>
+#include <llvm/ADT/DepthFirstIterator.h>
+#include <llvm/IR/CFG.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Intrinsics.h>
@@ -36,14 +44,14 @@ namespace fminus::ir
             unsigned arity;
         };
 
-        // name -> the LLVM intrinsic it lowers to, overloaded on float. sin, cos, exp and log become calls to libm on
-        // most targets; abs, sqrt, floor, min and max become instructions.
+        // <math.h>'s float functions -> the LLVM intrinsic each lowers to, overloaded on float. sinf, cosf, expf and
+        // logf become calls to libm on most targets; fabsf, sqrtf, floorf, fminf and fmaxf become instructions.
         constexpr std::array kBuiltins{
-            Builtin{"abs", llvm::Intrinsic::fabs, 1},   Builtin{"sqrt", llvm::Intrinsic::sqrt, 1},
-            Builtin{"sin", llvm::Intrinsic::sin, 1},    Builtin{"cos", llvm::Intrinsic::cos, 1},
-            Builtin{"exp", llvm::Intrinsic::exp, 1},    Builtin{"log", llvm::Intrinsic::log, 1},
-            Builtin{"floor", llvm::Intrinsic::floor, 1}, Builtin{"min", llvm::Intrinsic::minnum, 2},
-            Builtin{"max", llvm::Intrinsic::maxnum, 2},
+            Builtin{"fabsf", llvm::Intrinsic::fabs, 1},   Builtin{"sqrtf", llvm::Intrinsic::sqrt, 1},
+            Builtin{"sinf", llvm::Intrinsic::sin, 1},     Builtin{"cosf", llvm::Intrinsic::cos, 1},
+            Builtin{"expf", llvm::Intrinsic::exp, 1},     Builtin{"logf", llvm::Intrinsic::log, 1},
+            Builtin{"floorf", llvm::Intrinsic::floor, 1}, Builtin{"fminf", llvm::Intrinsic::minnum, 2},
+            Builtin{"fmaxf", llvm::Intrinsic::maxnum, 2},
         };
 
         const Builtin* findBuiltin(std::string_view name)
@@ -78,12 +86,19 @@ namespace fminus::ir
                 for (const ast::Function& function : program.functions)
                 {
                     const auto found = functions_.find(function.name);
-                    if (found != functions_.end() && found->second == &function)   // not a rejected duplicate
-                        define(function);
+                    if (function.isDefinition && found != functions_.end() && found->second == &function)
+                        define(function);   // the accepted definition, not a rejected duplicate
                 }
             }
 
         private:
+            // A variable in scope: its stack slot, and whether it may be assigned.
+            struct Binding
+            {
+                llvm::AllocaInst* slot;
+                bool isConst;
+            };
+
             llvm::Type* typeOf(ast::Type type)
             {
                 switch (type)
@@ -105,16 +120,38 @@ namespace fminus::ir
             }
 
             // ---- declarations -----------------------------------------------------------------------------------
+            static bool sameSignature(const ast::Function& a, const ast::Function& b)
+            {
+                if (a.returnType != b.returnType || a.params.size() != b.params.size())
+                    return false;
+                for (std::size_t i = 0; i < a.params.size(); ++i)
+                {
+                    if (a.params[i].type != b.params[i].type)   // const on a parameter is not part of the type
+                        return false;
+                }
+                return true;
+            }
+
             void declare(const ast::Function& function)
             {
-                if (findBuiltin(function.name) != nullptr)
+                if (const Builtin* builtin = findBuiltin(function.name))
                 {
-                    error(function.location, quoted(function.name) + " is a builtin and cannot be defined");
+                    // A prototype of a builtin, as <math.h> has, declares nothing new; a definition is refused.
+                    if (function.isDefinition)
+                        error(function.location, quoted(function.name) + " is a builtin and cannot be redefined");
+                    else if (function.params.size() != builtin->arity)
+                        error(function.location, "conflicting types for " + quoted(function.name));
                     return;
                 }
-                if (functions_.contains(function.name))
+                if (const auto found = functions_.find(function.name); found != functions_.end())
                 {
-                    error(function.location, "function " + quoted(function.name) + " is already defined");
+                    const ast::Function& previous = *found->second;
+                    if (!sameSignature(previous, function))
+                        error(function.location, "conflicting types for " + quoted(function.name));
+                    else if (function.isDefinition && previous.isDefinition)
+                        error(function.location, "redefinition of " + quoted(function.name));
+                    else if (function.isDefinition)
+                        found->second = &function;   // the definition, after its prototypes
                     return;
                 }
                 std::vector<llvm::Type*> params;
@@ -130,37 +167,39 @@ namespace fminus::ir
             {
                 llvm::Function* llvmFunction = module_.getFunction(function.name);
                 builder_.SetInsertPoint(llvm::BasicBlock::Create(module_.getContext(), "entry", llvmFunction));
-                scope_.clear();
+                scopes_.assign(1, {});   // the outermost scope: the parameters and the body's own declarations
+
+                // Each parameter gets a slot, as a local does (clang names them x.addr), so it can be assigned.
                 for (std::size_t i = 0; i < function.params.size(); ++i)
                 {
                     const ast::Param& param = function.params[i];
+                    if (param.name.empty())
+                    {
+                        error(param.location, "parameter name omitted");
+                        continue;
+                    }
                     llvm::Argument* argument = llvmFunction->getArg(static_cast<unsigned>(i));
                     argument->setName(param.name);
-                    if (!scope_.emplace(param.name, argument).second)
-                        error(param.location, "parameter " + quoted(param.name) + " is declared twice");
+                    llvm::AllocaInst* slot = allocate(typeOf(param.type), param.name + ".addr");
+                    builder_.CreateStore(argument, slot);
+                    if (!bind(param.name, Binding{slot, param.isConst}))
+                        error(param.location, "redefinition of parameter " + quoted(param.name));
                 }
 
-                bool returned = false;
-                for (const ast::Stmt& stmt : function.body)
+                lowerStatements(function.body);
+
+                if (!builder_.GetInsertBlock()->hasTerminator())
                 {
-                    if (returned)
+                    if (reachable(builder_.GetInsertBlock()))
                     {
-                        error(stmt.location, "statement after the return of " + quoted(function.name));
-                        break;
+                        error(function.location,
+                              "non-void function " + quoted(function.name) + " does not return a value");
+                        builder_.CreateRet(poison(function.returnType));
                     }
-                    std::visit(Overloaded{
-                                   [&](const ast::LetStmt& let) { bind(stmt.location, let); },
-                                   [&](const ast::ReturnStmt& ret) {
-                                       builder_.CreateRet(lower(*ret.value));
-                                       returned = true;
-                                   },
-                               },
-                               stmt.node);
-                }
-                if (!returned)
-                {
-                    error(function.location, "function " + quoted(function.name) + " does not end with a return");
-                    builder_.CreateRet(poison(function.returnType));
+                    else
+                    {
+                        builder_.CreateUnreachable();   // the end follows a return: nothing runs here
+                    }
                 }
 
                 std::string problem;
@@ -170,72 +209,212 @@ namespace fminus::ir
                                                  + problem);
             }
 
-            void bind(SourceLocation location, const ast::LetStmt& let)
+            // A slot at the top of the entry block, whatever block the builder is in: mem2reg promotes only those.
+            llvm::AllocaInst* allocate(llvm::Type* type, const std::string& name)
             {
-                llvm::Value* value = lower(*let.value);
-                // Name the instruction after the binding, for readable IR (a constant or an argument keeps its own).
-                auto* instruction = llvm::dyn_cast<llvm::Instruction>(value);
-                if (instruction != nullptr && !instruction->hasName())
-                    instruction->setName(let.name);
-                if (!scope_.emplace(let.name, value).second)
-                    error(location, quoted(let.name) + " is already defined");
+                llvm::BasicBlock& entry = builder_.GetInsertBlock()->getParent()->getEntryBlock();
+                llvm::IRBuilder<> atEntry(&entry, entry.begin());
+                return atEntry.CreateAlloca(type, nullptr, name);
             }
 
+            // Whether control can reach `block` from the function's entry. (Having predecessors is not enough: code
+            // after a return can branch, and its blocks are all dead.)
+            static bool reachable(llvm::BasicBlock* block)
+            {
+                for (llvm::BasicBlock* live : llvm::depth_first(&block->getParent()->getEntryBlock()))
+                {
+                    if (live == block)
+                        return true;
+                }
+                return false;
+            }
+
+            // Adds `name` to the innermost scope; false when that scope already has it.
+            bool bind(const std::string& name, Binding binding)
+            {
+                return scopes_.back().emplace(name, binding).second;
+            }
+
+            // The innermost binding of `name`, or nullptr.
+            const Binding* find(const std::string& name) const
+            {
+                for (auto scope = scopes_.rbegin(); scope != scopes_.rend(); ++scope)
+                {
+                    const auto found = scope->find(name);
+                    if (found != scope->end())
+                        return &found->second;
+                }
+                return nullptr;
+            }
+
+            void lowerStatements(const std::vector<ast::Stmt>& statements)
+            {
+                for (const ast::Stmt& stmt : statements)
+                {
+                    // C accepts statements after a return (and, once the language has them, a break or a continue).
+                    // They still lower, so their errors are found, into a block nothing branches to, which the
+                    // optimiser deletes. (Not getTerminator(): since LLVM 23 it assumes a finished block.)
+                    if (builder_.GetInsertBlock()->hasTerminator())
+                    {
+                        llvm::Function* function = builder_.GetInsertBlock()->getParent();
+                        builder_.SetInsertPoint(
+                            llvm::BasicBlock::Create(module_.getContext(), "unreachable", function));
+                    }
+                    lowerStatement(stmt);
+                }
+            }
+
+            void lowerStatement(const ast::Stmt& stmt)
+            {
+                std::visit(Overloaded{
+                               [&](const ast::DeclStmt& decl) { declareVariable(stmt.location, decl); },
+                               [&](const ast::ExprStmt& statement) { lower(*statement.expr); },
+                               [&](const ast::ReturnStmt& ret) { builder_.CreateRet(lower(*ret.value)); },
+                               [&](const ast::BlockStmt& block) {
+                                   scopes_.emplace_back();
+                                   lowerStatements(block.items);
+                                   scopes_.pop_back();
+                               },
+                               [&](const ast::EmptyStmt&) {},
+                           },
+                           stmt.node);
+            }
+
+            // The initialiser is lowered before the name is bound, so `float x = x;` reads an outer x. Without one,
+            // the variable starts at 0.
+            void declareVariable(SourceLocation location, const ast::DeclStmt& decl)
+            {
+                llvm::Value* value =
+                    decl.init ? lower(*decl.init) : llvm::Constant::getNullValue(typeOf(decl.type));
+                llvm::AllocaInst* slot = allocate(typeOf(decl.type), decl.name);
+                builder_.CreateStore(value, slot);
+                if (!bind(decl.name, Binding{slot, decl.isConst}))
+                    error(location, "redefinition of " + quoted(decl.name));
+            }
+
+            // ---- expressions ------------------------------------------------------------------------------------
             llvm::Value* lower(const ast::Expr& expr)
             {
                 return std::visit(
                     Overloaded{
                         [&](const ast::NumberExpr& number) { return lowerNumber(expr.location, number); },
                         [&](const ast::VariableExpr& variable) -> llvm::Value* {
-                            const auto found = scope_.find(variable.name);
-                            if (found != scope_.end())
-                                return found->second;
-                            error(expr.location, "unknown variable " + quoted(variable.name));
-                            return poison(ast::Type::Float);
+                            const Binding* binding = find(variable.name);
+                            if (binding == nullptr)
+                            {
+                                error(expr.location, "use of undeclared identifier " + quoted(variable.name));
+                                return poison(ast::Type::Float);
+                            }
+                            return builder_.CreateLoad(binding->slot->getAllocatedType(), binding->slot,
+                                                       variable.name);
                         },
                         [&](const ast::UnaryExpr& unary) -> llvm::Value* {
+                            llvm::Value* operand = lower(*unary.operand);
                             switch (unary.op)
                             {
                             case ast::UnaryOp::Negate:
-                                return builder_.CreateFNeg(lower(*unary.operand));
+                                return builder_.CreateFNeg(operand);
+                            case ast::UnaryOp::Plus:
+                                return operand;
                             }
                             return poison(ast::Type::Float);
                         },
                         [&](const ast::BinaryExpr& binary) -> llvm::Value* {
                             llvm::Value* lhs = lower(*binary.lhs);
                             llvm::Value* rhs = lower(*binary.rhs);
-                            switch (binary.op)
-                            {
-                            case ast::BinaryOp::Add:
-                                return builder_.CreateFAdd(lhs, rhs);
-                            case ast::BinaryOp::Subtract:
-                                return builder_.CreateFSub(lhs, rhs);
-                            case ast::BinaryOp::Multiply:
-                                return builder_.CreateFMul(lhs, rhs);
-                            case ast::BinaryOp::Divide:
-                                return builder_.CreateFDiv(lhs, rhs);
-                            }
-                            return poison(ast::Type::Float);
+                            return arithmetic(binary.op, lhs, rhs);
                         },
                         [&](const ast::CallExpr& call) { return lowerCall(expr.location, call); },
+                        [&](const ast::AssignExpr& assign) { return lowerAssign(expr.location, assign); },
                     },
                     expr.node);
             }
 
-            // The literal rounded once, from its decimal spelling straight to float (no detour through double).
+            llvm::Value* arithmetic(ast::BinaryOp op, llvm::Value* lhs, llvm::Value* rhs)
+            {
+                switch (op)
+                {
+                case ast::BinaryOp::Add:
+                    return builder_.CreateFAdd(lhs, rhs);
+                case ast::BinaryOp::Subtract:
+                    return builder_.CreateFSub(lhs, rhs);
+                case ast::BinaryOp::Multiply:
+                    return builder_.CreateFMul(lhs, rhs);
+                case ast::BinaryOp::Divide:
+                    return builder_.CreateFDiv(lhs, rhs);
+                }
+                return poison(ast::Type::Float);
+            }
+
+            // The constant rounded once, from its spelling straight to float (no detour through double). APFloat
+            // reads decimal and hex floats alike; the f suffix is C's and goes.
             llvm::Value* lowerNumber(SourceLocation location, const ast::NumberExpr& number)
             {
+                std::string spelling = number.spelling;
+                if (!spelling.empty() && (spelling.back() == 'f' || spelling.back() == 'F'))
+                    spelling.pop_back();
                 llvm::APFloat value(llvm::APFloat::IEEEsingle());
-                auto status = value.convertFromString(number.spelling, llvm::APFloat::rmNearestTiesToEven);
+                auto status = value.convertFromString(spelling, llvm::APFloat::rmNearestTiesToEven);
                 if (!status)
                 {
                     llvm::consumeError(status.takeError());
-                    error(location, "malformed number " + quoted(number.spelling));
+                    error(location, "invalid floating-point constant " + quoted(number.spelling));
                     return poison(ast::Type::Float);
                 }
                 if ((*status & llvm::APFloat::opOverflow) != 0)
-                    error(location, "number " + quoted(number.spelling) + " is out of range for float");
+                    error(location, "magnitude of floating-point constant too large for type 'float'");
                 return llvm::ConstantFP::get(module_.getContext(), value);
+            }
+
+            // `target op value`: the target must be a variable that is not const. The value of the expression is
+            // the one stored.
+            llvm::Value* lowerAssign(SourceLocation location, const ast::AssignExpr& assign)
+            {
+                llvm::Value* value = lower(*assign.value);
+                const auto* variable = std::get_if<ast::VariableExpr>(&assign.target->node);
+                if (variable == nullptr)
+                {
+                    error(location, "expression is not assignable");
+                    return poison(ast::Type::Float);
+                }
+                const Binding* binding = find(variable->name);
+                if (binding == nullptr)
+                {
+                    error(assign.target->location, "use of undeclared identifier " + quoted(variable->name));
+                    return poison(ast::Type::Float);
+                }
+                if (binding->isConst)
+                {
+                    error(location, "cannot assign to variable " + quoted(variable->name)
+                                        + " with const-qualified type 'const float'");
+                    return poison(ast::Type::Float);
+                }
+                if (assign.op != ast::AssignOp::Assign)
+                {
+                    llvm::Value* current =
+                        builder_.CreateLoad(binding->slot->getAllocatedType(), binding->slot, variable->name);
+                    value = arithmetic(compoundOperator(assign.op), current, value);
+                }
+                builder_.CreateStore(value, binding->slot);
+                return value;
+            }
+
+            // The operator of a compound assignment: += is +, ...
+            static ast::BinaryOp compoundOperator(ast::AssignOp op)
+            {
+                switch (op)
+                {
+                case ast::AssignOp::Assign:
+                case ast::AssignOp::Add:
+                    return ast::BinaryOp::Add;
+                case ast::AssignOp::Subtract:
+                    return ast::BinaryOp::Subtract;
+                case ast::AssignOp::Multiply:
+                    return ast::BinaryOp::Multiply;
+                case ast::AssignOp::Divide:
+                    return ast::BinaryOp::Divide;
+                }
+                return ast::BinaryOp::Add;
             }
 
             llvm::Value* lowerCall(SourceLocation location, const ast::CallExpr& call)
@@ -255,7 +434,7 @@ namespace fminus::ir
                 const auto found = functions_.find(call.callee);
                 if (found == functions_.end())
                 {
-                    error(location, "unknown function " + quoted(call.callee));
+                    error(location, "call to undeclared function " + quoted(call.callee));
                     return poison(ast::Type::Float);
                 }
                 const ast::Function& callee = *found->second;
@@ -266,8 +445,9 @@ namespace fminus::ir
 
             llvm::Value* wrongArity(SourceLocation location, const ast::CallExpr& call, unsigned expected)
             {
-                error(location, quoted(call.callee) + " takes " + std::to_string(expected) + " argument"
-                                    + (expected == 1 ? "" : "s") + ", not " + std::to_string(call.args.size()));
+                error(location, std::string(call.args.size() > expected ? "too many" : "too few")
+                                    + " arguments to function call, expected " + std::to_string(expected) + ", have "
+                                    + std::to_string(call.args.size()));
                 return poison(ast::Type::Float);
             }
 
@@ -275,7 +455,7 @@ namespace fminus::ir
             Diagnostics& diagnostics_;
             llvm::IRBuilder<> builder_;
             std::unordered_map<std::string, const ast::Function*> functions_;   // the program's, by name
-            std::unordered_map<std::string, llvm::Value*> scope_;              // the current function's bindings
+            std::vector<std::unordered_map<std::string, Binding>> scopes_;     // the current function's, inner last
         };
     } // namespace
 

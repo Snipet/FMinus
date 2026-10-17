@@ -1,12 +1,16 @@
 # Extending the compiler
 
 How to add to FMinus. First, how a change moves through the compiler, and the few rules that keep that easy. Then
-six worked recipes, from a one-line builtin to loops and a custom LLVM pass. Then the pitfalls those recipes ran into,
-and design notes for what comes next.
+six worked recipes, which grow the C subset from a one-line builtin to C's control flow and a custom LLVM pass. Then
+the pitfalls those recipes ran into, and design notes for what comes next.
 
 The recipes are not sketches. Each was applied to this repository, built with `-Werror`, and tested in the dev and
-asan presets, all 19 tests passing. They live in [recipes/](recipes/) as patches, so you can apply one to see it work,
+asan presets, all 22 tests passing. They live in [recipes/](recipes/) as patches, so you can apply one to see it work,
 or compare it with your own version. [architecture.md](architecture.md) describes the stages they touch.
+
+FMinus follows C. When a recipe has a semantic choice to make, it makes C's: conversions, short-circuiting, which
+`if` an `else` belongs to, what `continue` does in a `for`. And it reports errors in clang's words. The README lists
+the few deliberate deviations.
 
 ## How a change moves through the compiler
 
@@ -16,16 +20,17 @@ Most language features touch the same places, in this order:
 |---|---|---|
 | 1 | `src/frontend/Lexer.l` | a rule for each new token. Keywords go before `{IDENTIFIER}`. |
 | 2 | `src/frontend/Parser.y` | the tokens (`%token`), their precedence if they are operators, and the grammar rules with their actions |
-| 3 | `src/frontend/Ast.h` | a node: an alternative of `Expr::node` or `Stmt::node`, or an enumerator of `BinaryOp`, `UnaryOp`, `Type` |
+| 3 | `src/frontend/Ast.h` | a node: an alternative of `Expr::node` or `Stmt::node`, or an enumerator of `UnaryOp`, `BinaryOp`, `AssignOp`, `Type` |
 | 4 | `src/frontend/Ast.cpp` | its `dump` |
-| 5 | `src/ir/CodeGen.cpp` | its checks and its lowering to LLVM IR |
+| 5 | `src/ir/CodeGen.cpp` | its conversions and checks, and its lowering to LLVM IR |
 | 6 | `src/runtime/` | if it needs C++ at run time, a runtime function (recipe 5) |
 | 7 | `tests/` | a dump in `FrontendTest.cpp`, results in `CodeGenTest.cpp`, IR or errors in `tests/lit/fminus/` |
-| 8 | `README.md` | the language table |
+| 8 | `README.md` | the language table, and the deviations from C if any |
 
 Steps 3 to 5 need no searching. Once the node exists, the build fails at every walk that doesn't handle it yet: a
 `std::visit` without a matching lambda fails to compile, and a `switch` without the new enumerator trips `-Wswitch`,
-an error under `-Werror`. Fix the errors in order and the feature is wired through.
+an error under `-Werror`. Fix the errors in order and the feature is wired through. `std::visit` names only the
+first alternative it can't handle, so after you fix one, the next appears.
 
 ## Ground rules
 
@@ -34,189 +39,213 @@ an error under `-Werror`. Fix the errors in order and the feature is wired throu
   needs.
 - **Keep the syntax tree free of LLVM.** Nodes hold names, spellings, enums and children. Types, values and checks
   belong to the passes.
-- **Report and continue.** In the code generator, `error(location, message)` records an error. Then return a poison
-  value of the expected type (`poison(ast::Type::Float)`), never a null pointer, so lowering goes on and finds the
-  next error. `lower` throws the module away at the end.
+- **Do what C does.** When in doubt, write the C program, compile it with `clang -O0 -S -emit-llvm`, and compare
+  with `fminus file.fm -O0`. The block names here are clang's (`land.rhs`, `cond.true`, `for.inc`, ...), so the two
+  read alike.
+- **Report and continue.** In the code generator, `error(location, message)` records an error, in clang's wording.
+  Then return a poison value of the expected type (`poison(ast::Type::Float)`), never a null pointer, so lowering
+  goes on and finds the next error. `lower` throws the module away at the end.
 - **Leave the IR valid.** Every block ends in exactly one terminator (`ret`, `br`). A phi lists every predecessor
-  exactly once. Allocas belong in the entry block. `verifyFunction` runs on every function and reports a violation
-  as an internal error.
-- **Look at the IR twice.** `fminus file.fm -O0` shows what your lowering wrote; `fminus file.fm` (-O2) shows what
-  LLVM made of it. Most lowering bugs are obvious at `-O0`, and most performance questions are answered at `-O2`.
+  exactly once. Allocas belong in the entry block (`allocate()`). `verifyFunction` runs on every function and reports
+  a violation as an internal error.
+- **Look at the IR twice.** `fminus file.fm -O0` shows what your lowering wrote: stack slots, loads and stores, as at
+  clang's `-O0`. `fminus file.fm` (-O2) shows what LLVM made of it. Most lowering bugs are obvious at `-O0`, and most
+  performance questions are answered at `-O2`.
 - **Test both halves.** New syntax gets a dump test, new semantics a codegen test (run in the JIT), and new errors a
   test that checks their text and location.
 
-## Recipe 1: a builtin (`tanh`)
+## Recipe 1: a builtin (`tanhf`)
 
 *Patch: [recipes/1-builtin-and-operator.patch](recipes/1-builtin-and-operator.patch) (with recipe 2).*
 
-A builtin is a row in `kBuiltins` (`src/ir/CodeGen.cpp`). The name maps to an LLVM intrinsic over `float`, with its
-parameter count:
+A builtin is a row in `kBuiltins` (`src/ir/CodeGen.cpp`): a `<math.h>` name, the LLVM intrinsic it lowers to (over
+`float`), and its parameter count.
 
 ```cpp
-            Builtin{"max", llvm::Intrinsic::maxnum, 2}, Builtin{"tanh", llvm::Intrinsic::tanh, 1},
+            Builtin{"fmaxf", llvm::Intrinsic::maxnum, 2}, Builtin{"tanhf", llvm::Intrinsic::tanh, 1},
 ```
 
 That is the whole change. `lowerCall` already declares the intrinsic (`Intrinsic::getOrInsertDeclaration`),
-checks the argument count, and refuses a function that tries to reuse the name. LLVM lowers `llvm.tanh.f32` to a
-call to libm's `tanhf`, which the JIT resolves from the process.
+checks the argument count, and refuses a definition that tries to reuse the name. A prototype of it, as `<math.h>`
+would have, is accepted. LLVM lowers `llvm.tanh.f32` to a call to libm's `tanhf`, which the JIT resolves from the
+process.
 
-`IntrinsicEnums.inc` in the LLVM install (`include/llvm/IR/`) lists the intrinsics. Intrinsics such as `exp2`,
-`pow`, `copysign`, `fma`, `minimum` and `maximum` are one row each: `pow`, `copysign`, `minimum` and `maximum` take two
-parameters, and `fma` takes three.
-Update the count in `CodeGenTest.cpp` (`builtins().size()`) and test the value:
+Without the row, a program could still call `tanhf` C's way, through a prototype, `float tanhf(float x);`: an
+external function, which the JIT finds in libm. The builtin makes it part of the language: no declaration is
+needed, and the call is the intrinsic that LLVM's passes treat uniformly. `IntrinsicEnums.inc`, in the LLVM
+install's `include/llvm/IR/`, lists the intrinsics. `exp2f` (`exp2`), `powf` (`pow`), `copysignf` (`copysign`) and
+`fmaf` (`fma`, three parameters) are one row each.
+
+Update the count in `CodeGenTest.cpp` (`builtins().size()`), then test the value:
 
 ```cpp
-    auto jit = build("fn f(x: float) -> float { return tanh(x); }", errors);
-    auto f = llvm::cantFail(jit->lookup("f")).toPtr<float (*)(float)>();
-    CHECK(f(0.5f) == std::tanh(0.5f));
+    auto jit = build("float f(float x) { return tanhf(x); }", errors);
+    CHECK(lookup<float(float)>(*jit, "f")(0.5f) == std::tanh(0.5f));
 ```
 
-## Recipe 2: an operator (`%`)
+## Recipe 2: an operator (`%` and `%=`)
 
 *Patch: [recipes/1-builtin-and-operator.patch](recipes/1-builtin-and-operator.patch).*
 
-Floating-point remainder, with C's `fmodf` semantics: the result takes the sign of the dividend. It binds like `*`
-and `/`.
+Floating-point remainder, with `fmodf`'s semantics: the result takes the sign of the dividend. C allows `%` on
+integers only, so this is FMinus's first extension beyond C; HLSL allows it on floats. It binds like `*` and `/`, and
+it gets its compound assignment.
 
-**Token** (`Lexer.l`, beside the other operators):
+**Tokens** (`Lexer.l`, beside the other operators; `%=` is longer, so it wins over `%`):
 
 ```lex
-"%"             { return Parser::make_PERCENT(yyextra->where); }
+"%="                        { return Parser::make_PERCENT_ASSIGN(yyextra->where); }
+...
+"%"                         { return Parser::make_PERCENT(yyextra->where); }
 ```
 
-**Grammar** (`Parser.y`): declare the token, put it on the `*` `/` precedence level, and add the rule.
+**Grammar** (`Parser.y`): declare the tokens, put them on their precedence levels, and add the rules.
 
 ```yacc
-%token ARROW "->" PLUS "+" MINUS "-" STAR "*" SLASH "/" PERCENT "%" ASSIGN "="
+%token PLUS "+" MINUS "-" STAR "*" SLASH "/" PERCENT "%"
+%token ASSIGN "=" PLUS_ASSIGN "+=" MINUS_ASSIGN "-=" STAR_ASSIGN "*=" SLASH_ASSIGN "/=" PERCENT_ASSIGN "%="
 ...
+%right "=" "+=" "-=" "*=" "/=" "%="
+%left "+" "-"
 %left "*" "/" "%"
 ...
-    | expr "%" expr                         { $$ = ast::makeExpr(at(@2), ast::BinaryExpr{ast::BinaryOp::Remainder, $1, $3}); }
+    | expr "%" expr                         { $$ = binary(@2, ast::BinaryOp::Remainder, $1, $3); }
+...
+    | expr "%=" expr                        { $$ = assign(@2, ast::AssignOp::Remainder, $1, $3); }
 ```
 
-**Node** (`Ast.h`):
+**Nodes** (`Ast.h`): an enumerator in each of `BinaryOp` and `AssignOp`.
 
 ```cpp
-    enum class BinaryOp
-    {
-        Add,
-        Subtract,
-        Multiply,
-        Divide,
-        Remainder,   // the sign of the dividend, as C's fmodf
-    };
+        Remainder,   // fmodf's: the sign of the dividend (C has % for integers only; HLSL has it for floats too)
 ```
 
 Build now, and the compiler lists the rest of the work:
 
 ```
-src/frontend/Ast.cpp:16:21: error: enumeration value 'Remainder' not handled in switch [-Werror,-Wswitch]
-src/ir/CodeGen.cpp:207:37: error: enumeration value 'Remainder' not handled in switch [-Werror,-Wswitch]
+src/frontend/Ast.cpp: error: enumeration value 'Remainder' not handled in switch [-Werror,-Wswitch]   (BinaryOp)
+src/frontend/Ast.cpp: error: enumeration value 'Remainder' not handled in switch [-Werror,-Wswitch]   (AssignOp)
+src/ir/CodeGen.cpp: error: enumeration value 'Remainder' not handled in switch [-Werror,-Wswitch]     (arithmetic)
+src/ir/CodeGen.cpp: error: enumeration value 'Remainder' not handled in switch [-Werror,-Wswitch]     (compoundOperator)
 ```
 
-**Dump** (`Ast.cpp`, in `opName`):
+**The dump** gets a case in each `opName`: `"%"` and `"%="`. **The lowering** needs two cases:
 
 ```cpp
-            case BinaryOp::Remainder:
-                return "%";
+                case ast::BinaryOp::Remainder:
+                    return builder_.CreateFRem(lhs, rhs);
+...
+                case ast::AssignOp::Remainder:
+                    return ast::BinaryOp::Remainder;
 ```
 
-**Lowering** (`CodeGen.cpp`, in the `BinaryExpr` lambda):
+A compound assignment is `x = x op v`, so `compoundOperator` maps `%=` to `%`, and `lowerAssign` does the rest.
+
+**Tests.** The precedence shows in the dump: `a + b % a * b` is `(+ a (* (% b a) b))`. The values show in the JIT:
 
 ```cpp
-                            case ast::BinaryOp::Remainder:
-                                return builder_.CreateFRem(lhs, rhs);
+    auto jit = build("float f(float x, float y) { return x % y * 2; }\n"
+                     "float wrap(float phase) { phase %= 1; return phase; }\n",
+                     errors);
+    CHECK(lookup<float(float, float)>(*jit, "f")(7.5f, 2.0f) == 3.0f);    // (7.5 % 2) * 2: % binds as * and /
+    CHECK(lookup<float(float, float)>(*jit, "f")(-7.5f, 2.0f) == -3.0f);  // the sign of the dividend
+    CHECK(lookup<float(float)>(*jit, "wrap")(2.25f) == 0.25f);
 ```
 
-**Tests.** The precedence shows in the dump: `a + b % a * b` is `(+ a (* (% b a) b))`. The value shows in the JIT:
+`frem` has no AArch64 instruction, so it becomes a call to `fmodf`. Check with `fminus file.fm --emit asm -o -`.
 
-```cpp
-    auto jit = build("fn f(x: float, y: float) -> float { return x % y * 2; }", errors);
-    auto f = llvm::cantFail(jit->lookup("f")).toPtr<float (*)(float, float)>();
-    CHECK(f(7.5f, 2.0f) == 3.0f);    // (7.5 % 2) * 2: % binds as * and /
-    CHECK(f(-7.5f, 2.0f) == -3.0f);  // the sign of the dividend
+## Recipe 3: `bool`, comparisons, `!`, `&&`, `||` and `?:`
+
+*Patch: [recipes/2-bool-logic-conditional.patch](recipes/2-bool-logic-conditional.patch).*
+
+This recipe adds the expression half of C's control flow:
+
+- C23's `bool`, with `true` and `false`;
+- the comparisons, `<`, `<=`, `>`, `>=`, `==` and `!=`;
+- `!`, `&&` and `||`;
+- the conditional operator, `c ? a : b`.
+
+```c
+float sign(float x) { return x > 0 ? 1 : x < 0 ? -1 : 0; }
+bool in_range(float x) { return x >= 0 && x <= 1; }
 ```
 
-`frem` has no AArch64 instruction; it becomes a call to `fmodf`. Check with `fminus file.fm --emit asm -o -`.
-
-## Recipe 3: comparisons, `bool` and an `if` expression
-
-*Patch: [recipes/2-comparisons-bool-if.patch](recipes/2-comparisons-bool-if.patch).*
-
-This recipe adds:
-
-- `<`, `<=`, `>`, `>=`, `==` and `!=` over floats, which give `bool`;
-- `bool` as a type for parameters and return values;
-- `if c { a } else { b }`, an expression whose branches give a value of one type.
-
-```
-fn magnitude(x: float) -> float { return if x < 0 { -x } else { x }; }
-fn positive(x: float) -> bool { return x > 0; }
-```
-
-It brings three firsts: a second type, which means type checks; a C ABI detail; and control flow, which means basic
-blocks and a phi.
+It brings three firsts: a second type with C's conversions; a C ABI detail; and control flow inside an expression,
+which means basic blocks and phis.
 
 ### Tokens and grammar
 
 `Lexer.l`: the keywords go with the others, before `{IDENTIFIER}`. The operators can go in any order, because Flex
-takes the longest match, so `<=` wins over `<`.
+takes the longest match, so `<=` wins over `<` and `!=` over `!`.
 
 ```lex
-"bool"          { return Parser::make_BOOL(yyextra->where); }
-"if"            { return Parser::make_IF(yyextra->where); }
-"else"          { return Parser::make_ELSE(yyextra->where); }
+"bool"                      { return Parser::make_BOOL(yyextra->where); }
+"true"                      { return Parser::make_TRUE(yyextra->where); }
+"false"                     { return Parser::make_FALSE(yyextra->where); }
 ...
-"<="            { return Parser::make_LE(yyextra->where); }
-">="            { return Parser::make_GE(yyextra->where); }
-"=="            { return Parser::make_EQ(yyextra->where); }
-"!="            { return Parser::make_NE(yyextra->where); }
-"<"             { return Parser::make_LT(yyextra->where); }
-">"             { return Parser::make_GT(yyextra->where); }
+"<="                        { return Parser::make_LE(yyextra->where); }
+">="                        { return Parser::make_GE(yyextra->where); }
+"=="                        { return Parser::make_EQ(yyextra->where); }
+"!="                        { return Parser::make_NE(yyextra->where); }
+"&&"                        { return Parser::make_AND(yyextra->where); }
+"||"                        { return Parser::make_OR(yyextra->where); }
+"<"                         { return Parser::make_LT(yyextra->where); }
+">"                         { return Parser::make_GT(yyextra->where); }
+"!"                         { return Parser::make_NOT(yyextra->where); }
+"?"                         { return Parser::make_QUESTION(yyextra->where); }
+":"                         { return Parser::make_COLON(yyextra->where); }
 ```
 
-`Parser.y`: the comparisons are `%nonassoc`, so `a < b < c` is a syntax error rather than a surprise. They bind more
-loosely than arithmetic, which puts them above `+` and `-`.
+`Parser.y`: C's precedence levels, in C's order, between assignment and the arithmetic ones. `?:` is right
+associative, so `a ? b : c ? d : e` nests to the right. Equality binds more loosely than the relational operators,
+and both are left associative, as in C.
 
 ```yacc
-%token FN "fn" LET "let" RETURN "return" FLOAT "float" BOOL "bool" IF "if" ELSE "else"
-%token LT "<" LE "<=" GT ">" GE ">=" EQ "==" NE "!="
+%token FLOAT "float" CONST "const" RETURN "return" BOOL "bool" TRUE "true" FALSE "false"
+%token LT "<" LE "<=" GT ">" GE ">=" EQ "==" NE "!=" NOT "!" AND "&&" OR "||" QUESTION "?" COLON ":"
 ...
-%nonassoc "<" "<=" ">" ">=" "==" "!="
+%right "=" "+=" "-=" "*=" "/=" "%="
+%right "?" ":"
+%left "||"
+%left "&&"
+%left "==" "!="
+%left "<" "<=" ">" ">="
 %left "+" "-"
-%left "*" "/" "%"
-%precedence NEG
 ...
 type
     : "float"                               { $$ = ast::Type::Float; }
     | "bool"                                { $$ = ast::Type::Bool; }
     ;
 ...
-    | expr "<" expr                         { $$ = ast::makeExpr(at(@2), ast::BinaryExpr{ast::BinaryOp::Less, $1, $3}); }
-    | expr "<=" expr                        { $$ = ast::makeExpr(at(@2), ast::BinaryExpr{ast::BinaryOp::LessEqual, $1, $3}); }
-    | expr ">" expr                         { $$ = ast::makeExpr(at(@2), ast::BinaryExpr{ast::BinaryOp::Greater, $1, $3}); }
-    | expr ">=" expr                        { $$ = ast::makeExpr(at(@2), ast::BinaryExpr{ast::BinaryOp::GreaterEqual, $1, $3}); }
-    | expr "==" expr                        { $$ = ast::makeExpr(at(@2), ast::BinaryExpr{ast::BinaryOp::Equal, $1, $3}); }
-    | expr "!=" expr                        { $$ = ast::makeExpr(at(@2), ast::BinaryExpr{ast::BinaryOp::NotEqual, $1, $3}); }
-    | "if" expr "{" expr "}" "else" "{" expr "}"
-                                            { $$ = ast::makeExpr(at(@1), ast::IfExpr{$2, $4, $8}); }
+    | "!" expr %prec UNARY                  { $$ = ast::makeExpr(at(@1), ast::UnaryExpr{ast::UnaryOp::Not, $2}); }
+    | "true"                                { $$ = ast::makeExpr(at(@1), ast::BoolExpr{true}); }
+    | "false"                               { $$ = ast::makeExpr(at(@1), ast::BoolExpr{false}); }
+    | expr "<" expr                         { $$ = binary(@2, ast::BinaryOp::Less, $1, $3); }
+    ...                                     (<=, >, >=, ==, != alike)
+    | expr "&&" expr                        { $$ = logical(@2, ast::LogicalOp::And, $1, $3); }
+    | expr "||" expr                        { $$ = logical(@2, ast::LogicalOp::Or, $1, $3); }
+    | expr "?" expr ":" expr                { $$ = ast::makeExpr(at(@2), ast::ConditionalExpr{$1, $3, $5}); }
 ```
 
-There are no conflicts: after `"if" expr`, a `{` can only start the branch, because `{` is not an operator. If you
-change the syntax and Bison reports a conflict, its `-Wcounterexamples` output shows an input that parses two ways.
+`logical()` is a helper beside `binary()` in the `%code` block. The precedence lines resolve every conflict: after
+`a ? b : c`, a `+` is shifted (`+` binds tighter than `:`), but an `=` reduces first. So `(a ? b : c) = d` is the
+code generator's "expression is not assignable", as in C.
 
 ### Nodes
 
-`Ast.h`: a type, six operators and a node.
+`Ast.h`: a type, an operator, six comparisons, and three nodes.
 
 ```cpp
+    // The value types. float is IEEE single precision (LLVM's float). bool is C23's: 0 or 1, which converts to float
+    // as 0 or 1, and to which a float converts as `x != 0` (a NaN is true).
     enum class Type
     {
         Float,
         Bool,
     };
     ...
-        Remainder,   // the sign of the dividend, as C's fmodf
+        Not,      // !x: a bool
+    ...
         Less,        // the comparisons give bool; with a NaN, all but != are false
         LessEqual,
         Greater,
@@ -224,112 +253,92 @@ change the syntax and Bison reports a conflict, its `-Wcounterexamples` output s
         Equal,
         NotEqual,
     };
+
+    // && and ||: C's, so the right operand runs only when the left does not decide.
+    enum class LogicalOp
+    {
+        And,
+        Or,
+    };
     ...
-    // `if condition { thenValue } else { elseValue }`: an expression, so both branches give a value of one type.
-    struct IfExpr
+    // `true` or `false`.
+    struct BoolExpr
+    {
+        bool value = false;
+    };
+    ...
+    struct LogicalExpr
+    {
+        LogicalOp op = LogicalOp::And;
+        ExprPtr lhs;
+        ExprPtr rhs;
+    };
+
+    // `condition ? thenValue : elseValue`: C's, so only one branch runs. Two floats or two bools give that type;
+    // a float and a bool give float.
+    struct ConditionalExpr
     {
         ExprPtr condition;
         ExprPtr thenValue;
         ExprPtr elseValue;
     };
-
-    struct Expr
-    {
-        SourceLocation location;
-        std::variant<NumberExpr, VariableExpr, UnaryExpr, BinaryExpr, CallExpr, IfExpr> node;
-    };
 ```
 
-The build then fails in six places:
+The build then fails at every walk:
 
-- `Ast.cpp`: the operator switch, the dump's `std::visit` ("`std::visit` requires the visitor to be exhaustive"),
-  and `typeName`;
-- `CodeGen.cpp`: `typeOf`, the operator switch and the lowering's `std::visit`.
+- `Ast.cpp`: the `BinaryOp` and `UnaryOp` switches, `typeName`, and the expression `std::visit`;
+- `CodeGen.cpp`: `typeOf`, the `UnaryOp` switch, `arithmetic` and the expression `std::visit`.
 
-The dump is mechanical: an `opName` case per operator, `case Type::Bool: return "bool";` in `typeName`, and:
+Bison reports no conflicts. The dump is mechanical:
+
+- an `opName` case per operator;
+- `"true"` and `"false"`;
+- `(&& a b)`, `(|| a b)` and `(?: c a b)`.
+
+### C's conversions
+
+With two types, values have to meet. C's rules are short:
+
+- **bool to float:** a `bool` used arithmetically is 0 or 1. C goes through `int`; with `float` the only arithmetic
+  type, it goes straight to `float`.
+- **float to bool:** any scalar used as a condition is compared with 0. `x` as a condition means `x != 0`, and since
+  that comparison is unordered, a NaN is true, as in C.
+- **Where they apply:** a value is converted wherever C converts it: operands, assignments, initialisers, arguments,
+  returns, conditions.
+
+One helper does both directions:
 
 ```cpp
-                                  [](const IfExpr& branch) {
-                                      return "(if " + dump(*branch.condition) + " " + dump(*branch.thenValue) + " "
-                                             + dump(*branch.elseValue) + ")";
-                                  },
-```
-
-### Types in the code generator
-
-With two types, every operand needs checking. The smallest approach that works is to treat each value's LLVM type
-as its FMinus type: `float` is `float`, and `bool` is `i1`. A handful of helpers in `Lowering` cover it:
-
-```cpp
-                case ast::Type::Bool:
-                    return builder_.getInt1Ty();
-...
-            // An LLVM type's FMinus name, for messages.
-            static std::string describe(const llvm::Type* type)
+            // C's implicit conversions between the two types: bool to float is 0 or 1, and float to bool is `x != 0`,
+            // so a NaN is true (an unordered comparison). Every value is a float or an i1.
+            llvm::Value* convert(llvm::Value* value, ast::Type type)
             {
-                return type->isIntegerTy(1) ? "bool" : "float";
-            }
-
-            // `value` when it has `type`; otherwise an error and a poison of `type`, so lowering goes on.
-            llvm::Value* expect(SourceLocation location, llvm::Value* value, ast::Type type, const std::string& what)
-            {
-                if (value->getType() == typeOf(type))
+                llvm::Type* target = typeOf(type);
+                if (value->getType() == target)
                     return value;
-                error(location, what + " must be " + ast::typeName(type) + ", not " + describe(value->getType()));
-                return poison(type);
+                if (type == ast::Type::Bool)
+                    return builder_.CreateFCmpUNE(value, llvm::ConstantFP::get(value->getType(), 0.0), "tobool");
+                return builder_.CreateUIToFP(value, target, "conv");
             }
 ```
 
-Then every place that consumes a value says what it expects:
-
-- the operands of `-` and of the binary operators: `float`;
-- a `return`: the function's return type;
-- each argument: the callee's parameter type (`float` for builtins);
-- the condition of an `if`: `bool`.
+Then every place that consumes a value converts it to what it expects:
 
 ```cpp
-                            llvm::Value* lhs = expect(expr.location, lower(*binary.lhs), ast::Type::Float,
-                                                      "the left operand");
-                            llvm::Value* rhs = expect(expr.location, lower(*binary.rhs), ast::Type::Float,
-                                                      "the right operand");
+                            // C's usual arithmetic conversions, with float the only arithmetic type: a bool is 0 or 1.
+                            llvm::Value* lhs = convert(lower(*binary.lhs), ast::Type::Float);
+                            llvm::Value* rhs = convert(lower(*binary.rhs), ast::Type::Float);
 ...
-                                       builder_.CreateRet(expect(stmt.location, lower(*ret.value),
-                                                                 function.returnType,
-                                                                 "the value " + quoted(function.name) + " returns"));
+                                   builder_.CreateRet(convert(lower(*ret.value), function_->returnType));
 ...
                 for (std::size_t i = 0; i < args.size(); ++i)
-                {
-                    args[i] = expect(location, args[i], callee.params[i].type,
-                                     "argument " + std::to_string(i + 1) + " of " + quoted(call.callee));
-                }
+                    args[i] = convert(args[i], callee.params[i].type);
 ```
 
-`wrongArity` now returns a poison of the callee's return type (a fourth parameter, `ast::Type result`), so a wrong
-argument count in a call to a `bool` function causes no second, misleading error.
-
-This stays manageable for a couple of types. When types multiply (integers, buffers, structs) or need conversions,
-move the checks into their own pass over the tree that records each expression's type (see "Where to go next").
-
-### Comparisons
-
-LLVM has ordered and unordered float comparisons. Ordered ones are false when either side is NaN; unordered ones
-are true. C's operators use ordered comparisons except for `!=`, and FMinus follows C:
-
-```cpp
-                            // Ordered comparisons: false when either side is NaN. != is unordered: true then.
-                            case ast::BinaryOp::Less:
-                                return builder_.CreateFCmpOLT(lhs, rhs);
-                            case ast::BinaryOp::LessEqual:
-                                return builder_.CreateFCmpOLE(lhs, rhs);
-                            case ast::BinaryOp::Greater:
-                                return builder_.CreateFCmpOGT(lhs, rhs);
-                            case ast::BinaryOp::GreaterEqual:
-                                return builder_.CreateFCmpOGE(lhs, rhs);
-                            case ast::BinaryOp::Equal:
-                                return builder_.CreateFCmpOEQ(lhs, rhs);
-                            case ast::BinaryOp::NotEqual:
-                                return builder_.CreateFCmpUNE(lhs, rhs);
-```
+The same goes for initialisers, assignments (`Binding` gains the variable's type), and the operands of `-`, `+` and
+`!`. `function_` (the function being lowered) comes back for the return. These are implicit conversions, so there
+are no type errors to report: `x + (a < b)` and `bool truthy(float x) { return x; }` are valid C, and they work.
+Once types multiply, a semantic pass replaces this scheme (see "Where to go next").
 
 ### `bool` at the C boundary
 
@@ -350,346 +359,448 @@ parameters and returns `zeroext`, and `declare` does the same:
                     llvmFunction->addRetAttr(llvm::Attribute::ZExt);
 ```
 
-Every new type that crosses into C++ raises the same question: integers narrower than 32 bits, structs (passed in
-registers or through memory, depending on their size), vectors. The answer is whatever clang emits for the
-equivalent C declaration. To see it, write the C version and run `clang -S -emit-llvm`.
+Every new type that crosses into C++ raises the same question: integers narrower than 32 bits, structs (in
+registers or through memory, by size), vectors. The answer is whatever clang emits for the equivalent C declaration.
 
-### The `if` expression: blocks and a phi
+### Comparisons
 
-An `if` needs control flow: a conditional branch to two blocks, each computing its value and branching to a join
-block, where a phi picks the value of whichever branch ran.
+LLVM has ordered and unordered float comparisons. Ordered ones are false when either side is NaN; unordered ones
+are true. C's operators use ordered comparisons except for `!=`. The cases go into `arithmetic`, after the
+operands' conversion to `float`:
 
 ```cpp
-                        [&](const ast::IfExpr& branch) { return lowerIf(expr.location, branch); },
-...
-            // condition ? then : else as a diamond of blocks joined by a phi. (SimplifyCFG turns a small one into a
-            // select at -O1 and above.)
-            llvm::Value* lowerIf(SourceLocation location, const ast::IfExpr& branch)
+                // Ordered comparisons: false when either side is NaN. != is unordered: true then.
+                case ast::BinaryOp::Less:
+                    return builder_.CreateFCmpOLT(lhs, rhs, "cmp");
+                ...
+                case ast::BinaryOp::NotEqual:
+                    return builder_.CreateFCmpUNE(lhs, rhs, "cmp");
+```
+
+`!` converts its operand to `bool` and flips it: `builder_.CreateNot(convert(operand, ast::Type::Bool), "lnot")`.
+
+### `&&` and `||`: short-circuiting
+
+In C, `a && b` evaluates `b` only when `a` is true. That's observable: `x > 0 && (ran = 1)` assigns only for a
+positive `x`. So the operator is control flow. The left side branches either to a block that evaluates the right
+side, or straight to the join block, where a phi picks the answer:
+
+```cpp
+            // a && b and a || b, as clang lowers them: b runs only when a does not decide (land.rhs, lor.rhs), and a
+            // phi joins the two ways out.
+            llvm::Value* lowerLogical(const ast::LogicalExpr& logical)
             {
-                llvm::Value* condition =
-                    expect(location, lower(*branch.condition), ast::Type::Bool, "the condition of an if");
-                llvm::Function* function = builder_.GetInsertBlock()->getParent();
+                const bool isAnd = logical.op == ast::LogicalOp::And;
+                llvm::Value* lhs = convert(lower(*logical.lhs), ast::Type::Bool);
+                llvm::BasicBlock* lhsEnd = builder_.GetInsertBlock();
+                llvm::Function* function = lhsEnd->getParent();
                 llvm::LLVMContext& context = module_.getContext();
-                llvm::BasicBlock* thenBlock = llvm::BasicBlock::Create(context, "if.then", function);
-                llvm::BasicBlock* elseBlock = llvm::BasicBlock::Create(context, "if.else", function);
-                llvm::BasicBlock* endBlock = llvm::BasicBlock::Create(context, "if.end", function);
-                builder_.CreateCondBr(condition, thenBlock, elseBlock);
+                llvm::BasicBlock* rhsBlock =
+                    llvm::BasicBlock::Create(context, isAnd ? "land.rhs" : "lor.rhs", function);
+                llvm::BasicBlock* endBlock =
+                    llvm::BasicBlock::Create(context, isAnd ? "land.end" : "lor.end", function);
+                if (isAnd)
+                    builder_.CreateCondBr(lhs, rhsBlock, endBlock);
+                else
+                    builder_.CreateCondBr(lhs, endBlock, rhsBlock);
 
-                // Each branch may end in another block than it started in (a nested if): the phi needs the last.
-                builder_.SetInsertPoint(thenBlock);
-                llvm::Value* thenValue = lower(*branch.thenValue);
-                llvm::BasicBlock* thenEnd = builder_.GetInsertBlock();
-                builder_.CreateBr(endBlock);
-
-                builder_.SetInsertPoint(elseBlock);
-                llvm::Value* elseValue = lower(*branch.elseValue);
-                llvm::BasicBlock* elseEnd = builder_.GetInsertBlock();
+                builder_.SetInsertPoint(rhsBlock);
+                llvm::Value* rhs = convert(lower(*logical.rhs), ast::Type::Bool);
+                llvm::BasicBlock* rhsEnd = builder_.GetInsertBlock();   // lowering b may have added blocks
                 builder_.CreateBr(endBlock);
 
                 builder_.SetInsertPoint(endBlock);
-                if (thenValue->getType() != elseValue->getType())
-                {
-                    error(location, "the branches of an if give " + describe(thenValue->getType()) + " and "
-                                        + describe(elseValue->getType()));
-                    return poison(ast::Type::Float);
-                }
-                llvm::PHINode* phi = builder_.CreatePHI(thenValue->getType(), 2, "if.value");
+                llvm::PHINode* phi = builder_.CreatePHI(builder_.getInt1Ty(), 2, isAnd ? "land" : "lor");
+                phi->addIncoming(builder_.getInt1(!isAnd), lhsEnd);   // && is false when a is; || is true when a is
+                phi->addIncoming(rhs, rhsEnd);
+                return phi;
+            }
+```
+
+`lhsEnd` and `rhsEnd` matter. Lowering an operand can leave the builder in a different block from the one it
+started in, for example when that operand is itself an `&&`. The phi must name the blocks that actually branch to
+the join block.
+
+### `?:`: one branch runs
+
+C evaluates only the branch taken, so `x > 0 ? (t = 1) : (t = 2)` assigns once. A `select` would evaluate both
+operands, so the conditional needs blocks too. Its type is known only once both branches are lowered: two `bool`s
+give `bool`, anything else `float`. So the conversions go at the end of each branch's block, before its branch to the
+join:
+
+```cpp
+            // c ? a : b, as clang lowers it: only the branch taken runs, so it takes blocks and a phi (a select would
+            // run both). SimplifyCFG turns a small one without side effects into a select at -O1 and above.
+            llvm::Value* lowerConditional(const ast::ConditionalExpr& conditional)
+            {
+                llvm::Value* condition = convert(lower(*conditional.condition), ast::Type::Bool);
+                llvm::Function* function = builder_.GetInsertBlock()->getParent();
+                llvm::LLVMContext& context = module_.getContext();
+                llvm::BasicBlock* trueBlock = llvm::BasicBlock::Create(context, "cond.true", function);
+                llvm::BasicBlock* falseBlock = llvm::BasicBlock::Create(context, "cond.false", function);
+                llvm::BasicBlock* endBlock = llvm::BasicBlock::Create(context, "cond.end", function);
+                builder_.CreateCondBr(condition, trueBlock, falseBlock);
+
+                // Each branch may end in another block than it started in (a nested ?:): the phi needs the last. Both
+                // are lowered before their type is known, then converted to it at their ends.
+                builder_.SetInsertPoint(trueBlock);
+                llvm::Value* thenValue = lower(*conditional.thenValue);
+                llvm::BasicBlock* thenEnd = builder_.GetInsertBlock();
+                builder_.SetInsertPoint(falseBlock);
+                llvm::Value* elseValue = lower(*conditional.elseValue);
+                llvm::BasicBlock* elseEnd = builder_.GetInsertBlock();
+
+                const bool bothBool = thenValue->getType()->isIntegerTy(1) && elseValue->getType()->isIntegerTy(1);
+                const ast::Type type = bothBool ? ast::Type::Bool : ast::Type::Float;
+                builder_.SetInsertPoint(thenEnd);
+                thenValue = convert(thenValue, type);
+                builder_.CreateBr(endBlock);
+                builder_.SetInsertPoint(elseEnd);
+                elseValue = convert(elseValue, type);
+                builder_.CreateBr(endBlock);
+
+                builder_.SetInsertPoint(endBlock);
+                llvm::PHINode* phi = builder_.CreatePHI(typeOf(type), 2, "cond");
                 phi->addIncoming(thenValue, thenEnd);
                 phi->addIncoming(elseValue, elseEnd);
                 return phi;
             }
 ```
 
-The comment about `thenEnd` matters. With a nested `if` in the then-branch, lowering that branch leaves the builder
-in the nested `if.end`, not in `thenBlock`, and the phi must name that block as its predecessor. Taking
-`GetInsertBlock()` after lowering each branch gets this right. Naming `thenBlock` instead produces IR the verifier
-rejects.
-
-At `-O0` you see the diamond. At `-O2`, SimplifyCFG has flattened it into a `select`, which for DSP code is usually
-what you want: no branch to mispredict.
+At `-O0` you see the blocks as clang writes them. At `-O2`, SimplifyCFG has flattened them into `select`s, because
+these operands have no side effects. For DSP code that is usually what you want: no branch to mispredict.
 
 ```llvm
-; fminus magnitude.fm -O0
-define float @magnitude(float %x) {
-entry:
-  %0 = fcmp olt float %x, 0.000000e+00
-  br i1 %0, label %if.then, label %if.else
-if.then:
-  %1 = fneg float %x
-  br label %if.end
-if.else:
-  br label %if.end
-if.end:
-  %if.value = phi float [ %1, %if.then ], [ %x, %if.else ]
-  ret float %if.value
-}
+; float both(float x, float y) { return x > 0 && y > 0 ? x : y; }     fminus both.fm -O0 (the slots elided)
+  %cmp = fcmp ogt float %x1, 0.000000e+00
+  br i1 %cmp, label %land.rhs, label %land.end
+land.rhs:
+  %cmp3 = fcmp ogt float %y2, 0.000000e+00
+  br label %land.end
+land.end:
+  %land = phi i1 [ false, %entry ], [ %cmp3, %land.rhs ]
+  br i1 %land, label %cond.true, label %cond.false
+cond.true:
+  %x4 = load float, ptr %x.addr, align 4
+  br label %cond.end
+cond.false:
+  %y5 = load float, ptr %y.addr, align 4
+  br label %cond.end
+cond.end:
+  %cond = phi float [ %x4, %cond.true ], [ %y5, %cond.false ]
+  ret float %cond
 
-; fminus magnitude.fm -O2
-define float @magnitude(float %x) local_unnamed_addr #0 {
-entry:
-  %0 = fcmp olt float %x, 0.000000e+00
-  %1 = fneg float %x
-  %if.value = select i1 %0, float %1, float %x
-  ret float %if.value
-}
+; fminus both.fm -O2
+  %cmp = fcmp ogt float %x, 0.000000e+00
+  %cmp3 = fcmp ogt float %y, 0.000000e+00
+  %land = select i1 %cmp, i1 %cmp3, i1 false
+  %cond = select i1 %land, float %x, float %y
+  ret float %cond
 ```
 
 ### Tests
 
-```cpp
-    auto positive = llvm::cantFail(jit->lookup("positive")).toPtr<bool (*)(float)>();
-    CHECK(positive(2.0f));
-    CHECK_FALSE(positive(std::nanf("")));
-    ...
-    CHECK(errors == "test.fm:1:34: error: the condition of an if must be bool, not float\n"
-                    "test.fm:2:36: error: the right operand must be float, not bool\n"
-                    "test.fm:3:26: error: the value 'h' returns must be bool, not float\n"
-                    "test.fm:4:34: error: the branches of an if give float and bool\n");
-```
+The recipe's test (`tests/unit/RecipeTest.cpp`) checks:
 
-Two existing tests also change, though nothing about them broke. With `if` added, five tokens can now start an
-expression, and Bison's detailed message lists the expected tokens only when there are at most four (see the
-pitfalls). "syntax error, unexpected ;, expecting - or ( or identifier or number" becomes "syntax error, unexpected
-;", in `FrontendTest.cpp` and in `tests/lit/fminus/syntax-error.fm`.
+- the values of `magnitude` and `sign`;
+- `bool` returned to C++ (`lookup<bool(float)>`);
+- NaN in a comparison, and NaN as a condition;
+- `bool` as 0 and 1 in arithmetic;
+- that `&&` and `||` skip their right side;
+- that `?:` runs one branch;
+- the not-assignable conditional.
 
-## Recipe 4: `var`, assignment and `while`
+One existing test changes, though nothing about it broke. `bool` is a new way to start a function, so Bison's
+top-level message gains a token: "expecting end of file or float" becomes "expecting end of file or float or bool"
+(`FrontendTest.cpp`; see the pitfalls).
 
-*Patch: [recipes/3-var-assignment-while.patch](recipes/3-var-assignment-while.patch), on top of recipe 3.*
+## Recipe 4: `if`, `else`, `while`, `for`, `break` and `continue`
 
-This recipe adds mutable bindings, `var x = e;`, which `x = e;` may change, and loops,
-`while condition { statements }`:
+*Patch: [recipes/3-if-while-for.patch](recipes/3-if-while-for.patch), on top of recipe 3.*
 
-```
-fn sum_to(n: float) -> float {
-    var i = 0;
-    var total = 0;
-    while i < n {
-        i = i + 1;
-        total = total + i;
-    }
+C's statements for control flow:
+
+```c
+float sum_to(float n)
+{
+    float total = 0;
+    for (float i = 1; i <= n; i += 1)
+        total += i;
     return total;
 }
 ```
 
-### Tokens, grammar, nodes
+### Tokens and the dangling `else`
 
-```lex
-"var"           { return Parser::make_VAR(yyextra->where); }
-"while"         { return Parser::make_WHILE(yyextra->where); }
-```
+`Lexer.l` gets six keywords: `if`, `else`, `while`, `for`, `break` and `continue`. The grammar takes the statements
+as C writes them:
 
 ```yacc
-%token FN "fn" LET "let" RETURN "return" FLOAT "float" BOOL "bool" IF "if" ELSE "else" VAR "var" WHILE "while"
-...
-    | "var" IDENTIFIER "=" expr ";"         { $$ = ast::Stmt{at(@1), ast::VarStmt{$2, $4}}; }
-    | IDENTIFIER "=" expr ";"               { $$ = ast::Stmt{at(@1), ast::AssignStmt{$1, $3}}; }
-    | "while" expr "{" statements "}"       { $$ = ast::Stmt{at(@1), ast::WhileStmt{$2, $4}}; }
+    | "if" "(" expr ")" statement %prec THEN
+                                            { $$ = ast::Stmt{at(@1), ast::IfStmt{$3, ast::own($5), nullptr}}; }
+    | "if" "(" expr ")" statement "else" statement
+                                            { $$ = ast::Stmt{at(@1), ast::IfStmt{$3, ast::own($5), ast::own($7)}}; }
+    | "while" "(" expr ")" statement        { $$ = ast::Stmt{at(@1), ast::WhileStmt{$3, ast::own($5)}}; }
+    | "for" "(" for_init optional_expr ";" optional_expr ")" statement
+                                            { $$ = ast::Stmt{at(@1), ast::ForStmt{$3, $4, $6, ast::own($8)}}; }
+    | "break" ";"                           { $$ = ast::Stmt{at(@1), ast::BreakStmt{}}; }
+    | "continue" ";"                        { $$ = ast::Stmt{at(@1), ast::ContinueStmt{}}; }
+    ;
+
+// The first clause of a for: a declaration (its ; included), an expression and ;, or just ;.
+for_init
+    : declaration                           { $$ = $1; }
+    | expr ";"                              { $$.push_back(ast::Stmt{at(@1), ast::ExprStmt{$1}}); }
+    | ";"                                   {}
+    ;
+
+optional_expr
+    : %empty                                { $$ = nullptr; }
+    | expr                                  { $$ = $1; }
+    ;
 ```
 
-A statement starting with an identifier can only be an assignment, since FMinus has no expression statements, so
-there is no conflict. Add expression statements (`f(x);`) later, and `IDENTIFIER "="` against `expr` becomes the
-first thing to think about.
+Without the `%prec THEN`, Bison reports C's classic ambiguity. This is its real output (`-Wcounterexamples`):
 
-`Ast.h`: three statements. A `while` holds a vector of statements, so `Stmt` is declared before it is defined
-(`std::vector` of an incomplete type is fine since C++17).
+```
+Parser.y: warning: 1 shift/reduce conflict [-Wconflicts-sr]
+Parser.y: warning: shift/reduce conflict on token "else" [-Wcounterexamples]
+  Example: "if" "(" expr ")" "if" "(" expr ")" statement . "else" statement
+  Shift derivation
+    statement
+    `-> 30: "if" "(" expr ")" statement
+                              `-> 31: "if" "(" expr ")" statement . "else" statement
+  Reduce derivation
+    statement
+    `-> 31: "if" "(" expr ")" statement                             "else" statement
+                              `-> 30: "if" "(" expr ")" statement .
+```
+
+In `if (a) if (b) s; else t;`, the `else` could close either `if`. C says it closes the nearest one, which is the
+shift. Two precedence declarations say so: the rule without an `else` gets the lower precedence `THEN`, so an
+`else` arriving after it is shifted.
+
+```yacc
+// The dangling else: in `if (a) if (b) s; else t;` the else could close either if. Giving it more precedence than the
+// shorter rule (THEN) makes Bison shift it, so it closes the nearest if, as in C.
+%precedence THEN
+%precedence "else"
+```
+
+### Nodes
+
+A branch and a loop body are single statements (often a block), owned through `StmtPtr = std::unique_ptr<Stmt>`.
+`ast::own(stmt)` boxes one in a grammar action.
 
 ```cpp
-    // `var name = value;`: a binding `name = value;` may change. It lives in memory (an alloca), which mem2reg turns
-    // back into SSA values.
-    struct VarStmt
+    using StmtPtr = std::unique_ptr<Stmt>;
+
+    // `if (condition) thenBranch [else elseBranch]`. A float condition is `!= 0`, as in C.
+    struct IfStmt
     {
-        std::string name;
-        ExprPtr value;
+        ExprPtr condition;
+        StmtPtr thenBranch;
+        StmtPtr elseBranch;   // null without an else
     };
 
-    struct AssignStmt
-    {
-        std::string name;
-        ExprPtr value;
-    };
-
-    struct Stmt;
-
-    // `while condition { body }`. The body's bindings end with it.
     struct WhileStmt
     {
         ExprPtr condition;
-        std::vector<Stmt> body;
+        StmtPtr body;
     };
 
-    struct Stmt
+    // `for (init; condition; step) body`. The init's declarations are scoped to the loop; a missing condition is
+    // true, so the loop runs until a break or a return.
+    struct ForStmt
     {
-        SourceLocation location;
-        std::variant<LetStmt, ReturnStmt, VarStmt, AssignStmt, WhileStmt> node;
+        std::vector<Stmt> init;   // declarations, an expression statement, or nothing
+        ExprPtr condition;        // null when omitted
+        ExprPtr step;             // null when omitted
+        StmtPtr body;
+    };
+
+    struct BreakStmt
+    {
+    };
+
+    struct ContinueStmt
+    {
     };
 ```
 
-The dump adds `(var x e)`, `(set x e)` and `(while c s...)`.
+These join `Stmt::node`. The build fails at the two statement walks, the dump and the lowering. The dump prints a
+statement's sub-statements one level further in.
 
-### Storage: allocas, and mem2reg
+### Lowering
 
-A `let` binds an SSA value, and an SSA value can't change. Building SSA directly for a variable that changes inside
-a loop means placing phis yourself. The classic shortcut, and what clang does, is to give each mutable variable a
-stack slot, an `alloca` in the entry block, and to `load` and `store` it. LLVM's mem2reg and SROA, which the
-pipeline runs from `-O1`, turn those slots back into SSA values with the phis in the right places.
-
-`scope_` now records which kind of binding each name is:
+Three small helpers come first:
 
 ```cpp
-            // A name in scope: a let's value or a parameter, or a var's alloca.
-            struct Binding
+            // A sub-statement (a branch, a loop body) has a scope of its own, as in C.
+            void lowerScoped(const ast::Stmt& stmt)
             {
-                llvm::Value* value;
-                bool isVar;
-            };
-            std::unordered_map<std::string, Binding> scope_;   // the current function's bindings
-            const ast::Function* function_ = nullptr;          // the function being lowered
-```
+                scopes_.emplace_back();
+                lowerStatement(stmt);
+                scopes_.pop_back();
+            }
 
-A `var` allocates its slot at the top of the entry block, whatever block the builder is in. Allocas anywhere else
-are not promoted, and a slot allocated inside a loop is allocated again on every iteration.
-
-```cpp
-            // A var's storage: an alloca at the top of the entry block, where mem2reg (O1 and up) promotes it.
-            void declareVar(SourceLocation location, const ast::VarStmt& var)
+            llvm::BasicBlock* newBlock(const char* name)
             {
-                llvm::Value* value = lower(*var.value);
-                llvm::BasicBlock& entry = builder_.GetInsertBlock()->getParent()->getEntryBlock();
-                llvm::IRBuilder<> atEntry(&entry, entry.begin());
-                llvm::AllocaInst* slot = atEntry.CreateAlloca(value->getType(), nullptr, var.name);
-                builder_.CreateStore(value, slot);
-                if (!scope_.emplace(var.name, Binding{slot, true}).second)
-                    error(location, quoted(var.name) + " is already defined");
+                return llvm::BasicBlock::Create(module_.getContext(), name, builder_.GetInsertBlock()->getParent());
+            }
+
+            // Branches to `target` unless the block already ends (a return, a break, a continue in it).
+            void fallThrough(llvm::BasicBlock* target)
+            {
+                if (!builder_.GetInsertBlock()->hasTerminator())
+                    builder_.CreateBr(target);
             }
 ```
 
-Reading a `var` loads it (in the `VariableExpr` lambda):
+`fallThrough` handles control that never reaches the end of a branch or a body. `if (c) return 1;` must not get a
+second terminator after its `ret`.
+
+**`if`**: if.then and if.else (when there is an else) join at if.end. When both branches return, if.end has no
+predecessors. The statements after it then lower into dead code. The function's end is unreachable too, so no
+"does not return a value" error is reported. `reachable()`, a depth-first walk from the entry, already handles that.
 
 ```cpp
-                            if (found != scope_.end() && found->second.isVar)
-                            {
-                                auto* slot = llvm::cast<llvm::AllocaInst>(found->second.value);
-                                return builder_.CreateLoad(slot->getAllocatedType(), slot, variable.name);
-                            }
-```
+            void lowerIf(const ast::IfStmt& branch)
+            {
+                llvm::Value* condition = convert(lower(*branch.condition), ast::Type::Bool);
+                llvm::BasicBlock* thenBlock = newBlock("if.then");
+                llvm::BasicBlock* elseBlock = branch.elseBranch ? newBlock("if.else") : nullptr;
+                llvm::BasicBlock* endBlock = newBlock("if.end");
+                builder_.CreateCondBr(condition, thenBlock, elseBlock != nullptr ? elseBlock : endBlock);
 
-Assigning stores, after checking that the name is a `var` and that the type matches. The function is `assign` in
-the patch: `unknown variable`, then "'a' is not a var, so it cannot change", then "'c' is float, not bool".
-
-### Statements become recursive
-
-Until now, `define` lowered a flat list of statements, with a `returned` flag to catch statements after a
-`return`. With loops, statements nest, and a `return` can sit inside a loop body. So the list moves into
-`lowerStatements`, a single statement into `lowerStatement`, and the flag becomes a question about the current
-block: is it already terminated?
-
-```cpp
-                function_ = &function;
-                lowerStatements(function.body);
-                if (!terminated())
+                builder_.SetInsertPoint(thenBlock);
+                lowerScoped(*branch.thenBranch);
+                fallThrough(endBlock);
+                if (elseBlock != nullptr)
                 {
-                    error(function.location, "function " + quoted(function.name) + " does not end with a return");
-                    builder_.CreateRet(poison(function.returnType));
+                    builder_.SetInsertPoint(elseBlock);
+                    lowerScoped(*branch.elseBranch);
+                    fallThrough(endBlock);
                 }
-...
-            // Whether the current block already ends (in a return): nothing more may be added to it. (Not
-            // getTerminator(): since LLVM 23 it assumes a finished block.)
-            bool terminated()
-            {
-                return builder_.GetInsertBlock()->hasTerminator();
-            }
-
-            void lowerStatements(const std::vector<ast::Stmt>& statements)
-            {
-                for (const ast::Stmt& stmt : statements)
-                {
-                    if (terminated())
-                    {
-                        error(stmt.location, "statement after the return of " + quoted(function_->name));
-                        return;
-                    }
-                    lowerStatement(stmt);
-                }
+                builder_.SetInsertPoint(endBlock);
             }
 ```
 
-Read the comment on `terminated()`. The first version called `getTerminator() != nullptr`, which on LLVM 23 returns
-a bogus non-null pointer for an unfinished block (its assert is compiled out). Every function then reported
-"statement after the return" at its first statement. See the pitfalls.
-
-### The loop
+**Loops**: `loops_` is a stack of `{breakTarget, continueTarget}` pairs, pushed around each body. A `break` branches to
+the innermost loop's exit, and a `continue` to its next iteration. With no loop around them, they are clang's
+errors: "'break' statement not in loop or switch statement" and "'continue' statement not in loop statement".
 
 ```cpp
-            // while.cond tests and branches to while.body or while.end; the body jumps back to while.cond.
-            void lowerWhile(SourceLocation location, const ast::WhileStmt& loop)
+                               [&](const ast::BreakStmt&) {
+                                   if (loops_.empty())
+                                       error(stmt.location, "'break' statement not in loop or switch statement");
+                                   else
+                                       builder_.CreateBr(loops_.back().breakTarget);
+                               },
+```
+
+`while` is while.cond → while.body → while.cond, until while.end. `continue` goes to while.cond.
+
+```cpp
+            void lowerWhile(const ast::WhileStmt& loop)
             {
-                llvm::Function* function = builder_.GetInsertBlock()->getParent();
-                llvm::LLVMContext& context = module_.getContext();
-                llvm::BasicBlock* condBlock = llvm::BasicBlock::Create(context, "while.cond", function);
-                llvm::BasicBlock* bodyBlock = llvm::BasicBlock::Create(context, "while.body", function);
-                llvm::BasicBlock* endBlock = llvm::BasicBlock::Create(context, "while.end", function);
+                llvm::BasicBlock* condBlock = newBlock("while.cond");
+                llvm::BasicBlock* bodyBlock = newBlock("while.body");
+                llvm::BasicBlock* endBlock = newBlock("while.end");
                 builder_.CreateBr(condBlock);
 
                 builder_.SetInsertPoint(condBlock);
-                llvm::Value* condition =
-                    expect(location, lower(*loop.condition), ast::Type::Bool, "the condition of a while");
-                builder_.CreateCondBr(condition, bodyBlock, endBlock);
+                builder_.CreateCondBr(convert(lower(*loop.condition), ast::Type::Bool), bodyBlock, endBlock);
 
                 builder_.SetInsertPoint(bodyBlock);
-                const auto outer = scope_;   // the body's bindings end with it
-                lowerStatements(loop.body);
-                scope_ = outer;
-                if (!terminated())
-                    builder_.CreateBr(condBlock);
+                loops_.push_back({endBlock, condBlock});
+                lowerScoped(*loop.body);
+                loops_.pop_back();
+                fallThrough(condBlock);
 
                 builder_.SetInsertPoint(endBlock);
             }
 ```
 
-- **Scope.** Copying `scope_` around the body gives the body its own scope: a `let` inside a loop is gone after it
-  ("unknown variable 'inner'"). A `var` declared outside stays visible, and stores to it stick, because the binding
-  holds the slot, not the value. The copy is the simplest way to get block scope; a stack of maps is the usual
-  next step.
-- **A `return` in the body** terminates the body's block, so the back-edge isn't added. `while.end` is still
-  reachable through the condition, so a function still needs a `return` after its loops.
+`for` has one more block, for.inc, for the step. `continue` goes there, so the step still runs, as in C. The init's
+declarations live in a scope around the whole loop, so `i` is gone after it. The body has a scope of its own inside
+that, so the body may redeclare `i`; in C that is legal, and in C++ it isn't. A missing condition branches straight
+into the body.
 
-### Before and after mem2reg
+```cpp
+            void lowerFor(const ast::ForStmt& loop)
+            {
+                scopes_.emplace_back();
+                lowerStatements(loop.init);
+                llvm::BasicBlock* condBlock = newBlock("for.cond");
+                llvm::BasicBlock* bodyBlock = newBlock("for.body");
+                llvm::BasicBlock* incBlock = newBlock("for.inc");
+                llvm::BasicBlock* endBlock = newBlock("for.end");
+                builder_.CreateBr(condBlock);
+
+                builder_.SetInsertPoint(condBlock);
+                if (loop.condition)
+                    builder_.CreateCondBr(convert(lower(*loop.condition), ast::Type::Bool), bodyBlock, endBlock);
+                else
+                    builder_.CreateBr(bodyBlock);   // no condition: until a break or a return
+
+                builder_.SetInsertPoint(bodyBlock);
+                loops_.push_back({endBlock, incBlock});
+                lowerScoped(*loop.body);
+                loops_.pop_back();
+                fallThrough(incBlock);
+
+                builder_.SetInsertPoint(incBlock);
+                if (loop.step)
+                    lower(*loop.step);
+                builder_.CreateBr(condBlock);
+
+                builder_.SetInsertPoint(endBlock);
+                scopes_.pop_back();
+            }
+```
+
+`for (;;) { }` never reaches for.end. A function that ends with it therefore needs no `return`, again because the end
+isn't reachable.
+
+### The loop, before and after
 
 ```llvm
-; fminus sum.fm -O0: slots, loads and stores
-define float @sum_to(float %n) #0 {
-entry:
-  %total = alloca float, align 4
-  %i = alloca float, align 4
-  store float 0.000000e+00, ptr %i, align 4
-  store float 0.000000e+00, ptr %total, align 4
-  br label %while.cond
-while.cond:
-  %i1 = load float, ptr %i, align 4
-  %0 = fcmp olt float %i1, %n
-  br i1 %0, label %while.body, label %while.end
-while.body:
-  ...
-  br label %while.cond
-while.end:
-  %total5 = load float, ptr %total, align 4
-  ret float %total5
-}
+; fminus sum.fm -O0: the four blocks, as clang names them (the loads and stores elided)
+for.cond:                                         ; preds = %for.inc, %entry
+  br i1 %cmp, label %for.body, label %for.end
+for.body:                                         ; preds = %for.cond
+  br label %for.inc
+for.inc:                                          ; preds = %for.body
+  br label %for.cond
+for.end:                                          ; preds = %for.cond
+  ret float %total6
 
-; fminus sum.fm -O1: mem2reg placed the phis; the loop is rotated (the test moved to the bottom)
-while.body:
-  %i.07 = phi float [ %1, %while.body ], [ 0.000000e+00, %entry ]
-  %total.06 = phi float [ %2, %while.body ], [ 0.000000e+00, %entry ]
-  %1 = fadd float %i.07, 1.000000e+00
-  %2 = fadd float %total.06, %1
-  %3 = fcmp olt float %1, %n
-  br i1 %3, label %while.body, label %while.end
+; fminus sum.fm -O1: the slots became phis, and the loop was rotated (the test moved to the bottom)
+for.body:                                         ; preds = %entry, %for.body
+  %i.09 = phi float [ %1, %for.body ], [ 1.000000e+00, %entry ]
+  %total.08 = phi float [ %0, %for.body ], [ 0.000000e+00, %entry ]
+  %0 = fadd float %total.08, %i.09
+  %1 = fadd float %i.09, 1.000000e+00
+  %cmp = fcmp ugt float %1, %n
+  br i1 %cmp, label %for.end, label %for.body
 ```
 
 ### Tests
 
-`sum_to(4) == 10`, nested loops, a `let` inside a body, and a `return` from inside a loop. The errors: assigning to
-a `let`, an unknown name, a type mismatch, a non-`bool` condition, and a body's `let` used after the loop.
+The recipe's test checks:
+
+- a `for` with a declared counter;
+- that an `else` binds to the nearest `if`;
+- that `continue` still runs the step;
+- that `break` leaves only the inner loop, in a `for (;;)`;
+- a `while`;
+- an `if`/`else` that returns in both branches;
+- an endless `for (;;) { }`;
+- an `if` in dead code after a `return`.
+
+The errors: `break` and `continue` outside a loop, the counter used after its loop, and a function that can still
+fall off its end.
 
 ## Recipe 5: a runtime function (`db_to_gain`)
 
@@ -703,7 +814,8 @@ through `defineRuntimeSymbols`, and an executable links `libfminus_runtime.a`.
 **The function** (`src/runtime/Runtime.h`, `Runtime.cpp`, `RuntimeSymbols.def`):
 
 ```cpp
-    // Decibels to a linear gain: 10^(db / 20). FMinus calls it as db_to_gain (ir/CodeGen.cpp).
+    // Decibels to a linear gain: 10^(db / 20). FMinus code declares it (`float fminus_rt_db_to_gain(float db);`), or
+    // calls it as the builtin db_to_gain (ir/CodeGen.cpp).
     float fminus_rt_db_to_gain(float db) noexcept;
 ```
 
@@ -718,16 +830,20 @@ extern "C" float fminus_rt_db_to_gain(float db) noexcept
 FMINUS_RUNTIME_SYMBOL(fminus_rt_db_to_gain)
 ```
 
-Keep the `.def` line in step with the header. Without it, the JIT in this repository's tools still finds the
-function, but only by accident. LLJIT also searches the process's own symbols, and the tools link the runtime
-statically and export it. A plugin that hides its symbols or dead-strips the unused ones would fail at lookup.
+**C's way: a prototype.** With the function in the runtime, a program can already call it. Declare it and call it,
+as C calls any external function. The compiler doesn't change:
 
-**The name in FMinus** (`CodeGen.cpp`): a second table, beside `kBuiltins`, from the FMinus name to the runtime's
-symbol.
+```c
+float fminus_rt_db_to_gain(float db);
+float f(float db) { return fminus_rt_db_to_gain(db) * 2; }
+```
+
+**The language's way: a builtin name.** To make it part of FMinus, under a name of its own and with no prototype,
+add a second table beside `kBuiltins`, from the FMinus name to the runtime's symbol:
 
 ```cpp
-        // name -> a function of the FMinus runtime (runtime/Runtime.h), float(float, ...): JIT'd code finds it through
-        // support/JitRuntime.h, an executable links libfminus_runtime.a.
+        // name -> a function of the FMinus runtime (runtime/Runtime.h), float(float, ...), callable with no prototype:
+        // JIT'd code finds it through support/JitRuntime.h, an executable links libfminus_runtime.a.
         struct RuntimeFunction
         {
             std::string_view name;
@@ -745,9 +861,9 @@ symbol.
                 if (const RuntimeFunction* runtime = findRuntimeFunction(call.callee))
                 {
                     if (args.size() != runtime->arity)
-                        return wrongArity(location, call, runtime->arity, ast::Type::Float);
+                        return wrongArity(location, call, runtime->arity);
                     for (llvm::Value*& arg : args)
-                        arg = expect(location, arg, ast::Type::Float, "an argument of " + quoted(call.callee));
+                        arg = convert(arg, ast::Type::Float);
                     std::vector<llvm::Type*> params(runtime->arity, builder_.getFloatTy());
                     llvm::FunctionCallee callee = module_.getOrInsertFunction(
                         runtime->symbol, llvm::FunctionType::get(builder_.getFloatTy(), params, false));
@@ -755,9 +871,12 @@ symbol.
                 }
 ```
 
-`declare` refuses a function with a runtime name, as it does for builtins:
-`findBuiltin(function.name) != nullptr || findRuntimeFunction(function.name) != nullptr`.
+`declare` refuses the name for any function of the program, prototype or definition, the way it refuses to redefine a
+builtin.
 
+Keep the `.def` line in step with the header. Without it, the JIT in this repository's tools still finds the
+function, but only by accident. LLJIT also searches the process's own symbols, and the tools link the runtime
+statically and export it. A plugin that hides its symbols or dead-strips the unused ones would fail at lookup.
 Runtime functions run inside the audio thread's call tree. Keep them free of allocation, locks and system calls,
 and `noexcept`.
 
@@ -788,7 +907,8 @@ LLVM leaves of a kernel; the biquad's coefficient math, for instance.
         {
             for (const llvm::Instruction& instruction : block)
             {
-                const bool arithmetic = llvm::isa<llvm::BinaryOperator, llvm::UnaryOperator, llvm::FCmpInst>(instruction);
+                const bool arithmetic =
+                    llvm::isa<llvm::BinaryOperator, llvm::UnaryOperator, llvm::FCmpInst>(instruction);
                 if (arithmetic && instruction.getOperand(0)->getType()->isFPOrFPVectorTy())
                     ++flops;
             }
@@ -830,77 +950,93 @@ extension point too: `fminus file.fm -O0` also shows the attribute.
 
 **Testing it** with lit (`tests/lit/fminus/flops.fm`):
 
-```
+```c
 // RUN: fminus %s -O2 | FileCheck %s
-fn softclip(x: float, drive: float) -> float {
-    let y = x * drive;
-    return y / (1.0 + abs(y));
+float softclip(float x, float drive)
+{
+    const float y = x * drive;
+    return y / (1.0f + fabsf(y));
 }
 // CHECK: define float @softclip({{.*}} #[[ATTRS:[0-9]+]]
 // CHECK: attributes #[[ATTRS]] = { {{.*}}"fminus-flops"="3"
 ```
 
-Adding an attribute to every function changed an existing test: `codegen.fm` matched `define float @gain(float %x,
-float %g) {` exactly, and at `-O0` the line now ends in `#0 {`. Write IR checks that tolerate attributes:
-`define float @gain(float %x, float %g){{.*}} {`.
+A pass that adds an attribute to every function changes every `define` line. The IR checks in
+`tests/lit/fminus/codegen.fm` end their `define` lines with `{{.*}} {`, so they tolerate it. Write new checks the
+same way.
 
 ## Pitfalls
 
-Each of these was hit while writing the recipes.
+Each of these was hit while writing the language or its recipes.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Every function reports "statement after the return" at its first statement | LLVM 23's `BasicBlock::getTerminator()` assumes a finished block; on an unfinished one it returns `&InstList.back()`, a bogus non-null pointer (the assert is compiled out under `NDEBUG`) | `hasTerminator()`, or `getTerminatorOrNull()` |
-| A syntax error test changes text after you add an unrelated token | Bison's `parse.error detailed` lists expected tokens only when there are at most four | update the test; or `%define parse.error custom` and write `Parser::report_syntax_error` |
+| Code lands in a dead block, or the verifier reports a block without a terminator, wherever you ask whether the current block is finished | LLVM 23's `BasicBlock::getTerminator()` assumes a finished block; on an unfinished one it returns `&InstList.back()`, a bogus non-null pointer (the assert is compiled out under `NDEBUG`) | `hasTerminator()`, or `getTerminatorOrNull()` |
+| A syntax-error test changes text after you add an unrelated token | Bison's `parse.error detailed` lists the expected tokens only when there are at most four, and a new token that can start a construct joins the list (or pushes it past four) | update the test; or `%define parse.error custom` and write `Parser::report_syntax_error` |
+| Bison: "shift/reduce conflict on token "else"" | the dangling else (recipe 4) | `%precedence THEN` below `%precedence "else"`, and `%prec THEN` on the if without an else |
 | The build fails in `Ast.cpp` and `CodeGen.cpp` after you add a node or an enumerator | `std::visit` needs every alternative; `-Wswitch` every enumerator | handle each one: this is the checklist working |
-| An IR test fails after an unrelated change | an exact match on a line that gained an attribute, a name or a flag | match loosely: `{{.*}}`, `[[NAME:%.*]]`, `CHECK-LABEL` |
-| The verifier: "PHINode should have one entry for each predecessor" | the phi names the block a branch started in, but lowering it (a nested `if`) moved the builder on | take `builder_.GetInsertBlock()` after lowering each branch |
-| The verifier: "Basic Block does not have terminator" | a path that falls off a block: an `if` branch, a loop body, a function without a `return` | branch or return at every block's end; `terminated()` before adding |
-| A `var` stays in memory at `-O2` | its `alloca` is not in the entry block | allocate with an `IRBuilder` positioned at the entry block's start |
+| An IR test fails after an unrelated change | an exact match on a line that gained an attribute, a name or a flag | match loosely: `{{.*}}`, `[[NAME:%.*]]`, `CHECK-LABEL`, `CHECK-DAG` |
+| The verifier: "PHINode should have one entry for each predecessor" | the phi names the block a branch started in, but lowering it (a nested `&&` or `?:`) moved the builder on | take `builder_.GetInsertBlock()` after lowering each operand or branch |
+| The verifier: "Instruction does not dominate all uses" | a conversion emitted in the join block for a value from one branch | convert at the end of the branch's own block, before its branch to the join (`lowerConditional`) |
+| The verifier: "Basic Block does not have terminator", or two terminators in a block | a branch or loop body that ends in a return, given a second branch, or a path left open | `fallThrough(target)`: branch only when the block has no terminator |
+| "non-void function does not return a value" for a function whose end is dead | reachability judged by predecessors: dead code after a `return` can branch | walk from the entry (`llvm::depth_first`), as `reachable()` does |
+| A variable stays in memory at `-O2` | its `alloca` is not in the entry block | `allocate()`: an `IRBuilder` positioned at the entry block's start |
 | C++ reads a wrong `bool` from JIT'd code | `i1` crossed the C ABI without `zeroext` | `addParamAttr` / `addRetAttr(llvm::Attribute::ZExt)`, as clang does |
-| Bison: "multiple occurrences of $2 with api.value.automove" | automove moves `$n` on its first use | use each `$n` once; copy into a local first if you need it twice |
+| An assignment inside `?:`, `&&` or `||` runs when it shouldn't | the operator lowered to a `select`, which evaluates both sides | blocks and a phi; SimplifyCFG makes the `select` itself when it is safe |
+| Bison: "multiple occurrences of $1 with api.value.automove" | automove moves `$n` on its first use | use each `$n` once; copy into a local first (as the declaration rule does) |
 | A keyword scans as an identifier, or the reverse | Flex takes the longest match, then the earliest rule | keywords before `{IDENTIFIER}` |
 | A runtime function works in `fminus` but is not found once FMinus is embedded | it is missing from `RuntimeSymbols.def`, and the tools found it among their own process symbols | add its `FMINUS_RUNTIME_SYMBOL` line |
-| A literal like `0.1` differs in its last bit from C++ | rounding through `double` first | keep NumberExpr's spelling; `APFloat::convertFromString` straight to the target type |
+| A constant like `0.1f` differs in its last bit from clang's | rounding through `double` first | keep NumberExpr's spelling; `APFloat::convertFromString` straight to the target type |
 
 ## Where to go next
 
-Design notes for features beyond the recipes: what each involves and which LLVM pieces it uses. This code is
-not written or verified; `examples/biquad/README.md` suggests an order driven by a real kernel.
+Design notes for growing the C subset beyond the recipes: what each feature involves and which LLVM pieces it uses.
+This code is not written or verified. `examples/biquad/README.md` suggests an order driven by a real kernel.
 
-**A type checker.** Recipe 3 checks types with LLVM's types, which stops scaling once types multiply or convert
-implicitly, or once an error should mention a type that has no LLVM counterpart. Give the tree a semantic pass
-before lowering: resolve every name to its declaration, compute every expression's `ast::Type`, store it beside the
-node (a side table keyed by node address, or a `type` field on `Expr`), and report every type error there. Lowering
-then reads types instead of checking them, and `expect` disappears. Add integers here: `int` as `i32` or `i64`, with
-`icmp` and `add`/`sub`/`mul`/`sdiv`, and explicit conversions (`sitofp`, `fptosi`).
+**A type checker, and C's integer types.** Recipe 3 converts with LLVM's types. That stops scaling once types
+multiply, which C's do quickly: `int`, `unsigned`, the narrower integers, `double`. Give the tree a semantic pass
+before lowering:
 
-**Several results.** A struct or tuple type, `fn lowpass(...) -> Coefficients`. In IR, a function can return a
-literal struct (`{float, float, float, float, float}`). At the C boundary, AArch64 returns structs of up to four
-floats in registers `s0` to `s3` (a homogeneous floating-point aggregate) and anything larger through a hidden
-pointer (`sret`). Clang's IR for the equivalent C declaration shows exactly what to emit. Inside FMinus, where
-functions get inlined, any representation works.
+- resolve every name to its declaration;
+- compute every expression's type with C's usual arithmetic conversions and integer promotions;
+- record each one beside the node (a side table keyed by node address, or a `type` field on `Expr`);
+- insert the implicit conversions as explicit nodes;
+- report the type errors C has: "invalid operands to binary expression", incompatible types in an assignment.
 
-**State.** DSP code keeps state between calls: filter memories, phases, smoothed parameters. One design is an
-instance struct that the host allocates and the generated code receives as its first parameter: a `ptr`, with its
-fields reached by `getelementptr`, and `noalias` so LLVM knows nothing else writes it. A `state` declaration at the
-top level would describe its fields, and an `init` function would fill them. Keep the memory the host's, so nothing
-allocates on the audio thread.
+Lowering then just reads the types. Integers lower to `iN` with `add`/`sub`/`mul`/`sdiv`/`udiv`, and `icmp`
+compares them. The conversions are `sitofp`, `fptosi`, `zext` and `sext`; signedness lives in the operations, not
+the types.
 
-**Buffers and loops over them.** `fn process(input: buffer, output: buffer, n: int)` lowers to pointers and a loop
-over an integer index. This is where the loop vectoriser starts to matter. Mark buffer parameters `noalias` if they
-cannot overlap, keep the trip count an integer, and make `fminus file.fm` show a `vector.body`. The smoke test
-`tests/lit/smoke/opt-vectorize.ll` is the target shape.
+**Pointers and arrays.** `float* buffer`, `buffer[i]`, `*p`. In LLVM, every pointer is an opaque `ptr`, and the
+element type rides on each `getelementptr`, `load` and `store`. `buffer[i]` is a GEP and a load, and as a target
+it is a GEP and a store. So `lowerAssign`'s "must be a variable" check grows into an *lvalue* check, which is why the
+grammar already takes any expression as a target. Two things matter most for DSP: `restrict` (C99), which lowers to
+`noalias` on parameters, and `const float*`. They tell the vectoriser that buffers don't overlap.
 
-**Fast-math.** `IRBuilder::setFastMathFlags` puts flags on every floating-point instruction it creates: `contract`
-lets AArch64 fuse a multiply and an add, `reassoc` allows vector reductions, `afn` approximate functions, `nnan` and
-`ninf` drop NaN and infinity handling. Scope the flags per function or per block (`FastMathFlagGuard`), so a
-program opts in where it can afford to.
+**Structs.** `struct coefficients { float b0, b1, b2, a1, a2; };` becomes an LLVM struct type, with fields reached by
+GEP. At the C boundary, AArch64 passes and returns a struct of up to four floats in registers `s0`–`s3` (a
+homogeneous floating-point aggregate), and a larger one through memory (`sret` for a return). Clang's IR for the
+equivalent C declaration shows exactly what to emit. Inside FMinus, where calls get inlined, any representation
+works.
 
-**Better syntax errors.** Bison recovers through the `error` token. A rule like
-`statement: error ";"` resynchronises at the next `;`, so one run reports several syntax errors.
-`tests/smoke/calc/Calc.y` does exactly this. With `%define parse.error custom`, you write the message yourself and
-keep the expected-token list as long as you like.
+**State: globals and `static`.** File-scope variables lower to LLVM globals, and `static` locals likewise. For a
+plugin, prefer state the host owns: a struct passed by pointer, so nothing allocates on the audio thread and every
+instance has its own copy.
+
+**`switch`.** It lowers to LLVM's `switch` instruction, and its `break` reuses recipe 4's loop stack (rename
+`Loop`). Fall-through and `default:` are C's.
+
+**`void` functions and expression statements that matter.** With state and pointers, `void process(...)` becomes
+useful: `ret void`, and "void function should not return a value".
+
+**Contraction and fast-math, C's way.** `#pragma STDC FP_CONTRACT ON` (C99) allows fusing `a * b + c`. Lower it to
+`llvm.fmuladd`, or set the `contract` flag through `IRBuilder::setFastMathFlags`. The other fast-math flags
+(`reassoc` for vector reductions, `afn`, `nnan`, `ninf`) can follow a clang-style `#pragma clang fp` or a function
+attribute. Scope them with `FastMathFlagGuard`.
+
+**Better syntax errors.** Bison recovers through the `error` token: a rule like `statement: error ";"` resynchronises
+at the next `;`, so one run reports several syntax errors. `tests/smoke/calc/Calc.y` does exactly this. With
+`%define parse.error custom`, you write the message yourself, for example clang's "expected ';' after expression".
 
 **Debug information.** `llvm::DIBuilder` attaches source locations to instructions, so lldb steps through FMinus
 source in an AOT executable. Every node already carries a `SourceLocation`. For JIT'd code, ORC can register debug
@@ -918,11 +1054,11 @@ written against:
 ```bash
 git switch -c try-recipes
 git apply docs/recipes/1-builtin-and-operator.patch
-git apply docs/recipes/2-comparisons-bool-if.patch
-git apply docs/recipes/3-var-assignment-while.patch
+git apply docs/recipes/2-bool-logic-conditional.patch
+git apply docs/recipes/3-if-while-for.patch
 git apply docs/recipes/4-runtime-function-and-pass.patch
 cmake --workflow --preset dev
 ```
 
-Each adds its tests to `tests/unit/RecipeTest.cpp`, and the suite then counts 19 tests. Once your own compiler has
-moved on, the patches stop applying, but they remain readable diffs of one way to do each step.
+Each adds its tests to `tests/unit/RecipeTest.cpp`, and the suite then counts 22 tests. Once your own compiler has
+moved on, the patches stop applying, but they remain readable diffs of one way to make each change.

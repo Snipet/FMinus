@@ -36,22 +36,22 @@ Each file states what it tests in its first line, then has a few helpers and the
 - `errorsOf(source)` returns the errors of a program that must fail.
 
 ```cpp
-TEST_CASE("operators have the usual precedence and associativity", "[frontend]")
+TEST_CASE("operators have C's precedence and associativity", "[frontend]")
 {
-    CHECK(parsed("fn f(a: float, b: float) -> float { return -a * -(a + b); }")
-          == "(fn f ((a float) (b float)) float\n  (return (* (- a) (- (+ a b)))))\n");
+    CHECK(parsed("float f(float a, float b) { return -a * -(a + b) + +b; }")
+          == "(function float f ((float a) (float b))\n  (return (+ (* (- a) (- (+ a b))) (+ b))))\n");
 }
 
 TEST_CASE("functions compute what they say", "[codegen]")
 {
-    auto jit = compile("fn half(x: float) -> float { return x / 2; }");
+    auto jit = compile("float half(float x) { return x / 2; }");
     REQUIRE(jit);
     CHECK(lookup<float(float)>(*jit, "half")(3.0f) == 1.5f);
 }
 ```
 
 - **Compare floats exactly** where the arithmetic is exact or IEEE-deterministic; FMinus fuses and reorders nothing.
-  Use a tolerance only around libm (`sin`, `exp`, ...).
+  Use a tolerance only around libm (`sinf`, `expf`, ...).
 - **Error tests compare the whole formatted text**, locations included. A moved column is a real change.
 - **Tags**: `[frontend]`, `[codegen]`, `[smoke]`, `[jit]`, `[aot]`, `[grammar]`. Add new ones freely.
 - `INFO(errors)` before a `REQUIRE(jit)` prints the compiler's errors when the compile fails, and saves a debugging
@@ -63,21 +63,23 @@ A lit test is a file with `RUN:` lines. lit runs each line in its own shell (pip
 passes when every line exits 0. FileCheck reads the test file itself for `CHECK:` lines and matches them, in order,
 against its input. FMinus files put both in `//` comments.
 
-```
+```c
 // The code generator's IR, as written and optimised.
 // RUN: fminus %s -O0 | FileCheck %s
 // RUN: fminus %s -O2 | FileCheck %s --check-prefix=OPT
 // RUN: not fminus %s --run gain 1 2>&1 | FileCheck %s --check-prefix=ARITY
 
-fn gain(x: float, g: float) -> float {
+float gain(float x, float g)
+{
     return x * g;
 }
 
 // CHECK-LABEL: define float @gain(float %x, float %g){{.*}} {
-// CHECK-NEXT:  entry:
-// CHECK-NEXT:    [[P:%.*]] = fmul float %x, %g
+// CHECK:         [[X:%.*]] = load float, ptr %x.addr
+// CHECK-NEXT:    [[G:%.*]] = load float, ptr %g.addr
+// CHECK-NEXT:    [[P:%.*]] = fmul float [[X]], [[G]]
 // CHECK-NEXT:    ret float [[P]]
-// OPT-NOT:     call
+// OPT-NOT:     alloca
 // ARITY: fminus: --run: 'gain' takes 2 arguments, not 1
 ```
 

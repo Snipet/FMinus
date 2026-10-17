@@ -17,40 +17,68 @@ namespace
     }
 } // namespace
 
-TEST_CASE("the parser builds functions, bindings and returns", "[frontend]")
+TEST_CASE("the parser builds functions, declarations, statements and blocks", "[frontend]")
 {
-    CHECK(parsed("fn gain(x: float, g: float) -> float {\n"
-                 "    let y = x * g; // a comment\n"
+    CHECK(parsed("float gain(float x, const float g)\n"
+                 "{\n"
+                 "    float y = x * g; // a comment\n"
+                 "    /* a block\n"
+                 "       comment */\n"
+                 "    y *= 2;\n"
+                 "    { float y = 1; ; }\n"
                  "    return y;\n"
                  "}\n"
-                 "fn one() -> float { return 1.0; }\n")
-          == "(fn gain ((x float) (g float)) float\n"
-             "  (let y (* x g))\n"
+                 "float one() { const float a = 1, b; return a; }\n")
+          == "(function float gain ((float x) (const float g))\n"
+             "  (decl float y (* x g))\n"
+             "  (*= y 2)\n"
+             "  (block\n"
+             "    (decl float y 1)\n"
+             "    (empty))\n"
              "  (return y))\n"
-             "(fn one () float\n"
-             "  (return 1.0))\n");
+             "(function float one ()\n"
+             "  (decl const float a 1)\n"
+             "  (decl const float b)\n"
+             "  (return a))\n");
     CHECK(parsed("") == "");
 }
 
-TEST_CASE("operators have the usual precedence and associativity", "[frontend]")
+TEST_CASE("prototypes declare, and may leave parameter names out", "[frontend]")
 {
-    CHECK(parsed("fn f(a: float, b: float, c: float) -> float { return a - b - c * a / b; }")
-          == "(fn f ((a float) (b float) (c float)) float\n  (return (- (- a b) (/ (* c a) b))))\n");
-    CHECK(parsed("fn f(a: float, b: float) -> float { return -a * -(a + b); }")
-          == "(fn f ((a float) (b float)) float\n  (return (* (- a) (- (+ a b)))))\n");
+    CHECK(parsed("float half(float);\nfloat tanhf(const float x);\nfloat half(float x) { return x / 2; }\n")
+          == "(declare float half ((float)))\n"
+             "(declare float tanhf ((const float x)))\n"
+             "(function float half ((float x))\n"
+             "  (return (/ x 2)))\n");
 }
 
-TEST_CASE("calls and numbers keep their spelling", "[frontend]")
+TEST_CASE("operators have C's precedence and associativity", "[frontend]")
 {
-    CHECK(parsed("fn f() -> float { return max(min(1, .5), g(2e3, 1.e-2, 3.25E+1)); }")
-          == "(fn f () float\n  (return (call max (call min 1 .5) (call g 2e3 1.e-2 3.25E+1))))\n");
+    CHECK(parsed("float f(float a, float b, float c) { return a - b - c * a / b; }")
+          == "(function float f ((float a) (float b) (float c))\n  (return (- (- a b) (/ (* c a) b))))\n");
+    CHECK(parsed("float f(float a, float b) { return -a * -(a + b) + +b; }")
+          == "(function float f ((float a) (float b))\n  (return (+ (* (- a) (- (+ a b))) (+ b))))\n");
+    // Assignment binds loosest and right to left; any expression parses as a target (the code generator decides).
+    CHECK(parsed("float f(float a, float b) { a = b += 1 + 2; a + b = 3; return a; }")
+          == "(function float f ((float a) (float b))\n  (= a (+= b (+ 1 2)))\n  (= (+ a b) 3)\n  (return a))\n");
+}
+
+TEST_CASE("constants keep their spelling: C's decimal, hex and integer forms", "[frontend]")
+{
+    CHECK(parsed("float f() { return fmaxf(fminf(1, .5), g(2e3, 1.e-2f, 3.25E+1F, 0x1.8p1, 0x1p-3f, 1.)); }")
+          == "(function float f ()\n"
+             "  (return (call fmaxf (call fminf 1 .5) (call g 2e3 1.e-2f 3.25E+1F 0x1.8p1 0x1p-3f 1.))))\n");
 }
 
 TEST_CASE("syntax and scanner errors carry their locations", "[frontend]")
 {
-    CHECK(parsed("fn f(x: float) -> float {\n    return x + ;\n}")
-          == "test.fm:2:16: error: syntax error, unexpected ;, expecting - or ( or identifier or number\n");
-    CHECK(parsed("fn f(x: float) float { return x; }")
-          == "test.fm:1:16: error: syntax error, unexpected float, expecting ->\n");
-    CHECK(parsed("fn f(x: float) -> float {\n  return x $ 2;\n}") == "test.fm:2:12: error: unexpected character '$'\n");
+    CHECK(parsed("float f(float x) {\n    return x + ;\n}") == "test.fm:2:16: error: syntax error, unexpected ;\n");
+    CHECK(parsed("float f(float x) float { return x; }")
+          == "test.fm:1:18: error: syntax error, unexpected float, expecting { or ;\n");
+    CHECK(parsed("float f(float x) {\n  return x $ 2;\n}") == "test.fm:2:12: error: unexpected character '$'\n");
+    CHECK(parsed("float f(float x) { return 1f; }") == "test.fm:1:27: error: invalid suffix 'f' on integer constant\n");
+    CHECK(parsed("float f(float x) /* never\nclosed { return x; }")
+          == "test.fm:1:18: error: unterminated /* comment\n");
+    CHECK(parsed("fn f(x: float) -> float { return x; }")
+          == "test.fm:1:1: error: syntax error, unexpected identifier, expecting end of file or float\n");
 }

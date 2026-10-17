@@ -48,56 +48,106 @@ namespace
 
 TEST_CASE("functions compute what they say", "[codegen]")
 {
-    auto jit = compile("fn softclip(x: float, drive: float) -> float {\n"
-                       "    let y = x * drive;\n"
-                       "    return y / (1.0 + abs(y));\n"
+    auto jit = compile("float softclip(float x, const float drive)\n"
+                       "{\n"
+                       "    const float y = x * drive;\n"
+                       "    return y / (1.0f + fabsf(y));\n"
                        "}\n"
-                       "fn chain(x: float) -> float { return softclip(half(x), 4); }\n"   // calls before definitions
-                       "fn half(x: float) -> float { return x / 2; }\n"
-                       "fn constant() -> float { return -(1 - 3) * 2.5; }\n");
+                       "float chain(float x) { return softclip(half(x), 4); }\n"   // calls before definitions
+                       "float half(float x) { return x / 2; }\n"
+                       "float constant() { return -(1 - 3) * 2.5f + +1; }\n");
     REQUIRE(jit);
     CHECK(lookup<float(float, float)>(*jit, "softclip")(1.0f, 1.0f) == 0.5f);
     CHECK(lookup<float(float)>(*jit, "chain")(1.0f) == 2.0f / 3.0f);
-    CHECK(lookup<float()>(*jit, "constant")() == 5.0f);
+    CHECK(lookup<float()>(*jit, "constant")() == 6.0f);
 }
 
-TEST_CASE("builtins lower to LLVM's intrinsics", "[codegen]")
+TEST_CASE("variables have C's semantics: assignable, scoped, zeroed when uninitialised", "[codegen]")
 {
-    auto jit = compile("fn f(x: float) -> float { return sqrt(x) + abs(-x) + floor(x / 2) + min(x, 1) + max(x, 1); }\n"
-                       "fn g(x: float) -> float { return sin(x) * sin(x) + cos(x) * cos(x) + log(exp(x)); }\n");
+    auto jit = compile("float f(float x)\n"
+                       "{\n"
+                       "    float a, b = x;\n"          // a starts at 0
+                       "    a += b * 2;\n"              // compound assignment
+                       "    x = a = a - 1;\n"           // assignment is an expression, right to left
+                       "    { float a = 100; b = a; }\n" // a block's a shadows, and ends with it
+                       "    return a + b + x;\n"
+                       "}\n"
+                       "float g(float x) { x *= x; x -= 1; x /= 2; return x; }\n"   // parameters are assignable
+                       "float h(float x) { return x; x = 7; return x; }\n");        // code after a return is accepted
+    REQUIRE(jit);
+    CHECK(lookup<float(float)>(*jit, "f")(3.0f) == 5.0f + 100.0f + 5.0f);
+    CHECK(lookup<float(float)>(*jit, "g")(3.0f) == 4.0f);
+    CHECK(lookup<float(float)>(*jit, "h")(2.0f) == 2.0f);
+}
+
+TEST_CASE("prototypes declare functions defined later, or elsewhere (external, resolved at link time)", "[codegen]")
+{
+    auto jit = compile("float half(float);\n"
+                       "float tanhf(float x);\n"   // no definition: external, libm's (the JIT looks in the process)
+                       "float sinf(float);\n"      // a builtin's prototype, as <math.h> has, changes nothing
+                       "float f(float x) { return tanhf(half(x)) + sinf(0); }\n"
+                       "float half(const float x) { return x / 2; }\n");
+    REQUIRE(jit);
+    CHECK(lookup<float(float)>(*jit, "f")(2.0f) == std::tanh(1.0f));
+    CHECK(errorsOf("float f(float x);\n"
+                   "float f(float x, float y) { return x; }\n"
+                   "float sinf(float a, float b);\n"
+                   "float g(float) { return 1; }\n"
+                   "float k(float);\n"
+                   "float k(float x) { return x; }\n"
+                   "float k(float x) { return x; }\n")
+          == "test.fm:2:7: error: conflicting types for 'f'\n"
+             "test.fm:3:7: error: conflicting types for 'sinf'\n"
+             "test.fm:4:9: error: parameter name omitted\n"
+             "test.fm:7:7: error: redefinition of 'k'\n");
+}
+
+TEST_CASE("builtins are <math.h>'s float functions, lowered to LLVM's intrinsics", "[codegen]")
+{
+    auto jit = compile("float f(float x) { return sqrtf(x) + fabsf(-x) + floorf(x / 2) + fminf(x, 1) + fmaxf(x, 1); }\n"
+                       "float g(float x) { return sinf(x) * sinf(x) + cosf(x) * cosf(x) + logf(expf(x)); }\n");
     REQUIRE(jit);
     CHECK(lookup<float(float)>(*jit, "f")(9.0f) == 3.0f + 9.0f + 4.0f + 1.0f + 9.0f);
     CHECK(std::abs(lookup<float(float)>(*jit, "g")(0.25f) - 1.25f) < 1e-6f);
     CHECK(fminus::ir::builtins().size() == 9);
 }
 
-TEST_CASE("a literal is rounded once, straight to float", "[codegen]")
+TEST_CASE("a constant is rounded once, straight to float", "[codegen]")
 {
     // Just above the midpoint of 1 and the next float: through double it would land on the midpoint and round down.
-    auto jit = compile("fn f() -> float { return 1.0000000596046447753906250000000001; }");
+    auto jit = compile("float f() { return 1.0000000596046447753906250000000001; }\n"
+                       "float g() { return 0x1.000002p0f + 0x1p-149; }\n");   // hex floats are exact
     REQUIRE(jit);
     CHECK(lookup<float()>(*jit, "f")() == std::nextafter(1.0f, 2.0f));
+    CHECK(lookup<float()>(*jit, "g")() == std::nextafter(1.0f, 2.0f));
 }
 
-TEST_CASE("every semantic error is reported, in source order", "[codegen]")
+TEST_CASE("every semantic error is reported, in source order, as clang words it", "[codegen]")
 {
-    CHECK(errorsOf("fn f(x: float, x: float) -> float {\n"
-                   "    let y = x + z;\n"
-                   "    let y = nope(x);\n"
-                   "    return sqrt(x, y);\n"
-                   "    return 1.0;\n"
+    CHECK(errorsOf("float f(float x, float x)\n"
+                   "{\n"
+                   "    float y = x + z;\n"
+                   "    float y = nope(x);\n"
+                   "    const float k = 1;\n"
+                   "    k = 2;\n"
+                   "    x + 1 = 3;\n"
+                   "    return sqrtf(x, y);\n"
                    "}\n"
-                   "fn f(a: float) -> float { return a; }\n"
-                   "fn sin(a: float) -> float { return a; }\n"
-                   "fn g() -> float { let k = 1e60; }\n")
-          == "test.fm:1:16: error: parameter 'x' is declared twice\n"
-             "test.fm:2:17: error: unknown variable 'z'\n"
-             "test.fm:3:5: error: 'y' is already defined\n"
-             "test.fm:3:13: error: unknown function 'nope'\n"
-             "test.fm:4:12: error: 'sqrt' takes 1 argument, not 2\n"
-             "test.fm:5:5: error: statement after the return of 'f'\n"
-             "test.fm:7:1: error: function 'f' is already defined\n"
-             "test.fm:8:1: error: 'sin' is a builtin and cannot be defined\n"
-             "test.fm:9:1: error: function 'g' does not end with a return\n"
-             "test.fm:9:27: error: number '1e60' is out of range for float\n");
+                   "float f(float a) { return a; }\n"
+                   "float sinf(float a) { return a; }\n"
+                   "float g() { float big = 1e60f; }\n"
+                   "float h() { return g(1) + q(); }\n")
+          == "test.fm:1:24: error: redefinition of parameter 'x'\n"
+             "test.fm:3:19: error: use of undeclared identifier 'z'\n"
+             "test.fm:4:11: error: redefinition of 'y'\n"
+             "test.fm:4:15: error: call to undeclared function 'nope'\n"
+             "test.fm:6:7: error: cannot assign to variable 'k' with const-qualified type 'const float'\n"
+             "test.fm:7:11: error: expression is not assignable\n"
+             "test.fm:8:12: error: too many arguments to function call, expected 1, have 2\n"
+             "test.fm:10:7: error: conflicting types for 'f'\n"
+             "test.fm:11:7: error: 'sinf' is a builtin and cannot be redefined\n"
+             "test.fm:12:7: error: non-void function 'g' does not return a value\n"
+             "test.fm:12:25: error: magnitude of floating-point constant too large for type 'float'\n"
+             "test.fm:13:20: error: too many arguments to function call, expected 0, have 1\n"
+             "test.fm:13:27: error: call to undeclared function 'q'\n");
 }

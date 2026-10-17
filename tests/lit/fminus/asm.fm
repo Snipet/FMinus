@@ -2,9 +2,10 @@
 // REQUIRES: arm64
 // RUN: fminus %s --emit asm -o - | FileCheck %s
 
-fn softclip(x: float, drive: float) -> float {
-    let y = x * drive;
-    return y / (1.0 + abs(y));
+float softclip(float x, float drive)
+{
+    const float y = x * drive;
+    return y / (1.0f + fabsf(y));
 }
 
 // CHECK-LABEL: _softclip:
