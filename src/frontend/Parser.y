@@ -88,8 +88,8 @@
 }
 
 %token FLOAT "float" CONST "const" RETURN "return"
-%token PLUS "+" MINUS "-" STAR "*" SLASH "/"
-%token ASSIGN "=" PLUS_ASSIGN "+=" MINUS_ASSIGN "-=" STAR_ASSIGN "*=" SLASH_ASSIGN "/="
+%token PLUS "+" MINUS "-" STAR "*" SLASH "/" PERCENT "%"
+%token ASSIGN "=" PLUS_ASSIGN "+=" MINUS_ASSIGN "-=" STAR_ASSIGN "*=" SLASH_ASSIGN "/=" PERCENT_ASSIGN "%="
 %token LPAREN "(" RPAREN ")" LBRACE "{" RBRACE "}" COMMA "," SEMI ";"
 %token <std::string> IDENTIFIER "identifier"
 %token <std::string> NUMBER "number"
@@ -107,9 +107,9 @@
 %nterm <ast::ExprPtr> expr
 %nterm <std::vector<ast::ExprPtr>> args arg_list
 
-%right "=" "+=" "-=" "*=" "/="
+%right "=" "+=" "-=" "*=" "/=" "%="
 %left "+" "-"
-%left "*" "/"
+%left "*" "/" "%"
 %precedence UNARY
 
 %%
@@ -203,6 +203,7 @@ expr
     | "+" expr %prec UNARY                  { $$ = ast::makeExpr(at(@1), ast::UnaryExpr{ast::UnaryOp::Plus, $2}); }
     | expr "*" expr                         { $$ = binary(@2, ast::BinaryOp::Multiply, $1, $3); }
     | expr "/" expr                         { $$ = binary(@2, ast::BinaryOp::Divide, $1, $3); }
+    | expr "%" expr                         { $$ = binary(@2, ast::BinaryOp::Remainder, $1, $3); }
     | expr "+" expr                         { $$ = binary(@2, ast::BinaryOp::Add, $1, $3); }
     | expr "-" expr                         { $$ = binary(@2, ast::BinaryOp::Subtract, $1, $3); }
     | expr "=" expr                         { $$ = assign(@2, ast::AssignOp::Assign, $1, $3); }
@@ -210,6 +211,7 @@ expr
     | expr "-=" expr                        { $$ = assign(@2, ast::AssignOp::Subtract, $1, $3); }
     | expr "*=" expr                        { $$ = assign(@2, ast::AssignOp::Multiply, $1, $3); }
     | expr "/=" expr                        { $$ = assign(@2, ast::AssignOp::Divide, $1, $3); }
+    | expr "%=" expr                        { $$ = assign(@2, ast::AssignOp::Remainder, $1, $3); }
     ;
 
 args

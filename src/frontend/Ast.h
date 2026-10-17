@@ -33,6 +33,7 @@ namespace fminus::ast
         Subtract,
         Multiply,
         Divide,
+        Remainder,
     };
 
     // =, and the compound assignments: x op= v is x = x op v.
@@ -43,6 +44,7 @@ namespace fminus::ast
         Subtract,
         Multiply,
         Divide,
+        Remainder,
     };
 
     struct Expr;

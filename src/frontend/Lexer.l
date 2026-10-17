@@ -72,10 +72,12 @@ IDENTIFIER  [A-Za-z_][A-Za-z0-9_]*
 "-="                        { return Parser::make_MINUS_ASSIGN(yyextra->where); }
 "*="                        { return Parser::make_STAR_ASSIGN(yyextra->where); }
 "/="                        { return Parser::make_SLASH_ASSIGN(yyextra->where); }
+"%="                        { return Parser::make_PERCENT_ASSIGN(yyextra->where); }
 "+"                         { return Parser::make_PLUS(yyextra->where); }
 "-"                         { return Parser::make_MINUS(yyextra->where); }
 "*"                         { return Parser::make_STAR(yyextra->where); }
 "/"                         { return Parser::make_SLASH(yyextra->where); }
+"%"                        { return Parser::make_PERCENT(yyextra->where); }
 "="                         { return Parser::make_ASSIGN(yyextra->where); }
 "("                         { return Parser::make_LPAREN(yyextra->where); }
 ")"                         { return Parser::make_RPAREN(yyextra->where); }

@@ -105,11 +105,23 @@ TEST_CASE("prototypes declare functions defined later, or elsewhere (external, r
 TEST_CASE("builtins are <math.h>'s float functions, lowered to LLVM's intrinsics", "[codegen]")
 {
     auto jit = compile("float f(float x) { return sqrtf(x) + fabsf(-x) + floorf(x / 2) + fminf(x, 1) + fmaxf(x, 1); }\n"
-                       "float g(float x) { return sinf(x) * sinf(x) + cosf(x) * cosf(x) + logf(expf(x)); }\n");
+                       "float g(float x) { return sinf(x) * sinf(x) + cosf(x) * cosf(x) + logf(expf(x)); }\n"
+                        "float h(float x) { return tanhf(x); }\n");
     REQUIRE(jit);
     CHECK(lookup<float(float)>(*jit, "f")(9.0f) == 3.0f + 9.0f + 4.0f + 1.0f + 9.0f);
     CHECK(std::abs(lookup<float(float)>(*jit, "g")(0.25f) - 1.25f) < 1e-6f);
-    CHECK(fminus::ir::builtins().size() == 9);
+    CHECK(lookup<float(float)>(*jit, "h")(0.5f) == std::tanh(0.5f));
+    CHECK(fminus::ir::builtins().size() == 10);
+}
+
+TEST_CASE("% is fmodf's remainder: the sign of the dividend", "[codegen]")
+{
+    auto jit = compile("float f(float x, float y) { return x % y * 2; }\n"
+                       "float wrap(float phase) { phase %= 1; return phase; }\n");
+    REQUIRE(jit);
+    CHECK(lookup<float(float, float)>(*jit, "f")(7.5f, 2.0f) == 3.0f);    // (7.5 % 2) * 2: % binds as * and /
+    CHECK(lookup<float(float, float)>(*jit, "f")(-7.5f, 2.0f) == -3.0f);  // the sign of the dividend
+    CHECK(lookup<float(float)>(*jit, "wrap")(2.25f) == 0.25f);
 }
 
 TEST_CASE("a constant is rounded once, straight to float", "[codegen]")

@@ -61,6 +61,8 @@ TEST_CASE("operators have C's precedence and associativity", "[frontend]")
     // Assignment binds loosest and right to left; any expression parses as a target (the code generator decides).
     CHECK(parsed("float f(float a, float b) { a = b += 1 + 2; a + b = 3; return a; }")
           == "(function float f ((float a) (float b))\n  (= a (+= b (+ 1 2)))\n  (= (+ a b) 3)\n  (return a))\n");
+    CHECK(parsed("float f(float a, float b) { a %= b; return a + b % a * b; }")
+          == "(function float f ((float a) (float b))\n  (%= a b)\n  (return (+ a (* (% b a) b))))\n");
 }
 
 TEST_CASE("constants keep their spelling: C's decimal, hex and integer forms", "[frontend]")

@@ -23,6 +23,8 @@ namespace fminus::ast
                 return "*";
             case BinaryOp::Divide:
                 return "/";
+            case BinaryOp::Remainder:
+                return "%";
             }
             return "?";
         }
@@ -41,6 +43,8 @@ namespace fminus::ast
                 return "*=";
             case AssignOp::Divide:
                 return "/=";
+            case AssignOp::Remainder:
+                return "%=";
             }
             return "?";
         }

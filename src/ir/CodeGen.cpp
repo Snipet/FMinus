@@ -51,7 +51,7 @@ namespace fminus::ir
             Builtin{"sinf", llvm::Intrinsic::sin, 1},     Builtin{"cosf", llvm::Intrinsic::cos, 1},
             Builtin{"expf", llvm::Intrinsic::exp, 1},     Builtin{"logf", llvm::Intrinsic::log, 1},
             Builtin{"floorf", llvm::Intrinsic::floor, 1}, Builtin{"fminf", llvm::Intrinsic::minnum, 2},
-            Builtin{"fmaxf", llvm::Intrinsic::maxnum, 2},
+            Builtin{"fmaxf", llvm::Intrinsic::maxnum, 2}, Builtin{"tanhf", llvm::Intrinsic::tanh, 1},
         };
 
         const Builtin* findBuiltin(std::string_view name)
@@ -342,6 +342,8 @@ namespace fminus::ir
                     return builder_.CreateFMul(lhs, rhs);
                 case ast::BinaryOp::Divide:
                     return builder_.CreateFDiv(lhs, rhs);
+                case ast::BinaryOp::Remainder:
+                    return builder_.CreateFRem(lhs, rhs);
                 }
                 return poison(ast::Type::Float);
             }
@@ -413,6 +415,8 @@ namespace fminus::ir
                     return ast::BinaryOp::Multiply;
                 case ast::AssignOp::Divide:
                     return ast::BinaryOp::Divide;
+                case ast::AssignOp::Remainder:
+                    return ast::BinaryOp::Remainder;
                 }
                 return ast::BinaryOp::Add;
             }
