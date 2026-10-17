@@ -1,0 +1,45 @@
+// --emit exe: an executable that starts in the program's main. Its arguments come from the command line, its result is
+// printed, and wrong arguments exit with status 2 (support/Aot.h: addEntryPoint).
+// RUN: fminus %s --emit exe -o %t
+// RUN: %t 3 4 | FileCheck %s --check-prefix=RESULT
+// RUN: not %t 3 2>&1 | FileCheck %s --check-prefix=ARITY
+// RUN: not %t 3 four 2>&1 | FileCheck %s --check-prefix=NAN
+// RUN: fminus %s --run main 3 4 | FileCheck %s --check-prefix=RESULT
+// RUN: fminus %s --entry -O0 | FileCheck %s --check-prefix=IR
+// RUN: echo 'float main() { return 0.5; }' | fminus - --emit exe -o %t.none
+// RUN: %t.none | FileCheck %s --check-prefix=NONE
+// RUN: echo 'float f() { return 1; }' | not fminus - --emit exe -o %t.no 2>&1 | FileCheck %s --check-prefix=MISSING
+// RUN: not fminus %s --emit exe 2>&1 | FileCheck %s --check-prefix=OUTPUT
+// RUN: fminus %S/../../../examples/note/note.fm --emit exe -o %t.note
+// RUN: %t.note 69 | FileCheck %s --check-prefix=NOTE
+
+float hypotenuse(float a, float b)
+{
+    return sqrtf(a * a + b * b);
+}
+
+float main(float a, float b)
+{
+    return hypotenuse(a, b);
+}
+
+// RESULT: 5
+// ARITY: 'main' takes 2 arguments, not 1
+// NAN: 'four' is not a number
+// NONE: 0.5
+// MISSING: fminus: an executable needs a main function, such as float main(float x)
+// OUTPUT: fminus: --emit exe: an executable needs a file name (-o)
+// NOTE: 440
+
+// The program's main becomes internal fminus.main; the C main reads the arguments, calls it and prints the result.
+// IR:       define internal float @fminus.main(float %a, float %b)
+// IR-LABEL: define i32 @main(i32 %argc, ptr %argv)
+// IR:         %args = alloca [2 x float]
+// IR:         %status = call i32 @fminus_rt_main_args(i32 %argc, ptr %argv, i32 2, ptr %args)
+// IR:         br i1 %{{.*}}, label %run, label %usage
+// IR:       run:
+// IR:         %result = call float @fminus.main(float %{{.*}}, float %{{.*}})
+// IR:         call void @fminus_rt_main_result(float %result)
+// IR:         ret i32 0
+// IR:       usage:
+// IR:         ret i32 %status

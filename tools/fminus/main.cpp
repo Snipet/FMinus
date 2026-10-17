@@ -1,11 +1,12 @@
-// tools/fminus/main.cpp: the FMinus compiler driver. FMinus v0 source goes to its syntax tree, LLVM IR, assembly or an
-// object file, or is JIT-compiled and called:
+// tools/fminus/main.cpp: the FMinus compiler driver. FMinus v0 source goes to its syntax tree, LLVM IR, assembly, an
+// object file or an executable, or is JIT-compiled and called:
 //     fminus gain.fm                        the optimised IR (-O2) on stdout
 //     fminus gain.fm -O0                    the IR as the code generator wrote it
 //     fminus gain.fm --emit ast             the syntax tree
 //     fminus gain.fm --emit asm -o -        this machine's assembly (--emit obj: an object file)
+//     fminus gain.fm --emit exe -o gain     an executable that runs the program's main (support/Aot.h)
+//     fminus gain.fm --entry                the IR with that executable's C main (also for asm and obj)
 //     fminus gain.fm --run gain 0.5 2       JIT-compiles the program, calls gain(0.5, 2) and prints the result
-// For an executable, emit the IR and use fminus-build (the program needs a C main for that).
 #include "frontend/Frontend.h"
 #include "ir/CodeGen.h"
 #include "jit/Jit.h"
@@ -78,8 +79,8 @@ int main(int argc, char** argv)
 {
     llvm::InitLLVM initLLVM(argc, argv);   // stack traces on a crash
 
-    CLI::App app{"The FMinus compiler: FMinus v0 source to its syntax tree, LLVM IR, assembly or an object file, or "
-                 "JIT-compiled and run.",
+    CLI::App app{"The FMinus compiler: FMinus v0 source to its syntax tree, LLVM IR, assembly, an object file or an "
+                 "executable, or JIT-compiled and run.",
                  "fminus"};
     std::string input;
     std::string output = "-";
@@ -87,15 +88,20 @@ int main(int argc, char** argv)
     int level = 2;
     std::string run;
     std::vector<float> runArgs;
+    bool entry = false;
     app.add_option("input", input, "FMinus source file ('-' for stdin)")->required();
     app.add_option("args", runArgs, "The arguments of --run's function");
     app.add_option("-o,--output", output, "The output file ('-' is stdout)")->capture_default_str();
-    app.add_option("--emit", emit, "What to write: ast, ll, asm or obj")
-        ->check(CLI::IsMember({"ast", "ll", "asm", "obj"}))
+    app.add_option("--emit", emit, "What to write: ast, ll, asm, obj, or exe (an executable that runs main)")
+        ->check(CLI::IsMember({"ast", "ll", "asm", "obj", "exe"}))
         ->capture_default_str();
     app.add_option("-O", level, "Optimisation level, 0 to 3")->check(CLI::Range(0, 3))->capture_default_str();
     app.add_option("--run", run, "JIT-compile, call this function with the arguments and print its result");
+    app.add_flag("--entry", entry, "Add the C main an executable starts in, which runs the program's main (always "
+                                   "with --emit exe)");
     CLI11_PARSE(app, argc, argv);
+    if (emit == "exe" && run.empty() && output == "-")
+        return fail("--emit exe: an executable needs a file name (-o)");
 
     const std::array<llvm::OptimizationLevel, 4> levels{llvm::OptimizationLevel::O0, llvm::OptimizationLevel::O1,
                                                         llvm::OptimizationLevel::O2, llvm::OptimizationLevel::O3};
@@ -154,12 +160,23 @@ int main(int argc, char** argv)
         return 0;
     }
 
-    // LLVM IR -> optimised for this machine -> IR, assembly or an object file.
+    // LLVM IR -> optimised for this machine -> IR, assembly, an object file or an executable.
+    if (entry || emit == "exe")
+    {
+        if (llvm::Error error = fminus::aot::addEntryPoint(*module))
+            return fail(std::move(error));
+    }
     auto machine = fminus::hostTargetMachine(fminus::codeGenLevel(optimisation));
     if (!machine)
         return fail(machine.takeError());
     fminus::prepareModule(*module, **machine);
     fminus::optimiseModule(*module, **machine, optimisation);
+    if (emit == "exe")
+    {
+        if (llvm::Error error = fminus::aot::emitExecutable(*module, **machine, {.output = output}))
+            return fail(std::move(error));
+        return 0;
+    }
     if (emit == "ll")
     {
         std::string text;

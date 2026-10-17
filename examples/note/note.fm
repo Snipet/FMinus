@@ -1,0 +1,17 @@
+// examples/note/note.fm: a whole FMinus program. main is where it starts: an executable reads main's arguments from its
+// command line and prints its result (docs/programs.md).
+//     fminus examples/note/note.fm --emit exe -o note
+//     ./note 69                             prints 440
+//     fminus examples/note/note.fm --run main 60
+
+// The frequency of a MIDI note, in hertz: equal temperament, A4 (note 69) at 440 Hz.
+float frequency(float note)
+{
+    const float ln2 = 0.693147181f;
+    return 440 * expf((note - 69) / 12 * ln2);   // 440 * 2^((note - 69) / 12)
+}
+
+float main(float note)
+{
+    return frequency(note);
+}
