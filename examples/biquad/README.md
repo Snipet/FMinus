@@ -54,9 +54,13 @@ harness's `Kernel` a little. After each one, run `example-biquad` and read the I
    starts to matter.
 7. **Control-rate coefficients**: computed every 16 or 32 samples and interpolated in between. An algorithmic win
    that only state and loops can express.
-8. **Vectors**: several channels at once, or the coefficient math for a whole block. That needs a loop for the
-   vectoriser (step 4), and a vector `sinf`/`cosf`, for example Accelerate's vForce through TargetLibraryInfo's
-   vector library. Clang's `ext_vector_type` is one model for vector types in a C-like language.
+8. **Vectors**: several channels at once, or the coefficient math for a whole block.
+   [docs/simd.md](../../docs/simd.md) has verified recipes for the pieces: `float4` (recipe 7), so four channels'
+   state and coefficients sit in one register each; a vector `sinf`/`cosf` from libsystem_m through LLVM's
+   vector library (recipe 8; Accelerate's mapping also replaces `fabsf` and `sqrtf` with calls, so it is the worse
+   choice); and `poly float` (recipe 9), as many channels or voices as the machine's registers hold. Channels are
+   lane-independent, so the output stays the same at any width. A loop over a block (step 4) lets the vectoriser
+   help too.
 
 Keep `example-biquad --check` passing (ctest runs it) as the kernel moves from the harness into FMinus. Its C++
 version is the reference to change in step with the FMinus one.

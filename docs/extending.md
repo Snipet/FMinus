@@ -2,11 +2,14 @@
 
 How to add to FMinus. First, how a change moves through the compiler, and the few rules that keep that easy. Then
 six worked recipes, which grow the C subset from a one-line builtin to C's control flow and a custom LLVM pass. Then
-the pitfalls those recipes ran into, and design notes for what comes next.
+the pitfalls those recipes ran into, and design notes for what comes next. [simd.md](simd.md) continues with
+recipes 7 to 9, for vectors.
 
-The recipes are not sketches. Each was applied to this repository, built with `-Werror`, and tested in the dev and
-asan presets, all 22 tests passing. They live in [recipes/](recipes/) as patches, so you can apply one to see it work,
-or compare it with your own version. [architecture.md](architecture.md) describes the stages they touch.
+Recipes 1 and 2, `tanhf` and `%`, are in the base now: commit 30c1dc4 made them part of FMinus, so their sections
+describe how that change was made. The others are not sketches either. Each was applied to this repository, built
+with `-Werror`, and tested in the dev and asan presets, every test passing. They live in [recipes/](recipes/) as
+patches, so you can apply one to see it work, or compare it with your own version. [architecture.md](architecture.md)
+describes the stages they touch.
 
 FMinus follows C. When a recipe has a semantic choice to make, it makes C's: conversions, short-circuiting, which
 `if` an `else` belongs to, what `continue` does in a `for`. And it reports errors in clang's words. The README lists
@@ -56,7 +59,7 @@ first alternative it can't handle, so after you fix one, the next appears.
 
 ## Recipe 1: a builtin (`tanhf`)
 
-*Patch: [recipes/1-builtin-and-operator.patch](recipes/1-builtin-and-operator.patch) (with recipe 2).*
+*In the base since commit 30c1dc4.*
 
 A builtin is a row in `kBuiltins` (`src/ir/CodeGen.cpp`): a `<math.h>` name, the LLVM intrinsic it lowers to (over
 `float`), and its parameter count.
@@ -70,22 +73,25 @@ checks the argument count, and refuses a definition that tries to reuse the name
 would have, is accepted. LLVM lowers `llvm.tanh.f32` to a call to libm's `tanhf`, which the JIT resolves from the
 process.
 
-Without the row, a program could still call `tanhf` C's way, through a prototype, `float tanhf(float x);`: an
-external function, which the JIT finds in libm. The builtin makes it part of the language: no declaration is
-needed, and the call is the intrinsic that LLVM's passes treat uniformly. `IntrinsicEnums.inc`, in the LLVM
-install's `include/llvm/IR/`, lists the intrinsics. `exp2f` (`exp2`), `powf` (`pow`), `copysignf` (`copysign`) and
-`fmaf` (`fma`, three parameters) are one row each.
+Before the row, a program could already call `tanhf` C's way, through a prototype, `float tanhf(float x);`: an
+external function, which the JIT finds in libm. (Any `<math.h>` function that isn't a builtin still works that way,
+`atanf` for one.) The builtin makes it part of the language: no declaration is needed, and the call is the intrinsic
+that LLVM's passes treat uniformly. `IntrinsicEnums.inc`, in the LLVM install's `include/llvm/IR/`, lists the
+intrinsics. `exp2f` (`exp2`), `powf` (`pow`), `copysignf` (`copysign`) and `fmaf` (`fma`, three parameters) are one
+row each.
 
-Update the count in `CodeGenTest.cpp` (`builtins().size()`), then test the value:
+Update the count in `CodeGenTest.cpp` (`builtins().size()`), then test the value, in the builtins' test case:
 
 ```cpp
-    auto jit = build("float f(float x) { return tanhf(x); }", errors);
-    CHECK(lookup<float(float)>(*jit, "f")(0.5f) == std::tanh(0.5f));
+                       "float h(float x) { return tanhf(x); }\n");
+    ...
+    CHECK(lookup<float(float)>(*jit, "h")(0.5f) == std::tanh(0.5f));
+    CHECK(fminus::ir::builtins().size() == 10);
 ```
 
 ## Recipe 2: an operator (`%` and `%=`)
 
-*Patch: [recipes/1-builtin-and-operator.patch](recipes/1-builtin-and-operator.patch).*
+*In the base since commit 30c1dc4.*
 
 Floating-point remainder, with `fmodf`'s semantics: the result takes the sign of the dividend. C allows `%` on
 integers only, so this is FMinus's first extension beyond C; HLSL allows it on floats. It binds like `*` and `/`, and
@@ -141,12 +147,13 @@ src/ir/CodeGen.cpp: error: enumeration value 'Remainder' not handled in switch [
 
 A compound assignment is `x = x op v`, so `compoundOperator` maps `%=` to `%`, and `lowerAssign` does the rest.
 
-**Tests.** The precedence shows in the dump: `a + b % a * b` is `(+ a (* (% b a) b))`. The values show in the JIT:
+**Tests.** The precedence shows in the dump (`FrontendTest.cpp`): `a + b % a * b` is `(+ a (* (% b a) b))`. The
+values show in the JIT, in a test case of their own in `CodeGenTest.cpp`:
 
 ```cpp
-    auto jit = build("float f(float x, float y) { return x % y * 2; }\n"
-                     "float wrap(float phase) { phase %= 1; return phase; }\n",
-                     errors);
+    auto jit = compile("float f(float x, float y) { return x % y * 2; }\n"
+                       "float wrap(float phase) { phase %= 1; return phase; }\n");
+    REQUIRE(jit);
     CHECK(lookup<float(float, float)>(*jit, "f")(7.5f, 2.0f) == 3.0f);    // (7.5 % 2) * 2: % binds as * and /
     CHECK(lookup<float(float, float)>(*jit, "f")(-7.5f, 2.0f) == -3.0f);  // the sign of the dividend
     CHECK(lookup<float(float)>(*jit, "wrap")(2.25f) == 0.25f);
@@ -156,7 +163,7 @@ A compound assignment is `x = x op v`, so `compoundOperator` maps `%=` to `%`, a
 
 ## Recipe 3: `bool`, comparisons, `!`, `&&`, `||` and `?:`
 
-*Patch: [recipes/2-bool-logic-conditional.patch](recipes/2-bool-logic-conditional.patch).*
+*Patch: [recipes/3-bool-logic-conditional.patch](recipes/3-bool-logic-conditional.patch).*
 
 This recipe adds the expression half of C's control flow:
 
@@ -500,7 +507,7 @@ cond.end:
 
 ### Tests
 
-The recipe's test (`tests/unit/RecipeTest.cpp`) checks:
+The recipe's tests (in `tests/unit/CodeGenTest.cpp`, which they share with the base's) check:
 
 - the values of `magnitude` and `sign`;
 - `bool` returned to C++ (`lookup<bool(float)>`);
@@ -516,7 +523,7 @@ top-level message gains a token: "expecting end of file or float" becomes "expec
 
 ## Recipe 4: `if`, `else`, `while`, `for`, `break` and `continue`
 
-*Patch: [recipes/3-if-while-for.patch](recipes/3-if-while-for.patch), on top of recipe 3.*
+*Patch: [recipes/4-if-while-for.patch](recipes/4-if-while-for.patch), on top of recipe 3.*
 
 C's statements for control flow:
 
@@ -804,7 +811,7 @@ fall off its end.
 
 ## Recipe 5: a runtime function (`db_to_gain`)
 
-*Patch: [recipes/4-runtime-function-and-pass.patch](recipes/4-runtime-function-and-pass.patch) (with recipe 6), on
+*Patch: [recipes/5-runtime-function-and-pass.patch](recipes/5-runtime-function-and-pass.patch) (with recipe 6), on
 top of recipe 4.*
 
 Some operations are better written in C++ than generated: lookup tables, approximations, calls to the platform. The
@@ -882,7 +889,7 @@ and `noexcept`.
 
 ## Recipe 6: an LLVM pass of your own (`CountFlopsPass`)
 
-*Patch: [recipes/4-runtime-function-and-pass.patch](recipes/4-runtime-function-and-pass.patch).*
+*Patch: [recipes/5-runtime-function-and-pass.patch](recipes/5-runtime-function-and-pass.patch).*
 
 `src/opt/` holds FMinus's own LLVM passes. The example counts a function's floating-point operations after
 optimisation and records the count as a string attribute, `"fminus-flops"="3"`. That's handy for watching what
@@ -965,9 +972,25 @@ A pass that adds an attribute to every function changes every `define` line. The
 `tests/lit/fminus/codegen.fm` end their `define` lines with `{{.*}} {`, so they tolerate it. Write new checks the
 same way.
 
+## Recipes 7 to 9: SIMD
+
+[simd.md](simd.md) has three more recipes, on top of these, with the hardware and LLVM's vector model they rest on:
+
+- **Recipe 7, `float2`, `float4` and `float8`**: OpenCL C's vector types. Lane-wise operators with scalars broadcast,
+  literals (`(float4)(a, b, c, d)`), swizzles read and written (`v.wzyx`, `v.xy = ...`), comparisons that give lane
+  masks, `?:` as a lane-wise select, the builtins overloaded on vectors, and ordered reductions (`reduce_add`,
+  `reduce_min`, `reduce_max`). Every lowered expression starts carrying its FMinus type beside its IR (`Value`),
+  instead of the code generator reading types off LLVM's.
+- **Recipe 8, a vector math library**: `sinf` of a `float4` becomes one call to libsystem_m's `_simd_sin_f4`,
+  through LLVM's target library information and `ReplaceWithVeclib`, about three times faster than four calls to
+  `sinf`. Why not Accelerate, measured.
+- **Recipe 9, `poly float`**: a vector as wide as the target's registers (4 floats on NEON, 16 on AVX-512), chosen by
+  LLVM's cost model, with rules that keep a program's meaning the same at every width, `poly_lanes()` and
+  `poly_index()`, and what does change with the width (the order of float sums).
+
 ## Pitfalls
 
-Each of these was hit while writing the language or its recipes.
+Each of these was hit while writing the language or its recipes. [simd.md](simd.md) has the vector ones.
 
 | Symptom | Cause | Fix |
 |---|---|---|
@@ -993,9 +1016,10 @@ Each of these was hit while writing the language or its recipes.
 Design notes for growing the C subset beyond the recipes: what each feature involves and which LLVM pieces it uses.
 This code is not written or verified. `examples/biquad/README.md` suggests an order driven by a real kernel.
 
-**A type checker, and C's integer types.** Recipe 3 converts with LLVM's types. That stops scaling once types
-multiply, which C's do quickly: `int`, `unsigned`, the narrower integers, `double`. Give the tree a semantic pass
-before lowering:
+**A type checker, and C's integer types.** Recipe 3 converts with LLVM's types. Recipe 7 takes the first step away
+from that: every lowered expression carries its FMinus type (simd.md, "Every value carries its FMinus type"). That
+still computes types while lowering, which stops scaling once types multiply, as C's do quickly: `int`, `unsigned`,
+the narrower integers, `double`. Give the tree a semantic pass before lowering:
 
 - resolve every name to its declaration;
 - compute every expression's type with C's usual arithmetic conversions and integer promotions;
@@ -1048,17 +1072,20 @@ LLJIT's concurrent compilation, and caching objects between runs (`llvm::ObjectC
 
 ## Reference solutions
 
-[recipes/](recipes/) holds the six recipes as four patches. They apply in order to the commit the documentation was
-written against:
+[recipes/](recipes/) holds recipes 3 to 9 as six patches. They apply in order to the base, which has recipes 1 and
+2 and `main` ([recipes/README.md](recipes/README.md) has the details):
 
 ```bash
 git switch -c try-recipes
-git apply docs/recipes/1-builtin-and-operator.patch
-git apply docs/recipes/2-bool-logic-conditional.patch
-git apply docs/recipes/3-if-while-for.patch
-git apply docs/recipes/4-runtime-function-and-pass.patch
+git apply docs/recipes/3-bool-logic-conditional.patch
+git apply docs/recipes/4-if-while-for.patch
+git apply docs/recipes/5-runtime-function-and-pass.patch
+git apply docs/recipes/7-vectors.patch               # simd.md
+git apply docs/recipes/8-vector-math-library.patch
+git apply docs/recipes/9-poly-float.patch
 cmake --workflow --preset dev
 ```
 
-Each adds its tests to `tests/unit/RecipeTest.cpp`, and the suite then counts 22 tests. Once your own compiler has
-moved on, the patches stop applying, but they remain readable diffs of one way to make each change.
+Each adds its tests beside the base's, in `tests/unit/CodeGenTest.cpp`, `FrontendTest.cpp` and `tests/lit/fminus/`.
+Once your own compiler has moved on, the patches stop applying, but they remain readable diffs of one way to make each
+change.

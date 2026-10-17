@@ -5,12 +5,13 @@ optimises it for the CPU it is running on, and ORC's LLJIT compiles it, all on t
 the same IR can also be compiled ahead of time into a native executable.
 
 **Status:** FMinus v0, a deliberately small subset of C that goes all the way through, from source to the JIT, to
-expand on. It has functions over `float`, declarations, assignments, blocks, `return`, arithmetic, calls and
-`<math.h>`'s float functions (below). The build, the dependencies and the toolchain's smoke tests are in place around
-it.
+expand on. It has functions over `float`, declarations, assignments, blocks, `return`, arithmetic with `%`, calls and
+`<math.h>`'s float functions (below). A program with a `float main(...)` also builds into an executable. The build, the
+dependencies and the toolchain's smoke tests are in place around it.
 
-Documentation: [docs/](docs/README.md). It covers the architecture, a guide to extending the compiler with worked
-recipes, the build, and testing and debugging.
+Documentation: [docs/](docs/README.md). It covers the architecture, writing a program with `main`, a guide to
+extending the compiler with worked recipes, SIMD (vector types, a vector math library, and vectors as wide as the
+machine's), the build, and testing and debugging.
 
 ## Quick start
 
@@ -42,7 +43,8 @@ src/                    the fminus library: every .cpp is a source, every gramma
                         TargetMachine and the O0-O3 pipeline), JitRuntime (the runtime, defined in an LLJIT),
                         Aot (object and assembly files, linked executables)
   runtime/              the FMinus runtime: its own library, libfminus_runtime.a, with no LLVM in it; the C
-                        functions generated code calls, listed in RuntimeSymbols.def (a placeholder ABI version)
+                        functions generated code calls, listed in RuntimeSymbols.def (a placeholder ABI version,
+                        and an executable's command line and result)
   frontend/             FMinus v0's front end: Lexer.l, Parser.y, Ast.h (the syntax tree), Diagnostics.h,
                         Frontend.h (parse), Scanner.h (the glue between scanner and parser)
   ir/                   CodeGen: the syntax tree to LLVM IR
@@ -50,14 +52,16 @@ src/                    the fminus library: every .cpp is a source, every gramma
   opt/                  empty: for FMinus's own pass pipelines
 tools/<name>/           one executable per directory, with CLI11 for its command line: fminus (the driver),
                         fminus-build and fminus-hostinfo
-examples/<name>/        one example per directory: an FMinus program and its harness (bin/example-<name>):
+examples/<name>/        one example per directory: an FMinus program, and a harness if it has .cpp files
+                        (bin/example-<name>):
   biquad/               a biquad with per-sample coefficients, against C++, compared and timed; a plan to grow it
+  note/                 a whole program with a main: a MIDI note's frequency (docs/programs.md)
 tests/
   unit/                 your Catch2 tests
   smoke/                the toolchain's checks: LLJIT + O3 on the host, Bison + Flex (smoke/calc/)
   lit/                  lit + FileCheck tests (*.test, *.fm, *.ll)
 Scripts/pin-llvm.sh     the pin lines for another LLVM release
-docs/                   the manual: architecture, extending, building, testing; recipes/ as patches
+docs/                   the manual: architecture, programs, extending, SIMD, building, testing; recipes/ as patches
 ```
 
 Adding a source, a header, a grammar, a tool or a test edits no CMake: the globs pick it up when you build again.
@@ -145,27 +149,32 @@ float half(float x) { x /= 2; return x; }
 | program | function definitions, `float name(float a, const float b) { ... }`, and prototypes, `float name(float);` |
 | declarations | `float x = e;`, `const float k = e;`, several at once (`float a = 1, b;`); block-scoped, shadowing allowed in an inner block |
 | statements | `{ ... }`, `e;`, `return e;`, `;` |
-| expressions | constants, names, calls, `( )`, unary `-` `+`, `* /`, `+ -`, and `= += -= *= /=` (right to left; an assignment's value is the one stored) |
+| expressions | constants, names, calls, `( )`, unary `-` `+`, `* / %`, `+ -`, and `= += -= *= /= %=` (right to left; an assignment's value is the one stored) |
 | constants | C's floating and integer forms: `1.5`, `1.`, `.5`, `2e3`, `1.5e-3f`, hex floats `0x1.8p1`, `0x1p-3f`, and `2` |
 | comments | `// ...` and `/* ... */` |
 | types | `float` (IEEE single precision) |
-| builtins | `fabsf sqrtf sinf cosf expf logf floorf fminf fmaxf` (LLVM intrinsics) |
+| builtins | `fabsf sqrtf sinf cosf expf logf floorf fminf fmaxf tanhf` (LLVM intrinsics) |
 
 Where FMinus differs from C, it is on purpose:
 
 - **`float` is the only type, and every constant is a `float`.** In C an unsuffixed `1.5` is a `double`, and `x * 1.5`
   is computed in double. Write the `f` suffix (`1.5f`) and a program means the same in both. Every example here does.
+- **`%` works on floats**, with `fmodf`'s semantics: the result has the sign of the dividend, so `-7.5 % 2` is
+  `-1.5`. C allows `%` on integers only; HLSL allows it on floats. `%=` goes with it.
 - **A function may be called before its definition** without a prototype, because the compiler declares every
   function first. A prototype with no definition declares an external C function, as in C: the JIT resolves it in
-  the process (`float tanhf(float x);` calls libm's), and the linker resolves it in an executable.
+  the process (`float atanf(float x);` calls libm's), and the linker resolves it in an executable.
 - **A declaration without an initialiser starts at 0.** C leaves the variable indeterminate.
 - **A non-void function that can reach its end is an error**, as in C++. Clang only warns in C.
 - **Arithmetic is IEEE single precision**, with no contraction into fused multiply-adds (clang's
   `-ffp-contract=off`).
 
-A v0 program with `f` suffixes, and with prototypes for calls ahead of a definition, is therefore also a valid C
-program with the same meaning, given `<math.h>` and `-ffp-contract=off`. The example above and
-`examples/biquad/biquad.fm` both compile as C under `-Wall -Wextra -Werror`.
+- **`main` is `float main(float, ...)`.** C's returns an `int` and takes `argc` and `argv`. An FMinus executable reads
+  `main`'s arguments from its command line and prints its result ([docs/programs.md](docs/programs.md)).
+
+A v0 program with `f` suffixes, with prototypes for calls ahead of a definition, and without `%` or `main`, is
+therefore also a valid C program with the same meaning, given `<math.h>` and `-ffp-contract=off`. The example above
+and `examples/biquad/biquad.fm` both compile as C under `-Wall -Wextra -Werror`.
 
 Every FMinus function becomes an external LLVM function of the same name with the C calling convention, so C++
 calls JIT'd code as `float(float, ...)`. The code generator reports every error it finds, in source order and in
@@ -177,6 +186,7 @@ build-dev/bin/fminus chain.fm -O0                  # the IR as the code generato
 build-dev/bin/fminus chain.fm --emit ast           # the syntax tree, as s-expressions
 build-dev/bin/fminus chain.fm --emit asm -o -      # this machine's assembly (--emit obj: an object file)
 build-dev/bin/fminus chain.fm --run chain 1        # JIT-compiles, calls chain(1), prints 0.33333334
+build-dev/bin/fminus note.fm --emit exe -o note    # an executable that runs main: ./note 69 prints 440
 ```
 
 How it fits together: `frontend::parse` (Lexer.l, then Parser.y) gives an `ast::Program`, and `ir::lower`
@@ -184,7 +194,8 @@ How it fits together: `frontend::parse` (Lexer.l, then Parser.y) gives an `ast::
 `support/Aot.h` writes it to a file.
 
 **Adding a construct**, say comparisons and `?:`. [docs/extending.md](docs/extending.md) works through this one and
-five more, all the way to C's `if`, `while` and `for`:
+the others it builds on, all the way to C's `if`, `while` and `for`, and [docs/simd.md](docs/simd.md) through vector
+types:
 
 1. Its tokens: a rule in `src/frontend/Lexer.l` (keywords before `{IDENTIFIER}`), a `%token` in `Parser.y`.
 2. Its grammar: a rule in `Parser.y`, with C's precedence if it is an operator. Bison's report is
@@ -207,6 +218,17 @@ For development, a module can also be compiled ahead of time for this machine, i
 under lldb or Instruments, or into an object or assembly file to read. Its machine code is what LLJIT generates for the
 same module, since both use the TargetMachine and pipeline in `support/HostTarget.h`.
 
+An FMinus program with a `float main(...)` builds straight into one. `fminus::aot::addEntryPoint` renames the
+program's `main` to `fminus.main` and adds the C `main` an executable starts in, which reads the arguments and prints
+the result ([docs/programs.md](docs/programs.md)):
+
+```bash
+build-dev/bin/fminus note.fm --emit exe -o note             # then ./note 69
+build-dev/bin/fminus note.fm --entry                        # the IR with that C main (--emit asm, obj too)
+```
+
+`fminus-build` builds LLVM IR written by hand, which brings its own C `main`:
+
 ```bash
 build-dev/bin/fminus-build kernel.ll -o kernel              # an executable (the IR needs a main)
 build-dev/bin/fminus-build kernel.ll --emit asm -o -        # this machine's assembly, after -O3
@@ -214,12 +236,12 @@ build-dev/bin/fminus-build kernel.ll --emit ll -O2 -o -     # the optimised IR; 
 build-dev/bin/fminus-build kernel.ll -o kernel --link-arg=-framework --link-arg=Accelerate
 ```
 
-From code, it is `fminus::aot::emitFile`, `linkExecutable` and `emitExecutable` in `src/support/Aot.h`. Linking goes
-through the C++ compiler driver this build tree was configured with (Xcode's clang; `$FMINUS_LINK_DRIVER` overrides
-it), which brings the SDK, libSystem and the ad-hoc signature arm64 needs. It links this tree's `libfminus_runtime.a`,
-so JIT'd and ahead-of-time code call the same runtime. In the JIT, `fminus::defineRuntimeSymbols` defines every
-function listed in `src/runtime/RuntimeSymbols.def` by its address. Under the `asan` and `tsan` presets, the
-sanitizer runtimes are linked too. This is a development feature: inside a plugin, FMinus only ever JITs.
+From code, it is `fminus::aot::emitFile`, `linkExecutable`, `emitExecutable` and `addEntryPoint` in `src/support/Aot.h`.
+Linking goes through the C++ compiler driver this build tree was configured with (Xcode's clang; `$FMINUS_LINK_DRIVER`
+overrides it), which brings the SDK, libSystem and the ad-hoc signature arm64 needs. It links this tree's
+`libfminus_runtime.a`, so JIT'd and ahead-of-time code call the same runtime. In the JIT, `fminus::defineRuntimeSymbols`
+defines every function listed in `src/runtime/RuntimeSymbols.def` by its address. Under the `asan` and `tsan` presets,
+the sanitizer runtimes are linked too. This is a development feature: inside a plugin, FMinus only ever JITs.
 
 ## Tests
 

@@ -65,7 +65,7 @@ index 7277c2a..faa49f4 100644
          return "?";
      }
 diff --git a/src/frontend/Ast.h b/src/frontend/Ast.h
-index aa86c07..65b314e 100644
+index 77413d6..02284ef 100644
 --- a/src/frontend/Ast.h
 +++ b/src/frontend/Ast.h
 @@ -15,16 +15,19 @@
@@ -92,7 +92,7 @@ index aa86c07..65b314e 100644
 @@ -34,6 +37,19 @@ namespace fminus::ast
          Multiply,
          Divide,
-         Remainder,   // fmodf's: the sign of the dividend (C has % for integers only; HLSL has it for floats too)
+         Remainder,
 +        Less,        // the comparisons give bool; with a NaN, all but != are false
 +        LessEqual,
 +        Greater,
@@ -153,7 +153,7 @@ index aa86c07..65b314e 100644
  
      struct Stmt;
 diff --git a/src/frontend/Lexer.l b/src/frontend/Lexer.l
-index 493b906..ec7bed5 100644
+index 5b629c2..f514d57 100644
 --- a/src/frontend/Lexer.l
 +++ b/src/frontend/Lexer.l
 @@ -51,6 +51,9 @@ IDENTIFIER  [A-Za-z_][A-Za-z0-9_]*
@@ -516,44 +516,33 @@ index cd363e7..ffe3868 100644
          };
      } // namespace
  
-diff --git a/tests/unit/FrontendTest.cpp b/tests/unit/FrontendTest.cpp
-index e14fbd8..3d7308d 100644
---- a/tests/unit/FrontendTest.cpp
-+++ b/tests/unit/FrontendTest.cpp
-@@ -80,5 +80,5 @@ TEST_CASE("syntax and scanner errors carry their locations", "[frontend]")
-     CHECK(parsed("float f(float x) /* never\nclosed { return x; }")
-           == "test.fm:1:18: error: unterminated /* comment\n");
-     CHECK(parsed("fn f(x: float) -> float { return x; }")
--          == "test.fm:1:1: error: syntax error, unexpected identifier, expecting end of file or float\n");
-+          == "test.fm:1:1: error: syntax error, unexpected identifier, expecting end of file or float or bool\n");
- }
-diff --git a/tests/unit/RecipeTest.cpp b/tests/unit/RecipeTest.cpp
-index 0852d62..5365114 100644
---- a/tests/unit/RecipeTest.cpp
-+++ b/tests/unit/RecipeTest.cpp
-@@ -58,3 +58,57 @@ TEST_CASE("recipe 2: % and %=", "[recipe]")
-     CHECK(lookup<float(float, float)>(*jit, "f")(-7.5f, 2.0f) == -3.0f);  // the sign of the dividend
-     CHECK(lookup<float(float)>(*jit, "wrap")(2.25f) == 0.25f);
+diff --git a/tests/unit/CodeGenTest.cpp b/tests/unit/CodeGenTest.cpp
+index e093366..f81c244 100644
+--- a/tests/unit/CodeGenTest.cpp
++++ b/tests/unit/CodeGenTest.cpp
+@@ -163,3 +163,57 @@ TEST_CASE("every semantic error is reported, in source order, as clang words it"
+              "test.fm:13:20: error: too many arguments to function call, expected 0, have 1\n"
+              "test.fm:13:27: error: call to undeclared function 'q'\n");
  }
 +
-+TEST_CASE("recipe 3: bool, comparisons, !, && and ||, ?:", "[recipe]")
++TEST_CASE("bool, comparisons, !, && and ||, and ?: follow C", "[codegen]")
 +{
 +    std::string errors;
-+    auto jit = build("float magnitude(float x) { return x < 0 ? -x : x; }\n"
-+                     "float sign(float x) { return x > 0 ? 1 : x < 0 ? -1 : 0; }\n"   // ?: nests to the right
-+                     "bool positive(float x) { return x > 0; }\n"
-+                     "bool truthy(float x) { return x; }\n"                           // C: x != 0, so NaN is true
-+                     "float count(bool a, bool b) { return a + b + !a; }\n"           // C: a bool is 0 or 1
-+                     "float both(float x)\n"                                          // && may skip its right side
-+                     "{\n"
-+                     "    float ran = 0;\n"
-+                     "    x > 0 && (ran = 1);\n"
-+                     "    return ran;\n"
-+                     "}\n"
-+                     "float either(float x) { float ran = 0; x > 0 || (ran = 1); return ran; }\n"
-+                     "float pick(float x) { float t = 0; x > 0 ? (t = 1) : (t = 2); return t; }\n"   // one runs
-+                     "bool range(float x) { return x >= 0 && x <= 1 || x == 10 || !(x != 20); }\n",
-+                     errors);
++    auto jit = compile("float magnitude(float x) { return x < 0 ? -x : x; }\n"
++                       "float sign(float x) { return x > 0 ? 1 : x < 0 ? -1 : 0; }\n"   // ?: nests to the right
++                       "bool positive(float x) { return x > 0; }\n"
++                       "bool truthy(float x) { return x; }\n"                           // C: x != 0, so NaN is true
++                       "float count(bool a, bool b) { return a + b + !a; }\n"           // C: a bool is 0 or 1
++                       "float both(float x)\n"                                          // && may skip its right side
++                       "{\n"
++                       "    float ran = 0;\n"
++                       "    x > 0 && (ran = 1);\n"
++                       "    return ran;\n"
++                       "}\n"
++                       "float either(float x) { float ran = 0; x > 0 || (ran = 1); return ran; }\n"
++                       "float pick(float x) { float t = 0; x > 0 ? (t = 1) : (t = 2); return t; }\n"   // one runs
++                       "bool range(float x) { return x >= 0 && x <= 1 || x == 10 || !(x != 20); }\n",
++                       &errors);
 +    INFO(errors);
 +    REQUIRE(jit);
 +    auto magnitude = lookup<float(float)>(*jit, "magnitude");
@@ -586,6 +575,17 @@ index 0852d62..5365114 100644
 +    CHECK(range(20.0f));
 +    CHECK_FALSE(range(5.0f));
 +
-+    CHECK(build("float f(float a, float b, float c) { (a ? b : c) = 1; return a; }", errors) == nullptr);
-+    CHECK(errors == "test.fm:1:50: error: expression is not assignable\n");
++    CHECK(errorsOf("float f(float a, float b, float c) { (a ? b : c) = 1; return a; }")
++          == "test.fm:1:50: error: expression is not assignable\n");
 +}
+diff --git a/tests/unit/FrontendTest.cpp b/tests/unit/FrontendTest.cpp
+index 9e15a7d..47288e6 100644
+--- a/tests/unit/FrontendTest.cpp
++++ b/tests/unit/FrontendTest.cpp
+@@ -82,5 +82,5 @@ TEST_CASE("syntax and scanner errors carry their locations", "[frontend]")
+     CHECK(parsed("float f(float x) /* never\nclosed { return x; }")
+           == "test.fm:1:18: error: unterminated /* comment\n");
+     CHECK(parsed("fn f(x: float) -> float { return x; }")
+-          == "test.fm:1:1: error: syntax error, unexpected identifier, expecting end of file or float\n");
++          == "test.fm:1:1: error: syntax error, unexpected identifier, expecting end of file or float or bool\n");
+ }

@@ -22,7 +22,10 @@ build-dev/bin/example-biquad --check               # one example's comparison
 ```
 
 `ctest --preset asan` and `ctest --preset tsan` run the same tests under the sanitizers, after building those
-presets.
+presets. Run them through the preset, not with `ctest --test-dir build-asan`: the preset sets
+`ASAN_OPTIONS=detect_container_overflow=0`. FMinus is instrumented and LLVM isn't, and they share `std::vector`
+instantiations (LLVM's `df_iterator`, for one), so without it the JIT and AOT smoke tests abort with a false
+"container-overflow" inside LLVM's passes.
 
 ## Unit tests (Catch2)
 
@@ -32,7 +35,8 @@ Each file states what it tests in its first line, then has a few helpers and the
 - `parsed(source)` (`FrontendTest.cpp`) returns the dump of the parsed program, or its errors. Compare whole
   strings, so a parser test reads as input → tree.
 - `compile(source, &errors)` (`CodeGenTest.cpp`) parses, lowers and JIT-compiles at -O2, and returns the `Jit`, or
-  null with the formatted errors. `lookup<float(float)>(*jit, "f")` gives a callable function.
+  null with the formatted errors. `lookup<float(float)>(*jit, "f")` gives a callable function. (Recipe 9 adds a third
+  parameter, the `ir::Options`, to compile at a chosen `poly float` width.)
 - `errorsOf(source)` returns the errors of a program that must fail.
 
 ```cpp
@@ -53,7 +57,11 @@ TEST_CASE("functions compute what they say", "[codegen]")
 - **Compare floats exactly** where the arithmetic is exact or IEEE-deterministic; FMinus fuses and reorders nothing.
   Use a tolerance only around libm (`sinf`, `expf`, ...).
 - **Error tests compare the whole formatted text**, locations included. A moved column is a real change.
-- **Tags**: `[frontend]`, `[codegen]`, `[smoke]`, `[jit]`, `[aot]`, `[grammar]`. Add new ones freely.
+- **Tags**: `[frontend]`, `[codegen]`, `[smoke]`, `[jit]`, `[aot]` (the AOT smoke test, and `AotTest.cpp`'s checks
+  of an executable's entry), `[grammar]`; the SIMD recipes add `[simd]` and `[poly]`. Add new ones freely.
+- **Vector functions** are called from C++ through clang's `ext_vector_type`
+  (`using float4 = float __attribute__((ext_vector_type(4)));`), which matches FMinus's `float2` and `float4` at the C
+  boundary ([simd.md](simd.md)).
 - `INFO(errors)` before a `REQUIRE(jit)` prints the compiler's errors when the compile fails, and saves a debugging
   round-trip.
 
@@ -107,10 +115,21 @@ float gain(float x, float g)
 | `REQUIRES: arm64` (or `x86_64`) | the host architecture, for assembly checks |
 | `REQUIRES: asserts` | LLVM built with assertions |
 | `REQUIRES: asan`, `ubsan`, `tsan` | the sanitizer build |
+| `REQUIRES: system-darwin` (or `system-linux`) | the host's system; recipe 8 adds it, for its Apple-only library |
+| `%if arm64 %{ ... %}` | a RUN line only on arm64, so the rest of the file still runs elsewhere (recipes 7 to 9) |
 
 On PATH: `fminus`, `fminus-build`, `fminus-hostinfo`, then `FileCheck`, `not`, `count`, `opt`, `llc`, `llvm-mca`,
 `llvm-objdump`, ... from the LLVM flavor. To check an error, send stderr to FileCheck and expect failure:
-`not fminus %s 2>&1 | FileCheck %s`.
+`not fminus %s 2>&1 | FileCheck %s`. To check a program, build it and run it (`tests/lit/fminus/main.fm`):
+
+```c
+// RUN: fminus %s --emit exe -o %t
+// RUN: %t 3 4 | FileCheck %s --check-prefix=RESULT
+// RUN: not %t 3 2>&1 | FileCheck %s --check-prefix=ARITY
+```
+
+A check prefix can't be `RUN` (FileCheck refuses it), and lit's `%t` names a file per test, so several executables
+take suffixes: `%t.none`, `%t.note`.
 
 **Writing IR checks that last:**
 

@@ -163,18 +163,20 @@ index 0000000..bbd5aff
 +    void registerPasses(llvm::PassBuilder& passes);
 +} // namespace fminus::opt
 diff --git a/src/runtime/Runtime.cpp b/src/runtime/Runtime.cpp
-index e880819..ef08e85 100644
+index 1ebc49f..b094263 100644
 --- a/src/runtime/Runtime.cpp
 +++ b/src/runtime/Runtime.cpp
-@@ -1,7 +1,14 @@
- // src/runtime/Runtime.cpp
+@@ -2,6 +2,7 @@
  #include "runtime/Runtime.h"
  
+ #include <charconv>
 +#include <cmath>
-+
- extern "C" std::int32_t fminus_rt_abi_version() noexcept
- {
-     return 1;
+ #include <cstdio>
+ #include <cstdlib>
+ 
+@@ -40,3 +41,8 @@ extern "C" void fminus_rt_main_result(float result) noexcept
+     *written.ptr = '\n';
+     std::fwrite(text, 1, static_cast<std::size_t>(written.ptr + 1 - text), stdout);
  }
 +
 +extern "C" float fminus_rt_db_to_gain(float db) noexcept
@@ -182,26 +184,26 @@ index e880819..ef08e85 100644
 +    return std::pow(10.0f, db / 20.0f);
 +}
 diff --git a/src/runtime/Runtime.h b/src/runtime/Runtime.h
-index 87bf2ed..a8b50ed 100644
+index 86dd441..aee6cb1 100644
 --- a/src/runtime/Runtime.h
 +++ b/src/runtime/Runtime.h
-@@ -13,4 +13,8 @@ extern "C"
- {
-     // The runtime's ABI version, for generated code to check against the one it was compiled for.
-     std::int32_t fminus_rt_abi_version() noexcept;
+@@ -22,4 +22,8 @@ extern "C"
+     // An executable's end: prints main's result and a newline on stdout as `fminus --run` prints a result, the
+     // shortest decimal that reads back as the same float.
+     void fminus_rt_main_result(float result) noexcept;
 +
 +    // Decibels to a linear gain: 10^(db / 20). FMinus code declares it (`float fminus_rt_db_to_gain(float db);`), or
 +    // calls it as the builtin db_to_gain (ir/CodeGen.cpp).
 +    float fminus_rt_db_to_gain(float db) noexcept;
  }
 diff --git a/src/runtime/RuntimeSymbols.def b/src/runtime/RuntimeSymbols.def
-index 49c7f9e..b16928a 100644
+index faeff49..86b9a7c 100644
 --- a/src/runtime/RuntimeSymbols.def
 +++ b/src/runtime/RuntimeSymbols.def
-@@ -2,3 +2,4 @@
- // FMINUS_RUNTIME_SYMBOL(name) each. support/JitRuntime.cpp defines them in a JIT by address; executables get them by
- // linking libfminus_runtime.a. Add a line whenever Runtime.h gains a function.
+@@ -4,3 +4,4 @@
  FMINUS_RUNTIME_SYMBOL(fminus_rt_abi_version)
+ FMINUS_RUNTIME_SYMBOL(fminus_rt_main_args)
+ FMINUS_RUNTIME_SYMBOL(fminus_rt_main_result)
 +FMINUS_RUNTIME_SYMBOL(fminus_rt_db_to_gain)
 diff --git a/src/support/HostTarget.cpp b/src/support/HostTarget.cpp
 index 43a1a21..9eae83f 100644
@@ -240,26 +242,26 @@ index 0000000..7a8a38a
 +
 +// CHECK: define float @softclip({{.*}} #[[ATTRS:[0-9]+]]
 +// CHECK: attributes #[[ATTRS]] = { {{.*}}"fminus-flops"="3"
-diff --git a/tests/unit/RecipeTest.cpp b/tests/unit/RecipeTest.cpp
-index 78acefa..7e29307 100644
---- a/tests/unit/RecipeTest.cpp
-+++ b/tests/unit/RecipeTest.cpp
-@@ -180,3 +180,18 @@ TEST_CASE("recipe 4: if, else, while, for, break and continue", "[recipe]")
-                     "test.fm:6:12: error: use of undeclared identifier 'i'\n"
-                     "test.fm:8:7: error: non-void function 'g' does not return a value\n");
+diff --git a/tests/unit/CodeGenTest.cpp b/tests/unit/CodeGenTest.cpp
+index c463f71..d5426d1 100644
+--- a/tests/unit/CodeGenTest.cpp
++++ b/tests/unit/CodeGenTest.cpp
+@@ -283,3 +283,18 @@ TEST_CASE("if, else, while, for, break and continue follow C", "[codegen]")
+              "test.fm:6:12: error: use of undeclared identifier 'i'\n"
+              "test.fm:8:7: error: non-void function 'g' does not return a value\n");
  }
 +
-+TEST_CASE("recipe 5: a runtime function, through a prototype or as a builtin", "[recipe]")
++TEST_CASE("a runtime function is called through a prototype, or as a builtin", "[codegen]")
 +{
 +    std::string errors;
-+    auto jit = build("float fminus_rt_db_to_gain(float db);\n"   // C's way: declare it, call it
-+                     "float f(float db) { return fminus_rt_db_to_gain(db) * 2; }\n"
-+                     "float g(float db) { return db_to_gain(db); }\n",   // the language's way: a builtin name
-+                     errors);
++    auto jit = compile("float fminus_rt_db_to_gain(float db);\n"   // C's way: declare it, call it
++                       "float f(float db) { return fminus_rt_db_to_gain(db) * 2; }\n"
++                       "float g(float db) { return db_to_gain(db); }\n",   // the language's way: a builtin name
++                       &errors);
 +    INFO(errors);
 +    REQUIRE(jit);
 +    CHECK(lookup<float(float)>(*jit, "f")(20.0f) == 20.0f);
 +    CHECK(lookup<float(float)>(*jit, "g")(0.0f) == 1.0f);
-+    CHECK(build("float db_to_gain(float x) { return x; }", errors) == nullptr);
-+    CHECK(errors == "test.fm:1:7: error: 'db_to_gain' is a builtin and cannot be redefined\n");
++    CHECK(errorsOf("float db_to_gain(float x) { return x; }")
++          == "test.fm:1:7: error: 'db_to_gain' is a builtin and cannot be redefined\n");
 +}

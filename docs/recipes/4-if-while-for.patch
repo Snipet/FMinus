@@ -32,7 +32,7 @@ index faa49f4..dfb0966 100644
                                stmt.node);
          }
 diff --git a/src/frontend/Ast.h b/src/frontend/Ast.h
-index 65b314e..865d4ce 100644
+index 02284ef..d22b4f3 100644
 --- a/src/frontend/Ast.h
 +++ b/src/frontend/Ast.h
 @@ -172,12 +172,53 @@ namespace fminus::ast
@@ -91,7 +91,7 @@ index 65b314e..865d4ce 100644
      // leave its name out (empty).
      struct Param
 diff --git a/src/frontend/Lexer.l b/src/frontend/Lexer.l
-index ec7bed5..4c2302e 100644
+index f514d57..3e57666 100644
 --- a/src/frontend/Lexer.l
 +++ b/src/frontend/Lexer.l
 @@ -56,6 +56,12 @@ IDENTIFIER  [A-Za-z_][A-Za-z0-9_]*
@@ -307,54 +307,54 @@ index ffe3868..e597f66 100644
          };
      } // namespace
  
-diff --git a/tests/unit/RecipeTest.cpp b/tests/unit/RecipeTest.cpp
-index 5365114..78acefa 100644
---- a/tests/unit/RecipeTest.cpp
-+++ b/tests/unit/RecipeTest.cpp
-@@ -112,3 +112,71 @@ TEST_CASE("recipe 3: bool, comparisons, !, && and ||, ?:", "[recipe]")
-     CHECK(build("float f(float a, float b, float c) { (a ? b : c) = 1; return a; }", errors) == nullptr);
-     CHECK(errors == "test.fm:1:50: error: expression is not assignable\n");
+diff --git a/tests/unit/CodeGenTest.cpp b/tests/unit/CodeGenTest.cpp
+index f81c244..c463f71 100644
+--- a/tests/unit/CodeGenTest.cpp
++++ b/tests/unit/CodeGenTest.cpp
+@@ -217,3 +217,69 @@ TEST_CASE("bool, comparisons, !, && and ||, and ?: follow C", "[codegen]")
+     CHECK(errorsOf("float f(float a, float b, float c) { (a ? b : c) = 1; return a; }")
+           == "test.fm:1:50: error: expression is not assignable\n");
  }
 +
-+TEST_CASE("recipe 4: if, else, while, for, break and continue", "[recipe]")
++TEST_CASE("if, else, while, for, break and continue follow C", "[codegen]")
 +{
 +    std::string errors;
-+    auto jit = build("float sum_to(float n)\n"
-+                     "{\n"
-+                     "    float total = 0;\n"
-+                     "    for (float i = 1; i <= n; i += 1)\n"
-+                     "        total += i;\n"
-+                     "    return total;\n"
-+                     "}\n"
-+                     "float classify(float x)\n"                 // the else binds to the nearest if
-+                     "{\n"
-+                     "    if (x > 0) if (x > 10) return 2; else return 1;\n"
-+                     "    return 0;\n"
-+                     "}\n"
-+                     "float odd_sum(float n)\n"                  // continue runs the step
-+                     "{\n"
-+                     "    float total = 0;\n"
-+                     "    for (float i = 0; i < n; i += 1) {\n"
-+                     "        if (i % 2 == 0) continue;\n"
-+                     "        total += i;\n"
-+                     "    }\n"
-+                     "    return total;\n"
-+                     "}\n"
-+                     "float first_square_above(float limit)\n"   // for (;;), break leaves the inner loop only
-+                     "{\n"
-+                     "    float found = 0;\n"
-+                     "    for (float i = 1; ; i += 1) {\n"
-+                     "        float j = 0;\n"
-+                     "        while (1) { j += 1; if (j >= i) break; }\n"
-+                     "        if (i * j > limit) { found = i * j; break; }\n"
-+                     "    }\n"
-+                     "    return found;\n"
-+                     "}\n"
-+                     "float halve_until(float x) { while (x > 1) x /= 2; return x; }\n"
-+                     "float pick(bool c) { if (c) return 1; else return 2; }\n"   // both branches return: no end
-+                     "float forever() { for (;;) { } }\n"                          // the end is unreachable
-+                     "float dead(float x) { return x; if (x < 0) x = 1; }\n",     // an if in dead code
-+                     errors);
++    auto jit = compile("float sum_to(float n)\n"
++                       "{\n"
++                       "    float total = 0;\n"
++                       "    for (float i = 1; i <= n; i += 1)\n"
++                       "        total += i;\n"
++                       "    return total;\n"
++                       "}\n"
++                       "float classify(float x)\n"                 // the else binds to the nearest if
++                       "{\n"
++                       "    if (x > 0) if (x > 10) return 2; else return 1;\n"
++                       "    return 0;\n"
++                       "}\n"
++                       "float odd_sum(float n)\n"                  // continue runs the step
++                       "{\n"
++                       "    float total = 0;\n"
++                       "    for (float i = 0; i < n; i += 1) {\n"
++                       "        if (i % 2 == 0) continue;\n"
++                       "        total += i;\n"
++                       "    }\n"
++                       "    return total;\n"
++                       "}\n"
++                       "float first_square_above(float limit)\n"   // for (;;), break leaves the inner loop only
++                       "{\n"
++                       "    float found = 0;\n"
++                       "    for (float i = 1; ; i += 1) {\n"
++                       "        float j = 0;\n"
++                       "        while (1) { j += 1; if (j >= i) break; }\n"
++                       "        if (i * j > limit) { found = i * j; break; }\n"
++                       "    }\n"
++                       "    return found;\n"
++                       "}\n"
++                       "float halve_until(float x) { while (x > 1) x /= 2; return x; }\n"
++                       "float pick(bool c) { if (c) return 1; else return 2; }\n"   // both branches return: no end
++                       "float forever() { for (;;) { } }\n"                          // the end is unreachable
++                       "float dead(float x) { return x; if (x < 0) x = 1; }\n",     // an if in dead code
++                       &errors);
 +    INFO(errors);
 +    REQUIRE(jit);
 +    CHECK(lookup<float(float)>(*jit, "sum_to")(4.0f) == 10.0f);
@@ -368,18 +368,16 @@ index 5365114..78acefa 100644
 +    CHECK(lookup<float(bool)>(*jit, "pick")(false) == 2.0f);
 +    CHECK(lookup<float(float)>(*jit, "dead")(3.0f) == 3.0f);
 +
-+    CHECK(build("float f(float x)\n"
-+                "{\n"
-+                "    break;\n"
-+                "    continue;\n"
-+                "    for (float i = 0; i < 1; i += 1) { }\n"
-+                "    return i;\n"
-+                "}\n"
-+                "float g(float x) { if (x > 0) return 1; }\n",
-+                errors)
-+          == nullptr);
-+    CHECK(errors == "test.fm:3:5: error: 'break' statement not in loop or switch statement\n"
-+                    "test.fm:4:5: error: 'continue' statement not in loop statement\n"
-+                    "test.fm:6:12: error: use of undeclared identifier 'i'\n"
-+                    "test.fm:8:7: error: non-void function 'g' does not return a value\n");
++    CHECK(errorsOf("float f(float x)\n"
++                   "{\n"
++                   "    break;\n"
++                   "    continue;\n"
++                   "    for (float i = 0; i < 1; i += 1) { }\n"
++                   "    return i;\n"
++                   "}\n"
++                   "float g(float x) { if (x > 0) return 1; }\n")
++          == "test.fm:3:5: error: 'break' statement not in loop or switch statement\n"
++             "test.fm:4:5: error: 'continue' statement not in loop statement\n"
++             "test.fm:6:12: error: use of undeclared identifier 'i'\n"
++             "test.fm:8:7: error: non-void function 'g' does not return a value\n");
 +}

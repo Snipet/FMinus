@@ -20,8 +20,9 @@ stage to the next. [extending.md](extending.md) builds on this to show how to ad
      ├──────────────────────────────┐
      ▼                              ▼
  jit/Jit (ORC LLJIT)            support/Aot
- lookup("f") -> address         emitFile -> object or assembly
- in this process                linkExecutable -> a native executable
+ lookup("f") -> address         addEntryPoint -> a C main that runs the program's main
+ in this process                emitFile -> object or assembly
+                                linkExecutable -> a native executable
 ```
 
 Each arrow is one function call with a plain value in between, so each stage can be tested on its own and the
@@ -34,7 +35,7 @@ see the whole flow.
 | lower | `ir::lower` (`CodeGen.h`) | `const ast::Program&`, `llvm::LLVMContext&` | `std::unique_ptr<llvm::Module>` (null on error) | `Diagnostics`; every error in one run |
 | optimise | `prepareModule`, `optimiseModule` (`HostTarget.h`) | `llvm::Module&`, `llvm::TargetMachine&`, level | the module, rewritten | none (the module is valid by now) |
 | JIT | `jit::Jit::create`, `add`, `lookup` (`Jit.h`) | module + its context | `llvm::orc::ExecutorAddr` | `llvm::Error` |
-| AOT | `aot::emitFile`, `linkExecutable`, `emitExecutable` (`Aot.h`) | module, target machine | files | `llvm::Error` |
+| AOT | `aot::addEntryPoint`, `emitFile`, `linkExecutable`, `emitExecutable` (`Aot.h`) | module, target machine | files | `llvm::Error` |
 
 ## Diagnostics and locations
 
@@ -93,8 +94,8 @@ subset of C's, is written out as EBNF in the file's header comment.
   once. `api.token.constructor` gives the scanner `Parser::make_FLOAT(location)` and friends.
 - **C's precedence.** The `%right`, `%left` and `%precedence` lines give the operators C's precedence and
   associativity, from the loosest at the top to the tightest at the bottom: assignment (right to left), additive,
-  multiplicative, unary (`%prec UNARY`). The small helpers in the `%code` block, `binary()` and `assign()`, keep each
-  operator's rule to one line.
+  multiplicative (`*`, `/` and `%`), unary (`%prec UNARY`). The small helpers in the `%code` block, `binary()` and
+  `assign()`, keep each operator's rule to one line.
 - **Assignment is an expression.** `expr "=" expr` (and `+=` ...) accepts any expression as its target, as C's
   grammar does in effect. The code generator rejects what isn't a variable with clang's "expression is not
   assignable". Array elements and struct fields can join the check later without touching the grammar.
@@ -146,7 +147,7 @@ each other in any order. The rules for a name's prototypes and definition are C'
 - a second definition is "redefinition of 'f'";
 - a prototype of a builtin, as `<math.h>` has, declares nothing new, but a definition of a builtin is refused;
 - a function with prototypes and no definition stays external, and is resolved when the code is linked. The JIT
-  looks in the process, so `float tanhf(float x);` calls libm's.
+  looks in the process, so `float atanf(float x);` calls libm's.
 
 **Pass 2, define.** Each definition's body is lowered with an `llvm::IRBuilder<>`:
 
@@ -175,8 +176,9 @@ Expressions lower recursively (`lower(const ast::Expr&)` returns an `llvm::Value
 - **Constants** go through `llvm::APFloat::convertFromString`, after the `f` suffix is dropped, straight to IEEE
   single, so they are rounded once. Hex floats are exact. A constant too large for `float` is clang's "magnitude of
   floating-point constant too large for type 'float'".
-- **Arithmetic** becomes `fneg`, `fadd`, `fsub`, `fmul` and `fdiv` with no fast-math flags, so it is IEEE exact, as
-  clang does with `-ffp-contract=off`.
+- **Arithmetic** becomes `fneg`, `fadd`, `fsub`, `fmul`, `fdiv` and `frem` with no fast-math flags, so it is IEEE
+  exact, as clang does with `-ffp-contract=off`. `frem` is `%`, with `fmodf`'s semantics; AArch64 has no instruction
+  for it, so it becomes a call to `fmodf`.
 - **Calls** first try `kBuiltins`, a table from `<math.h>`'s float names to LLVM intrinsics (`fabsf` to
   `llvm.fabs`, `sinf` to `llvm.sin`, ...), declared with `Intrinsic::getOrInsertDeclaration`. Then they try the
   program's functions. Argument counts are checked with clang's "too many/too few arguments to function call".
@@ -211,7 +213,7 @@ Expressions lower recursively (`lower(const ast::Expr&)` returns an `llvm::Value
   the address to a function pointer (`address.toPtr<float (*)(float)>()`).
 - **Symbol resolution.** JIT'd code finds the FMinus runtime's functions by address (`defineRuntimeSymbols`), and
   process symbols through LLJIT's default process-symbol link order. These include libm's `sinf` behind the `sinf`
-  builtin, and any external function a prototype declares (`float tanhf(float x);`).
+  builtin, and any external function a prototype declares (`float atanf(float x);`).
 - **Lifetimes.** The `Jit` owns its `TargetMachine` and `LLJIT` (destroyed in reverse order), and the `LLJIT` owns
   every module added. Function pointers stay valid as long as the `Jit` lives.
 
@@ -228,15 +230,22 @@ The same module can be written to disk instead, for development:
   overrides it), with the objects, this tree's `libfminus_runtime.a` and, under `asan` or `tsan`, the sanitizer
   runtimes.
 - **`emitExecutable(module, machine, options)`** combines the two through a temporary object file.
+- **`addEntryPoint(module)`** makes a program's `float main(float, ...)` the executable's entry. C's entry is
+  `int main(int, char**)`, so it renames the program's `main` to `fminus.main` (internal, so the inliner can fold it)
+  and adds a C `main` that reads the arguments through `fminus_rt_main_args`, calls it, and prints the result through
+  `fminus_rt_main_result`. It runs before `prepareModule` and `optimiseModule`, so the entry is optimised with the
+  rest. [programs.md](programs.md) shows the IR.
 
-The `fminus` driver emits objects and assembly. `fminus-build` takes LLVM IR all the way to an executable.
+The `fminus` driver emits objects, assembly and executables (`--emit exe`, which adds the entry; `--entry` adds it to
+the other outputs). `fminus-build` takes hand-written LLVM IR, which brings its own `main`, to an executable.
 
 ## The runtime: `src/runtime/`
 
 The runtime is a separate static library, `libfminus_runtime.a` (`FMinus::Runtime`), of plain C functions that
 generated code calls. It contains no LLVM.
 
-- `Runtime.h` declares the functions as `extern "C"`.
+- `Runtime.h` declares the functions as `extern "C"`: a placeholder ABI version, and the command line and result of
+  an executable (`fminus_rt_main_args`, `fminus_rt_main_result`).
 - `RuntimeSymbols.def` lists them, one `FMINUS_RUNTIME_SYMBOL(name)` each.
 - `support/JitRuntime.cpp` expands that list into absolute symbols in a JIT (`defineRuntimeSymbols`).
 - An executable gets the same functions by linking the archive.
@@ -247,7 +256,7 @@ Because the JIT and executables share one runtime, the two compile the same prog
 
 | Target | Source | Uses |
 |---|---|---|
-| `fminus` | `tools/fminus/main.cpp` | parse, lower, then `--emit ast/ll/asm/obj` or `--run` in the JIT |
+| `fminus` | `tools/fminus/main.cpp` | parse, lower, then `--emit ast/ll/asm/obj/exe` or `--run` in the JIT |
 | `fminus-build` | `tools/fminus-build/main.cpp` | LLVM IR to exe/obj/asm/ll (HostTarget + Aot) |
 | `fminus-hostinfo` | `tools/fminus-hostinfo/main.cpp` | the triple, CPU, features and data layout the JIT targets |
 | `example-biquad` | `examples/biquad/bench.cpp` | biquad.fm in the JIT against C++, compared and timed |
@@ -281,8 +290,9 @@ Because the JIT and executables share one runtime, the two compile the same prog
   layout.
 - **Generated functions have the C calling convention, C names and external linkage.** That is the contract with
   C++ callers, the JIT's `lookup` and the linker. A new type at the boundary needs its C ABI attributes (extending.md,
-  recipe 3: `bool` is `zeroext`).
+  recipe 3: `bool` is `zeroext`; simd.md: `float8` goes through memory). The one exception is an executable's
+  `main`, which `addEntryPoint` renames and makes internal.
 - **Semantics follow C unless a deviation is documented.** The README lists the deviations: `float` is the only type,
-  constants are `float`, calls may precede definitions, uninitialised variables are 0, and falling off a non-void
-  function's end is an error.
+  constants are `float`, `%` works on floats, calls may precede definitions, uninitialised variables are 0, falling
+  off a non-void function's end is an error, and `main` is `float main(float, ...)`.
 - **The runtime stays free of LLVM and real-time safe.** It runs inside the audio thread's call tree.
