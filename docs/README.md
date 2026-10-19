@@ -18,3 +18,5 @@ Elsewhere:
 - [../README.md](../README.md) is the quick reference: the language, the commands, the presets.
 - [../examples/biquad/README.md](../examples/biquad/README.md) plans the language's growth around a DSP kernel.
 - [../examples/note/note.fm](../examples/note/note.fm) is a whole program, with a `main`.
+- [../examples/](../examples/) shows each feature in use: `waveforms/` (loops), `chord/` (`float4` and the vector
+  math library), `unison/` (`poly float`), `comparison/` (a `bool main`).

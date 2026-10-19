@@ -13,7 +13,7 @@ stage to the next. [extending.md](extending.md) builds on this to show how to ad
      │  frontend/Parser.y     Bison, LALR(1) C++ with variants: tokens -> syntax tree
      ▼
  ast::Program                 frontend/Ast.h: functions, statements, expressions (no LLVM in it)
-     │  ir/CodeGen.cpp        ir::lower: syntax tree -> LLVM IR, reporting every semantic error
+     │  ir/                   ir::lower: syntax tree -> LLVM IR, reporting every semantic error
      ▼
  llvm::Module                 one function per FMinus function, C calling convention
      │  support/HostTarget    prepareModule (triple, data layout) + optimiseModule (LLVM's O0-O3 pipeline)
@@ -141,11 +141,26 @@ on it without the code generator.
 - **`ast::dump`** prints the tree as s-expressions, one statement per line (`fminus --emit ast`). It is the parser's
   test oracle.
 
-## Code generation: `ir/CodeGen.cpp`
+## Code generation: `src/ir/`
 
-`ir::lower(program, context, diagnostics, options)` creates a module named after the file. `options.polyLanes` is a
-`poly float`'s width, which the driver gets from the target machine (`polyLanes`, below). A `Lowering` object then
-runs two passes over the program.
+`ir::lower(program, context, diagnostics, options)` (`CodeGen.h`) creates a module named after the file.
+`options.polyLanes` is a `poly float`'s width, which the driver gets from the target machine (`polyLanes`, below). A
+`Lowering` object then runs two passes over the program. `Lowering` is one class (`Lowering.h`, internal to `src/ir/`,
+in `fminus::ir::detail`), but its members are defined across the directory by what they lower:
+
+| File | Lowering's members for |
+|---|---|
+| `CodeGen.cpp` | `ir::lower()`, the constructor, and the two passes: where the parts combine |
+| `Types.cpp` | FMinus's types as LLVM's (`typeOf`, `lanes`), the conversions (`convert`, `commonType`), errors and poison values |
+| `Functions.cpp` | declarations and prototypes (`declare`), bodies and parameters (`define`), stack slots and scopes |
+| `Statements.cpp` | blocks, declarations, `return`, `if`, `while`, `for`, `break` and `continue` |
+| `Expressions.cpp` | the expression `std::visit` (`lower`), constants, operators, `&&` and `\|\|`, `?:`, assignment |
+| `Calls.cpp` | the builtin tables, calls, reductions, `poly_lanes` and `poly_index`, and `ir::builtins()` |
+| `Vectors.cpp` | vector literals in both forms, swizzles read and assigned, `?:` with a vector condition |
+
+The header declares every member under the name of its file, so it doubles as the map. A new node goes in the file its
+kind belongs to, and the compiler finds the rest: `lower`'s `std::visit` in `Expressions.cpp` and the statement visit in
+`Statements.cpp` fail to compile until they handle it.
 
 **Pass 1, declare.** Every function name gets one `llvm::Function`, with external linkage, its C name and the C
 calling convention (`float` is `f32`). C++ therefore calls JIT'd code as `float(float, ...)`, and functions may call

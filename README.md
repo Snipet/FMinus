@@ -49,16 +49,22 @@ src/                    the fminus library: every .cpp is a source, every gramma
                         and an executable's command line and result)
   frontend/             FMinus v0's front end: Lexer.l, Parser.y, Ast.h (the syntax tree), Diagnostics.h,
                         Frontend.h (parse), Scanner.h (the glue between scanner and parser)
-  ir/                   CodeGen: the syntax tree to LLVM IR
+  ir/                   the syntax tree to LLVM IR: CodeGen.h (ir::lower), Lowering.h (the code generator's class
+                        and its parts' map), CodeGen.cpp (the two passes), Types, Functions, Statements,
+                        Expressions, Calls and Vectors .cpp
   jit/                  Jit: LLJIT for FMinus modules (host CPU, pipeline, runtime)
   opt/                  empty: for FMinus's own pass pipelines
 tools/<name>/           one executable per directory, with CLI11 for its command line: fminus (the driver),
                         fminus-build and fminus-hostinfo
 examples/<name>/        one example per directory: an FMinus program, and a harness if it has .cpp files
                         (bin/example-<name>):
-  biquad/               a biquad with per-sample coefficients, against C++, compared and timed; a plan to grow it
+  biquad/               a biquad with per-sample coefficients, one float4 call a sample, against C++, compared and
+                        timed; a plan to grow it
   note/                 a whole program with a main: a MIDI note's frequency (docs/programs.md)
   comparison/           a main that returns a bool: whether its two arguments are equal
+  waveforms/            band-limited sawtooth and square waves by additive synthesis: for, while, if, break, continue
+  chord/                a chord's four notes in a float4: one vector expf, literals, swizzles, reductions
+  unison/               detuned sawtooth voices, one a lane of a poly float: a strip-mined loop with a mask
 tests/
   unit/                 your Catch2 tests
   smoke/                the toolchain's checks: LLJIT + O3 on the host, Bison + Flex (smoke/calc/)
@@ -153,7 +159,7 @@ float half(float x) { x /= 2; return x; }
 | program | function definitions, `float name(float a, const float b) { ... }`, and prototypes, `float name(float);` |
 | declarations | `float x = e;`, `const float k = e;`, several at once (`float a = 1, b;`); block-scoped, shadowing allowed in an inner block |
 | statements | `{ ... }`, `e;`, `return e;`, `;`, `if (c) s else s` (an `else` closes the nearest `if`), `while (c) s`, `for (init; c; step) s` (its declarations are the loop's), `break;`, `continue;` |
-| expressions | constants, names, calls, `( )`, unary `-` `+` `!`, `* / %`, `+ -`, `< <= > >=`, `== !=`, `&&`, `\|\|` (both short-circuit), `?:` (only the branch taken runs), and `= += -= *= /= %=` (right to left; an assignment's value is the one stored), with C's precedence; vector literals `(float4)(a, b, c, d)` and swizzles `v.wzyx`, `v.s0` |
+| expressions | constants, names, calls, `( )`, unary `-` `+` `!`, `* / %`, `+ -`, `< <= > >=`, `== !=`, `&&`, `\|\|` (both short-circuit), `?:` (only the branch taken runs), and `= += -= *= /= %=` (right to left; an assignment's value is the one stored), with C's precedence; vector literals, OpenCL C's `(float4)(a, b, c, d)` and C's `(float4){a, b}` (the lanes left out are 0), and swizzles `v.wzyx`, `v.s0` |
 | constants | C's floating and integer forms: `1.5`, `1.`, `.5`, `2e3`, `1.5e-3f`, hex floats `0x1.8p1`, `0x1p-3f`, and `2`; `true` and `false` |
 | comments | `// ...` and `/* ... */` |
 | types | `float` (IEEE single precision) and `bool` (C23's: 0 or 1 as a float; a float is `x != 0` as a bool); `float2`, `float4`, `float8` (OpenCL C's vectors, lane by lane, scalars broadcast); `poly float` and `poly bool`, as many lanes as the machine's vectors ([docs/simd.md](docs/simd.md)) |
@@ -166,8 +172,10 @@ Where FMinus differs from C, it is on purpose:
   here does.
 - **Vectors are OpenCL C's**, which C has none of: `float2`, `float4`, `float8`, their literals and swizzles, and math
   functions that take them. A comparison of vectors gives a lane mask (OpenCL C gives 0 or -1 in an `int` vector), and
-  `?:` with a vector condition picks each lane, so both sides run. `poly float`, a vector as wide as the machine's, is
-  FMinus's own ([docs/simd.md](docs/simd.md)).
+  `?:` with a vector condition picks each lane, so both sides run. Literals come in OpenCL C's form,
+  `(float4)(a, b, c, d)`, and in C's, `(float4){a, b, c, d}` (with clang's `ext_vector_type`). They differ: C reads
+  `(float4)(...)` as a cast of a comma expression. `poly float`, a vector as wide as the machine's, is FMinus's own
+  ([docs/simd.md](docs/simd.md)).
 - **`%` works on floats**, with `fmodf`'s semantics: the result has the sign of the dividend, so `-7.5 % 2` is
   `-1.5`. C allows `%` on integers only; HLSL allows it on floats. `%=` goes with it.
 - **A function may be called before its definition** without a prototype, because the compiler declares every
@@ -182,9 +190,10 @@ Where FMinus differs from C, it is on purpose:
   FMinus executable reads `main`'s arguments from its command line and prints its result, a float or `true` or
   `false` ([docs/programs.md](docs/programs.md)).
 
-A v0 program with `f` suffixes, with prototypes for calls ahead of a definition, and without `%`, vectors or `main`, is
-therefore also a valid C program with the same meaning, given `<math.h>` and `-ffp-contract=off`. The example above
-and `examples/biquad/biquad.fm` both compile as C under `-Wall -Wextra -Werror`.
+A v0 program with `f` suffixes, with prototypes for calls ahead of a definition, with vectors only in C's form (braces,
+given clang's `ext_vector_type`), and without `%`, `poly` or `main`, is therefore also a valid C program with the same
+meaning, given `<math.h>` and `-ffp-contract=off`. The example above and `examples/biquad/biquad.fm` both compile as C
+under `-Wall -Wextra -Werror`.
 
 Every FMinus function becomes an external LLVM function of the same name with the C calling convention, so C++
 calls JIT'd code as `float(float, ...)`. The code generator reports every error it finds, in source order and in
@@ -197,12 +206,12 @@ build-dev/bin/fminus chain.fm --emit ast           # the syntax tree, as s-expre
 build-dev/bin/fminus chain.fm --emit asm -o -      # this machine's assembly (--emit obj: an object file)
 build-dev/bin/fminus chain.fm --run chain 1        # JIT-compiles, calls chain(1), prints 0.33333334
 build-dev/bin/fminus note.fm --emit exe -o note    # an executable that runs main: ./note 69 prints 440
-build-dev/bin/fminus voices.fm --poly-lanes 16     # compile as for a machine with 16-float vectors (AVX-512)
+build-dev/bin/fminus unison.fm --poly-lanes 16     # compile as for a machine with 16-float vectors (AVX-512)
 ```
 
-How it fits together: `frontend::parse` (Lexer.l, then Parser.y) gives an `ast::Program`, and `ir::lower`
-(ir/CodeGen.cpp) gives an `llvm::Module`. From there, `jit::Jit` optimises and compiles it in memory, or
-`support/Aot.h` writes it to a file.
+How it fits together: `frontend::parse` (Lexer.l, then Parser.y) gives an `ast::Program`, and `ir::lower` (in
+`src/ir/`, where CodeGen.cpp runs the parts that `Lowering.h` lists) gives an `llvm::Module`. From there, `jit::Jit`
+optimises and compiles it in memory, or `support/Aot.h` writes it to a file.
 
 **Adding a construct**, say comparisons and `?:`. [docs/extending.md](docs/extending.md) works through this one and
 the others it builds on, all the way to C's `if`, `while` and `for`, and [docs/simd.md](docs/simd.md) through vector
@@ -213,8 +222,10 @@ types:
    `build-dev/src/generated/frontend/Parser.output`, and `-Wcounterexamples` shows an input for each conflict.
 3. Its node: an alternative of a `std::variant` in `src/frontend/Ast.h`, or an enumerator. Every `std::visit` and
    every `switch` over it now fails to compile until it handles the new node: `dump` in `Ast.cpp`, and the lowering
-   in `src/ir/CodeGen.cpp`.
-4. Its tests: a dump in `tests/unit/FrontendTest.cpp`, a result in `tests/unit/CodeGenTest.cpp`, IR or errors in
+   in `src/ir/`, in the file its kind belongs to (statements in `Statements.cpp`, vectors in `Vectors.cpp`, ...;
+   `Lowering.h` has the list).
+4. Its tests: a dump in `tests/unit/FrontendTest.cpp`, a result in the code generator's tests (`CodeGenTest.cpp`,
+   `ControlFlowTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`, which share `Compile.h`), IR or errors in
    `tests/lit/fminus/*.fm` (`// RUN:` lines, checked by FileCheck).
 
 `examples/biquad/` is a kernel to grow the language around. It is a biquad low-pass with coefficients recomputed

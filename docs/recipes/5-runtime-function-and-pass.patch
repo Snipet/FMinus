@@ -1,64 +1,90 @@
-diff --git a/src/ir/CodeGen.cpp b/src/ir/CodeGen.cpp
-index 9a576cd..7b30d49 100644
---- a/src/ir/CodeGen.cpp
-+++ b/src/ir/CodeGen.cpp
-@@ -56,6 +56,28 @@ namespace fminus::ir
-             Builtin{"fmaxf", llvm::Intrinsic::maxnum, 2}, Builtin{"tanhf", llvm::Intrinsic::tanh, 1},
-         };
+diff --git a/src/ir/Calls.cpp b/src/ir/Calls.cpp
+index 1979d76..a693daa 100644
+--- a/src/ir/Calls.cpp
++++ b/src/ir/Calls.cpp
+@@ -1,5 +1,6 @@
+ // src/ir/Calls.cpp: calls. The builtins, in the order a call tries them: the reductions, poly_lanes and poly_index,
+-// then <math.h>'s float functions (LLVM intrinsics, overloaded on vectors); then the program's own functions.
++// then <math.h>'s float functions (LLVM intrinsics, overloaded on vectors), then the runtime's functions; then the
++// program's own functions.
+ #include "ir/Lowering.h"
  
-+        // name -> a function of the FMinus runtime (runtime/Runtime.h), float(float, ...), callable with no prototype:
-+        // JIT'd code finds it through support/JitRuntime.h, an executable links libfminus_runtime.a.
-+        struct RuntimeFunction
-+        {
-+            std::string_view name;
-+            std::string_view symbol;
-+            unsigned arity;
-+        };
-+        constexpr std::array kRuntimeFunctions{
-+            RuntimeFunction{"db_to_gain", "fminus_rt_db_to_gain", 1},
-+        };
+ #include <llvm/IR/Constants.h>
+@@ -39,6 +40,21 @@ namespace fminus::ir::detail
+         return name == "poly_lanes" || name == "poly_index";
+     }
+ 
++    // name -> the runtime's symbol for it.
++    constexpr std::array kRuntimeFunctions{
++        RuntimeFunction{"db_to_gain", "fminus_rt_db_to_gain", 1},
++    };
 +
-+        const RuntimeFunction* findRuntimeFunction(std::string_view name)
++    const RuntimeFunction* findRuntimeFunction(std::string_view name)
++    {
++        for (const RuntimeFunction& function : kRuntimeFunctions)
 +        {
-+            for (const RuntimeFunction& function : kRuntimeFunctions)
-+            {
-+                if (function.name == name)
-+                    return &function;
-+            }
-+            return nullptr;
++            if (function.name == name)
++                return &function;
 +        }
++        return nullptr;
++    }
 +
-         // The reductions of a float vector to one float: its sum (in lane order, so the result does not depend on
-         // fast-math), its least and its greatest lane (NaN lanes ignored, as fminf and fmaxf ignore them).
-         constexpr std::array<std::string_view, 3> kReductions{"reduce_add", "reduce_min", "reduce_max"};
-@@ -285,7 +307,8 @@ namespace fminus::ir
+     const Builtin* findBuiltin(std::string_view name)
+     {
+         for (const Builtin& builtin : kBuiltins)
+@@ -88,6 +104,17 @@ namespace fminus::ir::detail
+                 llvm::Intrinsic::getOrInsertDeclaration(&module_, builtin->intrinsic, {typeOf(type)});
+             return {builder_.CreateCall(intrinsic, irArgs), type};
+         }
++        if (const RuntimeFunction* runtime = findRuntimeFunction(call.callee))
++        {
++            if (args.size() != runtime->arity)
++                return wrongArity(location, call, runtime->arity);
++            for (const Value& arg : args)
++                irArgs.push_back(convert(arg, ast::Type::Float, location, Use::Passing));
++            std::vector<llvm::Type*> params(runtime->arity, builder_.getFloatTy());
++            llvm::FunctionCallee callee = module_.getOrInsertFunction(
++                runtime->symbol, llvm::FunctionType::get(builder_.getFloatTy(), params, false));
++            return {builder_.CreateCall(callee, irArgs), ast::Type::Float};
++        }
+         const auto found = functions_.find(call.callee);
+         if (found == functions_.end())
+         {
+diff --git a/src/ir/Functions.cpp b/src/ir/Functions.cpp
+index 5b0dc0f..bade46a 100644
+--- a/src/ir/Functions.cpp
++++ b/src/ir/Functions.cpp
+@@ -24,7 +24,7 @@ namespace fminus::ir::detail
  
-             void declare(const ast::Function& function)
-             {
--                if (isReduction(function.name) || isPolyQuery(function.name))
-+                if (findRuntimeFunction(function.name) != nullptr || isReduction(function.name)
-+                    || isPolyQuery(function.name))
-                 {
-                     error(function.location, quoted(function.name) + " is a builtin and cannot be redefined");
-                     return;
-@@ -1109,6 +1132,17 @@ namespace fminus::ir
-                         llvm::Intrinsic::getOrInsertDeclaration(&module_, builtin->intrinsic, {typeOf(type)});
-                     return {builder_.CreateCall(intrinsic, irArgs), type};
-                 }
-+                if (const RuntimeFunction* runtime = findRuntimeFunction(call.callee))
-+                {
-+                    if (args.size() != runtime->arity)
-+                        return wrongArity(location, call, runtime->arity);
-+                    for (const Value& arg : args)
-+                        irArgs.push_back(convert(arg, ast::Type::Float, location, Use::Passing));
-+                    std::vector<llvm::Type*> params(runtime->arity, builder_.getFloatTy());
-+                    llvm::FunctionCallee callee = module_.getOrInsertFunction(
-+                        runtime->symbol, llvm::FunctionType::get(builder_.getFloatTy(), params, false));
-+                    return {builder_.CreateCall(callee, irArgs), ast::Type::Float};
-+                }
-                 const auto found = functions_.find(call.callee);
-                 if (found == functions_.end())
-                 {
+     void Lowering::declare(const ast::Function& function)
+     {
+-        if (isReduction(function.name) || isPolyQuery(function.name))
++        if (findRuntimeFunction(function.name) != nullptr || isReduction(function.name) || isPolyQuery(function.name))
+         {
+             error(function.location, quoted(function.name) + " is a builtin and cannot be redefined");
+             return;
+diff --git a/src/ir/Lowering.h b/src/ir/Lowering.h
+index 77fb6ba..9a5ff0d 100644
+--- a/src/ir/Lowering.h
++++ b/src/ir/Lowering.h
+@@ -46,7 +46,17 @@ namespace fminus::ir::detail
+         unsigned arity;
+     };
+ 
++    // A function of the FMinus runtime (runtime/Runtime.h), float(float, ...), callable with no prototype (Calls.cpp):
++    // JIT'd code finds it through support/JitRuntime.h, an executable links libfminus_runtime.a.
++    struct RuntimeFunction
++    {
++        std::string_view name;
++        std::string_view symbol;
++        unsigned arity;
++    };
++
+     const Builtin* findBuiltin(std::string_view name);   // <math.h>'s float functions, or nullptr
++    const RuntimeFunction* findRuntimeFunction(std::string_view name);   // db_to_gain, or nullptr
+     bool isReduction(std::string_view name);             // reduce_add, reduce_min, reduce_max
+     bool isPolyQuery(std::string_view name);             // poly_lanes, poly_index
+ 
 diff --git a/src/opt/.gitkeep b/src/opt/.gitkeep
 deleted file mode 100644
 index e69de29..0000000
@@ -182,7 +208,7 @@ index 5358735..46ea00a 100644
 +    return std::pow(10.0f, db / 20.0f);
 +}
 diff --git a/src/runtime/Runtime.h b/src/runtime/Runtime.h
-index d4e212e..d4b2e14 100644
+index d4e212e..aec2b95 100644
 --- a/src/runtime/Runtime.h
 +++ b/src/runtime/Runtime.h
 @@ -25,4 +25,8 @@ extern "C"
@@ -191,7 +217,7 @@ index d4e212e..d4b2e14 100644
      void fminus_rt_main_bool_result(bool result) noexcept;
 +
 +    // Decibels to a linear gain: 10^(db / 20). FMinus code declares it (`float fminus_rt_db_to_gain(float db);`), or
-+    // calls it as the builtin db_to_gain (ir/CodeGen.cpp).
++    // calls it as the builtin db_to_gain (ir/Calls.cpp).
 +    float fminus_rt_db_to_gain(float db) noexcept;
  }
 diff --git a/src/runtime/RuntimeSymbols.def b/src/runtime/RuntimeSymbols.def
@@ -241,12 +267,12 @@ index 0000000..7a8a38a
 +// CHECK: define float @softclip({{.*}} #[[ATTRS:[0-9]+]]
 +// CHECK: attributes #[[ATTRS]] = { {{.*}}"fminus-flops"="3"
 diff --git a/tests/unit/CodeGenTest.cpp b/tests/unit/CodeGenTest.cpp
-index 326dd69..4a9af8a 100644
+index 92c56d9..42c6726 100644
 --- a/tests/unit/CodeGenTest.cpp
 +++ b/tests/unit/CodeGenTest.cpp
-@@ -567,3 +567,18 @@ TEST_CASE("a poly float never mixes with a fixed-size vector, even with as many
-              "test.fm:12:5: error: returning 'poly float' from a function with incompatible result type 'float4'\n"
-              "test.fm:14:7: error: 'poly_index' is a builtin and cannot be redefined\n");
+@@ -127,3 +127,18 @@ TEST_CASE("every semantic error is reported, in source order, as clang words it"
+              "test.fm:13:20: error: too many arguments to function call, expected 0, have 1\n"
+              "test.fm:13:27: error: call to undeclared function 'q'\n");
  }
 +
 +TEST_CASE("a runtime function is called through a prototype, or as a builtin", "[codegen]")

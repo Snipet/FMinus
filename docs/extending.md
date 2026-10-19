@@ -26,15 +26,25 @@ Most language features touch the same places, in this order:
 | 2 | `src/frontend/Parser.y` | the tokens (`%token`), their precedence if they are operators, and the grammar rules with their actions |
 | 3 | `src/frontend/Ast.h` | a node: an alternative of `Expr::node` or `Stmt::node`, or an enumerator of `UnaryOp`, `BinaryOp`, `AssignOp`, `Type` |
 | 4 | `src/frontend/Ast.cpp` | its `dump` |
-| 5 | `src/ir/CodeGen.cpp` | its conversions and checks, and its lowering to LLVM IR |
+| 5 | `src/ir/` | its conversions and checks, and its lowering to LLVM IR, in the file its kind belongs to (`Lowering.h` lists them: types, functions, statements, expressions, calls, vectors) |
 | 6 | `src/runtime/` | if it needs C++ at run time, a runtime function (recipe 5) |
-| 7 | `tests/` | a dump in `FrontendTest.cpp`, results in `CodeGenTest.cpp`, IR or errors in `tests/lit/fminus/` |
-| 8 | `README.md` | the language table, and the deviations from C if any |
+| 7 | `tools/fminus/main.cpp`, `src/support/Aot.cpp` | for a new type: whether `--run` can pass and print it (its `switch` over the result type), and whether an executable's `main` may take or return it (`addEntryPoint`) |
+| 8 | `tests/` | a dump in `FrontendTest.cpp`; results in `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `VectorTest.cpp` or `PolyTest.cpp` (their helpers are in `Compile.h`); IR or errors in `tests/lit/fminus/` |
+| 9 | `examples/` | a program that uses it, and a line in `tests/lit/fminus/examples.test` that runs it |
+| 10 | `editors/vscode/syntaxes/fminus.tmLanguage.json` | a new keyword, type or builtin, so VSCode highlights it (its README says where) |
+| 11 | `README.md` | the language table, and the deviations from C if any |
 
 Steps 3 to 5 need no searching. Once the node exists, the build fails at every walk that doesn't handle it yet: a
 `std::visit` without a matching lambda fails to compile, and a `switch` without the new enumerator trips `-Wswitch`,
 an error under `-Werror`. Fix the errors in order and the feature is wired through. `std::visit` names only the
-first alternative it can't handle, so after you fix one, the next appears.
+first alternative it can't handle, so after you fix one, the next appears. The same goes for step 7's `switch`: when
+recipe 7 added `Float2` to `Bool8`, the build stopped in the driver until `--run` said what to do with a vector. Steps
+9 and 10 are the ones nothing reminds you of.
+
+Each feature has an example to read beside its recipe: `examples/comparison/` for `bool` (recipe 3),
+`examples/waveforms/` for every statement (recipe 4), `examples/chord/` for `float4` and the vector math library
+(recipes 7 and 8), `examples/unison/` for `poly float` (recipe 9), and `examples/biquad/` for a `float4` returning
+several results.
 
 ## Ground rules
 
@@ -62,7 +72,7 @@ first alternative it can't handle, so after you fix one, the next appears.
 
 *In the base since commit 30c1dc4.*
 
-A builtin is a row in `kBuiltins` (`src/ir/CodeGen.cpp`): a `<math.h>` name, the LLVM intrinsic it lowers to (over
+A builtin is a row in `kBuiltins` (`src/ir/Calls.cpp`): a `<math.h>` name, the LLVM intrinsic it lowers to (over
 `float`), and its parameter count.
 
 ```cpp
@@ -130,10 +140,10 @@ it gets its compound assignment.
 Build now, and the compiler lists the rest of the work:
 
 ```
-src/frontend/Ast.cpp: error: enumeration value 'Remainder' not handled in switch [-Werror,-Wswitch]   (BinaryOp)
-src/frontend/Ast.cpp: error: enumeration value 'Remainder' not handled in switch [-Werror,-Wswitch]   (AssignOp)
-src/ir/CodeGen.cpp: error: enumeration value 'Remainder' not handled in switch [-Werror,-Wswitch]     (arithmetic)
-src/ir/CodeGen.cpp: error: enumeration value 'Remainder' not handled in switch [-Werror,-Wswitch]     (compoundOperator)
+src/frontend/Ast.cpp: error: enumeration value 'Remainder' not handled in switch [-Werror,-Wswitch]    (BinaryOp)
+src/frontend/Ast.cpp: error: enumeration value 'Remainder' not handled in switch [-Werror,-Wswitch]    (AssignOp)
+src/ir/Expressions.cpp: error: enumeration value 'Remainder' not handled in switch [-Werror,-Wswitch]  (arithmetic)
+src/ir/Expressions.cpp: error: enumeration value 'Remainder' not handled in switch [-Werror,-Wswitch]  (compound)
 ```
 
 **The dump** gets a case in each `opName`: `"%"` and `"%="`. **The lowering** needs two cases:
@@ -164,7 +174,7 @@ values show in the JIT, in a test case of their own in `CodeGenTest.cpp`:
 
 ## Recipe 3: `bool`, comparisons, `!`, `&&`, `||` and `?:`
 
-*In the compiler since commit 660d5f8.*
+*In the compiler since commit 660d5f8. Example: `examples/comparison/comparison.fm`, a `bool main`.*
 
 This recipe adds the expression half of C's control flow:
 
@@ -295,7 +305,8 @@ code generator's "expression is not assignable", as in C.
 The build then fails at every walk:
 
 - `Ast.cpp`: the `BinaryOp` and `UnaryOp` switches, `typeName`, and the expression `std::visit`;
-- `CodeGen.cpp`: `typeOf`, the `UnaryOp` switch, `arithmetic` and the expression `std::visit`.
+- `src/ir/`: `typeOf` (`Types.cpp`), and the `UnaryOp` switch, `arithmetic` and the expression `std::visit`
+  (`Expressions.cpp`).
 
 Bison reports no conflicts. The dump is mechanical:
 
@@ -512,7 +523,7 @@ cond.end:
 
 ### Tests
 
-The recipe's tests (in `tests/unit/CodeGenTest.cpp`, which they share with the base's) check:
+The recipe's tests (in `tests/unit/ControlFlowTest.cpp`) check:
 
 - the values of `magnitude` and `sign`;
 - `bool` returned to C++ (`lookup<bool(float)>`);
@@ -528,7 +539,8 @@ top-level message gains a token: "expecting end of file or float" becomes "expec
 
 ## Recipe 4: `if`, `else`, `while`, `for`, `break` and `continue`
 
-*In the compiler.*
+*In the compiler. Example: `examples/waveforms/waveforms.fm`, band-limited waves by additive synthesis, which uses
+every statement.*
 
 C's statements for control flow:
 
@@ -800,7 +812,7 @@ for.body:                                         ; preds = %entry, %for.body
 
 ### Tests
 
-The recipe's test checks:
+The recipe's tests (in `tests/unit/ControlFlowTest.cpp`) check:
 
 - a `for` with a declared counter;
 - that an `else` binds to the nearest `if`;
@@ -827,7 +839,7 @@ through `defineRuntimeSymbols`, and an executable links `libfminus_runtime.a`.
 
 ```cpp
     // Decibels to a linear gain: 10^(db / 20). FMinus code declares it (`float fminus_rt_db_to_gain(float db);`), or
-    // calls it as the builtin db_to_gain (ir/CodeGen.cpp).
+    // calls it as the builtin db_to_gain (ir/Calls.cpp).
     float fminus_rt_db_to_gain(float db) noexcept;
 ```
 
@@ -851,40 +863,46 @@ float f(float db) { return fminus_rt_db_to_gain(db) * 2; }
 ```
 
 **The language's way: a builtin name.** To make it part of FMinus, under a name of its own and with no prototype,
-add a second table beside `kBuiltins`, from the FMinus name to the runtime's symbol:
+add a second table beside `kBuiltins`, from the FMinus name to the runtime's symbol. The type goes in `Lowering.h`,
+beside `Builtin`, since `declare` (in `Functions.cpp`) needs it too; the table and its lookup go in `Calls.cpp`:
 
 ```cpp
-        // name -> a function of the FMinus runtime (runtime/Runtime.h), float(float, ...), callable with no prototype:
-        // JIT'd code finds it through support/JitRuntime.h, an executable links libfminus_runtime.a.
-        struct RuntimeFunction
-        {
-            std::string_view name;
-            std::string_view symbol;
-            unsigned arity;
-        };
-        constexpr std::array kRuntimeFunctions{
-            RuntimeFunction{"db_to_gain", "fminus_rt_db_to_gain", 1},
-        };
+    // src/ir/Lowering.h
+    // A function of the FMinus runtime (runtime/Runtime.h), float(float, ...), callable with no prototype (Calls.cpp):
+    // JIT'd code finds it through support/JitRuntime.h, an executable links libfminus_runtime.a.
+    struct RuntimeFunction
+    {
+        std::string_view name;
+        std::string_view symbol;
+        unsigned arity;
+    };
+    ...
+    const RuntimeFunction* findRuntimeFunction(std::string_view name);   // db_to_gain, or nullptr
+
+    // src/ir/Calls.cpp
+    constexpr std::array kRuntimeFunctions{
+        RuntimeFunction{"db_to_gain", "fminus_rt_db_to_gain", 1},
+    };
 ```
 
 `lowerCall` checks it after the builtins. `getOrInsertFunction` declares the external function once per module:
 
 ```cpp
-                if (const RuntimeFunction* runtime = findRuntimeFunction(call.callee))
-                {
-                    if (args.size() != runtime->arity)
-                        return wrongArity(location, call, runtime->arity);
-                    for (llvm::Value*& arg : args)
-                        arg = convert(arg, ast::Type::Float);
-                    std::vector<llvm::Type*> params(runtime->arity, builder_.getFloatTy());
-                    llvm::FunctionCallee callee = module_.getOrInsertFunction(
-                        runtime->symbol, llvm::FunctionType::get(builder_.getFloatTy(), params, false));
-                    return builder_.CreateCall(callee, args);
-                }
+        if (const RuntimeFunction* runtime = findRuntimeFunction(call.callee))
+        {
+            if (args.size() != runtime->arity)
+                return wrongArity(location, call, runtime->arity);
+            for (const Value& arg : args)
+                irArgs.push_back(convert(arg, ast::Type::Float, location, Use::Passing));
+            std::vector<llvm::Type*> params(runtime->arity, builder_.getFloatTy());
+            llvm::FunctionCallee callee = module_.getOrInsertFunction(
+                runtime->symbol, llvm::FunctionType::get(builder_.getFloatTy(), params, false));
+            return {builder_.CreateCall(callee, irArgs), ast::Type::Float};
+        }
 ```
 
-`declare` refuses the name for any function of the program, prototype or definition, the way it refuses to redefine a
-builtin.
+`declare` (`Functions.cpp`) refuses the name for any function of the program, prototype or definition, the way it
+refuses to redefine a builtin.
 
 Keep the `.def` line in step with the header. Without it, the JIT in this repository's tools still finds the
 function, but only by accident. LLJIT also searches the process's own symbols, and the tools link the runtime
@@ -1003,7 +1021,7 @@ Each of these was hit while writing the language or its recipes. [simd.md](simd.
 | Code lands in a dead block, or the verifier reports a block without a terminator, wherever you ask whether the current block is finished | LLVM 23's `BasicBlock::getTerminator()` assumes a finished block; on an unfinished one it returns `&InstList.back()`, a bogus non-null pointer (the assert is compiled out under `NDEBUG`) | `hasTerminator()`, or `getTerminatorOrNull()` |
 | A syntax-error test changes text after you add an unrelated token | Bison's `parse.error detailed` lists the expected tokens only when there are at most four, and a new token that can start a construct joins the list (or pushes it past four) | update the test; or `%define parse.error custom` and write `Parser::report_syntax_error` |
 | Bison: "shift/reduce conflict on token "else"" | the dangling else (recipe 4) | `%precedence THEN` below `%precedence "else"`, and `%prec THEN` on the if without an else |
-| The build fails in `Ast.cpp` and `CodeGen.cpp` after you add a node or an enumerator | `std::visit` needs every alternative; `-Wswitch` every enumerator | handle each one: this is the checklist working |
+| The build fails in `Ast.cpp` and `src/ir/` after you add a node or an enumerator | `std::visit` needs every alternative; `-Wswitch` every enumerator | handle each one: this is the checklist working |
 | An IR test fails after an unrelated change | an exact match on a line that gained an attribute, a name or a flag | match loosely: `{{.*}}`, `[[NAME:%.*]]`, `CHECK-LABEL`, `CHECK-DAG` |
 | The verifier: "PHINode should have one entry for each predecessor" | the phi names the block a branch started in, but lowering it (a nested `&&` or `?:`) moved the builder on | take `builder_.GetInsertBlock()` after lowering each operand or branch |
 | The verifier: "Instruction does not dominate all uses" | a conversion emitted in the join block for a value from one branch | convert at the end of the branch's own block, before its branch to the join (`lowerConditional`) |
@@ -1036,6 +1054,9 @@ the narrower integers, `double`. Give the tree a semantic pass before lowering:
 Lowering then just reads the types. Integers lower to `iN` with `add`/`sub`/`mul`/`sdiv`/`udiv`, and `icmp`
 compares them. The conversions are `sitofp`, `fptosi`, `zext` and `sext`; signedness lives in the operations, not
 the types.
+
+Until then, a loop counts in floats, as the examples' loops do (`for (float k = 1; ...; k += 1)`). That is exact for
+whole numbers up to 2^24, 16777216; past it, `k += 1` stops changing `k`, and the loop never ends.
 
 **Pointers and arrays.** `float* buffer`, `buffer[i]`, `*p`. In LLVM, every pointer is an opaque `ptr`, and the
 element type rides on each `getelementptr`, `load` and `store`. `buffer[i]` is a GEP and a load, and as a target
@@ -1078,8 +1099,9 @@ LLJIT's concurrent compilation, and caching objects between runs (`llvm::ObjectC
 
 ## Reference solutions
 
-The recipes in the compiler are their own reference: their code is in `src/`, and their tests in
-`tests/unit/CodeGenTest.cpp`, `FrontendTest.cpp` and `tests/lit/fminus/`. [recipes/](recipes/) holds the two that
+The recipes in the compiler are their own reference: their code is in `src/`, and their tests in `tests/unit/`
+(`FrontendTest.cpp`, and `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `VectorTest.cpp` and `PolyTest.cpp` for the code
+generator) and `tests/lit/fminus/`. [recipes/](recipes/) holds the two that
 aren't, 5 and 6, as one patch against the compiler as it is ([recipes/README.md](recipes/README.md)):
 
 ```bash

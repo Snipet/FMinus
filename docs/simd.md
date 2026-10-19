@@ -7,13 +7,14 @@ and walks through them in the order a change moves through the compiler.
 
 | Recipe | Adds | Where |
 |---|---|---|
-| 7 | `float2`, `float4`, `float8`: OpenCL C's vector types, lane-wise operators, swizzles, masks, reductions | `Ast.h` (the types), `Lexer.l`, `Parser.y`, `CodeGen.cpp` (`Value`, `convert`, `commonType`, `lowerSelect`, `lowerConstruct`, `lowerSwizzle`, `assignComponents`, `lowerReduction`); `fminus --run`'s checks |
+| 7 | `float2`, `float4`, `float8`: OpenCL C's vector types, lane-wise operators, swizzles, masks, reductions | `Ast.h` (the types), `Lexer.l`, `Parser.y`; in `src/ir/`, `Lowering.h` (`Value`), `Types.cpp` (`convert`, `commonType`), `Expressions.cpp` (operators), `Vectors.cpp` (`lowerSelect`, `lowerConstruct`, `lowerBraces`, `lowerSwizzle`, `assignComponents`), `Calls.cpp` (the overloaded builtins, `lowerReduction`); `fminus --run`'s checks |
 | 8 | a vector math library: `sinf` on a `float4` is one call to libsystem_m's `_simd_sin_f4`, not four to `sinf` | `HostTarget.cpp` (`optimiseModule`) |
-| 9 | `poly float`: a vector as wide as the target's registers (4 floats on NEON, 16 on AVX-512), and rules that keep a program's meaning the same at any width | `Ast.h`, `Parser.y`, `CodeGen.h` (`ir::Options`), `CodeGen.cpp` (`lanes`, `polyMismatch`, `poly_lanes`, `poly_index`), `HostTarget.cpp` (`polyLanes`), the driver (`--poly-lanes`) |
+| 9 | `poly float`: a vector as wide as the target's registers (4 floats on NEON, 16 on AVX-512), and rules that keep a program's meaning the same at any width | `Ast.h`, `Parser.y`, `CodeGen.h` (`ir::Options`), `Types.cpp` (`lanes`, `polyMismatch`), `Calls.cpp` (`poly_lanes`, `poly_index`), `HostTarget.cpp` (`polyLanes`), the driver (`--poly-lanes`) |
 
-After the recipes: scalable vectors (SVE, RISC-V V) and how they relate to `poly float`, the auto-vectoriser that
-already runs, the pitfalls, and what to build next. Every IR listing, assembly listing and measurement here was
-produced on this repository's toolchain (LLVM 23.1.3) on an Apple M5, unless it says otherwise.
+After the recipes: the examples that use them, scalable vectors (SVE, RISC-V V) and how they relate to
+`poly float`, the auto-vectoriser that already runs, the pitfalls, and what to build next. Every IR listing, assembly
+listing and measurement here was produced on this repository's toolchain (LLVM 23.1.3) on an Apple M5, unless it says
+otherwise.
 
 The recipes build on recipes 3 and 4 ([extending.md](extending.md)): masks need `bool` and the comparisons, `?:`
 becomes a lane-wise select, and recipe 9's examples loop with `for`.
@@ -83,7 +84,7 @@ Scalable vectors (SVE, RISC-V V) are a fifth way, with the width picked at run t
 
 ## Recipe 7: `float2`, `float4` and `float8`
 
-*In the compiler. Tests: `CodeGenTest.cpp` (`[simd]`), `FrontendTest.cpp`, `tests/lit/fminus/simd.fm`.*
+*In the compiler. Tests: `VectorTest.cpp` (`[simd]`), `FrontendTest.cpp`, `tests/lit/fminus/simd.fm`.*
 
 ```c
 float4 softclip4(float4 x, float drive)
@@ -101,8 +102,8 @@ float4 halfwave(float4 x) { return x * (x > 0); }                    // a mask i
 
 ### The model: OpenCL C
 
-FMinus follows C, and C has no vector types. OpenCL C, a C dialect for vector hardware, does, and clang implements it
-for C as `ext_vector_type`. So FMinus takes OpenCL C's:
+FMinus follows C, and C has no vector types. OpenCL C, a C dialect for vector hardware, does, and clang implements it,
+both as OpenCL C (`clang -x cl`) and, most of it, for C as `ext_vector_type`. So FMinus takes OpenCL C's:
 
 - the names `float2`, `float4`, `float8`;
 - the literal `(float4)(a, b, c, d)`, which looks like a cast;
@@ -112,10 +113,17 @@ for C as `ext_vector_type`. So FMinus takes OpenCL C's:
 - the math functions, overloaded on vectors.
 
 The alternatives were weaker fits. GCC's `vector_size` attribute has no swizzles, and builds vectors from braces.
-C++'s `std::simd` is a library, not syntax. And clang's `ext_vector_type` is OpenCL C's model, so clang compiles the
-same C, which makes clang the reference for what FMinus should do. `clang -O0 -S -emit-llvm` on a C file with
-`typedef float float4 __attribute__((ext_vector_type(4)));` shows the IR to aim for, and its error messages are the
-ones FMinus reports.
+C++'s `std::simd` is a library, not syntax. And clang implements OpenCL C's model, which makes clang the reference for
+what FMinus should do: `clang -x cl -O0 -S -emit-llvm` on the same function shows the IR to aim for. FMinus's error
+messages are clang's: its C-mode ones for conversions, components and assignments (clang adds "(vector of 4 'float'
+values)" after a type, FMinus doesn't), and its OpenCL ones for literals ("too few elements in vector initialization
+(expected 4 elements, have 3)").
+
+One thing does not carry over to C. In C, even with `ext_vector_type`, `(float4)(a, b, c, d)` is not a literal: it
+is a cast of the comma expression `(a, b, c, d)`, so `d` in every lane. Clang only warns that "left operand of comma
+operator has no effect", and a C program printing the result gets `4 4 4 4` for `(float4)(1, 2, 3, 4)`. C's vector
+literal is a compound literal, `(float4){1, 2, 3, 4}`, which gives `1 2 3 4`. So FMinus has both: OpenCL C's
+parentheses, and C's braces, with C's meaning ("Literals", below). A function that uses only braces is C as well.
 
 Two of OpenCL C's rules are left out. OpenCL C's comparisons of float vectors give `int4` (0 or -1 per lane), which
 FMinus can't express without integers. FMinus gives a lane mask instead, which converts to 0 or 1 per lane as a
@@ -280,6 +288,10 @@ the value meets its type, so a failure gets clang's message for that place:
             }
 ```
 
+(This is `convert` as recipe 7 wrote it. Recipe 9 adds a splat to `poly bool` and uses the code generator's own
+`lanes(type)`, which knows a poly type's width; `Types.cpp` has that version. The same goes for `commonType` below,
+which recipe 9 teaches to refuse a poly type meeting a fixed vector.)
+
 | From | To | How |
 |---|---|---|
 | `float` or `bool` | `float4` | a splat (a `bool` is 0 or 1 first) |
@@ -413,6 +425,60 @@ The chain of `insertelement`s looks wasteful at `-O0`. At `-O2`, constant lanes 
   %0 = insertelement <4 x float> <float poison, float 2.000000e+00, float 3.000000e+00, float 4.000000e+00>, float %a, i64 0
   ret <4 x float> %0
 ```
+
+**C's form, in braces.** `(float4){a, b, c, d}` is C's compound literal, which clang's `ext_vector_type` gives vectors.
+It means what C says, which is not what the parentheses mean:
+
+| | OpenCL C's `(float4)(...)` | C's `(float4){...}` |
+|---|---|---|
+| one scalar, `(x)` / `{x}` | `x` in every lane | `x`, then three zeros |
+| fewer elements than lanes | an error | the rest are 0; `{}` is all zeros |
+| a vector element | its lanes fill in, `(float4)(v2, 1, 2)` | an error, except a single one of the literal's own type, `{v}`, which is `v` |
+| more elements than lanes | an error | an error (C only warns, and drops them) |
+| a trailing comma | a syntax error | allowed, `{a, b,}` |
+| `poly float` | `(poly float)(x)`, a broadcast | none: a program can't know how many lanes the zeros fill |
+
+The grammar has a rule for each form, the braces with and without the trailing comma, and a flag on the node tells
+them apart (`ConstructExpr::braces`). It needs no precedence: after `(float4)`, a `(` or a `{` decides. The lowering is
+its own function, because almost nothing is shared:
+
+```cpp
+    Lowering::Value Lowering::lowerBraces(SourceLocation location, const ast::ConstructExpr& construct,
+                                          const std::vector<Value>& args)
+    {
+        if (args.size() > lanes(construct.type))
+        {
+            error(location, "excess elements in vector initializer");
+            return poison(construct.type);
+        }
+        if (args.size() == 1 && args[0].type == construct.type)
+            return args[0];
+        llvm::Value* vector = llvm::Constant::getNullValue(typeOf(construct.type));
+        for (std::size_t i = 0; i < args.size(); ++i)
+        {
+            if (ast::isVector(args[i].type))
+            {
+                // clang's: the first element could initialise the whole vector, any other only a lane
+                incompatible(location, Use::Initializing, args[i].type, i == 0 ? construct.type : ast::Type::Float);
+                return poison(construct.type);
+            }
+            llvm::Value* element = convert(args[i], ast::Type::Float, location, Use::Initializing);
+            vector = builder_.CreateInsertElement(vector, element, static_cast<std::uint64_t>(i));
+        }
+        return {vector, construct.type};
+    }
+```
+
+It starts from a zero vector instead of poison, and the zeros fold into the constant:
+
+```llvm
+; float4 braces(float a) { return (float4){a, 2}; }     fminus -O2
+  %0 = insertelement <4 x float> <float poison, float 2.000000e+00, float 0.000000e+00, float 0.000000e+00>, float %a, i64 0
+```
+
+A function that builds its vectors with braces only is C as well. `examples/biquad/biquad.fm` does, and compiles with
+`clang -std=c17 -Wall -Wextra -Werror` given `typedef float float4 __attribute__((ext_vector_type(4)));`; the C build
+and FMinus's agree bit for bit.
 
 ### Swizzles
 
@@ -609,15 +675,17 @@ C++ gets FMinus's vector types from clang's extension, so the tests call JIT'd v
     CHECK(lanesOf(lookup<float4(float4)>(*jit, "reverse")(v)) == std::array{4.0f, 3.0f, 2.0f, 1.0f});
 ```
 
-`CodeGenTest.cpp` gets three test cases:
+`VectorTest.cpp` has four test cases:
 
 - literals, broadcasts, swizzles read and written, an uninitialised vector being zero;
+- C's brace literal: full, short, empty, one element, a copy, a mask element, its errors;
 - arithmetic with broadcasting, `%=`, builtins, the ordered sum (compared exactly with `((a + b) + c) + d`),
   `reduce_min` and `reduce_max` past a NaN lane, masks in `?:` and in arithmetic, and a `float8` used inside FMinus;
 - every error above, with its location.
 
-`FrontendTest.cpp` checks the dumps and that a swizzle binds tighter than unary minus. `tests/lit/fminus/simd.fm`
-checks the IR (the splat, `llvm.fabs.v4f32`, the shuffle, the ordered reduction, a select and no branch) and, on
+`FrontendTest.cpp` checks the dumps (a brace literal is `(float4 {a 2})`), that a swizzle binds tighter than unary
+minus, and that `(poly float){...}` is a syntax error. `tests/lit/fminus/simd.fm` checks the IR (the splat,
+`llvm.fabs.v4f32`, a brace literal's zeros, the shuffle, the ordered reduction, a select and no branch) and, on
 arm64, the assembly (`fmul.4s v0, v0, v1[0]`, `fcmgt.4s`, two `fmul.4s` for a `float8`), using lit's
 `%if arm64 %{ ... %}` so the IR checks still run elsewhere.
 
@@ -638,6 +706,8 @@ arm64, the assembly (`fmul.4s v0, v0, v1[0]`, `fcmgt.4s`, two `fmul.4s` for a `f
 | `k.x = 1` (`const float4 k`) | cannot assign to variable 'k' with const-qualified type 'const float4' |
 | `(float4)(1, 2, 3)` | too few elements in vector initialization (expected 4 elements, have 3) |
 | `(float4)(1, 2, 3, 4, 5)` | excess elements in vector initializer |
+| `(float4){1, 2, 3, 4, 5}` | excess elements in vector initializer (C only warns) |
+| `(float4){p, 1}`, `(float4){1, p}` (`p` a `float2`) | initializing 'float4' with an expression of incompatible type 'float2'; initializing 'float' ... |
 | `reduce_add(x)` (a float) | the argument of 'reduce_add' must be a float vector, not 'float' |
 | `if (v)` | statement requires expression of scalar type ('float4' invalid) |
 | `v && x` | a logical operator needs scalar operands, not 'float4' |
@@ -645,7 +715,7 @@ arm64, the assembly (`fmul.4s v0, v0, v1[0]`, `fcmgt.4s`, two `fmul.4s` for a `f
 
 ## Recipe 8: a vector math library
 
-*In the compiler. Tests: `CodeGenTest.cpp` (`[simd]`), `tests/lit/fminus/veclib.fm`.*
+*In the compiler. Tests: `VectorTest.cpp` (`[simd]`), `tests/lit/fminus/veclib.fm`.*
 
 After recipe 7, `sinf` of a `float4` is `llvm.sin.v4f32`, and the backend scalarises it:
 
@@ -779,7 +849,7 @@ _shape:                             ; tanhf(x) + sqrtf(fabsf(x)): only tanhf bec
 
 ### Tests
 
-`CodeGenTest.cpp`'s `sinf` check from recipe 7 changes from exact equality to Catch2's
+`VectorTest.cpp`'s `sinf` check from recipe 7 changes from exact equality to Catch2's
 `WithinULP(std::sin(x), 3)`, and a new test case sweeps `sinf` and `tanhf` over [-100, 100] the same way. It also checks
 that a `float8` `sinf` is still exactly eight calls to `sinf`, in lane order. `tests/lit/fminus/veclib.fm` checks the
 IR (`@_simd_sin_f4`, `@_simd_tanh_f4`, `llvm.fabs.v4f32` and `llvm.sqrt.v4f32` left alone, `llvm.sin.v8f32` left
@@ -788,7 +858,7 @@ alone) and, on arm64, the calls in the assembly. It is `REQUIRES: system-darwin`
 
 ## Recipe 9: `poly float`
 
-*In the compiler. Tests: `CodeGenTest.cpp` (`[poly]`), `FrontendTest.cpp`, `tests/lit/fminus/poly.fm`.*
+*In the compiler. Tests: `PolyTest.cpp` (`[poly]`), `FrontendTest.cpp`, `tests/lit/fminus/poly.fm`.*
 
 A `float4` is four lanes everywhere. On an AVX-512 machine, where a register holds sixteen floats, it uses a quarter
 of each register; on NEON it is just right. A `poly float` is a float vector as wide as the target's registers. The
@@ -1016,7 +1086,7 @@ from the CPU's features, as Highway's dynamic dispatch does.
 
 ### Tests
 
-`CodeGenTest.cpp` gets three test cases:
+`PolyTest.cpp` has three test cases:
 
 - one source compiled at 1, 2, 4, 8, 16 and 64 lanes (through `compile(source, &errors, {.polyLanes = lanes})`):
   `poly_lanes()`, the sum of `poly_index()`, a declared `poly bool`, `basel` against its own order and against
@@ -1029,6 +1099,52 @@ tokens that can start a function, more than Bison lists, so the top-level syntax
 part: "syntax error, unexpected identifier". `tests/lit/fminus/poly.fm` checks the IR at 4 and 16 lanes, the
 assembly (one `fdiv.4s` per iteration at 4 lanes, four at 16), runs in the JIT and as an executable, and the
 `--poly-lanes` check.
+
+## The examples
+
+Three examples use what the recipes added, and `tests/lit/fminus/examples.test` and ctest run them.
+
+**`examples/chord/chord.fm`** (recipes 7 and 8): a chord's four notes in a `float4`. One function turns four MIDI note
+numbers into four frequencies, with scalars broadcast and one vector `expf`:
+
+```c
+float4 frequencies(float4 notes)
+{
+    const float ln2 = 0.693147181f;
+    return 440 * expf((notes - 69) / 12 * ln2);
+}
+```
+
+At `-O2` that is one `call <4 x float> @_simd_exp_f4`. A literal rearranges the lanes:
+`(float4)(chord.yz, chord.w, chord.x * 2)` is the chord's first inversion, from a `float2`, a `float` and a product.
+`reduce_max(chord) / reduce_min(chord)` is its span. `main` picks one note with nested `?:` over `chord.x` to
+`chord.w`, since a lane can't be chosen by a variable yet. `fminus examples/chord/chord.fm --run main 60 1` prints
+`391.99542`, G4.
+
+**`examples/unison/unison.fm`** (recipe 9): detuned sawtooth voices, one per lane, strip-mined as in "Writing poly
+code":
+
+```c
+    for (float first = 0; first < voices; first += poly_lanes())
+    {
+        const poly float voice = first + poly_index();   // this step's voices, one a lane
+        const poly bool active = voice < voices;         // false in the lanes past the last voice
+        ...
+        mix += active ? saw(frequency * time) : 0;
+    }
+    return reduce_add(mix) / voices;
+```
+
+`active` is a `poly bool`, a mask a program can name. `--run main 0.01 7` at each width gives the mean of the same
+seven voices, with the last digits depending on the order of the additions (Python, in double: -0.79959219):
+
+| `--poly-lanes` | 1 | 2 | 4 | 8 | 16 | 64 |
+|---|---|---|---|---|---|---|
+| `main(0.01, 7)` | -0.7995922 | -0.79959214 | -0.79959214 | -0.7995922 | -0.7995922 | -0.7995922 |
+
+**`examples/biquad/`** (recipe 7): a `float4` as several results. The filter returns `(y, s1, s2, 0)` from one call,
+and computes its coefficients once a sample instead of three times. On the M5, in the dev build, that took it from
+6.35 to 3.9 ns a sample (C++: 2.65), with its output still bit-identical to C++'s. Its README has the rest of the plan.
 
 ## Scalable vectors
 
@@ -1128,6 +1244,8 @@ and the backend legalises both the same way.
 | The top-level syntax error loses its "expecting ..." list | `poly` is a fifth way to start a function; Bison lists at most four | update the test |
 | A local variable stops compiling after adding a member function | `std::vector<int> lanes` hides the member `lanes(type)` | rename the local |
 | `llc` crashes on scalable vectors with `-mattr=+sme` | streaming mode lacks `fadda`, and LLVM 23 can't expand an ordered scalable reduction | SVE for scalable code; fixed widths on Apple silicon |
+| An FMinus function with `(float4)(1, 2, 3, 4)`, compiled as C with `ext_vector_type`, gives `4 4 4 4` | in C the parentheses are a cast of a comma expression; only OpenCL C reads them as a literal | C's `(float4){1, 2, 3, 4}`, which FMinus has too; or `clang -x cl` to compare with FMinus |
+| `(float4){x}` is `x, 0, 0, 0`, where `(float4)(x)` is `x` in every lane | C's braces fill the lanes left out with 0; OpenCL C's parentheses broadcast a single scalar | the form that means what you want: both are there |
 
 ## Where to go next
 
@@ -1143,8 +1261,9 @@ Design notes, not written or verified:
   (`shufflevector` with indices computed from the width), and prefix sums. They are what filters across lanes need.
 - **Voices in lanes.** For a synthesizer: a struct of `poly float` state, one voice per lane, stepped together, with
   a mask for the lanes whose voices are off. The work is lane-independent, so the output is the same at any width.
-- **The biquad on four channels.** `float4` state and coefficients make `examples/biquad/` process four channels in
-  the time of one, once it has state and loops (its README's steps 3 and 4).
+- **The biquad on four channels.** `examples/biquad/` already returns its results in a `float4`. Four channels'
+  states and coefficients as `float4`s would process four channels in the time of one, once it has state (its README's
+  step 3): one call would otherwise have to return three `float4`s.
 - **Multiversioning.** Compile `poly` functions at several widths for executables, and dispatch on the CPU at load
   time.
 - **Fast-math, scoped.** A per-function or per-block `reassoc` (extending.md, "Contraction and fast-math") would let

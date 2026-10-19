@@ -9,7 +9,7 @@ The layers of tests, how to write each, and how to look at what the compiler did
 | unit (Catch2) | `tests/unit/*.cpp` | the parser through `ast::dump`; the code generator by running JIT'd functions; error messages | you change the language |
 | smoke (Catch2) | `tests/smoke/` | the toolchain itself: LLJIT and O3 on the host, an AOT executable, Bison and Flex (the calculator) | rarely: they guard the integration |
 | lit + FileCheck | `tests/lit/**` | the tools end to end: `fminus` IR, assembly, runs and errors; `fminus-build`; LLVM's tools | you change output a tool prints |
-| examples | `examples/<name>/` (`--check`) | a real kernel against C++, bit for bit or within a tolerance | you change what a kernel computes or how fast |
+| examples | `examples/<name>/` (`--check`); `tests/lit/fminus/examples.test` | a real kernel against C++, bit for bit or within a tolerance; the `.fm` examples' results | you change what a kernel or an example computes, or how fast |
 
 ```bash
 cmake --build --preset dev --target check-fminus   # build what the tests need, then ctest
@@ -34,9 +34,10 @@ Each file states what it tests in its first line, then has a few helpers and the
 
 - `parsed(source)` (`FrontendTest.cpp`) returns the dump of the parsed program, or its errors. Compare whole
   strings, so a parser test reads as input → tree.
-- `compile(source, &errors)` (`CodeGenTest.cpp`) parses, lowers and JIT-compiles at -O2, and returns the `Jit`, or
-  null with the formatted errors. `lookup<float(float)>(*jit, "f")` gives a callable function. A third parameter, the
-  `ir::Options`, compiles at a chosen `poly float` width: `compile(source, &errors, {.polyLanes = 16})`.
+- `compile(source, &errors)` (`Compile.h`, which the code generator's tests share: `CodeGenTest.cpp`,
+  `ControlFlowTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`) parses, lowers and JIT-compiles at -O2, and returns the
+  `Jit`, or null with the formatted errors. `lookup<float(float)>(*jit, "f")` gives a callable function. A third
+  parameter, the `ir::Options`, compiles at a chosen `poly float` width: `compile(source, &errors, {.polyLanes = 16})`.
 - `errorsOf(source)` returns the errors of a program that must fail.
 
 ```cpp
