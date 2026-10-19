@@ -163,3 +163,59 @@ TEST_CASE("every semantic error is reported, in source order, as clang words it"
              "test.fm:13:20: error: too many arguments to function call, expected 0, have 1\n"
              "test.fm:13:27: error: call to undeclared function 'q'\n");
 }
+
+TEST_CASE("bool, comparisons, !, && and ||, and ?: follow C", "[codegen]")
+{
+    std::string errors;
+    auto jit = compile("float magnitude(float x) { return x < 0 ? -x : x; }\n"
+                       "float sign(float x) { return x > 0 ? 1 : x < 0 ? -1 : 0; }\n"   // ?: nests to the right
+                       "bool positive(float x) { return x > 0; }\n"
+                       "bool truthy(float x) { return x; }\n"                           // C: x != 0, so NaN is true
+                       "float count(bool a, bool b) { return a + b + !a; }\n"           // C: a bool is 0 or 1
+                       "float both(float x)\n"                                          // && may skip its right side
+                       "{\n"
+                       "    float ran = 0;\n"
+                       "    x > 0 && (ran = 1);\n"
+                       "    return ran;\n"
+                       "}\n"
+                       "float either(float x) { float ran = 0; x > 0 || (ran = 1); return ran; }\n"
+                       "float pick(float x) { float t = 0; x > 0 ? (t = 1) : (t = 2); return t; }\n"   // one runs
+                       "bool range(float x) { return x >= 0 && x <= 1 || x == 10 || !(x != 20); }\n",
+                       &errors);
+    INFO(errors);
+    REQUIRE(jit);
+    auto magnitude = lookup<float(float)>(*jit, "magnitude");
+    auto sign = lookup<float(float)>(*jit, "sign");
+    auto positive = lookup<bool(float)>(*jit, "positive");
+    auto truthy = lookup<bool(float)>(*jit, "truthy");
+    auto count = lookup<float(bool, bool)>(*jit, "count");
+    auto both = lookup<float(float)>(*jit, "both");
+    auto either = lookup<float(float)>(*jit, "either");
+    auto pick = lookup<float(float)>(*jit, "pick");
+    auto range = lookup<bool(float)>(*jit, "range");
+    CHECK(magnitude(-2.5f) == 2.5f);
+    CHECK(sign(-4.0f) == -1.0f);
+    CHECK(sign(0.0f) == 0.0f);
+    CHECK(sign(7.0f) == 1.0f);
+    CHECK(positive(2.0f));
+    CHECK_FALSE(positive(std::nanf("")));
+    CHECK(truthy(std::nanf("")));
+    CHECK_FALSE(truthy(0.0f));
+    CHECK(count(true, true) == 2.0f);
+    CHECK(count(false, false) == 1.0f);
+    CHECK(both(1.0f) == 1.0f);
+    CHECK(both(-1.0f) == 0.0f);
+    CHECK(either(1.0f) == 0.0f);
+    CHECK(either(-1.0f) == 1.0f);
+    CHECK(pick(1.0f) == 1.0f);
+    CHECK(pick(-1.0f) == 2.0f);
+    CHECK(range(0.5f));
+    CHECK(range(10.0f));
+    CHECK(range(20.0f));
+    CHECK_FALSE(range(5.0f));
+
+    CHECK(errorsOf("float f(float a, float b, float c) { (a ? b : c) = 1; return a; }")
+          == "test.fm:1:50: error: expression is not assignable\n");
+    CHECK(errorsOf("float k() { const bool b = true; b = false; return 0; }")
+          == "test.fm:1:36: error: cannot assign to variable 'b' with const-qualified type 'const bool'\n");
+}

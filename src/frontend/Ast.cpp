@@ -25,6 +25,18 @@ namespace fminus::ast
                 return "/";
             case BinaryOp::Remainder:
                 return "%";
+            case BinaryOp::Less:
+                return "<";
+            case BinaryOp::Greater:
+                return ">";
+            case BinaryOp::LessEqual:
+                return "<=";
+            case BinaryOp::GreaterEqual:
+                return ">=";
+            case BinaryOp::Equal:
+                return "==";
+            case BinaryOp::NotEqual:
+                return "!=";
             }
             return "?";
         }
@@ -57,6 +69,8 @@ namespace fminus::ast
                 return "-";
             case UnaryOp::Plus:
                 return "+";
+            case UnaryOp::Not:
+                return "!";
             }
             return "?";
         }
@@ -66,6 +80,9 @@ namespace fminus::ast
             return std::visit(Overloaded{
                                   [](const NumberExpr& number) { return number.spelling; },
                                   [](const VariableExpr& variable) { return variable.name; },
+                                  [](const BoolExpr& constant) {
+                                      return std::string(constant.value ? "true" : "false");
+                                  },
                                   [](const UnaryExpr& unary) {
                                       return std::string("(") + opName(unary.op) + " " + dump(*unary.operand) + ")";
                                   },
@@ -78,6 +95,14 @@ namespace fminus::ast
                                       for (const ExprPtr& arg : call.args)
                                           text += " " + dump(*arg);
                                       return text + ")";
+                                  },
+                                  [](const LogicalExpr& logical) {
+                                      return std::string(logical.op == LogicalOp::And ? "(&& " : "(|| ")
+                                             + dump(*logical.lhs) + " " + dump(*logical.rhs) + ")";
+                                  },
+                                  [](const ConditionalExpr& conditional) {
+                                      return "(?: " + dump(*conditional.condition) + " " + dump(*conditional.thenValue)
+                                             + " " + dump(*conditional.elseValue) + ")";
                                   },
                                   [](const AssignExpr& assign) {
                                       return std::string("(") + opName(assign.op) + " " + dump(*assign.target) + " "
@@ -115,6 +140,8 @@ namespace fminus::ast
         {
         case Type::Float:
             return "float";
+        case Type::Bool:
+            return "bool";
         }
         return "?";
     }

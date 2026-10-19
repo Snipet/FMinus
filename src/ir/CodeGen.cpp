@@ -92,11 +92,12 @@ namespace fminus::ir
             }
 
         private:
-            // A variable in scope: its stack slot, and whether it may be assigned.
+            // A variable in scope: its stack slot, whether it may be assigned, and its type.
             struct Binding
             {
                 llvm::AllocaInst* slot;
                 bool isConst;
+                ast::Type type;
             };
 
             llvm::Type* typeOf(ast::Type type)
@@ -105,8 +106,22 @@ namespace fminus::ir
                 {
                 case ast::Type::Float:
                     return builder_.getFloatTy();
+                case ast::Type::Bool:
+                    return builder_.getInt1Ty();
                 }
                 return builder_.getFloatTy();
+            }
+
+            // C's implicit conversions between the two types: bool to float is 0 or 1, and float to bool is `x != 0`,
+            // so a NaN is true (an unordered comparison). Every value is a float or an i1.
+            llvm::Value* convert(llvm::Value* value, ast::Type type)
+            {
+                llvm::Type* target = typeOf(type);
+                if (value->getType() == target)
+                    return value;
+                if (type == ast::Type::Bool)
+                    return builder_.CreateFCmpUNE(value, llvm::ConstantFP::get(value->getType(), 0.0), "tobool");
+                return builder_.CreateUIToFP(value, target, "conv");
             }
 
             llvm::Value* poison(ast::Type type)
@@ -158,7 +173,16 @@ namespace fminus::ir
                 for (const ast::Param& param : function.params)
                     params.push_back(typeOf(param.type));
                 llvm::FunctionType* type = llvm::FunctionType::get(typeOf(function.returnType), params, false);
-                llvm::Function::Create(type, llvm::Function::ExternalLinkage, function.name, module_);
+                llvm::Function* llvmFunction =
+                    llvm::Function::Create(type, llvm::Function::ExternalLinkage, function.name, module_);
+                // The C ABI passes and returns bool zero-extended: say so, or a C++ caller reads garbage bits.
+                for (std::size_t i = 0; i < function.params.size(); ++i)
+                {
+                    if (function.params[i].type == ast::Type::Bool)
+                        llvmFunction->addParamAttr(static_cast<unsigned>(i), llvm::Attribute::ZExt);
+                }
+                if (function.returnType == ast::Type::Bool)
+                    llvmFunction->addRetAttr(llvm::Attribute::ZExt);
                 functions_.emplace(function.name, &function);
             }
 
@@ -167,6 +191,7 @@ namespace fminus::ir
             {
                 llvm::Function* llvmFunction = module_.getFunction(function.name);
                 builder_.SetInsertPoint(llvm::BasicBlock::Create(module_.getContext(), "entry", llvmFunction));
+                function_ = &function;
                 scopes_.assign(1, {});   // the outermost scope: the parameters and the body's own declarations
 
                 // Each parameter gets a slot, as a local does (clang names them x.addr), so it can be assigned.
@@ -182,7 +207,7 @@ namespace fminus::ir
                     argument->setName(param.name);
                     llvm::AllocaInst* slot = allocate(typeOf(param.type), param.name + ".addr");
                     builder_.CreateStore(argument, slot);
-                    if (!bind(param.name, Binding{slot, param.isConst}))
+                    if (!bind(param.name, Binding{slot, param.isConst, param.type}))
                         error(param.location, "redefinition of parameter " + quoted(param.name));
                 }
 
@@ -269,7 +294,9 @@ namespace fminus::ir
                 std::visit(Overloaded{
                                [&](const ast::DeclStmt& decl) { declareVariable(stmt.location, decl); },
                                [&](const ast::ExprStmt& statement) { lower(*statement.expr); },
-                               [&](const ast::ReturnStmt& ret) { builder_.CreateRet(lower(*ret.value)); },
+                               [&](const ast::ReturnStmt& ret) {
+                                   builder_.CreateRet(convert(lower(*ret.value), function_->returnType));
+                               },
                                [&](const ast::BlockStmt& block) {
                                    scopes_.emplace_back();
                                    lowerStatements(block.items);
@@ -284,11 +311,11 @@ namespace fminus::ir
             // the variable starts at 0.
             void declareVariable(SourceLocation location, const ast::DeclStmt& decl)
             {
-                llvm::Value* value =
-                    decl.init ? lower(*decl.init) : llvm::Constant::getNullValue(typeOf(decl.type));
+                llvm::Value* value = decl.init ? convert(lower(*decl.init), decl.type)
+                                               : llvm::Constant::getNullValue(typeOf(decl.type));
                 llvm::AllocaInst* slot = allocate(typeOf(decl.type), decl.name);
                 builder_.CreateStore(value, slot);
-                if (!bind(decl.name, Binding{slot, decl.isConst}))
+                if (!bind(decl.name, Binding{slot, decl.isConst, decl.type}))
                     error(location, "redefinition of " + quoted(decl.name));
             }
 
@@ -308,22 +335,28 @@ namespace fminus::ir
                             return builder_.CreateLoad(binding->slot->getAllocatedType(), binding->slot,
                                                        variable.name);
                         },
+                        [&](const ast::BoolExpr& constant) -> llvm::Value* { return builder_.getInt1(constant.value); },
                         [&](const ast::UnaryExpr& unary) -> llvm::Value* {
                             llvm::Value* operand = lower(*unary.operand);
                             switch (unary.op)
                             {
                             case ast::UnaryOp::Negate:
-                                return builder_.CreateFNeg(operand);
+                                return builder_.CreateFNeg(convert(operand, ast::Type::Float));
                             case ast::UnaryOp::Plus:
-                                return operand;
+                                return convert(operand, ast::Type::Float);
+                            case ast::UnaryOp::Not:
+                                return builder_.CreateNot(convert(operand, ast::Type::Bool), "lnot");
                             }
                             return poison(ast::Type::Float);
                         },
                         [&](const ast::BinaryExpr& binary) -> llvm::Value* {
-                            llvm::Value* lhs = lower(*binary.lhs);
-                            llvm::Value* rhs = lower(*binary.rhs);
+                            // C's usual arithmetic conversions, with float the only arithmetic type: a bool is 0 or 1.
+                            llvm::Value* lhs = convert(lower(*binary.lhs), ast::Type::Float);
+                            llvm::Value* rhs = convert(lower(*binary.rhs), ast::Type::Float);
                             return arithmetic(binary.op, lhs, rhs);
                         },
+                        [&](const ast::LogicalExpr& logical) { return lowerLogical(logical); },
+                        [&](const ast::ConditionalExpr& conditional) { return lowerConditional(conditional); },
                         [&](const ast::CallExpr& call) { return lowerCall(expr.location, call); },
                         [&](const ast::AssignExpr& assign) { return lowerAssign(expr.location, assign); },
                     },
@@ -344,8 +377,88 @@ namespace fminus::ir
                     return builder_.CreateFDiv(lhs, rhs);
                 case ast::BinaryOp::Remainder:
                     return builder_.CreateFRem(lhs, rhs);
+                // Ordered comparisons: false when either side is NaN. != is unordered: true then.
+                case ast::BinaryOp::Less:
+                    return builder_.CreateFCmpOLT(lhs, rhs, "cmp");
+                case ast::BinaryOp::LessEqual:
+                    return builder_.CreateFCmpOLE(lhs, rhs, "cmp");
+                case ast::BinaryOp::Greater:
+                    return builder_.CreateFCmpOGT(lhs, rhs, "cmp");
+                case ast::BinaryOp::GreaterEqual:
+                    return builder_.CreateFCmpOGE(lhs, rhs, "cmp");
+                case ast::BinaryOp::Equal:
+                    return builder_.CreateFCmpOEQ(lhs, rhs, "cmp");
+                case ast::BinaryOp::NotEqual:
+                    return builder_.CreateFCmpUNE(lhs, rhs, "cmp");
                 }
                 return poison(ast::Type::Float);
+            }
+
+            // a && b and a || b, as clang lowers them: b runs only when a does not decide (land.rhs, lor.rhs), and a
+            // phi joins the two ways out.
+            llvm::Value* lowerLogical(const ast::LogicalExpr& logical)
+            {
+                const bool isAnd = logical.op == ast::LogicalOp::And;
+                llvm::Value* lhs = convert(lower(*logical.lhs), ast::Type::Bool);
+                llvm::BasicBlock* lhsEnd = builder_.GetInsertBlock();
+                llvm::Function* function = lhsEnd->getParent();
+                llvm::LLVMContext& context = module_.getContext();
+                llvm::BasicBlock* rhsBlock =
+                    llvm::BasicBlock::Create(context, isAnd ? "land.rhs" : "lor.rhs", function);
+                llvm::BasicBlock* endBlock =
+                    llvm::BasicBlock::Create(context, isAnd ? "land.end" : "lor.end", function);
+                if (isAnd)
+                    builder_.CreateCondBr(lhs, rhsBlock, endBlock);
+                else
+                    builder_.CreateCondBr(lhs, endBlock, rhsBlock);
+
+                builder_.SetInsertPoint(rhsBlock);
+                llvm::Value* rhs = convert(lower(*logical.rhs), ast::Type::Bool);
+                llvm::BasicBlock* rhsEnd = builder_.GetInsertBlock();   // lowering b may have added blocks
+                builder_.CreateBr(endBlock);
+
+                builder_.SetInsertPoint(endBlock);
+                llvm::PHINode* phi = builder_.CreatePHI(builder_.getInt1Ty(), 2, isAnd ? "land" : "lor");
+                phi->addIncoming(builder_.getInt1(!isAnd), lhsEnd);   // && is false when a is; || is true when a is
+                phi->addIncoming(rhs, rhsEnd);
+                return phi;
+            }
+
+            // c ? a : b, as clang lowers it: only the branch taken runs, so it takes blocks and a phi (a select would
+            // run both). SimplifyCFG turns a small one without side effects into a select at -O1 and above.
+            llvm::Value* lowerConditional(const ast::ConditionalExpr& conditional)
+            {
+                llvm::Value* condition = convert(lower(*conditional.condition), ast::Type::Bool);
+                llvm::Function* function = builder_.GetInsertBlock()->getParent();
+                llvm::LLVMContext& context = module_.getContext();
+                llvm::BasicBlock* trueBlock = llvm::BasicBlock::Create(context, "cond.true", function);
+                llvm::BasicBlock* falseBlock = llvm::BasicBlock::Create(context, "cond.false", function);
+                llvm::BasicBlock* endBlock = llvm::BasicBlock::Create(context, "cond.end", function);
+                builder_.CreateCondBr(condition, trueBlock, falseBlock);
+
+                // Each branch may end in another block than it started in (a nested ?:): the phi needs the last. Both
+                // are lowered before their type is known, then converted to it at their ends.
+                builder_.SetInsertPoint(trueBlock);
+                llvm::Value* thenValue = lower(*conditional.thenValue);
+                llvm::BasicBlock* thenEnd = builder_.GetInsertBlock();
+                builder_.SetInsertPoint(falseBlock);
+                llvm::Value* elseValue = lower(*conditional.elseValue);
+                llvm::BasicBlock* elseEnd = builder_.GetInsertBlock();
+
+                const bool bothBool = thenValue->getType()->isIntegerTy(1) && elseValue->getType()->isIntegerTy(1);
+                const ast::Type type = bothBool ? ast::Type::Bool : ast::Type::Float;
+                builder_.SetInsertPoint(thenEnd);
+                thenValue = convert(thenValue, type);
+                builder_.CreateBr(endBlock);
+                builder_.SetInsertPoint(elseEnd);
+                elseValue = convert(elseValue, type);
+                builder_.CreateBr(endBlock);
+
+                builder_.SetInsertPoint(endBlock);
+                llvm::PHINode* phi = builder_.CreatePHI(typeOf(type), 2, "cond");
+                phi->addIncoming(thenValue, thenEnd);
+                phi->addIncoming(elseValue, elseEnd);
+                return phi;
             }
 
             // The constant rounded once, from its spelling straight to float (no detour through double). APFloat
@@ -388,15 +501,18 @@ namespace fminus::ir
                 if (binding->isConst)
                 {
                     error(location, "cannot assign to variable " + quoted(variable->name)
-                                        + " with const-qualified type 'const float'");
+                                        + " with const-qualified type "
+                                        + quoted(std::string("const ") + ast::typeName(binding->type)));
                     return poison(ast::Type::Float);
                 }
                 if (assign.op != ast::AssignOp::Assign)
                 {
                     llvm::Value* current =
                         builder_.CreateLoad(binding->slot->getAllocatedType(), binding->slot, variable->name);
-                    value = arithmetic(compoundOperator(assign.op), current, value);
+                    value = arithmetic(compoundOperator(assign.op), convert(current, ast::Type::Float),
+                                       convert(value, ast::Type::Float));
                 }
+                value = convert(value, binding->type);
                 builder_.CreateStore(value, binding->slot);
                 return value;
             }
@@ -431,6 +547,8 @@ namespace fminus::ir
                 {
                     if (args.size() != builtin->arity)
                         return wrongArity(location, call, builtin->arity);
+                    for (llvm::Value*& arg : args)
+                        arg = convert(arg, ast::Type::Float);
                     llvm::Function* intrinsic =
                         llvm::Intrinsic::getOrInsertDeclaration(&module_, builtin->intrinsic, {builder_.getFloatTy()});
                     return builder_.CreateCall(intrinsic, args);
@@ -444,6 +562,8 @@ namespace fminus::ir
                 const ast::Function& callee = *found->second;
                 if (args.size() != callee.params.size())
                     return wrongArity(location, call, static_cast<unsigned>(callee.params.size()));
+                for (std::size_t i = 0; i < args.size(); ++i)
+                    args[i] = convert(args[i], callee.params[i].type);
                 return builder_.CreateCall(module_.getFunction(call.callee), args);
             }
 
@@ -460,6 +580,7 @@ namespace fminus::ir
             llvm::IRBuilder<> builder_;
             std::unordered_map<std::string, const ast::Function*> functions_;   // the program's, by name
             std::vector<std::unordered_map<std::string, Binding>> scopes_;     // the current function's, inner last
+            const ast::Function* function_ = nullptr;                          // the function being lowered
         };
     } // namespace
 

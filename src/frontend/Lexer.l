@@ -53,6 +53,9 @@ IDENTIFIER  [A-Za-z_][A-Za-z0-9_]*
 "float"                     { return Parser::make_FLOAT(yyextra->where); }
 "const"                     { return Parser::make_CONST(yyextra->where); }
 "return"                    { return Parser::make_RETURN(yyextra->where); }
+"bool"                      { return Parser::make_BOOL(yyextra->where); }
+"true"                      { return Parser::make_TRUE(yyextra->where); }
+"false"                     { return Parser::make_FALSE(yyextra->where); }
 
 {DIGITS}"."[0-9]*{EXPONENT}?[fF]?   |
 "."{DIGITS}{EXPONENT}?[fF]?         |
@@ -74,6 +77,17 @@ IDENTIFIER  [A-Za-z_][A-Za-z0-9_]*
 "/="                        { return Parser::make_SLASH_ASSIGN(yyextra->where); }
 "%="                        { return Parser::make_PERCENT_ASSIGN(yyextra->where); }
 "+"                         { return Parser::make_PLUS(yyextra->where); }
+"<="                        { return Parser::make_LE(yyextra->where); }
+">="                        { return Parser::make_GE(yyextra->where); }
+"=="                        { return Parser::make_EQ(yyextra->where); }
+"!="                        { return Parser::make_NE(yyextra->where); }
+"&&"                        { return Parser::make_AND(yyextra->where); }
+"||"                        { return Parser::make_OR(yyextra->where); }
+"<"                         { return Parser::make_LT(yyextra->where); }
+">"                         { return Parser::make_GT(yyextra->where); }
+"!"                         { return Parser::make_NOT(yyextra->where); }
+"?"                         { return Parser::make_QUESTION(yyextra->where); }
+":"                         { return Parser::make_COLON(yyextra->where); }
 "-"                         { return Parser::make_MINUS(yyextra->where); }
 "*"                         { return Parser::make_STAR(yyextra->where); }
 "/"                         { return Parser::make_SLASH(yyextra->where); }

@@ -5,16 +5,19 @@
 //     program      : function*
 //     function     : type IDENTIFIER "(" (param ("," param)*)? ")" (block | ";")     a definition, or a prototype
 //     param        : "const"? type IDENTIFIER?                                       (a prototype may omit names)
-//     type         : "float"
+//     type         : "float" | "bool"
 //     block        : "{" (declaration | statement)* "}"
 //     declaration  : "const"? type declarator ("," declarator)* ";"
 //     declarator   : IDENTIFIER ("=" expr)?
 //     statement    : block | expr ";" | "return" expr ";" | ";"
-//     expr         : NUMBER | IDENTIFIER | IDENTIFIER "(" (expr ("," expr)*)? ")" | "(" expr ")"
-//                  | ("-" | "+") expr | expr ("*" | "/") expr | expr ("+" | "-") expr
-//                  | expr ("=" | "+=" | "-=" | "*=" | "/=") expr
+//     expr         : NUMBER | "true" | "false" | IDENTIFIER | IDENTIFIER "(" (expr ("," expr)*)? ")" | "(" expr ")"
+//                  | ("-" | "+" | "!") expr | expr ("*" | "/" | "%") expr | expr ("+" | "-") expr
+//                  | expr ("<" | "<=" | ">" | ">=") expr | expr ("==" | "!=") expr
+//                  | expr "&&" expr | expr "||" expr | expr "?" expr ":" expr
+//                  | expr ("=" | "+=" | "-=" | "*=" | "/=" | "%=") expr
 //
-// Precedence and associativity are C's, from the loosest: assignment (right to left), additive, multiplicative, unary.
+// Precedence and associativity are C's, from the loosest: assignment (right to left), ?: (right to left), ||, &&,
+// equality, relational, additive, multiplicative, unary.
 // The grammar accepts any expression on the left of an assignment; the code generator rejects what is not a variable
 // ("expression is not assignable"), so buffer elements and fields can join it later.
 //
@@ -79,6 +82,12 @@
             return fminus::ast::makeExpr(at(where), fminus::ast::BinaryExpr{op, std::move(lhs), std::move(rhs)});
         }
 
+        fminus::ast::ExprPtr logical(const fminus::frontend::location& where, fminus::ast::LogicalOp op,
+                                     fminus::ast::ExprPtr lhs, fminus::ast::ExprPtr rhs)
+        {
+            return fminus::ast::makeExpr(at(where), fminus::ast::LogicalExpr{op, std::move(lhs), std::move(rhs)});
+        }
+
         fminus::ast::ExprPtr assign(const fminus::frontend::location& where, fminus::ast::AssignOp op,
                                     fminus::ast::ExprPtr target, fminus::ast::ExprPtr value)
         {
@@ -87,7 +96,8 @@
     } // namespace
 }
 
-%token FLOAT "float" CONST "const" RETURN "return"
+%token FLOAT "float" CONST "const" RETURN "return" BOOL "bool" TRUE "true" FALSE "false"
+%token LT "<" LE "<=" GT ">" GE ">=" EQ "==" NE "!=" NOT "!" AND "&&" OR "||" QUESTION "?" COLON ":"
 %token PLUS "+" MINUS "-" STAR "*" SLASH "/" PERCENT "%"
 %token ASSIGN "=" PLUS_ASSIGN "+=" MINUS_ASSIGN "-=" STAR_ASSIGN "*=" SLASH_ASSIGN "/=" PERCENT_ASSIGN "%="
 %token LPAREN "(" RPAREN ")" LBRACE "{" RBRACE "}" COMMA "," SEMI ";"
@@ -108,6 +118,11 @@
 %nterm <std::vector<ast::ExprPtr>> args arg_list
 
 %right "=" "+=" "-=" "*=" "/=" "%="
+%right "?" ":"
+%left "||"
+%left "&&"
+%left "==" "!="
+%left "<" "<=" ">" ">="
 %left "+" "-"
 %left "*" "/" "%"
 %precedence UNARY
@@ -150,6 +165,7 @@ qualifier
 
 type
     : "float"                               { $$ = ast::Type::Float; }
+    | "bool"                                { $$ = ast::Type::Bool; }
     ;
 
 block
@@ -201,6 +217,15 @@ expr
     | "(" expr ")"                          { $$ = $2; }
     | "-" expr %prec UNARY                  { $$ = ast::makeExpr(at(@1), ast::UnaryExpr{ast::UnaryOp::Negate, $2}); }
     | "+" expr %prec UNARY                  { $$ = ast::makeExpr(at(@1), ast::UnaryExpr{ast::UnaryOp::Plus, $2}); }
+    | "!" expr %prec UNARY                  { $$ = ast::makeExpr(at(@1), ast::UnaryExpr{ast::UnaryOp::Not, $2}); }
+    | "true"                                { $$ = ast::makeExpr(at(@1), ast::BoolExpr{true}); }
+    | "false"                               { $$ = ast::makeExpr(at(@1), ast::BoolExpr{false}); }
+    | expr "<" expr                         { $$ = binary(@2, ast::BinaryOp::Less, $1, $3); }
+    | expr ">" expr                         { $$ = binary(@2, ast::BinaryOp::Greater, $1, $3); }
+    | expr "<=" expr                        { $$ = binary(@2, ast::BinaryOp::LessEqual, $1, $3); }
+    | expr ">=" expr                        { $$ = binary(@2, ast::BinaryOp::GreaterEqual, $1, $3); }
+    | expr "==" expr                        { $$ = binary(@2, ast::BinaryOp::Equal, $1, $3); }
+    | expr "!=" expr                        { $$ = binary(@2, ast::BinaryOp::NotEqual, $1, $3); }
     | expr "*" expr                         { $$ = binary(@2, ast::BinaryOp::Multiply, $1, $3); }
     | expr "/" expr                         { $$ = binary(@2, ast::BinaryOp::Divide, $1, $3); }
     | expr "%" expr                         { $$ = binary(@2, ast::BinaryOp::Remainder, $1, $3); }
@@ -212,6 +237,9 @@ expr
     | expr "*=" expr                        { $$ = assign(@2, ast::AssignOp::Multiply, $1, $3); }
     | expr "/=" expr                        { $$ = assign(@2, ast::AssignOp::Divide, $1, $3); }
     | expr "%=" expr                        { $$ = assign(@2, ast::AssignOp::Remainder, $1, $3); }
+    | expr "&&" expr                        { $$ = logical(@2, ast::LogicalOp::And, $1, $3); }
+    | expr "||" expr                        { $$ = logical(@2, ast::LogicalOp::Or, $1, $3); }
+    | expr "?" expr ":" expr                { $$ = ast::makeExpr(at(@2), ast::ConditionalExpr{$1, $3, $5}); }
     ;
 
 args

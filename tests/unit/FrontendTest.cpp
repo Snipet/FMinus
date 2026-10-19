@@ -65,6 +65,18 @@ TEST_CASE("operators have C's precedence and associativity", "[frontend]")
           == "(function float f ((float a) (float b))\n  (%= a b)\n  (return (+ a (* (% b a) b))))\n");
 }
 
+TEST_CASE("comparisons, !, && and ||, and ?: have C's precedence", "[frontend]")
+{
+    // Loosest first: assignment, ?:, ||, &&, equality, relational, additive, multiplicative, unary.
+    CHECK(parsed("bool f(float a, float b) { return a + 1 < b * 2 == a >= b && !(a != b) || a <= b; }")
+          == "(function bool f ((float a) (float b))\n"
+             "  (return (|| (&& (== (< (+ a 1) (* b 2)) (>= a b)) (! (!= a b))) (<= a b))))\n");
+    // ?: nests to the right, and an assignment takes the whole conditional.
+    CHECK(parsed("float g(float a, float x) { x = a > 0 ? 1 : a < 0 ? -1 : 0; return x; }")
+          == "(function float g ((float a) (float x))\n  (= x (?: (> a 0) 1 (?: (< a 0) (- 1) 0)))\n  (return x))\n");
+    CHECK(parsed("bool h() { return !true || false; }") == "(function bool h ()\n  (return (|| (! true) false)))\n");
+}
+
 TEST_CASE("constants keep their spelling: C's decimal, hex and integer forms", "[frontend]")
 {
     CHECK(parsed("float f() { return fmaxf(fminf(1, .5), g(2e3, 1.e-2f, 3.25E+1F, 0x1.8p1, 0x1p-3f, 1.)); }")
@@ -82,5 +94,5 @@ TEST_CASE("syntax and scanner errors carry their locations", "[frontend]")
     CHECK(parsed("float f(float x) /* never\nclosed { return x; }")
           == "test.fm:1:18: error: unterminated /* comment\n");
     CHECK(parsed("fn f(x: float) -> float { return x; }")
-          == "test.fm:1:1: error: syntax error, unexpected identifier, expecting end of file or float\n");
+          == "test.fm:1:1: error: syntax error, unexpected identifier, expecting end of file or float or bool\n");
 }

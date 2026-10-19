@@ -5,9 +5,10 @@ optimises it for the CPU it is running on, and ORC's LLJIT compiles it, all on t
 the same IR can also be compiled ahead of time into a native executable.
 
 **Status:** FMinus v0, a deliberately small subset of C that goes all the way through, from source to the JIT, to
-expand on. It has functions over `float`, declarations, assignments, blocks, `return`, arithmetic with `%`, calls and
-`<math.h>`'s float functions (below). A program with a `float main(...)` also builds into an executable. The build, the
-dependencies and the toolchain's smoke tests are in place around it.
+expand on. It has functions over `float` and `bool`, declarations, assignments, blocks, `return`, arithmetic with `%`,
+comparisons, `!`, `&&`, `||` and `?:`, calls and `<math.h>`'s float functions (below). A program with a
+`float main(...)` also builds into an executable. The build, the dependencies and the toolchain's smoke tests are in
+place around it.
 
 Documentation: [docs/](docs/README.md). It covers the architecture, writing a program with `main`, a guide to
 extending the compiler with worked recipes, SIMD (vector types, a vector math library, and vectors as wide as the
@@ -149,16 +150,17 @@ float half(float x) { x /= 2; return x; }
 | program | function definitions, `float name(float a, const float b) { ... }`, and prototypes, `float name(float);` |
 | declarations | `float x = e;`, `const float k = e;`, several at once (`float a = 1, b;`); block-scoped, shadowing allowed in an inner block |
 | statements | `{ ... }`, `e;`, `return e;`, `;` |
-| expressions | constants, names, calls, `( )`, unary `-` `+`, `* / %`, `+ -`, and `= += -= *= /= %=` (right to left; an assignment's value is the one stored) |
-| constants | C's floating and integer forms: `1.5`, `1.`, `.5`, `2e3`, `1.5e-3f`, hex floats `0x1.8p1`, `0x1p-3f`, and `2` |
+| expressions | constants, names, calls, `( )`, unary `-` `+` `!`, `* / %`, `+ -`, `< <= > >=`, `== !=`, `&&`, `\|\|` (both short-circuit), `?:` (only the branch taken runs), and `= += -= *= /= %=` (right to left; an assignment's value is the one stored), with C's precedence |
+| constants | C's floating and integer forms: `1.5`, `1.`, `.5`, `2e3`, `1.5e-3f`, hex floats `0x1.8p1`, `0x1p-3f`, and `2`; `true` and `false` |
 | comments | `// ...` and `/* ... */` |
-| types | `float` (IEEE single precision) |
+| types | `float` (IEEE single precision) and `bool` (C23's: 0 or 1 as a float; a float is `x != 0` as a bool) |
 | builtins | `fabsf sqrtf sinf cosf expf logf floorf fminf fmaxf tanhf` (LLVM intrinsics) |
 
 Where FMinus differs from C, it is on purpose:
 
-- **`float` is the only type, and every constant is a `float`.** In C an unsuffixed `1.5` is a `double`, and `x * 1.5`
-  is computed in double. Write the `f` suffix (`1.5f`) and a program means the same in both. Every example here does.
+- **`float` is the only arithmetic type, and every number is a `float`.** In C an unsuffixed `1.5` is a `double`, and
+  `x * 1.5` is computed in double. Write the `f` suffix (`1.5f`) and a program means the same in both. Every example
+  here does.
 - **`%` works on floats**, with `fmodf`'s semantics: the result has the sign of the dividend, so `-7.5 % 2` is
   `-1.5`. C allows `%` on integers only; HLSL allows it on floats. `%=` goes with it.
 - **A function may be called before its definition** without a prototype, because the compiler declares every

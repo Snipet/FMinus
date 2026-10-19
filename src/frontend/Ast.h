@@ -15,16 +15,19 @@
 
 namespace fminus::ast
 {
-    // The value types. float is IEEE single precision (LLVM's float); it is the only type so far.
+    // The value types. float is IEEE single precision (LLVM's float). bool is C23's: 0 or 1, which converts to float
+    // as 0 or 1, and to which a float converts as `x != 0` (a NaN is true).
     enum class Type
     {
         Float,
+        Bool,
     };
 
     enum class UnaryOp
     {
         Negate,   // -x
         Plus,     // +x: the value itself
+        Not,      // !x: a bool
     };
 
     enum class BinaryOp
@@ -34,6 +37,19 @@ namespace fminus::ast
         Multiply,
         Divide,
         Remainder,
+        Less,        // the comparisons give bool; with a NaN, all but != are false
+        LessEqual,
+        Greater,
+        GreaterEqual,
+        Equal,
+        NotEqual,
+    };
+
+    // && and ||: C's, so the right operand runs only when the left does not decide.
+    enum class LogicalOp
+    {
+        And,
+        Or,
     };
 
     // =, and the compound assignments: x op= v is x = x op v.
@@ -55,6 +71,28 @@ namespace fminus::ast
     struct NumberExpr
     {
         std::string spelling;
+    };
+
+    // `true` or `false`.
+    struct BoolExpr
+    {
+        bool value = false;
+    };
+
+    struct LogicalExpr
+    {
+        LogicalOp op = LogicalOp::And;
+        ExprPtr lhs;
+        ExprPtr rhs;
+    };
+
+    // `condition ? thenValue : elseValue`: C's, so only one branch runs. Two floats or two bools give that type;
+    // a float and a bool give float.
+    struct ConditionalExpr
+    {
+        ExprPtr condition;
+        ExprPtr thenValue;
+        ExprPtr elseValue;
     };
 
     struct VariableExpr
@@ -94,7 +132,9 @@ namespace fminus::ast
     struct Expr
     {
         SourceLocation location;
-        std::variant<NumberExpr, VariableExpr, UnaryExpr, BinaryExpr, CallExpr, AssignExpr> node;
+        std::variant<NumberExpr, VariableExpr, BoolExpr, UnaryExpr, BinaryExpr, LogicalExpr, CallExpr, AssignExpr,
+                     ConditionalExpr>
+            node;
     };
 
     struct Stmt;
