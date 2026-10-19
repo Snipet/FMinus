@@ -4,11 +4,12 @@ A JIT compiler for audio DSP. FMinus source is lexed by Flex and parsed by Bison
 optimises it for the CPU it is running on, and ORC's LLJIT compiles it, all on the user's machine. For development,
 the same IR can also be compiled ahead of time into a native executable.
 
-**Status:** FMinus v0, a deliberately small subset of C that goes all the way through, from source to the JIT, to
-expand on. It has functions over `float`, `int` and `bool`, and `void` ones; declarations, assignments, blocks, `if`,
-`while`, `for`, `break`, `continue` and `return`; arithmetic with `%`, `++` and `--`, casts, comparisons, `!`, `&&`,
-`||` and `?:`; calls and `<math.h>`'s float functions (below). It has pointers, `const` and `restrict` ones, so a
-function can take a C++ host's buffers and process a whole block in one call. It has SIMD: OpenCL C's `float2`,
+**Status:** FMinus v0, a deliberately small subset of C that goes all the way through, from source to the JIT, to expand
+on. It has functions over `float`, `int` and `bool`, and `void` ones; declarations, assignments, blocks, `if`, `while`,
+`for`, `break`, `continue` and `return`; arithmetic with `%`, `++` and `--`, casts, comparisons, `!`, `&&`, `||` and
+`?:`; calls and `<math.h>`'s float functions (below). It has pointers, `const` and `restrict` ones, so a function can
+take a C++ host's buffers and process a whole block in one call, and C's heap (`malloc`, `calloc`, `free`), with clang's
+`[[clang::nonblocking]]` checked so that the code on the audio thread can't reach it. It has SIMD: OpenCL C's `float2`,
 `float4` and `float8`, and `poly float`, a vector as wide as the machine's. A program with a `float main(...)` also
 builds into an executable. The build, the dependencies and the toolchain's smoke tests are in place around it.
 
@@ -157,14 +158,14 @@ float half(float x) { x /= 2; return x; }
 
 | | |
 |---|---|
-| program | function definitions, `float name(float a, const float b) { ... }` or `void name(...)`, and prototypes, `float name(float);`; `f(void)` is C's empty list |
+| program | function definitions, `float name(float a, const float b) { ... }` or `void name(...)`, and prototypes, `float name(float);`; `f(void)` is C's empty list; after the parameters, clang's `[[clang::nonallocating]]` or `[[clang::nonblocking]]`, checked: the function may not reach the heap (nor, nonblocking, an external function not marked so) |
 | declarations | `float x = e;`, `const float k = e;`, `float* p = out;`, several at once (`float a = 1, b;`; in `float *p, x;` only `p` is a pointer, as in C); block-scoped, shadowing allowed in an inner block |
 | statements | `{ ... }`, `e;`, `return e;` and `return;`, `;`, `if (c) s else s` (an `else` closes the nearest `if`), `while (c) s`, `for (init; c; step) s` (its declarations are the loop's), `break;`, `continue;` |
-| expressions | constants, names, calls, `( )`, unary `-` `+` `!`, `++` and `--` (before or after), casts `(int)x` `(float)x` `(bool)x`, `* / %`, `+ -`, `< <= > >=`, `== !=`, `&&`, `\|\|` (both short-circuit), `?:` (only the branch taken runs), and `= += -= *= /= %=` (right to left; an assignment's value is the one stored), with C's precedence; pointers' `p[i]`, `*p`, `&x`, `p + i`, `p - q` and comparisons; vector literals, OpenCL C's `(float4)(a, b, c, d)` and C's `(float4){a, b}` (the lanes left out are 0), and swizzles `v.wzyx`, `v.s0` |
+| expressions | constants, names, calls, `( )`, unary `-` `+` `!`, `++` and `--` (before or after), casts `(int)x` `(float)x` `(bool)x`, `* / %`, `+ -`, `< <= > >=`, `== !=`, `&&`, `\|\|` (both short-circuit), `?:` (only the branch taken runs), and `= += -= *= /= %=` (right to left; an assignment's value is the one stored), with C's precedence; pointers' `p[i]`, `*p`, `&x`, `p + i`, `p - q` and comparisons; `sizeof(type)`, an `int`; vector literals, OpenCL C's `(float4)(a, b, c, d)` and C's `(float4){a, b}` (the lanes left out are 0), and swizzles `v.wzyx`, `v.s0` |
 | constants | C's: floating ones are floats (`1.5`, `1.`, `.5`, `2e3`, `1.5e-3f`, hex floats `0x1.8p1`, `0x1p-3f`), integer ones ints (`2`, `010` in octal, `0x1F` in hex); `true` and `false` |
 | comments | `// ...` and `/* ... */` |
-| types | `float` (IEEE single precision), `int` (32 bits, signed: C's `/` and `%`, overflow undefined) and `bool` (C23's: 0 or 1, computed as an int; a number is `x != 0` as a bool); `void`, a function's result; pointers to `float`, `int`, `float2`, `float4` and `float8`, `const` (`const float*`, read-only through it) and `restrict` (C99's promise that nothing else reaches it); `float2`, `float4`, `float8` (OpenCL C's vectors, lane by lane, scalars broadcast); `poly float` and `poly bool`, as many lanes as the machine's vectors ([docs/simd.md](docs/simd.md)) |
-| builtins | `fabsf sqrtf sinf cosf expf logf floorf fminf fmaxf tanhf` (LLVM intrinsics, on floats and vectors); `reduce_add reduce_min reduce_max` (a vector to a float); `poly_lanes` (an int) and `poly_index` |
+| types | `float` (IEEE single precision), `int` (32 bits, signed: C's `/` and `%`, overflow undefined) and `bool` (C23's: 0 or 1, computed as an int; a number is `x != 0` as a bool); `void`, a function's result; pointers to `float`, `int`, `float2`, `float4` and `float8`, `const` (`const float*`, read-only through it) and `restrict` (C99's promise that nothing else reaches it), and `void*` (an address with no type, which converts to and from any pointer); `float2`, `float4`, `float8` (OpenCL C's vectors, lane by lane, scalars broadcast); `poly float` and `poly bool`, as many lanes as the machine's vectors ([docs/simd.md](docs/simd.md)) |
+| builtins | `fabsf sqrtf sinf cosf expf logf floorf fminf fmaxf tanhf` (LLVM intrinsics, on floats and vectors); `malloc calloc free` (C's, with `int` sizes); `reduce_add reduce_min reduce_max` (a vector to a float); `poly_lanes` (an int) and `poly_index` |
 
 Where FMinus differs from C, it is on purpose:
 
@@ -172,10 +173,14 @@ Where FMinus differs from C, it is on purpose:
   unsuffixed `1.5` is a `double`, and `x * 1.5` is computed in double; in FMinus it is a float. Write the `f` suffix
   (`1.5f`) and a program means the same in both. Every example here does. An integer constant is an `int`, as in C, so
   `1 / 2` is 0; one too large for an `int` is an error, where C would make it a `long`.
-- **Pointers point to `float`, `int`, `float2`, `float4` or `float8`, one level deep**: no pointers to pointers, no
-  `void*` or `bool*`, no arrays, no null pointer constant (`0` is an int; an uninitialised pointer is null) and no
-  casts between pointer types. Converting a pointer to one of another type, or dropping its `const`, is an error,
-  where C warns.
+- **Pointers point to `float`, `int`, `float2`, `float4`, `float8` or `void`, one level deep**: no pointers to
+  pointers, no `bool*`, no arrays, no null pointer constant (`0` is an int; an uninitialised pointer is null) and no
+  casts between pointer types. Converting a pointer to one of another type (other than through a `void*`), or
+  dropping its `const`, is an error, where C warns.
+- **The heap's memory is aligned to 64 bytes and zeroed**, `malloc`'s too, as everything FMinus declares starts at 0;
+  sizes are `int`s (C's are `size_t`s), so one block holds at most 2 GB. A call that breaks a function's
+  `[[clang::nonallocating]]` or `[[clang::nonblocking]]` is an error, where clang only warns
+  (`-Wfunction-effects`).
 - **Vectors are OpenCL C's**, which C has none of: `float2`, `float4`, `float8`, their literals and swizzles, and math
   functions that take them. A comparison of vectors gives a lane mask (OpenCL C gives 0 or -1 in an `int` vector), and
   `?:` with a vector condition picks each lane, so both sides run. Literals come in OpenCL C's form,
@@ -198,8 +203,9 @@ Where FMinus differs from C, it is on purpose:
 
 A v0 program with `f` suffixes, with prototypes for calls ahead of a definition, with vectors only in C's form (braces,
 given clang's `ext_vector_type`), and without `%` on floats, `poly` or `main`, is therefore also a valid C program with
-the same meaning, given `<math.h>` and `-ffp-contract=off`. The example above and `examples/biquad/biquad.fm` both
-compile as C under `-Wall -Wextra -Werror`.
+the same meaning, given `<math.h>` (`<stdlib.h>` for the heap; C23 for the attributes) and `-ffp-contract=off`. The
+example above, `examples/biquad/biquad.fm` and `examples/delay/delay.fm` all compile as C under `-Wall -Wextra
+-Werror`, the last with clang's `-Wfunction-effects` too.
 
 Every FMinus function becomes an external LLVM function of the same name with the C calling convention (a `float` is
 LLVM's `float`, an `int` an `i32`, a pointer a `ptr`), so C++ calls JIT'd code through a pointer of the matching type:
@@ -233,12 +239,14 @@ types:
    in `src/ir/`, in the file its kind belongs to (statements in `Statements.cpp`, vectors in `Vectors.cpp`, ...;
    `Lowering.h` has the list).
 4. Its tests: a dump in `tests/unit/FrontendTest.cpp`, a result in the code generator's tests (`CodeGenTest.cpp`,
-   `ControlFlowTest.cpp`, `IntTest.cpp`, `PointerTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`, which share
-   `Compile.h`), IR or errors in `tests/lit/fminus/*.fm` (`// RUN:` lines, checked by FileCheck).
+   `ControlFlowTest.cpp`, `IntTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `VectorTest.cpp`,
+   `PolyTest.cpp`, which share `Compile.h`), IR or errors in `tests/lit/fminus/*.fm` (`// RUN:` lines, checked by
+   FileCheck).
 
 `examples/biquad/` is a kernel to grow the language around. It is a biquad low-pass with coefficients recomputed
 every sample, which filters a block a call, with a harness that calls it once, compares it with C++ and times both,
-and a plan of features in its README.
+and a plan of features in its README. `examples/delay/` is a feedback delay whose line the program allocates, with a
+kernel marked `[[clang::nonblocking]]`.
 
 Each variable is a stack slot (an `alloca` in the entry block), read with loads and written with stores, so
 `fminus -O0` reads like `clang -O0`. From `-O1`, mem2reg promotes the slots back into registers.
@@ -328,7 +336,9 @@ These are constraints the research will run into, not things the skeleton handle
   runs in its host's process and has only the host's entitlements, so check each target DAW early. Unsigned test
   executables (this repository's) are unaffected.
 - **Real time.** LLJIT compiles lazily, on the thread that looks a symbol up. Compile and look up on a background
-  thread, hand the function pointer to the audio thread atomically, and keep JIT'd code free of allocation and locks.
+  thread, hand the function pointer to the audio thread atomically, and keep JIT'd code free of allocation and locks:
+  mark the functions the audio thread calls `[[clang::nonblocking]]`, and FMinus refuses any that could reach
+  `malloc` or `free` ([docs/extending.md](docs/extending.md), recipe 11).
 - **Size and symbols.** Static LLVM adds tens of megabytes. Export only the plugin's entry points (an
   exported-symbols list), so LLVM's symbols cannot clash with another copy of LLVM in the host process.
 - **Bit-exactness across machines.** Host-tuned code can differ in its last bits between CPUs (FMA contraction,

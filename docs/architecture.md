@@ -42,9 +42,11 @@ see the whole flow.
 `frontend/Diagnostics.h` holds what every stage reports into.
 
 - `SourceLocation` is a line and a column, both counted from 1 (the column counts bytes).
-- `Diagnostics` belongs to one compilation of one file. `error(location, message)` records an error. `hasErrors()`
-  tells a stage whether to hand over a result. `format()` renders `file:line:column: error: message` lines, sorted
-  into source order.
+- `Diagnostics` belongs to one compilation of one file. `error(location, message, notes)` records an error, with the
+  notes that explain it (clang's: `[[clang::nonblocking]]`'s errors have one for each call down to the `malloc`).
+  `hasErrors()` tells a stage whether to hand over a result. `format()` renders `file:line:column: error: message`
+  lines, sorted into source order, each followed by its `file:line:column: note: message` lines, wherever they
+  point.
 - The sort matters because the code generator reports in two passes (declarations, then bodies), so its errors
   arrive out of order. `errors()` keeps the order of reporting, for tests that care about it.
 
@@ -162,8 +164,9 @@ on it without the code generator.
 
 `ir::lower(program, context, diagnostics, options)` (`CodeGen.h`) creates a module named after the file.
 `options.polyLanes` is a `poly float`'s width, which the driver gets from the target machine (`polyLanes`, below). A
-`Lowering` object then runs two passes over the program. `Lowering` is one class (`Lowering.h`, internal to `src/ir/`,
-in `fminus::ir::detail`), but its members are defined across the directory by what they lower:
+`Lowering` object then runs two passes over the program, and checks the functions' effects after them. `Lowering` is one
+class (`Lowering.h`, internal to `src/ir/`, in `fminus::ir::detail`), but its members are defined across the directory
+by what they lower:
 
 | File | Lowering's members for |
 |---|---|
@@ -172,9 +175,10 @@ in `fminus::ir::detail`), but its members are defined across the directory by wh
 | `Functions.cpp` | declarations and prototypes (`declare`), bodies and parameters (`define`), stack slots and scopes |
 | `Statements.cpp` | blocks, declarations, `return`, `if`, `while`, `for`, `break` and `continue` |
 | `Expressions.cpp` | the expression `std::visit` (`lower`), constants, operators (`binary`, `arithmetic`), `&&` and `\|\|`, `?:`, casts, assignment, `++` and `--` |
-| `Calls.cpp` | the builtin tables, calls, reductions, `poly_lanes` and `poly_index`, and `ir::builtins()` |
+| `Calls.cpp` | the builtin tables, calls, reductions, `poly_lanes` and `poly_index`, the heap's `malloc`, `calloc` and `free`, and `ir::builtins()` |
 | `Vectors.cpp` | vector literals in both forms, swizzles, `?:` with a vector condition |
 | `Memory.cpp` | lvalues (`lvalue`, `read`, `write`): variables, elements (`p[i]`, `*p`), components of either; `&x`; pointer arithmetic |
+| `Effects.cpp` | `[[clang::nonallocating]]` and `[[clang::nonblocking]]`: each function's calls (recorded by `lowerCall`), checked once every body is lowered |
 
 The header declares every member under the name of its file, so it doubles as the map. A new node goes in the file its
 kind belongs to, and the compiler finds the rest: `lower`'s `std::visit` in `Expressions.cpp` and the statement visit in
@@ -245,8 +249,14 @@ to `bool` and to the same pointer with `const` added (`convertPointer`).
 - **Calls** first try the reductions (`reduce_add`, `reduce_min`, `reduce_max`) and `poly_lanes` and `poly_index`,
   then `kBuiltins`, a table from `<math.h>`'s float names to LLVM intrinsics (`fabsf` to `llvm.fabs`, `sinf` to
   `llvm.sin`, ...), declared with `Intrinsic::getOrInsertDeclaration` at the arguments' type, so `sinf` of a `float4`
-  is `llvm.sin.v4f32`. Then they try the program's functions. Argument counts are checked with clang's "too many/too
-  few arguments to function call".
+  is `llvm.sin.v4f32`. Then `kAllocations`, C's `malloc`, `calloc` and `free`, which call the runtime's functions
+  (below) with 64-bit sizes and give back a `void*`. Then they try the program's functions. Argument counts are
+  checked with clang's "too many/too few arguments to function call". Every call of the heap or of a program
+  function is recorded for the effects' check.
+- **Effects** (`Effects.cpp`) run after every body: a function marked `[[clang::nonallocating]]` or
+  `[[clang::nonblocking]]` (C23's syntax, after its parameters) is checked call by call, as clang's
+  `-Wfunction-effects` checks it, down through the program's unmarked functions; a call that could reach the heap
+  (or, nonblocking, an unmarked external function) is an error, with a note for each step down.
 - **Control flow** is blocks named as clang names them: `land.rhs` and `lor.rhs` for `&&` and `||`, `cond.true`,
   `cond.false` and `cond.end` for `?:`, `if.then`, `while.cond`, `for.inc`, ... A `?:` with a vector condition is a
   `select` instead, lane by lane.
@@ -316,8 +326,9 @@ the other outputs). `fminus-build` takes hand-written LLVM IR, which brings its 
 The runtime is a separate static library, `libfminus_runtime.a` (`FMinus::Runtime`), of plain C functions that
 generated code calls. It contains no LLVM.
 
-- `Runtime.h` declares the functions as `extern "C"`: a placeholder ABI version, and the command line and result of
-  an executable (`fminus_rt_main_args`, `fminus_rt_main_result`).
+- `Runtime.h` declares the functions as `extern "C"`: a placeholder ABI version, the command line and result of an
+  executable (`fminus_rt_main_args`, `fminus_rt_main_result`), and the heap that `malloc`, `calloc` and `free` call
+  (`fminus_rt_malloc`, `fminus_rt_calloc`, `fminus_rt_free`: 64-byte aligned, zeroed, on C's `aligned_alloc`).
 - `RuntimeSymbols.def` lists them, one `FMINUS_RUNTIME_SYMBOL(name)` each.
 - `support/JitRuntime.cpp` expands that list into absolute symbols in a JIT (`defineRuntimeSymbols`).
 - An executable gets the same functions by linking the archive.
@@ -365,7 +376,8 @@ Because the JIT and executables share one runtime, the two compile the same prog
   recipe 3: `bool` is `zeroext`; recipe 10: a `restrict` pointer is `noalias`; simd.md: `float8` goes through memory).
   The one exception is an executable's `main`, which `addEntryPoint` renames and makes internal.
 - **Semantics follow C unless a deviation is documented.** The README lists the deviations: `float` and `int` are the
-  only arithmetic types, an unsuffixed `1.5` is a `float`, pointers point to five types and convert only by adding
-  `const`, `%` works on floats, calls may precede definitions, uninitialised variables are 0, falling off a non-void
-  function's end is an error, and `main` returns a `float` or a `bool` and takes floats.
+  only arithmetic types, an unsuffixed `1.5` is a `float`, pointers point to six types and convert only through
+  `void*` or by adding `const`, the heap's memory is aligned and zeroed, `%` works on floats, calls may precede
+  definitions, uninitialised variables are 0, falling off a non-void function's end is an error, a broken function
+  effect is an error, and `main` returns a `float` or a `bool` and takes floats.
 - **The runtime stays free of LLVM and real-time safe.** It runs inside the audio thread's call tree.

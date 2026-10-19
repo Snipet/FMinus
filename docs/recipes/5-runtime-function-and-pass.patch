@@ -1,17 +1,18 @@
 diff --git a/src/ir/Calls.cpp b/src/ir/Calls.cpp
-index 1979d76..a693daa 100644
+index b91bdb4..9def2ed 100644
 --- a/src/ir/Calls.cpp
 +++ b/src/ir/Calls.cpp
-@@ -1,5 +1,6 @@
+@@ -1,6 +1,6 @@
  // src/ir/Calls.cpp: calls. The builtins, in the order a call tries them: the reductions, poly_lanes and poly_index,
--// then <math.h>'s float functions (LLVM intrinsics, overloaded on vectors); then the program's own functions.
-+// then <math.h>'s float functions (LLVM intrinsics, overloaded on vectors), then the runtime's functions; then the
-+// program's own functions.
+-// <math.h>'s float functions (LLVM intrinsics, overloaded on vectors), and <stdlib.h>'s heap (malloc, calloc and
+-// free, on the runtime's functions); then the program's own functions.
++// <math.h>'s float functions (LLVM intrinsics, overloaded on vectors), <stdlib.h>'s heap (malloc, calloc and free,
++// on the runtime's functions) and the runtime's other functions; then the program's own functions.
  #include "ir/Lowering.h"
  
  #include <llvm/IR/Constants.h>
-@@ -39,6 +40,21 @@ namespace fminus::ir::detail
-         return name == "poly_lanes" || name == "poly_index";
+@@ -57,6 +57,21 @@ namespace fminus::ir::detail
+         return nullptr;
      }
  
 +    // name -> the runtime's symbol for it.
@@ -32,7 +33,7 @@ index 1979d76..a693daa 100644
      const Builtin* findBuiltin(std::string_view name)
      {
          for (const Builtin& builtin : kBuiltins)
-@@ -88,6 +104,17 @@ namespace fminus::ir::detail
+@@ -115,6 +130,17 @@ namespace fminus::ir::detail
                  llvm::Intrinsic::getOrInsertDeclaration(&module_, builtin->intrinsic, {typeOf(type)});
              return {builder_.CreateCall(intrinsic, irArgs), type};
          }
@@ -51,23 +52,23 @@ index 1979d76..a693daa 100644
          if (found == functions_.end())
          {
 diff --git a/src/ir/Functions.cpp b/src/ir/Functions.cpp
-index 5b0dc0f..bade46a 100644
+index cf539b1..d01c9f0 100644
 --- a/src/ir/Functions.cpp
 +++ b/src/ir/Functions.cpp
-@@ -24,7 +24,7 @@ namespace fminus::ir::detail
+@@ -28,7 +28,7 @@ namespace fminus::ir::detail
+         Effect& effect = effects_[function.name];
+         effect = std::max(effect, declaredEffect(function));
  
-     void Lowering::declare(const ast::Function& function)
-     {
 -        if (isReduction(function.name) || isPolyQuery(function.name))
 +        if (findRuntimeFunction(function.name) != nullptr || isReduction(function.name) || isPolyQuery(function.name))
          {
              error(function.location, quoted(function.name) + " is a builtin and cannot be redefined");
              return;
 diff --git a/src/ir/Lowering.h b/src/ir/Lowering.h
-index 77fb6ba..9a5ff0d 100644
+index 82b8e5f..2318c61 100644
 --- a/src/ir/Lowering.h
 +++ b/src/ir/Lowering.h
-@@ -46,7 +46,17 @@ namespace fminus::ir::detail
+@@ -56,8 +56,18 @@ namespace fminus::ir::detail
          unsigned arity;
      };
  
@@ -81,6 +82,7 @@ index 77fb6ba..9a5ff0d 100644
 +    };
 +
      const Builtin* findBuiltin(std::string_view name);   // <math.h>'s float functions, or nullptr
+     const Allocation* findAllocation(std::string_view name);   // malloc, calloc, free, or nullptr
 +    const RuntimeFunction* findRuntimeFunction(std::string_view name);   // db_to_gain, or nullptr
      bool isReduction(std::string_view name);             // reduce_add, reduce_min, reduce_max
      bool isPolyQuery(std::string_view name);             // poly_lanes, poly_index
@@ -187,7 +189,7 @@ index 0000000..bbd5aff
 +    void registerPasses(llvm::PassBuilder& passes);
 +} // namespace fminus::opt
 diff --git a/src/runtime/Runtime.cpp b/src/runtime/Runtime.cpp
-index 5358735..46ea00a 100644
+index dfbd166..cf4eb5d 100644
 --- a/src/runtime/Runtime.cpp
 +++ b/src/runtime/Runtime.cpp
 @@ -2,6 +2,7 @@
@@ -197,10 +199,10 @@ index 5358735..46ea00a 100644
 +#include <cmath>
  #include <cstdio>
  #include <cstdlib>
- 
-@@ -45,3 +46,8 @@ extern "C" void fminus_rt_main_bool_result(bool result) noexcept
+ #include <cstring>
+@@ -74,3 +75,8 @@ extern "C" void fminus_rt_free(void* memory) noexcept
  {
-     std::fputs(result ? "true\n" : "false\n", stdout);
+     std::free(memory);
  }
 +
 +extern "C" float fminus_rt_db_to_gain(float db) noexcept
@@ -208,26 +210,26 @@ index 5358735..46ea00a 100644
 +    return std::pow(10.0f, db / 20.0f);
 +}
 diff --git a/src/runtime/Runtime.h b/src/runtime/Runtime.h
-index d4e212e..aec2b95 100644
+index f09c4d6..6721740 100644
 --- a/src/runtime/Runtime.h
 +++ b/src/runtime/Runtime.h
-@@ -25,4 +25,8 @@ extern "C"
- 
-     // The same for a main that returns bool: prints true or false.
-     void fminus_rt_main_bool_result(bool result) noexcept;
+@@ -34,4 +34,8 @@ extern "C"
+     void* fminus_rt_malloc(std::int64_t size) noexcept;
+     void* fminus_rt_calloc(std::int64_t count, std::int64_t size) noexcept;
+     void fminus_rt_free(void* memory) noexcept;
 +
 +    // Decibels to a linear gain: 10^(db / 20). FMinus code declares it (`float fminus_rt_db_to_gain(float db);`), or
 +    // calls it as the builtin db_to_gain (ir/Calls.cpp).
 +    float fminus_rt_db_to_gain(float db) noexcept;
  }
 diff --git a/src/runtime/RuntimeSymbols.def b/src/runtime/RuntimeSymbols.def
-index edbbbcb..8cd4079 100644
+index 9d84c25..f9d9428 100644
 --- a/src/runtime/RuntimeSymbols.def
 +++ b/src/runtime/RuntimeSymbols.def
-@@ -5,3 +5,4 @@ FMINUS_RUNTIME_SYMBOL(fminus_rt_abi_version)
- FMINUS_RUNTIME_SYMBOL(fminus_rt_main_args)
- FMINUS_RUNTIME_SYMBOL(fminus_rt_main_result)
- FMINUS_RUNTIME_SYMBOL(fminus_rt_main_bool_result)
+@@ -8,3 +8,4 @@ FMINUS_RUNTIME_SYMBOL(fminus_rt_main_bool_result)
+ FMINUS_RUNTIME_SYMBOL(fminus_rt_malloc)
+ FMINUS_RUNTIME_SYMBOL(fminus_rt_calloc)
+ FMINUS_RUNTIME_SYMBOL(fminus_rt_free)
 +FMINUS_RUNTIME_SYMBOL(fminus_rt_db_to_gain)
 diff --git a/src/support/HostTarget.cpp b/src/support/HostTarget.cpp
 index a9819f6..61b676d 100644
@@ -267,10 +269,10 @@ index 0000000..7a8a38a
 +// CHECK: define float @softclip({{.*}} #[[ATTRS:[0-9]+]]
 +// CHECK: attributes #[[ATTRS]] = { {{.*}}"fminus-flops"="3"
 diff --git a/tests/unit/CodeGenTest.cpp b/tests/unit/CodeGenTest.cpp
-index 92c56d9..42c6726 100644
+index c6c8659..51fb851 100644
 --- a/tests/unit/CodeGenTest.cpp
 +++ b/tests/unit/CodeGenTest.cpp
-@@ -127,3 +127,18 @@ TEST_CASE("every semantic error is reported, in source order, as clang words it"
+@@ -159,3 +159,18 @@ TEST_CASE("every semantic error is reported, in source order, as clang words it"
               "test.fm:13:20: error: too many arguments to function call, expected 0, have 1\n"
               "test.fm:13:27: error: call to undeclared function 'q'\n");
  }

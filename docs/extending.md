@@ -1,17 +1,16 @@
 # Extending the compiler
 
 How to add to FMinus. First, how a change moves through the compiler, and the few rules that keep that easy. Then
-seven worked recipes, which grow the C subset from a one-line builtin to C's control flow, a custom LLVM pass, and
-`int`, `void` and pointers. Then the pitfalls those recipes ran into, and design notes for what comes next.
-[simd.md](simd.md) has recipes 7 to 9, for vectors.
+eight worked recipes, which grow the C subset from a one-line builtin to C's control flow, a custom LLVM pass,
+`int`, `void` and pointers, and the heap with the attributes that keep it off the audio thread. Then the pitfalls
+those recipes ran into, and design notes for what comes next. [simd.md](simd.md) has recipes 7 to 9, for vectors.
 
-Recipes 1 to 4 are in the compiler now (`tanhf` and `%`; `bool` and its operators; `if`, `while` and `for`), and so
-are simd.md's 7 to 9 and recipe 10 (`int`, `void` and pointers), so their sections describe how the code you have got
-there: read a section beside the files it names. Recipes 5 and 6, a runtime function and a pass, are not part of
-the language; they live in [recipes/](recipes/) as a patch, so you can apply them to see them work. None of these are
-sketches: each was applied to this repository, built with `-Werror`, and tested in the dev and asan presets, every
-test passing.
-[architecture.md](architecture.md) describes the stages they touch.
+Recipes 1 to 4 are in the compiler now (`tanhf` and `%`; `bool` and its operators; `if`, `while` and `for`), and so are
+simd.md's 7 to 9, recipe 10 (`int`, `void` and pointers) and recipe 11 (the heap), so their sections describe how the
+code you have got there: read a section beside the files it names. Recipes 5 and 6, a runtime function and a pass, are
+not part of the language; they live in [recipes/](recipes/) as a patch, so you can apply them to see them work. None of
+these are sketches: each was applied to this repository, built with `-Werror`, and tested in the dev and asan presets,
+every test passing. [architecture.md](architecture.md) describes the stages they touch.
 
 FMinus follows C. When a recipe has a semantic choice to make, it makes C's: conversions, short-circuiting, which
 `if` an `else` belongs to, what `continue` does in a `for`. And it reports errors in clang's words. The README lists
@@ -27,10 +26,10 @@ Most language features touch the same places, in this order:
 | 2 | `src/frontend/Parser.y` | the tokens (`%token`), their precedence if they are operators, and the grammar rules with their actions |
 | 3 | `src/frontend/Ast.h` | a node: an alternative of `Expr::node` or `Stmt::node`, or an enumerator of `UnaryOp`, `BinaryOp`, `AssignOp`, `IncrementOp`, `Kind` (a type's) |
 | 4 | `src/frontend/Ast.cpp` | its `dump` |
-| 5 | `src/ir/` | its conversions and checks, and its lowering to LLVM IR, in the file its kind belongs to (`Lowering.h` lists them: types, functions, statements, expressions, calls, vectors, memory) |
+| 5 | `src/ir/` | its conversions and checks, and its lowering to LLVM IR, in the file its kind belongs to (`Lowering.h` lists them: types, functions, statements, expressions, calls, vectors, memory, effects) |
 | 6 | `src/runtime/` | if it needs C++ at run time, a runtime function (recipe 5) |
 | 7 | `tools/fminus/main.cpp`, `src/support/Aot.cpp` | for a new type: whether `--run` can pass and print it (its `switch` over the result type), and whether an executable's `main` may take or return it (`addEntryPoint`) |
-| 8 | `tests/` | a dump in `FrontendTest.cpp`; results in `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `IntTest.cpp`, `PointerTest.cpp`, `VectorTest.cpp` or `PolyTest.cpp` (their helpers are in `Compile.h`); IR or errors in `tests/lit/fminus/` |
+| 8 | `tests/` | a dump in `FrontendTest.cpp`; results in `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `IntTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `VectorTest.cpp` or `PolyTest.cpp` (their helpers are in `Compile.h`); IR or errors in `tests/lit/fminus/` |
 | 9 | `examples/` | a program that uses it, and a line in `tests/lit/fminus/examples.test` that runs it |
 | 10 | `editors/vscode/syntaxes/fminus.tmLanguage.json` | a new keyword, type or builtin, so VSCode highlights it (its README says where) |
 | 11 | `README.md` | the language table, and the deviations from C if any |
@@ -45,8 +44,9 @@ nothing reminds you of.
 
 Each feature has an example to read beside its recipe: `examples/comparison/` for `bool` (recipe 3),
 `examples/waveforms/` for every statement (recipe 4), `examples/chord/` for `float4` and the vector math library
-(recipes 7 and 8), `examples/unison/` for `poly float` (recipe 9), and `examples/biquad/` for a block of samples a
-call, through pointers (recipe 10).
+(recipes 7 and 8), `examples/unison/` for `poly float` (recipe 9), `examples/biquad/` for a block of samples a
+call, through pointers (recipe 10), and `examples/delay/` for state on the heap and a kernel that can't allocate
+(recipe 11).
 
 ## Ground rules
 
@@ -1343,6 +1343,181 @@ refuses an `int` or pointer parameter ("takes a parameter of type 'int'"); it pr
   `int` function. `tests/lit/fminus/pointers.fm`: the IR of `p[i]`, `noalias`, and the vectorised loop with and
   without `restrict`.
 
+## Recipe 11: the heap, kept off the audio thread
+
+*In the compiler. Example: `examples/delay/delay.fm`, a feedback delay whose line the program allocates; harness and
+measurements in its README.*
+
+A kernel's memory is often its own business. A delay line's length depends on the sample rate, a table's on the
+range it covers, and the program that uses the memory is the one that knows how much it needs. So FMinus has C's
+heap: `malloc`, `calloc` and `free`, with `void*` and `sizeof` to go with them. But an audio callback must never
+allocate: the system's allocator takes a lock and can fault in a page, and either one can miss a deadline. So FMinus
+also has clang's function effects, `[[clang::nonallocating]]` and `[[clang::nonblocking]]`, and checks them: a kernel
+marked with one cannot reach the heap, however far down its calls go.
+
+The pattern is three functions: one that allocates, one that runs a block, and one that frees.
+
+```c
+float* echo_create(int length)                     // off the audio thread: prepare(), once
+{
+    return calloc(length, sizeof(float));
+}
+
+void echo_process(float* restrict line, int* restrict position, int length, const float* restrict input,
+                  float* restrict output, int n, float feedback, float mix) [[clang::nonblocking]]
+{
+    ...                                            // the audio thread: every block, no allocation
+}
+
+void echo_destroy(float* line, int* position)      // off the audio thread: once, at the end
+{
+    free(line);
+    free(position);
+}
+```
+
+All of it is C23. Clang compiles the file with `<stdlib.h>`, its `-Wfunction-effects` checks the same attribute, and
+the two builds agree bit for bit (`examples/delay/README.md`). The recipe went in as three steps, each of which builds
+and passes the suite: notes in diagnostics, the heap, and the effects.
+
+### `malloc`, `calloc` and `free`
+
+They are builtins, as `<math.h>`'s functions are: a call is lowered without a prototype (one, as `<stdlib.h>` has,
+declares nothing new), and a definition of one is refused. Each calls a function of the runtime, `src/runtime/`
+(`Calls.cpp`):
+
+```cpp
+    constexpr std::array kAllocations{
+        Allocation{"malloc", "fminus_rt_malloc", 1},
+        Allocation{"calloc", "fminus_rt_calloc", 2},
+        Allocation{"free", "fminus_rt_free", 1},
+    };
+```
+
+`lowerAllocation` converts the sizes to `int` (C's are `size_t`, which FMinus doesn't have), widens them to 64 bits
+for the call, and gives back a `void*`:
+
+```cpp
+        std::vector<llvm::Value*> sizes;
+        std::vector<llvm::Type*> sizeTypes;
+        for (const Value& arg : args)
+        {
+            llvm::Value* size = convert(arg, ast::Type::Int, location, Use::Passing);
+            sizes.push_back(builder_.CreateSExt(size, builder_.getInt64Ty(), "size"));
+            sizeTypes.push_back(builder_.getInt64Ty());
+        }
+```
+
+The runtime functions join `RuntimeSymbols.def`, so the JIT defines them by address and an executable links them
+from `libfminus_runtime.a`, as recipe 5's `db_to_gain` would be. What they do is FMinus's choice:
+
+```cpp
+    void* memory = std::aligned_alloc(static_cast<std::size_t>(kAlignment), static_cast<std::size_t>(bytes));
+    if (memory != nullptr)
+        std::memset(memory, 0, static_cast<std::size_t>(bytes));
+    return memory;
+```
+
+- **Aligned to 64 bytes**: a cache line, and the widest vector there is (AVX-512's `poly float`). A `float8` loads from
+  it at its natural alignment, and two lines never share a cache line.
+- **Zeroed**, `malloc`'s memory too. C leaves `malloc`'s indeterminate; FMinus starts everything at 0, its variables
+  already, so a delay line starts silent. Write `calloc` for C's meaning everywhere. Zeroing touches every page, so
+  the audio thread never takes a page fault on the memory later, as it could on fresh pages from the system.
+- **Null** when a count or size is not positive, when the block would be more than 16 GiB (a mistake, which zeroing
+  would turn into the machine's whole memory; ASan's allocator aborts on such a request), or when the memory isn't
+  there.
+- **C's memory**: `aligned_alloc`'s blocks are `free`'s, so a C++ host may free what FMinus allocated, and FMinus may
+  free the host's `malloc`'s (`HeapTest.cpp` does both).
+
+### `void*` and `sizeof`
+
+`malloc` returns an address with no type, and C converts a `void*` to and from any other pointer without a cast. So
+`float* p = calloc(n, sizeof(float));` needs no cast in C, and none in FMinus. `canPointTo` now includes `Kind::Void`,
+and `convertPointer` accepts the conversion either way, `const` still refused where it would be dropped:
+
+```cpp
+            const bool compatible = value.type.pointee == type.pointee || value.type.pointee == ast::Kind::Void
+                                    || type.pointee == ast::Kind::Void;
+```
+
+A `void*` has no elements, so `element()` refuses `v[i]` ("subscript of pointer to incomplete type 'void'") and `*v`
+("indirection not permitted on operand of type 'void *'"), and `pointerArithmetic` refuses `v + 1` ("arithmetic on a
+pointer to void"). It compares with any pointer, and in `?:` meets any pointer as a `void*`, as in C.
+
+`sizeof(type)` is a constant `int` (C's is a `size_t`): `sizeOf` in `Types.cpp` knows each kind's size on the 64-bit
+targets FMinus runs on, as clang's `ext_vector_type` lays them out. A `float4` is 16, a pointer 8, and a `poly float`
+whatever the target's vectors hold: 16 bytes with NEON, 64 with AVX-512. The grammar takes a type, with a declarator's
+`*`: `"sizeof" "(" qualifier type pointer ")"`. C's `sizeof expr` is not there: its operand is not evaluated, and
+FMinus finds an expression's type only by lowering it.
+
+### The effects
+
+The attributes are C23's syntax, after a function's parameter list, where clang puts its function attributes:
+
+```yacc
+attributes
+    : %empty                                {}
+    | attributes "[" "[" attribute_list "]" "]"
+                                            { $$ = $1; for (ast::Attribute& a : $4) $$.push_back(std::move(a)); }
+    ;
+```
+
+The tree keeps them as written (`ast::Attribute`, a name such as `clang::nonblocking`), and `Effects.cpp` gives them
+their meaning, clang's:
+
+- **`nonallocating`**: the function calls no `malloc`, `calloc` or `free`;
+- **`nonblocking`**: nor anything else that might wait, which in FMinus means an external function (a prototype the
+  program doesn't define) whose own prototype isn't marked `nonblocking`.
+
+A function's effect is the strongest any of its declarations states. The check needs every body's calls, so it runs
+last. `lowerCall` records each call of an allocation builtin or a program function into `calls_` as it lowers it,
+and `checkEffects` goes through the calls of every marked function. `unsafe` decides one, following calls down:
+
+```cpp
+        if (findAllocation(callee) != nullptr)
+            return std::vector<Diagnostic>{};
+        const auto found = functions_.find(callee);
+        if (found == functions_.end() || effectOf(callee) >= required)
+            return std::nullopt;   // undeclared (an error of its own), or marked: its own definition is checked
+```
+
+A call is fine when it goes to a function marked with the effect (or the stronger one), since that function's own
+definition is checked. A function of the program without the mark is fine when its body is, by the same rule: clang
+infers an effect through the definitions it sees, and an FMinus program's are all seen. An external function without
+the mark is never fine; its definition isn't there to look at. Recursion is fine: a function already being looked into
+adds nothing that the first look won't find. `<math.h>`'s builtins are fine (clang trusts its own, too), so `sinf`
+works in a nonblocking kernel.
+
+Each call that breaks the effect is an error at the call, in clang's words (clang only warns; FMinus refuses), with a
+note for every step down to what breaks it:
+
+```
+effects.fm:19:18: error: function with 'nonblocking' attribute must not call non-'nonblocking' function 'helper'
+effects.fm:12:5: note: function cannot be inferred 'nonblocking' because it calls non-'nonblocking' function 'grow'
+effects.fm:7:12: note: function cannot be inferred 'nonblocking' because it calls non-'nonblocking' function 'calloc'
+```
+
+Notes are new in `Diagnostics`: an error carries them (`Diagnostic::notes`), and `format()` prints them right after
+it, wherever they point. The errors sort by their own locations, and the notes stay with their error.
+
+What the check does not see is what happens inside external functions that say they are nonblocking (it takes their
+word, as clang does) and inside the JIT'd code LLVM generates (calls to `fmodf` for `%` and to the vector math
+library, which allocate nothing). At run time, clang's RealtimeSanitizer (`-fsanitize=realtime`) checks the same
+attribute in C++; FMinus has no run-time check.
+
+### Tests
+
+- `tests/unit/HeapTest.cpp`: memory from `calloc` and `malloc`, aligned and zeroed, freed by C++ and by FMinus, and
+  the host's freed by FMinus; null for sizes that aren't positive or overflow; `sizeof` of each kind, `poly float`'s at
+  4 and 16 lanes; a delay line's state across two blocks; the errors (a redefined `malloc`, `void*`'s, `sizeof(void)`,
+  a `const` pointer to `free`).
+- `tests/unit/EffectTest.cpp`: a nonblocking kernel calling `sinf`, a marked prototype, and unmarked functions that
+  don't allocate, recursion included; the errors and their notes, clang's, for an inferred function, an external one,
+  `free`, a merely nonallocating prototype under `nonblocking`, and an unknown attribute.
+- `tests/unit/FrontendTest.cpp`: the dumps of attributes and `sizeof`, and notes printed after their error.
+- `tests/lit/fminus/heap.fm`: the IR of `calloc` and `free`, and an executable that allocates. `effects.fm`: the notes,
+  from the command line.
+
 ## Pitfalls
 
 Each of these was hit while writing the language or its recipes. [simd.md](simd.md) has the vector ones.
@@ -1368,6 +1543,8 @@ Each of these was hit while writing the language or its recipes. [simd.md](simd.
 | LLVM asserts "Insertelement types must match!" in `(float4)(1, 2, 3, 4)` | once integer constants are `int`s, `lowerConstruct` converted each scalar to `arithmeticOf` its type, an `int`, and inserted an `i32` into a float vector | convert a scalar element to `float`; only a vector's lanes keep their own type |
 | `typeName(type) + ...` will not build a name such as `'const float *'` | it returned a `const char*`, one per kind | return a `std::string`, built for a pointer |
 | A lit test that a loop vectorises without an overlap check passes either way | LLVM 23 folds the check for a simple loop into `iter.check` as `%diff.check`, without a `vector.memcheck` block | check for `diff.check`, and check that it appears when the `restrict` is gone (`pointers.fm` runs both) |
+| A C++ reference in a harness runs slower than the same code in FMinus | the examples and tests compile with LLVM's definitions, which turn on libc++'s hardening: a `std::vector`'s `operator[]` checks every index | write the reference on raw pointers, as the kernel is (`examples/delay/bench.cpp`) |
+| A test of `sizeof(poly float)` fails to parse, at a function named `poly` | `poly` is a keyword | another name |
 | The JIT crashes on a `void` value, or the verifier on a `void` phi | `PoisonValue` of `void`, or a `?:` that joins two `void` calls | `poison(Type::Void)` has no IR; `lowerConditional` builds no phi for `void` |
 
 ## Where to go next
@@ -1393,8 +1570,21 @@ not the types: `udiv` and `urem` beside recipe 10's `sdiv` and `srem`, unsigned 
 
 **Arrays, and more pointers.** A local array, `float history[16];`, is an `alloca [16 x float]`, and its name decays
 to a pointer to its first element, which recipe 10's `p[i]` already indexes. `bool*` needs `i8` in memory (recipe 10
-says why), `void*` a pointer whose element type a cast supplies, and null C's `0` as a pointer constant. Pointers to
-pointers are a `ptr` to a `ptr`, once a type can nest (`Type` would hold its pointee as a type, not a kind).
+says why), and null C's `0` as a pointer constant. Casts between pointer types (`(float4*)samples`, a float buffer
+seen as frames; `free((void*)table)`, a `const` pointer freed) are C's and change nothing in the IR, but a `float4*`
+cast from a `float*` must still meet a `float4`'s alignment. Pointers to pointers are a `ptr` to a `ptr`, once a type
+can nest (`Type` would hold its pointee as a type, not a kind).
+
+**`sizeof` of an expression.** C's `sizeof x` doesn't evaluate `x`. FMinus learns an expression's type only by
+lowering it, so it would need a type checker first (above), or a lowering into a block it then throws away.
+
+**The host's allocator.** `fminus_rt_malloc` and `fminus_rt_free` are where a plugin would plug in its own memory:
+an arena it hands each instance, freed all at once, or memory it has locked so the audio thread never faults on it. A
+runtime function that sets the allocator, or one arena per JIT, would do it.
+
+**A run-time check.** Recipe 11's check is static. Clang's RealtimeSanitizer (`-fsanitize=realtime`) catches the rest
+at run time: a function marked `nonblocking` that, while it runs, allocates or takes a lock anywhere, in a library
+too. FMinus could mark its kernels' LLVM functions as clang does for RTSan's instrumentation.
 
 **Structs.** `struct coefficients { float b0, b1, b2, a1, a2; };` becomes an LLVM struct type, with fields reached by
 GEP. At the C boundary, AArch64 passes and returns a struct of up to four floats in registers `s0`–`s3` (a
@@ -1403,8 +1593,10 @@ equivalent C declaration shows exactly what to emit. Inside FMinus, where calls 
 works.
 
 **State: globals and `static`.** File-scope variables lower to LLVM globals, and `static` locals likewise. For a
-plugin, prefer state the host owns, passed by pointer, as `examples/biquad/` passes its `float* state` since recipe
-10: nothing allocates on the audio thread, and every instance has its own copy. A struct would name the fields.
+plugin, prefer state each instance owns, passed by pointer: memory the host gives, as `examples/biquad/` passes its
+`float* state` (recipe 10), or memory the program allocates off the audio thread, as `examples/delay/` does (recipe
+11). Nothing then allocates on the audio thread, and every instance has its own copy. A struct would name the
+fields, and hold them in one allocation.
 
 **`switch`.** It lowers to LLVM's `switch` instruction, and its `break` reuses recipe 4's loop stack (rename
 `Loop`). Fall-through and `default:` are C's.
@@ -1429,9 +1621,10 @@ LLJIT's concurrent compilation, and caching objects between runs (`llvm::ObjectC
 ## Reference solutions
 
 The recipes in the compiler are their own reference: their code is in `src/`, and their tests in `tests/unit/`
-(`FrontendTest.cpp`, and `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `IntTest.cpp`, `PointerTest.cpp`, `VectorTest.cpp`
-and `PolyTest.cpp` for the code generator) and `tests/lit/fminus/`. [recipes/](recipes/) holds the two that
-aren't, 5 and 6, as one patch against the compiler as it is ([recipes/README.md](recipes/README.md)):
+(`FrontendTest.cpp`, and `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `IntTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`,
+`EffectTest.cpp`, `VectorTest.cpp` and `PolyTest.cpp` for the code generator) and `tests/lit/fminus/`.
+[recipes/](recipes/) holds the two that aren't, 5 and 6, as one patch against the compiler as it is
+([recipes/README.md](recipes/README.md)):
 
 ```bash
 git switch -c try-recipes

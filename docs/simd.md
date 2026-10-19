@@ -900,7 +900,7 @@ than none.
 |---|---|
 | `poly float` | a float per lane, as many lanes as the target's vector registers hold floats |
 | `poly bool` | a lane mask: what comparing `poly float`s gives; unlike `bool4`, a program can declare it |
-| `poly_lanes()` | the number of lanes, an `int` (a `float` before recipe 10): a constant once the target is known |
+| `poly_lanes()` | the number of lanes, an `int` (a `float` before recipe 10): a constant once the target is known; `sizeof(poly float)` is 4 bytes a lane (recipe 11) |
 | `poly_index()` | a `poly float` whose lanes hold their own index: 0, 1, 2, ... |
 | `(poly float)(x)` | a broadcast of one scalar |
 
