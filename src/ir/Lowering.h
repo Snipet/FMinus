@@ -6,7 +6,8 @@
 //     Statements.cpp    blocks, declarations, return, if, while, for, break and continue
 //     Expressions.cpp   constants, variables, operators, &&, ||, ?: and assignment
 //     Calls.cpp         calls: the builtins (math functions, reductions, poly queries) and the program's functions
-//     Vectors.cpp       vector literals, swizzles read and assigned, and ?: lane by lane
+//     Vectors.cpp       vector literals, swizzles, and ?: lane by lane
+//     Memory.cpp        lvalues, what assignments store to: variables and their components
 // A new node is lowered in the file its kind belongs to. The build says which members still need it: a std::visit
 // without its lambda fails to compile, and a switch without its enumerator trips -Wswitch.
 #pragma once
@@ -87,6 +88,18 @@ namespace fminus::ir::detail
             Logical,
         };
 
+        // Something a program can assign (Memory.cpp): a variable, or components of one. read() and write() load and
+        // store it.
+        struct LValue
+        {
+            llvm::Value* address = nullptr;   // the variable's stack slot
+            ast::Type type;                   // what a read gives, and what a write converts to
+            bool isConst = false;
+            std::string name;                 // the variable's
+            ast::Type whole;                  // the type of what is at `address`
+            std::vector<int> components;      // for components, the lanes of `whole` they are
+        };
+
         // The loops around the statement being lowered, innermost last: where break and continue go.
         struct Loop
         {
@@ -132,7 +145,6 @@ namespace fminus::ir::detail
         Value lowerConditional(SourceLocation location, const ast::ConditionalExpr& conditional);
         llvm::Value* lowerNumber(SourceLocation location, const ast::NumberExpr& number);
         Value lowerAssign(SourceLocation location, const ast::AssignExpr& assign);
-        const Binding* assignable(SourceLocation location, const ast::Expr& target);
         Value compound(SourceLocation location, ast::AssignOp op, Value current, Value value);
         static ast::BinaryOp compoundOperator(ast::AssignOp op);
 
@@ -145,8 +157,13 @@ namespace fminus::ir::detail
         std::optional<ast::Type> componentsType(SourceLocation location, std::size_t count);
         bool hasComponents(SourceLocation location, ast::Type type);
         Value lowerSwizzle(SourceLocation location, const ast::SwizzleExpr& swizzle);
-        Value assignComponents(SourceLocation location, const ast::AssignExpr& assign,
-                               const ast::SwizzleExpr& swizzle, Value value);
+
+        // ---- Memory.cpp ---------------------------------------------------------------------------------------------
+        static bool isLValue(const ast::Expr& expr);
+        std::optional<LValue> lvalue(const ast::Expr& expr, SourceLocation location);
+        bool writable(SourceLocation location, const LValue& target);
+        Value read(const LValue& source);
+        llvm::Value* write(SourceLocation location, const LValue& target, Value value, Use use);
 
         // ---- Calls.cpp ----------------------------------------------------------------------------------------------
         Value lowerCall(SourceLocation location, const ast::CallExpr& call);

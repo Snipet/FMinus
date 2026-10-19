@@ -22,6 +22,7 @@ TEST_CASE("float2, float4 and float8 are OpenCL C's vector types: literals, lane
                        "float2 middle(float4 v) { return v.yz; }\n"
                        "float4 set(float4 v) { v.x = 10; v.zw *= 2; return v; }\n"
                        "float2 swap(float2 v) { v.yx = v; return v; }\n"
+                       "float4 nested(float4 v) { v.wzyx.x = 10; v.zw.y += 1; return v; }\n"   // v.w twice
                        "float4 zero() { float4 v; return v; }\n",   // indeterminate in C; FMinus zeroes it
                        &errors);
     INFO(errors);
@@ -37,6 +38,7 @@ TEST_CASE("float2, float4 and float8 are OpenCL C's vector types: literals, lane
     CHECK(lanesOf(lookup<float4(float4)>(*jit, "set")(v)) == std::array{10.0f, 2.0f, 6.0f, 8.0f});
     const float2 swapped = lookup<float2(float2)>(*jit, "swap")(float2{1.0f, 2.0f});
     CHECK((swapped.x == 2.0f && swapped.y == 1.0f));
+    CHECK(lanesOf(lookup<float4(float4)>(*jit, "nested")(v)) == std::array{1.0f, 2.0f, 3.0f, 11.0f});
     CHECK(lanesOf(lookup<float4()>(*jit, "zero")()) == std::array{0.0f, 0.0f, 0.0f, 0.0f});
 }
 

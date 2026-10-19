@@ -211,54 +211,26 @@ namespace fminus::ir::detail
         return llvm::ConstantFP::get(module_.getContext(), value);
     }
 
-    // `target op value`: the target must be a variable that is not const. The value of the expression is
-    // the one stored.
+    // `target op value`: the target must be an lvalue that is not const (Memory.cpp). The value of the expression
+    // is the one stored.
     Lowering::Value Lowering::lowerAssign(SourceLocation location, const ast::AssignExpr& assign)
     {
         Value value = lower(*assign.value);
-        if (const auto* swizzle = std::get_if<ast::SwizzleExpr>(&assign.target->node))
-            return assignComponents(location, assign, *swizzle, value);
-        const Binding* binding = assignable(location, *assign.target);
-        if (binding == nullptr)
-            return poison(ast::Type::Float);
-        llvm::AllocaInst* slot = binding->slot;
-        if (assign.op != ast::AssignOp::Assign)
-        {
-            const Value current{builder_.CreateLoad(slot->getAllocatedType(), slot, slot->getName()),
-                                binding->type};
-            value = compound(location, assign.op, current, value);
-            if (value.ir == nullptr)
-                return poison(binding->type);
-        }
-        llvm::Value* stored = convert(value, binding->type, location, Use::Assigning);
-        builder_.CreateStore(stored, slot);
-        return {stored, binding->type};
-    }
-
-    // The variable an assignment stores to: one that is declared and not const. Otherwise reports clang's
-    // error and returns null.
-    const Lowering::Binding* Lowering::assignable(SourceLocation location, const ast::Expr& target)
-    {
-        const auto* variable = std::get_if<ast::VariableExpr>(&target.node);
-        if (variable == nullptr)
+        if (!isLValue(*assign.target))
         {
             error(location, "expression is not assignable");
-            return nullptr;
+            return poison(ast::Type::Float);
         }
-        const Binding* binding = find(variable->name);
-        if (binding == nullptr)
+        const std::optional<LValue> target = lvalue(*assign.target, location);
+        if (!target || !writable(location, *target))
+            return poison(ast::Type::Float);
+        if (assign.op != ast::AssignOp::Assign)
         {
-            error(target.location, "use of undeclared identifier " + quoted(variable->name));
-            return nullptr;
+            value = compound(location, assign.op, read(*target), value);
+            if (value.ir == nullptr)
+                return poison(target->type);
         }
-        if (binding->isConst)
-        {
-            error(location, "cannot assign to variable " + quoted(variable->name)
-                                + " with const-qualified type "
-                                + quoted(std::string("const ") + ast::typeName(binding->type)));
-            return nullptr;
-        }
-        return binding;
+        return {write(location, *target, value, Use::Assigning), target->type};
     }
 
     // What `current op= value` stores: the operator, in the type both convert to (a scalar broadcasts to a

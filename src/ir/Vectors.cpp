@@ -1,5 +1,5 @@
-// src/ir/Vectors.cpp: vector expressions, OpenCL C's: literals, swizzles read and assigned, and ?: with a vector
-// condition, lane by lane. The types, and how scalars broadcast, are Types.cpp's.
+// src/ir/Vectors.cpp: vector expressions, OpenCL C's: literals, swizzles, and ?: with a vector condition, lane by
+// lane. The types, and how scalars broadcast, are Types.cpp's; assigning components is Memory.cpp's.
 #include "ir/Lowering.h"
 
 #include <llvm/IR/Constants.h>
@@ -198,54 +198,5 @@ namespace fminus::ir::detail
                                                   swizzle.components),
                     *type};
         return {builder_.CreateShuffleVector(base.ir, *lanes, swizzle.components), *type};
-    }
-
-    // v.x = e, v.zw += e: components of a vector variable, assigned. They must be distinct, and the value has
-    // their type (a float for one, a vector of their number otherwise; a scalar is broadcast to it).
-    Lowering::Value Lowering::assignComponents(SourceLocation location, const ast::AssignExpr& assign,
-                                               const ast::SwizzleExpr& swizzle, Value value)
-    {
-        const Binding* binding = assignable(location, *swizzle.base);
-        if (binding == nullptr || !hasComponents(location, binding->type))
-            return poison(ast::Type::Float);
-        const auto lanes = components(location, swizzle.components, binding->type);
-        if (!lanes)
-            return poison(ast::Type::Float);
-        for (std::size_t i = 0; i < lanes->size(); ++i)
-        {
-            for (std::size_t j = i + 1; j < lanes->size(); ++j)
-            {
-                if ((*lanes)[i] == (*lanes)[j])
-                {
-                    error(location, "vector is not assignable (contains duplicate components)");
-                    return poison(ast::Type::Float);
-                }
-            }
-        }
-        const auto type = componentsType(location, lanes->size());
-        if (!type)
-            return poison(ast::Type::Float);
-
-        llvm::AllocaInst* slot = binding->slot;
-        llvm::Value* vector = builder_.CreateLoad(slot->getAllocatedType(), slot, slot->getName());
-        if (assign.op != ast::AssignOp::Assign)
-        {
-            llvm::Value* lanesNow =
-                lanes->size() == 1
-                    ? builder_.CreateExtractElement(vector, static_cast<std::uint64_t>((*lanes)[0]))
-                    : builder_.CreateShuffleVector(vector, *lanes);
-            const Value current{lanesNow, *type};
-            value = compound(location, assign.op, current, value);
-            if (value.ir == nullptr)
-                return poison(*type);
-        }
-        llvm::Value* stored = convert(value, *type, location, Use::Assigning);
-        for (std::size_t i = 0; i < lanes->size(); ++i)
-        {
-            llvm::Value* element = lanes->size() == 1 ? stored : builder_.CreateExtractElement(stored, i);
-            vector = builder_.CreateInsertElement(vector, element, static_cast<std::uint64_t>((*lanes)[i]));
-        }
-        builder_.CreateStore(vector, slot);
-        return {stored, *type};
     }
 } // namespace fminus::ir::detail
