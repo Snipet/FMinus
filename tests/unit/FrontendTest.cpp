@@ -45,9 +45,9 @@ TEST_CASE("the parser builds functions, declarations, statements and blocks", "[
 
 TEST_CASE("prototypes declare, and may leave parameter names out", "[frontend]")
 {
-    CHECK(parsed("float half(float);\nfloat tanhf(const float x);\nfloat half(float x) { return x / 2; }\n")
+    CHECK(parsed("float half(float);\nfloat atanf(const float x);\nfloat half(float x) { return x / 2; }\n")
           == "(declare float half ((float)))\n"
-             "(declare float tanhf ((const float x)))\n"
+             "(declare float atanf ((const float x)))\n"
              "(function float half ((float x))\n"
              "  (return (/ x 2)))\n");
 }

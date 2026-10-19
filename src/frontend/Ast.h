@@ -356,7 +356,7 @@ namespace fminus::ast
 
     // A definition, or a prototype (`float f(float x);`, no body). As in C, a prototype declares a function defined
     // later or elsewhere: one with no definition in the program is external, resolved when the code is linked (the
-    // JIT looks in the process, so `float tanhf(float x);` calls libm's).
+    // JIT looks in the process, so `float atanf(float x);` calls libm's).
     struct Function
     {
         SourceLocation location;   // of its name

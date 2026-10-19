@@ -47,12 +47,12 @@ TEST_CASE("variables have C's semantics: assignable, scoped, zeroed when uniniti
 TEST_CASE("prototypes declare functions defined later, or elsewhere (external, resolved at link time)", "[codegen]")
 {
     auto jit = compile("float half(float);\n"
-                       "float tanhf(float x);\n"   // no definition: external, libm's (the JIT looks in the process)
+                       "float atanf(float x);\n"   // no definition: external, libm's (the JIT looks in the process)
                        "float sinf(float);\n"      // a builtin's prototype, as <math.h> has, changes nothing
-                       "float f(float x) { return tanhf(half(x)) + sinf(0); }\n"
+                       "float f(float x) { return atanf(half(x)) + sinf(0); }\n"
                        "float half(const float x) { return x / 2; }\n");
     REQUIRE(jit);
-    CHECK(lookup<float(float)>(*jit, "f")(2.0f) == std::tanh(1.0f));
+    CHECK(lookup<float(float)>(*jit, "f")(2.0f) == std::atan(1.0f));
     CHECK(errorsOf("float f(float x);\n"
                    "float f(float x, float y) { return x; }\n"
                    "float sinf(float a, float b);\n"
@@ -70,7 +70,7 @@ TEST_CASE("builtins are <math.h>'s float functions, lowered to LLVM's intrinsics
 {
     auto jit = compile("float f(float x) { return sqrtf(x) + fabsf(-x) + floorf(x / 2) + fminf(x, 1) + fmaxf(x, 1); }\n"
                        "float g(float x) { return sinf(x) * sinf(x) + cosf(x) * cosf(x) + logf(expf(x)); }\n"
-                        "float h(float x) { return tanhf(x); }\n");
+                       "float h(float x) { return tanhf(x); }\n");
     REQUIRE(jit);
     CHECK(lookup<float(float)>(*jit, "f")(9.0f) == 3.0f + 9.0f + 4.0f + 1.0f + 9.0f);
     CHECK(std::abs(lookup<float(float)>(*jit, "g")(0.25f) - 1.25f) < 1e-6f);
