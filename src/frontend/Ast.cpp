@@ -260,6 +260,8 @@ namespace fminus::ast
                         + (param.name.empty() ? "" : " " + param.name) + ")";
             }
             text += ")";
+            for (const Attribute& attribute : function.attributes)
+                text += " [[" + attribute.name + "]]";
             for (const Stmt& stmt : function.body)
                 text += "\n" + dump(stmt, "  ");
             text += ")\n";

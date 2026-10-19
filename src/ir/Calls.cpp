@@ -87,7 +87,10 @@ namespace fminus::ir::detail
             return {llvm::ConstantVector::get(indices), ast::Type::PolyFloat};
         }
         if (const Allocation* allocation = findAllocation(call.callee))
+        {
+            calls_[function_->name].push_back({location, call.callee});   // what Effects.cpp checks
             return lowerAllocation(location, *allocation, call, args);
+        }
         std::vector<llvm::Value*> irArgs;
         if (const Builtin* builtin = findBuiltin(call.callee))
         {
@@ -119,6 +122,7 @@ namespace fminus::ir::detail
             return poison(ast::Type::Float);
         }
         const ast::Function& callee = *found->second;
+        calls_[function_->name].push_back({location, call.callee});
         if (args.size() != callee.params.size())
             return wrongArity(location, call, static_cast<unsigned>(callee.params.size()));
         for (std::size_t i = 0; i < args.size(); ++i)

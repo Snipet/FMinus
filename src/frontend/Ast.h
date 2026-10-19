@@ -483,6 +483,14 @@ namespace fminus::ast
     // A definition, or a prototype (`float f(float x);`, no body). As in C, a prototype declares a function defined
     // later or elsewhere: one with no definition in the program is external, resolved when the code is linked (the
     // JIT looks in the process, so `float atanf(float x);` calls libm's).
+    // `[[clang::nonblocking]]` after a function's parameters: C23's attribute syntax, with clang's names. The tree
+    // keeps an attribute as written; the code generator gives it its meaning (ir/Effects.cpp).
+    struct Attribute
+    {
+        SourceLocation location;
+        std::string name;   // "clang::nonblocking", or a name without its namespace
+    };
+
     struct Function
     {
         SourceLocation location;   // of its name
@@ -491,6 +499,7 @@ namespace fminus::ast
         Type returnType = Type::Float;
         std::vector<Stmt> body;   // the outermost block's items: the same scope as the parameters
         bool isDefinition = true;
+        std::vector<Attribute> attributes;
     };
 
     struct Program

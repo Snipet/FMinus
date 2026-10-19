@@ -8,6 +8,7 @@
 //     Calls.cpp         calls: the builtins (math functions, reductions, poly queries, the heap) and the program's
 //     Vectors.cpp       vector literals, swizzles, and ?: lane by lane
 //     Memory.cpp        lvalues (variables, p[i], *p, components) read and written, &x, and pointer arithmetic
+//     Effects.cpp       [[clang::nonallocating]] and [[clang::nonblocking]], checked over the calls
 // A new node is lowered in the file its kind belongs to. The build says which members still need it: a std::visit
 // without its lambda fails to compile, and a switch without its enumerator trips -Wswitch.
 #pragma once
@@ -63,6 +64,14 @@ namespace fminus::ir::detail
     class Lowering
     {
     public:
+        // What a function promises not to do (Effects.cpp), weakest first: nonblocking includes nonallocating.
+        enum class Effect
+        {
+            None,
+            NonAllocating,
+            NonBlocking,
+        };
+
         Lowering(llvm::Module& module, Diagnostics& diagnostics, const Options& options);
 
         // Declares every function, then defines each body (CodeGen.cpp).
@@ -108,6 +117,13 @@ namespace fminus::ir::detail
             std::string name;                 // the variable's; empty for an element
             ast::Type whole;                  // the type of what is at `address`
             std::vector<int> components;      // for components, the lanes of `whole` they are
+        };
+
+        // A call a function's body makes, for Effects.cpp: where, and of what (a builtin, or a function by name).
+        struct CallSite
+        {
+            SourceLocation location;
+            std::string callee;
         };
 
         // The loops around the statement being lowered, innermost last: where break and continue go.
@@ -197,6 +213,13 @@ namespace fminus::ir::detail
         Value lowerAllocation(SourceLocation location, const Allocation& allocation, const ast::CallExpr& call,
                               const std::vector<Value>& args);
 
+        // ---- Effects.cpp --------------------------------------------------------------------------------------------
+        Effect declaredEffect(const ast::Function& function);
+        Effect effectOf(const std::string& name) const;
+        std::optional<std::vector<Diagnostic>> unsafe(const std::string& callee, Effect required,
+                                                      std::vector<std::string>& looking);
+        void checkEffects(const ast::Program& program);
+
         // ---- the state of one lowering ----------------------------------------------------------------------------
         llvm::Module& module_;
         Diagnostics& diagnostics_;
@@ -206,5 +229,7 @@ namespace fminus::ir::detail
         std::vector<std::unordered_map<std::string, Binding>> scopes_;     // the current function's, inner last
         const ast::Function* function_ = nullptr;                          // the function being lowered
         std::vector<Loop> loops_;
+        std::unordered_map<std::string, Effect> effects_;                  // each name's, from all its declarations
+        std::unordered_map<std::string, std::vector<CallSite>> calls_;     // each definition's calls, in order
     };
 } // namespace fminus::ir::detail

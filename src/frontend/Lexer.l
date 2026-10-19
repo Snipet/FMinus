@@ -107,6 +107,7 @@ IDENTIFIER  [A-Za-z_][A-Za-z0-9_]*
 "&"                         { return Parser::make_AMPERSAND(yyextra->where); }
 "?"                         { return Parser::make_QUESTION(yyextra->where); }
 "."                         { return Parser::make_DOT(yyextra->where); }
+"::"                        { return Parser::make_COLONCOLON(yyextra->where); }
 ":"                         { return Parser::make_COLON(yyextra->where); }
 "-"                         { return Parser::make_MINUS(yyextra->where); }
 "*"                         { return Parser::make_STAR(yyextra->where); }

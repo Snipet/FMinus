@@ -3,7 +3,8 @@
 // ParseContext.
 //
 //     program      : function*
-//     function     : "const"? type pointer IDENTIFIER "(" params ")" (block | ";")   a definition, or a prototype
+//     function     : "const"? type pointer IDENTIFIER "(" params ")" attributes (block | ";")    or a prototype
+//     attributes   : ("[" "[" attribute ("," attribute)* "]" "]")*      attribute: IDENTIFIER ("::" IDENTIFIER)?
 //     params       : (param ("," param)*)? | "void"                                  (void) is none, as in C
 //     param        : "const"? type pointer IDENTIFIER?                               (a prototype may omit names)
 //     type         : "float" | "bool" | "int" | "void" | VECTOR_TYPE | "poly" ("float" | "bool")
@@ -141,7 +142,7 @@
 }
 
 %token FLOAT "float" CONST "const" RETURN "return" BOOL "bool" INT "int" VOID "void" TRUE "true" FALSE "false"
-%token RESTRICT "restrict" AMPERSAND "&" LBRACKET "[" RBRACKET "]" SIZEOF "sizeof"
+%token RESTRICT "restrict" AMPERSAND "&" LBRACKET "[" RBRACKET "]" SIZEOF "sizeof" COLONCOLON "::"
 %token LT "<" LE "<=" GT ">" GE ">=" EQ "==" NE "!=" NOT "!" AND "&&" OR "||" QUESTION "?" COLON ":"
 %token IF "if" ELSE "else" WHILE "while" FOR "for" BREAK "break" CONTINUE "continue"
 %token <ast::Type> VECTOR_TYPE "vector type"
@@ -154,6 +155,8 @@
 
 %nterm <std::vector<ast::Function>> functions
 %nterm <ast::Function> function
+%nterm <std::vector<ast::Attribute>> attributes attribute_list
+%nterm <ast::Attribute> attribute
 %nterm <std::vector<ast::Param>> params param_list
 %nterm <ast::Param> param
 %nterm <bool> qualifier
@@ -196,16 +199,34 @@ functions
     ;
 
 function
-    : qualifier type pointer IDENTIFIER "(" params ")" block
+    : qualifier type pointer IDENTIFIER "(" params ")" attributes block
                                             {
                                                 const Declared result = declared($1, $2, $3);
-                                                $$ = ast::Function{at(@4), $4, $6, result.type, $8, true};
+                                                $$ = ast::Function{at(@4), $4, $6, result.type, $9, true, $8};
                                             }
-    | qualifier type pointer IDENTIFIER "(" params ")" ";"
+    | qualifier type pointer IDENTIFIER "(" params ")" attributes ";"
                                             {
                                                 const Declared result = declared($1, $2, $3);
-                                                $$ = ast::Function{at(@4), $4, $6, result.type, {}, false};
+                                                $$ = ast::Function{at(@4), $4, $6, result.type, {}, false, $8};
                                             }
+    ;
+
+// C23's attribute specifiers, after a function's parameter list, where clang's function attributes go:
+// `void process(...) [[clang::nonblocking]]`.
+attributes
+    : %empty                                {}
+    | attributes "[" "[" attribute_list "]" "]"
+                                            { $$ = $1; for (ast::Attribute& a : $4) $$.push_back(std::move(a)); }
+    ;
+
+attribute_list
+    : attribute                             { $$.push_back($1); }
+    | attribute_list "," attribute          { $$ = $1; $$.push_back($3); }
+    ;
+
+attribute
+    : IDENTIFIER "::" IDENTIFIER            { $$ = ast::Attribute{at(@1), $1 + "::" + $3}; }
+    | IDENTIFIER                            { $$ = ast::Attribute{at(@1), $1}; }
     ;
 
 // `(void)` is C's empty list: one unnamed parameter of type void, which is no parameter.

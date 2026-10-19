@@ -140,6 +140,13 @@ TEST_CASE("pointers parse as C's: declarators, *, & and []", "[frontend]")
              "  (return (& ([] p 2))))\n");
 }
 
+TEST_CASE("attributes follow a function's parameters, as C23 writes them", "[frontend]")
+{
+    CHECK(parsed("void f(float* p) [[clang::nonblocking]] { }\nfloat g(float) [[clang::nonallocating, other]];\n")
+          == "(function void f ((float * p)) [[clang::nonblocking]])\n"
+             "(declare float g ((float)) [[clang::nonallocating]] [[other]])\n");
+}
+
 TEST_CASE("sizeof takes a type, as C's sizeof(type) does", "[frontend]")
 {
     CHECK(parsed("int f() { return sizeof(float) + sizeof(const float4*) + sizeof(poly float); }")
@@ -158,13 +165,13 @@ TEST_CASE("errors print in source order, each with its notes after it", "[fronte
 TEST_CASE("syntax and scanner errors carry their locations", "[frontend]")
 {
     CHECK(parsed("float f(float x) {\n    return x + ;\n}") == "test.fm:2:16: error: syntax error, unexpected ;\n");
-    CHECK(parsed("float f(float x) float { return x; }")
-          == "test.fm:1:18: error: syntax error, unexpected float, expecting { or ;\n");
+    CHECK(parsed("float f(float x) float { return x; }")   // [ starts an attribute: [[clang::nonblocking]]
+          == "test.fm:1:18: error: syntax error, unexpected float, expecting [ or { or ;\n");
     CHECK(parsed("float f(float x) {\n  return x $ 2;\n}") == "test.fm:2:12: error: unexpected character '$'\n");
     CHECK(parsed("float f(float x) { return 1f; }") == "test.fm:1:27: error: invalid suffix 'f' on integer constant\n");
     CHECK(parsed("float f(float x) /* never\nclosed { return x; }")
           == "test.fm:1:18: error: unterminated /* comment\n");
-    // Bison lists what it expected only when that is at most four tokens; a function can start five ways now.
+    // Bison lists what it expected only when that is at most four tokens, and a function can start in eight ways.
     CHECK(parsed("fn f(x: float) -> float { return x; }")
           == "test.fm:1:1: error: syntax error, unexpected identifier\n");
 }

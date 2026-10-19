@@ -1,0 +1,24 @@
+// A kernel marked [[clang::nonblocking]] that reaches calloc through two functions: the error at its call, and a note
+// for each step down, as clang's -Wfunction-effects reports it.
+// RUN: not fminus %s 2>&1 | FileCheck %s
+
+float* grow(int n)
+{
+    return calloc(n, sizeof(float));
+}
+
+float helper(float x)
+{
+    grow(4);
+    return x;
+}
+
+void process(const float* restrict in, float* restrict out, int n) [[clang::nonblocking]]
+{
+    for (int i = 0; i < n; ++i)
+        out[i] = helper(in[i]);
+}
+
+// CHECK:      effects.fm:19:18: error: function with 'nonblocking' attribute must not call non-'nonblocking' function 'helper'
+// CHECK-NEXT: effects.fm:12:5: note: function cannot be inferred 'nonblocking' because it calls non-'nonblocking' function 'grow'
+// CHECK-NEXT: effects.fm:7:12: note: function cannot be inferred 'nonblocking' because it calls non-'nonblocking' function 'calloc'

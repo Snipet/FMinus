@@ -24,6 +24,10 @@ namespace fminus::ir::detail
 
     void Lowering::declare(const ast::Function& function)
     {
+        // Every declaration's attributes count, a prototype's or the definition's: the strongest is the function's.
+        Effect& effect = effects_[function.name];
+        effect = std::max(effect, declaredEffect(function));
+
         if (isReduction(function.name) || isPolyQuery(function.name))
         {
             error(function.location, quoted(function.name) + " is a builtin and cannot be redefined");

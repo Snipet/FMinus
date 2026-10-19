@@ -12,7 +12,8 @@
 //
 // The parts are one class, Lowering (Lowering.h), whose members are defined by what they lower: types and conversions
 // (Types.cpp), functions (Functions.cpp), statements (Statements.cpp), expressions (Expressions.cpp), calls and
-// builtins (Calls.cpp), vectors (Vectors.cpp). This file runs them.
+// builtins (Calls.cpp), vectors (Vectors.cpp), memory (Memory.cpp). This file runs them, and then the check of the
+// functions' effects (Effects.cpp), which needs every body's calls.
 #include "ir/CodeGen.h"
 
 #include "ir/Lowering.h"
@@ -34,7 +35,8 @@ namespace fminus::ir
         {
         }
 
-        // Pass 1 declares every function, so calls may come before definitions; pass 2 lowers each definition's body.
+        // Pass 1 declares every function, so calls may come before definitions; pass 2 lowers each definition's body;
+        // then every function marked nonallocating or nonblocking is checked against the calls it makes.
         void Lowering::lower(const ast::Program& program)
         {
             for (const ast::Function& function : program.functions)
@@ -45,6 +47,7 @@ namespace fminus::ir
                 if (function.isDefinition && found != functions_.end() && found->second == &function)
                     define(function);   // the accepted definition, not a rejected duplicate
             }
+            checkEffects(program);
         }
     } // namespace detail
 
