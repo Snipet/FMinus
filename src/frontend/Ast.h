@@ -9,6 +9,7 @@
 #include "frontend/Diagnostics.h"
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <variant>
 #include <vector>
@@ -17,11 +18,94 @@ namespace fminus::ast
 {
     // The value types. float is IEEE single precision (LLVM's float). bool is C23's: 0 or 1, which converts to float
     // as 0 or 1, and to which a float converts as `x != 0` (a NaN is true).
+    //
+    // float2, float4 and float8 are OpenCL C's vector types: that many floats side by side, computed on together. A
+    // float4 fills one 128-bit NEON register; a float8 is two. Comparing two of them gives a lane mask, a bool2, bool4
+    // or bool8, which a program cannot declare (as in OpenCL C) but can select with or use as 0s and 1s.
     enum class Type
     {
         Float,
         Bool,
+        Float2,
+        Float4,
+        Float8,
+        Bool2,
+        Bool4,
+        Bool8,
     };
+
+    // A vector type's number of lanes; 1 for a scalar.
+    inline unsigned lanes(Type type)
+    {
+        switch (type)
+        {
+        case Type::Float:
+        case Type::Bool:
+            return 1;
+        case Type::Float2:
+        case Type::Bool2:
+            return 2;
+        case Type::Float4:
+        case Type::Bool4:
+            return 4;
+        case Type::Float8:
+        case Type::Bool8:
+            return 8;
+        }
+        return 1;
+    }
+
+    inline bool isVector(Type type)
+    {
+        return lanes(type) > 1;
+    }
+
+    inline bool isMask(Type type)
+    {
+        return type == Type::Bool2 || type == Type::Bool4 || type == Type::Bool8;
+    }
+
+    // The float vector type of `count` lanes, if FMinus has one.
+    inline std::optional<Type> vectorOf(unsigned count)
+    {
+        switch (count)
+        {
+        case 2:
+            return Type::Float2;
+        case 4:
+            return Type::Float4;
+        case 8:
+            return Type::Float8;
+        default:
+            return std::nullopt;
+        }
+    }
+
+    // What a comparison of two values of `type` gives: a bool for floats, a lane mask for float vectors.
+    inline Type maskOf(Type type)
+    {
+        switch (type)
+        {
+        case Type::Float2:
+            return Type::Bool2;
+        case Type::Float4:
+            return Type::Bool4;
+        case Type::Float8:
+            return Type::Bool8;
+        default:
+            return Type::Bool;
+        }
+    }
+
+    // The type a value of `type` computes as: a bool as a float, a lane mask as the float vector of its size.
+    inline Type arithmeticOf(Type type)
+    {
+        if (type == Type::Bool)
+            return Type::Float;
+        if (isMask(type))
+            return *vectorOf(lanes(type));
+        return type;
+    }
 
     enum class UnaryOp
     {
@@ -129,11 +213,27 @@ namespace fminus::ast
         ExprPtr value;
     };
 
+    // `(float4)(a, b, c, d)`: OpenCL C's vector literal. One scalar is broadcast to every lane; otherwise the
+    // arguments' lanes (one for a scalar, all of a vector's) fill the vector in order, and must fill it exactly.
+    struct ConstructExpr
+    {
+        Type type = Type::Float4;
+        std::vector<ExprPtr> args;
+    };
+
+    // `v.x`, `v.wzyx`, `v.s07`: OpenCL C's components. x, y, z, w name lanes 0 to 3, and s followed by hex digits names
+    // any lane. One component is a float, two, four or eight a vector of them; a variable's components can be assigned.
+    struct SwizzleExpr
+    {
+        ExprPtr base;
+        std::string components;
+    };
+
     struct Expr
     {
         SourceLocation location;
         std::variant<NumberExpr, VariableExpr, BoolExpr, UnaryExpr, BinaryExpr, LogicalExpr, CallExpr, AssignExpr,
-                     ConditionalExpr>
+                     ConditionalExpr, ConstructExpr, SwizzleExpr>
             node;
     };
 

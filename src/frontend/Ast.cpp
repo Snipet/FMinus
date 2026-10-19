@@ -104,6 +104,15 @@ namespace fminus::ast
                                       return "(?: " + dump(*conditional.condition) + " " + dump(*conditional.thenValue)
                                              + " " + dump(*conditional.elseValue) + ")";
                                   },
+                                  [](const ConstructExpr& construct) {
+                                      std::string text = std::string("(") + typeName(construct.type);
+                                      for (const ExprPtr& arg : construct.args)
+                                          text += " " + dump(*arg);
+                                      return text + ")";
+                                  },
+                                  [](const SwizzleExpr& swizzle) {
+                                      return "(. " + dump(*swizzle.base) + " " + swizzle.components + ")";
+                                  },
                                   [](const AssignExpr& assign) {
                                       return std::string("(") + opName(assign.op) + " " + dump(*assign.target) + " "
                                              + dump(*assign.value) + ")";
@@ -164,6 +173,18 @@ namespace fminus::ast
             return "float";
         case Type::Bool:
             return "bool";
+        case Type::Float2:
+            return "float2";
+        case Type::Float4:
+            return "float4";
+        case Type::Float8:
+            return "float8";
+        case Type::Bool2:
+            return "bool2";
+        case Type::Bool4:
+            return "bool4";
+        case Type::Bool8:
+            return "bool8";
         }
         return "?";
     }

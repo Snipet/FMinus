@@ -101,6 +101,8 @@
 %token FLOAT "float" CONST "const" RETURN "return" BOOL "bool" TRUE "true" FALSE "false"
 %token LT "<" LE "<=" GT ">" GE ">=" EQ "==" NE "!=" NOT "!" AND "&&" OR "||" QUESTION "?" COLON ":"
 %token IF "if" ELSE "else" WHILE "while" FOR "for" BREAK "break" CONTINUE "continue"
+%token <ast::Type> VECTOR_TYPE "vector type"
+%token DOT "."
 %token PLUS "+" MINUS "-" STAR "*" SLASH "/" PERCENT "%"
 %token ASSIGN "=" PLUS_ASSIGN "+=" MINUS_ASSIGN "-=" STAR_ASSIGN "*=" SLASH_ASSIGN "/=" PERCENT_ASSIGN "%="
 %token LPAREN "(" RPAREN ")" LBRACE "{" RBRACE "}" COMMA "," SEMI ";"
@@ -136,6 +138,7 @@
 %left "+" "-"
 %left "*" "/" "%"
 %precedence UNARY
+%precedence "."
 
 %%
 
@@ -176,6 +179,7 @@ qualifier
 type
     : "float"                               { $$ = ast::Type::Float; }
     | "bool"                                { $$ = ast::Type::Bool; }
+    | VECTOR_TYPE                           { $$ = $1; }
     ;
 
 block
@@ -257,6 +261,8 @@ expr
     | expr ">=" expr                        { $$ = binary(@2, ast::BinaryOp::GreaterEqual, $1, $3); }
     | expr "==" expr                        { $$ = binary(@2, ast::BinaryOp::Equal, $1, $3); }
     | expr "!=" expr                        { $$ = binary(@2, ast::BinaryOp::NotEqual, $1, $3); }
+    | "(" VECTOR_TYPE ")" "(" args ")"      { $$ = ast::makeExpr(at(@1), ast::ConstructExpr{$2, $5}); }
+    | expr "." IDENTIFIER                   { $$ = ast::makeExpr(at(@2), ast::SwizzleExpr{$1, $3}); }
     | expr "*" expr                         { $$ = binary(@2, ast::BinaryOp::Multiply, $1, $3); }
     | expr "/" expr                         { $$ = binary(@2, ast::BinaryOp::Divide, $1, $3); }
     | expr "%" expr                         { $$ = binary(@2, ast::BinaryOp::Remainder, $1, $3); }

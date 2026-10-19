@@ -1,0 +1,56 @@
+// recipe 7: float2, float4 and float8 lower to LLVM's fixed vectors; NEON holds a float4 in one register.
+// RUN: fminus %s -O2 | FileCheck %s --check-prefix=IR
+// RUN: %if arm64 %{ fminus %s -O2 --emit asm -o - | FileCheck %s --check-prefix=ASM %}
+// RUN: not fminus %s --run reverse 1 2>&1 | FileCheck %s --check-prefix=RUNPARAM
+// RUN: echo 'float4 f(float x) { return x; }' | not fminus - --run f 1 2>&1 | FileCheck %s --check-prefix=RUNRESULT
+
+float4 softclip4(float4 x, float drive)
+{
+    const float4 y = x * drive;
+    return y / (1.0f + fabsf(y));
+}
+
+// IR-LABEL: define <4 x float> @softclip4(<4 x float> %x, float %drive)
+// IR:         insertelement <4 x float> poison, float %drive, i64 0
+// IR:         fmul <4 x float>
+// IR:         call <4 x float> @llvm.fabs.v4f32(
+// IR:         fdiv <4 x float>
+// ASM-LABEL: _softclip4:
+// ASM:         fmul.4s v0, v0, v1[0]
+// ASM:         fabs.4s
+// ASM:         fdiv.4s
+// ASM:         ret
+
+float4 reverse(float4 v) { return v.wzyx; }
+
+// IR-LABEL: define <4 x float> @reverse(
+// IR:         shufflevector <4 x float> %v, <4 x float> poison, <4 x i32> <i32 3, i32 2, i32 1, i32 0>
+
+float sum(float4 v) { return reduce_add(v); }
+
+// The reduction is ordered (no fast-math flags): lane 0, then 1, 2, 3, from -0.0.
+// IR-LABEL: define float @sum(
+// IR:         call float @llvm.vector.reduce.fadd.v4f32(float -0.000000e+00, <4 x float> %v)
+
+float4 rectify(float4 x) { return x > 0 ? x : 0; }
+
+// A vector condition is a lane mask: a select, not a branch.
+// IR-LABEL: define <4 x float> @rectify(
+// IR:         fcmp ogt <4 x float> %x, zeroinitializer
+// IR:         select <4 x i1>
+// IR-NOT:     br
+// ASM-LABEL: _rectify:
+// ASM:         fcmgt.4s
+// ASM:         and.16b
+
+float8 wide(float8 a, float8 b) { return a * b + 1; }
+
+// float8 is legal LLVM; the backend splits it into two NEON registers.
+// IR-LABEL: define <8 x float> @wide(
+// IR:         fmul <8 x float>
+// ASM-LABEL: _wide:
+// ASM-COUNT-2: fmul.4s
+
+// --run passes floats and prints floats and bools: vectors cross the C boundary only from C++ (docs/simd.md).
+// RUNPARAM: fminus: --run: 'reverse' takes a float4 parameter; --run passes floats only
+// RUNRESULT: fminus: --run: 'f' returns a float4; --run prints floats and bools only

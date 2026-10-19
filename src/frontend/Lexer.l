@@ -54,6 +54,9 @@ IDENTIFIER  [A-Za-z_][A-Za-z0-9_]*
 "const"                     { return Parser::make_CONST(yyextra->where); }
 "return"                    { return Parser::make_RETURN(yyextra->where); }
 "bool"                      { return Parser::make_BOOL(yyextra->where); }
+"float2"                    { return Parser::make_VECTOR_TYPE(fminus::ast::Type::Float2, yyextra->where); }
+"float4"                    { return Parser::make_VECTOR_TYPE(fminus::ast::Type::Float4, yyextra->where); }
+"float8"                    { return Parser::make_VECTOR_TYPE(fminus::ast::Type::Float8, yyextra->where); }
 "true"                      { return Parser::make_TRUE(yyextra->where); }
 "false"                     { return Parser::make_FALSE(yyextra->where); }
 "if"                        { return Parser::make_IF(yyextra->where); }
@@ -93,6 +96,7 @@ IDENTIFIER  [A-Za-z_][A-Za-z0-9_]*
 ">"                         { return Parser::make_GT(yyextra->where); }
 "!"                         { return Parser::make_NOT(yyextra->where); }
 "?"                         { return Parser::make_QUESTION(yyextra->where); }
+"."                         { return Parser::make_DOT(yyextra->where); }
 ":"                         { return Parser::make_COLON(yyextra->where); }
 "-"                         { return Parser::make_MINUS(yyextra->where); }
 "*"                         { return Parser::make_STAR(yyextra->where); }

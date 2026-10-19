@@ -24,6 +24,8 @@
 #include <llvm/Support/raw_ostream.h>
 
 #include <array>
+#include <cctype>
+#include <optional>
 #include <string>
 #include <unordered_map>
 
@@ -53,6 +55,20 @@ namespace fminus::ir
             Builtin{"floorf", llvm::Intrinsic::floor, 1}, Builtin{"fminf", llvm::Intrinsic::minnum, 2},
             Builtin{"fmaxf", llvm::Intrinsic::maxnum, 2}, Builtin{"tanhf", llvm::Intrinsic::tanh, 1},
         };
+
+        // The reductions of a float vector to one float: its sum (in lane order, so the result does not depend on
+        // fast-math), its least and its greatest lane (NaN lanes ignored, as fminf and fmaxf ignore them).
+        constexpr std::array<std::string_view, 3> kReductions{"reduce_add", "reduce_min", "reduce_max"};
+
+        bool isReduction(std::string_view name)
+        {
+            for (std::string_view reduction : kReductions)
+            {
+                if (reduction == name)
+                    return true;
+            }
+            return false;
+        }
 
         const Builtin* findBuiltin(std::string_view name)
         {
@@ -92,6 +108,15 @@ namespace fminus::ir
             }
 
         private:
+            // A lowered expression: its IR and its FMinus type. The rules read the FMinus type, never the IR's, since
+            // two FMinus types may share an LLVM type: one whose width the target decides would be <4 x float> on
+            // NEON, as float4 is.
+            struct Value
+            {
+                llvm::Value* ir = nullptr;
+                ast::Type type = ast::Type::Float;
+            };
+
             // A variable in scope: its stack slot, whether it may be assigned, and its type.
             struct Binding
             {
@@ -108,25 +133,105 @@ namespace fminus::ir
                     return builder_.getFloatTy();
                 case ast::Type::Bool:
                     return builder_.getInt1Ty();
+                case ast::Type::Float2:
+                case ast::Type::Float4:
+                case ast::Type::Float8:
+                    return llvm::FixedVectorType::get(builder_.getFloatTy(), ast::lanes(type));
+                case ast::Type::Bool2:
+                case ast::Type::Bool4:
+                case ast::Type::Bool8:
+                    return llvm::FixedVectorType::get(builder_.getInt1Ty(), ast::lanes(type));
                 }
                 return builder_.getFloatTy();
             }
 
-            // C's implicit conversions between the two types: bool to float is 0 or 1, and float to bool is `x != 0`,
-            // so a NaN is true (an unordered comparison). Every value is a float or an i1.
-            llvm::Value* convert(llvm::Value* value, ast::Type type)
+            // Where a value meets the type it must have, for the message when it cannot (clang's wording for each).
+            enum class Use
             {
-                llvm::Type* target = typeOf(type);
-                if (value->getType() == target)
-                    return value;
-                if (type == ast::Type::Bool)
-                    return builder_.CreateFCmpUNE(value, llvm::ConstantFP::get(value->getType(), 0.0), "tobool");
-                return builder_.CreateUIToFP(value, target, "conv");
+                Initializing,
+                Assigning,
+                Returning,
+                Passing,
+                Condition,
+                Logical,
+            };
+
+            // C's implicit conversions, and OpenCL C's for vectors. A bool is 0 or 1 as a float, and a float is
+            // `x != 0` as a bool (so a NaN is true). A scalar becomes a vector by being broadcast to every lane, and a
+            // lane mask is 0 or 1 per lane as the float vector of its size. Nothing else converts from a vector: that
+            // is an error, reported for `use`.
+            llvm::Value* convert(Value value, ast::Type type, SourceLocation location, Use use)
+            {
+                if (value.type == type)
+                    return value.ir;
+                if (!ast::isVector(value.type))
+                {
+                    if (ast::isVector(type) && !ast::isMask(type))
+                    {
+                        llvm::Value* scalar = convert(value, ast::Type::Float, location, use);
+                        return builder_.CreateVectorSplat(ast::lanes(type), scalar, "splat");
+                    }
+                    if (type == ast::Type::Bool)
+                        return builder_.CreateFCmpUNE(value.ir, llvm::ConstantFP::get(value.ir->getType(), 0.0),
+                                                      "tobool");
+                    if (type == ast::Type::Float)
+                        return builder_.CreateUIToFP(value.ir, typeOf(type), "conv");
+                }
+                else if (ast::isMask(value.type) && type == ast::arithmeticOf(value.type))
+                {
+                    return builder_.CreateUIToFP(value.ir, typeOf(type), "conv");
+                }
+                incompatible(location, use, value.type, type);
+                return poison(type).ir;
             }
 
-            llvm::Value* poison(ast::Type type)
+            void incompatible(SourceLocation location, Use use, ast::Type from, ast::Type to)
             {
-                return llvm::PoisonValue::get(typeOf(type));
+                const std::string source = quoted(ast::typeName(from));
+                const std::string target = quoted(ast::typeName(to));
+                switch (use)
+                {
+                case Use::Initializing:
+                    error(location, "initializing " + target + " with an expression of incompatible type " + source);
+                    return;
+                case Use::Assigning:
+                    error(location, "assigning to " + target + " from incompatible type " + source);
+                    return;
+                case Use::Returning:
+                    error(location, "returning " + source + " from a function with incompatible result type " + target);
+                    return;
+                case Use::Passing:
+                    error(location, "passing " + source + " to parameter of incompatible type " + target);
+                    return;
+                case Use::Condition:
+                    error(location, "statement requires expression of scalar type (" + source + " invalid)");
+                    return;
+                case Use::Logical:
+                    error(location, "a logical operator needs scalar operands, not " + source);
+                    return;
+                }
+            }
+
+            // The type two operands meet in, as OpenCL C's usual arithmetic conversions decide it: float, or the
+            // vector type when either one is a vector (the other is broadcast to it); a bool and a lane mask take part
+            // as floats. Vectors of two sizes do not meet: clang's error, and false.
+            bool commonType(SourceLocation location, ast::Type a, ast::Type b, ast::Type& type)
+            {
+                const ast::Type ta = ast::arithmeticOf(a);
+                const ast::Type tb = ast::arithmeticOf(b);
+                if (ast::isVector(ta) && ast::isVector(tb) && ta != tb)
+                {
+                    error(location, "cannot convert between vector values of different size ("
+                                        + quoted(ast::typeName(a)) + " and " + quoted(ast::typeName(b)) + ")");
+                    return false;
+                }
+                type = ast::isVector(ta) ? ta : tb;
+                return true;
+            }
+
+            Value poison(ast::Type type)
+            {
+                return {llvm::PoisonValue::get(typeOf(type)), type};
             }
 
             void error(SourceLocation location, std::string message)
@@ -149,6 +254,11 @@ namespace fminus::ir
 
             void declare(const ast::Function& function)
             {
+                if (isReduction(function.name))
+                {
+                    error(function.location, quoted(function.name) + " is a builtin and cannot be redefined");
+                    return;
+                }
                 if (const Builtin* builtin = findBuiltin(function.name))
                 {
                     // A prototype of a builtin, as <math.h> has, declares nothing new; a definition is refused.
@@ -219,7 +329,7 @@ namespace fminus::ir
                     {
                         error(function.location,
                               "non-void function " + quoted(function.name) + " does not return a value");
-                        builder_.CreateRet(poison(function.returnType));
+                        builder_.CreateRet(poison(function.returnType).ir);
                     }
                     else
                     {
@@ -295,7 +405,8 @@ namespace fminus::ir
                                [&](const ast::DeclStmt& decl) { declareVariable(stmt.location, decl); },
                                [&](const ast::ExprStmt& statement) { lower(*statement.expr); },
                                [&](const ast::ReturnStmt& ret) {
-                                   builder_.CreateRet(convert(lower(*ret.value), function_->returnType));
+                                   builder_.CreateRet(convert(lower(*ret.value), function_->returnType, stmt.location,
+                                                              Use::Returning));
                                },
                                [&](const ast::BlockStmt& block) {
                                    scopes_.emplace_back();
@@ -346,7 +457,8 @@ namespace fminus::ir
             // is unreachable, and so is what follows.
             void lowerIf(const ast::IfStmt& branch)
             {
-                llvm::Value* condition = convert(lower(*branch.condition), ast::Type::Bool);
+                llvm::Value* condition =
+                    convert(lower(*branch.condition), ast::Type::Bool, branch.condition->location, Use::Condition);
                 llvm::BasicBlock* thenBlock = newBlock("if.then");
                 llvm::BasicBlock* elseBlock = branch.elseBranch ? newBlock("if.else") : nullptr;
                 llvm::BasicBlock* endBlock = newBlock("if.end");
@@ -374,7 +486,9 @@ namespace fminus::ir
                 builder_.CreateBr(condBlock);
 
                 builder_.SetInsertPoint(condBlock);
-                builder_.CreateCondBr(convert(lower(*loop.condition), ast::Type::Bool), bodyBlock, endBlock);
+                builder_.CreateCondBr(
+                    convert(lower(*loop.condition), ast::Type::Bool, loop.condition->location, Use::Condition),
+                    bodyBlock, endBlock);
 
                 builder_.SetInsertPoint(bodyBlock);
                 loops_.push_back({endBlock, condBlock});
@@ -399,7 +513,9 @@ namespace fminus::ir
 
                 builder_.SetInsertPoint(condBlock);
                 if (loop.condition)
-                    builder_.CreateCondBr(convert(lower(*loop.condition), ast::Type::Bool), bodyBlock, endBlock);
+                    builder_.CreateCondBr(
+                        convert(lower(*loop.condition), ast::Type::Bool, loop.condition->location, Use::Condition),
+                        bodyBlock, endBlock);
                 else
                     builder_.CreateBr(bodyBlock);   // no condition: until a break or a return
 
@@ -422,7 +538,7 @@ namespace fminus::ir
             // the variable starts at 0.
             void declareVariable(SourceLocation location, const ast::DeclStmt& decl)
             {
-                llvm::Value* value = decl.init ? convert(lower(*decl.init), decl.type)
+                llvm::Value* value = decl.init ? convert(lower(*decl.init), decl.type, location, Use::Initializing)
                                                : llvm::Constant::getNullValue(typeOf(decl.type));
                 llvm::AllocaInst* slot = allocate(typeOf(decl.type), decl.name);
                 builder_.CreateStore(value, slot);
@@ -431,47 +547,80 @@ namespace fminus::ir
             }
 
             // ---- expressions ------------------------------------------------------------------------------------
-            llvm::Value* lower(const ast::Expr& expr)
+            Value lower(const ast::Expr& expr)
             {
                 return std::visit(
                     Overloaded{
-                        [&](const ast::NumberExpr& number) { return lowerNumber(expr.location, number); },
-                        [&](const ast::VariableExpr& variable) -> llvm::Value* {
+                        [&](const ast::NumberExpr& number) {
+                            return Value{lowerNumber(expr.location, number), ast::Type::Float};
+                        },
+                        [&](const ast::VariableExpr& variable) {
                             const Binding* binding = find(variable.name);
                             if (binding == nullptr)
                             {
                                 error(expr.location, "use of undeclared identifier " + quoted(variable.name));
                                 return poison(ast::Type::Float);
                             }
-                            return builder_.CreateLoad(binding->slot->getAllocatedType(), binding->slot,
-                                                       variable.name);
+                            return Value{builder_.CreateLoad(binding->slot->getAllocatedType(), binding->slot,
+                                                             variable.name),
+                                         binding->type};
                         },
-                        [&](const ast::BoolExpr& constant) -> llvm::Value* { return builder_.getInt1(constant.value); },
-                        [&](const ast::UnaryExpr& unary) -> llvm::Value* {
-                            llvm::Value* operand = lower(*unary.operand);
+                        [&](const ast::BoolExpr& constant) {
+                            return Value{builder_.getInt1(constant.value), ast::Type::Bool};
+                        },
+                        [&](const ast::UnaryExpr& unary) {
+                            const Value operand = lower(*unary.operand);
+                            const ast::Type type = ast::arithmeticOf(operand.type);   // a float or a float vector
                             switch (unary.op)
                             {
                             case ast::UnaryOp::Negate:
-                                return builder_.CreateFNeg(convert(operand, ast::Type::Float));
+                            {
+                                llvm::Value* value = convert(operand, type, expr.location, Use::Initializing);
+                                return Value{builder_.CreateFNeg(value), type};
+                            }
                             case ast::UnaryOp::Plus:
-                                return convert(operand, ast::Type::Float);
+                                return Value{convert(operand, type, expr.location, Use::Initializing), type};
                             case ast::UnaryOp::Not:
-                                return builder_.CreateNot(convert(operand, ast::Type::Bool), "lnot");
+                            {
+                                llvm::Value* test = convert(operand, ast::Type::Bool, expr.location, Use::Logical);
+                                return Value{builder_.CreateNot(test, "lnot"), ast::Type::Bool};
+                            }
                             }
                             return poison(ast::Type::Float);
                         },
-                        [&](const ast::BinaryExpr& binary) -> llvm::Value* {
-                            // C's usual arithmetic conversions, with float the only arithmetic type: a bool is 0 or 1.
-                            llvm::Value* lhs = convert(lower(*binary.lhs), ast::Type::Float);
-                            llvm::Value* rhs = convert(lower(*binary.rhs), ast::Type::Float);
-                            return arithmetic(binary.op, lhs, rhs);
+                        [&](const ast::BinaryExpr& binary) {
+                            // C's usual arithmetic conversions, and OpenCL C's: a bool is 0 or 1, and a scalar
+                            // meeting a vector is broadcast to it. Vector operators work lane by lane; a comparison of
+                            // vectors is a lane mask.
+                            const Value lhs = lower(*binary.lhs);
+                            const Value rhs = lower(*binary.rhs);
+                            ast::Type type = ast::Type::Float;
+                            if (!commonType(expr.location, lhs.type, rhs.type, type))
+                                return poison(ast::Type::Float);
+                            llvm::Value* result =
+                                arithmetic(binary.op, convert(lhs, type, expr.location, Use::Initializing),
+                                           convert(rhs, type, expr.location, Use::Initializing));
+                            return Value{result, isComparison(binary.op) ? ast::maskOf(type) : type};
                         },
-                        [&](const ast::LogicalExpr& logical) { return lowerLogical(logical); },
-                        [&](const ast::ConditionalExpr& conditional) { return lowerConditional(conditional); },
+                        [&](const ast::LogicalExpr& logical) {
+                            return Value{lowerLogical(expr.location, logical), ast::Type::Bool};
+                        },
+                        [&](const ast::ConditionalExpr& conditional) {
+                            return lowerConditional(expr.location, conditional);
+                        },
+                        [&](const ast::ConstructExpr& construct) { return lowerConstruct(expr.location, construct); },
+                        [&](const ast::SwizzleExpr& swizzle) { return lowerSwizzle(expr.location, swizzle); },
                         [&](const ast::CallExpr& call) { return lowerCall(expr.location, call); },
                         [&](const ast::AssignExpr& assign) { return lowerAssign(expr.location, assign); },
                     },
                     expr.node);
+            }
+
+            static bool isComparison(ast::BinaryOp op)
+            {
+                return op == ast::BinaryOp::Less || op == ast::BinaryOp::LessEqual || op == ast::BinaryOp::Greater
+                       || op == ast::BinaryOp::GreaterEqual || op == ast::BinaryOp::Equal
+                       || op == ast::BinaryOp::NotEqual;
             }
 
             llvm::Value* arithmetic(ast::BinaryOp op, llvm::Value* lhs, llvm::Value* rhs)
@@ -502,15 +651,15 @@ namespace fminus::ir
                 case ast::BinaryOp::NotEqual:
                     return builder_.CreateFCmpUNE(lhs, rhs, "cmp");
                 }
-                return poison(ast::Type::Float);
+                return poison(ast::Type::Float).ir;
             }
 
             // a && b and a || b, as clang lowers them: b runs only when a does not decide (land.rhs, lor.rhs), and a
             // phi joins the two ways out.
-            llvm::Value* lowerLogical(const ast::LogicalExpr& logical)
+            llvm::Value* lowerLogical(SourceLocation location, const ast::LogicalExpr& logical)
             {
                 const bool isAnd = logical.op == ast::LogicalOp::And;
-                llvm::Value* lhs = convert(lower(*logical.lhs), ast::Type::Bool);
+                llvm::Value* lhs = convert(lower(*logical.lhs), ast::Type::Bool, location, Use::Logical);
                 llvm::BasicBlock* lhsEnd = builder_.GetInsertBlock();
                 llvm::Function* function = lhsEnd->getParent();
                 llvm::LLVMContext& context = module_.getContext();
@@ -524,7 +673,7 @@ namespace fminus::ir
                     builder_.CreateCondBr(lhs, endBlock, rhsBlock);
 
                 builder_.SetInsertPoint(rhsBlock);
-                llvm::Value* rhs = convert(lower(*logical.rhs), ast::Type::Bool);
+                llvm::Value* rhs = convert(lower(*logical.rhs), ast::Type::Bool, location, Use::Logical);
                 llvm::BasicBlock* rhsEnd = builder_.GetInsertBlock();   // lowering b may have added blocks
                 builder_.CreateBr(endBlock);
 
@@ -537,9 +686,12 @@ namespace fminus::ir
 
             // c ? a : b, as clang lowers it: only the branch taken runs, so it takes blocks and a phi (a select would
             // run both). SimplifyCFG turns a small one without side effects into a select at -O1 and above.
-            llvm::Value* lowerConditional(const ast::ConditionalExpr& conditional)
+            Value lowerConditional(SourceLocation location, const ast::ConditionalExpr& conditional)
             {
-                llvm::Value* condition = convert(lower(*conditional.condition), ast::Type::Bool);
+                const Value test = lower(*conditional.condition);
+                if (ast::isVector(test.type))
+                    return lowerSelect(location, test, conditional);
+                llvm::Value* condition = convert(test, ast::Type::Bool, location, Use::Condition);
                 llvm::Function* function = builder_.GetInsertBlock()->getParent();
                 llvm::LLVMContext& context = module_.getContext();
                 llvm::BasicBlock* trueBlock = llvm::BasicBlock::Create(context, "cond.true", function);
@@ -550,26 +702,217 @@ namespace fminus::ir
                 // Each branch may end in another block than it started in (a nested ?:): the phi needs the last. Both
                 // are lowered before their type is known, then converted to it at their ends.
                 builder_.SetInsertPoint(trueBlock);
-                llvm::Value* thenValue = lower(*conditional.thenValue);
+                const Value thenValue = lower(*conditional.thenValue);
                 llvm::BasicBlock* thenEnd = builder_.GetInsertBlock();
                 builder_.SetInsertPoint(falseBlock);
-                llvm::Value* elseValue = lower(*conditional.elseValue);
+                const Value elseValue = lower(*conditional.elseValue);
                 llvm::BasicBlock* elseEnd = builder_.GetInsertBlock();
 
-                const bool bothBool = thenValue->getType()->isIntegerTy(1) && elseValue->getType()->isIntegerTy(1);
-                const ast::Type type = bothBool ? ast::Type::Bool : ast::Type::Float;
+                // Two of one type give that type (two bools give a bool); otherwise the usual arithmetic conversions
+                // decide (a scalar and a vector give the vector).
+                ast::Type type = thenValue.type;
+                const bool meet = thenValue.type == elseValue.type
+                                  || commonType(location, thenValue.type, elseValue.type, type);
+                if (!meet)
+                    type = ast::Type::Float;
                 builder_.SetInsertPoint(thenEnd);
-                thenValue = convert(thenValue, type);
+                llvm::Value* thenIR = meet ? convert(thenValue, type, location, Use::Initializing) : poison(type).ir;
                 builder_.CreateBr(endBlock);
                 builder_.SetInsertPoint(elseEnd);
-                elseValue = convert(elseValue, type);
+                llvm::Value* elseIR = meet ? convert(elseValue, type, location, Use::Initializing) : poison(type).ir;
                 builder_.CreateBr(endBlock);
 
                 builder_.SetInsertPoint(endBlock);
                 llvm::PHINode* phi = builder_.CreatePHI(typeOf(type), 2, "cond");
-                phi->addIncoming(thenValue, thenEnd);
-                phi->addIncoming(elseValue, elseEnd);
-                return phi;
+                phi->addIncoming(thenIR, thenEnd);
+                phi->addIncoming(elseIR, elseEnd);
+                return {phi, type};
+            }
+
+            // c ? a : b with a vector c chooses lane by lane, as in OpenCL C: there are no branches, so both sides run,
+            // and a select picks each lane from one or the other. A float vector condition is `!= 0` per lane, as a
+            // scalar one is. The result is a float vector of the condition's size; scalar branches are broadcast.
+            Value lowerSelect(SourceLocation location, Value test, const ast::ConditionalExpr& conditional)
+            {
+                const ast::Type mask = ast::maskOf(ast::arithmeticOf(test.type));
+                llvm::Value* condition = test.ir;
+                if (!ast::isMask(test.type))
+                    condition = builder_.CreateFCmpUNE(condition, llvm::Constant::getNullValue(typeOf(test.type)),
+                                                       "tobool");
+                const Value thenValue = lower(*conditional.thenValue);
+                const Value elseValue = lower(*conditional.elseValue);
+                const ast::Type type = ast::arithmeticOf(mask);
+                ast::Type branches = type;
+                if (!commonType(location, thenValue.type, elseValue.type, branches))
+                    return poison(type);
+                if (ast::isVector(branches) && branches != type)
+                {
+                    error(location, "vector condition type " + quoted(ast::typeName(mask)) + " and result type "
+                                        + quoted(ast::typeName(branches)) + " do not have the same number of elements");
+                    return poison(type);
+                }
+                return {builder_.CreateSelect(condition, convert(thenValue, type, location, Use::Initializing),
+                                              convert(elseValue, type, location, Use::Initializing), "select"),
+                        type};
+            }
+
+            // (float4)(a, b, c, d), OpenCL C's vector literal: one scalar is broadcast; otherwise the arguments' lanes,
+            // in order, must fill the vector exactly.
+            Value lowerConstruct(SourceLocation location, const ast::ConstructExpr& construct)
+            {
+                const unsigned lanes = ast::lanes(construct.type);
+                std::vector<Value> args;
+                for (const ast::ExprPtr& arg : construct.args)
+                    args.push_back(lower(*arg));
+                if (args.size() == 1 && !ast::isVector(args[0].type))
+                    return {convert(args[0], construct.type, location, Use::Initializing), construct.type};
+
+                std::vector<llvm::Value*> elements;
+                for (const Value& arg : args)
+                {
+                    const ast::Type type = ast::arithmeticOf(arg.type);
+                    llvm::Value* floats = convert(arg, type, location, Use::Initializing);
+                    if (!ast::isVector(type))
+                        elements.push_back(floats);
+                    for (unsigned i = 0; ast::isVector(type) && i < ast::lanes(type); ++i)
+                        elements.push_back(builder_.CreateExtractElement(floats, i));
+                }
+                if (elements.size() != lanes)
+                {
+                    if (elements.size() < lanes)
+                        error(location, "too few elements in vector initialization (expected " + std::to_string(lanes)
+                                            + " elements, have " + std::to_string(elements.size()) + ")");
+                    else
+                        error(location, "excess elements in vector initializer");
+                    return poison(construct.type);
+                }
+                llvm::Value* vector = llvm::PoisonValue::get(typeOf(construct.type));
+                for (unsigned i = 0; i < lanes; ++i)
+                    vector = builder_.CreateInsertElement(vector, elements[i], i);
+                return {vector, construct.type};
+            }
+
+            // The lanes a component name names, as in OpenCL C: x, y, z and w for 0 to 3, or s followed by hex digits
+            // (s0 ... s7) for any lane; the two do not mix. Reports clang's errors, and returns nothing, for a name
+            // that is neither, or that names a lane `vector` does not have.
+            std::optional<std::vector<int>> components(SourceLocation location, const std::string& name,
+                                                       ast::Type vector)
+            {
+                std::vector<int> lanes;
+                const bool numbered = name.size() > 1 && (name[0] == 's' || name[0] == 'S');
+                for (std::size_t i = numbered ? 1 : 0; i < name.size(); ++i)
+                {
+                    const auto c = static_cast<unsigned char>(name[i]);
+                    int lane = -1;
+                    if (numbered && std::isxdigit(c) != 0)
+                        lane = std::isdigit(c) != 0 ? c - '0' : std::tolower(c) - 'a' + 10;
+                    else if (!numbered && std::string_view("xyzw").find(static_cast<char>(c)) != std::string_view::npos)
+                        lane = static_cast<int>(std::string_view("xyzw").find(static_cast<char>(c)));
+                    if (lane < 0)
+                    {
+                        error(location,
+                              "illegal vector component name " + quoted(std::string(1, static_cast<char>(c))));
+                        return std::nullopt;
+                    }
+                    if (lane >= static_cast<int>(ast::lanes(vector)))
+                    {
+                        error(location, "vector component access exceeds type " + quoted(ast::typeName(vector)));
+                        return std::nullopt;
+                    }
+                    lanes.push_back(lane);
+                }
+                return lanes;
+            }
+
+            // The type of `count` components: one is a float, 2, 4 or 8 a float vector; anything else is an error.
+            std::optional<ast::Type> componentsType(SourceLocation location, std::size_t count)
+            {
+                if (count == 1)
+                    return ast::Type::Float;
+                const auto type = ast::vectorOf(static_cast<unsigned>(count));
+                if (!type)
+                    error(location,
+                          std::to_string(count) + " components have no type: FMinus has float2, float4 and float8");
+                return type;
+            }
+
+            // Whether `type` has components: a float vector does; a scalar or a lane mask does not.
+            bool hasComponents(SourceLocation location, ast::Type type)
+            {
+                if (ast::isVector(type) && !ast::isMask(type))
+                    return true;
+                error(location,
+                      "member reference base type " + quoted(ast::typeName(type)) + " is not a structure or union");
+                return false;
+            }
+
+            // v.x is one lane (extractelement); v.wzyx, v.xxyy, v.s0123 are several, in any order, repeated or not (a
+            // shufflevector).
+            Value lowerSwizzle(SourceLocation location, const ast::SwizzleExpr& swizzle)
+            {
+                const Value base = lower(*swizzle.base);
+                if (!hasComponents(location, base.type))
+                    return poison(ast::Type::Float);
+                const auto lanes = components(location, swizzle.components, base.type);
+                if (!lanes)
+                    return poison(ast::Type::Float);
+                const auto type = componentsType(location, lanes->size());
+                if (!type)
+                    return poison(ast::Type::Float);
+                if (lanes->size() == 1)
+                    return {builder_.CreateExtractElement(base.ir, static_cast<std::uint64_t>((*lanes)[0]),
+                                                          swizzle.components),
+                            *type};
+                return {builder_.CreateShuffleVector(base.ir, *lanes, swizzle.components), *type};
+            }
+
+            // v.x = e, v.zw += e: components of a vector variable, assigned. They must be distinct, and the value has
+            // their type (a float for one, a vector of their number otherwise; a scalar is broadcast to it).
+            Value assignComponents(SourceLocation location, const ast::AssignExpr& assign,
+                                   const ast::SwizzleExpr& swizzle, Value value)
+            {
+                const Binding* binding = assignable(location, *swizzle.base);
+                if (binding == nullptr || !hasComponents(location, binding->type))
+                    return poison(ast::Type::Float);
+                const auto lanes = components(location, swizzle.components, binding->type);
+                if (!lanes)
+                    return poison(ast::Type::Float);
+                for (std::size_t i = 0; i < lanes->size(); ++i)
+                {
+                    for (std::size_t j = i + 1; j < lanes->size(); ++j)
+                    {
+                        if ((*lanes)[i] == (*lanes)[j])
+                        {
+                            error(location, "vector is not assignable (contains duplicate components)");
+                            return poison(ast::Type::Float);
+                        }
+                    }
+                }
+                const auto type = componentsType(location, lanes->size());
+                if (!type)
+                    return poison(ast::Type::Float);
+
+                llvm::AllocaInst* slot = binding->slot;
+                llvm::Value* vector = builder_.CreateLoad(slot->getAllocatedType(), slot, slot->getName());
+                if (assign.op != ast::AssignOp::Assign)
+                {
+                    llvm::Value* lanesNow =
+                        lanes->size() == 1
+                            ? builder_.CreateExtractElement(vector, static_cast<std::uint64_t>((*lanes)[0]))
+                            : builder_.CreateShuffleVector(vector, *lanes);
+                    const Value current{lanesNow, *type};
+                    value = compound(location, assign.op, current, value);
+                    if (value.ir == nullptr)
+                        return poison(*type);
+                }
+                llvm::Value* stored = convert(value, *type, location, Use::Assigning);
+                for (std::size_t i = 0; i < lanes->size(); ++i)
+                {
+                    llvm::Value* element = lanes->size() == 1 ? stored : builder_.CreateExtractElement(stored, i);
+                    vector = builder_.CreateInsertElement(vector, element, static_cast<std::uint64_t>((*lanes)[i]));
+                }
+                builder_.CreateStore(vector, slot);
+                return {stored, *type};
             }
 
             // The constant rounded once, from its spelling straight to float (no detour through double). APFloat
@@ -585,7 +928,7 @@ namespace fminus::ir
                 {
                     llvm::consumeError(status.takeError());
                     error(location, "invalid floating-point constant " + quoted(number.spelling));
-                    return poison(ast::Type::Float);
+                    return poison(ast::Type::Float).ir;
                 }
                 if ((*status & llvm::APFloat::opOverflow) != 0)
                     error(location, "magnitude of floating-point constant too large for type 'float'");
@@ -594,38 +937,64 @@ namespace fminus::ir
 
             // `target op value`: the target must be a variable that is not const. The value of the expression is
             // the one stored.
-            llvm::Value* lowerAssign(SourceLocation location, const ast::AssignExpr& assign)
+            Value lowerAssign(SourceLocation location, const ast::AssignExpr& assign)
             {
-                llvm::Value* value = lower(*assign.value);
-                const auto* variable = std::get_if<ast::VariableExpr>(&assign.target->node);
+                Value value = lower(*assign.value);
+                if (const auto* swizzle = std::get_if<ast::SwizzleExpr>(&assign.target->node))
+                    return assignComponents(location, assign, *swizzle, value);
+                const Binding* binding = assignable(location, *assign.target);
+                if (binding == nullptr)
+                    return poison(ast::Type::Float);
+                llvm::AllocaInst* slot = binding->slot;
+                if (assign.op != ast::AssignOp::Assign)
+                {
+                    const Value current{builder_.CreateLoad(slot->getAllocatedType(), slot, slot->getName()),
+                                        binding->type};
+                    value = compound(location, assign.op, current, value);
+                    if (value.ir == nullptr)
+                        return poison(binding->type);
+                }
+                llvm::Value* stored = convert(value, binding->type, location, Use::Assigning);
+                builder_.CreateStore(stored, slot);
+                return {stored, binding->type};
+            }
+
+            // The variable an assignment stores to: one that is declared and not const. Otherwise reports clang's
+            // error and returns null.
+            const Binding* assignable(SourceLocation location, const ast::Expr& target)
+            {
+                const auto* variable = std::get_if<ast::VariableExpr>(&target.node);
                 if (variable == nullptr)
                 {
                     error(location, "expression is not assignable");
-                    return poison(ast::Type::Float);
+                    return nullptr;
                 }
                 const Binding* binding = find(variable->name);
                 if (binding == nullptr)
                 {
-                    error(assign.target->location, "use of undeclared identifier " + quoted(variable->name));
-                    return poison(ast::Type::Float);
+                    error(target.location, "use of undeclared identifier " + quoted(variable->name));
+                    return nullptr;
                 }
                 if (binding->isConst)
                 {
                     error(location, "cannot assign to variable " + quoted(variable->name)
                                         + " with const-qualified type "
                                         + quoted(std::string("const ") + ast::typeName(binding->type)));
-                    return poison(ast::Type::Float);
+                    return nullptr;
                 }
-                if (assign.op != ast::AssignOp::Assign)
-                {
-                    llvm::Value* current =
-                        builder_.CreateLoad(binding->slot->getAllocatedType(), binding->slot, variable->name);
-                    value = arithmetic(compoundOperator(assign.op), convert(current, ast::Type::Float),
-                                       convert(value, ast::Type::Float));
-                }
-                value = convert(value, binding->type);
-                builder_.CreateStore(value, binding->slot);
-                return value;
+                return binding;
+            }
+
+            // What `current op= value` stores: the operator, in the type both convert to (a scalar broadcasts to a
+            // vector). A null IR after an error.
+            Value compound(SourceLocation location, ast::AssignOp op, Value current, Value value)
+            {
+                ast::Type common = ast::Type::Float;
+                if (!commonType(location, current.type, value.type, common))
+                    return {nullptr, common};
+                return {arithmetic(compoundOperator(op), convert(current, common, location, Use::Initializing),
+                                   convert(value, common, location, Use::Initializing)),
+                        common};
             }
 
             // The operator of a compound assignment: += is +, ...
@@ -648,21 +1017,32 @@ namespace fminus::ir
                 return ast::BinaryOp::Add;
             }
 
-            llvm::Value* lowerCall(SourceLocation location, const ast::CallExpr& call)
+            Value lowerCall(SourceLocation location, const ast::CallExpr& call)
             {
-                std::vector<llvm::Value*> args;
+                std::vector<Value> args;
                 for (const ast::ExprPtr& arg : call.args)
                     args.push_back(lower(*arg));
 
+                if (isReduction(call.callee))
+                    return lowerReduction(location, call, args);
+                std::vector<llvm::Value*> irArgs;
                 if (const Builtin* builtin = findBuiltin(call.callee))
                 {
                     if (args.size() != builtin->arity)
                         return wrongArity(location, call, builtin->arity);
-                    for (llvm::Value*& arg : args)
-                        arg = convert(arg, ast::Type::Float);
+                    // Overloaded on its arguments, as OpenCL C's math functions are: with a vector argument it is the
+                    // vector intrinsic (llvm.fabs.v4f32), and scalar arguments beside it are broadcast.
+                    ast::Type type = ast::Type::Float;
+                    for (const Value& arg : args)
+                    {
+                        if (!commonType(location, type, arg.type, type))
+                            return poison(ast::Type::Float);
+                    }
+                    for (const Value& arg : args)
+                        irArgs.push_back(convert(arg, type, location, Use::Passing));
                     llvm::Function* intrinsic =
-                        llvm::Intrinsic::getOrInsertDeclaration(&module_, builtin->intrinsic, {builder_.getFloatTy()});
-                    return builder_.CreateCall(intrinsic, args);
+                        llvm::Intrinsic::getOrInsertDeclaration(&module_, builtin->intrinsic, {typeOf(type)});
+                    return {builder_.CreateCall(intrinsic, irArgs), type};
                 }
                 const auto found = functions_.find(call.callee);
                 if (found == functions_.end())
@@ -674,11 +1054,34 @@ namespace fminus::ir
                 if (args.size() != callee.params.size())
                     return wrongArity(location, call, static_cast<unsigned>(callee.params.size()));
                 for (std::size_t i = 0; i < args.size(); ++i)
-                    args[i] = convert(args[i], callee.params[i].type);
-                return builder_.CreateCall(module_.getFunction(call.callee), args);
+                    irArgs.push_back(convert(args[i], callee.params[i].type, location, Use::Passing));
+                return {builder_.CreateCall(module_.getFunction(call.callee), irArgs), callee.returnType};
             }
 
-            llvm::Value* wrongArity(SourceLocation location, const ast::CallExpr& call, unsigned expected)
+            // reduce_add(v), reduce_min(v), reduce_max(v): a float vector to one float. The sum is ordered, lane 0
+            // first, as a loop would add them (llvm.vector.reduce.fadd without the reassoc flag), so it is exact and
+            // reproducible; reassociating it into a tree is fast-math's to allow. min and max ignore NaN lanes.
+            Value lowerReduction(SourceLocation location, const ast::CallExpr& call, const std::vector<Value>& args)
+            {
+                if (args.size() != 1)
+                    return wrongArity(location, call, 1);
+                const Value& vector = args[0];
+                if (!ast::isVector(vector.type) || ast::isMask(vector.type))
+                {
+                    error(location, "the argument of " + quoted(call.callee) + " must be a float vector, not "
+                                        + quoted(ast::typeName(vector.type)));
+                    return poison(ast::Type::Float);
+                }
+                if (call.callee == "reduce_add")
+                    return {builder_.CreateFAddReduce(llvm::ConstantFP::getNegativeZero(builder_.getFloatTy()),
+                                                      vector.ir),
+                            ast::Type::Float};
+                if (call.callee == "reduce_min")
+                    return {builder_.CreateFPMinReduce(vector.ir), ast::Type::Float};
+                return {builder_.CreateFPMaxReduce(vector.ir), ast::Type::Float};
+            }
+
+            Value wrongArity(SourceLocation location, const ast::CallExpr& call, unsigned expected)
             {
                 error(location, std::string(call.args.size() > expected ? "too many" : "too few")
                                     + " arguments to function call, expected " + std::to_string(expected) + ", have "

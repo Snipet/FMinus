@@ -173,6 +173,14 @@ int main(int argc, char** argv)
         case fminus::ast::Type::Bool:
             llvm::outs() << std::format("{}\n", call<bool>(*address, runArgs, counts));
             break;
+        case fminus::ast::Type::Float2:   // a vector stays inside FMinus, or goes to a C++ host (docs/simd.md)
+        case fminus::ast::Type::Float4:
+        case fminus::ast::Type::Float8:
+        case fminus::ast::Type::Bool2:
+        case fminus::ast::Type::Bool4:
+        case fminus::ast::Type::Bool8:
+            return fail(std::format("--run: '{}' returns a {}; --run prints floats and bools only", run,
+                                    fminus::ast::typeName(function->returnType)));
         }
         return 0;
     }

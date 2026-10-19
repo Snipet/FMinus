@@ -77,6 +77,16 @@ TEST_CASE("comparisons, !, && and ||, and ?: have C's precedence", "[frontend]")
     CHECK(parsed("bool h() { return !true || false; }") == "(function bool h ()\n  (return (|| (! true) false)))\n");
 }
 
+TEST_CASE("vector types, literals and swizzles parse as OpenCL C's", "[frontend]")
+{
+    // A literal is a parenthesised type, then its elements; a swizzle binds tighter than any operator, as in C.
+    CHECK(parsed("float4 f(float2 a, float8 b) { return (float4)(a, b.s0, 1) * -a.yx.xxyy; }")
+          == "(function float4 f ((float2 a) (float8 b))\n"
+             "  (return (* (float4 a (. b s0) 1) (- (. (. a yx) xxyy)))))\n");
+    CHECK(parsed("float f(float4 v) { v.xy = v.zw; return v.x; }")
+          == "(function float f ((float4 v))\n  (= (. v xy) (. v zw))\n  (return (. v x)))\n");
+}
+
 TEST_CASE("constants keep their spelling: C's decimal, hex and integer forms", "[frontend]")
 {
     CHECK(parsed("float f() { return fmaxf(fminf(1, .5), g(2e3, 1.e-2f, 3.25E+1F, 0x1.8p1, 0x1p-3f, 1.)); }")
@@ -94,5 +104,6 @@ TEST_CASE("syntax and scanner errors carry their locations", "[frontend]")
     CHECK(parsed("float f(float x) /* never\nclosed { return x; }")
           == "test.fm:1:18: error: unterminated /* comment\n");
     CHECK(parsed("fn f(x: float) -> float { return x; }")
-          == "test.fm:1:1: error: syntax error, unexpected identifier, expecting end of file or float or bool\n");
+          == "test.fm:1:1: error: syntax error, unexpected identifier, expecting end of file or float or bool or "
+             "vector type\n");
 }
