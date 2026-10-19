@@ -5,11 +5,12 @@ optimises it for the CPU it is running on, and ORC's LLJIT compiles it, all on t
 the same IR can also be compiled ahead of time into a native executable.
 
 **Status:** FMinus v0, a deliberately small subset of C that goes all the way through, from source to the JIT, to
-expand on. It has functions over `float` and `bool`, declarations, assignments, blocks, `if`, `while`, `for`,
-`break`, `continue` and `return`, arithmetic with `%`, comparisons, `!`, `&&`, `||` and `?:`, calls and `<math.h>`'s
-float functions (below). It has SIMD: OpenCL C's `float2`, `float4` and `float8`, and `poly float`, a vector as wide as
-the machine's. A program with a `float main(...)` also builds into an executable. The build, the dependencies and the
-toolchain's smoke tests are in place around it.
+expand on. It has functions over `float`, `int` and `bool`, and `void` ones; declarations, assignments, blocks, `if`,
+`while`, `for`, `break`, `continue` and `return`; arithmetic with `%`, `++` and `--`, casts, comparisons, `!`, `&&`,
+`||` and `?:`; calls and `<math.h>`'s float functions (below). It has pointers, `const` and `restrict` ones, so a
+function can take a C++ host's buffers and process a whole block in one call. It has SIMD: OpenCL C's `float2`,
+`float4` and `float8`, and `poly float`, a vector as wide as the machine's. A program with a `float main(...)` also
+builds into an executable. The build, the dependencies and the toolchain's smoke tests are in place around it.
 
 Documentation: [docs/](docs/README.md). It covers the architecture, writing a program with `main`, a guide to
 extending the compiler with worked recipes, SIMD (vector types, a vector math library, and vectors as wide as the
@@ -156,20 +157,25 @@ float half(float x) { x /= 2; return x; }
 
 | | |
 |---|---|
-| program | function definitions, `float name(float a, const float b) { ... }`, and prototypes, `float name(float);` |
-| declarations | `float x = e;`, `const float k = e;`, several at once (`float a = 1, b;`); block-scoped, shadowing allowed in an inner block |
-| statements | `{ ... }`, `e;`, `return e;`, `;`, `if (c) s else s` (an `else` closes the nearest `if`), `while (c) s`, `for (init; c; step) s` (its declarations are the loop's), `break;`, `continue;` |
-| expressions | constants, names, calls, `( )`, unary `-` `+` `!`, `* / %`, `+ -`, `< <= > >=`, `== !=`, `&&`, `\|\|` (both short-circuit), `?:` (only the branch taken runs), and `= += -= *= /= %=` (right to left; an assignment's value is the one stored), with C's precedence; vector literals, OpenCL C's `(float4)(a, b, c, d)` and C's `(float4){a, b}` (the lanes left out are 0), and swizzles `v.wzyx`, `v.s0` |
-| constants | C's floating and integer forms: `1.5`, `1.`, `.5`, `2e3`, `1.5e-3f`, hex floats `0x1.8p1`, `0x1p-3f`, and `2`; `true` and `false` |
+| program | function definitions, `float name(float a, const float b) { ... }` or `void name(...)`, and prototypes, `float name(float);`; `f(void)` is C's empty list |
+| declarations | `float x = e;`, `const float k = e;`, `float* p = out;`, several at once (`float a = 1, b;`; in `float *p, x;` only `p` is a pointer, as in C); block-scoped, shadowing allowed in an inner block |
+| statements | `{ ... }`, `e;`, `return e;` and `return;`, `;`, `if (c) s else s` (an `else` closes the nearest `if`), `while (c) s`, `for (init; c; step) s` (its declarations are the loop's), `break;`, `continue;` |
+| expressions | constants, names, calls, `( )`, unary `-` `+` `!`, `++` and `--` (before or after), casts `(int)x` `(float)x` `(bool)x`, `* / %`, `+ -`, `< <= > >=`, `== !=`, `&&`, `\|\|` (both short-circuit), `?:` (only the branch taken runs), and `= += -= *= /= %=` (right to left; an assignment's value is the one stored), with C's precedence; pointers' `p[i]`, `*p`, `&x`, `p + i`, `p - q` and comparisons; vector literals, OpenCL C's `(float4)(a, b, c, d)` and C's `(float4){a, b}` (the lanes left out are 0), and swizzles `v.wzyx`, `v.s0` |
+| constants | C's: floating ones are floats (`1.5`, `1.`, `.5`, `2e3`, `1.5e-3f`, hex floats `0x1.8p1`, `0x1p-3f`), integer ones ints (`2`, `010` in octal, `0x1F` in hex); `true` and `false` |
 | comments | `// ...` and `/* ... */` |
-| types | `float` (IEEE single precision) and `bool` (C23's: 0 or 1 as a float; a float is `x != 0` as a bool); `float2`, `float4`, `float8` (OpenCL C's vectors, lane by lane, scalars broadcast); `poly float` and `poly bool`, as many lanes as the machine's vectors ([docs/simd.md](docs/simd.md)) |
-| builtins | `fabsf sqrtf sinf cosf expf logf floorf fminf fmaxf tanhf` (LLVM intrinsics, on floats and vectors); `reduce_add reduce_min reduce_max` (a vector to a float); `poly_lanes poly_index` |
+| types | `float` (IEEE single precision), `int` (32 bits, signed: C's `/` and `%`, overflow undefined) and `bool` (C23's: 0 or 1, computed as an int; a number is `x != 0` as a bool); `void`, a function's result; pointers to `float`, `int`, `float2`, `float4` and `float8`, `const` (`const float*`, read-only through it) and `restrict` (C99's promise that nothing else reaches it); `float2`, `float4`, `float8` (OpenCL C's vectors, lane by lane, scalars broadcast); `poly float` and `poly bool`, as many lanes as the machine's vectors ([docs/simd.md](docs/simd.md)) |
+| builtins | `fabsf sqrtf sinf cosf expf logf floorf fminf fmaxf tanhf` (LLVM intrinsics, on floats and vectors); `reduce_add reduce_min reduce_max` (a vector to a float); `poly_lanes` (an int) and `poly_index` |
 
 Where FMinus differs from C, it is on purpose:
 
-- **`float` is the only arithmetic type, and every number is a `float`.** In C an unsuffixed `1.5` is a `double`, and
-  `x * 1.5` is computed in double. Write the `f` suffix (`1.5f`) and a program means the same in both. Every example
-  here does.
+- **`float` and `int` are the arithmetic types**: no `double`, `long`, `unsigned` or narrower integers. In C an
+  unsuffixed `1.5` is a `double`, and `x * 1.5` is computed in double; in FMinus it is a float. Write the `f` suffix
+  (`1.5f`) and a program means the same in both. Every example here does. An integer constant is an `int`, as in C, so
+  `1 / 2` is 0; one too large for an `int` is an error, where C would make it a `long`.
+- **Pointers point to `float`, `int`, `float2`, `float4` or `float8`, one level deep**: no pointers to pointers, no
+  `void*` or `bool*`, no arrays, no null pointer constant (`0` is an int; an uninitialised pointer is null) and no
+  casts between pointer types. Converting a pointer to one of another type, or dropping its `const`, is an error,
+  where C warns.
 - **Vectors are OpenCL C's**, which C has none of: `float2`, `float4`, `float8`, their literals and swizzles, and math
   functions that take them. A comparison of vectors gives a lane mask (OpenCL C gives 0 or -1 in an `int` vector), and
   `?:` with a vector condition picks each lane, so both sides run. Literals come in OpenCL C's form,
@@ -181,7 +187,7 @@ Where FMinus differs from C, it is on purpose:
 - **A function may be called before its definition** without a prototype, because the compiler declares every
   function first. A prototype with no definition declares an external C function, as in C: the JIT resolves it in
   the process (`float atanf(float x);` calls libm's), and the linker resolves it in an executable.
-- **A declaration without an initialiser starts at 0.** C leaves the variable indeterminate.
+- **A declaration without an initialiser starts at 0**, and a pointer at null. C leaves the variable indeterminate.
 - **A non-void function that can reach its end is an error**, as in C++. Clang only warns in C.
 - **Arithmetic is IEEE single precision**, with no contraction into fused multiply-adds (clang's
   `-ffp-contract=off`).
@@ -191,12 +197,14 @@ Where FMinus differs from C, it is on purpose:
   `false` ([docs/programs.md](docs/programs.md)).
 
 A v0 program with `f` suffixes, with prototypes for calls ahead of a definition, with vectors only in C's form (braces,
-given clang's `ext_vector_type`), and without `%`, `poly` or `main`, is therefore also a valid C program with the same
-meaning, given `<math.h>` and `-ffp-contract=off`. The example above and `examples/biquad/biquad.fm` both compile as C
-under `-Wall -Wextra -Werror`.
+given clang's `ext_vector_type`), and without `%` on floats, `poly` or `main`, is therefore also a valid C program with
+the same meaning, given `<math.h>` and `-ffp-contract=off`. The example above and `examples/biquad/biquad.fm` both
+compile as C under `-Wall -Wextra -Werror`.
 
-Every FMinus function becomes an external LLVM function of the same name with the C calling convention, so C++
-calls JIT'd code as `float(float, ...)`. The code generator reports every error it finds, in source order and in
+Every FMinus function becomes an external LLVM function of the same name with the C calling convention (a `float` is
+LLVM's `float`, an `int` an `i32`, a pointer a `ptr`), so C++ calls JIT'd code through a pointer of the matching type:
+`float(float, ...)`, or `void(const float*, float*, int)` for a function that processes a block of samples in one
+call. The code generator reports every error it finds, in source order and in
 clang's words, as `file:line:column: error: message`. The parser stops at the first syntax error.
 
 ```bash
@@ -225,11 +233,12 @@ types:
    in `src/ir/`, in the file its kind belongs to (statements in `Statements.cpp`, vectors in `Vectors.cpp`, ...;
    `Lowering.h` has the list).
 4. Its tests: a dump in `tests/unit/FrontendTest.cpp`, a result in the code generator's tests (`CodeGenTest.cpp`,
-   `ControlFlowTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`, which share `Compile.h`), IR or errors in
-   `tests/lit/fminus/*.fm` (`// RUN:` lines, checked by FileCheck).
+   `ControlFlowTest.cpp`, `IntTest.cpp`, `PointerTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`, which share
+   `Compile.h`), IR or errors in `tests/lit/fminus/*.fm` (`// RUN:` lines, checked by FileCheck).
 
 `examples/biquad/` is a kernel to grow the language around. It is a biquad low-pass with coefficients recomputed
-every sample, with a harness that compares it with C++ and times both, and a plan of features in its README.
+every sample, which filters a block a call, with a harness that calls it once, compares it with C++ and times both,
+and a plan of features in its README.
 
 Each variable is a stack slot (an `alloca` in the entry block), read with loads and written with stores, so
 `fminus -O0` reads like `clang -O0`. From `-O1`, mem2reg promotes the slots back into registers.
@@ -301,7 +310,7 @@ preset has a workflow (`cmake --workflow --preset <name>`) except `xcode`, which
 ## Handy
 
 - `build-dev/bin/fminus-hostinfo [--features]`: the triple, CPU, features and data layout the JIT targets here.
-- VSCode: `python3 editors/vscode/package.py`, then `code --install-extension build-vscode/fminus-0.1.0.vsix`, for
+- VSCode: `python3 editors/vscode/package.py`, then `code --install-extension build-vscode/fminus-0.2.0.vsix`, for
   FMinus syntax highlighting, lit's `RUN:` and `CHECK:` lines included
   ([editors/vscode/README.md](editors/vscode/README.md)).
 - `build-dev/bin/fminus`: FMinus source to its tree, IR, assembly or an object, or run in the JIT (above).

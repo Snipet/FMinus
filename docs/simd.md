@@ -70,9 +70,10 @@ maps them onto the target's registers.
 ## Four ways to SIMD
 
 1. **The auto-vectorisers**, already running. `optimiseModule` enables LLVM's loop vectoriser and SLP vectoriser with
-   the host's cost model. The loop vectoriser needs loops over memory, which FMinus doesn't have yet (no pointers),
-   and the SLP vectoriser packs independent scalar operations, which small functions rarely have. Today they do
-   little for FMinus code; with buffers they will do a lot (see "The auto-vectorisers").
+   the host's cost model. The loop vectoriser needs loops over memory, which FMinus has had since recipe 10's
+   pointers: a loop over a buffer, such as `out[i] = in[i] * g`, runs on `<4 x float>`s with no vector type in the
+   source. The SLP vectoriser packs independent scalar operations, which small functions rarely have (see "The
+   auto-vectorisers").
 2. **Fixed-width vector types** (recipe 7): the programmer writes `float4`, and gets exactly four lanes on every
    target. Good for data that is four-wide by nature: four channels, a 4×4 matrix row, a filter's four states.
 3. **A vector math library** (recipe 8): `sinf` of a vector becomes one call to a vectorised `sinf`.
@@ -126,8 +127,9 @@ literal is a compound literal, `(float4){1, 2, 3, 4}`, which gives `1 2 3 4`. So
 parentheses, and C's braces, with C's meaning ("Literals", below). A function that uses only braces is C as well.
 
 Two of OpenCL C's rules are left out. OpenCL C's comparisons of float vectors give `int4` (0 or -1 per lane), which
-FMinus can't express without integers. FMinus gives a lane mask instead, which converts to 0 or 1 per lane as a
-float. And OpenCL C allows three-component vectors (`float3`, stored as four); FMinus doesn't.
+FMinus can't express: it has `int` since recipe 10, but no integer vectors. FMinus gives a lane mask instead, which
+converts to 0 or 1 per lane as a float. And OpenCL C allows three-component vectors (`float3`, stored as four);
+FMinus doesn't.
 
 ### Types and masks
 
@@ -202,7 +204,8 @@ type:
 
 `lower(const ast::Expr&)` returns a `Value`, and so does each lowering function. Every rule below reads `value.type`.
 This is the "type checker" that extending.md's design notes call for, in its smallest form: types are computed while
-lowering, not in a pass of their own. When FMinus gets integers, a separate semantic pass becomes worth it.
+lowering, not in a pass of their own. Recipe 10 added `int` and pointers the same way; with C's other integer
+types, a separate semantic pass becomes worth it.
 `poison(type)` now returns a `Value`, and code that needs only the IR takes `.ir`.
 
 ### The grammar
@@ -289,8 +292,10 @@ the value meets its type, so a failure gets clang's message for that place:
 ```
 
 (This is `convert` as recipe 7 wrote it. Recipe 9 adds a splat to `poly bool` and uses the code generator's own
-`lanes(type)`, which knows a poly type's width; `Types.cpp` has that version. The same goes for `commonType` below,
-which recipe 9 teaches to refuse a poly type meeting a fixed vector.)
+`lanes(type)`, which knows a poly type's width, and recipe 10 adds `int`, `void` and pointers; `Types.cpp` has that
+version. The same goes for `commonType` below, which recipe 9 teaches to refuse a poly type meeting a fixed vector,
+and recipe 10 to meet two `int`s as an `int`. Since recipe 10, too, a switch over a type is a switch over its
+`kind`: `switch (type.kind)`, with `case ast::Kind::Float4:`.)
 
 | From | To | How |
 |---|---|---|
@@ -504,12 +509,14 @@ Reading is one instruction. One lane is an `extractelement`; several, in any ord
   %wzyx = shufflevector <4 x float> %v, <4 x float> poison, <4 x i32> <i32 3, i32 2, i32 1, i32 0>
 ```
 
-Writing is `assignComponents`, which `lowerAssign` calls for a swizzle target. It checks the target as any assignment
-does (a variable, declared, not `const`, through the helper `assignable`), then the components. They must be distinct:
-`v.xx = e` would write lane 0 twice, which is clang's "vector is not assignable (contains duplicate components)". It
-loads the whole vector, replaces the named lanes with `insertelement`s, and stores it back. A compound assignment
-(`v.zw *= 2`) first reads the components with the same `shufflevector`. At `-O2`, the load and store disappear with
-mem2reg, and the inserts become shuffles:
+Writing goes through recipe 10's lvalues (`Memory.cpp`; extending.md, "Lvalues: one path for every store"). This
+recipe wrote it as `assignComponents`; recipe 10 folded it into `lvalue` and `write`, so components of anything
+assignable can be assigned: a variable's, an element's (`frames[i].yz *= 2`), other components' (`v.xy.x = 1`). The
+target is checked as any assignment's is (declared, not `const`), and so are the components. They must be distinct:
+`v.xx = e` would write lane 0 twice, which is clang's "vector is not assignable (contains duplicate components)".
+`write` loads the whole vector, replaces the named lanes with `insertelement`s, and stores it back. A compound
+assignment (`v.zw *= 2`) first reads the components with the same `shufflevector`. At `-O2`, the load and store
+disappear with mem2reg, and the inserts become shuffles:
 
 ```llvm
 ; float4 set(float4 v) { v.x = 10; v.zw *= 2; return v; }     fminus -O2
@@ -519,7 +526,7 @@ mem2reg, and the inserts become shuffles:
   %3 = shufflevector <4 x float> %0, <4 x float> %2, <4 x i32> <i32 0, i32 1, i32 4, i32 5>
 ```
 
-Only a variable's components can be assigned. `f().x = 1` is "expression is not assignable", as in clang.
+Only an lvalue's components can be assigned. `f().x = 1` is "expression is not assignable", as in clang.
 
 ### Builtins on vectors
 
@@ -656,8 +663,9 @@ ABI. To export one, lower it as clang does: a `ptr sret(<8 x float>)` first para
 asks it.
 
 `fminus --run` crosses the boundary too: it calls the JIT'd function through a C++ pointer type, and its command line
-has floats only. So it refuses a vector parameter ("--run: 'g' takes a float4 parameter; --run passes floats only")
-and a vector result ("--run: 'f' returns a float4; --run prints floats and bools only"). The second comes from the
+has floats only. So it refuses a vector parameter ("--run: 'g' takes a parameter of type 'float4'; --run passes floats
+only") and a vector result ("--run: 'f' returns 'float4'; --run prints floats, bools and ints only"). The second
+comes from the
 driver's `switch` over the result type (`tools/fminus/main.cpp`), which has no `default:`: when this recipe added
 `Float2` to `Bool8`, `-Wswitch` stopped the build there until they were handled, and recipe 9's poly types did the
 same. An executable's `main` refuses them the same way (programs.md).
@@ -841,8 +849,8 @@ _shape:                             ; tanhf(x) + sqrtf(fabsf(x)): only tanhf bec
   `sinf` stays `llvm.sin.v8f32`, which the backend splits and scalarises: eight calls to `sinf`. Splitting the call into
   two `float4` halves before the replacement (a few lines in a pass of your own, recipe 6's pattern) would give two
   calls. The same holds for a `float2`, and for a `poly float` that isn't four wide (recipe 9).
-- **No scalar loops yet.** The loop vectoriser would use the table for a loop of `sinf` calls over a buffer, once
-  FMinus has buffers.
+- **Scalar loops.** With recipe 10's pointers, the loop vectoriser can use the table too: a loop of `sinf` calls over
+  a buffer becomes one `_simd_sin_f4` call each four samples.
 - **No choice.** The recipe turns the library on for every program. A real compiler would make it an option, as clang's
   `-fveclib=` is, or a function attribute, for code that needs libm's accuracy or bit-identical scalar and vector
   results.
@@ -892,13 +900,13 @@ than none.
 |---|---|
 | `poly float` | a float per lane, as many lanes as the target's vector registers hold floats |
 | `poly bool` | a lane mask: what comparing `poly float`s gives; unlike `bool4`, a program can declare it |
-| `poly_lanes()` | the number of lanes, as a `float`: a constant once the target is known |
+| `poly_lanes()` | the number of lanes, an `int` (a `float` before recipe 10): a constant once the target is known |
 | `poly_index()` | a `poly float` whose lanes hold their own index: 0, 1, 2, ... |
 | `(poly float)(x)` | a broadcast of one scalar |
 
 Everything recipe 7 gives vectors works: the operators with broadcasting, comparisons and masks, `?:` lane by lane,
 the builtins (overloaded at the target's width), `reduce_add`, `reduce_min`, `reduce_max`. `poly` is a qualifier on a
-scalar type, as ISPC's `varying` is, so `poly int` can follow once FMinus has `int`. A scalar converts to a
+scalar type, as ISPC's `varying` is, so `poly int` can follow `int` (recipe 10). A scalar converts to a
 `poly float` (broadcast), a `bool` to a `poly bool`, and a `poly bool` to a `poly float` (0 or 1 per lane).
 
 What recipe 7 has and `poly float` doesn't, because each would depend on the width:
@@ -996,14 +1004,15 @@ Most of the work was recipe 7's. The rest:
 - **The rules.** `commonType` refuses a poly type meeting a fixed vector; `lowerSelect` refuses a poly mask with fixed
   branches and the reverse; `lowerConstruct` refuses a poly literal with more than one argument and a poly argument in
   a fixed literal; `hasComponents` refuses a `poly float`. All of them report through one message, `polyMismatch`.
-- **`poly_lanes()` and `poly_index()`** are constants: `ConstantFP` of the width, and a `ConstantVector` of
-  0, 1, ... They are refused as function names, like the reductions.
+- **`poly_lanes()` and `poly_index()`** are constants: an `i32` of the width (a `ConstantFP` until recipe 10 added
+  `int`), and a `ConstantVector` of 0, 1, ... They are refused as function names, like the reductions.
 
 ### Writing poly code
 
 `basel` above is the basic pattern, *strip-mining*: a loop that advances by `poly_lanes()`, a `poly_index()` that gives
 each lane its own element, and a mask for the last step, where some lanes run past the end. The mask keeps them from
-contributing: `k <= n ? term : 0` is a select. With buffers, the same loop would load `poly_lanes()` samples at a time.
+contributing: `k <= n ? term : 0` is a select. Over a buffer, the same loop would load `poly_lanes()` samples at a
+time, which needs a `poly float` load from a `float*` ("Where to go next").
 
 At 4 lanes the loop is:
 
@@ -1042,7 +1051,7 @@ This is inherent in width-agnostic code, and it is the main thing to design for:
 - **Lane-independent work is exact at any width.** Each lane computes on its own data: a voice per lane, a channel per
   lane, a sample per lane. Only how the work is spread over lanes changes, never what any lane computes.
 - **Order-independent reductions are exact too**: `reduce_min`, `reduce_max`, and integer sums once FMinus has
-  integers. The test's `peak` (a maximum) is bit-identical at every width.
+  integer vectors. The test's `peak` (a maximum) is bit-identical at every width.
 - **Float sums across lanes are not.** If the result must not depend on the machine, fix the number of partial sums in
   the program (accumulate in a `float8`, or in a fixed number of `poly float`-sized blocks), or sum in a wider type.
 - **The math library depends on the width too.** With recipe 8, `sinf` of a 4-lane `poly float` calls
@@ -1073,7 +1082,7 @@ not always the fastest. An option would be `polyLanes × interleave`, with the i
 A `poly float` parameter or result is the target's vector type. At 4 lanes on NEON, that is `<4 x float>`, and C++
 calls it as a `float4` (the test does). At 8 or 16 lanes it is an `<8 x float>` or a `<16 x float>`, which meets
 recipe 7's `float8` problem: the C ABI passes those through memory. And the C++ caller would have to know the width.
-Exported functions should take and return scalars, or (once FMinus has them) buffers, and keep `poly float` inside.
+Exported functions should take and return scalars and buffers (recipe 10's pointers), and keep `poly float` inside.
 `main` refuses `poly` parameters, as it refuses everything but `float` (see [programs.md](programs.md)).
 
 ### JIT and ahead of time
@@ -1160,7 +1169,7 @@ with fixed sizes, and the width only through `poly_lanes()` and `poly_index()`. 
 | `poly float` | Scalable lowering |
 |---|---|
 | the type | `ScalableVectorType::get(float, 4)` |
-| `poly_lanes()` | `llvm.vscale.i32` × 4, converted to float |
+| `poly_lanes()` | `llvm.vscale.i32` × 4 |
 | `poly_index()` | `llvm.stepvector.nxv4i32`, converted to float |
 | a splat | `CreateVectorSplat(ElementCount::getScalable(4), x)` |
 | arithmetic, comparisons, `select` | unchanged |
@@ -1215,8 +1224,10 @@ servers (Graviton, Neoverse) and RISC-V, with its own tests on such a machine.
 `optimiseModule` turns on LLVM's two vectorisers, with the host's cost model (`PipelineTuningOptions`):
 
 - **The loop vectoriser** turns a loop over memory into a loop over vectors, with a scalar or masked tail. It needs
-  loops (recipe 4), and memory to load and store (pointers, not yet in FMinus). `tests/lit/smoke/opt-vectorize.ll`
-  shows it working on hand-written IR: a gain loop over a buffer gets a `vector.body` of `fmul <N x float>`.
+  loops (recipe 4), and memory to load and store (recipe 10's pointers). `tests/lit/fminus/pointers.fm` shows it on
+  FMinus: a gain loop over a buffer gets a `vector.body` of `fmul <4 x float>` on NEON, four of them interleaved,
+  with no overlap check when the buffers are `restrict`. (`tests/lit/smoke/opt-vectorize.ll` shows the same on
+  hand-written IR.)
 - **The SLP vectoriser** packs independent scalar operations of the same kind into vector operations. Four separate
   `fmul`s on four separate values can become one `fmul <4 x float>`, if loading and storing them as a vector is
   cheap. Without memory, that is rare.
@@ -1251,19 +1262,20 @@ and the backend legalises both the same way.
 
 Design notes, not written or verified:
 
-- **Buffers, loads and stores.** With pointers, a `poly float` load reads `poly_lanes()` floats
-  (`load <N x float>, ptr`), and the last, partial step of a strip-mined loop needs a masked load and store
-  (`llvm.masked.load`, `llvm.masked.store`, with the step's mask), or a scalar tail. This is what makes strip-mining
-  practical, and what lets the loop vectoriser work on scalar FMinus loops.
+- **`poly float` loads and stores.** FMinus has pointers (recipe 10), but not to `poly float`. A `poly float` load
+  from a `float*` would read `poly_lanes()` floats (`load <N x float>, ptr`), and the last, partial step of a
+  strip-mined loop needs a masked load and store (`llvm.masked.load`, `llvm.masked.store`, with the step's mask), or a
+  scalar tail. This is what makes strip-mining over buffers practical.
 - **Mask operations.** `&`, `|` and `^` on masks (`and`, `or`, `xor` of `<N x i1>`), `!` on a mask, and `any(m)`,
   `all(m)` (`llvm.vector.reduce.or` and `.and`), so a strip-mined loop can stop when no lane is active.
 - **Lane movement.** Rotations and broadcasts of one lane across a `poly float`
   (`shufflevector` with indices computed from the width), and prefix sums. They are what filters across lanes need.
 - **Voices in lanes.** For a synthesizer: a struct of `poly float` state, one voice per lane, stepped together, with
   a mask for the lanes whose voices are off. The work is lane-independent, so the output is the same at any width.
-- **The biquad on four channels.** `examples/biquad/` already returns its results in a `float4`. Four channels'
-  states and coefficients as `float4`s would process four channels in the time of one, once it has state (its README's
-  step 3): one call would otherwise have to return three `float4`s.
+- **The biquad on four channels.** `examples/biquad/` filters a block a call, its state through a pointer (recipe
+  10). Four channels' samples, states and coefficients as `float4`s (a `const float4*` of frames) would filter four
+  channels at once: in C++, 1.44 ns a channel's sample against 2.8 for one channel, twice the throughput, the four
+  lanes' recursions running side by side and `sinf` and `cosf` one vector call each.
 - **Multiversioning.** Compile `poly` functions at several widths for executables, and dispatch on the CPU at load
   time.
 - **Fast-math, scoped.** A per-function or per-block `reassoc` (extending.md, "Contraction and fast-math") would let

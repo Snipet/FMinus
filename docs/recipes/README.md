@@ -5,7 +5,8 @@ Most of the recipes in [../extending.md](../extending.md) and [../simd.md](../si
 - recipes 1 and 2 (`tanhf`, `%`);
 - recipe 3 (`bool`, comparisons, `!`, `&&`, `||`, `?:`);
 - recipe 4 (`if`, `while`, `for`, `break`, `continue`);
-- recipes 7 to 9 (`float2`/`float4`/`float8`, the vector math library, `poly float`).
+- recipes 7 to 9 (`float2`/`float4`/`float8`, the vector math library, `poly float`);
+- recipe 10 (`int`, `void` and pointers).
 
 Their code is in `src/`, and their tests in `tests/`.
 
@@ -15,7 +16,7 @@ One patch is left, for the two recipes that aren't part of the language:
 |---|---|---|
 | `5-runtime-function-and-pass.patch` | 5, 6 | a runtime function (`db_to_gain`, by prototype or builtin); an LLVM pass (`CountFlopsPass`, which records each function's floating-point operations as an attribute) |
 
-It applies, with no whitespace errors, to the compiler as it is, with all of the above. The suite then has 35 tests,
+It applies, with no whitespace errors, to the compiler as it is, with all of the above. The suite then has 45 tests,
 which pass in the dev and asan presets.
 
 ```bash

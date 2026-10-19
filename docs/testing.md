@@ -35,8 +35,10 @@ Each file states what it tests in its first line, then has a few helpers and the
 - `parsed(source)` (`FrontendTest.cpp`) returns the dump of the parsed program, or its errors. Compare whole
   strings, so a parser test reads as input → tree.
 - `compile(source, &errors)` (`Compile.h`, which the code generator's tests share: `CodeGenTest.cpp`,
-  `ControlFlowTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`) parses, lowers and JIT-compiles at -O2, and returns the
-  `Jit`, or null with the formatted errors. `lookup<float(float)>(*jit, "f")` gives a callable function. A third
+  `ControlFlowTest.cpp`, `IntTest.cpp`, `PointerTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`) parses, lowers and
+  JIT-compiles at -O2, and returns the `Jit`, or null with the formatted errors. `lookup<float(float)>(*jit, "f")`
+  gives a callable function, and `lookup<void(const float*, float*, int)>(*jit, "g")` one that takes a test's
+  buffers (`std::array::data()`). A third
   parameter, the `ir::Options`, compiles at a chosen `poly float` width: `compile(source, &errors, {.polyLanes = 16})`.
 - `errorsOf(source)` returns the errors of a program that must fail.
 
@@ -59,8 +61,8 @@ TEST_CASE("functions compute what they say", "[codegen]")
   Use a tolerance only around libm (`sinf`, `expf`, ...).
 - **Error tests compare the whole formatted text**, locations included. A moved column is a real change.
 - **Tags**: `[frontend]`, `[codegen]`, `[smoke]`, `[jit]`, `[aot]` (the AOT smoke test, and `AotTest.cpp`'s checks
-  of an executable's entry), `[grammar]`, `[simd]` (vectors and the vector math library), `[poly]`. Add new ones
-  freely.
+  of an executable's entry), `[grammar]`, `[simd]` (vectors and the vector math library), `[poly]`, `[int]`,
+  `[pointer]`. Add new ones freely.
 - **Vector functions** are called from C++ through clang's `ext_vector_type`
   (`using float4 = float __attribute__((ext_vector_type(4)));`), which matches FMinus's `float2` and `float4` at the C
   boundary ([simd.md](simd.md)).
@@ -147,6 +149,18 @@ An example's `--check` compares the FMinus kernel against a C++ version of the s
 `--tolerance`. ctest runs it. When a change alters what the kernel computes on purpose, through new math or
 fast-math flags, change the C++ reference in the same commit. A tolerance is a statement about accuracy, so keep it
 as tight as the change allows.
+
+A harness calls FMinus once for a whole run, so the loop over the samples is the kernel's, as `examples/biquad/`
+does. The kernel processes a block:
+
+```c
+void process(const float* restrict input, float* restrict output, int n, float* restrict state);
+```
+
+Its state is the caller's, read at the start of a call and written back at the end, so `--block N` can call it a
+block at a time, as a plugin would, and `--check` compares calls of 64 and 61 samples with one call (they must be
+bit-identical). A call per sample measures the call more than the kernel: the biquad took 3.88 ns a sample at one call
+a sample, and takes 2.66, level with C++, at one call for all of them.
 
 ## Looking at what the compiler did
 

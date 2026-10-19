@@ -1,15 +1,16 @@
 # Extending the compiler
 
 How to add to FMinus. First, how a change moves through the compiler, and the few rules that keep that easy. Then
-six worked recipes, which grow the C subset from a one-line builtin to C's control flow and a custom LLVM pass. Then
-the pitfalls those recipes ran into, and design notes for what comes next. [simd.md](simd.md) continues with
-recipes 7 to 9, for vectors.
+seven worked recipes, which grow the C subset from a one-line builtin to C's control flow, a custom LLVM pass, and
+`int`, `void` and pointers. Then the pitfalls those recipes ran into, and design notes for what comes next.
+[simd.md](simd.md) has recipes 7 to 9, for vectors.
 
-Recipes 1 to 4 are in the compiler now (`tanhf` and `%`; `bool` and its operators; `if`, `while` and `for`), and
-so are simd.md's 7 to 9, so their sections describe how the code you have got there: read a section beside the files
-it names. Recipes 5 and 6, a runtime function and a pass, are not part of the language; they live in
-[recipes/](recipes/) as a patch, so you can apply them to see them work. None of these are sketches: each was applied
-to this repository, built with `-Werror`, and tested in the dev and asan presets, every test passing.
+Recipes 1 to 4 are in the compiler now (`tanhf` and `%`; `bool` and its operators; `if`, `while` and `for`), and so
+are simd.md's 7 to 9 and recipe 10 (`int`, `void` and pointers), so their sections describe how the code you have got
+there: read a section beside the files it names. Recipes 5 and 6, a runtime function and a pass, are not part of
+the language; they live in [recipes/](recipes/) as a patch, so you can apply them to see them work. None of these are
+sketches: each was applied to this repository, built with `-Werror`, and tested in the dev and asan presets, every
+test passing.
 [architecture.md](architecture.md) describes the stages they touch.
 
 FMinus follows C. When a recipe has a semantic choice to make, it makes C's: conversions, short-circuiting, which
@@ -24,12 +25,12 @@ Most language features touch the same places, in this order:
 |---|---|---|
 | 1 | `src/frontend/Lexer.l` | a rule for each new token. Keywords go before `{IDENTIFIER}`. |
 | 2 | `src/frontend/Parser.y` | the tokens (`%token`), their precedence if they are operators, and the grammar rules with their actions |
-| 3 | `src/frontend/Ast.h` | a node: an alternative of `Expr::node` or `Stmt::node`, or an enumerator of `UnaryOp`, `BinaryOp`, `AssignOp`, `Type` |
+| 3 | `src/frontend/Ast.h` | a node: an alternative of `Expr::node` or `Stmt::node`, or an enumerator of `UnaryOp`, `BinaryOp`, `AssignOp`, `IncrementOp`, `Kind` (a type's) |
 | 4 | `src/frontend/Ast.cpp` | its `dump` |
-| 5 | `src/ir/` | its conversions and checks, and its lowering to LLVM IR, in the file its kind belongs to (`Lowering.h` lists them: types, functions, statements, expressions, calls, vectors) |
+| 5 | `src/ir/` | its conversions and checks, and its lowering to LLVM IR, in the file its kind belongs to (`Lowering.h` lists them: types, functions, statements, expressions, calls, vectors, memory) |
 | 6 | `src/runtime/` | if it needs C++ at run time, a runtime function (recipe 5) |
 | 7 | `tools/fminus/main.cpp`, `src/support/Aot.cpp` | for a new type: whether `--run` can pass and print it (its `switch` over the result type), and whether an executable's `main` may take or return it (`addEntryPoint`) |
-| 8 | `tests/` | a dump in `FrontendTest.cpp`; results in `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `VectorTest.cpp` or `PolyTest.cpp` (their helpers are in `Compile.h`); IR or errors in `tests/lit/fminus/` |
+| 8 | `tests/` | a dump in `FrontendTest.cpp`; results in `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `IntTest.cpp`, `PointerTest.cpp`, `VectorTest.cpp` or `PolyTest.cpp` (their helpers are in `Compile.h`); IR or errors in `tests/lit/fminus/` |
 | 9 | `examples/` | a program that uses it, and a line in `tests/lit/fminus/examples.test` that runs it |
 | 10 | `editors/vscode/syntaxes/fminus.tmLanguage.json` | a new keyword, type or builtin, so VSCode highlights it (its README says where) |
 | 11 | `README.md` | the language table, and the deviations from C if any |
@@ -38,13 +39,14 @@ Steps 3 to 5 need no searching. Once the node exists, the build fails at every w
 `std::visit` without a matching lambda fails to compile, and a `switch` without the new enumerator trips `-Wswitch`,
 an error under `-Werror`. Fix the errors in order and the feature is wired through. `std::visit` names only the
 first alternative it can't handle, so after you fix one, the next appears. The same goes for step 7's `switch`: when
-recipe 7 added `Float2` to `Bool8`, the build stopped in the driver until `--run` said what to do with a vector. Steps
-9 and 10 are the ones nothing reminds you of.
+recipe 7 added `Float2` to `Bool8`, the build stopped in the driver until `--run` said what to do with a vector, and
+when recipe 10 added `Kind::Pointer`, it stopped in `typeOf`, `typeName` and the driver. Steps 9 and 10 are the ones
+nothing reminds you of.
 
 Each feature has an example to read beside its recipe: `examples/comparison/` for `bool` (recipe 3),
 `examples/waveforms/` for every statement (recipe 4), `examples/chord/` for `float4` and the vector math library
-(recipes 7 and 8), `examples/unison/` for `poly float` (recipe 9), and `examples/biquad/` for a `float4` returning
-several results.
+(recipes 7 and 8), `examples/unison/` for `poly float` (recipe 9), and `examples/biquad/` for a block of samples a
+call, through pointers (recipe 10).
 
 ## Ground rules
 
@@ -319,7 +321,7 @@ Bison reports no conflicts. The dump is mechanical:
 With two types, values have to meet. C's rules are short:
 
 - **bool to float:** a `bool` used arithmetically is 0 or 1. C goes through `int`; with `float` the only arithmetic
-  type, it goes straight to `float`.
+  type, it goes straight to `float`. (Since recipe 10 added `int`, a `bool` computes as an `int`, as in C.)
 - **float to bool:** any scalar used as a condition is compared with 0. `x` as a condition means `x != 0`, and since
   that comparison is unordered, a NaN is true, as in C.
 - **Where they apply:** a value is converted wherever C converts it: operands, assignments, initialisers, arguments,
@@ -1012,6 +1014,335 @@ on:
   LLVM's cost model, with rules that keep a program's meaning the same at every width, `poly_lanes()` and
   `poly_index()`, and what does change with the width (the order of float sums).
 
+## Recipe 10: `int`, `void` and pointers
+
+*In the compiler. Example: `examples/biquad/biquad.fm`, a filter that processes a block of samples in one call;
+harness and measurements in its README.*
+
+A DSP kernel works on buffers. To take a C++ host's buffers and loop over them, a function needs pointers to reach the
+samples, an `int` to count and index them, and a way to return nothing:
+
+```c
+void gain(const float* restrict in, float* restrict out, int n, float g)
+{
+    for (int i = 0; i < n; ++i)
+        out[i] = in[i] * g;
+}
+```
+
+C++ calls it as `void (*)(const float*, float*, int, float)`, once for a whole block, and the loop is FMinus's: at
+`-O2`, LLVM's loop vectoriser runs it four `<4 x float>` multiplies at a time on NEON (`tests/lit/fminus/pointers.fm`).
+
+The recipe went in as five steps, each of which builds and passes the whole suite: the type becomes a struct, every
+store goes through lvalues, then `int`, `void` and pointers. The sections follow them.
+
+### A type is a kind, and a pointee
+
+Until recipe 10, `ast::Type` was an enum: every type was one name. A pointer is two, itself and what it points to, so
+the enum became `Kind`, and `Type` a struct around it (`Ast.h`):
+
+```cpp
+    struct Type
+    {
+        Kind kind = Kind::Float;
+        Kind pointee = Kind::Void;   // a pointer's: what it points to
+        bool pointeeConst = false;   // a pointer's: what it points to is read-only through it (const float*)
+
+        constexpr Type() = default;
+        constexpr Type(Kind kind) : kind(kind) {}   // implicit: Kind::Float is the type float
+
+        static constexpr Type pointerTo(Kind pointee, bool isConst)
+        {
+            Type type(Kind::Pointer);
+            type.pointee = pointee;
+            type.pointeeConst = isConst;
+            return type;
+        }
+
+        friend constexpr bool operator==(Type, Type) = default;
+
+        static const Type Void, Float, Bool, Int, Float2, Float4, Float8, Bool2, Bool4, Bool8, PolyFloat, PolyBool;
+    };
+
+    inline constexpr Type Type::Void{Kind::Void};
+    inline constexpr Type Type::Float{Kind::Float};
+```
+
+The static members keep `ast::Type::Float` meaning what it did, so `poison(ast::Type::Float)` and
+`type == ast::Type::Bool` compiled unchanged, here and in the recipes above. What changed is every `switch`: it
+switches over `type.kind`, with `case ast::Kind::Float:`. The defaulted `==` compares every field, so `float*` and
+`const float*` are different types, as in C, and a pointer never equals `Type::Float`. A struct type, later, is one
+more kind and an index into a table of structs.
+
+`typeName` returns a `std::string` now, since a pointer's name is built: clang's spelling, `'const float *'`.
+
+### Lvalues: one path for every store
+
+Before pointers, the only thing a program could assign was a variable, or components of one, and two functions knew
+it: `assignable`, for a variable, and `assignComponents`, for a swizzle. Pointers add `p[i]` and `*p`, and `++`, `--`
+and `&` need the same knowledge. So it moved into one place, `Memory.cpp`, around one struct (`Lowering.h`):
+
+```cpp
+        struct LValue
+        {
+            llvm::Value* address = nullptr;   // the variable's stack slot, or the element's address
+            ast::Type type;                   // what a read gives, and what a write converts to
+            bool isConst = false;             // a const variable, or an element through a const T*
+            std::string name;                 // the variable's; empty for an element
+            ast::Type whole;                  // the type of what is at `address`
+            std::vector<int> components;      // for components, the lanes of `whole` they are
+        };
+```
+
+`isLValue(expr)` says whether an expression names one: a variable, `p[i]`, `*p`, or components of any of those.
+`lvalue(expr, location)` finds it, reporting what is wrong with it (an undeclared name, a component a vector lacks).
+`read` loads it; `write` converts a value to its type and stores it, loading the vector and inserting the lanes for
+components; `writable` refuses a `const` one and duplicate components. An assignment is then:
+
+```cpp
+    Lowering::Value Lowering::lowerAssign(SourceLocation location, const ast::AssignExpr& assign)
+    {
+        Value value = lower(*assign.value);
+        if (!isLValue(*assign.target))
+        {
+            error(location, "expression is not assignable");
+            return poison(ast::Type::Float);
+        }
+        const std::optional<LValue> target = lvalue(*assign.target, location);
+        if (!target || !writable(location, *target))
+            return poison(ast::Type::Float);
+        if (assign.op != ast::AssignOp::Assign)
+        {
+            value = compound(location, assign.op, read(*target), value);
+            if (value.ir == nullptr)
+                return poison(target->type);
+        }
+        return {write(location, *target, value, Use::Assigning), target->type};
+    }
+```
+
+Components of components came for free: in `v.xy.x = 1`, the inner lvalue's lanes are `{0, 1}`, and `.x` picks the
+first of them, so `lvalue` composes the two into `{0}`. A variable's value is a `read` too (`readLValue`), and so is
+`p[i]`'s, so each new kind of lvalue below was one more case in `isLValue` and `lvalue`, and every use had it.
+
+### `int`
+
+`int` is C's on every target FMinus runs on: 32 bits, signed, `i32` in LLVM. The scanner gains the keyword, hex
+integer constants (`0[xX]{HEXDIGITS}`), and `++` and `--`. It still returns one `NUMBER` token for every constant,
+and the code generator reads the kind from the spelling: no point and no exponent (for hex, no `p`) make an integer
+constant.
+
+```cpp
+    Lowering::Value Lowering::lowerNumber(SourceLocation location, const ast::NumberExpr& number)
+    {
+        const bool hex = number.spelling.size() > 1 && number.spelling[0] == '0'
+                         && (number.spelling[1] == 'x' || number.spelling[1] == 'X');
+        if (number.spelling.find_first_of(hex ? ".pP" : ".eEfF") == std::string::npos)
+            return {lowerInteger(location, number.spelling, hex), ast::Type::Int};
+```
+
+`lowerInteger` reads it in its base with `std::from_chars`: hex after `0x`, octal after a leading `0`, so `010` is 8
+and `08` is clang's "invalid digit '8' in octal constant". A constant that doesn't fit in an `int` is an error. C
+would make it a `long`, which FMinus doesn't have, so `INT_MIN` is written `-2147483647 - 1`, as `<limits.h>` does.
+
+This is a change of meaning. Before recipe 10, `2` named a float, so `1 / 2` was 0.5; now it is 0, as in C. Nothing in
+the tree relied on it, since every example writes its floats with an `f`. And `x * 2` compiles to the IR it always
+did: the `int` 2 converts to `float`, `x`'s type, and `IRBuilder`'s constant folder turns `sitofp i32 2 to float`
+into `float 2.0` as it builds it.
+
+**The usual arithmetic conversions.** `commonType` grows C's rule for scalars: two integers meet as an `int`, and an
+`int` meeting a `float` meets it as a `float`. A `bool` takes part as an `int` (`arithmeticOf(Type::Bool)` is
+`Type::Int`, C's integer promotion), so `true + true` is the `int` 2. Before, it was the float 2, which converts to the
+same thing everywhere but in a division.
+
+```cpp
+        if (ast::isVector(ta) || ast::isVector(tb))
+            type = ast::isVector(ta) ? ta : tb;
+        else
+            type = ta == ast::Type::Int && tb == ast::Type::Int ? ast::Type::Int : ast::Type::Float;
+```
+
+The operators moved into one function, `binary`, which the binary expressions, the compound assignments and `++`
+share. It converts both operands to the common type and calls `arithmetic`, which now takes that type to choose the
+instructions:
+
+```cpp
+        if (type == ast::Type::Int)
+        {
+            switch (op)
+            {
+            case ast::BinaryOp::Add:
+                return builder_.CreateNSWAdd(lhs, rhs);
+            case ast::BinaryOp::Subtract:
+                return builder_.CreateNSWSub(lhs, rhs);
+            case ast::BinaryOp::Multiply:
+                return builder_.CreateNSWMul(lhs, rhs);
+            case ast::BinaryOp::Divide:
+                return builder_.CreateSDiv(lhs, rhs);
+            case ast::BinaryOp::Remainder:
+                return builder_.CreateSRem(lhs, rhs);
+            case ast::BinaryOp::Less:
+                return builder_.CreateICmpSLT(lhs, rhs, "cmp");
+```
+
+These are clang's. `sdiv` and `srem` truncate toward zero, as C's `/` and `%` do, and dividing by zero is undefined
+(AArch64's `sdiv` gives 0; x86's `idiv` traps). The `nsw` ("no signed wrap") flags say what C says, that signed
+overflow is undefined, and they matter to the optimiser. In `s += p[i + k]`, the address needs `i + k` as 64 bits.
+With `nsw`, `sext(i + k)` is `sext(i) + sext(k)`: LLVM sign-extends `k` once, before the loop, and counts `i` in 64
+bits. Without it, `i + k` might wrap, so a `sext` stays in every iteration of the vectorised loop. To see it, put
+that loop in a file and compare `fminus sum.fm -O0 | opt -passes='default<O2>' -S` with the same after `sed 's/
+nsw//g'` (LLVM's `opt` is in `.deps/install/llvm-…/bin`). A language that wants wrapping, as `-fwrapv` gives C,
+drops the flags and pays that.
+
+Conversions between scalars are C's, in `convert`: `sitofp` from `int` to `float` (exact up to 2^24, rounded beyond),
+`fptosi` back (toward zero; out of range, undefined), `zext` from `bool`, and `icmp ne 0` to `bool`. `i *= 1.5f`
+computes a float and truncates it into `i`, as C does. Casts are the same conversions, written out: a rule
+`"(" cast_type ")" expr %prec UNARY`, for `float`, `int` and `bool`, a `CastExpr`, and `lowerCast`, which is
+`convert` with `Use::Casting` for its error ("cannot cast from 'float4' to 'int'").
+
+**`++` and `--`** are C's, before or after their operand. The prefix rules take `%prec UNARY`. The postfix ones sit
+with the swizzle's `.` at the tightest level, `%precedence "." "++" "--" "["`, so `-i++` is `-(i++)` and `*p++` is
+`*(p++)`, as in C. `++x` is `x += 1`, and `x++` is too, with the value from before:
+
+```cpp
+        const Value before = read(*target);
+        const Value one{builder_.getInt32(1), ast::Type::Int};
+        const Value after =
+            binary(location, decrement ? ast::BinaryOp::Subtract : ast::BinaryOp::Add, before, one);
+        llvm::Value* stored = write(location, *target, after, Use::Assigning);
+        return prefix ? Value{stored, target->type} : before;
+```
+
+Since it goes through `binary` and `write`, it works on anything `+= 1` does: an `int` (`add nsw i32 %i, 1`, as
+clang's `%inc`), a float, every lane of a vector, one component (`v.x--`), a `bool` (which `++` makes true, as in C),
+and, below, a pointer.
+
+`poly_lanes()` is an `int` now, as a count should be. Programs that used it as a float still work, since it converts.
+
+### `void`
+
+`Kind::Void` is a function's result type and nothing else's: a `void` parameter is clang's "argument may not have
+'void' type", and a `void` variable "variable has incomplete type 'void'". `f(void)` is C's empty parameter list: the
+`params` rule turns a single unnamed `void` parameter into none. `return;` is a `ReturnStmt` with no value, and
+`lowerReturn` checks each kind of function against the other's form ("non-void function 'f' should return a value",
+"void function 'g' should not return a value"). A `void` function that reaches its end returns there (`ret void`).
+
+A call of a `void` function has no value, and the type rules say so. `convert` refuses `void` either way, so `float x
+= f();` is "initializing 'float' with an expression of incompatible type 'void'". `commonType` refuses anything that
+isn't arithmetic (`isArithmetic`: neither `void` nor a pointer), so `f() + 1` is "invalid operands to binary
+expression ('void' and 'int')". `poison(Type::Void)` has no IR at all, since LLVM has no values of type `void`, and
+nothing reads it: every use of a `void` value is one of these errors first.
+
+### Pointers
+
+**Declarations.** As in C, the `*` belongs to the declarator, not the type: `float *p, x;` is a pointer and a float.
+`Parser.y` has a `pointer` rule, nothing or a `*` with the qualifiers after it, and every declarator, parameter and
+result takes one. Where `const` lands is C's rule, in one helper:
+
+```cpp
+        inline Declared declared(bool isConst, ast::Type type, const Pointer& pointer)
+        {
+            if (!pointer.isPointer)
+                return {type, isConst, false};
+            return {ast::Type::pointerTo(type.kind, isConst), pointer.isConst, pointer.isRestrict};
+        }
+```
+
+`const float* p` is a pointer to read-only floats, and `p` itself can move; `float* const p` is the reverse. The first
+`const` is part of the type, and the second the variable's, kept where a variable's `const` always was (`isConst`).
+
+**What a pointer may point to**: `float`, `int`, `float2`, `float4` and `float8` (`canPointTo`), one level deep. The
+others wait for a reason:
+
+- `bool*`: in a register FMinus's `bool` is an `i1`, but C keeps a `bool` in a byte. Through a pointer it would need
+  `i8` in memory, and a `zext` on every store and a `trunc` on every load, as clang emits.
+- `poly float*`: `p[1]` would sit `poly_lanes()` floats along, a different place on every target. With buffers, the
+  natural way in is a `poly float` load from a `float*` at a strip-mined index, with a masked load for the tail
+  ([simd.md](simd.md), "Where to go next").
+- Pointers to pointers, `void*`, null constants and casts between pointer types: nothing needs them yet.
+
+A declaration of any other is "FMinus has pointers to float, int, float2, float4 and float8, not to 'bool'". The
+variable is then bound as a `float*`, so its uses report nothing more.
+
+**Elements.** `p[i]` and `*p` are lvalues (`IndexExpr`, and a `UnaryExpr` with `Dereference`), and both end in
+`element`:
+
+```cpp
+        llvm::Value* address = pointer.ir;
+        if (index)
+        {
+            llvm::Value* offset = convert(*index, ast::Type::Int, location, Use::Initializing);   // a bool: 0 or 1
+            offset = builder_.CreateSExt(offset, builder_.getInt64Ty(), "idxprom");
+            address = builder_.CreateInBoundsGEP(typeOf(type), pointer.ir, offset, "arrayidx");
+        }
+        return LValue{address, type, pointer.type.pointeeConst, "", type, {}};
+```
+
+That is clang's IR to the name: the index sign-extended to 64 bits (`idxprom`), since it is a signed `int` and
+addresses are 64 bits, then a `getelementptr inbounds` of the element type (`arrayidx`). LLVM's pointers are opaque
+(`ptr`), so the element type rides on the GEP and on each load and store, never on the pointer. `inbounds` is C's
+promise that the address stays inside the object the pointer points into (or one past its end). As in C, `i[p]` is
+`p[i]`: `lvalue` swaps the two when only the index is a pointer. An element through a `const T*` is read-only:
+"read-only variable is not assignable", clang's words for it.
+
+**Pointer arithmetic** (`pointerArithmetic`, which `binary` calls when either operand is a pointer) is C's:
+
+- `p + i` and `i + p` are a GEP, as `p[i]`'s address is (`add.ptr`); `p - i` negates the index first (`idx.neg`);
+- `p - q`, for two pointers of one type, is how many elements apart they are: `CreatePtrDiff`, the difference of
+  the two addresses (`ptrtoaddr`, LLVM 23's; clang's `-O0` still writes `ptrtoint`) divided exactly by the element's
+  size (`sdiv exact`), truncated to an `int` (C's is a `ptrdiff_t`, a `long`);
+- comparisons of two pointers of one type are unsigned `icmp`s of the addresses (`icmp ult ptr`);
+- anything else is "invalid operands to binary expression ('float *' and 'int')", or clang's own words for two
+  pointers of different types ("comparison of distinct pointer types", "are not pointers to compatible types").
+
+Since `++` and `+=` go through `binary`, `p++` and `p += 4` work too, and `*p++` reads and moves on, as in C.
+
+**Conversions** (`convertPointer`). A pointer converts to `bool`, whether it is not null (`icmp ne ptr %p, null`), so
+`if (p)` and `!p` work. It converts to a pointer to the same type with `const` added, `float*` to `const float*`,
+which changes nothing in the IR. Nothing else converts. C converts a pointer to one of another type, or drops a
+`const`, with only a warning. FMinus makes both errors, in the warning's words: "incompatible pointer types assigning
+to 'float *' from 'int *'", "initializing 'float *' with an expression of type 'const float *' discards qualifiers".
+
+**`&x`** (`lowerAddressOf`) is an lvalue's address, a pointer to its type, `const` when the lvalue is. For a variable,
+that is its stack slot. A slot whose address escapes is one mem2reg leaves in memory; after inlining, SROA usually
+promotes it after all. `&v.x` is clang's "address of vector element requested", and `&(x + 1)` "cannot take the
+address of an rvalue of type 'float'".
+
+**`restrict`** is C99's promise that, while the function runs, what a pointer reaches is reached through no other
+pointer. On a parameter it becomes LLVM's `noalias`, as clang does it, in `declare`:
+
+```cpp
+            if (function.params[i].isRestrict)
+                llvmFunction->addParamAttr(static_cast<unsigned>(i), llvm::Attribute::NoAlias);
+```
+
+It is what lets the optimiser keep a value in a register across a store through another pointer, and vectorise a
+loop without first checking that its buffers don't overlap. On `gain` above, LLVM 23 vectorises either way, but
+without `restrict` it computes `%diff.check` first, the distance between `in` and `out`, and runs the scalar loop when
+they overlap; `pointers.fm` checks both. A `restrict` on a local pointer is accepted and changes nothing.
+
+**At the C boundary** a pointer is an address in a general register (`x0` to `x7` on AArch64), and an `int` the low
+half of one (`w0` to `w7`), with no attributes needed; floats travel separately, in `s0` to `s7`. So the C++
+function pointer type only has to name the same parameters in the same order. `--run` passes floats only, and
+refuses an `int` or pointer parameter ("takes a parameter of type 'int'"); it prints an `int` result.
+
+### Tests
+
+- `tests/unit/IntTest.cpp`: division and remainder toward zero, octal and hex constants, `1 / 2` as 0, the
+  conversions both ways, casts, `++` and `--` in both positions on ints, floats, vectors, a component and a `bool`,
+  and the errors: an octal 8, a constant too large, `++` of an rvalue and of a `const`, a cast of a vector.
+- `tests/unit/PointerTest.cpp`: a buffer from C++ through `gain`; state the host owns, carried across two calls
+  (two blocks of two give one block of four); `*p++` over an `int*`; `float4*` frames with components assigned;
+  a pointer as a loop counter, `p - q`, negative indices, `i[p]`, `&x` of a local, null; and the errors, each in
+  clang's words.
+- `tests/unit/CodeGenTest.cpp`: `void` functions, `f(void)`, and `void`'s errors. `VectorTest.cpp`: components of
+  components, assigned.
+- `tests/unit/FrontendTest.cpp`: the dumps, `(pre++ i)`, `(cast int x)`, `([] p i)`, `(* p)`, `(& x)`, `(return)`,
+  and `(const float * restrict in)` for a parameter.
+- `tests/lit/fminus/int.fm`: the IR of `int` arithmetic and conversions, as clang -O0 writes it, and `--run` of an
+  `int` function. `tests/lit/fminus/pointers.fm`: the IR of `p[i]`, `noalias`, and the vectorised loop with and
+  without `restrict`.
+
 ## Pitfalls
 
 Each of these was hit while writing the language or its recipes. [simd.md](simd.md) has the vector ones.
@@ -1034,16 +1365,21 @@ Each of these was hit while writing the language or its recipes. [simd.md](simd.
 | A keyword scans as an identifier, or the reverse | Flex takes the longest match, then the earliest rule | keywords before `{IDENTIFIER}` |
 | A runtime function works in `fminus` but is not found once FMinus is embedded | it is missing from `RuntimeSymbols.def`, and the tools found it among their own process symbols | add its `FMINUS_RUNTIME_SYMBOL` line |
 | A constant like `0.1f` differs in its last bit from clang's | rounding through `double` first | keep NumberExpr's spelling; `APFloat::convertFromString` straight to the target type |
+| LLVM asserts "Insertelement types must match!" in `(float4)(1, 2, 3, 4)` | once integer constants are `int`s, `lowerConstruct` converted each scalar to `arithmeticOf` its type, an `int`, and inserted an `i32` into a float vector | convert a scalar element to `float`; only a vector's lanes keep their own type |
+| `typeName(type) + ...` will not build a name such as `'const float *'` | it returned a `const char*`, one per kind | return a `std::string`, built for a pointer |
+| A lit test that a loop vectorises without an overlap check passes either way | LLVM 23 folds the check for a simple loop into `iter.check` as `%diff.check`, without a `vector.memcheck` block | check for `diff.check`, and check that it appears when the `restrict` is gone (`pointers.fm` runs both) |
+| The JIT crashes on a `void` value, or the verifier on a `void` phi | `PoisonValue` of `void`, or a `?:` that joins two `void` calls | `poison(Type::Void)` has no IR; `lowerConditional` builds no phi for `void` |
 
 ## Where to go next
 
 Design notes for growing the C subset beyond the recipes: what each feature involves and which LLVM pieces it uses.
 This code is not written or verified. `examples/biquad/README.md` suggests an order driven by a real kernel.
 
-**A type checker, and C's integer types.** Recipe 3 converts with LLVM's types. Recipe 7 takes the first step away
-from that: every lowered expression carries its FMinus type (simd.md, "Every value carries its FMinus type"). That
-still computes types while lowering, which stops scaling once types multiply, as C's do quickly: `int`, `unsigned`,
-the narrower integers, `double`. Give the tree a semantic pass before lowering:
+**A type checker, and the rest of C's arithmetic types.** Recipe 3 converts with LLVM's types. Recipe 7 takes the
+first step away from that: every lowered expression carries its FMinus type (simd.md, "Every value carries its
+FMinus type"), and recipe 10 adds `int` and pointers to it. That still computes types while lowering, which stops
+scaling once types multiply, as C's do quickly: `unsigned`, `long`, the narrower integers, `double`. Give the tree a
+semantic pass before lowering:
 
 - resolve every name to its declaration;
 - compute every expression's type with C's usual arithmetic conversions and integer promotions;
@@ -1051,18 +1387,14 @@ the narrower integers, `double`. Give the tree a semantic pass before lowering:
 - insert the implicit conversions as explicit nodes;
 - report the type errors C has: "invalid operands to binary expression", incompatible types in an assignment.
 
-Lowering then just reads the types. Integers lower to `iN` with `add`/`sub`/`mul`/`sdiv`/`udiv`, and `icmp`
-compares them. The conversions are `sitofp`, `fptosi`, `zext` and `sext`; signedness lives in the operations, not
-the types.
+Lowering then just reads the types. Each integer type lowers to an `iN`, and signedness lives in the operations,
+not the types: `udiv` and `urem` beside recipe 10's `sdiv` and `srem`, unsigned `icmp`s, `zext` where `int` uses
+`sext`, `uitofp` and `fptoui`. An `unsigned` has no `nsw`: it wraps, by definition.
 
-Until then, a loop counts in floats, as the examples' loops do (`for (float k = 1; ...; k += 1)`). That is exact for
-whole numbers up to 2^24, 16777216; past it, `k += 1` stops changing `k`, and the loop never ends.
-
-**Pointers and arrays.** `float* buffer`, `buffer[i]`, `*p`. In LLVM, every pointer is an opaque `ptr`, and the
-element type rides on each `getelementptr`, `load` and `store`. `buffer[i]` is a GEP and a load, and as a target
-it is a GEP and a store. So `lowerAssign`'s "must be a variable" check grows into an *lvalue* check, which is why the
-grammar already takes any expression as a target. Two things matter most for DSP: `restrict` (C99), which lowers to
-`noalias` on parameters, and `const float*`. They tell the vectoriser that buffers don't overlap.
+**Arrays, and more pointers.** A local array, `float history[16];`, is an `alloca [16 x float]`, and its name decays
+to a pointer to its first element, which recipe 10's `p[i]` already indexes. `bool*` needs `i8` in memory (recipe 10
+says why), `void*` a pointer whose element type a cast supplies, and null C's `0` as a pointer constant. Pointers to
+pointers are a `ptr` to a `ptr`, once a type can nest (`Type` would hold its pointee as a type, not a kind).
 
 **Structs.** `struct coefficients { float b0, b1, b2, a1, a2; };` becomes an LLVM struct type, with fields reached by
 GEP. At the C boundary, AArch64 passes and returns a struct of up to four floats in registers `s0`–`s3` (a
@@ -1071,14 +1403,11 @@ equivalent C declaration shows exactly what to emit. Inside FMinus, where calls 
 works.
 
 **State: globals and `static`.** File-scope variables lower to LLVM globals, and `static` locals likewise. For a
-plugin, prefer state the host owns: a struct passed by pointer, so nothing allocates on the audio thread and every
-instance has its own copy.
+plugin, prefer state the host owns, passed by pointer, as `examples/biquad/` passes its `float* state` since recipe
+10: nothing allocates on the audio thread, and every instance has its own copy. A struct would name the fields.
 
 **`switch`.** It lowers to LLVM's `switch` instruction, and its `break` reuses recipe 4's loop stack (rename
 `Loop`). Fall-through and `default:` are C's.
-
-**`void` functions and expression statements that matter.** With state and pointers, `void process(...)` becomes
-useful: `ret void`, and "void function should not return a value".
 
 **Contraction and fast-math, C's way.** `#pragma STDC FP_CONTRACT ON` (C99) allows fusing `a * b + c`. Lower it to
 `llvm.fmuladd`, or set the `contract` flag through `IRBuilder::setFastMathFlags`. The other fast-math flags
@@ -1100,8 +1429,8 @@ LLJIT's concurrent compilation, and caching objects between runs (`llvm::ObjectC
 ## Reference solutions
 
 The recipes in the compiler are their own reference: their code is in `src/`, and their tests in `tests/unit/`
-(`FrontendTest.cpp`, and `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `VectorTest.cpp` and `PolyTest.cpp` for the code
-generator) and `tests/lit/fminus/`. [recipes/](recipes/) holds the two that
+(`FrontendTest.cpp`, and `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `IntTest.cpp`, `PointerTest.cpp`, `VectorTest.cpp`
+and `PolyTest.cpp` for the code generator) and `tests/lit/fminus/`. [recipes/](recipes/) holds the two that
 aren't, 5 and 6, as one patch against the compiler as it is ([recipes/README.md](recipes/README.md)):
 
 ```bash

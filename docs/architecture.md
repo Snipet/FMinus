@@ -67,11 +67,14 @@ Flex generates `Lexer.yy.cpp` and `Lexer.yy.hpp` into `build-*/src/generated/fro
   `BLOCK_COMMENT` (`%x`), whose rules skip text and count lines until `*/`. At end of file, it reports clang's
   "unterminated /* comment" at the location where the comment started.
 - **Constants.** C's floating constants (`1.5`, `1.`, `.5`, `2e3`, `1.5e-3f`, hex floats like `0x1.8p1`) and integer
-  constants (`2`) are all one `NUMBER` token. The token keeps its spelling, `f` suffix included, so the code generator
-  can round it once, to the right type. `2f` is clang's "invalid suffix 'f' on integer constant", as in C.
+  constants (`2`, `010`, `0x1F`) are all one `NUMBER` token. The token keeps its spelling, `f` suffix included, and the
+  code generator reads which it is from that: no point and no exponent make an integer constant, an `int`. A floating
+  one is rounded once, to `float`. `2f` is clang's "invalid suffix 'f' on integer constant", as in C; in `0x1F`, the
+  `F` is a hex digit.
 - **Rules.** Flex takes the longest match, and between matches of equal length, the earlier rule. That makes
-  `+=` beat `+`, and `/*` beat `/`. Keywords (`float`, `bool`, `if`, `poly`, ...) therefore come before `{IDENTIFIER}`:
-  `float` is a keyword and `floaty` an identifier.
+  `+=` and `++` beat `+`, `&&` beat `&`, and `/*` beat `/`, so `i+++j` is `i++ + j`, as in C. Keywords (`float`,
+  `int`, `if`, `restrict`, ...) therefore come before `{IDENTIFIER}`: `float` is a keyword and `floaty` an
+  identifier.
 - **Errors.** An unexpected character throws `Parser::syntax_error`. The parser catches it and reports it through
   `Parser::error`, like any syntax error.
 
@@ -94,18 +97,26 @@ subset of C's, is written out as EBNF in the file's header comment.
   once. `api.token.constructor` gives the scanner `Parser::make_FLOAT(location)` and friends.
 - **C's precedence.** The `%right`, `%left` and `%precedence` lines give the operators C's precedence and
   associativity, from the loosest at the top to the tightest at the bottom: assignment (right to left), `?:` (right
-  to left), `||`, `&&`, equality, relational, additive, multiplicative (`*`, `/` and `%`), unary (`%prec UNARY`), and
-  the swizzle's `.`. The small helpers in the `%code` block, `binary()`, `logical()` and `assign()`, keep each
-  operator's rule to one line. The dangling `else` is resolved with `%precedence THEN` below `"else"`: an `else` closes
-  the nearest `if`, as in C.
-- **Assignment is an expression.** `expr "=" expr` (and `+=` ...) accepts any expression as its target, as C's
-  grammar does in effect. The code generator rejects what isn't a variable with clang's "expression is not
-  assignable". Array elements and struct fields can join the check later without touching the grammar.
-- **Declarations.** `const float a = 1, b;` is a qualifier, a type and a list of declarators. A declarator
-  (`Declarator`, defined in `%code requires`) doesn't know the declaration's type when it reduces, so the declaration
-  rule makes one `DeclStmt` per declarator. That is also why a block item is a *list* of statements.
+  to left), `||`, `&&`, equality, relational, additive, multiplicative (`*`, `/` and `%`), unary (`%prec UNARY`:
+  `-`, `!`, `*p`, `&x`, a prefix `++`, a cast), and the postfix operators, the swizzle's `.`, `[`, and `++` and `--`
+  after their operand. `*` and `&` are binary or unary by where they stand, as in C's grammar: after an expression
+  `*` is a product, at the start of one it is `*p`. The small helpers in the `%code` block, `binary()`, `logical()`,
+  `assign()` and `increment()`, keep each operator's rule to one line. The dangling `else` is resolved with
+  `%precedence THEN` below `"else"`: an `else` closes the nearest `if`, as in C.
+- **Assignment is an expression.** `expr "=" expr` (and `+=`, `++` ...) accepts any expression as its target, as C's
+  grammar does in effect. The code generator rejects what isn't an lvalue (a variable, an element `p[i]` or `*p`,
+  components of either) with clang's "expression is not assignable". Struct fields can join the check later without
+  touching the grammar.
+- **Declarations.** `const float a = 1, *p;` is a qualifier, a type and a list of declarators. As in C, a declarator
+  carries its own `*` and the qualifiers after it (`* const restrict`), so `float *p, x;` declares a pointer and a
+  float. A declarator (`Declarator`, defined in `%code requires`) doesn't know the declaration's type when it
+  reduces, so the declaration rule makes one `DeclStmt` per declarator, and `declared()` works out each one's type:
+  with a `*`, the first `const` is the pointee's (`const float* p` points to read-only floats), and one after the `*`
+  the pointer's own (`float* const p`). That is also why a block item is a *list* of statements.
 - **Functions** are a definition (`type name(params) { ... }`) or a prototype (`type name(params);`, in which
-  parameter names may be omitted). Both build an `ast::Function`, with `isDefinition` telling them apart.
+  parameter names may be omitted). Both build an `ast::Function`, with `isDefinition` telling them apart. A result or
+  a parameter may be a pointer, and `(void)` is C's empty parameter list: the `params` rule turns a single unnamed
+  `void` parameter into none.
 - **Locations.** `%locations` gives every symbol an `@n`. `at(@n)` turns Bison's `location` into a `SourceLocation`.
   Expressions take the location of their operator or first token, declarations that of their name (as clang points
   at the name), and functions that of their name.
@@ -125,17 +136,23 @@ The tree is plain data. It has no LLVM in it, so other passes (a type checker, a
 on it without the code generator.
 
 - **Nodes.** `Expr` and `Stmt` each pair a `SourceLocation` with a `std::variant` of node kinds:
-  - expressions: `NumberExpr`, `VariableExpr`, `BoolExpr`, `UnaryExpr`, `BinaryExpr`, `LogicalExpr`, `CallExpr`,
-    `AssignExpr`, `ConditionalExpr`, `ConstructExpr` (a vector literal), `SwizzleExpr`;
+  - expressions: `NumberExpr`, `VariableExpr`, `BoolExpr`, `UnaryExpr` (with `*p` and `&x`), `BinaryExpr`,
+    `LogicalExpr`, `CallExpr`, `AssignExpr`, `IncrementExpr`, `CastExpr`, `IndexExpr` (`p[i]`), `ConditionalExpr`,
+    `ConstructExpr` (a vector literal), `SwizzleExpr`;
   - statements: `DeclStmt`, `ExprStmt`, `ReturnStmt`, `BlockStmt`, `EmptyStmt`, `IfStmt`, `WhileStmt`, `ForStmt`,
     `BreakStmt`, `ContinueStmt`.
-- **Types.** `Type` is `float`, `bool`, the vectors `float2`, `float4`, `float8`, their lane masks `bool2`, `bool4`,
-  `bool8`, and `poly float` and `poly bool`, whose width the target decides. Helpers answer the questions the rules
-  ask: `lanes`, `isVector`, `isMask`, `isPoly`, `vectorOf`, `maskOf`, `arithmeticOf` ([simd.md](simd.md)).
+- **Types.** A `Type` is a `Kind` and, for a pointer, what it points to and whether that is `const`. The kinds are
+  `void`, `float`, `bool`, `int`, the vectors `float2`, `float4`, `float8`, their lane masks `bool2`, `bool4`,
+  `bool8`, `poly float` and `poly bool`, whose width the target decides, and `Pointer`. `Type::Float` and the rest
+  name the types that are only a kind, and a `Kind` converts to its `Type`, so `type == Type::Float` reads as it
+  says; `Type::pointerTo(Kind::Float, true)` is `const float*`. Helpers answer the questions the rules ask:
+  `lanes`, `isVector`, `isMask`, `isPoly`, `isPointer`, `pointee`, `canPointTo`, `isArithmetic`, `vectorOf`,
+  `maskOf`, `arithmeticOf` ([simd.md](simd.md)).
 - **Ownership.** Children are owned: `ExprPtr = std::unique_ptr<Expr>`, and a `BlockStmt` holds a
   `std::vector<Stmt>`. `Param`, `Function` (definition or prototype) and `Program` are aggregates of those.
 - **Exhaustive walks.** Code that walks the tree uses `std::visit` with an `Overloaded{...}` set of lambdas and no
-  catch-all. Enums (`UnaryOp`, `BinaryOp`, `AssignOp`, `Type`) are walked with `switch` and no `default:`. So adding a
+  catch-all. Enums (`UnaryOp`, `BinaryOp`, `AssignOp`, `IncrementOp`, `Kind`) are walked with `switch` and no
+  `default:`; a switch over a type is a switch over `type.kind`. So adding a
   node kind or an enumerator breaks the build at every walk that doesn't handle it, through `std::visit`'s
   exhaustiveness and `-Wswitch` under `-Werror`. Keep it that way.
 - **`ast::dump`** prints the tree as s-expressions, one statement per line (`fminus --emit ast`). It is the parser's
@@ -151,20 +168,23 @@ in `fminus::ir::detail`), but its members are defined across the directory by wh
 | File | Lowering's members for |
 |---|---|
 | `CodeGen.cpp` | `ir::lower()`, the constructor, and the two passes: where the parts combine |
-| `Types.cpp` | FMinus's types as LLVM's (`typeOf`, `lanes`), the conversions (`convert`, `commonType`), errors and poison values |
+| `Types.cpp` | FMinus's types as LLVM's (`typeOf`, `lanes`), the conversions (`convert`, `convertPointer`, `commonType`), errors and poison values |
 | `Functions.cpp` | declarations and prototypes (`declare`), bodies and parameters (`define`), stack slots and scopes |
 | `Statements.cpp` | blocks, declarations, `return`, `if`, `while`, `for`, `break` and `continue` |
-| `Expressions.cpp` | the expression `std::visit` (`lower`), constants, operators, `&&` and `\|\|`, `?:`, assignment |
+| `Expressions.cpp` | the expression `std::visit` (`lower`), constants, operators (`binary`, `arithmetic`), `&&` and `\|\|`, `?:`, casts, assignment, `++` and `--` |
 | `Calls.cpp` | the builtin tables, calls, reductions, `poly_lanes` and `poly_index`, and `ir::builtins()` |
-| `Vectors.cpp` | vector literals in both forms, swizzles read and assigned, `?:` with a vector condition |
+| `Vectors.cpp` | vector literals in both forms, swizzles, `?:` with a vector condition |
+| `Memory.cpp` | lvalues (`lvalue`, `read`, `write`): variables, elements (`p[i]`, `*p`), components of either; `&x`; pointer arithmetic |
 
 The header declares every member under the name of its file, so it doubles as the map. A new node goes in the file its
 kind belongs to, and the compiler finds the rest: `lower`'s `std::visit` in `Expressions.cpp` and the statement visit in
 `Statements.cpp` fail to compile until they handle it.
 
 **Pass 1, declare.** Every function name gets one `llvm::Function`, with external linkage, its C name and the C
-calling convention (`float` is `f32`). C++ therefore calls JIT'd code as `float(float, ...)`, and functions may call
-each other in any order. The rules for a name's prototypes and definition are C's:
+calling convention (`float` is `float`, `int` is `i32`, a pointer is `ptr`, a `void` result is `void`). C++ therefore
+calls JIT'd code as `float(float, ...)` or `void(const float*, float*, int)`, and functions may call each other in any
+order. The attributes are clang's: a `bool` is `zeroext`, and a `restrict` pointer `noalias`. The rules for a name's
+prototypes and definition are C's:
 
 - a prototype and a definition must agree ("conflicting types for 'f'");
 - a second definition is "redefinition of 'f'";
@@ -177,20 +197,27 @@ each other in any order. The rules for a name's prototypes and definition are C'
 - **Variables are C's.** Every parameter and local gets a stack slot: an `alloca` at the top of the entry block
   (`allocate`), which is where mem2reg looks. Reads are loads, writes are stores, and a parameter's incoming value is
   stored to its slot (`x.addr`, as clang names it). So `fminus -O0` reads like `clang -O0`, and from `-O1` mem2reg
-  promotes the slots back into SSA values. A declaration without an initialiser stores 0. C leaves such a variable
-  indeterminate, and reading it undefined.
+  promotes the slots back into SSA values. A declaration without an initialiser stores 0 (a pointer, null). C leaves
+  such a variable indeterminate, and reading it undefined.
 - **Scopes are C's.** `scopes_` is a stack of name-to-slot maps. Parameters and the body's own declarations share the
   outermost scope, so redeclaring a parameter is an error. Each `{ ... }` pushes a scope, in which an outer name may
   be shadowed. A name is looked up innermost first.
-- **Assignment** (`lowerAssign`) checks its target: it must be a variable ("expression is not assignable") that isn't
-  `const` ("cannot assign to variable 'k' with const-qualified type 'const float'"). It stores the value, and returns
-  it as the expression's value, so `a = b = 0` works. A compound assignment loads, combines and stores.
+- **Lvalues** (`Memory.cpp`) are what a program reads, assigns and takes the address of: a variable (its slot), an
+  element a pointer reaches (`p[i]`, a `getelementptr inbounds` on the index sign-extended to 64 bits, as clang's;
+  `*p`, the pointer itself), or components of either (`v.x`, `p[i].zw`). `lvalue()` finds one, `read()` loads it and
+  `write()` stores to it (for components: load the vector, insert the lanes, store it back). A variable's value is a
+  `read`, and so is `p[i]`'s; so a new kind of lvalue joins every use at once.
+- **Assignment** (`lowerAssign`) checks its target: it must be an lvalue ("expression is not assignable") that isn't
+  `const` ("cannot assign to variable 'k' with const-qualified type 'const float'"; through a `const float*`, "read-only
+  variable is not assignable"). It stores the value, and returns it as the expression's value, so `a = b = 0` works. A
+  compound assignment reads, combines and writes, and `++` and `--` are `+= 1` and `-= 1`.
 - **Statements after a `return`** are accepted, as C accepts them. They still lower, so their errors are found, into
   a fresh block named `unreachable` that nothing branches to, and the optimiser deletes it. The terminator check is
   `hasTerminator()`, not `getTerminator()`; see extending.md's pitfalls.
-- **The function's end.** If the last block can still be reached from the entry (`reachable`, a depth-first walk:
-  having predecessors isn't enough, because dead code can branch), the function falls off its end. That is "non-void
-  function 'g' does not return a value", an error as in C++. Otherwise the block gets an `unreachable` terminator.
+- **The function's end.** A `void` function that reaches its end returns there (`ret void`), as `return;` does. In any
+  other, if the last block can still be reached from the entry (`reachable`, a depth-first walk: having predecessors
+  isn't enough, because dead code can branch), the function falls off its end. That is "non-void function 'g' does
+  not return a value", an error as in C++. Otherwise the block gets an `unreachable` terminator.
 - **Verification.** `llvm::verifyFunction` checks each function, and anything it rejects is reported as an internal
   error, because the IR is wrong rather than the program.
 
@@ -198,14 +225,23 @@ Expressions lower recursively. `lower(const ast::Expr&)` returns a `Value`: the 
 The rules read the FMinus type, never the IR's, because two FMinus types can share an LLVM type (a `poly float` is
 `<4 x float>` on NEON, as a `float4` is). `convert(value, type, location, use)` applies C's implicit conversions and
 OpenCL C's (a scalar broadcasts to a vector), and reports clang's message for the place a value meets its type
-(`Use`: initialising, assigning, returning, passing, a condition, a logical operand).
+(`Use`: initialising, assigning, returning, passing, a condition, a logical operand, a cast). Between scalars they are
+C's: `sitofp` and `fptosi` between `int` and `float`, `zext` from `bool`, `!= 0` to `bool`. A pointer converts only
+to `bool` and to the same pointer with `const` added (`convertPointer`).
 
-- **Constants** go through `llvm::APFloat::convertFromString`, after the `f` suffix is dropped, straight to IEEE
-  single, so they are rounded once. Hex floats are exact. A constant too large for `float` is clang's "magnitude of
-  floating-point constant too large for type 'float'".
-- **Arithmetic** becomes `fneg`, `fadd`, `fsub`, `fmul`, `fdiv` and `frem` with no fast-math flags, so it is IEEE
-  exact, as clang does with `-ffp-contract=off`. `frem` is `%`, with `fmodf`'s semantics; AArch64 has no instruction
-  for it, so it becomes a call to `fmodf`.
+- **Constants**: an integer constant is an `i32`, read in its base (`010` is octal) and refused when it doesn't fit
+  in an `int`. A floating one goes through `llvm::APFloat::convertFromString`, after the `f` suffix is dropped,
+  straight to IEEE single, so it is rounded once. Hex floats are exact. A constant too large for `float` is clang's
+  "magnitude of floating-point constant too large for type 'float'".
+- **Arithmetic** (`binary`, then `arithmetic`) works in the type C's usual arithmetic conversions give the operands
+  (`commonType`): `int` when both are integers (a `bool` computes as an `int`), `float` when either is a float, a
+  vector when either is one. On `float`s it is `fneg`, `fadd`, `fsub`, `fmul`, `fdiv` and `frem` with no fast-math
+  flags, so it is IEEE exact, as clang does with `-ffp-contract=off`. `frem` is `%`, with `fmodf`'s semantics; AArch64
+  has no instruction for it, so it becomes a call to `fmodf`. On `int`s it is clang's: `add nsw`, `sub nsw`, `mul
+  nsw` (signed overflow is undefined, which lets LLVM widen a loop counter), `sdiv` and `srem`, and signed `icmp`s.
+  With a pointer, it is pointer arithmetic (`pointerArithmetic`): `p + i` is a `getelementptr`, `p - q` LLVM's
+  `CreatePtrDiff` (the addresses' difference divided by the element's size), and comparisons are unsigned `icmp`s of
+  the addresses.
 - **Calls** first try the reductions (`reduce_add`, `reduce_min`, `reduce_max`) and `poly_lanes` and `poly_index`,
   then `kBuiltins`, a table from `<math.h>`'s float names to LLVM intrinsics (`fabsf` to `llvm.fabs`, `sinf` to
   `llvm.sin`, ...), declared with `Intrinsic::getOrInsertDeclaration` at the arguments' type, so `sinf` of a `float4`
@@ -326,9 +362,10 @@ Because the JIT and executables share one runtime, the two compile the same prog
   layout.
 - **Generated functions have the C calling convention, C names and external linkage.** That is the contract with
   C++ callers, the JIT's `lookup` and the linker. A new type at the boundary needs its C ABI attributes (extending.md,
-  recipe 3: `bool` is `zeroext`; simd.md: `float8` goes through memory). The one exception is an executable's
-  `main`, which `addEntryPoint` renames and makes internal.
-- **Semantics follow C unless a deviation is documented.** The README lists the deviations: `float` is the only
-  arithmetic type, constants are `float`, `%` works on floats, calls may precede definitions, uninitialised variables
-  are 0, falling off a non-void function's end is an error, and `main` returns a `float` or a `bool` and takes floats.
+  recipe 3: `bool` is `zeroext`; recipe 10: a `restrict` pointer is `noalias`; simd.md: `float8` goes through memory).
+  The one exception is an executable's `main`, which `addEntryPoint` renames and makes internal.
+- **Semantics follow C unless a deviation is documented.** The README lists the deviations: `float` and `int` are the
+  only arithmetic types, an unsuffixed `1.5` is a `float`, pointers point to five types and convert only by adding
+  `const`, `%` works on floats, calls may precede definitions, uninitialised variables are 0, falling off a non-void
+  function's end is an error, and `main` returns a `float` or a `bool` and takes floats.
 - **The runtime stays free of LLVM and real-time safe.** It runs inside the audio thread's call tree.

@@ -60,15 +60,16 @@ The executable:
   that is not a number. (`fminus` itself exits with 1 when a program doesn't compile.)
 
 This is where FMinus departs from C. C's `main` returns an `int`, the exit status, takes `argc` and `argv`, and
-prints through `printf`. FMinus has only `float` and `bool` and no strings or I/O, so the executable does the
-command line and the printing for it, and `main` stays a plain function over floats. When FMinus has integers and
-pointers, C's `int main(int argc, char** argv)` can join it.
+prints through `printf`. FMinus has no strings and no I/O, so the executable does the command line and the printing
+for it, and `main` stays a plain function over floats. It has `int` and pointers now (extending.md, recipe 10), but
+`argv` is a `char**`, which needs `char` and pointers to pointers, so C's `int main(int argc, char** argv)` waits for
+them ("Where to go next").
 
 `main` is otherwise an ordinary function:
 
 - other functions may call it;
 - `fminus --run main ...` calls it in the JIT, as any function. `--run` takes floats on its command line, so it calls
-  functions whose parameters are all `float`, and prints a `float` or a `bool` result;
+  functions whose parameters are all `float`, and prints a `float`, `bool` or `int` result;
 - a host program finds it with `jit->lookup("main")`, as `float (*)(float)` or `bool (*)(float, float)`;
 - a program without one compiles, runs in the JIT, and emits IR, assembly and objects as before. Only an executable
   needs it.
@@ -77,7 +78,7 @@ pointers, C's `int main(int argc, char** argv)` can join it.
 |---|---|
 | `--emit exe` and no `main` (or only a prototype) | fminus: an executable needs a main function, such as float main(float x) |
 | a `main` with another type, such as `float main(bool b)` or `float main(float4 v)` | fminus: 'main' must return float or bool and take only float parameters |
-| `--run` of a function with a `bool` parameter | fminus: --run: 'f' takes a bool parameter; --run passes floats only |
+| `--run` of a function with a `bool` parameter | fminus: --run: 'f' takes a parameter of type 'bool'; --run passes floats only |
 | `--emit exe` without `-o` | fminus: --emit exe: an executable needs a file name (-o) |
 
 ## The commands
@@ -240,7 +241,9 @@ inlined into `main` and there is nothing to break on but `main` itself. Source-l
 - **Printing.** A runtime function `fminus_rt_print(float x)` that writes `x` and returns it, made a builtin `print`
   (recipe 5's pattern), would let a program trace values in a loop. It belongs to executables and debugging: inside a
   plugin, nothing on the audio thread may write to a stream.
-- **An exit status.** With integers, `int main(...)` can return the status as C does.
-- **Strings and buffers.** With pointers, `main` could take C's `argc` and `argv`, and runtime functions could read
-  and write audio files, so an FMinus program processes a file from the command line.
+- **An exit status.** With `int` (recipe 10), `int main(...)` could return the status as C does: `addEntryPoint`
+  would return the result from C's `main` instead of printing it.
+- **Strings and buffers.** With `char` and pointers to pointers, `main` could take C's `argc` and `argv`, and runtime
+  functions could read and write audio files into buffers (recipe 10's pointers), so an FMinus program processes a
+  file from the command line.
 - **Debug information**, so lldb shows FMinus source.
