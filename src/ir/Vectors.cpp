@@ -50,6 +50,8 @@ namespace fminus::ir::detail
         std::vector<Value> args;
         for (const ast::ExprPtr& arg : construct.args)
             args.push_back(lower(*arg));
+        if (construct.braces)
+            return lowerBraces(location, construct, args);
         if (args.size() == 1 && !ast::isVector(args[0].type))
             return {convert(args[0], construct.type, location, Use::Initializing), construct.type};
         if (ast::isPoly(construct.type))
@@ -85,6 +87,36 @@ namespace fminus::ir::detail
         llvm::Value* vector = llvm::PoisonValue::get(typeOf(construct.type));
         for (unsigned i = 0; i < count; ++i)
             vector = builder_.CreateInsertElement(vector, elements[i], i);
+        return {vector, construct.type};
+    }
+
+    // (float4){a, b, c, d}, C's compound literal for a vector: scalars fill the lanes in order, and the rest are 0, so
+    // (float4){x} is x and three zeros, not a broadcast, and (float4){} is all zeros. A vector element is an error, as
+    // in C, except a single one of the literal's own type, which is the value itself. C only warns about excess
+    // elements (and drops them); FMinus refuses them. The grammar has no poly form: a program can't know how many
+    // lanes the zeros would fill.
+    Lowering::Value Lowering::lowerBraces(SourceLocation location, const ast::ConstructExpr& construct,
+                                          const std::vector<Value>& args)
+    {
+        if (args.size() > lanes(construct.type))
+        {
+            error(location, "excess elements in vector initializer");
+            return poison(construct.type);
+        }
+        if (args.size() == 1 && args[0].type == construct.type)
+            return args[0];
+        llvm::Value* vector = llvm::Constant::getNullValue(typeOf(construct.type));
+        for (std::size_t i = 0; i < args.size(); ++i)
+        {
+            if (ast::isVector(args[i].type))
+            {
+                // clang's: the first element could initialise the whole vector, any other only a lane
+                incompatible(location, Use::Initializing, args[i].type, i == 0 ? construct.type : ast::Type::Float);
+                return poison(construct.type);
+            }
+            llvm::Value* element = convert(args[i], ast::Type::Float, location, Use::Initializing);
+            vector = builder_.CreateInsertElement(vector, element, static_cast<std::uint64_t>(i));
+        }
         return {vector, construct.type};
     }
 

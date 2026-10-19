@@ -21,6 +21,12 @@ float4 softclip4(float4 x, float drive)
 // ASM:         fdiv.4s
 // ASM:         ret
 
+float4 braces(float a) { return (float4){a, 2}; }
+
+// C's literal: the lanes left out are 0, constants once the slots are gone.
+// IR-LABEL: define <4 x float> @braces(
+// IR:         insertelement <4 x float> <float poison, float 2.0{{0*}}e+00, float 0.0{{0*}}e+00, float 0.0{{0*}}e+00>
+
 float4 reverse(float4 v) { return v.wzyx; }
 
 // IR-LABEL: define <4 x float> @reverse(

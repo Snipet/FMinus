@@ -104,11 +104,14 @@ namespace fminus::ast
                                       return "(?: " + dump(*conditional.condition) + " " + dump(*conditional.thenValue)
                                              + " " + dump(*conditional.elseValue) + ")";
                                   },
-                                  [](const ConstructExpr& construct) {
-                                      std::string text = std::string("(") + typeName(construct.type);
+                                  [](const ConstructExpr& construct) {   // (float4 a b), or (float4 {a b}) for C's
+                                      std::string elements;
                                       for (const ExprPtr& arg : construct.args)
-                                          text += " " + dump(*arg);
-                                      return text + ")";
+                                          elements += (elements.empty() ? "" : " ") + dump(*arg);
+                                      if (construct.braces)
+                                          return std::string("(") + typeName(construct.type) + " {" + elements + "})";
+                                      return std::string("(") + typeName(construct.type)
+                                             + (elements.empty() ? "" : " " + elements) + ")";
                                   },
                                   [](const SwizzleExpr& swizzle) {
                                       return "(. " + dump(*swizzle.base) + " " + swizzle.components + ")";

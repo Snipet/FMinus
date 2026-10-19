@@ -40,6 +40,41 @@ TEST_CASE("float2, float4 and float8 are OpenCL C's vector types: literals, lane
     CHECK(lanesOf(lookup<float4()>(*jit, "zero")()) == std::array{0.0f, 0.0f, 0.0f, 0.0f});
 }
 
+TEST_CASE("C's vector literal, in braces, fills the lanes in order and zeroes the rest", "[codegen][simd]")
+{
+    std::string errors;
+    auto jit = compile("float4 full(float a) { return (float4){a, 2, 3, 4}; }\n"
+                       "float4 one(float a) { return (float4){a}; }\n"            // not a broadcast, as (float4)(a) is
+                       "float4 two(float a) { return (float4){a, 2,}; }\n"        // C's trailing comma
+                       "float4 none() { return (float4){}; }\n"
+                       "float4 copy(float4 v) { return (float4){v}; }\n"          // one of its own type: the value
+                       "float4 mask(float a) { return (float4){a > 0, 1}; }\n"    // a bool is 0 or 1
+                       "float eight() { return reduce_add((float8){1, 2, 3, 4, 5, 6, 7, 8}); }\n",
+                       &errors);
+    INFO(errors);
+    REQUIRE(jit);
+    CHECK(lanesOf(lookup<float4(float)>(*jit, "full")(7.0f)) == std::array{7.0f, 2.0f, 3.0f, 4.0f});
+    CHECK(lanesOf(lookup<float4(float)>(*jit, "one")(7.0f)) == std::array{7.0f, 0.0f, 0.0f, 0.0f});
+    CHECK(lanesOf(lookup<float4(float)>(*jit, "two")(7.0f)) == std::array{7.0f, 2.0f, 0.0f, 0.0f});
+    CHECK(lanesOf(lookup<float4()>(*jit, "none")()) == std::array{0.0f, 0.0f, 0.0f, 0.0f});
+    CHECK(lanesOf(lookup<float4(float4)>(*jit, "copy")(float4{1.0f, 2.0f, 3.0f, 4.0f}))
+          == std::array{1.0f, 2.0f, 3.0f, 4.0f});
+    CHECK(lanesOf(lookup<float4(float)>(*jit, "mask")(-1.0f)) == std::array{0.0f, 1.0f, 0.0f, 0.0f});
+    CHECK(lookup<float()>(*jit, "eight")() == 36.0f);
+    // C takes scalars only: a vector initialises the whole literal, if it comes first, or one lane. C only warns about
+    // excess elements; FMinus refuses them.
+    CHECK(errorsOf("float f(float2 p)\n"
+                   "{\n"
+                   "    (float4){1, 2, 3, 4, 5};\n"
+                   "    (float4){p, 1};\n"
+                   "    (float4){1, p};\n"
+                   "    return 0;\n"
+                   "}\n")
+          == "test.fm:3:5: error: excess elements in vector initializer\n"
+             "test.fm:4:5: error: initializing 'float4' with an expression of incompatible type 'float2'\n"
+             "test.fm:5:5: error: initializing 'float' with an expression of incompatible type 'float2'\n");
+}
+
 TEST_CASE("vector arithmetic works lane by lane, broadcasting scalars, with builtins and reductions", "[codegen][simd]")
 {
     std::string errors;

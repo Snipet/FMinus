@@ -5,7 +5,7 @@
 //     program      : function*
 //     function     : type IDENTIFIER "(" (param ("," param)*)? ")" (block | ";")     a definition, or a prototype
 //     param        : "const"? type IDENTIFIER?                                       (a prototype may omit names)
-//     type         : "float" | "bool"
+//     type         : "float" | "bool" | VECTOR_TYPE | "poly" ("float" | "bool")       VECTOR_TYPE: float2/4/8
 //     block        : "{" (declaration | statement)* "}"
 //     declaration  : "const"? type declarator ("," declarator)* ";"
 //     declarator   : IDENTIFIER ("=" expr)?
@@ -16,10 +16,13 @@
 //                  | ("-" | "+" | "!") expr | expr ("*" | "/" | "%") expr | expr ("+" | "-") expr
 //                  | expr ("<" | "<=" | ">" | ">=") expr | expr ("==" | "!=") expr
 //                  | expr "&&" expr | expr "||" expr | expr "?" expr ":" expr
+//                  | "(" VECTOR_TYPE ")" "(" (expr ("," expr)*)? ")"                 OpenCL C's vector literal
+//                  | "(" VECTOR_TYPE ")" "{" (expr ("," expr)* ","?)? "}"            C's: lanes left out are 0
+//                  | "(" "poly" "float" ")" "(" expr ")" | expr "." IDENTIFIER       a broadcast; a swizzle
 //                  | expr ("=" | "+=" | "-=" | "*=" | "/=" | "%=") expr
 //
 // Precedence and associativity are C's, from the loosest: assignment (right to left), ?: (right to left), ||, &&,
-// equality, relational, additive, multiplicative, unary.
+// equality, relational, additive, multiplicative, unary, and the swizzle's "." (as C's postfix operators).
 // The grammar accepts any expression on the left of an assignment; the code generator rejects what is not a variable
 // ("expression is not assignable"), so buffer elements and fields can join it later.
 //
@@ -263,7 +266,10 @@ expr
     | expr ">=" expr                        { $$ = binary(@2, ast::BinaryOp::GreaterEqual, $1, $3); }
     | expr "==" expr                        { $$ = binary(@2, ast::BinaryOp::Equal, $1, $3); }
     | expr "!=" expr                        { $$ = binary(@2, ast::BinaryOp::NotEqual, $1, $3); }
-    | "(" VECTOR_TYPE ")" "(" args ")"      { $$ = ast::makeExpr(at(@1), ast::ConstructExpr{$2, $5}); }
+    | "(" VECTOR_TYPE ")" "(" args ")"      { $$ = ast::makeExpr(at(@1), ast::ConstructExpr{$2, $5, false}); }
+    | "(" VECTOR_TYPE ")" "{" args "}"      { $$ = ast::makeExpr(at(@1), ast::ConstructExpr{$2, $5, true}); }
+    | "(" VECTOR_TYPE ")" "{" arg_list "," "}"
+                                            { $$ = ast::makeExpr(at(@1), ast::ConstructExpr{$2, $5, true}); }
     | "(" "poly" "float" ")" "(" args ")"   {
                                                 $$ = ast::makeExpr(at(@1),
                                                                    ast::ConstructExpr{ast::Type::PolyFloat, $6});

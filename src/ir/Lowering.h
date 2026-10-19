@@ -139,6 +139,7 @@ namespace fminus::ir::detail
         // ---- Vectors.cpp --------------------------------------------------------------------------------------------
         Value lowerSelect(SourceLocation location, Value test, const ast::ConditionalExpr& conditional);
         Value lowerConstruct(SourceLocation location, const ast::ConstructExpr& construct);
+        Value lowerBraces(SourceLocation location, const ast::ConstructExpr& construct, const std::vector<Value>& args);
         std::optional<std::vector<int>> components(SourceLocation location, const std::string& name,
                                                    ast::Type vector);
         std::optional<ast::Type> componentsType(SourceLocation location, std::size_t count);

@@ -236,10 +236,14 @@ namespace fminus::ast
     // `(float4)(a, b, c, d)`: OpenCL C's vector literal. One scalar is broadcast to every lane; otherwise the
     // arguments' lanes (one for a scalar, all of a vector's) fill the vector in order, and must fill it exactly.
     // `(poly float)(x)` takes one scalar, broadcast.
+    //
+    // `(float4){a, b, c, d}`: C's, a compound literal (braces). Scalars fill the lanes in order and the rest are 0, so
+    // `(float4){x}` is x and three zeros.
     struct ConstructExpr
     {
         Type type = Type::Float4;
         std::vector<ExprPtr> args;
+        bool braces = false;   // C's form
     };
 
     // `v.x`, `v.wzyx`, `v.s07`: OpenCL C's components. x, y, z, w name lanes 0 to 3, and s followed by hex digits names

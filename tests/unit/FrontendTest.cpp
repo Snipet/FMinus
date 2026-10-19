@@ -85,6 +85,11 @@ TEST_CASE("vector types, literals and swizzles parse as OpenCL C's", "[frontend]
              "  (return (* (float4 a (. b s0) 1) (- (. (. a yx) xxyy)))))\n");
     CHECK(parsed("float f(float4 v) { v.xy = v.zw; return v.x; }")
           == "(function float f ((float4 v))\n  (= (. v xy) (. v zw))\n  (return (. v x)))\n");
+    // C's literal, in braces: a trailing comma, or none at all, as C allows. There is no poly form.
+    CHECK(parsed("float4 f(float a) { (float4){a, 2,}; (float4){}; return (float4){a}; }")
+          == "(function float4 f ((float a))\n  (float4 {a 2})\n  (float4 {})\n  (return (float4 {a})))\n");
+    CHECK(parsed("poly float f() { return (poly float){1}; }")
+          == "test.fm:1:37: error: syntax error, unexpected {, expecting (\n");
 }
 
 TEST_CASE("poly types parse as a qualifier and a scalar type", "[frontend]")
