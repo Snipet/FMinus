@@ -57,6 +57,7 @@ IDENTIFIER  [A-Za-z_][A-Za-z0-9_]*
 "float2"                    { return Parser::make_VECTOR_TYPE(fminus::ast::Type::Float2, yyextra->where); }
 "float4"                    { return Parser::make_VECTOR_TYPE(fminus::ast::Type::Float4, yyextra->where); }
 "float8"                    { return Parser::make_VECTOR_TYPE(fminus::ast::Type::Float8, yyextra->where); }
+"poly"                      { return Parser::make_POLY(yyextra->where); }
 "true"                      { return Parser::make_TRUE(yyextra->where); }
 "false"                     { return Parser::make_FALSE(yyextra->where); }
 "if"                        { return Parser::make_IF(yyextra->where); }

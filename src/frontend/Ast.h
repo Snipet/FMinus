@@ -22,6 +22,11 @@ namespace fminus::ast
     // float2, float4 and float8 are OpenCL C's vector types: that many floats side by side, computed on together. A
     // float4 fills one 128-bit NEON register; a float8 is two. Comparing two of them gives a lane mask, a bool2, bool4
     // or bool8, which a program cannot declare (as in OpenCL C) but can select with or use as 0s and 1s.
+    //
+    // poly float is a float vector as wide as the target's vector registers: 4 lanes with NEON or SSE, 8 with AVX2,
+    // 16 with AVX-512. A program is written without knowing how many (poly_lanes() is the number, a constant once the
+    // target is known), so it means the same on every target. Comparing two gives a poly bool, which a program can
+    // declare.
     enum class Type
     {
         Float,
@@ -32,13 +37,24 @@ namespace fminus::ast
         Bool2,
         Bool4,
         Bool8,
+        PolyFloat,
+        PolyBool,
     };
 
-    // A vector type's number of lanes; 1 for a scalar.
+    inline bool isPoly(Type type)
+    {
+        return type == Type::PolyFloat || type == Type::PolyBool;
+    }
+
+    // A vector type's number of lanes; 1 for a scalar, and 0 for a poly type, whose lanes the target decides (the code
+    // generator knows how many).
     inline unsigned lanes(Type type)
     {
         switch (type)
         {
+        case Type::PolyFloat:
+        case Type::PolyBool:
+            return 0;
         case Type::Float:
         case Type::Bool:
             return 1;
@@ -57,12 +73,12 @@ namespace fminus::ast
 
     inline bool isVector(Type type)
     {
-        return lanes(type) > 1;
+        return lanes(type) > 1 || isPoly(type);
     }
 
     inline bool isMask(Type type)
     {
-        return type == Type::Bool2 || type == Type::Bool4 || type == Type::Bool8;
+        return type == Type::Bool2 || type == Type::Bool4 || type == Type::Bool8 || type == Type::PolyBool;
     }
 
     // The float vector type of `count` lanes, if FMinus has one.
@@ -92,6 +108,8 @@ namespace fminus::ast
             return Type::Bool4;
         case Type::Float8:
             return Type::Bool8;
+        case Type::PolyFloat:
+            return Type::PolyBool;
         default:
             return Type::Bool;
         }
@@ -102,6 +120,8 @@ namespace fminus::ast
     {
         if (type == Type::Bool)
             return Type::Float;
+        if (type == Type::PolyBool)
+            return Type::PolyFloat;
         if (isMask(type))
             return *vectorOf(lanes(type));
         return type;
@@ -215,6 +235,7 @@ namespace fminus::ast
 
     // `(float4)(a, b, c, d)`: OpenCL C's vector literal. One scalar is broadcast to every lane; otherwise the
     // arguments' lanes (one for a scalar, all of a vector's) fill the vector in order, and must fill it exactly.
+    // `(poly float)(x)` takes one scalar, broadcast.
     struct ConstructExpr
     {
         Type type = Type::Float4;

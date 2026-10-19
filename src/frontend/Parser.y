@@ -102,7 +102,7 @@
 %token LT "<" LE "<=" GT ">" GE ">=" EQ "==" NE "!=" NOT "!" AND "&&" OR "||" QUESTION "?" COLON ":"
 %token IF "if" ELSE "else" WHILE "while" FOR "for" BREAK "break" CONTINUE "continue"
 %token <ast::Type> VECTOR_TYPE "vector type"
-%token DOT "."
+%token DOT "." POLY "poly"
 %token PLUS "+" MINUS "-" STAR "*" SLASH "/" PERCENT "%"
 %token ASSIGN "=" PLUS_ASSIGN "+=" MINUS_ASSIGN "-=" STAR_ASSIGN "*=" SLASH_ASSIGN "/=" PERCENT_ASSIGN "%="
 %token LPAREN "(" RPAREN ")" LBRACE "{" RBRACE "}" COMMA "," SEMI ";"
@@ -180,6 +180,8 @@ type
     : "float"                               { $$ = ast::Type::Float; }
     | "bool"                                { $$ = ast::Type::Bool; }
     | VECTOR_TYPE                           { $$ = $1; }
+    | "poly" "float"                        { $$ = ast::Type::PolyFloat; }
+    | "poly" "bool"                         { $$ = ast::Type::PolyBool; }
     ;
 
 block
@@ -262,6 +264,10 @@ expr
     | expr "==" expr                        { $$ = binary(@2, ast::BinaryOp::Equal, $1, $3); }
     | expr "!=" expr                        { $$ = binary(@2, ast::BinaryOp::NotEqual, $1, $3); }
     | "(" VECTOR_TYPE ")" "(" args ")"      { $$ = ast::makeExpr(at(@1), ast::ConstructExpr{$2, $5}); }
+    | "(" "poly" "float" ")" "(" args ")"   {
+                                                $$ = ast::makeExpr(at(@1),
+                                                                   ast::ConstructExpr{ast::Type::PolyFloat, $6});
+                                            }
     | expr "." IDENTIFIER                   { $$ = ast::makeExpr(at(@2), ast::SwizzleExpr{$1, $3}); }
     | expr "*" expr                         { $$ = binary(@2, ast::BinaryOp::Multiply, $1, $3); }
     | expr "/" expr                         { $$ = binary(@2, ast::BinaryOp::Divide, $1, $3); }

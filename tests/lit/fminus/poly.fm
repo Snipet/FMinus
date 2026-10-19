@@ -1,0 +1,53 @@
+// recipe 9: a poly float is as wide as the target's vectors (4 lanes with NEON); --poly-lanes picks another width.
+// RUN: fminus %s -O2 --poly-lanes 4 | FileCheck %s --check-prefix=IR4
+// RUN: fminus %s -O2 --poly-lanes 16 | FileCheck %s --check-prefix=IR16
+// RUN: %if arm64 %{ fminus %s -O2 --emit asm -o - | FileCheck %s --check-prefix=ASM4 %}
+// RUN: %if arm64 %{ fminus %s -O2 --poly-lanes 16 --emit asm -o - | FileCheck %s --check-prefix=ASM16 %}
+// RUN: fminus %s --run basel 1000 | FileCheck %s --check-prefix=RESULT
+// RUN: fminus %s --poly-lanes 64 --run basel 1000 | FileCheck %s --check-prefix=RESULT
+// RUN: fminus %s --emit exe -o %t
+// RUN: %t 1000 | FileCheck %s --check-prefix=RESULT
+// RUN: not fminus %s --poly-lanes 3 2>&1 | FileCheck %s --check-prefix=LANES
+// RUN: echo 'poly float f(float x) { return x; }' | not fminus - --run f 1 2>&1 | FileCheck %s --check-prefix=RUNPOLY
+
+// The sum of 1/k^2 for k = 1 to n, poly_lanes() terms at a time: lane i takes k = base + i, and a mask drops the k past
+// n in the last step.
+float basel(float n)
+{
+    poly float sum = 0;
+    for (float base = 1; base <= n; base += poly_lanes())
+    {
+        const poly float k = base + poly_index();
+        sum += k <= n ? 1 / (k * k) : 0;
+    }
+    return reduce_add(sum);
+}
+
+float main(float n)
+{
+    return basel(n);
+}
+
+// IR4-LABEL: define float @basel(
+// IR4:         fadd <4 x float> %{{.*}}, <float 0.000000e+00, float 1.000000e+00, float 2.000000e+00, float 3.0{{.*}}>
+// IR4:         select <4 x i1>
+// IR4:         fadd float %{{.*}}, 4.000000e+00
+// IR4:         call float @llvm.vector.reduce.fadd.v4f32(
+// IR16-LABEL: define float @basel(
+// IR16:         select <16 x i1>
+// IR16:         fadd float %{{.*}}, 1.600000e+01
+// IR16:         call float @llvm.vector.reduce.fadd.v16f32(
+
+// One NEON register at the host's width; four at 16 lanes, which work as four independent accumulators.
+// ASM4-LABEL: _basel:
+// ASM4-COUNT-1: fdiv.4s
+// ASM4-NOT:     fdiv.4s
+// ASM4:         ret
+// ASM16-LABEL: _basel:
+// ASM16-COUNT-4: fdiv.4s
+// ASM16:         ret
+
+// pi^2/6 - 1/1000.5, to float precision: the last digits depend on the width (the order of the additions).
+// RESULT: 1.64393{{[0-9]+}}
+// LANES: --poly-lanes: 3 not in {1,2,4,8,16,32,64}
+// RUNPOLY: fminus: --run: 'f' returns a poly float; --run prints floats and bools only

@@ -4,12 +4,16 @@
 #include "support/LLVMInit.h"
 
 #include <llvm/Analysis/TargetLibraryInfo.h>
+#include <llvm/Analysis/TargetTransformInfo.h>
 #include <llvm/CodeGen/ReplaceWithVeclib.h>
 #include <llvm/ExecutionEngine/Orc/JITTargetMachineBuilder.h>
+#include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/SystemLibraries.h>
 #include <llvm/Passes/PassBuilder.h>
 #include <llvm/Target/TargetMachine.h>
+
+#include <algorithm>
 
 namespace fminus
 {
@@ -76,5 +80,18 @@ namespace fminus
         passes.registerLoopAnalyses(loops);
         passes.crossRegisterProxies(loops, functions, cgsccs, modules);
         passes.buildPerModuleDefaultPipeline(level).run(module, modules);
+    }
+
+    unsigned polyLanes(const llvm::TargetMachine& machine)
+    {
+        // The cost model asks a function, whose attributes may pick another CPU: one without any has the machine's.
+        llvm::LLVMContext context;
+        llvm::Module module("fminus.poly-lanes", context);
+        llvm::Function* function =
+            llvm::Function::Create(llvm::FunctionType::get(llvm::Type::getVoidTy(context), false),
+                                   llvm::GlobalValue::ExternalLinkage, "f", module);
+        const llvm::TargetTransformInfo info = machine.getTargetTransformInfo(*function);
+        const llvm::TypeSize bits = info.getRegisterBitWidth(llvm::TargetTransformInfo::RGK_FixedWidthVector);
+        return std::max(1u, static_cast<unsigned>(bits.getFixedValue() / 32));
     }
 } // namespace fminus

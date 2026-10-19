@@ -31,4 +31,10 @@ namespace fminus
     // Runs LLVM's default pipeline at `level` (O0 to O3, as clang -O<n> would), with loop and SLP vectorisation, using
     // the machine's TargetTransformInfo: what lets the vectorisers see the host's vector unit.
     void optimiseModule(llvm::Module& module, llvm::TargetMachine& machine, llvm::OptimizationLevel level);
+
+    // How many floats the machine's vector registers hold, as its cost model says (the width its vectorisers use): a
+    // poly float's lanes (ir::Options). 4 with NEON or SSE, 8 with AVX2, 16 with AVX-512 (where LLVM prefers 512-bit
+    // vectors: on AMD's Zen 4 and later, or with prefer-vector-width=512; on Intel's AVX-512 CPUs it prefers 256 bits,
+    // so 8).
+    unsigned polyLanes(const llvm::TargetMachine& machine);
 } // namespace fminus

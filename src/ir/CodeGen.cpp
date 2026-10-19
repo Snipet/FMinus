@@ -70,6 +70,13 @@ namespace fminus::ir
             return false;
         }
 
+        // poly_lanes(): how many lanes a poly float has, as a float. poly_index(): a poly float whose lanes hold their
+        // own indices, 0, 1, 2, ...: what tells the lanes apart.
+        bool isPolyQuery(std::string_view name)
+        {
+            return name == "poly_lanes" || name == "poly_index";
+        }
+
         const Builtin* findBuiltin(std::string_view name)
         {
             for (const Builtin& builtin : kBuiltins)
@@ -88,10 +95,11 @@ namespace fminus::ir
         class Lowering
         {
         public:
-            Lowering(llvm::Module& module, Diagnostics& diagnostics)
+            Lowering(llvm::Module& module, Diagnostics& diagnostics, const Options& options)
                 : module_(module)
                 , diagnostics_(diagnostics)
                 , builder_(module.getContext())
+                , polyLanes_(options.polyLanes)
             {
             }
 
@@ -125,6 +133,12 @@ namespace fminus::ir
                 ast::Type type;
             };
 
+            // A type's lanes: a poly type has the target's.
+            unsigned lanes(ast::Type type) const
+            {
+                return ast::isPoly(type) ? polyLanes_ : ast::lanes(type);
+            }
+
             llvm::Type* typeOf(ast::Type type)
             {
                 switch (type)
@@ -136,11 +150,13 @@ namespace fminus::ir
                 case ast::Type::Float2:
                 case ast::Type::Float4:
                 case ast::Type::Float8:
-                    return llvm::FixedVectorType::get(builder_.getFloatTy(), ast::lanes(type));
+                case ast::Type::PolyFloat:
+                    return llvm::FixedVectorType::get(builder_.getFloatTy(), lanes(type));
                 case ast::Type::Bool2:
                 case ast::Type::Bool4:
                 case ast::Type::Bool8:
-                    return llvm::FixedVectorType::get(builder_.getInt1Ty(), ast::lanes(type));
+                case ast::Type::PolyBool:
+                    return llvm::FixedVectorType::get(builder_.getInt1Ty(), lanes(type));
                 }
                 return builder_.getFloatTy();
             }
@@ -157,19 +173,20 @@ namespace fminus::ir
             };
 
             // C's implicit conversions, and OpenCL C's for vectors. A bool is 0 or 1 as a float, and a float is
-            // `x != 0` as a bool (so a NaN is true). A scalar becomes a vector by being broadcast to every lane, and a
-            // lane mask is 0 or 1 per lane as the float vector of its size. Nothing else converts from a vector: that
-            // is an error, reported for `use`.
+            // `x != 0` as a bool (so a NaN is true). A scalar becomes a vector by being broadcast to every lane (a
+            // poly bool takes a bool), and a lane mask is 0 or 1 per lane as the float vector of its size. Nothing
+            // else converts from a vector: that is an error, reported for `use`.
             llvm::Value* convert(Value value, ast::Type type, SourceLocation location, Use use)
             {
                 if (value.type == type)
                     return value.ir;
                 if (!ast::isVector(value.type))
                 {
-                    if (ast::isVector(type) && !ast::isMask(type))
+                    if (ast::isVector(type))
                     {
-                        llvm::Value* scalar = convert(value, ast::Type::Float, location, use);
-                        return builder_.CreateVectorSplat(ast::lanes(type), scalar, "splat");
+                        const ast::Type scalarType = ast::isMask(type) ? ast::Type::Bool : ast::Type::Float;
+                        llvm::Value* scalar = convert(value, scalarType, location, use);
+                        return builder_.CreateVectorSplat(lanes(type), scalar, "splat");
                     }
                     if (type == ast::Type::Bool)
                         return builder_.CreateFCmpUNE(value.ir, llvm::ConstantFP::get(value.ir->getType(), 0.0),
@@ -219,6 +236,11 @@ namespace fminus::ir
             {
                 const ast::Type ta = ast::arithmeticOf(a);
                 const ast::Type tb = ast::arithmeticOf(b);
+                if (ast::isVector(ta) && ast::isVector(tb) && ast::isPoly(ta) != ast::isPoly(tb))
+                {
+                    polyMismatch(location, a, b);
+                    return false;
+                }
                 if (ast::isVector(ta) && ast::isVector(tb) && ta != tb)
                 {
                     error(location, "cannot convert between vector values of different size ("
@@ -227,6 +249,15 @@ namespace fminus::ir
                 }
                 type = ast::isVector(ta) ? ta : tb;
                 return true;
+            }
+
+            // A poly type never meets a fixed-size vector, even where the two have as many lanes: on another target
+            // they would not, and a program means the same on every target.
+            void polyMismatch(SourceLocation location, ast::Type a, ast::Type b)
+            {
+                error(location, "cannot convert between " + quoted(ast::typeName(a)) + " and "
+                                    + quoted(ast::typeName(b))
+                                    + ": a poly type has as many lanes as the target's vectors");
             }
 
             Value poison(ast::Type type)
@@ -254,7 +285,7 @@ namespace fminus::ir
 
             void declare(const ast::Function& function)
             {
-                if (isReduction(function.name))
+                if (isReduction(function.name) || isPolyQuery(function.name))
                 {
                     error(function.location, quoted(function.name) + " is a builtin and cannot be redefined");
                     return;
@@ -745,6 +776,11 @@ namespace fminus::ir
                 ast::Type branches = type;
                 if (!commonType(location, thenValue.type, elseValue.type, branches))
                     return poison(type);
+                if (ast::isVector(branches) && ast::isPoly(branches) != ast::isPoly(type))
+                {
+                    polyMismatch(location, mask, branches);
+                    return poison(type);
+                }
                 if (ast::isVector(branches) && branches != type)
                 {
                     error(location, "vector condition type " + quoted(ast::typeName(mask)) + " and result type "
@@ -757,37 +793,48 @@ namespace fminus::ir
             }
 
             // (float4)(a, b, c, d), OpenCL C's vector literal: one scalar is broadcast; otherwise the arguments' lanes,
-            // in order, must fill the vector exactly.
+            // in order, must fill the vector exactly. (poly float)(x) is a broadcast only: a program does not know how
+            // many lanes it would have to fill, and a poly argument cannot fill a fixed number.
             Value lowerConstruct(SourceLocation location, const ast::ConstructExpr& construct)
             {
-                const unsigned lanes = ast::lanes(construct.type);
+                const unsigned count = lanes(construct.type);
                 std::vector<Value> args;
                 for (const ast::ExprPtr& arg : construct.args)
                     args.push_back(lower(*arg));
                 if (args.size() == 1 && !ast::isVector(args[0].type))
                     return {convert(args[0], construct.type, location, Use::Initializing), construct.type};
+                if (ast::isPoly(construct.type))
+                {
+                    error(location, "a poly float literal takes one scalar, which it broadcasts");
+                    return poison(construct.type);
+                }
 
                 std::vector<llvm::Value*> elements;
                 for (const Value& arg : args)
                 {
                     const ast::Type type = ast::arithmeticOf(arg.type);
+                    if (ast::isPoly(type))
+                    {
+                        polyMismatch(location, arg.type, construct.type);
+                        return poison(construct.type);
+                    }
                     llvm::Value* floats = convert(arg, type, location, Use::Initializing);
                     if (!ast::isVector(type))
                         elements.push_back(floats);
-                    for (unsigned i = 0; ast::isVector(type) && i < ast::lanes(type); ++i)
+                    for (unsigned i = 0; ast::isVector(type) && i < lanes(type); ++i)
                         elements.push_back(builder_.CreateExtractElement(floats, i));
                 }
-                if (elements.size() != lanes)
+                if (elements.size() != count)
                 {
-                    if (elements.size() < lanes)
-                        error(location, "too few elements in vector initialization (expected " + std::to_string(lanes)
+                    if (elements.size() < count)
+                        error(location, "too few elements in vector initialization (expected " + std::to_string(count)
                                             + " elements, have " + std::to_string(elements.size()) + ")");
                     else
                         error(location, "excess elements in vector initializer");
                     return poison(construct.type);
                 }
                 llvm::Value* vector = llvm::PoisonValue::get(typeOf(construct.type));
-                for (unsigned i = 0; i < lanes; ++i)
+                for (unsigned i = 0; i < count; ++i)
                     vector = builder_.CreateInsertElement(vector, elements[i], i);
                 return {vector, construct.type};
             }
@@ -798,7 +845,7 @@ namespace fminus::ir
             std::optional<std::vector<int>> components(SourceLocation location, const std::string& name,
                                                        ast::Type vector)
             {
-                std::vector<int> lanes;
+                std::vector<int> indices;
                 const bool numbered = name.size() > 1 && (name[0] == 's' || name[0] == 'S');
                 for (std::size_t i = numbered ? 1 : 0; i < name.size(); ++i)
                 {
@@ -814,14 +861,14 @@ namespace fminus::ir
                               "illegal vector component name " + quoted(std::string(1, static_cast<char>(c))));
                         return std::nullopt;
                     }
-                    if (lane >= static_cast<int>(ast::lanes(vector)))
+                    if (lane >= static_cast<int>(lanes(vector)))
                     {
                         error(location, "vector component access exceeds type " + quoted(ast::typeName(vector)));
                         return std::nullopt;
                     }
-                    lanes.push_back(lane);
+                    indices.push_back(lane);
                 }
-                return lanes;
+                return indices;
             }
 
             // The type of `count` components: one is a float, 2, 4 or 8 a float vector; anything else is an error.
@@ -836,9 +883,15 @@ namespace fminus::ir
                 return type;
             }
 
-            // Whether `type` has components: a float vector does; a scalar or a lane mask does not.
+            // Whether `type` has components: a float vector does; a scalar, a lane mask or a poly float (whose lanes
+            // a program cannot name, not knowing how many there are) does not.
             bool hasComponents(SourceLocation location, ast::Type type)
             {
+                if (type == ast::Type::PolyFloat)
+                {
+                    error(location, "a poly float has no components: its lanes are the target's");
+                    return false;
+                }
                 if (ast::isVector(type) && !ast::isMask(type))
                     return true;
                 error(location,
@@ -1025,6 +1078,18 @@ namespace fminus::ir
 
                 if (isReduction(call.callee))
                     return lowerReduction(location, call, args);
+                if (isPolyQuery(call.callee))
+                {
+                    if (!args.empty())
+                        return wrongArity(location, call, 0);
+                    if (call.callee == "poly_lanes")
+                        return {llvm::ConstantFP::get(builder_.getFloatTy(), static_cast<double>(polyLanes_)),
+                                ast::Type::Float};
+                    std::vector<llvm::Constant*> indices;
+                    for (unsigned i = 0; i < polyLanes_; ++i)
+                        indices.push_back(llvm::ConstantFP::get(builder_.getFloatTy(), static_cast<double>(i)));
+                    return {llvm::ConstantVector::get(indices), ast::Type::PolyFloat};
+                }
                 std::vector<llvm::Value*> irArgs;
                 if (const Builtin* builtin = findBuiltin(call.callee))
                 {
@@ -1092,6 +1157,7 @@ namespace fminus::ir
             llvm::Module& module_;
             Diagnostics& diagnostics_;
             llvm::IRBuilder<> builder_;
+            unsigned polyLanes_;                                                // a poly float's lanes
             std::unordered_map<std::string, const ast::Function*> functions_;   // the program's, by name
             std::vector<std::unordered_map<std::string, Binding>> scopes_;     // the current function's, inner last
             const ast::Function* function_ = nullptr;                          // the function being lowered
@@ -1107,11 +1173,11 @@ namespace fminus::ir
     } // namespace
 
     std::unique_ptr<llvm::Module> lower(const ast::Program& program, llvm::LLVMContext& context,
-                                        Diagnostics& diagnostics)
+                                        Diagnostics& diagnostics, const Options& options)
     {
         auto module = std::make_unique<llvm::Module>(diagnostics.fileName(), context);
         module->setSourceFileName(diagnostics.fileName());
-        Lowering(*module, diagnostics).lower(program);
+        Lowering(*module, diagnostics, options).lower(program);
         if (diagnostics.hasErrors())
             return nullptr;
         return module;

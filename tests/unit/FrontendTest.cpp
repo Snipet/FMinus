@@ -87,6 +87,14 @@ TEST_CASE("vector types, literals and swizzles parse as OpenCL C's", "[frontend]
           == "(function float f ((float4 v))\n  (= (. v xy) (. v zw))\n  (return (. v x)))\n");
 }
 
+TEST_CASE("poly types parse as a qualifier and a scalar type", "[frontend]")
+{
+    CHECK(parsed("poly float f(poly float a, const poly bool m) { poly float b = (poly float)(1); return m ? a : b; }")
+          == "(function poly float f ((poly float a) (const poly bool m))\n"
+             "  (decl poly float b (poly float 1))\n"
+             "  (return (?: m a b)))\n");
+}
+
 TEST_CASE("constants keep their spelling: C's decimal, hex and integer forms", "[frontend]")
 {
     CHECK(parsed("float f() { return fmaxf(fminf(1, .5), g(2e3, 1.e-2f, 3.25E+1F, 0x1.8p1, 0x1p-3f, 1.)); }")
@@ -103,7 +111,7 @@ TEST_CASE("syntax and scanner errors carry their locations", "[frontend]")
     CHECK(parsed("float f(float x) { return 1f; }") == "test.fm:1:27: error: invalid suffix 'f' on integer constant\n");
     CHECK(parsed("float f(float x) /* never\nclosed { return x; }")
           == "test.fm:1:18: error: unterminated /* comment\n");
+    // Bison lists what it expected only when that is at most four tokens; a function can start five ways now.
     CHECK(parsed("fn f(x: float) -> float { return x; }")
-          == "test.fm:1:1: error: syntax error, unexpected identifier, expecting end of file or float or bool or "
-             "vector type\n");
+          == "test.fm:1:1: error: syntax error, unexpected identifier\n");
 }

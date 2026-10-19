@@ -185,6 +185,10 @@ namespace fminus::ast
             return "bool4";
         case Type::Bool8:
             return "bool8";
+        case Type::PolyFloat:
+            return "poly float";
+        case Type::PolyBool:
+            return "poly bool";
         }
         return "?";
     }

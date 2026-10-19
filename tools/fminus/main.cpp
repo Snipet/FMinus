@@ -7,6 +7,7 @@
 //     fminus gain.fm --emit exe -o gain     an executable that runs the program's main (support/Aot.h)
 //     fminus gain.fm --entry                the IR with that executable's C main (also for asm and obj)
 //     fminus gain.fm --run gain 0.5 2       JIT-compiles the program, calls gain(0.5, 2) and prints the result
+//     fminus voices.fm --poly-lanes 16      as if this machine's vectors held 16 floats (any target's poly float)
 #include "frontend/Frontend.h"
 #include "ir/CodeGen.h"
 #include "jit/Jit.h"
@@ -90,6 +91,7 @@ int main(int argc, char** argv)
     std::string run;
     std::vector<float> runArgs;
     bool entry = false;
+    unsigned polyLanes = 0;
     app.add_option("input", input, "FMinus source file ('-' for stdin)")->required();
     app.add_option("args", runArgs, "The arguments of --run's function");
     app.add_option("-o,--output", output, "The output file ('-' is stdout)")->capture_default_str();
@@ -98,6 +100,8 @@ int main(int argc, char** argv)
         ->capture_default_str();
     app.add_option("-O", level, "Optimisation level, 0 to 3")->check(CLI::Range(0, 3))->capture_default_str();
     app.add_option("--run", run, "JIT-compile, call this function with the arguments and print its result");
+    app.add_option("--poly-lanes", polyLanes, "A poly float's lanes: 1, 2, 4, ... 64 (by default, this machine's)")
+        ->check(CLI::IsMember({1u, 2u, 4u, 8u, 16u, 32u, 64u}));
     app.add_flag("--entry", entry, "Add the C main an executable starts in, which runs the program's main (always "
                                    "with --emit exe)");
     CLI11_PARSE(app, argc, argv);
@@ -122,9 +126,16 @@ int main(int argc, char** argv)
     if (emit == "ast" && run.empty())
         return writeText(output, fminus::ast::dump(*program));
 
+    // The target: it decides how many lanes a poly float has.
+    auto machine = fminus::hostTargetMachine(fminus::codeGenLevel(optimisation));
+    if (!machine)
+        return fail(machine.takeError());
+    fminus::ir::Options options;
+    options.polyLanes = polyLanes != 0 ? polyLanes : fminus::polyLanes(**machine);
+
     // Syntax tree -> LLVM IR.
     auto context = std::make_unique<llvm::LLVMContext>();
-    std::unique_ptr<llvm::Module> module = fminus::ir::lower(*program, *context, diagnostics);
+    std::unique_ptr<llvm::Module> module = fminus::ir::lower(*program, *context, diagnostics, options);
     if (!module)
     {
         llvm::errs() << diagnostics.format();
@@ -179,6 +190,8 @@ int main(int argc, char** argv)
         case fminus::ast::Type::Bool2:
         case fminus::ast::Type::Bool4:
         case fminus::ast::Type::Bool8:
+        case fminus::ast::Type::PolyFloat:
+        case fminus::ast::Type::PolyBool:
             return fail(std::format("--run: '{}' returns a {}; --run prints floats and bools only", run,
                                     fminus::ast::typeName(function->returnType)));
         }
@@ -191,9 +204,6 @@ int main(int argc, char** argv)
         if (llvm::Error error = fminus::aot::addEntryPoint(*module))
             return fail(std::move(error));
     }
-    auto machine = fminus::hostTargetMachine(fminus::codeGenLevel(optimisation));
-    if (!machine)
-        return fail(machine.takeError());
     fminus::prepareModule(*module, **machine);
     fminus::optimiseModule(*module, **machine, optimisation);
     if (emit == "exe")
