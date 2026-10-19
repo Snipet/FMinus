@@ -87,6 +87,10 @@ namespace fminus::ast
                 return "+";
             case UnaryOp::Not:
                 return "!";
+            case UnaryOp::Dereference:
+                return "*";
+            case UnaryOp::AddressOf:
+                return "&";
             }
             return "?";
         }
@@ -140,6 +144,9 @@ namespace fminus::ast
                                       return std::string("(") + opName(increment.op) + " " + dump(*increment.target)
                                              + ")";
                                   },
+                                  [](const IndexExpr& index) {   // ([] p i)
+                                      return "([] " + dump(*index.base) + " " + dump(*index.index) + ")";
+                                  },
                                   [](const CastExpr& cast) {   // (cast int x)
                                       return std::string("(cast ") + typeName(cast.type) + " " + dump(*cast.operand)
                                              + ")";
@@ -148,12 +155,20 @@ namespace fminus::ast
                               expr.node);
         }
 
+        // A declared name's type, as C spells it: `const float`, `const float * restrict`, `float * const`.
+        std::string declared(Type type, bool isConst, bool isRestrict)
+        {
+            if (!isPointer(type))
+                return (isConst ? "const " : "") + typeName(type);
+            return typeName(type) + (isConst ? " const" : "") + (isRestrict ? " restrict" : "");
+        }
+
         // One statement per line, `indent` spaces in; a block's items one level further in.
         std::string dump(const Stmt& stmt, const std::string& indent)
         {
             return std::visit(Overloaded{
                                   [&](const DeclStmt& decl) {
-                                      return indent + "(decl " + (decl.isConst ? "const " : "") + typeName(decl.type)
+                                      return indent + "(decl " + declared(decl.type, decl.isConst, decl.isRestrict)
                                              + " " + decl.name + (decl.init ? " " + dump(*decl.init) : "") + ")";
                                   },
                                   [&](const ExprStmt& statement) { return indent + dump(*statement.expr); },
@@ -194,7 +209,7 @@ namespace fminus::ast
         }
     } // namespace
 
-    const char* typeName(Type type)
+    std::string typeName(Type type)
     {
         switch (type.kind)
         {
@@ -222,6 +237,8 @@ namespace fminus::ast
             return "poly float";
         case Kind::PolyBool:
             return "poly bool";
+        case Kind::Pointer:
+            return (type.pointeeConst ? "const " : "") + typeName(type.pointee) + " *";
         }
         return "?";
     }
@@ -236,7 +253,7 @@ namespace fminus::ast
             for (std::size_t i = 0; i < function.params.size(); ++i)
             {
                 const Param& param = function.params[i];
-                text += std::string(i == 0 ? "(" : " (") + (param.isConst ? "const " : "") + typeName(param.type)
+                text += std::string(i == 0 ? "(" : " (") + declared(param.type, param.isConst, param.isRestrict)
                         + (param.name.empty() ? "" : " " + param.name) + ")";
             }
             text += ")";

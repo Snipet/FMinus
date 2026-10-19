@@ -3,17 +3,21 @@
 // ParseContext.
 //
 //     program      : function*
-//     function     : type IDENTIFIER "(" (param ("," param)* | "void")? ")" (block | ";")   a definition, or a prototype
-//     param        : "const"? type IDENTIFIER?                                       (a prototype may omit names)
-//     type         : "float" | "bool" | "int" | "void" | VECTOR_TYPE | "poly" ("float" | "bool")   VECTOR_TYPE: float2/4/8
+//     function     : "const"? type pointer IDENTIFIER "(" params ")" (block | ";")   a definition, or a prototype
+//     params       : (param ("," param)*)? | "void"                                  (void) is none, as in C
+//     param        : "const"? type pointer IDENTIFIER?                               (a prototype may omit names)
+//     type         : "float" | "bool" | "int" | "void" | VECTOR_TYPE | "poly" ("float" | "bool")
+//     pointer      : ("*" ("const" | "restrict")*)?        with a *, the first const is the pointee's (const float*),
+//                                                          and one after it the pointer's own (float* const)
 //     block        : "{" (declaration | statement)* "}"
 //     declaration  : "const"? type declarator ("," declarator)* ";"
-//     declarator   : IDENTIFIER ("=" expr)?
+//     declarator   : pointer IDENTIFIER ("=" expr)?                                  as in C, `float *p, x;`
 //     statement    : block | expr ";" | "return" expr? ";" | ";"
 //                  | "if" "(" expr ")" statement ("else" statement)? | "while" "(" expr ")" statement
 //                  | "for" "(" (declaration | expr? ";") expr? ";" expr? ")" statement | "break" ";" | "continue" ";"
 //     expr         : NUMBER | "true" | "false" | IDENTIFIER | IDENTIFIER "(" (expr ("," expr)*)? ")" | "(" expr ")"
-//                  | ("-" | "+" | "!") expr | expr ("*" | "/" | "%") expr | expr ("+" | "-") expr
+//                  | ("-" | "+" | "!" | "*" | "&") expr | expr "[" expr "]"         *p, &x, p[i]
+//                  | expr ("*" | "/" | "%") expr | expr ("+" | "-") expr
 //                  | expr ("<" | "<=" | ">" | ">=") expr | expr ("==" | "!=") expr
 //                  | expr "&&" expr | expr "||" expr | expr "?" expr ":" expr
 //                  | "(" VECTOR_TYPE ")" "(" (expr ("," expr)*)? ")"                 OpenCL C's vector literal
@@ -24,13 +28,13 @@
 //
 // Precedence and associativity are C's, from the loosest: assignment (right to left), ?: (right to left), ||, &&,
 // equality, relational, additive, multiplicative, unary (and casts), and the postfix operators: the swizzle's ".",
-// and "++" and "--" after their operand.
-// The grammar accepts any expression on the left of an assignment; the code generator rejects what is not a variable
-// ("expression is not assignable"), so buffer elements and fields can join it later.
+// "[" and "++" and "--" after their operand.
+// The grammar accepts any expression on the left of an assignment; the code generator rejects what is not an lvalue
+// (a variable, an element p[i] or *p, components of either: "expression is not assignable"), so fields can join it.
 //
 // To add a construct: its tokens in Lexer.l and here, a rule here, a node in Ast.h, its dump in Ast.cpp and its
-// lowering in ir/CodeGen.cpp. Bison's report (build tree: src/generated/frontend/Parser.output) and -Wcounterexamples
-// explain any conflict.
+// lowering in src/ir/ (Lowering.h says which file). Bison's report (build tree: src/generated/frontend/Parser.output)
+// and -Wcounterexamples explain any conflict.
 %require "3.8"
 %language "c++"
 %header
@@ -63,13 +67,39 @@
 
     namespace fminus::frontend
     {
-        // One name of a declaration (`a = 1` in `float a = 1, b;`), before the declaration knows its type.
+        // A declarator's `*` and the qualifiers after it: `* const restrict`. Without the *, nothing.
+        struct Pointer
+        {
+            bool isPointer = false;
+            bool isConst = false;      // the pointer's own: `float* const p`
+            bool isRestrict = false;
+        };
+
+        // One name of a declaration (`*p = 0` in `float *p = 0, x;`), before the declaration knows its type.
         struct Declarator
         {
             SourceLocation location;
+            Pointer pointer;
             std::string name;
             ast::ExprPtr init;   // null without an initialiser
         };
+
+        // What a name is declared as, from the declaration's `const` and type and the name's pointer: `const float x`
+        // is a const float; `const float* p` is a pointer to const floats, and not itself const; `float* const p` is
+        // a const pointer.
+        struct Declared
+        {
+            ast::Type type;
+            bool isConst;
+            bool isRestrict;
+        };
+
+        inline Declared declared(bool isConst, ast::Type type, const Pointer& pointer)
+        {
+            if (!pointer.isPointer)
+                return {type, isConst, false};
+            return {ast::Type::pointerTo(type.kind, isConst), pointer.isConst, pointer.isRestrict};
+        }
     } // namespace fminus::frontend
 }
 
@@ -110,6 +140,7 @@
 }
 
 %token FLOAT "float" CONST "const" RETURN "return" BOOL "bool" INT "int" VOID "void" TRUE "true" FALSE "false"
+%token RESTRICT "restrict" AMPERSAND "&" LBRACKET "[" RBRACKET "]"
 %token LT "<" LE "<=" GT ">" GE ">=" EQ "==" NE "!=" NOT "!" AND "&&" OR "||" QUESTION "?" COLON ":"
 %token IF "if" ELSE "else" WHILE "while" FOR "for" BREAK "break" CONTINUE "continue"
 %token <ast::Type> VECTOR_TYPE "vector type"
@@ -125,6 +156,7 @@
 %nterm <std::vector<ast::Param>> params param_list
 %nterm <ast::Param> param
 %nterm <bool> qualifier
+%nterm <Pointer> pointer pointer_qualifiers
 %nterm <ast::Type> type cast_type
 %nterm <std::vector<ast::Stmt>> block block_items block_item declaration
 %nterm <ast::Stmt> statement
@@ -149,7 +181,7 @@
 %left "+" "-"
 %left "*" "/" "%"
 %precedence UNARY
-%precedence "." "++" "--"
+%precedence "." "++" "--" "["
 
 %%
 
@@ -163,8 +195,16 @@ functions
     ;
 
 function
-    : type IDENTIFIER "(" params ")" block  { $$ = ast::Function{at(@2), $2, $4, $1, $6, true}; }
-    | type IDENTIFIER "(" params ")" ";"    { $$ = ast::Function{at(@2), $2, $4, $1, {}, false}; }
+    : qualifier type pointer IDENTIFIER "(" params ")" block
+                                            {
+                                                const Declared result = declared($1, $2, $3);
+                                                $$ = ast::Function{at(@4), $4, $6, result.type, $8, true};
+                                            }
+    | qualifier type pointer IDENTIFIER "(" params ")" ";"
+                                            {
+                                                const Declared result = declared($1, $2, $3);
+                                                $$ = ast::Function{at(@4), $4, $6, result.type, {}, false};
+                                            }
     ;
 
 // `(void)` is C's empty list: one unnamed parameter of type void, which is no parameter.
@@ -184,8 +224,26 @@ param_list
     ;
 
 param
-    : qualifier type IDENTIFIER             { $$ = ast::Param{at(@3), $3, $2, $1}; }
-    | qualifier type                        { $$ = ast::Param{at(@2), "", $2, $1}; }
+    : qualifier type pointer IDENTIFIER     {
+                                                const Declared d = declared($1, $2, $3);
+                                                $$ = ast::Param{at(@4), $4, d.type, d.isConst, d.isRestrict};
+                                            }
+    | qualifier type pointer                {
+                                                const Declared d = declared($1, $2, $3);
+                                                $$ = ast::Param{at(@2), "", d.type, d.isConst, d.isRestrict};
+                                            }
+    ;
+
+// A declarator's pointer: nothing, or a * and the qualifiers of the pointer itself.
+pointer
+    : %empty                                { $$ = Pointer{}; }
+    | "*" pointer_qualifiers                { $$ = $2; $$.isPointer = true; }
+    ;
+
+pointer_qualifiers
+    : %empty                                { $$ = Pointer{}; }
+    | pointer_qualifiers "const"            { $$ = $1; $$.isConst = true; }
+    | pointer_qualifiers "restrict"         { $$ = $1; $$.isRestrict = true; }
     ;
 
 qualifier
@@ -230,8 +288,14 @@ declaration
                                                 const bool isConst = $1;
                                                 const ast::Type type = $2;
                                                 for (Declarator& d : $3)
-                                                    $$.push_back(ast::Stmt{d.location, ast::DeclStmt{isConst, type,
-                                                                           std::move(d.name), std::move(d.init)}});
+                                                {
+                                                    const Declared name = declared(isConst, type, d.pointer);
+                                                    $$.push_back(ast::Stmt{d.location,
+                                                                           ast::DeclStmt{name.isConst, name.type,
+                                                                                         std::move(d.name),
+                                                                                         std::move(d.init),
+                                                                                         name.isRestrict}});
+                                                }
                                             }
     ;
 
@@ -241,8 +305,8 @@ declarators
     ;
 
 declarator
-    : IDENTIFIER                            { $$ = Declarator{at(@1), $1, nullptr}; }
-    | IDENTIFIER "=" expr                   { $$ = Declarator{at(@1), $1, $3}; }
+    : pointer IDENTIFIER                    { $$ = Declarator{at(@2), $1, $2, nullptr}; }
+    | pointer IDENTIFIER "=" expr           { $$ = Declarator{at(@2), $1, $2, $4}; }
     ;
 
 statement
@@ -282,6 +346,14 @@ expr
     | "-" expr %prec UNARY                  { $$ = ast::makeExpr(at(@1), ast::UnaryExpr{ast::UnaryOp::Negate, $2}); }
     | "+" expr %prec UNARY                  { $$ = ast::makeExpr(at(@1), ast::UnaryExpr{ast::UnaryOp::Plus, $2}); }
     | "!" expr %prec UNARY                  { $$ = ast::makeExpr(at(@1), ast::UnaryExpr{ast::UnaryOp::Not, $2}); }
+    | "*" expr %prec UNARY                  {
+                                                $$ = ast::makeExpr(at(@1),
+                                                                   ast::UnaryExpr{ast::UnaryOp::Dereference, $2});
+                                            }
+    | "&" expr %prec UNARY                  {
+                                                $$ = ast::makeExpr(at(@1), ast::UnaryExpr{ast::UnaryOp::AddressOf, $2});
+                                            }
+    | expr "[" expr "]"                     { $$ = ast::makeExpr(at(@2), ast::IndexExpr{$1, $3}); }
     | "++" expr %prec UNARY                 { $$ = increment(@1, ast::IncrementOp::PreIncrement, $2); }
     | "--" expr %prec UNARY                 { $$ = increment(@1, ast::IncrementOp::PreDecrement, $2); }
     | expr "++"                             { $$ = increment(@2, ast::IncrementOp::PostIncrement, $1); }

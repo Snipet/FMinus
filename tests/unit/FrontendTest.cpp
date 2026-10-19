@@ -123,6 +123,23 @@ TEST_CASE("int, void, casts, ++ and -- parse as C's", "[frontend]")
     CHECK(parsed("int g(int i) { return i+++i; }") == "(function int g ((int i))\n  (return (+ (post++ i) i)))\n");
 }
 
+TEST_CASE("pointers parse as C's: declarators, *, & and []", "[frontend]")
+{
+    // The * belongs to the declarator, as in C: `float *a, b;` is a pointer and a float. A const before the type is
+    // the pointee's, one after the * the pointer's own.
+    CHECK(parsed("void f(const float* restrict in, float* const out, int n) { float *a = out, b; *a = in[n] + b; }")
+          == "(function void f ((const float * restrict in) (float * const out) (int n))\n"
+             "  (decl float * a out)\n"
+             "  (decl float b)\n"
+             "  (= (* a) (+ ([] in n) b)))\n");
+    // [] and ++ after their operand bind tighter than * and & before it.
+    CHECK(parsed("float* g(float* p, float x) { *p++ = -p[1]; &x; return &p[2]; }")
+          == "(function float * g ((float * p) (float x))\n"
+             "  (= (* (post++ p)) (- ([] p 1)))\n"
+             "  (& x)\n"
+             "  (return (& ([] p 2))))\n");
+}
+
 TEST_CASE("syntax and scanner errors carry their locations", "[frontend]")
 {
     CHECK(parsed("float f(float x) {\n    return x + ;\n}") == "test.fm:2:16: error: syntax error, unexpected ;\n");

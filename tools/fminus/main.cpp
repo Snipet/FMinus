@@ -196,6 +196,7 @@ int main(int argc, char** argv)
         case fminus::ast::Kind::Bool8:
         case fminus::ast::Kind::PolyFloat:
         case fminus::ast::Kind::PolyBool:
+        case fminus::ast::Kind::Pointer:
             return fail(std::format("--run: '{}' returns '{}'; --run prints floats, bools and ints only", run,
                                     fminus::ast::typeName(function->returnType)));
         }

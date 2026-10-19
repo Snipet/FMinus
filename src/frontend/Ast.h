@@ -31,10 +31,14 @@ namespace fminus::ast
     // target is known), so it means the same on every target. Comparing two gives a poly bool, which a program can
     // declare.
     //
-    // A type is a kind, and fields that kinds such as a pointer's need beside it; two types are the same when every
-    // field is. Type::Float and the rest name the types that are only a kind, and a kind converts to its type, so
-    // `type == Type::Float` reads as it says. A switch over a type is a switch over `type.kind`, and -Wswitch lists
-    // the kinds it misses.
+    // A pointer is C's: the address of a float, an int, a float2, a float4 or a float8 (FMinus has no pointers to
+    // pointers, to bool, to poly types or to void). `const float*` points to floats a program reads but cannot write
+    // through it. p[i] is the i-th element from p, *p is p[0], and &x is x's address; p + i, p - i, p - q (how many
+    // elements apart, an int) and comparisons of two pointers of one type are C's.
+    //
+    // A type is a kind, and for a pointer what it points to; two types are the same when every field is. Type::Float
+    // and the rest name the types that are only a kind, and a kind converts to its type, so `type == Type::Float`
+    // reads as it says. A switch over a type is a switch over `type.kind`, and -Wswitch lists the kinds it misses.
     enum class Kind
     {
         Void,
@@ -49,14 +53,25 @@ namespace fminus::ast
         Bool8,
         PolyFloat,
         PolyBool,
+        Pointer,
     };
 
     struct Type
     {
         Kind kind = Kind::Float;
+        Kind pointee = Kind::Void;   // a pointer's: what it points to
+        bool pointeeConst = false;   // a pointer's: what it points to is read-only through it (const float*)
 
         constexpr Type() = default;
         constexpr Type(Kind kind) : kind(kind) {}   // implicit: Kind::Float is the type float
+
+        static constexpr Type pointerTo(Kind pointee, bool isConst)
+        {
+            Type type(Kind::Pointer);
+            type.pointee = pointee;
+            type.pointeeConst = isConst;
+            return type;
+        }
 
         friend constexpr bool operator==(Type, Type) = default;
 
@@ -94,6 +109,7 @@ namespace fminus::ast
         case Kind::Float:
         case Kind::Bool:
         case Kind::Int:
+        case Kind::Pointer:
             return 1;
         case Kind::Float2:
         case Kind::Bool2:
@@ -113,10 +129,29 @@ namespace fminus::ast
         return lanes(type) > 1 || isPoly(type);
     }
 
-    // Whether a value of `type` takes part in arithmetic: every type's but void's.
+    inline bool isPointer(Type type)
+    {
+        return type.kind == Kind::Pointer;
+    }
+
+    // What a pointer of `type` points to.
+    inline Type pointee(Type type)
+    {
+        return type.pointee;
+    }
+
+    // Whether FMinus has pointers to `kind`: to float, int, float2, float4 and float8.
+    inline bool canPointTo(Kind kind)
+    {
+        return kind == Kind::Float || kind == Kind::Int || kind == Kind::Float2 || kind == Kind::Float4
+               || kind == Kind::Float8;
+    }
+
+    // Whether a value of `type` takes part in arithmetic: every type's but void's and a pointer's (whose arithmetic
+    // is its own).
     inline bool isArithmetic(Type type)
     {
-        return type != Type::Void;
+        return type != Type::Void && !isPointer(type);
     }
 
     inline bool isMask(Type type)
@@ -173,9 +208,11 @@ namespace fminus::ast
 
     enum class UnaryOp
     {
-        Negate,   // -x
-        Plus,     // +x: the value itself
-        Not,      // !x: a bool
+        Negate,        // -x
+        Plus,          // +x: the value itself
+        Not,           // !x: a bool
+        Dereference,   // *p: what p points to, an lvalue
+        AddressOf,     // &x: the address of an lvalue
     };
 
     enum class BinaryOp
@@ -315,6 +352,14 @@ namespace fminus::ast
         ExprPtr target;
     };
 
+    // `p[i]`: the i-th element from the pointer p, an lvalue; i is an int (or a bool), and may be negative. As in C,
+    // i[p] is the same element.
+    struct IndexExpr
+    {
+        ExprPtr base;
+        ExprPtr index;
+    };
+
     // `(int)x`, `(float)x`, `(bool)x`: C's casts between scalar types, the implicit conversions written out. (int)
     // truncates toward zero.
     struct CastExpr
@@ -327,21 +372,22 @@ namespace fminus::ast
     {
         SourceLocation location;
         std::variant<NumberExpr, VariableExpr, BoolExpr, UnaryExpr, BinaryExpr, LogicalExpr, CallExpr, AssignExpr,
-                     ConditionalExpr, ConstructExpr, SwizzleExpr, IncrementExpr, CastExpr>
+                     ConditionalExpr, ConstructExpr, SwizzleExpr, IncrementExpr, CastExpr, IndexExpr>
             node;
     };
 
     struct Stmt;
 
     // `[const] float name = init;`: a variable of the enclosing block, from its declaration to the block's end. One per
-    // declarator: `float a = 1, b;` is two. Without an initialiser the variable starts at 0 (C leaves it
-    // indeterminate, and reading it undefined).
+    // declarator: `float a = 1, b;` is two, and `float *p, x;` a pointer and a float, as in C. Without an initialiser
+    // the variable starts at 0, and a pointer at null (C leaves them indeterminate, and reading them undefined).
     struct DeclStmt
     {
-        bool isConst = false;
+        bool isConst = false;      // the variable's: `const float x`, or `float* const p` (`const float* p` is not)
         Type type = Type::Float;
         std::string name;
-        ExprPtr init;   // null without an initialiser
+        ExprPtr init;              // null without an initialiser
+        bool isRestrict = false;   // `float* restrict p`: accepted, and changes nothing for a local
     };
 
     // `expr;`: evaluated for its effect (an assignment, a call).
@@ -414,13 +460,16 @@ namespace fminus::ast
     }
 
     // A parameter is a variable of the function's outermost block, as in C: assignable unless const. A prototype may
-    // leave its name out (empty).
+    // leave its name out (empty). A restrict pointer is C99's promise that, while the function runs, what it reaches
+    // is reached through no other pointer, so the optimiser may keep it in registers and vectorise across it (LLVM's
+    // noalias).
     struct Param
     {
         SourceLocation location;
         std::string name;
         Type type = Type::Float;
-        bool isConst = false;
+        bool isConst = false;      // the parameter's own, as DeclStmt's
+        bool isRestrict = false;
     };
 
     // A definition, or a prototype (`float f(float x);`, no body). As in C, a prototype declares a function defined
@@ -447,8 +496,8 @@ namespace fminus::ast
         return std::make_unique<Expr>(Expr{location, std::move(node)});
     }
 
-    // The type's name in FMinus source.
-    const char* typeName(Type type);
+    // The type's name, as clang writes it in its messages: `float`, `poly float`, `const float *`.
+    std::string typeName(Type type);
 
     // The tree as s-expressions, one function after another, for `fminus --emit ast` and tests:
     //     (function float gain ((float x) (const float g))

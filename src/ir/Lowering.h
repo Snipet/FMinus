@@ -7,7 +7,7 @@
 //     Expressions.cpp   constants, variables, operators, &&, ||, ?:, casts, assignment, ++ and --
 //     Calls.cpp         calls: the builtins (math functions, reductions, poly queries) and the program's functions
 //     Vectors.cpp       vector literals, swizzles, and ?: lane by lane
-//     Memory.cpp        lvalues, what assignments store to: variables and their components
+//     Memory.cpp        lvalues (variables, p[i], *p, components) read and written, &x, and pointer arithmetic
 // A new node is lowered in the file its kind belongs to. The build says which members still need it: a std::visit
 // without its lambda fails to compile, and a switch without its enumerator trips -Wswitch.
 #pragma once
@@ -89,14 +89,14 @@ namespace fminus::ir::detail
             Casting,
         };
 
-        // Something a program can assign (Memory.cpp): a variable, or components of one. read() and write() load and
-        // store it.
+        // Something a program can assign, or take the address of (Memory.cpp): a variable, an element a pointer
+        // reaches (p[i], *p), or components of either. read() and write() load and store it.
         struct LValue
         {
-            llvm::Value* address = nullptr;   // the variable's stack slot
+            llvm::Value* address = nullptr;   // the variable's stack slot, or the element's address
             ast::Type type;                   // what a read gives, and what a write converts to
-            bool isConst = false;
-            std::string name;                 // the variable's
+            bool isConst = false;             // a const variable, or an element through a const T*
+            std::string name;                 // the variable's; empty for an element
             ast::Type whole;                  // the type of what is at `address`
             std::vector<int> components;      // for components, the lanes of `whole` they are
         };
@@ -112,7 +112,11 @@ namespace fminus::ir::detail
         unsigned lanes(ast::Type type) const;
         llvm::Type* typeOf(ast::Type type);
         llvm::Value* convert(Value value, ast::Type type, SourceLocation location, Use use);
+        llvm::Value* convertPointer(Value value, ast::Type type, SourceLocation location, Use use);
         void incompatible(SourceLocation location, Use use, ast::Type from, ast::Type to);
+        void pointerMismatch(SourceLocation location, Use use, ast::Type from, ast::Type to, bool discardsConst);
+        bool checkType(SourceLocation location, ast::Type type);
+        void noPointerTo(SourceLocation location, ast::Type pointee);
         bool commonType(SourceLocation location, ast::Type a, ast::Type b, ast::Type& type);
         void polyMismatch(SourceLocation location, ast::Type a, ast::Type b);
         Value poison(ast::Type type);
@@ -167,9 +171,13 @@ namespace fminus::ir::detail
         // ---- Memory.cpp ---------------------------------------------------------------------------------------------
         static bool isLValue(const ast::Expr& expr);
         std::optional<LValue> lvalue(const ast::Expr& expr, SourceLocation location);
+        std::optional<LValue> element(SourceLocation location, Value pointer, std::optional<Value> index);
         bool writable(SourceLocation location, const LValue& target);
         Value read(const LValue& source);
+        Value readLValue(const ast::Expr& expr);
         llvm::Value* write(SourceLocation location, const LValue& target, Value value, Use use);
+        Value lowerAddressOf(SourceLocation location, const ast::Expr& operand);
+        Value pointerArithmetic(SourceLocation location, ast::BinaryOp op, Value lhs, Value rhs);
 
         // ---- Calls.cpp ----------------------------------------------------------------------------------------------
         Value lowerCall(SourceLocation location, const ast::CallExpr& call);

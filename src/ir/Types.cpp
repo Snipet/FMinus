@@ -34,6 +34,8 @@ namespace fminus::ir::detail
         case ast::Kind::Bool8:
         case ast::Kind::PolyBool:
             return llvm::FixedVectorType::get(builder_.getInt1Ty(), lanes(type));
+        case ast::Kind::Pointer:
+            return builder_.getPtrTy();   // opaque: what it points to rides on each load, store and GEP
         }
         return builder_.getFloatTy();
     }
@@ -53,6 +55,8 @@ namespace fminus::ir::detail
             incompatible(location, use, value.type, type);
             return poison(type).ir;
         }
+        if (ast::isPointer(value.type) || ast::isPointer(type))
+            return convertPointer(value, type, location, use);
         if (!ast::isVector(value.type))
         {
             if (ast::isVector(type))
@@ -81,6 +85,72 @@ namespace fminus::ir::detail
         }
         incompatible(location, use, value.type, type);
         return poison(type).ir;
+    }
+
+    // A pointer converts to a bool (whether it is not null), and to a pointer to the same type with const added
+    // (float* to const float*), as in C. Nothing else converts to or from a pointer: C would convert another pointer
+    // or an integer, with a warning; FMinus refuses, in the warning's words.
+    llvm::Value* Lowering::convertPointer(Value value, ast::Type type, SourceLocation location, Use use)
+    {
+        if (ast::isPointer(value.type) && type == ast::Type::Bool)
+            return builder_.CreateIsNotNull(value.ir, "tobool");
+        if (ast::isPointer(value.type) && ast::isPointer(type))
+        {
+            const bool samePointee = value.type.pointee == type.pointee;
+            const bool discardsConst = value.type.pointeeConst && !type.pointeeConst;
+            if (samePointee && !discardsConst)
+                return value.ir;   // const is the type's, not the IR's: the same ptr
+            pointerMismatch(location, use, value.type, type, samePointee);
+            return poison(type).ir;
+        }
+        incompatible(location, use, value.type, type);
+        return poison(type).ir;
+    }
+
+    // clang's words for a pointer that converts only with a warning in C: to a pointer to another type ("incompatible
+    // pointer types ..."), or to one without the const it had ("... discards qualifiers").
+    void Lowering::pointerMismatch(SourceLocation location, Use use, ast::Type from, ast::Type to, bool discardsConst)
+    {
+        const std::string source = quoted(ast::typeName(from));
+        const std::string target = quoted(ast::typeName(to));
+        std::string what;
+        switch (use)
+        {
+        case Use::Initializing:
+            what = "initializing " + target + " with an expression of type " + source;
+            break;
+        case Use::Assigning:
+            what = "assigning to " + target + " from " + source;
+            break;
+        case Use::Returning:
+            what = "returning " + source + " from a function with result type " + target;
+            break;
+        case Use::Passing:
+            what = "passing " + source + " to parameter of type " + target;
+            break;
+        case Use::Condition:   // a pointer converts to a bool, and nothing converts to a pointer otherwise
+        case Use::Logical:
+        case Use::Casting:
+            what = "converting " + source + " to " + target;
+            break;
+        }
+        error(location, discardsConst ? what + " discards qualifiers" : "incompatible pointer types " + what);
+    }
+
+    // Whether a variable, a parameter or a result may have `type`: one with a pointer to what FMinus cannot point to
+    // may not. Reports the error when not.
+    bool Lowering::checkType(SourceLocation location, ast::Type type)
+    {
+        if (!ast::isPointer(type) || ast::canPointTo(type.pointee))
+            return true;
+        noPointerTo(location, ast::pointee(type));
+        return false;
+    }
+
+    void Lowering::noPointerTo(SourceLocation location, ast::Type pointee)
+    {
+        error(location, "FMinus has pointers to float, int, float2, float4 and float8, not to "
+                            + quoted(ast::typeName(pointee)));
     }
 
     void Lowering::incompatible(SourceLocation location, Use use, ast::Type from, ast::Type to)

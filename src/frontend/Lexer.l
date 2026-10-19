@@ -57,6 +57,7 @@ IDENTIFIER  [A-Za-z_][A-Za-z0-9_]*
 "bool"                      { return Parser::make_BOOL(yyextra->where); }
 "int"                       { return Parser::make_INT(yyextra->where); }
 "void"                      { return Parser::make_VOID(yyextra->where); }
+"restrict"                  { return Parser::make_RESTRICT(yyextra->where); }
 "float2"                    { return Parser::make_VECTOR_TYPE(fminus::ast::Type::Float2, yyextra->where); }
 "float4"                    { return Parser::make_VECTOR_TYPE(fminus::ast::Type::Float4, yyextra->where); }
 "float8"                    { return Parser::make_VECTOR_TYPE(fminus::ast::Type::Float8, yyextra->where); }
@@ -102,6 +103,7 @@ IDENTIFIER  [A-Za-z_][A-Za-z0-9_]*
 "<"                         { return Parser::make_LT(yyextra->where); }
 ">"                         { return Parser::make_GT(yyextra->where); }
 "!"                         { return Parser::make_NOT(yyextra->where); }
+"&"                         { return Parser::make_AMPERSAND(yyextra->where); }
 "?"                         { return Parser::make_QUESTION(yyextra->where); }
 "."                         { return Parser::make_DOT(yyextra->where); }
 ":"                         { return Parser::make_COLON(yyextra->where); }
@@ -112,6 +114,8 @@ IDENTIFIER  [A-Za-z_][A-Za-z0-9_]*
 "="                         { return Parser::make_ASSIGN(yyextra->where); }
 "("                         { return Parser::make_LPAREN(yyextra->where); }
 ")"                         { return Parser::make_RPAREN(yyextra->where); }
+"["                         { return Parser::make_LBRACKET(yyextra->where); }
+"]"                         { return Parser::make_RBRACKET(yyextra->where); }
 "{"                         { return Parser::make_LBRACE(yyextra->where); }
 "}"                         { return Parser::make_RBRACE(yyextra->where); }
 ","                         { return Parser::make_COMMA(yyextra->where); }

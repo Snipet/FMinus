@@ -19,21 +19,16 @@ namespace fminus::ir::detail
         return std::visit(
             Overloaded{
                 [&](const ast::NumberExpr& number) { return lowerNumber(expr.location, number); },
-                [&](const ast::VariableExpr& variable) {
-                    const Binding* binding = find(variable.name);
-                    if (binding == nullptr)
-                    {
-                        error(expr.location, "use of undeclared identifier " + quoted(variable.name));
-                        return poison(ast::Type::Float);
-                    }
-                    return Value{builder_.CreateLoad(binding->slot->getAllocatedType(), binding->slot,
-                                                     variable.name),
-                                 binding->type};
-                },
+                [&](const ast::VariableExpr&) { return readLValue(expr); },
+                [&](const ast::IndexExpr&) { return readLValue(expr); },
                 [&](const ast::BoolExpr& constant) {
                     return Value{builder_.getInt1(constant.value), ast::Type::Bool};
                 },
                 [&](const ast::UnaryExpr& unary) {
+                    if (unary.op == ast::UnaryOp::Dereference)
+                        return readLValue(expr);   // *p: what p points to
+                    if (unary.op == ast::UnaryOp::AddressOf)
+                        return lowerAddressOf(expr.location, *unary.operand);
                     const Value operand = lower(*unary.operand);
                     const ast::Type type = ast::arithmeticOf(operand.type);   // an int, a float, a float vector
                     if (!ast::isArithmetic(operand.type) && unary.op != ast::UnaryOp::Not)
@@ -58,6 +53,9 @@ namespace fminus::ir::detail
                         llvm::Value* test = convert(operand, ast::Type::Bool, expr.location, Use::Logical);
                         return Value{builder_.CreateNot(test, "lnot"), ast::Type::Bool};
                     }
+                    case ast::UnaryOp::Dereference:   // above
+                    case ast::UnaryOp::AddressOf:
+                        break;
                     }
                     return poison(ast::Type::Float);
                 },
@@ -94,6 +92,8 @@ namespace fminus::ir::detail
     // lane by lane on vectors, and a comparison gives a bool, or a lane mask for vectors.
     Lowering::Value Lowering::binary(SourceLocation location, ast::BinaryOp op, Value lhs, Value rhs)
     {
+        if (ast::isPointer(lhs.type) || ast::isPointer(rhs.type))
+            return pointerArithmetic(location, op, lhs, rhs);   // Memory.cpp
         ast::Type type = ast::Type::Float;
         if (!commonType(location, lhs.type, rhs.type, type))
             return poison(ast::Type::Float);
@@ -219,16 +219,29 @@ namespace fminus::ir::detail
         llvm::BasicBlock* elseEnd = builder_.GetInsertBlock();
 
         // Two of one type give that type (two bools give a bool, two voids nothing); otherwise the usual arithmetic
-        // conversions decide (a scalar and a vector give the vector). A void meets only a void.
+        // conversions decide (a scalar and a vector give the vector). A void meets only a void, and a pointer only
+        // a pointer to the same type (const if either is).
         const bool thenVoid = thenValue.type == ast::Type::Void;
         const bool elseVoid = elseValue.type == ast::Type::Void;
+        const bool pointers = ast::isPointer(thenValue.type) || ast::isPointer(elseValue.type);
+        ast::Type type = thenValue.type;
+        bool meet = thenValue.type == elseValue.type;
         if (thenVoid != elseVoid)
             error(location, std::string(thenVoid ? "left" : "right") + " operand to ? is void, but "
                                 + (thenVoid ? "right" : "left") + " operand is of type "
                                 + quoted(ast::typeName(thenVoid ? elseValue.type : thenValue.type)));
-        ast::Type type = thenValue.type;
-        const bool meet = thenValue.type == elseValue.type
-                          || (thenVoid == elseVoid && commonType(location, thenValue.type, elseValue.type, type));
+        else if (pointers && !meet)
+        {
+            meet = ast::isPointer(thenValue.type) && ast::isPointer(elseValue.type)
+                   && thenValue.type.pointee == elseValue.type.pointee;
+            if (meet)
+                type.pointeeConst = true;   // the one that is not const converts to the one that is
+            else
+                error(location, "incompatible operand types (" + quoted(ast::typeName(thenValue.type)) + " and "
+                                    + quoted(ast::typeName(elseValue.type)) + ")");
+        }
+        else if (!meet && !thenVoid)
+            meet = commonType(location, thenValue.type, elseValue.type, type);
         if (!meet)
             type = ast::Type::Float;
         builder_.SetInsertPoint(thenEnd);

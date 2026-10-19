@@ -49,21 +49,26 @@ namespace fminus::ir::detail
                 found->second = &function;   // the definition, after its prototypes
             return;
         }
+        checkType(function.location, function.returnType);
         std::vector<llvm::Type*> params;
         for (const ast::Param& param : function.params)
         {
             if (param.type == ast::Type::Void)
                 error(param.location, "argument may not have 'void' type");
+            checkType(param.location, param.type);
             params.push_back(typeOf(param.type == ast::Type::Void ? ast::Type::Float : param.type));
         }
         llvm::FunctionType* type = llvm::FunctionType::get(typeOf(function.returnType), params, false);
         llvm::Function* llvmFunction =
             llvm::Function::Create(type, llvm::Function::ExternalLinkage, function.name, module_);
-        // The C ABI passes and returns bool zero-extended: say so, or a C++ caller reads garbage bits.
+        // The C ABI passes and returns bool zero-extended: say so, or a C++ caller reads garbage bits. A restrict
+        // pointer is noalias: nothing the function reaches otherwise overlaps what it points to.
         for (std::size_t i = 0; i < function.params.size(); ++i)
         {
             if (function.params[i].type == ast::Type::Bool)
                 llvmFunction->addParamAttr(static_cast<unsigned>(i), llvm::Attribute::ZExt);
+            if (function.params[i].isRestrict)
+                llvmFunction->addParamAttr(static_cast<unsigned>(i), llvm::Attribute::NoAlias);
         }
         if (function.returnType == ast::Type::Bool)
             llvmFunction->addRetAttr(llvm::Attribute::ZExt);
@@ -88,11 +93,16 @@ namespace fminus::ir::detail
             }
             if (param.type == ast::Type::Void)
                 continue;   // declare() reported it
+            // A pointer to what FMinus cannot point to (declare() reported it) is bound as a float*, so its uses
+            // report no more errors.
+            const ast::Type type = ast::isPointer(param.type) && !ast::canPointTo(param.type.pointee)
+                                       ? ast::Type::pointerTo(ast::Kind::Float, param.type.pointeeConst)
+                                       : param.type;
             llvm::Argument* argument = llvmFunction->getArg(static_cast<unsigned>(i));
             argument->setName(param.name);
-            llvm::AllocaInst* slot = allocate(typeOf(param.type), param.name + ".addr");
+            llvm::AllocaInst* slot = allocate(typeOf(type), param.name + ".addr");
             builder_.CreateStore(argument, slot);
-            if (!bind(param.name, Binding{slot, param.isConst, param.type}))
+            if (!bind(param.name, Binding{slot, param.isConst, type}))
                 error(param.location, "redefinition of parameter " + quoted(param.name));
         }
 

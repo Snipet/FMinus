@@ -191,6 +191,8 @@ namespace fminus::ir::detail
             error(location, "variable has incomplete type 'void'");
             type = ast::Type::Float;   // so its uses report no more errors
         }
+        if (!checkType(location, type))
+            type = ast::Type::pointerTo(ast::Kind::Float, type.pointeeConst);   // likewise
         llvm::Value* value = decl.init ? convert(lower(*decl.init), type, location, Use::Initializing)
                                        : llvm::Constant::getNullValue(typeOf(type));
         llvm::AllocaInst* slot = allocate(typeOf(type), decl.name);

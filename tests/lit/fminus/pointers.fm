@@ -1,0 +1,35 @@
+// Pointers, as clang -O0 writes them: an element's address is a getelementptr on the index widened to 64 bits (sext),
+// then a load or a store; a restrict parameter is noalias. At -O2 the loop vectoriser runs the loop on vectors, with
+// no run-time check that the buffers overlap, since restrict says they don't. Without restrict, it checks first.
+// RUN: fminus %s -O0 | FileCheck %s
+// RUN: fminus %s -O2 | FileCheck %s --check-prefix=OPT
+// RUN: sed 's/ restrict//g' %s | fminus - -O2 | FileCheck %s --check-prefix=ALIAS
+
+void gain(const float* restrict in, float* restrict out, int n, float g)
+{
+    for (int i = 0; i < n; ++i)
+        out[i] = in[i] * g;
+}
+
+// CHECK-LABEL: define void @gain(ptr noalias %in, ptr noalias %out, i32 %n, float %g)
+// CHECK-DAG:     %in.addr = alloca ptr
+// CHECK-DAG:     %out.addr = alloca ptr
+// CHECK:       for.body:
+// CHECK:         [[IN:%.*]] = load ptr, ptr %in.addr
+// CHECK-NEXT:    [[I:%.*]] = load i32, ptr %i
+// CHECK-NEXT:    [[IDX:%.*]] = sext i32 [[I]] to i64
+// CHECK-NEXT:    [[ELEMENT:%.*]] = getelementptr inbounds float, ptr [[IN]], i64 [[IDX]]
+// CHECK-NEXT:    load float, ptr [[ELEMENT]]
+// CHECK:         getelementptr inbounds float, ptr
+// CHECK-NEXT:    store float
+// CHECK:       for.end:
+// CHECK-NEXT:    ret void
+
+// OPT-LABEL: define void @gain(ptr noalias {{.*}}%in, ptr noalias {{.*}}%out
+// OPT-NOT:   diff.check
+// OPT:       vector.body:
+// OPT:         fmul <{{[0-9]+}} x float>
+
+// ALIAS-LABEL: define void @gain(
+// ALIAS:         %diff.check = icmp
+// ALIAS:       vector.body:
