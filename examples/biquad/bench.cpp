@@ -1,8 +1,11 @@
 // examples/biquad/bench.cpp: the biquad example's harness. It JIT-compiles biquad.fm, runs the filter over noise with
 // its cutoff swept every sample, compares the result with a C++ version of the same formulas, and times both. With
-// --check (what ctest runs) it only compares, and fails when the two differ by more than --tolerance.
+// --check (what ctest runs) it only compares, and fails when the two differ by more than --tolerance, or when calling
+// the kernel a block at a time changes its output.
 //
-// As FMinus grows, move work from here into biquad.fm (README.md suggests an order), and watch the numbers:
+// The harness makes one call to FMinus for the whole signal (or, with --block, one a block): the loop over the
+// samples is the kernel's. As FMinus grows, move work from here into biquad.fm (README.md suggests an order), and
+// watch the numbers:
 //     build-release/bin/example-biquad               (time in the release preset)
 //     build-dev/bin/example-biquad -O0 --samples 480000
 //
@@ -36,13 +39,12 @@
 
 namespace
 {
-    // FMinus's float4 at the C boundary: clang's ext_vector_type, in one register (docs/simd.md).
-    using float4 = float __attribute__((ext_vector_type(4)));
-
-    // The FMinus kernel. One sample is one call, which returns the output and the two new states as (y, s1, s2, 0).
+    // The FMinus kernel: one call filters n samples. The state, (s1, s2), is the caller's: read at the start of the
+    // call and written back at its end.
     struct Kernel
     {
-        float4 (*lowpass)(float x, float s1, float s2, float cutoff, float q, float rate) = nullptr;
+        void (*lowpass)(const float* input, const float* cutoff, float* output, int n, float q, float rate,
+                        float* state) = nullptr;
     };
 
     struct Signal
@@ -114,18 +116,18 @@ namespace
         }
     };
 
-    void runKernel(const Kernel& kernel, const Signal& signal, float q, float rate, std::vector<float>& output)
+    // The kernel over the whole signal, one call a block of `block` samples (0: one call for all of it), as a plugin
+    // calls it once a host buffer. The state carries over from one call to the next.
+    void runKernel(const Kernel& kernel, const Signal& signal, float q, float rate, std::size_t block,
+                   std::vector<float>& output)
     {
-        float s1 = 0.0f;
-        float s2 = 0.0f;
-        for (std::size_t i = 0; i < output.size(); ++i)
+        std::array<float, 2> state{0.0f, 0.0f};
+        const std::size_t step = block == 0 ? output.size() : block;
+        for (std::size_t start = 0; start < output.size(); start += step)
         {
-            const float x = signal.input[i];
-            const float cutoff = signal.cutoff[i];
-            const float4 step = kernel.lowpass(x, s1, s2, cutoff, q, rate);
-            output[i] = step.x;
-            s1 = step.y;
-            s2 = step.z;
+            const std::size_t n = std::min(step, output.size() - start);
+            kernel.lowpass(signal.input.data() + start, signal.cutoff.data() + start, output.data() + start,
+                           static_cast<int>(n), q, rate, state.data());
         }
     }
 
@@ -204,6 +206,7 @@ int main(int argc, char** argv)
     CLI::App app{"The biquad example: biquad.fm against C++, compared and timed.", "example-biquad"};
     std::string source = std::string(FMINUS_EXAMPLE_DIR) + "/biquad.fm";
     std::size_t samples = 48000;
+    std::size_t block = 0;
     int repeats = 20;
     int level = 2;
     float q = 0.7071f;
@@ -211,7 +214,11 @@ int main(int argc, char** argv)
     bool check = false;
     double tolerance = 1e-5;
     app.add_option("source", source, "The FMinus source")->capture_default_str();
-    app.add_option("--samples", samples, "Samples per run")->check(CLI::PositiveNumber)->capture_default_str();
+    app.add_option("--samples", samples, "Samples per run")
+        ->check(CLI::Range(std::size_t{1}, static_cast<std::size_t>(std::numeric_limits<int>::max())))
+        ->capture_default_str();
+    app.add_option("--block", block, "Samples per call to FMinus (0: one call for the whole run)")
+        ->capture_default_str();
     app.add_option("--repeat", repeats, "Runs to time (the best counts)")
         ->check(CLI::PositiveNumber)
         ->capture_default_str();
@@ -231,9 +238,10 @@ int main(int argc, char** argv)
 
     const Signal signal = makeSignal(samples, rate);
     std::vector<float> fminusOutput(samples);
+    std::vector<float> blockOutput(samples);
     std::vector<float> cppOutput(samples);
     std::vector<double> doubleOutput(samples);
-    auto runFminus = [&] { runKernel(kernel, signal, q, rate, fminusOutput); };
+    auto runFminus = [&] { runKernel(kernel, signal, q, rate, block, fminusOutput); };
     auto runCpp = [&] { Reference<float>::run(signal, q, rate, cppOutput); };
     runFminus();
     runCpp();
@@ -243,19 +251,29 @@ int main(int argc, char** argv)
 
     if (check)
     {
-        llvm::outs() << std::format("example-biquad: max |FMinus - C++| = {:.3g} over {} samples (tolerance {:.3g})\n",
-                                    difference, samples, tolerance);
-        return difference <= tolerance ? 0 : 1;
+        // Calls of 64 samples, then of 61 (blocks that end mid-way through), must give the output one call does.
+        bool sameInBlocks = true;
+        for (const std::size_t size : {std::size_t{64}, std::size_t{61}})
+        {
+            runKernel(kernel, signal, q, rate, size, blockOutput);
+            sameInBlocks = sameInBlocks && blockOutput == fminusOutput;
+        }
+        llvm::outs() << std::format("example-biquad: max |FMinus - C++| = {:.3g} over {} samples (tolerance {:.3g}); "
+                                    "in blocks of 64 and 61, the same output: {}\n",
+                                    difference, samples, tolerance, sameInBlocks ? "yes" : "no");
+        return difference <= tolerance && sameInBlocks ? 0 : 1;
     }
 
     const double fminusTime = nanosecondsPerSample(runFminus, samples, repeats);
     const double cppTime = nanosecondsPerSample(runCpp, samples, repeats);
+    const std::string calls = block == 0 || block >= samples ? std::format("1 call for all {} samples", samples)
+                                                             : std::format("1 call a block of {}", block);
     llvm::outs() << std::format(
         "biquad low-pass, cutoff swept 200 Hz to 8 kHz every sample: {} samples at {} Hz, Q {}\n"
-        "  FMinus (JIT, -O{}) {:8.2f} ns/sample   1 call a sample, returning (y, s1, s2) in a float4\n"
+        "  FMinus (JIT, -O{}) {:8.2f} ns/sample   {}, the loop FMinus's\n"
         "  C++ (clang)       {:8.2f} ns/sample   the same formulas, inlined into one loop\n"
         "  FMinus / C++      {:8.2f}x\n"
         "  max |FMinus - C++| = {:.3g}; float's own error (C++ float - double) = {:.3g}\n",
-        samples, rate, q, level, fminusTime, cppTime, fminusTime / cppTime, difference, floatError);
+        samples, rate, q, level, fminusTime, calls, cppTime, fminusTime / cppTime, difference, floatError);
     return 0;
 }

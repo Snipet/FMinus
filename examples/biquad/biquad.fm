@@ -2,17 +2,16 @@
 // Cookbook" low-pass, in transposed direct form II. The harness (bench.cpp) runs it over noise with the cutoff swept
 // every sample, compares it with a C++ version of the same formulas and times both.
 //
-// One sample is one call. FMinus has no structs yet, but it has float4, so the filter's three results come back
-// together in one vector, and the coefficients, sinf and cosf included, are computed once a sample:
-//     (y, s1, s2, 0) = lowpass(x, s1, s2, cutoff, q, rate)
-// A float4 crosses the C ABI in a register, so the harness calls it as clang's ext_vector_type. README.md, beside this
-// file, suggests the features that shrink this to one call per buffer, in order.
+// One call filters a block. The harness passes its buffers (the input, a cutoff for each sample, the output), their
+// length, and the filter's state, (s1, s2), which it owns: lowpass reads the state at the start and writes it back at
+// the end, so the next call carries on where this one stopped. One call for the whole signal and one call a block
+// give the same output.
 //
-// Every constant is written as a float (the f suffix), and the float4s are built with C's literal, (float4){...}, not
-// OpenCL C's (float4)(...). So with clang's ext_vector_type for float4 (README.md has the typedef) this file is also
-// C with the same meaning, given <math.h> and -ffp-contract=off.
+// Every constant that is not a whole number is written as a float (the f suffix), and the float4s are built with C's
+// literal, (float4){...}, not OpenCL C's (float4)(...). So with clang's ext_vector_type for float4 (README.md has the
+// typedef) this file is also C with the same meaning, given <math.h> and -ffp-contract=off.
 
-float pi()
+float pi(void)
 {
     return 3.14159265358979323846f;
 }
@@ -28,10 +27,22 @@ float4 lowpass_coefficients(float cutoff, float q, float rate)
     return (float4){(1.0f - c) / 2.0f / a0, (1.0f - c) / a0, -2.0f * c / a0, (1.0f - alpha) / a0};
 }
 
-// One sample of transposed direct form II: the output and the two new states, (y, s1, s2, 0).
-float4 lowpass(float x, float s1, float s2, float cutoff, float q, float rate)
+// n samples of transposed direct form II. The state is read once, lives in registers through the loop, and is written
+// back once. restrict promises that no two of the buffers overlap.
+void lowpass(const float* restrict input, const float* restrict cutoff, float* restrict output, int n, float q,
+             float rate, float* restrict state)
 {
-    const float4 k = lowpass_coefficients(cutoff, q, rate);   // (b0, b1, a1, a2)
-    const float y = k.x * x + s1;
-    return (float4){y, k.y * x - k.z * y + s2, k.x * x - k.w * y};   // the last lane is 0
+    float s1 = state[0];
+    float s2 = state[1];
+    for (int i = 0; i < n; ++i)
+    {
+        const float4 k = lowpass_coefficients(cutoff[i], q, rate);   // (b0, b1, a1, a2)
+        const float x = input[i];
+        const float y = k.x * x + s1;
+        s1 = k.y * x - k.z * y + s2;
+        s2 = k.x * x - k.w * y;
+        output[i] = y;
+    }
+    state[0] = s1;
+    state[1] = s2;
 }
