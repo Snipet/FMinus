@@ -1,0 +1,52 @@
+// examples/delay/delay.fm: a feedback delay (an echo) whose line lives on the heap. The harness (bench.cpp) creates it
+// once, as a plugin does in prepare(), runs it over a signal in one call (and, for --check, in blocks), compares it
+// with C++, times both, and frees it.
+//
+// What allocates and what runs on the audio thread are separate functions. echo_create, echo_position and
+// echo_destroy allocate and free, off the audio thread. echo_process is marked [[clang::nonblocking]], so FMinus
+// refuses to compile it if it could reach malloc, calloc or free, however far down (docs/extending.md, recipe 11).
+// The line's length depends on the sample rate, so the program decides how much memory it needs (echo_length).
+//
+// The state is two allocations: the line, and its write position. FMinus has no structs yet to keep them together.
+// With <stdlib.h>, this file is also C (C23, for the attribute), which clang checks with -Wfunction-effects.
+
+// The line's length in whole samples.
+int echo_length(float seconds, float rate)
+{
+    return seconds * rate;
+}
+
+// The line, silent: calloc's memory starts at 0 (FMinus's malloc's does too).
+float* echo_create(int length)
+{
+    return calloc(length, sizeof(float));
+}
+
+int* echo_position(void)
+{
+    return calloc(1, sizeof(int));
+}
+
+void echo_destroy(float* line, int* position)
+{
+    free(line);
+    free(position);
+}
+
+// n samples: the output is the input plus `mix` times the line's oldest sample, which the line replaces with the input
+// plus `feedback` times it. The write position carries over to the next call.
+void echo_process(float* restrict line, int* restrict position, int length, const float* restrict input,
+                  float* restrict output, int n, float feedback, float mix) [[clang::nonblocking]]
+{
+    int w = *position;
+    for (int i = 0; i < n; ++i)
+    {
+        const float delayed = line[w];
+        const float x = input[i];
+        line[w] = x + feedback * delayed;
+        output[i] = x + mix * delayed;
+        if (++w == length)
+            w = 0;
+    }
+    *position = w;
+}
