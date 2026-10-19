@@ -4,6 +4,7 @@
 #include "jit/Jit.h"
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
@@ -369,8 +370,9 @@ TEST_CASE("vector arithmetic works lane by lane, broadcasting scalars, with buil
     CHECK(lanesOf(lookup<float4(float4)>(*jit, "rectify")(x)) == std::array{0.0f, 0.0f, 0.5f, 2.0f});
     CHECK(lanesOf(lookup<float4(float4)>(*jit, "halfwave")(x)) == std::array{-0.0f, -0.0f, 0.5f, 2.0f});
     const float4 angles = {0.0f, 0.5f, 1.0f, 2.0f};
-    CHECK(lanesOf(lookup<float4(float4)>(*jit, "sines")(angles))
-          == std::array{std::sin(0.0f), std::sin(0.5f), std::sin(1.0f), std::sin(2.0f)});   // four calls to sinf
+    const float4 sines = lookup<float4(float4)>(*jit, "sines")(angles);
+    for (int i = 0; i < 4; ++i)   // one call to the vector math library (recipe 8): within 3 ulp of sinf's
+        CHECK_THAT(sines[i], Catch::Matchers::WithinULP(std::sin(angles[i]), 3));
     CHECK(lookup<float(float)>(*jit, "wide")(1.0f) == 72.0f);
 }
 
@@ -415,4 +417,33 @@ TEST_CASE("vector errors are reported as clang reports them", "[codegen][simd]")
              "test.fm:17:5: error: returning 'float8' from a function with incompatible result type 'float4'\n"
              "test.fm:20:37: error: passing 'float4' to parameter of incompatible type 'float'\n"
              "test.fm:21:21: error: returning 'float4' from a function with incompatible result type 'float'\n");
+}
+
+TEST_CASE("float4 math calls the vector math library; other sizes call sinf for each lane", "[codegen][simd]")
+{
+    std::string errors;
+    auto jit = compile("float4 sines(float4 x) { return sinf(x); }\n"
+                       "float4 tanhs(float4 x) { return tanhf(x); }\n"
+                       "float wide(float a)\n"
+                       "{\n"
+                       "    return reduce_add(sinf((float8)(a) * (float8)(1, 2, 3, 4, 5, 6, 7, 8)));\n"
+                       "}\n",
+                       &errors);
+    INFO(errors);
+    REQUIRE(jit);
+    for (float x = -100.0f; x <= 100.0f; x += 0.37f)
+    {
+        const float4 v = {x, x * 0.5f, x * 0.25f, -x};
+        const float4 s = lookup<float4(float4)>(*jit, "sines")(v);
+        const float4 t = lookup<float4(float4)>(*jit, "tanhs")(v * 0.05f);
+        for (int i = 0; i < 4; ++i)
+        {
+            CHECK_THAT(s[i], Catch::Matchers::WithinULP(std::sin(v[i]), 3));
+            CHECK_THAT(t[i], Catch::Matchers::WithinULP(std::tanh(v[i] * 0.05f), 3));
+        }
+    }
+    float exact = 0.0f;   // float8 has no vector form: eight calls to sinf, in lane order, so exactly this
+    for (int i = 1; i <= 8; ++i)
+        exact += std::sin(0.5f * static_cast<float>(i));
+    CHECK(lookup<float(float)>(*jit, "wide")(0.5f) == exact);
 }

@@ -1,0 +1,31 @@
+// recipe 8: on Apple systems, float4 math calls libsystem_m's vector functions; NEON's own instructions stay.
+// REQUIRES: system-darwin
+// RUN: fminus %s -O2 | FileCheck %s
+// RUN: %if arm64 %{ fminus %s -O2 --emit asm -o - | FileCheck %s --check-prefix=ASM %}
+
+float4 sines(float4 x) { return sinf(x); }
+float4 shape(float4 x) { return tanhf(x) + sqrtf(fabsf(x)); }
+float8 wide(float8 x) { return sinf(x); }
+
+// CHECK-LABEL: define <4 x float> @sines(
+// CHECK:         call <4 x float> @_simd_sin_f4(<4 x float> %x)
+// CHECK-LABEL: define <4 x float> @shape(
+// CHECK-DAG:     call <4 x float> @_simd_tanh_f4(
+// CHECK-DAG:     call <4 x float> @llvm.fabs.v4f32(
+// CHECK-DAG:     call <4 x float> @llvm.sqrt.v4f32(
+// float8 has no vector form in the library: the intrinsic stays, and the backend calls sinf for each lane.
+// CHECK-LABEL: define <8 x float> @wide(
+// CHECK:         call <8 x float> @llvm.sin.v8f32(
+// CHECK: declare <4 x float> @_simd_sin_f4(<4 x float>)
+
+// Calls to other images go through the GOT.
+// ASM-LABEL: _sines:
+// ASM:         __simd_sin_f4@GOTPAGE
+// ASM:         blr
+// ASM-LABEL: _shape:
+// ASM:         __simd_tanh_f4@GOTPAGE
+// ASM:         fabs.4s
+// ASM:         fsqrt.4s
+// ASM-LABEL: _wide:
+// ASM:         _sinf@GOTPAGE
+// ASM-COUNT-8: blr x{{[0-9]+}}
