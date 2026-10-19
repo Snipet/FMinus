@@ -47,7 +47,7 @@ namespace
         return fail(llvm::toString(std::move(error)));
     }
 
-    // Calls the JIT'd Result(float, ...) at `address` with args.size() arguments: Result is float or bool.
+    // Calls the JIT'd Result(float, ...) at `address` with args.size() arguments: Result is float, bool or int.
     template <typename Result, std::size_t... I>
     Result callWith(llvm::orc::ExecutorAddr address, const std::vector<float>& args, std::index_sequence<I...>)
     {
@@ -161,7 +161,7 @@ int main(int argc, char** argv)
         for (const fminus::ast::Param& param : function->params)
         {
             if (param.type != fminus::ast::Type::Float)
-                return fail(std::format("--run: '{}' takes a {} parameter; --run passes floats only", run,
+                return fail(std::format("--run: '{}' takes a parameter of type '{}'; --run passes floats only", run,
                                         fminus::ast::typeName(param.type)));
         }
 
@@ -173,8 +173,8 @@ int main(int argc, char** argv)
         auto address = (*jit)->lookup(run);
         if (!address)
             return fail(address.takeError());
-        // Through a pointer of the function's own type: a bool comes back zero-extended in a general register, a
-        // float in a vector register. std::format prints a bool as true or false.
+        // Through a pointer of the function's own type: a bool or an int comes back in a general register (a bool
+        // zero-extended), a float in a vector register. std::format prints a bool as true or false.
         constexpr auto counts = std::make_index_sequence<kMaxRunArgs + 1>{};
         switch (function->returnType.kind)
         {
@@ -184,6 +184,9 @@ int main(int argc, char** argv)
         case fminus::ast::Kind::Bool:
             llvm::outs() << std::format("{}\n", call<bool>(*address, runArgs, counts));
             break;
+        case fminus::ast::Kind::Int:
+            llvm::outs() << std::format("{}\n", call<int>(*address, runArgs, counts));
+            break;
         case fminus::ast::Kind::Float2:   // a vector stays inside FMinus, or goes to a C++ host (docs/simd.md)
         case fminus::ast::Kind::Float4:
         case fminus::ast::Kind::Float8:
@@ -192,7 +195,7 @@ int main(int argc, char** argv)
         case fminus::ast::Kind::Bool8:
         case fminus::ast::Kind::PolyFloat:
         case fminus::ast::Kind::PolyBool:
-            return fail(std::format("--run: '{}' returns a {}; --run prints floats and bools only", run,
+            return fail(std::format("--run: '{}' returns a {}; --run prints floats, bools and ints only", run,
                                     fminus::ast::typeName(function->returnType)));
         }
         return 0;

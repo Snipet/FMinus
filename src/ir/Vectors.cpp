@@ -63,7 +63,8 @@ namespace fminus::ir::detail
         std::vector<llvm::Value*> elements;
         for (const Value& arg : args)
         {
-            const ast::Type type = ast::arithmeticOf(arg.type);
+            // a scalar is one float lane; a vector (a mask as 0s and 1s) gives its lanes
+            const ast::Type type = ast::isVector(arg.type) ? ast::arithmeticOf(arg.type) : ast::Type::Float;
             if (ast::isPoly(type))
             {
                 polyMismatch(location, arg.type, construct.type);

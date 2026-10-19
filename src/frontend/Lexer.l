@@ -2,9 +2,10 @@
  * memory). It returns Bison's symbols (Parser.y) with their locations, which it keeps in the scanner's state
  * (Scanner.h).
  *
- * Comments are C's: // to the end of the line, and block comments, which do not nest. Floating constants are C's:
- * 1.5, 1., .5, 2e3, 1.5e-3f, hex floats such as 0x1.8p1 and 0x1p-3f, and integer constants such as 2, which name the
- * same float. The f or F suffix is allowed only where C allows it (not on 2), and is kept in the spelling.
+ * Comments are C's: // to the end of the line, and block comments, which do not nest. Constants are C's: floating
+ * ones (1.5, 1., .5, 2e3, 1.5e-3f, hex floats such as 0x1.8p1 and 0x1p-3f) and integer ones (2, 010 in octal, 0x1F in
+ * hex), one token whose spelling tells the code generator which. The f or F suffix is allowed only where C allows it
+ * (not on 2; in 0x1F the F is a digit), and is kept in the spelling.
  * To add a token: a rule here, its %token in Parser.y. Keywords come before {IDENTIFIER}: with equal lengths, Flex
  * picks the earlier rule. */
 %option reentrant noyywrap nounput noinput nounistd never-interactive batch
@@ -54,6 +55,7 @@ IDENTIFIER  [A-Za-z_][A-Za-z0-9_]*
 "const"                     { return Parser::make_CONST(yyextra->where); }
 "return"                    { return Parser::make_RETURN(yyextra->where); }
 "bool"                      { return Parser::make_BOOL(yyextra->where); }
+"int"                       { return Parser::make_INT(yyextra->where); }
 "float2"                    { return Parser::make_VECTOR_TYPE(fminus::ast::Type::Float2, yyextra->where); }
 "float4"                    { return Parser::make_VECTOR_TYPE(fminus::ast::Type::Float4, yyextra->where); }
 "float8"                    { return Parser::make_VECTOR_TYPE(fminus::ast::Type::Float8, yyextra->where); }
@@ -71,6 +73,7 @@ IDENTIFIER  [A-Za-z_][A-Za-z0-9_]*
 "."{DIGITS}{EXPONENT}?[fF]?         |
 {DIGITS}{EXPONENT}[fF]?             |
 {DIGITS}                            |
+0[xX]{HEXDIGITS}                    |
 0[xX]({HEXDIGITS}("."[0-9a-fA-F]*)?|"."{HEXDIGITS}){BINEXPONENT}[fF]? {
                                 return Parser::make_NUMBER(std::string(yytext, yyleng), yyextra->where);
                             }
@@ -81,6 +84,8 @@ IDENTIFIER  [A-Za-z_][A-Za-z0-9_]*
                             }
 {IDENTIFIER}                { return Parser::make_IDENTIFIER(std::string(yytext, yyleng), yyextra->where); }
 
+"++"                        { return Parser::make_INCREMENT(yyextra->where); }
+"--"                        { return Parser::make_DECREMENT(yyextra->where); }
 "+="                        { return Parser::make_PLUS_ASSIGN(yyextra->where); }
 "-="                        { return Parser::make_MINUS_ASSIGN(yyextra->where); }
 "*="                        { return Parser::make_STAR_ASSIGN(yyextra->where); }

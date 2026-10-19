@@ -5,7 +5,7 @@
 //     program      : function*
 //     function     : type IDENTIFIER "(" (param ("," param)*)? ")" (block | ";")     a definition, or a prototype
 //     param        : "const"? type IDENTIFIER?                                       (a prototype may omit names)
-//     type         : "float" | "bool" | VECTOR_TYPE | "poly" ("float" | "bool")       VECTOR_TYPE: float2/4/8
+//     type         : "float" | "bool" | "int" | VECTOR_TYPE | "poly" ("float" | "bool")   VECTOR_TYPE: float2/4/8
 //     block        : "{" (declaration | statement)* "}"
 //     declaration  : "const"? type declarator ("," declarator)* ";"
 //     declarator   : IDENTIFIER ("=" expr)?
@@ -19,10 +19,12 @@
 //                  | "(" VECTOR_TYPE ")" "(" (expr ("," expr)*)? ")"                 OpenCL C's vector literal
 //                  | "(" VECTOR_TYPE ")" "{" (expr ("," expr)* ","?)? "}"            C's: lanes left out are 0
 //                  | "(" "poly" "float" ")" "(" expr ")" | expr "." IDENTIFIER       a broadcast; a swizzle
+//                  | ("++" | "--") expr | expr ("++" | "--") | "(" ("float" | "int" | "bool") ")" expr    a cast
 //                  | expr ("=" | "+=" | "-=" | "*=" | "/=" | "%=") expr
 //
 // Precedence and associativity are C's, from the loosest: assignment (right to left), ?: (right to left), ||, &&,
-// equality, relational, additive, multiplicative, unary, and the swizzle's "." (as C's postfix operators).
+// equality, relational, additive, multiplicative, unary (and casts), and the postfix operators: the swizzle's ".",
+// and "++" and "--" after their operand.
 // The grammar accepts any expression on the left of an assignment; the code generator rejects what is not a variable
 // ("expression is not assignable"), so buffer elements and fields can join it later.
 //
@@ -98,15 +100,21 @@
         {
             return fminus::ast::makeExpr(at(where), fminus::ast::AssignExpr{op, std::move(target), std::move(value)});
         }
+
+        fminus::ast::ExprPtr increment(const fminus::frontend::location& where, fminus::ast::IncrementOp op,
+                                       fminus::ast::ExprPtr target)
+        {
+            return fminus::ast::makeExpr(at(where), fminus::ast::IncrementExpr{op, std::move(target)});
+        }
     } // namespace
 }
 
-%token FLOAT "float" CONST "const" RETURN "return" BOOL "bool" TRUE "true" FALSE "false"
+%token FLOAT "float" CONST "const" RETURN "return" BOOL "bool" INT "int" TRUE "true" FALSE "false"
 %token LT "<" LE "<=" GT ">" GE ">=" EQ "==" NE "!=" NOT "!" AND "&&" OR "||" QUESTION "?" COLON ":"
 %token IF "if" ELSE "else" WHILE "while" FOR "for" BREAK "break" CONTINUE "continue"
 %token <ast::Type> VECTOR_TYPE "vector type"
 %token DOT "." POLY "poly"
-%token PLUS "+" MINUS "-" STAR "*" SLASH "/" PERCENT "%"
+%token PLUS "+" MINUS "-" STAR "*" SLASH "/" PERCENT "%" INCREMENT "++" DECREMENT "--"
 %token ASSIGN "=" PLUS_ASSIGN "+=" MINUS_ASSIGN "-=" STAR_ASSIGN "*=" SLASH_ASSIGN "/=" PERCENT_ASSIGN "%="
 %token LPAREN "(" RPAREN ")" LBRACE "{" RBRACE "}" COMMA "," SEMI ";"
 %token <std::string> IDENTIFIER "identifier"
@@ -117,7 +125,7 @@
 %nterm <std::vector<ast::Param>> params param_list
 %nterm <ast::Param> param
 %nterm <bool> qualifier
-%nterm <ast::Type> type
+%nterm <ast::Type> type cast_type
 %nterm <std::vector<ast::Stmt>> block block_items block_item declaration
 %nterm <ast::Stmt> statement
 %nterm <std::vector<ast::Stmt>> for_init
@@ -141,7 +149,7 @@
 %left "+" "-"
 %left "*" "/" "%"
 %precedence UNARY
-%precedence "."
+%precedence "." "++" "--"
 
 %%
 
@@ -182,9 +190,17 @@ qualifier
 type
     : "float"                               { $$ = ast::Type::Float; }
     | "bool"                                { $$ = ast::Type::Bool; }
+    | "int"                                 { $$ = ast::Type::Int; }
     | VECTOR_TYPE                           { $$ = $1; }
     | "poly" "float"                        { $$ = ast::Type::PolyFloat; }
     | "poly" "bool"                         { $$ = ast::Type::PolyBool; }
+    ;
+
+// The types a cast names: C casts between scalars (a vector's literal is OpenCL C's (float4)(...)).
+cast_type
+    : "float"                               { $$ = ast::Type::Float; }
+    | "int"                                 { $$ = ast::Type::Int; }
+    | "bool"                                { $$ = ast::Type::Bool; }
     ;
 
 block
@@ -258,6 +274,11 @@ expr
     | "-" expr %prec UNARY                  { $$ = ast::makeExpr(at(@1), ast::UnaryExpr{ast::UnaryOp::Negate, $2}); }
     | "+" expr %prec UNARY                  { $$ = ast::makeExpr(at(@1), ast::UnaryExpr{ast::UnaryOp::Plus, $2}); }
     | "!" expr %prec UNARY                  { $$ = ast::makeExpr(at(@1), ast::UnaryExpr{ast::UnaryOp::Not, $2}); }
+    | "++" expr %prec UNARY                 { $$ = increment(@1, ast::IncrementOp::PreIncrement, $2); }
+    | "--" expr %prec UNARY                 { $$ = increment(@1, ast::IncrementOp::PreDecrement, $2); }
+    | expr "++"                             { $$ = increment(@2, ast::IncrementOp::PostIncrement, $1); }
+    | expr "--"                             { $$ = increment(@2, ast::IncrementOp::PostDecrement, $1); }
+    | "(" cast_type ")" expr %prec UNARY    { $$ = ast::makeExpr(at(@1), ast::CastExpr{$2, $4}); }
     | "true"                                { $$ = ast::makeExpr(at(@1), ast::BoolExpr{true}); }
     | "false"                               { $$ = ast::makeExpr(at(@1), ast::BoolExpr{false}); }
     | expr "<" expr                         { $$ = binary(@2, ast::BinaryOp::Less, $1, $3); }

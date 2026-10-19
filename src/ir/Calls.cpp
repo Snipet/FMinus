@@ -32,8 +32,8 @@ namespace fminus::ir::detail
         return false;
     }
 
-    // poly_lanes(): how many lanes a poly float has, as a float. poly_index(): a poly float whose lanes hold their
-    // own indices, 0, 1, 2, ...: what tells the lanes apart.
+    // poly_lanes(): how many lanes a poly float has, an int. poly_index(): a poly float whose lanes hold their own
+    // indices, 0, 1, 2, ...: what tells the lanes apart.
     bool isPolyQuery(std::string_view name)
     {
         return name == "poly_lanes" || name == "poly_index";
@@ -62,8 +62,7 @@ namespace fminus::ir::detail
             if (!args.empty())
                 return wrongArity(location, call, 0);
             if (call.callee == "poly_lanes")
-                return {llvm::ConstantFP::get(builder_.getFloatTy(), static_cast<double>(polyLanes_)),
-                        ast::Type::Float};
+                return {builder_.getInt32(polyLanes_), ast::Type::Int};
             std::vector<llvm::Constant*> indices;
             for (unsigned i = 0; i < polyLanes_; ++i)
                 indices.push_back(llvm::ConstantFP::get(builder_.getFloatTy(), static_cast<double>(i)));

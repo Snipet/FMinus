@@ -4,7 +4,7 @@
 //     Types.cpp         FMinus's types as LLVM's, the conversions between them, the errors' helpers
 //     Functions.cpp     declarations and prototypes, bodies and parameters, stack slots and scopes
 //     Statements.cpp    blocks, declarations, return, if, while, for, break and continue
-//     Expressions.cpp   constants, variables, operators, &&, ||, ?: and assignment
+//     Expressions.cpp   constants, variables, operators, &&, ||, ?:, casts, assignment, ++ and --
 //     Calls.cpp         calls: the builtins (math functions, reductions, poly queries) and the program's functions
 //     Vectors.cpp       vector literals, swizzles, and ?: lane by lane
 //     Memory.cpp        lvalues, what assignments store to: variables and their components
@@ -86,6 +86,7 @@ namespace fminus::ir::detail
             Passing,
             Condition,
             Logical,
+            Casting,
         };
 
         // Something a program can assign (Memory.cpp): a variable, or components of one. read() and write() load and
@@ -140,13 +141,17 @@ namespace fminus::ir::detail
         // ---- Expressions.cpp ----------------------------------------------------------------------------------------
         Value lower(const ast::Expr& expr);
         static bool isComparison(ast::BinaryOp op);
-        llvm::Value* arithmetic(ast::BinaryOp op, llvm::Value* lhs, llvm::Value* rhs);
+        Value binary(SourceLocation location, ast::BinaryOp op, Value lhs, Value rhs);
+        llvm::Value* arithmetic(ast::BinaryOp op, ast::Type type, llvm::Value* lhs, llvm::Value* rhs);
         llvm::Value* lowerLogical(SourceLocation location, const ast::LogicalExpr& logical);
         Value lowerConditional(SourceLocation location, const ast::ConditionalExpr& conditional);
-        llvm::Value* lowerNumber(SourceLocation location, const ast::NumberExpr& number);
+        Value lowerNumber(SourceLocation location, const ast::NumberExpr& number);
+        llvm::Value* lowerInteger(SourceLocation location, const std::string& spelling, bool hex);
+        Value lowerCast(SourceLocation location, const ast::CastExpr& cast);
         Value lowerAssign(SourceLocation location, const ast::AssignExpr& assign);
         Value compound(SourceLocation location, ast::AssignOp op, Value current, Value value);
         static ast::BinaryOp compoundOperator(ast::AssignOp op);
+        Value lowerIncrement(SourceLocation location, const ast::IncrementExpr& increment);
 
         // ---- Vectors.cpp --------------------------------------------------------------------------------------------
         Value lowerSelect(SourceLocation location, Value test, const ast::ConditionalExpr& conditional);

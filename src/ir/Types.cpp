@@ -1,5 +1,5 @@
-// src/ir/Types.cpp: FMinus's types as LLVM's, and the conversions between them: C's implicit ones, and OpenCL C's for
-// vectors. Also the errors' helpers (clang's wording) and poison values, which every other part uses.
+// src/ir/Types.cpp: FMinus's types as LLVM's, and the conversions between them: C's implicit ones (and its casts), and
+// OpenCL C's for vectors. Also the errors' helpers (clang's wording) and poison values, which every other part uses.
 #include "ir/Lowering.h"
 
 #include <llvm/IR/Constants.h>
@@ -20,6 +20,8 @@ namespace fminus::ir::detail
             return builder_.getFloatTy();
         case ast::Kind::Bool:
             return builder_.getInt1Ty();
+        case ast::Kind::Int:
+            return builder_.getInt32Ty();
         case ast::Kind::Float2:
         case ast::Kind::Float4:
         case ast::Kind::Float8:
@@ -34,10 +36,12 @@ namespace fminus::ir::detail
         return builder_.getFloatTy();
     }
 
-    // C's implicit conversions, and OpenCL C's for vectors. A bool is 0 or 1 as a float, and a float is
-    // `x != 0` as a bool (so a NaN is true). A scalar becomes a vector by being broadcast to every lane (a
-    // poly bool takes a bool), and a lane mask is 0 or 1 per lane as the float vector of its size. Nothing
-    // else converts from a vector: that is an error, reported for `use`.
+    // C's implicit conversions, and OpenCL C's for vectors. Between scalars: a bool is 0 or 1 as an int or a
+    // float; an int is exact as a float up to 2^24 and rounded beyond; a float becomes an int truncated toward
+    // zero (out of int's range the result is undefined, as in C); and a number is `x != 0` as a bool (so a NaN
+    // is true). A scalar becomes a vector by being broadcast to every lane (a poly bool takes a bool), and a
+    // lane mask is 0 or 1 per lane as the float vector of its size. Nothing else converts from a vector: that is
+    // an error, reported for `use`.
     llvm::Value* Lowering::convert(Value value, ast::Type type, SourceLocation location, Use use)
     {
         if (value.type == type)
@@ -50,11 +54,19 @@ namespace fminus::ir::detail
                 llvm::Value* scalar = convert(value, scalarType, location, use);
                 return builder_.CreateVectorSplat(lanes(type), scalar, "splat");
             }
+            const bool fromFloat = value.type == ast::Type::Float;
             if (type == ast::Type::Bool)
-                return builder_.CreateFCmpUNE(value.ir, llvm::ConstantFP::get(value.ir->getType(), 0.0),
-                                              "tobool");
+            {
+                llvm::Value* zero = llvm::Constant::getNullValue(value.ir->getType());
+                return fromFloat ? builder_.CreateFCmpUNE(value.ir, zero, "tobool")
+                                 : builder_.CreateICmpNE(value.ir, zero, "tobool");
+            }
+            if (type == ast::Type::Int)
+                return fromFloat ? builder_.CreateFPToSI(value.ir, typeOf(type), "conv")
+                                 : builder_.CreateZExt(value.ir, typeOf(type), "conv");
             if (type == ast::Type::Float)
-                return builder_.CreateUIToFP(value.ir, typeOf(type), "conv");
+                return value.type == ast::Type::Int ? builder_.CreateSIToFP(value.ir, typeOf(type), "conv")
+                                                    : builder_.CreateUIToFP(value.ir, typeOf(type), "conv");
         }
         else if (ast::isMask(value.type) && type == ast::arithmeticOf(value.type))
         {
@@ -88,12 +100,16 @@ namespace fminus::ir::detail
         case Use::Logical:
             error(location, "a logical operator needs scalar operands, not " + source);
             return;
+        case Use::Casting:
+            error(location, "cannot cast from " + source + " to " + target);
+            return;
         }
     }
 
-    // The type two operands meet in, as OpenCL C's usual arithmetic conversions decide it: float, or the
-    // vector type when either one is a vector (the other is broadcast to it); a bool and a lane mask take part
-    // as floats. Vectors of two sizes do not meet: clang's error, and false.
+    // The type two operands meet in, as C's usual arithmetic conversions and OpenCL C's decide it: the vector
+    // type when either one is a vector (the other is broadcast to it), otherwise float when either one is a
+    // float, otherwise int. A bool takes part as an int, and a lane mask as the float vector of its size. Vectors
+    // of two sizes do not meet: clang's error, and false.
     bool Lowering::commonType(SourceLocation location, ast::Type a, ast::Type b, ast::Type& type)
     {
         const ast::Type ta = ast::arithmeticOf(a);
@@ -109,7 +125,10 @@ namespace fminus::ir::detail
                                 + quoted(ast::typeName(a)) + " and " + quoted(ast::typeName(b)) + ")");
             return false;
         }
-        type = ast::isVector(ta) ? ta : tb;
+        if (ast::isVector(ta) || ast::isVector(tb))
+            type = ast::isVector(ta) ? ta : tb;
+        else
+            type = ta == ast::Type::Int && tb == ast::Type::Int ? ast::Type::Int : ast::Type::Float;
         return true;
     }
 

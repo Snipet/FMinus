@@ -105,6 +105,20 @@ TEST_CASE("constants keep their spelling: C's decimal, hex and integer forms", "
     CHECK(parsed("float f() { return fmaxf(fminf(1, .5), g(2e3, 1.e-2f, 3.25E+1F, 0x1.8p1, 0x1p-3f, 1.)); }")
           == "(function float f ()\n"
              "  (return (call fmaxf (call fminf 1 .5) (call g 2e3 1.e-2f 3.25E+1F 0x1.8p1 0x1p-3f 1.))))\n");
+    CHECK(parsed("int f() { return g(0, 010, 0x1F, 0Xff); }")   // an F in hex is a digit, not a suffix
+          == "(function int f ()\n  (return (call g 0 010 0x1F 0Xff)))\n");
+}
+
+TEST_CASE("int, casts, ++ and -- parse as C's", "[frontend]")
+{
+    // A postfix ++ binds tighter than a unary -, and a cast binds as a unary operator does.
+    CHECK(parsed("int f(int i, float x) { ++i; i--; return -i++ + (int)x * 2 + 0x1F; }")
+          == "(function int f ((int i) (float x))\n"
+             "  (pre++ i)\n"
+             "  (post-- i)\n"
+             "  (return (+ (+ (- (post++ i)) (* (cast int x) 2)) 0x1F)))\n");
+    // ++ is one token, the longest that matches, as in C: i+++i is i++ + i.
+    CHECK(parsed("int g(int i) { return i+++i; }") == "(function int g ((int i))\n  (return (+ (post++ i) i)))\n");
 }
 
 TEST_CASE("syntax and scanner errors carry their locations", "[frontend]")

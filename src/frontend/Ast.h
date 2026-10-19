@@ -16,8 +16,10 @@
 
 namespace fminus::ast
 {
-    // The value types. float is IEEE single precision (LLVM's float). bool is C23's: 0 or 1, which converts to float
-    // as 0 or 1, and to which a float converts as `x != 0` (a NaN is true).
+    // The value types. float is IEEE single precision (LLVM's float). int is C's on every target FMinus runs on: 32
+    // bits, signed. Two ints compute as ints (`/` truncates toward zero), and an int meeting a float converts to it,
+    // as C's usual arithmetic conversions say. bool is C23's: 0 or 1, which computes as an int, and to which a number
+    // converts as `x != 0` (a NaN is true).
     //
     // float2, float4 and float8 are OpenCL C's vector types: that many floats side by side, computed on together. A
     // float4 fills one 128-bit NEON register; a float8 is two. Comparing two of them gives a lane mask, a bool2, bool4
@@ -36,6 +38,7 @@ namespace fminus::ast
     {
         Float,
         Bool,
+        Int,
         Float2,
         Float4,
         Float8,
@@ -55,11 +58,12 @@ namespace fminus::ast
 
         friend constexpr bool operator==(Type, Type) = default;
 
-        static const Type Float, Bool, Float2, Float4, Float8, Bool2, Bool4, Bool8, PolyFloat, PolyBool;
+        static const Type Float, Bool, Int, Float2, Float4, Float8, Bool2, Bool4, Bool8, PolyFloat, PolyBool;
     };
 
     inline constexpr Type Type::Float{Kind::Float};
     inline constexpr Type Type::Bool{Kind::Bool};
+    inline constexpr Type Type::Int{Kind::Int};
     inline constexpr Type Type::Float2{Kind::Float2};
     inline constexpr Type Type::Float4{Kind::Float4};
     inline constexpr Type Type::Float8{Kind::Float8};
@@ -85,6 +89,7 @@ namespace fminus::ast
             return 0;
         case Kind::Float:
         case Kind::Bool:
+        case Kind::Int:
             return 1;
         case Kind::Float2:
         case Kind::Bool2:
@@ -125,7 +130,7 @@ namespace fminus::ast
         }
     }
 
-    // What a comparison of two values of `type` gives: a bool for floats, a lane mask for float vectors.
+    // What a comparison of two values of `type` gives: a bool for scalars, a lane mask for float vectors.
     inline Type maskOf(Type type)
     {
         switch (type.kind)
@@ -143,11 +148,12 @@ namespace fminus::ast
         }
     }
 
-    // The type a value of `type` computes as: a bool as a float, a lane mask as the float vector of its size.
+    // The type a value of `type` computes as: a bool as an int (C's integer promotion), a lane mask as the float vector
+    // of its size.
     inline Type arithmeticOf(Type type)
     {
         if (type == Type::Bool)
-            return Type::Float;
+            return Type::Int;
         if (type == Type::PolyBool)
             return Type::PolyFloat;
         if (isMask(type))
@@ -198,8 +204,9 @@ namespace fminus::ast
     struct Expr;
     using ExprPtr = std::unique_ptr<Expr>;
 
-    // A floating or integer constant as written, f suffix included. The code generator rounds it once, straight to
-    // float: in FMinus every constant is a float (in C, an unsuffixed 1.5 would be a double).
+    // A constant as written, f suffix included. An integer constant (2, 010 in octal, 0x1F in hex: no point and no
+    // exponent) is an int, as in C. Any other is a float, which the code generator rounds once, straight to float (in
+    // C, an unsuffixed 1.5 would be a double).
     struct NumberExpr
     {
         std::string spelling;
@@ -282,11 +289,35 @@ namespace fminus::ast
         std::string components;
     };
 
+    enum class IncrementOp
+    {
+        PreIncrement,    // ++x
+        PreDecrement,    // --x
+        PostIncrement,   // x++
+        PostDecrement,   // x--
+    };
+
+    // ++x, --x, x++ and x--: C's. The target is an lvalue that is not const, as an assignment's is; ++x is x += 1, and
+    // so is x++, whose value is the target's before.
+    struct IncrementExpr
+    {
+        IncrementOp op = IncrementOp::PreIncrement;
+        ExprPtr target;
+    };
+
+    // `(int)x`, `(float)x`, `(bool)x`: C's casts between scalar types, the implicit conversions written out. (int)
+    // truncates toward zero.
+    struct CastExpr
+    {
+        Type type = Type::Float;
+        ExprPtr operand;
+    };
+
     struct Expr
     {
         SourceLocation location;
         std::variant<NumberExpr, VariableExpr, BoolExpr, UnaryExpr, BinaryExpr, LogicalExpr, CallExpr, AssignExpr,
-                     ConditionalExpr, ConstructExpr, SwizzleExpr>
+                     ConditionalExpr, ConstructExpr, SwizzleExpr, IncrementExpr, CastExpr>
             node;
     };
 

@@ -61,6 +61,22 @@ namespace fminus::ast
             return "?";
         }
 
+        const char* opName(IncrementOp op)
+        {
+            switch (op)
+            {
+            case IncrementOp::PreIncrement:
+                return "pre++";
+            case IncrementOp::PreDecrement:
+                return "pre--";
+            case IncrementOp::PostIncrement:
+                return "post++";
+            case IncrementOp::PostDecrement:
+                return "post--";
+            }
+            return "?";
+        }
+
         const char* opName(UnaryOp op)
         {
             switch (op)
@@ -120,6 +136,14 @@ namespace fminus::ast
                                       return std::string("(") + opName(assign.op) + " " + dump(*assign.target) + " "
                                              + dump(*assign.value) + ")";
                                   },
+                                  [](const IncrementExpr& increment) {   // (pre++ i), (post-- i)
+                                      return std::string("(") + opName(increment.op) + " " + dump(*increment.target)
+                                             + ")";
+                                  },
+                                  [](const CastExpr& cast) {   // (cast int x)
+                                      return std::string("(cast ") + typeName(cast.type) + " " + dump(*cast.operand)
+                                             + ")";
+                                  },
                               },
                               expr.node);
         }
@@ -176,6 +200,8 @@ namespace fminus::ast
             return "float";
         case Kind::Bool:
             return "bool";
+        case Kind::Int:
+            return "int";
         case Kind::Float2:
             return "float2";
         case Kind::Float4:

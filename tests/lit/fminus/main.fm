@@ -37,7 +37,7 @@ float main(float a, float b)
 // NOTE: 440
 // TRUE: true
 // FALSE: false
-// BOOLARG: fminus: --run: 'f' takes a bool parameter; --run passes floats only
+// BOOLARG: fminus: --run: 'f' takes a parameter of type 'bool'; --run passes floats only
 
 // The program's main becomes internal fminus.main; the C main reads the arguments, calls it and prints the result.
 // IR:       define internal float @fminus.main(float %a, float %b)

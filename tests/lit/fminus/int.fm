@@ -1,0 +1,46 @@
+// int: C's integer arithmetic, as clang -O0 writes it (+ - * carry nsw; / and % are sdiv and srem), its conversions to
+// and from float, and the usual arithmetic conversions. --run prints an int.
+// RUN: fminus %s -O0 | FileCheck %s
+// RUN: fminus %s --run floors 2.5 | FileCheck %s --check-prefix=RESULT
+// RUN: not fminus %s --run mix 1 2 2>&1 | FileCheck %s --check-prefix=PARAM
+
+int mix(int a, int b)
+{
+    return -a + b * 2 - a / b + a % b;
+}
+
+float scale(int i, float x)
+{
+    return i * x + (float)i / 3;
+}
+
+int floors(float x)
+{
+    int n = 0;
+    for (int k = 0; k < x; ++k)
+        n++;
+    return n;
+}
+
+// CHECK-LABEL: define i32 @mix(i32 %a, i32 %b)
+// CHECK:         sub nsw i32 0, {{%.*}}
+// CHECK:         mul nsw i32 {{%.*}}, 2
+// CHECK:         add nsw i32
+// CHECK:         sdiv i32
+// CHECK:         sub nsw i32
+// CHECK:         srem i32
+// CHECK:         ret i32
+// CHECK-LABEL: define float @scale(i32 %i, float %x)
+// CHECK:         sitofp i32 {{%.*}} to float
+// CHECK:         fmul float
+// CHECK:         sitofp i32 {{%.*}} to float
+// CHECK:         fdiv float {{%.*}}, 3.000000e+00
+// CHECK-LABEL: define i32 @floors(float %x)
+// CHECK:       for.cond:
+// CHECK:         sitofp i32 {{%.*}} to float
+// CHECK:         fcmp olt float
+// CHECK:       for.inc:
+// CHECK:         add nsw i32 {{%.*}}, 1
+
+// RESULT: 3
+// PARAM: fminus: --run: 'mix' takes a parameter of type 'int'; --run passes floats only

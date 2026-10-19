@@ -1,11 +1,16 @@
 // src/ir/Expressions.cpp: expressions. Constants, variables, unary and binary operators (lane by lane on vectors), &&
-// and || (short-circuiting), ?: (only the branch taken runs, unless the condition is a vector: Vectors.cpp), and
-// assignment. Calls are Calls.cpp's, vector literals and swizzles Vectors.cpp's.
+// and || (short-circuiting), ?: (only the branch taken runs, unless the condition is a vector: Vectors.cpp), casts,
+// assignment, ++ and --. Calls are Calls.cpp's, vector literals and swizzles Vectors.cpp's, and what an assignment
+// stores to Memory.cpp's.
 #include "ir/Lowering.h"
 
 #include <llvm/ADT/APFloat.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/Support/Error.h>
+
+#include <charconv>
+#include <cstdint>
+#include <limits>
 
 namespace fminus::ir::detail
 {
@@ -13,9 +18,7 @@ namespace fminus::ir::detail
     {
         return std::visit(
             Overloaded{
-                [&](const ast::NumberExpr& number) {
-                    return Value{lowerNumber(expr.location, number), ast::Type::Float};
-                },
+                [&](const ast::NumberExpr& number) { return lowerNumber(expr.location, number); },
                 [&](const ast::VariableExpr& variable) {
                     const Binding* binding = find(variable.name);
                     if (binding == nullptr)
@@ -32,12 +35,14 @@ namespace fminus::ir::detail
                 },
                 [&](const ast::UnaryExpr& unary) {
                     const Value operand = lower(*unary.operand);
-                    const ast::Type type = ast::arithmeticOf(operand.type);   // a float or a float vector
+                    const ast::Type type = ast::arithmeticOf(operand.type);   // an int, a float, a float vector
                     switch (unary.op)
                     {
                     case ast::UnaryOp::Negate:
                     {
                         llvm::Value* value = convert(operand, type, expr.location, Use::Initializing);
+                        if (type == ast::Type::Int)
+                            return Value{builder_.CreateNSWNeg(value), type};   // 0 - x, as clang's
                         return Value{builder_.CreateFNeg(value), type};
                     }
                     case ast::UnaryOp::Plus:
@@ -50,19 +55,10 @@ namespace fminus::ir::detail
                     }
                     return poison(ast::Type::Float);
                 },
-                [&](const ast::BinaryExpr& binary) {
-                    // C's usual arithmetic conversions, and OpenCL C's: a bool is 0 or 1, and a scalar
-                    // meeting a vector is broadcast to it. Vector operators work lane by lane; a comparison of
-                    // vectors is a lane mask.
-                    const Value lhs = lower(*binary.lhs);
-                    const Value rhs = lower(*binary.rhs);
-                    ast::Type type = ast::Type::Float;
-                    if (!commonType(expr.location, lhs.type, rhs.type, type))
-                        return poison(ast::Type::Float);
-                    llvm::Value* result =
-                        arithmetic(binary.op, convert(lhs, type, expr.location, Use::Initializing),
-                                   convert(rhs, type, expr.location, Use::Initializing));
-                    return Value{result, isComparison(binary.op) ? ast::maskOf(type) : type};
+                [&](const ast::BinaryExpr& operation) {
+                    const Value lhs = lower(*operation.lhs);
+                    const Value rhs = lower(*operation.rhs);
+                    return binary(expr.location, operation.op, lhs, rhs);
                 },
                 [&](const ast::LogicalExpr& logical) {
                     return Value{lowerLogical(expr.location, logical), ast::Type::Bool};
@@ -74,6 +70,8 @@ namespace fminus::ir::detail
                 [&](const ast::SwizzleExpr& swizzle) { return lowerSwizzle(expr.location, swizzle); },
                 [&](const ast::CallExpr& call) { return lowerCall(expr.location, call); },
                 [&](const ast::AssignExpr& assign) { return lowerAssign(expr.location, assign); },
+                [&](const ast::IncrementExpr& increment) { return lowerIncrement(expr.location, increment); },
+                [&](const ast::CastExpr& cast) { return lowerCast(expr.location, cast); },
             },
             expr.node);
     }
@@ -85,8 +83,52 @@ namespace fminus::ir::detail
                || op == ast::BinaryOp::NotEqual;
     }
 
-    llvm::Value* Lowering::arithmetic(ast::BinaryOp op, llvm::Value* lhs, llvm::Value* rhs)
+    // A binary operator, as C's usual arithmetic conversions and OpenCL C's say: the operands meet in their common
+    // type (an int meeting a float is a float; a scalar meeting a vector is broadcast to it), the operator works
+    // lane by lane on vectors, and a comparison gives a bool, or a lane mask for vectors.
+    Lowering::Value Lowering::binary(SourceLocation location, ast::BinaryOp op, Value lhs, Value rhs)
     {
+        ast::Type type = ast::Type::Float;
+        if (!commonType(location, lhs.type, rhs.type, type))
+            return poison(ast::Type::Float);
+        llvm::Value* result = arithmetic(op, type, convert(lhs, type, location, Use::Initializing),
+                                         convert(rhs, type, location, Use::Initializing));
+        return {result, isComparison(op) ? ast::maskOf(type) : type};
+    }
+
+    // The operator's instruction in `type`. For int, C's: + - * carry nsw, as clang's do, since signed overflow is
+    // undefined (it is what lets LLVM widen a loop counter to 64 bits); / and % truncate toward zero, and dividing by
+    // 0 is undefined; the comparisons are signed. For floats and float vectors, IEEE's.
+    llvm::Value* Lowering::arithmetic(ast::BinaryOp op, ast::Type type, llvm::Value* lhs, llvm::Value* rhs)
+    {
+        if (type == ast::Type::Int)
+        {
+            switch (op)
+            {
+            case ast::BinaryOp::Add:
+                return builder_.CreateNSWAdd(lhs, rhs);
+            case ast::BinaryOp::Subtract:
+                return builder_.CreateNSWSub(lhs, rhs);
+            case ast::BinaryOp::Multiply:
+                return builder_.CreateNSWMul(lhs, rhs);
+            case ast::BinaryOp::Divide:
+                return builder_.CreateSDiv(lhs, rhs);
+            case ast::BinaryOp::Remainder:
+                return builder_.CreateSRem(lhs, rhs);
+            case ast::BinaryOp::Less:
+                return builder_.CreateICmpSLT(lhs, rhs, "cmp");
+            case ast::BinaryOp::LessEqual:
+                return builder_.CreateICmpSLE(lhs, rhs, "cmp");
+            case ast::BinaryOp::Greater:
+                return builder_.CreateICmpSGT(lhs, rhs, "cmp");
+            case ast::BinaryOp::GreaterEqual:
+                return builder_.CreateICmpSGE(lhs, rhs, "cmp");
+            case ast::BinaryOp::Equal:
+                return builder_.CreateICmpEQ(lhs, rhs, "cmp");
+            case ast::BinaryOp::NotEqual:
+                return builder_.CreateICmpNE(lhs, rhs, "cmp");
+            }
+        }
         switch (op)
         {
         case ast::BinaryOp::Add:
@@ -191,10 +233,16 @@ namespace fminus::ir::detail
         return {phi, type};
     }
 
-    // The constant rounded once, from its spelling straight to float (no detour through double). APFloat
-    // reads decimal and hex floats alike; the f suffix is C's and goes.
-    llvm::Value* Lowering::lowerNumber(SourceLocation location, const ast::NumberExpr& number)
+    // A constant, from its spelling. One with no point and no exponent is an integer constant, an int, as in C
+    // (lowerInteger). Any other is a float, rounded once, from its spelling straight to float (no detour through
+    // double): APFloat reads decimal and hex floats alike, and the f suffix is C's and goes.
+    Lowering::Value Lowering::lowerNumber(SourceLocation location, const ast::NumberExpr& number)
     {
+        const bool hex = number.spelling.size() > 1 && number.spelling[0] == '0'
+                         && (number.spelling[1] == 'x' || number.spelling[1] == 'X');
+        if (number.spelling.find_first_of(hex ? ".pP" : ".eEfF") == std::string::npos)
+            return {lowerInteger(location, number.spelling, hex), ast::Type::Int};
+
         std::string spelling = number.spelling;
         if (!spelling.empty() && (spelling.back() == 'f' || spelling.back() == 'F'))
             spelling.pop_back();
@@ -204,11 +252,39 @@ namespace fminus::ir::detail
         {
             llvm::consumeError(status.takeError());
             error(location, "invalid floating-point constant " + quoted(number.spelling));
-            return poison(ast::Type::Float).ir;
+            return poison(ast::Type::Float);
         }
         if ((*status & llvm::APFloat::opOverflow) != 0)
             error(location, "magnitude of floating-point constant too large for type 'float'");
-        return llvm::ConstantFP::get(module_.getContext(), value);
+        return {llvm::ConstantFP::get(module_.getContext(), value), ast::Type::Float};
+    }
+
+    // An integer constant: hex after 0x, octal after a leading 0 (010 is 8), decimal otherwise. It must fit in an
+    // int: C would make a larger one a long, which FMinus does not have.
+    llvm::Value* Lowering::lowerInteger(SourceLocation location, const std::string& spelling, bool hex)
+    {
+        const int base = hex ? 16 : spelling.size() > 1 && spelling[0] == '0' ? 8 : 10;
+        const char* first = spelling.data() + (hex ? 2 : 0);
+        const char* last = spelling.data() + spelling.size();
+        std::uint64_t value = 0;
+        const auto [end, failure] = std::from_chars(first, last, value, base);
+        if (end != last)   // only an octal constant can hold a digit its base does not have: an 8 or a 9
+        {
+            error(location, "invalid digit " + quoted(std::string(1, *end)) + " in octal constant");
+            return poison(ast::Type::Int).ir;
+        }
+        if (failure == std::errc::result_out_of_range || value > std::numeric_limits<std::int32_t>::max())
+        {
+            error(location, "integer constant is too large for type 'int'");
+            return poison(ast::Type::Int).ir;
+        }
+        return builder_.getInt32(static_cast<std::uint32_t>(value));
+    }
+
+    // (float)x, (int)x, (bool)x: C's casts between scalars. Each is the implicit conversion, written out.
+    Lowering::Value Lowering::lowerCast(SourceLocation location, const ast::CastExpr& cast)
+    {
+        return {convert(lower(*cast.operand), cast.type, location, Use::Casting), cast.type};
     }
 
     // `target op value`: the target must be an lvalue that is not const (Memory.cpp). The value of the expression
@@ -233,16 +309,11 @@ namespace fminus::ir::detail
         return {write(location, *target, value, Use::Assigning), target->type};
     }
 
-    // What `current op= value` stores: the operator, in the type both convert to (a scalar broadcasts to a
-    // vector). A null IR after an error.
+    // What `current op= value` stores, before it converts to the target's type: the operator's result, as
+    // binary() gives it (i *= 0.5f is a float, then truncated to the int i).
     Lowering::Value Lowering::compound(SourceLocation location, ast::AssignOp op, Value current, Value value)
     {
-        ast::Type common = ast::Type::Float;
-        if (!commonType(location, current.type, value.type, common))
-            return {nullptr, common};
-        return {arithmetic(compoundOperator(op), convert(current, common, location, Use::Initializing),
-                           convert(value, common, location, Use::Initializing)),
-                common};
+        return binary(location, compoundOperator(op), current, value);
     }
 
     // The operator of a compound assignment: += is +, ...
@@ -263,5 +334,29 @@ namespace fminus::ir::detail
             return ast::BinaryOp::Remainder;
         }
         return ast::BinaryOp::Add;
+    }
+
+    // ++x and --x are x += 1 and x -= 1, and so is x++ (x--), whose value is the target's before. The target is
+    // any lvalue that is not const: an int, a float, a vector (every lane), or a bool, which ++ makes true, as in C.
+    Lowering::Value Lowering::lowerIncrement(SourceLocation location, const ast::IncrementExpr& increment)
+    {
+        const bool decrement = increment.op == ast::IncrementOp::PreDecrement
+                               || increment.op == ast::IncrementOp::PostDecrement;
+        const bool prefix = increment.op == ast::IncrementOp::PreIncrement
+                            || increment.op == ast::IncrementOp::PreDecrement;
+        if (!isLValue(*increment.target))
+        {
+            error(location, "expression is not assignable");
+            return poison(ast::Type::Float);
+        }
+        const std::optional<LValue> target = lvalue(*increment.target, location);
+        if (!target || !writable(location, *target))
+            return poison(ast::Type::Float);
+        const Value before = read(*target);
+        const Value one{builder_.getInt32(1), ast::Type::Int};
+        const Value after =
+            binary(location, decrement ? ast::BinaryOp::Subtract : ast::BinaryOp::Add, before, one);
+        llvm::Value* stored = write(location, *target, after, Use::Assigning);
+        return prefix ? Value{stored, target->type} : before;
     }
 } // namespace fminus::ir::detail
