@@ -172,11 +172,52 @@ namespace fminus::ast
     {
     };
 
+    using StmtPtr = std::unique_ptr<Stmt>;
+
+    // `if (condition) thenBranch [else elseBranch]`. A float condition is `!= 0`, as in C.
+    struct IfStmt
+    {
+        ExprPtr condition;
+        StmtPtr thenBranch;
+        StmtPtr elseBranch;   // null without an else
+    };
+
+    struct WhileStmt
+    {
+        ExprPtr condition;
+        StmtPtr body;
+    };
+
+    // `for (init; condition; step) body`. The init's declarations are scoped to the loop; a missing condition is
+    // true, so the loop runs until a break or a return.
+    struct ForStmt
+    {
+        std::vector<Stmt> init;   // declarations, an expression statement, or nothing
+        ExprPtr condition;        // null when omitted
+        ExprPtr step;             // null when omitted
+        StmtPtr body;
+    };
+
+    struct BreakStmt
+    {
+    };
+
+    struct ContinueStmt
+    {
+    };
+
     struct Stmt
     {
         SourceLocation location;
-        std::variant<DeclStmt, ExprStmt, ReturnStmt, BlockStmt, EmptyStmt> node;
+        std::variant<DeclStmt, ExprStmt, ReturnStmt, BlockStmt, EmptyStmt, IfStmt, WhileStmt, ForStmt, BreakStmt,
+                     ContinueStmt>
+            node;
     };
+
+    inline StmtPtr own(Stmt stmt)
+    {
+        return std::make_unique<Stmt>(std::move(stmt));
+    }
 
     // A parameter is a variable of the function's outermost block, as in C: assignable unless const. A prototype may
     // leave its name out (empty).

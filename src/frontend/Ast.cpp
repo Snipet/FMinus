@@ -129,6 +129,28 @@ namespace fminus::ast
                                       return text + ")";
                                   },
                                   [&](const EmptyStmt&) { return indent + "(empty)"; },
+                                  [&](const IfStmt& branch) {
+                                      std::string text = indent + "(if " + dump(*branch.condition) + "\n"
+                                                         + dump(*branch.thenBranch, indent + "  ");
+                                      if (branch.elseBranch)
+                                          text += "\n" + dump(*branch.elseBranch, indent + "  ");
+                                      return text + ")";
+                                  },
+                                  [&](const WhileStmt& loop) {
+                                      return indent + "(while " + dump(*loop.condition) + "\n"
+                                             + dump(*loop.body, indent + "  ") + ")";
+                                  },
+                                  [&](const ForStmt& loop) {
+                                      std::string init;
+                                      for (const Stmt& item : loop.init)
+                                          init += (init.empty() ? "" : " ") + dump(item, "");
+                                      return indent + "(for (" + init + ") "
+                                             + (loop.condition ? dump(*loop.condition) : "()") + " "
+                                             + (loop.step ? dump(*loop.step) : "()") + "\n"
+                                             + dump(*loop.body, indent + "  ") + ")";
+                                  },
+                                  [&](const BreakStmt&) { return indent + "(break)"; },
+                                  [&](const ContinueStmt&) { return indent + "(continue)"; },
                               },
                               stmt.node);
         }

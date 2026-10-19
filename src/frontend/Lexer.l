@@ -56,6 +56,12 @@ IDENTIFIER  [A-Za-z_][A-Za-z0-9_]*
 "bool"                      { return Parser::make_BOOL(yyextra->where); }
 "true"                      { return Parser::make_TRUE(yyextra->where); }
 "false"                     { return Parser::make_FALSE(yyextra->where); }
+"if"                        { return Parser::make_IF(yyextra->where); }
+"else"                      { return Parser::make_ELSE(yyextra->where); }
+"while"                     { return Parser::make_WHILE(yyextra->where); }
+"for"                       { return Parser::make_FOR(yyextra->where); }
+"break"                     { return Parser::make_BREAK(yyextra->where); }
+"continue"                  { return Parser::make_CONTINUE(yyextra->where); }
 
 {DIGITS}"."[0-9]*{EXPONENT}?[fF]?   |
 "."{DIGITS}{EXPONENT}?[fF]?         |

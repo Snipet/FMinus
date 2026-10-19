@@ -10,6 +10,8 @@
 //     declaration  : "const"? type declarator ("," declarator)* ";"
 //     declarator   : IDENTIFIER ("=" expr)?
 //     statement    : block | expr ";" | "return" expr ";" | ";"
+//                  | "if" "(" expr ")" statement ("else" statement)? | "while" "(" expr ")" statement
+//                  | "for" "(" (declaration | expr? ";") expr? ";" expr? ")" statement | "break" ";" | "continue" ";"
 //     expr         : NUMBER | "true" | "false" | IDENTIFIER | IDENTIFIER "(" (expr ("," expr)*)? ")" | "(" expr ")"
 //                  | ("-" | "+" | "!") expr | expr ("*" | "/" | "%") expr | expr ("+" | "-") expr
 //                  | expr ("<" | "<=" | ">" | ">=") expr | expr ("==" | "!=") expr
@@ -98,6 +100,7 @@
 
 %token FLOAT "float" CONST "const" RETURN "return" BOOL "bool" TRUE "true" FALSE "false"
 %token LT "<" LE "<=" GT ">" GE ">=" EQ "==" NE "!=" NOT "!" AND "&&" OR "||" QUESTION "?" COLON ":"
+%token IF "if" ELSE "else" WHILE "while" FOR "for" BREAK "break" CONTINUE "continue"
 %token PLUS "+" MINUS "-" STAR "*" SLASH "/" PERCENT "%"
 %token ASSIGN "=" PLUS_ASSIGN "+=" MINUS_ASSIGN "-=" STAR_ASSIGN "*=" SLASH_ASSIGN "/=" PERCENT_ASSIGN "%="
 %token LPAREN "(" RPAREN ")" LBRACE "{" RBRACE "}" COMMA "," SEMI ";"
@@ -112,10 +115,17 @@
 %nterm <ast::Type> type
 %nterm <std::vector<ast::Stmt>> block block_items block_item declaration
 %nterm <ast::Stmt> statement
+%nterm <std::vector<ast::Stmt>> for_init
+%nterm <ast::ExprPtr> optional_expr
 %nterm <std::vector<Declarator>> declarators
 %nterm <Declarator> declarator
 %nterm <ast::ExprPtr> expr
 %nterm <std::vector<ast::ExprPtr>> args arg_list
+
+// The dangling else: in `if (a) if (b) s; else t;` the else could close either if. Giving it more precedence than the
+// shorter rule (THEN) makes Bison shift it, so it closes the nearest if, as in C.
+%precedence THEN
+%precedence "else"
 
 %right "=" "+=" "-=" "*=" "/=" "%="
 %right "?" ":"
@@ -208,6 +218,27 @@ statement
     | expr ";"                              { $$ = ast::Stmt{at(@1), ast::ExprStmt{$1}}; }
     | "return" expr ";"                     { $$ = ast::Stmt{at(@1), ast::ReturnStmt{$2}}; }
     | ";"                                   { $$ = ast::Stmt{at(@1), ast::EmptyStmt{}}; }
+    | "if" "(" expr ")" statement %prec THEN
+                                            { $$ = ast::Stmt{at(@1), ast::IfStmt{$3, ast::own($5), nullptr}}; }
+    | "if" "(" expr ")" statement "else" statement
+                                            { $$ = ast::Stmt{at(@1), ast::IfStmt{$3, ast::own($5), ast::own($7)}}; }
+    | "while" "(" expr ")" statement        { $$ = ast::Stmt{at(@1), ast::WhileStmt{$3, ast::own($5)}}; }
+    | "for" "(" for_init optional_expr ";" optional_expr ")" statement
+                                            { $$ = ast::Stmt{at(@1), ast::ForStmt{$3, $4, $6, ast::own($8)}}; }
+    | "break" ";"                           { $$ = ast::Stmt{at(@1), ast::BreakStmt{}}; }
+    | "continue" ";"                        { $$ = ast::Stmt{at(@1), ast::ContinueStmt{}}; }
+    ;
+
+// The first clause of a for: a declaration (its ; included), an expression and ;, or just ;.
+for_init
+    : declaration                           { $$ = $1; }
+    | expr ";"                              { $$.push_back(ast::Stmt{at(@1), ast::ExprStmt{$1}}); }
+    | ";"                                   {}
+    ;
+
+optional_expr
+    : %empty                                { $$ = nullptr; }
+    | expr                                  { $$ = $1; }
     ;
 
 expr
