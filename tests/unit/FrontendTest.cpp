@@ -140,6 +140,15 @@ TEST_CASE("pointers parse as C's: declarators, *, & and []", "[frontend]")
              "  (return (& ([] p 2))))\n");
 }
 
+TEST_CASE("errors print in source order, each with its notes after it", "[frontend]")
+{
+    fminus::Diagnostics diagnostics("x.fm");
+    diagnostics.error({2, 3}, "second");
+    diagnostics.error({1, 1}, "first", {{{5, 6}, "why", {}}, {{1, 9}, "and why", {}}});
+    CHECK(diagnostics.format()
+          == "x.fm:1:1: error: first\nx.fm:5:6: note: why\nx.fm:1:9: note: and why\nx.fm:2:3: error: second\n");
+}
+
 TEST_CASE("syntax and scanner errors carry their locations", "[frontend]")
 {
     CHECK(parsed("float f(float x) {\n    return x + ;\n}") == "test.fm:2:16: error: syntax error, unexpected ;\n");

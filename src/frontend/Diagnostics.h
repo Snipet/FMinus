@@ -13,10 +13,12 @@ namespace fminus
         int column = 1;
     };
 
+    // An error, and the notes that explain it (each a location and a message of its own, as clang's notes are).
     struct Diagnostic
     {
         SourceLocation location;
         std::string message;
+        std::vector<Diagnostic> notes;
     };
 
     // The errors of one compilation of one source file. Errors only for now: add a severity when warnings arrive.
@@ -25,7 +27,7 @@ namespace fminus
     public:
         explicit Diagnostics(std::string fileName);
 
-        void error(SourceLocation location, std::string message);
+        void error(SourceLocation location, std::string message, std::vector<Diagnostic> notes = {});
         bool hasErrors() const
         {
             return !errors_.empty();
@@ -40,7 +42,8 @@ namespace fminus
         }
 
         // Every error as "<file>:<line>:<column>: error: <message>\n", in source order (errors() keeps the order
-        // reported: the code generator's declaration pass reports before it lowers the bodies).
+        // reported: the code generator's declaration pass reports before it lowers the bodies), each followed by its
+        // notes, "<file>:<line>:<column>: note: <message>\n", in their own order wherever they point.
         std::string format() const;
 
     private:
