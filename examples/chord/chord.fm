@@ -1,0 +1,41 @@
+// examples/chord/chord.fm: the four notes of a chord, computed together in a float4. One vector expf gives all four
+// frequencies (libsystem_m's _simd_exp_f4 on Apple systems, docs/simd.md); literals and swizzles rearrange the lanes;
+// reductions read across them.
+//     fminus examples/chord/chord.fm --run main 60 1      note 1 of a C major seventh, first inversion: G4, 392 Hz
+//     fminus examples/chord/chord.fm --run span 60        how far its top is above its bottom, as a ratio
+//     fminus examples/chord/chord.fm --emit asm -o -      four frequencies, one call
+
+// MIDI note numbers to frequencies, four at a time: 440 * 2^((note - 69) / 12), lane by lane. A scalar meeting a
+// vector is broadcast: 69, 12, ln2 and 440 apply to every lane.
+float4 frequencies(float4 notes)
+{
+    const float ln2 = 0.693147181f;
+    return 440 * expf((notes - 69) / 12 * ln2);
+}
+
+// A major seventh chord on `root`: the root, the major third, the fifth and the major seventh.
+float4 major_seventh(float root)
+{
+    return frequencies(root + (float4)(0, 4, 7, 11));
+}
+
+// The chord's first inversion: its root moved up an octave, from the bottom to the top. The lanes of a float2 and two
+// floats fill the new float4 in order.
+float4 first_inversion(float4 chord)
+{
+    return (float4)(chord.yz, chord.w, chord.x * 2);
+}
+
+// The frequency of note `which` (0 to 3, lowest first) of the first inversion of the major seventh on `root`.
+float main(float root, float which)
+{
+    const float4 chord = first_inversion(major_seventh(root));
+    return which < 1 ? chord.x : which < 2 ? chord.y : which < 3 ? chord.z : chord.w;
+}
+
+// The ratio of that chord's highest note to its lowest.
+float span(float root)
+{
+    const float4 chord = first_inversion(major_seventh(root));
+    return reduce_max(chord) / reduce_min(chord);
+}

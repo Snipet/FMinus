@@ -1,0 +1,41 @@
+// examples/unison/unison.fm: a unison of detuned sawtooth voices, mixed down to one sample. A poly float holds one
+// voice per lane, as many lanes as the machine's vectors (4 on NEON, 16 on AVX-512), so the loop strip-mines the
+// voices: each step takes the next poly_lanes() of them, and a mask drops the lanes past the last voice.
+//     fminus examples/unison/unison.fm --run main 0.01 7                     7 voices, 10 ms in
+//     fminus examples/unison/unison.fm --poly-lanes 16 --run main 0.01 7     as an AVX-512 machine computes it
+// The voices are added up in an order that depends on the width, and float addition rounds differently in each order,
+// so the last digits do too (docs/simd.md, "Results depend on the width"). What each lane computes does not.
+
+// A naive sawtooth at `t` periods: from -1 up to 1 over each period.
+poly float saw(poly float t)
+{
+    return 2 * (t - floorf(t)) - 1;
+}
+
+// `voices` sawtooths at 110 Hz, detuned evenly from -spread to +spread semitones, mixed (their mean) at `time` seconds.
+float unison(float time, float voices, float spread)
+{
+    const float ln2 = 0.693147181f;
+    poly float mix = 0;
+    for (float first = 0; first < voices; first += poly_lanes())
+    {
+        const poly float voice = first + poly_index();   // this step's voices, one a lane
+        const poly bool active = voice < voices;         // false in the lanes past the last voice
+        const poly float detune = voices > 1 ? (voice / (voices - 1) * 2 - 1) * spread : 0;
+        const poly float frequency = 110 * expf(detune / 12 * ln2);
+        mix += active ? saw(frequency * time) : 0;
+    }
+    return reduce_add(mix) / voices;
+}
+
+// How many lanes a poly float has here.
+float lanes()
+{
+    return poly_lanes();
+}
+
+// A sample of `voices` voices, spread a quarter tone either side, at `time` seconds.
+float main(float time, float voices)
+{
+    return unison(time, voices, 0.5f);
+}

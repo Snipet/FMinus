@@ -1,0 +1,29 @@
+# The examples run, and give what their comments say (examples/*/*.fm). main.fm runs note and comparison; the biquad
+# has a harness of its own (ctest's example.biquad).
+# RUN: fminus %S/../../../examples/waveforms/waveforms.fm --run main 0.25 1000 | FileCheck %s --check-prefix=SAW
+# RUN: fminus %S/../../../examples/waveforms/waveforms.fm --run main 0.25 10000 | FileCheck %s --check-prefix=SAW2
+# RUN: fminus %S/../../../examples/waveforms/waveforms.fm --run square 0.25 1000 48000 | FileCheck %s --check-prefix=SQ
+# RUN: fminus %S/../../../examples/waveforms/waveforms.fm --emit exe -o %t.waveforms
+# RUN: %t.waveforms 0.75 1000 | FileCheck %s --check-prefix=SAWNEG
+# RUN: fminus %S/../../../examples/chord/chord.fm --run main 60 1 | FileCheck %s --check-prefix=CHORD
+# RUN: fminus %S/../../../examples/chord/chord.fm --run span 60 | FileCheck %s --check-prefix=SPAN
+# RUN: fminus %S/../../../examples/chord/chord.fm -O2 | FileCheck %s --check-prefix=CHORDIR
+# RUN: fminus %S/../../../examples/unison/unison.fm --run main 0.01 7 | FileCheck %s --check-prefix=MIX
+# RUN: fminus %S/../../../examples/unison/unison.fm --poly-lanes 16 --run main 0.01 7 | FileCheck %s --check-prefix=MIX
+# RUN: fminus %S/../../../examples/unison/unison.fm --poly-lanes 16 --run lanes | FileCheck %s --check-prefix=LANES16
+
+# 23 harmonics below 24 kHz approach the ideal 0.5; at 10 kHz only two fit, and the sum is exactly 2/pi.
+# SAW: 0.48675{{[0-9]*}}
+# SAW2: 0.63661975
+# SQ: 0.97351{{[0-9]*}}
+# SAWNEG: -0.48675{{[0-9]*}}
+
+# G4, and the span of the inversion: 2^(8/12). One vector expf for the four notes.
+# CHORD: 391.995{{[0-9]*}}
+# SPAN: 1.5874{{[0-9]*}}
+# CHORDIR-LABEL: define <4 x float> @frequencies(
+# CHORDIR: exp{{.*}}<4 x float>
+
+# The mean of 7 detuned saws; the last digits depend on the width.
+# MIX: -0.799592{{[0-9]*}}
+# LANES16: 16

@@ -36,12 +36,13 @@
 
 namespace
 {
-    // The FMinus kernel. One sample is three calls: v0 has no state and a single result per function.
+    // FMinus's float4 at the C boundary: clang's ext_vector_type, in one register (docs/simd.md).
+    using float4 = float __attribute__((ext_vector_type(4)));
+
+    // The FMinus kernel. One sample is one call, which returns the output and the two new states as (y, s1, s2, 0).
     struct Kernel
     {
-        float (*y)(float x, float s1, float cutoff, float q, float rate) = nullptr;
-        float (*s1)(float x, float y, float s2, float cutoff, float q, float rate) = nullptr;
-        float (*s2)(float x, float y, float cutoff, float q, float rate) = nullptr;
+        float4 (*lowpass)(float x, float s1, float s2, float cutoff, float q, float rate) = nullptr;
     };
 
     struct Signal
@@ -121,10 +122,10 @@ namespace
         {
             const float x = signal.input[i];
             const float cutoff = signal.cutoff[i];
-            const float y = kernel.y(x, s1, cutoff, q, rate);
-            s1 = kernel.s1(x, y, s2, cutoff, q, rate);
-            s2 = kernel.s2(x, y, cutoff, q, rate);
-            output[i] = y;
+            const float4 step = kernel.lowpass(x, s1, s2, cutoff, q, rate);
+            output[i] = step.x;
+            s1 = step.y;
+            s2 = step.z;
         }
     }
 
@@ -164,7 +165,7 @@ namespace
         return 1;
     }
 
-    // Compiles `path` at `level` into `jit`, and finds the kernel's three functions.
+    // Compiles `path` at `level` into `jit`, and finds the kernel.
     llvm::Error compile(const std::string& path, llvm::OptimizationLevel level, std::unique_ptr<fminus::jit::Jit>& jit,
                         Kernel& kernel)
     {
@@ -192,11 +193,7 @@ namespace
             function = address->toPtr<std::remove_reference_t<decltype(function)>>();
             return llvm::Error::success();
         };
-        if (llvm::Error error = find("lowpass_y", kernel.y))
-            return error;
-        if (llvm::Error error = find("lowpass_s1", kernel.s1))
-            return error;
-        return find("lowpass_s2", kernel.s2);
+        return find("lowpass", kernel.lowpass);
     }
 } // namespace
 
@@ -255,7 +252,7 @@ int main(int argc, char** argv)
     const double cppTime = nanosecondsPerSample(runCpp, samples, repeats);
     llvm::outs() << std::format(
         "biquad low-pass, cutoff swept 200 Hz to 8 kHz every sample: {} samples at {} Hz, Q {}\n"
-        "  FMinus (JIT, -O{}) {:8.2f} ns/sample   3 calls a sample, each recomputing coefficients\n"
+        "  FMinus (JIT, -O{}) {:8.2f} ns/sample   1 call a sample, returning (y, s1, s2) in a float4\n"
         "  C++ (clang)       {:8.2f} ns/sample   the same formulas, inlined into one loop\n"
         "  FMinus / C++      {:8.2f}x\n"
         "  max |FMinus - C++| = {:.3g}; float's own error (C++ float - double) = {:.3g}\n",

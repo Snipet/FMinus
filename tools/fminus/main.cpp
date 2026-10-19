@@ -7,7 +7,7 @@
 //     fminus gain.fm --emit exe -o gain     an executable that runs the program's main (support/Aot.h)
 //     fminus gain.fm --entry                the IR with that executable's C main (also for asm and obj)
 //     fminus gain.fm --run gain 0.5 2       JIT-compiles the program, calls gain(0.5, 2) and prints the result
-//     fminus voices.fm --poly-lanes 16      as if this machine's vectors held 16 floats (any target's poly float)
+//     fminus unison.fm --poly-lanes 16      as if this machine's vectors held 16 floats (any target's poly float)
 #include "frontend/Frontend.h"
 #include "ir/CodeGen.h"
 #include "jit/Jit.h"

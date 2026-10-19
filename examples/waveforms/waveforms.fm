@@ -1,0 +1,58 @@
+// examples/waveforms/waveforms.fm: band-limited waveforms by additive synthesis, one sample at a time: the sum of a
+// wave's harmonics, for every harmonic below Nyquist (above it, a harmonic would alias). C's control flow: for, while,
+// if, break and continue.
+//     fminus examples/waveforms/waveforms.fm --run main 0.25 1000          a 1 kHz sawtooth, a quarter period in
+//     fminus examples/waveforms/waveforms.fm --run square 0.25 1000 48000  a square wave
+//     fminus examples/waveforms/waveforms.fm --emit exe -o waveforms && ./waveforms 0.25 1000
+
+float pi()
+{
+    return 3.14159265358979323846f;
+}
+
+// A phase (in periods) brought into [-0.5, 0.5): whole periods change nothing.
+float wrap(float phase)
+{
+    while (phase >= 0.5f)
+        phase -= 1;
+    while (phase < -0.5f)
+        phase += 1;
+    return phase;
+}
+
+// A sawtooth rising from -1 to 1 over each period, through 0 at phase 0: 2/pi times the sum of (-1)^(k+1) sin(k w) / k.
+float sawtooth(float phase, float frequency, float rate)
+{
+    const float w = 2 * pi() * wrap(phase);
+    float sum = 0;
+    float sign = 1;   // (-1)^(k + 1)
+    for (float k = 1;; k += 1)
+    {
+        if (k * frequency >= rate / 2)
+            break;   // this harmonic and every one above it would alias
+        sum += sign * sinf(k * w) / k;
+        sign = -sign;
+    }
+    return 2 / pi() * sum;
+}
+
+// A square wave, from 1 for the first half period to -1 for the second: 4/pi times the sum of sin(k w) / k over the
+// odd harmonics only.
+float square(float phase, float frequency, float rate)
+{
+    const float w = 2 * pi() * wrap(phase);
+    float sum = 0;
+    for (float k = 1; k * frequency < rate / 2; k += 1)
+    {
+        if (k % 2 == 0)
+            continue;   // a square wave has no even harmonics
+        sum += sinf(k * w) / k;
+    }
+    return 4 / pi() * sum;
+}
+
+// A sample of a sawtooth at `frequency` Hz, at 48 kHz.
+float main(float phase, float frequency)
+{
+    return sawtooth(phase, frequency, 48000);
+}
