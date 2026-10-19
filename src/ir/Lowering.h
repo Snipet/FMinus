@@ -5,7 +5,7 @@
 //     Functions.cpp     declarations and prototypes, bodies and parameters, stack slots and scopes
 //     Statements.cpp    blocks, declarations, return, if, while, for, break and continue
 //     Expressions.cpp   constants, variables, operators, &&, ||, ?:, casts, assignment, ++ and --
-//     Calls.cpp         calls: the builtins (math functions, reductions, poly queries) and the program's functions
+//     Calls.cpp         calls: the builtins (math functions, reductions, poly queries, the heap) and the program's
 //     Vectors.cpp       vector literals, swizzles, and ?: lane by lane
 //     Memory.cpp        lvalues (variables, p[i], *p, components) read and written, &x, and pointer arithmetic
 // A new node is lowered in the file its kind belongs to. The build says which members still need it: a std::visit
@@ -47,7 +47,16 @@ namespace fminus::ir::detail
         unsigned arity;
     };
 
+    // An allocation builtin (Calls.cpp): C's name, the runtime function it calls (runtime/Runtime.h) and its arity.
+    struct Allocation
+    {
+        std::string_view name;
+        std::string_view runtime;
+        unsigned arity;
+    };
+
     const Builtin* findBuiltin(std::string_view name);   // <math.h>'s float functions, or nullptr
+    const Allocation* findAllocation(std::string_view name);   // malloc, calloc, free, or nullptr
     bool isReduction(std::string_view name);             // reduce_add, reduce_min, reduce_max
     bool isPolyQuery(std::string_view name);             // poly_lanes, poly_index
 
@@ -117,6 +126,7 @@ namespace fminus::ir::detail
         void pointerMismatch(SourceLocation location, Use use, ast::Type from, ast::Type to, bool discardsConst);
         bool checkType(SourceLocation location, ast::Type type);
         void noPointerTo(SourceLocation location, ast::Type pointee);
+        std::optional<unsigned> sizeOf(ast::Type type) const;
         bool commonType(SourceLocation location, ast::Type a, ast::Type b, ast::Type& type);
         void polyMismatch(SourceLocation location, ast::Type a, ast::Type b);
         Value poison(ast::Type type);
@@ -153,6 +163,7 @@ namespace fminus::ir::detail
         Value lowerNumber(SourceLocation location, const ast::NumberExpr& number);
         llvm::Value* lowerInteger(SourceLocation location, const std::string& spelling, bool hex);
         Value lowerCast(SourceLocation location, const ast::CastExpr& cast);
+        Value lowerSizeof(SourceLocation location, const ast::SizeofExpr& size);
         Value lowerAssign(SourceLocation location, const ast::AssignExpr& assign);
         Value compound(SourceLocation location, ast::AssignOp op, Value current, Value value);
         static ast::BinaryOp compoundOperator(ast::AssignOp op);
@@ -183,6 +194,8 @@ namespace fminus::ir::detail
         Value lowerCall(SourceLocation location, const ast::CallExpr& call);
         Value lowerReduction(SourceLocation location, const ast::CallExpr& call, const std::vector<Value>& args);
         Value wrongArity(SourceLocation location, const ast::CallExpr& call, unsigned expected);
+        Value lowerAllocation(SourceLocation location, const Allocation& allocation, const ast::CallExpr& call,
+                              const std::vector<Value>& args);
 
         // ---- the state of one lowering ----------------------------------------------------------------------------
         llvm::Module& module_;

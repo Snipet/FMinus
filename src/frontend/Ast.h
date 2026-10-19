@@ -32,9 +32,10 @@ namespace fminus::ast
     // declare.
     //
     // A pointer is C's: the address of a float, an int, a float2, a float4 or a float8 (FMinus has no pointers to
-    // pointers, to bool, to poly types or to void). `const float*` points to floats a program reads but cannot write
-    // through it. p[i] is the i-th element from p, *p is p[0], and &x is x's address; p + i, p - i, p - q (how many
-    // elements apart, an int) and comparisons of two pointers of one type are C's.
+    // pointers, to bool or to poly types). `const float*` points to floats a program reads but cannot write through
+    // it. p[i] is the i-th element from p, *p is p[0], and &x is x's address; p + i, p - i, p - q (how many elements
+    // apart, an int) and comparisons of two pointers of one type are C's. A void* is an address with no type, what
+    // malloc returns: it converts to and from any other pointer, as in C, and has no elements.
     //
     // A type is a kind, and for a pointer what it points to; two types are the same when every field is. Type::Float
     // and the rest name the types that are only a kind, and a kind converts to its type, so `type == Type::Float`
@@ -140,11 +141,11 @@ namespace fminus::ast
         return type.pointee;
     }
 
-    // Whether FMinus has pointers to `kind`: to float, int, float2, float4 and float8.
+    // Whether FMinus has pointers to `kind`: to float, int, float2, float4, float8 and void.
     inline bool canPointTo(Kind kind)
     {
         return kind == Kind::Float || kind == Kind::Int || kind == Kind::Float2 || kind == Kind::Float4
-               || kind == Kind::Float8;
+               || kind == Kind::Float8 || kind == Kind::Void;
     }
 
     // Whether a value of `type` takes part in arithmetic: every type's but void's and a pointer's (whose arithmetic
@@ -360,6 +361,13 @@ namespace fminus::ast
         ExprPtr index;
     };
 
+    // `sizeof(float)`, `sizeof(float4*)`: a type's size in bytes, an int (C's is a size_t). FMinus has no sizeof of an
+    // expression.
+    struct SizeofExpr
+    {
+        Type type = Type::Float;
+    };
+
     // `(int)x`, `(float)x`, `(bool)x`: C's casts between scalar types, the implicit conversions written out. (int)
     // truncates toward zero.
     struct CastExpr
@@ -372,7 +380,7 @@ namespace fminus::ast
     {
         SourceLocation location;
         std::variant<NumberExpr, VariableExpr, BoolExpr, UnaryExpr, BinaryExpr, LogicalExpr, CallExpr, AssignExpr,
-                     ConditionalExpr, ConstructExpr, SwizzleExpr, IncrementExpr, CastExpr, IndexExpr>
+                     ConditionalExpr, ConstructExpr, SwizzleExpr, IncrementExpr, CastExpr, IndexExpr, SizeofExpr>
             node;
     };
 

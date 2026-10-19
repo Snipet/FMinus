@@ -76,6 +76,7 @@ namespace fminus::ir::detail
                 [&](const ast::AssignExpr& assign) { return lowerAssign(expr.location, assign); },
                 [&](const ast::IncrementExpr& increment) { return lowerIncrement(expr.location, increment); },
                 [&](const ast::CastExpr& cast) { return lowerCast(expr.location, cast); },
+                [&](const ast::SizeofExpr& size) { return lowerSizeof(expr.location, size); },
             },
             expr.node);
     }
@@ -232,10 +233,14 @@ namespace fminus::ir::detail
                                 + quoted(ast::typeName(thenVoid ? elseValue.type : thenValue.type)));
         else if (pointers && !meet)
         {
-            meet = ast::isPointer(thenValue.type) && ast::isPointer(elseValue.type)
-                   && thenValue.type.pointee == elseValue.type.pointee;
+            // Two pointers to one type, or one a void*, which the other converts to (C's); const if either is.
+            const bool both = ast::isPointer(thenValue.type) && ast::isPointer(elseValue.type);
+            const bool same = both && thenValue.type.pointee == elseValue.type.pointee;
+            meet = same || (both && (thenValue.type.pointee == ast::Kind::Void
+                                     || elseValue.type.pointee == ast::Kind::Void));
             if (meet)
-                type.pointeeConst = true;   // the one that is not const converts to the one that is
+                type = ast::Type::pointerTo(same ? thenValue.type.pointee : ast::Kind::Void,
+                                            thenValue.type.pointeeConst || elseValue.type.pointeeConst);
             else
                 error(location, "incompatible operand types (" + quoted(ast::typeName(thenValue.type)) + " and "
                                     + quoted(ast::typeName(elseValue.type)) + ")");
@@ -306,6 +311,20 @@ namespace fminus::ir::detail
             return poison(ast::Type::Int).ir;
         }
         return builder_.getInt32(static_cast<std::uint32_t>(value));
+    }
+
+    // sizeof(type): the type's size in bytes (Types.cpp), an int constant.
+    Lowering::Value Lowering::lowerSizeof(SourceLocation location, const ast::SizeofExpr& size)
+    {
+        const std::optional<unsigned> bytes = sizeOf(size.type);
+        if (!bytes)
+        {
+            error(location, "invalid application of 'sizeof' to an incomplete type 'void'");
+            return poison(ast::Type::Int);
+        }
+        if (!checkType(location, size.type))
+            return poison(ast::Type::Int);
+        return {builder_.getInt32(*bytes), ast::Type::Int};
     }
 
     // (float)x, (int)x, (bool)x: C's casts between scalars. Each is the implicit conversion, written out.

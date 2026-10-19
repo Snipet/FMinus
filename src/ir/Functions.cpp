@@ -29,12 +29,16 @@ namespace fminus::ir::detail
             error(function.location, quoted(function.name) + " is a builtin and cannot be redefined");
             return;
         }
-        if (const Builtin* builtin = findBuiltin(function.name))
+        const Builtin* builtin = findBuiltin(function.name);
+        const Allocation* allocation = findAllocation(function.name);
+        if (builtin != nullptr || allocation != nullptr)
         {
-            // A prototype of a builtin, as <math.h> has, declares nothing new; a definition is refused.
+            // A prototype of a builtin, as <math.h> and <stdlib.h> have, declares nothing new; a definition is
+            // refused.
+            const unsigned arity = builtin != nullptr ? builtin->arity : allocation->arity;
             if (function.isDefinition)
                 error(function.location, quoted(function.name) + " is a builtin and cannot be redefined");
-            else if (function.params.size() != builtin->arity)
+            else if (function.params.size() != arity)
                 error(function.location, "conflicting types for " + quoted(function.name));
             return;
         }

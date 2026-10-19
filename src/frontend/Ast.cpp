@@ -144,6 +144,9 @@ namespace fminus::ast
                                       return std::string("(") + opName(increment.op) + " " + dump(*increment.target)
                                              + ")";
                                   },
+                                  [](const SizeofExpr& size) {   // (sizeof float *)
+                                      return "(sizeof " + typeName(size.type) + ")";
+                                  },
                                   [](const IndexExpr& index) {   // ([] p i)
                                       return "([] " + dump(*index.base) + " " + dump(*index.index) + ")";
                                   },

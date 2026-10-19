@@ -1,5 +1,6 @@
 // src/ir/Calls.cpp: calls. The builtins, in the order a call tries them: the reductions, poly_lanes and poly_index,
-// then <math.h>'s float functions (LLVM intrinsics, overloaded on vectors); then the program's own functions.
+// <math.h>'s float functions (LLVM intrinsics, overloaded on vectors), and <stdlib.h>'s heap (malloc, calloc and
+// free, on the runtime's functions); then the program's own functions.
 #include "ir/Lowering.h"
 
 #include <llvm/IR/Constants.h>
@@ -16,6 +17,13 @@ namespace fminus::ir::detail
         Builtin{"expf", llvm::Intrinsic::exp, 1},     Builtin{"logf", llvm::Intrinsic::log, 1},
         Builtin{"floorf", llvm::Intrinsic::floor, 1}, Builtin{"fminf", llvm::Intrinsic::minnum, 2},
         Builtin{"fmaxf", llvm::Intrinsic::maxnum, 2}, Builtin{"tanhf", llvm::Intrinsic::tanh, 1},
+    };
+
+    // C's heap, <stdlib.h>'s functions, on the runtime's (runtime/Runtime.h): memory aligned to 64 bytes and zeroed.
+    constexpr std::array kAllocations{
+        Allocation{"malloc", "fminus_rt_malloc", 1},
+        Allocation{"calloc", "fminus_rt_calloc", 2},
+        Allocation{"free", "fminus_rt_free", 1},
     };
 
     // The reductions of a float vector to one float: its sum (in lane order, so the result does not depend on
@@ -37,6 +45,16 @@ namespace fminus::ir::detail
     bool isPolyQuery(std::string_view name)
     {
         return name == "poly_lanes" || name == "poly_index";
+    }
+
+    const Allocation* findAllocation(std::string_view name)
+    {
+        for (const Allocation& allocation : kAllocations)
+        {
+            if (allocation.name == name)
+                return &allocation;
+        }
+        return nullptr;
     }
 
     const Builtin* findBuiltin(std::string_view name)
@@ -68,6 +86,8 @@ namespace fminus::ir::detail
                 indices.push_back(llvm::ConstantFP::get(builder_.getFloatTy(), static_cast<double>(i)));
             return {llvm::ConstantVector::get(indices), ast::Type::PolyFloat};
         }
+        if (const Allocation* allocation = findAllocation(call.callee))
+            return lowerAllocation(location, *allocation, call, args);
         std::vector<llvm::Value*> irArgs;
         if (const Builtin* builtin = findBuiltin(call.callee))
         {
@@ -128,6 +148,36 @@ namespace fminus::ir::detail
         if (call.callee == "reduce_min")
             return {builder_.CreateFPMinReduce(vector.ir), ast::Type::Float};
         return {builder_.CreateFPMaxReduce(vector.ir), ast::Type::Float};
+    }
+
+    // malloc(size), calloc(count, size) and free(p): C's, with sizes in ints (C's are size_t), on the runtime's
+    // functions, which take 64-bit sizes. malloc and calloc return a void* (null when the size is not positive or the
+    // memory is not there), which converts to any pointer; free takes any pointer, or null.
+    Lowering::Value Lowering::lowerAllocation(SourceLocation location, const Allocation& allocation,
+                                              const ast::CallExpr& call, const std::vector<Value>& args)
+    {
+        if (args.size() != allocation.arity)
+            return wrongArity(location, call, allocation.arity);
+        const ast::Type voidPointer = ast::Type::pointerTo(ast::Kind::Void, false);
+        llvm::Type* pointerType = builder_.getPtrTy();
+        if (allocation.name == "free")
+        {
+            llvm::Value* pointer = convert(args[0], voidPointer, location, Use::Passing);
+            const llvm::FunctionCallee free =
+                module_.getOrInsertFunction(allocation.runtime, builder_.getVoidTy(), pointerType);
+            return {builder_.CreateCall(free, {pointer}), ast::Type::Void};
+        }
+        std::vector<llvm::Value*> sizes;
+        std::vector<llvm::Type*> sizeTypes;
+        for (const Value& arg : args)
+        {
+            llvm::Value* size = convert(arg, ast::Type::Int, location, Use::Passing);
+            sizes.push_back(builder_.CreateSExt(size, builder_.getInt64Ty(), "size"));
+            sizeTypes.push_back(builder_.getInt64Ty());
+        }
+        const llvm::FunctionCallee allocate =
+            module_.getOrInsertFunction(allocation.runtime, llvm::FunctionType::get(pointerType, sizeTypes, false));
+        return {builder_.CreateCall(allocate, sizes, std::string(allocation.name)), voidPointer};
     }
 
     Lowering::Value Lowering::wrongArity(SourceLocation location, const ast::CallExpr& call, unsigned expected)

@@ -95,6 +95,12 @@ namespace fminus::ir::detail
                                                       std::optional<Value> index)
     {
         const ast::Type type = ast::pointee(pointer.type);
+        if (type == ast::Type::Void)   // an address with no type: it has no elements
+        {
+            error(location, index ? "subscript of pointer to incomplete type 'void'"
+                                  : "indirection not permitted on operand of type " + quoted(ast::typeName(pointer.type)));
+            return std::nullopt;
+        }
         if (!ast::canPointTo(type.kind))
             return std::nullopt;
         llvm::Value* address = pointer.ir;
@@ -216,10 +222,18 @@ namespace fminus::ir::detail
         const std::string operands =
             "(" + quoted(ast::typeName(lhs.type)) + " and " + quoted(ast::typeName(rhs.type)) + ")";
         const auto integer = [](Value value) { return value.type == ast::Type::Int || value.type == ast::Type::Bool; };
+        const bool voidPointee = (ast::isPointer(lhs.type) && lhs.type.pointee == ast::Kind::Void)
+                                 || (ast::isPointer(rhs.type) && rhs.type.pointee == ast::Kind::Void);
+        if (voidPointee && !isComparison(op) && (op == ast::BinaryOp::Add || op == ast::BinaryOp::Subtract))
+        {
+            error(location, "arithmetic on a pointer to void");   // a void* has no element size
+            return poison(op == ast::BinaryOp::Subtract && ast::isPointer(rhs.type) ? ast::Type::Int : lhs.type);
+        }
         if (ast::isPointer(lhs.type) && ast::isPointer(rhs.type))
         {
             const bool comparison = isComparison(op);
-            const bool samePointee = lhs.type.pointee == rhs.type.pointee;
+            // A void* compares with any pointer, as in C: it converts to the void* first.
+            const bool samePointee = lhs.type.pointee == rhs.type.pointee || voidPointee;
             if (samePointee && op == ast::BinaryOp::Subtract && ast::canPointTo(lhs.type.pointee))
             {
                 llvm::Value* difference =

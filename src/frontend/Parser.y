@@ -17,6 +17,7 @@
 //                  | "for" "(" (declaration | expr? ";") expr? ";" expr? ")" statement | "break" ";" | "continue" ";"
 //     expr         : NUMBER | "true" | "false" | IDENTIFIER | IDENTIFIER "(" (expr ("," expr)*)? ")" | "(" expr ")"
 //                  | ("-" | "+" | "!" | "*" | "&") expr | expr "[" expr "]"         *p, &x, p[i]
+//                  | "sizeof" "(" "const"? type pointer ")"                          a type's size, an int
 //                  | expr ("*" | "/" | "%") expr | expr ("+" | "-") expr
 //                  | expr ("<" | "<=" | ">" | ">=") expr | expr ("==" | "!=") expr
 //                  | expr "&&" expr | expr "||" expr | expr "?" expr ":" expr
@@ -140,7 +141,7 @@
 }
 
 %token FLOAT "float" CONST "const" RETURN "return" BOOL "bool" INT "int" VOID "void" TRUE "true" FALSE "false"
-%token RESTRICT "restrict" AMPERSAND "&" LBRACKET "[" RBRACKET "]"
+%token RESTRICT "restrict" AMPERSAND "&" LBRACKET "[" RBRACKET "]" SIZEOF "sizeof"
 %token LT "<" LE "<=" GT ">" GE ">=" EQ "==" NE "!=" NOT "!" AND "&&" OR "||" QUESTION "?" COLON ":"
 %token IF "if" ELSE "else" WHILE "while" FOR "for" BREAK "break" CONTINUE "continue"
 %token <ast::Type> VECTOR_TYPE "vector type"
@@ -354,6 +355,10 @@ expr
                                                 $$ = ast::makeExpr(at(@1), ast::UnaryExpr{ast::UnaryOp::AddressOf, $2});
                                             }
     | expr "[" expr "]"                     { $$ = ast::makeExpr(at(@2), ast::IndexExpr{$1, $3}); }
+    | "sizeof" "(" qualifier type pointer ")"
+                                            {
+                                                $$ = ast::makeExpr(at(@1), ast::SizeofExpr{declared($3, $4, $5).type});
+                                            }
     | "++" expr %prec UNARY                 { $$ = increment(@1, ast::IncrementOp::PreIncrement, $2); }
     | "--" expr %prec UNARY                 { $$ = increment(@1, ast::IncrementOp::PreDecrement, $2); }
     | expr "++"                             { $$ = increment(@2, ast::IncrementOp::PostIncrement, $1); }

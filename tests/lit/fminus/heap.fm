@@ -1,0 +1,28 @@
+// The heap: malloc and calloc call the runtime's functions with 64-bit sizes (sizeof is a constant), and free does too.
+// An executable links the runtime, so a main may allocate.
+// RUN: fminus %s -O0 | FileCheck %s
+// RUN: fminus %s --emit exe -o %t
+// RUN: %t 1000 | FileCheck %s --check-prefix=RESULT
+
+// The sum of 0, 1, ..., n - 1, through a buffer on the heap.
+float main(float n)
+{
+    const int count = n;
+    float* buffer = calloc(count, sizeof(float));
+    for (int i = 0; i < count; ++i)
+        buffer[i] = i;
+    float sum = 0;
+    for (int i = 0; i < count; ++i)
+        sum += buffer[i];
+    free(buffer);
+    return sum;
+}
+
+// CHECK-LABEL: define float @main(float %n)
+// CHECK:         [[COUNT:%.*]] = sext i32 {{%.*}} to i64
+// CHECK:         call ptr @fminus_rt_calloc(i64 [[COUNT]], i64 4)
+// CHECK:         call void @fminus_rt_free(ptr {{%.*}})
+// CHECK:       declare ptr @fminus_rt_calloc(i64, i64)
+// CHECK:       declare void @fminus_rt_free(ptr)
+
+// RESULT: 499500

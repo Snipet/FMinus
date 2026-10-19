@@ -140,6 +140,12 @@ TEST_CASE("pointers parse as C's: declarators, *, & and []", "[frontend]")
              "  (return (& ([] p 2))))\n");
 }
 
+TEST_CASE("sizeof takes a type, as C's sizeof(type) does", "[frontend]")
+{
+    CHECK(parsed("int f() { return sizeof(float) + sizeof(const float4*) + sizeof(poly float); }")
+          == "(function int f ()\n  (return (+ (+ (sizeof float) (sizeof const float4 *)) (sizeof poly float))))\n");
+}
+
 TEST_CASE("errors print in source order, each with its notes after it", "[frontend]")
 {
     fminus::Diagnostics diagnostics("x.fm");

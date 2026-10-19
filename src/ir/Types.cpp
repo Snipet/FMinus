@@ -96,11 +96,13 @@ namespace fminus::ir::detail
             return builder_.CreateIsNotNull(value.ir, "tobool");
         if (ast::isPointer(value.type) && ast::isPointer(type))
         {
-            const bool samePointee = value.type.pointee == type.pointee;
+            // C converts any pointer to a void* and back (what malloc's result needs), without a cast.
+            const bool compatible = value.type.pointee == type.pointee || value.type.pointee == ast::Kind::Void
+                                    || type.pointee == ast::Kind::Void;
             const bool discardsConst = value.type.pointeeConst && !type.pointeeConst;
-            if (samePointee && !discardsConst)
-                return value.ir;   // const is the type's, not the IR's: the same ptr
-            pointerMismatch(location, use, value.type, type, samePointee);
+            if (compatible && !discardsConst)
+                return value.ir;   // const and the pointee are the type's, not the IR's: the same ptr
+            pointerMismatch(location, use, value.type, type, compatible);
             return poison(type).ir;
         }
         incompatible(location, use, value.type, type);
@@ -149,8 +151,38 @@ namespace fminus::ir::detail
 
     void Lowering::noPointerTo(SourceLocation location, ast::Type pointee)
     {
-        error(location, "FMinus has pointers to float, int, float2, float4 and float8, not to "
+        error(location, "FMinus has pointers to float, int, float2, float4, float8 and void, not to "
                             + quoted(ast::typeName(pointee)));
+    }
+
+    // A type's size in bytes, as C and clang's ext_vector_type have it on the 64-bit targets FMinus runs on: a float4
+    // is 16, a pointer 8, a poly float as many floats as the target's vectors hold (16 bytes with NEON, 64 with
+    // AVX-512). A lane mask has a byte a lane. void has no size.
+    std::optional<unsigned> Lowering::sizeOf(ast::Type type) const
+    {
+        switch (type.kind)
+        {
+        case ast::Kind::Void:
+            return std::nullopt;
+        case ast::Kind::Bool:
+            return 1;
+        case ast::Kind::Int:
+        case ast::Kind::Float:
+            return 4;
+        case ast::Kind::Float2:
+        case ast::Kind::Float4:
+        case ast::Kind::Float8:
+        case ast::Kind::PolyFloat:
+            return 4 * lanes(type);
+        case ast::Kind::Bool2:
+        case ast::Kind::Bool4:
+        case ast::Kind::Bool8:
+        case ast::Kind::PolyBool:
+            return lanes(type);
+        case ast::Kind::Pointer:
+            return 8;
+        }
+        return std::nullopt;
     }
 
     void Lowering::incompatible(SourceLocation location, Use use, ast::Type from, ast::Type to)

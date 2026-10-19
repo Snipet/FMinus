@@ -4,6 +4,8 @@
 #include <charconv>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <limits>
 
 extern "C" std::int32_t fminus_rt_abi_version() noexcept
 {
@@ -44,4 +46,34 @@ extern "C" void fminus_rt_main_result(float result) noexcept
 extern "C" void fminus_rt_main_bool_result(bool result) noexcept
 {
     std::fputs(result ? "true\n" : "false\n", stdout);
+}
+
+namespace
+{
+    constexpr std::int64_t kAlignment = 64;
+    constexpr std::int64_t kLargest = std::int64_t{1} << 34;   // 16 GiB: any more is a mistake, and zeroing it would
+                                                               // take the machine's memory
+}
+
+extern "C" void* fminus_rt_malloc(std::int64_t size) noexcept
+{
+    return fminus_rt_calloc(1, size);
+}
+
+extern "C" void* fminus_rt_calloc(std::int64_t count, std::int64_t size) noexcept
+{
+    if (count <= 0 || size <= 0 || count > kLargest / size)
+        return nullptr;
+    // aligned_alloc wants a multiple of the alignment. Zeroing touches every page, so the audio thread will not fault
+    // on one later.
+    const std::int64_t bytes = (count * size + kAlignment - 1) / kAlignment * kAlignment;
+    void* memory = std::aligned_alloc(static_cast<std::size_t>(kAlignment), static_cast<std::size_t>(bytes));
+    if (memory != nullptr)
+        std::memset(memory, 0, static_cast<std::size_t>(bytes));
+    return memory;
+}
+
+extern "C" void fminus_rt_free(void* memory) noexcept
+{
+    std::free(memory);
 }
