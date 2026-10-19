@@ -62,6 +62,7 @@ tests/
   unit/                 your Catch2 tests
   smoke/                the toolchain's checks: LLJIT + O3 on the host, Bison + Flex (smoke/calc/)
   lit/                  lit + FileCheck tests (*.test, *.fm, *.ll)
+editors/vscode/         a VSCode extension: syntax highlighting for .fm files (its README installs it)
 Scripts/pin-llvm.sh     the pin lines for another LLVM release
 docs/                   the manual: architecture, programs, extending, SIMD, building, testing; recipes/ as patches
 ```
@@ -283,6 +284,9 @@ preset has a workflow (`cmake --workflow --preset <name>`) except `xcode`, which
 ## Handy
 
 - `build-dev/bin/fminus-hostinfo [--features]`: the triple, CPU, features and data layout the JIT targets here.
+- VSCode: `python3 editors/vscode/package.py`, then `code --install-extension build-vscode/fminus-0.1.0.vsix`, for
+  FMinus syntax highlighting, lit's `RUN:` and `CHECK:` lines included
+  ([editors/vscode/README.md](editors/vscode/README.md)).
 - `build-dev/bin/fminus`: FMinus source to its tree, IR, assembly or an object, or run in the JIT (above).
 - `build-dev/bin/fminus-build`: LLVM IR to an executable, object, assembly or optimised IR (above).
 - The LLVM tools of the flavor in use are in `.deps/install/llvm-…/bin`: `opt -passes='default<O3>' -S`,

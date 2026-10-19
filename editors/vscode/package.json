@@ -1,0 +1,35 @@
+{
+    "name": "fminus",
+    "displayName": "FMinus",
+    "description": "Syntax highlighting for FMinus (.fm), a subset of C for audio DSP, and its lit tests",
+    "version": "0.1.0",
+    "publisher": "fminus",
+    "engines": {
+        "vscode": "^1.75.0"
+    },
+    "categories": [
+        "Programming Languages"
+    ],
+    "contributes": {
+        "languages": [
+            {
+                "id": "fminus",
+                "aliases": [
+                    "FMinus",
+                    "fminus"
+                ],
+                "extensions": [
+                    ".fm"
+                ],
+                "configuration": "./language-configuration.json"
+            }
+        ],
+        "grammars": [
+            {
+                "language": "fminus",
+                "scopeName": "source.fminus",
+                "path": "./syntaxes/fminus.tmLanguage.json"
+            }
+        ]
+    }
+}
