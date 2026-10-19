@@ -113,7 +113,8 @@ Every source list is a glob, so adding a file never edits CMake. Configure picks
 | an example | `examples/<name>/*.cpp`, and its FMinus sources | `bin/example-<name>`, told its directory as `FMINUS_EXAMPLE_DIR`, with a ctest `example.<name>` running `--check` |
 | a unit test | `tests/unit/*.cpp` | part of `fminus-tests`; each `TEST_CASE` is a ctest test |
 | a lit test | `tests/lit/**/*.{fm,ll,test}` | part of the lit suite |
-| a public header | `include/fminus/` | `"fminus/..."`, for code embedding FMinus |
+| a public header | `include/fminus/` | `"fminus/..."`, for code embedding FMinus (FMinus.h: C++17, no LLVM) |
+| a test of the public API | `tests/library/*.cpp` | part of `fminus-library-tests` (C++17, `FMinus::FMinus` alone) |
 
 A grammar outside `src/` (a test's, say) uses the helper directly, as `tests/CMakeLists.txt` does for the
 calculator:
@@ -123,8 +124,10 @@ fminus_add_grammar(<target> PARSER x.y LEXERS x.l [BASE_DIR dir] [OUTPUT_DIR dir
                    [BISON_FLAGS ...] [FLEX_FLAGS ...])
 ```
 
-Every FMinus target gets `fminus_target_defaults(<target>)`: C++23, the warnings, `-Werror` (`FMINUS_WERROR`), and
-the sanitizers.
+Every FMinus target gets `fminus_target_defaults(<target> [CXX_STANDARD <n>])`: C++23 (or C++<n>), the warnings,
+`-Werror` (`FMINUS_WERROR`), and the sanitizers. The standard is the target's own and never reaches its users, except
+through an interface library (`FMinus::Internal`'s C++23): `FMinus::FMinus` asks its users for C++17, what the public
+header needs.
 
 ## Adding a dependency
 

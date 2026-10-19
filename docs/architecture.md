@@ -27,7 +27,8 @@ stage to the next. [extending.md](extending.md) builds on this to show how to ad
 
 Each arrow is one function call with a plain value in between, so each stage can be tested on its own and the
 stages can be recombined freely. `tools/fminus/main.cpp` strings them together; reading it is the quickest way to
-see the whole flow.
+see the whole flow. For a host, the public API strings parse, lower and the JIT together behind one class,
+`fminus::Program` (`include/fminus/FMinus.h`, implemented in `src/api/FMinus.cpp`; below).
 
 | Stage | Entry point | Input | Output | Errors |
 |---|---|---|---|---|
@@ -344,6 +345,7 @@ Because the JIT and executables share one runtime, the two compile the same prog
 | `fminus-hostinfo` | `tools/fminus-hostinfo/main.cpp` | the triple, CPU, features and data layout the JIT targets |
 | `example-biquad` | `examples/biquad/bench.cpp` | biquad.fm in the JIT against C++, compared and timed |
 | `fminus-tests` | `tests/unit/`, `tests/smoke/` | Catch2 |
+| `fminus-library-tests` | `tests/library/` | Catch2, in C++17, against `FMinus::FMinus` alone: the public API as a host uses it |
 | lit suite | `tests/lit/` | `fminus`, `fminus-build`, FileCheck, LLVM's tools |
 
 ## Libraries and include roots
@@ -351,11 +353,15 @@ Because the JIT and executables share one runtime, the two compile the same prog
 | Target | What | Include roots it gives |
 |---|---|---|
 | `fminus_runtime` (`FMinus::Runtime`) | `src/runtime/**` | none (generated code calls it by name) |
-| `fminus_lib` (`FMinus::FMinus`, `libfminus.a`) | every other `.cpp` under `src/`, and the generated scanner and parser | `include/` (`"fminus/..."`), `<build>/include` (`fminus/Config.h`) |
-| `FMinus::Internal` | `fminus_lib` for this tree's tools, examples and tests | also `src/` (`"frontend/Ast.h"`, ...) and `<build>/src/generated/` (`"frontend/Parser.tab.hpp"`) |
+| `fminus_lib` (`FMinus::FMinus`, `libfminus.a`) | every other `.cpp` under `src/`, and the generated scanner and parser | `include/` (`"fminus/FMinus.h"`), `<build>/include` (`fminus/Config.h`); C++17; LLVM linked, not included |
+| `FMinus::Internal` | `fminus_lib` for this tree's tools, examples and tests | also `src/` (`"frontend/Ast.h"`, ...), `<build>/src/generated/` (`"frontend/Parser.tab.hpp"`), LLVM's headers; C++23 |
 | `FMinus::LLVM` | LLVM's headers (as system headers) and the libraries of `FMINUS_LLVM_COMPONENTS` | LLVM's |
 
-`include/fminus/` is meant for a public API, for a plugin to call once FMinus has one. Today everything goes through
+`include/fminus/FMinus.h` is the public API: `fminus::Program` compiles a source (parse, lower for the machine's
+`poly float` width, add the module to a `jit::Jit`), looks its functions up as C function pointers, and says which are
+marked `nonblocking` or `nonallocating`. It has no LLVM in it and needs C++17, so `FMinus::FMinus` gives its users
+neither LLVM's include directories and definitions nor FMinus's C++23 (`fminus_target_defaults` makes a target's
+standard its own), only the libraries to link. The tree's tools, examples and tests use the stages directly, through
 `FMinus::Internal`.
 
 ## Invariants worth keeping

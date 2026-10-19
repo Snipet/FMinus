@@ -7,6 +7,7 @@ The layers of tests, how to write each, and how to look at what the compiler did
 | Layer | Where | Tests | Write one when |
 |---|---|---|---|
 | unit (Catch2) | `tests/unit/*.cpp` | the parser through `ast::dump`; the code generator by running JIT'd functions; error messages | you change the language |
+| library (Catch2) | `tests/library/*.cpp` | the public API (`fminus/FMinus.h`), in C++17 against `FMinus::FMinus` alone, as a host builds | you change the public API |
 | smoke (Catch2) | `tests/smoke/` | the toolchain itself: LLJIT and O3 on the host, an AOT executable, Bison and Flex (the calculator) | rarely: they guard the integration |
 | lit + FileCheck | `tests/lit/**` | the tools end to end: `fminus` IR, assembly, runs and errors; `fminus-build`; LLVM's tools | you change output a tool prints |
 | examples | `examples/<name>/` (`--check`); `tests/lit/fminus/examples.test` | a real kernel against C++, bit for bit or within a tolerance; the `.fm` examples' results | you change what a kernel or an example computes, or how fast |

@@ -15,7 +15,8 @@ reference. To write programs in it, read programs.md.
 
 Elsewhere:
 
-- [../README.md](../README.md) is the quick reference: the language, the commands, the presets.
+- [../README.md](../README.md) is the quick reference: the language, using FMinus as a C++ library
+  (`include/fminus/FMinus.h`), the commands, the presets.
 - [../examples/biquad/README.md](../examples/biquad/README.md) plans the language's growth around a DSP kernel, which
   processes a block of samples in one call.
 - [../examples/note/note.fm](../examples/note/note.fm) is a whole program, with a `main`.

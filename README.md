@@ -41,8 +41,9 @@ cmake/
   FMinusCLI11.cmake       CLI11 -> CLI11::CLI11, linked into every tool
   FMinusTesting.cmake     Catch2 and lit
   templates/Config.h.in   -> <build>/include/fminus/Config.h
-include/fminus/         the library's public API ("fminus/...")
+include/fminus/         the library's public API ("fminus/..."): FMinus.h, fminus::Program (below)
 src/                    the fminus library: every .cpp is a source, every grammar is generated in
+  api/                  the public API (include/fminus/FMinus.h) on the pipeline
   support/              integration helpers that came with the skeleton: LLVMInit, HostTarget (the host's
                         TargetMachine and the O0-O3 pipeline), JitRuntime (the runtime, defined in an LLJIT),
                         Aot (object and assembly files, linked executables)
@@ -69,6 +70,7 @@ examples/<name>/        one example per directory: an FMinus program, and a harn
   unison/               detuned sawtooth voices, one a lane of a poly float: a strip-mined loop with a mask
 tests/
   unit/                 your Catch2 tests
+  library/              the public API as a host uses it: in C++17, against FMinus::FMinus alone
   smoke/                the toolchain's checks: LLJIT + O3 on the host, Bison + Flex (smoke/calc/)
   lit/                  lit + FileCheck tests (*.test, *.fm, *.ll)
 editors/vscode/         a VSCode extension: syntax highlighting for .fm files (its README installs it)
@@ -251,6 +253,54 @@ kernel marked `[[clang::nonblocking]]`.
 Each variable is a stack slot (an `alloca` in the entry block), read with loads and written with stores, so
 `fminus -O0` reads like `clang -O0`. From `-O1`, mem2reg promotes the slots back into registers.
 
+## Using FMinus as a library
+
+`include/fminus/FMinus.h` is FMinus's C++ API, and the one header a host includes. A `fminus::Program` compiles FMinus
+source while the host runs, for the CPU it runs on, and gives its functions as C function pointers:
+
+```cpp
+#include "fminus/FMinus.h"
+
+std::string errors;
+auto program = fminus::Program::compile(source, errors);     // nullptr when it does not compile
+if (!program)
+    return report(errors);                                    // "program.fm:3:12: error: ...", as clang words it
+auto* gain = program->function<void(const float*, float*, int, float)>("gain", errors);
+gain(in, out, n, 0.5f);                                       // one call a block: the loop is FMinus's
+```
+
+- **Types.** A function's C++ type is its FMinus declaration's C type: `float`, `int`, `bool`, `void`, pointers, and
+  `float2` and `float4` as clang's `ext_vector_type`. The C ABI passes a `float8`, and a `poly float` of 8 lanes or
+  more, through memory, and FMinus in registers, so keep those inside FMinus. Nothing is checked at the boundary: a
+  signature that does not match the declaration is undefined behaviour. The header has the table.
+- **Options.** `Program::Options` sets the optimisation level (`-O2` by default, as for `fminus`), a `poly float`'s
+  lanes (this machine's by default, which `polyLanes()` reports), and the file name the errors give.
+- **Threads.** `compile()` and the first look-up of each function run LLVM's optimiser and code generator on the
+  calling thread: they take milliseconds and allocate. Different programs may compile on different threads at once.
+  In a plugin, compile off the audio thread and hand the pointer over (below).
+- **Effects.** `nonBlocking(name)` and `nonAllocating(name)` say whether a function is marked
+  `[[clang::nonblocking]]` or `[[clang::nonallocating]]`, which FMinus has then checked, so a host can refuse to run
+  anything else on its audio thread.
+- **Lifetime.** A function pointer is valid while its `Program` lives.
+
+The header has no LLVM in it and needs C++17. In CMake, a host links `FMinus::FMinus`, and gets FMinus's include
+directories and libraries (LLVM's too, linked statically), but neither LLVM's headers nor FMinus's C++23. As a
+subproject, FMinus builds its library and runtime only (its tests, tools and examples are on only at the top level):
+
+```cmake
+include(FetchContent)
+FetchContent_Declare(FMinus GIT_REPOSITORY https://github.com/Snipet/FMinus.git GIT_TAG <commit> SYSTEM)
+set(FMINUS_WERROR OFF)               # warnings in FMinus's sources are not errors in the host's build
+FetchContent_MakeAvailable(FMinus)
+target_link_libraries(my_plugin PRIVATE FMinus::FMinus)
+```
+
+A subproject gets its LLVM as FMinus's own build does (Dependencies, above): by default it builds a flavor into its
+deps cache. To reuse one an FMinus checkout has built, set `FMINUS_LLVM_MODE` to `system`, `LLVM_DIR` to
+`<checkout>/.deps/install/llvm-<version>-<flavor>/lib/cmake/llvm` and `FMINUS_DEPS_DIR` to `<checkout>/.deps` (for its
+Bison and Flex) before `FetchContent_MakeAvailable`. Calling into FMinus's internals instead (`"frontend/Frontend.h"`,
+`"jit/Jit.h"`, ...) takes `FMinus::Internal`, which adds `src/`, LLVM's headers and C++23.
+
 ## Executables (ahead of time)
 
 For development, a module can also be compiled ahead of time for this machine, into a native executable you can run
@@ -292,6 +342,8 @@ build-dev/bin/fminus-lit -v tests/lit               # lit directly; a source pat
 ```
 
 - **Catch2** (`tests/unit/`, `tests/smoke/`): one executable, `fminus-tests`; ctest runs each `TEST_CASE` on its own.
+  `tests/library/` is a second one, `fminus-library-tests`: the public API, built in C++17 against `FMinus::FMinus`
+  alone, as a host builds.
   The smoke tests cover the JIT, an executable linked ahead of time and run, and the calculator grammar.
   Catch2's `BENCHMARK` is there for timing JIT'd kernels.
 - **lit** (`tests/lit/`): a file with `RUN:` lines, checked by FileCheck. `tests/lit/fminus/` drives `fminus`. FMinus's
