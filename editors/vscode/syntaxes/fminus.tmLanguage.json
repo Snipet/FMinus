@@ -39,11 +39,15 @@
             "captures": { "1": { "name": "keyword.other.directive.lit.fminus" } }
         },
         "numbers": {
-            "comment": "Lexer.l's constants: hex floats, decimal floats and integers, with C's f suffix. 2f is an error, as in C.",
+            "comment": "Lexer.l's constants: hex floats, decimal floats, and hex, octal and decimal integers, with C's f suffix. 2f is an error, as in C; in 0x1F the F is a digit.",
             "patterns": [
                 {
                     "name": "constant.numeric.hex.fminus",
                     "match": "\\b0[xX](?:[0-9a-fA-F]+(?:\\.[0-9a-fA-F]*)?|\\.[0-9a-fA-F]+)[pP][+-]?[0-9]+[fF]?\\b"
+                },
+                {
+                    "name": "constant.numeric.integer.hexadecimal.fminus",
+                    "match": "\\b0[xX][0-9a-fA-F]+\\b"
                 },
                 {
                     "name": "constant.numeric.float.fminus",
@@ -65,8 +69,8 @@
         },
         "types": {
             "patterns": [
-                { "name": "storage.modifier.fminus", "match": "\\b(?:const|poly)\\b" },
-                { "name": "storage.type.fminus", "match": "\\b(?:float|bool|float2|float4|float8)\\b" }
+                { "name": "storage.modifier.fminus", "match": "\\b(?:const|restrict|poly)\\b" },
+                { "name": "storage.type.fminus", "match": "\\b(?:void|float|int|bool|float2|float4|float8)\\b" }
             ]
         },
         "constants": {
@@ -95,16 +99,19 @@
             "patterns": [
                 { "name": "keyword.operator.comparison.fminus", "match": "==|!=|<=|>=|<|>" },
                 { "name": "keyword.operator.logical.fminus", "match": "&&|\\|\\||!" },
+                { "name": "keyword.operator.increment-decrement.fminus", "match": "\\+\\+|--" },
                 { "name": "keyword.operator.assignment.compound.fminus", "match": "[+\\-*/%]=" },
                 { "name": "keyword.operator.assignment.fminus", "match": "=" },
                 { "name": "keyword.operator.arithmetic.fminus", "match": "[+\\-*/%]" },
-                { "name": "keyword.operator.ternary.fminus", "match": "[?:]" }
+                { "name": "keyword.operator.ternary.fminus", "match": "[?:]" },
+                { "name": "keyword.operator.address.fminus", "match": "&" }
             ]
         },
         "punctuation": {
             "patterns": [
                 { "name": "punctuation.terminator.statement.fminus", "match": ";" },
-                { "name": "punctuation.separator.delimiter.fminus", "match": "," }
+                { "name": "punctuation.separator.delimiter.fminus", "match": "," },
+                { "name": "punctuation.definition.subscript.fminus", "match": "[\\[\\]]" }
             ]
         }
     }
