@@ -40,3 +40,8 @@ extern "C" void fminus_rt_main_result(float result) noexcept
     *written.ptr = '\n';
     std::fwrite(text, 1, static_cast<std::size_t>(written.ptr + 1 - text), stdout);
 }
+
+extern "C" void fminus_rt_main_bool_result(bool result) noexcept
+{
+    std::fputs(result ? "true\n" : "false\n", stdout);
+}

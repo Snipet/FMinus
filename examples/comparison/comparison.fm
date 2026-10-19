@@ -1,0 +1,4 @@
+
+bool main(float a, float b){
+    return (a == b) ? true : false;
+}

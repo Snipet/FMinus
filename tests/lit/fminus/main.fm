@@ -12,6 +12,11 @@
 // RUN: not fminus %s --emit exe 2>&1 | FileCheck %s --check-prefix=OUTPUT
 // RUN: fminus %S/../../../examples/note/note.fm --emit exe -o %t.note
 // RUN: %t.note 69 | FileCheck %s --check-prefix=NOTE
+// RUN: fminus %S/../../../examples/comparison/comparison.fm --emit exe -o %t.bool
+// RUN: %t.bool 2 2 | FileCheck %s --check-prefix=TRUE
+// RUN: %t.bool 2 3 | FileCheck %s --check-prefix=FALSE
+// RUN: fminus %S/../../../examples/comparison/comparison.fm --run main 2 2 | FileCheck %s --check-prefix=TRUE
+// RUN: echo 'float f(bool b) { return b; }' | not fminus - --run f 1 2>&1 | FileCheck %s --check-prefix=BOOLARG
 
 float hypotenuse(float a, float b)
 {
@@ -30,6 +35,9 @@ float main(float a, float b)
 // MISSING: fminus: an executable needs a main function, such as float main(float x)
 // OUTPUT: fminus: --emit exe: an executable needs a file name (-o)
 // NOTE: 440
+// TRUE: true
+// FALSE: false
+// BOOLARG: fminus: --run: 'f' takes a bool parameter; --run passes floats only
 
 // The program's main becomes internal fminus.main; the C main reads the arguments, calls it and prints the result.
 // IR:       define internal float @fminus.main(float %a, float %b)

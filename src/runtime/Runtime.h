@@ -22,4 +22,7 @@ extern "C"
     // An executable's end: prints main's result and a newline on stdout as `fminus --run` prints a result, the
     // shortest decimal that reads back as the same float.
     void fminus_rt_main_result(float result) noexcept;
+
+    // The same for a main that returns bool: prints true or false.
+    void fminus_rt_main_bool_result(bool result) noexcept;
 }

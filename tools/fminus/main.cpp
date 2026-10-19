@@ -46,21 +46,22 @@ namespace
         return fail(llvm::toString(std::move(error)));
     }
 
-    // Calls the JIT'd float(float, ...) at `address` with args.size() arguments.
-    template <std::size_t... I>
-    float callWith(llvm::orc::ExecutorAddr address, const std::vector<float>& args, std::index_sequence<I...>)
+    // Calls the JIT'd Result(float, ...) at `address` with args.size() arguments: Result is float or bool.
+    template <typename Result, std::size_t... I>
+    Result callWith(llvm::orc::ExecutorAddr address, const std::vector<float>& args, std::index_sequence<I...>)
     {
-        using Function = float (*)(decltype(static_cast<void>(I), 0.0f)...);
+        using Function = Result (*)(decltype(static_cast<void>(I), 0.0f)...);
         return address.toPtr<Function>()(args[I]...);
     }
 
-    template <std::size_t... N>
-    float call(llvm::orc::ExecutorAddr address, const std::vector<float>& args, std::index_sequence<N...>)
+    template <typename Result, std::size_t... N>
+    Result call(llvm::orc::ExecutorAddr address, const std::vector<float>& args, std::index_sequence<N...>)
     {
-        float result = 0.0f;
-        static_cast<void>(((args.size() == N ? (result = callWith(address, args, std::make_index_sequence<N>{}), true)
-                                             : false)
-                           || ...));
+        Result result{};
+        static_cast<void>(
+            ((args.size() == N ? (result = callWith<Result>(address, args, std::make_index_sequence<N>{}), true)
+                               : false)
+             || ...));
         return result;
     }
 
@@ -146,6 +147,12 @@ int main(int argc, char** argv)
                                     runArgs.size()));
         if (runArgs.size() > kMaxRunArgs)
             return fail(std::format("--run: at most {} arguments", kMaxRunArgs));
+        for (const fminus::ast::Param& param : function->params)
+        {
+            if (param.type != fminus::ast::Type::Float)
+                return fail(std::format("--run: '{}' takes a {} parameter; --run passes floats only", run,
+                                        fminus::ast::typeName(param.type)));
+        }
 
         auto jit = fminus::jit::Jit::create(optimisation);
         if (!jit)
@@ -155,8 +162,18 @@ int main(int argc, char** argv)
         auto address = (*jit)->lookup(run);
         if (!address)
             return fail(address.takeError());
-        const float result = call(*address, runArgs, std::make_index_sequence<kMaxRunArgs + 1>{});
-        llvm::outs() << std::format("{}\n", result);
+        // Through a pointer of the function's own type: a bool comes back zero-extended in a general register, a
+        // float in a vector register. std::format prints a bool as true or false.
+        constexpr auto counts = std::make_index_sequence<kMaxRunArgs + 1>{};
+        switch (function->returnType)
+        {
+        case fminus::ast::Type::Float:
+            llvm::outs() << std::format("{}\n", call<float>(*address, runArgs, counts));
+            break;
+        case fminus::ast::Type::Bool:
+            llvm::outs() << std::format("{}\n", call<bool>(*address, runArgs, counts));
+            break;
+        }
         return 0;
     }
 

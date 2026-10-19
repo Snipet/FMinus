@@ -44,11 +44,12 @@ namespace fminus::aot
     // Writes the module's object to a temporary file and links it, ahead of `options.objects`, into `options.output`.
     llvm::Error emitExecutable(llvm::Module& module, llvm::TargetMachine& machine, LinkOptions options);
 
-    // Makes a program's `float main(float, ...)` its executable's entry. C's entry is `int main(int, char**)`, so the
-    // program's main is renamed fminus.main (a name no FMinus function can have) and made internal, free to be
-    // inlined, and a new C main runs it: it reads main's arguments from the command line, calls it and prints its
-    // result (fminus_rt_main_args, fminus_rt_main_result: runtime/Runtime.h), exiting with 0, or with 2 when the
-    // arguments are wrong. Call it before prepareModule and optimising. Fails when the module defines no main, or a
-    // main that takes or returns anything but float.
+    // Makes a program's `float main(float, ...)` or `bool main(float, ...)` its executable's entry. C's entry is
+    // `int main(int, char**)`, so the program's main is renamed fminus.main (a name no FMinus function can have) and
+    // made internal, free to be inlined, and a new C main runs it: it reads main's arguments from the command line,
+    // calls it and prints its result, a float or true or false (fminus_rt_main_args, fminus_rt_main_result,
+    // fminus_rt_main_bool_result: runtime/Runtime.h), exiting with 0, or with 2 when the arguments are wrong. Call it
+    // before prepareModule and optimising. Fails when the module defines no main, or a main that takes anything but
+    // floats or returns anything but a float or a bool.
     llvm::Error addEntryPoint(llvm::Module& module);
 } // namespace fminus::aot

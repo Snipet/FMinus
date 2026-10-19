@@ -230,11 +230,12 @@ The same module can be written to disk instead, for development:
   overrides it), with the objects, this tree's `libfminus_runtime.a` and, under `asan` or `tsan`, the sanitizer
   runtimes.
 - **`emitExecutable(module, machine, options)`** combines the two through a temporary object file.
-- **`addEntryPoint(module)`** makes a program's `float main(float, ...)` the executable's entry. C's entry is
-  `int main(int, char**)`, so it renames the program's `main` to `fminus.main` (internal, so the inliner can fold it)
-  and adds a C `main` that reads the arguments through `fminus_rt_main_args`, calls it, and prints the result through
-  `fminus_rt_main_result`. It runs before `prepareModule` and `optimiseModule`, so the entry is optimised with the
-  rest. [programs.md](programs.md) shows the IR.
+- **`addEntryPoint(module)`** makes a program's `float main(float, ...)` or `bool main(float, ...)` the executable's
+  entry. C's entry is `int main(int, char**)`, so it renames the program's `main` to `fminus.main` (internal, so the
+  inliner can fold it) and adds a C `main` that reads the arguments through `fminus_rt_main_args`, calls it, and prints
+  the result through `fminus_rt_main_result` (or `fminus_rt_main_bool_result`, as `true` or `false`). It runs before
+  `prepareModule` and `optimiseModule`, so the entry is optimised with the rest. [programs.md](programs.md) shows the
+  IR.
 
 The `fminus` driver emits objects, assembly and executables (`--emit exe`, which adds the entry; `--entry` adds it to
 the other outputs). `fminus-build` takes hand-written LLVM IR, which brings its own `main`, to an executable.
@@ -292,7 +293,7 @@ Because the JIT and executables share one runtime, the two compile the same prog
   C++ callers, the JIT's `lookup` and the linker. A new type at the boundary needs its C ABI attributes (extending.md,
   recipe 3: `bool` is `zeroext`; simd.md: `float8` goes through memory). The one exception is an executable's
   `main`, which `addEntryPoint` renames and makes internal.
-- **Semantics follow C unless a deviation is documented.** The README lists the deviations: `float` is the only type,
-  constants are `float`, `%` works on floats, calls may precede definitions, uninitialised variables are 0, falling
-  off a non-void function's end is an error, and `main` is `float main(float, ...)`.
+- **Semantics follow C unless a deviation is documented.** The README lists the deviations: `float` is the only
+  arithmetic type, constants are `float`, `%` works on floats, calls may precede definitions, uninitialised variables
+  are 0, falling off a non-void function's end is an error, and `main` returns a `float` or a `bool` and takes floats.
 - **The runtime stays free of LLVM and real-time safe.** It runs inside the audio thread's call tree.

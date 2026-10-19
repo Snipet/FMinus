@@ -56,13 +56,28 @@ TEST_CASE("the program's main becomes internal, and a C main runs it", "[aot]")
     CHECK(module->getFunction("fminus_rt_main_result") != nullptr);
 }
 
-TEST_CASE("an executable needs a main that takes and returns floats", "[aot]")
+TEST_CASE("a bool main's result is printed as true or false", "[aot]")
+{
+    llvm::LLVMContext context;
+    std::unique_ptr<llvm::Module> module =
+        parse(context, "define zeroext i1 @main(float %a, float %b) {\n  %e = fcmp oeq float %a, %b\n  ret i1 %e\n}\n");
+    REQUIRE_FALSE(llvm::errorToBool(fminus::aot::addEntryPoint(*module)));
+    const llvm::Function* print = module->getFunction("fminus_rt_main_bool_result");
+    REQUIRE(print != nullptr);
+    CHECK(print->getArg(0)->getType()->isIntegerTy(1));
+    CHECK(print->hasParamAttribute(0, llvm::Attribute::ZExt));   // the C ABI passes a bool zero-extended
+    CHECK(module->getFunction("fminus_rt_main_result") == nullptr);
+}
+
+TEST_CASE("an executable needs a main that takes floats and returns a float or a bool", "[aot]")
 {
     const std::string missing = "an executable needs a main function, such as float main(float x)";
-    const std::string signature = "'main' must return float and take only float parameters";
+    const std::string signature = "'main' must return float or bool and take only float parameters";
     CHECK(entryError("define float @f() {\n  ret float 1.0\n}\n") == missing);
     CHECK(entryError("declare float @main(float)\n") == missing);   // a prototype is not a program
-    CHECK(entryError("define i1 @main() {\n  ret i1 true\n}\n") == signature);
+    CHECK(entryError("define i1 @main() {\n  ret i1 true\n}\n").empty());
+    CHECK(entryError("define i32 @main() {\n  ret i32 0\n}\n") == signature);
+    CHECK(entryError("define float @main(i1 %b) {\n  ret float 1.0\n}\n") == signature);
     CHECK(entryError("define float @main(<4 x float> %v) {\n  ret float 1.0\n}\n") == signature);
     CHECK(entryError("define float @main(...) {\n  ret float 1.0\n}\n") == signature);
 }

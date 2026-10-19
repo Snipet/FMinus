@@ -57,6 +57,7 @@ examples/<name>/        one example per directory: an FMinus program, and a harn
                         (bin/example-<name>):
   biquad/               a biquad with per-sample coefficients, against C++, compared and timed; a plan to grow it
   note/                 a whole program with a main: a MIDI note's frequency (docs/programs.md)
+  comparison/           a main that returns a bool: whether its two arguments are equal
 tests/
   unit/                 your Catch2 tests
   smoke/                the toolchain's checks: LLJIT + O3 on the host, Bison + Flex (smoke/calc/)
@@ -171,8 +172,9 @@ Where FMinus differs from C, it is on purpose:
 - **Arithmetic is IEEE single precision**, with no contraction into fused multiply-adds (clang's
   `-ffp-contract=off`).
 
-- **`main` is `float main(float, ...)`.** C's returns an `int` and takes `argc` and `argv`. An FMinus executable reads
-  `main`'s arguments from its command line and prints its result ([docs/programs.md](docs/programs.md)).
+- **`main` returns a `float` or a `bool` and takes floats.** C's returns an `int` and takes `argc` and `argv`. An
+  FMinus executable reads `main`'s arguments from its command line and prints its result, a float or `true` or
+  `false` ([docs/programs.md](docs/programs.md)).
 
 A v0 program with `f` suffixes, with prototypes for calls ahead of a definition, and without `%` or `main`, is
 therefore also a valid C program with the same meaning, given `<math.h>` and `-ffp-contract=off`. The example above

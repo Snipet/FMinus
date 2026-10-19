@@ -108,11 +108,13 @@ namespace fminus::aot
         llvm::LLVMContext& context = module.getContext();
         llvm::Type* floatType = llvm::Type::getFloatTy(context);
         const llvm::FunctionType* programType = program->getFunctionType();
-        bool floats = programType->getReturnType() == floatType && !programType->isVarArg();
+        llvm::Type* resultType = programType->getReturnType();
+        const bool printsBool = resultType->isIntegerTy(1);   // an FMinus bool
+        bool floats = (resultType == floatType || printsBool) && !programType->isVarArg();
         for (const llvm::Type* param : programType->params())
             floats = floats && param == floatType;
         if (!floats)
-            return llvm::createStringError("'main' must return float and take only float parameters");
+            return llvm::createStringError("'main' must return float or bool and take only float parameters");
         program->setName("fminus.main");
         program->setLinkage(llvm::GlobalValue::InternalLinkage);
 
@@ -129,8 +131,12 @@ namespace fminus::aot
         argv->setName("argv");
         const llvm::FunctionCallee readArgs = module.getOrInsertFunction("fminus_rt_main_args", intType, intType,
                                                                          pointerType, intType, pointerType);
-        const llvm::FunctionCallee printResult =
-            module.getOrInsertFunction("fminus_rt_main_result", builder.getVoidTy(), floatType);
+        // A bool crosses the C ABI zero-extended, as FMinus's own bool parameters do (ir/CodeGen.cpp).
+        llvm::FunctionCallee printResult =
+            module.getOrInsertFunction(printsBool ? "fminus_rt_main_bool_result" : "fminus_rt_main_result",
+                                       builder.getVoidTy(), resultType);
+        if (printsBool)
+            llvm::cast<llvm::Function>(printResult.getCallee())->addParamAttr(0, llvm::Attribute::ZExt);
 
         llvm::BasicBlock* start = llvm::BasicBlock::Create(context, "entry", entry);
         llvm::BasicBlock* run = llvm::BasicBlock::Create(context, "run", entry);
@@ -147,7 +153,9 @@ namespace fminus::aot
         for (unsigned i = 0; i < count; ++i)
             values.push_back(builder.CreateLoad(floatType, builder.CreateConstInBoundsGEP2_32(argsType, args, 0, i)));
         llvm::Value* result = builder.CreateCall(program, values, "result");
-        builder.CreateCall(printResult, {result});
+        llvm::CallInst* print = builder.CreateCall(printResult, {result});
+        if (printsBool)
+            print->addParamAttr(0, llvm::Attribute::ZExt);
         builder.CreateRet(builder.getInt32(0));
 
         builder.SetInsertPoint(usage);
