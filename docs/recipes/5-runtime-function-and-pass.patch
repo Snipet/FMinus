@@ -1,8 +1,8 @@
 diff --git a/src/ir/CodeGen.cpp b/src/ir/CodeGen.cpp
-index e597f66..91b6eb9 100644
+index 9a576cd..7b30d49 100644
 --- a/src/ir/CodeGen.cpp
 +++ b/src/ir/CodeGen.cpp
-@@ -54,6 +54,28 @@ namespace fminus::ir
+@@ -56,6 +56,28 @@ namespace fminus::ir
              Builtin{"fmaxf", llvm::Intrinsic::maxnum, 2}, Builtin{"tanhf", llvm::Intrinsic::tanh, 1},
          };
  
@@ -28,35 +28,33 @@ index e597f66..91b6eb9 100644
 +            return nullptr;
 +        }
 +
-         const Builtin* findBuiltin(std::string_view name)
-         {
-             for (const Builtin& builtin : kBuiltins)
-@@ -149,6 +171,11 @@ namespace fminus::ir
+         // The reductions of a float vector to one float: its sum (in lane order, so the result does not depend on
+         // fast-math), its least and its greatest lane (NaN lanes ignored, as fminf and fmaxf ignore them).
+         constexpr std::array<std::string_view, 3> kReductions{"reduce_add", "reduce_min", "reduce_max"};
+@@ -285,7 +307,8 @@ namespace fminus::ir
  
              void declare(const ast::Function& function)
              {
-+                if (findRuntimeFunction(function.name) != nullptr)
-+                {
-+                    error(function.location, quoted(function.name) + " is a builtin and cannot be redefined");
-+                    return;
-+                }
-                 if (const Builtin* builtin = findBuiltin(function.name))
+-                if (isReduction(function.name) || isPolyQuery(function.name))
++                if (findRuntimeFunction(function.name) != nullptr || isReduction(function.name)
++                    || isPolyQuery(function.name))
                  {
-                     // A prototype of a builtin, as <math.h> has, declares nothing new; a definition is refused.
-@@ -663,6 +690,17 @@ namespace fminus::ir
-                         llvm::Intrinsic::getOrInsertDeclaration(&module_, builtin->intrinsic, {builder_.getFloatTy()});
-                     return builder_.CreateCall(intrinsic, args);
+                     error(function.location, quoted(function.name) + " is a builtin and cannot be redefined");
+                     return;
+@@ -1109,6 +1132,17 @@ namespace fminus::ir
+                         llvm::Intrinsic::getOrInsertDeclaration(&module_, builtin->intrinsic, {typeOf(type)});
+                     return {builder_.CreateCall(intrinsic, irArgs), type};
                  }
 +                if (const RuntimeFunction* runtime = findRuntimeFunction(call.callee))
 +                {
 +                    if (args.size() != runtime->arity)
 +                        return wrongArity(location, call, runtime->arity);
-+                    for (llvm::Value*& arg : args)
-+                        arg = convert(arg, ast::Type::Float);
++                    for (const Value& arg : args)
++                        irArgs.push_back(convert(arg, ast::Type::Float, location, Use::Passing));
 +                    std::vector<llvm::Type*> params(runtime->arity, builder_.getFloatTy());
 +                    llvm::FunctionCallee callee = module_.getOrInsertFunction(
 +                        runtime->symbol, llvm::FunctionType::get(builder_.getFloatTy(), params, false));
-+                    return builder_.CreateCall(callee, args);
++                    return {builder_.CreateCall(callee, irArgs), ast::Type::Float};
 +                }
                  const auto found = functions_.find(call.callee);
                  if (found == functions_.end())
@@ -163,7 +161,7 @@ index 0000000..bbd5aff
 +    void registerPasses(llvm::PassBuilder& passes);
 +} // namespace fminus::opt
 diff --git a/src/runtime/Runtime.cpp b/src/runtime/Runtime.cpp
-index 1ebc49f..b094263 100644
+index 5358735..46ea00a 100644
 --- a/src/runtime/Runtime.cpp
 +++ b/src/runtime/Runtime.cpp
 @@ -2,6 +2,7 @@
@@ -174,9 +172,9 @@ index 1ebc49f..b094263 100644
  #include <cstdio>
  #include <cstdlib>
  
-@@ -40,3 +41,8 @@ extern "C" void fminus_rt_main_result(float result) noexcept
-     *written.ptr = '\n';
-     std::fwrite(text, 1, static_cast<std::size_t>(written.ptr + 1 - text), stdout);
+@@ -45,3 +46,8 @@ extern "C" void fminus_rt_main_bool_result(bool result) noexcept
+ {
+     std::fputs(result ? "true\n" : "false\n", stdout);
  }
 +
 +extern "C" float fminus_rt_db_to_gain(float db) noexcept
@@ -184,29 +182,29 @@ index 1ebc49f..b094263 100644
 +    return std::pow(10.0f, db / 20.0f);
 +}
 diff --git a/src/runtime/Runtime.h b/src/runtime/Runtime.h
-index 86dd441..aee6cb1 100644
+index d4e212e..d4b2e14 100644
 --- a/src/runtime/Runtime.h
 +++ b/src/runtime/Runtime.h
-@@ -22,4 +22,8 @@ extern "C"
-     // An executable's end: prints main's result and a newline on stdout as `fminus --run` prints a result, the
-     // shortest decimal that reads back as the same float.
-     void fminus_rt_main_result(float result) noexcept;
+@@ -25,4 +25,8 @@ extern "C"
+ 
+     // The same for a main that returns bool: prints true or false.
+     void fminus_rt_main_bool_result(bool result) noexcept;
 +
 +    // Decibels to a linear gain: 10^(db / 20). FMinus code declares it (`float fminus_rt_db_to_gain(float db);`), or
 +    // calls it as the builtin db_to_gain (ir/CodeGen.cpp).
 +    float fminus_rt_db_to_gain(float db) noexcept;
  }
 diff --git a/src/runtime/RuntimeSymbols.def b/src/runtime/RuntimeSymbols.def
-index faeff49..86b9a7c 100644
+index edbbbcb..8cd4079 100644
 --- a/src/runtime/RuntimeSymbols.def
 +++ b/src/runtime/RuntimeSymbols.def
-@@ -4,3 +4,4 @@
- FMINUS_RUNTIME_SYMBOL(fminus_rt_abi_version)
+@@ -5,3 +5,4 @@ FMINUS_RUNTIME_SYMBOL(fminus_rt_abi_version)
  FMINUS_RUNTIME_SYMBOL(fminus_rt_main_args)
  FMINUS_RUNTIME_SYMBOL(fminus_rt_main_result)
+ FMINUS_RUNTIME_SYMBOL(fminus_rt_main_bool_result)
 +FMINUS_RUNTIME_SYMBOL(fminus_rt_db_to_gain)
 diff --git a/src/support/HostTarget.cpp b/src/support/HostTarget.cpp
-index 43a1a21..9eae83f 100644
+index a9819f6..61b676d 100644
 --- a/src/support/HostTarget.cpp
 +++ b/src/support/HostTarget.cpp
 @@ -1,6 +1,7 @@
@@ -216,15 +214,15 @@ index 43a1a21..9eae83f 100644
 +#include "opt/Passes.h"
  #include "support/LLVMInit.h"
  
- #include <llvm/ExecutionEngine/Orc/JITTargetMachineBuilder.h>
-@@ -49,6 +50,7 @@ namespace fminus
+ #include <llvm/Analysis/TargetLibraryInfo.h>
+@@ -56,6 +57,7 @@ namespace fminus
          tuning.LoopVectorization = true;
          tuning.SLPVectorization = true;
          llvm::PassBuilder passes(&machine, tuning);
 +        opt::registerPasses(passes);
-         passes.registerModuleAnalyses(modules);
-         passes.registerCGSCCAnalyses(cgsccs);
-         passes.registerFunctionAnalyses(functions);
+ 
+         // A vector math library. On Apple systems, libsystem_m's _simd_sin_f4, _simd_exp_f4, ... (in libSystem, which
+         // every process and executable links already): the target library analysis tells the loop vectoriser about
 diff --git a/tests/lit/fminus/flops.fm b/tests/lit/fminus/flops.fm
 new file mode 100644
 index 0000000..7a8a38a
@@ -243,12 +241,12 @@ index 0000000..7a8a38a
 +// CHECK: define float @softclip({{.*}} #[[ATTRS:[0-9]+]]
 +// CHECK: attributes #[[ATTRS]] = { {{.*}}"fminus-flops"="3"
 diff --git a/tests/unit/CodeGenTest.cpp b/tests/unit/CodeGenTest.cpp
-index c463f71..d5426d1 100644
+index 326dd69..4a9af8a 100644
 --- a/tests/unit/CodeGenTest.cpp
 +++ b/tests/unit/CodeGenTest.cpp
-@@ -283,3 +283,18 @@ TEST_CASE("if, else, while, for, break and continue follow C", "[codegen]")
-              "test.fm:6:12: error: use of undeclared identifier 'i'\n"
-              "test.fm:8:7: error: non-void function 'g' does not return a value\n");
+@@ -567,3 +567,18 @@ TEST_CASE("a poly float never mixes with a fixed-size vector, even with as many
+              "test.fm:12:5: error: returning 'poly float' from a function with incompatible result type 'float4'\n"
+              "test.fm:14:7: error: 'poly_index' is a builtin and cannot be redefined\n");
  }
 +
 +TEST_CASE("a runtime function is called through a prototype, or as a builtin", "[codegen]")

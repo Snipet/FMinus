@@ -1,21 +1,22 @@
 # SIMD
 
-How to give FMinus SIMD: several floats computed by one instruction. It starts with the hardware and LLVM's model of
-vectors. Then three recipes, each applied to this repository, built with `-Werror`, tested in the dev and asan presets
-and kept as a patch in [recipes/](recipes/):
+How FMinus does SIMD: several floats computed by one instruction. It starts with the hardware and LLVM's model of
+vectors. Then the three recipes that gave FMinus its vectors, built with `-Werror` and tested in the dev and asan
+presets. They are in the compiler now, so this is also a guide to that code: each recipe names the files it changed,
+and walks through them in the order a change moves through the compiler.
 
-| Recipe | Adds | Patch |
+| Recipe | Adds | Where |
 |---|---|---|
-| 7 | `float2`, `float4`, `float8`: OpenCL C's vector types, lane-wise operators, swizzles, masks, reductions | `7-vectors.patch` |
-| 8 | a vector math library: `sinf` on a `float4` is one call to libsystem_m's `_simd_sin_f4`, not four to `sinf` | `8-vector-math-library.patch` |
-| 9 | `poly float`: a vector as wide as the target's registers (4 floats on NEON, 16 on AVX-512), and rules that keep a program's meaning the same at any width | `9-poly-float.patch` |
+| 7 | `float2`, `float4`, `float8`: OpenCL C's vector types, lane-wise operators, swizzles, masks, reductions | `Ast.h` (the types), `Lexer.l`, `Parser.y`, `CodeGen.cpp` (`Value`, `convert`, `commonType`, `lowerSelect`, `lowerConstruct`, `lowerSwizzle`, `assignComponents`, `lowerReduction`); `fminus --run`'s checks |
+| 8 | a vector math library: `sinf` on a `float4` is one call to libsystem_m's `_simd_sin_f4`, not four to `sinf` | `HostTarget.cpp` (`optimiseModule`) |
+| 9 | `poly float`: a vector as wide as the target's registers (4 floats on NEON, 16 on AVX-512), and rules that keep a program's meaning the same at any width | `Ast.h`, `Parser.y`, `CodeGen.h` (`ir::Options`), `CodeGen.cpp` (`lanes`, `polyMismatch`, `poly_lanes`, `poly_index`), `HostTarget.cpp` (`polyLanes`), the driver (`--poly-lanes`) |
 
 After the recipes: scalable vectors (SVE, RISC-V V) and how they relate to `poly float`, the auto-vectoriser that
 already runs, the pitfalls, and what to build next. Every IR listing, assembly listing and measurement here was
 produced on this repository's toolchain (LLVM 23.1.3) on an Apple M5, unless it says otherwise.
 
-The recipes build on recipes 3 to 6 ([extending.md](extending.md)): masks need `bool` and the comparisons, `?:`
-becomes a lane-wise select, and recipe 9's examples loop with `for`. Apply the patches in order.
+The recipes build on recipes 3 and 4 ([extending.md](extending.md)): masks need `bool` and the comparisons, `?:`
+becomes a lane-wise select, and recipe 9's examples loop with `for`.
 
 ## The hardware
 
@@ -82,7 +83,7 @@ Scalable vectors (SVE, RISC-V V) are a fifth way, with the width picked at run t
 
 ## Recipe 7: `float2`, `float4` and `float8`
 
-*Patch: [recipes/7-vectors.patch](recipes/7-vectors.patch), on top of recipes 3 to 6.*
+*In the compiler. Tests: `CodeGenTest.cpp` (`[simd]`), `FrontendTest.cpp`, `tests/lit/fminus/simd.fm`.*
 
 ```c
 float4 softclip4(float4 x, float drive)
@@ -480,7 +481,7 @@ arguments, with scalars broadcast. `fminf(v, 1)` is `llvm.minnum.v4f32(v, splat 
 `fminnm.4s`, `fmaxnm.4s`). `sinf`, `cosf`, `expf`, `logf` and `tanhf` have no instruction, so the backend scalarises
 them: four calls to `sinf`, with the lanes moved in and out around each. Recipe 8 replaces those with one call.
 
-Runtime functions (`db_to_gain`) and the program's own functions are not overloaded. Their parameter types are what
+The program's own functions are not overloaded (nor recipe 5's runtime functions). Their parameter types are what
 they declare.
 
 ### Reductions
@@ -510,7 +511,7 @@ names (OpenCL C has no reductions for vector types).
 - **`reduce_min` and `reduce_max` ignore NaN lanes**, as `fminf` and `fmaxf` ignore a NaN argument
   (`llvm.vector.reduce.fmin`/`fmax` have `minnum`/`maxnum` semantics). They are `fminnmv.4s` and `fmaxnmv.4s`.
 
-The names are refused as function names, like the runtime's ("'reduce_add' is a builtin and cannot be redefined").
+The names are refused as function names ("'reduce_add' is a builtin and cannot be redefined"), as a builtin's are.
 
 ### What LLVM makes of it
 
@@ -588,6 +589,13 @@ ABI. To export one, lower it as clang does: a `ptr sret(<8 x float>)` first para
 `ptr`s, a `void` return. Recipe 3 met the same question for `bool` (`zeroext`); every type that crosses the boundary
 asks it.
 
+`fminus --run` crosses the boundary too: it calls the JIT'd function through a C++ pointer type, and its command line
+has floats only. So it refuses a vector parameter ("--run: 'g' takes a float4 parameter; --run passes floats only")
+and a vector result ("--run: 'f' returns a float4; --run prints floats and bools only"). The second comes from the
+driver's `switch` over the result type (`tools/fminus/main.cpp`), which has no `default:`: when this recipe added
+`Float2` to `Bool8`, `-Wswitch` stopped the build there until they were handled, and recipe 9's poly types did the
+same. An executable's `main` refuses them the same way (programs.md).
+
 ### Tests
 
 C++ gets FMinus's vector types from clang's extension, so the tests call JIT'd vector functions directly:
@@ -637,7 +645,7 @@ arm64, the assembly (`fmul.4s v0, v0, v1[0]`, `fcmgt.4s`, two `fmul.4s` for a `f
 
 ## Recipe 8: a vector math library
 
-*Patch: [recipes/8-vector-math-library.patch](recipes/8-vector-math-library.patch), on top of recipe 7.*
+*In the compiler. Tests: `CodeGenTest.cpp` (`[simd]`), `tests/lit/fminus/veclib.fm`.*
 
 After recipe 7, `sinf` of a `float4` is `llvm.sin.v4f32`, and the backend scalarises it:
 
@@ -775,12 +783,12 @@ _shape:                             ; tanhf(x) + sqrtf(fabsf(x)): only tanhf bec
 `WithinULP(std::sin(x), 3)`, and a new test case sweeps `sinf` and `tanhf` over [-100, 100] the same way. It also checks
 that a `float8` `sinf` is still exactly eight calls to `sinf`, in lane order. `tests/lit/fminus/veclib.fm` checks the
 IR (`@_simd_sin_f4`, `@_simd_tanh_f4`, `llvm.fabs.v4f32` and `llvm.sqrt.v4f32` left alone, `llvm.sin.v8f32` left
-alone) and, on arm64, the calls in the assembly. It is `REQUIRES: system-darwin`, a feature the recipe adds to
+alone) and, on arm64, the calls in the assembly. It is `REQUIRES: system-darwin`, a feature the recipe added to
 `tests/lit/lit.cfg.py` (`"system-" + platform.system().lower()`).
 
 ## Recipe 9: `poly float`
 
-*Patch: [recipes/9-poly-float.patch](recipes/9-poly-float.patch), on top of recipe 8.*
+*In the compiler. Tests: `CodeGenTest.cpp` (`[poly]`), `FrontendTest.cpp`, `tests/lit/fminus/poly.fm`.*
 
 A `float4` is four lanes everywhere. On an AVX-512 machine, where a register holds sixteen floats, it uses a quarter
 of each register; on NEON it is just right. A `poly float` is a float vector as wide as the target's registers. The

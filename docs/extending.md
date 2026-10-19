@@ -5,11 +5,12 @@ six worked recipes, which grow the C subset from a one-line builtin to C's contr
 the pitfalls those recipes ran into, and design notes for what comes next. [simd.md](simd.md) continues with
 recipes 7 to 9, for vectors.
 
-Recipes 1 and 2, `tanhf` and `%`, are in the base now: commit 30c1dc4 made them part of FMinus, so their sections
-describe how that change was made. The others are not sketches either. Each was applied to this repository, built
-with `-Werror`, and tested in the dev and asan presets, every test passing. They live in [recipes/](recipes/) as
-patches, so you can apply one to see it work, or compare it with your own version. [architecture.md](architecture.md)
-describes the stages they touch.
+Recipes 1 to 4 are in the compiler now (`tanhf` and `%`; `bool` and its operators; `if`, `while` and `for`), and
+so are simd.md's 7 to 9, so their sections describe how the code you have got there: read a section beside the files
+it names. Recipes 5 and 6, a runtime function and a pass, are not part of the language; they live in
+[recipes/](recipes/) as a patch, so you can apply them to see them work. None of these are sketches: each was applied
+to this repository, built with `-Werror`, and tested in the dev and asan presets, every test passing.
+[architecture.md](architecture.md) describes the stages they touch.
 
 FMinus follows C. When a recipe has a semantic choice to make, it makes C's: conversions, short-circuiting, which
 `if` an `else` belongs to, what `continue` does in a `for`. And it reports errors in clang's words. The README lists
@@ -163,7 +164,7 @@ values show in the JIT, in a test case of their own in `CodeGenTest.cpp`:
 
 ## Recipe 3: `bool`, comparisons, `!`, `&&`, `||` and `?:`
 
-*Patch: [recipes/3-bool-logic-conditional.patch](recipes/3-bool-logic-conditional.patch).*
+*In the compiler since commit 660d5f8.*
 
 This recipe adds the expression half of C's control flow:
 
@@ -328,6 +329,10 @@ One helper does both directions:
                 return builder_.CreateUIToFP(value, target, "conv");
             }
 ```
+
+(This is the helper as recipe 3 wrote it. Recipe 7 grew it into `convert(Value, type, location, use)`: the lowered
+value carries its FMinus type, and a failed conversion reports clang's message for where it happened. See simd.md,
+"Every value carries its FMinus type".)
 
 Then every place that consumes a value converts it to what it expects:
 
@@ -523,7 +528,7 @@ top-level message gains a token: "expecting end of file or float" becomes "expec
 
 ## Recipe 4: `if`, `else`, `while`, `for`, `break` and `continue`
 
-*Patch: [recipes/4-if-while-for.patch](recipes/4-if-while-for.patch), on top of recipe 3.*
+*In the compiler.*
 
 C's statements for control flow:
 
@@ -812,7 +817,7 @@ fall off its end.
 ## Recipe 5: a runtime function (`db_to_gain`)
 
 *Patch: [recipes/5-runtime-function-and-pass.patch](recipes/5-runtime-function-and-pass.patch) (with recipe 6), on
-top of recipe 4.*
+top of the compiler as it is.*
 
 Some operations are better written in C++ than generated: lookup tables, approximations, calls to the platform. The
 FMinus runtime is where they go. Generated code calls a runtime function by its symbol. The JIT resolves the symbol
@@ -974,7 +979,8 @@ same way.
 
 ## Recipes 7 to 9: SIMD
 
-[simd.md](simd.md) has three more recipes, on top of these, with the hardware and LLVM's vector model they rest on:
+[simd.md](simd.md) has three more recipes, in the compiler too, with the hardware and LLVM's vector model they rest
+on:
 
 - **Recipe 7, `float2`, `float4` and `float8`**: OpenCL C's vector types. Lane-wise operators with scalars broadcast,
   literals (`(float4)(a, b, c, d)`), swizzles read and written (`v.wzyx`, `v.xy = ...`), comparisons that give lane
@@ -1072,20 +1078,15 @@ LLJIT's concurrent compilation, and caching objects between runs (`llvm::ObjectC
 
 ## Reference solutions
 
-[recipes/](recipes/) holds recipes 3 to 9 as six patches. They apply in order to the base, which has recipes 1 and
-2 and `main` ([recipes/README.md](recipes/README.md) has the details):
+The recipes in the compiler are their own reference: their code is in `src/`, and their tests in
+`tests/unit/CodeGenTest.cpp`, `FrontendTest.cpp` and `tests/lit/fminus/`. [recipes/](recipes/) holds the two that
+aren't, 5 and 6, as one patch against the compiler as it is ([recipes/README.md](recipes/README.md)):
 
 ```bash
 git switch -c try-recipes
-git apply docs/recipes/3-bool-logic-conditional.patch
-git apply docs/recipes/4-if-while-for.patch
 git apply docs/recipes/5-runtime-function-and-pass.patch
-git apply docs/recipes/7-vectors.patch               # simd.md
-git apply docs/recipes/8-vector-math-library.patch
-git apply docs/recipes/9-poly-float.patch
 cmake --workflow --preset dev
 ```
 
-Each adds its tests beside the base's, in `tests/unit/CodeGenTest.cpp`, `FrontendTest.cpp` and `tests/lit/fminus/`.
-Once your own compiler has moved on, the patches stop applying, but they remain readable diffs of one way to make each
+Once your own compiler has moved on, the patch stops applying, but it remains a readable diff of one way to make the
 change.

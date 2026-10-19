@@ -76,7 +76,7 @@ pointers, C's `int main(int argc, char** argv)` can join it.
 | Problem | Message |
 |---|---|
 | `--emit exe` and no `main` (or only a prototype) | fminus: an executable needs a main function, such as float main(float x) |
-| a `main` with another type, such as `float main(bool b)` or `float main(float4 v)` (recipe 7) | fminus: 'main' must return float or bool and take only float parameters |
+| a `main` with another type, such as `float main(bool b)` or `float main(float4 v)` | fminus: 'main' must return float or bool and take only float parameters |
 | `--run` of a function with a `bool` parameter | fminus: --run: 'f' takes a bool parameter; --run passes floats only |
 | `--emit exe` without `-o` | fminus: --emit exe: an executable needs a file name (-o) |
 

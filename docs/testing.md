@@ -35,8 +35,8 @@ Each file states what it tests in its first line, then has a few helpers and the
 - `parsed(source)` (`FrontendTest.cpp`) returns the dump of the parsed program, or its errors. Compare whole
   strings, so a parser test reads as input → tree.
 - `compile(source, &errors)` (`CodeGenTest.cpp`) parses, lowers and JIT-compiles at -O2, and returns the `Jit`, or
-  null with the formatted errors. `lookup<float(float)>(*jit, "f")` gives a callable function. (Recipe 9 adds a third
-  parameter, the `ir::Options`, to compile at a chosen `poly float` width.)
+  null with the formatted errors. `lookup<float(float)>(*jit, "f")` gives a callable function. A third parameter, the
+  `ir::Options`, compiles at a chosen `poly float` width: `compile(source, &errors, {.polyLanes = 16})`.
 - `errorsOf(source)` returns the errors of a program that must fail.
 
 ```cpp
@@ -58,7 +58,8 @@ TEST_CASE("functions compute what they say", "[codegen]")
   Use a tolerance only around libm (`sinf`, `expf`, ...).
 - **Error tests compare the whole formatted text**, locations included. A moved column is a real change.
 - **Tags**: `[frontend]`, `[codegen]`, `[smoke]`, `[jit]`, `[aot]` (the AOT smoke test, and `AotTest.cpp`'s checks
-  of an executable's entry), `[grammar]`; the SIMD recipes add `[simd]` and `[poly]`. Add new ones freely.
+  of an executable's entry), `[grammar]`, `[simd]` (vectors and the vector math library), `[poly]`. Add new ones
+  freely.
 - **Vector functions** are called from C++ through clang's `ext_vector_type`
   (`using float4 = float __attribute__((ext_vector_type(4)));`), which matches FMinus's `float2` and `float4` at the C
   boundary ([simd.md](simd.md)).
@@ -115,8 +116,8 @@ float gain(float x, float g)
 | `REQUIRES: arm64` (or `x86_64`) | the host architecture, for assembly checks |
 | `REQUIRES: asserts` | LLVM built with assertions |
 | `REQUIRES: asan`, `ubsan`, `tsan` | the sanitizer build |
-| `REQUIRES: system-darwin` (or `system-linux`) | the host's system; recipe 8 adds it, for its Apple-only library |
-| `%if arm64 %{ ... %}` | a RUN line only on arm64, so the rest of the file still runs elsewhere (recipes 7 to 9) |
+| `REQUIRES: system-darwin` (or `system-linux`) | the host's system (`veclib.fm` needs Apple's vector math library) |
+| `%if arm64 %{ ... %}` | a RUN line only on arm64, so the rest of the file still runs elsewhere (`simd.fm`, `poly.fm`) |
 
 On PATH: `fminus`, `fminus-build`, `fminus-hostinfo`, then `FileCheck`, `not`, `count`, `opt`, `llc`, `llvm-mca`,
 `llvm-objdump`, ... from the LLVM flavor. To check an error, send stderr to FileCheck and expect failure:

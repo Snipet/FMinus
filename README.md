@@ -5,10 +5,11 @@ optimises it for the CPU it is running on, and ORC's LLJIT compiles it, all on t
 the same IR can also be compiled ahead of time into a native executable.
 
 **Status:** FMinus v0, a deliberately small subset of C that goes all the way through, from source to the JIT, to
-expand on. It has functions over `float` and `bool`, declarations, assignments, blocks, `return`, arithmetic with `%`,
-comparisons, `!`, `&&`, `||` and `?:`, calls and `<math.h>`'s float functions (below). A program with a
-`float main(...)` also builds into an executable. The build, the dependencies and the toolchain's smoke tests are in
-place around it.
+expand on. It has functions over `float` and `bool`, declarations, assignments, blocks, `if`, `while`, `for`,
+`break`, `continue` and `return`, arithmetic with `%`, comparisons, `!`, `&&`, `||` and `?:`, calls and `<math.h>`'s
+float functions (below). It has SIMD: OpenCL C's `float2`, `float4` and `float8`, and `poly float`, a vector as wide as
+the machine's. A program with a `float main(...)` also builds into an executable. The build, the dependencies and the
+toolchain's smoke tests are in place around it.
 
 Documentation: [docs/](docs/README.md). It covers the architecture, writing a program with `main`, a guide to
 extending the compiler with worked recipes, SIMD (vector types, a vector math library, and vectors as wide as the
@@ -151,18 +152,22 @@ float half(float x) { x /= 2; return x; }
 |---|---|
 | program | function definitions, `float name(float a, const float b) { ... }`, and prototypes, `float name(float);` |
 | declarations | `float x = e;`, `const float k = e;`, several at once (`float a = 1, b;`); block-scoped, shadowing allowed in an inner block |
-| statements | `{ ... }`, `e;`, `return e;`, `;` |
-| expressions | constants, names, calls, `( )`, unary `-` `+` `!`, `* / %`, `+ -`, `< <= > >=`, `== !=`, `&&`, `\|\|` (both short-circuit), `?:` (only the branch taken runs), and `= += -= *= /= %=` (right to left; an assignment's value is the one stored), with C's precedence |
+| statements | `{ ... }`, `e;`, `return e;`, `;`, `if (c) s else s` (an `else` closes the nearest `if`), `while (c) s`, `for (init; c; step) s` (its declarations are the loop's), `break;`, `continue;` |
+| expressions | constants, names, calls, `( )`, unary `-` `+` `!`, `* / %`, `+ -`, `< <= > >=`, `== !=`, `&&`, `\|\|` (both short-circuit), `?:` (only the branch taken runs), and `= += -= *= /= %=` (right to left; an assignment's value is the one stored), with C's precedence; vector literals `(float4)(a, b, c, d)` and swizzles `v.wzyx`, `v.s0` |
 | constants | C's floating and integer forms: `1.5`, `1.`, `.5`, `2e3`, `1.5e-3f`, hex floats `0x1.8p1`, `0x1p-3f`, and `2`; `true` and `false` |
 | comments | `// ...` and `/* ... */` |
-| types | `float` (IEEE single precision) and `bool` (C23's: 0 or 1 as a float; a float is `x != 0` as a bool) |
-| builtins | `fabsf sqrtf sinf cosf expf logf floorf fminf fmaxf tanhf` (LLVM intrinsics) |
+| types | `float` (IEEE single precision) and `bool` (C23's: 0 or 1 as a float; a float is `x != 0` as a bool); `float2`, `float4`, `float8` (OpenCL C's vectors, lane by lane, scalars broadcast); `poly float` and `poly bool`, as many lanes as the machine's vectors ([docs/simd.md](docs/simd.md)) |
+| builtins | `fabsf sqrtf sinf cosf expf logf floorf fminf fmaxf tanhf` (LLVM intrinsics, on floats and vectors); `reduce_add reduce_min reduce_max` (a vector to a float); `poly_lanes poly_index` |
 
 Where FMinus differs from C, it is on purpose:
 
 - **`float` is the only arithmetic type, and every number is a `float`.** In C an unsuffixed `1.5` is a `double`, and
   `x * 1.5` is computed in double. Write the `f` suffix (`1.5f`) and a program means the same in both. Every example
   here does.
+- **Vectors are OpenCL C's**, which C has none of: `float2`, `float4`, `float8`, their literals and swizzles, and math
+  functions that take them. A comparison of vectors gives a lane mask (OpenCL C gives 0 or -1 in an `int` vector), and
+  `?:` with a vector condition picks each lane, so both sides run. `poly float`, a vector as wide as the machine's, is
+  FMinus's own ([docs/simd.md](docs/simd.md)).
 - **`%` works on floats**, with `fmodf`'s semantics: the result has the sign of the dividend, so `-7.5 % 2` is
   `-1.5`. C allows `%` on integers only; HLSL allows it on floats. `%=` goes with it.
 - **A function may be called before its definition** without a prototype, because the compiler declares every
@@ -177,7 +182,7 @@ Where FMinus differs from C, it is on purpose:
   FMinus executable reads `main`'s arguments from its command line and prints its result, a float or `true` or
   `false` ([docs/programs.md](docs/programs.md)).
 
-A v0 program with `f` suffixes, with prototypes for calls ahead of a definition, and without `%` or `main`, is
+A v0 program with `f` suffixes, with prototypes for calls ahead of a definition, and without `%`, vectors or `main`, is
 therefore also a valid C program with the same meaning, given `<math.h>` and `-ffp-contract=off`. The example above
 and `examples/biquad/biquad.fm` both compile as C under `-Wall -Wextra -Werror`.
 
@@ -192,6 +197,7 @@ build-dev/bin/fminus chain.fm --emit ast           # the syntax tree, as s-expre
 build-dev/bin/fminus chain.fm --emit asm -o -      # this machine's assembly (--emit obj: an object file)
 build-dev/bin/fminus chain.fm --run chain 1        # JIT-compiles, calls chain(1), prints 0.33333334
 build-dev/bin/fminus note.fm --emit exe -o note    # an executable that runs main: ./note 69 prints 440
+build-dev/bin/fminus voices.fm --poly-lanes 16     # compile as for a machine with 16-float vectors (AVX-512)
 ```
 
 How it fits together: `frontend::parse` (Lexer.l, then Parser.y) gives an `ast::Program`, and `ir::lower`
@@ -262,8 +268,8 @@ build-dev/bin/fminus-lit -v tests/lit               # lit directly; a source pat
   Catch2's `BENCHMARK` is there for timing JIT'd kernels.
 - **lit** (`tests/lit/`): a file with `RUN:` lines, checked by FileCheck. `tests/lit/fminus/` drives `fminus`. FMinus's
   tools and LLVM's are on PATH; `%host_triple` is substituted; the features for `REQUIRES:` are `asserts`, `asan`,
-  `ubsan`, `tsan`, `arm64`, `x86_64`. `.fm` is a placeholder extension for FMinus sources: change it in
-  `tests/lit/lit.cfg.py`.
+  `ubsan`, `tsan`, `arm64`, `x86_64`, `system-darwin`, `system-linux`. `.fm` is a placeholder extension for FMinus
+  sources: change it in `tests/lit/lit.cfg.py`.
 
 ## Presets
 

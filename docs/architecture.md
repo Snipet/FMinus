@@ -70,7 +70,7 @@ Flex generates `Lexer.yy.cpp` and `Lexer.yy.hpp` into `build-*/src/generated/fro
   constants (`2`) are all one `NUMBER` token. The token keeps its spelling, `f` suffix included, so the code generator
   can round it once, to the right type. `2f` is clang's "invalid suffix 'f' on integer constant", as in C.
 - **Rules.** Flex takes the longest match, and between matches of equal length, the earlier rule. That makes
-  `+=` beat `+`, and `/*` beat `/`. Keywords (`float`, `const`, `return`) therefore come before `{IDENTIFIER}`:
+  `+=` beat `+`, and `/*` beat `/`. Keywords (`float`, `bool`, `if`, `poly`, ...) therefore come before `{IDENTIFIER}`:
   `float` is a keyword and `floaty` an identifier.
 - **Errors.** An unexpected character throws `Parser::syntax_error`. The parser catches it and reports it through
   `Parser::error`, like any syntax error.
@@ -93,9 +93,11 @@ subset of C's, is written out as EBNF in the file's header comment.
   what lets move-only types such as `std::unique_ptr` pass through. As a consequence, an action may use each `$n` only
   once. `api.token.constructor` gives the scanner `Parser::make_FLOAT(location)` and friends.
 - **C's precedence.** The `%right`, `%left` and `%precedence` lines give the operators C's precedence and
-  associativity, from the loosest at the top to the tightest at the bottom: assignment (right to left), additive,
-  multiplicative (`*`, `/` and `%`), unary (`%prec UNARY`). The small helpers in the `%code` block, `binary()` and
-  `assign()`, keep each operator's rule to one line.
+  associativity, from the loosest at the top to the tightest at the bottom: assignment (right to left), `?:` (right
+  to left), `||`, `&&`, equality, relational, additive, multiplicative (`*`, `/` and `%`), unary (`%prec UNARY`), and
+  the swizzle's `.`. The small helpers in the `%code` block, `binary()`, `logical()` and `assign()`, keep each
+  operator's rule to one line. The dangling `else` is resolved with `%precedence THEN` below `"else"`: an `else` closes
+  the nearest `if`, as in C.
 - **Assignment is an expression.** `expr "=" expr` (and `+=` ...) accepts any expression as its target, as C's
   grammar does in effect. The code generator rejects what isn't a variable with clang's "expression is not
   assignable". Array elements and struct fields can join the check later without touching the grammar.
@@ -123,8 +125,13 @@ The tree is plain data. It has no LLVM in it, so other passes (a type checker, a
 on it without the code generator.
 
 - **Nodes.** `Expr` and `Stmt` each pair a `SourceLocation` with a `std::variant` of node kinds:
-  - expressions: `NumberExpr`, `VariableExpr`, `UnaryExpr`, `BinaryExpr`, `CallExpr`, `AssignExpr`;
-  - statements: `DeclStmt`, `ExprStmt`, `ReturnStmt`, `BlockStmt`, `EmptyStmt`.
+  - expressions: `NumberExpr`, `VariableExpr`, `BoolExpr`, `UnaryExpr`, `BinaryExpr`, `LogicalExpr`, `CallExpr`,
+    `AssignExpr`, `ConditionalExpr`, `ConstructExpr` (a vector literal), `SwizzleExpr`;
+  - statements: `DeclStmt`, `ExprStmt`, `ReturnStmt`, `BlockStmt`, `EmptyStmt`, `IfStmt`, `WhileStmt`, `ForStmt`,
+    `BreakStmt`, `ContinueStmt`.
+- **Types.** `Type` is `float`, `bool`, the vectors `float2`, `float4`, `float8`, their lane masks `bool2`, `bool4`,
+  `bool8`, and `poly float` and `poly bool`, whose width the target decides. Helpers answer the questions the rules
+  ask: `lanes`, `isVector`, `isMask`, `isPoly`, `vectorOf`, `maskOf`, `arithmeticOf` ([simd.md](simd.md)).
 - **Ownership.** Children are owned: `ExprPtr = std::unique_ptr<Expr>`, and a `BlockStmt` holds a
   `std::vector<Stmt>`. `Param`, `Function` (definition or prototype) and `Program` are aggregates of those.
 - **Exhaustive walks.** Code that walks the tree uses `std::visit` with an `Overloaded{...}` set of lambdas and no
@@ -136,8 +143,9 @@ on it without the code generator.
 
 ## Code generation: `ir/CodeGen.cpp`
 
-`ir::lower(program, context, diagnostics)` creates a module named after the file. A `Lowering` object then runs two
-passes over the program.
+`ir::lower(program, context, diagnostics, options)` creates a module named after the file. `options.polyLanes` is a
+`poly float`'s width, which the driver gets from the target machine (`polyLanes`, below). A `Lowering` object then
+runs two passes over the program.
 
 **Pass 1, declare.** Every function name gets one `llvm::Function`, with external linkage, its C name and the C
 calling convention (`float` is `f32`). C++ therefore calls JIT'd code as `float(float, ...)`, and functions may call
@@ -171,7 +179,11 @@ each other in any order. The rules for a name's prototypes and definition are C'
 - **Verification.** `llvm::verifyFunction` checks each function, and anything it rejects is reported as an internal
   error, because the IR is wrong rather than the program.
 
-Expressions lower recursively (`lower(const ast::Expr&)` returns an `llvm::Value*`):
+Expressions lower recursively. `lower(const ast::Expr&)` returns a `Value`: the IR and the expression's FMinus type.
+The rules read the FMinus type, never the IR's, because two FMinus types can share an LLVM type (a `poly float` is
+`<4 x float>` on NEON, as a `float4` is). `convert(value, type, location, use)` applies C's implicit conversions and
+OpenCL C's (a scalar broadcasts to a vector), and reports clang's message for the place a value meets its type
+(`Use`: initialising, assigning, returning, passing, a condition, a logical operand).
 
 - **Constants** go through `llvm::APFloat::convertFromString`, after the `f` suffix is dropped, straight to IEEE
   single, so they are rounded once. Hex floats are exact. A constant too large for `float` is clang's "magnitude of
@@ -179,9 +191,14 @@ Expressions lower recursively (`lower(const ast::Expr&)` returns an `llvm::Value
 - **Arithmetic** becomes `fneg`, `fadd`, `fsub`, `fmul`, `fdiv` and `frem` with no fast-math flags, so it is IEEE
   exact, as clang does with `-ffp-contract=off`. `frem` is `%`, with `fmodf`'s semantics; AArch64 has no instruction
   for it, so it becomes a call to `fmodf`.
-- **Calls** first try `kBuiltins`, a table from `<math.h>`'s float names to LLVM intrinsics (`fabsf` to
-  `llvm.fabs`, `sinf` to `llvm.sin`, ...), declared with `Intrinsic::getOrInsertDeclaration`. Then they try the
-  program's functions. Argument counts are checked with clang's "too many/too few arguments to function call".
+- **Calls** first try the reductions (`reduce_add`, `reduce_min`, `reduce_max`) and `poly_lanes` and `poly_index`,
+  then `kBuiltins`, a table from `<math.h>`'s float names to LLVM intrinsics (`fabsf` to `llvm.fabs`, `sinf` to
+  `llvm.sin`, ...), declared with `Intrinsic::getOrInsertDeclaration` at the arguments' type, so `sinf` of a `float4`
+  is `llvm.sin.v4f32`. Then they try the program's functions. Argument counts are checked with clang's "too many/too
+  few arguments to function call".
+- **Control flow** is blocks named as clang names them: `land.rhs` and `lor.rhs` for `&&` and `||`, `cond.true`,
+  `cond.false` and `cond.end` for `?:`, `if.then`, `while.cond`, `for.inc`, ... A `?:` with a vector condition is a
+  `select` instead, lane by lane.
 - **On an error**, the lowering reports it, in clang's words, and returns `llvm::PoisonValue`. The IR stays
   well-formed, the next error is still found, and the module is thrown away at the end: `lower` returns null when
   `diagnostics.hasErrors()`.
@@ -196,8 +213,11 @@ Expressions lower recursively (`lower(const ast::Expr&)` returns an `llvm::Value
   read both.
 - **`optimiseModule(module, machine, level)`** runs `PassBuilder::buildPerModuleDefaultPipeline(level)`, which is
   clang's `-O<n>` pipeline, with loop and SLP vectorisation on. It passes the target machine, so the cost models know
-  the host's vector width and instruction costs. This is the place to plug in FMinus's own passes (extending.md,
-  recipe 6).
+  the host's vector width and instruction costs. On Apple systems it also gives the pipeline libsystem_m's vector
+  math library, and runs `ReplaceWithVeclib` last, so `sinf` of a `float4` is one call to `_simd_sin_f4`
+  ([simd.md](simd.md), recipe 8). This is the place to plug in FMinus's own passes (extending.md, recipe 6).
+- **`polyLanes(machine)`** asks the machine's cost model how many floats its vector registers hold, the width LLVM's
+  vectorisers use: a `poly float`'s lanes (4 on NEON).
 - **`codeGenLevel(level)`** maps an optimisation level to the code generator's level.
 
 ## The JIT: `jit/Jit.h`
