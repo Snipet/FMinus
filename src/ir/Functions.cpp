@@ -1,0 +1,153 @@
+// src/ir/Functions.cpp: functions. Declarations follow C's rules for prototypes and definitions, with the C ABI's
+// attributes; a definition's parameters become stack slots, its body is lowered, and a non-void function that can
+// fall off its end is an error. Also the stack slots and the scopes variables live in.
+#include "ir/Lowering.h"
+
+#include <llvm/ADT/DepthFirstIterator.h>
+#include <llvm/IR/CFG.h>
+#include <llvm/IR/Verifier.h>
+#include <llvm/Support/raw_ostream.h>
+
+namespace fminus::ir::detail
+{
+    bool Lowering::sameSignature(const ast::Function& a, const ast::Function& b)
+    {
+        if (a.returnType != b.returnType || a.params.size() != b.params.size())
+            return false;
+        for (std::size_t i = 0; i < a.params.size(); ++i)
+        {
+            if (a.params[i].type != b.params[i].type)   // const on a parameter is not part of the type
+                return false;
+        }
+        return true;
+    }
+
+    void Lowering::declare(const ast::Function& function)
+    {
+        if (isReduction(function.name) || isPolyQuery(function.name))
+        {
+            error(function.location, quoted(function.name) + " is a builtin and cannot be redefined");
+            return;
+        }
+        if (const Builtin* builtin = findBuiltin(function.name))
+        {
+            // A prototype of a builtin, as <math.h> has, declares nothing new; a definition is refused.
+            if (function.isDefinition)
+                error(function.location, quoted(function.name) + " is a builtin and cannot be redefined");
+            else if (function.params.size() != builtin->arity)
+                error(function.location, "conflicting types for " + quoted(function.name));
+            return;
+        }
+        if (const auto found = functions_.find(function.name); found != functions_.end())
+        {
+            const ast::Function& previous = *found->second;
+            if (!sameSignature(previous, function))
+                error(function.location, "conflicting types for " + quoted(function.name));
+            else if (function.isDefinition && previous.isDefinition)
+                error(function.location, "redefinition of " + quoted(function.name));
+            else if (function.isDefinition)
+                found->second = &function;   // the definition, after its prototypes
+            return;
+        }
+        std::vector<llvm::Type*> params;
+        for (const ast::Param& param : function.params)
+            params.push_back(typeOf(param.type));
+        llvm::FunctionType* type = llvm::FunctionType::get(typeOf(function.returnType), params, false);
+        llvm::Function* llvmFunction =
+            llvm::Function::Create(type, llvm::Function::ExternalLinkage, function.name, module_);
+        // The C ABI passes and returns bool zero-extended: say so, or a C++ caller reads garbage bits.
+        for (std::size_t i = 0; i < function.params.size(); ++i)
+        {
+            if (function.params[i].type == ast::Type::Bool)
+                llvmFunction->addParamAttr(static_cast<unsigned>(i), llvm::Attribute::ZExt);
+        }
+        if (function.returnType == ast::Type::Bool)
+            llvmFunction->addRetAttr(llvm::Attribute::ZExt);
+        functions_.emplace(function.name, &function);
+    }
+
+    void Lowering::define(const ast::Function& function)
+    {
+        llvm::Function* llvmFunction = module_.getFunction(function.name);
+        builder_.SetInsertPoint(llvm::BasicBlock::Create(module_.getContext(), "entry", llvmFunction));
+        function_ = &function;
+        scopes_.assign(1, {});   // the outermost scope: the parameters and the body's own declarations
+
+        // Each parameter gets a slot, as a local does (clang names them x.addr), so it can be assigned.
+        for (std::size_t i = 0; i < function.params.size(); ++i)
+        {
+            const ast::Param& param = function.params[i];
+            if (param.name.empty())
+            {
+                error(param.location, "parameter name omitted");
+                continue;
+            }
+            llvm::Argument* argument = llvmFunction->getArg(static_cast<unsigned>(i));
+            argument->setName(param.name);
+            llvm::AllocaInst* slot = allocate(typeOf(param.type), param.name + ".addr");
+            builder_.CreateStore(argument, slot);
+            if (!bind(param.name, Binding{slot, param.isConst, param.type}))
+                error(param.location, "redefinition of parameter " + quoted(param.name));
+        }
+
+        lowerStatements(function.body);
+
+        if (!builder_.GetInsertBlock()->hasTerminator())
+        {
+            if (reachable(builder_.GetInsertBlock()))
+            {
+                error(function.location,
+                      "non-void function " + quoted(function.name) + " does not return a value");
+                builder_.CreateRet(poison(function.returnType).ir);
+            }
+            else
+            {
+                builder_.CreateUnreachable();   // the end follows a return: nothing runs here
+            }
+        }
+
+        std::string problem;
+        llvm::raw_string_ostream os(problem);
+        if (llvm::verifyFunction(*llvmFunction, &os))
+            error(function.location, "internal error: the IR of " + quoted(function.name) + " is invalid: "
+                                         + problem);
+    }
+
+    // A slot at the top of the entry block, whatever block the builder is in: mem2reg promotes only those.
+    llvm::AllocaInst* Lowering::allocate(llvm::Type* type, const std::string& name)
+    {
+        llvm::BasicBlock& entry = builder_.GetInsertBlock()->getParent()->getEntryBlock();
+        llvm::IRBuilder<> atEntry(&entry, entry.begin());
+        return atEntry.CreateAlloca(type, nullptr, name);
+    }
+
+    // Whether control can reach `block` from the function's entry. (Having predecessors is not enough: code
+    // after a return can branch, and its blocks are all dead.)
+    bool Lowering::reachable(llvm::BasicBlock* block)
+    {
+        for (llvm::BasicBlock* live : llvm::depth_first(&block->getParent()->getEntryBlock()))
+        {
+            if (live == block)
+                return true;
+        }
+        return false;
+    }
+
+    // Adds `name` to the innermost scope; false when that scope already has it.
+    bool Lowering::bind(const std::string& name, Binding binding)
+    {
+        return scopes_.back().emplace(name, binding).second;
+    }
+
+    // The innermost binding of `name`, or nullptr.
+    const Lowering::Binding* Lowering::find(const std::string& name) const
+    {
+        for (auto scope = scopes_.rbegin(); scope != scopes_.rend(); ++scope)
+        {
+            const auto found = scope->find(name);
+            if (found != scope->end())
+                return &found->second;
+        }
+        return nullptr;
+    }
+} // namespace fminus::ir::detail
