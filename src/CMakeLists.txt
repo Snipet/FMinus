@@ -10,8 +10,11 @@
 # fminus_add_grammar. A scanner in a directory without a grammar is generated alone. Generated files land under
 # ${CMAKE_CURRENT_BINARY_DIR}/generated/<dir>/; include them as "<dir>/<stem>.tab.hpp" and "<dir>/<stem>.yy.hpp".
 #
-# Include roots: include/ (public: "fminus/..."), the generated include/fminus/Config.h, and for FMinus::Internal also
-# src/ ("support/LLVMInit.h", "runtime/Runtime.h", "frontend/...") and the generated grammar files.
+# FMinus::FMinus is the library as a host uses it: its public API, include/fminus/FMinus.h, which needs C++17 and has
+# no LLVM in it. A host gets the include roots include/ ("fminus/FMinus.h") and the generated include/fminus/Config.h,
+# and links LLVM, but compiles with neither LLVM's include paths and definitions nor FMinus's C++23. FMinus::Internal,
+# for this tree's tools, examples and tests, adds both, src/ ("support/LLVMInit.h", "runtime/Runtime.h",
+# "frontend/...") and the generated grammar files.
 
 file(GLOB_RECURSE _fminus_all_sources CONFIGURE_DEPENDS RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}"
      "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/*.h" "${CMAKE_CURRENT_SOURCE_DIR}/*.def")
@@ -37,7 +40,8 @@ fminus_target_defaults(fminus_lib)
 target_include_directories(fminus_lib
   PUBLIC "${PROJECT_SOURCE_DIR}/include" "${PROJECT_BINARY_DIR}/include"
   PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
-target_link_libraries(fminus_lib PUBLIC FMinus::LLVM fminus_runtime)
+target_compile_features(fminus_lib INTERFACE cxx_std_17)   # what include/fminus/FMinus.h needs
+target_link_libraries(fminus_lib PUBLIC fminus_runtime PRIVATE FMinus::LLVM)   # linked by its users, not included
 # What support/Aot.cpp links executables with: this tree's C++ compiler driver, runtime library and sanitizers.
 target_compile_definitions(fminus_lib PRIVATE
   "FMINUS_AOT_DRIVER=\"${CMAKE_CXX_COMPILER}\""
@@ -72,6 +76,7 @@ endforeach()
 # This tree's tools and tests see the library's internals too.
 add_library(fminus_internal INTERFACE)
 add_library(FMinus::Internal ALIAS fminus_internal)
-target_link_libraries(fminus_internal INTERFACE fminus_lib)
+fminus_target_defaults(fminus_internal)   # C++${FMINUS_CXX_STANDARD}, which the internal headers need
+target_link_libraries(fminus_internal INTERFACE fminus_lib FMinus::LLVM)
 target_include_directories(fminus_internal INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}"
                                                      "${CMAKE_CURRENT_BINARY_DIR}/generated")

@@ -4,6 +4,9 @@
 # runs each TEST_CASE as its own test; `bin/fminus-tests "[jit]"` runs a tag by hand, and `--benchmark-samples 100`
 # tunes Catch2's BENCHMARKs.
 #
+# library/ tests the public API (include/fminus/FMinus.h) as a host uses it: its own executable,
+# bin/fminus-library-tests, built in C++17 against FMinus::FMinus alone, without LLVM's headers or FMinus's internals.
+#
 # smoke/ checks the toolchain itself: LLJIT and the O3 pipeline on the host CPU (JitSmokeTest.cpp), and Bison + Flex
 # through fminus_add_grammar (smoke/calc/, a reentrant scanner feeding a C++ variant parser: a pattern to copy).
 #
@@ -24,6 +27,13 @@ add_executable(fminus-tests ${_fminus_unit_tests} ${_fminus_smoke_tests})
 fminus_target_defaults(fminus-tests)
 target_link_libraries(fminus-tests PRIVATE FMinus::Internal fminus_smoke_calc Catch2::Catch2WithMain)
 catch_discover_tests(fminus-tests DISCOVERY_MODE PRE_TEST)
+
+# ---- the public API, as a host uses it ------------------------------------------------------------------------------
+file(GLOB_RECURSE _fminus_library_tests CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/library/*.cpp")
+add_executable(fminus-library-tests ${_fminus_library_tests})
+fminus_target_defaults(fminus-library-tests CXX_STANDARD 17)
+target_link_libraries(fminus-library-tests PRIVATE FMinus::FMinus Catch2::Catch2WithMain)
+catch_discover_tests(fminus-library-tests DISCOVERY_MODE PRE_TEST)
 
 # ---- lit ------------------------------------------------------------------------------------------------------------
 if(FMINUS_LIT_PYTHON)
@@ -48,7 +58,7 @@ add_custom_target(check-fminus
   COMMAND "${CMAKE_CTEST_COMMAND}" --test-dir "${PROJECT_BINARY_DIR}" --output-on-failure
   USES_TERMINAL
   COMMENT "ctest")
-add_dependencies(check-fminus fminus-tests)
+add_dependencies(check-fminus fminus-tests fminus-library-tests)
 if(FMINUS_EXAMPLE_TARGETS)
   add_dependencies(check-fminus ${FMINUS_EXAMPLE_TARGETS})
 endif()

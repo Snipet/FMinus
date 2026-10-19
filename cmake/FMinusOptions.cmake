@@ -50,13 +50,20 @@ list(JOIN _fminus_sanitizers "," FMINUS_SANITIZE_ARG)
 
 # The defaults of an FMinus target: C++${FMINUS_CXX_STANDARD} without extensions, the warnings (as errors with
 # FMINUS_WERROR), the sanitizers. LLVM, Catch2 and the generated scanners' and parsers' own needs are handled elsewhere.
+# The standard is the target's own, never its users': a library says what its headers need itself (fminus_lib's public
+# API needs C++17), and an interface library passes the standard on. CXX_STANDARD <n> builds the target in C++<n>
+# instead (the public API's test, in C++17).
 function(fminus_target_defaults target)
+  cmake_parse_arguments(PARSE_ARGV 1 _arg "" "CXX_STANDARD" "")
+  if(NOT _arg_CXX_STANDARD)
+    set(_arg_CXX_STANDARD ${FMINUS_CXX_STANDARD})
+  endif()
   get_target_property(_type ${target} TYPE)
   if(_type STREQUAL "INTERFACE_LIBRARY")
-    target_compile_features(${target} INTERFACE cxx_std_${FMINUS_CXX_STANDARD})
+    target_compile_features(${target} INTERFACE cxx_std_${_arg_CXX_STANDARD})
     return()
   endif()
-  target_compile_features(${target} PUBLIC cxx_std_${FMINUS_CXX_STANDARD})
+  target_compile_features(${target} PRIVATE cxx_std_${_arg_CXX_STANDARD})
   set_target_properties(${target} PROPERTIES CXX_EXTENSIONS OFF)
   target_compile_options(${target} PRIVATE ${FMINUS_WARNING_FLAGS} $<$<BOOL:${FMINUS_WERROR}>:-Werror>)
   if(FMINUS_SANITIZE_ARG)
