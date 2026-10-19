@@ -2,8 +2,9 @@
 
 Syntax highlighting for FMinus (`.fm`): keywords, types (`float`, `int`, `bool`, `void`, and the SIMD recipes'
 `float4` and `poly float`) and qualifiers (`const`, `restrict`, `poly`), `true` and `false`, C's constants including
-hex floats and hex integers (and `2f` marked as the error it is), operators (`++`, `&`, `[]` too), builtins (`sinf`,
-`tanhf`, `reduce_add`, ...), function names and swizzles (`v.wzyx`). In lit tests, `RUN:`,
+hex floats and hex integers (and `2f` marked as the error it is), operators (`++`, `&`, `[]`, `sizeof` too),
+attributes (`[[clang::nonblocking]]`), builtins (`sinf`, `tanhf`, `malloc`, `reduce_add`, ...), function names and
+swizzles (`v.wzyx`). In lit tests, `RUN:`,
 `REQUIRES:`, `CHECK:` and the other check prefixes stand out inside their comments. `//` and `/* */` toggle as
 comments, and brackets match and close.
 
@@ -19,8 +20,8 @@ It is declarative: three JSON files, no code, nothing that runs on your files.
 ## Installing
 
 ```bash
-python3 editors/vscode/package.py                               # build-vscode/fminus-0.2.0.vsix
-code --install-extension build-vscode/fminus-0.2.0.vsix
+python3 editors/vscode/package.py                               # build-vscode/fminus-0.3.0.vsix
+code --install-extension build-vscode/fminus-0.3.0.vsix
 ```
 
 Then reload the window (Developer: Reload Window). `code` comes with VSCode; if it isn't on PATH, run "Shell Command:
