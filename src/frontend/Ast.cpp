@@ -170,27 +170,27 @@ namespace fminus::ast
 
     const char* typeName(Type type)
     {
-        switch (type)
+        switch (type.kind)
         {
-        case Type::Float:
+        case Kind::Float:
             return "float";
-        case Type::Bool:
+        case Kind::Bool:
             return "bool";
-        case Type::Float2:
+        case Kind::Float2:
             return "float2";
-        case Type::Float4:
+        case Kind::Float4:
             return "float4";
-        case Type::Float8:
+        case Kind::Float8:
             return "float8";
-        case Type::Bool2:
+        case Kind::Bool2:
             return "bool2";
-        case Type::Bool4:
+        case Kind::Bool4:
             return "bool4";
-        case Type::Bool8:
+        case Kind::Bool8:
             return "bool8";
-        case Type::PolyFloat:
+        case Kind::PolyFloat:
             return "poly float";
-        case Type::PolyBool:
+        case Kind::PolyBool:
             return "poly bool";
         }
         return "?";

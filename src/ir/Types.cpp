@@ -14,21 +14,21 @@ namespace fminus::ir::detail
 
     llvm::Type* Lowering::typeOf(ast::Type type)
     {
-        switch (type)
+        switch (type.kind)
         {
-        case ast::Type::Float:
+        case ast::Kind::Float:
             return builder_.getFloatTy();
-        case ast::Type::Bool:
+        case ast::Kind::Bool:
             return builder_.getInt1Ty();
-        case ast::Type::Float2:
-        case ast::Type::Float4:
-        case ast::Type::Float8:
-        case ast::Type::PolyFloat:
+        case ast::Kind::Float2:
+        case ast::Kind::Float4:
+        case ast::Kind::Float8:
+        case ast::Kind::PolyFloat:
             return llvm::FixedVectorType::get(builder_.getFloatTy(), lanes(type));
-        case ast::Type::Bool2:
-        case ast::Type::Bool4:
-        case ast::Type::Bool8:
-        case ast::Type::PolyBool:
+        case ast::Kind::Bool2:
+        case ast::Kind::Bool4:
+        case ast::Kind::Bool8:
+        case ast::Kind::PolyBool:
             return llvm::FixedVectorType::get(builder_.getInt1Ty(), lanes(type));
         }
         return builder_.getFloatTy();

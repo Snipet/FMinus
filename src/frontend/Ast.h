@@ -27,7 +27,12 @@ namespace fminus::ast
     // 16 with AVX-512. A program is written without knowing how many (poly_lanes() is the number, a constant once the
     // target is known), so it means the same on every target. Comparing two gives a poly bool, which a program can
     // declare.
-    enum class Type
+    //
+    // A type is a kind, and fields that kinds such as a pointer's need beside it; two types are the same when every
+    // field is. Type::Float and the rest name the types that are only a kind, and a kind converts to its type, so
+    // `type == Type::Float` reads as it says. A switch over a type is a switch over `type.kind`, and -Wswitch lists
+    // the kinds it misses.
+    enum class Kind
     {
         Float,
         Bool,
@@ -41,6 +46,29 @@ namespace fminus::ast
         PolyBool,
     };
 
+    struct Type
+    {
+        Kind kind = Kind::Float;
+
+        constexpr Type() = default;
+        constexpr Type(Kind kind) : kind(kind) {}   // implicit: Kind::Float is the type float
+
+        friend constexpr bool operator==(Type, Type) = default;
+
+        static const Type Float, Bool, Float2, Float4, Float8, Bool2, Bool4, Bool8, PolyFloat, PolyBool;
+    };
+
+    inline constexpr Type Type::Float{Kind::Float};
+    inline constexpr Type Type::Bool{Kind::Bool};
+    inline constexpr Type Type::Float2{Kind::Float2};
+    inline constexpr Type Type::Float4{Kind::Float4};
+    inline constexpr Type Type::Float8{Kind::Float8};
+    inline constexpr Type Type::Bool2{Kind::Bool2};
+    inline constexpr Type Type::Bool4{Kind::Bool4};
+    inline constexpr Type Type::Bool8{Kind::Bool8};
+    inline constexpr Type Type::PolyFloat{Kind::PolyFloat};
+    inline constexpr Type Type::PolyBool{Kind::PolyBool};
+
     inline bool isPoly(Type type)
     {
         return type == Type::PolyFloat || type == Type::PolyBool;
@@ -50,22 +78,22 @@ namespace fminus::ast
     // generator knows how many).
     inline unsigned lanes(Type type)
     {
-        switch (type)
+        switch (type.kind)
         {
-        case Type::PolyFloat:
-        case Type::PolyBool:
+        case Kind::PolyFloat:
+        case Kind::PolyBool:
             return 0;
-        case Type::Float:
-        case Type::Bool:
+        case Kind::Float:
+        case Kind::Bool:
             return 1;
-        case Type::Float2:
-        case Type::Bool2:
+        case Kind::Float2:
+        case Kind::Bool2:
             return 2;
-        case Type::Float4:
-        case Type::Bool4:
+        case Kind::Float4:
+        case Kind::Bool4:
             return 4;
-        case Type::Float8:
-        case Type::Bool8:
+        case Kind::Float8:
+        case Kind::Bool8:
             return 8;
         }
         return 1;
@@ -100,15 +128,15 @@ namespace fminus::ast
     // What a comparison of two values of `type` gives: a bool for floats, a lane mask for float vectors.
     inline Type maskOf(Type type)
     {
-        switch (type)
+        switch (type.kind)
         {
-        case Type::Float2:
+        case Kind::Float2:
             return Type::Bool2;
-        case Type::Float4:
+        case Kind::Float4:
             return Type::Bool4;
-        case Type::Float8:
+        case Kind::Float8:
             return Type::Bool8;
-        case Type::PolyFloat:
+        case Kind::PolyFloat:
             return Type::PolyBool;
         default:
             return Type::Bool;

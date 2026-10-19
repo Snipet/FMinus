@@ -176,22 +176,22 @@ int main(int argc, char** argv)
         // Through a pointer of the function's own type: a bool comes back zero-extended in a general register, a
         // float in a vector register. std::format prints a bool as true or false.
         constexpr auto counts = std::make_index_sequence<kMaxRunArgs + 1>{};
-        switch (function->returnType)
+        switch (function->returnType.kind)
         {
-        case fminus::ast::Type::Float:
+        case fminus::ast::Kind::Float:
             llvm::outs() << std::format("{}\n", call<float>(*address, runArgs, counts));
             break;
-        case fminus::ast::Type::Bool:
+        case fminus::ast::Kind::Bool:
             llvm::outs() << std::format("{}\n", call<bool>(*address, runArgs, counts));
             break;
-        case fminus::ast::Type::Float2:   // a vector stays inside FMinus, or goes to a C++ host (docs/simd.md)
-        case fminus::ast::Type::Float4:
-        case fminus::ast::Type::Float8:
-        case fminus::ast::Type::Bool2:
-        case fminus::ast::Type::Bool4:
-        case fminus::ast::Type::Bool8:
-        case fminus::ast::Type::PolyFloat:
-        case fminus::ast::Type::PolyBool:
+        case fminus::ast::Kind::Float2:   // a vector stays inside FMinus, or goes to a C++ host (docs/simd.md)
+        case fminus::ast::Kind::Float4:
+        case fminus::ast::Kind::Float8:
+        case fminus::ast::Kind::Bool2:
+        case fminus::ast::Kind::Bool4:
+        case fminus::ast::Kind::Bool8:
+        case fminus::ast::Kind::PolyFloat:
+        case fminus::ast::Kind::PolyBool:
             return fail(std::format("--run: '{}' returns a {}; --run prints floats and bools only", run,
                                     fminus::ast::typeName(function->returnType)));
         }
