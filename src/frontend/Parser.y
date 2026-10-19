@@ -3,13 +3,13 @@
 // ParseContext.
 //
 //     program      : function*
-//     function     : type IDENTIFIER "(" (param ("," param)*)? ")" (block | ";")     a definition, or a prototype
+//     function     : type IDENTIFIER "(" (param ("," param)* | "void")? ")" (block | ";")   a definition, or a prototype
 //     param        : "const"? type IDENTIFIER?                                       (a prototype may omit names)
-//     type         : "float" | "bool" | "int" | VECTOR_TYPE | "poly" ("float" | "bool")   VECTOR_TYPE: float2/4/8
+//     type         : "float" | "bool" | "int" | "void" | VECTOR_TYPE | "poly" ("float" | "bool")   VECTOR_TYPE: float2/4/8
 //     block        : "{" (declaration | statement)* "}"
 //     declaration  : "const"? type declarator ("," declarator)* ";"
 //     declarator   : IDENTIFIER ("=" expr)?
-//     statement    : block | expr ";" | "return" expr ";" | ";"
+//     statement    : block | expr ";" | "return" expr? ";" | ";"
 //                  | "if" "(" expr ")" statement ("else" statement)? | "while" "(" expr ")" statement
 //                  | "for" "(" (declaration | expr? ";") expr? ";" expr? ")" statement | "break" ";" | "continue" ";"
 //     expr         : NUMBER | "true" | "false" | IDENTIFIER | IDENTIFIER "(" (expr ("," expr)*)? ")" | "(" expr ")"
@@ -109,7 +109,7 @@
     } // namespace
 }
 
-%token FLOAT "float" CONST "const" RETURN "return" BOOL "bool" INT "int" TRUE "true" FALSE "false"
+%token FLOAT "float" CONST "const" RETURN "return" BOOL "bool" INT "int" VOID "void" TRUE "true" FALSE "false"
 %token LT "<" LE "<=" GT ">" GE ">=" EQ "==" NE "!=" NOT "!" AND "&&" OR "||" QUESTION "?" COLON ":"
 %token IF "if" ELSE "else" WHILE "while" FOR "for" BREAK "break" CONTINUE "continue"
 %token <ast::Type> VECTOR_TYPE "vector type"
@@ -167,9 +167,15 @@ function
     | type IDENTIFIER "(" params ")" ";"    { $$ = ast::Function{at(@2), $2, $4, $1, {}, false}; }
     ;
 
+// `(void)` is C's empty list: one unnamed parameter of type void, which is no parameter.
 params
     : %empty                                {}
-    | param_list                            { $$ = $1; }
+    | param_list                            {
+                                                $$ = $1;
+                                                if ($$.size() == 1 && $$[0].name.empty() && !$$[0].isConst
+                                                    && $$[0].type == ast::Type::Void)
+                                                    $$.clear();
+                                            }
     ;
 
 param_list
@@ -191,6 +197,7 @@ type
     : "float"                               { $$ = ast::Type::Float; }
     | "bool"                                { $$ = ast::Type::Bool; }
     | "int"                                 { $$ = ast::Type::Int; }
+    | "void"                                { $$ = ast::Type::Void; }
     | VECTOR_TYPE                           { $$ = $1; }
     | "poly" "float"                        { $$ = ast::Type::PolyFloat; }
     | "poly" "bool"                         { $$ = ast::Type::PolyBool; }
@@ -242,6 +249,7 @@ statement
     : block                                 { $$ = ast::Stmt{at(@1), ast::BlockStmt{$1}}; }
     | expr ";"                              { $$ = ast::Stmt{at(@1), ast::ExprStmt{$1}}; }
     | "return" expr ";"                     { $$ = ast::Stmt{at(@1), ast::ReturnStmt{$2}}; }
+    | "return" ";"                          { $$ = ast::Stmt{at(@1), ast::ReturnStmt{nullptr}}; }
     | ";"                                   { $$ = ast::Stmt{at(@1), ast::EmptyStmt{}}; }
     | "if" "(" expr ")" statement %prec THEN
                                             { $$ = ast::Stmt{at(@1), ast::IfStmt{$3, ast::own($5), nullptr}}; }

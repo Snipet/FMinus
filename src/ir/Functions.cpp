@@ -1,6 +1,6 @@
 // src/ir/Functions.cpp: functions. Declarations follow C's rules for prototypes and definitions, with the C ABI's
 // attributes; a definition's parameters become stack slots, its body is lowered, and a non-void function that can
-// fall off its end is an error. Also the stack slots and the scopes variables live in.
+// fall off its end is an error (a void one returns there). Also the stack slots and the scopes variables live in.
 #include "ir/Lowering.h"
 
 #include <llvm/ADT/DepthFirstIterator.h>
@@ -51,7 +51,11 @@ namespace fminus::ir::detail
         }
         std::vector<llvm::Type*> params;
         for (const ast::Param& param : function.params)
-            params.push_back(typeOf(param.type));
+        {
+            if (param.type == ast::Type::Void)
+                error(param.location, "argument may not have 'void' type");
+            params.push_back(typeOf(param.type == ast::Type::Void ? ast::Type::Float : param.type));
+        }
         llvm::FunctionType* type = llvm::FunctionType::get(typeOf(function.returnType), params, false);
         llvm::Function* llvmFunction =
             llvm::Function::Create(type, llvm::Function::ExternalLinkage, function.name, module_);
@@ -82,6 +86,8 @@ namespace fminus::ir::detail
                 error(param.location, "parameter name omitted");
                 continue;
             }
+            if (param.type == ast::Type::Void)
+                continue;   // declare() reported it
             llvm::Argument* argument = llvmFunction->getArg(static_cast<unsigned>(i));
             argument->setName(param.name);
             llvm::AllocaInst* slot = allocate(typeOf(param.type), param.name + ".addr");
@@ -94,7 +100,9 @@ namespace fminus::ir::detail
 
         if (!builder_.GetInsertBlock()->hasTerminator())
         {
-            if (reachable(builder_.GetInsertBlock()))
+            if (function.returnType == ast::Type::Void)
+                builder_.CreateRetVoid();   // a void function may fall off its end, as in C
+            else if (reachable(builder_.GetInsertBlock()))
             {
                 error(function.location,
                       "non-void function " + quoted(function.name) + " does not return a value");

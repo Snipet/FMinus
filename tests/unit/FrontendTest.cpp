@@ -109,7 +109,7 @@ TEST_CASE("constants keep their spelling: C's decimal, hex and integer forms", "
           == "(function int f ()\n  (return (call g 0 010 0x1F 0Xff)))\n");
 }
 
-TEST_CASE("int, casts, ++ and -- parse as C's", "[frontend]")
+TEST_CASE("int, void, casts, ++ and -- parse as C's", "[frontend]")
 {
     // A postfix ++ binds tighter than a unary -, and a cast binds as a unary operator does.
     CHECK(parsed("int f(int i, float x) { ++i; i--; return -i++ + (int)x * 2 + 0x1F; }")
@@ -117,6 +117,8 @@ TEST_CASE("int, casts, ++ and -- parse as C's", "[frontend]")
              "  (pre++ i)\n"
              "  (post-- i)\n"
              "  (return (+ (+ (- (post++ i)) (* (cast int x) 2)) 0x1F)))\n");
+    // void, `return;`, and C's empty parameter list, (void).
+    CHECK(parsed("void f(void) { return; }") == "(function void f ()\n  (return))\n");
     // ++ is one token, the longest that matches, as in C: i+++i is i++ + i.
     CHECK(parsed("int g(int i) { return i+++i; }") == "(function int g ((int i))\n  (return (+ (post++ i) i)))\n");
 }

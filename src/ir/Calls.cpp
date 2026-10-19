@@ -78,6 +78,11 @@ namespace fminus::ir::detail
             ast::Type type = ast::Type::Float;
             for (const Value& arg : args)
             {
+                if (!ast::isArithmetic(arg.type))
+                {
+                    incompatible(location, Use::Passing, arg.type, ast::Type::Float);
+                    return poison(ast::Type::Float);
+                }
                 if (!commonType(location, type, arg.type, type))
                     return poison(ast::Type::Float);
             }

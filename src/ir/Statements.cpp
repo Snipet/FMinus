@@ -28,10 +28,7 @@ namespace fminus::ir::detail
         std::visit(Overloaded{
                        [&](const ast::DeclStmt& decl) { declareVariable(stmt.location, decl); },
                        [&](const ast::ExprStmt& statement) { lower(*statement.expr); },
-                       [&](const ast::ReturnStmt& ret) {
-                           builder_.CreateRet(convert(lower(*ret.value), function_->returnType, stmt.location,
-                                                      Use::Returning));
-                       },
+                       [&](const ast::ReturnStmt& ret) { lowerReturn(stmt.location, ret); },
                        [&](const ast::BlockStmt& block) {
                            scopes_.emplace_back();
                            lowerStatements(block.items);
@@ -63,6 +60,32 @@ namespace fminus::ir::detail
         scopes_.emplace_back();
         lowerStatement(stmt);
         scopes_.pop_back();
+    }
+
+    // `return value;` converts the value to the function's result type; a void function's is `return;`, and each
+    // kind of function refuses the other's, as C does.
+    void Lowering::lowerReturn(SourceLocation location, const ast::ReturnStmt& ret)
+    {
+        const ast::Type result = function_->returnType;
+        const bool returnsVoid = result == ast::Type::Void;
+        if (ret.value == nullptr)
+        {
+            if (!returnsVoid)
+                error(location, "non-void function " + quoted(function_->name) + " should return a value");
+            if (returnsVoid)
+                builder_.CreateRetVoid();
+            else
+                builder_.CreateRet(poison(result).ir);
+            return;
+        }
+        const Value value = lower(*ret.value);
+        if (returnsVoid)
+        {
+            error(location, "void function " + quoted(function_->name) + " should not return a value");
+            builder_.CreateRetVoid();
+            return;
+        }
+        builder_.CreateRet(convert(value, result, location, Use::Returning));
     }
 
     llvm::BasicBlock* Lowering::newBlock(const char* name)
@@ -162,11 +185,17 @@ namespace fminus::ir::detail
     // the variable starts at 0.
     void Lowering::declareVariable(SourceLocation location, const ast::DeclStmt& decl)
     {
-        llvm::Value* value = decl.init ? convert(lower(*decl.init), decl.type, location, Use::Initializing)
-                                       : llvm::Constant::getNullValue(typeOf(decl.type));
-        llvm::AllocaInst* slot = allocate(typeOf(decl.type), decl.name);
+        ast::Type type = decl.type;
+        if (type == ast::Type::Void)
+        {
+            error(location, "variable has incomplete type 'void'");
+            type = ast::Type::Float;   // so its uses report no more errors
+        }
+        llvm::Value* value = decl.init ? convert(lower(*decl.init), type, location, Use::Initializing)
+                                       : llvm::Constant::getNullValue(typeOf(type));
+        llvm::AllocaInst* slot = allocate(typeOf(type), decl.name);
         builder_.CreateStore(value, slot);
-        if (!bind(decl.name, Binding{slot, decl.isConst, decl.type}))
+        if (!bind(decl.name, Binding{slot, decl.isConst, type}))
             error(location, "redefinition of " + quoted(decl.name));
     }
 } // namespace fminus::ir::detail

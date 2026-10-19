@@ -50,4 +50,4 @@ float main(float n)
 // pi^2/6 - 1/1000.5, to float precision: the last digits depend on the width (the order of the additions).
 // RESULT: 1.64393{{[0-9]+}}
 // LANES: --poly-lanes: 3 not in {1,2,4,8,16,32,64}
-// RUNPOLY: fminus: --run: 'f' returns a poly float; --run prints floats, bools and ints only
+// RUNPOLY: fminus: --run: 'f' returns 'poly float'; --run prints floats, bools and ints only

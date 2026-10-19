@@ -36,6 +36,12 @@ namespace fminus::ir::detail
                 [&](const ast::UnaryExpr& unary) {
                     const Value operand = lower(*unary.operand);
                     const ast::Type type = ast::arithmeticOf(operand.type);   // an int, a float, a float vector
+                    if (!ast::isArithmetic(operand.type) && unary.op != ast::UnaryOp::Not)
+                    {
+                        error(expr.location,
+                              "invalid argument type " + quoted(ast::typeName(operand.type)) + " to unary expression");
+                        return poison(ast::Type::Float);
+                    }
                     switch (unary.op)
                     {
                     case ast::UnaryOp::Negate:
@@ -212,11 +218,17 @@ namespace fminus::ir::detail
         const Value elseValue = lower(*conditional.elseValue);
         llvm::BasicBlock* elseEnd = builder_.GetInsertBlock();
 
-        // Two of one type give that type (two bools give a bool); otherwise the usual arithmetic conversions
-        // decide (a scalar and a vector give the vector).
+        // Two of one type give that type (two bools give a bool, two voids nothing); otherwise the usual arithmetic
+        // conversions decide (a scalar and a vector give the vector). A void meets only a void.
+        const bool thenVoid = thenValue.type == ast::Type::Void;
+        const bool elseVoid = elseValue.type == ast::Type::Void;
+        if (thenVoid != elseVoid)
+            error(location, std::string(thenVoid ? "left" : "right") + " operand to ? is void, but "
+                                + (thenVoid ? "right" : "left") + " operand is of type "
+                                + quoted(ast::typeName(thenVoid ? elseValue.type : thenValue.type)));
         ast::Type type = thenValue.type;
         const bool meet = thenValue.type == elseValue.type
-                          || commonType(location, thenValue.type, elseValue.type, type);
+                          || (thenVoid == elseVoid && commonType(location, thenValue.type, elseValue.type, type));
         if (!meet)
             type = ast::Type::Float;
         builder_.SetInsertPoint(thenEnd);
@@ -227,6 +239,8 @@ namespace fminus::ir::detail
         builder_.CreateBr(endBlock);
 
         builder_.SetInsertPoint(endBlock);
+        if (type == ast::Type::Void)
+            return poison(type);   // nothing to join
         llvm::PHINode* phi = builder_.CreatePHI(typeOf(type), 2, "cond");
         phi->addIncoming(thenIR, thenEnd);
         phi->addIncoming(elseIR, elseEnd);

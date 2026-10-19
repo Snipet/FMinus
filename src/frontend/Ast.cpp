@@ -157,7 +157,9 @@ namespace fminus::ast
                                              + " " + decl.name + (decl.init ? " " + dump(*decl.init) : "") + ")";
                                   },
                                   [&](const ExprStmt& statement) { return indent + dump(*statement.expr); },
-                                  [&](const ReturnStmt& ret) { return indent + "(return " + dump(*ret.value) + ")"; },
+                                  [&](const ReturnStmt& ret) {
+                                      return indent + "(return" + (ret.value ? " " + dump(*ret.value) : "") + ")";
+                                  },
                                   [&](const BlockStmt& block) {
                                       std::string text = indent + "(block";
                                       for (const Stmt& item : block.items)
@@ -196,6 +198,8 @@ namespace fminus::ast
     {
         switch (type.kind)
         {
+        case Kind::Void:
+            return "void";
         case Kind::Float:
             return "float";
         case Kind::Bool:

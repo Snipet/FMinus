@@ -16,6 +16,8 @@ namespace fminus::ir::detail
     {
         switch (type.kind)
         {
+        case ast::Kind::Void:
+            return builder_.getVoidTy();
         case ast::Kind::Float:
             return builder_.getFloatTy();
         case ast::Kind::Bool:
@@ -40,12 +42,17 @@ namespace fminus::ir::detail
     // float; an int is exact as a float up to 2^24 and rounded beyond; a float becomes an int truncated toward
     // zero (out of int's range the result is undefined, as in C); and a number is `x != 0` as a bool (so a NaN
     // is true). A scalar becomes a vector by being broadcast to every lane (a poly bool takes a bool), and a
-    // lane mask is 0 or 1 per lane as the float vector of its size. Nothing else converts from a vector: that is
-    // an error, reported for `use`.
+    // lane mask is 0 or 1 per lane as the float vector of its size. Nothing else converts from a vector, and
+    // nothing at all from void (a call of a void function has no value): those are errors, reported for `use`.
     llvm::Value* Lowering::convert(Value value, ast::Type type, SourceLocation location, Use use)
     {
         if (value.type == type)
             return value.ir;
+        if (value.type == ast::Type::Void || type == ast::Type::Void)
+        {
+            incompatible(location, use, value.type, type);
+            return poison(type).ir;
+        }
         if (!ast::isVector(value.type))
         {
             if (ast::isVector(type))
@@ -112,6 +119,12 @@ namespace fminus::ir::detail
     // of two sizes do not meet: clang's error, and false.
     bool Lowering::commonType(SourceLocation location, ast::Type a, ast::Type b, ast::Type& type)
     {
+        if (!ast::isArithmetic(a) || !ast::isArithmetic(b))
+        {
+            error(location, "invalid operands to binary expression (" + quoted(ast::typeName(a)) + " and "
+                                + quoted(ast::typeName(b)) + ")");
+            return false;
+        }
         const ast::Type ta = ast::arithmeticOf(a);
         const ast::Type tb = ast::arithmeticOf(b);
         if (ast::isVector(ta) && ast::isVector(tb) && ast::isPoly(ta) != ast::isPoly(tb))
@@ -141,8 +154,12 @@ namespace fminus::ir::detail
                             + ": a poly type has as many lanes as the target's vectors");
     }
 
+    // A value of `type` that stands in for one an error kept from being computed. void has no values: its stand-in
+    // has no IR, which nothing reads, since every use of a void value is an error of its own.
     Lowering::Value Lowering::poison(ast::Type type)
     {
+        if (type == ast::Type::Void)
+            return {nullptr, type};
         return {llvm::PoisonValue::get(typeOf(type)), type};
     }
 

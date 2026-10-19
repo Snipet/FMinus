@@ -59,4 +59,4 @@ float8 wide(float8 a, float8 b) { return a * b + 1; }
 
 // --run passes floats and prints floats and bools: vectors cross the C boundary only from C++ (docs/simd.md).
 // RUNPARAM: fminus: --run: 'reverse' takes a parameter of type 'float4'; --run passes floats only
-// RUNRESULT: fminus: --run: 'f' returns a float4; --run prints floats, bools and ints only
+// RUNRESULT: fminus: --run: 'f' returns 'float4'; --run prints floats, bools and ints only

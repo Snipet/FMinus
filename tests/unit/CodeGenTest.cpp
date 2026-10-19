@@ -98,6 +98,38 @@ TEST_CASE("a constant is rounded once, straight to float", "[codegen]")
     CHECK(lookup<float()>(*jit, "g")() == std::nextafter(1.0f, 2.0f));
 }
 
+TEST_CASE("void functions return nothing, as C's do", "[codegen]")
+{
+    std::string errors;
+    auto jit = compile("void nothing() {}\n"                                     // falls off its end
+                       "void early(float x) { if (x > 0) return; x = 1; }\n"
+                       "float f(void) { nothing(); early(1); return 2; }\n",    // (void): C's empty list
+                       &errors);
+    INFO(errors);
+    REQUIRE(jit);
+    lookup<void()>(*jit, "nothing")();
+    CHECK(lookup<float()>(*jit, "f")() == 2.0f);
+    CHECK(errorsOf("void v() {}\n"
+                   "float f(float x, void y)\n"
+                   "{\n"
+                   "    void z;\n"
+                   "    float a = v();\n"
+                   "    x = v() + 1;\n"
+                   "    -v();\n"
+                   "    x > 0 ? v() : 1;\n"
+                   "    return;\n"
+                   "}\n"
+                   "void g() { return 1; }\n")
+          == "test.fm:2:23: error: argument may not have 'void' type\n"
+             "test.fm:4:10: error: variable has incomplete type 'void'\n"
+             "test.fm:5:11: error: initializing 'float' with an expression of incompatible type 'void'\n"
+             "test.fm:6:13: error: invalid operands to binary expression ('void' and 'int')\n"
+             "test.fm:7:5: error: invalid argument type 'void' to unary expression\n"
+             "test.fm:8:11: error: left operand to ? is void, but right operand is of type 'int'\n"
+             "test.fm:9:5: error: non-void function 'f' should return a value\n"
+             "test.fm:11:12: error: void function 'g' should not return a value\n");
+}
+
 TEST_CASE("every semantic error is reported, in source order, as clang words it", "[codegen]")
 {
     CHECK(errorsOf("float f(float x, float x)\n"

@@ -187,6 +187,7 @@ int main(int argc, char** argv)
         case fminus::ast::Kind::Int:
             llvm::outs() << std::format("{}\n", call<int>(*address, runArgs, counts));
             break;
+        case fminus::ast::Kind::Void:
         case fminus::ast::Kind::Float2:   // a vector stays inside FMinus, or goes to a C++ host (docs/simd.md)
         case fminus::ast::Kind::Float4:
         case fminus::ast::Kind::Float8:
@@ -195,7 +196,7 @@ int main(int argc, char** argv)
         case fminus::ast::Kind::Bool8:
         case fminus::ast::Kind::PolyFloat:
         case fminus::ast::Kind::PolyBool:
-            return fail(std::format("--run: '{}' returns a {}; --run prints floats, bools and ints only", run,
+            return fail(std::format("--run: '{}' returns '{}'; --run prints floats, bools and ints only", run,
                                     fminus::ast::typeName(function->returnType)));
         }
         return 0;

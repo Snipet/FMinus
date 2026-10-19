@@ -19,7 +19,8 @@ namespace fminus::ast
     // The value types. float is IEEE single precision (LLVM's float). int is C's on every target FMinus runs on: 32
     // bits, signed. Two ints compute as ints (`/` truncates toward zero), and an int meeting a float converts to it,
     // as C's usual arithmetic conversions say. bool is C23's: 0 or 1, which computes as an int, and to which a number
-    // converts as `x != 0` (a NaN is true).
+    // converts as `x != 0` (a NaN is true). void is C's: what a function returns when it returns nothing, and no
+    // variable or parameter has it (`f(void)` is C's empty parameter list).
     //
     // float2, float4 and float8 are OpenCL C's vector types: that many floats side by side, computed on together. A
     // float4 fills one 128-bit NEON register; a float8 is two. Comparing two of them gives a lane mask, a bool2, bool4
@@ -36,6 +37,7 @@ namespace fminus::ast
     // the kinds it misses.
     enum class Kind
     {
+        Void,
         Float,
         Bool,
         Int,
@@ -58,9 +60,10 @@ namespace fminus::ast
 
         friend constexpr bool operator==(Type, Type) = default;
 
-        static const Type Float, Bool, Int, Float2, Float4, Float8, Bool2, Bool4, Bool8, PolyFloat, PolyBool;
+        static const Type Void, Float, Bool, Int, Float2, Float4, Float8, Bool2, Bool4, Bool8, PolyFloat, PolyBool;
     };
 
+    inline constexpr Type Type::Void{Kind::Void};
     inline constexpr Type Type::Float{Kind::Float};
     inline constexpr Type Type::Bool{Kind::Bool};
     inline constexpr Type Type::Int{Kind::Int};
@@ -87,6 +90,7 @@ namespace fminus::ast
         case Kind::PolyFloat:
         case Kind::PolyBool:
             return 0;
+        case Kind::Void:
         case Kind::Float:
         case Kind::Bool:
         case Kind::Int:
@@ -107,6 +111,12 @@ namespace fminus::ast
     inline bool isVector(Type type)
     {
         return lanes(type) > 1 || isPoly(type);
+    }
+
+    // Whether a value of `type` takes part in arithmetic: every type's but void's.
+    inline bool isArithmetic(Type type)
+    {
+        return type != Type::Void;
     }
 
     inline bool isMask(Type type)
@@ -342,7 +352,7 @@ namespace fminus::ast
 
     struct ReturnStmt
     {
-        ExprPtr value;
+        ExprPtr value;   // null for `return;`, a void function's
     };
 
     // `{ ... }`: a nested scope. Its declarations end with it, and may shadow outer ones.

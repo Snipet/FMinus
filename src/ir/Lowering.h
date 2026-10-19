@@ -131,6 +131,7 @@ namespace fminus::ir::detail
         void lowerStatements(const std::vector<ast::Stmt>& statements);
         void lowerStatement(const ast::Stmt& stmt);
         void lowerScoped(const ast::Stmt& stmt);
+        void lowerReturn(SourceLocation location, const ast::ReturnStmt& ret);
         llvm::BasicBlock* newBlock(const char* name);
         void fallThrough(llvm::BasicBlock* target);
         void lowerIf(const ast::IfStmt& branch);
