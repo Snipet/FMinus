@@ -32,10 +32,10 @@ namespace fminus::aot
 
     struct LinkOptions
     {
-        std::string output;                    // the executable
-        std::vector<std::string> objects;      // object files and archives, in link order
-        std::vector<std::string> driverArgs;   // to the driver as they are: -framework Accelerate, -lm, -v, ...
-        bool linkRuntime = true;               // libfminus_runtime.a (and this tree's sanitizer runtimes)
+        std::string output;                      // the executable
+        std::vector<std::string> objects{};      // object files and archives, in link order
+        std::vector<std::string> driverArgs{};   // to the driver as they are: -framework Accelerate, -lm, -v, ...
+        bool linkRuntime = true;                 // libfminus_runtime.a (and this tree's sanitizer runtimes)
     };
 
     // Links `options.objects` into `options.output` through the compiler driver.
