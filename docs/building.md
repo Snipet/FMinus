@@ -235,6 +235,7 @@ commands (`cmake --workflow --preset dev`), except `asan`, `tsan` and `xcode`. W
 | clangd can't find headers | configure the dev preset once (`cmake --preset dev`), or point `.clangd` at another build tree |
 | `asan` reports container-overflow inside LLVM | run the asan test preset (`ctest --preset asan`), which sets `ASAN_OPTIONS=detect_container_overflow=0` |
 | An example's `--check` fails after a change in fast-math or contraction | the C++ reference no longer computes the same thing: change it in step, or raise `--tolerance` |
+| Windows: `cannot use 'throw' with exceptions disabled`, or configure stops at `CMAKE_CXX_FLAGS (...) has no /EHsc` | the build tree was first configured when the compiler could not be found, and kept the empty flags it cached then: delete `build-<preset>/` and configure again (LLVM stays in `.deps/`) |
 | Windows: `FMinus: no clang-cl` | add "C++ Clang tools for Windows" to Visual Studio (Visual Studio Installer, Modify), or install LLVM; delete `build-<preset>/` and configure again |
 | Windows: `FMinus: this developer prompt targets x86` | open "x64 Native Tools Command Prompt for VS" instead, delete `build-<preset>/`, and configure again |
 | Windows: `'unistd.h' file not found` in a `*.yy.hpp` | a build tree configured before Flex got `--nounistd` on Windows: build again (the changed command regenerates the scanners) |

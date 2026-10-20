@@ -65,6 +65,14 @@ if(CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
   if(NOT DEFINED CMAKE_MSVC_RUNTIME_LIBRARY)
     set(CMAKE_MSVC_RUNTIME_LIBRARY MultiThreadedDLL)
   endif()
+  # C++ exceptions (/EHsc, in CMake's default flags): Bison's C++ parser and FMinus's scanner throw. A build tree whose
+  # first configure could not find the compiler keeps the empty flags it cached then, which lack them (and /O2).
+  if(NOT CMAKE_CXX_FLAGS MATCHES "[/-]EH")
+    message(FATAL_ERROR "FMinus: CMAKE_CXX_FLAGS ('${CMAKE_CXX_FLAGS}') has no /EHsc, so C++ exceptions are off, and "
+                        "FMinus's parser and scanner throw. A build tree first configured when the compiler could not "
+                        "be found keeps the empty flags it cached then: delete ${PROJECT_BINARY_DIR} and configure "
+                        "again (the deps cache keeps LLVM).")
+  endif()
 endif()
 
 # ccache or sccache, when installed and no launcher was chosen. Set before LLVM so an inline LLVM uses it too.
