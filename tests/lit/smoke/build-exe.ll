@@ -1,5 +1,6 @@
-; fminus-build links an executable with the FMinus runtime, and the executable runs.
-; RUN: fminus-build %s -o %t
+; fminus-build links an executable with the FMinus runtime, and the executable runs. (Windows' C runtime defines printf
+; in its header, inline; legacy_stdio_definitions.lib has it for code that calls it from outside C.)
+; RUN: fminus-build %s -o %t %if system-windows %{ --link-arg=legacy_stdio_definitions.lib %}
 ; RUN: %t | FileCheck %s
 ; CHECK: runtime abi {{[0-9]+}}
 

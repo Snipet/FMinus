@@ -38,6 +38,8 @@ build-dev/bin/fminus examples/note/note.fm --emit exe -o note
 ./note C4                                                    # ./note: 'C4' is not a number             (status 2)
 ```
 
+On Windows, `-o note` writes `note.exe` (clang-cl, the linking driver there, adds the extension), and `note 69` runs it.
+
 ## `main`
 
 A program's entry is a function named `main` that returns a `float` or a `bool` and takes any number of `float`
@@ -93,7 +95,8 @@ build-dev/bin/fminus prog.fm --run main 3 4             # no executable: the JIT
 ```
 
 `--entry` adds the entry point to whatever `--emit` writes, so an object file can be linked by hand
-(`c++ prog.o build-dev/lib/libfminus_runtime.a -o prog`). `--emit exe` always adds it.
+(`c++ prog.o build-dev/lib/libfminus_runtime.a -o prog`; on Windows,
+`clang-cl prog.o build-dev\lib\fminus_runtime.lib`). `--emit exe` always adds it.
 
 ## How an executable gets its entry
 

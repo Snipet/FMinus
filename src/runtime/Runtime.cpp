@@ -6,6 +6,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#if defined(_WIN32)
+#include <malloc.h>   // _aligned_malloc, _aligned_free
+#endif
 
 extern "C" std::int32_t fminus_rt_abi_version() noexcept
 {
@@ -67,7 +70,13 @@ extern "C" void* fminus_rt_calloc(std::int64_t count, std::int64_t size) noexcep
     // aligned_alloc wants a multiple of the alignment. Zeroing touches every page, so the audio thread will not fault
     // on one later.
     const std::int64_t bytes = (count * size + kAlignment - 1) / kAlignment * kAlignment;
+#if defined(_WIN32)
+    // The Windows C runtime has no aligned_alloc: its aligned blocks come from _aligned_malloc, and go back to
+    // _aligned_free, not free.
+    void* memory = _aligned_malloc(static_cast<std::size_t>(bytes), static_cast<std::size_t>(kAlignment));
+#else
     void* memory = std::aligned_alloc(static_cast<std::size_t>(kAlignment), static_cast<std::size_t>(bytes));
+#endif
     if (memory != nullptr)
         std::memset(memory, 0, static_cast<std::size_t>(bytes));
     return memory;
@@ -75,5 +84,9 @@ extern "C" void* fminus_rt_calloc(std::int64_t count, std::int64_t size) noexcep
 
 extern "C" void fminus_rt_free(void* memory) noexcept
 {
+#if defined(_WIN32)
+    _aligned_free(memory);
+#else
     std::free(memory);
+#endif
 }

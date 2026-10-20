@@ -28,6 +28,10 @@ The first run downloads the pinned sources: LLVM (179 MB), Bison, Flex, CLI11 an
 Later configures, in this build tree or any other, find them there in seconds. Then it builds FMinus and runs every
 test.
 
+On Windows, run the same command from an x64 developer prompt for Visual Studio, with its "C++ Clang tools for Windows"
+installed. The build uses clang-cl there, and builds WinFlexBison, the same Bison and Flex ported to Windows, in place
+of their `./configure && make` ([docs/building.md](docs/building.md#windows)).
+
 ## Layout
 
 ```
@@ -37,7 +41,7 @@ cmake/
   FMinusPins.cmake        every dependency: version, URL, SHA-256
   FMinusOptions.cmake     options, the deps cache, ccache, fminus_target_defaults()
   FMinusLLVM.cmake        LLVM (cache | inline | system) -> FMinus::LLVM
-  FMinusParserTools.cmake Bison and Flex (fetch | system) -> fminus_add_grammar()
+  FMinusParserTools.cmake Bison and Flex (fetch | system; WinFlexBison on Windows) -> fminus_add_grammar()
   FMinusCLI11.cmake       CLI11 -> CLI11::CLI11, linked into every tool
   FMinusTesting.cmake     Catch2 and lit
   templates/Config.h.in   -> <build>/include/fminus/Config.h
@@ -90,6 +94,7 @@ system unless an option asks for it.
 | LLVM (llvm/ only) | 23.1.3 | source release, built and installed once per flavor | `.deps/install/llvm-<ver>-<flavor>` |
 | GNU Bison | 3.8.2 | source tarball, `./configure && make` at configure time | `.deps/install/bison-3.8.2` |
 | Flex | 2.6.4 | source tarball, `./configure && make` at configure time | `.deps/install/flex-2.6.4` |
+| WinFlexBison (Windows, in place of the two above) | 2.5.25 and fixes: Bison 3.8.2, Flex 2.6.4 | source archive of a commit, built with CMake at configure time | `.deps/install/winflexbison-2.5.25-a243a1c` |
 | CLI11 | 2.7.2 | release source package, header-only, inside each build tree | the build tree |
 | Catch2 | 3.16.1 | source archive, built inside each build tree | the build tree |
 
@@ -327,10 +332,11 @@ build-dev/bin/fminus-build kernel.ll -o kernel --link-arg=-framework --link-arg=
 
 From code, it is `fminus::aot::emitFile`, `linkExecutable`, `emitExecutable` and `addEntryPoint` in `src/support/Aot.h`.
 Linking goes through the C++ compiler driver this build tree was configured with (Xcode's clang; `$FMINUS_LINK_DRIVER`
-overrides it), which brings the SDK, libSystem and the ad-hoc signature arm64 needs. It links this tree's
-`libfminus_runtime.a`, so JIT'd and ahead-of-time code call the same runtime. In the JIT, `fminus::defineRuntimeSymbols`
-defines every function listed in `src/runtime/RuntimeSymbols.def` by its address. Under the `asan` and `tsan` presets,
-the sanitizer runtimes are linked too. This is a development feature: inside a plugin, FMinus only ever JITs.
+overrides it), which brings the SDK, libSystem and the ad-hoc signature arm64 needs; on Windows, clang-cl, which
+names an executable `note.exe` when asked for `note`. It links this tree's `libfminus_runtime.a`, so JIT'd and
+ahead-of-time code call the same runtime. In the JIT, `fminus::defineRuntimeSymbols` defines every function listed in
+`src/runtime/RuntimeSymbols.def` by its address. Under the `asan` and `tsan` presets, the sanitizer runtimes are linked
+too. This is a development feature: inside a plugin, FMinus only ever JITs.
 
 ## Tests
 
@@ -348,8 +354,8 @@ build-dev/bin/fminus-lit -v tests/lit               # lit directly; a source pat
   Catch2's `BENCHMARK` is there for timing JIT'd kernels.
 - **lit** (`tests/lit/`): a file with `RUN:` lines, checked by FileCheck. `tests/lit/fminus/` drives `fminus`. FMinus's
   tools and LLVM's are on PATH; `%host_triple` is substituted; the features for `REQUIRES:` are `asserts`, `asan`,
-  `ubsan`, `tsan`, `arm64`, `x86_64`, `system-darwin`, `system-linux`. `.fm` is a placeholder extension for FMinus
-  sources: change it in `tests/lit/lit.cfg.py`.
+  `ubsan`, `tsan`, `arm64`, `x86_64`, `system-darwin`, `system-linux`, `system-windows`. `.fm` is a placeholder
+  extension for FMinus sources: change it in `tests/lit/lit.cfg.py`.
 
 ## Presets
 
@@ -365,7 +371,8 @@ build-dev/bin/fminus-lit -v tests/lit               # lit directly; a source pat
 
 Every preset builds in `build-<preset>/` and exports `compile_commands.json`; `.clangd` reads `build-dev`'s. Each
 preset has a workflow (`cmake --workflow --preset <name>`) except `xcode`, which is built from Xcode
-(`cmake --preset xcode && open build-xcode/FMinus.xcodeproj`). ccache or sccache is used when installed.
+(`cmake --preset xcode && open build-xcode/FMinus.xcodeproj`). ccache or sccache is used when installed. On Windows,
+`asan`, `tsan` and `xcode` are not available.
 
 ## Handy
 
@@ -400,4 +407,5 @@ These are constraints the research will run into, not things the skeleton handle
 
 FMinus is free software under the GNU General Public License, version 3 (`LICENSE`). Its dependencies keep their own
 licenses: LLVM (Apache 2.0 with LLVM exceptions), Catch2 (BSL-1.0) and CLI11 (BSD-3-Clause). Bison and Flex run only
-at build time; the code they generate is covered by Bison's skeleton exception and Flex's permissive license.
+at build time; the code they generate is covered by Bison's skeleton exception and Flex's permissive license. On
+Windows they are WinFlexBison's ports, under the same licenses (its build scripts are GPL-3.0-or-later).

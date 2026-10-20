@@ -189,7 +189,7 @@ index 0000000..bbd5aff
 +    void registerPasses(llvm::PassBuilder& passes);
 +} // namespace fminus::opt
 diff --git a/src/runtime/Runtime.cpp b/src/runtime/Runtime.cpp
-index dfbd166..cf4eb5d 100644
+index cb1b142..85828e8 100644
 --- a/src/runtime/Runtime.cpp
 +++ b/src/runtime/Runtime.cpp
 @@ -2,6 +2,7 @@
@@ -200,9 +200,9 @@ index dfbd166..cf4eb5d 100644
  #include <cstdio>
  #include <cstdlib>
  #include <cstring>
-@@ -74,3 +75,8 @@ extern "C" void fminus_rt_free(void* memory) noexcept
- {
+@@ -90,3 +91,8 @@ extern "C" void fminus_rt_free(void* memory) noexcept
      std::free(memory);
+ #endif
  }
 +
 +extern "C" float fminus_rt_db_to_gain(float db) noexcept
@@ -210,10 +210,10 @@ index dfbd166..cf4eb5d 100644
 +    return std::pow(10.0f, db / 20.0f);
 +}
 diff --git a/src/runtime/Runtime.h b/src/runtime/Runtime.h
-index f09c4d6..6721740 100644
+index a7deada..434779d 100644
 --- a/src/runtime/Runtime.h
 +++ b/src/runtime/Runtime.h
-@@ -34,4 +34,8 @@ extern "C"
+@@ -37,4 +37,8 @@ extern "C"
      void* fminus_rt_malloc(std::int64_t size) noexcept;
      void* fminus_rt_calloc(std::int64_t count, std::int64_t size) noexcept;
      void fminus_rt_free(void* memory) noexcept;

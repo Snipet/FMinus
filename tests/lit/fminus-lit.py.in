@@ -4,15 +4,23 @@
 #     bin/fminus-lit -v ../tests/lit                 (the whole suite)
 #     bin/fminus-lit -v ../tests/lit/smoke/x.test    (one test)
 import os
+import platform
 import sys
 
 lit_dir = r"@FMINUS_LIT_DIR@"
 if lit_dir:
     sys.path.insert(0, lit_dir)
 
+
+def suite_config(path):
+    # The key lit looks a suite's configuration up by (lit.util.abs_path_preserve_drive): on Windows, the absolute
+    # path with any mapped drive (subst) kept; elsewhere, the real path.
+    path = os.path.abspath(path) if platform.system() == "Windows" else os.path.realpath(path)
+    return os.path.normcase(path)
+
+
 config_map = {
-    os.path.normcase(os.path.realpath(r"@CMAKE_CURRENT_SOURCE_DIR@/lit/lit.cfg.py")):
-        os.path.normpath(r"@FMINUS_LIT_SITE_CONFIG@"),
+    suite_config(r"@CMAKE_CURRENT_SOURCE_DIR@/lit/lit.cfg.py"): os.path.normpath(r"@FMINUS_LIT_SITE_CONFIG@"),
 }
 
 if __name__ == "__main__":
