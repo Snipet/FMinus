@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -128,4 +129,85 @@ TEST_CASE("a poly float never mixes with a fixed-size vector, even with as many 
              "test.fm:11:5: error: too many arguments to function call, expected 0, have 1\n"
              "test.fm:12:5: error: returning 'poly float' from a function with incompatible result type 'float4'\n"
              "test.fm:14:7: error: 'poly_index' is a builtin and cannot be redefined\n");
+}
+
+TEST_CASE("poly_load and poly_store move poly floats through a buffer, and a mask keeps the last step inside it",
+          "[codegen][poly]")
+{
+    // [[clang::nonblocking]]: neither builtin allocates, so an audio thread's kernel may use them.
+    const char* source = "void scale(const float* restrict input, float* restrict output, int n, float g)\n"
+                         "    [[clang::nonblocking]]\n"
+                         "{\n"
+                         "    int i = 0;\n"
+                         "    for (; i + poly_lanes() <= n; i += poly_lanes())\n"
+                         "        poly_store(output + i, g * poly_load(input + i));\n"
+                         "    const poly bool rest = i + poly_index() < n;\n"   // the lanes still in the buffer
+                         "    poly_store(output + i, g * poly_load(input + i, rest), rest);\n"
+                         "}\n"
+                         "float first(const float* p, int k) { return reduce_add(poly_load(p, poly_index() < k)); }\n"
+                         "void fill(float* p, float x) { poly_store(p, x); }\n";   // a scalar, broadcast
+    for (const unsigned lanes : {1u, 2u, 4u, 8u, 16u, 64u})
+    {
+        INFO("poly float lanes: " << lanes);
+        std::string errors;
+        auto jit = compile(source, &errors, {.polyLanes = lanes});
+        INFO(errors);
+        REQUIRE(jit);
+        auto scale = lookup<void(const float*, float*, int, float)>(*jit, "scale");
+        const int width = static_cast<int>(lanes);
+        for (const int n : {0, 1, width - 1, width, width + 1, 3 * width + 2, 100})
+        {
+            INFO("n = " << n);
+            std::vector<float> input(static_cast<std::size_t>(n) + 64);
+            for (std::size_t i = 0; i < input.size(); ++i)
+                input[i] = static_cast<float>(i) + 0.5f;
+            std::vector<float> output(input.size(), -7.0f);   // -7 past n: what the masked store must not overwrite
+            scale(input.data(), output.data(), n, 2.0f);
+            bool scaled = true;
+            bool untouched = true;
+            for (std::size_t i = 0; i < output.size(); ++i)
+            {
+                if (static_cast<int>(i) < n)
+                    scaled = scaled && output[i] == 2.0f * input[i];
+                else
+                    untouched = untouched && output[i] == -7.0f;
+            }
+            CHECK(scaled);
+            CHECK(untouched);
+        }
+
+        // A masked load reads only its lanes: the NaNs after the first k never reach the sum.
+        std::vector<float> values(lanes, std::numeric_limits<float>::quiet_NaN());
+        const int k = std::max(1, width / 2);
+        for (int i = 0; i < k; ++i)
+            values[static_cast<std::size_t>(i)] = static_cast<float>(i + 1);
+        CHECK(lookup<float(const float*, int)>(*jit, "first")(values.data(), k) == static_cast<float>(k * (k + 1) / 2));
+
+        std::vector<float> filled(lanes + 1, 0.0f);
+        lookup<void(float*, float)>(*jit, "fill")(filled.data(), 3.0f);
+        CHECK(std::count(filled.begin(), filled.end(), 3.0f) == width);
+        CHECK(filled.back() == 0.0f);
+    }
+}
+
+TEST_CASE("poly_load reads a const float*, poly_store writes a float*, and a mask is a poly bool", "[codegen][poly]")
+{
+    CHECK(errorsOf("void a(int* p) { poly float x = poly_load(p); }\n"
+                   "void b(const float* p) { poly_store(p, 1); }\n"
+                   "void c(float* p, float4 v) { poly_store(p, v); }\n"
+                   "void d(float* p) { poly float x = poly_load(); }\n"
+                   "void e(float* p, poly bool m) { poly float x = poly_load(p, m, m); }\n"
+                   "void f(float* p) { float x = poly_load(p); }\n"
+                   "void g(float* p) { float x = poly_store(p, 0); }\n"
+                   "void h(float4* p) { poly_store(p, 0, poly_index() < 2); }\n"
+                   "void poly_store(float* p) { }\n")
+          == "test.fm:1:33: error: incompatible pointer types passing 'int *' to parameter of type 'const float *'\n"
+             "test.fm:2:26: error: passing 'const float *' to parameter of type 'float *' discards qualifiers\n"
+             "test.fm:3:30: error: passing 'float4' to parameter of incompatible type 'poly float'\n"
+             "test.fm:4:35: error: too few arguments to function call, expected 1, have 0\n"
+             "test.fm:5:48: error: too many arguments to function call, expected 2, have 3\n"
+             "test.fm:6:26: error: initializing 'float' with an expression of incompatible type 'poly float'\n"
+             "test.fm:7:26: error: initializing 'float' with an expression of incompatible type 'void'\n"
+             "test.fm:8:21: error: incompatible pointer types passing 'float4 *' to parameter of type 'float *'\n"
+             "test.fm:9:6: error: 'poly_store' is a builtin and cannot be redefined\n");
 }
