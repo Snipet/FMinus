@@ -1,0 +1,94 @@
+// examples/saturator/saturator.fm: a saturator, y = tanh(drive * x), the soft clip of a distortion or a tape stage. The
+// harness (bench.cpp) runs it over noise, compares it with C++ and times it.
+//
+// Each output sample depends on its input sample alone: no state, no recursion. So poly_lanes() samples can go through
+// it at once, one in each lane of a poly float, and each lane computes what the scalar loop does. It comes in four
+// versions, two tanh by two loops:
+//
+//   saturate_tanhf         <math.h>'s tanhf, one sample at a time
+//   saturate_tanhf_poly    tanhf of a poly float, poly_lanes() samples a step
+//   saturate               a rational function for tanh, written below, one sample at a time
+//   saturate_poly          the same rational function of a poly float, poly_lanes() samples a step
+//
+// tanhf is a call into the C library. Of a poly float it is one call a lane, unless the target has a vector tanhf:
+// libsystem_m's _simd_tanh_f4 on Apple systems, for 4 lanes (docs/simd.md, recipe 8), which may differ from tanhf in
+// the last bits. The rational function is multiplies, adds and one divide, so of a poly float it is one vector
+// instruction each, and its output is the same at any width.
+//
+// Every kernel is [[clang::nonblocking]]: it may run on the audio thread.
+
+// tanh(x) as x times an even polynomial of degree 12 over an even polynomial of degree 6, in x squared: Eigen's fast
+// tanh for float (generic_fast_tanh_float), with its coefficients. Past +-7.905311, tanh(x) is +-1 to float's
+// precision, and the polynomials would go on to grow, so x is clamped there first. Evaluated in this order, with no
+// fused multiply-adds, it is within 3.5e-7 of tanh, and within 6 ulp for |x| above 1e-35 (below, x times the first
+// coefficient is subnormal, and loses bits).
+float rational_tanh(float x)
+{
+    const float clamped = fminf(fmaxf(x, -7.90531110763549805f), 7.90531110763549805f);
+    const float x2 = clamped * clamped;
+    float p = -2.76076847742355e-16f;
+    p = p * x2 + 2.00018790482477e-13f;
+    p = p * x2 + -8.60467152213735e-11f;
+    p = p * x2 + 5.12229709037114e-08f;
+    p = p * x2 + 1.48572235717979e-05f;
+    p = p * x2 + 6.37261928875436e-04f;
+    p = p * x2 + 4.89352455891786e-03f;
+    float q = 1.19825839466702e-06f;
+    q = q * x2 + 1.18534705686654e-04f;
+    q = q * x2 + 2.26843463243900e-03f;
+    q = q * x2 + 4.89352518554385e-03f;
+    return clamped * p / q;
+}
+
+// rational_tanh, lane by lane: the same statements on poly floats. FMinus has no overloading (C has none), so the poly
+// version is a second function.
+poly float rational_tanh_poly(poly float x)
+{
+    const poly float clamped = fminf(fmaxf(x, -7.90531110763549805f), 7.90531110763549805f);
+    const poly float x2 = clamped * clamped;
+    poly float p = -2.76076847742355e-16f;
+    p = p * x2 + 2.00018790482477e-13f;
+    p = p * x2 + -8.60467152213735e-11f;
+    p = p * x2 + 5.12229709037114e-08f;
+    p = p * x2 + 1.48572235717979e-05f;
+    p = p * x2 + 6.37261928875436e-04f;
+    p = p * x2 + 4.89352455891786e-03f;
+    poly float q = 1.19825839466702e-06f;
+    q = q * x2 + 1.18534705686654e-04f;
+    q = q * x2 + 2.26843463243900e-03f;
+    q = q * x2 + 4.89352518554385e-03f;
+    return clamped * p / q;
+}
+
+void saturate_tanhf(const float* restrict input, float* restrict output, int n, float drive) [[clang::nonblocking]]
+{
+    for (int i = 0; i < n; ++i)
+        output[i] = tanhf(drive * input[i]);
+}
+
+// poly_lanes() samples a step, through poly_load and poly_store. The last step, of the n % poly_lanes() samples left
+// (maybe none), goes under a mask: the lanes past n are neither read nor written.
+void saturate_tanhf_poly(const float* restrict input, float* restrict output, int n, float drive)
+    [[clang::nonblocking]]
+{
+    int i = 0;
+    for (; i + poly_lanes() <= n; i += poly_lanes())
+        poly_store(output + i, tanhf(drive * poly_load(input + i)));
+    const poly bool rest = i + poly_index() < n;
+    poly_store(output + i, tanhf(drive * poly_load(input + i, rest)), rest);
+}
+
+void saturate(const float* restrict input, float* restrict output, int n, float drive) [[clang::nonblocking]]
+{
+    for (int i = 0; i < n; ++i)
+        output[i] = rational_tanh(drive * input[i]);
+}
+
+void saturate_poly(const float* restrict input, float* restrict output, int n, float drive) [[clang::nonblocking]]
+{
+    int i = 0;
+    for (; i + poly_lanes() <= n; i += poly_lanes())
+        poly_store(output + i, rational_tanh_poly(drive * poly_load(input + i)));
+    const poly bool rest = i + poly_index() < n;
+    poly_store(output + i, rational_tanh_poly(drive * poly_load(input + i, rest)), rest);
+}

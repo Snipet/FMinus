@@ -5,7 +5,8 @@
 //     Functions.cpp     declarations and prototypes, bodies and parameters, stack slots and scopes
 //     Statements.cpp    blocks, declarations, return, if, while, for, break and continue
 //     Expressions.cpp   constants, variables, operators, &&, ||, ?:, casts, assignment, ++ and --
-//     Calls.cpp         calls: the builtins (math functions, reductions, poly queries, the heap) and the program's
+//     Calls.cpp         calls: the builtins (math functions, reductions, poly queries and memory, the heap) and the
+//                       program's
 //     Vectors.cpp       vector literals, swizzles, and ?: lane by lane
 //     Memory.cpp        lvalues (variables, p[i], *p, components) read and written, &x, and pointer arithmetic
 //     Effects.cpp       [[clang::nonallocating]] and [[clang::nonblocking]], checked over the calls
@@ -60,6 +61,7 @@ namespace fminus::ir::detail
     const Allocation* findAllocation(std::string_view name);   // malloc, calloc, free, or nullptr
     bool isReduction(std::string_view name);             // reduce_add, reduce_min, reduce_max
     bool isPolyQuery(std::string_view name);             // poly_lanes, poly_index
+    bool isPolyMemory(std::string_view name);            // poly_load, poly_store
 
     class Lowering
     {
@@ -209,6 +211,7 @@ namespace fminus::ir::detail
         // ---- Calls.cpp ----------------------------------------------------------------------------------------------
         Value lowerCall(SourceLocation location, const ast::CallExpr& call);
         Value lowerReduction(SourceLocation location, const ast::CallExpr& call, const std::vector<Value>& args);
+        Value lowerPolyMemory(SourceLocation location, const ast::CallExpr& call, const std::vector<Value>& args);
         Value wrongArity(SourceLocation location, const ast::CallExpr& call, unsigned expected);
         Value lowerAllocation(SourceLocation location, const Allocation& allocation, const ast::CallExpr& call,
                               const std::vector<Value>& args);

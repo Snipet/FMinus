@@ -45,8 +45,9 @@ nothing reminds you of.
 Each feature has an example to read beside its recipe: `examples/comparison/` for `bool` (recipe 3),
 `examples/waveforms/` for every statement (recipe 4), `examples/chord/` for `float4` and the vector math library
 (recipes 7 and 8), `examples/unison/` for `poly float` (recipe 9), `examples/biquad/` for a block of samples a
-call, through pointers (recipe 10), and `examples/delay/` for state on the heap and a kernel that can't allocate
-(recipe 11).
+call, through pointers (recipe 10), `examples/delay/` for state on the heap and a kernel that can't allocate
+(recipe 11), and `examples/saturator/` and `examples/meter/` for `poly float` through a buffer, against plain loops
+(recipes 9 and 10).
 
 ## Ground rules
 
@@ -1256,9 +1257,9 @@ others wait for a reason:
 
 - `bool*`: in a register FMinus's `bool` is an `i1`, but C keeps a `bool` in a byte. Through a pointer it would need
   `i8` in memory, and a `zext` on every store and a `trunc` on every load, as clang emits.
-- `poly float*`: `p[1]` would sit `poly_lanes()` floats along, a different place on every target. With buffers, the
-  natural way in is a `poly float` load from a `float*` at a strip-mined index, with a masked load for the tail
-  ([simd.md](simd.md), "Where to go next").
+- `poly float*`: `p[1]` would sit `poly_lanes()` floats along, a different place on every target. With buffers, a
+  `poly float` comes from a `float*` at a strip-mined index instead, with a masked load for the tail: `poly_load` and
+  `poly_store` ([simd.md](simd.md), "Loads and stores").
 - Pointers to pointers, `void*`, null constants and casts between pointer types: nothing needs them yet.
 
 A declaration of any other is "FMinus has pointers to float, int, float2, float4 and float8, not to 'bool'". The

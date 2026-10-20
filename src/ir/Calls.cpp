@@ -1,6 +1,6 @@
 // src/ir/Calls.cpp: calls. The builtins, in the order a call tries them: the reductions, poly_lanes and poly_index,
-// <math.h>'s float functions (LLVM intrinsics, overloaded on vectors), and <stdlib.h>'s heap (malloc, calloc and
-// free, on the runtime's functions); then the program's own functions.
+// poly_load and poly_store, <math.h>'s float functions (LLVM intrinsics, overloaded on vectors), and <stdlib.h>'s heap
+// (malloc, calloc and free, on the runtime's functions); then the program's own functions.
 #include "ir/Lowering.h"
 
 #include <llvm/IR/Constants.h>
@@ -47,6 +47,14 @@ namespace fminus::ir::detail
         return name == "poly_lanes" || name == "poly_index";
     }
 
+    // poly_load(p) and poly_store(p, v): a poly float from, or to, the poly_lanes() floats at p, lane i at p[i]. With a
+    // poly bool after them, only the lanes it sets: a lane it doesn't set is neither read (it loads as 0) nor written,
+    // so the last, partial step of a loop over a buffer stays inside it.
+    bool isPolyMemory(std::string_view name)
+    {
+        return name == "poly_load" || name == "poly_store";
+    }
+
     const Allocation* findAllocation(std::string_view name)
     {
         for (const Allocation& allocation : kAllocations)
@@ -86,6 +94,8 @@ namespace fminus::ir::detail
                 indices.push_back(llvm::ConstantFP::get(builder_.getFloatTy(), static_cast<double>(i)));
             return {llvm::ConstantVector::get(indices), ast::Type::PolyFloat};
         }
+        if (isPolyMemory(call.callee))
+            return lowerPolyMemory(location, call, args);
         if (const Allocation* allocation = findAllocation(call.callee))
         {
             calls_[function_->name].push_back({location, call.callee});   // what Effects.cpp checks
@@ -152,6 +162,38 @@ namespace fminus::ir::detail
         if (call.callee == "reduce_min")
             return {builder_.CreateFPMinReduce(vector.ir), ast::Type::Float};
         return {builder_.CreateFPMaxReduce(vector.ir), ast::Type::Float};
+    }
+
+    // poly_load(p), poly_load(p, active), poly_store(p, v) and poly_store(p, v, active): OpenCL C's vloadn and vstoren
+    // at the target's width, and Highway's masked forms. p is a const float* to load from (a float* or a void*
+    // converts) and a float* to store to. The floats need only a float's alignment, as a buffer's do at any index, so
+    // the load and store are unaligned vector ones; with a mask, llvm.masked.load (the lanes it leaves out 0) and
+    // llvm.masked.store, which touch no memory in the lanes it leaves out.
+    Lowering::Value Lowering::lowerPolyMemory(SourceLocation location, const ast::CallExpr& call,
+                                              const std::vector<Value>& args)
+    {
+        const bool load = call.callee == "poly_load";
+        const std::size_t arity = load ? 1 : 2;   // without the mask
+        if (args.size() < arity)
+            return wrongArity(location, call, static_cast<unsigned>(arity));
+        if (args.size() > arity + 1)
+            return wrongArity(location, call, static_cast<unsigned>(arity + 1));
+        const llvm::Align align(4);
+        llvm::Value* pointer =
+            convert(args[0], ast::Type::pointerTo(ast::Kind::Float, load), location, Use::Passing);
+        llvm::Value* value = load ? nullptr : convert(args[1], ast::Type::PolyFloat, location, Use::Passing);
+        llvm::Value* mask =
+            args.size() > arity ? convert(args[arity], ast::Type::PolyBool, location, Use::Passing) : nullptr;
+        llvm::Type* vector = typeOf(ast::Type::PolyFloat);
+        if (load && mask == nullptr)
+            return {builder_.CreateAlignedLoad(vector, pointer, align, "poly.load"), ast::Type::PolyFloat};
+        if (load)
+            return {builder_.CreateMaskedLoad(vector, pointer, align, mask, llvm::Constant::getNullValue(vector),
+                                              "poly.load"),
+                    ast::Type::PolyFloat};
+        if (mask == nullptr)
+            return {builder_.CreateAlignedStore(value, pointer, align), ast::Type::Void};
+        return {builder_.CreateMaskedStore(value, pointer, align, mask), ast::Type::Void};
     }
 
     // malloc(size), calloc(count, size) and free(p): C's, with sizes in ints (C's are size_t), on the runtime's

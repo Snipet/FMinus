@@ -9,7 +9,7 @@ and walks through them in the order a change moves through the compiler.
 |---|---|---|
 | 7 | `float2`, `float4`, `float8`: OpenCL C's vector types, lane-wise operators, swizzles, masks, reductions | `Ast.h` (the types), `Lexer.l`, `Parser.y`; in `src/ir/`, `Lowering.h` (`Value`), `Types.cpp` (`convert`, `commonType`), `Expressions.cpp` (operators), `Vectors.cpp` (`lowerSelect`, `lowerConstruct`, `lowerBraces`, `lowerSwizzle`, `assignComponents`), `Calls.cpp` (the overloaded builtins, `lowerReduction`); `fminus --run`'s checks |
 | 8 | a vector math library: `sinf` on a `float4` is one call to libsystem_m's `_simd_sin_f4`, not four to `sinf` | `HostTarget.cpp` (`optimiseModule`) |
-| 9 | `poly float`: a vector as wide as the target's registers (4 floats on NEON, 16 on AVX-512), and rules that keep a program's meaning the same at any width | `Ast.h`, `Parser.y`, `CodeGen.h` (`ir::Options`), `Types.cpp` (`lanes`, `polyMismatch`), `Calls.cpp` (`poly_lanes`, `poly_index`), `HostTarget.cpp` (`polyLanes`), the driver (`--poly-lanes`) |
+| 9 | `poly float`: a vector as wide as the target's registers (4 floats on NEON, 16 on AVX-512), and rules that keep a program's meaning the same at any width | `Ast.h`, `Parser.y`, `CodeGen.h` (`ir::Options`), `Types.cpp` (`lanes`, `polyMismatch`), `Calls.cpp` (`poly_lanes`, `poly_index`, `poly_load`, `poly_store`), `HostTarget.cpp` (`polyLanes`), the driver (`--poly-lanes`) |
 
 After the recipes: the examples that use them, scalable vectors (SVE, RISC-V V) and how they relate to
 `poly float`, the auto-vectoriser that already runs, the pitfalls, and what to build next. Every IR listing, assembly
@@ -902,6 +902,8 @@ than none.
 | `poly bool` | a lane mask: what comparing `poly float`s gives; unlike `bool4`, a program can declare it |
 | `poly_lanes()` | the number of lanes, an `int` (a `float` before recipe 10): a constant once the target is known; `sizeof(poly float)` is 4 bytes a lane (recipe 11) |
 | `poly_index()` | a `poly float` whose lanes hold their own index: 0, 1, 2, ... |
+| `poly_load(p)`, `poly_load(p, active)` | the `poly_lanes()` floats at `p`, a `const float*`, lane i from `p[i]`; with a `poly bool`, only the lanes it sets, the others 0 and not read |
+| `poly_store(p, v)`, `poly_store(p, v, active)` | `v` into the `poly_lanes()` floats at `p`, a `float*`; with a `poly bool`, only the lanes it sets |
 | `(poly float)(x)` | a broadcast of one scalar |
 
 Everything recipe 7 gives vectors works: the operators with broadcasting, comparisons and masks, `?:` lane by lane,
@@ -1011,8 +1013,8 @@ Most of the work was recipe 7's. The rest:
 
 `basel` above is the basic pattern, *strip-mining*: a loop that advances by `poly_lanes()`, a `poly_index()` that gives
 each lane its own element, and a mask for the last step, where some lanes run past the end. The mask keeps them from
-contributing: `k <= n ? term : 0` is a select. Over a buffer, the same loop would load `poly_lanes()` samples at a
-time, which needs a `poly float` load from a `float*` ("Where to go next").
+contributing: `k <= n ? term : 0` is a select. Over a buffer, the same loop loads `poly_lanes()` samples at a time
+(below).
 
 At 4 lanes the loop is:
 
@@ -1032,6 +1034,59 @@ for.body:                                         ; fminus poly.fm -O2 (4 lanes,
 
 and at `--poly-lanes 16` the same IR with `<16 x float>`, which NEON computes as four registers: four `fdiv.4s`, four
 `fadd.4s` into four accumulators, per iteration.
+
+### Loads and stores
+
+A buffer is a `float*`, and a `poly float` moves through it with two builtins, OpenCL C's `vloadn` and `vstoren` at
+the target's width:
+
+```c
+// A gain over a block: poly_lanes() samples a step, and the rest under a mask.
+void scale(const float* restrict input, float* restrict output, int n, float g)
+{
+    int i = 0;
+    for (; i + poly_lanes() <= n; i += poly_lanes())
+        poly_store(output + i, g * poly_load(input + i));
+    const poly bool rest = i + poly_index() < n;   // the lanes still in the buffer
+    poly_store(output + i, g * poly_load(input + i, rest), rest);
+}
+```
+
+`poly_load(p)` reads the `poly_lanes()` floats at `p`, lane i from `p[i]`, and `poly_store(p, v)` writes them. A
+buffer's floats are aligned to a float, not to a vector, so they are unaligned vector loads and stores (`align 4`),
+which today's NEON and x86 cores run as fast as aligned ones unless they cross a cache line. With a `poly bool` after
+them, they touch only the lanes it sets: `llvm.masked.load` gives 0 in the others without reading them, and
+`llvm.masked.store` leaves them alone, so the last step stays inside the buffer whatever `n` is. At 4 lanes the loop
+and its tail are:
+
+```llvm
+  %poly.load = load <4 x float>, ptr %add.ptr9, align 4                ; fminus -O2 --poly-lanes 4
+  %1 = fmul <4 x float> %.pre47, %poly.load
+  store <4 x float> %1, ptr %add.ptr, align 4
+  ...
+  %poly.load29 = tail call <4 x float> @llvm.masked.load.v4f32.p0(ptr align 4 %add.ptr27, <4 x i1> %cmp18,
+                                                                  <4 x float> zeroinitializer)
+  tail call void @llvm.masked.store.v4f32.p0(<4 x float> %4, ptr align 4 %add.ptr22, <4 x i1> %cmp18)
+```
+
+Why the loop is in two parts, unmasked steps and one masked: x86 with AVX-512 has masked loads and stores in
+hardware, and AVX2 has `vmaskmovps`, but NEON has none, so LLVM expands a masked load into one conditional load a
+lane. Once, at the end, that costs nothing; on every step it would cost more than the arithmetic. The mask is all
+false when `n` is a multiple of the width, and then the tail touches nothing.
+
+What the two builtins take, and refuse:
+
+- `p` is a `const float*` for `poly_load` and a `float*` for `poly_store`: a `float*` converts to the first and a
+  `void*` to both, as in C. `poly_store` through a `const float*` is clang's "discards qualifiers", and an `int*` or
+  a `float4*` is "incompatible pointer types".
+- The value is a `poly float`: a scalar broadcasts, a `float4` is refused as everywhere (a `poly float` never meets a
+  fixed width). The mask is a `poly bool`.
+- Neither allocates, so a `[[clang::nonblocking]]` function may call them.
+- Their results are the width's, so the rule above holds: a loop that does the same thing to every sample gives the
+  same output at every width. `examples/saturator/` (below) checks that at widths 1 to 64.
+
+There is no `poly float*`: `p[1]` would sit a different number of floats along on every target ([extending.md](
+extending.md), recipe 10). The builtins take the address of a float, and the loop steps it by `poly_lanes()`.
 
 ### Results depend on the width
 
@@ -1095,23 +1150,28 @@ from the CPU's features, as Highway's dynamic dispatch does.
 
 ### Tests
 
-`PolyTest.cpp` has three test cases:
+`PolyTest.cpp` has five test cases:
 
 - one source compiled at 1, 2, 4, 8, 16 and 64 lanes (through `compile(source, &errors, {.polyLanes = lanes})`):
   `poly_lanes()`, the sum of `poly_index()`, a declared `poly bool`, `basel` against its own order and against
   π²/6, and an order-independent maximum that must not change with the width;
 - a `poly float` function called from C++ as a `float4`, at 4 lanes;
-- the errors, compiled at 4 lanes.
+- the errors, compiled at 4 lanes;
+- `poly_load` and `poly_store` at 1 to 64 lanes: `scale` (above, marked `[[clang::nonblocking]]`) over buffers of 0,
+  1, a width less one, a width, a width and one, three widths and two, and 100 floats, with the floats past the end
+  checked untouched; a masked load whose other lanes hold NaN, summed (they must not be read); and a scalar stored to
+  every lane;
+- their errors.
 
 `FrontendTest.cpp` checks the dump of `poly float`, `const poly bool` and a poly literal. Adding `poly` makes five
 tokens that can start a function, more than Bison lists, so the top-level syntax error loses its "expecting ..."
-part: "syntax error, unexpected identifier". `tests/lit/fminus/poly.fm` checks the IR at 4 and 16 lanes, the
-assembly (one `fdiv.4s` per iteration at 4 lanes, four at 16), runs in the JIT and as an executable, and the
-`--poly-lanes` check.
+part: "syntax error, unexpected identifier". `tests/lit/fminus/poly.fm` checks the IR at 4 and 16 lanes (`scale`'s
+vector loads and stores, and its masked tail, too), the assembly (one `fdiv.4s` per iteration at 4 lanes, four at 16),
+runs in the JIT and as an executable, and the `--poly-lanes` check.
 
 ## The examples
 
-Three examples use what the recipes added, and `tests/lit/fminus/examples.test` and ctest run them.
+Five examples use what the recipes added, and `tests/lit/fminus/examples.test` and ctest run them.
 
 **`examples/chord/chord.fm`** (recipes 7 and 8): a chord's four notes in a `float4`. One function turns four MIDI note
 numbers into four frequencies, with scalars broadcast and one vector `expf`:
@@ -1155,6 +1215,27 @@ seven voices, with the last digits depending on the order of the additions (Pyth
 and computes its coefficients once a sample instead of three times. On the M5, in the dev build, that took it from
 6.35 to 3.9 ns a sample (C++: 2.65), with its output still bit-identical to C++'s. Its README has the rest of the plan.
 
+**`examples/saturator/`** (recipe 9, "Loads and stores"): `tanh(drive * x)` over a block, a sample at a time and a
+`poly float` at a time, with `<math.h>`'s `tanhf` and with a rational function written in FMinus. Every sample is
+independent, so the poly loop gives the same output at every width, which its harness checks from 1 to 64 lanes. On
+an Emerald Rapids Xeon (8 lanes), in the dev build:
+
+| ns a sample | a sample at a time | a `poly float` at a time |
+|---|---|---|
+| `tanhf` | 15.2 | 15.2 |
+| the rational function | 0.44 (9.95 at `-O0`) | 0.44 (1.33 at `-O0`) |
+
+glibc has no vector `tanhf`, so a `poly float` of it is a call a lane, and the call is the cost. The rational
+function is arithmetic, and 35 times faster. At `-O2` LLVM's loop vectoriser widens the plain loop to the same code
+the poly loop has; at `-O0` only the poly loop is vector code.
+
+**`examples/meter/`** (recipe 9): a block's peak and RMS, the same two ways, with `reduce_max` and `reduce_add`. The
+plain RMS loop adds one sample at a time, and LLVM may not vectorise it, since that would change the order of the
+additions: 0.607 ns a sample, in FMinus and in C++. `rms_poly` keeps 8 sums side by side: 0.077 ns, and more
+accurate, but its last digits depend on the width, which its harness checks against a C++ emulation of each width's
+order. A maximum doesn't depend on the order, so LLVM vectorises the plain `peak` itself, with four running maxima
+(0.085 ns); `peak_poly` has one, and is three times slower, until `--poly-lanes 32` gives it more.
+
 ## Scalable vectors
 
 SVE (Arm) and the RISC-V V extension have vector registers whose width the CPU decides: 128 to 2048 bits on SVE. Code
@@ -1171,6 +1252,7 @@ with fixed sizes, and the width only through `poly_lanes()` and `poly_index()`. 
 | the type | `ScalableVectorType::get(float, 4)` |
 | `poly_lanes()` | `llvm.vscale.i32` × 4 |
 | `poly_index()` | `llvm.stepvector.nxv4i32`, converted to float |
+| `poly_load`, `poly_store` | `load` and `store` of `<vscale x 4 x float>`; masked, SVE's predicated `ld1w` and `st1w` |
 | a splat | `CreateVectorSplat(ElementCount::getScalable(4), x)` |
 | arithmetic, comparisons, `select` | unchanged |
 | `reduce_add` (ordered) | `llvm.vector.reduce.fadd.nxv4f32`: SVE's `fadda`, which adds the lanes one by one |
@@ -1262,10 +1344,9 @@ and the backend legalises both the same way.
 
 Design notes, not written or verified:
 
-- **`poly float` loads and stores.** FMinus has pointers (recipe 10), but not to `poly float`. A `poly float` load
-  from a `float*` would read `poly_lanes()` floats (`load <N x float>, ptr`), and the last, partial step of a
-  strip-mined loop needs a masked load and store (`llvm.masked.load`, `llvm.masked.store`, with the step's mask), or a
-  scalar tail. This is what makes strip-mining over buffers practical.
+- **Strided and gathered loads.** `poly_load` reads consecutive floats. A stereo buffer's left channel is every
+  other float: a strided load (`llvm.masked.gather` with computed addresses, or a load and a `shufflevector`), and a
+  `poly int` index would make any pattern a gather. Interleaved channels are what a plugin's host often hands over.
 - **Mask operations.** `&`, `|` and `^` on masks (`and`, `or`, `xor` of `<N x i1>`), `!` on a mask, and `any(m)`,
   `all(m)` (`llvm.vector.reduce.or` and `.and`), so a strip-mined loop can stop when no lane is active.
 - **Lane movement.** Rotations and broadcasts of one lane across a `poly float`
@@ -1276,6 +1357,8 @@ Design notes, not written or verified:
   10). Four channels' samples, states and coefficients as `float4`s (a `const float4*` of frames) would filter four
   channels at once: in C++, 1.44 ns a channel's sample against 2.8 for one channel, twice the throughput, the four
   lanes' recursions running side by side and `sinf` and `cosf` one vector call each.
+- **Overloading.** `examples/saturator/` writes its rational tanh twice, for a `float` and for a `poly float`, since
+  C has no overloading. OpenCL C's `__attribute__((overloadable))`, or C11's `_Generic`, would give the two one name.
 - **Multiversioning.** Compile `poly` functions at several widths for executables, and dispatch on the CPU at load
   time.
 - **Fast-math, scoped.** A per-function or per-block `reassoc` (extending.md, "Contraction and fast-math") would let
