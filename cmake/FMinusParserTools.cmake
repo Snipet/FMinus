@@ -1,10 +1,14 @@
 # cmake/FMinusParserTools.cmake: GNU Bison and Flex, and fminus_add_grammar(). Two modes (FMINUS_PARSER_TOOLS_MODE):
 #
-#   fetch   (default)  FetchContent fetches the pinned tarballs. The first configure builds each tool (./configure &&
-#                      make, about a minute) into ${FMINUS_DEPS_DIR}/install/<tool>-<version>; later configures of
-#                      any build tree find the install.
-#   system             Bison >= 3.8 and Flex >= 2.6 from PATH, or Homebrew's keg-only /opt/homebrew/opt/bison/bin.
-#                      macOS's own /usr/bin/bison is 2.3, too old for the C++ variant skeleton.
+#   fetch   (default)  FetchContent fetches the pinned sources. The first configure builds the tools into
+#                      ${FMINUS_DEPS_DIR}/install/<tool>-<version>; later configures of any build tree find the install.
+#                      On macOS and Linux, Bison's and Flex's release tarballs, each with ./configure && make (about a
+#                      minute). On Windows, which has neither a POSIX shell nor make for those, WinFlexBison: the same
+#                      Bison and Flex ported to Windows (win_bison.exe, win_flex.exe), built with CMake and this tree's
+#                      C compiler.
+#   system             Bison >= 3.8 and Flex >= 2.6 from PATH (on Windows, win_bison and win_flex too), or Homebrew's
+#                      keg-only /opt/homebrew/opt/bison/bin. macOS's own /usr/bin/bison is 2.3, too old for the C++
+#                      variant skeleton.
 #
 # Gives FMINUS_BISON_EXECUTABLE and FMINUS_FLEX_EXECUTABLE. It also sets BISON_EXECUTABLE and FLEX_EXECUTABLE, so
 # CMake's own FindBISON and FindFLEX (BISON_TARGET, FLEX_TARGET) find the same tools. FLEX_INCLUDE_DIR holds the
@@ -27,8 +31,6 @@ set(FMINUS_PARSER_TOOLS_MODE "fetch" CACHE STRING "Where Bison and Flex come fro
 set_property(CACHE FMINUS_PARSER_TOOLS_MODE PROPERTY STRINGS fetch system)
 set(FMINUS_BISON_FLAGS -Wall -Wcounterexamples CACHE STRING "Flags fminus_add_grammar passes to every Bison run")
 set(FMINUS_FLEX_FLAGS "" CACHE STRING "Flags fminus_add_grammar passes to every Flex run")
-
-find_program(FMINUS_MAKE NAMES gmake make)
 
 # Fetches <name>-<version>, builds it out of tree with ./configure <args> and installs it under the deps cache.
 function(_fminus_build_autotool name version sha256)
@@ -77,7 +79,68 @@ function(_fminus_build_autotool name version sha256)
   file(WRITE "${_stamp}" "${sha256}")
 endfunction()
 
-if(FMINUS_PARSER_TOOLS_MODE STREQUAL "fetch")
+# Windows: fetches WinFlexBison and builds it with CMake and this tree's C compiler (clang-cl or cl) into the deps
+# cache. The install holds win_bison.exe and win_flex.exe, Bison's data/ beside them (where win_bison looks for it)
+# and FlexLexer.h. Bison's m4 is built into both tools, so nothing else needs installing.
+function(_fminus_build_winflexbison)
+  set(_name "winflexbison-${FMINUS_WINFLEXBISON_VERSION}")
+  set(_prefix "${FMINUS_DEPS_DIR}/install/${_name}")
+  set(_stamp "${_prefix}/.fminus-installed")
+  if(EXISTS "${_stamp}")
+    return()
+  endif()
+  file(LOCK "${FMINUS_DEPS_DIR}/install/${_name}.lock" GUARD FUNCTION)
+  if(EXISTS "${_stamp}")
+    return()
+  endif()
+
+  message(STATUS "FMinus: fetching and building WinFlexBison ${FMINUS_WINFLEXBISON_VERSION} into ${_prefix}")
+  FetchContent_Declare(fminus_winflexbison
+    URL "${FMINUS_WINFLEXBISON_URL}"
+    URL_HASH SHA256=${FMINUS_WINFLEXBISON_SHA256}
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    SOURCE_DIR "${FMINUS_DEPS_DIR}/src/${_name}"
+    SOURCE_SUBDIR fminus-no-cmake)   # a subdirectory that does not exist: populate only, it is built below
+  FetchContent_MakeAvailable(fminus_winflexbison)
+
+  set(_bdir "${FMINUS_DEPS_DIR}/build/${_name}")
+  file(REMOVE_RECURSE "${_bdir}")
+  file(MAKE_DIRECTORY "${_bdir}")
+  fminus_dependency_generator(_gen)
+  # A host tool: Release, and none of this tree's or the environment's flags.
+  set(_env "${CMAKE_COMMAND}" -E env --unset=CFLAGS --unset=CPPFLAGS --unset=LDFLAGS)
+  foreach(_step configure build install)
+    if(_step STREQUAL "configure")
+      set(_cmd ${_env} "${CMAKE_COMMAND}" ${_gen} -S "${FMINUS_DEPS_DIR}/src/${_name}" -B "${_bdir}"
+               -DCMAKE_BUILD_TYPE=Release "-DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}" "-DCMAKE_INSTALL_PREFIX=${_prefix}")
+    elseif(_step STREQUAL "build")
+      set(_cmd ${_env} "${CMAKE_COMMAND}" --build "${_bdir}" --config Release --parallel ${FMINUS_DEPS_JOBS})
+    else()
+      set(_cmd ${_env} "${CMAKE_COMMAND}" --install "${_bdir}" --config Release)
+    endif()
+    execute_process(COMMAND ${_cmd} RESULT_VARIABLE _rc
+                    OUTPUT_FILE "${_bdir}/fminus-${_step}.log" ERROR_FILE "${_bdir}/fminus-${_step}.log")
+    if(NOT _rc EQUAL 0)
+      message(FATAL_ERROR "FMinus: WinFlexBison ${FMINUS_WINFLEXBISON_VERSION}: ${_step} failed (${_rc}); log: "
+                          "${_bdir}/fminus-${_step}.log")
+    endif()
+  endforeach()
+  foreach(_file win_bison.exe win_flex.exe data/m4sugar/m4sugar.m4 FlexLexer.h)
+    if(NOT EXISTS "${_prefix}/${_file}")
+      message(FATAL_ERROR "FMinus: WinFlexBison ${FMINUS_WINFLEXBISON_VERSION} installed no ${_file} in ${_prefix}")
+    endif()
+  endforeach()
+  file(WRITE "${_stamp}" "${FMINUS_WINFLEXBISON_SHA256}")
+endfunction()
+
+if(FMINUS_PARSER_TOOLS_MODE STREQUAL "fetch" AND CMAKE_HOST_WIN32)
+  _fminus_build_winflexbison()
+  set(_fminus_winflexbison "${FMINUS_DEPS_DIR}/install/winflexbison-${FMINUS_WINFLEXBISON_VERSION}")
+  set(BISON_EXECUTABLE "${_fminus_winflexbison}/win_bison.exe" CACHE FILEPATH "GNU Bison (FMinus's deps cache)" FORCE)
+  set(FLEX_EXECUTABLE "${_fminus_winflexbison}/win_flex.exe" CACHE FILEPATH "Flex (FMinus's deps cache)" FORCE)
+  set(FLEX_INCLUDE_DIR "${_fminus_winflexbison}" CACHE PATH "FlexLexer.h (FMinus's deps cache)" FORCE)
+elseif(FMINUS_PARSER_TOOLS_MODE STREQUAL "fetch")
+  find_program(FMINUS_MAKE NAMES gmake make)
   if(NOT FMINUS_MAKE)
     message(FATAL_ERROR "FMinus: building Bison and Flex needs make (Xcode's command line tools)")
   endif()
@@ -94,8 +157,8 @@ if(FMINUS_PARSER_TOOLS_MODE STREQUAL "fetch")
   set(FLEX_INCLUDE_DIR "${FMINUS_DEPS_DIR}/install/flex-${FMINUS_FLEX_VERSION}/include" CACHE PATH
       "FlexLexer.h (FMinus's deps cache)" FORCE)
 elseif(FMINUS_PARSER_TOOLS_MODE STREQUAL "system")
-  find_program(BISON_EXECUTABLE bison HINTS /opt/homebrew/opt/bison/bin /usr/local/opt/bison/bin)
-  find_program(FLEX_EXECUTABLE flex HINTS /opt/homebrew/opt/flex/bin /usr/local/opt/flex/bin)
+  find_program(BISON_EXECUTABLE NAMES bison win_bison HINTS /opt/homebrew/opt/bison/bin /usr/local/opt/bison/bin)
+  find_program(FLEX_EXECUTABLE NAMES flex win_flex HINTS /opt/homebrew/opt/flex/bin /usr/local/opt/flex/bin)
 else()
   message(FATAL_ERROR "FMinus: FMINUS_PARSER_TOOLS_MODE is '${FMINUS_PARSER_TOOLS_MODE}'; use fetch or system")
 endif()

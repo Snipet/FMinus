@@ -23,6 +23,17 @@ set(FMINUS_FLEX_VERSION "2.6.4")
 set(FMINUS_FLEX_URL "https://github.com/westes/flex/releases/download/v${FMINUS_FLEX_VERSION}/flex-${FMINUS_FLEX_VERSION}.tar.gz")
 set(FMINUS_FLEX_SHA256 "e87aae032bf07c26f85ac0ed3250998c37621d95f8bd748b31f15b33c45ee995")
 
+# WinFlexBison: the same Flex 2.6.4 and Bison 3.8.2, ported to Windows (win_flex, win_bison), where the two autotools
+# builds above cannot run. Built from source with CMake at configure time, on Windows only. The pin is a commit after
+# release 2.5.25, with the same tool versions: 2.5.25's tools can pick the same temporary file when they run at once,
+# as Ninja runs them, and the commit also builds with clang-cl and CMake 4. The URL is GitHub's archive of the commit;
+# its hash is that of the archive rebuilt from the commit (git archive | gzip -n), which is how 2.5.25's archive
+# reproduces the hash conda-forge publishes for it.
+set(FMINUS_WINFLEXBISON_VERSION "2.5.25-a243a1c")
+set(FMINUS_WINFLEXBISON_COMMIT "a243a1c618c061624cdf48ac9dbb68de1e08e9a0")
+set(FMINUS_WINFLEXBISON_URL "https://github.com/lexxmark/winflexbison/archive/${FMINUS_WINFLEXBISON_COMMIT}.tar.gz")
+set(FMINUS_WINFLEXBISON_SHA256 "5cf20e1ab3a4c0570ee54e64eb2a6dd7d1719e2c813620b3a5f0f873e6b058af")   # 1,473,341 bytes
+
 # CLI11: command-line parsing for the executables under tools/ (header-only; the release's source package).
 set(FMINUS_CLI11_VERSION "2.7.2")
 set(FMINUS_CLI11_URL

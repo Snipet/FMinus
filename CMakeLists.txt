@@ -19,6 +19,17 @@ cmake_minimum_required(VERSION 3.30)    # CMP0168: FetchContent populates direct
 
 set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS")
 
+# Windows: clang-cl unless a compiler was chosen (CC, CXX, -DCMAKE_<LANG>_COMPILER). FMinus needs clang there too
+# (cmake/FMinusOptions.cmake). A Visual Studio generator picks it with -T ClangCL instead.
+if(CMAKE_HOST_WIN32 AND NOT CMAKE_GENERATOR MATCHES "Visual Studio")
+  if(NOT DEFINED CMAKE_C_COMPILER AND NOT DEFINED ENV{CC})
+    set(CMAKE_C_COMPILER clang-cl)
+  endif()
+  if(NOT DEFINED CMAKE_CXX_COMPILER AND NOT DEFINED ENV{CXX})
+    set(CMAKE_CXX_COMPILER clang-cl)
+  endif()
+endif()
+
 project(FMinus
   VERSION 0.1.0
   DESCRIPTION "A JIT compiler for audio DSP on LLVM"

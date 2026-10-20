@@ -1427,7 +1427,9 @@ from `libfminus_runtime.a`, as recipe 5's `db_to_gain` would be. What they do is
   would turn into the machine's whole memory; ASan's allocator aborts on such a request), or when the memory isn't
   there.
 - **C's memory**: `aligned_alloc`'s blocks are `free`'s, so a C++ host may free what FMinus allocated, and FMinus may
-  free the host's `malloc`'s (`HeapTest.cpp` does both).
+  free the host's `malloc`'s (`HeapTest.cpp` does both). Not on Windows, whose C runtime has no `aligned_alloc`: there
+  the blocks come from `_aligned_malloc`, which only `_aligned_free` releases, so `fminus_rt_free` calls that, a host
+  frees FMinus's memory with it (or with FMinus's `free`), and FMinus's `free` cannot take the host's `malloc`'s.
 
 ### `void*` and `sizeof`
 

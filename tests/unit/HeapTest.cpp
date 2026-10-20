@@ -8,6 +8,9 @@
 #include <cstdint>
 #include <cstdlib>
 #include <string>
+#if defined(_WIN32)
+#include <malloc.h>   // _aligned_free
+#endif
 
 using namespace fminus::test;
 
@@ -33,7 +36,11 @@ TEST_CASE("malloc, calloc and free are C's, on memory aligned to 64 bytes and ze
     CHECK(reinterpret_cast<std::uintptr_t>(p) % 64 == 0);
     CHECK((p[0] == 0.0f && p[1] == 1.0f && p[99] == 99.0f));
     CHECK(lookup<bool(float*, void*)>(*jit, "same")(p, p));
+#if defined(_WIN32)
+    _aligned_free(p);   // FMinus's memory is the Windows C runtime's aligned memory (runtime/Runtime.h)
+#else
     std::free(p);   // FMinus's memory is C's: the host may free it
+#endif
 
     float4* f = lookup<float4*(int)>(*jit, "frames")(3);
     REQUIRE(f != nullptr);
@@ -42,7 +49,9 @@ TEST_CASE("malloc, calloc and free are C's, on memory aligned to 64 bytes and ze
     auto release = lookup<void(void*)>(*jit, "release");
     release(f);
     release(nullptr);
-    release(std::malloc(16));   // and FMinus may free the host's
+#if !defined(_WIN32)
+    release(std::malloc(16));   // and FMinus may free the host's (not on Windows, where malloc's is not aligned memory)
+#endif
     CHECK(lookup<bool()>(*jit, "refused")());
 }
 

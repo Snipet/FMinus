@@ -166,6 +166,9 @@ if(FMINUS_LLVM_MODE STREQUAL "cache")
   if(CMAKE_OSX_ARCHITECTURES)
     _fminus_llvm_set(CMAKE_OSX_ARCHITECTURES "${CMAKE_OSX_ARCHITECTURES}")
   endif()
+  if(FMINUS_MSVC_FRONTEND)
+    _fminus_llvm_set(CMAKE_MSVC_RUNTIME_LIBRARY "${CMAKE_MSVC_RUNTIME_LIBRARY}")   # the C runtime FMinus links
+  endif()
   if(FMINUS_LLVM_BUILD_TYPE STREQUAL "Debug")
     _fminus_llvm_set(LLVM_OPTIMIZED_TABLEGEN ON)
   endif()
@@ -214,16 +217,7 @@ if(FMINUS_LLVM_MODE STREQUAL "cache")
     file(MAKE_DIRECTORY "${_bdir}")
     file(WRITE "${_bdir}/fminus-settings.cmake" "${_local}")
 
-    if(CMAKE_GENERATOR MATCHES "Ninja" AND CMAKE_MAKE_PROGRAM)
-      set(_gen -G Ninja "-DCMAKE_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}")
-    else()
-      find_program(FMINUS_NINJA ninja)
-      if(FMINUS_NINJA)
-        set(_gen -G Ninja "-DCMAKE_MAKE_PROGRAM=${FMINUS_NINJA}")
-      else()
-        set(_gen -G "Unix Makefiles")
-      endif()
-    endif()
+    fminus_dependency_generator(_gen)
 
     message(STATUS "FMinus: building LLVM ${FMINUS_LLVM_VERSION} as ${FMINUS_LLVM_FLAVOR} (once per flavor; "
                    "${FMINUS_DEPS_JOBS} jobs; build tree ${_bdir})")
@@ -235,7 +229,8 @@ if(FMINUS_LLVM_MODE STREQUAL "cache")
       message(FATAL_ERROR "FMinus: configuring LLVM failed (${_rc}); build tree ${_bdir}")
     endif()
     execute_process(
-      COMMAND "${CMAKE_COMMAND}" --build "${_bdir}" --target install-distribution --parallel ${FMINUS_DEPS_JOBS}
+      COMMAND "${CMAKE_COMMAND}" --build "${_bdir}" --target install-distribution --config ${FMINUS_LLVM_BUILD_TYPE}
+              --parallel ${FMINUS_DEPS_JOBS}
       RESULT_VARIABLE _rc)
     if(NOT _rc EQUAL 0)
       message(FATAL_ERROR "FMinus: building LLVM failed (${_rc}); build tree ${_bdir}. Reconfiguring resumes it.")
