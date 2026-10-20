@@ -217,6 +217,13 @@ function(fminus_add_grammar target)
     list(APPEND _generated "${_dir}/${_stem}.tab.cpp" "${_dir}/${_stem}.tab.hpp")
   endif()
 
+  # Windows (MSVC's headers) has no <unistd.h>. A scanner's %option nounistd keeps it out of the scanner, but Flex
+  # 2.6.4 still writes it into the scanner's header, guarded by a macro only the scanner defines; --nounistd keeps it
+  # out of both. A scanner on Windows has to do without <unistd.h> anyway, as FMinus's, which read from memory, do.
+  set(_flex_platform_flags "")
+  if(MSVC)
+    set(_flex_platform_flags --nounistd)
+  endif()
   foreach(_l IN LISTS _g_LEXERS)
     cmake_path(ABSOLUTE_PATH _l BASE_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" OUTPUT_VARIABLE _l)
     cmake_path(RELATIVE_PATH _l BASE_DIRECTORY "${_g_BASE_DIR}" OUTPUT_VARIABLE _rel)
@@ -226,7 +233,7 @@ function(fminus_add_grammar target)
     file(MAKE_DIRECTORY "${_dir}")
     add_custom_command(
       OUTPUT "${_dir}/${_stem}.yy.cpp" "${_dir}/${_stem}.yy.hpp"
-      COMMAND "${FMINUS_FLEX_EXECUTABLE}" ${FMINUS_FLEX_FLAGS} ${_g_FLEX_FLAGS}
+      COMMAND "${FMINUS_FLEX_EXECUTABLE}" ${_flex_platform_flags} ${FMINUS_FLEX_FLAGS} ${_g_FLEX_FLAGS}
               "--outfile=${_stem}.yy.cpp" "--header-file=${_stem}.yy.hpp" "${_l}"
       DEPENDS "${_l}"
       WORKING_DIRECTORY "${_dir}"

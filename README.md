@@ -28,9 +28,9 @@ The first run downloads the pinned sources: LLVM (179 MB), Bison, Flex, CLI11 an
 Later configures, in this build tree or any other, find them there in seconds. Then it builds FMinus and runs every
 test.
 
-On Windows, run the same command from an x64 developer prompt for Visual Studio, with its "C++ Clang tools for Windows"
-installed. The build uses clang-cl there, and builds WinFlexBison, the same Bison and Flex ported to Windows, in place
-of their `./configure && make` ([docs/building.md](docs/building.md#windows)).
+On Windows, install Visual Studio's "C++ Clang tools for Windows" and run the same command, best from its "x64 Native
+Tools Command Prompt". The build uses clang-cl there, and builds WinFlexBison, the same Bison and Flex ported to
+Windows, in place of their `./configure && make` ([docs/building.md](docs/building.md#windows)).
 
 ## Layout
 
@@ -39,6 +39,7 @@ CMakeLists.txt          the project; cmake/ holds the parts
 CMakePresets.json       dev, debug, release, asan, tsan, inline, xcode
 cmake/
   FMinusPins.cmake        every dependency: version, URL, SHA-256
+  FMinusClangCl.cmake     Windows: clang-cl, found before project() (Visual Studio's, PATH's, LLVM's)
   FMinusOptions.cmake     options, the deps cache, ccache, fminus_target_defaults()
   FMinusLLVM.cmake        LLVM (cache | inline | system) -> FMinus::LLVM
   FMinusParserTools.cmake Bison and Flex (fetch | system; WinFlexBison on Windows) -> fminus_add_grammar()
