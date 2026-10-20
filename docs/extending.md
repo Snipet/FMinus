@@ -45,8 +45,9 @@ nothing reminds you of.
 Each feature has an example to read beside its recipe: `examples/comparison/` for `bool` (recipe 3),
 `examples/waveforms/` for every statement (recipe 4), `examples/chord/` for `float4` and the vector math library
 (recipes 7 and 8), `examples/unison/` for `poly float` (recipe 9), `examples/biquad/` for a block of samples a
-call, through pointers (recipe 10), and `examples/delay/` for state on the heap and a kernel that can't allocate
-(recipe 11).
+call, through pointers (recipe 10), `examples/delay/` for state on the heap and a kernel that can't allocate
+(recipe 11), and `examples/saturator/` and `examples/meter/` for `poly float` through a buffer, against plain loops
+(recipes 9 and 10).
 
 ## Ground rules
 

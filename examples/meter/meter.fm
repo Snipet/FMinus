@@ -1,0 +1,59 @@
+// examples/meter/meter.fm: a level meter's two readings of a block, its peak and its RMS. The harness (bench.cpp) runs
+// them over noise, compares them with C++ and times them.
+//
+// Both reduce a block to one number, and each comes as a loop over the samples and as a poly float loop:
+//
+//   peak, peak_poly    the largest |x|: a maximum, which comes out the same in any order
+//   rms, rms_poly      sqrt of the mean of x squared: a sum, which rounds differently in each order
+//
+// The scalar loops add, or take the maximum, one sample at a time, each step waiting for the one before. The poly loops
+// keep poly_lanes() partial results, lane i taking every poly_lanes()-th sample from i, and combine the lanes at the
+// end. So the peak is the same at any width, and the RMS is not, in its last digits (docs/simd.md, "Results depend on
+// the width").
+//
+// Every kernel is [[clang::nonblocking]]: it may run on the audio thread.
+
+float peak(const float* restrict input, int n) [[clang::nonblocking]]
+{
+    float largest = 0;
+    for (int i = 0; i < n; ++i)
+        largest = fmaxf(largest, fabsf(input[i]));
+    return largest;
+}
+
+// The last step's mask reads the lanes past n as 0, which changes no maximum of absolute values.
+float peak_poly(const float* restrict input, int n) [[clang::nonblocking]]
+{
+    poly float largest = 0;
+    int i = 0;
+    for (; i + poly_lanes() <= n; i += poly_lanes())
+        largest = fmaxf(largest, fabsf(poly_load(input + i)));
+    const poly bool rest = i + poly_index() < n;
+    largest = fmaxf(largest, fabsf(poly_load(input + i, rest)));
+    return reduce_max(largest);
+}
+
+// 0 for an empty block.
+float rms(const float* restrict input, int n) [[clang::nonblocking]]
+{
+    float sum = 0;
+    for (int i = 0; i < n; ++i)
+        sum += input[i] * input[i];
+    return n > 0 ? sqrtf(sum / n) : 0;
+}
+
+// The last step adds 0 in the lanes past n.
+float rms_poly(const float* restrict input, int n) [[clang::nonblocking]]
+{
+    poly float sum = 0;
+    int i = 0;
+    for (; i + poly_lanes() <= n; i += poly_lanes())
+    {
+        const poly float x = poly_load(input + i);
+        sum += x * x;
+    }
+    const poly bool rest = i + poly_index() < n;
+    const poly float x = poly_load(input + i, rest);
+    sum += x * x;
+    return n > 0 ? sqrtf(reduce_add(sum) / n) : 0;
+}

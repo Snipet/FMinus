@@ -22,4 +22,5 @@ Elsewhere:
 - [../examples/note/note.fm](../examples/note/note.fm) is a whole program, with a `main`.
 - [../examples/](../examples/) shows each feature in use: `waveforms/` (loops), `chord/` (`float4` and the vector
   math library), `unison/` (`poly float`), `comparison/` (a `bool main`), `biquad/` (pointers: a block a call),
-  `delay/` (the heap, and a kernel that can't allocate).
+  `delay/` (the heap, and a kernel that can't allocate), `saturator/` and `meter/` (`poly float` through a buffer,
+  against plain loops: a stateless tanh, and reductions).

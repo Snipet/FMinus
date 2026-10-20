@@ -346,6 +346,9 @@ Because the JIT and executables share one runtime, the two compile the same prog
 | `fminus-build` | `tools/fminus-build/main.cpp` | LLVM IR to exe/obj/asm/ll (HostTarget + Aot) |
 | `fminus-hostinfo` | `tools/fminus-hostinfo/main.cpp` | the triple, CPU, features and data layout the JIT targets |
 | `example-biquad` | `examples/biquad/bench.cpp` | biquad.fm in the JIT against C++, compared and timed |
+| `example-delay` | `examples/delay/bench.cpp` | delay.fm, its line allocated by the program, against C++ |
+| `example-saturator` | `examples/saturator/bench.cpp` | saturator.fm's tanh, plain and `poly float` loops, against C++, through `fminus::Program` |
+| `example-meter` | `examples/meter/bench.cpp` | meter.fm's peak and RMS, plain and `poly float` loops, against C++, through `fminus::Program` |
 | `fminus-tests` | `tests/unit/`, `tests/smoke/` | Catch2 |
 | `fminus-library-tests` | `tests/library/` | Catch2, in C++17, against `FMinus::FMinus` alone: the public API as a host uses it |
 | lit suite | `tests/lit/` | `fminus`, `fminus-build`, FileCheck, LLVM's tools |

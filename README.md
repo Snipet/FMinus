@@ -254,7 +254,8 @@ types:
 `examples/biquad/` is a kernel to grow the language around. It is a biquad low-pass with coefficients recomputed
 every sample, which filters a block a call, with a harness that calls it once, compares it with C++ and times both,
 and a plan of features in its README. `examples/delay/` is a feedback delay whose line the program allocates, with a
-kernel marked `[[clang::nonblocking]]`.
+kernel marked `[[clang::nonblocking]]`. `examples/saturator/` (tanh) and `examples/meter/` (peak and RMS) each run a
+loop over samples against a loop over `poly float`s, and time both.
 
 Each variable is a stack slot (an `alloca` in the entry block), read with loads and written with stores, so
 `fminus -O0` reads like `clang -O0`. From `-O1`, mem2reg promotes the slots back into registers.

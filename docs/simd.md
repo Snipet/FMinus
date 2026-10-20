@@ -1083,7 +1083,7 @@ What the two builtins take, and refuse:
   fixed width). The mask is a `poly bool`.
 - Neither allocates, so a `[[clang::nonblocking]]` function may call them.
 - Their results are the width's, so the rule above holds: a loop that does the same thing to every sample gives the
-  same output at every width.
+  same output at every width. `examples/saturator/` (below) checks that at widths 1 to 64.
 
 There is no `poly float*`: `p[1]` would sit a different number of floats along on every target ([extending.md](
 extending.md), recipe 10). The builtins take the address of a float, and the loop steps it by `poly_lanes()`.
@@ -1171,7 +1171,7 @@ runs in the JIT and as an executable, and the `--poly-lanes` check.
 
 ## The examples
 
-Three examples use what the recipes added, and `tests/lit/fminus/examples.test` and ctest run them.
+Five examples use what the recipes added, and `tests/lit/fminus/examples.test` and ctest run them.
 
 **`examples/chord/chord.fm`** (recipes 7 and 8): a chord's four notes in a `float4`. One function turns four MIDI note
 numbers into four frequencies, with scalars broadcast and one vector `expf`:
@@ -1214,6 +1214,27 @@ seven voices, with the last digits depending on the order of the additions (Pyth
 **`examples/biquad/`** (recipe 7): a `float4` as several results. The filter returns `(y, s1, s2, 0)` from one call,
 and computes its coefficients once a sample instead of three times. On the M5, in the dev build, that took it from
 6.35 to 3.9 ns a sample (C++: 2.65), with its output still bit-identical to C++'s. Its README has the rest of the plan.
+
+**`examples/saturator/`** (recipe 9, "Loads and stores"): `tanh(drive * x)` over a block, a sample at a time and a
+`poly float` at a time, with `<math.h>`'s `tanhf` and with a rational function written in FMinus. Every sample is
+independent, so the poly loop gives the same output at every width, which its harness checks from 1 to 64 lanes. On
+an Emerald Rapids Xeon (8 lanes), in the dev build:
+
+| ns a sample | a sample at a time | a `poly float` at a time |
+|---|---|---|
+| `tanhf` | 15.2 | 15.2 |
+| the rational function | 0.44 (9.95 at `-O0`) | 0.44 (1.33 at `-O0`) |
+
+glibc has no vector `tanhf`, so a `poly float` of it is a call a lane, and the call is the cost. The rational
+function is arithmetic, and 35 times faster. At `-O2` LLVM's loop vectoriser widens the plain loop to the same code
+the poly loop has; at `-O0` only the poly loop is vector code.
+
+**`examples/meter/`** (recipe 9): a block's peak and RMS, the same two ways, with `reduce_max` and `reduce_add`. The
+plain RMS loop adds one sample at a time, and LLVM may not vectorise it, since that would change the order of the
+additions: 0.607 ns a sample, in FMinus and in C++. `rms_poly` keeps 8 sums side by side: 0.077 ns, and more
+accurate, but its last digits depend on the width, which its harness checks against a C++ emulation of each width's
+order. A maximum doesn't depend on the order, so LLVM vectorises the plain `peak` itself, with four running maxima
+(0.085 ns); `peak_poly` has one, and is three times slower, until `--poly-lanes 32` gives it more.
 
 ## Scalable vectors
 
@@ -1336,6 +1357,8 @@ Design notes, not written or verified:
   10). Four channels' samples, states and coefficients as `float4`s (a `const float4*` of frames) would filter four
   channels at once: in C++, 1.44 ns a channel's sample against 2.8 for one channel, twice the throughput, the four
   lanes' recursions running side by side and `sinf` and `cosf` one vector call each.
+- **Overloading.** `examples/saturator/` writes its rational tanh twice, for a `float` and for a `poly float`, since
+  C has no overloading. OpenCL C's `__attribute__((overloadable))`, or C11's `_Generic`, would give the two one name.
 - **Multiversioning.** Compile `poly` functions at several widths for executables, and dispatch on the CPU at load
   time.
 - **Fast-math, scoped.** A per-function or per-block `reassoc` (extending.md, "Contraction and fast-math") would let
