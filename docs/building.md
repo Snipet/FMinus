@@ -211,6 +211,9 @@ commands (`cmake --workflow --preset dev`), except `asan`, `tsan` and `xcode`. W
   `_CRT_NONSTDC_NO_WARNINGS` turn off the C runtime's deprecations of standard functions such as `getenv` and of
   POSIX names such as `fileno`. The examples' `-ffp-contract=off` goes through clang-cl as
   `/clang:-ffp-contract=off`.
+- **File names.** The library is `lib/libfminus.lib`, and the runtime `lib/fminus_runtime.lib`. `lib/fminus.lib` is
+  the driver's import library: LLVM's JIT exports two symbols for debuggers (`__jit_debug_descriptor`,
+  `__jit_debug_register_code`), so the linker writes one for every executable that links it, beside the libraries.
 - **Sanitizers** are not set up for clang-cl: `FMINUS_SANITIZERS` is an error.
 - **Executables.** `fminus --emit exe` and `fminus-build` link through clang-cl, which adds `.exe` to a name without
   an extension (`-o note` writes `note.exe`) and needs the developer prompt's `LIB` to find the C runtime. The Windows
@@ -236,6 +239,7 @@ commands (`cmake --workflow --preset dev`), except `asan`, `tsan` and `xcode`. W
 | `asan` reports container-overflow inside LLVM | run the asan test preset (`ctest --preset asan`), which sets `ASAN_OPTIONS=detect_container_overflow=0` |
 | An example's `--check` fails after a change in fast-math or contraction | the C++ reference no longer computes the same thing: change it in step, or raise `--tolerance` |
 | Windows: `cannot use 'throw' with exceptions disabled`, or configure stops at `CMAKE_CXX_FLAGS (...) has no /EHsc` | the build tree was first configured when the compiler could not be found, and kept the empty flags it cached then: delete `build-<preset>/` and configure again (LLVM stays in `.deps/`) |
+| Windows: linking `bin\fminus.exe` fails at `FINAL LINK` with undefined `fminus::...` symbols | a build tree from before the library became `libfminus.lib`, where `fminus.exe`'s import library overwrote it: build again |
 | Windows: `FMinus: no clang-cl` | add "C++ Clang tools for Windows" to Visual Studio (Visual Studio Installer, Modify), or install LLVM; delete `build-<preset>/` and configure again |
 | Windows: `FMinus: this developer prompt targets x86` | open "x64 Native Tools Command Prompt for VS" instead, delete `build-<preset>/`, and configure again |
 | Windows: `'unistd.h' file not found` in a `*.yy.hpp` | a build tree configured before Flex got `--nounistd` on Windows: build again (the changed command regenerates the scanners) |
