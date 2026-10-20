@@ -35,7 +35,13 @@ target_include_directories(fminus_runtime PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 # ---- the library ----------------------------------------------------------------------------------------------------
 add_library(fminus_lib STATIC ${_fminus_sources} ${_fminus_public_headers})
 add_library(FMinus::FMinus ALIAS fminus_lib)
-set_target_properties(fminus_lib PROPERTIES OUTPUT_NAME fminus)
+# libfminus.a, and on Windows libfminus.lib: fminus.lib there is the driver's (tools/fminus) import library, which the
+# linker writes into lib/ too, since LLVM's JIT exports two symbols for debuggers (__jit_debug_register_code).
+if(MSVC)
+  set_target_properties(fminus_lib PROPERTIES OUTPUT_NAME libfminus)
+else()
+  set_target_properties(fminus_lib PROPERTIES OUTPUT_NAME fminus)
+endif()
 fminus_target_defaults(fminus_lib)
 target_include_directories(fminus_lib
   PUBLIC "${PROJECT_SOURCE_DIR}/include" "${PROJECT_BINARY_DIR}/include"
