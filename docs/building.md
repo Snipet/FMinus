@@ -12,10 +12,11 @@ build itself. The first configure needs the network.
 
 On Windows: Visual Studio 2022 or later (or its Build Tools) with the "Desktop development with C++" workload and
 its "C++ Clang tools for Windows" (clang-cl; "C++ Clang Compiler for Windows" under Individual components), CMake 3.30
-or later, Ninja, and Python 3. A developer prompt for x64 ("x64 Native Tools Command Prompt for VS" in the Start
-menu, or Visual Studio's `Common7\Tools\Launch-VsDevShell.ps1 -Arch amd64` in PowerShell) names the C runtime's and
-the Windows SDK's headers and libraries in its environment; from another prompt, clang-cl finds them itself. The x86
-developer prompt is refused at configure time. The commands are the same; [Windows](#windows) has what differs.
+or later, Ninja, Python 3, and Git for Windows (lit's tests use its `echo` and `sed`). A developer prompt for x64
+("x64 Native Tools Command Prompt for VS" in the Start menu, or Visual Studio's
+`Common7\Tools\Launch-VsDevShell.ps1 -Arch amd64` in PowerShell) names the C runtime's and the Windows SDK's headers
+and libraries in its environment; from another prompt, clang-cl finds them itself. The x86 developer prompt is
+refused at configure time. The commands are the same; [Windows](#windows) has what differs.
 
 ## Presets
 
@@ -224,7 +225,9 @@ commands (`cmake --workflow --preset dev`), except `asan`, `tsan` and `xcode`. W
   or FMinus's `free`, and FMinus's `free` cannot release the host's `malloc`'s (`src/runtime/Runtime.h`).
 - **lit** runs through Python, `python build-dev\bin\fminus-lit -v tests\lit` (ctest does that itself). The tests of
   Apple's arm64 assembly (`REQUIRES: arm64`) and of its vector math library (`system-darwin`) are skipped; Windows
-  names its architectures `AMD64` and `ARM64`, and its system `system-windows`.
+  names its architectures `AMD64` and `ARM64`, and its system `system-windows`. Windows has no `echo` or `sed`
+  program for `RUN:` lines to pipe through, so, as LLVM's own suites do, `tests/lit/lit.cfg.py` takes Git for
+  Windows' (its `usr\bin`, found through its registry key or beside the `git` on PATH) when PATH has none.
 
 ## Troubleshooting
 
@@ -240,6 +243,7 @@ commands (`cmake --workflow --preset dev`), except `asan`, `tsan` and `xcode`. W
 | An example's `--check` fails after a change in fast-math or contraction | the C++ reference no longer computes the same thing: change it in step, or raise `--tolerance` |
 | Windows: `cannot use 'throw' with exceptions disabled`, or configure stops at `CMAKE_CXX_FLAGS (...) has no /EHsc` | the build tree was first configured when the compiler could not be found, and kept the empty flags it cached then: delete `build-<preset>/` and configure again (LLVM stays in `.deps/`) |
 | Windows: linking `bin\fminus.exe` fails at `FINAL LINK` with undefined `fminus::...` symbols | a build tree from before the library became `libfminus.lib`, where `fminus.exe`'s import library overwrote it: build again |
+| Windows: lit fails with `'echo': command not found` (or `'sed'`) | install Git for Windows, whose `usr\bin` has them, or put a directory with `echo.exe` and `sed.exe` on PATH |
 | Windows: `FMinus: no clang-cl` | add "C++ Clang tools for Windows" to Visual Studio (Visual Studio Installer, Modify), or install LLVM; delete `build-<preset>/` and configure again |
 | Windows: `FMinus: this developer prompt targets x86` | open "x64 Native Tools Command Prompt for VS" instead, delete `build-<preset>/`, and configure again |
 | Windows: `'unistd.h' file not found` in a `*.yy.hpp` | a build tree configured before Flex got `--nounistd` on Windows: build again (the changed command regenerates the scanners) |
