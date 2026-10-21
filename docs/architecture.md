@@ -98,14 +98,14 @@ subset of C's, is written out as EBNF in the file's header comment.
   IDENTIFIER`, `%nterm <ast::ExprPtr> expr`). `api.value.automove` moves `$1`, `$2`, ... into the action, which is
   what lets move-only types such as `std::unique_ptr` pass through. As a consequence, an action may use each `$n` only
   once. `api.token.constructor` gives the scanner `Parser::make_FLOAT(location)` and friends.
-- **C's precedence.** The `%right`, `%left` and `%precedence` lines give the operators C's precedence and
-  associativity, from the loosest at the top to the tightest at the bottom: assignment (right to left), `?:` (right
-  to left), `||`, `&&`, equality, relational, additive, multiplicative (`*`, `/` and `%`), unary (`%prec UNARY`:
-  `-`, `!`, `*p`, `&x`, a prefix `++`, a cast), and the postfix operators, the swizzle's `.`, `[`, and `++` and `--`
-  after their operand. `*` and `&` are binary or unary by where they stand, as in C's grammar: after an expression
-  `*` is a product, at the start of one it is `*p`. The small helpers in the `%code` block, `binary()`, `logical()`,
-  `assign()` and `increment()`, keep each operator's rule to one line. The dangling `else` is resolved with
-  `%precedence THEN` below `"else"`: an `else` closes the nearest `if`, as in C.
+- **C's precedence.** The `%right`, `%left` and `%precedence` lines give the operators C's precedence and associativity,
+  from the loosest at the top to the tightest at the bottom: assignment (right to left), `?:` (right to left), `||`,
+  `&&`, equality, relational, additive, multiplicative (`*`, `/` and `%`), unary (`%prec UNARY`: `-`, `!`, `*p`, `&x`, a
+  prefix `++`, a cast), and the postfix operators, `.` (a swizzle or a field), `->`, `[`, and `++` and `--` after their
+  operand. `*` and `&` are binary or unary by where they stand, as in C's grammar: after an expression `*` is a product,
+  at the start of one it is `*p`. The small helpers in the `%code` block, `binary()`, `logical()`, `assign()` and
+  `increment()`, keep each operator's rule to one line. The dangling `else` is resolved with `%precedence THEN` below
+  `"else"`: an `else` closes the nearest `if`, as in C.
 - **Assignment is an expression.** `expr "=" expr` (and `+=`, `++` ...) accepts any expression as its target, as C's
   grammar does in effect. The code generator rejects what isn't an lvalue (a variable, an element `p[i]` or `*p`,
   components of either) with clang's "expression is not assignable". Struct fields can join the check later without
@@ -141,16 +141,23 @@ on it without the code generator.
 - **Nodes.** `Expr` and `Stmt` each pair a `SourceLocation` with a `std::variant` of node kinds:
   - expressions: `NumberExpr`, `VariableExpr`, `BoolExpr`, `UnaryExpr` (with `*p` and `&x`), `BinaryExpr`,
     `LogicalExpr`, `CallExpr`, `AssignExpr`, `IncrementExpr`, `CastExpr`, `IndexExpr` (`p[i]`), `ConditionalExpr`,
-    `ConstructExpr` (a vector literal), `SwizzleExpr`;
+    `ConstructExpr` (a vector literal), `MemberExpr` (a swizzle, `v.xy`, or a module's field, `m.y` and `p->y`),
+    `MethodCallExpr` (`m.tick(x)`), `ThisExpr`;
   - statements: `DeclStmt`, `ExprStmt`, `ReturnStmt`, `BlockStmt`, `EmptyStmt`, `IfStmt`, `WhileStmt`, `ForStmt`,
     `BreakStmt`, `ContinueStmt`.
-- **Types.** A `Type` is a `Kind` and, for a pointer, what it points to and whether that is `const`. The kinds are
-  `void`, `float`, `bool`, `int`, the vectors `float2`, `float4`, `float8`, their lane masks `bool2`, `bool4`,
-  `bool8`, `poly float` and `poly bool`, whose width the target decides, and `Pointer`. `Type::Float` and the rest
-  name the types that are only a kind, and a `Kind` converts to its `Type`, so `type == Type::Float` reads as it
-  says; `Type::pointerTo(Kind::Float, true)` is `const float*`. Helpers answer the questions the rules ask:
-  `lanes`, `isVector`, `isMask`, `isPoly`, `isPointer`, `pointee`, `canPointTo`, `isArithmetic`, `vectorOf`,
-  `maskOf`, `arithmeticOf` ([simd.md](simd.md)).
+- **Types.** A `Type` is a `Kind` and, for a pointer, what it points to and whether that is `const`; for an array,
+  its elements and how many; for a module, which (a pointer to its `Module`). The kinds are `void`, `float`, `bool`,
+  `int`, the vectors `float2`, `float4`, `float8`, their lane masks `bool2`, `bool4`, `bool8`, `poly float` and
+  `poly bool`, whose width the target decides, `Pointer`, `Module` and `Array`. `Type::Float` and the rest name the
+  types that are only a kind, and a `Kind` converts to its `Type`, so `type == Type::Float` reads as it says;
+  `Type::pointerTo(Kind::Float, true)` is `const float*`, `Type::arrayOf(Kind::Float, 16)` is `float[16]`. Helpers
+  answer the questions the rules ask: `lanes`, `isVector`, `isMask`, `isPoly`, `isPointer`, `isModule`, `isArray`,
+  `pointee`, `samePointee`, `canPointTo`, `isArithmetic`, `vectorOf`, `maskOf`, `arithmeticOf` ([simd.md](simd.md)).
+- **Modules.** A `Module` is a name, its `Field`s (a name and a type each) and its methods' names. Its methods are
+  `Function`s of the program, named `OnePole::tick`, with `module` set and a first parameter, `this`, that the parser
+  adds. The program holds its modules by `std::unique_ptr`, so a `Type` may point to one. A module's name is a type
+  from its declaration on: the scanner returns it as `MODULE_NAME` (`ParseContext.h`), as a C compiler does a
+  typedef's, so `OnePole* p;` is a declaration and `a * b;` a product.
 - **Ownership.** Children are owned: `ExprPtr = std::unique_ptr<Expr>`, and a `BlockStmt` holds a
   `std::vector<Stmt>`. `Param`, `Function` (definition or prototype) and `Program` are aggregates of those.
 - **Exhaustive walks.** Code that walks the tree uses `std::visit` with an `Overloaded{...}` set of lambdas and no
@@ -165,25 +172,31 @@ on it without the code generator.
 
 `ir::lower(program, context, diagnostics, options)` (`CodeGen.h`) creates a module named after the file.
 `options.polyLanes` is a `poly float`'s width, which the driver gets from the target machine (`polyLanes`, below). A
-`Lowering` object then runs two passes over the program, and checks the functions' effects after them. `Lowering` is one
-class (`Lowering.h`, internal to `src/ir/`, in `fminus::ir::detail`), but its members are defined across the directory
-by what they lower:
+`Lowering` object then lays the modules out, runs two passes over the program, and checks the functions' effects after
+them. `Lowering` is one class (`Lowering.h`, internal to `src/ir/`, in `fminus::ir::detail`), but its members are
+defined across the directory by what they lower:
 
 | File | Lowering's members for |
 |---|---|
-| `CodeGen.cpp` | `ir::lower()`, the constructor, and the two passes: where the parts combine |
+| `CodeGen.cpp` | `ir::lower()`, the constructor, and the passes: where the parts combine |
 | `Types.cpp` | FMinus's types as LLVM's (`typeOf`, `lanes`), the conversions (`convert`, `convertPointer`, `commonType`), errors and poison values |
 | `Functions.cpp` | declarations and prototypes (`declare`), bodies and parameters (`define`), stack slots and scopes |
 | `Statements.cpp` | blocks, declarations, `return`, `if`, `while`, `for`, `break` and `continue` |
 | `Expressions.cpp` | the expression `std::visit` (`lower`), constants, operators (`binary`, `arithmetic`), `&&` and `\|\|`, `?:`, casts, assignment, `++` and `--` |
 | `Calls.cpp` | the builtin tables, calls, reductions, `poly_lanes` and `poly_index`, the heap's `malloc`, `calloc` and `free`, and `ir::builtins()` |
 | `Vectors.cpp` | vector literals in both forms, swizzles, `?:` with a vector condition |
-| `Memory.cpp` | lvalues (`lvalue`, `read`, `write`): variables, elements (`p[i]`, `*p`), components of either; `&x`; pointer arithmetic |
+| `Memory.cpp` | lvalues (`lvalue`, `read`, `write`): variables, elements (`p[i]`, `*p`), fields, components of any of them; arrays (a name that stands for a pointer, a list); `&x`; pointer arithmetic |
+| `Modules.cpp` | each module's struct type (`layOut`), fields (`field`), `this`, method calls (`callMethod`), copies |
 | `Effects.cpp` | `[[clang::nonallocating]]` and `[[clang::nonblocking]]`: each function's calls (recorded by `lowerCall`), checked once every body is lowered |
 
 The header declares every member under the name of its file, so it doubles as the map. A new node goes in the file its
 kind belongs to, and the compiler finds the rest: `lower`'s `std::visit` in `Expressions.cpp` and the statement visit in
 `Statements.cpp` fail to compile until they handle it.
+
+**Before the passes, the modules.** `layOut` gives every module an LLVM struct type of its fields, in order, laid out
+as a C struct (`%OnePole = type { float, float }`): opaque ones first, so a field may point to any module, then each
+body, so a field may hold a module declared before it. A module's `sizeof` and alignment are the data layout's,
+`options.dataLayout` (the driver's and the API's come from the target machine).
 
 **Pass 1, declare.** Every function name gets one `llvm::Function`, with external linkage, its C name and the C
 calling convention (`float` is `float`, `int` is `i32`, a pointer is `ptr`, a `void` result is `void`). C++ therefore
@@ -209,9 +222,12 @@ prototypes and definition are C's:
   be shadowed. A name is looked up innermost first.
 - **Lvalues** (`Memory.cpp`) are what a program reads, assigns and takes the address of: a variable (its slot), an
   element a pointer reaches (`p[i]`, a `getelementptr inbounds` on the index sign-extended to 64 bits, as clang's;
-  `*p`, the pointer itself), or components of either (`v.x`, `p[i].zw`). `lvalue()` finds one, `read()` loads it and
-  `write()` stores to it (for components: load the vector, insert the lanes, store it back). A variable's value is a
-  `read`, and so is `p[i]`'s; so a new kind of lvalue joins every use at once.
+  `*p`, the pointer itself), a module's field (`m.y`, `p->y`, or `y` in a method: a struct GEP from the module's
+  address), or components of any of them (`v.x`, `p[i].zw`). `lvalue()` finds one, `read()` loads it and `write()`
+  stores to it (for components: load the vector, insert the lanes, store it back). A variable's value is a `read`, and
+  so is `p[i]`'s; so a new kind of lvalue joins every use at once. Two kinds are never loaded whole: an array's `read`
+  is a pointer to its first element (C's decay), and a module's is its address, which `write()` and a declaration copy
+  with a memcpy, as clang copies a struct.
 - **Assignment** (`lowerAssign`) checks its target: it must be an lvalue ("expression is not assignable") that isn't
   `const` ("cannot assign to variable 'k' with const-qualified type 'const float'"; through a `const float*`, "read-only
   variable is not assignable"). It stores the value, and returns it as the expression's value, so `a = b = 0` works. A
@@ -377,10 +393,12 @@ standard its own), only the libraries to link. The tree's tools, examples and te
   instead of crashing in a later pass.
 - **Modules are prepared before they are optimised.** The pipeline's decisions depend on the triple and the data
   layout.
-- **Generated functions have the C calling convention, C names and external linkage.** That is the contract with
-  C++ callers, the JIT's `lookup` and the linker. A new type at the boundary needs its C ABI attributes (extending.md,
-  recipe 3: `bool` is `zeroext`; recipe 10: a `restrict` pointer is `noalias`; simd.md: `float8` goes through memory).
-  The one exception is an executable's `main`, which `addEntryPoint` renames and makes internal.
+- **Generated functions have the C calling convention, C names and external linkage.** That is the contract with C++
+  callers, the JIT's `lookup` and the linker. A method's name is C++'s qualified one, `OnePole::tick`, with `this` as
+  its first parameter: a symbol no C function can have, and what a host looks it up by. A new type at the boundary needs
+  its C ABI attributes (extending.md, recipe 3: `bool` is `zeroext`; recipe 10: a `restrict` pointer is `noalias`;
+  simd.md: `float8` goes through memory). The one exception is an executable's `main`, which `addEntryPoint` renames and
+  makes internal.
 - **Semantics follow C unless a deviation is documented.** The README lists the deviations: `float` and `int` are the
   only arithmetic types, an unsuffixed `1.5` is a `float`, pointers point to six types and convert only through
   `void*` or by adding `const`, the heap's memory is aligned and zeroed, `%` works on floats, calls may precede

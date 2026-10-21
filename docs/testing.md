@@ -36,11 +36,11 @@ Each file states what it tests in its first line, then has a few helpers and the
 - `parsed(source)` (`FrontendTest.cpp`) returns the dump of the parsed program, or its errors. Compare whole
   strings, so a parser test reads as input → tree.
 - `compile(source, &errors)` (`Compile.h`, which the code generator's tests share: `CodeGenTest.cpp`,
-  `ControlFlowTest.cpp`, `IntTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `VectorTest.cpp`,
-  `PolyTest.cpp`) parses, lowers and JIT-compiles at -O2, and returns the `Jit`, or null with the formatted errors.
-  `lookup<float(float)>(*jit, "f")` gives a callable function, and `lookup<void(const float*, float*, int)>(*jit, "g")`
-  one that takes a test's buffers (`std::array::data()`). A third parameter, the `ir::Options`, compiles at a chosen
-  `poly float` width: `compile(source, &errors, {.polyLanes = 16})`.
+  `ControlFlowTest.cpp`, `IntTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`,
+  `ModuleTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`) parses, lowers and JIT-compiles at -O2, and returns the `Jit`, or
+  null with the formatted errors. `lookup<float(float)>(*jit, "f")` gives a callable function, and `lookup<void(const
+  float*, float*, int)>(*jit, "g")` one that takes a test's buffers (`std::array::data()`). A third parameter, the
+  `ir::Options`, compiles at a chosen `poly float` width: `compile(source, &errors, {.polyLanes = 16})`.
 - `errorsOf(source)` returns the errors of a program that must fail.
 
 ```cpp

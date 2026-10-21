@@ -4,7 +4,7 @@
 |---|---|
 | [architecture.md](architecture.md) | The compiler from source text to machine code: every stage, the file that implements it, what passes between stages, how C's semantics map onto LLVM, and the invariants that keep it extensible |
 | [programs.md](programs.md) | Writing a whole program: `float main(...)`, running it in the JIT, building an executable, and how the compiler gives an executable its C entry point |
-| [extending.md](extending.md) | How to grow the C subset: the change checklist, the worked and verified recipes (a builtin and `%`; `bool` with comparisons, `&&` `\|\|` and `?:`; `if` `while` `for` `break` `continue`; `int`, `void` and pointers; the heap, and clang's `[[clang::nonblocking]]` checked to keep it off the audio thread, all in the compiler now; a runtime function and an LLVM pass, as a patch), the pitfalls, and design notes for what comes next (a type checker, arrays, structs, the host's allocator) |
+| [extending.md](extending.md) | How to grow the C subset: the change checklist, the worked and verified recipes (a builtin and `%`; `bool` with comparisons, `&&` `\|\|` and `?:`; `if` `while` `for` `break` `continue`; `int`, `void` and pointers; the heap, and clang's `[[clang::nonblocking]]` checked to keep it off the audio thread; arrays and modules, FMinus's classes, all in the compiler now; a runtime function and an LLVM pass, as a patch), the pitfalls, and design notes for what comes next (a type checker, more of arrays and modules, the host's allocator) |
 | [simd.md](simd.md) | SIMD, in detail: the hardware and LLVM's vector model, then the three recipes that are FMinus's SIMD, a guide to their code: `float2`/`float4`/`float8` (OpenCL C's vectors), a vector math library, and `poly float`, a vector as wide as the machine's; scalable vectors (SVE), the auto-vectorisers, pitfalls, next steps |
 | [building.md](building.md) | Presets, the dependency cache and LLVM flavors, adding sources, tools, examples, tests and dependencies, warnings and sanitizers, troubleshooting |
 | [testing.md](testing.md) | The test layers (Catch2, lit + FileCheck, example harnesses, which call a block kernel once) and how to write each; inspecting and debugging the compiler's output with `fminus`, `opt`, `llc`, `llvm-mca` and lldb |
@@ -22,4 +22,5 @@ Elsewhere:
 - [../examples/note/note.fm](../examples/note/note.fm) is a whole program, with a `main`.
 - [../examples/](../examples/) shows each feature in use: `waveforms/` (loops), `chord/` (`float4` and the vector
   math library), `unison/` (`poly float`), `comparison/` (a `bool main`), `biquad/` (pointers: a block a call),
-  `delay/` (the heap, and a kernel that can't allocate).
+  `delay/` (the heap, and a kernel that can't allocate), `voices/` (modules, in memory a host of the public API
+  allocates).

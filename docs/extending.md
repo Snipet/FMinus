@@ -1,16 +1,18 @@
 # Extending the compiler
 
 How to add to FMinus. First, how a change moves through the compiler, and the few rules that keep that easy. Then
-eight worked recipes, which grow the C subset from a one-line builtin to C's control flow, a custom LLVM pass,
-`int`, `void` and pointers, and the heap with the attributes that keep it off the audio thread. Then the pitfalls
-those recipes ran into, and design notes for what comes next. [simd.md](simd.md) has recipes 7 to 9, for vectors.
+nine worked recipes, which grow the C subset from a one-line builtin to C's control flow, a custom LLVM pass,
+`int`, `void` and pointers, the heap with the attributes that keep it off the audio thread, and arrays and modules,
+FMinus's classes. Then the pitfalls those recipes ran into, and design notes for what comes next. [simd.md](simd.md)
+has recipes 7 to 9, for vectors.
 
 Recipes 1 to 4 are in the compiler now (`tanhf` and `%`; `bool` and its operators; `if`, `while` and `for`), and so are
-simd.md's 7 to 9, recipe 10 (`int`, `void` and pointers) and recipe 11 (the heap), so their sections describe how the
-code you have got there: read a section beside the files it names. Recipes 5 and 6, a runtime function and a pass, are
-not part of the language; they live in [recipes/](recipes/) as a patch, so you can apply them to see them work. None of
-these are sketches: each was applied to this repository, built with `-Werror`, and tested in the dev and asan presets,
-every test passing. [architecture.md](architecture.md) describes the stages they touch.
+simd.md's 7 to 9, recipe 10 (`int`, `void` and pointers), recipe 11 (the heap) and recipe 12 (arrays and modules), so
+their sections describe how the code you have got there: read a section beside the files it names. Recipes 5 and 6, a
+runtime function and a pass, are not part of the language; they live in [recipes/](recipes/) as a patch, so you can
+apply them to see them work. None of these are sketches: each was applied to this repository, built with `-Werror`, and
+tested in the dev and asan presets, every test passing. [architecture.md](architecture.md) describes the stages they
+touch.
 
 FMinus follows C. When a recipe has a semantic choice to make, it makes C's: conversions, short-circuiting, which
 `if` an `else` belongs to, what `continue` does in a `for`. And it reports errors in clang's words. The README lists
@@ -1071,8 +1073,8 @@ the enum became `Kind`, and `Type` a struct around it (`Ast.h`):
 The static members keep `ast::Type::Float` meaning what it did, so `poison(ast::Type::Float)` and
 `type == ast::Type::Bool` compiled unchanged, here and in the recipes above. What changed is every `switch`: it
 switches over `type.kind`, with `case ast::Kind::Float:`. The defaulted `==` compares every field, so `float*` and
-`const float*` are different types, as in C, and a pointer never equals `Type::Float`. A struct type, later, is one
-more kind and an index into a table of structs.
+`const float*` are different types, as in C, and a pointer never equals `Type::Float`. A module type, recipe 12, is
+one more kind and a pointer to the module's declaration, and an array one more and a length.
 
 `typeName` returns a `std::string` now, since a pointer's name is built: clang's spelling, `'const float *'`.
 
@@ -1436,7 +1438,7 @@ from `libfminus_runtime.a`, as recipe 5's `db_to_gain` would be. What they do is
 and `convertPointer` accepts the conversion either way, `const` still refused where it would be dropped:
 
 ```cpp
-            const bool compatible = value.type.pointee == type.pointee || value.type.pointee == ast::Kind::Void
+            const bool compatible = ast::samePointee(value.type, type) || value.type.pointee == ast::Kind::Void
                                     || type.pointee == ast::Kind::Void;
 ```
 
@@ -1518,6 +1520,289 @@ attribute in C++; FMinus has no run-time check.
 - `tests/lit/fminus/heap.fm`: the IR of `calloc` and `free`, and an executable that allocates. `effects.fm`: the notes,
   from the command line.
 
+## Recipe 12: arrays and modules
+
+*In the compiler. Example: `examples/voices/voices.fm`, eight synth voices in modules, in memory a host of the public
+API allocates; harness and measurements in its README.*
+
+A DSP kernel is state and the code that runs on it. Recipe 11's delay keeps its state in two allocations, and every
+call passes both, by position, to functions that only share a prefix. A module gathers them: fields, and methods that
+see the fields by name. It is FMinus's class, C++'s struct with member functions. Arrays come with it, since a module's
+state is often a history, a table or a set of voices:
+
+```c
+module OnePole
+{
+    float y;
+    float k;
+
+    void init(float cutoff, float rate)
+    {
+        k = 1 - expf(-6.2831853f * cutoff / rate);
+    }
+
+    float tick(float x) [[clang::nonblocking]]
+    {
+        return y += k * (x - y);
+    }
+};
+
+module Bank
+{
+    OnePole filters[4];   // modules hold modules, and arrays of them
+    float history[8];
+
+    float tick(int i, float x)
+    {
+        history[i] = x;
+        return filters[i].tick(x);
+    }
+};
+```
+
+What a module is, beside C++'s, follows from where it runs:
+
+- **Nothing runs when one is made.** Its fields start at 0, as every variable FMinus declares does, wherever it lives:
+  a local, a field, an array, FMinus's heap (`calloc(1, sizeof(Bank))`), or memory a host gives it. There are no
+  constructors and no field initialisers: a method such as `init` sets the fields. So a host allocates a module with
+  nothing but its size and alignment (`fminus::Program::module`), and memory it zeroes is a valid instance.
+- **A module goes to a function and back by pointer.** `a = b` copies one, but a parameter or a result of a module
+  type is an error. C++ would copy it, which a kernel that was meant to change it never wants; the C ABI passes an
+  aggregate this size through memory anyway.
+- **A method is a function named as C++ qualifies it**, `OnePole::tick`, whose first parameter is `this`: what a host
+  calls (`function<float(void*, float)>("OnePole::tick", errors)`), and what errors say, as clang does.
+- **No const methods, inheritance, overloading or access control** yet. A method is not called on a module that is
+  read-only where it is called (clang's "'this' argument to member function 'tick' has type 'const OnePole', but
+  function is not marked const").
+
+Arrays are C's: one dimension of `float`, `int`, the float vectors or modules, zeroed, with C's initialiser lists, a
+name that stands for a pointer to the first element, and parameters that are pointers. Everything goes through the
+stages in order: a type that names a declaration, the scanner, the grammar, a layout pass, and the lowering of
+fields, methods and copies.
+
+### A type that names a declaration
+
+A module type is one kind, and which module. `Type` gains a pointer to the module's declaration, and an array's
+length (`Ast.h`):
+
+```cpp
+    struct Type
+    {
+        Kind kind = Kind::Float;
+        Kind pointee = Kind::Void;        // a pointer's: what it points to; an array's: what its elements are
+        bool pointeeConst = false;        // a pointer's: what it points to is read-only through it (const float*)
+        const Module* module = nullptr;   // a module type's, and a pointer's or an array's whose pointee is one
+        int count = 0;                    // an array's: how many elements
+        ...
+        static constexpr Type pointerTo(Type pointee, bool isConst);   // a kind, or a module type
+        static constexpr Type moduleType(const Module* module);
+        static constexpr Type arrayOf(Type element, int count);
+    };
+```
+
+It stays a literal type, so `Type::Float` and the rest are still constants, and the defaulted `==` still compares every
+field: two modules are two types, and `float[4]` is not `float[8]`. `pointerTo` takes a `Type` now, not a `Kind`, and
+`pointee()` gives back the module with the kind, so a `OnePole*` knows its module. Everything that built a pointer
+from a kind (`pointerTo(type.kind, ...)`) lost the module that way, which crashed the first program that used one
+(Pitfalls). `samePointee(a, b)` replaces comparing two pointers' `pointee` kinds.
+
+The modules themselves are `std::vector<std::unique_ptr<Module>>` in the `Program`, so a `Type` may point to one: the
+modules stay where they are while the parser adds more, and when the program moves.
+
+### The scanner learns the types
+
+`OnePole lp;` and `OnePole* p;` are declarations, and `a * b;` is a product, and an LALR(1) parser cannot tell `T * p`
+from `a * b` by its tokens. C has the same problem with typedef names, and C compilers solve it the same way: the
+scanner knows which names are types. A module's name is a type from its declaration on, so the parse context keeps the
+modules declared so far, and the scanner returns those names as `MODULE_NAME`, a token whose value is the type
+(`ParseContext.h`, `Lexer.l`):
+
+```lex
+{IDENTIFIER}                {
+                                std::string name(yytext, yyleng);
+                                if (const fminus::ast::Module* module = yyextra->context->moduleNamed(name))
+                                    return Parser::make_MODULE_NAME(fminus::ast::Type::moduleType(module),
+                                                                    yyextra->where);
+                                return Parser::make_IDENTIFIER(std::move(name), yyextra->where);
+                            }
+```
+
+The grammar registers a module as soon as its name is read, in a mid-rule action, so its own fields can point to it
+(`Osc* next;`):
+
+```yacc
+module
+    : "module" module_name                  <ast::Module*>{
+                                                auto module = std::make_unique<ast::Module>();
+                                                module->location = at(@2);
+                                                module->name = $2;
+                                                $$ = module.get();
+                                                parseContext.moduleNames.emplace($$->name, $$);   // the first stays
+                                                parseContext.program.modules.push_back(std::move(module));
+                                                parseContext.currentModule = $$;
+                                            }
+      "{" module_body "}" ";"               { ... }
+```
+
+The price is C's: a module is declared before it is used. Before its declaration its name is an identifier, and
+`M m;` there is two identifiers in a row, a syntax error. A module's methods may call each other in any order, as
+functions may, since the code generator declares every function before it lowers any.
+
+### The grammar
+
+`type` takes a `MODULE_NAME`, so every declaration, parameter, result and `sizeof` takes a module with no rule of its
+own. A module's body is declarations, which become its fields, and functions, which become its methods. The method
+rule shares its start with a field's declarator, `qualifier type pointer IDENTIFIER`, and the next token, `(`,
+decides, so Bison has no conflict to resolve. The action names the method and gives it `this` before its parameters:
+
+```yacc
+    | qualifier type pointer IDENTIFIER "(" params ")" attributes block
+                                            {
+                                                ast::Module* module = parseContext.currentModule;
+                                                ...
+                                                ast::Function method{at(@4), module->name + "::" + name, $6,
+                                                                     result.type, $9, true, $8, module};
+                                                const ast::Type self =
+                                                    ast::Type::pointerTo(ast::Type::moduleType(module), false);
+                                                method.params.insert(method.params.begin(),
+                                                                     ast::Param{at(@4), "this", self, true, false});
+```
+
+A method is an `ast::Function` among the program's, with `module` set, so declaring it, lowering it, checking its
+effects and looking it up in the JIT are a function's, unchanged. `this` is a keyword, so no parameter of the program
+can be called that, and the parameter can't be assigned.
+
+A swizzle and a field are written alike, `v.x` and `m.y`, and the parser can't tell them apart without the base's
+type. So `SwizzleExpr` became `MemberExpr`, with an `arrow` flag for `p->y`, and the code generator decides by the
+base's type. `m.tick(x)` and `p->tick(x)` are `MethodCallExpr`s, and `this` a `ThisExpr`. An array is a declarator
+with a size after its name, `"[" NUMBER "]"`, and an initialiser list; a parameter declared as one is a pointer, as in
+C. The size is the parser's to check (a positive integer constant: `arraySize` in `Parser.y`), since the `Type` holds
+it.
+
+### A struct type per module
+
+Before any function is declared, `layOut` (`Modules.cpp`) makes every module's LLVM struct type: opaque ones first, so
+a field may point to any module, then each body in order, so a field may hold, by value, a module declared before. A
+field that holds its own module, or a later one, is "field has incomplete type", as in C:
+
+```cpp
+        for (const std::unique_ptr<ast::Module>& module : program.modules)
+            structs_.emplace(module.get(), llvm::StructType::create(module_.getContext(), module->name));
+        ...
+                else if (byValue && !complete.contains(type.module))
+                {
+                    error(field.location, "field has incomplete type " + quoted(ast::typeName(type))
+                                              + ": a module holds only modules declared before it (and pointers)");
+```
+
+```llvm
+%OnePole = type { float, float }
+%Bank = type { [4 x %OnePole], [8 x float] }
+```
+
+The fields are laid out as a C struct's, padding where the data layout puts it, so a C++ struct with the same fields
+in the same order is the same layout. That is what lets a host mirror a module, or read one of its fields. A module's
+`sizeof` and alignment are the data layout's (`sizeOf` and `alignOf` in `Types.cpp`), so lowering needs the target's:
+`ir::Options::dataLayout`, which the driver and the public API fill from the TargetMachine. Left empty, LLVM's default
+agrees with the 64-bit targets FMinus runs on for every type it has.
+
+### Fields, and `this`
+
+A field is an lvalue, so it joins `lvalue()` (`Memory.cpp`), and with it reading, assignment, `++` and `&`. `field()`
+finds it by name and gives its address, a getelementptr from the module's:
+
+```cpp
+        llvm::Value* at = builder_.CreateStructGEP(structs_.at(&module), address, index, name);
+        return LValue{at, found->type, isConst, "", found->type, {}};
+```
+
+The module's address comes from `m.y` (an lvalue of a module type), `p->y` (a pointer to one, read-only for a `const
+OnePole*`), or a bare `y` in a method. That last is C++'s lookup: the scopes first, the parameters and locals, then the
+module's members, through `this`. In `lowerCall`, a method of the module is tried before anything else, so `tick(x)`
+in a method is `this->tick(x)`, and a method named `sinf` would hide the builtin there, as a member hides a global in
+C++.
+
+`this` is the method's first parameter, and its attributes are clang's for C++'s: never null, aligned, and as big as
+the module. They tell the optimiser that every field can be loaded at any point, which lets it hoist a field's load out
+of a loop:
+
+```llvm
+define float @"OnePole::tick"(ptr nonnull align 4 dereferenceable(8) %this, float %x) {
+  ...
+  %this1 = load ptr, ptr %this.addr, align 8
+  %k = getelementptr inbounds nuw %OnePole, ptr %this1, i32 0, i32 1
+```
+
+### Methods, and their effects
+
+`callMethod` passes the module's address first, then the arguments, converted to the parameters' types. Arity counts
+without `this`, so a wrong one reads as clang's would. It records the call by its qualified name, which is all the
+effects need: `Effects.cpp` infers through a method's body as through a function's, so a nonblocking method that
+could reach `calloc` is refused, with the note that says where, in clang's words (clang's `-Wfunction-effects` names
+`'Line::grow'` too):
+
+```
+test.fm:5:50: error: function with 'nonblocking' attribute must not call non-'nonblocking' function 'Line::grow'
+test.fm:4:31: note: function cannot be inferred 'nonblocking' because it calls non-'nonblocking' function 'calloc'
+```
+
+### A module's value is its address
+
+LLVM can load and store a struct whole, but clang copies a C struct with a memcpy, and FMinus does as clang does: a
+`Value` of a module type holds the module's address (`valueTypeOf` is a `ptr` for it). `read()` does not load it;
+`write()` copies it with a memcpy, as clang's assignment does, and so does a declaration from another module:
+
+```llvm
+  call void @llvm.memset.p0.i64(ptr align 4 %local, i8 0, i64 8, i1 false)
+  call void @llvm.memset.p0.i64(ptr align 4 %copy, i8 0, i64 8, i1 false)
+  call void @llvm.memcpy.p0.p0.i64(ptr align 4 %copy, ptr align 4 %local, i64 8, i1 false)
+```
+
+Each declaration of an array or a module starts with a memset of 0, the aggregate form of every variable's zero. The
+same representation decides what is an error. `convert` refuses a module to anything but its own type; a module as a
+parameter or a result is refused in `declare()`, which then declares a `ptr` there, so the IR stays valid while the
+other errors are found; `?:` refuses two modules, since its phi would join two addresses where a copy was meant (choose
+between pointers, `c ? &a : &b`).
+
+### Arrays: a name that stands for a pointer
+
+An array is a variable whose `read()` is no load: it is a getelementptr to the first element, and the pointer to it
+is what an expression gets, const when the array is:
+
+```cpp
+        if (ast::isArray(source.type))
+            return {builder_.CreateConstInBoundsGEP2_64(typeOf(source.type), source.address, 0, 0, "arraydecay"),
+                    ast::Type::pointerTo(ast::pointee(source.type), source.isConst)};
+```
+
+That one line is C's decay, and with it `a[i]`, `a + 1`, `float* p = a;` and passing `a` to a `float*` parameter all
+work through recipe 10's pointers, unchanged. `writable()` refuses an array ("array type 'float[4]' is not
+assignable"), `&a` is refused (FMinus has no pointers to arrays), and `checkType` keeps an array's elements to what a
+pointer can point to, since the decayed pointer must be one. `initializeArray` stores a list's elements in order, after
+the memset; one longer than the array is an error, where C only warns.
+
+### Modules to a host
+
+The public API describes each module (`Program::module`, `include/fminus/FMinus.h`): its size and alignment, and each
+field's name, type, offset and size, read from the data layout before the module goes to the JIT. A host allocates an
+instance, zeroes it, and calls methods on it; `examples/voices/bench.cpp` does exactly that, checks that its C++
+mirror of the modules has the same layout, and plays a score through both, bit for bit.
+
+### Tests
+
+- `tests/unit/ArrayTest.cpp`: arrays zeroed, indexed, initialised from lists, decayed to pointers and compared as
+  them, of ints and vectors, declared afresh in a loop, a C++ host's buffer as an array parameter; the errors, the
+  parser's for sizes included.
+- `tests/unit/ModuleTest.cpp`: a module's methods run on a C++ host's struct, against C++; modules holding modules and
+  arrays of them, methods calling methods with and without `this`, `this` passed on; sizes with padding, copies,
+  modules on the heap, pointers to a module's own kind; the effects through methods; the errors, clang's where clang
+  has them.
+- `tests/unit/FrontendTest.cpp`: the dumps of arrays and of modules, and a module's name used before its declaration.
+- `tests/library/ProgramTest.cpp`: `module()`'s sizes, alignments, offsets and methods, and a module in memory the host
+  allocates, through the public API alone.
+- `tests/lit/fminus/modules.fm` and `arrays.fm`: the IR, at `-O0` and `-O2`.
+- `example.voices`: the voices example's `--check`.
+
 ## Pitfalls
 
 Each of these was hit while writing the language or its recipes. [simd.md](simd.md) has the vector ones.
@@ -1546,6 +1831,11 @@ Each of these was hit while writing the language or its recipes. [simd.md](simd.
 | A C++ reference in a harness runs slower than the same code in FMinus | the examples and tests compile with LLVM's definitions, which turn on libc++'s hardening: a `std::vector`'s `operator[]` checks every index | write the reference on raw pointers, as the kernel is (`examples/delay/bench.cpp`) |
 | A test of `sizeof(poly float)` fails to parse, at a function named `poly` | `poly` is a keyword | another name |
 | The JIT crashes on a `void` value, or the verifier on a `void` phi | `PoisonValue` of `void`, or a `?:` that joins two `void` calls | `poison(Type::Void)` has no IR; `lowerConditional` builds no phi for `void` |
+| The compiler crashes on `p->y`, and `--emit ast` prints a `OnePole*` as `? *` | a pointer built from a type's kind, `pointerTo(type.kind, ...)`, lost its module | pass the `Type`: `pointerTo(type, ...)` keeps `module` |
+| A C++ reference differs from FMinus in the last bit, though the formulas match | clang's default `-ffp-contract=on` fuses `y + k * (x - y)` written as one expression into a multiply-add; FMinus never fuses | build the reference with `-ffp-contract=off` (the examples are), or round once a statement (`ModuleTest.cpp`'s `next`) |
+| A host's `aligned_alloc` returns null for a module | macOS's wants an alignment of at least a pointer's, and every implementation a size that is a multiple of it | round both up to `alignof(std::max_align_t)` (`examples/voices/bench.cpp`) |
+| One error in a module hides every other | an error the parser reports (a redefined module) stops the run before the code generator | report it in the code generator (`layOut`), and the parser carries on |
+| `fminus-tests "a module's methods, and ..."` runs no test | Catch2 splits a filter at its commas | run by tag (`"[module]"`), or escape the comma (`\,`) |
 
 ## Where to go next
 
@@ -1568,12 +1858,14 @@ Lowering then just reads the types. Each integer type lowers to an `iN`, and sig
 not the types: `udiv` and `urem` beside recipe 10's `sdiv` and `srem`, unsigned `icmp`s, `zext` where `int` uses
 `sext`, `uitofp` and `fptoui`. An `unsigned` has no `nsw`: it wraps, by definition.
 
-**Arrays, and more pointers.** A local array, `float history[16];`, is an `alloca [16 x float]`, and its name decays
-to a pointer to its first element, which recipe 10's `p[i]` already indexes. `bool*` needs `i8` in memory (recipe 10
-says why), and null C's `0` as a pointer constant. Casts between pointer types (`(float4*)samples`, a float buffer
-seen as frames; `free((void*)table)`, a `const` pointer freed) are C's and change nothing in the IR, but a `float4*`
-cast from a `float*` must still meet a `float4`'s alignment. Pointers to pointers are a `ptr` to a `ptr`, once a type
-can nest (`Type` would hold its pointee as a type, not a kind).
+**More arrays, and more pointers.** Recipe 12's arrays are one dimension deep. An array of arrays, `float m[4][4]`, is
+an `[4 x [4 x float]]` whose rows decay in turn; it needs `Type` to nest (its element a type, not a kind), and so do
+pointers to pointers and arrays of pointers. C's `float c[] = {1, 2, 3};` takes its size from its list, and `sizeof` of
+an array type (`sizeof(float[16])`) wants the grammar's abstract declarators. `bool*` and arrays of `bool` need `i8` in
+memory (recipe 10 says why), and null C's `0` as a pointer constant. Casts between pointer types (`(float4*)samples`, a
+float buffer seen as frames; `free((void*)table)`, a `const` pointer freed) are C's and change nothing in the IR, but a
+`float4*` cast from a `float*` must still meet a `float4`'s alignment. Pointers to pointers are a `ptr` to a `ptr`, once
+a type can nest (`Type` would hold its pointee as a type, not a kind).
 
 **`sizeof` of an expression.** C's `sizeof x` doesn't evaluate `x`. FMinus learns an expression's type only by
 lowering it, so it would need a type checker first (above), or a lowering into a block it then throws away.
@@ -1586,17 +1878,22 @@ runtime function that sets the allocator, or one arena per JIT, would do it.
 at run time: a function marked `nonblocking` that, while it runs, allocates or takes a lock anywhere, in a library
 too. FMinus could mark its kernels' LLVM functions as clang does for RTSan's instrumentation.
 
-**Structs.** `struct coefficients { float b0, b1, b2, a1, a2; };` becomes an LLVM struct type, with fields reached by
-GEP. At the C boundary, AArch64 passes and returns a struct of up to four floats in registers `s0`–`s3` (a
-homogeneous floating-point aggregate), and a larger one through memory (`sret` for a return). Clang's IR for the
-equivalent C declaration shows exactly what to emit. Inside FMinus, where calls get inlined, any representation
-works.
+**More of modules.** Recipe 12's modules leave out what needs code to run where a module is made, or a choice at
+run time. *Modules by value*: at the C boundary, AArch64 passes and returns a struct of up to four floats in registers
+`s0`–`s3` (a homogeneous floating-point aggregate), and a larger one through memory (`byval`, and `sret` for a
+return); clang's IR for the equivalent C++ declaration shows what to emit, and inside FMinus, where calls get inlined,
+any representation works. *Const methods*: a `const` after the parameters, and `this` a `const OnePole*` in them, so a
+method can run on a read-only module. *Forward declarations* (`module Later;`) would let a module point to one declared
+after it, and methods defined outside their module (`float OnePole::tick(float x) { ... }`) would let a module's
+declaration be its interface. *Interfaces* (a table of function pointers per module, a vtable) and *generics* (a
+module of a type parameter, `Delay<float4>`) are the large ones; for DSP, generics over the vector width are the more
+useful, and `poly float` already covers much of it.
 
 **State: globals and `static`.** File-scope variables lower to LLVM globals, and `static` locals likewise. For a
 plugin, prefer state each instance owns, passed by pointer: memory the host gives, as `examples/biquad/` passes its
 `float* state` (recipe 10), or memory the program allocates off the audio thread, as `examples/delay/` does (recipe
-11). Nothing then allocates on the audio thread, and every instance has its own copy. A struct would name the
-fields, and hold them in one allocation.
+11). Nothing then allocates on the audio thread, and every instance has its own copy. A module (recipe 12) names the
+fields and holds them in one allocation, with the functions that run on them.
 
 **`switch`.** It lowers to LLVM's `switch` instruction, and its `break` reuses recipe 4's loop stack (rename
 `Loop`). Fall-through and `default:` are C's.
@@ -1622,7 +1919,8 @@ LLJIT's concurrent compilation, and caching objects between runs (`llvm::ObjectC
 
 The recipes in the compiler are their own reference: their code is in `src/`, and their tests in `tests/unit/`
 (`FrontendTest.cpp`, and `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `IntTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`,
-`EffectTest.cpp`, `VectorTest.cpp` and `PolyTest.cpp` for the code generator) and `tests/lit/fminus/`.
+`EffectTest.cpp`, `ArrayTest.cpp`, `ModuleTest.cpp`, `VectorTest.cpp` and `PolyTest.cpp` for the code generator) and
+`tests/lit/fminus/`.
 [recipes/](recipes/) holds the two that aren't, 5 and 6, as one patch against the compiler as it is
 ([recipes/README.md](recipes/README.md)):
 
