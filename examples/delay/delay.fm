@@ -7,8 +7,9 @@
 // refuses to compile it if it could reach malloc, calloc or free, however far down (docs/extending.md, recipe 11).
 // The line's length depends on the sample rate, so the program decides how much memory it needs (echo_length).
 //
-// The state is two allocations: the line, and its write position. FMinus has no structs yet to keep them together.
-// With <stdlib.h>, this file is also C (C23, for the attribute), which clang checks with -Wfunction-effects.
+// The state is two allocations: the line, and its write position. echo.fm keeps them together, as the fields of a
+// module, with the feedback and the mix as its parameters; this file stays plain C. With <stdlib.h>, it is also C
+// (C23, for the attribute), which clang checks with -Wfunction-effects.
 
 // The line's length in whole samples.
 int echo_length(float seconds, float rate)

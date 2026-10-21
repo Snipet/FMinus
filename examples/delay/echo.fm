@@ -1,0 +1,54 @@
+// examples/delay/echo.fm: delay.fm's feedback delay as a module (docs/extending.md, recipes 12 and 14). The line, its
+// length and its write position are the module's fields, and what a host sets, the feedback and the mix, are its
+// parameters. The harness (bench.cpp) runs it beside delay.fm, the same echo as plain C functions, and the outputs are
+// the same, bit for bit.
+//
+// What allocates and what runs on the audio thread are still separate: init and end allocate and free, off the audio
+// thread; process is marked [[clang::nonblocking]], so FMinus refuses it if it could reach malloc, calloc or free.
+
+module Echo
+{
+    param float feedback [[fminus::range(0, 0.99)]] [[fminus::default(0.5)]];
+    param float mix [[fminus::range(0, 1)]] [[fminus::default(0.5)]];
+    float* line;
+    int length;     // in whole samples
+    int position;   // where the next sample is written
+
+    // Off the audio thread, as a plugin's prepare(): a line `seconds` long at `rate`, silent (calloc's memory starts
+    // at 0). False when the memory isn't there.
+    bool init(float seconds, float rate)
+    {
+        length = seconds * rate;
+        line = calloc(length, sizeof(float));
+        if (!line)
+            return false;
+        return true;
+    }
+
+    // n samples: the output is the input plus `mix` times the line's oldest sample, which the line replaces with the
+    // input plus `feedback` times it. The fields go into locals first: FMinus tells LLVM nothing about which types
+    // alias, so a store through the line could, as far as LLVM knows, change `line` or `position` themselves, and the
+    // loop would load them again every sample (examples/convolver/README.md). The knobs are registers already.
+    void process(const float* restrict input, float* restrict output, int n) [[clang::nonblocking]]
+    {
+        float* d = line;
+        const int size = length;
+        int w = position;
+        for (int i = 0; i < n; ++i)
+        {
+            const float delayed = d[w];
+            const float x = input[i];
+            d[w] = x + feedback[i] * delayed;
+            output[i] = x + mix[i] * delayed;
+            if (++w == size)
+                w = 0;
+        }
+        position = w;
+    }
+
+    // Off the audio thread, at the end.
+    void end()
+    {
+        free(line);
+    }
+};
