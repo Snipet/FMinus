@@ -7,8 +7,8 @@ its options.
 ## Requirements
 
 macOS on Apple silicon with Xcode's command line tools (clang, make, m4), CMake 3.30 or later, Ninja, and Python 3
-for lit. Nothing else needs to be installed: LLVM, Bison, Flex, CLI11 and Catch2 are all fetched and built by the
-build itself. The first configure needs the network.
+for lit. Nothing else needs to be installed: LLVM, Bison, Flex, PFFFT, CLI11 and Catch2 are all fetched and built by
+the build itself. The first configure needs the network.
 
 On Windows: Visual Studio 2022 or later (or its Build Tools) with the "Desktop development with C++" workload and
 its "C++ Clang tools for Windows" (clang-cl; "C++ Clang Compiler for Windows" under Individual components), CMake 3.30
@@ -51,6 +51,7 @@ environment variable), shared by every build tree of the checkout:
 .deps/
   src/llvm-project-23.1.3/     extracted, then pruned to what llvm/ builds from (about 300 MB)
   src/bison-3.8.2/  src/flex-2.6.4/
+  src/pffft-<commit>/          PFFFT's source, of which the runtime library compiles two files
   build/<flavor>/              LLVM's build tree: about 1 GB, safe to delete once installed
   install/<flavor>/            LLVM: headers, static libraries, CMake package, tools, lit
   install/bison-3.8.2/  install/flex-2.6.4/
@@ -170,7 +171,10 @@ Every dependency comes through FetchContent, pinned by version, URL and SHA-256.
    An autotools tarball builds once into the deps cache: see `_fminus_build_autotool` in
    `cmake/FMinusParserTools.cmake`. Its `DOWNLOAD_EXTRACT_TIMESTAMP TRUE` matters there, because make compares the
    archive's timestamps. A tool that is a CMake project of its own builds there the same way, with CMake:
-   `_fminus_build_winflexbison`, beside it.
+   `_fminus_build_winflexbison`, beside it. A C library that goes into FMinus's own libraries is compiled from its
+   sources instead, its project never added: `cmake/FMinusFft.cmake` fetches PFFFT once into the deps cache
+   (`SOURCE_SUBDIR` naming no directory: populated, nothing added) and builds two of its files as an object library,
+   whose objects the runtime library takes.
 3. **Include the module** from `CMakeLists.txt`, under the option that needs it, and link its target where it's used.
 4. **Note it** in README.md's dependency table and its License section.
 
@@ -182,8 +186,9 @@ Every dependency comes through FetchContent, pinned by version, URL and SHA-256.
   `float` silently widened to `double`, a common DSP slip. With clang-cl, `/W4` stands for `-Wall -Wextra`
   ([Windows](#windows)).
 - **Sanitizers.** `FMINUS_SANITIZERS` is a list of `address`, `undefined` and `thread` (address and thread don't
-  combine). AOT executables are linked with the same sanitizers, because the runtime library is instrumented too.
-  RealtimeSanitizer is not available in Apple's clang. The sanitizers are not set up for clang-cl, on Windows.
+  combine). AOT executables are linked with the same sanitizers, because the runtime library is instrumented too (all
+  but PFFFT's objects in it, which keep their own flags). RealtimeSanitizer is not available in Apple's clang. The
+  sanitizers are not set up for clang-cl, on Windows.
 - **ccache or sccache** is used when installed.
 - **Examples' reference code** is built with `-ffp-contract=off` (`examples/CMakeLists.txt`): FMinus's IR fuses
   nothing, so the C++ reference must not either, or the outputs stop matching bit for bit.

@@ -1,19 +1,17 @@
 diff --git a/src/ir/Calls.cpp b/src/ir/Calls.cpp
-index d371cd3..e8ddf1e 100644
+index 5bbd76d..e972afd 100644
 --- a/src/ir/Calls.cpp
 +++ b/src/ir/Calls.cpp
-@@ -1,8 +1,8 @@
- // src/ir/Calls.cpp: calls. Inside a method, a method of its module first (`tick(x)` is this->tick(x), as in C++,
+@@ -2,7 +2,7 @@
  // where the class's names hide the others); then the builtins, in the order a call tries them: the reductions,
  // poly_lanes and poly_index, poly_load and poly_store, <math.h>'s float functions (LLVM intrinsics, overloaded on
--// vectors), and <stdlib.h>'s heap (malloc, calloc and free, on the runtime's functions); then the program's own
--// functions.
-+// vectors), <stdlib.h>'s heap (malloc, calloc and free, on the runtime's functions) and the runtime's other
-+// functions; then the program's own functions.
+ // vectors), <stdlib.h>'s heap (malloc, calloc and free) and the FFT (fft_create, fft_forward, ...), both on the
+-// runtime's functions; then the program's own functions.
++// runtime's functions, and the runtime's other functions; then the program's own functions.
  #include "ir/Lowering.h"
  
  #include <llvm/IR/Constants.h>
-@@ -67,6 +67,21 @@ namespace fminus::ir::detail
+@@ -86,6 +86,21 @@ namespace fminus::ir::detail
          return nullptr;
      }
  
@@ -32,10 +30,10 @@ index d371cd3..e8ddf1e 100644
 +        return nullptr;
 +    }
 +
-     const Builtin* findBuiltin(std::string_view name)
+     // What the effects refuse a nonallocating function (Effects.cpp): a builtin that allocates or frees.
+     bool allocates(std::string_view name)
      {
-         for (const Builtin& builtin : kBuiltins)
-@@ -130,6 +145,17 @@ namespace fminus::ir::detail
+@@ -162,6 +177,17 @@ namespace fminus::ir::detail
                  llvm::Intrinsic::getOrInsertDeclaration(&module_, builtin->intrinsic, {typeOf(type)});
              return {builder_.CreateCall(intrinsic, irArgs), type};
          }
@@ -54,7 +52,7 @@ index d371cd3..e8ddf1e 100644
          if (found == functions_.end())
          {
 diff --git a/src/ir/Functions.cpp b/src/ir/Functions.cpp
-index 4392c9b..e828b04 100644
+index c2853e3..393783b 100644
 --- a/src/ir/Functions.cpp
 +++ b/src/ir/Functions.cpp
 @@ -29,7 +29,8 @@ namespace fminus::ir::detail
@@ -68,11 +66,11 @@ index 4392c9b..e828b04 100644
              error(function.location, quoted(function.name) + " is a builtin and cannot be redefined");
              return;
 diff --git a/src/ir/Lowering.h b/src/ir/Lowering.h
-index b386c84..309d7ff 100644
+index 65a3ac8..e9a3cdb 100644
 --- a/src/ir/Lowering.h
 +++ b/src/ir/Lowering.h
-@@ -58,8 +58,18 @@ namespace fminus::ir::detail
-         unsigned arity;
+@@ -67,10 +67,20 @@ namespace fminus::ir::detail
+         bool allocates;
      };
  
 +    // A function of the FMinus runtime (runtime/Runtime.h), float(float, ...), callable with no prototype (Calls.cpp):
@@ -86,6 +84,8 @@ index b386c84..309d7ff 100644
 +
      const Builtin* findBuiltin(std::string_view name);   // <math.h>'s float functions, or nullptr
      const Allocation* findAllocation(std::string_view name);   // malloc, calloc, free, or nullptr
+     const Fft* findFft(std::string_view name);           // fft_create, fft_forward, ..., or nullptr
+     bool allocates(std::string_view name);               // a builtin that allocates or frees: the heap's, a plan's
 +    const RuntimeFunction* findRuntimeFunction(std::string_view name);   // db_to_gain, or nullptr
      bool isReduction(std::string_view name);             // reduce_add, reduce_min, reduce_max
      bool isPolyQuery(std::string_view name);             // poly_lanes, poly_index
@@ -213,26 +213,26 @@ index cb1b142..85828e8 100644
 +    return std::pow(10.0f, db / 20.0f);
 +}
 diff --git a/src/runtime/Runtime.h b/src/runtime/Runtime.h
-index a7deada..434779d 100644
+index 468d223..a67f388 100644
 --- a/src/runtime/Runtime.h
 +++ b/src/runtime/Runtime.h
-@@ -37,4 +37,8 @@ extern "C"
-     void* fminus_rt_malloc(std::int64_t size) noexcept;
-     void* fminus_rt_calloc(std::int64_t count, std::int64_t size) noexcept;
-     void fminus_rt_free(void* memory) noexcept;
+@@ -52,4 +52,8 @@ extern "C"
+     void fminus_rt_fft_inverse_real(void* plan, const float* in, float* out) noexcept;
+     void fminus_rt_fft_forward_complex(void* plan, const float* in, float* out) noexcept;
+     void fminus_rt_fft_inverse_complex(void* plan, const float* in, float* out) noexcept;
 +
 +    // Decibels to a linear gain: 10^(db / 20). FMinus code declares it (`float fminus_rt_db_to_gain(float db);`), or
 +    // calls it as the builtin db_to_gain (ir/Calls.cpp).
 +    float fminus_rt_db_to_gain(float db) noexcept;
  }
 diff --git a/src/runtime/RuntimeSymbols.def b/src/runtime/RuntimeSymbols.def
-index 9d84c25..f9d9428 100644
+index bc0f869..add6f3d 100644
 --- a/src/runtime/RuntimeSymbols.def
 +++ b/src/runtime/RuntimeSymbols.def
-@@ -8,3 +8,4 @@ FMINUS_RUNTIME_SYMBOL(fminus_rt_main_bool_result)
- FMINUS_RUNTIME_SYMBOL(fminus_rt_malloc)
- FMINUS_RUNTIME_SYMBOL(fminus_rt_calloc)
- FMINUS_RUNTIME_SYMBOL(fminus_rt_free)
+@@ -15,3 +15,4 @@ FMINUS_RUNTIME_SYMBOL(fminus_rt_fft_forward_real)
+ FMINUS_RUNTIME_SYMBOL(fminus_rt_fft_inverse_real)
+ FMINUS_RUNTIME_SYMBOL(fminus_rt_fft_forward_complex)
+ FMINUS_RUNTIME_SYMBOL(fminus_rt_fft_inverse_complex)
 +FMINUS_RUNTIME_SYMBOL(fminus_rt_db_to_gain)
 diff --git a/src/support/HostTarget.cpp b/src/support/HostTarget.cpp
 index a9819f6..61b676d 100644

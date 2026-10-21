@@ -1,18 +1,18 @@
 # Extending the compiler
 
-How to add to FMinus. First, how a change moves through the compiler, and the few rules that keep that easy. Then
-nine worked recipes, which grow the C subset from a one-line builtin to C's control flow, a custom LLVM pass,
-`int`, `void` and pointers, the heap with the attributes that keep it off the audio thread, and arrays and modules,
-FMinus's classes. Then the pitfalls those recipes ran into, and design notes for what comes next. [simd.md](simd.md)
-has recipes 7 to 9, for vectors.
+How to add to FMinus. First, how a change moves through the compiler, and the few rules that keep that easy. Then ten
+worked recipes, which grow the C subset from a one-line builtin to C's control flow, a custom LLVM pass, `int`, `void`
+and pointers, the heap with the attributes that keep it off the audio thread, arrays and modules, FMinus's classes, and
+an FFT from a C library built into the runtime. Then the pitfalls those recipes ran into, and design notes for what
+comes next. [simd.md](simd.md) has recipes 7 to 9, for vectors.
 
 Recipes 1 to 4 are in the compiler now (`tanhf` and `%`; `bool` and its operators; `if`, `while` and `for`), and so are
-simd.md's 7 to 9, recipe 10 (`int`, `void` and pointers), recipe 11 (the heap) and recipe 12 (arrays and modules), so
-their sections describe how the code you have got there: read a section beside the files it names. Recipes 5 and 6, a
-runtime function and a pass, are not part of the language; they live in [recipes/](recipes/) as a patch, so you can
-apply them to see them work. None of these are sketches: each was applied to this repository, built with `-Werror`, and
-tested in the dev and asan presets, every test passing. [architecture.md](architecture.md) describes the stages they
-touch.
+simd.md's 7 to 9, recipe 10 (`int`, `void` and pointers), recipe 11 (the heap), recipe 12 (arrays and modules) and
+recipe 13 (the FFT), so their sections describe how the code you have got there: read a section beside the files it
+names. Recipes 5 and 6, a runtime function and a pass, are not part of the language; they live in [recipes/](recipes/)
+as a patch, so you can apply them to see them work. None of these are sketches: each was applied to this repository,
+built with `-Werror`, and tested in the dev and asan presets, every test passing. [architecture.md](architecture.md)
+describes the stages they touch.
 
 FMinus follows C. When a recipe has a semantic choice to make, it makes C's: conversions, short-circuiting, which
 `if` an `else` belongs to, what `continue` does in a `for`. And it reports errors in clang's words. The README lists
@@ -31,7 +31,7 @@ Most language features touch the same places, in this order:
 | 5 | `src/ir/` | its conversions and checks, and its lowering to LLVM IR, in the file its kind belongs to (`Lowering.h` lists them: types, functions, statements, expressions, calls, vectors, memory, effects) |
 | 6 | `src/runtime/` | if it needs C++ at run time, a runtime function (recipe 5) |
 | 7 | `tools/fminus/main.cpp`, `src/support/Aot.cpp` | for a new type: whether `--run` can pass and print it (its `switch` over the result type), and whether an executable's `main` may take or return it (`addEntryPoint`) |
-| 8 | `tests/` | a dump in `FrontendTest.cpp`; results in `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `IntTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `ModuleTest.cpp`, `VectorTest.cpp` or `PolyTest.cpp` (their helpers are in `Compile.h`); IR or errors in `tests/lit/fminus/` |
+| 8 | `tests/` | a dump in `FrontendTest.cpp`; results in `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `IntTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `VectorTest.cpp` or `PolyTest.cpp` (their helpers are in `Compile.h`); IR or errors in `tests/lit/fminus/` |
 | 9 | `examples/` | a program that uses it, and a line in `tests/lit/fminus/examples.test` that runs it |
 | 10 | `editors/vscode/syntaxes/fminus.tmLanguage.json` | a new keyword, type or builtin, so VSCode highlights it (its README says where) |
 | 11 | `README.md` | the language table, and the deviations from C if any |
@@ -1806,6 +1806,130 @@ mirror of the modules has the same layout, and plays a score through both, bit f
 - `tests/lit/fminus/modules.fm` and `arrays.fm`: the IR, at `-O0` and `-O2`.
 - `example.voices`: the voices example's `--check`.
 
+## Recipe 13: the FFT, a C library inside the runtime
+
+*In the compiler. Tests: `tests/unit/FftTest.cpp`, `tests/lit/fminus/fft.fm`.*
+
+Spectral processing needs an FFT: fast convolution, analysis, a phase vocoder. Writing a fast one is a project of its
+own, so FMinus takes a library's, and builds it into the runtime. A program makes a plan off the audio thread, runs
+transforms on it there, and frees it at the end:
+
+```c
+module Spectrum
+{
+    void* plan;
+
+    void init(int n) { plan = fft_create(n); }                 // allocates: off the audio thread
+
+    void process(const float* restrict in, float2* restrict bins) [[clang::nonblocking]]
+    {
+        fft_forward(plan, in, bins);                           // n floats into n/2 + 1 bins; allocates nothing
+    }
+
+    void end() { fft_destroy(plan); }
+};
+```
+
+A real plan transforms n floats into n/2 + 1 bins and back; a complex plan, `fft_create_complex(n)`, n `float2`s into
+n and back. A bin is a `float2`, (re, im), as FFTW's `fftwf_complex` and C++'s `std::complex<float>` lay one out.
+Neither direction scales, as in FFTW and PFFFT: inverse(forward(x)) is n times x, and a program scales once, often in a
+window it multiplies by anyway.
+
+The library is PFFFT, marton78's fork of Julien Pommier's. On an M5, against FFTW 3.3.10 built with NEON (both single
+precision, one thread, the median of five runs):
+
+| N | real, FFTW_MEASURE | real, PFFFT | complex, FFTW_MEASURE | complex, PFFFT |
+|---|---|---|---|---|
+| 256 | 100 / 96 ns | 84 / 81 ns | 127 / 124 ns | 163 / 166 ns |
+| 1024 | 443 / 425 ns | 336 / 333 ns | 636 / 636 ns | 787 / 774 ns |
+| 4096 | 1899 / 1831 ns | 1537 / 1513 ns | 3116 / 3110 ns | 3697 / 3583 ns |
+| 960 | 427 / 435 ns | 333 / 331 ns | 658 / 658 ns | 788 / 776 ns |
+
+(forward / inverse). PFFFT is 15–25% faster on real transforms, audio's usual case, from 256 points up; FFTW is 15–35%
+faster on complex ones. PFFFT makes a plan in microseconds, with two allocations, and never touches the heap in a
+transform. FFTW's planner takes 10–70 ms a size, allocates tens of thousands of times and isn't thread-safe, and some
+of its plans allocate in every transform (an inverse real one asked to preserve its input does). PFFFT is two C files,
+and compiles into the runtime on every target with SIMD (NEON, SSE); FFTW is an autotools build at configure time. So
+PFFFT, whose price is its sizes: products of 2, 3 and 5, a multiple of 32 points for a real plan and of 16 for a
+complex one. Apple's vDSP is 2–3 times faster than both from about 512 points, but it is a system framework, not a
+library that can be built in.
+
+### The library, inside the runtime
+
+`cmake/FMinusFft.cmake` fetches PFFFT once, pinned in `cmake/FMinusPins.cmake` like every other dependency, into the
+deps cache (`.deps/src/pffft-<commit>`, marked with its hash, as LLVM's source is). It compiles two of its files,
+`pffft.c` and `pffft_common.c`, into an object library, and never adds PFFFT's own CMake (its tests, its benchmarks,
+the FFT libraries it compares itself with):
+
+```cmake
+add_library(fminus_pffft OBJECT
+  "${FMINUS_PFFFT_SOURCE_DIR}/src/pffft.c" "${FMINUS_PFFFT_SOURCE_DIR}/src/pffft_common.c")
+target_compile_definitions(fminus_pffft PRIVATE PFFFT_STATIC_DEFINE PFFFT_ENABLE_NEON=1 _USE_MATH_DEFINES)
+set_target_properties(fminus_pffft PROPERTIES C_VISIBILITY_PRESET hidden POSITION_INDEPENDENT_CODE ON)
+```
+
+- **NEON has to be asked for.** PFFFT uses SSE on x86-64 by itself, but NEON only with `PFFFT_ENABLE_NEON`; without
+  it, an arm64 build is scalar and says so only in a `#pragma message`. The NEON header checks for ARM itself, so the
+  define is safe on every target, and in a universal binary.
+- **Its symbols are hidden.** A plugin that links FMinus exports none of them, so it can't meet another copy of PFFFT
+  in the host's process.
+- **It keeps its own flags.** FMinus's warnings and sanitizers stay out of it, as they stay out of LLVM.
+
+`src/CMakeLists.txt` puts the objects into the runtime library, `$<TARGET_OBJECTS:fminus_pffft>`, so
+`libfminus_runtime.a` holds the FFT: a host links nothing more for it, and neither does an executable that
+`fminus --emit exe` links (`fft.fm` runs one).
+
+### The runtime's plan
+
+`src/runtime/Fft.cpp` gives Runtime.h's seven functions, `fminus_rt_fft_create` to `fminus_rt_fft_inverse_complex`, on
+PFFFT. A plan holds PFFFT's setup and three buffers, aligned for PFFFT's SIMD and touched when the plan is made, so a
+transform never allocates or faults a page in, and the caller's buffers need neither PFFFT's alignment nor its
+formats:
+
+- **PFFFT packs a real transform's bins** into n floats: bins 0 and n/2, which are real, share the first pair, as
+  F(0) + i F(n/2). The forward transform moves bin n/2 to the end and zeroes the two imaginary parts. Every other bin
+  is where FMinus wants it, so an aligned output takes PFFFT's directly, and the transform costs what PFFFT's own call
+  does. The inverse packs the bins back into the plan's buffer (its input is `const`), about 10% over PFFFT's call at
+  1024 points.
+- **A buffer that isn't on 16 bytes** goes through the plan's own: SSE's aligned loads need them (NEON's are only
+  faster), and a program's `float x[1024]` is aligned to 4.
+- **A null plan, or a plan of the other kind, does nothing**, so a size `fft_create` refused costs a program a silent
+  output, not a crash. A size past 2^26 is refused before PFFFT sees it, since `pffft_new_setup` asserts there.
+
+### The builtins
+
+`fft_create`, `fft_create_complex`, `fft_destroy`, `fft_forward` and `fft_inverse` are builtins, as `malloc` is: a
+table in `Calls.cpp`, `kFfts`, and `lowerFft`, which calls the runtime's functions through `callRuntime` (declared
+from the arguments' IR types). The transforms are overloaded on their buffers, as a math builtin is on its arguments:
+
+```cpp
+        const Value& decides = forward ? args[1] : args[2];   // the floats' side
+        const bool real = pointsTo(decides, ast::Kind::Float);
+```
+
+A forward transform of floats is the real one, of `float2`s the complex one; an inverse that gives floats is real.
+Each buffer then converts as a parameter of its type would, `const` added to the input's, so a wrong pointer is
+clang's "incompatible pointer types passing ..." and a read-only output is "... discards qualifiers". Anything else is
+"no matching function for call to 'fft_forward'", with the two forms it takes.
+
+The effects need one change. `allocates(name)` is what they refuse a nonallocating function: the heap's builtins,
+and the three that make and free a plan. A transform is fine in a nonblocking one, so `Spectrum::process` above
+compiles, and a `process` that made its plan itself the first time it ran would not:
+
+```
+test.fm:7:20: error: function with 'nonblocking' attribute must not call non-'nonblocking' function 'fft_create'
+```
+
+The runtime's functions join `RuntimeSymbols.def`, so the JIT defines them by address, as it does the heap's.
+
+### Tests
+
+- `tests/unit/FftTest.cpp`: real and complex transforms at 64 and 1024 points against a double-precision DFT (within
+  2e-6 of the largest bin), and their round trips, n times the input; PFFFT's sizes, accepted and refused; buffers a
+  float off 16 bytes, bit for bit as aligned ones; null plans and plans of the other kind; the effects and the errors.
+- `tests/lit/fminus/fft.fm`: the runtime calls in the IR, and a program that finds a sine's bin through the JIT and as
+  an executable linked with `libfminus_runtime.a`.
+
 ## Pitfalls
 
 Each of these was hit while writing the language or its recipes. [simd.md](simd.md) has the vector ones.
@@ -1838,6 +1962,10 @@ Each of these was hit while writing the language or its recipes. [simd.md](simd.
 | A C++ reference differs from FMinus in the last bit, though the formulas match | clang's default `-ffp-contract=on` fuses `y + k * (x - y)` written as one expression into a multiply-add; FMinus never fuses | build the reference with `-ffp-contract=off` (the examples are), or round once a statement (`ModuleTest.cpp`'s `next`) |
 | A host's `aligned_alloc` returns null for a module | macOS's wants an alignment of at least a pointer's, and every implementation a size that is a multiple of it | round both up to `alignof(std::max_align_t)` (`examples/voices/bench.cpp`) |
 | One error in a module hides every other | an error the parser reports (a redefined module) stops the run before the code generator | report it in the code generator (`layOut`), and the parser carries on |
+| An arm64 build of a SIMD C library runs at scalar speed, with no error | PFFFT uses NEON only when asked (`PFFFT_ENABLE_NEON`); it says otherwise only in a `#pragma message` | define it (`cmake/FMinusFft.cmake`), and check `pffft_simd_arch()` once |
+| A third-party file fills the build log with warnings | PFFFT's SIMD headers announce themselves with `#pragma message`, which clang reports as warnings | `-Wno-#pragma-messages` for that object library only |
+| A debug build aborts in `pffft_new_setup` | it asserts on more than 2^26 points | refuse the size before calling it (`Fft.cpp`) |
+| A lit test runs a check line as a command | a FileCheck prefix named `RUN` | any other prefix (`fft.fm` uses `PEAK`) |
 | `fminus-tests "a module's methods, and ..."` runs no test | Catch2 splits a filter at its commas | run by tag (`"[module]"`), or escape the comma (`\,`) |
 
 ## Where to go next
@@ -1892,6 +2020,15 @@ declaration be its interface. *Interfaces* (a table of function pointers per mod
 module of a type parameter, `Delay<float4>`) are the large ones; for DSP, generics over the vector width are the more
 useful, and `poly float` already covers much of it.
 
+**More of the FFT.** Recipe 13's transforms give their bins in the usual order. For convolution, PFFFT's own order is
+about 10% faster again: `pffft_transform` without its reorder, and `pffft_zconvolve_accumulate` to multiply two
+spectra in that order, behind builtins whose spectra a program never indexes. `fft_size(n)`, on
+`pffft_nearest_transform_size`, would give the size to pad a block to. The sizes PFFFT can't take could go to a
+mixed-radix or Bluestein transform in the runtime, or to FFTW, which takes any (build it with
+`--enable-armv8-cntvct-el0` on macOS arm64: without a timer, its measured plans come out slower than its estimated
+ones). On Apple systems vDSP is 2–3 times faster than either from about 512 points, but it comes from Accelerate, a
+system framework: a backend chosen when FMinus is built, not a library inside it.
+
 **State: globals and `static`.** File-scope variables lower to LLVM globals, and `static` locals likewise. For a
 plugin, prefer state each instance owns, passed by pointer: memory the host gives, as `examples/biquad/` passes its
 `float* state` (recipe 10), or memory the program allocates off the audio thread, as `examples/delay/` does (recipe
@@ -1922,8 +2059,8 @@ LLJIT's concurrent compilation, and caching objects between runs (`llvm::ObjectC
 
 The recipes in the compiler are their own reference: their code is in `src/`, and their tests in `tests/unit/`
 (`FrontendTest.cpp`, and `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `IntTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`,
-`EffectTest.cpp`, `ArrayTest.cpp`, `ModuleTest.cpp`, `VectorTest.cpp` and `PolyTest.cpp` for the code generator) and
-`tests/lit/fminus/`.
+`EffectTest.cpp`, `ArrayTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `VectorTest.cpp` and `PolyTest.cpp` for the code
+generator) and `tests/lit/fminus/`.
 [recipes/](recipes/) holds the two that aren't, 5 and 6, as one patch against the compiler as it is
 ([recipes/README.md](recipes/README.md)):
 

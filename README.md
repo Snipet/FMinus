@@ -8,12 +8,13 @@ the same IR can also be compiled ahead of time into a native executable.
 on. It has functions over `float`, `int` and `bool`, and `void` ones; declarations, assignments, blocks, `if`, `while`,
 `for`, `break`, `continue` and `return`; arithmetic with `%`, `++` and `--`, casts, comparisons, `!`, `&&`, `||` and
 `?:`; calls and `<math.h>`'s float functions (below). It has pointers, `const` and `restrict` ones, so a function can
-take a C++ host's buffers and process a whole block in one call, C's arrays, and C's heap (`malloc`, `calloc`,
-`free`), with clang's `[[clang::nonblocking]]` checked so that the code on the audio thread can't reach it. It has
-modules, its classes: fields and methods, as C++'s structs with member functions, which hold each other and arrays of
-each other and live wherever their host puts them. It has SIMD: OpenCL C's `float2`, `float4` and `float8`, and `poly
-float`, a vector as wide as the machine's. A program with a `float main(...)` also builds into an executable. The
-build, the dependencies and the toolchain's smoke tests are in place around it.
+take a C++ host's buffers and process a whole block in one call, C's arrays, and C's heap (`malloc`, `calloc`, `free`),
+with clang's `[[clang::nonblocking]]` checked so that the code on the audio thread can't reach it. It has modules, its
+classes: fields and methods, as C++'s structs with member functions, which hold each other and arrays of each other and
+live wherever their host puts them. It has an FFT, real and complex, whose plans are made off the audio thread and whose
+transforms run on it (PFFFT, compiled into FMinus's runtime library). It has SIMD: OpenCL C's `float2`, `float4` and
+`float8`, and `poly float`, a vector as wide as the machine's. A program with a `float main(...)` also builds into an
+executable. The build, the dependencies and the toolchain's smoke tests are in place around it.
 
 Documentation: [docs/](docs/README.md). It covers the architecture, writing a program with `main`, a guide to
 extending the compiler with worked recipes, SIMD (vector types, a vector math library, and vectors as wide as the
@@ -56,7 +57,8 @@ src/                    the fminus library: every .cpp is a source, every gramma
                         Aot (object and assembly files, linked executables)
   runtime/              the FMinus runtime: its own library, libfminus_runtime.a, with no LLVM in it; the C
                         functions generated code calls, listed in RuntimeSymbols.def (a placeholder ABI version,
-                        and an executable's command line and result)
+                        an executable's command line and result, the heap, and the FFT, Fft.cpp, on PFFFT's
+                        objects, which the library holds)
   frontend/             FMinus v0's front end: Lexer.l, Parser.y, Ast.h (the syntax tree), Diagnostics.h,
                         Frontend.h (parse), Scanner.h (the glue between scanner and parser)
   ir/                   the syntax tree to LLVM IR: CodeGen.h (ir::lower), Lowering.h (the code generator's class
@@ -103,6 +105,7 @@ system unless an option asks for it.
 | GNU Bison | 3.8.2 | source tarball, `./configure && make` at configure time | `.deps/install/bison-3.8.2` |
 | Flex | 2.6.4 | source tarball, `./configure && make` at configure time | `.deps/install/flex-2.6.4` |
 | WinFlexBison (Windows, in place of the two above) | 2.5.25 and fixes: Bison 3.8.2, Flex 2.6.4 | source archive of a commit, built with CMake at configure time | `.deps/install/winflexbison-2.5.25-a243a1c` |
+| PFFFT | marton78's fork, commit aa16fd3 (2026-09-29) | source archive of a commit; two C files compiled into `libfminus_runtime.a` | `.deps/src/pffft-<commit>` |
 | CLI11 | 2.7.2 | release source package, header-only, inside each build tree | the build tree |
 | Catch2 | 3.16.1 | source archive, built inside each build tree | the build tree |
 
@@ -180,7 +183,7 @@ float half(float x) { x /= 2; return x; }
 | constants | C's: floating ones are floats (`1.5`, `1.`, `.5`, `2e3`, `1.5e-3f`, hex floats `0x1.8p1`, `0x1p-3f`), integer ones ints (`2`, `010` in octal, `0x1F` in hex); `true` and `false` |
 | comments | `// ...` and `/* ... */` |
 | types | `float` (IEEE single precision), `int` (32 bits, signed: C's `/` and `%`, overflow undefined) and `bool` (C23's: 0 or 1, computed as an int; a number is `x != 0` as a bool); `void`, a function's result; pointers to `float`, `int`, `float2`, `float4`, `float8` and modules, `const` (`const float*`, read-only through it) and `restrict` (C99's promise that nothing else reaches it), and `void*` (an address with no type, which converts to and from any pointer); arrays of `float`, `int`, the float vectors and modules; modules, by name (`OnePole`), from their declaration on; `float2`, `float4`, `float8` (OpenCL C's vectors, lane by lane, scalars broadcast); `poly float` and `poly bool`, as many lanes as the machine's vectors ([docs/simd.md](docs/simd.md)) |
-| builtins | `fabsf sqrtf sinf cosf expf logf floorf fminf fmaxf tanhf` (LLVM intrinsics, on floats and vectors); `malloc calloc free` (C's, with `int` sizes); `reduce_add reduce_min reduce_max` (a vector to a float); `poly_lanes` (an int) and `poly_index`; `poly_load poly_store` (a poly float from or to a `float*`, with an optional mask) |
+| builtins | `fabsf sqrtf sinf cosf expf logf floorf fminf fmaxf tanhf` (LLVM intrinsics, on floats and vectors); `malloc calloc free` (C's, with `int` sizes); `reduce_add reduce_min reduce_max` (a vector to a float); `poly_lanes` (an int) and `poly_index`; `poly_load poly_store` (a poly float from or to a `float*`, with an optional mask); the FFT: `fft_create(n)` and `fft_create_complex(n)` (a plan, a `void*`; they allocate), `fft_forward(plan, in, out)` and `fft_inverse(plan, in, out)` (real when one side is floats, complex when both are `float2`s; unnormalised), `fft_destroy(plan)` |
 
 Where FMinus differs from C, it is on purpose:
 
@@ -205,6 +208,11 @@ Where FMinus differs from C, it is on purpose:
   sizes are `int`s (C's are `size_t`s), so one block holds at most 2 GB. A call that breaks a function's
   `[[clang::nonallocating]]` or `[[clang::nonblocking]]` is an error, where clang only warns
   (`-Wfunction-effects`).
+- **The FFT is FMinus's own**, as C has none: builtins on PFFFT, which take sizes of 2, 3 and 5 only, multiples of 32
+  points for a real plan and of 16 for a complex one (`fft_create` is null for any other). A plan is made and freed off
+  the audio thread (the effects count `fft_create`, `fft_create_complex` and `fft_destroy` as allocations), and a
+  transform allocates nothing. Bins are `float2`s, (re, im), and neither direction scales: inverse(forward(x)) is n
+  times x, as in FFTW and PFFFT.
 - **Vectors are OpenCL C's**, which C has none of: `float2`, `float4`, `float8`, their literals and swizzles, and math
   functions that take them. A comparison of vectors gives a lane mask (OpenCL C gives 0 or -1 in an `int` vector), and
   `?:` with a vector condition picks each lane, so both sides run. Literals come in OpenCL C's form,
@@ -267,7 +275,7 @@ types:
    `Lowering.h` has the list).
 4. Its tests: a dump in `tests/unit/FrontendTest.cpp`, a result in the code generator's tests (`CodeGenTest.cpp`,
    `ControlFlowTest.cpp`, `IntTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`,
-   `ModuleTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`, which share `Compile.h`), IR or errors in
+   `ModuleTest.cpp`, `FftTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`, which share `Compile.h`), IR or errors in
    `tests/lit/fminus/*.fm` (`// RUN:` lines, checked by FileCheck).
 
 `examples/biquad/` is a kernel to grow the language around. It is a biquad low-pass with coefficients recomputed
@@ -316,7 +324,8 @@ gain(in, out, n, 0.5f);                                       // one call a bloc
 - **Lifetime.** A function pointer is valid while its `Program` lives.
 
 The header has no LLVM in it and needs C++17. In CMake, a host links `FMinus::FMinus`, and gets FMinus's include
-directories and libraries (LLVM's too, linked statically), but neither LLVM's headers nor FMinus's C++23. As a
+directories and libraries (LLVM's too, linked statically, and the FFT inside the runtime's), but neither LLVM's headers
+nor FMinus's C++23. As a
 subproject, FMinus builds its library and runtime only (its tests, tools and examples are on only at the top level):
 
 ```cmake
@@ -404,7 +413,7 @@ preset has a workflow (`cmake --workflow --preset <name>`) except `xcode`, which
 ## Handy
 
 - `build-dev/bin/fminus-hostinfo [--features]`: the triple, CPU, features and data layout the JIT targets here.
-- VSCode: `python3 editors/vscode/package.py`, then `code --install-extension build-vscode/fminus-0.5.0.vsix`, for
+- VSCode: `python3 editors/vscode/package.py`, then `code --install-extension build-vscode/fminus-0.6.0.vsix`, for
   FMinus syntax highlighting, lit's `RUN:` and `CHECK:` lines included
   ([editors/vscode/README.md](editors/vscode/README.md)).
 - `build-dev/bin/fminus`: FMinus source to its tree, IR, assembly or an object, or run in the JIT (above).
@@ -433,6 +442,8 @@ These are constraints the research will run into, not things the skeleton handle
 ## License
 
 FMinus is free software under the GNU General Public License, version 3 (`LICENSE`). Its dependencies keep their own
-licenses: LLVM (Apache 2.0 with LLVM exceptions), Catch2 (BSL-1.0) and CLI11 (BSD-3-Clause). Bison and Flex run only
-at build time; the code they generate is covered by Bison's skeleton exception and Flex's permissive license. On
-Windows they are WinFlexBison's ports, under the same licenses (its build scripts are GPL-3.0-or-later).
+licenses: LLVM (Apache 2.0 with LLVM exceptions), PFFFT (FFTPACKv5's BSD-style license: a binary that includes it, as
+anything linking FMinus's runtime does, reproduces its copyright notice, conditions and disclaimer, from its
+`LICENSE.txt`, in its documentation), Catch2 (BSL-1.0) and CLI11 (BSD-3-Clause). Bison and Flex run only at build time;
+the code they generate is covered by Bison's skeleton exception and Flex's permissive license. On Windows they are
+WinFlexBison's ports, under the same licenses (its build scripts are GPL-3.0-or-later).

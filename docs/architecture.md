@@ -183,7 +183,7 @@ defined across the directory by what they lower:
 | `Functions.cpp` | declarations and prototypes (`declare`), bodies and parameters (`define`), stack slots and scopes |
 | `Statements.cpp` | blocks, declarations, `return`, `if`, `while`, `for`, `break` and `continue` |
 | `Expressions.cpp` | the expression `std::visit` (`lower`), constants, operators (`binary`, `arithmetic`), `&&` and `\|\|`, `?:`, casts, assignment, `++` and `--` |
-| `Calls.cpp` | the builtin tables, calls, reductions, `poly_lanes` and `poly_index`, `poly_load` and `poly_store`, the heap's `malloc`, `calloc` and `free`, and `ir::builtins()` |
+| `Calls.cpp` | the builtin tables, calls, reductions, `poly_lanes` and `poly_index`, `poly_load` and `poly_store`, the heap's `malloc`, `calloc` and `free`, the FFT's `fft_*` (`lowerFft`, on the runtime's), and `ir::builtins()` |
 | `Vectors.cpp` | vector literals in both forms, swizzles, `?:` with a vector condition |
 | `Memory.cpp` | lvalues (`lvalue`, `read`, `write`): variables, elements (`p[i]`, `*p`), fields, components of any of them; arrays (a name that stands for a pointer, a list); `&x`; pointer arithmetic |
 | `Modules.cpp` | each module's struct type (`layOut`), fields (`field`), `this`, method calls (`callMethod`), copies |
@@ -342,12 +342,13 @@ the other outputs). `fminus-build` takes hand-written LLVM IR, which brings its 
 ## The runtime: `src/runtime/`
 
 The runtime is a separate static library, `libfminus_runtime.a` (`FMinus::Runtime`), of plain C functions that
-generated code calls. It contains no LLVM.
+generated code calls. It contains no LLVM, and it holds the FFT: PFFFT's objects (`cmake/FMinusFft.cmake`) are in it.
 
 - `Runtime.h` declares the functions as `extern "C"`: a placeholder ABI version, the command line and result of an
   executable (`fminus_rt_main_args`, `fminus_rt_main_result`), and the heap that `malloc`, `calloc` and `free` call
-  (`fminus_rt_malloc`, `fminus_rt_calloc`, `fminus_rt_free`: 64-byte aligned, zeroed, on C's `aligned_alloc`, or
-  on Windows, which has none, `_aligned_malloc`).
+  (`fminus_rt_malloc`, `fminus_rt_calloc`, `fminus_rt_free`: 64-byte aligned, zeroed, on C's `aligned_alloc`, or on
+  Windows, which has none, `_aligned_malloc`), and the FFT behind the `fft_*` builtins (`fminus_rt_fft_create`, ...,
+  `Fft.cpp`: a plan holds PFFFT's setup and buffers of its own, so a transform never allocates).
 - `RuntimeSymbols.def` lists them, one `FMINUS_RUNTIME_SYMBOL(name)` each.
 - `support/JitRuntime.cpp` expands that list into absolute symbols in a JIT (`defineRuntimeSymbols`).
 - An executable gets the same functions by linking the archive.
@@ -373,7 +374,7 @@ Because the JIT and executables share one runtime, the two compile the same prog
 
 | Target | What | Include roots it gives |
 |---|---|---|
-| `fminus_runtime` (`FMinus::Runtime`) | `src/runtime/**` | none (generated code calls it by name) |
+| `fminus_runtime` (`FMinus::Runtime`) | `src/runtime/**`, and PFFFT's objects (`fminus_pffft`) | none (generated code calls it by name) |
 | `fminus_lib` (`FMinus::FMinus`, `libfminus.a`) | every other `.cpp` under `src/`, and the generated scanner and parser | `include/` (`"fminus/FMinus.h"`), `<build>/include` (`fminus/Config.h`); C++17; LLVM linked, not included |
 | `FMinus::Internal` | `fminus_lib` for this tree's tools, examples and tests | also `src/` (`"frontend/Ast.h"`, ...), `<build>/src/generated/` (`"frontend/Parser.tab.hpp"`), LLVM's headers; C++23 |
 | `FMinus::LLVM` | LLVM's headers (as system headers) and the libraries of `FMINUS_LLVM_COMPONENTS` | LLVM's |
