@@ -4,6 +4,7 @@
 #include "frontend/Ast.h"
 #include "frontend/Diagnostics.h"
 
+#include <map>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -17,6 +18,25 @@ namespace llvm
 
 namespace fminus::ir
 {
+    // How a program reads a module's parameter (`param float cutoff;`), the host's choice when it compiles:
+    //   Knob     its value slot, read once a call with a relaxed atomic load where a method starts: the host writes it
+    //            whenever it likes, from any thread (the default)
+    //   Stream   the samples its stream slot points to, cutoff[i] the i-th: the host sets the pointer before each call
+    //   Frozen   `value`, a constant compiled in, so the code around it folds (a frozen `mode` picks one branch)
+    // Whatever the binding, the parameter's slot in the module is the same: { const float* stream; T value; }, T the
+    // parameter's type (bool a byte). So a program compiled with other bindings runs on the same instances.
+    struct ParamBinding
+    {
+        enum class Kind
+        {
+            Knob,
+            Stream,
+            Frozen,
+        };
+        Kind kind = Kind::Knob;
+        double value = 0.0;   // a frozen parameter's, converted to its type as C converts
+    };
+
     struct Options
     {
         // The lanes of a poly float: the target's vector register width in floats (support/HostTarget.h: polyLanes
@@ -26,6 +46,9 @@ namespace fminus::ir
         // The target's data layout (TargetMachine::createDataLayout), which a module's layout and sizeof follow. Empty
         // is LLVM's default, which agrees with the 64-bit targets FMinus runs on for every type it has.
         std::string dataLayout;
+
+        // Each parameter's binding, by its qualified name ("Lowpass::cutoff"); a parameter not listed is a knob.
+        std::map<std::string, ParamBinding> parameters;
     };
 
     // Lowers `program` into a new module in `context`, named after the diagnostics' file. Every FMinus function becomes

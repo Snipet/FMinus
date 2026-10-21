@@ -49,13 +49,22 @@ namespace fminus::ir::detail
         }
         if (const auto* index = std::get_if<ast::IndexExpr>(&expr.node))
         {
+            if (const std::optional<unsigned> field = parameterOf(*index->base))
+            {
+                error(expr.location,
+                      "parameter " + quoted(function_->module->fields[*field].name)
+                          + " is the host's: a method reads it, and cannot assign it or take its address");
+                return std::nullopt;
+            }
+            const std::size_t reported = diagnostics_.errors().size();
             Value base = lower(*index->base);
             Value offset = lower(*index->index);
             if (!ast::isPointer(base.type) && ast::isPointer(offset.type))
                 std::swap(base, offset);   // C's i[p] is p[i]
             if (!ast::isPointer(base.type))
             {
-                error(expr.location, "subscripted value is not a pointer");
+                if (diagnostics_.errors().size() == reported)   // else the operands' own errors say why
+                    error(expr.location, "subscripted value is not a pointer");
                 return std::nullopt;
             }
             if (offset.type != ast::Type::Int && offset.type != ast::Type::Bool)

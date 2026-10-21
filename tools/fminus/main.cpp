@@ -8,6 +8,8 @@
 //     fminus gain.fm --entry                the IR with that executable's C main (also for asm and obj)
 //     fminus gain.fm --run gain 0.5 2       JIT-compiles the program, calls gain(0.5, 2) and prints the result
 //     fminus unison.fm --poly-lanes 16      as if this machine's vectors held 16 floats (any target's poly float)
+//     fminus lowpass.fm --stream Lowpass::cutoff --freeze Lowpass::mode=2
+//                                           a parameter read from a buffer, one compiled in (a knob otherwise)
 #include "frontend/Frontend.h"
 #include "ir/CodeGen.h"
 #include "jit/Jit.h"
@@ -26,6 +28,7 @@
 #include <llvm/Target/TargetMachine.h>
 
 #include <array>
+#include <cstdlib>
 #include <format>
 #include <memory>
 #include <string>
@@ -66,6 +69,19 @@ namespace
         return result;
     }
 
+    // --freeze Lowpass::mode=2: the parameter, and the value it is compiled with.
+    bool frozen(const std::string& spec, std::string& name, double& value)
+    {
+        const std::size_t equals = spec.rfind('=');
+        if (equals == std::string::npos || equals == 0)
+            return false;
+        name = spec.substr(0, equals);
+        const std::string number = spec.substr(equals + 1);
+        char* end = nullptr;
+        value = std::strtod(number.c_str(), &end);
+        return !number.empty() && end == number.c_str() + number.size();
+    }
+
     int writeText(const std::string& path, const std::string& text)
     {
         std::error_code ec;
@@ -92,6 +108,8 @@ int main(int argc, char** argv)
     std::vector<float> runArgs;
     bool entry = false;
     unsigned polyLanes = 0;
+    std::vector<std::string> streams;
+    std::vector<std::string> freezes;
     app.add_option("input", input, "FMinus source file ('-' for stdin)")->required();
     app.add_option("args", runArgs, "The arguments of --run's function");
     app.add_option("-o,--output", output, "The output file ('-' is stdout)")->capture_default_str();
@@ -104,6 +122,10 @@ int main(int argc, char** argv)
         ->check(CLI::IsMember({1u, 2u, 4u, 8u, 16u, 32u, 64u}));
     app.add_flag("--entry", entry, "Add the C main an executable starts in, which runs the program's main (always "
                                    "with --emit exe)");
+    app.add_option("--stream", streams, "Read a float parameter (Module::name) from a buffer the host points it at")
+        ->allow_extra_args(false);
+    app.add_option("--freeze", freezes, "Compile a parameter in as a constant: Module::name=value")
+        ->allow_extra_args(false);
     CLI11_PARSE(app, argc, argv);
     if (emit == "exe" && run.empty() && output == "-")
         return fail("--emit exe: an executable needs a file name (-o)");
@@ -133,6 +155,16 @@ int main(int argc, char** argv)
     fminus::ir::Options options;
     options.polyLanes = polyLanes != 0 ? polyLanes : fminus::polyLanes(**machine);
     options.dataLayout = (*machine)->createDataLayout().getStringRepresentation();
+    for (const std::string& name : streams)
+        options.parameters[name] = {fminus::ir::ParamBinding::Kind::Stream, 0.0};
+    for (const std::string& spec : freezes)
+    {
+        std::string name;
+        double value = 0.0;
+        if (!frozen(spec, name, value))
+            return fail("--freeze " + spec + ": not Module::name=value");
+        options.parameters[name] = {fminus::ir::ParamBinding::Kind::Frozen, value};
+    }
 
     // Syntax tree -> LLVM IR.
     auto context = std::make_unique<llvm::LLVMContext>();

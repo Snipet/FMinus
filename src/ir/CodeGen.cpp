@@ -32,6 +32,7 @@ namespace fminus::ir
             , diagnostics_(diagnostics)
             , builder_(module.getContext())
             , polyLanes_(options.polyLanes)
+            , bindings_(options.parameters)
         {
         }
 

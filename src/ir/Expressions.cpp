@@ -20,7 +20,11 @@ namespace fminus::ir::detail
             Overloaded{
                 [&](const ast::NumberExpr& number) { return lowerNumber(expr.location, number); },
                 [&](const ast::VariableExpr&) { return readLValue(expr); },
-                [&](const ast::IndexExpr&) { return readLValue(expr); },
+                [&](const ast::IndexExpr& index) {
+                    if (const std::optional<unsigned> field = parameterOf(*index.base))
+                        return lowerParameter(expr.location, *field, index);   // cutoff[i] (Modules.cpp)
+                    return readLValue(expr);
+                },
                 [&](const ast::BoolExpr& constant) {
                     return Value{builder_.getInt1(constant.value), ast::Type::Bool};
                 },

@@ -123,6 +123,8 @@ namespace fminus::ir::detail
         builder_.SetInsertPoint(llvm::BasicBlock::Create(module_.getContext(), "entry", llvmFunction));
         function_ = &function;
         scopes_.assign(1, {});   // the outermost scope: the parameters and the body's own declarations
+        entryLoads_.clear();     // a method's module parameters, read where it starts (Modules.cpp)
+        streamReads_.clear();
 
         // Each parameter gets a slot, as a local does (clang names them x.addr), so it can be assigned.
         for (std::size_t i = 0; i < function.params.size(); ++i)
@@ -167,6 +169,9 @@ namespace fminus::ir::detail
                 builder_.CreateUnreachable();   // the end follows a return: nothing runs here
             }
         }
+
+        if (!streamReads_.empty())
+            scopeStreams(*llvmFunction);
 
         std::string problem;
         llvm::raw_string_ostream os(problem);

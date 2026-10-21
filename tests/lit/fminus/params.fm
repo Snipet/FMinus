@@ -1,0 +1,87 @@
+// A module's parameters, under each binding the host can choose (extending.md, recipe 14). Every binding has the
+// same slot, { ptr, T }: the stream's pointer, then the value. A knob is a relaxed atomic load (monotonic) of the value
+// where the method starts, a register from then on; a stream's pointer is loaded there too, and its samples, in their
+// own alias scope, cannot be what the method stores to its fields, so the state stays in a register through the loop;
+// a frozen parameter is a constant, folded.
+// RUN: fminus %s -O0 | FileCheck %s --check-prefix=LAYOUT
+// RUN: fminus %s | FileCheck %s --check-prefix=KNOB
+// RUN: fminus %s --stream Lowpass::cutoff --stream Gain::gain | FileCheck %s --check-prefix=STREAM
+// RUN: fminus %s --freeze Lowpass::cutoff=0.5 --freeze Gain::gain=0.5 --freeze Gain::on=0 \
+// RUN:   | FileCheck %s --check-prefix=FROZEN
+// RUN: fminus %s --emit ast | FileCheck %s --check-prefix=AST
+// RUN: not fminus %s --stream Gain::on --freeze Gain::volume=1 2>&1 | FileCheck %s --check-prefix=ERR
+// RUN: not fminus %s --freeze Gain::gain 2>&1 | FileCheck %s --check-prefix=SPEC
+
+module Lowpass
+{
+    param float cutoff [[fminus::range(0, 1)]] [[fminus::default(0.1)]];
+    float y;
+
+    void process(const float* restrict in, float* restrict out, int n) [[clang::nonblocking]]
+    {
+        for (int i = 0; i < n; ++i)
+            out[i] = y += cutoff[i] * (in[i] - y);
+    }
+};
+
+module Gain
+{
+    param float gain;
+    param bool on;
+
+    void process(const float* restrict in, float* restrict out, int n) [[clang::nonblocking]]
+    {
+        for (int i = 0; i < n; ++i)
+            out[i] = on[i] ? in[i] * gain[i] : in[i];
+    }
+};
+
+// LAYOUT: %Lowpass = type { { ptr, float }, float }
+// LAYOUT: %Gain = type { { ptr, float }, { ptr, i8 } }
+
+// KNOB-LABEL: define void @"Lowpass::process"(
+// KNOB:         entry:
+// KNOB-NEXT:      [[VALUE:%.*]] = getelementptr inbounds nuw i8, ptr %this, i64 8
+// KNOB-NEXT:      %cutoff = load atomic float, ptr [[VALUE]] monotonic, align 8
+// KNOB:         for.body:
+// KNOB-NOT:       load atomic
+// KNOB:           fmul float %cutoff,
+// KNOB-LABEL: define void @"Gain::process"(
+// KNOB:           %gain = load atomic float, ptr {{%.*}} monotonic
+// KNOB:           %on = load atomic i8, ptr {{%.*}} monotonic
+// KNOB:         vector.body:
+// KNOB:           fmul <4 x float>
+
+// STREAM-LABEL: define void @"Lowpass::process"(
+// STREAM:         entry:
+// STREAM-NEXT:      call void @llvm.experimental.noalias.scope.decl(metadata [[SCOPES:![0-9]+]])
+// STREAM-NEXT:      %cutoff.stream = load ptr, ptr %this, align 8, !noalias [[SCOPES]]
+// STREAM:         for.body:
+// STREAM:           %cutoff.at = getelementptr inbounds nuw [4 x i8], ptr %cutoff.stream, i64 %indvars.iv
+// STREAM-NEXT:      %cutoff = load float, ptr %cutoff.at, align 4, !alias.scope [[SCOPES]]
+// STREAM-NOT:       store float {{%.*}}, ptr %y
+// STREAM:           br i1 %exitcond.not
+// STREAM:           store float {{%.*}}, ptr %y, align 8, !noalias [[SCOPES]]
+// STREAM-LABEL: define void @"Gain::process"(
+// STREAM:           %gain = load float, ptr %gain.at, align 4, !alias.scope
+// STREAM:       [[SCOPES]] = !{[[SCOPE:![0-9]+]]}
+// STREAM:       [[SCOPE]] = distinct !{[[SCOPE]], [[DOMAIN:![0-9]+]], !"streams"}
+// STREAM:       [[DOMAIN]] = distinct !{[[DOMAIN]], !"Lowpass::process"}
+
+// FROZEN-LABEL: define void @"Lowpass::process"(
+// FROZEN-NOT:       load atomic
+// FROZEN:           fmul float {{%.*}}, 5.000000e-01
+// FROZEN-LABEL: define void @"Gain::process"(
+// FROZEN-NOT:       fmul
+// FROZEN:           call void @llvm.memcpy.p0.p0.i64(ptr align 4 %out, ptr align 4 %in,
+
+// AST:      (module Lowpass
+// AST-NEXT:   (param float cutoff {{\[\[}}fminus::range(0, 1){{\]\]}} {{\[\[}}fminus::default(0.1){{\]\]}})
+// AST-NEXT:   (field float y))
+// AST:      (method void Lowpass::process
+// AST:          (= ([] out i) (+= y (* ([] cutoff i) (- ([] in i) y))))))
+
+// ERR: params.fm:1:1: error: the host binds 'Gain::volume', but the program has no such parameter
+// ERR: params.fm:30:16: error: parameter 'on' is a bool: only a float parameter can be a stream
+
+// SPEC: fminus: --freeze Gain::gain: not Module::name=value

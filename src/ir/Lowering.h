@@ -23,8 +23,10 @@
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/Module.h>
 
+#include <map>
 #include <optional>
 #include <string>
+#include <utility>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
@@ -237,6 +239,13 @@ namespace fminus::ir::detail
 
         // ---- Modules.cpp --------------------------------------------------------------------------------------------
         void layOut(const ast::Program& program);
+        void checkParameter(const ast::Module& module, const ast::Field& field);
+        llvm::Type* slotTypeOf(ast::Type type);
+        ParamBinding bindingOf(const ast::Module& module, const ast::Field& field) const;
+        std::optional<unsigned> parameterOf(const ast::Expr& base) const;
+        Value lowerParameter(SourceLocation location, unsigned field, const ast::IndexExpr& index);
+        llvm::Value* atEntry(unsigned field, bool stream);
+        void scopeStreams(llvm::Function& function);
         static const ast::Field* findField(const ast::Module& module, const std::string& name, unsigned* index);
         std::optional<LValue> field(SourceLocation location, llvm::Value* address, const ast::Module& module,
                                     const std::string& name, bool isConst);
@@ -266,5 +275,8 @@ namespace fminus::ir::detail
         std::unordered_map<std::string, Effect> effects_;                  // each name's, from all its declarations
         std::unordered_map<std::string, std::vector<CallSite>> calls_;     // each definition's calls, in order
         std::unordered_map<const ast::Module*, llvm::StructType*> structs_;   // each module's layout
+        std::map<std::string, ParamBinding> bindings_;                     // the host's, by qualified name
+        std::map<std::pair<unsigned, bool>, llvm::Value*> entryLoads_;     // the method's parameters, read at entry
+        std::vector<llvm::Instruction*> streamReads_;                      // its loads of its streams' samples
     };
 } // namespace fminus::ir::detail
