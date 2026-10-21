@@ -1,0 +1,58 @@
+// examples/parameters/parameters.fm: a filter whose cutoff an LFO sweeps, written with parameters (docs/extending.md,
+// recipe 14). A parameter is a value the host sets, which a method reads as cutoff[i]: its value at sample i of the
+// call. How it reads is the host's choice when it compiles, not this file's:
+//   a knob     the host's value, read once when the method starts (the default);
+//   a stream   a buffer the host points it at, a value a sample;
+//   frozen     a constant, compiled in.
+//
+// The harness (bench.cpp) compiles this file three ways. With knobs, the host moves the filter's cutoff once a call,
+// as a plugin that reads its controls once a block does. With the cutoff a stream, the Lfo writes a cutoff a sample
+// into a buffer, the host points the filter's cutoff at it, and the sweep is sample-accurate. Frozen, the filter is
+// fixed, and its coefficient is folded into a constant.
+
+// A low-frequency oscillator for a cutoff: centre * 2^(depth * sin(2 pi phase)), `depth` octaves either side of
+// `centre`, in Hz.
+module Lfo
+{
+    param float frequency [[fminus::range(0.01, 20)]] [[fminus::default(0.5)]];       // Hz
+    param float depth [[fminus::range(0, 4)]] [[fminus::default(2)]];                 // octaves
+    param float centre [[fminus::range(20, 5000)]] [[fminus::default(800)]];          // Hz
+    param float sampleRate [[fminus::range(8000, 384000)]] [[fminus::default(48000)]];
+    float phase;
+
+    void process(float* restrict out, int n) [[clang::nonblocking]]
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            out[i] = centre[i] * expf(0.6931472f * depth[i] * sinf(6.2831853f * phase));   // 2^x is e^(x ln 2)
+            phase += frequency[i] / sampleRate[i];
+            if (phase >= 1)
+                phase -= 1;
+        }
+    }
+};
+
+// A state-variable filter, Chamberlin's (Musical Applications of Microprocessors, 1985): a low-pass, a band-pass and a
+// high-pass from one pair of integrators. It holds up to a cutoff of about a sixth of the sample rate.
+module Filter
+{
+    param float cutoff [[fminus::range(20, 8000)]] [[fminus::default(1000)]];          // Hz
+    param float damping [[fminus::range(0.1, 2)]] [[fminus::default(0.5)]];           // 1 / Q: below 1, a peak
+    param int shape [[fminus::range(0, 2)]];                                           // low-, band-, high-pass
+    param float sampleRate [[fminus::range(8000, 384000)]] [[fminus::default(48000)]];
+    float low;
+    float band;
+
+    void process(const float* restrict in, float* restrict out, int n) [[clang::nonblocking]]
+    {
+        const float w = 3.14159265f / sampleRate[0];
+        for (int i = 0; i < n; ++i)
+        {
+            const float f = 2 * sinf(w * cutoff[i]);
+            low += f * band;
+            const float high = in[i] - low - damping[i] * band;
+            band += f * high;
+            out[i] = shape[i] == 0 ? low : shape[i] == 1 ? band : high;
+        }
+    }
+};

@@ -153,7 +153,8 @@ on it without the code generator.
   `Type::pointerTo(Kind::Float, true)` is `const float*`, `Type::arrayOf(Kind::Float, 16)` is `float[16]`. Helpers
   answer the questions the rules ask: `lanes`, `isVector`, `isMask`, `isPoly`, `isPointer`, `isModule`, `isArray`,
   `pointee`, `samePointee`, `canPointTo`, `isArithmetic`, `vectorOf`, `maskOf`, `arithmeticOf` ([simd.md](simd.md)).
-- **Modules.** A `Module` is a name, its `Field`s (a name and a type each) and its methods' names. Its methods are
+- **Modules.** A `Module` is a name, its `Field`s (a name and a type each; a parameter's, `param float cutoff;`, is
+  marked, with its attributes) and its methods' names. Its methods are
   `Function`s of the program, named `OnePole::tick`, with `module` set and a first parameter, `this`, that the parser
   adds. The program holds its modules by `std::unique_ptr`, so a `Type` may point to one. A module's name is a type
   from its declaration on: the scanner returns it as `MODULE_NAME` (`ParseContext.h`), as a C compiler does a
@@ -171,7 +172,8 @@ on it without the code generator.
 ## Code generation: `src/ir/`
 
 `ir::lower(program, context, diagnostics, options)` (`CodeGen.h`) creates a module named after the file.
-`options.polyLanes` is a `poly float`'s width, which the driver gets from the target machine (`polyLanes`, below). A
+`options.polyLanes` is a `poly float`'s width, which the driver gets from the target machine (`polyLanes`, below), and
+`options.parameters` the host's binding of each module parameter: a knob, a stream or a frozen constant. A
 `Lowering` object then lays the modules out, runs two passes over the program, and checks the functions' effects after
 them. `Lowering` is one class (`Lowering.h`, internal to `src/ir/`, in `fminus::ir::detail`), but its members are
 defined across the directory by what they lower:
@@ -186,7 +188,7 @@ defined across the directory by what they lower:
 | `Calls.cpp` | the builtin tables, calls, reductions, `poly_lanes` and `poly_index`, `poly_load` and `poly_store`, the heap's `malloc`, `calloc` and `free`, the FFT's `fft_*` (`lowerFft`, on the runtime's), and `ir::builtins()` |
 | `Vectors.cpp` | vector literals in both forms, swizzles, `?:` with a vector condition |
 | `Memory.cpp` | lvalues (`lvalue`, `read`, `write`): variables, elements (`p[i]`, `*p`), fields, components of any of them; arrays (a name that stands for a pointer, a list); `&x`; pointer arithmetic |
-| `Modules.cpp` | each module's struct type (`layOut`), fields (`field`), `this`, method calls (`callMethod`), copies |
+| `Modules.cpp` | each module's struct type (`layOut`), fields (`field`), `this`, method calls (`callMethod`), copies; parameters, read by their binding (`lowerParameter`, `atEntry`), and their streams' alias scope (`scopeStreams`) |
 | `Effects.cpp` | `[[clang::nonallocating]]` and `[[clang::nonblocking]]`: each function's calls (recorded by `lowerCall`), checked once every body is lowered |
 
 The header declares every member under the name of its file, so it doubles as the map. A new node goes in the file its
@@ -196,7 +198,10 @@ kind belongs to, and the compiler finds the rest: `lower`'s `std::visit` in `Exp
 **Before the passes, the modules.** `layOut` gives every module an LLVM struct type of its fields, in order, laid out
 as a C struct (`%OnePole = type { float, float }`): opaque ones first, so a field may point to any module, then each
 body, so a field may hold a module declared before it. A module's `sizeof` and alignment are the data layout's,
-`options.dataLayout` (the driver's and the API's come from the target machine).
+`options.dataLayout` (the driver's and the API's come from the target machine). A parameter's element is its slot,
+`{ ptr, float }` (or `i32`, or a `bool`'s `i8`): the stream's pointer and the value, the same under every binding, so
+one instance runs under programs that bind it differently. A method reads a knob's value, or a stream's pointer, once,
+in its entry block, so both are registers through its loops (extending.md, recipe 14).
 
 **Pass 1, declare.** Every function name gets one `llvm::Function`, with external linkage, its C name and the C
 calling convention (`float` is `float`, `int` is `i32`, a pointer is `ptr`, a `void` result is `void`). C++ therefore
@@ -381,7 +386,8 @@ Because the JIT and executables share one runtime, the two compile the same prog
 
 `include/fminus/FMinus.h` is the public API: `fminus::Program` compiles a source (parse, lower for the machine's
 `poly float` width, add the module to a `jit::Jit`), looks its functions up as C function pointers, and says which are
-marked `nonblocking` or `nonallocating`. It has no LLVM in it and needs C++17, so `FMinus::FMinus` gives its users
+marked `nonblocking` or `nonallocating`; it describes each module and its parameters, and sets a parameter's value or
+stream in an instance. It has no LLVM in it and needs C++17, so `FMinus::FMinus` gives its users
 neither LLVM's include directories and definitions nor FMinus's C++23 (`fminus_target_defaults` makes a target's
 standard its own), only the libraries to link. The tree's tools, examples and tests use the stages directly, through
 `FMinus::Internal`.

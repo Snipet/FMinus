@@ -1,15 +1,16 @@
 # Extending the compiler
 
-How to add to FMinus. First, how a change moves through the compiler, and the few rules that keep that easy. Then ten
-worked recipes, which grow the C subset from a one-line builtin to C's control flow, a custom LLVM pass, `int`, `void`
-and pointers, the heap with the attributes that keep it off the audio thread, arrays and modules, FMinus's classes, and
-an FFT from a C library built into the runtime. Then the pitfalls those recipes ran into, and design notes for what
-comes next. [simd.md](simd.md) has recipes 7 to 9, for vectors.
+How to add to FMinus. First, how a change moves through the compiler, and the few rules that keep that easy. Then
+eleven worked recipes, which grow the C subset from a one-line builtin to C's control flow, a custom LLVM pass, `int`,
+`void` and pointers, the heap with the attributes that keep it off the audio thread, arrays and modules, FMinus's
+classes, an FFT from a C library built into the runtime, and parameters, the values a plugin's host sets. Then the
+pitfalls those recipes ran into, and design notes for what comes next. [simd.md](simd.md) has recipes 7 to 9, for
+vectors.
 
 Recipes 1 to 4 are in the compiler now (`tanhf` and `%`; `bool` and its operators; `if`, `while` and `for`), and so are
-simd.md's 7 to 9, recipe 10 (`int`, `void` and pointers), recipe 11 (the heap), recipe 12 (arrays and modules) and
-recipe 13 (the FFT), so their sections describe how the code you have got there: read a section beside the files it
-names. Recipes 5 and 6, a runtime function and a pass, are not part of the language; they live in [recipes/](recipes/)
+simd.md's 7 to 9, recipe 10 (`int`, `void` and pointers), recipe 11 (the heap), recipe 12 (arrays and modules),
+recipe 13 (the FFT) and recipe 14 (parameters), so their sections describe how the code you have got there: read a
+section beside the files it names. Recipes 5 and 6, a runtime function and a pass, are not part of the language; they live in [recipes/](recipes/)
 as a patch, so you can apply them to see them work. None of these are sketches: each was applied to this repository,
 built with `-Werror`, and tested in the dev and asan presets, every test passing. [architecture.md](architecture.md)
 describes the stages they touch.
@@ -1931,6 +1932,197 @@ The runtime's functions join `RuntimeSymbols.def`, so the JIT defines them by ad
 - `tests/lit/fminus/fft.fm`: the runtime calls in the IR, and a program that finds a sine's bin through the JIT and as
   an executable linked with `libfminus_runtime.a`.
 
+## Recipe 14: parameters, the host's values
+
+*In the compiler. Example: `examples/parameters/`, a filter whose cutoff an LFO sweeps through a knob or a stream, or
+fixed and frozen, against C++; measurements in its README. Tests: `tests/unit/ParamTest.cpp`,
+`tests/library/ProgramTest.cpp`, `tests/lit/fminus/params.fm`.*
+
+A plugin's controls are values its host owns: a knob the user turns while the audio plays, an automation lane, a
+modulation source. A kernel reads them, and C has no good way to say how. A field the host writes from another
+thread is a data race; `volatile` makes every read a load from memory, in every iteration of the loop; a buffer
+argument per control makes every caller pass one. A parameter is a field of a module that the host sets, and that its
+methods read like a buffer:
+
+```c
+module Lowpass
+{
+    param float cutoff [[fminus::range(20, 20000)]] [[fminus::default(1000)]];   // Hz
+    param bool bypass;
+    float y;
+
+    void process(const float* restrict in, float* restrict out, int n) [[clang::nonblocking]]
+    {
+        const float w = 6.2831853f / 48000;   // w * cutoff: a one-pole's coefficient, well below the Nyquist
+        for (int i = 0; i < n; ++i)
+            out[i] = bypass[i] ? in[i] : (y += w * cutoff[i] * (in[i] - y));
+    }
+};
+```
+
+`cutoff[i]` is the cutoff at sample i of the call. Where that comes from is the host's choice when it compiles the
+program, not the program's (`Program::Options::parameters`, by qualified name; `fminus --stream` and `--freeze`):
+
+| Binding | `cutoff[i]` is | Costs | For |
+|---|---|---|---|
+| a knob (the default) | the value the host set, read once when the method starts, atomically | a load a call | a control that moves now and then, set from any thread |
+| a stream | `samples[i]`, from the pointer the host set before the call | a load a sample | modulation, automation, a smoothed control: sample-accurate |
+| frozen | a constant | nothing: the optimiser folds it | a setting that won't move while this program plays: a sample rate, a mode |
+
+So one source serves a plugin whose cutoff is a plain knob, one that modulates it, and one that compiles again with
+the settings that stopped moving frozen in. A knob is `volatile` in the sense that matters: the method never assumes
+the value it read last call, and always sees one the host set. It is not `volatile` in the sense that costs: within a
+call it is one value, in a register. A control that the host knows will hold still for a long time is a candidate for
+freezing; one that moves inside a block wants to be a stream.
+
+### Tokens and grammar
+
+`param` is a keyword (`Lexer.l`), and a module member of its own (`Parser.y`): a type, a name and attributes, with
+no initialiser, since the host, not the program, gives a parameter its value:
+
+```
+module_member
+    : "param" type IDENTIFIER attributes ";"
+                                            {
+                                                $$.fields.push_back(ast::Field{at(@3), $3, $2, false, false, true,
+                                                                               $4});
+                                            }
+    | declaration                           ...
+```
+
+A parameter is a `Field` with `isParam` set and its attributes, so it is laid out, copied and zeroed as a field is.
+Attributes gain arguments: `attribute_args` is a list of numbers, each with a leading `-` if it has one, kept as
+written (`"-60"`, `"2e4"`) so the tree's dump shows them as the source does; `ast::attributeNumber` reads one, as C
+reads a constant.
+
+### One slot for every binding
+
+A parameter's place in its module is a slot, `{ const float* stream; T value; }`, a `float`, an `int` or a `bool`'s
+byte for `T`, whatever the binding (`layOut`, `Modules.cpp`):
+
+```cpp
+                if (field.isParam)
+                {
+                    checkParameter(*module, field);
+                    elements.push_back(
+                        llvm::StructType::get(module_.getContext(), {builder_.getPtrTy(), slotTypeOf(type)}));
+                    continue;
+                }
+```
+
+The same layout under every binding means one instance runs under several programs. A host that freezes a setting
+compiles a new program, then swaps the function pointers, and the instance's state (a filter's history, a delay's
+line) carries on; a host that compiles a program with a stream and one without can run either on the same instance.
+A stream is a `float` only: a gate or a mode a sample is something else (events, below).
+
+`checkParameter` checks the rest: the type, the binding (an `int` stream is "parameter 'mode' is an int: only a
+float parameter can be a stream"), and the attributes. `fminus::range(minimum, maximum)` takes two numbers in order,
+`fminus::default(value)` one, inside the range if there is one, and any other attribute is unknown. A binding that
+names no parameter of the program is an error too, at 1:1, as an option that names nothing would be. The range and the
+default are for the host: FMinus checks them against each other, and neither clamps to them nor checks a value the
+host sets.
+
+### Reading one
+
+`cutoff[i]` is a subscript, and the code generator looks at it before the general one: `parameterOf` says whether the
+base is a parameter of the method's own module, named as a field is (a name no local or parameter of the method has),
+or as `this->cutoff`. `lowerParameter` then lowers it by its binding:
+
+- **Frozen**, it is a constant: the float, rounded; a `bool`'s `value != 0`; an `int`'s C conversion, toward 0, and the
+  end of an int's range past it.
+- **A knob** is the slot's value, which `atEntry` loads once, where the method starts:
+
+  ```cpp
+        llvm::BasicBlock& entry = function->getEntryBlock();
+        llvm::IRBuilder<> at(&entry, entry.getFirstInsertionPt());
+        llvm::Value* slot =
+            at.CreateStructGEP(structs_.at(&module), function->getArg(0), field, parameter.name + ".slot");
+        ...
+            llvm::LoadInst* load = at.CreateAlignedLoad(value, at.CreateStructGEP(slotType, slot, 1), ...);
+            load->setAtomic(llvm::AtomicOrdering::Monotonic);
+  ```
+
+  `Monotonic` is C++'s `memory_order_relaxed`: the load can't tear, and the host's store (`setValue`, a relaxed
+  `std::atomic_ref` store) is not a data race, from whichever thread it comes. On arm64 and x86-64 it is a plain load.
+  It is in the entry block, from `this` itself (the method's first argument, not its stack slot), so every
+  `cutoff[i]` in the method reads the same value, and the value is a register through the loops, which then vectorise
+  as they would on a constant. An atomic load in the loop instead would be one per iteration: LLVM neither merges nor
+  hoists atomic loads.
+- **A stream** loads its pointer at the method's start the same way (`atEntry(field, true)`), and `cutoff[i]` is a load
+  from it, as `p[i]` is.
+
+A parameter is the host's to write: `cutoff[0] = 1` and `&cutoff[0]` are "parameter 'cutoff' is the host's: a method
+reads it, and cannot assign it or take its address" (`lvalue`, `Memory.cpp`), and `cutoff` without its sample is
+"parameter 'cutoff' is read as cutoff[i], in a method of 'Lowpass'" (`field`), which is also what reading one through
+another instance, `other->cutoff[i]`, gives: a knob's once-a-call value belongs to the call of its own instance's
+method. (A subscript whose base was already reported adds no "subscripted value is not a pointer" of its own.)
+
+### A stream is restrict
+
+A stream's samples are the method's to read, and nothing the method writes overlaps them: the host promises it, as
+`restrict` promises it of an argument. LLVM has to be told. A stream's pointer is loaded from the module, not passed
+as a `noalias` argument, so for all LLVM knows, the stream could be the module's own field `y`, and `y += ...` would
+then go back to memory every sample, to be read again as the next sample of the cutoff.
+
+`scopeStreams` tells it the way the inliner tells it about an inlined `restrict` argument: one alias scope for the
+method's streams, the streams' loads in it (`!alias.scope`), every other access to memory outside it (`!noalias`), and
+the scope declared where the method starts (`llvm.experimental.noalias.scope.decl`), so that a copy of the method
+inlined into a loop gets a scope for each call. In `params.fm`, the one-pole's state stays in a register:
+
+```llvm
+for.body:
+  %cutoff = load float, ptr %cutoff.at, align 4, !alias.scope !0
+  %1 = load float, ptr %arrayidx, align 4, !noalias !0
+  ...
+  store float %4, ptr %arrayidx13, align 4, !noalias !0
+  br i1 %exitcond.not, label %for.cond.for.end_crit_edge, label %for.body
+
+for.cond.for.end_crit_edge:
+  store float %4, ptr %y, align 8, !noalias !0                   ; y, once, after the loop
+```
+
+### The host's side
+
+`include/fminus/FMinus.h` gives each binding (`Program::Binding::knob()`, `stream()`, `frozen(value)`), and describes
+each parameter in `Module::parameters`: its type and binding, where its slot's pointer and value are in an instance,
+and its range and default. Four functions write them, none of which allocates or locks:
+
+```cpp
+fminus::Program::Options options;
+options.parameters["Lowpass::cutoff"] = fminus::Program::Binding::stream();
+auto program = fminus::Program::compile(source, errors, options);
+const fminus::Program::Module& lowpass = *program->module("Lowpass");
+const fminus::Program::Parameter& cutoff = *program->parameter("Lowpass::cutoff");
+const fminus::Program::Parameter& bypass = *program->parameter("Lowpass::bypass");
+fminus::Program::setDefaults(instance, lowpass);              // each parameter at its fminus::default
+
+// The audio thread, each block: the modulation into a buffer, the buffer as the cutoff.
+lfo(modulation, n);
+fminus::Program::setStream(instance, cutoff, modulation);
+process(instance, in, out, n);
+
+// Any thread, any time: the next call reads it.
+fminus::Program::setValue(instance, bypass, 1.0);
+```
+
+`setValue` converts as the binding's constant does (a float rounded, an int truncated, a bool unless 0) and stores
+with `std::atomic_ref`; `value` reads it back. The header still needs only C++17: the atomics are in `FMinus.cpp`.
+
+### Tests
+
+- `tests/unit/ParamTest.cpp`: a knob read once when its method starts, so a write during the call is not what it
+  reads; streams a sample at a time, a one-pole whose coefficient is one against C++ bit for bit; frozen floats, ints
+  (toward 0, and the ends) and bools; one instance under a knob's, a stream's and a frozen program; parameters inside
+  another module, in an array of them; the errors.
+- `tests/unit/FrontendTest.cpp`: the dump of parameters and their attributes, and the syntax errors.
+- `tests/library/ProgramTest.cpp`: `Module::parameters` and `parameter()`, offsets, ranges and defaults; `setValue`'s
+  conversions, `setDefaults` and `setStream`; one instance under two programs; the binding errors; a knob set from
+  another thread, every block showing one value whole.
+- `tests/lit/fminus/params.fm`: the slots, the knob's atomic load at the start and the vectorised loop, the stream's
+  alias scope and its state kept out of memory, the frozen parameters folded (a frozen `bool` turns a loop into a
+  `memcpy`), and the driver's options.
+- `example.parameters`: the parameters example's `--check`.
+
 ## Pitfalls
 
 Each of these was hit while writing the language or its recipes. [simd.md](simd.md) has the vector ones.
@@ -1969,6 +2161,9 @@ Each of these was hit while writing the language or its recipes. [simd.md](simd.
 | A debug build aborts in `pffft_new_setup` | it asserts on more than 2^26 points | refuse the size before calling it (`Fft.cpp`) |
 | A lit test runs a check line as a command | a FileCheck prefix named `RUN` | any other prefix (`fft.fm` uses `PEAK`) |
 | `fminus-tests "a module's methods, and ..."` runs no test | Catch2 splits a filter at its commas | run by tag (`"[module]"`), or escape the comma (`\,`) |
+| A knob read in a loop is loaded every iteration, and the loop doesn't vectorise | an atomic load where `cutoff[i]` is: LLVM neither hoists nor merges atomic loads | load it once, in the entry block (`atEntry`, recipe 14) |
+| A method's state (`y += ...`) goes back to memory every sample once a parameter is a stream | the stream's pointer comes from the module, so LLVM can't tell its samples from the module's fields | an alias scope for the streams (`scopeStreams`, recipe 14) |
+| FileCheck reports a bad variable on a line that checks `[[fminus::range(0, 1)]]` | `[[...]]` is FileCheck's own syntax | match the brackets as regexes: `{{\[\[}}fminus::range(0, 1){{\]\]}}` (`params.fm`) |
 
 ## Where to go next
 
@@ -2031,6 +2226,14 @@ locals instead. Clang tags each access with its type's node in a tree rooted at 
 has no pointer casts, but a `void*` converts to any pointer, so a program could still write floats and read them back
 as ints.
 
+**More of parameters.** Recipe 14's parameters are `float`s, `int`s and `bool`s, and only a `float` streams. *A
+smoothed knob*: a binding that ramps from the value the last call read to this call's across the block, computed at
+the method's start, would give most of a stream's smoothness at a knob's price. *Events*: a gate or a note, an `int`
+or a `bool` that changes at a sample inside a block, is a list of (sample, value) pairs, not a buffer. *Other
+instances*: a voice reading its filter's cutoff (`filter.cutoff[i]`) needs the read's own load, an atomic one for a
+knob, where the method's own are at its start. *A table of them* (`Program::parameters()`, every module's, with a
+stable id each) is what a plugin's parameter list is built from; `Module::parameters` already has what it needs.
+
 **More of the FFT.** Recipe 13's transforms give their bins in the usual order. For convolution, PFFFT's own order is
 about 10% faster again: `pffft_transform` without its reorder, and `pffft_zconvolve_accumulate` to multiply two
 spectra in that order, behind builtins whose spectra a program never indexes. `fft_size(n)`, on
@@ -2070,8 +2273,8 @@ LLJIT's concurrent compilation, and caching objects between runs (`llvm::ObjectC
 
 The recipes in the compiler are their own reference: their code is in `src/`, and their tests in `tests/unit/`
 (`FrontendTest.cpp`, and `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `IntTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`,
-`EffectTest.cpp`, `ArrayTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `VectorTest.cpp` and `PolyTest.cpp` for the code
-generator) and `tests/lit/fminus/`.
+`EffectTest.cpp`, `ArrayTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `ParamTest.cpp`, `VectorTest.cpp` and
+`PolyTest.cpp` for the code generator) and `tests/lit/fminus/`.
 [recipes/](recipes/) holds the two that aren't, 5 and 6, as one patch against the compiler as it is
 ([recipes/README.md](recipes/README.md)):
 

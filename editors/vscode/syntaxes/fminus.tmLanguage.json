@@ -66,14 +66,17 @@
             ]
         },
         "attributes": {
-            "comment": "C23's attributes, as FMinus has them: [[clang::nonblocking]], [[clang::nonallocating]].",
+            "comment": "C23's attributes, as FMinus has them: [[clang::nonblocking]], [[clang::nonallocating]], and a parameter's [[fminus::range(20, 20000)]] and [[fminus::default(-6)]].",
             "begin": "\\[\\[",
             "end": "\\]\\]",
             "beginCaptures": { "0": { "name": "punctuation.definition.attribute.begin.fminus" } },
             "endCaptures": { "0": { "name": "punctuation.definition.attribute.end.fminus" } },
             "patterns": [
-                { "name": "entity.other.attribute-name.fminus", "match": "\\b(?:clang::)?[A-Za-z_][A-Za-z0-9_]*\\b" },
-                { "name": "punctuation.separator.delimiter.fminus", "match": "," }
+                { "name": "entity.other.attribute-name.fminus", "match": "\\b(?:(?:clang|fminus)::)?[A-Za-z_][A-Za-z0-9_]*\\b" },
+                { "include": "#numbers" },
+                { "name": "keyword.operator.arithmetic.fminus", "match": "-" },
+                { "name": "punctuation.separator.delimiter.fminus", "match": "," },
+                { "name": "punctuation.section.parens.fminus", "match": "[()]" }
             ]
         },
         "modules": {
@@ -92,7 +95,7 @@
         },
         "types": {
             "patterns": [
-                { "name": "storage.modifier.fminus", "match": "\\b(?:const|restrict|poly)\\b" },
+                { "name": "storage.modifier.fminus", "match": "\\b(?:const|restrict|poly|param)\\b" },
                 { "name": "keyword.operator.sizeof.fminus", "match": "\\bsizeof\\b" },
                 { "name": "storage.type.fminus", "match": "\\b(?:void|float|int|bool|float2|float4|float8)\\b" }
             ]

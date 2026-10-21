@@ -9,7 +9,8 @@ Most of the recipes in [../extending.md](../extending.md) and [../simd.md](../si
 - recipe 10 (`int`, `void` and pointers);
 - recipe 11 (the heap, `void*` and `sizeof`, and `[[clang::nonblocking]]`);
 - recipe 12 (arrays and modules);
-- recipe 13 (the FFT, on PFFFT in the runtime).
+- recipe 13 (the FFT, on PFFFT in the runtime);
+- recipe 14 (parameters: knobs, streams and frozen constants).
 
 Their code is in `src/`, and their tests in `tests/`.
 
@@ -19,7 +20,7 @@ One patch is left, for the two recipes that aren't part of the language:
 |---|---|---|
 | `5-runtime-function-and-pass.patch` | 5, 6 | a runtime function (`db_to_gain`, by prototype or builtin); an LLVM pass (`CountFlopsPass`, which records each function's floating-point operations as an attribute) |
 
-It applies, with no whitespace errors, to the compiler as it is, with all of the above. The suite then has 84 tests,
+It applies, with no whitespace errors, to the compiler as it is, with all of the above. The suite then has 95 tests,
 which pass in the dev and asan presets.
 
 ```bash

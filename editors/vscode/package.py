@@ -6,7 +6,7 @@ types ([Content_Types].xml). Both are written from package.json, so a version bu
 
     python3 editors/vscode/package.py               writes build-vscode/fminus-<version>.vsix (in the repository)
     python3 editors/vscode/package.py -o DIR        writes DIR/fminus-<version>.vsix
-    code --install-extension build-vscode/fminus-0.6.0.vsix
+    code --install-extension build-vscode/fminus-0.7.0.vsix
 """
 import argparse
 import json
