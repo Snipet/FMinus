@@ -79,6 +79,7 @@ examples/<name>/        one example per directory: an FMinus program, and a harn
   saturator/            tanh(drive * x), a loop over samples against one over poly floats (poly_load, poly_store)
   meter/                a block's peak and RMS, by plain loops and by poly floats' reductions
   voices/               eight synth voices in modules, in memory a host of the public API allocates, against C++
+  hello/                FMinus as a library at its smallest: a main that JIT-compiles a program from a string
 tests/
   unit/                 your Catch2 tests
   library/              the public API as a host uses it: in C++17, against FMinus::FMinus alone
@@ -282,7 +283,8 @@ Each variable is a stack slot (an `alloca` in the entry block), read with loads 
 ## Using FMinus as a library
 
 `include/fminus/FMinus.h` is FMinus's C++ API, and the one header a host includes. A `fminus::Program` compiles FMinus
-source while the host runs, for the CPU it runs on, and gives its functions as C function pointers:
+source while the host runs, for the CPU it runs on, and gives its functions as C function pointers
+(`examples/hello/main.cpp` is a whole program that does this and no more):
 
 ```cpp
 #include "fminus/FMinus.h"
