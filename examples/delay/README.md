@@ -51,7 +51,7 @@ void echo_process(float* restrict line, int* restrict position, int length, cons
   ```
 
 - **The state is two allocations**, the line and its write position, and the host passes both to every call. A
-  struct would hold them together; FMinus has none yet.
+  module would hold them together, with the functions as its methods (recipe 12, and `examples/voices/`).
 - **The host frees it**: `echo_destroy`, off the audio thread. FMinus's memory is C's `aligned_alloc`'s, so C's
   `free` releases it too.
 

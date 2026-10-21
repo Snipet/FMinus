@@ -1,0 +1,119 @@
+// examples/voices/voices.fm: a small synth in modules (docs/extending.md, recipe 12): eight voices, each a sawtooth
+// through a low-pass under a linear envelope. A module is FMinus's class: fields, and methods that see them by name.
+// A Voice holds an Osc, a OnePole and an Envelope, and the Synth an array of eight Voices: modules inside modules.
+//
+// The host (bench.cpp) allocates the Synth itself, as a plugin's prepare() would: the program tells it the module's
+// size and alignment (fminus::Program::module), and every field starts at 0. It calls init once, then note_on,
+// note_off and process, which runs a block of samples and cannot allocate.
+
+// A naive sawtooth, from -1 up to 1 once a period.
+module Osc
+{
+    float phase;   // 0 to 1
+    float step;    // the frequency, in periods a sample
+
+    void start(float frequency, float rate) [[clang::nonblocking]]
+    {
+        phase = 0;
+        step = frequency / rate;
+    }
+
+    float tick() [[clang::nonblocking]]
+    {
+        const float out = 2 * phase - 1;
+        phase += step;
+        if (phase >= 1)
+            phase -= 1;
+        return out;
+    }
+};
+
+// A one-pole low-pass.
+module OnePole
+{
+    float y;
+    float k;
+
+    void init(float cutoff, float rate)
+    {
+        k = 1 - expf(-6.28318531f * cutoff / rate);
+    }
+
+    float tick(float x) [[clang::nonblocking]]
+    {
+        y += k * (x - y);
+        return y;
+    }
+};
+
+// A linear attack and release: up to 1 while the note is held, then down to 0.
+module Envelope
+{
+    float level;
+    float up;     // a sample's step
+    float down;
+    bool held;
+
+    void init(float attack, float release, float rate)   // in seconds
+    {
+        up = 1 / (attack * rate);
+        down = 1 / (release * rate);
+    }
+
+    float tick() [[clang::nonblocking]]
+    {
+        level = held ? fminf(1, level + up) : fmaxf(0, level - down);
+        return level;
+    }
+};
+
+module Voice
+{
+    Osc osc;
+    OnePole filter;
+    Envelope envelope;
+
+    float tick() [[clang::nonblocking]]
+    {
+        return envelope.tick() * filter.tick(osc.tick());
+    }
+};
+
+module Synth
+{
+    Voice voices[8];
+    float rate;
+
+    void init(float sampleRate)
+    {
+        rate = sampleRate;
+        for (int v = 0; v < 8; ++v)
+        {
+            voices[v].filter.init(2000, rate);
+            voices[v].envelope.init(0.005f, 0.05f, rate);
+        }
+    }
+
+    void note_on(int v, float frequency) [[clang::nonblocking]]
+    {
+        voices[v].osc.start(frequency, rate);
+        voices[v].envelope.held = true;
+    }
+
+    void note_off(int v) [[clang::nonblocking]]
+    {
+        voices[v].envelope.held = false;
+    }
+
+    // n samples of the eight voices, mixed.
+    void process(float* restrict out, int n) [[clang::nonblocking]]
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            float mix = 0;
+            for (int v = 0; v < 8; ++v)
+                mix += voices[v].tick();
+            out[i] = 0.125f * mix;
+        }
+    }
+};
