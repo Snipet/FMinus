@@ -1,8 +1,11 @@
 // examples/voices/bench.cpp: the voices example's harness, a host of FMinus's public API alone (fminus/FMinus.h). It
-// compiles voices.fm, allocates the Synth module in its own memory (the size and alignment the program gives, zeroed),
-// plays a score of notes through it, compares the result with the same modules written as C++ structs, and times
-// both. With --check (what ctest runs) it only compares, and fails when the two differ at all, when calling process a
-// block at a time changes the output, or when the C++ structs are not laid out as FMinus lays out the modules.
+// compiles voices.fm with the Synth's sample rate frozen, allocates the Synth module in its own memory (the size and
+// alignment the program gives, zeroed, its parameters at their defaults), plays a score of notes through it, with the
+// cutoff knob turned on the way, compares the result with the same modules written as C++ structs, and times both.
+// With --check (what ctest runs) it only compares, and fails when the two differ at all, when calling process a block
+// at a time changes the output, when the knob's turn is not heard, when the synth is silent, when process is not
+// [[clang::nonblocking]], when the C++ structs are not laid out as FMinus lays out the modules, or when a program with
+// the rate frozen at 44.1 kHz is not C++ at that rate (the frozen value reaching the code).
 //
 //     build-dev/bin/example-voices
 //     build-dev/bin/example-voices --block 64
@@ -60,11 +63,6 @@ namespace
         float y = 0.0f;
         float k = 0.0f;
 
-        void init(float cutoff, float rate)
-        {
-            k = 1.0f - std::exp(-6.28318531f * cutoff / rate);
-        }
-
         float tick(float x)
         {
             y += k * (x - y);
@@ -78,12 +76,6 @@ namespace
         float up = 0.0f;
         float down = 0.0f;
         bool held = false;
-
-        void init(float attack, float release, float rate)
-        {
-            up = 1.0f / (attack * rate);
-            down = 1.0f / (release * rate);
-        }
 
         float tick()
         {
@@ -104,24 +96,39 @@ namespace
         }
     };
 
+    // A parameter's slot, as FMinus lays one out: the stream's pointer, then the value (fminus::Program::Parameter).
+    struct Slot
+    {
+        const float* stream = nullptr;
+        float value = 0.0f;
+    };
+
     struct Synth
     {
+        Slot cutoff;
+        Slot attack;
+        Slot release;
+        Slot gain;
+        Slot rate;
         std::array<Voice, 8> voices;
-        float rate = 0.0f;
 
-        void init(float sampleRate)
+        // Each parameter at its fminus::default, as the program describes it: what setDefaults sets.
+        explicit Synth(const fminus::Program& program)
         {
-            rate = sampleRate;
-            for (Voice& voice : voices)
-            {
-                voice.filter.init(2000.0f, rate);
-                voice.envelope.init(0.005f, 0.05f, rate);
-            }
+            auto initial = [&](const char* name) {
+                const fminus::Program::Parameter* parameter = program.parameter(name);
+                return parameter != nullptr ? static_cast<float>(parameter->defaultValue.value_or(0.0)) : 0.0f;
+            };
+            cutoff.value = initial("Synth::cutoff");
+            attack.value = initial("Synth::attack");
+            release.value = initial("Synth::release");
+            gain.value = initial("Synth::gain");
+            rate.value = initial("Synth::rate");
         }
 
         void noteOn(int v, float frequency)
         {
-            voices[static_cast<std::size_t>(v)].osc.start(frequency, rate);
+            voices[static_cast<std::size_t>(v)].osc.start(frequency, rate.value);
             voices[static_cast<std::size_t>(v)].envelope.held = true;
         }
 
@@ -132,25 +139,36 @@ namespace
 
         void process(float* __restrict out, int n)
         {
+            const float k = 1.0f - std::exp(-6.28318531f * cutoff.value / rate.value);
+            const float up = 1.0f / (attack.value * rate.value);
+            const float down = 1.0f / (release.value * rate.value);
+            for (Voice& voice : voices)
+            {
+                voice.filter.k = k;
+                voice.envelope.up = up;
+                voice.envelope.down = down;
+            }
             for (int i = 0; i < n; ++i)
             {
                 float mix = 0.0f;
                 for (Voice& voice : voices)
                     mix += voice.tick();
-                out[i] = 0.125f * mix;
+                out[i] = gain.value * mix;
             }
         }
     };
 
-    // A note's start or end, at a sample.
+    // A note's start or end, or a turn of the cutoff knob, at a sample.
     struct Event
     {
         std::size_t at;
         int voice;
-        float frequency;   // 0: the note ends
+        float frequency;      // 0: the note ends
+        float cutoff = 0.0f;  // not 0: the cutoff knob goes to it, and the event is no note's
     };
 
-    // Eight notes: a chord of four, its lower half let go half-way, and four more that come in over it.
+    // Eight notes: a chord of four, its lower half let go half-way, and four more that come in over it; the cutoff
+    // knob turned down to 600 Hz three quarters of the way.
     std::vector<Event> score(std::size_t samples)
     {
         const std::array<float, 8> notes{130.81f, 164.81f, 196.0f, 246.94f, 261.63f, 329.63f, 392.0f, 493.88f};
@@ -162,14 +180,15 @@ namespace
         for (int v = 4; v < 8; ++v)
             events.push_back({samples / 2 + static_cast<std::size_t>(v) * samples / 32, v,
                               notes[static_cast<std::size_t>(v)]});
+        events.push_back({samples * 3 / 4, 0, 0.0f, 600.0f});
         return events;
     }
 
     // Plays `events` through a synth: process up to each event, then apply it, in calls of at most `block` samples
     // (0: as long as the gap between events). The same driver runs FMinus's modules and the C++ structs.
-    template <typename Process, typename NoteOn, typename NoteOff>
+    template <typename Process, typename NoteOn, typename NoteOff, typename Cutoff>
     void play(const std::vector<Event>& events, std::size_t block, std::vector<float>& out, Process&& process,
-              NoteOn&& noteOn, NoteOff&& noteOff)
+              NoteOn&& noteOn, NoteOff&& noteOff, Cutoff&& cutoff)
     {
         std::size_t done = 0;
         auto until = [&](std::size_t end) {
@@ -183,7 +202,9 @@ namespace
         for (const Event& event : events)
         {
             until(event.at);
-            if (event.frequency > 0.0f)
+            if (event.cutoff > 0.0f)
+                cutoff(event.cutoff);
+            else if (event.frequency > 0.0f)
                 noteOn(event.voice, event.frequency);
             else
                 noteOff(event.voice);
@@ -197,8 +218,8 @@ namespace
     public:
         FminusSynth(fminus::Program& program, const fminus::Program::Module& module, std::string& errors)
             : module_(module)
+            , cutoff_(program.parameter("Synth::cutoff"))
         {
-            init_ = program.function<void(void*, float)>("Synth::init", errors);
             noteOn_ = program.function<void(void*, int, float)>("Synth::note_on", errors);
             noteOff_ = program.function<void(void*, int)>("Synth::note_off", errors);
             process_ = program.function<void(void*, float*, int)>("Synth::process", errors);
@@ -206,13 +227,13 @@ namespace
 
         bool found() const
         {
-            return init_ != nullptr && noteOn_ != nullptr && noteOff_ != nullptr && process_ != nullptr;
+            return cutoff_ != nullptr && noteOn_ != nullptr && noteOff_ != nullptr && process_ != nullptr;
         }
 
-        // A new synth at `rate`: aligned as the module needs, zeroed, as every module starts, then init. (C's
-        // aligned_alloc takes an alignment of at least a max_align_t's on some systems, and a size that is a multiple
-        // of it: both are rounded up.)
-        void reset(float rate)
+        // A new synth: aligned as the module needs, zeroed, as every module starts, then its parameters at their
+        // defaults. (C's aligned_alloc takes an alignment of at least a max_align_t's on some systems, and a size
+        // that is a multiple of it: both are rounded up.)
+        void reset()
         {
             const std::size_t alignment = std::max(module_.alignment, alignof(std::max_align_t));
             const std::size_t size = (module_.size + alignment - 1) / alignment * alignment;
@@ -220,12 +241,13 @@ namespace
             if (!memory_)
                 throw std::bad_alloc();
             std::memset(memory_.get(), 0, size);
-            init_(memory_.get(), rate);
+            fminus::Program::setDefaults(memory_.get(), module_);
         }
 
         void process(float* out, int n) { process_(memory_.get(), out, n); }
         void noteOn(int voice, float frequency) { noteOn_(memory_.get(), voice, frequency); }
         void noteOff(int voice) { noteOff_(memory_.get(), voice); }
+        void setCutoff(float hertz) { fminus::Program::setValue(memory_.get(), *cutoff_, static_cast<double>(hertz)); }
 
     private:
         struct Free
@@ -234,7 +256,7 @@ namespace
         };
 
         const fminus::Program::Module& module_;
-        void (*init_)(void*, float) = nullptr;
+        const fminus::Program::Parameter* cutoff_;
         void (*noteOn_)(void*, int, float) = nullptr;
         void (*noteOff_)(void*, int) = nullptr;
         void (*process_)(void*, float*, int) = nullptr;
@@ -307,6 +329,7 @@ int main(int argc, char** argv)
     fminus::Program::Options options;
     options.optimisation = level;
     options.fileName = path;
+    options.parameters["Synth::rate"] = fminus::Program::Binding::frozen(static_cast<double>(rate));   // known at start
     std::unique_ptr<fminus::Program> program = fminus::Program::compile(source, errors, options);
     const fminus::Program::Module* module = program ? program->module("Synth") : nullptr;
     if (module == nullptr)
@@ -325,17 +348,19 @@ int main(int argc, char** argv)
     std::vector<float> fminusOutput(samples);
     std::vector<float> cppOutput(samples);
     auto runFminus = [&](std::size_t size, std::vector<float>& out) {
-        fminusSynth.reset(rate);
+        fminusSynth.reset();
         play(
             events, size, out, [&](float* o, int n) { fminusSynth.process(o, n); },
-            [&](int v, float f) { fminusSynth.noteOn(v, f); }, [&](int v) { fminusSynth.noteOff(v); });
+            [&](int v, float f) { fminusSynth.noteOn(v, f); }, [&](int v) { fminusSynth.noteOff(v); },
+            [&](float hertz) { fminusSynth.setCutoff(hertz); });
     };
     auto runCpp = [&] {
-        Synth synth;
-        synth.init(rate);
+        Synth synth(*program);
+        synth.rate.value = rate;
         play(
             events, block, cppOutput, [&](float* o, int n) { synth.process(o, n); },
-            [&](int v, float f) { synth.noteOn(v, f); }, [&](int v) { synth.noteOff(v); });
+            [&](int v, float f) { synth.noteOn(v, f); }, [&](int v) { synth.noteOff(v); },
+            [&](float hertz) { synth.cutoff.value = hertz; });
     };
     runFminus(block, fminusOutput);
     runCpp();
@@ -347,7 +372,9 @@ int main(int argc, char** argv)
         const fminus::Program::Module* envelope = program->module("Envelope");
         const bool layouts =
             voice != nullptr && envelope != nullptr
-            && sameLayout(*module, sizeof(Synth), alignof(Synth), {offsetof(Synth, voices), offsetof(Synth, rate)})
+            && sameLayout(*module, sizeof(Synth), alignof(Synth),
+                          {offsetof(Synth, cutoff), offsetof(Synth, attack), offsetof(Synth, release),
+                           offsetof(Synth, gain), offsetof(Synth, rate), offsetof(Synth, voices)})
             && sameLayout(*voice, sizeof(Voice), alignof(Voice),
                           {offsetof(Voice, osc), offsetof(Voice, filter), offsetof(Voice, envelope)})
             && sameLayout(*envelope, sizeof(Envelope), alignof(Envelope),
@@ -365,14 +392,60 @@ int main(int argc, char** argv)
         const bool same = fminusOutput == cppOutput;
         const bool sounds = std::any_of(fminusOutput.begin(), fminusOutput.end(), [](float x) { return x != 0.0f; });
         const bool nonBlocking = program->nonBlocking("Synth::process");
+        // The knob's turn is heard: the same score with the cutoff left alone differs from three quarters on.
+        std::vector<float> untouched(samples);
+        {
+            fminusSynth.reset();
+            std::vector<Event> notes = events;
+            std::erase_if(notes, [](const Event& event) { return event.cutoff > 0.0f; });
+            play(
+                notes, block, untouched, [&](float* o, int n) { fminusSynth.process(o, n); },
+                [&](int v, float f) { fminusSynth.noteOn(v, f); }, [&](int v) { fminusSynth.noteOff(v); },
+                [](float) {});
+        }
+        // The frozen rate reaches the code: compiled at 44.1 kHz, the synth plays as C++ does at 44.1 kHz.
+        constexpr float kOtherRate = 44100.0f;
+        fminus::Program::Options otherOptions = options;
+        otherOptions.parameters["Synth::rate"] = fminus::Program::Binding::frozen(static_cast<double>(kOtherRate));
+        std::unique_ptr<fminus::Program> otherProgram = fminus::Program::compile(source, errors, otherOptions);
+        bool otherRate = otherProgram != nullptr && otherProgram->module("Synth") != nullptr;
+        if (otherRate)
+        {
+            FminusSynth otherSynth(*otherProgram, *otherProgram->module("Synth"), errors);
+            otherRate = otherSynth.found();
+            if (otherRate)
+            {
+                std::vector<float> fminusAt(samples);
+                std::vector<float> cppAt(samples);
+                otherSynth.reset();
+                play(
+                    events, block, fminusAt, [&](float* o, int n) { otherSynth.process(o, n); },
+                    [&](int v, float f) { otherSynth.noteOn(v, f); }, [&](int v) { otherSynth.noteOff(v); },
+                    [&](float hertz) { otherSynth.setCutoff(hertz); });
+                Synth synth(*program);
+                synth.rate.value = kOtherRate;
+                play(
+                    events, block, cppAt, [&](float* o, int n) { synth.process(o, n); },
+                    [&](int v, float f) { synth.noteOn(v, f); }, [&](int v) { synth.noteOff(v); },
+                    [&](float hertz) { synth.cutoff.value = hertz; });
+                otherRate = fminusAt == cppAt && fminusAt != fminusOutput;
+            }
+        }
+        const std::size_t turn = samples * 3 / 4;
+        const bool turned = std::equal(untouched.begin(), untouched.begin() + static_cast<std::ptrdiff_t>(turn),
+                                       fminusOutput.begin())
+                         && !std::equal(untouched.begin() + static_cast<std::ptrdiff_t>(turn), untouched.end(),
+                                        fminusOutput.begin() + static_cast<std::ptrdiff_t>(turn));
         std::printf("%s", std::format("example-voices: a Synth of {} bytes, aligned to {}, laid out as the C++ "
                                       "structs: {}; process nonblocking: {}; FMinus and C++ the same over {} samples: "
-                                      "{}; in blocks of 64 and 61: {}\n",
+                                      "{}; in blocks of 64 and 61: {}; the cutoff's turn heard from its sample on: "
+                                      "{}; frozen at {} Hz, C++ at {} Hz: {}\n",
                                       module->size, module->alignment, layouts ? "yes" : "no",
                                       nonBlocking ? "yes" : "no", samples, same ? "yes" : "no",
-                                      sameInBlocks ? "yes" : "no")
+                                      sameInBlocks ? "yes" : "no", turned ? "yes" : "no", kOtherRate, kOtherRate,
+                                      otherRate ? "yes" : "no")
                               .c_str());
-        return layouts && nonBlocking && same && sameInBlocks && sounds ? 0 : 1;
+        return layouts && nonBlocking && same && sameInBlocks && sounds && turned && otherRate ? 0 : 1;
     }
 
     const double fminusTime = nanosecondsPerSample([&] { runFminus(block, fminusOutput); }, samples, repeats);
@@ -380,7 +453,8 @@ int main(int argc, char** argv)
     std::printf("%s",
                 std::format("eight voices (a sawtooth, a one-pole low-pass, an envelope each) at {} Hz, {} samples, "
                             "{}\n"
-                            "  FMinus (JIT, -O{}) {:8.3f} ns/sample   modules, the Synth in the host's memory\n"
+                            "  FMinus (JIT, -O{}) {:8.3f} ns/sample   modules, the Synth in the host's memory, its "
+                            "knobs read once a call\n"
                             "  C++ (clang)       {:8.3f} ns/sample   the same, as structs\n"
                             "  FMinus / C++      {:8.2f}x\n"
                             "  the outputs are {}\n",

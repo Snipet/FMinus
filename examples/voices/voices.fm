@@ -2,9 +2,12 @@
 // through a low-pass under a linear envelope. A module is FMinus's class: fields, and methods that see them by name.
 // A Voice holds an Osc, a OnePole and an Envelope, and the Synth an array of eight Voices: modules inside modules.
 //
-// The host (bench.cpp) allocates the Synth itself, as a plugin's prepare() would: the program tells it the module's
-// size and alignment (fminus::Program::module), and every field starts at 0. It calls init once, then note_on,
-// note_off and process, which runs a block of samples and cannot allocate.
+// What a player turns is the Synth's parameters (recipe 14): the cutoff, the attack, the release and the gain are
+// knobs, values the host sets between calls (or from another thread), which process reads once a call; the sample
+// rate is one too, and the harness freezes it, compiling it in. The host (bench.cpp) allocates the Synth itself, as a
+// plugin's prepare() would: the program tells it the module's size and alignment (fminus::Program::module), every
+// field starts at 0, and setDefaults sets the parameters. It then calls note_on, note_off and process, which runs a
+// block of samples and cannot allocate.
 
 // A naive sawtooth, from -1 up to 1 once a period.
 module Osc
@@ -28,16 +31,11 @@ module Osc
     }
 };
 
-// A one-pole low-pass.
+// A one-pole low-pass, its coefficient k the Synth's to set.
 module OnePole
 {
     float y;
     float k;
-
-    void init(float cutoff, float rate)
-    {
-        k = 1 - expf(-6.28318531f * cutoff / rate);
-    }
 
     float tick(float x) [[clang::nonblocking]]
     {
@@ -46,19 +44,13 @@ module OnePole
     }
 };
 
-// A linear attack and release: up to 1 while the note is held, then down to 0.
+// A linear attack and release: up to 1 while the note is held, then down to 0, a step a sample (the Synth's to set).
 module Envelope
 {
     float level;
-    float up;     // a sample's step
+    float up;
     float down;
     bool held;
-
-    void init(float attack, float release, float rate)   // in seconds
-    {
-        up = 1 / (attack * rate);
-        down = 1 / (release * rate);
-    }
 
     float tick() [[clang::nonblocking]]
     {
@@ -81,22 +73,16 @@ module Voice
 
 module Synth
 {
+    param float cutoff [[fminus::range(20, 20000)]] [[fminus::default(2000)]];    // Hz, every voice's filter
+    param float attack [[fminus::range(0.001, 2)]] [[fminus::default(0.005)]];    // seconds
+    param float release [[fminus::range(0.001, 5)]] [[fminus::default(0.05)]];    // seconds
+    param float gain [[fminus::range(0, 1)]] [[fminus::default(0.125)]];          // the mix's level
+    param float rate [[fminus::range(8000, 384000)]] [[fminus::default(48000)]];  // Hz
     Voice voices[8];
-    float rate;
-
-    void init(float sampleRate)
-    {
-        rate = sampleRate;
-        for (int v = 0; v < 8; ++v)
-        {
-            voices[v].filter.init(2000, rate);
-            voices[v].envelope.init(0.005f, 0.05f, rate);
-        }
-    }
 
     void note_on(int v, float frequency) [[clang::nonblocking]]
     {
-        voices[v].osc.start(frequency, rate);
+        voices[v].osc.start(frequency, rate[0]);
         voices[v].envelope.held = true;
     }
 
@@ -105,15 +91,25 @@ module Synth
         voices[v].envelope.held = false;
     }
 
-    // n samples of the eight voices, mixed.
+    // n samples of the eight voices, mixed. The knobs become every voice's coefficients once, where the call starts:
+    // a knob is one value a call.
     void process(float* restrict out, int n) [[clang::nonblocking]]
     {
+        const float k = 1 - expf(-6.28318531f * cutoff[0] / rate[0]);
+        const float up = 1 / (attack[0] * rate[0]);
+        const float down = 1 / (release[0] * rate[0]);
+        for (int v = 0; v < 8; ++v)
+        {
+            voices[v].filter.k = k;
+            voices[v].envelope.up = up;
+            voices[v].envelope.down = down;
+        }
         for (int i = 0; i < n; ++i)
         {
             float mix = 0;
             for (int v = 0; v < 8; ++v)
                 mix += voices[v].tick();
-            out[i] = 0.125f * mix;
+            out[i] = gain[i] * mix;
         }
     }
 };
