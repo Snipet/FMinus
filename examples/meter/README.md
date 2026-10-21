@@ -4,7 +4,8 @@
 of the mean of `x²`). Both reduce a block to one number, which makes them the opposite case to
 [`examples/saturator/`](../saturator/README.md): there, every sample is independent, and LLVM's loop vectoriser
 widens the plain loop by itself. Here each step of the plain loop waits for the one before, and whether LLVM may
-vectorise it depends on whether the order of the steps matters. `bench.cpp` compiles it through FMinus's library API
+vectorise it depends on whether the order of the steps matters. A module, `Meter`, then shows them as a meter does:
+the peak held, falling by a parameter each block. `bench.cpp` compiles it through FMinus's library API
 (`fminus::Program`), takes one reading a block, compares the readings with C++, and times them.
 
 ```bash
@@ -55,6 +56,31 @@ changes no maximum of absolute values.
   width (docs/simd.md, "Results depend on the width"). `--check` checks it at every width from 1 to 64 against a C++
   emulation of that width's order (`rmsInLanes`), exactly.
 
+The meter a host shows is a module, its readings its fields, and how fast its peak falls a parameter
+([docs/extending.md](../../docs/extending.md), recipes 12 and 14):
+
+```c
+module Meter
+{
+    param float decay [[fminus::range(0, 1)]] [[fminus::default(0.9)]];   // what is left of the held peak a block on
+    float held;    // the peak, held
+    float level;   // the last block's RMS
+
+    void measure(const float* restrict input, int n) [[clang::nonblocking]]
+    {
+        held = fmaxf(peak(input, n), held * decay[0]);
+        level = rms_poly(input, n);
+    }
+};
+```
+
+Each reading comes from its faster loop (below): the plain `peak`, which LLVM vectorises itself, and `rms_poly`. The
+decay is a knob, which the host sets with `setValue` and `measure` reads once a call; the host reads `held` and
+`level` after the call (`Module::fields` gives their offsets). `--check` runs it over noise that fades out, so the
+held peak falls, at every width, and compares its fields after every block with a C++ meter's, bit for bit. It also
+plays it an impulse and then silence, after which the held peak must be `--decay` itself, then its square: the knob
+reaching the module, at a decay (0.8 by default) other than the program's own default (0.9).
+
 ## What it measures
 
 On this sandbox's Linux machine (an Intel Xeon, Emerald Rapids, with AVX-512), in the dev build, one reading of 48000
@@ -67,7 +93,10 @@ samples of noise. A `poly float` has 8 lanes there. The C++ is the system's clan
 | RMS, a sample at a time | 0.607 | 2.43 | 0.607 | 2.0e-6 |
 | RMS, a `poly float` at a time | 0.077 | 0.360 | | 1.9e-7 |
 
-The relative error is against the reading in double. The `poly float` loops at other widths (`--poly-lanes`):
+The relative error is against the reading in double. On an M5 (the dev build, NEON's 4 lanes, the best of 200 runs):
+`peak` 0.062 ns a sample (C++ 0.065), `peak_poly` 0.110, `rms` 0.479 (C++ 0.479), `rms_poly` 0.135, and
+`Meter::measure`, both readings, 0.195: the sum of its two loops. The `poly float` loops at other widths on the Linux
+machine (`--poly-lanes`):
 
 | lanes | 1 | 4 | 8 | 16 | 32 | 64 |
 |---|---|---|---|---|---|---|
@@ -98,5 +127,6 @@ The relative error is against the reading in double. The `poly float` loops at o
    them, would let the program say how many.
 2. **Fast-math, scoped.** A `reassoc` flag on `rms` alone would let LLVM vectorise the plain loop, in an order of its
    choosing (docs/simd.md, "Where to go next").
-3. **A running meter.** A meter's display decays between readings: a one-pole smoother of the readings, or of `x²`
-   sample by sample. Sample by sample, that is a recursion, which no width helps, as in the biquad.
+3. **A running meter, sample by sample.** `Meter` holds its peak a block at a time. A meter's ballistics sample by
+   sample (a one-pole smoother of `x²`, a peak that falls per sample) are a recursion, which no width helps, as in
+   the biquad; a decay a block is what keeps the reading cheap.

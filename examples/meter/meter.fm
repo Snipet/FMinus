@@ -11,6 +11,10 @@
 // end. So the peak is the same at any width, and the RMS is not, in its last digits (docs/simd.md, "Results depend on
 // the width").
 //
+// Meter, a module, is the meter a host shows: a peak that is held and falls a little each block, and the last block's
+// RMS, read from its fields after each call. How fast the peak falls is its parameter, a knob (docs/extending.md,
+// recipe 14).
+//
 // Every kernel is [[clang::nonblocking]]: it may run on the audio thread.
 
 float peak(const float* restrict input, int n) [[clang::nonblocking]]
@@ -57,3 +61,20 @@ float rms_poly(const float* restrict input, int n) [[clang::nonblocking]]
     sum += x * x;
     return n > 0 ? sqrtf(reduce_add(sum) / n) : 0;
 }
+
+// A block's readings, as a meter shows them: the peak held, the larger of the block's peak and what is left of the
+// last reading (decay of it), and the block's RMS. Each from its faster loop: the plain peak, which LLVM vectorises
+// itself (a maximum's order doesn't matter), and the poly RMS, since LLVM may not reorder a sum: it keeps the plain
+// loop's adds one after another (a sum's order matters).
+module Meter
+{
+    param float decay [[fminus::range(0, 1)]] [[fminus::default(0.9)]];   // what is left of the held peak a block on
+    float held;    // the peak, held
+    float level;   // the last block's RMS
+
+    void measure(const float* restrict input, int n) [[clang::nonblocking]]
+    {
+        held = fmaxf(peak(input, n), held * decay[0]);
+        level = rms_poly(input, n);
+    }
+};
