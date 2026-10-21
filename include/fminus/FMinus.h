@@ -19,6 +19,12 @@
 //                                  inside FMinus
 //   poly float                     the vector of polyLanes() floats: a float4 at 4 lanes (NEON's), and at 8 or more
 //                                  none, as float8; keep it inside FMinus too
+//   OnePole* (a module's pointer)  void*, or a pointer to a C++ struct with the same fields in the same order (which
+//                                  C++ lays out as FMinus does); module() says where each field is. A module itself
+//                                  never crosses: FMinus passes and returns modules by pointer only
+//
+// A module's method is a function too, named as C++ qualifies it, whose first parameter is the instance it runs on:
+// `float tick(float x)` in `module OnePole` is function<float(void*, float)>("OnePole::tick", errors).
 //
 // Threads: compile(), and the first look-up of each function, run LLVM's optimiser and code generator on the calling
 // thread. They take milliseconds and allocate, so in a plugin they run off the audio thread, and the pointer is handed
@@ -32,11 +38,13 @@
 
 #include "fminus/Config.h"   // IWYU pragma: export (FMINUS_VERSION_STRING, the LLVM this build links)
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <vector>
 
 namespace fminus
 {
@@ -85,6 +93,33 @@ namespace fminus
         // Whether a declaration of function `name` is marked [[clang::nonallocating]] or [[clang::nonblocking]]
         // (which includes it). FMinus has then checked that it cannot reach malloc, calloc or free.
         bool nonAllocating(std::string_view name) const;
+
+        // A module of the program (FMinus's class), as a host sees it. An instance is `size` bytes, aligned to
+        // `alignment` and zeroed, since every field starts at 0 (std::aligned_alloc and std::memset, or a value-
+        // initialised C++ struct with the same fields); a method then runs on its address (above). Nothing else is
+        // needed to make one: FMinus runs no constructor.
+        struct Module
+        {
+            struct Field
+            {
+                std::string name;
+                std::string type;          // as FMinus writes it: "float", "float4", "float[16]", "Osc", "Osc *"
+                std::size_t offset = 0;    // in bytes, from the instance's address
+                std::size_t size = 0;
+            };
+
+            std::string name;
+            std::size_t size = 0;
+            std::size_t alignment = 1;
+            std::vector<Field> fields;          // in declaration order
+            std::vector<std::string> methods;   // as function() takes them: "OnePole::tick"
+        };
+
+        // The module `name`, or nullptr when the program has none.
+        const Module* module(std::string_view name) const;
+
+        // Every module of the program, in declaration order.
+        const std::vector<Module>& modules() const;
 
     private:
         struct Impl;

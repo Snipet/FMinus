@@ -1,6 +1,7 @@
 // src/api/FMinus.cpp: the public API (include/fminus/FMinus.h) on the pipeline, run as the fminus driver
-// (tools/fminus/main.cpp) runs it: parse, lower for a poly float's width, then hand the module to an LLJIT that
-// optimises it at the chosen level and compiles it when one of its functions is first looked up.
+// (tools/fminus/main.cpp) runs it: parse, lower for this machine (a poly float's width, the data layout a module
+// follows), then hand the module to an LLJIT that optimises it at the chosen level and compiles it when one of its
+// functions is first looked up.
 #include "fminus/FMinus.h"
 
 #include "frontend/Frontend.h"
@@ -8,6 +9,8 @@
 #include "jit/Jit.h"
 #include "support/HostTarget.h"
 
+#include <llvm/IR/DataLayout.h>
+#include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/Support/Error.h>
@@ -58,6 +61,7 @@ namespace fminus
         std::unique_ptr<fminus::jit::Jit> jit;
         unsigned polyLanes = 4;
         std::map<std::string, Effect, std::less<>> effects;   // the functions a declaration marks
+        std::vector<Module> modules;
     };
 
     Program::Program(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
@@ -96,19 +100,16 @@ namespace fminus
         const std::array<llvm::OptimizationLevel, 4> levels{llvm::OptimizationLevel::O0, llvm::OptimizationLevel::O1,
                                                             llvm::OptimizationLevel::O2, llvm::OptimizationLevel::O3};
         const llvm::OptimizationLevel level = levels[static_cast<std::size_t>(options.optimisation)];
-        ir::Options lowering;
-        lowering.polyLanes = options.polyLanes;
-        if (lowering.polyLanes == 0)
+        // The machine decides a poly float's width, as it does for fminus, and a module's layout.
+        auto machine = hostTargetMachine(codeGenLevel(level));
+        if (!machine)
         {
-            // The machine decides a poly float's width, as it does for fminus.
-            auto machine = hostTargetMachine(codeGenLevel(level));
-            if (!machine)
-            {
-                errors = llvm::toString(machine.takeError()) + "\n";
-                return nullptr;
-            }
-            lowering.polyLanes = fminus::polyLanes(**machine);
+            errors = llvm::toString(machine.takeError()) + "\n";
+            return nullptr;
         }
+        ir::Options lowering;
+        lowering.polyLanes = options.polyLanes != 0 ? options.polyLanes : fminus::polyLanes(**machine);
+        lowering.dataLayout = (*machine)->createDataLayout().getStringRepresentation();
 
         auto context = std::make_unique<llvm::LLVMContext>();
         std::unique_ptr<llvm::Module> module = ir::lower(*program, *context, diagnostics, lowering);
@@ -117,6 +118,28 @@ namespace fminus
             errors = diagnostics.format();
             return nullptr;
         }
+        // Each module's layout, while the module and its context are still here (the JIT takes both).
+        std::vector<Module> modules;
+        const llvm::DataLayout& layout = module->getDataLayout();
+        for (const std::unique_ptr<ast::Module>& declared : program->modules)
+        {
+            llvm::StructType* type = llvm::StructType::getTypeByName(*context, declared->name);
+            const llvm::StructLayout* fields = layout.getStructLayout(type);
+            Module& info = modules.emplace_back();
+            info.name = declared->name;
+            info.size = layout.getTypeAllocSize(type).getFixedValue();
+            info.alignment = layout.getABITypeAlign(type).value();
+            for (std::size_t i = 0; i < declared->fields.size(); ++i)
+            {
+                const auto index = static_cast<unsigned>(i);
+                info.fields.push_back({declared->fields[i].name, ast::typeName(declared->fields[i].type),
+                                       fields->getElementOffset(index).getFixedValue(),
+                                       layout.getTypeAllocSize(type->getElementType(index)).getFixedValue()});
+            }
+            for (const std::string& method : declared->methods)
+                info.methods.push_back(declared->name + "::" + method);
+        }
+
         auto created = jit::Jit::create(level);
         if (!created)
         {
@@ -132,6 +155,7 @@ namespace fminus
         auto impl = std::make_unique<Impl>();
         impl->jit = std::move(*created);
         impl->polyLanes = lowering.polyLanes;
+        impl->modules = std::move(modules);
         for (const ast::Function& function : program->functions)
         {
             const Effect effect = declaredEffect(function);
@@ -169,5 +193,20 @@ namespace fminus
     bool Program::nonAllocating(std::string_view name) const
     {
         return impl_->effects.find(name) != impl_->effects.end();
+    }
+
+    const Program::Module* Program::module(std::string_view name) const
+    {
+        for (const Module& module : impl_->modules)
+        {
+            if (module.name == name)
+                return &module;
+        }
+        return nullptr;
+    }
+
+    const std::vector<Program::Module>& Program::modules() const
+    {
+        return impl_->modules;
     }
 } // namespace fminus

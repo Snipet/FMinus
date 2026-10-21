@@ -8,6 +8,7 @@
 #include <array>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <thread>
 #include <vector>
@@ -170,6 +171,75 @@ TEST_CASE("a Program's options: the optimisation level, a poly float's lanes, an
     bad.polyLanes = 3;
     CHECK(fminus::Program::compile(kGain, errors, bad) == nullptr);
     CHECK(errors == "fminus::Program: polyLanes 3 is not 0 (this machine's) or a power of two from 1 to 64\n");
+}
+
+TEST_CASE("a Program describes its modules, and a host runs their methods on memory it allocates", "[library]")
+{
+    std::string errors;
+    auto program = fminus::Program::compile("module Osc\n"
+                                            "{\n"
+                                            "    float phase;\n"
+                                            "    float step;\n"
+                                            "    float4 lanes;\n"   // aligned to 16 bytes
+                                            "    Osc* next;\n"
+                                            "    float history[3];\n"
+                                            "    void init(float s) { step = s; }\n"
+                                            "    float tick() [[clang::nonblocking]]\n"
+                                            "    {\n"
+                                            "        phase += step;\n"
+                                            "        if (phase >= 1)\n"
+                                            "            phase -= 1;\n"
+                                            "        return phase;\n"
+                                            "    }\n"
+                                            "};\n"
+                                            "module Voice\n"
+                                            "{\n"
+                                            "    Osc osc;\n"
+                                            "    float gain;\n"
+                                            "    float tick() [[clang::nonblocking]] { return gain * osc.tick(); }\n"
+                                            "};\n",
+                                            errors);
+    INFO(errors);
+    REQUIRE(program);
+    REQUIRE(program->modules().size() == 2);
+    CHECK(program->module("Missing") == nullptr);
+    const fminus::Program::Module* osc = program->module("Osc");
+    REQUIRE(osc != nullptr);
+    CHECK(osc->name == "Osc");
+    CHECK(osc->size == 64);   // 4, 4, padding to 16, 16, 8, 12, padding to a multiple of 16: a C struct's layout
+    CHECK(osc->alignment == 16);
+    REQUIRE(osc->fields.size() == 5);
+    const auto described = [](const fminus::Program::Module::Field& field) {
+        return field.name + " " + field.type + " " + std::to_string(field.offset) + " " + std::to_string(field.size);
+    };
+    CHECK(described(osc->fields[0]) == "phase float 0 4");
+    CHECK(described(osc->fields[2]) == "lanes float4 16 16");
+    CHECK(described(osc->fields[3]) == "next Osc * 32 8");
+    CHECK(described(osc->fields[4]) == "history float[3] 40 12");
+    CHECK(osc->methods == std::vector<std::string>{"Osc::init", "Osc::tick"});
+    const fminus::Program::Module* voice = program->module("Voice");
+    REQUIRE(voice != nullptr);
+    CHECK(voice->size == 80);
+    CHECK(described(voice->fields[1]) == "gain float 64 4");
+    CHECK(program->nonBlocking("Voice::tick"));
+    CHECK(!program->nonBlocking("Osc::init"));
+
+    // A voice in the host's memory: aligned, zeroed (every field starts at 0), then set up through a method and a
+    // field the host writes itself.
+    void* memory = std::aligned_alloc(voice->alignment, voice->size);
+    REQUIRE(memory != nullptr);
+    std::memset(memory, 0, voice->size);
+    auto* bytes = static_cast<unsigned char*>(memory);
+    program->function<void(void*, float)>("Osc::init", errors)(bytes + voice->fields[0].offset, 0.25f);
+    const float gain = 2.0f;
+    std::memcpy(bytes + voice->fields[1].offset, &gain, sizeof gain);
+    auto* tick = program->function<float(void*)>("Voice::tick", errors);
+    REQUIRE(tick != nullptr);
+    std::array<float, 5> out{};
+    for (float& y : out)
+        y = tick(memory);
+    CHECK(out == std::array<float, 5>{0.5f, 1.0f, 1.5f, 0.0f, 0.5f});
+    std::free(memory);
 }
 
 TEST_CASE("Programs compile, look up and run on several threads at once", "[library]")
