@@ -5,8 +5,8 @@
 //     Functions.cpp     declarations and prototypes, bodies and parameters, stack slots and scopes
 //     Statements.cpp    blocks, declarations, return, if, while, for, break and continue
 //     Expressions.cpp   constants, variables, operators, &&, ||, ?:, casts, assignment, ++ and --
-//     Calls.cpp         calls: the builtins (math functions, reductions, poly queries and memory, the heap) and the
-//                       program's
+//     Calls.cpp         calls: the builtins (math functions, reductions, poly queries and memory, the heap, the FFT)
+//                       and the program's
 //     Vectors.cpp       vector literals, swizzles, and ?: lane by lane
 //     Memory.cpp        lvalues (variables, p[i], *p, components) read and written, arrays, &x, pointer arithmetic
 //     Modules.cpp       modules: their layout, fields, methods and calls of them, `this`, copies
@@ -58,8 +58,19 @@ namespace fminus::ir::detail
         unsigned arity;
     };
 
+    // An FFT builtin (Calls.cpp): its name, its parameter count, and whether it allocates (a plan is made and freed off
+    // the audio thread; a transform on one allocates nothing).
+    struct Fft
+    {
+        std::string_view name;
+        unsigned arity;
+        bool allocates;
+    };
+
     const Builtin* findBuiltin(std::string_view name);   // <math.h>'s float functions, or nullptr
     const Allocation* findAllocation(std::string_view name);   // malloc, calloc, free, or nullptr
+    const Fft* findFft(std::string_view name);           // fft_create, fft_forward, ..., or nullptr
+    bool allocates(std::string_view name);               // a builtin that allocates or frees: the heap's, a plan's
     bool isReduction(std::string_view name);             // reduce_add, reduce_min, reduce_max
     bool isPolyQuery(std::string_view name);             // poly_lanes, poly_index
     bool isPolyMemory(std::string_view name);            // poly_load, poly_store
@@ -221,6 +232,8 @@ namespace fminus::ir::detail
         Value lowerPolyMemory(SourceLocation location, const ast::CallExpr& call, const std::vector<Value>& args);
         Value wrongArity(SourceLocation location, std::size_t have, std::size_t expected);
         Value lowerAllocation(SourceLocation location, const Allocation& allocation, const std::vector<Value>& args);
+        Value lowerFft(SourceLocation location, const Fft& fft, const std::vector<Value>& args);
+        llvm::CallInst* callRuntime(const std::string& name, llvm::Type* result, const std::vector<llvm::Value*>& args);
 
         // ---- Modules.cpp --------------------------------------------------------------------------------------------
         void layOut(const ast::Program& program);

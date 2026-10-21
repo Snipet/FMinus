@@ -1,8 +1,8 @@
 // src/ir/Calls.cpp: calls. Inside a method, a method of its module first (`tick(x)` is this->tick(x), as in C++,
 // where the class's names hide the others); then the builtins, in the order a call tries them: the reductions,
 // poly_lanes and poly_index, poly_load and poly_store, <math.h>'s float functions (LLVM intrinsics, overloaded on
-// vectors), and <stdlib.h>'s heap (malloc, calloc and free, on the runtime's functions); then the program's own
-// functions.
+// vectors), <stdlib.h>'s heap (malloc, calloc and free) and the FFT (fft_create, fft_forward, ...), both on the
+// runtime's functions; then the program's own functions.
 #include "ir/Lowering.h"
 
 #include <llvm/IR/Constants.h>
@@ -26,6 +26,15 @@ namespace fminus::ir::detail
         Allocation{"malloc", "fminus_rt_malloc", 1},
         Allocation{"calloc", "fminus_rt_calloc", 2},
         Allocation{"free", "fminus_rt_free", 1},
+    };
+
+    // The FFT, on the runtime's (runtime/Fft.cpp): a plan for one size, made off the audio thread (it allocates its
+    // tables and buffers, as calloc does), the transforms on it, which allocate nothing and may run on the audio
+    // thread, and the plan's end. A real plan transforms n floats into n/2 + 1 bins, float2s (re, im), and back; a
+    // complex plan n float2s into n, and back. Neither direction scales: inverse(forward(x)) is n times x.
+    constexpr std::array kFfts{
+        Fft{"fft_create", 1, true},  Fft{"fft_create_complex", 1, true}, Fft{"fft_destroy", 1, true},
+        Fft{"fft_forward", 3, false}, Fft{"fft_inverse", 3, false},
     };
 
     // The reductions of a float vector to one float: its sum (in lane order, so the result does not depend on
@@ -67,6 +76,23 @@ namespace fminus::ir::detail
         return nullptr;
     }
 
+    const Fft* findFft(std::string_view name)
+    {
+        for (const Fft& fft : kFfts)
+        {
+            if (fft.name == name)
+                return &fft;
+        }
+        return nullptr;
+    }
+
+    // What the effects refuse a nonallocating function (Effects.cpp): a builtin that allocates or frees.
+    bool allocates(std::string_view name)
+    {
+        const Fft* fft = findFft(name);
+        return findAllocation(name) != nullptr || (fft != nullptr && fft->allocates);
+    }
+
     const Builtin* findBuiltin(std::string_view name)
     {
         for (const Builtin& builtin : kBuiltins)
@@ -105,6 +131,12 @@ namespace fminus::ir::detail
         {
             calls_[function_->name].push_back({location, call.callee});   // what Effects.cpp checks
             return lowerAllocation(location, *allocation, args);
+        }
+        if (const Fft* fft = findFft(call.callee))
+        {
+            if (fft->allocates)
+                calls_[function_->name].push_back({location, call.callee});
+            return lowerFft(location, *fft, args);
         }
         std::vector<llvm::Value*> irArgs;
         if (const Builtin* builtin = findBuiltin(call.callee))
@@ -229,6 +261,63 @@ namespace fminus::ir::detail
         const llvm::FunctionCallee allocate =
             module_.getOrInsertFunction(allocation.runtime, llvm::FunctionType::get(pointerType, sizeTypes, false));
         return {builder_.CreateCall(allocate, sizes, std::string(allocation.name)), voidPointer};
+    }
+
+    // fft_create(n) and fft_create_complex(n): a plan, a void* (null when the library takes no plan of that size);
+    // fft_destroy(plan). fft_forward(plan, in, out) and fft_inverse(plan, in, out) are overloaded on their buffers, as
+    // a math builtin is on its arguments: a forward transform of floats is a real one, of float2s a complex one, and
+    // an inverse one is real when it gives floats. Each buffer converts as a parameter of its type would, const added
+    // to the input's.
+    Lowering::Value Lowering::lowerFft(SourceLocation location, const Fft& fft, const std::vector<Value>& args)
+    {
+        if (args.size() != fft.arity)
+            return wrongArity(location, args.size(), fft.arity);
+        const ast::Type plan = ast::Type::pointerTo(ast::Kind::Void, false);
+        if (fft.name == "fft_create" || fft.name == "fft_create_complex")
+        {
+            llvm::Value* n = convert(args[0], ast::Type::Int, location, Use::Passing);
+            const std::string runtime =
+                fft.name == "fft_create" ? "fminus_rt_fft_create" : "fminus_rt_fft_create_complex";
+            return {callRuntime(runtime, builder_.getPtrTy(), {n}), plan};
+        }
+        llvm::Value* setup = convert(args[0], plan, location, Use::Passing);
+        if (fft.name == "fft_destroy")
+            return {callRuntime("fminus_rt_fft_destroy", builder_.getVoidTy(), {setup}), ast::Type::Void};
+
+        const bool forward = fft.name == "fft_forward";
+        const auto pointsTo = [](const Value& value, ast::Kind kind) {
+            return ast::isPointer(value.type) && value.type.pointee == kind;
+        };
+        const Value& decides = forward ? args[1] : args[2];   // the floats' side
+        const bool real = pointsTo(decides, ast::Kind::Float);
+        if (!real && !pointsTo(decides, ast::Kind::Float2))
+        {
+            error(location, "no matching function for call to " + quoted(fft.name) + ": it takes "
+                                + (forward ? "(void *, const float *, float2 *) for a real plan, or (void *, const "
+                                             "float2 *, float2 *) for a complex one"
+                                           : "(void *, const float2 *, float *) for a real plan, or (void *, const "
+                                             "float2 *, float2 *) for a complex one"));
+            return poison(ast::Type::Void);
+        }
+        const ast::Type in = ast::Type::pointerTo(forward && real ? ast::Kind::Float : ast::Kind::Float2, true);
+        const ast::Type out = ast::Type::pointerTo(!forward && real ? ast::Kind::Float : ast::Kind::Float2, false);
+        llvm::Value* input = convert(args[1], in, location, Use::Passing);
+        llvm::Value* output = convert(args[2], out, location, Use::Passing);
+        const std::string runtime = std::string("fminus_rt_fft_") + (forward ? "forward" : "inverse")
+                                    + (real ? "_real" : "_complex");
+        return {callRuntime(runtime, builder_.getVoidTy(), {setup, input, output}), ast::Type::Void};
+    }
+
+    // A call of the runtime's function `name` (runtime/Runtime.h), declared from the arguments' IR types.
+    llvm::CallInst* Lowering::callRuntime(const std::string& name, llvm::Type* result,
+                                          const std::vector<llvm::Value*>& args)
+    {
+        std::vector<llvm::Type*> types;
+        for (llvm::Value* arg : args)
+            types.push_back(arg->getType());
+        const llvm::FunctionCallee function =
+            module_.getOrInsertFunction(name, llvm::FunctionType::get(result, types, false));
+        return builder_.CreateCall(function, args);
     }
 
     Lowering::Value Lowering::wrongArity(SourceLocation location, std::size_t have, std::size_t expected)

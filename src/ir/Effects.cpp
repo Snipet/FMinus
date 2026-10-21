@@ -2,7 +2,8 @@
 // parameter list (C23's attribute syntax), checked as clang's -Wfunction-effects checks them, but as errors. They are
 // what keeps the heap off the audio thread: a kernel marked nonblocking can call no malloc, however far down.
 //
-//   nonallocating   the function allocates and frees nothing: it calls no malloc, calloc or free.
+//   nonallocating   the function allocates and frees nothing: it calls no malloc, calloc or free, and makes and
+//                   frees no FFT plan (fft_create, fft_create_complex, fft_destroy; a transform is fine).
 //   nonblocking     and nothing else that might wait: no external function (a prototype the program does not
 //                   define) unless its own prototype is marked nonblocking too.
 //
@@ -55,7 +56,7 @@ namespace fminus::ir::detail
     std::optional<std::vector<Diagnostic>> Lowering::unsafe(const std::string& callee, Effect required,
                                                              std::vector<std::string>& looking)
     {
-        if (findAllocation(callee) != nullptr)
+        if (allocates(callee))
             return std::vector<Diagnostic>{};
         const auto found = functions_.find(callee);
         if (found == functions_.end() || effectOf(callee) >= required)

@@ -37,4 +37,19 @@ extern "C"
     void* fminus_rt_malloc(std::int64_t size) noexcept;
     void* fminus_rt_calloc(std::int64_t count, std::int64_t size) noexcept;
     void fminus_rt_free(void* memory) noexcept;
+
+    // The FFT (Fft.cpp), for FMinus's fft_create, fft_create_complex, fft_forward, fft_inverse and fft_destroy. A plan
+    // is for transforms of n points: real (n floats into n/2 + 1 complex bins, each a (re, im) pair of floats, and
+    // back) or complex (n complex values into n, and back). Neither direction scales, so inverse(forward(x)) is n times
+    // x. Making a plan allocates (its tables, and buffers for the transforms) and takes time: not for the audio thread.
+    // It is null when n is not a size the library takes. A transform allocates nothing, takes no lock, reads `in` (n
+    // floats, n/2 + 1 or n complex values, as the plan and the direction say) and writes `out`, which must not overlap
+    // it; a null plan, or a plan of the other kind, does nothing.
+    void* fminus_rt_fft_create(std::int32_t n) noexcept;
+    void* fminus_rt_fft_create_complex(std::int32_t n) noexcept;
+    void fminus_rt_fft_destroy(void* plan) noexcept;
+    void fminus_rt_fft_forward_real(void* plan, const float* in, float* out) noexcept;
+    void fminus_rt_fft_inverse_real(void* plan, const float* in, float* out) noexcept;
+    void fminus_rt_fft_forward_complex(void* plan, const float* in, float* out) noexcept;
+    void fminus_rt_fft_inverse_complex(void* plan, const float* in, float* out) noexcept;
 }

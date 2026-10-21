@@ -1,0 +1,64 @@
+// The FFT: its builtins are calls of the runtime's functions (runtime/Runtime.h), a plan a void*. A transform is
+// overloaded on its buffers: floats in (or out, for the inverse) make it the real one. A program runs it in the JIT
+// and as an executable, which links libfminus_runtime.a, the FFT library inside it.
+// RUN: fminus %s -O0 | FileCheck %s
+// RUN: fminus %s --run main 5 | FileCheck %s --check-prefix=PEAK
+// RUN: fminus %s --emit exe -o %t.fft
+// RUN: %t.fft 5 | FileCheck %s --check-prefix=PEAK
+
+module Spectrum
+{
+    void* plan;
+
+    void init(int n) { plan = fft_create(n); }
+    void process(const float* restrict in, float2* restrict bins) [[clang::nonblocking]]
+    {
+        fft_forward(plan, in, bins);
+    }
+    void back(const float2* restrict bins, float* restrict out) [[clang::nonblocking]]
+    {
+        fft_inverse(plan, bins, out);
+    }
+    void end() { fft_destroy(plan); }
+};
+
+void turn(void* plan, const float2* restrict x, float2* restrict y, float2* restrict z)
+{
+    fft_forward(plan, x, y);
+    fft_inverse(plan, y, z);
+}
+
+// The bin where the spectrum of `cycles` cycles of a sine in 64 samples peaks: `cycles`.
+float main(float cycles)
+{
+    void* plan = fft_create(64);
+    float* x = calloc(64, sizeof(float));
+    float2* bins = calloc(33, sizeof(float2));
+    for (int i = 0; i < 64; ++i)
+        x[i] = sinf(6.28318531f * cycles * i / 64);
+    fft_forward(plan, x, bins);
+    int peak = 0;
+    for (int k = 1; k < 33; ++k)
+    {
+        if (bins[k].x * bins[k].x + bins[k].y * bins[k].y > bins[peak].x * bins[peak].x + bins[peak].y * bins[peak].y)
+            peak = k;
+    }
+    free(x);
+    free(bins);
+    fft_destroy(plan);
+    return peak;
+}
+
+// CHECK-LABEL: define void @"Spectrum::init"(
+// CHECK:         call ptr @fminus_rt_fft_create(i32
+// CHECK-LABEL: define void @"Spectrum::process"(
+// CHECK:         call void @fminus_rt_fft_forward_real(ptr {{%.*}}, ptr {{%.*}}, ptr {{%.*}})
+// CHECK-LABEL: define void @"Spectrum::back"(
+// CHECK:         call void @fminus_rt_fft_inverse_real(ptr
+// CHECK-LABEL: define void @"Spectrum::end"(
+// CHECK:         call void @fminus_rt_fft_destroy(ptr
+// CHECK-LABEL: define void @turn(
+// CHECK:         call void @fminus_rt_fft_forward_complex(ptr
+// CHECK:         call void @fminus_rt_fft_inverse_complex(ptr
+
+// PEAK: 5

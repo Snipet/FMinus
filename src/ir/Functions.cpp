@@ -36,11 +36,13 @@ namespace fminus::ir::detail
         }
         const Builtin* builtin = findBuiltin(function.name);
         const Allocation* allocation = findAllocation(function.name);
-        if (builtin != nullptr || allocation != nullptr)
+        const Fft* fft = findFft(function.name);
+        if (builtin != nullptr || allocation != nullptr || fft != nullptr)
         {
             // A prototype of a builtin, as <math.h> and <stdlib.h> have, declares nothing new; a definition is
             // refused.
-            const unsigned arity = builtin != nullptr ? builtin->arity : allocation->arity;
+            const unsigned arity = builtin != nullptr ? builtin->arity : allocation != nullptr ? allocation->arity
+                                                                                                : fft->arity;
             if (function.isDefinition)
                 error(function.location, quoted(function.name) + " is a builtin and cannot be redefined");
             else if (function.params.size() != arity)
