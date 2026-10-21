@@ -3,8 +3,9 @@
 `saturator.fm` is a saturator, `y = tanh(drive * x)`: the soft clip of a distortion or a tape stage. It is stateless:
 each output sample depends on its input sample alone. So nothing stops a vector from taking several samples at once,
 and it is the simplest place to compare a loop over samples with a loop over `poly float`s (docs/simd.md, recipe 9).
-`bench.cpp` compiles it through FMinus's library API (`fminus::Program`, as a plugin would), runs it over noise,
-compares it with C++, and times it.
+It is a module, `Saturator`, whose drive is a parameter, a knob the host sets. `bench.cpp` compiles it through
+FMinus's library API (`fminus::Program`, as a plugin would), makes an instance, runs it over noise, compares it with
+C++, and times it.
 
 ```bash
 cmake --workflow --preset release                                      # once: also builds LLVM without assertions
@@ -18,29 +19,36 @@ build-dev/bin/fminus examples/saturator/saturator.fm --emit asm -o -   # what th
 
 ## The program
 
-Four kernels, two tanh by two loops. The loops:
+Four methods, two tanh by two loops. The loops:
 
 ```c
-void saturate(const float* restrict input, float* restrict output, int n, float drive) [[clang::nonblocking]]
+module Saturator
 {
-    for (int i = 0; i < n; ++i)
-        output[i] = rational_tanh(drive * input[i]);
-}
+    param float drive [[fminus::range(0.1, 20)]] [[fminus::default(4)]];   // the gain before the tanh
 
-void saturate_poly(const float* restrict input, float* restrict output, int n, float drive) [[clang::nonblocking]]
-{
-    int i = 0;
-    for (; i + poly_lanes() <= n; i += poly_lanes())
-        poly_store(output + i, rational_tanh_poly(drive * poly_load(input + i)));
-    const poly bool rest = i + poly_index() < n;
-    poly_store(output + i, rational_tanh_poly(drive * poly_load(input + i, rest)), rest);
-}
+    void process(const float* restrict input, float* restrict output, int n) [[clang::nonblocking]]
+    {
+        for (int i = 0; i < n; ++i)
+            output[i] = rational_tanh(drive[i] * input[i]);
+    }
+
+    void process_poly(const float* restrict input, float* restrict output, int n) [[clang::nonblocking]]
+    {
+        const float g = drive[0];
+        int i = 0;
+        for (; i + poly_lanes() <= n; i += poly_lanes())
+            poly_store(output + i, rational_tanh_poly(g * poly_load(input + i)));
+        const poly bool rest = i + poly_index() < n;
+        poly_store(output + i, rational_tanh_poly(g * poly_load(input + i, rest)), rest);
+    }
+    ...
+};
 ```
 
 The poly loop takes `poly_lanes()` samples a step through `poly_load` and `poly_store`, and the last, partial step
 under a mask, which keeps its loads and stores inside the buffer (docs/simd.md, "Loads and stores"). The tanh:
 
-- **`tanhf`**, `<math.h>`'s: `saturate_tanhf` and `saturate_tanhf_poly`. LLVM can only call it. Of a `poly float` it
+- **`tanhf`**, `<math.h>`'s: `process_tanhf` and `process_tanhf_poly`. LLVM can only call it. Of a `poly float` it
   is `llvm.tanh.v8f32`, which the backend splits into one call a lane, unless the target has a vector `tanhf`: on
   Apple systems libsystem_m's `_simd_tanh_f4`, for 4 lanes (recipe 8).
 - **A rational function**, `rational_tanh`: x times a polynomial of degree 12 in x over one of degree 6 (Eigen's
@@ -50,6 +58,13 @@ under a mask, which keeps its loads and stores inside the buffer (docs/simd.md, 
   checks the first bound against tanh in double, over noise and over a ramp from -10 to 10.
 
 FMinus has no overloading, as C has none, so `rational_tanh_poly` is the same body again, on `poly float`s.
+
+The drive is a knob ([docs/extending.md](../../docs/extending.md), recipe 14): the value the host last set with
+`setValue`, read once when a method starts, so `drive[i]` is one value a call, a register through the loop, and the
+plain loop vectorises as it would on a constant. The poly loops read it once, `drive[0]`, since a poly loop reads a
+parameter a float at a time: bound as a stream, its `drive[i]` would be one sample a step of `poly_lanes()`, not one
+a lane. The module has no other state, and its layout (the drive's slot) is the same however wide a `poly float`
+is, so `--check` runs one instance under the program compiled at every width.
 
 ## What it measures
 
@@ -65,7 +80,10 @@ FMinus's JIT compiles for the CPU it runs on.
 | rational, a sample at a time | 0.44 | 9.95 | 0.83 |
 | rational, a `poly float` at a time | 0.44 | 1.33 | |
 
-Expect noise of a few ns between runs in the `tanhf` lines: this machine is shared.
+Expect noise of a few ns between runs in the `tanhf` lines: this machine is shared. On an M5 (the dev build, the best of
+50 runs, the median of three), with the kernels as the module's methods: `tanhf` a sample at a time 0.80 ns, a `poly
+float` at a time 0.58, C++ 2.00 (FMinus's vector `tanhf`, below, against C++'s call a sample); the rational function
+0.38 either way, and C++ 0.38.
 
 - **The library call is the cost.** glibc has no vector `tanhf`, so 8 lanes are 8 calls, at 15 ns a sample either
   way. The rational function takes 0.44 ns, 35 times less, and is within 3.5e-7 of tanh (glibc's `tanhf`, about
@@ -109,5 +127,8 @@ holds the rational kernels, FMinus's own arithmetic, to the same output bit for 
    `_ZGVeN16v_tanhf` (AVX-512), but LLVM's libmvec table (`-fveclib=libmvec`) lists no `tanhf`, and FMinus registers
    Apple's library only (`src/support/HostTarget.cpp`). Mapping `llvm.tanh.v8f32` to it, and resolving libmvec in the
    JIT, would make the `tanhf` lines vector code too.
-5. **Oversampling.** A saturator adds harmonics that alias. Running it at 2× or 4× the sample rate, with a half-band
+5. **A stream in a poly loop.** A `poly float`'s worth of a stream's samples would be `poly_load` of the parameter,
+   which FMinus has no way to say yet (a parameter has no address). With it, the drive could be automated sample by
+   sample in the poly loop too.
+6. **Oversampling.** A saturator adds harmonics that alias. Running it at 2× or 4× the sample rate, with a half-band
    filter on each side, is the usual fix, and makes the kernel's speed matter four times over.

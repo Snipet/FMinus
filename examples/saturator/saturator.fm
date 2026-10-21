@@ -2,20 +2,21 @@
 // harness (bench.cpp) runs it over noise, compares it with C++ and times it.
 //
 // Each output sample depends on its input sample alone: no state, no recursion. So poly_lanes() samples can go through
-// it at once, one in each lane of a poly float, and each lane computes what the scalar loop does. It comes in four
-// versions, two tanh by two loops:
+// it at once, one in each lane of a poly float, and each lane computes what the scalar loop does. It is a module,
+// Saturator, whose one parameter is the drive (docs/extending.md, recipe 14), a knob the host sets, and it comes in
+// four methods, two tanh by two loops:
 //
-//   saturate_tanhf         <math.h>'s tanhf, one sample at a time
-//   saturate_tanhf_poly    tanhf of a poly float, poly_lanes() samples a step
-//   saturate               a rational function for tanh, written below, one sample at a time
-//   saturate_poly          the same rational function of a poly float, poly_lanes() samples a step
+//   Saturator::process_tanhf        <math.h>'s tanhf, one sample at a time
+//   Saturator::process_tanhf_poly   tanhf of a poly float, poly_lanes() samples a step
+//   Saturator::process              a rational function for tanh, written below, one sample at a time
+//   Saturator::process_poly         the same rational function of a poly float, poly_lanes() samples a step
 //
 // tanhf is a call into the C library. Of a poly float it is one call a lane, unless the target has a vector tanhf:
 // libsystem_m's _simd_tanh_f4 on Apple systems, for 4 lanes (docs/simd.md, recipe 8), which may differ from tanhf in
 // the last bits. The rational function is multiplies, adds and one divide, so of a poly float it is one vector
 // instruction each, and its output is the same at any width.
 //
-// Every kernel is [[clang::nonblocking]]: it may run on the audio thread.
+// Every method is [[clang::nonblocking]]: it may run on the audio thread.
 
 // tanh(x) as x times an even polynomial of degree 12 over an even polynomial of degree 6, in x squared: Eigen's fast
 // tanh for float (generic_fast_tanh_float), with its coefficients. Past +-7.905311, tanh(x) is +-1 to float's
@@ -60,35 +61,42 @@ poly float rational_tanh_poly(poly float x)
     return clamped * p / q;
 }
 
-void saturate_tanhf(const float* restrict input, float* restrict output, int n, float drive) [[clang::nonblocking]]
+module Saturator
 {
-    for (int i = 0; i < n; ++i)
-        output[i] = tanhf(drive * input[i]);
-}
+    param float drive [[fminus::range(0.1, 20)]] [[fminus::default(4)]];   // the gain before the tanh
 
-// poly_lanes() samples a step, through poly_load and poly_store. The last step, of the n % poly_lanes() samples left
-// (maybe none), goes under a mask: the lanes past n are neither read nor written.
-void saturate_tanhf_poly(const float* restrict input, float* restrict output, int n, float drive)
-    [[clang::nonblocking]]
-{
-    int i = 0;
-    for (; i + poly_lanes() <= n; i += poly_lanes())
-        poly_store(output + i, tanhf(drive * poly_load(input + i)));
-    const poly bool rest = i + poly_index() < n;
-    poly_store(output + i, tanhf(drive * poly_load(input + i, rest)), rest);
-}
+    void process_tanhf(const float* restrict input, float* restrict output, int n) [[clang::nonblocking]]
+    {
+        for (int i = 0; i < n; ++i)
+            output[i] = tanhf(drive[i] * input[i]);
+    }
 
-void saturate(const float* restrict input, float* restrict output, int n, float drive) [[clang::nonblocking]]
-{
-    for (int i = 0; i < n; ++i)
-        output[i] = rational_tanh(drive * input[i]);
-}
+    // poly_lanes() samples a step, through poly_load and poly_store. The last step, of the n % poly_lanes() samples
+    // left (maybe none), goes under a mask: the lanes past n are neither read nor written. A poly loop reads a
+    // parameter a float at a time, broadcast to every lane: so the drive is read once, a knob's one value a call.
+    void process_tanhf_poly(const float* restrict input, float* restrict output, int n) [[clang::nonblocking]]
+    {
+        const float g = drive[0];
+        int i = 0;
+        for (; i + poly_lanes() <= n; i += poly_lanes())
+            poly_store(output + i, tanhf(g * poly_load(input + i)));
+        const poly bool rest = i + poly_index() < n;
+        poly_store(output + i, tanhf(g * poly_load(input + i, rest)), rest);
+    }
 
-void saturate_poly(const float* restrict input, float* restrict output, int n, float drive) [[clang::nonblocking]]
-{
-    int i = 0;
-    for (; i + poly_lanes() <= n; i += poly_lanes())
-        poly_store(output + i, rational_tanh_poly(drive * poly_load(input + i)));
-    const poly bool rest = i + poly_index() < n;
-    poly_store(output + i, rational_tanh_poly(drive * poly_load(input + i, rest)), rest);
-}
+    void process(const float* restrict input, float* restrict output, int n) [[clang::nonblocking]]
+    {
+        for (int i = 0; i < n; ++i)
+            output[i] = rational_tanh(drive[i] * input[i]);
+    }
+
+    void process_poly(const float* restrict input, float* restrict output, int n) [[clang::nonblocking]]
+    {
+        const float g = drive[0];
+        int i = 0;
+        for (; i + poly_lanes() <= n; i += poly_lanes())
+            poly_store(output + i, rational_tanh_poly(g * poly_load(input + i)));
+        const poly bool rest = i + poly_index() < n;
+        poly_store(output + i, rational_tanh_poly(g * poly_load(input + i, rest)), rest);
+    }
+};

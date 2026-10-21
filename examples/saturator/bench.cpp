@@ -1,11 +1,14 @@
 // examples/saturator/bench.cpp: the saturator example's harness. It compiles saturator.fm through FMinus's library API
-// (include/fminus/FMinus.h), as a plugin would, runs its four kernels over noise, compares them with C++ versions of
-// the same formulas, and times them all. With --check (what ctest runs) it only compares, and fails when:
-//   - a kernel and its C++ version differ by more than --tolerance;
-//   - a poly float kernel's output changes with the width (it is compiled at every width from 1 to 64 lanes);
+// (include/fminus/FMinus.h), as a plugin would, makes an instance of its module, Saturator, sets its drive (a knob),
+// runs its four methods over noise, compares them with C++ versions of the same formulas, and times them all. With
+// --check (what ctest runs) it only compares, and fails when:
+//   - a method and its C++ version differ by more than --tolerance;
+//   - the rational tanh's poly float method's output changes with the width, or the tanhf one's moves more than
+//     tanhf's own 3 ulp from C++'s tanhf (both are compiled at every width from 1 to 64 lanes, and run on the same
+//     instance);
 //   - calling a kernel a block at a time changes its output;
 //   - the rational tanh is further from tanh (in double) than its comment promises;
-//   - a kernel is not [[clang::nonblocking]].
+//   - a method is not [[clang::nonblocking]].
 // It checks over noise at --drive, and over a ramp from -10 to 10, which reaches past the rational tanh's clamp.
 //
 //     build-release/bin/example-saturator                    (time in the release preset)
@@ -23,7 +26,10 @@
 #include <bit>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <format>
 #include <fstream>
 #include <iostream>
@@ -36,18 +42,54 @@
 
 namespace
 {
-    // Every kernel's C type: it saturates n samples from input into output.
+    // A C++ version's type: it saturates n samples from input into output, at `drive`.
     using Process = void(const float* input, float* output, int n, float drive);
 
-    // saturator.fm's kernels, as FMinus compiled them, and their C++ versions (none for the poly floats: the C++ loops
+    // A method's: it saturates n samples of the instance it runs on, at the instance's drive.
+    using Method = void(void* saturator, const float* input, float* output, int n);
+
+    // saturator.fm's methods, as FMinus compiled them, and their C++ versions (none for the poly floats: the C++ loops
     // are the same whichever way FMinus writes them).
     struct Kernel
     {
-        const char* name;          // the FMinus function
+        const char* name;          // the FMinus method
         const char* description;   // a line of the timing table
-        Process* fminus = nullptr;
+        Method* fminus = nullptr;
         Process* cpp = nullptr;
     };
+
+    struct Free
+    {
+        void operator()(void* memory) const
+        {
+            std::free(memory);
+        }
+    };
+
+    // An instance of Saturator, as a host makes one: aligned and zeroed, its drive at its default. Every program this
+    // harness compiles lays the module out alike (its one slot, the drive's), so one instance serves them all.
+    // std::aligned_alloc takes an alignment of at least a pointer's on macOS, and a size that is a multiple of it.
+    struct Instance
+    {
+        std::unique_ptr<void, Free> memory;
+        const fminus::Program::Parameter* drive = nullptr;
+    };
+
+    Instance makeInstance(const fminus::Program& program)
+    {
+        const fminus::Program::Module* module = program.module("Saturator");
+        Instance instance;
+        if (module == nullptr || (instance.drive = program.parameter("Saturator::drive")) == nullptr)
+            return instance;
+        const std::size_t alignment = std::max(module->alignment, alignof(std::max_align_t));
+        instance.memory.reset(std::aligned_alloc(alignment, (module->size + alignment - 1) / alignment * alignment));
+        if (instance.memory)
+        {
+            std::memset(instance.memory.get(), 0, module->size);
+            fminus::Program::setDefaults(instance.memory.get(), *module);
+        }
+        return instance;
+    }
 
     // saturator.fm's rational_tanh, in the same order.
     float rationalTanh(float x)
@@ -119,8 +161,8 @@ namespace
         return exact;
     }
 
-    // A kernel over the whole input, one call a block of `block` samples (0: one call for all of it), as a plugin calls
-    // it once a host buffer.
+    // A C++ version over the whole input, one call a block of `block` samples (0: one call for all of it), as a
+    // plugin calls it once a host buffer.
     void run(Process* process, const std::vector<float>& input, float drive, std::size_t block,
              std::vector<float>& output)
     {
@@ -129,6 +171,19 @@ namespace
         {
             const std::size_t n = std::min(step, input.size() - start);
             process(input.data() + start, output.data() + start, static_cast<int>(n), drive);
+        }
+    }
+
+    // A method, the same way, on `instance` with its drive set to `drive` (the knob, which each call reads once).
+    void run(Method* process, const Instance& instance, const std::vector<float>& input, float drive,
+             std::size_t block, std::vector<float>& output)
+    {
+        fminus::Program::setValue(instance.memory.get(), *instance.drive, static_cast<double>(drive));
+        const std::size_t step = block == 0 ? input.size() : block;
+        for (std::size_t start = 0; start < input.size(); start += step)
+        {
+            const std::size_t n = std::min(step, input.size() - start);
+            process(instance.memory.get(), input.data() + start, output.data() + start, static_cast<int>(n));
         }
     }
 
@@ -177,7 +232,7 @@ namespace
         return best / static_cast<double>(samples);
     }
 
-    // saturator.fm compiled at -O`level` with poly floats of `lanes` (0: this machine's), and its four kernels; or
+    // saturator.fm compiled at -O`level` with poly floats of `lanes` (0: this machine's), and its four methods; or
     // nullptr, with the errors.
     std::unique_ptr<fminus::Program> compile(const std::string& path, const std::string& source, int level,
                                              unsigned lanes, std::array<Kernel, 4>& kernels, std::string& errors)
@@ -191,7 +246,7 @@ namespace
             return nullptr;
         for (Kernel& kernel : kernels)
         {
-            kernel.fminus = program->function<Process>(kernel.name, errors);
+            kernel.fminus = program->function<Method>(kernel.name, errors);
             if (kernel.fminus == nullptr)
                 return nullptr;
         }
@@ -200,7 +255,8 @@ namespace
 
     // Everything --check checks, over one input. Prints a line, and returns whether it all held.
     bool check(const std::string& path, const std::string& source, int level, const std::array<Kernel, 4>& kernels,
-               const std::string& what, const std::vector<float>& input, float drive, double tolerance)
+               const Instance& instance, const std::string& what, const std::vector<float>& input, float drive,
+               double tolerance)
     {
         const std::size_t samples = input.size();
         std::vector<float> fminusOutput(samples);
@@ -212,7 +268,7 @@ namespace
         std::int64_t tanhfBlockUlps = 0;
         for (const Kernel& kernel : kernels)
         {
-            run(kernel.fminus, input, drive, 0, fminusOutput);
+            run(kernel.fminus, instance, input, drive, 0, fminusOutput);
             run(kernel.cpp, input, drive, 0, cppOutput);
             worstAgainstCpp = std::max(worstAgainstCpp, maxDifference(fminusOutput, cppOutput));
             // Calls of 64 samples, then of 61 (blocks that end mid-way through a poly float), give the output one
@@ -224,7 +280,7 @@ namespace
             const bool library = kernel.cpp == cppTanhf;
             for (const std::size_t block : {std::size_t{64}, std::size_t{61}})
             {
-                run(kernel.fminus, input, drive, block, other);
+                run(kernel.fminus, instance, input, drive, block, other);
                 const std::int64_t ulps = maxUlps(other, fminusOutput);
                 if (library)
                     tanhfBlockUlps = std::max(tanhfBlockUlps, ulps);
@@ -232,10 +288,14 @@ namespace
             }
         }
 
-        // The rational tanh's poly floats are lane-independent: every width gives the scalar loop's output.
+        // The rational tanh's poly floats are lane-independent: every width gives the scalar loop's output. The tanhf
+        // poly loop's is the C library's, scalar or vector as the width has it: within tanhf's ulps of C++'s tanhf.
         std::vector<float> scalar(samples);
-        run(kernels[2].fminus, input, drive, 0, scalar);
+        run(kernels[2].fminus, instance, input, drive, 0, scalar);
+        std::vector<float> libraryTanh(samples);
+        run(cppTanhf, input, drive, 0, libraryTanh);
         bool sameAtEveryWidth = true;
+        std::int64_t tanhfWidthUlps = 0;
         for (unsigned lanes = 1; lanes <= 64; lanes *= 2)
         {
             std::array<Kernel, 4> atWidth = kernels;
@@ -246,25 +306,28 @@ namespace
                 std::cerr << "example-saturator: " << errors;
                 return false;
             }
-            run(atWidth[3].fminus, input, drive, 0, other);
+            run(atWidth[3].fminus, instance, input, drive, 0, other);
             sameAtEveryWidth = sameAtEveryWidth && other == scalar;
-            run(atWidth[3].fminus, input, drive, 61, other);
+            run(atWidth[3].fminus, instance, input, drive, 61, other);
             sameAtEveryWidth = sameAtEveryWidth && other == scalar;
+            run(atWidth[1].fminus, instance, input, drive, 61, other);
+            tanhfWidthUlps = std::max(tanhfWidthUlps, maxUlps(other, libraryTanh));
         }
 
         const std::vector<double> exact = exactTanh(input, drive);
         const double rationalError = maxDifference(scalar, exact);
-        run(kernels[0].fminus, input, drive, 0, fminusOutput);
+        run(kernels[0].fminus, instance, input, drive, 0, fminusOutput);
         const double tanhfError = maxDifference(fminusOutput, exact);
 
         std::cout << std::format("example-saturator: {}: max |FMinus - C++| = {:.3g} (tolerance {:.3g}); "
                                  "the same output in blocks of 64 and 61: {} (tanhf's within {} ulp: {}), and at 1 "
-                                 "to 64 lanes: {}; max |tanh - exact|: tanhf {:.3g}, rational {:.3g} (at most "
-                                 "{:.3g})\n",
+                                 "to 64 lanes: {} (tanhf's poly within {} ulp of C++'s tanhf: {}); max |tanh - "
+                                 "exact|: tanhf {:.3g}, rational {:.3g} (at most {:.3g})\n",
                                  what, worstAgainstCpp, tolerance, sameInBlocks ? "yes" : "no", kMaxTanhfUlps,
-                                 tanhfBlockUlps, sameAtEveryWidth ? "yes" : "no", tanhfError, rationalError,
-                                 kRationalError);
-        return worstAgainstCpp <= tolerance && sameInBlocks && sameAtEveryWidth && rationalError <= kRationalError;
+                                 tanhfBlockUlps, sameAtEveryWidth ? "yes" : "no", kMaxTanhfUlps, tanhfWidthUlps,
+                                 tanhfError, rationalError, kRationalError);
+        return worstAgainstCpp <= tolerance && sameInBlocks && sameAtEveryWidth && tanhfWidthUlps <= kMaxTanhfUlps
+               && rationalError <= kRationalError;
     }
 } // namespace
 
@@ -309,10 +372,10 @@ int main(int argc, char** argv)
     const std::string source = text.str();
 
     std::array<Kernel, 4> kernels{
-        Kernel{"saturate_tanhf", "tanhf, one sample at a time", nullptr, cppTanhf},
-        Kernel{"saturate_tanhf_poly", "tanhf, a poly float at a time", nullptr, cppTanhf},
-        Kernel{"saturate", "rational tanh, one sample at a time", nullptr, cppRational},
-        Kernel{"saturate_poly", "rational tanh, a poly float at a time", nullptr, cppRational},
+        Kernel{"Saturator::process_tanhf", "tanhf, one sample at a time", nullptr, cppTanhf},
+        Kernel{"Saturator::process_tanhf_poly", "tanhf, a poly float at a time", nullptr, cppTanhf},
+        Kernel{"Saturator::process", "rational tanh, one sample at a time", nullptr, cppRational},
+        Kernel{"Saturator::process_poly", "rational tanh, a poly float at a time", nullptr, cppRational},
     };
     std::string errors;
     const std::unique_ptr<fminus::Program> program = compile(path, source, level, lanes, kernels, errors);
@@ -321,18 +384,24 @@ int main(int argc, char** argv)
         std::cerr << "example-saturator: " << errors;
         return 1;
     }
+    const Instance instance = makeInstance(*program);
+    if (!instance.memory)
+    {
+        std::cerr << "example-saturator: " << path << " has no module Saturator with a parameter drive\n";
+        return 1;
+    }
 
     if (checkOnly)
     {
         bool nonBlocking = true;
         for (const Kernel& kernel : kernels)
             nonBlocking = nonBlocking && program->nonBlocking(kernel.name);
-        const bool noise = check(path, source, level, kernels, std::format("noise at drive {}", drive),
+        const bool noise = check(path, source, level, kernels, instance, std::format("noise at drive {}", drive),
                                  makeNoise(samples), drive, tolerance);
-        const bool ramp =
-            check(path, source, level, kernels, "ramp from -10 to 10", makeRamp(samples), 1.0f, tolerance);
+        const bool ramp = check(path, source, level, kernels, instance, "ramp from -10 to 10", makeRamp(samples), 1.0f,
+                                tolerance);
         if (!nonBlocking)
-            std::cout << "example-saturator: a kernel is not [[clang::nonblocking]]\n";
+            std::cout << "example-saturator: a method is not [[clang::nonblocking]]\n";
         return noise && ramp && nonBlocking ? 0 : 1;
     }
 
@@ -348,10 +417,10 @@ int main(int argc, char** argv)
     for (const Kernel& kernel : kernels)
     {
         const double fminusTime =
-            nanosecondsPerSample([&] { run(kernel.fminus, input, drive, block, output); }, samples, repeats);
+            nanosecondsPerSample([&] { run(kernel.fminus, instance, input, drive, block, output); }, samples, repeats);
         const double error = maxDifference(output, exact);
         // The C++ loops are the same for a kernel and its poly float version: time them once.
-        const bool poly = std::string_view(kernel.name).ends_with("_poly");
+        const bool poly = std::string_view(kernel.name).ends_with("_poly");   // the same C++ as the one above
         const std::string cppTime =
             poly ? std::string("")
                  : std::format("{:.2f}", nanosecondsPerSample([&] { run(kernel.cpp, input, drive, block, output); },
