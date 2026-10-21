@@ -41,9 +41,9 @@ Each file states what it tests in its first line, then has a few helpers and the
   `ModuleTest.cpp`, `FftTest.cpp`, `ParamTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`) parses, lowers and JIT-compiles at
   -O2, and returns the `Jit`, or null with the formatted errors. `lookup<float(float)>(*jit, "f")` gives a callable
   function, and `lookup<void(const float*, float*, int)>(*jit, "g")` one that takes a test's buffers
-  (`std::array::data()`). A third
-  parameter, the `ir::Options`, compiles at a chosen `poly float` width, `compile(source, &errors, {.polyLanes = 16})`,
-  or with the parameters bound (`options.parameters["Amp::gain"] = {Kind::Stream, 0.0}`, `ParamTest.cpp`).
+  (`std::array::data()`). A third parameter, the `ir::Options`, compiles at a chosen `poly float` width,
+  `compile(source, &errors, {.polyLanes = 16})`, or with the parameters bound (`options.parameters["Amp::gain"] =
+  {Kind::Stream, 0.0}`, `ParamTest.cpp`).
 - `errorsOf(source)` returns the errors of a program that must fail.
 
 ```cpp
@@ -155,18 +155,26 @@ fast-math flags, change the C++ reference in the same commit. A tolerance is a s
 as tight as the change allows.
 
 A harness calls FMinus once for a whole run, so the loop over the samples is the kernel's, as `examples/biquad/`
-does. The kernel processes a block:
+does. The kernel is a module's method that processes a block, on an instance the harness allocates:
 
 ```c
-void process(const float* restrict input, float* restrict output, int n, float* restrict state);
+module Biquad
+{
+    param float cutoff;   // ... and q, and the rate: the host's
+    float s1;
+    float s2;
+    void process(const float* restrict input, float* restrict output, int n) [[clang::nonblocking]];
+};
 ```
 
-Its state is the caller's, read at the start of a call and written back at the end, so `--block N` can call it a
-block at a time, as a plugin would, and `--check` compares calls of 64 and 61 samples with one call (they must be
-bit-identical). A call per sample measures the call more than the kernel: the biquad took 3.88 ns a sample at one call
-a sample, and takes 2.66, level with C++, at one call for all of them. When the state's size is the program's to
-decide, the program allocates it, in functions the harness calls before and after the run, and marks the kernel
-`[[clang::nonblocking]]` so it can't allocate (`examples/delay/`).
+Its state is the instance's fields, which carry over from one call to the next, so `--block N` can call it a block at a
+time, as a plugin would, and `--check` compares calls of 64 and 61 samples with one call (they must be bit-identical). A
+harness sets the parameters to values other than their `fminus::default`s, at least in `--check`, so a parameter that
+never reaches its slot fails it. (`examples/delay/delay.fm` has the same shape in plain C: a function, its state the
+caller's, through a pointer.) A call per sample measures the call more than the kernel: the biquad took 3.88 ns a sample
+at one call a sample, and takes 2.66, level with C++, at one call for all of them. When the state's size is the
+program's to decide, the program allocates it, in functions the harness calls before and after the run, and marks the
+kernel `[[clang::nonblocking]]` so it can't allocate (`examples/delay/`).
 
 Write the C++ reference as the kernel is written, on raw pointers. The examples compile with LLVM's definitions,
 which turn on libc++'s hardening, so a `std::vector`'s `operator[]` in the reference's loop checks every index: the

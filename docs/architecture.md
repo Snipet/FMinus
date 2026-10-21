@@ -154,11 +154,11 @@ on it without the code generator.
   answer the questions the rules ask: `lanes`, `isVector`, `isMask`, `isPoly`, `isPointer`, `isModule`, `isArray`,
   `pointee`, `samePointee`, `canPointTo`, `isArithmetic`, `vectorOf`, `maskOf`, `arithmeticOf` ([simd.md](simd.md)).
 - **Modules.** A `Module` is a name, its `Field`s (a name and a type each; a parameter's, `param float cutoff;`, is
-  marked, with its attributes) and its methods' names. Its methods are
-  `Function`s of the program, named `OnePole::tick`, with `module` set and a first parameter, `this`, that the parser
-  adds. The program holds its modules by `std::unique_ptr`, so a `Type` may point to one. A module's name is a type
-  from its declaration on: the scanner returns it as `MODULE_NAME` (`ParseContext.h`), as a C compiler does a
-  typedef's, so `OnePole* p;` is a declaration and `a * b;` a product.
+  marked, with its attributes) and its methods' names. Its methods are `Function`s of the program, named
+  `OnePole::tick`, with `module` set and a first parameter, `this`, that the parser adds. The program holds its modules
+  by `std::unique_ptr`, so a `Type` may point to one. A module's name is a type from its declaration on: the scanner
+  returns it as `MODULE_NAME` (`ParseContext.h`), as a C compiler does a typedef's, so `OnePole* p;` is a declaration
+  and `a * b;` a product.
 - **Ownership.** Children are owned: `ExprPtr = std::unique_ptr<Expr>`, and a `BlockStmt` holds a
   `std::vector<Stmt>`. `Param`, `Function` (definition or prototype) and `Program` are aggregates of those.
 - **Exhaustive walks.** Code that walks the tree uses `std::visit` with an `Overloaded{...}` set of lambdas and no
@@ -367,8 +367,8 @@ Because the JIT and executables share one runtime, the two compile the same prog
 | `fminus` | `tools/fminus/main.cpp` | parse, lower, then `--emit ast/ll/asm/obj/exe` or `--run` in the JIT |
 | `fminus-build` | `tools/fminus-build/main.cpp` | LLVM IR to exe/obj/asm/ll (HostTarget + Aot) |
 | `fminus-hostinfo` | `tools/fminus-hostinfo/main.cpp` | the triple, CPU, features and data layout the JIT targets |
-| `example-biquad` | `examples/biquad/bench.cpp` | biquad.fm in the JIT against C++, compared and timed |
-| `example-delay` | `examples/delay/bench.cpp` | delay.fm, its line allocated by the program, against C++ |
+| `example-biquad` | `examples/biquad/bench.cpp` | biquad.fm's module, its cutoff a stream, against C++, compared and timed, through `fminus::Program` |
+| `example-delay` | `examples/delay/bench.cpp` | delay.fm's functions and echo.fm's module, their lines allocated by the program, against C++, through `fminus::Program` |
 | `example-saturator` | `examples/saturator/bench.cpp` | saturator.fm's tanh, plain and `poly float` loops, against C++, through `fminus::Program` |
 | `example-meter` | `examples/meter/bench.cpp` | meter.fm's peak and RMS, plain and `poly float` loops, against C++, through `fminus::Program` |
 | `fminus-tests` | `tests/unit/`, `tests/smoke/` | Catch2 |

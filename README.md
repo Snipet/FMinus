@@ -72,17 +72,21 @@ tools/<name>/           one executable per directory, with CLI11 for its command
                         fminus-build and fminus-hostinfo
 examples/<name>/        one example per directory: an FMinus program, and a harness if it has .cpp files
                         (bin/example-<name>):
-  biquad/               a biquad with per-sample coefficients, one float4 call a sample, against C++, compared and
-                        timed; a plan to grow it
+  biquad/               a biquad module with per-sample coefficients, its cutoff a stream, against C++, compared
+                        and timed; a plan to grow it
   note/                 a whole program with a main: a MIDI note's frequency (docs/programs.md)
   comparison/           a main that returns a bool: whether its two arguments are equal
   waveforms/            band-limited sawtooth and square waves by additive synthesis: for, while, if, break, continue
   chord/                a chord's four notes in a float4: one vector expf, literals, swizzles, reductions
   unison/               detuned sawtooth voices, one a lane of a poly float: a strip-mined loop with a mask
-  delay/                a feedback delay whose line the program allocates, run by a [[clang::nonblocking]] kernel
-  saturator/            tanh(drive * x), a loop over samples against one over poly floats (poly_load, poly_store)
-  meter/                a block's peak and RMS, by plain loops and by poly floats' reductions
-  voices/               eight synth voices in modules, in memory a host of the public API allocates, against C++
+  delay/                a feedback delay whose line the program allocates, run by a [[clang::nonblocking]] kernel:
+                        as plain C functions, and as a module with knobs
+  saturator/            tanh(drive * x), a loop over samples against one over poly floats (poly_load, poly_store);
+                        the drive a knob
+  meter/                a block's peak and RMS, by plain loops and by poly floats' reductions; a meter module whose
+                        held peak falls by a knob
+  voices/               eight synth voices in modules, in memory a host of the public API allocates, its controls
+                        knobs, against C++
   convolver/            a long FIR filter by FFT (overlap-add), against C++ and a direct convolution
   parameters/           a filter's cutoff swept by an LFO through a knob or a stream, or frozen, against C++
   hello/                FMinus as a library at its smallest: a main that JIT-compiles a program from a string
@@ -245,9 +249,12 @@ Where FMinus differs from C, it is on purpose:
 A v0 program with `f` suffixes, with prototypes for calls ahead of a definition, with vectors only in C's form (braces,
 given clang's `ext_vector_type`), and without `%` on floats, `poly`, modules or `main`, is therefore also a valid C
 program with the same meaning, given `<math.h>` (`<stdlib.h>` for the heap; C23 for the attributes) and
-`-ffp-contract=off`. The example above, `examples/biquad/biquad.fm` and `examples/delay/delay.fm` all compile as C
-under `-Wall -Wextra -Werror`, the last with clang's `-Wfunction-effects` too. One with modules is C++ instead, spelled
-`struct` for `module` and `__restrict` for `restrict` (`examples/voices/voices.fm` compiles so).
+`-ffp-contract=off`. The example above and `examples/delay/delay.fm` compile as C under `-Wall -Wextra -Werror`, the
+latter with clang's `-Wfunction-effects` too. One with modules is C++ instead, spelled `struct` for `module` and
+`__restrict` for `restrict`, as long as no module has parameters, which are FMinus's own: `examples/voices/voices.fm`'s
+modules but `Synth` compile so, with `-Wno-perf-constraint-implies-noexcept` (C++ wants a nonblocking function
+`noexcept` too). The other examples use modules with parameters, `poly`, FMinus's own builtins (the convolver's FFT)
+or a `main`; hello's one function is C.
 
 Every FMinus function becomes an external LLVM function of the same name with the C calling convention (a `float` is
 LLVM's `float`, an `int` an `i32`, a pointer a `ptr`), so C++ calls JIT'd code through a pointer of the matching type:
@@ -288,12 +295,13 @@ types:
    `ModuleTest.cpp`, `FftTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`, which share `Compile.h`), IR or errors in
    `tests/lit/fminus/*.fm` (`// RUN:` lines, checked by FileCheck).
 
-`examples/biquad/` is a kernel to grow the language around. It is a biquad low-pass with coefficients recomputed
-every sample, which filters a block a call, with a harness that calls it once, compares it with C++ and times both,
-and a plan of features in its README. `examples/delay/` is a feedback delay whose line the program allocates, with a
-kernel marked `[[clang::nonblocking]]`. `examples/saturator/` (tanh) and `examples/meter/` (peak and RMS) each run a
-loop over samples against a loop over `poly float`s, and time both. `examples/voices/` is a synth of eight voices in
-modules, which a host of the public API allocates and runs. `examples/convolver/` convolves with an impulse response
+`examples/biquad/` is a kernel to grow the language around. It is a biquad low-pass module with coefficients
+recomputed every sample, its cutoff a stream, which filters a block a call, with a harness that calls it once,
+compares it with C++ and times both, and a plan of features in its README. `examples/delay/` is a feedback delay whose
+line the program allocates, with a kernel marked `[[clang::nonblocking]]`, written as plain C and as a module.
+`examples/saturator/` (tanh) and `examples/meter/` (peak and RMS) each run a loop over samples against a loop over
+`poly float`s, and time both. `examples/voices/` is a synth of eight voices in modules, its controls knobs, which a
+host of the public API allocates and runs. `examples/convolver/` convolves with an impulse response
 by FFT. `examples/parameters/` sweeps a filter's cutoff with an LFO, through a knob once a call or a stream a sample,
 and freezes a fixed one.
 

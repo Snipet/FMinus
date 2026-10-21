@@ -481,9 +481,10 @@ It starts from a zero vector instead of poison, and the zeros fold into the cons
   %0 = insertelement <4 x float> <float poison, float 2.000000e+00, float 0.000000e+00, float 0.000000e+00>, float %a, i64 0
 ```
 
-A function that builds its vectors with braces only is C as well. `examples/biquad/biquad.fm` does, and compiles with
-`clang -std=c17 -Wall -Wextra -Werror` given `typedef float float4 __attribute__((ext_vector_type(4)));`; the C build
-and FMinus's agree bit for bit.
+A function that builds its vectors with braces only is C as well. `examples/biquad/biquad.fm`'s
+`lowpass_coefficients` does, and compiles with `clang -std=c17 -Wall -Wextra -Werror` given
+`typedef float float4 __attribute__((ext_vector_type(4)));` (the module around it, with its parameters, is FMinus's
+own).
 
 ### Swizzles
 
@@ -1353,10 +1354,10 @@ Design notes, not written or verified:
   (`shufflevector` with indices computed from the width), and prefix sums. They are what filters across lanes need.
 - **Voices in lanes.** For a synthesizer: a struct of `poly float` state, one voice per lane, stepped together, with
   a mask for the lanes whose voices are off. The work is lane-independent, so the output is the same at any width.
-- **The biquad on four channels.** `examples/biquad/` filters a block a call, its state through a pointer (recipe
-  10). Four channels' samples, states and coefficients as `float4`s (a `const float4*` of frames) would filter four
-  channels at once: in C++, 1.44 ns a channel's sample against 2.8 for one channel, twice the throughput, the four
-  lanes' recursions running side by side and `sinf` and `cosf` one vector call each.
+- **The biquad on four channels.** `examples/biquad/` filters a block a call, its state in a module's fields
+  (recipe 12). Four channels' samples, states and coefficients as `float4`s (a `const float4*` of frames) would
+  filter four channels at once: in C++, 1.44 ns a channel's sample against 2.8 for one channel, twice the
+  throughput, the four lanes' recursions running side by side and `sinf` and `cosf` one vector call each.
 - **Overloading.** `examples/saturator/` writes its rational tanh twice, for a `float` and for a `poly float`, since
   C has no overloading. OpenCL C's `__attribute__((overloadable))`, or C11's `_Generic`, would give the two one name.
 - **Multiversioning.** Compile `poly` functions at several widths for executables, and dispatch on the CPU at load

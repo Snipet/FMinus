@@ -10,10 +10,10 @@ vectors.
 Recipes 1 to 4 are in the compiler now (`tanhf` and `%`; `bool` and its operators; `if`, `while` and `for`), and so are
 simd.md's 7 to 9, recipe 10 (`int`, `void` and pointers), recipe 11 (the heap), recipe 12 (arrays and modules),
 recipe 13 (the FFT) and recipe 14 (parameters), so their sections describe how the code you have got there: read a
-section beside the files it names. Recipes 5 and 6, a runtime function and a pass, are not part of the language; they live in [recipes/](recipes/)
-as a patch, so you can apply them to see them work. None of these are sketches: each was applied to this repository,
-built with `-Werror`, and tested in the dev and asan presets, every test passing. [architecture.md](architecture.md)
-describes the stages they touch.
+section beside the files it names. Recipes 5 and 6, a runtime function and a pass, are not part of the language; they
+live in [recipes/](recipes/) as a patch, so you can apply them to see them work. None of these are sketches: each
+was applied to this repository, built with `-Werror`, and tested in the dev and asan presets, every test passing.
+[architecture.md](architecture.md) describes the stages they touch.
 
 FMinus follows C. When a recipe has a semantic choice to make, it makes C's: conversions, short-circuiting, which
 `if` an `else` belongs to, what `continue` does in a `for`. And it reports errors in clang's words. The README lists
@@ -1020,8 +1020,9 @@ on:
 
 ## Recipe 10: `int`, `void` and pointers
 
-*In the compiler. Example: `examples/biquad/biquad.fm`, a filter that processes a block of samples in one call;
-harness and measurements in its README.*
+*In the compiler. Example: `examples/delay/delay.fm`, a feedback delay that processes a block of samples in one call,
+in plain C; harness and measurements in its README. (`examples/biquad/` did this too, before its state became a
+module's, recipe 12.)*
 
 A DSP kernel works on buffers. To take a C++ host's buffers and loop over them, a function needs pointers to reach the
 samples, an `int` to count and index them, and a way to return nothing:
@@ -2163,6 +2164,7 @@ Each of these was hit while writing the language or its recipes. [simd.md](simd.
 | `fminus-tests "a module's methods, and ..."` runs no test | Catch2 splits a filter at its commas | run by tag (`"[module]"`), or escape the comma (`\,`) |
 | A knob read in a loop is loaded every iteration, and the loop doesn't vectorise | an atomic load where `cutoff[i]` is: LLVM neither hoists nor merges atomic loads | load it once, in the entry block (`atEntry`, recipe 14) |
 | A method's state (`y += ...`) goes back to memory every sample once a parameter is a stream | the stream's pointer comes from the module, so LLVM can't tell its samples from the module's fields | an alias scope for the streams (`scopeStreams`, recipe 14) |
+| A frozen parameter moves an output's last bit, against the same value as a knob | LLVM constant-folds `sinf`, `cosf`, `expf` and `tanhf` of a constant with the host's double functions, rounded to float, not with libm's float ones, which differ from them by an ulp for about 1% of arguments | compare a frozen program with a knob's within a tolerance (`examples/parameters/`); exact folding would need FMinus's own math functions |
 | FileCheck reports a bad variable on a line that checks `[[fminus::range(0, 1)]]` | `[[...]]` is FileCheck's own syntax | match the brackets as regexes: `{{\[\[}}fminus::range(0, 1){{\]\]}}` (`params.fm`) |
 
 ## Where to go next
@@ -2244,10 +2246,9 @@ ones). On Apple systems vDSP is 2–3 times faster than either from about 512 po
 system framework: a backend chosen when FMinus is built, not a library inside it.
 
 **State: globals and `static`.** File-scope variables lower to LLVM globals, and `static` locals likewise. For a
-plugin, prefer state each instance owns, passed by pointer: memory the host gives, as `examples/biquad/` passes its
-`float* state` (recipe 10), or memory the program allocates off the audio thread, as `examples/delay/` does (recipe
-11). Nothing then allocates on the audio thread, and every instance has its own copy. A module (recipe 12) names the
-fields and holds them in one allocation, with the functions that run on them.
+plugin, prefer state each instance owns: a module (recipe 12), in memory the host gives it, as `examples/biquad/`'s
+filter and `examples/voices/`'s synth are, or memory the program allocates off the audio thread, as
+`examples/delay/` does (recipe 11). Nothing then allocates on the audio thread, and every instance has its own copy.
 
 **`switch`.** It lowers to LLVM's `switch` instruction, and its `break` reuses recipe 4's loop stack (rename
 `Loop`). Fall-through and `default:` are C's.
@@ -2273,10 +2274,9 @@ LLJIT's concurrent compilation, and caching objects between runs (`llvm::ObjectC
 
 The recipes in the compiler are their own reference: their code is in `src/`, and their tests in `tests/unit/`
 (`FrontendTest.cpp`, and `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `IntTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`,
-`EffectTest.cpp`, `ArrayTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `ParamTest.cpp`, `VectorTest.cpp` and
-`PolyTest.cpp` for the code generator) and `tests/lit/fminus/`.
-[recipes/](recipes/) holds the two that aren't, 5 and 6, as one patch against the compiler as it is
-([recipes/README.md](recipes/README.md)):
+`EffectTest.cpp`, `ArrayTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `ParamTest.cpp`, `VectorTest.cpp` and `PolyTest.cpp`
+for the code generator) and `tests/lit/fminus/`. [recipes/](recipes/) holds the two that aren't, 5 and 6, as one patch
+against the compiler as it is ([recipes/README.md](recipes/README.md)):
 
 ```bash
 git switch -c try-recipes

@@ -21,8 +21,9 @@ Elsewhere:
   processes a block of samples in one call.
 - [../examples/note/note.fm](../examples/note/note.fm) is a whole program, with a `main`.
 - [../examples/](../examples/) shows each feature in use: `waveforms/` (loops), `chord/` (`float4` and the vector
-  math library), `unison/` (`poly float`), `comparison/` (a `bool main`), `biquad/` (pointers: a block a call),
-  `delay/` (the heap, and a kernel that can't allocate), `saturator/` and `meter/` (`poly float` through a buffer,
-  against plain loops: a stateless tanh, and reductions), `voices/` (modules, in memory a host of the public API
-  allocates), `convolver/` (the FFT: a convolution by overlap-add), `parameters/` (a filter's cutoff swept through a
-  knob or a stream, or frozen).
+  math library), `unison/` (`poly float`), `comparison/` (a `bool main`), `biquad/` (a module filtering a block a
+  call, its cutoff a stream), `delay/` (the heap, and a kernel that can't allocate, in plain C and as a module),
+  `saturator/` and `meter/` (`poly float` through a buffer, against plain loops: a stateless tanh, and reductions;
+  each a module with a knob), `voices/` (modules, in memory a host of the public API allocates, their controls knobs),
+  `convolver/` (the FFT: a convolution by overlap-add), `parameters/` (a filter's cutoff swept through a knob or a
+  stream, or frozen).
