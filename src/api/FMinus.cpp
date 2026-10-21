@@ -18,8 +18,11 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <cmath>
 #include <cstddef>
 #include <functional>
+#include <limits>
 #include <map>
 #include <optional>
 #include <utility>
@@ -53,6 +56,39 @@ namespace fminus
         bool isPolyWidth(unsigned lanes)
         {
             return lanes >= 1 && lanes <= 64 && (lanes & (lanes - 1)) == 0;
+        }
+
+        ir::ParamBinding lowered(const Program::Binding& binding)
+        {
+            using Kind = ir::ParamBinding::Kind;
+            const Kind kind = binding.kind == Program::Binding::Kind::Stream   ? Kind::Stream
+                              : binding.kind == Program::Binding::Kind::Frozen ? Kind::Frozen
+                                                                               : Kind::Knob;
+            return {kind, binding.value};
+        }
+
+        // A parameter's range and default, from its attributes (the code generator has checked them).
+        void describe(const ast::Field& field, Program::Parameter& parameter)
+        {
+            for (const ast::Attribute& attribute : field.attributes)
+            {
+                std::vector<double> numbers;
+                for (const std::string& arg : attribute.args)
+                    numbers.push_back(ast::attributeNumber(arg).value_or(0.0));
+                if (attribute.name == "fminus::range" && numbers.size() == 2)
+                {
+                    parameter.minimum = numbers[0];
+                    parameter.maximum = numbers[1];
+                }
+                else if (attribute.name == "fminus::default" && numbers.size() == 1)
+                    parameter.defaultValue = numbers[0];
+            }
+        }
+
+        template <typename T>
+        T& at(void* instance, std::size_t offset)
+        {
+            return *reinterpret_cast<T*>(static_cast<unsigned char*>(instance) + offset);
         }
     } // namespace
 
@@ -110,6 +146,8 @@ namespace fminus
         ir::Options lowering;
         lowering.polyLanes = options.polyLanes != 0 ? options.polyLanes : fminus::polyLanes(**machine);
         lowering.dataLayout = (*machine)->createDataLayout().getStringRepresentation();
+        for (const auto& [name, binding] : options.parameters)
+            lowering.parameters.emplace(name, lowered(binding));
 
         auto context = std::make_unique<llvm::LLVMContext>();
         std::unique_ptr<llvm::Module> module = ir::lower(*program, *context, diagnostics, lowering);
@@ -131,10 +169,25 @@ namespace fminus
             info.alignment = layout.getABITypeAlign(type).value();
             for (std::size_t i = 0; i < declared->fields.size(); ++i)
             {
+                const ast::Field& field = declared->fields[i];
                 const auto index = static_cast<unsigned>(i);
-                info.fields.push_back({declared->fields[i].name, ast::typeName(declared->fields[i].type),
-                                       fields->getElementOffset(index).getFixedValue(),
-                                       layout.getTypeAllocSize(type->getElementType(index)).getFixedValue()});
+                const std::size_t offset = fields->getElementOffset(index).getFixedValue();
+                llvm::Type* element = type->getElementType(index);
+                info.fields.push_back({field.name, (field.isParam ? "param " : "") + ast::typeName(field.type), offset,
+                                       layout.getTypeAllocSize(element).getFixedValue()});
+                if (!field.isParam)
+                    continue;
+                // The slot, { const float* stream; T value; }.
+                const llvm::StructLayout* slot = layout.getStructLayout(llvm::cast<llvm::StructType>(element));
+                Parameter& parameter = info.parameters.emplace_back();
+                parameter.module = declared->name;
+                parameter.name = field.name;
+                parameter.type = ast::typeName(field.type);
+                const auto bound = options.parameters.find(declared->name + "::" + field.name);
+                parameter.binding = bound != options.parameters.end() ? bound->second : Binding{};
+                parameter.streamOffset = offset + slot->getElementOffset(0).getFixedValue();
+                parameter.valueOffset = offset + slot->getElementOffset(1).getFixedValue();
+                describe(field, parameter);
             }
             for (const std::string& method : declared->methods)
                 info.methods.push_back(declared->name + "::" + method);
@@ -208,5 +261,65 @@ namespace fminus
     const std::vector<Program::Module>& Program::modules() const
     {
         return impl_->modules;
+    }
+
+    const Program::Parameter* Program::parameter(std::string_view name) const
+    {
+        for (const Module& module : impl_->modules)
+        {
+            for (const Parameter& parameter : module.parameters)
+            {
+                if (name.size() == module.name.size() + 2 + parameter.name.size() && name.starts_with(module.name)
+                    && name.substr(module.name.size(), 2) == "::" && name.ends_with(parameter.name))
+                    return &parameter;
+            }
+        }
+        return nullptr;
+    }
+
+    // The method's load is LLVM's `load atomic monotonic`, a relaxed load: these are C++'s relaxed stores to it.
+    void Program::setValue(void* instance, const Parameter& parameter, double value) noexcept
+    {
+        if (parameter.type == "int")
+        {
+            // C's conversion toward 0, where an int holds it; past an int's ends, the end (and NaN is 0).
+            const double clamped = std::isnan(value) ? 0.0
+                                                     : std::clamp(std::trunc(value),
+                                                                  double{std::numeric_limits<std::int32_t>::min()},
+                                                                  double{std::numeric_limits<std::int32_t>::max()});
+            std::atomic_ref(at<std::int32_t>(instance, parameter.valueOffset))
+                .store(static_cast<std::int32_t>(clamped), std::memory_order_relaxed);
+        }
+        else if (parameter.type == "bool")
+            std::atomic_ref(at<bool>(instance, parameter.valueOffset)).store(value != 0.0, std::memory_order_relaxed);
+        else
+            std::atomic_ref(at<float>(instance, parameter.valueOffset))
+                .store(static_cast<float>(value), std::memory_order_relaxed);
+    }
+
+    double Program::value(const void* instance, const Parameter& parameter) noexcept
+    {
+        // atomic_ref of a const object is C++26's; the load does not write.
+        void* slot = const_cast<void*>(instance);
+        if (parameter.type == "int")
+            return std::atomic_ref(at<std::int32_t>(slot, parameter.valueOffset)).load(std::memory_order_relaxed);
+        if (parameter.type == "bool")
+            return std::atomic_ref(at<bool>(slot, parameter.valueOffset)).load(std::memory_order_relaxed) ? 1.0 : 0.0;
+        const float stored = std::atomic_ref(at<float>(slot, parameter.valueOffset)).load(std::memory_order_relaxed);
+        return static_cast<double>(stored);
+    }
+
+    void Program::setStream(void* instance, const Parameter& parameter, const float* samples) noexcept
+    {
+        at<const float*>(instance, parameter.streamOffset) = samples;
+    }
+
+    void Program::setDefaults(void* instance, const Module& module) noexcept
+    {
+        for (const Parameter& parameter : module.parameters)
+        {
+            if (parameter.defaultValue)
+                setValue(instance, parameter, *parameter.defaultValue);
+        }
     }
 } // namespace fminus

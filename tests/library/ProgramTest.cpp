@@ -5,7 +5,10 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <array>
+#include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -264,4 +267,209 @@ TEST_CASE("Programs compile, look up and run on several threads at once", "[libr
     for (std::thread& thread : threads)
         thread.join();
     CHECK(results == std::array<float, kThreads>{3.0f, 6.0f, 9.0f, 12.0f});
+}
+
+namespace
+{
+    // A low-pass whose cutoff is a parameter, with a switch and a mode: the parameters' tests share it.
+    const char* const kLowpass = "module Lowpass\n"
+                                 "{\n"
+                                 "    param float cutoff [[fminus::range(0, 1)]] [[fminus::default(0.25)]];\n"
+                                 "    param bool on [[fminus::default(1)]];\n"
+                                 "    param int mode [[fminus::range(-4, 4)]];\n"
+                                 "    float y;\n"
+                                 "\n"
+                                 "    void process(const float* restrict in, float* restrict out, int n)\n"
+                                 "        [[clang::nonblocking]]\n"
+                                 "    {\n"
+                                 "        for (int i = 0; i < n; ++i)\n"
+                                 "            out[i] = on[i] ? (y += cutoff[i] * (in[i] - y)) : in[i];\n"
+                                 "    }\n"
+                                 "\n"
+                                 "    int modeOf() { return mode[0]; }\n"
+                                 "};\n";
+
+    using Process = void(void*, const float*, float*, int);
+
+    // An instance of a module, as a host makes one: aligned, zeroed. std::aligned_alloc takes an alignment of at least
+    // a pointer's on macOS, and a size that is a multiple of it.
+    struct Instance
+    {
+        explicit Instance(const fminus::Program::Module& module)
+            : alignment(std::max(module.alignment, alignof(std::max_align_t)))
+            , memory(std::aligned_alloc(alignment, (module.size + alignment - 1) / alignment * alignment))
+        {
+            if (memory != nullptr)
+                std::memset(memory, 0, module.size);
+        }
+
+        ~Instance()
+        {
+            std::free(memory);
+        }
+
+        Instance(const Instance&) = delete;
+        Instance& operator=(const Instance&) = delete;
+
+        std::size_t alignment;
+        void* memory;
+    };
+} // namespace
+
+TEST_CASE("a Program describes a module's parameters, and a host sets them", "[library][param]")
+{
+    std::string errors;
+    auto program = fminus::Program::compile(kLowpass, errors);
+    INFO(errors);
+    REQUIRE(program);
+    const fminus::Program::Module* lowpass = program->module("Lowpass");
+    REQUIRE(lowpass != nullptr);
+    CHECK(lowpass->size == 56);   // three slots of 16 bytes, then y
+    REQUIRE(lowpass->fields.size() == 4);
+    CHECK(lowpass->fields[0].type == "param float");
+    CHECK(lowpass->fields[0].size == 16);
+    CHECK(lowpass->fields[3].offset == 48);
+    REQUIRE(lowpass->parameters.size() == 3);
+
+    const fminus::Program::Parameter* cutoff = program->parameter("Lowpass::cutoff");
+    REQUIRE(cutoff == &lowpass->parameters[0]);
+    CHECK(cutoff->module == "Lowpass");
+    CHECK(cutoff->name == "cutoff");
+    CHECK(cutoff->type == "float");
+    CHECK(cutoff->binding.kind == fminus::Program::Binding::Kind::Knob);
+    CHECK(cutoff->streamOffset == 0);
+    CHECK(cutoff->valueOffset == 8);
+    CHECK(cutoff->minimum == 0.0);
+    CHECK(cutoff->maximum == 1.0);
+    CHECK(cutoff->defaultValue == 0.25);
+    const fminus::Program::Parameter* on = program->parameter("Lowpass::on");
+    const fminus::Program::Parameter* mode = program->parameter("Lowpass::mode");
+    REQUIRE(on != nullptr);
+    REQUIRE(mode != nullptr);
+    CHECK(on->type == "bool");
+    CHECK(on->valueOffset == 24);
+    CHECK(!on->minimum.has_value());
+    CHECK(mode->minimum == -4.0);
+    CHECK(!mode->defaultValue.has_value());
+    CHECK(program->parameter("Lowpass::y") == nullptr);   // a field, not a parameter
+    CHECK(program->parameter("Lowpass::cutof") == nullptr);
+    CHECK(program->parameter("cutoff") == nullptr);
+    CHECK(program->nonBlocking("Lowpass::process"));
+
+    // Zeroed, then each parameter at its default: cutoff 0.25, on; mode, with no default, 0.
+    Instance instance(*lowpass);
+    REQUIRE(instance.memory != nullptr);
+    fminus::Program::setDefaults(instance.memory, *lowpass);
+    CHECK(fminus::Program::value(instance.memory, *cutoff) == 0.25);
+    CHECK(fminus::Program::value(instance.memory, *on) == 1.0);
+    CHECK(fminus::Program::value(instance.memory, *mode) == 0.0);
+    auto* process = program->function<Process>("Lowpass::process", errors);
+    REQUIRE(process != nullptr);
+    const std::array<float, 4> ones{1.0f, 1.0f, 1.0f, 1.0f};
+    std::array<float, 4> out{};
+    process(instance.memory, ones.data(), out.data(), 4);
+    CHECK(out == std::array<float, 4>{0.25f, 0.4375f, 0.578125f, 0.68359375f});
+
+    // An int's value truncated toward 0, a bool's true unless 0.
+    fminus::Program::setValue(instance.memory, *mode, -2.9);
+    CHECK(fminus::Program::value(instance.memory, *mode) == -2.0);
+    CHECK(program->function<int(void*)>("Lowpass::modeOf", errors)(instance.memory) == -2);
+    fminus::Program::setValue(instance.memory, *on, 0.0);
+    process(instance.memory, ones.data(), out.data(), 4);
+    CHECK(out == ones);
+}
+
+TEST_CASE("a Program binds parameters as the host asks: streams, frozen values, and one instance under both",
+          "[library][param]")
+{
+    std::string errors;
+    fminus::Program::Options streamed;
+    streamed.parameters["Lowpass::cutoff"] = fminus::Program::Binding::stream();
+    auto stream = fminus::Program::compile(kLowpass, errors, streamed);
+    INFO(errors);
+    REQUIRE(stream);
+    fminus::Program::Options frozen;
+    frozen.parameters["Lowpass::cutoff"] = fminus::Program::Binding::frozen(0.5);
+    frozen.parameters["Lowpass::mode"] = fminus::Program::Binding::frozen(3);
+    auto constant = fminus::Program::compile(kLowpass, errors, frozen);
+    REQUIRE(constant);
+    const fminus::Program::Parameter* cutoff = stream->parameter("Lowpass::cutoff");
+    REQUIRE(cutoff != nullptr);
+    CHECK(cutoff->binding.kind == fminus::Program::Binding::Kind::Stream);
+    CHECK(constant->parameter("Lowpass::cutoff")->binding.value == 0.5);
+    CHECK(stream->nonBlocking("Lowpass::process"));   // a stream allocates nothing either
+
+    // Every binding lays the slots out alike, so one instance runs under both programs.
+    const fminus::Program::Module& lowpass = *stream->module("Lowpass");
+    CHECK(constant->module("Lowpass")->parameters[0].valueOffset == cutoff->valueOffset);
+    Instance instance(lowpass);
+    REQUIRE(instance.memory != nullptr);
+    fminus::Program::setDefaults(instance.memory, lowpass);   // on; cutoff's value 0.25, which neither reads
+    const std::array<float, 4> sweep{0.5f, 0.5f, 1.0f, 0.0f};
+    fminus::Program::setStream(instance.memory, *cutoff, sweep.data());
+    const std::array<float, 4> ones{1.0f, 1.0f, 1.0f, 1.0f};
+    std::array<float, 4> out{};
+    stream->function<Process>("Lowpass::process", errors)(instance.memory, ones.data(), out.data(), 4);
+    CHECK(out == std::array<float, 4>{0.5f, 0.75f, 1.0f, 1.0f});   // each sample's own cutoff
+    std::memset(static_cast<unsigned char*>(instance.memory) + lowpass.fields[3].offset, 0, sizeof(float));   // y = 0
+    constant->function<Process>("Lowpass::process", errors)(instance.memory, ones.data(), out.data(), 4);
+    CHECK(out == std::array<float, 4>{0.5f, 0.75f, 0.875f, 0.9375f});
+    CHECK(constant->function<int(void*)>("Lowpass::modeOf", errors)(instance.memory) == 3);
+
+    // A binding that names no parameter, or a stream that is not a float, does not compile.
+    fminus::Program::Options wrong;
+    wrong.parameters["Lowpass::q"] = fminus::Program::Binding::knob();
+    wrong.parameters["Lowpass::on"] = fminus::Program::Binding::stream();
+    CHECK(fminus::Program::compile(kLowpass, errors, wrong) == nullptr);
+    CHECK(errors
+          == "program.fm:1:1: error: the host binds 'Lowpass::q', but the program has no such parameter\n"
+             "program.fm:4:16: error: parameter 'on' is a bool: only a float parameter can be a stream\n");
+}
+
+TEST_CASE("a knob set from another thread is read once a call, whole", "[library][param]")
+{
+    std::string errors;
+    auto program = fminus::Program::compile(kLowpass, errors);
+    INFO(errors);
+    REQUIRE(program);
+    const fminus::Program::Module& lowpass = *program->module("Lowpass");
+    const fminus::Program::Parameter& cutoff = lowpass.parameters[0];
+    auto* process = program->function<Process>("Lowpass::process", errors);
+    REQUIRE(process != nullptr);
+    Instance instance(lowpass);
+    REQUIRE(instance.memory != nullptr);
+    fminus::Program::setDefaults(instance.memory, lowpass);
+    fminus::Program::setValue(instance.memory, cutoff, 1.0);   // with cutoff 1, y is the input: out[i] = in[i]
+
+    // A control thread moves the knob between two values while the audio thread runs blocks. With in[i] = 1 and
+    // y = 0 at each block's start, out[0] is the block's cutoff: every sample of the block shows the one value read.
+    std::atomic<bool> done{false};
+    std::thread control([&] {
+        for (int i = 0; !done.load(std::memory_order_relaxed); ++i)
+            fminus::Program::setValue(instance.memory, cutoff, i % 2 == 0 ? 1.0 : 0.5);
+    });
+    const std::array<float, 64> ones = [] {
+        std::array<float, 64> filled{};
+        filled.fill(1.0f);
+        return filled;
+    }();
+    std::array<float, 64> out{};
+    int torn = 0;
+    float* y = reinterpret_cast<float*>(static_cast<unsigned char*>(instance.memory) + lowpass.fields[3].offset);
+    for (int block = 0; block < 2000; ++block)
+    {
+        *y = 0.0f;
+        process(instance.memory, ones.data(), out.data(), 64);
+        const float k = out[0];
+        float expected = 0.0f;
+        for (float sample : out)
+        {
+            const float step = k * (1.0f - expected);   // one rounding at a time, as FMinus: no fused multiply-add
+            expected = expected + step;
+            torn += sample == expected && (k == 1.0f || k == 0.5f) ? 0 : 1;
+        }
+    }
+    done = true;
+    control.join();
+    CHECK(torn == 0);
 }

@@ -34,13 +34,26 @@
 //
 // Lifetime: a function pointer is valid while its Program lives. Destroy a Program only when no thread can still be
 // running its code.
+//
+// Parameters: a module's `param float cutoff;` is a value the host sets, read in a method as cutoff[i], at sample i of
+// the call. How it reads is the host's choice when it compiles (Options::parameters, Binding): a knob (the value, read
+// once when the method starts, and safe to set from any thread), a stream (a buffer of samples, an LFO's say), or
+// frozen (a constant compiled in). Module::parameters describes each; setValue, setStream and setDefaults write them.
+//
+//   Program::Options options;
+//   options.parameters["Lowpass::cutoff"] = Program::Binding::stream();   // modulated: a sample each
+//   auto program = Program::compile(source, errors, options);
+//   const Program::Parameter* cutoff = program->parameter("Lowpass::cutoff");
+//   Program::setStream(lowpass, *cutoff, lfo);                            // before each call of Lowpass::process
 #pragma once
 
 #include "fminus/Config.h"   // IWYU pragma: export (FMINUS_VERSION_STRING, the LLVM this build links)
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -51,11 +64,52 @@ namespace fminus
     class Program
     {
     public:
+        // How a module's parameter reads in its methods, chosen when the program compiles. Every binding has the same
+        // slot in an instance (Parameter), so one instance can be run by programs that bind it differently.
+        //   Knob    the slot's value, loaded once when the method starts, with an atomic load: the host may set it
+        //           from any thread at any time (setValue), and the method sees one value it set, never a torn one.
+        //           Held in a register from then on, as fast as a local. The default.
+        //   Stream  a float parameter's buffer: cutoff[i] is samples[i], from the pointer the host sets before each
+        //           call (setStream). Sample-accurate: an audio-rate signal, an envelope, a smoothed knob.
+        //   Frozen  `value`, compiled in as a constant: a knob that will not move while this program plays. The
+        //           optimiser folds it as it folds a constant (a branch on a frozen bool disappears); the host
+        //           compiles again to move it.
+        struct Binding
+        {
+            enum class Kind
+            {
+                Knob,
+                Stream,
+                Frozen,
+            };
+
+            Kind kind = Kind::Knob;
+            double value = 0.0;   // a frozen parameter's: an int's truncated toward 0, a bool's true unless 0
+
+            static Binding knob()
+            {
+                return {};
+            }
+
+            static Binding stream()
+            {
+                return {Kind::Stream, 0.0};
+            }
+
+            static Binding frozen(double value)
+            {
+                return {Kind::Frozen, value};
+            }
+        };
+
         struct Options
         {
             int optimisation = 2;                  // -O0 to -O3: LLVM's pipeline at that level, as fminus -O<n>
             unsigned polyLanes = 0;                // a poly float's lanes (1, 2, 4, ... 64); 0 is this machine's
             std::string fileName = "program.fm";   // what the error messages call the source
+            // Each parameter's binding, by its qualified name ("Lowpass::cutoff"); one not named is a knob. A name
+            // that is no parameter of the program, or a stream that is not a float, is a compile error.
+            std::map<std::string, Binding> parameters;
         };
 
         // Compiles `source`. Returns nullptr when it does not compile, with `errors` holding FMinus's messages, one a
@@ -94,16 +148,33 @@ namespace fminus
         // (which includes it). FMinus has then checked that it cannot reach malloc, calloc or free.
         bool nonAllocating(std::string_view name) const;
 
+        // A module's parameter, `param float cutoff [[fminus::range(20, 20000)]] [[fminus::default(1000)]];`. Its
+        // slot in an instance is the C struct { const float* stream; T value; }, T a float, an int32_t or a bool (a
+        // byte), whatever its binding: the stream's pointer at streamOffset, the value at valueOffset.
+        struct Parameter
+        {
+            std::string module;                   // "Lowpass"
+            std::string name;                     // "cutoff"
+            std::string type;                     // "float", "int" or "bool"
+            Binding binding;                      // as this program reads it
+            std::size_t streamOffset = 0;         // in bytes, from the instance's address
+            std::size_t valueOffset = 0;
+            std::optional<double> minimum;        // fminus::range(minimum, maximum): what the host's control spans;
+            std::optional<double> maximum;        // FMinus neither clamps to it nor checks it
+            std::optional<double> defaultValue;   // fminus::default(value): what setDefaults sets
+        };
+
         // A module of the program (FMinus's class), as a host sees it. An instance is `size` bytes, aligned to
         // `alignment` and zeroed, since every field starts at 0 (std::aligned_alloc and std::memset, or a value-
         // initialised C++ struct with the same fields); a method then runs on its address (above). Nothing else is
-        // needed to make one: FMinus runs no constructor.
+        // needed to make one: FMinus runs no constructor. A module with parameters wants them set too (setDefaults).
         struct Module
         {
             struct Field
             {
                 std::string name;
-                std::string type;          // as FMinus writes it: "float", "float4", "float[16]", "Osc", "Osc *"
+                std::string type;          // as FMinus writes it: "float", "float4", "float[16]", "Osc", "Osc *";
+                                           // a parameter's "param float" (its slot)
                 std::size_t offset = 0;    // in bytes, from the instance's address
                 std::size_t size = 0;
             };
@@ -111,8 +182,9 @@ namespace fminus
             std::string name;
             std::size_t size = 0;
             std::size_t alignment = 1;
-            std::vector<Field> fields;          // in declaration order
-            std::vector<std::string> methods;   // as function() takes them: "OnePole::tick"
+            std::vector<Field> fields;              // in declaration order
+            std::vector<std::string> methods;       // as function() takes them: "OnePole::tick"
+            std::vector<Parameter> parameters;      // the fields that are parameters, in declaration order
         };
 
         // The module `name`, or nullptr when the program has none.
@@ -120,6 +192,27 @@ namespace fminus
 
         // Every module of the program, in declaration order.
         const std::vector<Module>& modules() const;
+
+        // The parameter `name`, qualified ("Lowpass::cutoff"), or nullptr when the program has none.
+        const Parameter* parameter(std::string_view name) const;
+
+        // Sets a parameter's value in `instance`, an instance of its module: a relaxed atomic store, from any thread
+        // at any time, which a method reads when it next starts. A float's rounded, an int's truncated toward 0 (and
+        // clamped to an int's range), a bool's true unless 0. A stream's or a frozen parameter's methods do not read
+        // it. No allocation, no lock: the audio thread may call it.
+        static void setValue(void* instance, const Parameter& parameter, double value) noexcept;
+
+        // The value setValue last set (a relaxed atomic load), as a double.
+        static double value(const void* instance, const Parameter& parameter) noexcept;
+
+        // Points a stream parameter at its samples for the next call: as many as the call reads, which a method that
+        // processes n samples, reading cutoff[i] for i below n, is n. The thread that calls the method sets it,
+        // before the call; the method reads it when it starts. A knob's or a frozen parameter's methods do not read
+        // it.
+        static void setStream(void* instance, const Parameter& parameter, const float* samples) noexcept;
+
+        // Sets each of the module's parameters that has an fminus::default to it (setValue), in `instance`.
+        static void setDefaults(void* instance, const Module& module) noexcept;
 
     private:
         struct Impl;
