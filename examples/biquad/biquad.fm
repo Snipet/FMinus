@@ -2,14 +2,14 @@
 // Cookbook" low-pass, in transposed direct form II. The harness (bench.cpp) runs it over noise with the cutoff swept
 // every sample, compares it with a C++ version of the same formulas and times both.
 //
-// One call filters a block. The harness passes its buffers (the input, a cutoff for each sample, the output), their
-// length, and the filter's state, (s1, s2), which it owns: lowpass reads the state at the start and writes it back at
-// the end, so the next call carries on where this one stopped. One call for the whole signal and one call a block
-// give the same output.
+// The filter is a module, Biquad: its state, (s1, s2), is two fields, and what a host sets is three parameters
+// (docs/extending.md, recipe 14). The harness compiles it with the cutoff a stream, a buffer of one cutoff a sample,
+// so the sweep is sample-accurate; q a knob, set once a call; and the sample rate frozen, compiled in as a constant,
+// since it changes only when the host starts again. process filters a block a call, and the state carries over, so
+// one call for the whole signal and one call a block give the same output.
 //
-// Every constant that is not a whole number is written as a float (the f suffix), and the float4s are built with C's
-// literal, (float4){...}, not OpenCL C's (float4)(...). So with clang's ext_vector_type for float4 (README.md has the
-// typedef) this file is also C with the same meaning, given <math.h> and -ffp-contract=off.
+// In the code, every constant that is not a whole number is written as a float (the f suffix), and the float4s are
+// built with C's literal, (float4){...}, not OpenCL C's (float4)(...): the functions are C too.
 
 float pi(void)
 {
@@ -27,22 +27,27 @@ float4 lowpass_coefficients(float cutoff, float q, float rate)
     return (float4){(1.0f - c) / 2.0f / a0, (1.0f - c) / a0, -2.0f * c / a0, (1.0f - alpha) / a0};
 }
 
-// n samples of transposed direct form II. The state is read once, lives in registers through the loop, and is written
-// back once. restrict promises that no two of the buffers overlap.
-void lowpass(const float* restrict input, const float* restrict cutoff, float* restrict output, int n, float q,
-             float rate, float* restrict state)
+module Biquad
 {
-    float s1 = state[0];
-    float s2 = state[1];
-    for (int i = 0; i < n; ++i)
+    param float cutoff [[fminus::range(20, 20000)]] [[fminus::default(1000)]];   // Hz
+    param float q [[fminus::range(0.1, 20)]] [[fminus::default(0.7071)]];
+    param float rate [[fminus::range(8000, 384000)]] [[fminus::default(48000)]];   // Hz
+    float s1;
+    float s2;
+
+    // n samples of transposed direct form II. The state lives in registers through the loop and goes back to its
+    // fields once, at the end: nothing else the loop reads or writes can be a field (restrict, and the stream's own
+    // alias scope).
+    void process(const float* restrict input, float* restrict output, int n) [[clang::nonblocking]]
     {
-        const float4 k = lowpass_coefficients(cutoff[i], q, rate);   // (b0, b1, a1, a2)
-        const float x = input[i];
-        const float y = k.x * x + s1;
-        s1 = k.y * x - k.z * y + s2;
-        s2 = k.x * x - k.w * y;
-        output[i] = y;
+        for (int i = 0; i < n; ++i)
+        {
+            const float4 k = lowpass_coefficients(cutoff[i], q[i], rate[i]);   // (b0, b1, a1, a2)
+            const float x = input[i];
+            const float y = k.x * x + s1;
+            s1 = k.y * x - k.z * y + s2;
+            s2 = k.x * x - k.w * y;
+            output[i] = y;
+        }
     }
-    state[0] = s1;
-    state[1] = s2;
-}
+};
