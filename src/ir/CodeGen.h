@@ -19,7 +19,7 @@ namespace llvm
 namespace fminus::ir
 {
     // How a program reads a module's parameter (`param float cutoff;`), the host's choice when it compiles:
-    //   Knob     its value slot, read once a call with a relaxed atomic load where a method starts: the host writes it
+    //   Knob     its value slot, read once a call with an atomic load where a method starts: the host writes it
     //            whenever it likes, from any thread (the default)
     //   Stream   the samples its stream slot points to, cutoff[i] the i-th: the host sets the pointer before each call
     //   Frozen   `value`, a constant compiled in, so the code around it folds (a frozen `mode` picks one branch)

@@ -1,6 +1,7 @@
 // A module's parameters, under each binding the host can choose (extending.md, recipe 14). Every binding has the
-// same slot, { ptr, T }: the stream's pointer, then the value. A knob is a relaxed atomic load (monotonic) of the value
-// where the method starts, a register from then on; a stream's pointer is loaded there too, and its samples, in their
+// same slot, { ptr, T }: the stream's pointer, then the value. A knob is an atomic load (unordered) of the value where
+// the method starts, a register from then on, and one LLVM may move: inlined into another method's loop, it leaves the
+// loop; a stream's pointer is loaded there too, and its samples, in their
 // own alias scope, cannot be what the method stores to its fields, so the state stays in a register through the loop;
 // a frozen parameter is a constant, folded.
 // RUN: fminus %s -O0 | FileCheck %s --check-prefix=LAYOUT
@@ -36,21 +37,56 @@ module Gain
     }
 };
 
+// A method that reads a knob, inlined into another's loop a sample at a time: the knob's loads leave the loop, which
+// vectorises.
+module Level
+{
+    param float level;
+
+    float tick(float x) [[clang::nonblocking]]
+    {
+        return level[0] * x;
+    }
+};
+
+module Chain
+{
+    Level stages[4];
+
+    void process(const float* restrict in, float* restrict out, int n) [[clang::nonblocking]]
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            float x = in[i];
+            for (int s = 0; s < 4; ++s)
+                x = stages[s].tick(x);
+            out[i] = x;
+        }
+    }
+};
+
 // LAYOUT: %Lowpass = type { { ptr, float }, float }
 // LAYOUT: %Gain = type { { ptr, float }, { ptr, i8 } }
 
 // KNOB-LABEL: define void @"Lowpass::process"(
 // KNOB:         entry:
 // KNOB-NEXT:      [[VALUE:%.*]] = getelementptr inbounds nuw i8, ptr %this, i64 8
-// KNOB-NEXT:      %cutoff = load atomic float, ptr [[VALUE]] monotonic, align 8
+// KNOB-NEXT:      %cutoff = load atomic float, ptr [[VALUE]] unordered, align 8
 // KNOB:         for.body:
 // KNOB-NOT:       load atomic
 // KNOB:           fmul float %cutoff,
 // KNOB-LABEL: define void @"Gain::process"(
-// KNOB:           %gain = load atomic float, ptr {{%.*}} monotonic
-// KNOB:           %on = load atomic i8, ptr {{%.*}} monotonic
+// KNOB:           %gain = load atomic float, ptr {{%.*}} unordered
+// KNOB:           %on = load atomic i8, ptr {{%.*}} unordered
 // KNOB:         vector.body:
 // KNOB:           fmul <4 x float>
+// KNOB-LABEL: define void @"Chain::process"(
+// KNOB-COUNT-4:   load atomic float, ptr {{%.*}} unordered
+// KNOB:         vector.body:
+// KNOB-NOT:       load atomic
+// KNOB:           fmul <4 x float>
+// KNOB-NOT:       load atomic
+// KNOB:         middle.block:
 
 // STREAM-LABEL: define void @"Lowpass::process"(
 // STREAM:         entry:
@@ -82,6 +118,6 @@ module Gain
 // AST:          (= ([] out i) (+= y (* ([] cutoff i) (- ([] in i) y))))))
 
 // ERR: params.fm:1:1: error: the host binds 'Gain::volume', but the program has no such parameter
-// ERR: params.fm:30:16: error: parameter 'on' is a bool: only a float parameter can be a stream
+// ERR: params.fm:31:16: error: parameter 'on' is a bool: only a float parameter can be a stream
 
 // SPEC: fminus: --freeze Gain::gain: not Module::name=value

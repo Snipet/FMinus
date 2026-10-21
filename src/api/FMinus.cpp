@@ -277,7 +277,8 @@ namespace fminus
         return nullptr;
     }
 
-    // The method's load is LLVM's `load atomic monotonic`, a relaxed load: these are C++'s relaxed stores to it.
+    // The method's load is LLVM's `load atomic unordered`, which can't tear and reads a value some store wrote: these
+    // are C++'s relaxed stores to it, which can't tear either.
     void Program::setValue(void* instance, const Parameter& parameter, double value) noexcept
     {
         if (parameter.type == "int")

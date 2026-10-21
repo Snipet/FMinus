@@ -7,7 +7,7 @@
 //
 // A parameter (`param float cutoff;`) is a field whose slot the host writes, { const float* stream; T value; }, the
 // same whatever the binding the host compiled the program with (ir::Options, CodeGen.h). A method reads it as
-// cutoff[i]: a knob's value, loaded once where the method starts with a relaxed atomic load (the host may store it
+// cutoff[i]: a knob's value, loaded once where the method starts with an unordered atomic load (the host may store it
 // from another thread at any time); a stream's i-th sample, from the pointer the method also loads where it starts; a
 // frozen parameter's constant. Loaded at the start, a knob's value and a stream's pointer are registers through the
 // method's loops, which then vectorise.
@@ -236,8 +236,15 @@ namespace fminus::ir::detail
         return poison(type);
     }
 
-    // What the method reads of parameter `field` where it starts, once: its stream's pointer, or its value (a relaxed
-    // atomic load, a bool's byte compared with 0). From `this` itself, the method's first argument.
+    // What the method reads of parameter `field` where it starts, once: its stream's pointer, or its value (an atomic
+    // load, a bool's byte compared with 0). From `this` itself, the method's first argument.
+    //
+    // The value's load is unordered, LLVM's weakest atomic ordering: it can't tear, so the method reads a value the
+    // host stored, whole, however the host's thread races it; and unlike a monotonic (C++'s relaxed) load, LLVM may
+    // move it and merge it with others. That matters once the method is inlined: a voice's filter.tick(), called a
+    // sample from its synth's loop, has its knob's load in the loop, and an unordered one leaves the loop, read once
+    // for the synth's call, where a monotonic one would stay, loaded every sample and keeping the loop from
+    // vectorising.
     llvm::Value* Lowering::atEntry(unsigned field, bool stream)
     {
         const auto key = std::make_pair(field, stream);
@@ -263,7 +270,7 @@ namespace fminus::ir::detail
             llvm::LoadInst* load = at.CreateAlignedLoad(value, at.CreateStructGEP(slotType, slot, 1),
                                                         llvm::Align(parameter.type == ast::Type::Bool ? 1 : 4),
                                                         parameter.name);
-            load->setAtomic(llvm::AtomicOrdering::Monotonic);
+            load->setAtomic(llvm::AtomicOrdering::Unordered);
             loaded = parameter.type == ast::Type::Bool ? at.CreateICmpNE(load, at.getInt8(0), parameter.name + ".on")
                                                        : static_cast<llvm::Value*>(load);
         }

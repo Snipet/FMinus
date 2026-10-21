@@ -2040,15 +2040,21 @@ or as `this->cutoff`. `lowerParameter` then lowers it by its binding:
             at.CreateStructGEP(structs_.at(&module), function->getArg(0), field, parameter.name + ".slot");
         ...
             llvm::LoadInst* load = at.CreateAlignedLoad(value, at.CreateStructGEP(slotType, slot, 1), ...);
-            load->setAtomic(llvm::AtomicOrdering::Monotonic);
+            load->setAtomic(llvm::AtomicOrdering::Unordered);
   ```
 
-  `Monotonic` is C++'s `memory_order_relaxed`: the load can't tear, and the host's store (`setValue`, a relaxed
-  `std::atomic_ref` store) is not a data race, from whichever thread it comes. On arm64 and x86-64 it is a plain load.
-  It is in the entry block, from `this` itself (the method's first argument, not its stack slot), so every
-  `cutoff[i]` in the method reads the same value, and the value is a register through the loops, which then vectorise
-  as they would on a constant. An atomic load in the loop instead would be one per iteration: LLVM neither merges nor
-  hoists atomic loads.
+  `Unordered` is LLVM's weakest atomic ordering: the load can't tear, and it reads a value some store wrote, so the
+  host's store (`setValue`, a relaxed `std::atomic_ref` store) is not a data race, from whichever thread it comes. On
+  arm64 and x86-64 it is a plain load. It is in the entry block, from `this` itself (the method's first argument, not
+  its stack slot), so every `cutoff[i]` in the method reads the same value, and the value is a register through the
+  loops, which then vectorise as they would on a constant.
+
+  Unordered, not monotonic (C++'s `memory_order_relaxed`), because LLVM may move and merge an unordered load, and
+  neither a monotonic one. That decides what happens when the method is inlined into another's loop, a voice's
+  `filter.tick()` called a sample from its synth's `process`: the knob's load is then in the loop. Unordered, GVN takes
+  it out, once for the synth's call, and the loop vectorises; monotonic, it stays, a load every sample. Four such
+  methods in a chain ran 6.4 times slower monotonic (0.378 ns a sample, against 0.059 unordered or with plain fields).
+  A knob is then read once a call of the method that runs the loop, which a relaxed load was already allowed to see.
 - **A stream** loads its pointer at the method's start the same way (`atEntry(field, true)`), and `cutoff[i]` is a load
   from it, as `p[i]` is.
 
@@ -2119,9 +2125,9 @@ with `std::atomic_ref`; `value` reads it back. The header still needs only C++17
 - `tests/library/ProgramTest.cpp`: `Module::parameters` and `parameter()`, offsets, ranges and defaults; `setValue`'s
   conversions, `setDefaults` and `setStream`; one instance under two programs; the binding errors; a knob set from
   another thread, every block showing one value whole.
-- `tests/lit/fminus/params.fm`: the slots, the knob's atomic load at the start and the vectorised loop, the stream's
-  alias scope and its state kept out of memory, the frozen parameters folded (a frozen `bool` turns a loop into a
-  `memcpy`), and the driver's options.
+- `tests/lit/fminus/params.fm`: the slots, the knob's unordered load at the start and the vectorised loop (and out of
+  the loop of a method it is inlined into), the stream's alias scope and its state kept out of memory, the frozen
+  parameters folded (a frozen `bool` turns a loop into a `memcpy`), and the driver's options.
 - `example.parameters`: the parameters example's `--check`.
 
 ## Pitfalls
@@ -2162,7 +2168,7 @@ Each of these was hit while writing the language or its recipes. [simd.md](simd.
 | A debug build aborts in `pffft_new_setup` | it asserts on more than 2^26 points | refuse the size before calling it (`Fft.cpp`) |
 | A lit test runs a check line as a command | a FileCheck prefix named `RUN` | any other prefix (`fft.fm` uses `PEAK`) |
 | `fminus-tests "a module's methods, and ..."` runs no test | Catch2 splits a filter at its commas | run by tag (`"[module]"`), or escape the comma (`\,`) |
-| A knob read in a loop is loaded every iteration, and the loop doesn't vectorise | an atomic load where `cutoff[i]` is: LLVM neither hoists nor merges atomic loads | load it once, in the entry block (`atEntry`, recipe 14) |
+| A knob read in a loop is loaded every iteration, and the loop doesn't vectorise | a monotonic atomic load where `cutoff[i]` is, or in a method inlined into the loop: LLVM neither hoists nor merges monotonic loads | load it once, in the entry block (`atEntry`, recipe 14), and unordered, which LLVM may move out of a loop it was inlined into |
 | A method's state (`y += ...`) goes back to memory every sample once a parameter is a stream | the stream's pointer comes from the module, so LLVM can't tell its samples from the module's fields | an alias scope for the streams (`scopeStreams`, recipe 14) |
 | A frozen parameter moves an output's last bit, against the same value as a knob | LLVM constant-folds `sinf`, `cosf`, `expf` and `tanhf` of a constant with the host's double functions, rounded to float, not with libm's float ones, which differ from them by an ulp for about 1% of arguments | compare a frozen program with a knob's within a tolerance (`examples/parameters/`); exact folding would need FMinus's own math functions |
 | FileCheck reports a bad variable on a line that checks `[[fminus::range(0, 1)]]` | `[[...]]` is FileCheck's own syntax | match the brackets as regexes: `{{\[\[}}fminus::range(0, 1){{\]\]}}` (`params.fm`) |
