@@ -182,7 +182,8 @@ namespace fminus::ir::detail
     }
 
     // The initialiser is lowered before the name is bound, so `float x = x;` reads an outer x. Without one,
-    // the variable starts at 0.
+    // the variable starts at 0. An array or a module starts at 0 too (a memset), and then takes its initialiser: an
+    // array its list's elements, a module a copy of another.
     void Lowering::declareVariable(SourceLocation location, const ast::DeclStmt& decl)
     {
         ast::Type type = decl.type;
@@ -191,8 +192,34 @@ namespace fminus::ir::detail
             error(location, "variable has incomplete type 'void'");
             type = ast::Type::Float;   // so its uses report no more errors
         }
-        if (!checkType(location, type))
-            type = ast::Type::pointerTo(ast::Kind::Float, type.pointeeConst);   // likewise
+        if (!checkType(location, type))   // likewise
+            type = ast::isArray(type) ? ast::Type::arrayOf(ast::Type::Float, type.count)
+                                      : ast::Type::pointerTo(ast::Kind::Float, type.pointeeConst);
+        if (ast::isArray(type) || ast::isModule(type))
+        {
+            llvm::AllocaInst* slot = allocate(typeOf(type), decl.name);
+            zero(slot, type);
+            if (decl.init)
+            {
+                const Value value = lower(*decl.init);
+                if (ast::isArray(type))
+                    error(location, "array initializer must be an initializer list");
+                else if (value.type == type)
+                    copy(slot, value.ir, type);
+                else
+                    incompatible(location, Use::Initializing, value.type, type);
+            }
+            if (decl.hasList && ast::isArray(type))
+                initializeArray(location, slot, type, decl.list);
+            else if (decl.hasList)
+                error(location, "a module takes no initializer list: its fields start at 0 (set them in a method, "
+                                "such as init)");
+            if (!bind(decl.name, Binding{slot, decl.isConst, type}))
+                error(location, "redefinition of " + quoted(decl.name));
+            return;
+        }
+        if (decl.hasList)
+            error(location, "FMinus takes an initializer list for an array only");
         llvm::Value* value = decl.init ? convert(lower(*decl.init), type, location, Use::Initializing)
                                        : llvm::Constant::getNullValue(typeOf(type));
         llvm::AllocaInst* slot = allocate(typeOf(type), decl.name);

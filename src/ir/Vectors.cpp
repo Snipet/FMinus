@@ -1,5 +1,6 @@
 // src/ir/Vectors.cpp: vector expressions, OpenCL C's: literals, swizzles, and ?: with a vector condition, lane by
-// lane. The types, and how scalars broadcast, are Types.cpp's; assigning components is Memory.cpp's.
+// lane. The types, and how scalars broadcast, are Types.cpp's; assigning components is Memory.cpp's. A swizzle is
+// written as a module's field is, so it also reads a field of a module value.
 #include "ir/Lowering.h"
 
 #include <llvm/IR/Constants.h>
@@ -182,22 +183,32 @@ namespace fminus::ir::detail
     }
 
     // v.x is one lane (extractelement); v.wzyx, v.xxyy, v.s0123 are several, in any order, repeated or not (a
-    // shufflevector).
-    Lowering::Value Lowering::lowerSwizzle(SourceLocation location, const ast::SwizzleExpr& swizzle)
+    // shufflevector). m.y, where m is a module, is its field y, read (Modules.cpp).
+    Lowering::Value Lowering::lowerMember(SourceLocation location, const ast::MemberExpr& swizzle)
     {
         const Value base = lower(*swizzle.base);
+        if (ast::isModule(base.type))
+        {
+            const std::optional<LValue> field = this->field(location, base.ir, *base.type.module, swizzle.name, false);
+            return field ? read(*field) : poison(ast::Type::Float);
+        }
+        if (ast::isPointer(base.type) && base.type.pointee == ast::Kind::Module)
+        {
+            error(location, "member reference type " + quoted(ast::typeName(base.type))
+                                + " is a pointer; did you mean to use '->'?");
+            return poison(ast::Type::Float);
+        }
         if (!hasComponents(location, base.type))
             return poison(ast::Type::Float);
-        const auto lanes = components(location, swizzle.components, base.type);
+        const auto lanes = components(location, swizzle.name, base.type);
         if (!lanes)
             return poison(ast::Type::Float);
         const auto type = componentsType(location, lanes->size());
         if (!type)
             return poison(ast::Type::Float);
         if (lanes->size() == 1)
-            return {builder_.CreateExtractElement(base.ir, static_cast<std::uint64_t>((*lanes)[0]),
-                                                  swizzle.components),
+            return {builder_.CreateExtractElement(base.ir, static_cast<std::uint64_t>((*lanes)[0]), swizzle.name),
                     *type};
-        return {builder_.CreateShuffleVector(base.ir, *lanes, swizzle.components), *type};
+        return {builder_.CreateShuffleVector(base.ir, *lanes, swizzle.name), *type};
     }
 } // namespace fminus::ir::detail

@@ -133,9 +133,18 @@ namespace fminus::ast
                                       return std::string("(") + typeName(construct.type)
                                              + (elements.empty() ? "" : " " + elements) + ")";
                                   },
-                                  [](const SwizzleExpr& swizzle) {
-                                      return "(. " + dump(*swizzle.base) + " " + swizzle.components + ")";
+                                  [](const MemberExpr& member) {   // (. v xy), (-> p y)
+                                      return std::string(member.arrow ? "(-> " : "(. ") + dump(*member.base) + " "
+                                             + member.name + ")";
                                   },
+                                  [](const MethodCallExpr& call) {   // (call. lp tick x), (call-> p tick x)
+                                      std::string text = std::string(call.arrow ? "(call-> " : "(call. ")
+                                                         + dump(*call.object) + " " + call.method;
+                                      for (const ExprPtr& arg : call.args)
+                                          text += " " + dump(*arg);
+                                      return text + ")";
+                                  },
+                                  [](const ThisExpr&) { return std::string("this"); },
                                   [](const AssignExpr& assign) {
                                       return std::string("(") + opName(assign.op) + " " + dump(*assign.target) + " "
                                              + dump(*assign.value) + ")";
@@ -158,12 +167,22 @@ namespace fminus::ast
                               expr.node);
         }
 
-        // A declared name's type, as C spells it: `const float`, `const float * restrict`, `float * const`.
+        // A declared name's type, as C spells it: `const float`, `const float * restrict`, `float * const`,
+        // `const float[16]`.
         std::string declared(Type type, bool isConst, bool isRestrict)
         {
             if (!isPointer(type))
                 return (isConst ? "const " : "") + typeName(type);
             return typeName(type) + (isConst ? " const" : "") + (isRestrict ? " restrict" : "");
+        }
+
+        // An array's initialiser list: {1 2}.
+        std::string list(const std::vector<ExprPtr>& elements)
+        {
+            std::string text;
+            for (const ExprPtr& element : elements)
+                text += (text.empty() ? "" : " ") + dump(*element);
+            return "{" + text + "}";
         }
 
         // One statement per line, `indent` spaces in; a block's items one level further in.
@@ -172,7 +191,8 @@ namespace fminus::ast
             return std::visit(Overloaded{
                                   [&](const DeclStmt& decl) {
                                       return indent + "(decl " + declared(decl.type, decl.isConst, decl.isRestrict)
-                                             + " " + decl.name + (decl.init ? " " + dump(*decl.init) : "") + ")";
+                                             + " " + decl.name + (decl.init ? " " + dump(*decl.init) : "")
+                                             + (decl.hasList ? " " + list(decl.list) : "") + ")";
                                   },
                                   [&](const ExprStmt& statement) { return indent + dump(*statement.expr); },
                                   [&](const ReturnStmt& ret) {
@@ -241,22 +261,46 @@ namespace fminus::ast
         case Kind::PolyBool:
             return "poly bool";
         case Kind::Pointer:
-            return (type.pointeeConst ? "const " : "") + typeName(type.pointee) + " *";
+            return (type.pointeeConst ? "const " : "") + typeName(pointee(type)) + " *";
+        case Kind::Module:
+            return type.module != nullptr ? type.module->name : "?";
+        case Kind::Array:   // clang's spelling: float[16]
+            return typeName(pointee(type)) + "[" + std::to_string(type.count) + "]";
         }
         return "?";
     }
 
     std::string dump(const Program& program)
     {
+        // A module as its fields: (module OnePole (field float y) (field float k)). Its methods follow it, as the
+        // functions they are: (method float OnePole::tick ((float x)) ...), without the `this` the parser added.
+        const auto modulesAt = [&](std::size_t position) {
+            std::string text;
+            for (const std::unique_ptr<Module>& module : program.modules)
+            {
+                if (module->position != position)
+                    continue;
+                text += "(module " + module->name;
+                for (const Field& field : module->fields)
+                    text += "\n  (field " + declared(field.type, field.isConst, false) + " " + field.name + ")";
+                text += ")\n";
+            }
+            return text;
+        };
         std::string text;
-        for (const Function& function : program.functions)
+        for (std::size_t f = 0; f < program.functions.size(); ++f)
         {
-            text += std::string(function.isDefinition ? "(function " : "(declare ") + typeName(function.returnType)
-                    + " " + function.name + " (";
-            for (std::size_t i = 0; i < function.params.size(); ++i)
+            text += modulesAt(f);
+            const Function& function = program.functions[f];
+            const char* kind = function.module != nullptr ? "(method "
+                               : function.isDefinition    ? "(function "
+                                                          : "(declare ";
+            text += kind + typeName(function.returnType) + " " + function.name + " (";
+            const std::size_t first = function.module != nullptr ? 1 : 0;   // `this`
+            for (std::size_t i = first; i < function.params.size(); ++i)
             {
                 const Param& param = function.params[i];
-                text += std::string(i == 0 ? "(" : " (") + declared(param.type, param.isConst, param.isRestrict)
+                text += std::string(i == first ? "(" : " (") + declared(param.type, param.isConst, param.isRestrict)
                         + (param.name.empty() ? "" : " " + param.name) + ")";
             }
             text += ")";
@@ -266,6 +310,6 @@ namespace fminus::ast
                 text += "\n" + dump(stmt, "  ");
             text += ")\n";
         }
-        return text;
+        return text + modulesAt(program.functions.size());
     }
 } // namespace fminus::ast

@@ -12,8 +12,8 @@
 //
 // The parts are one class, Lowering (Lowering.h), whose members are defined by what they lower: types and conversions
 // (Types.cpp), functions (Functions.cpp), statements (Statements.cpp), expressions (Expressions.cpp), calls and
-// builtins (Calls.cpp), vectors (Vectors.cpp), memory (Memory.cpp). This file runs them, and then the check of the
-// functions' effects (Effects.cpp), which needs every body's calls.
+// builtins (Calls.cpp), vectors (Vectors.cpp), memory (Memory.cpp), modules (Modules.cpp). This file runs them, and
+// then the check of the functions' effects (Effects.cpp), which needs every body's calls.
 #include "ir/CodeGen.h"
 
 #include "ir/Lowering.h"
@@ -35,10 +35,12 @@ namespace fminus::ir
         {
         }
 
-        // Pass 1 declares every function, so calls may come before definitions; pass 2 lowers each definition's body;
-        // then every function marked nonallocating or nonblocking is checked against the calls it makes.
+        // The modules are laid out first, in order, since a function's types may name them. Pass 1 declares every
+        // function (a module's methods among them), so calls may come before definitions; pass 2 lowers each
+        // definition's body; then every function marked nonallocating or nonblocking is checked against its calls.
         void Lowering::lower(const ast::Program& program)
         {
+            layOut(program);
             for (const ast::Function& function : program.functions)
                 declare(function);
             for (const ast::Function& function : program.functions)
@@ -56,6 +58,8 @@ namespace fminus::ir
     {
         auto module = std::make_unique<llvm::Module>(diagnostics.fileName(), context);
         module->setSourceFileName(diagnostics.fileName());
+        if (!options.dataLayout.empty())
+            module->setDataLayout(options.dataLayout);
         detail::Lowering(*module, diagnostics, options).lower(program);
         if (diagnostics.hasErrors())
             return nullptr;

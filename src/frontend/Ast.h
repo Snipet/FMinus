@@ -8,6 +8,7 @@
 
 #include "frontend/Diagnostics.h"
 
+#include <cstddef>
 #include <memory>
 #include <optional>
 #include <string>
@@ -37,9 +38,21 @@ namespace fminus::ast
     // apart, an int) and comparisons of two pointers of one type are C's. A void* is an address with no type, what
     // malloc returns: it converts to and from any other pointer, as in C, and has no elements.
     //
-    // A type is a kind, and for a pointer what it points to; two types are the same when every field is. Type::Float
-    // and the rest name the types that are only a kind, and a kind converts to its type, so `type == Type::Float`
-    // reads as it says. A switch over a type is a switch over `type.kind`, and -Wswitch lists the kinds it misses.
+    // A module is FMinus's class: fields, and methods that reach them (`module OnePole { float y; float tick(float
+    // x) { ... } };`, Module below). A module type is a name the program declares; its value lives in memory (a local,
+    // a field, an element, the heap or the host's), is copied by `=` and goes to a function through a pointer. A
+    // pointer to a module is C's, and `p->y` its field.
+    //
+    // An array is C's: `float history[16];`, a fixed number of elements side by side, of a type FMinus can point to
+    // (a float, an int, a float vector or a module). Its name stands for a pointer to its first element, which p[i]
+    // indexes; it cannot be assigned, and a parameter declared as one is that pointer.
+    //
+    // A type is a kind, and for a pointer what it points to, for an array its elements and how many, for a module
+    // which; two types are the same when every field is. Type::Float and the rest name the types that are only a
+    // kind, and a kind converts to its type, so `type == Type::Float` reads as it says. A switch over a type is a
+    // switch over `type.kind`, and -Wswitch lists the kinds it misses.
+    struct Module;
+
     enum class Kind
     {
         Void,
@@ -55,22 +68,45 @@ namespace fminus::ast
         PolyFloat,
         PolyBool,
         Pointer,
+        Module,
+        Array,
     };
 
     struct Type
     {
         Kind kind = Kind::Float;
-        Kind pointee = Kind::Void;   // a pointer's: what it points to
-        bool pointeeConst = false;   // a pointer's: what it points to is read-only through it (const float*)
+        Kind pointee = Kind::Void;        // a pointer's: what it points to; an array's: what its elements are
+        bool pointeeConst = false;        // a pointer's: what it points to is read-only through it (const float*)
+        const Module* module = nullptr;   // a module type's, and a pointer's or an array's whose pointee is one
+        int count = 0;                    // an array's: how many elements
 
         constexpr Type() = default;
         constexpr Type(Kind kind) : kind(kind) {}   // implicit: Kind::Float is the type float
 
-        static constexpr Type pointerTo(Kind pointee, bool isConst)
+        // A pointer to `pointee`, which is a kind or a module type (FMinus has no pointers to pointers or arrays).
+        static constexpr Type pointerTo(Type pointee, bool isConst)
         {
             Type type(Kind::Pointer);
-            type.pointee = pointee;
+            type.pointee = pointee.kind;
+            type.module = pointee.module;
             type.pointeeConst = isConst;
+            return type;
+        }
+
+        static constexpr Type moduleType(const Module* module)
+        {
+            Type type(Kind::Module);
+            type.module = module;
+            return type;
+        }
+
+        // An array of `count` elements of `element`, a kind or a module type.
+        static constexpr Type arrayOf(Type element, int count)
+        {
+            Type type(Kind::Array);
+            type.pointee = element.kind;
+            type.module = element.module;
+            type.count = count;
             return type;
         }
 
@@ -111,6 +147,8 @@ namespace fminus::ast
         case Kind::Bool:
         case Kind::Int:
         case Kind::Pointer:
+        case Kind::Module:
+        case Kind::Array:
             return 1;
         case Kind::Float2:
         case Kind::Bool2:
@@ -135,24 +173,43 @@ namespace fminus::ast
         return type.kind == Kind::Pointer;
     }
 
-    // What a pointer of `type` points to.
-    inline Type pointee(Type type)
+    inline bool isModule(Type type)
     {
-        return type.pointee;
+        return type.kind == Kind::Module;
     }
 
-    // Whether FMinus has pointers to `kind`: to float, int, float2, float4, float8 and void.
+    inline bool isArray(Type type)
+    {
+        return type.kind == Kind::Array;
+    }
+
+    // What a pointer of `type` points to, or what the elements of an array of `type` are.
+    inline Type pointee(Type type)
+    {
+        Type element(type.pointee);
+        if (type.pointee == Kind::Module)
+            element.module = type.module;
+        return element;
+    }
+
+    // Whether FMinus has pointers to `kind`: to float, int, float2, float4, float8, void and modules.
     inline bool canPointTo(Kind kind)
     {
         return kind == Kind::Float || kind == Kind::Int || kind == Kind::Float2 || kind == Kind::Float4
-               || kind == Kind::Float8 || kind == Kind::Void;
+               || kind == Kind::Float8 || kind == Kind::Void || kind == Kind::Module;
     }
 
-    // Whether a value of `type` takes part in arithmetic: every type's but void's and a pointer's (whose arithmetic
-    // is its own).
+    // Whether two pointers point to the same type (const aside): the same kind, and the same module for modules.
+    inline bool samePointee(Type a, Type b)
+    {
+        return a.pointee == b.pointee && a.module == b.module;
+    }
+
+    // Whether a value of `type` takes part in arithmetic: every type's but void's, a pointer's (whose arithmetic is
+    // its own), a module's and an array's.
     inline bool isArithmetic(Type type)
     {
-        return type != Type::Void && !isPointer(type);
+        return type != Type::Void && !isPointer(type) && !isModule(type) && !isArray(type);
     }
 
     inline bool isMask(Type type)
@@ -329,12 +386,30 @@ namespace fminus::ast
         bool braces = false;   // C's form
     };
 
-    // `v.x`, `v.wzyx`, `v.s07`: OpenCL C's components. x, y, z, w name lanes 0 to 3, and s followed by hex digits names
-    // any lane. One component is a float, two, four or eight a vector of them; a variable's components can be assigned.
-    struct SwizzleExpr
+    // `m.y` and `p->y`: a module's field, through the module or a pointer to it, an lvalue. Also `v.x`, `v.wzyx`,
+    // `v.s07`: OpenCL C's components of a vector. x, y, z, w name lanes 0 to 3, and s followed by hex digits names any
+    // lane. One component is a float, two, four or eight a vector of them; an lvalue's components can be assigned.
+    // The code generator tells the two apart by the base's type.
+    struct MemberExpr
     {
         ExprPtr base;
-        std::string components;
+        std::string name;    // the field, or the components
+        bool arrow = false;  // p->y
+    };
+
+    // `m.tick(x)` and `p->tick(x)`: a method of the module, called on it. Inside a method, `tick(x)` calls one on
+    // `this` (a CallExpr: the code generator looks for a method first, as C++ does).
+    struct MethodCallExpr
+    {
+        ExprPtr object;
+        std::string method;
+        std::vector<ExprPtr> args;
+        bool arrow = false;
+    };
+
+    // `this`, inside a method: a pointer to the module it was called on.
+    struct ThisExpr
+    {
     };
 
     enum class IncrementOp
@@ -380,7 +455,8 @@ namespace fminus::ast
     {
         SourceLocation location;
         std::variant<NumberExpr, VariableExpr, BoolExpr, UnaryExpr, BinaryExpr, LogicalExpr, CallExpr, AssignExpr,
-                     ConditionalExpr, ConstructExpr, SwizzleExpr, IncrementExpr, CastExpr, IndexExpr, SizeofExpr>
+                     ConditionalExpr, ConstructExpr, MemberExpr, MethodCallExpr, ThisExpr, IncrementExpr, CastExpr,
+                     IndexExpr, SizeofExpr>
             node;
     };
 
@@ -388,7 +464,9 @@ namespace fminus::ast
 
     // `[const] float name = init;`: a variable of the enclosing block, from its declaration to the block's end. One per
     // declarator: `float a = 1, b;` is two, and `float *p, x;` a pointer and a float, as in C. Without an initialiser
-    // the variable starts at 0, and a pointer at null (C leaves them indeterminate, and reading them undefined).
+    // the variable starts at 0, and a pointer at null (C leaves them indeterminate, and reading them undefined). An
+    // array's initialiser is a list, `float c[4] = {1, 2};`, whose missing elements are 0; a module is initialised
+    // from another of its type, or starts at 0.
     struct DeclStmt
     {
         bool isConst = false;      // the variable's: `const float x`, or `float* const p` (`const float* p` is not)
@@ -396,6 +474,8 @@ namespace fminus::ast
         std::string name;
         ExprPtr init;              // null without an initialiser
         bool isRestrict = false;   // `float* restrict p`: accepted, and changes nothing for a local
+        bool hasList = false;      // `= {...}`
+        std::vector<ExprPtr> list;
     };
 
     // `expr;`: evaluated for its effect (an assignment, a call).
@@ -491,6 +571,8 @@ namespace fminus::ast
         std::string name;   // "clang::nonblocking", or a name without its namespace
     };
 
+    // A method is a function too: named `OnePole::tick`, with `module` set, and a first parameter the parser adds,
+    // `this`, a pointer to the module (what C++ passes, and what a C++ host passes when it calls the method).
     struct Function
     {
         SourceLocation location;   // of its name
@@ -500,11 +582,40 @@ namespace fminus::ast
         std::vector<Stmt> body;   // the outermost block's items: the same scope as the parameters
         bool isDefinition = true;
         std::vector<Attribute> attributes;
+        const Module* module = nullptr;   // a method's
     };
 
+    // A field of a module: a name and its type. It starts at 0, wherever the module is; a field cannot have an
+    // initialiser or be const (the code generator says so), since nothing would run either.
+    struct Field
+    {
+        SourceLocation location;
+        std::string name;
+        Type type = Type::Float;
+        bool isConst = false;
+        bool hasInitializer = false;
+    };
+
+    // `module OnePole { float y; float k; void init(float cutoff, float rate) { ... } float tick(float x) { ... } };`:
+    // FMinus's class, C++'s struct with member functions. Its fields are laid out as a C struct's (the C++ host's
+    // layout, too); its methods are Functions of the program, `OnePole::init` and `OnePole::tick`, which see the
+    // fields by name (through `this`). Nothing runs when one is made: its fields start at 0, and a method such as
+    // init sets them. The name is a type from the declaration on, as in C, so a module uses only modules declared
+    // before it (and pointers to itself).
+    struct Module
+    {
+        SourceLocation location;
+        std::string name;
+        std::vector<Field> fields;
+        std::vector<std::string> methods;   // their names inside the module: tick for OnePole::tick
+        std::size_t position = 0;           // how many of the program's functions come before it, for dump()
+    };
+
+    // The modules are kept by pointer, which a Type holds: they stay where they are while the program is built.
     struct Program
     {
-        std::vector<Function> functions;
+        std::vector<Function> functions;   // with the modules' methods, in source order
+        std::vector<std::unique_ptr<Module>> modules;
     };
 
     template <typename Node>

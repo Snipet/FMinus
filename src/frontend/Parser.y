@@ -2,17 +2,21 @@
 // automatically, token constructors, locations, detailed errors with LAC). It builds the syntax tree (Ast.h) into the
 // ParseContext.
 //
-//     program      : function*
+//     program      : (function | module)*
 //     function     : "const"? type pointer IDENTIFIER "(" params ")" attributes (block | ";")    or a prototype
+//     module       : "module" IDENTIFIER "{" (declaration | method)* "}" ";"      the declarations are its fields
+//     method       : "const"? type pointer IDENTIFIER "(" params ")" attributes block
 //     attributes   : ("[" "[" attribute ("," attribute)* "]" "]")*      attribute: IDENTIFIER ("::" IDENTIFIER)?
 //     params       : (param ("," param)*)? | "void"                                  (void) is none, as in C
-//     param        : "const"? type pointer IDENTIFIER?                               (a prototype may omit names)
-//     type         : "float" | "bool" | "int" | "void" | VECTOR_TYPE | "poly" ("float" | "bool")
+//     param        : "const"? type pointer IDENTIFIER? | "const"? type IDENTIFIER "[" NUMBER? "]"   a pointer
+//     type         : "float" | "bool" | "int" | "void" | VECTOR_TYPE | "poly" ("float" | "bool") | MODULE_NAME
 //     pointer      : ("*" ("const" | "restrict")*)?        with a *, the first const is the pointee's (const float*),
 //                                                          and one after it the pointer's own (float* const)
 //     block        : "{" (declaration | statement)* "}"
 //     declaration  : "const"? type declarator ("," declarator)* ";"
 //     declarator   : pointer IDENTIFIER ("=" expr)?                                  as in C, `float *p, x;`
+//                  | IDENTIFIER "[" NUMBER "]" ("=" "{" (expr ("," expr)* ","?)? "}")?        an array
+//                  | pointer IDENTIFIER "=" "{" (expr ("," expr)*)? "}"     parsed, for its error: only arrays
 //     statement    : block | expr ";" | "return" expr? ";" | ";"
 //                  | "if" "(" expr ")" statement ("else" statement)? | "while" "(" expr ")" statement
 //                  | "for" "(" (declaration | expr? ";") expr? ";" expr? ")" statement | "break" ";" | "continue" ";"
@@ -24,13 +28,16 @@
 //                  | expr "&&" expr | expr "||" expr | expr "?" expr ":" expr
 //                  | "(" VECTOR_TYPE ")" "(" (expr ("," expr)*)? ")"                 OpenCL C's vector literal
 //                  | "(" VECTOR_TYPE ")" "{" (expr ("," expr)* ","?)? "}"            C's: lanes left out are 0
-//                  | "(" "poly" "float" ")" "(" expr ")" | expr "." IDENTIFIER       a broadcast; a swizzle
+//                  | "(" "poly" "float" ")" "(" expr ")" | expr "." IDENTIFIER       a broadcast; a swizzle or field
+//                  | expr "->" IDENTIFIER | expr ("." | "->") IDENTIFIER "(" (expr ("," expr)*)? ")" | "this"
 //                  | ("++" | "--") expr | expr ("++" | "--") | "(" ("float" | "int" | "bool") ")" expr    a cast
 //                  | expr ("=" | "+=" | "-=" | "*=" | "/=" | "%=") expr
 //
 // Precedence and associativity are C's, from the loosest: assignment (right to left), ?: (right to left), ||, &&,
-// equality, relational, additive, multiplicative, unary (and casts), and the postfix operators: the swizzle's ".",
-// "[" and "++" and "--" after their operand.
+// equality, relational, additive, multiplicative, unary (and casts), and the postfix operators: ".", "->", "[" and
+// "++" and "--" after their operand.
+// A module's name is a type from its declaration on: the scanner returns it as MODULE_NAME (ParseContext.h), as a C
+// compiler returns a typedef's name, so `OnePole* p;` is a declaration and `a * b;` a product.
 // The grammar accepts any expression on the left of an assignment; the code generator rejects what is not an lvalue
 // (a variable, an element p[i] or *p, components of either: "expression is not assignable"), so fields can join it.
 //
@@ -83,7 +90,25 @@
             SourceLocation location;
             Pointer pointer;
             std::string name;
-            ast::ExprPtr init;   // null without an initialiser
+            ast::ExprPtr init;      // null without an initialiser
+            int count = 0;          // an array's elements; 0 for a name that is not an array
+            bool hasList = false;   // `= {...}`
+            std::vector<ast::ExprPtr> list = {};
+        };
+
+        // A module's body as it is parsed: its fields, and its methods (Functions named OnePole::tick).
+        struct ModuleBody
+        {
+            std::vector<ast::Field> fields;
+            std::vector<ast::Function> methods;
+        };
+
+        // A whole module declaration: the module, which the program already holds, and its methods, which go into
+        // the program's functions where the module is.
+        struct ModuleDeclaration
+        {
+            ast::Module* module = nullptr;
+            std::vector<ast::Function> methods;
         };
 
         // What a name is declared as, from the declaration's `const` and type and the name's pointer: `const float x`
@@ -100,13 +125,18 @@
         {
             if (!pointer.isPointer)
                 return {type, isConst, false};
-            return {ast::Type::pointerTo(type.kind, isConst), pointer.isConst, pointer.isRestrict};
+            return {ast::Type::pointerTo(type, isConst), pointer.isConst, pointer.isRestrict};
         }
     } // namespace fminus::frontend
 }
 
 %code {
     #include "frontend/Scanner.h"   // yylex
+
+    #include <charconv>
+    #include <memory>
+    #include <system_error>
+    #include <utility>
 
     namespace
     {
@@ -138,6 +168,51 @@
         {
             return fminus::ast::makeExpr(at(where), fminus::ast::IncrementExpr{op, std::move(target)});
         }
+
+        // An array's size, a positive integer constant (C's, in decimal, octal or hex). Reports the error, and gives
+        // 1, for anything else.
+        int arraySize(const fminus::frontend::location& where, const std::string& spelling,
+                      fminus::frontend::ParseContext& context)
+        {
+            const bool hex = spelling.size() > 1 && spelling[0] == '0' && (spelling[1] == 'x' || spelling[1] == 'X');
+            if (spelling.find_first_of(hex ? ".pP" : ".eEfF") != std::string::npos)
+            {
+                context.diagnostics.error(at(where), "size of array has non-integer type 'float'");
+                return 1;
+            }
+            const int base = hex ? 16 : spelling.size() > 1 && spelling[0] == '0' ? 8 : 10;
+            long long value = 0;
+            const char* first = spelling.data() + (hex ? 2 : 0);
+            const char* last = spelling.data() + spelling.size();
+            const auto [end, failure] = std::from_chars(first, last, value, base);
+            if (end != last || failure != std::errc{} || value > (1 << 30))
+            {
+                context.diagnostics.error(at(where), "array is too large: FMinus's arrays have at most 2^30 elements");
+                return 1;
+            }
+            if (value == 0)
+            {
+                context.diagnostics.error(at(where), "zero size arrays are not allowed");
+                return 1;
+            }
+            return static_cast<int>(value);
+        }
+
+        // The name declared with its pointer, and, for an array, the array of what the rest declares: `float x[4]`
+        // is a float[4], and `const float c[2]` a const float[2], whose elements are read-only.
+        fminus::frontend::Declared declaredName(bool isConst, fminus::ast::Type type,
+                                                fminus::frontend::Declarator& d,
+                                                fminus::frontend::ParseContext& context)
+        {
+            fminus::frontend::Declared name = fminus::frontend::declared(isConst, type, d.pointer);
+            if (d.count == 0)
+                return name;
+            if (d.pointer.isPointer)
+                context.diagnostics.error(d.location, "FMinus has no arrays of pointers");
+            else
+                name.type = fminus::ast::Type::arrayOf(type, d.count);
+            return name;
+        }
     } // namespace
 }
 
@@ -145,6 +220,8 @@
 %token RESTRICT "restrict" AMPERSAND "&" LBRACKET "[" RBRACKET "]" SIZEOF "sizeof" COLONCOLON "::"
 %token LT "<" LE "<=" GT ">" GE ">=" EQ "==" NE "!=" NOT "!" AND "&&" OR "||" QUESTION "?" COLON ":"
 %token IF "if" ELSE "else" WHILE "while" FOR "for" BREAK "break" CONTINUE "continue"
+%token MODULE "module" THIS "this" ARROW "->"
+%token <ast::Type> MODULE_NAME "module name"
 %token <ast::Type> VECTOR_TYPE "vector type"
 %token DOT "." POLY "poly"
 %token PLUS "+" MINUS "-" STAR "*" SLASH "/" PERCENT "%" INCREMENT "++" DECREMENT "--"
@@ -153,8 +230,12 @@
 %token <std::string> IDENTIFIER "identifier"
 %token <std::string> NUMBER "number"
 
-%nterm <std::vector<ast::Function>> functions
+%nterm <std::vector<ast::Function>> items
 %nterm <ast::Function> function
+%nterm <ModuleDeclaration> module
+%nterm <std::string> module_name
+%nterm <ModuleBody> module_body module_member
+%nterm <int> array_size
 %nterm <std::vector<ast::Attribute>> attributes attribute_list
 %nterm <ast::Attribute> attribute
 %nterm <std::vector<ast::Param>> params param_list
@@ -185,17 +266,91 @@
 %left "+" "-"
 %left "*" "/" "%"
 %precedence UNARY
-%precedence "." "++" "--" "["
+%precedence "." "->" "++" "--" "["
 
 %%
 
 program
-    : functions                             { parseContext.program.functions = $1; }
+    : items                                 { parseContext.program.functions = $1; }
     ;
 
-functions
+// The program's functions, a module's methods among them where the module is.
+items
     : %empty                                {}
-    | functions function                    { $$ = $1; $$.push_back($2); }
+    | items function                        { $$ = $1; $$.push_back($2); }
+    | items module                          {
+                                                $$ = $1;
+                                                ModuleDeclaration declaration = $2;
+                                                declaration.module->position = $$.size();
+                                                for (ast::Function& method : declaration.methods)
+                                                    $$.push_back(std::move(method));
+                                            }
+    ;
+
+// The module joins the program, and its name the types, as soon as the name is read: its fields may point to it.
+module
+    : "module" module_name                  <ast::Module*>{
+                                                auto module = std::make_unique<ast::Module>();
+                                                module->location = at(@2);
+                                                module->name = $2;
+                                                $$ = module.get();
+                                                parseContext.moduleNames.emplace($$->name, $$);   // the first stays
+                                                parseContext.program.modules.push_back(std::move(module));
+                                                parseContext.currentModule = $$;
+                                            }
+      "{" module_body "}" ";"               {
+                                                ModuleBody body = $5;
+                                                $$.module = $3;
+                                                $$.module->fields = std::move(body.fields);
+                                                $$.methods = std::move(body.methods);
+                                                parseContext.currentModule = nullptr;
+                                            }
+    ;
+
+// A second module of a name is the code generator's error (its first declaration keeps the name).
+module_name
+    : IDENTIFIER                            { $$ = $1; }
+    | MODULE_NAME                           { const ast::Type type = $1; $$ = type.module->name; }
+    ;
+
+module_body
+    : %empty                                {}
+    | module_body module_member             {
+                                                $$ = $1;
+                                                ModuleBody member = $2;
+                                                for (ast::Field& field : member.fields)
+                                                    $$.fields.push_back(std::move(field));
+                                                for (ast::Function& method : member.methods)
+                                                    $$.methods.push_back(std::move(method));
+                                            }
+    ;
+
+// A declaration's names are fields; a function is a method, with `this` before its parameters.
+module_member
+    : declaration                           {
+                                                for (ast::Stmt& stmt : $1)
+                                                {
+                                                    auto& decl = std::get<ast::DeclStmt>(stmt.node);
+                                                    $$.fields.push_back(ast::Field{stmt.location, std::move(decl.name),
+                                                                                   decl.type, decl.isConst,
+                                                                                   decl.init != nullptr
+                                                                                       || decl.hasList});
+                                                }
+                                            }
+    | qualifier type pointer IDENTIFIER "(" params ")" attributes block
+                                            {
+                                                ast::Module* module = parseContext.currentModule;
+                                                const Declared result = declared($1, $2, $3);
+                                                const std::string name = $4;
+                                                module->methods.push_back(name);
+                                                ast::Function method{at(@4), module->name + "::" + name, $6,
+                                                                     result.type, $9, true, $8, module};
+                                                const ast::Type self =
+                                                    ast::Type::pointerTo(ast::Type::moduleType(module), false);
+                                                method.params.insert(method.params.begin(),
+                                                                     ast::Param{at(@4), "this", self, true, false});
+                                                $$.methods.push_back(std::move(method));
+                                            }
     ;
 
 function
@@ -254,6 +409,24 @@ param
                                                 const Declared d = declared($1, $2, $3);
                                                 $$ = ast::Param{at(@2), "", d.type, d.isConst, d.isRestrict};
                                             }
+    | qualifier type pointer IDENTIFIER "[" array_size "]"
+                                            {
+                                                // C's: a parameter declared as an array is a pointer to its first
+                                                // element, and the size says nothing.
+                                                const Pointer pointer = $3;
+                                                if (pointer.isPointer)
+                                                    parseContext.diagnostics.error(at(@4),
+                                                                                   "FMinus has no arrays of pointers");
+                                                $$ = ast::Param{at(@4), $4, ast::Type::pointerTo($2, $1), false, false};
+                                            }
+    | qualifier type pointer IDENTIFIER "[" "]"
+                                            {
+                                                const Pointer pointer = $3;
+                                                if (pointer.isPointer)
+                                                    parseContext.diagnostics.error(at(@4),
+                                                                                   "FMinus has no arrays of pointers");
+                                                $$ = ast::Param{at(@4), $4, ast::Type::pointerTo($2, $1), false, false};
+                                            }
     ;
 
 // A declarator's pointer: nothing, or a * and the qualifiers of the pointer itself.
@@ -281,6 +454,7 @@ type
     | VECTOR_TYPE                           { $$ = $1; }
     | "poly" "float"                        { $$ = ast::Type::PolyFloat; }
     | "poly" "bool"                         { $$ = ast::Type::PolyBool; }
+    | MODULE_NAME                           { $$ = $1; }
     ;
 
 // The types a cast names: C casts between scalars (a vector's literal is OpenCL C's (float4)(...)).
@@ -311,12 +485,13 @@ declaration
                                                 const ast::Type type = $2;
                                                 for (Declarator& d : $3)
                                                 {
-                                                    const Declared name = declared(isConst, type, d.pointer);
+                                                    const Declared name = declaredName(isConst, type, d, parseContext);
                                                     $$.push_back(ast::Stmt{d.location,
                                                                            ast::DeclStmt{name.isConst, name.type,
                                                                                          std::move(d.name),
                                                                                          std::move(d.init),
-                                                                                         name.isRestrict}});
+                                                                                         name.isRestrict, d.hasList,
+                                                                                         std::move(d.list)}});
                                                 }
                                             }
     ;
@@ -329,6 +504,18 @@ declarators
 declarator
     : pointer IDENTIFIER                    { $$ = Declarator{at(@2), $1, $2, nullptr}; }
     | pointer IDENTIFIER "=" expr           { $$ = Declarator{at(@2), $1, $2, $4}; }
+    | pointer IDENTIFIER "=" "{" args "}"   { $$ = Declarator{at(@2), $1, $2, nullptr, 0, true, $5}; }
+    | pointer IDENTIFIER "[" array_size "]" { $$ = Declarator{at(@2), $1, $2, nullptr, $4}; }
+    | pointer IDENTIFIER "[" array_size "]" "=" expr
+                                            { $$ = Declarator{at(@2), $1, $2, $7, $4}; }
+    | pointer IDENTIFIER "[" array_size "]" "=" "{" args "}"
+                                            { $$ = Declarator{at(@2), $1, $2, nullptr, $4, true, $8}; }
+    | pointer IDENTIFIER "[" array_size "]" "=" "{" arg_list "," "}"
+                                            { $$ = Declarator{at(@2), $1, $2, nullptr, $4, true, $8}; }
+    ;
+
+array_size
+    : NUMBER                                { $$ = arraySize(@1, $1, parseContext); }
     ;
 
 statement
@@ -401,7 +588,15 @@ expr
                                                 $$ = ast::makeExpr(at(@1),
                                                                    ast::ConstructExpr{ast::Type::PolyFloat, $6});
                                             }
-    | expr "." IDENTIFIER                   { $$ = ast::makeExpr(at(@2), ast::SwizzleExpr{$1, $3}); }
+    | expr "." IDENTIFIER                   { $$ = ast::makeExpr(at(@2), ast::MemberExpr{$1, $3, false}); }
+    | expr "->" IDENTIFIER                  { $$ = ast::makeExpr(at(@2), ast::MemberExpr{$1, $3, true}); }
+    | expr "." IDENTIFIER "(" args ")"      {
+                                                $$ = ast::makeExpr(at(@3), ast::MethodCallExpr{$1, $3, $5, false});
+                                            }
+    | expr "->" IDENTIFIER "(" args ")"     {
+                                                $$ = ast::makeExpr(at(@3), ast::MethodCallExpr{$1, $3, $5, true});
+                                            }
+    | "this"                                { $$ = ast::makeExpr(at(@1), ast::ThisExpr{}); }
     | expr "*" expr                         { $$ = binary(@2, ast::BinaryOp::Multiply, $1, $3); }
     | expr "/" expr                         { $$ = binary(@2, ast::BinaryOp::Divide, $1, $3); }
     | expr "%" expr                         { $$ = binary(@2, ast::BinaryOp::Remainder, $1, $3); }

@@ -1,13 +1,15 @@
 // src/ir/Memory.cpp: memory. lvalues, what a program can assign or take the address of: a variable, an element a
-// pointer reaches (`p[i]`, `*p`), or components of either (`v.x`, `p[i].zw`, `v.xy.x`). lvalue() finds one, read()
-// and write() load and store it; reading a variable, an assignment, ++ and & all go through them, so a new kind of
-// lvalue joins every one at once. Also C's arithmetic on pointers, which is arithmetic on addresses.
+// pointer reaches (`p[i]`, `*p`), a module's field (`m.y`, `p->y`, or `y` in a method), or components of any of them
+// (`v.x`, `p[i].zw`, `v.xy.x`). lvalue() finds one, read() and write() load and store it; reading a variable, an
+// assignment, ++ and & all go through them, so a new kind of lvalue joins every one at once. Also C's arrays (an
+// array's name stands for a pointer to its first element), and C's arithmetic on pointers, on addresses.
 //
 // An element's address is a getelementptr, as clang's: inbounds (it stays within the object the pointer points
 // into, or one past its end, as C requires), on an index widened to 64 bits with sext, since the index is a signed
 // int.
 #include "ir/Lowering.h"
 
+#include <algorithm>
 #include <cstdint>
 
 namespace fminus::ir::detail
@@ -20,8 +22,8 @@ namespace fminus::ir::detail
             return true;
         if (const auto* unary = std::get_if<ast::UnaryExpr>(&expr.node))
             return unary->op == ast::UnaryOp::Dereference;
-        if (const auto* swizzle = std::get_if<ast::SwizzleExpr>(&expr.node))
-            return isLValue(*swizzle->base);
+        if (const auto* member = std::get_if<ast::MemberExpr>(&expr.node))
+            return member->arrow || isLValue(*member->base);   // p->y always is, as *p is
         return false;
     }
 
@@ -32,6 +34,12 @@ namespace fminus::ir::detail
         if (const auto* variable = std::get_if<ast::VariableExpr>(&expr.node))
         {
             const Binding* binding = find(variable->name);
+            // In a method, a name no local or parameter has may be one of the module's: `y` is this->y, as in C++.
+            const ast::Module* module = function_ != nullptr ? function_->module : nullptr;
+            if (binding == nullptr && module != nullptr
+                && (findField(*module, variable->name, nullptr) != nullptr
+                    || std::ranges::find(module->methods, variable->name) != module->methods.end()))
+                return field(expr.location, self(), *module, variable->name, false);
             if (binding == nullptr)
             {
                 error(expr.location, "use of undeclared identifier " + quoted(variable->name));
@@ -69,12 +77,42 @@ namespace fminus::ir::detail
             return element(expr.location, pointer, std::nullopt);
         }
 
-        // Components of an lvalue: of a variable, or of components of one (v.xy.x is v's lane 0).
-        const auto& swizzle = std::get<ast::SwizzleExpr>(expr.node);
-        std::optional<LValue> base = lvalue(*swizzle.base, location);
-        if (!base || !hasComponents(location, base->type))
+        // p->y, a field through a pointer to a module.
+        const auto& member = std::get<ast::MemberExpr>(expr.node);
+        if (member.arrow)
+        {
+            const Value pointer = lower(*member.base);
+            if (!ast::isPointer(pointer.type))
+            {
+                error(expr.location, "member reference type " + quoted(ast::typeName(pointer.type))
+                                         + " is not a pointer"
+                                         + (ast::isModule(pointer.type) ? "; did you mean to use '.'?" : ""));
+                return std::nullopt;
+            }
+            if (pointer.type.pointee != ast::Kind::Module)
+            {
+                error(expr.location, "member reference base type " + quoted(ast::typeName(ast::pointee(pointer.type)))
+                                         + " is not a structure or union");
+                return std::nullopt;
+            }
+            return field(expr.location, pointer.ir, *pointer.type.module, member.name, pointer.type.pointeeConst);
+        }
+        // m.y, a module's field; or components of an lvalue: of a variable, or of components of one (v.xy.x is v's
+        // lane 0).
+        std::optional<LValue> base = lvalue(*member.base, location);
+        if (!base)
             return std::nullopt;
-        const auto lanes = components(location, swizzle.components, base->type);
+        if (ast::isModule(base->type))
+            return field(expr.location, base->address, *base->type.module, member.name, base->isConst);
+        if (ast::isPointer(base->type) && base->type.pointee == ast::Kind::Module)
+        {
+            error(expr.location, "member reference type " + quoted(ast::typeName(base->type))
+                                     + " is a pointer; did you mean to use '->'?");
+            return std::nullopt;
+        }
+        if (!hasComponents(location, base->type))
+            return std::nullopt;
+        const auto lanes = components(location, member.name, base->type);
         if (!lanes)
             return std::nullopt;
         const auto type = componentsType(location, lanes->size());
@@ -113,10 +151,15 @@ namespace fminus::ir::detail
         return LValue{address, type, pointer.type.pointeeConst, "", type, {}};
     }
 
-    // Whether `target` may be stored to: not const, and with no component twice (`v.xx = e` would write lane 0
-    // twice). Reports clang's error when not.
+    // Whether `target` may be stored to: not an array, not const, and with no component twice (`v.xx = e` would write
+    // lane 0 twice). Reports clang's error when not.
     bool Lowering::writable(SourceLocation location, const LValue& target)
     {
+        if (ast::isArray(target.type))
+        {
+            error(location, "array type " + quoted(ast::typeName(target.type)) + " is not assignable");
+            return false;
+        }
         if (target.isConst && target.name.empty())
         {
             error(location, "read-only variable is not assignable");   // an element through a const T*
@@ -146,9 +189,15 @@ namespace fminus::ir::detail
     }
 
     // A load; for components, a load of the vector and the lanes taken out of it (an extractelement for one, a
-    // shufflevector for several).
+    // shufflevector for several). An array is no load: its name stands for a pointer to its first element, const
+    // when the array is (C's decay). Nor is a module, whose value is its address.
     Lowering::Value Lowering::read(const LValue& source)
     {
+        if (ast::isArray(source.type))
+            return {builder_.CreateConstInBoundsGEP2_64(typeOf(source.type), source.address, 0, 0, "arraydecay"),
+                    ast::Type::pointerTo(ast::pointee(source.type), source.isConst)};
+        if (ast::isModule(source.type))
+            return {source.address, source.type};
         llvm::Value* loaded = builder_.CreateLoad(typeOf(source.whole), source.address, source.name);
         if (source.components.empty())
             return {loaded, source.type};
@@ -166,10 +215,17 @@ namespace fminus::ir::detail
     }
 
     // `value` converted to the target's type and stored: for components, the vector is loaded, the lanes inserted
-    // and the vector stored back. Returns what was stored, the value of an assignment.
+    // and the vector stored back; a module is copied whole. Returns what was stored, the value of an assignment (a
+    // module's: its address).
     llvm::Value* Lowering::write(SourceLocation location, const LValue& target, Value value, Use use)
     {
         llvm::Value* stored = convert(value, target.type, location, use);
+        if (ast::isModule(target.type))
+        {
+            if (value.type == target.type)
+                copy(target.address, value.ir, target.type);
+            return target.address;
+        }
         if (target.components.empty())
         {
             builder_.CreateStore(stored, target.address);
@@ -210,7 +266,38 @@ namespace fminus::ir::detail
             noPointerTo(location, target->type);
             return failed;
         }
-        return {target->address, ast::Type::pointerTo(target->type.kind, target->isConst)};
+        return {target->address, ast::Type::pointerTo(target->type, target->isConst)};
+    }
+
+    // Every byte of what is at `address` 0, as a declaration of an array or a module starts.
+    void Lowering::zero(llvm::Value* address, ast::Type type)
+    {
+        builder_.CreateMemSet(address, builder_.getInt8(0), *sizeOf(type), alignOf(type));
+    }
+
+    // `float c[4] = {1, 2};`: the list's elements, converted to the element type, in order; the rest stay 0. C only
+    // warns about excess elements (and drops them); FMinus refuses them, as it does a vector literal's. An array of
+    // modules takes no list: its modules start at 0, as every module does.
+    void Lowering::initializeArray(SourceLocation location, llvm::Value* address, ast::Type type,
+                                   const std::vector<ast::ExprPtr>& list)
+    {
+        const ast::Type element = ast::pointee(type);
+        if (list.size() > static_cast<std::size_t>(type.count))
+        {
+            error(location, "excess elements in array initializer");
+            return;
+        }
+        if (ast::isModule(element) && !list.empty())
+        {
+            error(location, "an array of modules takes no initializer list: its modules start at 0");
+            return;
+        }
+        for (std::size_t i = 0; i < list.size(); ++i)
+        {
+            const Value value = lower(*list[i]);
+            llvm::Value* at = builder_.CreateConstInBoundsGEP2_64(typeOf(type), address, 0, i, "arrayinit");
+            builder_.CreateStore(convert(value, element, list[i]->location, Use::Initializing), at);
+        }
     }
 
     // C's arithmetic on pointers. p + i and i + p are the element i after p (i may be negative), and p - i the one i
@@ -233,7 +320,7 @@ namespace fminus::ir::detail
         {
             const bool comparison = isComparison(op);
             // A void* compares with any pointer, as in C: it converts to the void* first.
-            const bool samePointee = lhs.type.pointee == rhs.type.pointee || voidPointee;
+            const bool samePointee = ast::samePointee(lhs.type, rhs.type) || voidPointee;
             if (samePointee && op == ast::BinaryOp::Subtract && ast::canPointTo(lhs.type.pointee))
             {
                 llvm::Value* difference =

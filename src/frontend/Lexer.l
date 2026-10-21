@@ -7,7 +7,8 @@
  * hex), one token whose spelling tells the code generator which. The f or F suffix is allowed only where C allows it
  * (not on 2; in 0x1F the F is a digit), and is kept in the spelling.
  * To add a token: a rule here, its %token in Parser.y. Keywords come before {IDENTIFIER}: with equal lengths, Flex
- * picks the earlier rule. */
+ * picks the earlier rule. An identifier that names a module declared so far is a type, MODULE_NAME (ParseContext.h).
+ */
 %option reentrant noyywrap nounput noinput nounistd never-interactive batch
 %option prefix="fminus"
 %option extra-type="fminus::frontend::ScannerState*"
@@ -21,6 +22,7 @@
 
 %{
 #include <string>
+#include <utility>
 
 using Parser = fminus::frontend::Parser;
 
@@ -71,6 +73,8 @@ IDENTIFIER  [A-Za-z_][A-Za-z0-9_]*
 "for"                       { return Parser::make_FOR(yyextra->where); }
 "break"                     { return Parser::make_BREAK(yyextra->where); }
 "continue"                  { return Parser::make_CONTINUE(yyextra->where); }
+"module"                    { return Parser::make_MODULE(yyextra->where); }
+"this"                      { return Parser::make_THIS(yyextra->where); }
 
 {DIGITS}"."[0-9]*{EXPONENT}?[fF]?   |
 "."{DIGITS}{EXPONENT}?[fF]?         |
@@ -85,7 +89,13 @@ IDENTIFIER  [A-Za-z_][A-Za-z0-9_]*
                                 throw Parser::syntax_error(yyextra->where,
                                                            "invalid suffix '" + suffix + "' on integer constant");
                             }
-{IDENTIFIER}                { return Parser::make_IDENTIFIER(std::string(yytext, yyleng), yyextra->where); }
+{IDENTIFIER}                {
+                                std::string name(yytext, yyleng);
+                                if (const fminus::ast::Module* module = yyextra->context->moduleNamed(name))
+                                    return Parser::make_MODULE_NAME(fminus::ast::Type::moduleType(module),
+                                                                    yyextra->where);
+                                return Parser::make_IDENTIFIER(std::move(name), yyextra->where);
+                            }
 
 "++"                        { return Parser::make_INCREMENT(yyextra->where); }
 "--"                        { return Parser::make_DECREMENT(yyextra->where); }
@@ -94,6 +104,7 @@ IDENTIFIER  [A-Za-z_][A-Za-z0-9_]*
 "*="                        { return Parser::make_STAR_ASSIGN(yyextra->where); }
 "/="                        { return Parser::make_SLASH_ASSIGN(yyextra->where); }
 "%="                        { return Parser::make_PERCENT_ASSIGN(yyextra->where); }
+"->"                        { return Parser::make_ARROW(yyextra->where); }
 "+"                         { return Parser::make_PLUS(yyextra->where); }
 "<="                        { return Parser::make_LE(yyextra->where); }
 ">="                        { return Parser::make_GE(yyextra->where); }

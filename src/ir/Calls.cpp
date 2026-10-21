@@ -1,6 +1,7 @@
-// src/ir/Calls.cpp: calls. The builtins, in the order a call tries them: the reductions, poly_lanes and poly_index,
-// <math.h>'s float functions (LLVM intrinsics, overloaded on vectors), and <stdlib.h>'s heap (malloc, calloc and
-// free, on the runtime's functions); then the program's own functions.
+// src/ir/Calls.cpp: calls. Inside a method, a method of its module first (`tick(x)` is this->tick(x), as in C++,
+// where the class's names hide the others); then the builtins, in the order a call tries them: the reductions,
+// poly_lanes and poly_index, <math.h>'s float functions (LLVM intrinsics, overloaded on vectors), and <stdlib.h>'s
+// heap (malloc, calloc and free, on the runtime's functions); then the program's own functions.
 #include "ir/Lowering.h"
 
 #include <llvm/IR/Constants.h>
@@ -73,12 +74,15 @@ namespace fminus::ir::detail
         for (const ast::ExprPtr& arg : call.args)
             args.push_back(lower(*arg));
 
+        if (const ast::Module* module = function_->module;
+            module != nullptr && functions_.contains(module->name + "::" + call.callee))
+            return callMethod(location, *module, self(), false, call.callee, args);
         if (isReduction(call.callee))
             return lowerReduction(location, call, args);
         if (isPolyQuery(call.callee))
         {
             if (!args.empty())
-                return wrongArity(location, call, 0);
+                return wrongArity(location, args.size(), 0);
             if (call.callee == "poly_lanes")
                 return {builder_.getInt32(polyLanes_), ast::Type::Int};
             std::vector<llvm::Constant*> indices;
@@ -89,13 +93,13 @@ namespace fminus::ir::detail
         if (const Allocation* allocation = findAllocation(call.callee))
         {
             calls_[function_->name].push_back({location, call.callee});   // what Effects.cpp checks
-            return lowerAllocation(location, *allocation, call, args);
+            return lowerAllocation(location, *allocation, args);
         }
         std::vector<llvm::Value*> irArgs;
         if (const Builtin* builtin = findBuiltin(call.callee))
         {
             if (args.size() != builtin->arity)
-                return wrongArity(location, call, builtin->arity);
+                return wrongArity(location, args.size(), builtin->arity);
             // Overloaded on its arguments, as OpenCL C's math functions are: with a vector argument it is the
             // vector intrinsic (llvm.fabs.v4f32), and scalar arguments beside it are broadcast.
             ast::Type type = ast::Type::Float;
@@ -124,7 +128,7 @@ namespace fminus::ir::detail
         const ast::Function& callee = *found->second;
         calls_[function_->name].push_back({location, call.callee});
         if (args.size() != callee.params.size())
-            return wrongArity(location, call, static_cast<unsigned>(callee.params.size()));
+            return wrongArity(location, args.size(), callee.params.size());
         for (std::size_t i = 0; i < args.size(); ++i)
             irArgs.push_back(convert(args[i], callee.params[i].type, location, Use::Passing));
         return {builder_.CreateCall(module_.getFunction(call.callee), irArgs), callee.returnType};
@@ -137,7 +141,7 @@ namespace fminus::ir::detail
                                              const std::vector<Value>& args)
     {
         if (args.size() != 1)
-            return wrongArity(location, call, 1);
+            return wrongArity(location, args.size(), 1);
         const Value& vector = args[0];
         if (!ast::isVector(vector.type) || ast::isMask(vector.type))
         {
@@ -158,10 +162,10 @@ namespace fminus::ir::detail
     // functions, which take 64-bit sizes. malloc and calloc return a void* (null when the size is not positive or the
     // memory is not there), which converts to any pointer; free takes any pointer, or null.
     Lowering::Value Lowering::lowerAllocation(SourceLocation location, const Allocation& allocation,
-                                              const ast::CallExpr& call, const std::vector<Value>& args)
+                                              const std::vector<Value>& args)
     {
         if (args.size() != allocation.arity)
-            return wrongArity(location, call, allocation.arity);
+            return wrongArity(location, args.size(), allocation.arity);
         const ast::Type voidPointer = ast::Type::pointerTo(ast::Kind::Void, false);
         llvm::Type* pointerType = builder_.getPtrTy();
         if (allocation.name == "free")
@@ -184,11 +188,10 @@ namespace fminus::ir::detail
         return {builder_.CreateCall(allocate, sizes, std::string(allocation.name)), voidPointer};
     }
 
-    Lowering::Value Lowering::wrongArity(SourceLocation location, const ast::CallExpr& call, unsigned expected)
+    Lowering::Value Lowering::wrongArity(SourceLocation location, std::size_t have, std::size_t expected)
     {
-        error(location, std::string(call.args.size() > expected ? "too many" : "too few")
-                            + " arguments to function call, expected " + std::to_string(expected) + ", have "
-                            + std::to_string(call.args.size()));
+        error(location, std::string(have > expected ? "too many" : "too few") + " arguments to function call, expected "
+                            + std::to_string(expected) + ", have " + std::to_string(have));
         return poison(ast::Type::Float);
     }
 } // namespace fminus::ir::detail

@@ -153,6 +153,51 @@ TEST_CASE("sizeof takes a type, as C's sizeof(type) does", "[frontend]")
           == "(function int f ()\n  (return (+ (+ (sizeof float) (sizeof const float4 *)) (sizeof poly float))))\n");
 }
 
+TEST_CASE("arrays parse as C's: a size after the name, a list, and a parameter that is a pointer", "[frontend]")
+{
+    CHECK(parsed("void f(const float x[16], int k[]) { float a[4] = {1, 2,}, b; const int c[0x10]; a[1] = x[2]; }")
+          == "(function void f ((const float * x) (int * k))\n"
+             "  (decl float[4] a {1 2})\n"
+             "  (decl float b)\n"
+             "  (decl const int[16] c)\n"
+             "  (= ([] a 1) ([] x 2)))\n");
+}
+
+TEST_CASE("modules parse into fields and methods, and a module's name is a type from its declaration on",
+          "[frontend]")
+{
+    // The methods follow their module, as functions named Osc::tick; the `this` the parser gives them is not shown.
+    CHECK(parsed("module Osc\n"
+                 "{\n"
+                 "    float phase, step;\n"
+                 "    Osc* next;\n"
+                 "    float tick() [[clang::nonblocking]] { phase += step; return this->phase; }\n"
+                 "};\n"
+                 "module Voice { Osc oscs[2]; float tick() { return oscs[0].tick() + oscs[1].phase; } };\n"
+                 "float f(Voice* v, Osc o)\n"
+                 "{\n"
+                 "    Osc* p = &o;\n"
+                 "    return v->tick() + p->next->tick() + o.phase * sizeof(Osc);\n"
+                 "}\n")
+          == "(module Osc\n"
+             "  (field float phase)\n"
+             "  (field float step)\n"
+             "  (field Osc * next))\n"
+             "(method float Osc::tick () [[clang::nonblocking]]\n"
+             "  (+= phase step)\n"
+             "  (return (-> this phase)))\n"
+             "(module Voice\n"
+             "  (field Osc[2] oscs))\n"
+             "(method float Voice::tick ()\n"
+             "  (return (+ (call. ([] oscs 0) tick) (. ([] oscs 1) phase))))\n"
+             "(function float f ((Voice * v) (Osc o))\n"
+             "  (decl Osc * p (& o))\n"
+             "  (return (+ (+ (call-> v tick) (call-> (-> p next) tick)) (* (. o phase) (sizeof Osc)))))\n");
+    // Before its declaration, a module's name is not a type: there, as in C, `M m;` is two identifiers.
+    CHECK(parsed("float f() { M m; }\nmodule M { };\n")
+          == "test.fm:1:15: error: syntax error, unexpected identifier\n");
+}
+
 TEST_CASE("errors print in source order, each with its notes after it", "[frontend]")
 {
     fminus::Diagnostics diagnostics("x.fm");

@@ -7,7 +7,8 @@
 //     Expressions.cpp   constants, variables, operators, &&, ||, ?:, casts, assignment, ++ and --
 //     Calls.cpp         calls: the builtins (math functions, reductions, poly queries, the heap) and the program's
 //     Vectors.cpp       vector literals, swizzles, and ?: lane by lane
-//     Memory.cpp        lvalues (variables, p[i], *p, components) read and written, &x, and pointer arithmetic
+//     Memory.cpp        lvalues (variables, p[i], *p, components) read and written, arrays, &x, pointer arithmetic
+//     Modules.cpp       modules: their layout, fields, methods and calls of them, `this`, copies
 //     Effects.cpp       [[clang::nonallocating]] and [[clang::nonblocking]], checked over the calls
 // A new node is lowered in the file its kind belongs to. The build says which members still need it: a std::visit
 // without its lambda fails to compile, and a switch without its enumerator trips -Wswitch.
@@ -80,7 +81,7 @@ namespace fminus::ir::detail
     private:
         // A lowered expression: its IR and its FMinus type. The rules read the FMinus type, never the IR's, since
         // two FMinus types may share an LLVM type: one whose width the target decides would be <4 x float> on
-        // NEON, as float4 is.
+        // NEON, as float4 is. A module's value is its address (a ptr): it is copied from there, never loaded whole.
         struct Value
         {
             llvm::Value* ir = nullptr;
@@ -108,7 +109,8 @@ namespace fminus::ir::detail
         };
 
         // Something a program can assign, or take the address of (Memory.cpp): a variable, an element a pointer
-        // reaches (p[i], *p), or components of either. read() and write() load and store it.
+        // reaches (p[i], *p), a module's field (m.y, p->y), or components of any of them. read() and write() load
+        // and store it.
         struct LValue
         {
             llvm::Value* address = nullptr;   // the variable's stack slot, or the element's address
@@ -138,11 +140,13 @@ namespace fminus::ir::detail
         llvm::Type* typeOf(ast::Type type);
         llvm::Value* convert(Value value, ast::Type type, SourceLocation location, Use use);
         llvm::Value* convertPointer(Value value, ast::Type type, SourceLocation location, Use use);
+        llvm::Type* valueTypeOf(ast::Type type);
         void incompatible(SourceLocation location, Use use, ast::Type from, ast::Type to);
         void pointerMismatch(SourceLocation location, Use use, ast::Type from, ast::Type to, bool discardsConst);
         bool checkType(SourceLocation location, ast::Type type);
         void noPointerTo(SourceLocation location, ast::Type pointee);
-        std::optional<unsigned> sizeOf(ast::Type type) const;
+        std::optional<unsigned> sizeOf(ast::Type type);
+        llvm::Align alignOf(ast::Type type);
         bool commonType(SourceLocation location, ast::Type a, ast::Type b, ast::Type& type);
         void polyMismatch(SourceLocation location, ast::Type a, ast::Type b);
         Value poison(ast::Type type);
@@ -193,7 +197,7 @@ namespace fminus::ir::detail
                                                    ast::Type vector);
         std::optional<ast::Type> componentsType(SourceLocation location, std::size_t count);
         bool hasComponents(SourceLocation location, ast::Type type);
-        Value lowerSwizzle(SourceLocation location, const ast::SwizzleExpr& swizzle);
+        Value lowerMember(SourceLocation location, const ast::MemberExpr& member);
 
         // ---- Memory.cpp ---------------------------------------------------------------------------------------------
         static bool isLValue(const ast::Expr& expr);
@@ -205,13 +209,27 @@ namespace fminus::ir::detail
         llvm::Value* write(SourceLocation location, const LValue& target, Value value, Use use);
         Value lowerAddressOf(SourceLocation location, const ast::Expr& operand);
         Value pointerArithmetic(SourceLocation location, ast::BinaryOp op, Value lhs, Value rhs);
+        void zero(llvm::Value* address, ast::Type type);
+        void initializeArray(SourceLocation location, llvm::Value* address, ast::Type type,
+                             const std::vector<ast::ExprPtr>& list);
 
         // ---- Calls.cpp ----------------------------------------------------------------------------------------------
         Value lowerCall(SourceLocation location, const ast::CallExpr& call);
         Value lowerReduction(SourceLocation location, const ast::CallExpr& call, const std::vector<Value>& args);
-        Value wrongArity(SourceLocation location, const ast::CallExpr& call, unsigned expected);
-        Value lowerAllocation(SourceLocation location, const Allocation& allocation, const ast::CallExpr& call,
-                              const std::vector<Value>& args);
+        Value wrongArity(SourceLocation location, std::size_t have, std::size_t expected);
+        Value lowerAllocation(SourceLocation location, const Allocation& allocation, const std::vector<Value>& args);
+
+        // ---- Modules.cpp --------------------------------------------------------------------------------------------
+        void layOut(const ast::Program& program);
+        static const ast::Field* findField(const ast::Module& module, const std::string& name, unsigned* index);
+        std::optional<LValue> field(SourceLocation location, llvm::Value* address, const ast::Module& module,
+                                    const std::string& name, bool isConst);
+        llvm::Value* self();
+        Value lowerThis(SourceLocation location);
+        Value lowerMethodCall(SourceLocation location, const ast::MethodCallExpr& call);
+        Value callMethod(SourceLocation location, const ast::Module& module, llvm::Value* address, bool isConst,
+                         const std::string& name, const std::vector<Value>& args);
+        void copy(llvm::Value* target, llvm::Value* source, ast::Type type);
 
         // ---- Effects.cpp --------------------------------------------------------------------------------------------
         Effect declaredEffect(const ast::Function& function);
@@ -231,5 +249,6 @@ namespace fminus::ir::detail
         std::vector<Loop> loops_;
         std::unordered_map<std::string, Effect> effects_;                  // each name's, from all its declarations
         std::unordered_map<std::string, std::vector<CallSite>> calls_;     // each definition's calls, in order
+        std::unordered_map<const ast::Module*, llvm::StructType*> structs_;   // each module's layout
     };
 } // namespace fminus::ir::detail

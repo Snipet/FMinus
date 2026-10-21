@@ -1,0 +1,34 @@
+// Arrays, as clang lowers C's: a local is an alloca of [N x T], zeroed (a memset), its list's elements stored in
+// order; its name stands for a pointer to its first element (arraydecay), which an index then reaches as a pointer's
+// does. A parameter declared as an array is a pointer.
+// RUN: fminus %s -O0 | FileCheck %s
+// RUN: fminus %s -O2 | FileCheck %s --check-prefix=OPT
+
+float table(int i)
+{
+    float c[4] = {1, 2, 3};
+    return c[i];
+}
+
+void twice(float x[16], int n)
+{
+    for (int i = 0; i < n; ++i)
+        x[i] *= 2;
+}
+
+// CHECK-LABEL: define float @table(i32 %i)
+// CHECK:         %c = alloca [4 x float]
+// CHECK:         call void @llvm.memset.p0.i64(ptr align 4 %c, i8 0, i64 16, i1 false)
+// CHECK-NEXT:    %arrayinit = getelementptr inbounds [4 x float], ptr %c, i64 0, i64 0
+// CHECK-NEXT:    store float 1.000000e+00, ptr %arrayinit
+// CHECK:         getelementptr inbounds [4 x float], ptr %c, i64 0, i64 2
+// CHECK-NEXT:    store float 3.000000e+00
+// CHECK:         %arraydecay = getelementptr inbounds [4 x float], ptr %c, i64 0, i64 0
+// CHECK:         getelementptr inbounds float, ptr %arraydecay, i64 {{%.*}}
+
+// CHECK-LABEL: define void @twice(ptr %x, i32 %n)
+
+// At -O2 the loop over the parameter, a float* like any other, runs on vectors.
+// OPT-LABEL: define void @twice(ptr {{.*}}%x, i32 %n)
+// OPT:       vector.body:
+// OPT:         fmul <{{[0-9]+}} x float>

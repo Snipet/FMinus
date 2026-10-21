@@ -1,0 +1,65 @@
+// Modules, as clang lowers a C++ struct with member functions: an LLVM struct type of the fields in order; a method
+// is a function named as C++ qualifies it, whose first parameter is `this` (never null, aligned, as big as the
+// module); a field is a getelementptr from it. A module local starts at 0 (a memset), a copy is a memcpy, and a
+// method's call passes the module's address. At -O2 a field is a load at its offset.
+// RUN: fminus %s -O0 | FileCheck %s
+// RUN: fminus %s -O2 | FileCheck %s --check-prefix=OPT
+
+module OnePole
+{
+    float y;
+    float k;
+
+    float tick(float x) [[clang::nonblocking]]
+    {
+        return y += k * (x - y);
+    }
+};
+
+module Bank
+{
+    OnePole filters[4];
+    float history[8];
+
+    float tick(int i, float x)
+    {
+        history[i] = x;
+        return filters[i].tick(x);
+    }
+};
+
+float run(Bank* bank, float x)
+{
+    OnePole local;
+    OnePole copy = local;
+    return bank->tick(1, x) + copy.tick(x);
+}
+
+// CHECK: %OnePole = type { float, float }
+// CHECK: %Bank = type { [4 x %OnePole], [8 x float] }
+
+// CHECK-LABEL: define float @"OnePole::tick"(ptr nonnull align 4 dereferenceable(8) %this, float %x)
+// CHECK:         %this.addr = alloca ptr
+// CHECK:         [[THIS:%.*]] = load ptr, ptr %this.addr
+// CHECK-NEXT:    %k = getelementptr inbounds nuw %OnePole, ptr [[THIS]], i32 0, i32 1
+// CHECK:         %y{{[0-9]*}} = getelementptr inbounds nuw %OnePole, ptr {{%.*}}, i32 0, i32 0
+
+// An array field: its name stands for a pointer to its first element, which p[i] indexes.
+// CHECK-LABEL: define float @"Bank::tick"(ptr nonnull align 4 dereferenceable(64) %this, i32 %i, float %x)
+// CHECK:         %history = getelementptr inbounds nuw %Bank, ptr {{%.*}}, i32 0, i32 1
+// CHECK-NEXT:    %arraydecay = getelementptr inbounds [8 x float], ptr %history, i64 0, i64 0
+// CHECK:         %filters = getelementptr inbounds nuw %Bank, ptr {{%.*}}, i32 0, i32 0
+// CHECK:         [[FILTER:%.*]] = getelementptr inbounds %OnePole, ptr {{%.*}}, i64 {{%.*}}
+// CHECK:         call float @"OnePole::tick"(ptr [[FILTER]], float
+
+// CHECK-LABEL: define float @run(ptr %bank, float %x)
+// CHECK-DAG:     %local = alloca %OnePole
+// CHECK-DAG:     %copy = alloca %OnePole
+// CHECK:         call void @llvm.memset.p0.i64(ptr align 4 %local, i8 0, i64 8, i1 false)
+// CHECK:         call void @llvm.memcpy.p0.p0.i64(ptr align 4 %copy, ptr align 4 %local, i64 8, i1 false)
+// CHECK:         call float @"Bank::tick"(ptr {{%.*}}, i32 1, float
+// CHECK:         call float @"OnePole::tick"(ptr %copy, float
+
+// OPT-LABEL: define float @"OnePole::tick"(ptr {{.*}}nonnull align 4 {{.*}}dereferenceable(8) %this, float %x)
+// OPT:         getelementptr inbounds nuw i8, ptr %this, i64 4
+// OPT:         store float {{%.*}}, ptr %this

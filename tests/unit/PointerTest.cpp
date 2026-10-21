@@ -125,14 +125,16 @@ TEST_CASE("pointer errors are reported as clang reports them", "[codegen][pointe
              "test.fm:8:5: error: indirection requires pointer operand ('float' invalid)\n"
              "test.fm:9:5: error: cannot take the address of an rvalue of type 'float'\n"
              "test.fm:10:5: error: address of vector element requested\n"
-             "test.fm:11:5: error: FMinus has pointers to float, int, float2, float4, float8 and void, not to 'float *'\n"
+             "test.fm:11:5: error: FMinus has pointers to float, int, float2, float4, float8, void and modules, "
+             "not to 'float *'\n"
              "test.fm:12:7: error: invalid operands to binary expression ('float *' and 'float *')\n"
              "test.fm:13:7: error: 'float *' and 'int *' are not pointers to compatible types\n"
              "test.fm:14:7: error: comparison of distinct pointer types ('float *' and 'int *')\n"
              "test.fm:15:7: error: invalid operands to binary expression ('float *' and 'int')\n"
              "test.fm:16:5: error: invalid argument type 'float *' to unary expression\n"
              "test.fm:18:7: error: cannot assign to variable 'k' with const-qualified type 'float *const'\n"
-             "test.fm:19:11: error: FMinus has pointers to float, int, float2, float4, float8 and void, not to 'bool'\n"
+             "test.fm:19:11: error: FMinus has pointers to float, int, float2, float4, float8, void and modules, "
+             "not to 'bool'\n"
              "test.fm:20:11: error: incompatible operand types ('float *' and 'int *')\n"
              "test.fm:21:5: error: returning 'float *' from a function with incompatible result type 'float'\n");
 }

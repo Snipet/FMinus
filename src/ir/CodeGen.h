@@ -5,6 +5,7 @@
 #include "frontend/Diagnostics.h"
 
 #include <memory>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -21,6 +22,10 @@ namespace fminus::ir
         // The lanes of a poly float: the target's vector register width in floats (support/HostTarget.h: polyLanes
         // asks the TargetMachine). 4 is NEON's and SSE's; any power of two from 1 to 64 lowers, wider ones in parts.
         unsigned polyLanes = 4;
+
+        // The target's data layout (TargetMachine::createDataLayout), which a module's layout and sizeof follow. Empty
+        // is LLVM's default, which agrees with the 64-bit targets FMinus runs on for every type it has.
+        std::string dataLayout;
     };
 
     // Lowers `program` into a new module in `context`, named after the diagnostics' file. Every FMinus function becomes

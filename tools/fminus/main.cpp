@@ -132,6 +132,7 @@ int main(int argc, char** argv)
         return fail(machine.takeError());
     fminus::ir::Options options;
     options.polyLanes = polyLanes != 0 ? polyLanes : fminus::polyLanes(**machine);
+    options.dataLayout = (*machine)->createDataLayout().getStringRepresentation();
 
     // Syntax tree -> LLVM IR.
     auto context = std::make_unique<llvm::LLVMContext>();
@@ -197,6 +198,8 @@ int main(int argc, char** argv)
         case fminus::ast::Kind::PolyFloat:
         case fminus::ast::Kind::PolyBool:
         case fminus::ast::Kind::Pointer:
+        case fminus::ast::Kind::Module:   // never a result (the code generator refused it)
+        case fminus::ast::Kind::Array:
             return fail(std::format("--run: '{}' returns '{}'; --run prints floats, bools and ints only", run,
                                     fminus::ast::typeName(function->returnType)));
         }

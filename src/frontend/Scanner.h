@@ -1,7 +1,8 @@
 // src/frontend/Scanner.h: the glue between the scanner (Lexer.l) and the parser (Parser.y), the pattern of
 // tests/smoke/calc/:
 //   - the parser's header first, for its symbol and location types;
-//   - the scanner's state (Flex's yyextra), here the location (and where an open block comment began);
+//   - the scanner's state (Flex's yyextra), here the location (and where an open block comment began), and the
+//     parse context, whose modules' names the scanner returns as types;
 //   - the scanner's function under its own name (Flex defines it through YY_DECL), and the yylex the parser calls
 //     forwarding to it: the prefixed scanner #defines yylex to fminuslex in its own files.
 #pragma once
@@ -14,6 +15,7 @@ namespace fminus::frontend
     {
         location where;
         location commentStart;   // of the block comment being skipped, for "unterminated /* comment"
+        const ParseContext* context = nullptr;
     };
 
     // The next token, with its location.

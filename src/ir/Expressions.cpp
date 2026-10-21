@@ -1,7 +1,7 @@
 // src/ir/Expressions.cpp: expressions. Constants, variables, unary and binary operators (lane by lane on vectors), &&
 // and || (short-circuiting), ?: (only the branch taken runs, unless the condition is a vector: Vectors.cpp), casts,
-// assignment, ++ and --. Calls are Calls.cpp's, vector literals and swizzles Vectors.cpp's, and what an assignment
-// stores to Memory.cpp's.
+// assignment, ++ and --. Calls are Calls.cpp's, vector literals and swizzles Vectors.cpp's, methods and `this`
+// Modules.cpp's, and what an assignment stores to Memory.cpp's.
 #include "ir/Lowering.h"
 
 #include <llvm/ADT/APFloat.h>
@@ -71,7 +71,11 @@ namespace fminus::ir::detail
                     return lowerConditional(expr.location, conditional);
                 },
                 [&](const ast::ConstructExpr& construct) { return lowerConstruct(expr.location, construct); },
-                [&](const ast::SwizzleExpr& swizzle) { return lowerSwizzle(expr.location, swizzle); },
+                [&](const ast::MemberExpr& member) {
+                    return member.arrow ? readLValue(expr) : lowerMember(expr.location, member);
+                },
+                [&](const ast::MethodCallExpr& call) { return lowerMethodCall(expr.location, call); },
+                [&](const ast::ThisExpr&) { return lowerThis(expr.location); },
                 [&](const ast::CallExpr& call) { return lowerCall(expr.location, call); },
                 [&](const ast::AssignExpr& assign) { return lowerAssign(expr.location, assign); },
                 [&](const ast::IncrementExpr& increment) { return lowerIncrement(expr.location, increment); },
@@ -224,6 +228,17 @@ namespace fminus::ir::detail
         // a pointer to the same type (const if either is).
         const bool thenVoid = thenValue.type == ast::Type::Void;
         const bool elseVoid = elseValue.type == ast::Type::Void;
+        if (ast::isModule(thenValue.type) || ast::isModule(elseValue.type))
+        {
+            // A module's value is its address, and ?: would have to copy one: choose between pointers instead.
+            error(location, "FMinus's ?: does not choose between modules: choose between pointers, c ? &a : &b");
+            builder_.SetInsertPoint(thenEnd);
+            builder_.CreateBr(endBlock);
+            builder_.SetInsertPoint(elseEnd);
+            builder_.CreateBr(endBlock);
+            builder_.SetInsertPoint(endBlock);
+            return poison(ast::isModule(thenValue.type) ? thenValue.type : elseValue.type);   // its fields still read
+        }
         const bool pointers = ast::isPointer(thenValue.type) || ast::isPointer(elseValue.type);
         ast::Type type = thenValue.type;
         bool meet = thenValue.type == elseValue.type;
@@ -313,18 +328,18 @@ namespace fminus::ir::detail
         return builder_.getInt32(static_cast<std::uint32_t>(value));
     }
 
-    // sizeof(type): the type's size in bytes (Types.cpp), an int constant.
+    // sizeof(type): the type's size in bytes (Types.cpp), an int constant; a module's, padding included, is what to
+    // allocate for one.
     Lowering::Value Lowering::lowerSizeof(SourceLocation location, const ast::SizeofExpr& size)
     {
-        const std::optional<unsigned> bytes = sizeOf(size.type);
-        if (!bytes)
+        if (size.type == ast::Type::Void)
         {
             error(location, "invalid application of 'sizeof' to an incomplete type 'void'");
             return poison(ast::Type::Int);
         }
         if (!checkType(location, size.type))
             return poison(ast::Type::Int);
-        return {builder_.getInt32(*bytes), ast::Type::Int};
+        return {builder_.getInt32(*sizeOf(size.type)), ast::Type::Int};
     }
 
     // (float)x, (int)x, (bool)x: C's casts between scalars. Each is the implicit conversion, written out.

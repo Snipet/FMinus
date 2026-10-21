@@ -48,9 +48,10 @@ namespace fminus::frontend
             diagnostics.error({}, "the source is too long");
             return std::nullopt;
         }
-        ScannerState state;
-        ScannerHandle scanner(source, state);
         ParseContext context{{}, diagnostics};
+        ScannerState state;
+        state.context = &context;
+        ScannerHandle scanner(source, state);
         Parser parser(scanner.get(), context);
         if (parser.parse() != 0 || diagnostics.hasErrors())
             return std::nullopt;

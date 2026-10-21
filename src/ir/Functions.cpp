@@ -1,6 +1,7 @@
 // src/ir/Functions.cpp: functions. Declarations follow C's rules for prototypes and definitions, with the C ABI's
 // attributes; a definition's parameters become stack slots, its body is lowered, and a non-void function that can
-// fall off its end is an error (a void one returns there). Also the stack slots and the scopes variables live in.
+// fall off its end is an error (a void one returns there). A method is a function too, whose first parameter is
+// `this` (Modules.cpp has the rest). Also the stack slots and the scopes variables live in.
 #include "ir/Lowering.h"
 
 #include <llvm/ADT/DepthFirstIterator.h>
@@ -57,16 +58,34 @@ namespace fminus::ir::detail
                 found->second = &function;   // the definition, after its prototypes
             return;
         }
+        if (function.module != nullptr)
+        {
+            const std::string member = function.name.substr(function.module->name.size() + 2);
+            if (findField(*function.module, member, nullptr) != nullptr)
+                error(function.location, "duplicate member " + quoted(member));
+        }
+        // A module goes to a function and comes back through a pointer: what the C ABI does with an aggregate this size
+        // anyway, and what keeps a function from copying one it was only meant to change. (After the error, the
+        // declaration takes a ptr, which is what a module's Value is.)
+        const auto byValue = [&](SourceLocation location, ast::Type type, bool result) {
+            if (!ast::isModule(type))
+                return;
+            const std::string pointer = quoted(ast::typeName(ast::Type::pointerTo(type, false)));
+            error(location, result ? "FMinus returns no modules: write the result through a pointer, " + pointer
+                                   : "FMinus passes a module by pointer: make the parameter " + pointer);
+        };
         checkType(function.location, function.returnType);
+        byValue(function.location, function.returnType, true);
         std::vector<llvm::Type*> params;
         for (const ast::Param& param : function.params)
         {
             if (param.type == ast::Type::Void)
                 error(param.location, "argument may not have 'void' type");
             checkType(param.location, param.type);
-            params.push_back(typeOf(param.type == ast::Type::Void ? ast::Type::Float : param.type));
+            byValue(param.location, param.type, false);
+            params.push_back(valueTypeOf(param.type == ast::Type::Void ? ast::Type::Float : param.type));
         }
-        llvm::FunctionType* type = llvm::FunctionType::get(typeOf(function.returnType), params, false);
+        llvm::FunctionType* type = llvm::FunctionType::get(valueTypeOf(function.returnType), params, false);
         llvm::Function* llvmFunction =
             llvm::Function::Create(type, llvm::Function::ExternalLinkage, function.name, module_);
         // The C ABI passes and returns bool zero-extended: say so, or a C++ caller reads garbage bits. A restrict
@@ -80,6 +99,19 @@ namespace fminus::ir::detail
         }
         if (function.returnType == ast::Type::Bool)
             llvmFunction->addRetAttr(llvm::Attribute::ZExt);
+        // A method's `this` is never null and points to a whole module, aligned, as clang says of C++'s: what lets the
+        // optimiser hoist a field's load out of a loop.
+        if (function.module != nullptr)
+        {
+            const ast::Type module = ast::Type::moduleType(function.module);
+            const unsigned size = *sizeOf(module);
+            llvm::AttrBuilder attributes(module_.getContext());
+            attributes.addAttribute(llvm::Attribute::NonNull);
+            attributes.addAlignmentAttr(alignOf(module));
+            if (size > 0)
+                attributes.addDereferenceableAttr(size);
+            llvmFunction->addParamAttrs(0, attributes);
+        }
         functions_.emplace(function.name, &function);
     }
 
@@ -101,11 +133,13 @@ namespace fminus::ir::detail
             }
             if (param.type == ast::Type::Void)
                 continue;   // declare() reported it
-            // A pointer to what FMinus cannot point to (declare() reported it) is bound as a float*, so its uses
-            // report no more errors.
-            const ast::Type type = ast::isPointer(param.type) && !ast::canPointTo(param.type.pointee)
-                                       ? ast::Type::pointerTo(ast::Kind::Float, param.type.pointeeConst)
-                                       : param.type;
+            // A pointer to what FMinus cannot point to (declare() reported it) is bound as a float*, and a module
+            // passed by value (likewise) as a pointer to it, so their uses report no more errors.
+            ast::Type type = ast::isPointer(param.type) && !ast::canPointTo(param.type.pointee)
+                                 ? ast::Type::pointerTo(ast::Kind::Float, param.type.pointeeConst)
+                                 : param.type;
+            if (ast::isModule(type))
+                type = ast::Type::pointerTo(type, false);
             llvm::Argument* argument = llvmFunction->getArg(static_cast<unsigned>(i));
             argument->setName(param.name);
             llvm::AllocaInst* slot = allocate(typeOf(type), param.name + ".addr");
