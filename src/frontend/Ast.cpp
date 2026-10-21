@@ -1,6 +1,8 @@
 // src/frontend/Ast.cpp
 #include "frontend/Ast.h"
 
+#include <cstdlib>
+
 namespace fminus::ast
 {
     namespace
@@ -176,6 +178,15 @@ namespace fminus::ast
             return typeName(type) + (isConst ? " const" : "") + (isRestrict ? " restrict" : "");
         }
 
+        // [[fminus::range(20, 20000)]], [[clang::nonblocking]]
+        std::string attributeText(const Attribute& attribute)
+        {
+            std::string args;
+            for (const std::string& arg : attribute.args)
+                args += (args.empty() ? "" : ", ") + arg;
+            return "[[" + attribute.name + (attribute.args.empty() ? "" : "(" + args + ")") + "]]";
+        }
+
         // An array's initialiser list: {1 2}.
         std::string list(const std::vector<ExprPtr>& elements)
         {
@@ -232,6 +243,20 @@ namespace fminus::ast
         }
     } // namespace
 
+    std::optional<double> attributeNumber(std::string spelling)
+    {
+        const bool hex = spelling.find("0x") != std::string::npos || spelling.find("0X") != std::string::npos;
+        if (!hex && !spelling.empty() && (spelling.back() == 'f' || spelling.back() == 'F'))
+            spelling.pop_back();
+        const bool floating = spelling.find_first_of(hex ? ".pP" : ".eE") != std::string::npos;
+        char* end = nullptr;
+        const double value = floating ? std::strtod(spelling.c_str(), &end)
+                                      : static_cast<double>(std::strtoll(spelling.c_str(), &end, 0));
+        if (spelling.empty() || end != spelling.c_str() + spelling.size())
+            return std::nullopt;
+        return value;
+    }
+
     std::string typeName(Type type)
     {
         switch (type.kind)
@@ -282,7 +307,13 @@ namespace fminus::ast
                     continue;
                 text += "(module " + module->name;
                 for (const Field& field : module->fields)
-                    text += "\n  (field " + declared(field.type, field.isConst, false) + " " + field.name + ")";
+                {
+                    text += std::string(field.isParam ? "\n  (param " : "\n  (field ")
+                            + declared(field.type, field.isConst, false) + " " + field.name;
+                    for (const Attribute& attribute : field.attributes)
+                        text += " " + attributeText(attribute);
+                    text += ")";
+                }
                 text += ")\n";
             }
             return text;
@@ -305,7 +336,7 @@ namespace fminus::ast
             }
             text += ")";
             for (const Attribute& attribute : function.attributes)
-                text += " [[" + attribute.name + "]]";
+                text += " " + attributeText(attribute);
             for (const Stmt& stmt : function.body)
                 text += "\n" + dump(stmt, "  ");
             text += ")\n";

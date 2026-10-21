@@ -198,6 +198,29 @@ TEST_CASE("modules parse into fields and methods, and a module's name is a type 
           == "test.fm:1:15: error: syntax error, unexpected identifier\n");
 }
 
+TEST_CASE("a module's parameters parse with their attributes, and only in a module", "[frontend]")
+{
+    CHECK(parsed("module Lowpass\n"
+                 "{\n"
+                 "    param float cutoff [[fminus::range(20, 2e4)]] [[fminus::default(1000)]];\n"
+                 "    param int mode [[fminus::range(-1, 0x10)]];\n"
+                 "    param bool on;\n"
+                 "    float y;\n"
+                 "    float tick(float x) { return y += cutoff[0] * (x - y); }\n"
+                 "};\n")
+          == "(module Lowpass\n"
+             "  (param float cutoff [[fminus::range(20, 2e4)]] [[fminus::default(1000)]])\n"
+             "  (param int mode [[fminus::range(-1, 0x10)]])\n"
+             "  (param bool on)\n"
+             "  (field float y))\n"
+             "(method float Lowpass::tick ((float x))\n"
+             "  (return (+= y (* ([] cutoff 0) (- x y)))))\n");
+    // A parameter takes no initializer (its default is an attribute), and one is a module's.
+    CHECK(parsed("module A { param float x = 1; };")
+          == "test.fm:1:26: error: syntax error, unexpected =, expecting [ or ;\n");
+    CHECK(parsed("param float x;") == "test.fm:1:1: error: syntax error, unexpected param\n");
+}
+
 TEST_CASE("errors print in source order, each with its notes after it", "[frontend]")
 {
     fminus::Diagnostics diagnostics("x.fm");

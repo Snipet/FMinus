@@ -564,11 +564,13 @@ namespace fminus::ast
     // later or elsewhere: one with no definition in the program is external, resolved when the code is linked (the
     // JIT looks in the process, so `float atanf(float x);` calls libm's).
     // `[[clang::nonblocking]]` after a function's parameters: C23's attribute syntax, with clang's names. The tree
-    // keeps an attribute as written; the code generator gives it its meaning (ir/Effects.cpp).
+    // keeps an attribute as written; the code generator gives it its meaning (ir/Effects.cpp). A parameter's take
+    // arguments, numbers: `[[fminus::range(20, 20000), fminus::default(1000)]]`.
     struct Attribute
     {
         SourceLocation location;
-        std::string name;   // "clang::nonblocking", or a name without its namespace
+        std::string name;                 // "clang::nonblocking", or a name without its namespace
+        std::vector<std::string> args;    // the numbers between its parentheses, as written ("-60", "1e3")
     };
 
     // A method is a function too: named `OnePole::tick`, with `module` set, and a first parameter the parser adds,
@@ -587,6 +589,11 @@ namespace fminus::ast
 
     // A field of a module: a name and its type. It starts at 0, wherever the module is; a field cannot have an
     // initialiser or be const (the code generator says so), since nothing would run either.
+    //
+    // A parameter (`param float cutoff;`) is a field the host sets: its methods read it as `cutoff[i]`, its value at
+    // sample i of the call. How it gets there is the host's choice when it compiles the program (ir::Options): a
+    // stream (a buffer of samples, set before each call), a knob (one value, which may change between any two calls,
+    // read once a call), or frozen (a constant, compiled in). Its attributes give the host a range and a default.
     struct Field
     {
         SourceLocation location;
@@ -594,6 +601,8 @@ namespace fminus::ast
         Type type = Type::Float;
         bool isConst = false;
         bool hasInitializer = false;
+        bool isParam = false;
+        std::vector<Attribute> attributes;   // a parameter's
     };
 
     // `module OnePole { float y; float k; void init(float cutoff, float rate) { ... } float tick(float x) { ... } };`:
@@ -626,6 +635,10 @@ namespace fminus::ast
 
     // The type's name, as clang writes it in its messages: `float`, `poly float`, `const float *`.
     std::string typeName(Type type);
+
+    // An attribute's argument as a number, as C writes one: an integer (0x1F, 010, 12, -3) or a floating constant
+    // (1e3, 0.5f). Nothing for anything else.
+    std::optional<double> attributeNumber(std::string spelling);
 
     // The tree as s-expressions, one function after another, for `fminus --emit ast` and tests:
     //     (function float gain ((float x) (const float g))

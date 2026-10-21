@@ -4,9 +4,11 @@
 //
 //     program      : (function | module)*
 //     function     : "const"? type pointer IDENTIFIER "(" params ")" attributes (block | ";")    or a prototype
-//     module       : "module" IDENTIFIER "{" (declaration | method)* "}" ";"      the declarations are its fields
+//     module       : "module" IDENTIFIER "{" (declaration | parameter | method)* "}" ";"     declarations: fields
+//     parameter    : "param" type IDENTIFIER attributes ";"                     a field the host sets
 //     method       : "const"? type pointer IDENTIFIER "(" params ")" attributes block
-//     attributes   : ("[" "[" attribute ("," attribute)* "]" "]")*      attribute: IDENTIFIER ("::" IDENTIFIER)?
+//     attributes   : ("[" "[" attribute ("," attribute)* "]" "]")*
+//     attribute    : IDENTIFIER ("::" IDENTIFIER)? ("(" "-"? NUMBER ("," "-"? NUMBER)* ")")?
 //     params       : (param ("," param)*)? | "void"                                  (void) is none, as in C
 //     param        : "const"? type pointer IDENTIFIER? | "const"? type IDENTIFIER "[" NUMBER? "]"   a pointer
 //     type         : "float" | "bool" | "int" | "void" | VECTOR_TYPE | "poly" ("float" | "bool") | MODULE_NAME
@@ -220,7 +222,7 @@
 %token RESTRICT "restrict" AMPERSAND "&" LBRACKET "[" RBRACKET "]" SIZEOF "sizeof" COLONCOLON "::"
 %token LT "<" LE "<=" GT ">" GE ">=" EQ "==" NE "!=" NOT "!" AND "&&" OR "||" QUESTION "?" COLON ":"
 %token IF "if" ELSE "else" WHILE "while" FOR "for" BREAK "break" CONTINUE "continue"
-%token MODULE "module" THIS "this" ARROW "->"
+%token MODULE "module" THIS "this" ARROW "->" PARAM "param"
 %token <ast::Type> MODULE_NAME "module name"
 %token <ast::Type> VECTOR_TYPE "vector type"
 %token DOT "." POLY "poly"
@@ -238,6 +240,8 @@
 %nterm <int> array_size
 %nterm <std::vector<ast::Attribute>> attributes attribute_list
 %nterm <ast::Attribute> attribute
+%nterm <std::vector<std::string>> attribute_args
+%nterm <std::string> attribute_arg
 %nterm <std::vector<ast::Param>> params param_list
 %nterm <ast::Param> param
 %nterm <bool> qualifier
@@ -325,16 +329,23 @@ module_body
                                             }
     ;
 
-// A declaration's names are fields; a function is a method, with `this` before its parameters.
+// A declaration's names are fields; a parameter is a field the host sets; a function is a method, with `this` before
+// its parameters.
 module_member
-    : declaration                           {
+    : "param" type IDENTIFIER attributes ";"
+                                            {
+                                                $$.fields.push_back(ast::Field{at(@3), $3, $2, false, false, true,
+                                                                               $4});
+                                            }
+    | declaration                           {
                                                 for (ast::Stmt& stmt : $1)
                                                 {
                                                     auto& decl = std::get<ast::DeclStmt>(stmt.node);
                                                     $$.fields.push_back(ast::Field{stmt.location, std::move(decl.name),
                                                                                    decl.type, decl.isConst,
                                                                                    decl.init != nullptr
-                                                                                       || decl.hasList});
+                                                                                       || decl.hasList,
+                                                                                   false, {}});
                                                 }
                                             }
     | qualifier type pointer IDENTIFIER "(" params ")" attributes block
@@ -380,8 +391,22 @@ attribute_list
     ;
 
 attribute
-    : IDENTIFIER "::" IDENTIFIER            { $$ = ast::Attribute{at(@1), $1 + "::" + $3}; }
-    | IDENTIFIER                            { $$ = ast::Attribute{at(@1), $1}; }
+    : IDENTIFIER "::" IDENTIFIER            { $$ = ast::Attribute{at(@1), $1 + "::" + $3, {}}; }
+    | IDENTIFIER                            { $$ = ast::Attribute{at(@1), $1, {}}; }
+    | IDENTIFIER "::" IDENTIFIER "(" attribute_args ")"
+                                            { $$ = ast::Attribute{at(@1), $1 + "::" + $3, $5}; }
+    | IDENTIFIER "(" attribute_args ")"     { $$ = ast::Attribute{at(@1), $1, $3}; }
+    ;
+
+// An attribute's arguments: numbers, a minus before any of them.
+attribute_args
+    : attribute_arg                         { $$.push_back($1); }
+    | attribute_args "," attribute_arg      { $$ = $1; $$.push_back($3); }
+    ;
+
+attribute_arg
+    : NUMBER                                { $$ = $1; }
+    | "-" NUMBER                            { $$ = "-" + $2; }
     ;
 
 // `(void)` is C's empty list: one unnamed parameter of type void, which is no parameter.

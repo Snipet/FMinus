@@ -75,6 +75,7 @@ IDENTIFIER  [A-Za-z_][A-Za-z0-9_]*
 "continue"                  { return Parser::make_CONTINUE(yyextra->where); }
 "module"                    { return Parser::make_MODULE(yyextra->where); }
 "this"                      { return Parser::make_THIS(yyextra->where); }
+"param"                     { return Parser::make_PARAM(yyextra->where); }
 
 {DIGITS}"."[0-9]*{EXPONENT}?[fF]?   |
 "."{DIGITS}{EXPONENT}?[fF]?         |
