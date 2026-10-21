@@ -6,6 +6,7 @@
         { "include": "#comments" },
         { "include": "#attributes" },
         { "include": "#numbers" },
+        { "include": "#modules" },
         { "include": "#keywords" },
         { "include": "#types" },
         { "include": "#constants" },
@@ -75,9 +76,19 @@
                 { "name": "punctuation.separator.delimiter.fminus", "match": "," }
             ]
         },
+        "modules": {
+            "comment": "A module's declaration, module OnePole: the keyword, and the name it declares (a type from there on).",
+            "match": "\\b(module)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "captures": {
+                "1": { "name": "storage.type.module.fminus" },
+                "2": { "name": "entity.name.type.module.fminus" }
+            }
+        },
         "keywords": {
-            "name": "keyword.control.fminus",
-            "match": "\\b(?:if|else|while|for|break|continue|return)\\b"
+            "patterns": [
+                { "name": "keyword.control.fminus", "match": "\\b(?:if|else|while|for|break|continue|return)\\b" },
+                { "name": "variable.language.this.fminus", "match": "\\bthis\\b" }
+            ]
         },
         "types": {
             "patterns": [
@@ -101,8 +112,8 @@
             "captures": { "1": { "name": "entity.name.function.fminus" } }
         },
         "members": {
-            "comment": "A swizzle: v.x, v.wzyx, v.s01.",
-            "match": "(\\.)([A-Za-z_][A-Za-z0-9_]*)",
+            "comment": "A swizzle (v.x, v.wzyx, v.s01) or a module's field (m.y, p->y). A method's name (m.tick(x)) is left to functions.",
+            "match": "(\\.|->)(?:([A-Za-z_][A-Za-z0-9_]*)\\b(?!\\s*\\())?",
             "captures": {
                 "1": { "name": "punctuation.accessor.fminus" },
                 "2": { "name": "variable.other.member.fminus" }
