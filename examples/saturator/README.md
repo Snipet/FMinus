@@ -86,10 +86,13 @@ Expect noise of a few ns between runs in the `tanhf` lines: this machine is shar
   one's output at every width from 1 to 64, and every kernel gives the same output in blocks of 64 and 61 as in one
   call, which `--check` checks.
 
-On an Apple Silicon Mac, expect the rational lines to be roughly level, with NEON's 4 lanes on both sides, and the
-`tanhf` lines to differ: `_simd_tanh_f4` replaces the call a lane in the 4-lane poly loop, and the loop vectoriser
-uses it for the scalar loop too. It may differ from `tanhf` in the last bits, which `--check`'s tolerance (1e-6)
-allows for. Not measured here.
+On an Apple Silicon Mac, the `tanhf` lines are vector code too: `_simd_tanh_f4` replaces the call a lane in the 4-lane
+poly loop, and the loop vectoriser uses it for the scalar loop's body. It differs from `tanhf` in the last bits: by
+at most 3 ulp, for about 170 million of the 4.3 billion floats, over every finite float on an M5. FMinus and C++ then
+differ by up to 6e-8 (`--check`'s tolerance is 1e-6). And the plain loop's output depends on where a block ends: its
+body meets the vector function and its remainder the scalar one, so moving the end of a block moves samples from one
+to the other. `--check` allows the two `tanhf` kernels those 3 ulp across block sizes (it measures 2 here), and still
+holds the rational kernels, FMinus's own arithmetic, to the same output bit for bit.
 
 ## Where FMinus leaves it
 

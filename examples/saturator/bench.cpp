@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -82,6 +83,11 @@ namespace
     // The largest absolute error saturator.fm's comment allows rational_tanh.
     constexpr double kRationalError = 3.5e-7;
 
+    // How far apart the tanhf kernels' outputs may be when a block's end moves (check(), below): 3 ulp, the most
+    // libsystem_m's _simd_tanh_f4 and its tanhf differ by over every finite float (macOS 27, an M5). Where the
+    // target has no vector tanhf, as on Linux, the outputs are the same.
+    constexpr std::int64_t kMaxTanhfUlps = 3;
+
     // White noise in [-1, 1) from a fixed 32-bit LCG.
     std::vector<float> makeNoise(std::size_t samples)
     {
@@ -141,6 +147,21 @@ namespace
         return worst;
     }
 
+    // The largest distance between a and b in units in the last place: how many floats lie between the two, +0 and -0
+    // the same. Their bit patterns, made to count up with the float through 0 (negative floats count down in theirs),
+    // are integers that far apart.
+    std::int64_t maxUlps(const std::vector<float>& a, const std::vector<float>& b)
+    {
+        const auto ordered = [](float x) {
+            const auto bits = static_cast<std::int64_t>(std::bit_cast<std::int32_t>(x));
+            return bits < 0 ? std::int64_t{std::numeric_limits<std::int32_t>::min()} - bits : bits;
+        };
+        std::int64_t worst = 0;
+        for (std::size_t i = 0; i < a.size(); ++i)
+            worst = std::max(worst, std::abs(ordered(a[i]) - ordered(b[i])));
+        return worst;
+    }
+
     // The best of `repeats` runs, in nanoseconds per sample.
     template <typename Run>
     double nanosecondsPerSample(Run&& run, std::size_t samples, int repeats)
@@ -188,17 +209,26 @@ namespace
 
         double worstAgainstCpp = 0.0;
         bool sameInBlocks = true;
+        std::int64_t tanhfBlockUlps = 0;
         for (const Kernel& kernel : kernels)
         {
             run(kernel.fminus, input, drive, 0, fminusOutput);
             run(kernel.cpp, input, drive, 0, cppOutput);
             worstAgainstCpp = std::max(worstAgainstCpp, maxDifference(fminusOutput, cppOutput));
             // Calls of 64 samples, then of 61 (blocks that end mid-way through a poly float), give the output one
-            // call does.
+            // call does: bit for bit for the rational tanh, which is FMinus's own arithmetic. tanhf is the C
+            // library's, and a target's library may have a vector tanhf beside the scalar one, which can differ from
+            // it in the last bit: libsystem_m's _simd_tanh_f4 on Apple systems. The loop vectoriser then runs the
+            // plain loop's body on the vector function and its remainder on the scalar one, so where a block ends
+            // decides which one a sample meets, and the two may give it an ulp apart.
+            const bool library = kernel.cpp == cppTanhf;
             for (const std::size_t block : {std::size_t{64}, std::size_t{61}})
             {
                 run(kernel.fminus, input, drive, block, other);
-                sameInBlocks = sameInBlocks && other == fminusOutput;
+                const std::int64_t ulps = maxUlps(other, fminusOutput);
+                if (library)
+                    tanhfBlockUlps = std::max(tanhfBlockUlps, ulps);
+                sameInBlocks = sameInBlocks && ulps <= (library ? kMaxTanhfUlps : 0);
             }
         }
 
@@ -228,10 +258,12 @@ namespace
         const double tanhfError = maxDifference(fminusOutput, exact);
 
         std::cout << std::format("example-saturator: {}: max |FMinus - C++| = {:.3g} (tolerance {:.3g}); "
-                                 "the same output in blocks of 64 and 61: {}, and at 1 to 64 lanes: {}; "
-                                 "max |tanh - exact|: tanhf {:.3g}, rational {:.3g} (at most {:.3g})\n",
-                                 what, worstAgainstCpp, tolerance, sameInBlocks ? "yes" : "no",
-                                 sameAtEveryWidth ? "yes" : "no", tanhfError, rationalError, kRationalError);
+                                 "the same output in blocks of 64 and 61: {} (tanhf's within {} ulp: {}), and at 1 "
+                                 "to 64 lanes: {}; max |tanh - exact|: tanhf {:.3g}, rational {:.3g} (at most "
+                                 "{:.3g})\n",
+                                 what, worstAgainstCpp, tolerance, sameInBlocks ? "yes" : "no", kMaxTanhfUlps,
+                                 tanhfBlockUlps, sameAtEveryWidth ? "yes" : "no", tanhfError, rationalError,
+                                 kRationalError);
         return worstAgainstCpp <= tolerance && sameInBlocks && sameAtEveryWidth && rationalError <= kRationalError;
     }
 } // namespace
