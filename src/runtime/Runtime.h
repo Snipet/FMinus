@@ -31,6 +31,8 @@ extern "C"
     // starts at 0, and touched, so no page faults in later. Null when the count or the size is not positive, the
     // product is more than 16 GiB (a mistake: zeroing it would take the machine's memory), or the memory is not there.
     // The memory comes from C's aligned_alloc, so C's free releases it too, and fminus_rt_free releases C's malloc's.
+    // On Windows, whose C runtime has no aligned_alloc, it comes from _aligned_malloc: only _aligned_free (which
+    // fminus_rt_free calls there) releases it, and fminus_rt_free cannot release malloc's.
     // Not for the audio thread: allocating takes a lock in the system's allocator, and can take a page fault.
     void* fminus_rt_malloc(std::int64_t size) noexcept;
     void* fminus_rt_calloc(std::int64_t count, std::int64_t size) noexcept;

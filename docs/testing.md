@@ -19,6 +19,7 @@ ctest --preset dev -R calculator                   # tests whose name matches
 build-dev/bin/fminus-tests "[codegen]"             # one Catch2 tag
 build-dev/bin/fminus-tests "builtins*" -s          # matching test cases, printing every assertion
 build-dev/bin/fminus-lit -v tests/lit/fminus       # part of the lit suite; -a prints every test's output
+                                                   #   (on Windows: python build-dev\bin\fminus-lit ...)
 build-dev/bin/example-biquad --check               # one example's comparison
 ```
 
@@ -117,7 +118,7 @@ float gain(float x, float g)
 
 | Feature | |
 |---|---|
-| `REQUIRES: arm64` (or `x86_64`) | the host architecture, for assembly checks |
+| `REQUIRES: arm64` (or `x86_64`) | the host architecture, for assembly checks (Windows names them `ARM64` and `AMD64`, so these skip there) |
 | `REQUIRES: asserts` | LLVM built with assertions |
 | `REQUIRES: asan`, `ubsan`, `tsan` | the sanitizer build |
 | `REQUIRES: system-darwin` (or `system-linux`) | the host's system (`veclib.fm` needs Apple's vector math library) |

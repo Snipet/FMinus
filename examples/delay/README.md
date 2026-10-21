@@ -53,7 +53,7 @@ void echo_process(float* restrict line, int* restrict position, int length, cons
 - **The state is two allocations**, the line and its write position, and the host passes both to every call. A
   module would hold them together, with the functions as its methods (recipe 12, and `examples/voices/`).
 - **The host frees it**: `echo_destroy`, off the audio thread. FMinus's memory is C's `aligned_alloc`'s, so C's
-  `free` releases it too.
+  `free` releases it too (on Windows, `_aligned_malloc`'s, which `_aligned_free` releases).
 
 In the dev build on an M5, FMinus takes 0.70 ns a sample and the same loop in C++ 0.70 ns, and their outputs are
 bit-identical. Each sample is a load, a multiply and an add twice, two stores and a compare: there is no recursion

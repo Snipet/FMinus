@@ -1,19 +1,19 @@
 diff --git a/src/ir/Calls.cpp b/src/ir/Calls.cpp
-index 8b9ae2f..11a1d09 100644
+index d371cd3..e8ddf1e 100644
 --- a/src/ir/Calls.cpp
 +++ b/src/ir/Calls.cpp
-@@ -1,7 +1,8 @@
+@@ -1,8 +1,8 @@
  // src/ir/Calls.cpp: calls. Inside a method, a method of its module first (`tick(x)` is this->tick(x), as in C++,
  // where the class's names hide the others); then the builtins, in the order a call tries them: the reductions,
--// poly_lanes and poly_index, <math.h>'s float functions (LLVM intrinsics, overloaded on vectors), and <stdlib.h>'s
--// heap (malloc, calloc and free, on the runtime's functions); then the program's own functions.
-+// poly_lanes and poly_index, <math.h>'s float functions (LLVM intrinsics, overloaded on vectors), <stdlib.h>'s heap
-+// (malloc, calloc and free, on the runtime's functions) and the runtime's other functions; then the program's own
-+// functions.
+ // poly_lanes and poly_index, poly_load and poly_store, <math.h>'s float functions (LLVM intrinsics, overloaded on
+-// vectors), and <stdlib.h>'s heap (malloc, calloc and free, on the runtime's functions); then the program's own
+-// functions.
++// vectors), <stdlib.h>'s heap (malloc, calloc and free, on the runtime's functions) and the runtime's other
++// functions; then the program's own functions.
  #include "ir/Lowering.h"
  
  #include <llvm/IR/Constants.h>
-@@ -58,6 +59,21 @@ namespace fminus::ir::detail
+@@ -67,6 +67,21 @@ namespace fminus::ir::detail
          return nullptr;
      }
  
@@ -35,7 +35,7 @@ index 8b9ae2f..11a1d09 100644
      const Builtin* findBuiltin(std::string_view name)
      {
          for (const Builtin& builtin : kBuiltins)
-@@ -119,6 +135,17 @@ namespace fminus::ir::detail
+@@ -130,6 +145,17 @@ namespace fminus::ir::detail
                  llvm::Intrinsic::getOrInsertDeclaration(&module_, builtin->intrinsic, {typeOf(type)});
              return {builder_.CreateCall(intrinsic, irArgs), type};
          }
@@ -54,23 +54,24 @@ index 8b9ae2f..11a1d09 100644
          if (found == functions_.end())
          {
 diff --git a/src/ir/Functions.cpp b/src/ir/Functions.cpp
-index 5c8c1ee..87d333f 100644
+index 4392c9b..e828b04 100644
 --- a/src/ir/Functions.cpp
 +++ b/src/ir/Functions.cpp
-@@ -29,7 +29,7 @@ namespace fminus::ir::detail
+@@ -29,7 +29,8 @@ namespace fminus::ir::detail
          Effect& effect = effects_[function.name];
          effect = std::max(effect, declaredEffect(function));
  
--        if (isReduction(function.name) || isPolyQuery(function.name))
-+        if (findRuntimeFunction(function.name) != nullptr || isReduction(function.name) || isPolyQuery(function.name))
+-        if (isReduction(function.name) || isPolyQuery(function.name) || isPolyMemory(function.name))
++        if (findRuntimeFunction(function.name) != nullptr || isReduction(function.name) || isPolyQuery(function.name)
++            || isPolyMemory(function.name))
          {
              error(function.location, quoted(function.name) + " is a builtin and cannot be redefined");
              return;
 diff --git a/src/ir/Lowering.h b/src/ir/Lowering.h
-index c0ce98e..a45df20 100644
+index b386c84..309d7ff 100644
 --- a/src/ir/Lowering.h
 +++ b/src/ir/Lowering.h
-@@ -57,8 +57,18 @@ namespace fminus::ir::detail
+@@ -58,8 +58,18 @@ namespace fminus::ir::detail
          unsigned arity;
      };
  
@@ -88,7 +89,7 @@ index c0ce98e..a45df20 100644
 +    const RuntimeFunction* findRuntimeFunction(std::string_view name);   // db_to_gain, or nullptr
      bool isReduction(std::string_view name);             // reduce_add, reduce_min, reduce_max
      bool isPolyQuery(std::string_view name);             // poly_lanes, poly_index
- 
+     bool isPolyMemory(std::string_view name);            // poly_load, poly_store
 diff --git a/src/opt/.gitkeep b/src/opt/.gitkeep
 deleted file mode 100644
 index e69de29..0000000
@@ -191,7 +192,7 @@ index 0000000..bbd5aff
 +    void registerPasses(llvm::PassBuilder& passes);
 +} // namespace fminus::opt
 diff --git a/src/runtime/Runtime.cpp b/src/runtime/Runtime.cpp
-index d69170c..2ef1727 100644
+index cb1b142..85828e8 100644
 --- a/src/runtime/Runtime.cpp
 +++ b/src/runtime/Runtime.cpp
 @@ -2,6 +2,7 @@
@@ -202,9 +203,9 @@ index d69170c..2ef1727 100644
  #include <cstdio>
  #include <cstdlib>
  #include <cstring>
-@@ -77,3 +78,8 @@ extern "C" void fminus_rt_free(void* memory) noexcept
- {
+@@ -90,3 +91,8 @@ extern "C" void fminus_rt_free(void* memory) noexcept
      std::free(memory);
+ #endif
  }
 +
 +extern "C" float fminus_rt_db_to_gain(float db) noexcept
@@ -212,10 +213,10 @@ index d69170c..2ef1727 100644
 +    return std::pow(10.0f, db / 20.0f);
 +}
 diff --git a/src/runtime/Runtime.h b/src/runtime/Runtime.h
-index 56381b9..e6df337 100644
+index a7deada..434779d 100644
 --- a/src/runtime/Runtime.h
 +++ b/src/runtime/Runtime.h
-@@ -35,4 +35,8 @@ extern "C"
+@@ -37,4 +37,8 @@ extern "C"
      void* fminus_rt_malloc(std::int64_t size) noexcept;
      void* fminus_rt_calloc(std::int64_t count, std::int64_t size) noexcept;
      void fminus_rt_free(void* memory) noexcept;

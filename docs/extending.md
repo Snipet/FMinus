@@ -31,7 +31,7 @@ Most language features touch the same places, in this order:
 | 5 | `src/ir/` | its conversions and checks, and its lowering to LLVM IR, in the file its kind belongs to (`Lowering.h` lists them: types, functions, statements, expressions, calls, vectors, memory, effects) |
 | 6 | `src/runtime/` | if it needs C++ at run time, a runtime function (recipe 5) |
 | 7 | `tools/fminus/main.cpp`, `src/support/Aot.cpp` | for a new type: whether `--run` can pass and print it (its `switch` over the result type), and whether an executable's `main` may take or return it (`addEntryPoint`) |
-| 8 | `tests/` | a dump in `FrontendTest.cpp`; results in `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `IntTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `VectorTest.cpp` or `PolyTest.cpp` (their helpers are in `Compile.h`); IR or errors in `tests/lit/fminus/` |
+| 8 | `tests/` | a dump in `FrontendTest.cpp`; results in `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `IntTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `ModuleTest.cpp`, `VectorTest.cpp` or `PolyTest.cpp` (their helpers are in `Compile.h`); IR or errors in `tests/lit/fminus/` |
 | 9 | `examples/` | a program that uses it, and a line in `tests/lit/fminus/examples.test` that runs it |
 | 10 | `editors/vscode/syntaxes/fminus.tmLanguage.json` | a new keyword, type or builtin, so VSCode highlights it (its README says where) |
 | 11 | `README.md` | the language table, and the deviations from C if any |
@@ -47,8 +47,9 @@ nothing reminds you of.
 Each feature has an example to read beside its recipe: `examples/comparison/` for `bool` (recipe 3),
 `examples/waveforms/` for every statement (recipe 4), `examples/chord/` for `float4` and the vector math library
 (recipes 7 and 8), `examples/unison/` for `poly float` (recipe 9), `examples/biquad/` for a block of samples a
-call, through pointers (recipe 10), and `examples/delay/` for state on the heap and a kernel that can't allocate
-(recipe 11).
+call, through pointers (recipe 10), `examples/delay/` for state on the heap and a kernel that can't allocate
+(recipe 11), and `examples/saturator/` and `examples/meter/` for `poly float` through a buffer, against plain loops
+(recipes 9 and 10).
 
 ## Ground rules
 
@@ -1258,9 +1259,9 @@ others wait for a reason:
 
 - `bool*`: in a register FMinus's `bool` is an `i1`, but C keeps a `bool` in a byte. Through a pointer it would need
   `i8` in memory, and a `zext` on every store and a `trunc` on every load, as clang emits.
-- `poly float*`: `p[1]` would sit `poly_lanes()` floats along, a different place on every target. With buffers, the
-  natural way in is a `poly float` load from a `float*` at a strip-mined index, with a masked load for the tail
-  ([simd.md](simd.md), "Where to go next").
+- `poly float*`: `p[1]` would sit `poly_lanes()` floats along, a different place on every target. With buffers, a
+  `poly float` comes from a `float*` at a strip-mined index instead, with a masked load for the tail: `poly_load` and
+  `poly_store` ([simd.md](simd.md), "Loads and stores").
 - Pointers to pointers, `void*`, null constants and casts between pointer types: nothing needs them yet.
 
 A declaration of any other is "FMinus has pointers to float, int, float2, float4 and float8, not to 'bool'". The
@@ -1429,7 +1430,9 @@ from `libfminus_runtime.a`, as recipe 5's `db_to_gain` would be. What they do is
   would turn into the machine's whole memory; ASan's allocator aborts on such a request), or when the memory isn't
   there.
 - **C's memory**: `aligned_alloc`'s blocks are `free`'s, so a C++ host may free what FMinus allocated, and FMinus may
-  free the host's `malloc`'s (`HeapTest.cpp` does both).
+  free the host's `malloc`'s (`HeapTest.cpp` does both). Not on Windows, whose C runtime has no `aligned_alloc`: there
+  the blocks come from `_aligned_malloc`, which only `_aligned_free` releases, so `fminus_rt_free` calls that, a host
+  frees FMinus's memory with it (or with FMinus's `free`), and FMinus's `free` cannot take the host's `malloc`'s.
 
 ### `void*` and `sizeof`
 

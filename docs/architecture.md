@@ -183,7 +183,7 @@ defined across the directory by what they lower:
 | `Functions.cpp` | declarations and prototypes (`declare`), bodies and parameters (`define`), stack slots and scopes |
 | `Statements.cpp` | blocks, declarations, `return`, `if`, `while`, `for`, `break` and `continue` |
 | `Expressions.cpp` | the expression `std::visit` (`lower`), constants, operators (`binary`, `arithmetic`), `&&` and `\|\|`, `?:`, casts, assignment, `++` and `--` |
-| `Calls.cpp` | the builtin tables, calls, reductions, `poly_lanes` and `poly_index`, the heap's `malloc`, `calloc` and `free`, and `ir::builtins()` |
+| `Calls.cpp` | the builtin tables, calls, reductions, `poly_lanes` and `poly_index`, `poly_load` and `poly_store`, the heap's `malloc`, `calloc` and `free`, and `ir::builtins()` |
 | `Vectors.cpp` | vector literals in both forms, swizzles, `?:` with a vector condition |
 | `Memory.cpp` | lvalues (`lvalue`, `read`, `write`): variables, elements (`p[i]`, `*p`), fields, components of any of them; arrays (a name that stands for a pointer, a list); `&x`; pointer arithmetic |
 | `Modules.cpp` | each module's struct type (`layOut`), fields (`field`), `this`, method calls (`callMethod`), copies |
@@ -263,8 +263,9 @@ to `bool` and to the same pointer with `const` added (`convertPointer`).
   With a pointer, it is pointer arithmetic (`pointerArithmetic`): `p + i` is a `getelementptr`, `p - q` LLVM's
   `CreatePtrDiff` (the addresses' difference divided by the element's size), and comparisons are unsigned `icmp`s of
   the addresses.
-- **Calls** first try the reductions (`reduce_add`, `reduce_min`, `reduce_max`) and `poly_lanes` and `poly_index`,
-  then `kBuiltins`, a table from `<math.h>`'s float names to LLVM intrinsics (`fabsf` to `llvm.fabs`, `sinf` to
+- **Calls** first try the reductions (`reduce_add`, `reduce_min`, `reduce_max`), `poly_lanes` and `poly_index`, and
+  `poly_load` and `poly_store` (vector loads and stores at a float's alignment, masked with a `poly bool`), then
+  `kBuiltins`, a table from `<math.h>`'s float names to LLVM intrinsics (`fabsf` to `llvm.fabs`, `sinf` to
   `llvm.sin`, ...), declared with `Intrinsic::getOrInsertDeclaration` at the arguments' type, so `sinf` of a `float4`
   is `llvm.sin.v4f32`. Then `kAllocations`, C's `malloc`, `calloc` and `free`, which call the runtime's functions
   (below) with 64-bit sizes and give back a `void*`. Then they try the program's functions. Argument counts are
@@ -345,7 +346,8 @@ generated code calls. It contains no LLVM.
 
 - `Runtime.h` declares the functions as `extern "C"`: a placeholder ABI version, the command line and result of an
   executable (`fminus_rt_main_args`, `fminus_rt_main_result`), and the heap that `malloc`, `calloc` and `free` call
-  (`fminus_rt_malloc`, `fminus_rt_calloc`, `fminus_rt_free`: 64-byte aligned, zeroed, on C's `aligned_alloc`).
+  (`fminus_rt_malloc`, `fminus_rt_calloc`, `fminus_rt_free`: 64-byte aligned, zeroed, on C's `aligned_alloc`, or
+  on Windows, which has none, `_aligned_malloc`).
 - `RuntimeSymbols.def` lists them, one `FMINUS_RUNTIME_SYMBOL(name)` each.
 - `support/JitRuntime.cpp` expands that list into absolute symbols in a JIT (`defineRuntimeSymbols`).
 - An executable gets the same functions by linking the archive.
@@ -360,6 +362,9 @@ Because the JIT and executables share one runtime, the two compile the same prog
 | `fminus-build` | `tools/fminus-build/main.cpp` | LLVM IR to exe/obj/asm/ll (HostTarget + Aot) |
 | `fminus-hostinfo` | `tools/fminus-hostinfo/main.cpp` | the triple, CPU, features and data layout the JIT targets |
 | `example-biquad` | `examples/biquad/bench.cpp` | biquad.fm in the JIT against C++, compared and timed |
+| `example-delay` | `examples/delay/bench.cpp` | delay.fm, its line allocated by the program, against C++ |
+| `example-saturator` | `examples/saturator/bench.cpp` | saturator.fm's tanh, plain and `poly float` loops, against C++, through `fminus::Program` |
+| `example-meter` | `examples/meter/bench.cpp` | meter.fm's peak and RMS, plain and `poly float` loops, against C++, through `fminus::Program` |
 | `fminus-tests` | `tests/unit/`, `tests/smoke/` | Catch2 |
 | `fminus-library-tests` | `tests/library/` | Catch2, in C++17, against `FMinus::FMinus` alone: the public API as a host uses it |
 | lit suite | `tests/lit/` | `fminus`, `fminus-build`, FileCheck, LLVM's tools |

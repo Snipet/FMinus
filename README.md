@@ -30,6 +30,10 @@ The first run downloads the pinned sources: LLVM (179 MB), Bison, Flex, CLI11 an
 Later configures, in this build tree or any other, find them there in seconds. Then it builds FMinus and runs every
 test.
 
+On Windows, install Visual Studio's "C++ Clang tools for Windows" and run the same command, best from its "x64 Native
+Tools Command Prompt". The build uses clang-cl there, and builds WinFlexBison, the same Bison and Flex ported to
+Windows, in place of their `./configure && make` ([docs/building.md](docs/building.md#windows)).
+
 ## Layout
 
 ```
@@ -37,9 +41,10 @@ CMakeLists.txt          the project; cmake/ holds the parts
 CMakePresets.json       dev, debug, release, asan, tsan, inline, xcode
 cmake/
   FMinusPins.cmake        every dependency: version, URL, SHA-256
+  FMinusClangCl.cmake     Windows: clang-cl, found before project() (Visual Studio's, PATH's, LLVM's)
   FMinusOptions.cmake     options, the deps cache, ccache, fminus_target_defaults()
   FMinusLLVM.cmake        LLVM (cache | inline | system) -> FMinus::LLVM
-  FMinusParserTools.cmake Bison and Flex (fetch | system) -> fminus_add_grammar()
+  FMinusParserTools.cmake Bison and Flex (fetch | system; WinFlexBison on Windows) -> fminus_add_grammar()
   FMinusCLI11.cmake       CLI11 -> CLI11::CLI11, linked into every tool
   FMinusTesting.cmake     Catch2 and lit
   templates/Config.h.in   -> <build>/include/fminus/Config.h
@@ -71,6 +76,8 @@ examples/<name>/        one example per directory: an FMinus program, and a harn
   chord/                a chord's four notes in a float4: one vector expf, literals, swizzles, reductions
   unison/               detuned sawtooth voices, one a lane of a poly float: a strip-mined loop with a mask
   delay/                a feedback delay whose line the program allocates, run by a [[clang::nonblocking]] kernel
+  saturator/            tanh(drive * x), a loop over samples against one over poly floats (poly_load, poly_store)
+  meter/                a block's peak and RMS, by plain loops and by poly floats' reductions
   voices/               eight synth voices in modules, in memory a host of the public API allocates, against C++
 tests/
   unit/                 your Catch2 tests
@@ -94,6 +101,7 @@ system unless an option asks for it.
 | LLVM (llvm/ only) | 23.1.3 | source release, built and installed once per flavor | `.deps/install/llvm-<ver>-<flavor>` |
 | GNU Bison | 3.8.2 | source tarball, `./configure && make` at configure time | `.deps/install/bison-3.8.2` |
 | Flex | 2.6.4 | source tarball, `./configure && make` at configure time | `.deps/install/flex-2.6.4` |
+| WinFlexBison (Windows, in place of the two above) | 2.5.25 and fixes: Bison 3.8.2, Flex 2.6.4 | source archive of a commit, built with CMake at configure time | `.deps/install/winflexbison-2.5.25-a243a1c` |
 | CLI11 | 2.7.2 | release source package, header-only, inside each build tree | the build tree |
 | Catch2 | 3.16.1 | source archive, built inside each build tree | the build tree |
 
@@ -171,7 +179,7 @@ float half(float x) { x /= 2; return x; }
 | constants | C's: floating ones are floats (`1.5`, `1.`, `.5`, `2e3`, `1.5e-3f`, hex floats `0x1.8p1`, `0x1p-3f`), integer ones ints (`2`, `010` in octal, `0x1F` in hex); `true` and `false` |
 | comments | `// ...` and `/* ... */` |
 | types | `float` (IEEE single precision), `int` (32 bits, signed: C's `/` and `%`, overflow undefined) and `bool` (C23's: 0 or 1, computed as an int; a number is `x != 0` as a bool); `void`, a function's result; pointers to `float`, `int`, `float2`, `float4`, `float8` and modules, `const` (`const float*`, read-only through it) and `restrict` (C99's promise that nothing else reaches it), and `void*` (an address with no type, which converts to and from any pointer); arrays of `float`, `int`, the float vectors and modules; modules, by name (`OnePole`), from their declaration on; `float2`, `float4`, `float8` (OpenCL C's vectors, lane by lane, scalars broadcast); `poly float` and `poly bool`, as many lanes as the machine's vectors ([docs/simd.md](docs/simd.md)) |
-| builtins | `fabsf sqrtf sinf cosf expf logf floorf fminf fmaxf tanhf` (LLVM intrinsics, on floats and vectors); `malloc calloc free` (C's, with `int` sizes); `reduce_add reduce_min reduce_max` (a vector to a float); `poly_lanes` (an int) and `poly_index` |
+| builtins | `fabsf sqrtf sinf cosf expf logf floorf fminf fmaxf tanhf` (LLVM intrinsics, on floats and vectors); `malloc calloc free` (C's, with `int` sizes); `reduce_add reduce_min reduce_max` (a vector to a float); `poly_lanes` (an int) and `poly_index`; `poly_load poly_store` (a poly float from or to a `float*`, with an optional mask) |
 
 Where FMinus differs from C, it is on purpose:
 
@@ -264,8 +272,9 @@ types:
 `examples/biquad/` is a kernel to grow the language around. It is a biquad low-pass with coefficients recomputed
 every sample, which filters a block a call, with a harness that calls it once, compares it with C++ and times both,
 and a plan of features in its README. `examples/delay/` is a feedback delay whose line the program allocates, with a
-kernel marked `[[clang::nonblocking]]`. `examples/voices/` is a synth of eight voices in modules, which a host of the
-public API allocates and runs.
+kernel marked `[[clang::nonblocking]]`. `examples/saturator/` (tanh) and `examples/meter/` (peak and RMS) each run a
+loop over samples against a loop over `poly float`s, and time both. `examples/voices/` is a synth of eight voices in
+modules, which a host of the public API allocates and runs.
 
 Each variable is a stack slot (an `alloca` in the entry block), read with loads and written with stores, so
 `fminus -O0` reads like `clang -O0`. From `-O1`, mem2reg promotes the slots back into registers.
@@ -348,10 +357,11 @@ build-dev/bin/fminus-build kernel.ll -o kernel --link-arg=-framework --link-arg=
 
 From code, it is `fminus::aot::emitFile`, `linkExecutable`, `emitExecutable` and `addEntryPoint` in `src/support/Aot.h`.
 Linking goes through the C++ compiler driver this build tree was configured with (Xcode's clang; `$FMINUS_LINK_DRIVER`
-overrides it), which brings the SDK, libSystem and the ad-hoc signature arm64 needs. It links this tree's
-`libfminus_runtime.a`, so JIT'd and ahead-of-time code call the same runtime. In the JIT, `fminus::defineRuntimeSymbols`
-defines every function listed in `src/runtime/RuntimeSymbols.def` by its address. Under the `asan` and `tsan` presets,
-the sanitizer runtimes are linked too. This is a development feature: inside a plugin, FMinus only ever JITs.
+overrides it), which brings the SDK, libSystem and the ad-hoc signature arm64 needs; on Windows, clang-cl, which
+names an executable `note.exe` when asked for `note`. It links this tree's `libfminus_runtime.a`, so JIT'd and
+ahead-of-time code call the same runtime. In the JIT, `fminus::defineRuntimeSymbols` defines every function listed in
+`src/runtime/RuntimeSymbols.def` by its address. Under the `asan` and `tsan` presets, the sanitizer runtimes are linked
+too. This is a development feature: inside a plugin, FMinus only ever JITs.
 
 ## Tests
 
@@ -369,8 +379,8 @@ build-dev/bin/fminus-lit -v tests/lit               # lit directly; a source pat
   Catch2's `BENCHMARK` is there for timing JIT'd kernels.
 - **lit** (`tests/lit/`): a file with `RUN:` lines, checked by FileCheck. `tests/lit/fminus/` drives `fminus`. FMinus's
   tools and LLVM's are on PATH; `%host_triple` is substituted; the features for `REQUIRES:` are `asserts`, `asan`,
-  `ubsan`, `tsan`, `arm64`, `x86_64`, `system-darwin`, `system-linux`. `.fm` is a placeholder extension for FMinus
-  sources: change it in `tests/lit/lit.cfg.py`.
+  `ubsan`, `tsan`, `arm64`, `x86_64`, `system-darwin`, `system-linux`, `system-windows`. `.fm` is a placeholder
+  extension for FMinus sources: change it in `tests/lit/lit.cfg.py`.
 
 ## Presets
 
@@ -386,12 +396,13 @@ build-dev/bin/fminus-lit -v tests/lit               # lit directly; a source pat
 
 Every preset builds in `build-<preset>/` and exports `compile_commands.json`; `.clangd` reads `build-dev`'s. Each
 preset has a workflow (`cmake --workflow --preset <name>`) except `xcode`, which is built from Xcode
-(`cmake --preset xcode && open build-xcode/FMinus.xcodeproj`). ccache or sccache is used when installed.
+(`cmake --preset xcode && open build-xcode/FMinus.xcodeproj`). ccache or sccache is used when installed. On Windows,
+`asan`, `tsan` and `xcode` are not available.
 
 ## Handy
 
 - `build-dev/bin/fminus-hostinfo [--features]`: the triple, CPU, features and data layout the JIT targets here.
-- VSCode: `python3 editors/vscode/package.py`, then `code --install-extension build-vscode/fminus-0.4.0.vsix`, for
+- VSCode: `python3 editors/vscode/package.py`, then `code --install-extension build-vscode/fminus-0.5.0.vsix`, for
   FMinus syntax highlighting, lit's `RUN:` and `CHECK:` lines included
   ([editors/vscode/README.md](editors/vscode/README.md)).
 - `build-dev/bin/fminus`: FMinus source to its tree, IR, assembly or an object, or run in the JIT (above).
@@ -421,4 +432,5 @@ These are constraints the research will run into, not things the skeleton handle
 
 FMinus is free software under the GNU General Public License, version 3 (`LICENSE`). Its dependencies keep their own
 licenses: LLVM (Apache 2.0 with LLVM exceptions), Catch2 (BSL-1.0) and CLI11 (BSD-3-Clause). Bison and Flex run only
-at build time; the code they generate is covered by Bison's skeleton exception and Flex's permissive license.
+at build time; the code they generate is covered by Bison's skeleton exception and Flex's permissive license. On
+Windows they are WinFlexBison's ports, under the same licenses (its build scripts are GPL-3.0-or-later).

@@ -104,7 +104,11 @@ TEST_CASE("an AOT executable links the FMinus runtime and runs", "[smoke][aot]")
     llvm::SmallString<128> directory;
     REQUIRE_FALSE(llvm::sys::fs::createUniqueDirectory("fminus-aot-smoke", directory));
     llvm::SmallString<128> executable(directory);
+#if defined(_WIN32)
+    llvm::sys::path::append(executable, "program.exe");   // clang-cl adds .exe to a name without an extension
+#else
     llvm::sys::path::append(executable, "program");
+#endif
 
     fminus::aot::LinkOptions options;
     options.output = std::string(executable);

@@ -10,6 +10,14 @@ macOS on Apple silicon with Xcode's command line tools (clang, make, m4), CMake 
 for lit. Nothing else needs to be installed: LLVM, Bison, Flex, CLI11 and Catch2 are all fetched and built by the
 build itself. The first configure needs the network.
 
+On Windows: Visual Studio 2022 or later (or its Build Tools) with the "Desktop development with C++" workload and
+its "C++ Clang tools for Windows" (clang-cl; "C++ Clang Compiler for Windows" under Individual components), CMake 3.30
+or later, Ninja, Python 3, and Git for Windows (lit's tests use its `echo` and `sed`). A developer prompt for x64
+("x64 Native Tools Command Prompt for VS" in the Start menu, or Visual Studio's
+`Common7\Tools\Launch-VsDevShell.ps1 -Arch amd64` in PowerShell) names the C runtime's and the Windows SDK's headers
+and libraries in its environment; from another prompt, clang-cl finds them itself. The x86 developer prompt is
+refused at configure time. The commands are the same; [Windows](#windows) has what differs.
+
 ## Presets
 
 ```bash
@@ -46,6 +54,7 @@ environment variable), shared by every build tree of the checkout:
   build/<flavor>/              LLVM's build tree: about 1 GB, safe to delete once installed
   install/<flavor>/            LLVM: headers, static libraries, CMake package, tools, lit
   install/bison-3.8.2/  install/flex-2.6.4/
+  src/winflexbison-2.5.25-a243a1c/  install/winflexbison-2.5.25-a243a1c/     Windows, in place of Bison and Flex
 ```
 
 The cache saves work only: deleting any part of it is safe, and the next configure rebuilds what is missing.
@@ -93,6 +102,13 @@ llvm::...` at link time), add its component to `FMINUS_LLVM_COMPONENTS` in `cmak
 `cmake/FMinusParserTools.cmake` builds GNU Bison 3.8.2 and Flex 2.6.4 from source at the first configure (about a
 minute), and provides `fminus_add_grammar`. `FMINUS_PARSER_TOOLS_MODE=system` uses Bison 3.8 or later and Flex 2.6
 or later from PATH instead; macOS's own `/usr/bin/bison` is 2.3, too old for the C++ skeleton.
+
+Their release tarballs build with `./configure && make`, which Windows has no shell or make for. On Windows the build
+fetches [WinFlexBison](https://github.com/lexxmark/winflexbison) instead: the same Bison 3.8.2 and Flex 2.6.4,
+ported to Windows as `win_bison.exe` and `win_flex.exe`, with m4 built in. It is a CMake project, built at the first
+configure with this tree's C compiler and installed in the deps cache like the others. The pin is a commit after
+release 2.5.25: in 2.5.25, two of the tools running at once (Ninja runs the parser's and the scanner's together)
+could write the same temporary file. `FMINUS_PARSER_TOOLS_MODE=system` finds `win_bison` and `win_flex` on PATH too.
 
 Bison runs with `-Wall -Wcounterexamples` (`FMINUS_BISON_FLAGS`). Its report, `Parser.output`, is in
 `build-dev/src/generated/frontend/`. The generated parser and scanner are compiled with the project's warnings,
@@ -153,7 +169,8 @@ Every dependency comes through FetchContent, pinned by version, URL and SHA-256.
 
    An autotools tarball builds once into the deps cache: see `_fminus_build_autotool` in
    `cmake/FMinusParserTools.cmake`. Its `DOWNLOAD_EXTRACT_TIMESTAMP TRUE` matters there, because make compares the
-   archive's timestamps.
+   archive's timestamps. A tool that is a CMake project of its own builds there the same way, with CMake:
+   `_fminus_build_winflexbison`, beside it.
 3. **Include the module** from `CMakeLists.txt`, under the option that needs it, and link its target where it's used.
 4. **Note it** in README.md's dependency table and its License section.
 
@@ -162,13 +179,55 @@ Every dependency comes through FetchContent, pinned by version, URL and SHA-256.
 - **Warnings.** `-Wall -Wextra -Wpedantic -Wshadow -Wnon-virtual-dtor -Woverloaded-virtual -Wcast-align
   -Wnull-dereference -Wdouble-promotion -Wformat=2 -Wimplicit-fallthrough`, with `-Werror` unless
   `-DFMINUS_WERROR=OFF`. `-Wswitch` (in `-Wall`) is what makes extending the AST safe. `-Wdouble-promotion` catches a
-  `float` silently widened to `double`, a common DSP slip.
+  `float` silently widened to `double`, a common DSP slip. With clang-cl, `/W4` stands for `-Wall -Wextra`
+  ([Windows](#windows)).
 - **Sanitizers.** `FMINUS_SANITIZERS` is a list of `address`, `undefined` and `thread` (address and thread don't
   combine). AOT executables are linked with the same sanitizers, because the runtime library is instrumented too.
-  RealtimeSanitizer is not available in Apple's clang.
+  RealtimeSanitizer is not available in Apple's clang. The sanitizers are not set up for clang-cl, on Windows.
 - **ccache or sccache** is used when installed.
 - **Examples' reference code** is built with `-ffp-contract=off` (`examples/CMakeLists.txt`): FMinus's IR fuses
   nothing, so the C++ reference must not either, or the outputs stop matching bit for bit.
+
+## Windows
+
+FMinus builds on Windows with clang-cl, clang's driver for MSVC's command line, through the same presets and
+commands (`cmake --workflow --preset dev`), except `asan`, `tsan` and `xcode`. What differs:
+
+- **The compiler.** When no compiler was chosen (`CC`, `CXX`, `-DCMAKE_CXX_COMPILER`), configure finds clang-cl
+  for C and C++ (`cmake/FMinusClangCl.cmake`): first in Visual Studio, whose clang-cl matches its C++ library (in a
+  developer prompt, that prompt's; in another, the newest with the component, through `vswhere`), then on PATH, then
+  in LLVM's installer's directory. FMinus needs clang: its
+  tests and examples use clang's `ext_vector_type`, which FMinus's `float2`, `float4` and `float8` match. MSVC's own
+  `cl` is refused at configure time, with the fix. A Visual Studio generator, instead of the presets' Ninja, takes
+  `-T ClangCL`.
+- **Bison and Flex** come from WinFlexBison, built with CMake ([Bison and Flex](#bison-and-flex)). Flex runs with
+  `--nounistd`: Windows has no `<unistd.h>`, and a scanner's `%option nounistd` keeps it out of the scanner but not
+  out of the header Flex writes for it. A scanner on Windows does without `<unistd.h>`, as FMinus's do.
+- **The C runtime.** Every configuration, Debug included, uses the release C runtime (`/MD`:
+  `CMAKE_MSVC_RUNTIME_LIBRARY` is `MultiThreadedDLL`), which LLVM's libraries are built against too: the debug one
+  (`/MDd`) has other iterators and another allocator, and the two do not link together. Catch2 and an inline LLVM
+  follow it, and a cache-mode flavor records it.
+- **Warnings.** clang-cl reads `-Wall` as cl's `/Wall`, which is clang's `-Weverything`, so FMinus's list starts from
+  `/W4`, which is clang's `-Wall -Wextra`; the rest are clang's own flags, as elsewhere. `_CRT_SECURE_NO_WARNINGS` and
+  `_CRT_NONSTDC_NO_WARNINGS` turn off the C runtime's deprecations of standard functions such as `getenv` and of
+  POSIX names such as `fileno`. The examples' `-ffp-contract=off` goes through clang-cl as
+  `/clang:-ffp-contract=off`.
+- **File names.** The library is `lib/libfminus.lib`, and the runtime `lib/fminus_runtime.lib`. `lib/fminus.lib` is
+  the driver's import library: LLVM's JIT exports two symbols for debuggers (`__jit_debug_descriptor`,
+  `__jit_debug_register_code`), so the linker writes one for every executable that links it, beside the libraries.
+- **Sanitizers** are not set up for clang-cl: `FMINUS_SANITIZERS` is an error.
+- **Executables.** `fminus --emit exe` and `fminus-build` link through clang-cl, which adds `.exe` to a name without
+  an extension (`-o note` writes `note.exe`) and needs the developer prompt's `LIB` to find the C runtime. The Windows
+  C runtime defines `printf` inline in `<stdio.h>`, so IR that calls it needs
+  `--link-arg=legacy_stdio_definitions.lib` (`tests/lit/smoke/build-exe.ll`).
+- **The heap.** The Windows C runtime has no `aligned_alloc`. FMinus's `malloc` and `calloc` come from
+  `_aligned_malloc` there, and only `_aligned_free` releases that: a host frees FMinus's memory with `_aligned_free`
+  or FMinus's `free`, and FMinus's `free` cannot release the host's `malloc`'s (`src/runtime/Runtime.h`).
+- **lit** runs through Python, `python build-dev\bin\fminus-lit -v tests\lit` (ctest does that itself). The tests of
+  Apple's arm64 assembly (`REQUIRES: arm64`) and of its vector math library (`system-darwin`) are skipped; Windows
+  names its architectures `AMD64` and `ARM64`, and its system `system-windows`. Windows has no `echo` or `sed`
+  program for `RUN:` lines to pipe through, so, as LLVM's own suites do, `tests/lit/lit.cfg.py` takes Git for
+  Windows' (its `usr\bin`, found through its registry key or beside the `git` on PATH) when PATH has none.
 
 ## Troubleshooting
 
@@ -182,3 +241,14 @@ Every dependency comes through FetchContent, pinned by version, URL and SHA-256.
 | clangd can't find headers | configure the dev preset once (`cmake --preset dev`), or point `.clangd` at another build tree |
 | `asan` reports container-overflow inside LLVM | run the asan test preset (`ctest --preset asan`), which sets `ASAN_OPTIONS=detect_container_overflow=0` |
 | An example's `--check` fails after a change in fast-math or contraction | the C++ reference no longer computes the same thing: change it in step, or raise `--tolerance` |
+| Windows: `cannot use 'throw' with exceptions disabled`, or configure stops at `CMAKE_CXX_FLAGS (...) has no /EHsc` | the build tree was first configured when the compiler could not be found, and kept the empty flags it cached then: delete `build-<preset>/` and configure again (LLVM stays in `.deps/`) |
+| Windows: linking `bin\fminus.exe` fails at `FINAL LINK` with undefined `fminus::...` symbols | a build tree from before the library became `libfminus.lib`, where `fminus.exe`'s import library overwrote it: build again |
+| Windows: lit fails with `'echo': command not found` (or `'sed'`) | install Git for Windows, whose `usr\bin` has them, or put a directory with `echo.exe` and `sed.exe` on PATH |
+| Windows: `FMinus: no clang-cl` | add "C++ Clang tools for Windows" to Visual Studio (Visual Studio Installer, Modify), or install LLVM; delete `build-<preset>/` and configure again |
+| Windows: `FMinus: this developer prompt targets x86` | open "x64 Native Tools Command Prompt for VS" instead, delete `build-<preset>/`, and configure again |
+| Windows: `'unistd.h' file not found` in a `*.yy.hpp` | a build tree configured before Flex got `--nounistd` on Windows: build again (the changed command regenerates the scanners) |
+| Windows: `CMake 3.30 or higher is required` in a developer prompt | the prompt puts Visual Studio's own CMake first on PATH; update Visual Studio, or run a newer CMake by its full path |
+| Windows: `FMinus: ... is MSVC's cl; FMinus builds with clang` | install Visual Studio's "C++ Clang tools for Windows", and configure a fresh build tree (delete `build-<preset>/`) from a developer prompt |
+| Windows: `WinFlexBison ...: build failed` | the log it names has the compiler's error; WinFlexBison builds with this tree's C compiler, so the same prompt and clang-cl |
+| Windows: `LNK2038: mismatch detected for 'RuntimeLibrary'` | something asked for the debug C runtime (`/MDd`); FMinus and LLVM use the release one, `/MD`, in every configuration ([Windows](#windows)) |
+| Windows: `--emit exe` fails with `LNK1104: cannot open file 'msvcrt.lib'` | run from an x64 developer prompt, whose `LIB` names the C runtime's and the Windows SDK's libraries |

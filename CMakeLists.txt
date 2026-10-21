@@ -19,6 +19,13 @@ cmake_minimum_required(VERSION 3.30)    # CMP0168: FetchContent populates direct
 
 set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS")
 
+# Windows: clang-cl, from a developer prompt, unless a compiler was chosen (CC, CXX, -DCMAKE_<LANG>_COMPILER). A Visual
+# Studio generator picks it with -T ClangCL instead.
+if(CMAKE_HOST_WIN32 AND NOT CMAKE_GENERATOR MATCHES "Visual Studio" AND NOT DEFINED CMAKE_C_COMPILER
+   AND NOT DEFINED CMAKE_CXX_COMPILER AND NOT DEFINED ENV{CC} AND NOT DEFINED ENV{CXX})
+  include("${CMAKE_CURRENT_LIST_DIR}/cmake/FMinusClangCl.cmake")
+endif()
+
 project(FMinus
   VERSION 0.1.0
   DESCRIPTION "A JIT compiler for audio DSP on LLVM"
