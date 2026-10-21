@@ -1,0 +1,162 @@
+// examples/convolver/convolver.fm: a convolver, an FIR filter as long as an impulse response (a room's, a cabinet's),
+// run by FFT (docs/extending.md, recipe 13). Overlap-add: the input is gathered a block at a time; each block's
+// spectrum is multiplied by the response's, turned back into samples, and added onto what the blocks before it left
+// for the samples to come. A direct convolution costs `length` multiplies and adds a sample; this costs two FFTs and a
+// spectrum's multiply a block, whatever the response's length.
+//
+// The host (bench.cpp) makes one with convolver_create, off the audio thread: the plan, the buffers and the response's
+// spectrum are made there. Convolver::process then runs on the audio thread and allocates nothing. The output is the
+// input convolved with the response, `block` samples late (a block is gathered before it is convolved), and the same
+// however the host splits its calls of process.
+
+// The smallest FFT size of at least `need` points that PFFFT takes for a real plan: a multiple of 32, with no prime
+// factor but 2, 3 and 5.
+int fft_size(int need)
+{
+    for (int n = (need + 31) / 32 * 32;; n += 32)
+    {
+        int m = n;
+        while (m % 2 == 0)
+            m /= 2;
+        while (m % 3 == 0)
+            m /= 3;
+        while (m % 5 == 0)
+            m /= 5;
+        if (m == 1)
+            return n;
+    }
+}
+
+module Convolver
+{
+    void* plan;
+    int block;          // samples a block, and the latency
+    int size;           // the FFT's points: at least block + length - 1, so a block's convolution never wraps around
+    int filled;         // samples of the block gathered so far
+    float2* response;   // the impulse response's spectrum, size / 2 + 1 bins, scaled by 1 / size
+    float* gathered;    // the block being gathered
+    float* ready;       // the block being played: the convolution of the one before
+    float* frame;       // a block, padded with zeros to size samples: what the forward FFT reads
+    float2* bins;       // its spectrum
+    float* result;      // what the inverse FFT gives back: size samples
+    float* tail;        // the sum of the blocks' results so far, from the next block on: size samples
+
+    // Off the audio thread: the plan, the buffers, and the response's spectrum. False when the memory isn't there.
+    bool init(const float* restrict ir, int length, int hop)
+    {
+        block = hop;
+        size = fft_size(hop + length - 1);
+        plan = fft_create(size);
+        response = calloc(size / 2 + 1, sizeof(float2));
+        gathered = calloc(hop, sizeof(float));
+        ready = calloc(hop, sizeof(float));
+        frame = calloc(size, sizeof(float));
+        bins = calloc(size / 2 + 1, sizeof(float2));
+        result = calloc(size, sizeof(float));
+        tail = calloc(size, sizeof(float));
+        if (!plan || !response || !gathered || !ready || !frame || !bins || !result || !tail)
+            return false;
+        for (int i = 0; i < length; ++i)
+            frame[i] = ir[i];
+        fft_forward(plan, frame, response);
+        for (int i = 0; i < length; ++i)
+            frame[i] = 0;
+        const float scale = 1.0f / size;   // the inverse FFT does not scale: fold its 1 / size in here, once
+        for (int k = 0; k <= size / 2; ++k)
+            response[k] *= scale;
+        return true;
+    }
+
+    // n samples, in and out. Each output sample is played from the block convolved last; each input sample joins the
+    // block being gathered, and a full block is convolved at once.
+    void process(const float* restrict in, float* restrict out, int n) [[clang::nonblocking]]
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            out[i] = ready[filled];
+            gathered[filled] = in[i];
+            if (++filled == block)
+            {
+                convolve();
+                filled = 0;
+            }
+        }
+    }
+
+    // A block: its spectrum, times the response's, back into samples and added onto the tail, whose first block is
+    // then the one to play. The frame's samples past the block stay 0: the padding.
+    //
+    // Each loop reads the fields it uses into locals first. A store through a float* could, as far as LLVM knows,
+    // change a field (FMinus tells it nothing about which types may alias), so a loop that indexed a field would load
+    // it again every iteration, and could not run on vectors. In locals, the loops vectorise (README.md).
+    void convolve() [[clang::nonblocking]]
+    {
+        const int b = block;
+        const int n = size;
+        float* f = frame;
+        float2* x = bins;
+        const float2* h = response;
+        float* r = result;
+        float* t = tail;
+        float* y = ready;
+        const float* g = gathered;
+        for (int i = 0; i < b; ++i)
+            f[i] = g[i];
+        fft_forward(plan, f, x);
+        for (int k = 0; k <= n / 2; ++k)
+        {
+            const float2 u = x[k];
+            const float2 v = h[k];
+            x[k] = (float2)(u.x * v.x - u.y * v.y, u.x * v.y + u.y * v.x);
+        }
+        fft_inverse(plan, x, r);
+        for (int i = 0; i < n; ++i)
+            t[i] += r[i];
+        for (int i = 0; i < b; ++i)
+            y[i] = t[i];
+        for (int i = 0; i < n - b; ++i)
+            t[i] = t[i + b];
+        for (int i = n - b; i < n; ++i)
+            t[i] = 0;
+    }
+
+    // Off the audio thread, at the end.
+    void end()
+    {
+        fft_destroy(plan);
+        free(response);
+        free(gathered);
+        free(ready);
+        free(frame);
+        free(bins);
+        free(result);
+        free(tail);
+    }
+};
+
+// A convolver on FMinus's heap, made off the audio thread, for a host that holds only its address: null when it
+// could not be made.
+Convolver* convolver_create(const float* restrict ir, int length, int block)
+{
+    Convolver* convolver = calloc(1, sizeof(Convolver));
+    Convolver* none;   // null, as every pointer FMinus declares starts
+    if (!convolver)
+        return none;
+    if (!convolver->init(ir, length, block))
+    {
+        convolver->end();
+        free(convolver);
+        return none;
+    }
+    return convolver;
+}
+
+// Off the audio thread, at the end.
+void convolver_destroy(Convolver* convolver)
+{
+    if (convolver)
+    {
+        convolver->end();
+        free(convolver);
+    }
+}

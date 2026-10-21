@@ -1808,7 +1808,8 @@ mirror of the modules has the same layout, and plays a score through both, bit f
 
 ## Recipe 13: the FFT, a C library inside the runtime
 
-*In the compiler. Tests: `tests/unit/FftTest.cpp`, `tests/lit/fminus/fft.fm`.*
+*In the compiler. Example: `examples/convolver/`, a long FIR filter by overlap-add, against C++ and a direct
+convolution; measurements in its README. Tests: `tests/unit/FftTest.cpp`, `tests/lit/fminus/fft.fm`.*
 
 Spectral processing needs an FFT: fast convolution, analysis, a phase vocoder. Writing a fast one is a project of its
 own, so FMinus takes a library's, and builds it into the runtime. A program makes a plan off the audio thread, runs
@@ -1962,6 +1963,7 @@ Each of these was hit while writing the language or its recipes. [simd.md](simd.
 | A C++ reference differs from FMinus in the last bit, though the formulas match | clang's default `-ffp-contract=on` fuses `y + k * (x - y)` written as one expression into a multiply-add; FMinus never fuses | build the reference with `-ffp-contract=off` (the examples are), or round once a statement (`ModuleTest.cpp`'s `next`) |
 | A host's `aligned_alloc` returns null for a module | macOS's wants an alignment of at least a pointer's, and every implementation a size that is a multiple of it | round both up to `alignof(std::max_align_t)` (`examples/voices/bench.cpp`) |
 | One error in a module hides every other | an error the parser reports (a redefined module) stops the run before the code generator | report it in the code generator (`layOut`), and the parser carries on |
+| A method's loop over a field's buffer (`tail[i] += result[i]`) runs at half C++'s speed, and doesn't vectorise | FMinus emits no TBAA, so LLVM assumes a `float` store may change the field, a pointer, and loads it again every iteration | read the field into a local before the loop (`examples/convolver/`, "Fields, locals, and what LLVM knows") |
 | An arm64 build of a SIMD C library runs at scalar speed, with no error | PFFFT uses NEON only when asked (`PFFFT_ENABLE_NEON`); it says otherwise only in a `#pragma message` | define it (`cmake/FMinusFft.cmake`), and check `pffft_simd_arch()` once |
 | A third-party file fills the build log with warnings | PFFFT's SIMD headers announce themselves with `#pragma message`, which clang reports as warnings | `-Wno-#pragma-messages` for that object library only |
 | A debug build aborts in `pffft_new_setup` | it asserts on more than 2^26 points | refuse the size before calling it (`Fft.cpp`) |
@@ -2019,6 +2021,15 @@ after it, and methods defined outside their module (`float OnePole::tick(float x
 declaration be its interface. *Interfaces* (a table of function pointers per module, a vtable) and *generics* (a
 module of a type parameter, `Delay<float4>`) are the large ones; for DSP, generics over the vector width are the more
 useful, and `poly float` already covers much of it.
+
+**Type-based alias analysis.** FMinus's loads and stores carry no TBAA metadata, so LLVM assumes a `float` store may
+change anything, a module's pointer fields included. A method's loop over `tail[i]` then loads `tail` again every
+iteration and doesn't vectorise: `examples/convolver/` measures 1.6 times C++'s time for it, and reads its fields into
+locals instead. Clang tags each access with its type's node in a tree rooted at "omnipotent char"
+(`llvm::MDBuilder::createTBAAScalarTypeNode`, and a struct-path node per field); doing the same in `read()` and
+`write()` (`Memory.cpp`) would let the obvious code run as fast. It makes C's strict aliasing FMinus's rule too: FMinus
+has no pointer casts, but a `void*` converts to any pointer, so a program could still write floats and read them back
+as ints.
 
 **More of the FFT.** Recipe 13's transforms give their bins in the usual order. For convolution, PFFFT's own order is
 about 10% faster again: `pffft_transform` without its reorder, and `pffft_zconvolve_accumulate` to multiply two

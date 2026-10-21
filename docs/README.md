@@ -24,4 +24,4 @@ Elsewhere:
   math library), `unison/` (`poly float`), `comparison/` (a `bool main`), `biquad/` (pointers: a block a call),
   `delay/` (the heap, and a kernel that can't allocate), `saturator/` and `meter/` (`poly float` through a buffer,
   against plain loops: a stateless tanh, and reductions), `voices/` (modules, in memory a host of the public API
-  allocates).
+  allocates), `convolver/` (the FFT: a convolution by overlap-add).

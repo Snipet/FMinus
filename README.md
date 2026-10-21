@@ -81,6 +81,7 @@ examples/<name>/        one example per directory: an FMinus program, and a harn
   saturator/            tanh(drive * x), a loop over samples against one over poly floats (poly_load, poly_store)
   meter/                a block's peak and RMS, by plain loops and by poly floats' reductions
   voices/               eight synth voices in modules, in memory a host of the public API allocates, against C++
+  convolver/            a long FIR filter by FFT (overlap-add), against C++ and a direct convolution
   hello/                FMinus as a library at its smallest: a main that JIT-compiles a program from a string
 tests/
   unit/                 your Catch2 tests
@@ -283,7 +284,8 @@ every sample, which filters a block a call, with a harness that calls it once, c
 and a plan of features in its README. `examples/delay/` is a feedback delay whose line the program allocates, with a
 kernel marked `[[clang::nonblocking]]`. `examples/saturator/` (tanh) and `examples/meter/` (peak and RMS) each run a
 loop over samples against a loop over `poly float`s, and time both. `examples/voices/` is a synth of eight voices in
-modules, which a host of the public API allocates and runs.
+modules, which a host of the public API allocates and runs. `examples/convolver/` convolves with an impulse response
+by FFT.
 
 Each variable is a stack slot (an `alloca` in the entry block), read with loads and written with stores, so
 `fminus -O0` reads like `clang -O0`. From `-O1`, mem2reg promotes the slots back into registers.
