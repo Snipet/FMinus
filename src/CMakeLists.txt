@@ -2,8 +2,9 @@
 # (FMinus::Runtime), and FMinus::Internal for this tree's tools and tests. (The library's target is fminus_lib so the
 # driver, tools/fminus/, can be the target fminus.)
 #
-# fminus_runtime: every .cpp under src/runtime/. It holds the C functions generated code calls, with no LLVM in it. A
-# process that JITs links it (through fminus), and executables from support/Aot.h link libfminus_runtime.a itself.
+# fminus_runtime: every .cpp under src/runtime/, and PFFFT's objects (the FFT). It holds the C functions generated code
+# calls, with no LLVM in it. A process that JITs links it (through fminus), and executables from support/Aot.h link
+# libfminus_runtime.a itself.
 #
 # fminus_lib: every other .cpp under src/ (globbed: adding a file edits no CMake). Every directory holding a Bison
 # grammar (*.y) is a grammar: that .y, with every Flex scanner (*.l) beside it, is generated into the library through
@@ -31,6 +32,10 @@ add_library(fminus_runtime STATIC ${_fminus_runtime_sources})
 add_library(FMinus::Runtime ALIAS fminus_runtime)
 fminus_target_defaults(fminus_runtime)
 target_include_directories(fminus_runtime PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+# The FFT, PFFFT (cmake/FMinusFft.cmake): its objects go into this library, so it holds the FFT itself.
+target_sources(fminus_runtime PRIVATE $<TARGET_OBJECTS:fminus_pffft>)
+target_include_directories(fminus_runtime SYSTEM PRIVATE "${FMINUS_PFFFT_INCLUDE_DIR}")
+target_compile_definitions(fminus_runtime PRIVATE PFFFT_STATIC_DEFINE)
 
 # ---- the library ----------------------------------------------------------------------------------------------------
 add_library(fminus_lib STATIC ${_fminus_sources} ${_fminus_public_headers})

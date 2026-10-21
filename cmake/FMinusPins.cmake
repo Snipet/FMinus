@@ -44,3 +44,9 @@ set(FMINUS_CLI11_SHA256 "0cb0ef44c4c7129ea972505ee81e6d09c71b2e7fe59ca3a13c47d8a
 set(FMINUS_CATCH2_VERSION "3.16.1")
 set(FMINUS_CATCH2_URL "https://github.com/catchorg/Catch2/archive/refs/tags/v${FMINUS_CATCH2_VERSION}.tar.gz")
 set(FMINUS_CATCH2_SHA256 "d16bd1b8b2364918bd472cb216394acb93bde6784890df0d91bccfb3f28d777d")   # 1,228,880 bytes
+
+# PFFFT: the FFT behind fft_create and the other fft_* builtins (cmake/FMinusFft.cmake), compiled into the runtime
+# library. marton78's fork of Julien Pommier's PFFFT, at a commit of its master (it has no releases).
+set(FMINUS_PFFFT_COMMIT "aa16fd3db58de4ba5dae8b0438440bb9da46b6fa")   # 2026-09-29
+set(FMINUS_PFFFT_URL "https://github.com/marton78/pffft/archive/${FMINUS_PFFFT_COMMIT}.tar.gz")
+set(FMINUS_PFFFT_SHA256 "5379901efa11e889379b1f647ba69911c564a86b20fd1f93d156343d0ba9bfcb")   # 184,640 bytes

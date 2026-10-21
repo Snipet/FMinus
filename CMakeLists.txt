@@ -4,6 +4,7 @@
 # Every dependency comes through FetchContent, pinned by hash in cmake/FMinusPins.cmake:
 #   LLVM          cmake/FMinusLLVM.cmake         cache (default) | inline | system  -> FMinus::LLVM
 #   Bison, Flex   cmake/FMinusParserTools.cmake  fetch (default) | system           -> fminus_add_grammar()
+#   PFFFT         cmake/FMinusFft.cmake          two C files, into the runtime     -> fminus_pffft
 #   CLI11         cmake/FMinusCLI11.cmake        tools only                         -> CLI11::CLI11
 #   Catch2, lit   cmake/FMinusTesting.cmake      tests only
 # Built dependencies are kept in the deps cache (FMINUS_DEPS_DIR, default .deps/), shared by every build tree.
@@ -36,6 +37,7 @@ include(FMinusPins)
 include(FMinusOptions)          # options, the deps cache, ccache, fminus_target_defaults()
 include(FMinusParserTools)      # Bison, Flex, fminus_add_grammar() (first: a minute, where LLVM can take half an hour)
 include(FMinusLLVM)             # FMinus::LLVM
+include(FMinusFft)              # PFFFT, compiled into the runtime library
 
 # Our own outputs only (set after LLVM, which places its own).
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin")
