@@ -3469,7 +3469,8 @@ wrapper and adds the C `main`, which inlines the wrapper, never the body.
 
 - `tests/unit/DenormalTest.cpp`, against C++ computing in the same mode (a `ScopedMode` guard that sets FPCR or MXCSR,
   as a host's would): an entry point gives 0 for `1e-30f * 1e-10f`, -0 for its negative, 0 for a subnormal operand;
-  the caller's register comes back from every return, under an IEEE host and a flushing one; Preserve keeps subnormals
+  the caller's mode comes back from every return, under an IEEE host and a flushing one (on x86-64, MXCSR without its
+  six exception flags, which the arithmetic itself sets: FPCR has none); Preserve keeps subnormals
   bit for bit; a one-pole sticks at a subnormal under Preserve and at a normal number under Flush, bit for bit with
   C++ in each mode; a nonblocking function the program calls runs in the host's mode; entry points whose bodies touch
   no memory (a product, a `tanhf`, a comparison, a `float4`), flushing at `-O0` to `-O3` under an IEEE host and a

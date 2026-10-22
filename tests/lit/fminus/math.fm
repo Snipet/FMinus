@@ -38,9 +38,11 @@ void sines(const float* restrict in, float* restrict out, int n)
 // LIBM-LABEL: define void @sines(
 // LIBM-NOT:     vector.body
 // LIBM:           call float @fminus_rt_libm_sinf(float
+// In the fast mode, Apple's library's four-lane sine; elsewhere the intrinsic at the vectoriser's width, which the
+// backend calls sinf for a lane at a time.
 // FAST-LABEL: define void @sines(
 // FAST:         vector.body:
-// FAST:           call <4 x float> @_simd_sin_f4(<4 x float>
+// FAST:           call <{{[0-9]+}} x float> @{{_simd_sin_f4|llvm\.sin\.v[0-9]+f32}}(<{{[0-9]+}} x float>
 // FAST:           call float @llvm.sin.f32(float
 
 // A cosine and a sine of one angle: two calls in the vector mode, at -O2 as at -O0; one __sincosf_stret in the fast
@@ -92,7 +94,7 @@ float2 two(float2 x) { return logf(x); }
 // LIBM-NOT:       call
 // LIBM:           ret <4 x float>
 // FAST-LABEL: define <4 x float> @four(
-// FAST:           call <4 x float> @_simd_tanh_f4(<4 x float> %x)
+// FAST:           call <4 x float> @{{_simd_tanh_f4|llvm\.tanh\.v4f32}}(<4 x float> %x)
 // FAST-LABEL: define <8 x float> @eight(
 // FAST:           call <8 x float> @llvm.exp.v8f32(
 

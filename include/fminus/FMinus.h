@@ -220,9 +220,11 @@ namespace fminus
         };
 
         // A module of the program (FMinus's class), as a host sees it. An instance is `size` bytes, aligned to
-        // `alignment` and zeroed, since every field starts at 0 (std::aligned_alloc and std::memset, or a value-
-        // initialised C++ struct with the same fields); a method then runs on its address (above). Nothing else is
-        // needed to make one: FMinus runs no constructor. A module with parameters wants them set too (setDefaults).
+        // `alignment` and zeroed, since every field starts at 0: C's aligned_alloc and std::memset (an alignment of at
+        // least alignof(std::max_align_t), and the size rounded up to a multiple of it, suit every system's), or, on
+        // Windows, whose C runtime has no aligned_alloc, _aligned_malloc, which only _aligned_free releases; or a
+        // value-initialised C++ struct with the same fields. A method then runs on its address (above). Nothing else
+        // is needed to make one: FMinus runs no constructor. A module with parameters wants them set too (setDefaults).
         struct Module
         {
             struct Field

@@ -168,6 +168,11 @@ namespace
         std::set<std::string> callees;
         for (const llvm::Instruction& instruction : llvm::instructions(*module.getFunction(name)))
         {
+            // An annotation is not a call: it compiles to nothing. (The loop unroller adds an llvm.assume where it
+            // unrolls at run time, as it does on x86-64.)
+            if (const auto* intrinsic = llvm::dyn_cast<llvm::IntrinsicInst>(&instruction);
+                intrinsic != nullptr && intrinsic->isAssumeLikeIntrinsic())
+                continue;
             if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction))
                 callees.insert(call->getCalledOperand()->getName().str());
         }

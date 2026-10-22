@@ -79,18 +79,19 @@ module Tiny
 // FLUSH:      attributes #[[ENTRY]] = { denormal_fpenv(dynamic) }
 
 // After the pipeline the body's constant is still 0, and each wrapper still calls its body through the asm's result
-// (the body's address escapes into it, so the body keeps C's calling convention).
+// (the body's address escapes into it, so the body keeps C's calling convention). On x86-64 the wrapper keeps the mode
+// in stack slots (stmxcsr and ldmxcsr take an address), so the asm's call is not a tail call there.
 // OPTIMISED:       define float @mul(
 // OPTIMISED:       define internal float @twice.body(
 // OPTIMISED:       define internal noundef float @"Tiny::scaled.body"(
 // OPTIMISED-NEXT:  entry:
 // OPTIMISED-NEXT:    ret float 0.000000e+00
 // OPTIMISED-LABEL: define float @twice(
-// OPTIMISED:         %body = tail call ptr asm "", "=r,0"(ptr nonnull @twice.body)
+// OPTIMISED:         %body = {{(tail )?}}call ptr asm "", "=r,0"(ptr nonnull @twice.body)
 // OPTIMISED:         call float %body(float %a, float %b)
 // OPTIMISED:         call float %body(float %a, float %b)
 // OPTIMISED-LABEL: define float @"Tiny::scaled"(
-// OPTIMISED:         %body = tail call ptr asm "", "=r,0"(ptr nonnull @"Tiny::scaled.body")
+// OPTIMISED:         %body = {{(tail )?}}call ptr asm "", "=r,0"(ptr nonnull @"Tiny::scaled.body")
 // OPTIMISED:         call float %body(ptr nonnull align 8 dereferenceable(16) %this)
 
 // PRESERVE:      define float @mul(float %a, float %b) {

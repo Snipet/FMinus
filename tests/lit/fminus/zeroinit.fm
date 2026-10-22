@@ -121,7 +121,8 @@ float copied(const float* restrict in, int n)
 // CHECK-NOT:     call void @llvm.memset.
 // CHECK:         call void @llvm.memcpy.p0.p0.i64(ptr {{.*}}%t, ptr {{.*}}%in,
 
-// A fill, which it makes a memset.pattern of n floats.
+// A fill, which LLVM makes a memset.pattern of n floats where the C library has memset_pattern16 (Apple's), and a
+// vectorised loop of stores elsewhere.
 float filled(int n)
 {
     float t[64];
@@ -134,7 +135,7 @@ float filled(int n)
 }
 // CHECK-LABEL: define float @filled(
 // CHECK-NOT:     call void @llvm.memset.
-// CHECK:         call void @llvm.experimental.memset.pattern.p0.f32.i64(ptr {{.*}}%t, float 1.500000e+00,
+// CHECK:         {{call void @llvm\.experimental\.memset\.pattern\..*%t, float 1\.5|store <[0-9]+ x float> splat \(float 1\.5}}
 
 // Declared in a loop: zeroed again each iteration, and written again before it is read.
 void blocks(const float* restrict in, float* restrict out, int n, int count)

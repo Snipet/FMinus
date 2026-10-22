@@ -96,7 +96,7 @@ module Chain
 // STREAM:           %cutoff.at = getelementptr inbounds nuw [4 x i8], ptr %cutoff.stream, i64 %indvars.iv
 // STREAM-NEXT:      %cutoff = load float, ptr %cutoff.at, align 4, !tbaa {{![0-9]+}}, !alias.scope [[SCOPES]]
 // STREAM-NOT:       store float {{%.*}}, ptr %y
-// STREAM:           br i1 %exitcond.not
+// STREAM:           br i1 %{{[^,]+}}, label %{{[^,]+}}, label %for.body{{$|,}}
 // STREAM:           store float {{%.*}}, ptr %y, align 8, !tbaa {{![0-9]+}}, !noalias [[SCOPES]]
 // Versioned on `on` and on whether the gain is flat (versions.fm), the copy whose `on` is true and whose gain is a
 // stream reads its samples unconditionally, in their alias scope, and vectorises.
