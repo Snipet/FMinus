@@ -72,18 +72,18 @@ takes from it. The sources are at the end of the note.
 | Prior art | What it does | What FMinus takes |
 |---|---|---|
 | **OpenMP**, `#pragma omp parallel for` with `private`, `shared` and `reduction` clauses | The loop runs in parallel because the pragma says so; the programmer promises there is no race, and the compiler checks nothing. A pragma is ignorable, so the program is C without it. | The surface: one annotation on an ordinary `for`, a reduction recognised in the loop. Not the trust: the pragma's clauses are what FMinus's checker infers and verifies. |
-| **Cilk** (MIT, Intel Cilk Plus, now **OpenCilk**): `cilk_for`, `cilk_spawn`, `cilk_sync`, `cilk_scope` | Fork-join parallelism with *serial semantics*: delete the keywords (the *serial elision*) and the program is a C program that computes what the parallel one may compute. `cilk_for` constrains its loop to a counted one (one control variable, a loop-invariant limit and stride, no assignment to it in the body) and runs the iterations on a work-stealing runtime. Races are still the programmer's (Cilk ships a race detector, Cilksan). **Tapir** (Schardl, Moses, Leiserson) puts fork-join into LLVM's IR itself, three instructions, so LLVM's passes optimise across the fork; it lives in OpenCilk's fork of LLVM, not upstream. | The loop's shape, the serial semantics as the specification, and the principle that no runtime (or one worker) gives the same program. FMinus adds what Cilk leaves to the detector: the checker. Outlining before LLVM, since FMinus builds on upstream LLVM, where there is no parallel IR. |
-| **CPLEX**, WG14's C Parallel Language Extensions study group (2013–2016) | Cilk's constructs in C's reserved spelling, `_Task_parallel` and friends, for a technical specification that was never adopted. | The precedent for the `_Parallel` spelling, and the lesson that C itself never settled this. |
-| **ISPC** `foreach`, **Fortran** `do concurrent` (2008; `local`, `shared` and `reduce` clauses since 2018 and 2023) | The programmer declares a loop's iterations independent; the compiler may vectorise or (Fortran, on some compilers) thread them, and checks little. | The idea that independence is a property of the loop the programmer states once. FMinus checks the statement. |
-| **Deterministic Parallel Java** (Bocchino, Adve et al., 2009) | A type-and-effect system: every method declares the *regions* of memory it reads and writes, arrays can be partitioned by index so that `a[i]` is its own region, and the compiler proves that parallel branches do not interfere. Programs are deterministic by construction. | The whole idea, in miniature: an element indexed by the loop's counter is the iteration's own region, and a method's effects are read off its declaration. FMinus can do it without region annotations because it has no globals, no pointers to pointers and a `restrict` it already trusts, so the roots are few and visible. |
+| **Cilk** (MIT, Intel Cilk Plus, now **OpenCilk**): `cilk_for`, `cilk_spawn`, `cilk_sync`, `cilk_scope` | Fork-join parallelism with *serial semantics*: delete the keywords (the *serial elision* of Cilk-5, OpenCilk's *serial projection*) and the program is a C program that computes what the parallel one may compute; a race-free program must match it. `cilk_for` constrains its loop to a counted one (one control variable declared in the initialiser, a termination value and an increment that do not change between iterations, no assignment to the variable in the body) and runs the iterations on a work-stealing runtime. Races are still the programmer's (Cilk ships a race detector, Cilksan). **Tapir** (Schardl, Moses and Leiserson, PPoPP 2017) puts fork-join into LLVM's IR itself, three instructions, `detach`, `reattach` and `sync`, so LLVM's passes optimise across the fork; it lives in OpenCilk's fork of LLVM (3.0 of 2025 on LLVM 19, the 4.0 candidates on LLVM 21), and upstream LLVM has none of it. | The loop's shape, the serial semantics as the specification, and the principle that no runtime (or one worker) gives the same program. FMinus adds what Cilk leaves to the detector: the checker. Outlining before LLVM, since FMinus builds on upstream LLVM, where there is no parallel IR. |
+| **CPLEX**, WG14's C Parallel Language Extensions study group (2013–2017), ISO/IEC TS 21938-1:2019 | Cilk's constructs in C's reserved spelling: `_Task _Block { ... }` (a block whose tasks are joined at its end), `_Task _Spawn f(x);` (a call run as a task) and `_Task _Call` on a function that may spawn. Published as a technical specification in 2019, then abandoned when its sponsors moved on; a second part, vector parallelism, never left draft. | The precedent for the `_Parallel` spelling, and the lesson that C itself never settled this. |
+| **ISPC** `foreach`, **Fortran** `do concurrent` (2008; `local` and `shared` locality since 2018) | The programmer declares a loop's iterations independent and the compiler may vectorise or (Fortran, on some compilers) thread them. ISPC says the elements of a `foreach` run in no particular order and reading another element's result is undefined; Fortran forbids leaving the construct and calling an impure procedure from it, and flang's documentation calls those rules "necessary, not sufficient" for running it in parallel. | The idea that independence is a property of the loop the programmer states once. FMinus checks the statement, which neither of these does. |
+| **Deterministic Parallel Java** (Bocchino, Adve et al., OOPSLA 2009) | A type-and-effect system: every method declares the *regions* of memory it reads and writes, arrays can be partitioned by index so that `a[i]` is its own region, and the compiler proves that parallel branches do not interfere. Programs are deterministic by construction. | The whole idea, in miniature: an element indexed by the loop's counter is the iteration's own region, and a method's effects are read off its declaration. FMinus can do it without region annotations because it has no globals, no pointers to pointers and a `restrict` it already trusts, so the roots are few and visible. |
 | **Rust** (`Send`/`Sync`, Rayon's `par_iter_mut`) | Ownership and borrowing make a data race a compile error; a parallel iterator hands each iteration exclusive access to its element. | The same disjointness, enforced by the type system there and by the loop's index here. |
 | **Halide**, **Futhark** | Pure computations whose *schedule* (parallel, vectorised, tiled) is separate and cannot change the result. | The rule that a parallel directive is a permission, never a change of meaning. |
-| **FAUST** (Grame): `-omp` and `-sch` | A block-diagram language whose compiler extracts parallelism from the signal graph itself and schedules it with OpenMP or its own work-stealing scheduler; the programmer writes no threads at all. Their measurements found the overhead hard to amortise at audio block sizes unless the graph is large, and vectorisation (`-vec`) the first win. | The warning about grain, and the model for what a later FMinus could do automatically on top of the checker: a module graph scheduled by the compiler. The explicit loop is the step before it. |
-| **SOUL** (ROLI), **StreamIt**, synchronous dataflow (Lee & Messerschmitt) | A program is a graph of processors or actors with fixed rates; the runtime or compiler schedules them, across cores where it can, with no threads in the language. | The target (audio as instances rendering blocks) and the confirmation that threads can be invisible; FMinus keeps C's imperative shape and gets there by checking instead of by a graph. |
-| **DAWs** (Ableton Live, Logic, REAPER, Bitwig) and **Max/MSP**'s `poly~` | Parallelism across tracks, devices and voices, never across a block's samples; REAPER's *anticipative FX* also renders a block ahead on worker threads at the cost of a block of latency. | The grain: an instance's block is the unit of work; and the across-blocks pipeline as later work. |
-| **Intel TBB**, `parallel_deterministic_reduce` | A reduction whose partitioning is fixed by the problem, not the threads, so its result is the same at any thread count. | FMinus's fixed chunking and in-order combination. |
-| **Apple audio workgroups** (macOS 11, WWDC 2020 "Meet Audio Workgroups"; JUCE's `AudioWorkgroup`) | Worker threads join the audio device's `os_workgroup_t`, so the scheduler treats them with the audio thread as one real-time unit with its deadline. | The runtime's priority model on macOS, and the host API that hands the workgroup over. |
-| **Real-time audio practice** ("Real-time 101", Rowland & Renn-Giles, ADC 2019; Bencina, "Time waits for nothing") | No locks, allocation or system calls on the audio thread; a worker that is not real-time priority is a glitch waiting to happen; spin for a bounded time, then wait; hand data over with atomics. | The runtime's rules, one by one. |
+| **FAUST** (Grame): `-omp`, `-sch`, `-pl`, `-g`, still in its manual | A block-diagram language whose compiler extracts parallelism from the signal graph itself, as a DAG of vector loops over a block, and schedules it with OpenMP (LAC 2009) or its own work-stealing scheduler (LAC 2010); the programmer writes no threads at all. Their measurements made vectorisation (`-vec`) the first win, found "simple DSP effects are often faster in scalar mode", and that "vector sizes of 512 or 1024 samples usually give the best results" for the parallel modes: 10 to 20 ms of audio a block, far above a plugin's. | The warning about grain, and the model for what a later FMinus could do automatically on top of the checker: a module graph scheduled by the compiler. The explicit loop is the step before it. |
+| **SOUL** (ROLI, dormant since 2022), **StreamIt** (MIT, 2002), synchronous dataflow (Lee & Messerschmitt, 1987) | A program is a graph of processors or actors with fixed rates; the runtime or compiler schedules them, across cores where it can, with no threads in the language. SOUL's processors "are written as single-threaded actors" and its overview promises "No race conditions. No system calls.", with the graph left to the runtime's "auto-parallelisation tricks"; synchronous dataflow's fixed rates give a schedule at compile time. | The target (audio as instances rendering blocks) and the confirmation that threads can be invisible; FMinus keeps C's imperative shape and gets there by checking instead of by a graph. |
+| **DAWs** (Ableton Live, REAPER) and **Max/MSP**'s `poly~` | Parallelism across tracks, devices and voices, never across a block's samples: Live "assigns any independent segments of an audio path that can be processed in parallel to separate threads" while "all audio along the same signal path must be processed in chronological order", so one heavy plugin fills one core; REAPER's *anticipative FX processing* renders unarmed tracks ahead of the play head (about 200 ms) on worker threads, at the cost of a slower response to a live change; `poly~`'s `parallel` attribute "divides the voices among the available processors", worth it from signal vectors of 32 samples up. | The grain: an instance's block is the unit of work; and the across-blocks pipeline as later work. |
+| **oneTBB**, `parallel_deterministic_reduce` | A reduction that "executes the same set of split and join operations no matter how many threads participate in execution and how tasks are mapped to the threads", on a fixed partitioning, so its result is the same at any thread count; the specification adds that "the result might differ from that obtained with an equivalent sequential (linear) algorithm". | FMinus's fixed chunking and in-order combination, and the same honest caveat. |
+| **Apple audio workgroups** (macOS 11 and iOS 14; WWDC 2020, "Meet Audio Workgroups"; JUCE 7.0.8's `AudioWorkgroup`) | A real-time thread calls `os_workgroup_join` once on the device's workgroup (`kAudioDevicePropertyIOThreadOSWorkgroup`, or the one a plugin host hands over through its render context, which "may change from one render call to the next"; JUCE's `AudioProcessor::audioWorkgroupContextChanged`), so the scheduler treats the workers with the audio thread as one unit with its deadline; `os_workgroup_max_parallel_threads` says how many to make. Apple's own advice in the session: "If you're wondering if you should create your own realtime threads, the answer is probably no ... measure everything." | The runtime's priority model on macOS, the host API that hands the workgroup over, and the advice, which is why the example measures before it recommends. |
+| **Real-time audio practice** ("Real-time 101", Rowland & Renn-Giles, ADC 2019; Bencina, "Time waits for nothing", 2011; Doumler, "Using locks in real-time audio processing, safely", 2020) | No locks, allocation or system calls on the audio thread; a wait on a mutex "not only blocks the audio thread but also leads to priority inversion"; hand data over with atomics and single-producer queues; where a wait is unavoidable, spin in stages (Doumler's lock spins about 25 ns, then 400 ns with pauses, then yields by the millisecond). | The runtime's rules, one by one, and the shape of its workers' wait. |
 
 ## The design
 
@@ -94,7 +94,7 @@ Three spellings fit a subset of C; the attribute is the recommendation.
 ```c
 [[fminus::parallel]] for (int v = 0; v < 8; ++v) ...     // 1. a C23 attribute on the statement
 parallel for (int v = 0; v < 8; ++v) ...                 // 2. a keyword of FMinus's own, as poly is
-_Parallel for (int v = 0; v < 8; ++v) ...                // 3. a keyword in C's reserved spelling, as CPLEX's _Task_parallel
+_Parallel for (int v = 0; v < 8; ++v) ...                // 3. a keyword in C's reserved spelling, as CPLEX's _Task _Spawn
 ```
 
 1. **`[[fminus::parallel]]`** is C23 syntax: C23 lets an attribute specifier sequence stand before a statement, a
@@ -110,7 +110,8 @@ _Parallel for (int v = 0; v < 8; ++v) ...                // 3. a keyword in C's 
    parallel filters) and the C story: a `#define parallel` makes such a program C again, which is Cilk's serial
    elision exactly.
 3. **`_Parallel`** is how C11 spells new keywords (`_Atomic`, `_Thread_local`) and how WG14's CPLEX group spelled
-   Cilk's (`_Task_parallel`); it costs no identifier, but it is the ugliest, and CPLEX never became part of C.
+   Cilk's (`_Task _Spawn f(x);`, `_Task _Block { ... }`); it costs no identifier, but it is the ugliest, and CPLEX,
+   published as a technical specification in 2019, was abandoned rather than folded into C.
 
 The rest of this note writes `[[fminus::parallel]]`; everything in it holds for the other two spellings.
 
@@ -332,13 +333,22 @@ the body writes to tell loop-invariant expressions: a first walk collects the wr
    call is then also the barrier the enclosing function needs, since LLVM assumes it reads and writes what the
    captures point to. After the call, the reductions' partials are combined in chunk order, and the loop is done.
 4. **The chunk loop's accesses carry `llvm.access.group`**, and the loop `llvm.loop.parallel_accesses`: LLVM's own
-   way of being told a loop's iterations have no memory dependence, which the checker has just proved. It lets the
-   loop vectoriser run the chunk's iterations in lanes where it would otherwise see possible aliasing, so the
-   attribute also helps a loop LLVM could not vectorise by itself, with no pool at all. (Nothing else in FMinus
-   asserts independence to LLVM today; this is the one place a proof exists.)
+   way of being told that "no loop-carried memory dependence exist" between a loop's accesses (LangRef), which the
+   checker has just proved. The loop vectoriser then skips its dependence analysis for the loop and can run the
+   chunk's iterations in lanes where it would otherwise see a possible dependence, so the attribute also helps a
+   loop LLVM could not vectorise by itself, with no pool at all. It is not an aliasing claim (two iterations'
+   accesses may still alias, as the metadata's author points out), and every access of the loop must carry a group
+   or LLVM ignores it: the body's calls to functions that are not inlined keep it from applying. (Nothing else in
+   FMinus asserts independence to LLVM today; this is the one place a proof exists.)
 5. **`llvm.loop.mustprogress`** goes on the chunk loop as recipe 19 puts it on any counted loop.
 
 A parallel block lowers the same way with a function per task and `count = tasks`, each chunk one task.
+
+LLVM has an outliner of its own for this, the OpenMP IRBuilder (`llvm/Frontend/OpenMP/OMPIRBuilder.h`, which flang
+uses through MLIR): `createParallel` emits the region inline through callbacks and `finalize` cuts it out with
+`CodeExtractor`. It hands the result to libomp's `__kmpc_fork_call`, so it would tie FMinus's runtime to libomp's ABI
+and bring LLVM's shape of parallel region rather than this one's. The lowering above outlines in the code generator,
+where it knows each capture and its `restrict`, and calls a runtime that stays free of LLVM.
 
 What the other passes make of it. **Knob versioning** (recipe 16) versions a method on its knobs' loads at its entry;
 the outlined body receives a knob as a plain parameter, so a branch on it inside the body is not versioned (the body
@@ -400,11 +410,13 @@ How it works inside, and why each choice:
   `SCHED_FIFO` at the caller's priority, if permitted (rtkit, PipeWire's `module-rt`), and silently not otherwise;
   on Windows MMCSS's "Pro Audio" class. Nothing in the language changes with any of this, which is why it belongs
   in the runtime.
-- **The floating-point environment travels.** The fork reads the forking thread's control register (FPCR on arm64,
-  MXCSR on x86-64), stores it in the job, and a worker sets its own to match before its first chunk of the job (18 ns
-  when it differs, nothing when it does not). So a program compiled under `Denormals::Flush` computes in that mode on
-  every thread, and a host's rounding mode too; this is per-thread state and would otherwise be a silent difference
-  between a worker's result and the audio thread's.
+- **The floating-point environment travels.** C11 says it outright (7.6): "The floating-point environment has
+  thread storage duration", and a new thread starts with its creator's environment as it was when the thread was
+  made, so a pool started before the host set flush-to-zero would never see it. The fork therefore reads the
+  forking thread's control register (FPCR on arm64, MXCSR on x86-64), stores it in the job, and a worker sets its
+  own to match before its first chunk of the job (18 ns when it differs, nothing when it does not). So a program
+  compiled under `Denormals::Flush` computes in that mode on every thread, and under a host's rounding mode too, where
+  it would otherwise be a silent difference between a worker's result and the audio thread's.
 - **Stacks.** A body's privates are stack arrays, and a module's method may have a large one; a secondary thread's
   default stack is small on macOS (512 KB). Workers get 8 MB, the main thread's size.
 - **Nothing allocates after `start`.** Job slots, chunk counters and partials' slots are in the pool or on the
@@ -441,8 +453,11 @@ materialised it before any worker can reach it. The runtime library gains a depe
 ## Numbers to expect, and the example to measure them on
 
 A fork-join on warm workers costs cache-line transfers and a few atomics: a microsecond or so on an M-series or a
-recent x86, more across sockets; waking parked workers costs a system call, tens of microseconds, once a block. So a
-parallel loop pays when the block's work is tens of microseconds and up, and the gain approaches the core count only
+recent x86, more across sockets, to measure first (phase 1). Waking parked workers is dearer: the wake itself is a
+system call of a microsecond or a few (Linux measurements of a futex wake and the woken thread's return run from 1
+to 4 µs under `SCHED_FIFO`), but on a loaded machine the woken thread's latency is tens of microseconds (Bela's
+developers measured 20 to 40 µs waking their audio thread, and spun instead), which is why the workers spin inside
+a block and park between. So a parallel loop pays when the block's work is tens of microseconds and up, and the gain approaches the core count only
 when each iteration is a few microseconds or more. For `examples/voices/`: eight voices at 64 samples a block, about
 5 ns a voice-sample, is 2.5 µs of work, which no fork can speed up; 64 voices at 256 samples is 80 µs, which eight
 cores could bring near 10 µs plus the fork. The example should say both, as the biquad's README says what inlining
@@ -553,4 +568,50 @@ Read for this note. Some were reachable only as search summaries from this sessi
 - Cilk's `cilk_for` constraints (one control variable declared in the initialiser, a termination value and an
   increment that do not change between iterations, no assignment to the control variable in the body): Intel Cilk Plus
   reference, "cilk_for", and the OpenCilk Language Extension Specification,
-  https://cilk.mit.edu/docs/OpenCilkLanguageExtensionSpecification.htm (summaries).
+  https://cilk.mit.edu/docs/OpenCilkLanguageExtensionSpecification.htm (summaries). Serial elision: Frigo, Leiserson
+  and Randall, "The Implementation of the Cilk-5 Multithreaded Language", PLDI 1998; OpenCilk's glossary,
+  https://www.opencilk.org/doc/reference/glossary/serial-projection.
+- Tapir: Schardl, Moses and Leiserson, "Tapir: Embedding Fork-Join Parallelism into LLVM's Intermediate
+  Representation", PPoPP 2017 (slides: https://llvm.org/devmtg/2017-02-04/tapir-llvm.pdf); the instructions in
+  OpenCilk's `llvm/include/llvm/IR/Instructions.h` at tag `opencilk/v3.0`, and none in upstream's; OpenCilk's
+  releases, https://api.github.com/repos/OpenCilk/opencilk-project/releases (3.0 on LLVM 19.1.7, 4.0-rc2 on 21.1.3).
+- CPLEX: WG14 N1862, N1966, N2017 and N2170 (the technical specification's text; N2131 and N2138 quote its
+  spellings), https://www9.open-std.org/jtc1/sc22/wg14/www/docs/n2170.pdf; its status on cppreference's
+  "Experimental C features" page, https://cppreference.com/c/experimental (summaries).
+- LLVM's OpenMP IRBuilder: `llvm/lib/Frontend/OpenMP/OMPIRBuilder.cpp` (`createParallel`, `finalize`, its
+  `CodeExtractor`), and MLIR's `OpenMPToLLVMIRTranslation.cpp`, flang's path into it. `llvm.access.group` and
+  `llvm.loop.parallel_accesses`: LangRef, https://llvm.org/docs/LangRef.html#llvm-loop-parallel-accesses-metadata;
+  Michael Kruse on what the metadata does not say, https://lists.llvm.org/pipermail/llvm-dev/2020-May/141593.html.
+- FAUST: the compiler options in its manual, https://faustdoc.grame.fr/manual/options/; Orlarey, Fober and Letz,
+  "Adding Automatic Parallelization to Faust", LAC 2009; Letz, Orlarey and Fober, "Work Stealing Scheduler for
+  Automatic Parallelization in Faust", LAC 2010, https://hal.archives-ouvertes.fr/hal-02158924 (its measurements as
+  summaries).
+- Apple: WWDC 2020 session 10224, "Meet Audio Workgroups", https://developer.apple.com/videos/play/wwdc2020/10224/;
+  `os_workgroup_join`, https://developer.apple.com/documentation/os/os_workgroup_join; `AudioWorkIntervalCreate`;
+  `kAudioDevicePropertyIOThreadOSWorkgroup`; "Adding parallel real-time threads to audio workgroups",
+  https://developer.apple.com/documentation/audiotoolbox/adding-parallel-real-time-threads-to-audio-workgroups.
+  JUCE: `juce_AudioWorkgroup.h` and `AudioProcessor::audioWorkgroupContextChanged`, added in JUCE 7.0.8.
+- Real-time practice: Rowland and Renn-Giles, "Real-time 101", parts I and II, ADC 2019 (and farbot,
+  https://github.com/hogliux/farbot); Bencina, "Real-time audio programming 101: time waits for nothing", 2011;
+  Doumler, "Using locks in real-time audio processing, safely", 2020,
+  https://timur.audio/using-locks-in-real-time-audio-processing-safely. Priorities: Windows MMCSS,
+  https://learn.microsoft.com/en-us/windows/win32/procthread/multimedia-class-scheduler-service; Linux `SCHED_FIFO`
+  through `pthread_setschedparam` (or rtkit); macOS `thread_policy_set` with `THREAD_TIME_CONSTRAINT_POLICY`.
+  Wake-up latency: a futex wake measured on LKML, https://lkml.rescloud.iu.edu/2110.1/08298.html; Bela's forum,
+  https://forum.bela.io/d/7275-underruns-without-fully-utilizing-cpu.
+- Deterministic reductions: oneTBB's specification of `parallel_deterministic_reduce`,
+  https://oneapi-spec.uxlfoundation.org/specifications/oneapi/latest/elements/onetbb/source/algorithms/functions/parallel_deterministic_reduce_func;
+  Ahrens, Demmel and Nguyen, "Efficient Reproducible Floating Point Summation and BLAS", UCB/EECS-2015-229, on
+  why the order matters and what reproducible does not mean (more accurate).
+- Race freedom by construction: Bocchino et al., "A Type and Effect System for Deterministic Parallel Java",
+  OOPSLA 2009; ISPC's user guide, https://ispc.github.io/ispc.html (`foreach`, data races within a gang); flang's
+  notes on `do concurrent`, https://flang.llvm.org/docs/DoConcurrent.html; Ragan-Kelley et al., "Halide", PLDI
+  2013; the Futhark book, https://futhark-book.readthedocs.io/en/latest/language.html; the Rust book, chapter 16;
+  SOUL's overview, https://github.com/soul-lang/SOUL/blob/master/docs/SOUL_Overview.md; Thies, Karczmarek and
+  Amarasinghe, "StreamIt", CC 2002; Lee and Messerschmitt, "Synchronous Data Flow", Proc. IEEE 1987.
+- DAWs and Max: Ableton's "Multi-core CPU handling", https://help.ableton.com/hc/en-us/articles/209067649; REAPER's
+  audio buffering preferences, https://www.cockos.com/wiki/index.php/Preferences_Audio_Buffering; `poly~`'s
+  reference, https://docs.cycling74.com/reference/poly~/.
+- The floating-point environment is per thread: C11 7.6 (cppreference, https://cppreference.com/c/numeric/fenv), and
+  the kernels' per-thread FPU state (Linux x86 `struct fxregs_state`'s `mxcsr`, arm64 `user_fpsimd_state`'s `fpcr`).
+- libm is reentrant: Linux man-pages, `sin(3)`, "MT-Safe".
