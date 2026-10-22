@@ -12,6 +12,8 @@
 //                                           a parameter read from a buffer, one compiled in (a knob otherwise)
 //     fminus lowpass.fm --knob-versions 0   no copies of a method for its knobs' values (8 at most by default)
 //     fminus lowpass.fm --denormals=flush   subnormals flushed to zero: folded so, and set by the entry points
+//     fminus synth.fm --math libm           sinf, cosf, ... as libm's (--math vector, the default: the same result
+//                                           wherever computed; --math fast: LLVM's intrinsics, as clang's)
 #include "frontend/Frontend.h"
 #include "ir/CodeGen.h"
 #include "jit/Jit.h"
@@ -115,6 +117,7 @@ int main(int argc, char** argv)
     bool noStrictAliasing = false;
     unsigned knobVersions = fminus::ir::Options{}.knobVersions;
     std::string denormals = "preserve";
+    std::string math = "vector";
     app.add_option("input", input, "FMinus source file ('-' for stdin)")->required();
     app.add_option("args", runArgs, "The arguments of --run's function");
     app.add_option("-o,--output", output, "The output file ('-' is stdout)")->capture_default_str();
@@ -142,6 +145,11 @@ int main(int argc, char** argv)
                    "Subnormal floats: preserve (IEEE's, as in C) or flush (to zero: the code is folded for that mode, "
                    "and each entry point, a nonblocking function nothing calls, sets it)")
         ->check(CLI::IsMember({"preserve", "flush"}))
+        ->capture_default_str();
+    app.add_option("--math", math,
+                   "How sinf, cosf, expf, tanhf and logf compute: vector (one result wherever computed; Apple's vector "
+                   "library where there is one), libm (the C library's, a lane at a time) or fast (LLVM's intrinsics)")
+        ->check(CLI::IsMember({"vector", "libm", "fast"}))
         ->capture_default_str();
     CLI11_PARSE(app, argc, argv);
     if (emit == "exe" && run.empty() && output == "-")
@@ -174,6 +182,9 @@ int main(int argc, char** argv)
     options.dataLayout = (*machine)->createDataLayout().getStringRepresentation();
     options.strictAliasing = !noStrictAliasing;
     options.knobVersions = knobVersions;
+    options.math = math == "libm"   ? fminus::ir::Math::Libm
+                   : math == "fast" ? fminus::ir::Math::Fast
+                                    : fminus::ir::Math::Vector;
     for (const std::string& name : streams)
         options.parameters[name] = {fminus::ir::ParamBinding::Kind::Stream, 0.0};
     for (const std::string& spec : freezes)

@@ -3,9 +3,8 @@
 // runs its four methods over noise, compares them with C++ versions of the same formulas, and times them all. With
 // --check (what ctest runs) it only compares, and fails when:
 //   - a method and its C++ version differ by more than --tolerance;
-//   - the rational tanh's poly float method's output changes with the width, or the tanhf one's moves more than
-//     tanhf's own 3 ulp from C++'s tanhf (both are compiled at every width from 1 to 64 lanes, and run on the same
-//     instance);
+//   - a poly float method's output changes with the width, or is not the plain loop's (both are compiled at every
+//     width from 1 to 64 lanes, and run on the same instance);
 //   - calling a kernel a block at a time changes its output;
 //   - the rational tanh is further from tanh (in double) than its comment promises;
 //   - a method is not [[clang::nonblocking]].
@@ -14,9 +13,11 @@
 //     build-release/bin/example-saturator                    (time in the release preset)
 //     build-dev/bin/example-saturator --poly-lanes 16        (a poly float of 16 lanes, whatever the machine's)
 //     build-dev/bin/example-saturator -O1
+//     build-dev/bin/example-saturator --math fast            (timed with LLVM's intrinsics for tanhf)
 //
 // The C++ versions are built with -ffp-contract=off (examples/CMakeLists.txt), so that, like FMinus's IR, they never
-// fuse a multiply and an add.
+// fuse a multiply and an add, and the tanhf one calls fminus::math::tanh, tanhf as FMinus's default math mode computes
+// it, wherever it does.
 #include "fminus/FMinus.h"
 
 #include <CLI/CLI.hpp>
@@ -113,7 +114,7 @@ namespace
     void cppTanhf(const float* __restrict input, float* __restrict output, int n, float drive)
     {
         for (int i = 0; i < n; ++i)
-            output[i] = std::tanh(drive * input[i]);
+            output[i] = fminus::math::tanh(drive * input[i]);
     }
 
     void cppRational(const float* __restrict input, float* __restrict output, int n, float drive)
@@ -125,10 +126,12 @@ namespace
     // The largest absolute error saturator.fm's comment allows rational_tanh.
     constexpr double kRationalError = 3.5e-7;
 
-    // How far apart the tanhf kernels' outputs may be when a block's end moves (check(), below): 3 ulp, the most
-    // libsystem_m's _simd_tanh_f4 and its tanhf differ by over every finite float (macOS 27, an M5). Where the
-    // target has no vector tanhf, as on Linux, the outputs are the same.
-    constexpr std::int64_t kMaxTanhfUlps = 3;
+    // How far apart the tanhf kernels' outputs may be when a block's end moves, or a poly float's width (check(),
+    // below): none. FMinus's default math mode gives a float one tanhf wherever it is computed, in the plain loop's
+    // vectorised body or in its remainder, in a poly float of any width (Program::Math, include/fminus/FMinus.h). In
+    // the fast mode, whose vectorised body calls libsystem_m's _simd_tanh_f4 and whose remainder calls tanhf, it would
+    // be 3 ulp, the most the two differ by over every finite float (macOS 27, an M5).
+    constexpr std::int64_t kMaxTanhfUlps = 0;
 
     // White noise in [-1, 1) from a fixed 32-bit LCG.
     std::vector<float> makeNoise(std::size_t samples)
@@ -232,14 +235,16 @@ namespace
         return best / static_cast<double>(samples);
     }
 
-    // saturator.fm compiled at -O`level` with poly floats of `lanes` (0: this machine's), and its four methods; or
-    // nullptr, with the errors.
+    // saturator.fm compiled at -O`level` with poly floats of `lanes` (0: this machine's) and tanhf in the math mode
+    // `math`, and its four methods; or nullptr, with the errors.
     std::unique_ptr<fminus::Program> compile(const std::string& path, const std::string& source, int level,
-                                             unsigned lanes, std::array<Kernel, 4>& kernels, std::string& errors)
+                                             fminus::Program::Math math, unsigned lanes, std::array<Kernel, 4>& kernels,
+                                             std::string& errors)
     {
         fminus::Program::Options options;
         options.optimisation = level;
         options.polyLanes = lanes;
+        options.math = math;
         options.fileName = path;
         std::unique_ptr<fminus::Program> program = fminus::Program::compile(source, errors, options);
         if (!program)
@@ -254,9 +259,9 @@ namespace
     }
 
     // Everything --check checks, over one input. Prints a line, and returns whether it all held.
-    bool check(const std::string& path, const std::string& source, int level, const std::array<Kernel, 4>& kernels,
-               const Instance& instance, const std::string& what, const std::vector<float>& input, float drive,
-               double tolerance)
+    bool check(const std::string& path, const std::string& source, int level, fminus::Program::Math math,
+               const std::array<Kernel, 4>& kernels, const Instance& instance, const std::string& what,
+               const std::vector<float>& input, float drive, double tolerance)
     {
         const std::size_t samples = input.size();
         std::vector<float> fminusOutput(samples);
@@ -272,11 +277,10 @@ namespace
             run(kernel.cpp, input, drive, 0, cppOutput);
             worstAgainstCpp = std::max(worstAgainstCpp, maxDifference(fminusOutput, cppOutput));
             // Calls of 64 samples, then of 61 (blocks that end mid-way through a poly float), give the output one
-            // call does: bit for bit for the rational tanh, which is FMinus's own arithmetic. tanhf is the C
-            // library's, and a target's library may have a vector tanhf beside the scalar one, which can differ from
-            // it in the last bit: libsystem_m's _simd_tanh_f4 on Apple systems. The loop vectoriser then runs the
-            // plain loop's body on the vector function and its remainder on the scalar one, so where a block ends
-            // decides which one a sample meets, and the two may give it an ulp apart.
+            // call does, bit for bit: the rational tanh is FMinus's own arithmetic, and tanhf the runtime's, whose
+            // vector function gives each lane what its scalar one gives a float (the default math mode). The loop
+            // vectoriser runs the plain loop's body on the one and its remainder on the other, so in the fast mode,
+            // with the C library's two, where a block ends would decide which one a sample meets.
             const bool library = kernel.cpp == cppTanhf;
             for (const std::size_t block : {std::size_t{64}, std::size_t{61}})
             {
@@ -288,8 +292,8 @@ namespace
             }
         }
 
-        // The rational tanh's poly floats are lane-independent: every width gives the scalar loop's output. The tanhf
-        // poly loop's is the C library's, scalar or vector as the width has it: within tanhf's ulps of C++'s tanhf.
+        // The rational tanh's poly floats are lane-independent: every width gives the scalar loop's output. So are the
+        // tanhf poly loop's: at every width, C++'s fminus::math::tanh (within kMaxTanhfUlps, none).
         std::vector<float> scalar(samples);
         run(kernels[2].fminus, instance, input, drive, 0, scalar);
         std::vector<float> libraryTanh(samples);
@@ -300,7 +304,7 @@ namespace
         {
             std::array<Kernel, 4> atWidth = kernels;
             std::string errors;
-            const auto program = compile(path, source, level, lanes, atWidth, errors);
+            const auto program = compile(path, source, level, math, lanes, atWidth, errors);
             if (!program)
             {
                 std::cerr << "example-saturator: " << errors;
@@ -343,6 +347,7 @@ int main(int argc, char** argv)
     float drive = 4.0f;
     bool checkOnly = false;
     double tolerance = 1e-6;
+    std::string math = "vector";
     app.add_option("source", path, "The FMinus source")->capture_default_str();
     app.add_option("--samples", samples, "Samples per run")
         ->check(CLI::Range(std::size_t{2}, static_cast<std::size_t>(std::numeric_limits<int>::max())))
@@ -357,9 +362,16 @@ int main(int argc, char** argv)
         ->check(CLI::IsMember({0u, 1u, 2u, 4u, 8u, 16u, 32u, 64u}))
         ->capture_default_str();
     app.add_option("--drive", drive, "The gain before the tanh")->check(CLI::PositiveNumber)->capture_default_str();
+    app.add_option("--math", math, "How FMinus computes tanhf: vector, libm or fast (--check expects vector)")
+        ->check(CLI::IsMember({"vector", "libm", "fast"}))
+        ->capture_default_str();
     app.add_flag("--check", checkOnly, "Compare only: exit 1 when a comparison fails");
     app.add_option("--tolerance", tolerance, "The largest |FMinus - C++| --check accepts")->capture_default_str();
     CLI11_PARSE(app, argc, argv);
+    // --check holds the vector mode's promise, which the fast mode breaks.
+    const fminus::Program::Math mode = math == "libm"   ? fminus::Program::Math::Libm
+                                       : math == "fast" ? fminus::Program::Math::Fast
+                                                        : fminus::Program::Math::Vector;
 
     std::ifstream file(path, std::ios::binary);
     if (!file)
@@ -378,7 +390,7 @@ int main(int argc, char** argv)
         Kernel{"Saturator::process_poly", "rational tanh, a poly float at a time", nullptr, cppRational},
     };
     std::string errors;
-    const std::unique_ptr<fminus::Program> program = compile(path, source, level, lanes, kernels, errors);
+    const std::unique_ptr<fminus::Program> program = compile(path, source, level, mode, lanes, kernels, errors);
     if (!program)
     {
         std::cerr << "example-saturator: " << errors;
@@ -396,10 +408,10 @@ int main(int argc, char** argv)
         bool nonBlocking = true;
         for (const Kernel& kernel : kernels)
             nonBlocking = nonBlocking && program->nonBlocking(kernel.name);
-        const bool noise = check(path, source, level, kernels, instance, std::format("noise at drive {}", drive),
-                                 makeNoise(samples), drive, tolerance);
-        const bool ramp = check(path, source, level, kernels, instance, "ramp from -10 to 10", makeRamp(samples), 1.0f,
-                                tolerance);
+        const bool noise = check(path, source, level, mode, kernels, instance,
+                                 std::format("noise at drive {}", drive), makeNoise(samples), drive, tolerance);
+        const bool ramp = check(path, source, level, mode, kernels, instance, "ramp from -10 to 10",
+                                makeRamp(samples), 1.0f, tolerance);
         if (!nonBlocking)
             std::cout << "example-saturator: a method is not [[clang::nonblocking]]\n";
         return noise && ramp && nonBlocking ? 0 : 1;

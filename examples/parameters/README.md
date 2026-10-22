@@ -66,13 +66,13 @@ In the dev build on an M5, 96,000 samples of noise, each time the best of 20 run
 
 (The swept rows include the LFO, a `sinf` and an `expf` a sample.)
 
-- **Every output is C++'s, bit for bit**, under each binding: the same operations in the same order, and the same libm.
+- **Every output is C++'s, bit for bit**, under each binding: the same operations in the same order, and the same
+  `sinf` and `expf`, FMinus's runtime's (its default math mode), which the C++ calls as `fminus::math::sin` and `exp`.
   The sample-accurate output is also the same in calls of 61, of 256, or one call for the whole run, which `--check`
   compares; the once-a-call output isn't, since its cutoff moves where the calls start. The frozen filter's output is
-  the knobs' at the same values, bit for bit, but that is these values' doing: LLVM folds the coefficient, 2 sin(pi 1000
-  / 48000), with the host's `sin` in double, rounded to float, and libm's `sinf` happens to give the same float here.
-  For about 1% of arguments the two are an ulp apart, so a frozen value can move an output's last bits, and `--check`
-  compares the frozen filter with the knobs' within 1e-5.
+  the knobs' at the same values, bit for bit, which `--check` checks: the coefficient, 2 sin(pi 1000 / 48000), is a
+  call of the runtime's `sinf` either way, which LLVM moves out of the loop but cannot fold. (With `--math fast`, LLVM
+  folds it with the host's `sin` in double, rounded to float, which for about 1% of arguments is an ulp from `sinf`.)
 - **A sweep a sample costs a sine a sample, and it barely shows.** As a knob, the cutoff is a register, so LLVM moves
   `2 * sinf(w * cutoff[i])` out of the loop: one sine a call. As a stream it stays in the loop. But the coefficients
   don't depend on the filter's state, so the processor computes them ahead while the recursion waits: 1–3% over the

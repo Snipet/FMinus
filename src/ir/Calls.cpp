@@ -1,9 +1,10 @@
 // src/ir/Calls.cpp: calls. Inside a method, a method of its module first (`tick(x)` is this->tick(x), as in C++,
 // where the class's names hide the others); then the builtins, in the order a call tries them: the reductions,
 // poly_lanes and poly_index, poly_load and poly_store, <math.h>'s float functions (LLVM intrinsics, overloaded on
-// vectors), <stdlib.h>'s heap (malloc, calloc and free) and the FFT (fft_create, fft_forward, ...), both on the
-// runtime's functions; then the program's own functions. The runtime's functions are declared with what they do
-// (describeRuntime), so LLVM does not take one for an unknown function that may read and write all memory.
+// vectors; the transcendental ones the runtime's functions, by the math mode: Math.cpp), <stdlib.h>'s heap (malloc,
+// calloc and free) and the FFT (fft_create, fft_forward, ...), both on the runtime's functions; then the program's
+// own functions. The runtime's functions are declared with what they do (describeRuntime), so LLVM does not take one
+// for an unknown function that may read and write all memory.
 #include "ir/Lowering.h"
 
 #include <llvm/IR/Attributes.h>
@@ -15,14 +16,15 @@
 
 namespace fminus::ir::detail
 {
-    // <math.h>'s float functions -> the LLVM intrinsic each lowers to, overloaded on float. sinf, cosf, expf and
-    // logf become calls to libm on most targets; fabsf, sqrtf, floorf, fminf and fmaxf become instructions.
+    // <math.h>'s float functions -> the LLVM intrinsic each lowers to, overloaded on float, and for the transcendental
+    // ones the stem of the runtime functions the vector and libm math modes call instead (Math.cpp). fabsf, sqrtf,
+    // floorf, fminf and fmaxf become instructions, exact in every mode; sinf, cosf, expf, logf and tanhf have none.
     constexpr std::array kBuiltins{
-        Builtin{"fabsf", llvm::Intrinsic::fabs, 1},   Builtin{"sqrtf", llvm::Intrinsic::sqrt, 1},
-        Builtin{"sinf", llvm::Intrinsic::sin, 1},     Builtin{"cosf", llvm::Intrinsic::cos, 1},
-        Builtin{"expf", llvm::Intrinsic::exp, 1},     Builtin{"logf", llvm::Intrinsic::log, 1},
-        Builtin{"floorf", llvm::Intrinsic::floor, 1}, Builtin{"fminf", llvm::Intrinsic::minnum, 2},
-        Builtin{"fmaxf", llvm::Intrinsic::maxnum, 2}, Builtin{"tanhf", llvm::Intrinsic::tanh, 1},
+        Builtin{"fabsf", llvm::Intrinsic::fabs, 1},        Builtin{"sqrtf", llvm::Intrinsic::sqrt, 1},
+        Builtin{"sinf", llvm::Intrinsic::sin, 1, "sin"},   Builtin{"cosf", llvm::Intrinsic::cos, 1, "cos"},
+        Builtin{"expf", llvm::Intrinsic::exp, 1, "exp"},   Builtin{"logf", llvm::Intrinsic::log, 1, "log"},
+        Builtin{"floorf", llvm::Intrinsic::floor, 1},      Builtin{"fminf", llvm::Intrinsic::minnum, 2},
+        Builtin{"fmaxf", llvm::Intrinsic::maxnum, 2},      Builtin{"tanhf", llvm::Intrinsic::tanh, 1, "tanh"},
     };
 
     // C's heap, <stdlib.h>'s functions, on the runtime's (runtime/Runtime.h): memory aligned to 64 bytes and zeroed.
@@ -282,6 +284,8 @@ namespace fminus::ir::detail
             }
             for (const Value& arg : args)
                 irArgs.push_back(convert(arg, type, location, Use::Passing));
+            if (!builtin->runtime.empty() && math_ != Math::Fast)
+                return {lowerMath(*builtin, type, irArgs[0]), type};   // the runtime's function (Math.cpp)
             llvm::Function* intrinsic =
                 llvm::Intrinsic::getOrInsertDeclaration(&module_, builtin->intrinsic, {typeOf(type)});
             return {builder_.CreateCall(intrinsic, irArgs), type};

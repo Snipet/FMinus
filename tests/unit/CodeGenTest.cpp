@@ -2,6 +2,7 @@
 // prototypes, builtins, %, constants and the errors. ControlFlowTest.cpp, VectorTest.cpp and PolyTest.cpp have the
 // rest; Compile.h has what they share.
 #include "Compile.h"
+#include "fminus/FMinus.h"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -66,7 +67,7 @@ TEST_CASE("prototypes declare functions defined later, or elsewhere (external, r
              "test.fm:7:7: error: redefinition of 'k'\n");
 }
 
-TEST_CASE("builtins are <math.h>'s float functions, lowered to LLVM's intrinsics", "[codegen]")
+TEST_CASE("builtins are <math.h>'s float functions: LLVM's intrinsics, and the runtime's transcendentals", "[codegen]")
 {
     auto jit = compile("float f(float x) { return sqrtf(x) + fabsf(-x) + floorf(x / 2) + fminf(x, 1) + fmaxf(x, 1); }\n"
                        "float g(float x) { return sinf(x) * sinf(x) + cosf(x) * cosf(x) + logf(expf(x)); }\n"
@@ -74,7 +75,7 @@ TEST_CASE("builtins are <math.h>'s float functions, lowered to LLVM's intrinsics
     REQUIRE(jit);
     CHECK(lookup<float(float)>(*jit, "f")(9.0f) == 3.0f + 9.0f + 4.0f + 1.0f + 9.0f);
     CHECK(std::abs(lookup<float(float)>(*jit, "g")(0.25f) - 1.25f) < 1e-6f);
-    CHECK(lookup<float(float)>(*jit, "h")(0.5f) == std::tanh(0.5f));
+    CHECK(lookup<float(float)>(*jit, "h")(0.5f) == fminus::math::tanh(0.5f));   // the default math mode (MathTest.cpp)
     CHECK(fminus::ir::builtins().size() == 10);
 }
 

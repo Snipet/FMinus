@@ -80,10 +80,12 @@ so they cost little. C++ stand-ins measure it: holding the coefficients for 16 s
 saves 0.4 ns of 2.8, and fused multiply-adds (`-ffp-contract=fast`) save nothing. Four channels in the lanes of a
 `float4` take 1.44 ns a channel's sample: twice the throughput, since four independent recursions run side by side.
 
-At `-O2` the two outputs are bit-identical. Both compute the sine and cosine of the same angle with one call to
-Apple's `__sincosf_stret`, and neither fuses a multiply and an add: the harness is built with `-ffp-contract=off`, and
-FMinus's IR carries no `contract` flags. At `-O0`, FMinus calls `sinf` and `cosf` separately instead, and the outputs
-differ by about 3e-6. Float's own error, against the same filter in double, is about 7e-6.
+At every optimisation level the two outputs are bit-identical. FMinus's `sinf` and `cosf` are its runtime's (its
+default math mode), which give an angle one result wherever they are called, and the harness's C++ calls the same
+functions, `fminus::math::sin` and `cos`; neither side fuses a multiply and an add: the harness is built with
+`-ffp-contract=off`, and FMinus's IR carries no `contract` flags. (With `--math fast`, LLVM's intrinsics, FMinus calls
+Apple's `__sincosf_stret` once a sample at `-O2` but `sinf` and `cosf` separately at `-O0`, and the two levels'
+outputs differ by about 3e-6.) Float's own error, against the same filter in double, is about 7e-6.
 
 `biquad.fm` is no longer C: a module and its parameters are FMinus's own. Its free functions, `pi` and
 `lowpass_coefficients`, still are, and `examples/delay/delay.fm` is the example kept in plain C, which clang compiles

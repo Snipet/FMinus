@@ -1,6 +1,6 @@
 // examples/chord/chord.fm: the four notes of a chord, computed together in a float4. One vector expf gives all four
-// frequencies (libsystem_m's _simd_exp_f4 on Apple systems, docs/simd.md); literals and swizzles rearrange the lanes;
-// reductions read across them.
+// frequencies (the runtime's four-lane expf: libsystem_m's _simd_exp_f4 on Apple systems, docs/simd.md); literals and
+// swizzles rearrange the lanes; reductions read across them.
 //     fminus examples/chord/chord.fm --run main 60 1      note 1 of a C major seventh, first inversion: G4, 392 Hz
 //     fminus examples/chord/chord.fm --run span 60        how far its top is above its bottom, as a ratio
 //     fminus examples/chord/chord.fm --emit asm -o -      four frequencies, one call

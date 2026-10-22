@@ -122,10 +122,31 @@ namespace fminus
             Flush,
         };
 
+        // How sinf, cosf, expf, tanhf and logf compute, chosen when the program compiles (fabsf, sqrtf, floorf, fminf
+        // and fmaxf are exact, and the same in every mode).
+        //   Vector  a float gets one result wherever the program computes it: in a loop's vectorised body or its
+        //           remainder, so wherever a block ends; in a float4, a float8 or a poly float of any width; at any
+        //           optimisation level; from a frozen parameter or a knob. What it computes is fminus::math's (below):
+        //           on Apple systems, libsystem_m's vector functions (up to 3 ulp from the exact result), and loops
+        //           of them vectorise; elsewhere libm's. The default.
+        //   Libm    the C library's sinf, cosf, ..., a lane at a time, so C++'s std::sin of a float, bit for bit, on
+        //           every target. Loops of them don't vectorise. (A C++ std::sin and std::cos of one argument are
+        //           not sinf and cosf at -O1 and up on Apple systems: clang makes them one __sincosf_stret.)
+        //   Fast    LLVM's intrinsics, as clang compiles <math.h>: the vector library where LLVM vectorises, libm
+        //           elsewhere, constants folded with the compiling machine's own functions. Usually the fastest, and
+        //           a result may change in its last bits with any of the things above.
+        enum class Math
+        {
+            Vector,
+            Libm,
+            Fast,
+        };
+
         struct Options
         {
             int optimisation = 2;                  // -O0 to -O3: LLVM's pipeline at that level, as fminus -O<n>
             unsigned polyLanes = 0;                // a poly float's lanes (1, 2, 4, ... 64); 0 is this machine's
+            Math math = Math::Vector;              // how the math builtins compute (above), as fminus --math
             std::string fileName = "program.fm";   // what the error messages call the source
             // Each parameter's binding, by its qualified name ("Lowpass::cutoff"); one not named is a knob. A name
             // that is no parameter of the program, or a stream that is not a float, is a compile error.
@@ -254,4 +275,24 @@ namespace fminus
 
         std::unique_ptr<Impl> impl_;
     };
+
+    // sinf, cosf, expf, tanhf and logf as a program compiled in the default math mode (Program::Math::Vector) computes
+    // them, wherever it does: a C++ reference that calls these gets a program's results bit for bit. On Apple systems
+    // they are libsystem_m's vector functions, a call of four lanes for one float (up to 3 ulp from the exact
+    // result, where libm's sinf is within 1); elsewhere libm's. None allocates or locks: the audio thread may call
+    // them. Each depends on its argument alone and does nothing else, which FMINUS_MATH_CONST tells GCC and clang
+    // (their const attribute), so that two calls of one argument are one, as they are of std::sin.
+#if defined(__GNUC__) || defined(__clang__)
+#define FMINUS_MATH_CONST [[gnu::const]]
+#else
+#define FMINUS_MATH_CONST
+#endif
+    namespace math
+    {
+        FMINUS_MATH_CONST float sin(float x) noexcept;
+        FMINUS_MATH_CONST float cos(float x) noexcept;
+        FMINUS_MATH_CONST float exp(float x) noexcept;
+        FMINUS_MATH_CONST float tanh(float x) noexcept;
+        FMINUS_MATH_CONST float log(float x) noexcept;
+    } // namespace math
 } // namespace fminus

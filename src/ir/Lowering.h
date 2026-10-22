@@ -7,6 +7,7 @@
 //     Expressions.cpp   constants, variables, operators, &&, ||, ?:, casts, assignment, ++ and --
 //     Calls.cpp         calls: the builtins (math functions, reductions, poly queries and memory, the heap, the FFT)
 //                       and the program's
+//     Math.cpp          sinf, cosf, expf, tanhf and logf in the vector and libm math modes: the runtime's functions
 //     Vectors.cpp       vector literals, swizzles, and ?: lane by lane
 //     Memory.cpp        lvalues (variables, p[i], *p, components) read and written, arrays, &x, pointer arithmetic
 //     Modules.cpp       modules: their layout, fields, methods and calls of them, `this`, copies
@@ -48,12 +49,16 @@ namespace fminus::ir::detail
         return "'" + std::string(name) + "'";
     }
 
-    // A builtin function (Calls.cpp): its name, the LLVM intrinsic it lowers to, and its parameter count.
+    // A builtin function (Calls.cpp): its name, the LLVM intrinsic it lowers to, and its parameter count. A
+    // transcendental one also names its runtime functions' stem (Math.cpp): "sin" for fminus_rt_sinf,
+    // fminus_rt_sin_f4 and fminus_rt_libm_sinf, which the vector and libm modes call instead of the intrinsic. An
+    // exact one (fabsf, sqrtf, ...) has none, and is its intrinsic in every mode.
     struct Builtin
     {
         std::string_view name;
         llvm::Intrinsic::ID intrinsic;
         unsigned arity;
+        std::string_view runtime = {};
     };
 
     // An allocation builtin (Calls.cpp): C's name, the runtime function it calls (runtime/Runtime.h) and its arity.
@@ -154,6 +159,15 @@ namespace fminus::ir::detail
             llvm::BasicBlock* continueTarget;
         };
 
+        // The runtime functions behind a transcendental builtin (Math.cpp): the vector mode's scalar one
+        // (fminus_rt_sinf) and its four lanes (fminus_rt_sin_f4), and the libm mode's (fminus_rt_libm_sinf).
+        enum class MathFunction
+        {
+            Scalar,
+            Four,
+            Libm,
+        };
+
         // ---- Types.cpp ----------------------------------------------------------------------------------------------
         unsigned lanes(ast::Type type) const;
         llvm::Type* typeOf(ast::Type type);
@@ -241,6 +255,10 @@ namespace fminus::ir::detail
         Value lowerFft(SourceLocation location, const Fft& fft, const std::vector<Value>& args);
         llvm::CallInst* callRuntime(const std::string& name, llvm::Type* result, const std::vector<llvm::Value*>& args);
 
+        // ---- Math.cpp -----------------------------------------------------------------------------------------------
+        llvm::Value* lowerMath(const Builtin& builtin, ast::Type type, llvm::Value* x);
+        llvm::FunctionCallee mathFunction(const Builtin& builtin, MathFunction which);
+
         // ---- Modules.cpp --------------------------------------------------------------------------------------------
         void layOut(const ast::Program& program);
         void checkParameter(const ast::Module& module, const ast::Field& field);
@@ -279,6 +297,7 @@ namespace fminus::ir::detail
         Diagnostics& diagnostics_;
         llvm::IRBuilder<DenormalFolder> builder_;                          // folds constants as the mode computes
         unsigned polyLanes_;                                                // a poly float's lanes
+        Math math_;                                                         // how sinf, cosf, ... compute
         std::unordered_map<std::string, const ast::Function*> functions_;   // the program's, by name
         std::vector<std::unordered_map<std::string, Binding>> scopes_;     // the current function's, inner last
         const ast::Function* function_ = nullptr;                          // the function being lowered

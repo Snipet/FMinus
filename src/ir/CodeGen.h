@@ -50,11 +50,37 @@ namespace fminus::ir
         Flush,
     };
 
+    // How sinf, cosf, expf, tanhf and logf compute, scalar or vector (ir/Math.cpp lowers them, runtime/Math.cpp
+    // computes them). fabsf, sqrtf, floorf, fminf and fmaxf are exact, so they are LLVM's intrinsics in every mode.
+    //   Vector   the runtime's functions (runtime/Runtime.h, fminus_rt_sinf and fminus_rt_sin_f4), which give a float
+    //            the same result wherever it is: in a scalar loop or its vectorised body, a float4 or a poly float of
+    //            any width, at any optimisation level, a constant or not. On Apple systems they are libsystem_m's
+    //            vector functions (_simd_sin_f4, ...), made lane-independent; elsewhere libm's, lane by lane. Scalar
+    //            calls name the four-lane function as their vector variant, so loops of them still vectorise. The
+    //            default.
+    //   Libm     libm's sinf, cosf, ... (through the runtime, so that nothing folds them), a lane at a time: C++'s
+    //            std::sin of a float, bit for bit, everywhere. Loops of them don't vectorise.
+    //   Fast     LLVM's intrinsics (llvm.sin, ...), as clang has them: LLVM folds constants with the host's double
+    //            functions, pairs sinf and cosf into one sincos call, and the vectorisers and ReplaceWithVeclib use the
+    //            target's vector math library (support/HostTarget.h), so a result can depend on where a block ends,
+    //            on the optimisation level, on a poly float's width and on whether a parameter is frozen.
+    // The module records the mode in its kMathFlag (support/HostTarget.h), which tells optimiseModule whether to give
+    // the pipeline the vector math library: only Fast has it.
+    enum class Math
+    {
+        Vector,
+        Libm,
+        Fast,
+    };
+
     struct Options
     {
         // The lanes of a poly float: the target's vector register width in floats (support/HostTarget.h: polyLanes
         // asks the TargetMachine). 4 is NEON's and SSE's; any power of two from 1 to 64 lowers, wider ones in parts.
         unsigned polyLanes = 4;
+
+        // How the transcendental builtins compute (above).
+        Math math = Math::Vector;
 
         // The target's data layout (TargetMachine::createDataLayout), which a module's layout and sizeof follow. Empty
         // is LLVM's default, which agrees with the 64-bit targets FMinus runs on for every type it has.
@@ -91,7 +117,7 @@ namespace fminus::ir
                                         Diagnostics& diagnostics, const Options& options = {});
 
     // The builtins a program can call, with their parameter counts: <math.h>'s float functions (fabsf, sqrtf,
-    // sinf, ...), lowered to LLVM intrinsics.
+    // sinf, ...), lowered to LLVM intrinsics, or the transcendental ones to the runtime's functions (Math).
     struct BuiltinInfo
     {
         std::string_view name;

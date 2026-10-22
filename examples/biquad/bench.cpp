@@ -12,9 +12,11 @@
 // watch the numbers:
 //     build-release/bin/example-biquad               (time in the release preset)
 //     build-dev/bin/example-biquad -O0 --samples 480000
+//     build-dev/bin/example-biquad --math libm       (sinf and cosf as libm's; --math fast: LLVM's intrinsics)
 //
 // The C++ version is built with -ffp-contract=off (examples/CMakeLists.txt), so that, like FMinus's IR, it never
-// fuses a multiply and an add.
+// fuses a multiply and an add, and it takes its sines and cosines from fminus::math, which computes them as biquad.fm
+// does (FMinus's default math mode, at every optimisation level): so the two agree bit for bit.
 #include "fminus/FMinus.h"
 
 #include <CLI/CLI.hpp>
@@ -34,6 +36,7 @@
 #include <memory>
 #include <numbers>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace
@@ -92,31 +95,46 @@ namespace
         return signal;
     }
 
-    // biquad.fm's formulas, in the same order, in T: float for the comparison, double for float's own error.
+    // biquad.fm's formulas, in the same order, in T: float for the comparison, double for float's own error. A
+    // float's sine and cosine are fminus::math's, sinf's and cosf's in a program; a double's are std::'s.
     template <typename T>
     struct Reference
     {
+        static T sine(T x)
+        {
+            if constexpr (std::is_same_v<T, float>)
+                return fminus::math::sin(x);
+            else
+                return std::sin(x);
+        }
+        static T cosine(T x)
+        {
+            if constexpr (std::is_same_v<T, float>)
+                return fminus::math::cos(x);
+            else
+                return std::cos(x);
+        }
         static T omega(T cutoff, T rate)
         {
             return T(2) * std::numbers::pi_v<T> * cutoff / rate;
         }
         static T alpha(T cutoff, T q, T rate)
         {
-            return std::sin(omega(cutoff, rate)) / (T(2) * q);
+            return sine(omega(cutoff, rate)) / (T(2) * q);
         }
         static T b0(T cutoff, T q, T rate)
         {
-            const T c = std::cos(omega(cutoff, rate));
+            const T c = cosine(omega(cutoff, rate));
             return (T(1) - c) / T(2) / (T(1) + alpha(cutoff, q, rate));
         }
         static T b1(T cutoff, T q, T rate)
         {
-            const T c = std::cos(omega(cutoff, rate));
+            const T c = cosine(omega(cutoff, rate));
             return (T(1) - c) / (T(1) + alpha(cutoff, q, rate));
         }
         static T a1(T cutoff, T q, T rate)
         {
-            return T(-2) * std::cos(omega(cutoff, rate)) / (T(1) + alpha(cutoff, q, rate));
+            return T(-2) * cosine(omega(cutoff, rate)) / (T(1) + alpha(cutoff, q, rate));
         }
         static T a2(T cutoff, T q, T rate)
         {
@@ -194,8 +212,10 @@ namespace
         return 1;
     }
 
-    // Compiles `path` at `level`, the cutoff a stream and the rate frozen, and finds the kernel.
-    bool compile(const std::string& path, int level, float rate, Kernel& kernel, std::string& errors)
+    // Compiles `path` at `level`, sinf and cosf in the math mode `math`, the cutoff a stream and the rate frozen, and
+    // finds the kernel.
+    bool compile(const std::string& path, int level, fminus::Program::Math math, float rate, Kernel& kernel,
+                 std::string& errors)
     {
         std::ifstream file(path);
         if (!file)
@@ -206,6 +226,7 @@ namespace
         const std::string source{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
         fminus::Program::Options options;
         options.optimisation = level;
+        options.math = math;
         options.fileName = path;
         options.parameters["Biquad::cutoff"] = fminus::Program::Binding::stream();
         options.parameters["Biquad::rate"] = fminus::Program::Binding::frozen(static_cast<double>(rate));
@@ -235,6 +256,7 @@ int main(int argc, char** argv)
     float rate = 48000.0f;
     bool check = false;
     double tolerance = 1e-5;
+    std::string math = "vector";
     app.add_option("source", source, "The FMinus source")->capture_default_str();
     app.add_option("--samples", samples, "Samples per run")
         ->check(CLI::Range(std::size_t{1}, static_cast<std::size_t>(std::numeric_limits<int>::max())))
@@ -247,13 +269,19 @@ int main(int argc, char** argv)
     app.add_option("-O", level, "FMinus's optimisation level, 0 to 3")->check(CLI::Range(0, 3))->capture_default_str();
     app.add_option("--q", q, "The filter's Q")->check(CLI::PositiveNumber)->capture_default_str();
     app.add_option("--rate", rate, "The sample rate, Hz")->check(CLI::PositiveNumber)->capture_default_str();
+    app.add_option("--math", math, "How FMinus computes sinf and cosf: vector, libm or fast")
+        ->check(CLI::IsMember({"vector", "libm", "fast"}))
+        ->capture_default_str();
     app.add_flag("--check", check, "Compare only: exit 1 when FMinus and C++ differ by more than --tolerance");
     app.add_option("--tolerance", tolerance, "The largest |FMinus - C++| --check accepts")->capture_default_str();
     CLI11_PARSE(app, argc, argv);
+    const fminus::Program::Math mode = math == "libm"   ? fminus::Program::Math::Libm
+                                       : math == "fast" ? fminus::Program::Math::Fast
+                                                        : fminus::Program::Math::Vector;
 
     Kernel kernel;
     std::string errors;
-    if (!compile(source, level, rate, kernel, errors))
+    if (!compile(source, level, mode, rate, kernel, errors))
         return fail("\n" + errors);
 
     const Signal signal = makeSignal(samples, rate);
@@ -283,7 +311,7 @@ int main(int argc, char** argv)
         constexpr float kOtherQ = 2.0f;
         constexpr float kOtherRate = 44100.0f;
         Kernel other;
-        if (!compile(source, level, kOtherRate, other, errors))
+        if (!compile(source, level, mode, kOtherRate, other, errors))
             return fail("\n" + errors);
         runKernel(other, signal, kOtherQ, 0, blockOutput);
         Reference<float>::run(signal, kOtherQ, kOtherRate, cppOutput);

@@ -2,6 +2,7 @@
 // `this`, modules inside modules and arrays of them, copies, memory a C++ host owns, the effects of methods; and the
 // errors, run through the JIT.
 #include "Compile.h"
+#include "fminus/FMinus.h"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -63,7 +64,7 @@ TEST_CASE("a module's methods see its fields, and a C++ host runs them on its ow
     REQUIRE(jit);
     OnePole filter;   // the host's memory, zeroed: what a module starts as
     lookup<void(OnePole*, float, float)>(*jit, "OnePole::init")(&filter, 1000.0f, 48000.0f);
-    CHECK(filter.k == 1.0f - std::exp(-6.2831853f * 1000.0f / 48000.0f));
+    CHECK(filter.k == 1.0f - fminus::math::exp(-6.2831853f * 1000.0f / 48000.0f));   // expf, as programs compute it
     CHECK(filter.y == 0.0f);
 
     // Two calls of tick, then a block through run: the state carries over in the host's struct.

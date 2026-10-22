@@ -190,8 +190,8 @@ module Biquad
 // SAMPLES:         br i1 %cutoff.flat, label %{{.*}}, label %for.cond.preheader
 // SAMPLES:       for.body:
 // SAMPLES:         %cutoff = load float, ptr %cutoff.at, align 4, {{(!tbaa ![0-9]+, )?}}!alias.scope
-// SAMPLES:         call float @llvm.cos.f32
-// SAMPLES:         call float @llvm.sin.f32
+// SAMPLES:         call float @fminus_rt_cosf
+// SAMPLES:         call float @fminus_rt_sinf
 // SAMPLES:         br i1 %exitcond.not, label %{{.*}}, label %for.body
 
 // A flat stream: its copy computes the coefficients from the value once, before its loop, which reads no stream and
@@ -200,8 +200,8 @@ module Biquad
 // FLAT:         br i1 %cutoff.flat, label %for.cond.cutoff.flat1.preheader, label
 // FLAT:       cutoff.end.cutoff.flat1.lr.ph:
 // FLAT:         fmul float %cutoff.value,
-// FLAT:         call float @llvm.cos.f32
-// FLAT:         call float @llvm.sin.f32
+// FLAT:         call float @fminus_rt_cosf
+// FLAT:         call float @fminus_rt_sinf
 // FLAT:       cutoff.end.cutoff.flat1:
 // FLAT-NOT:     %cutoff.stream
 // FLAT-NOT:     call

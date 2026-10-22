@@ -1,6 +1,7 @@
-// tests/unit/VectorTest.cpp: float2, float4 and float8 (simd.md, recipe 7) and the vector math library (recipe 8),
-// called from C++ through clang's ext_vector_type.
+// tests/unit/VectorTest.cpp: float2, float4 and float8 (simd.md, recipe 7) and the vector math library (recipe 8, the
+// fast math mode's), called from C++ through clang's ext_vector_type. MathTest.cpp has the default math mode's.
 #include "Compile.h"
+#include "fminus/FMinus.h"
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
@@ -118,8 +119,8 @@ TEST_CASE("vector arithmetic works lane by lane, broadcasting scalars, with buil
     CHECK(lanesOf(lookup<float4(float4)>(*jit, "halfwave")(x)) == std::array{-0.0f, -0.0f, 0.5f, 2.0f});
     const float4 angles = {0.0f, 0.5f, 1.0f, 2.0f};
     const float4 sines = lookup<float4(float4)>(*jit, "sines")(angles);
-    for (int i = 0; i < 4; ++i)   // one call to the vector math library (recipe 8): within 3 ulp of sinf's
-        CHECK_THAT(sines[i], Catch::Matchers::WithinULP(std::sin(angles[i]), 3));
+    for (int i = 0; i < 4; ++i)   // one call of the runtime's four-lane sin: each lane what a float gets (MathTest.cpp)
+        CHECK(sines[i] == fminus::math::sin(angles[i]));
     CHECK(lookup<float(float)>(*jit, "wide")(1.0f) == 72.0f);
 }
 
@@ -166,7 +167,8 @@ TEST_CASE("vector errors are reported as clang reports them", "[codegen][simd]")
              "test.fm:21:21: error: returning 'float4' from a function with incompatible result type 'float'\n");
 }
 
-TEST_CASE("float4 math calls the vector math library; other sizes call sinf for each lane", "[codegen][simd]")
+TEST_CASE("in the fast math mode, float4 math calls the vector math library; other sizes call sinf for each lane",
+          "[codegen][simd]")
 {
     std::string errors;
     auto jit = compile("float4 sines(float4 x) { return sinf(x); }\n"
@@ -175,7 +177,7 @@ TEST_CASE("float4 math calls the vector math library; other sizes call sinf for 
                        "{\n"
                        "    return reduce_add(sinf((float8)(a) * (float8)(1, 2, 3, 4, 5, 6, 7, 8)));\n"
                        "}\n",
-                       &errors);
+                       &errors, {.math = fminus::ir::Math::Fast});
     INFO(errors);
     REQUIRE(jit);
     for (float x = -100.0f; x <= 100.0f; x += 0.37f)

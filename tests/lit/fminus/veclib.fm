@@ -1,7 +1,9 @@
-// recipe 8: on Apple systems, float4 math calls libsystem_m's vector functions; NEON's own instructions stay.
+// recipe 8: in the fast math mode, on Apple systems, float4 math calls libsystem_m's vector functions straight from
+// the IR (ReplaceWithVeclib); NEON's own instructions stay. (The default, vector, mode calls the runtime's functions:
+// math.fm.)
 // REQUIRES: system-darwin
-// RUN: fminus %s -O2 | FileCheck %s
-// RUN: %if arm64 %{ fminus %s -O2 --emit asm -o - | FileCheck %s --check-prefix=ASM %}
+// RUN: fminus %s -O2 --math fast | FileCheck %s
+// RUN: %if arm64 %{ fminus %s -O2 --math fast --emit asm -o - | FileCheck %s --check-prefix=ASM %}
 
 float4 sines(float4 x) { return sinf(x); }
 float4 shape(float4 x) { return tanhf(x) + sqrtf(fabsf(x)); }

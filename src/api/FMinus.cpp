@@ -7,6 +7,7 @@
 #include "frontend/Frontend.h"
 #include "ir/CodeGen.h"
 #include "jit/Jit.h"
+#include "runtime/Runtime.h"
 #include "support/HostTarget.h"
 
 #include <llvm/IR/DataLayout.h>
@@ -56,6 +57,20 @@ namespace fminus
         bool isPolyWidth(unsigned lanes)
         {
             return lanes >= 1 && lanes <= 64 && (lanes & (lanes - 1)) == 0;
+        }
+
+        ir::Math lowered(Program::Math math)
+        {
+            switch (math)
+            {
+            case Program::Math::Vector:
+                return ir::Math::Vector;
+            case Program::Math::Libm:
+                return ir::Math::Libm;
+            case Program::Math::Fast:
+                return ir::Math::Fast;
+            }
+            return ir::Math::Vector;
         }
 
         ir::ParamBinding lowered(const Program::Binding& binding)
@@ -146,6 +161,7 @@ namespace fminus
         ir::Options lowering;
         lowering.polyLanes = options.polyLanes != 0 ? options.polyLanes : fminus::polyLanes(**machine);
         lowering.dataLayout = (*machine)->createDataLayout().getStringRepresentation();
+        lowering.math = lowered(options.math);
         for (const auto& [name, binding] : options.parameters)
             lowering.parameters.emplace(name, lowered(binding));
         lowering.strictAliasing = options.strictAliasing;
@@ -328,3 +344,32 @@ namespace fminus
         }
     }
 } // namespace fminus
+
+// The runtime's scalar functions of the vector math mode, which generated code calls (runtime/Math.cpp).
+namespace fminus::math
+{
+    float sin(float x) noexcept
+    {
+        return fminus_rt_sinf(x);
+    }
+
+    float cos(float x) noexcept
+    {
+        return fminus_rt_cosf(x);
+    }
+
+    float exp(float x) noexcept
+    {
+        return fminus_rt_expf(x);
+    }
+
+    float tanh(float x) noexcept
+    {
+        return fminus_rt_tanhf(x);
+    }
+
+    float log(float x) noexcept
+    {
+        return fminus_rt_logf(x);
+    }
+} // namespace fminus::math

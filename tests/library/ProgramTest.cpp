@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -174,6 +175,62 @@ TEST_CASE("a Program's options: the optimisation level, a poly float's lanes, an
     bad.polyLanes = 3;
     CHECK(fminus::Program::compile(kGain, errors, bad) == nullptr);
     CHECK(errors == "fminus::Program: polyLanes 3 is not 0 (this machine's) or a power of two from 1 to 64\n");
+}
+
+TEST_CASE("fminus::math is what a Program's sinf, cosf, expf, tanhf and logf compute; Options::math picks another",
+          "[library][math]")
+{
+    // A block of each, the loop FMinus's (and vectorised, at -O2), against C++ a sample at a time.
+    const char* const kMath = "void math(const float* restrict in, float* restrict out, int n)\n"
+                              "{\n"
+                              "    for (int i = 0; i < n; ++i)\n"
+                              "        out[i] = sinf(in[i]) + cosf(in[i]) + expf(in[i]) + tanhf(in[i]) + logf(in[i]);\n"
+                              "}\n";
+    using Math = void(const float*, float*, int);
+    std::vector<float> in(1001);
+    for (std::size_t i = 0; i < in.size(); ++i)
+        in[i] = 0.01f + 0.037f * static_cast<float>(i);
+    // The C++ a host would write, one rounding a statement as FMinus's IR has it, calling its functions through
+    // pointers the compiler cannot see through. With std::'s seen through, clang at -O2 makes the sine and the cosine
+    // of one argument one call of Apple's __sincosf_stret, whose sine is an ulp from sinf's for some arguments (one of
+    // these).
+    using Function = float (*)(float);
+    const auto expected = [&](Function sin, Function cos, Function exp, Function tanh, Function log) {
+        volatile Function opaque[5] = {sin, cos, exp, tanh, log};
+        std::vector<float> out(in.size());
+        for (std::size_t i = 0; i < in.size(); ++i)
+        {
+            float sum = opaque[0](in[i]);
+            sum = sum + opaque[1](in[i]);
+            sum = sum + opaque[2](in[i]);
+            sum = sum + opaque[3](in[i]);
+            out[i] = sum + opaque[4](in[i]);
+        }
+        return out;
+    };
+    const auto computed = [&](fminus::Program::Math math, int level) {
+        fminus::Program::Options options;
+        options.math = math;
+        options.optimisation = level;
+        std::string errors;
+        auto program = fminus::Program::compile(kMath, errors, options);
+        std::vector<float> out(in.size());
+        if (program)
+            program->function<Math>("math", errors)(in.data(), out.data(), static_cast<int>(in.size()));
+        return out;
+    };
+    const std::vector<float> vector =
+        expected(fminus::math::sin, fminus::math::cos, fminus::math::exp, fminus::math::tanh, fminus::math::log);
+    const std::vector<float> libm = expected([](float x) { return std::sin(x); }, [](float x) { return std::cos(x); },
+                                             [](float x) { return std::exp(x); }, [](float x) { return std::tanh(x); },
+                                             [](float x) { return std::log(x); });
+    for (const int level : {0, 2})
+    {
+        INFO("-O" << level);
+        CHECK(computed(fminus::Program::Math::Vector, level) == vector);   // the default's: fminus::math
+        CHECK(computed(fminus::Program::Math::Libm, level) == libm);       // the C library's
+    }
+    CHECK(fminus::Program::Options{}.math == fminus::Program::Math::Vector);
 }
 
 TEST_CASE("a Program describes its modules, and a host runs their methods on memory it allocates", "[library]")

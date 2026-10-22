@@ -11,7 +11,8 @@
 //     build-dev/bin/example-voices --block 64
 //
 // The C++ version is built with -ffp-contract=off (examples/CMakeLists.txt), so that, like FMinus's IR, it never fuses
-// a multiply and an add.
+// a multiply and an add, and it takes expf from fminus::math, which computes it as voices.fm does (FMinus's default
+// math mode).
 #include "fminus/FMinus.h"
 
 #include <CLI/CLI.hpp>
@@ -139,7 +140,7 @@ namespace
 
         void process(float* __restrict out, int n)
         {
-            const float k = 1.0f - std::exp(-6.28318531f * cutoff.value / rate.value);
+            const float k = 1.0f - fminus::math::exp(-6.28318531f * cutoff.value / rate.value);
             const float up = 1.0f / (attack.value * rate.value);
             const float down = 1.0f / (release.value * rate.value);
             for (Voice& voice : voices)

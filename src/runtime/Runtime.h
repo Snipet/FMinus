@@ -9,6 +9,10 @@
 
 #include <cstdint>
 
+// Four floats in one vector register, as FMinus's float4 is (LLVM's <4 x float>): GCC's and clang's vector of 16 bytes,
+// which the C ABI passes and returns in one register on arm64 and x86-64, as it does clang's ext_vector_type(4).
+typedef float fminus_rt_float4 __attribute__((vector_size(16)));
+
 extern "C"
 {
     // The runtime's ABI version, for generated code to check against the one it was compiled for.
@@ -52,4 +56,32 @@ extern "C"
     void fminus_rt_fft_inverse_real(void* plan, const float* in, float* out) noexcept;
     void fminus_rt_fft_forward_complex(void* plan, const float* in, float* out) noexcept;
     void fminus_rt_fft_inverse_complex(void* plan, const float* in, float* out) noexcept;
+
+    // The math builtins sinf, cosf, expf, tanhf and logf (Math.cpp), as the code generator's math modes call them
+    // (ir::Options::math, ir/Math.cpp). None allocates, locks or makes a system call; each is a function of its
+    // argument alone, which the code generator tells LLVM (it reads no memory and is defined for every argument).
+    //
+    // The vector mode's, FMinus's default. A lane of a four-lane function is the scalar function of that lane, bit for
+    // bit, whatever the other lanes hold: so a float gets one result in a scalar loop and in its vectorised body, in a
+    // float4, and in a poly float of any width. On Apple systems they are libsystem_m's vector functions
+    // (_simd_sin_f4, ...), whose sin and cos are made lane-independent here, and a scalar call is lane 0 of the vector
+    // function of four copies of its argument; elsewhere they are libm's sinf, cosf, ..., lane by lane.
+    float fminus_rt_sinf(float x) noexcept;
+    float fminus_rt_cosf(float x) noexcept;
+    float fminus_rt_expf(float x) noexcept;
+    float fminus_rt_tanhf(float x) noexcept;
+    float fminus_rt_logf(float x) noexcept;
+    fminus_rt_float4 fminus_rt_sin_f4(fminus_rt_float4 x) noexcept;
+    fminus_rt_float4 fminus_rt_cos_f4(fminus_rt_float4 x) noexcept;
+    fminus_rt_float4 fminus_rt_exp_f4(fminus_rt_float4 x) noexcept;
+    fminus_rt_float4 fminus_rt_tanh_f4(fminus_rt_float4 x) noexcept;
+    fminus_rt_float4 fminus_rt_log_f4(fminus_rt_float4 x) noexcept;
+
+    // The libm mode's: libm's sinf, cosf, ..., which C++'s std::sin of a float calls, under names LLVM does not know,
+    // so that it neither folds nor vectorises them.
+    float fminus_rt_libm_sinf(float x) noexcept;
+    float fminus_rt_libm_cosf(float x) noexcept;
+    float fminus_rt_libm_expf(float x) noexcept;
+    float fminus_rt_libm_tanhf(float x) noexcept;
+    float fminus_rt_libm_logf(float x) noexcept;
 }

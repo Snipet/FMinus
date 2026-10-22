@@ -48,9 +48,9 @@ module Saturator
 The poly loop takes `poly_lanes()` samples a step through `poly_load` and `poly_store`, and the last, partial step
 under a mask, which keeps its loads and stores inside the buffer (docs/simd.md, "Loads and stores"). The tanh:
 
-- **`tanhf`**, `<math.h>`'s: `process_tanhf` and `process_tanhf_poly`. LLVM can only call it. Of a `poly float` it
-  is `llvm.tanh.v8f32`, which the backend splits into one call a lane, unless the target has a vector `tanhf`: on
-  Apple systems libsystem_m's `_simd_tanh_f4`, for 4 lanes (recipe 8).
+- **`tanhf`**, `<math.h>`'s: `process_tanhf` and `process_tanhf_poly`. LLVM can only call it: FMinus's runtime's
+  `tanhf` (its default math mode). Of a `poly float` it is one call of the runtime's four-lane `tanhf` each four lanes:
+  on Apple systems libsystem_m's `_simd_tanh_f4`, elsewhere the C library's `tanhf`, a lane at a time.
 - **A rational function**, `rational_tanh`: x times a polynomial of degree 12 in x over one of degree 6 (Eigen's
   fast tanh for float, with its coefficients), x clamped first to ±7.905311, past which tanh is ±1 in float. It is
   multiplies, adds, a divide and a clamp, so of a `poly float` it is one vector instruction each. Evaluated in its
@@ -100,17 +100,18 @@ float` at a time 0.58, C++ 2.00 (FMinus's vector `tanhf`, below, against C++'s c
   `--poly-lanes 1` is a scalar loop that the vectoriser leaves alone, since its operations are on vectors of one
   lane: 4.0 ns.
 - **FMinus and C++ agree bit for bit**, for the rational function (the same operations in the same order, no
-  contraction on either side) and for `tanhf` (the same glibc function). The rational poly kernel gives the scalar
-  one's output at every width from 1 to 64, and every kernel gives the same output in blocks of 64 and 61 as in one
-  call, which `--check` checks.
+  contraction on either side) and for `tanhf` (the same function, `fminus::math::tanh`: glibc's `tanhf` there). Each
+  poly kernel gives the scalar one's output at every width from 1 to 64, and every kernel gives the same output in
+  blocks of 64 and 61 as in one call, which `--check` checks.
 
-On an Apple Silicon Mac, the `tanhf` lines are vector code too: `_simd_tanh_f4` replaces the call a lane in the 4-lane
-poly loop, and the loop vectoriser uses it for the scalar loop's body. It differs from `tanhf` in the last bits: by
-at most 3 ulp, for about 170 million of the 4.3 billion floats, over every finite float on an M5. FMinus and C++ then
-differ by up to 6e-8 (`--check`'s tolerance is 1e-6). And the plain loop's output depends on where a block ends: its
-body meets the vector function and its remainder the scalar one, so moving the end of a block moves samples from one
-to the other. `--check` allows the two `tanhf` kernels those 3 ulp across block sizes (it measures 2 here), and still
-holds the rational kernels, FMinus's own arithmetic, to the same output bit for bit.
+On an Apple Silicon Mac, the `tanhf` lines are vector code too: the runtime's four-lane `tanhf`, libsystem_m's
+`_simd_tanh_f4`, is the 4-lane poly loop's call and the scalar loop's vectorised body's, and its scalar `tanhf`, lane
+0 of the same function, the remainder's. It differs from the C library's `tanhf` in the last bits, by at most 3 ulp,
+for about 170 million of the 4.3 billion floats, over every finite float on an M5; but it gives a float one result
+wherever it is computed, so `--check` holds all four kernels to the same output bit for bit, in any blocks and at any
+width, and to C++'s `fminus::math::tanh`. (With `--math fast`, LLVM's intrinsics, the plain loop's body calls
+`_simd_tanh_f4` and its remainder the C library's `tanhf`, so moving the end of a block moves samples from one to the
+other: 2 ulp apart here.)
 
 ## Where FMinus leaves it
 

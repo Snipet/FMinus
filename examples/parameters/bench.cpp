@@ -7,13 +7,15 @@
 // It compares each with the same modules written in C++, and times them, and the fixed filter as knobs too. With
 // --check (what ctest runs) it only compares, and fails when an output is not C++'s bit for bit, when the
 // sample-accurate output changes with the calls' length, or when the frozen filter is not the knobs' at the same
-// values.
+// values, bit for bit.
 //
 //     build-dev/bin/example-parameters
 //     build-dev/bin/example-parameters --block 256
+//     build-dev/bin/example-parameters --math fast       (timed with LLVM's intrinsics for sinf and expf)
 //
 // The C++ versions are built with -ffp-contract=off (examples/CMakeLists.txt), so that, like FMinus's IR, they never
-// fuse a multiply and an add.
+// fuse a multiply and an add, and they take sinf and expf from fminus::math, which computes them as parameters.fm does
+// (FMinus's default math mode).
 #include "fminus/FMinus.h"
 
 #include <CLI/CLI.hpp>
@@ -48,7 +50,7 @@ namespace
         {
             for (int i = 0; i < n; ++i)
             {
-                out[i] = centre * std::exp(0.6931472f * depth * std::sin(6.2831853f * phase));
+                out[i] = centre * fminus::math::exp(0.6931472f * depth * fminus::math::sin(6.2831853f * phase));
                 phase += frequency / sampleRate;
                 if (phase >= 1.0f)
                     phase -= 1.0f;
@@ -68,7 +70,7 @@ namespace
             const float w = 3.14159265f / sampleRate;
             for (int i = 0; i < n; ++i)
             {
-                const float f = 2.0f * std::sin(w * cutoff[i]);
+                const float f = 2.0f * fminus::math::sin(w * cutoff[i]);
                 low += f * band;
                 const float high = in[i] - low - damping * band;
                 band += f * high;
@@ -113,11 +115,12 @@ namespace
         void (*runFilter)(void*, const float*, float*, int) = nullptr;
     };
 
-    Patch compile(const std::string& source, const std::string& path, int level,
+    Patch compile(const std::string& source, const std::string& path, int level, Program::Math math,
                   std::map<std::string, Program::Binding> parameters, std::string& errors)
     {
         Program::Options options;
         options.optimisation = level;
+        options.math = math;
         options.fileName = path;
         options.parameters = std::move(parameters);
         Patch patch;
@@ -279,6 +282,7 @@ int main(int argc, char** argv)
     int repeats = 20;
     int level = 2;
     bool check = false;
+    std::string math = "vector";
     app.add_option("source", path, "The FMinus source")->capture_default_str();
     app.add_option("--samples", samples, "Samples per run")
         ->check(CLI::Range(std::size_t{1024}, std::size_t{1} << 26))
@@ -291,24 +295,31 @@ int main(int argc, char** argv)
         ->capture_default_str();
     app.add_option("-O", level, "FMinus's optimisation level, 0 to 3")->check(CLI::Range(0, 3))->capture_default_str();
     app.add_flag("--check", check, "Compare only: exit 1 when an output is not what it should be");
+    app.add_option("--math", math, "How FMinus computes sinf and expf: vector, libm or fast (--check expects vector)")
+        ->check(CLI::IsMember({"vector", "libm", "fast"}))
+        ->capture_default_str();
     CLI11_PARSE(app, argc, argv);
+    const Program::Math mode = math == "libm"   ? Program::Math::Libm
+                               : math == "fast" ? Program::Math::Fast
+                                                : Program::Math::Vector;
 
     std::ifstream file(path);
     if (!file)
         return fail("cannot read " + path);
     const std::string source{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
     std::string errors;
-    const Patch knobs = compile(source, path, level, {}, errors);
+    const Patch knobs = compile(source, path, level, mode, {}, errors);
     if (!knobs.program)
         return fail("\n" + errors);
-    const Patch streamed = compile(source, path, level, {{"Filter::cutoff", Program::Binding::stream()}}, errors);
+    const Patch streamed =
+        compile(source, path, level, mode, {{"Filter::cutoff", Program::Binding::stream()}}, errors);
     if (!streamed.program)
         return fail("\n" + errors);
     // The filter's defaults, frozen.
     std::map<std::string, Program::Binding> fixed;
     for (const Program::Parameter& parameter : knobs.filter->parameters)
         fixed[parameter.module + "::" + parameter.name] = Program::Binding::frozen(parameter.defaultValue.value_or(0));
-    const Patch frozen = compile(source, path, level, fixed, errors);
+    const Patch frozen = compile(source, path, level, mode, fixed, errors);
     if (!frozen.program)
         return fail("\n" + errors);
 
@@ -339,23 +350,21 @@ int main(int argc, char** argv)
             play(streamed, Sweep::Sample, input, other, size);
             sameInCalls = sameInCalls && other == sampleAccurate;
         }
-        // Frozen, LLVM folds the coefficient, 2 sin(pi 1000 / 48000), with its own sine: within a float's rounding of
-        // libm's, which the knobs' filter calls.
-        constexpr double kTolerance = 1e-5;
-        const double frozenError = difference(still, constant);
+        // Frozen, the coefficient, 2 sin(pi 1000 / 48000), is a constant's sine, which the knobs' filter computes from
+        // the knob: the same function in both, the runtime's (LLVM folds no call of it), so the same output.
+        const bool frozenSame = constant == still;
         bool nonBlocking = true;
         for (const Patch* patch : {&knobs, &streamed, &frozen})
             nonBlocking = nonBlocking && patch->program->nonBlocking("Lfo::process")
                        && patch->program->nonBlocking("Filter::process");
         std::printf("%s", std::format("example-parameters: calls of {}: the same as C++ with the cutoff a knob: {}, a "
-                                      "stream: {}, fixed: {}; the stream's in calls of 61, 256 and {}: {}; frozen "
-                                      "against knobs: {:.3g} of the peak (at most {:.0e}); nonblocking: {}\n",
+                                      "stream: {}, fixed: {}; the stream's in calls of 61, 256 and {}: {}; frozen, "
+                                      "the knobs' output: {}; nonblocking: {}\n",
                                       block, blockSame ? "yes" : "no", sampleSame ? "yes" : "no",
-                                      stillSame ? "yes" : "no", samples, sameInCalls ? "yes" : "no", frozenError,
-                                      kTolerance, nonBlocking ? "yes" : "no")
+                                      stillSame ? "yes" : "no", samples, sameInCalls ? "yes" : "no",
+                                      frozenSame ? "yes" : "no", nonBlocking ? "yes" : "no")
                               .c_str());
-        return blockSame && sampleSame && stillSame && sameInCalls && frozenError <= kTolerance && nonBlocking ? 0
-                                                                                                              : 1;
+        return blockSame && sampleSame && stillSame && sameInCalls && frozenSame && nonBlocking ? 0 : 1;
     }
 
     std::printf("parameters.fm's parameters, as fminus::Program describes them:\n");
