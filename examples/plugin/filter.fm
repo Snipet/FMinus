@@ -1,0 +1,88 @@
+// examples/plugin/filter.fm: the DSP of FMinus Filter, a JUCE plugin (README.md). The plugin embeds this file, and its
+// processor compiles it with fminus::Program when the host prepares it, for the CPU it runs on, with
+//   cutoff      a stream: a value a sample, which the processor smooths (juce::SmoothedValue), so a moved knob glides;
+//   resonance   a knob, set once a block from the plugin's parameter;
+//   mode        a knob too, an int: 0 low-pass, 1 band-pass, 2 high-pass, between which process glides itself (below);
+//   sampleRate  frozen at the host's rate: a constant, compiled in, and compiled again when the rate changes.
+// The processor keeps one instance a channel and runs process on each channel's samples, in place.
+//
+// The filter is a state-variable filter integrated by the trapezoidal rule (topology-preserving: V. Zavalishin, The
+// Art of VA Filter Design, 2012; this form, with the integrators' states as "equivalent currents", is A. Simper's,
+// Solving the continuous SVF equations using trapezoidal integration and equivalent currents, Cytomic, 2013). Unlike
+// Chamberlin's, in examples/parameters/, it is stable at every cutoff below the Nyquist frequency, and its response at
+// the cutoff is the analog filter's (the tan prewarps it). Low-, band- and high-pass come from the same two states;
+// each peaks at 1/k at the cutoff, k = 1/Q.
+//
+// Two more things keep it from clicking or sticking, both sample by sample, so that the output does not depend on how
+// the host splits it into blocks:
+//   - A new mode is a crossfade, not a switch. At a high resonance the three outputs are large and a quarter or half a
+//     period apart, and a switch would jump the output by up to twice their amplitude in one sample. Each output's
+//     weight in the mix moves a little each sample instead, the whole way in 20 ms. A new instance (all zeros) starts
+//     at its mode.
+//   - An input sample that is not finite (a NaN, an infinity) or is huge (1e30 or more) is taken as 0. It would make
+//     the integrators' states NaN, or overflow them, and every later output NaN. The test is on the input, off the
+//     chain of the states from one sample to the next, so it costs next to nothing; the same test on the states, on
+//     that chain, made process about 30% slower. A state that is not finite all the same (through a parameter out of
+//     its range, which the plugin's processor never sets, say) starts again from rest, after the call.
+module Filter
+{
+    param float cutoff [[fminus::range(20, 20000)]] [[fminus::default(1000)]];          // Hz
+    param float resonance [[fminus::range(0, 1)]] [[fminus::default(0.3)]];             // Q from 0.5 to 25
+    param int mode [[fminus::range(0, 2)]];                                              // low-, band-, high-pass
+    param float sampleRate [[fminus::range(8000, 384000)]] [[fminus::default(48000)]];  // Hz
+    float ic1;       // the integrators' states
+    float ic2;
+    float lowMix;    // each output's weight in the mix, gliding to the mode's
+    float bandMix;
+    float highMix;
+    int started;     // 0 in a new instance: the weights start at the mode's, without a glide
+
+    void process(float* restrict samples, int n) [[clang::nonblocking]]
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            // The mode's weights (past 2, a high-pass, as 2 is), and the most a weight moves in a sample: the whole
+            // way in 20 ms, a constant once the sample rate is frozen.
+            const float toLow = mode[i] == 0 ? 1.0f : 0.0f;
+            const float toBand = mode[i] == 1 ? 1.0f : 0.0f;
+            const float toHigh = 1.0f - toLow - toBand;
+            if (started == 0)
+            {
+                lowMix = toLow;
+                bandMix = toBand;
+                highMix = toHigh;
+                started = 1;
+            }
+            const float glide = 50.0f / sampleRate[i];
+            lowMix += fminf(fmaxf(toLow - lowMix, -glide), glide);
+            bandMix += fminf(fmaxf(toBand - bandMix, -glide), glide);
+            highMix += fminf(fmaxf(toHigh - highMix, -glide), glide);
+
+            // g = tan(pi fc / fs), with the cutoff held between 10 Hz and just below the Nyquist frequency, where the
+            // tangent stays finite. FMinus has no tanf: a sine over a cosine.
+            const float fc = fminf(fmaxf(cutoff[i], 10.0f), 0.49f * sampleRate[i]);
+            const float w = (3.14159265f / sampleRate[i]) * fc;
+            const float g = sinf(w) / cosf(w);
+            const float k = 2.0f - 1.96f * resonance[i];   // 1 / Q: 2 at resonance 0, 0.04 at 1
+            const float a1 = 1.0f / (1.0f + g * (g + k));
+            const float a2 = g * a1;
+            const float a3 = g * a2;
+            const float x = samples[i];
+            const float v0 = fabsf(x) < 1e30f ? x : 0.0f;   // a NaN fails every comparison: 0 too
+            const float v3 = v0 - ic2;
+            const float v1 = a1 * ic1 + a2 * v3;          // band-pass
+            const float v2 = ic2 + a2 * ic1 + a3 * v3;    // low-pass
+            ic1 = 2.0f * v1 - ic1;
+            ic2 = 2.0f * v2 - ic2;
+            samples[i] = lowMix * v2 + bandMix * v1 + highMix * (v0 - k * v1 - v2);
+        }
+
+        // Back to rest if a state passed 1e30 or is not a number. An input below 1e30 keeps the states within a small
+        // multiple of it (the gain is 25 at most), far below a float's overflow, so in-range parameters never get here.
+        if (!(fabsf(ic1) + fabsf(ic2) < 1e30f))
+        {
+            ic1 = 0.0f;
+            ic2 = 0.0f;
+        }
+    }
+};

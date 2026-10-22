@@ -1,12 +1,13 @@
 # examples/CMakeLists.txt: every directory under examples/ is one example. Its .cpp files build the executable
 # example-<directory> (bin/example-biquad), linked with FMinus::Internal and CLI11, which finds its FMinus sources
 # through FMINUS_EXAMPLE_DIR (the example's source directory). ctest runs each with --check. Adding an example edits no
-# CMake. FMINUS_EXAMPLE_TARGETS lists them.
+# CMake. FMINUS_EXAMPLE_TARGETS lists them. A directory with a CMakeLists.txt of its own is a separate project, built
+# on its own (examples/plugin/, a JUCE plugin: its README has the configure line), and is skipped here.
 
 file(GLOB _fminus_example_dirs LIST_DIRECTORIES true CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/*")
 set(FMINUS_EXAMPLE_TARGETS "")
 foreach(_dir IN LISTS _fminus_example_dirs)
-  if(NOT IS_DIRECTORY "${_dir}")
+  if(NOT IS_DIRECTORY "${_dir}" OR EXISTS "${_dir}/CMakeLists.txt")   # a separate project (above)
     continue()
   endif()
   file(GLOB_RECURSE _sources CONFIGURE_DEPENDS "${_dir}/*.cpp")

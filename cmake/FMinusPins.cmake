@@ -1,5 +1,6 @@
-# cmake/FMinusPins.cmake: every external dependency, pinned by version, URL and SHA-256. All of them are fetched with
-# FetchContent; nothing is taken from the system unless an FMINUS_*_MODE option asks for it.
+# cmake/FMinusPins.cmake: every external dependency, pinned by version, URL and SHA-256 (JUCE, which only the plugin
+# example uses, by version and git commit). All of them are fetched with FetchContent; nothing is taken from the system
+# unless an FMINUS_*_MODE option asks for it.
 #
 # Bumping a pin: change the version, URL and hash together. Scripts/pin-llvm.sh <version> prints the LLVM lines from
 # the GitHub release (asset size and digest). A changed LLVM pin or option set builds a new LLVM flavor next to the old
@@ -50,3 +51,13 @@ set(FMINUS_CATCH2_SHA256 "d16bd1b8b2364918bd472cb216394acb93bde6784890df0d91bccf
 set(FMINUS_PFFFT_COMMIT "aa16fd3db58de4ba5dae8b0438440bb9da46b6fa")   # 2026-09-29
 set(FMINUS_PFFFT_URL "https://github.com/marton78/pffft/archive/${FMINUS_PFFFT_COMMIT}.tar.gz")
 set(FMINUS_PFFFT_SHA256 "5379901efa11e889379b1f647ba69911c564a86b20fd1f93d156343d0ba9bfcb")   # 184,640 bytes
+
+# JUCE: only the plugin example uses it (examples/plugin/, a CMake project of its own; FMinus's build never fetches it).
+# Pinned by its git commit, not by an archive's SHA-256: FetchContent clones the repository and checks the commit out,
+# and git names a commit by the hash of its contents, so the clone is verified as it is made. The same pin also checks
+# a JUCE checkout the user already has (FETCHCONTENT_SOURCE_DIR_JUCE), which an archive's digest could not: there
+# examples/plugin/CMakeLists.txt checks that its HEAD is the commit and that no tracked file has changed since (git
+# status), as well as the version in its header.
+set(FMINUS_JUCE_VERSION "8.0.4")
+set(FMINUS_JUCE_REPOSITORY "https://github.com/juce-framework/JUCE.git")
+set(FMINUS_JUCE_COMMIT "51d11a2be6d5c97ccf12b4e5e827006e19f0555a")   # the tag 8.0.4
