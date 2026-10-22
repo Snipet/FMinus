@@ -90,9 +90,13 @@ through `processBlock` and exits 1 unless all of these hold:
 - A program that doesn't compile is refused, and so is one whose `process` isn't `[[clang::nonblocking]]`. In both
   cases the audio passes through untouched and the error is logged once.
 
-It also prints what `processBlock` costs: 4.7 to 5 ns per sample per channel on an M5 that is otherwise idle (it
-varies from run to run, and much more with the machine's load), about 0.05% of a core for stereo at 48 kHz. That
-includes a sine, a cosine and two divisions per sample; the modes' crossfade adds about 0.6 ns of it.
+It also prints what `processBlock` costs: 6.8 ns per sample per channel on an M5 (it varies from run to run, and much
+more with the machine's load), about 0.07% of a core for stereo at 48 kHz. That includes a sine, a cosine and two
+divisions per sample. The sine and cosine are 2.1 ns of it: in FMinus's default math mode each is lane 0 of the
+runtime's four-lane function, which costs more a call than libm's, in a loop that the filter's recursion keeps from
+vectorising. Compiled with `Program::Options::math = Libm` the filter takes 4.7 ns and passes the same checks. The
+modes' crossfade adds about 0.4 ns. Flush-to-zero costs nothing: `process` finds the mode set (the same 6.8 ns compiled
+with `Preserve`).
 
 ## How FMinus is used
 
@@ -129,12 +133,13 @@ output doesn't depend on how the host splits it into blocks:
   switching between them at once would jump the output by up to twice their amplitude. Instead, each output's weight in
   the mix moves a little every sample and gets all the way in 20 ms. The step per sample is `50 / sampleRate`, which
   the frozen rate makes a constant. A new instance starts at its mode, without a glide.
-- **A bad input sample is taken as 0.** That covers a NaN, an infinity, or anything of 1e30 or more. Otherwise it
-  would make the integrators' states NaN, or overflow them, and every later output would be NaN. The test is on the
-  input, off the chain that carries the states from one sample to the next, so it costs next to nothing. The same test
-  on the states sits on that chain, and made `processBlock` about 30% slower (6.0 ns a sample a channel against 4.7).
-  If a state goes bad anyway, say through a parameter out of its range, which this processor never sets, a test after
-  the loop restarts the filter from rest for the next call.
+- **A bad input sample is taken as 0.** That covers a NaN, an infinity, or anything of 1e30 or more. Otherwise it would
+  make the integrators' states NaN, or overflow them, and every later output would be NaN. The test is on the input, off
+  the chain that carries the states from one sample to the next, so it costs next to nothing. The same test on the
+  states sits on that chain, and makes `processBlock` about 30% slower in the libm math mode (6.1 ns a sample a channel
+  against 4.7); in the default mode it costs nothing measurable (6.7 against 6.8). If a state goes bad anyway, say
+  through a parameter out of its range, which this processor never sets, a test after the loop restarts the filter from
+  rest for the next call.
 
 The processor chooses each parameter's binding when it compiles (`Program::Options::parameters`):
 
@@ -149,6 +154,10 @@ A moved cutoff therefore glides a sample at a time, never a block at a time, and
 the two places a control can be smoothed: in the host, which smooths the cutoff and streams it, or in the program,
 which keeps the mix's weights in its instance. The plugin's parameters mirror the program's: the same names, ranges
 and defaults, which the check compares.
+
+It compiles with `Program::Options::denormals = Flush`: `processBlock` runs with flush-to-zero (JUCE's
+`ScopedNoDenormals`), so the program is folded for that mode, and `process`, an entry point, finds the mode set and
+writes nothing ([docs/extending.md](../../docs/extending.md), recipe 20).
 
 ### The processor, thread by thread
 

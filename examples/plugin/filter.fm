@@ -22,8 +22,9 @@
 //   - An input sample that is not finite (a NaN, an infinity) or is huge (1e30 or more) is taken as 0. It would make
 //     the integrators' states NaN, or overflow them, and every later output NaN. The test is on the input, off the
 //     chain of the states from one sample to the next, so it costs next to nothing; the same test on the states, on
-//     that chain, made process about 30% slower. A state that is not finite all the same (through a parameter out of
-//     its range, which the plugin's processor never sets, say) starts again from rest, after the call.
+//     that chain, makes process about 30% slower in the libm math mode. A state that is not finite all the same
+//     (through a parameter out of its range, which the plugin's processor never sets, say) starts again from rest,
+//     after the call.
 module Filter
 {
     param float cutoff [[fminus::range(20, 20000)]] [[fminus::default(1000)]];          // Hz

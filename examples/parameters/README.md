@@ -59,12 +59,14 @@ In the dev build on an M5, 96,000 samples of noise, each time the best of 20 run
 
 | | calls of 64 | calls of 256 | C++, calls of 64 |
 |---|---|---|---|
-| swept a sample: the cutoff a stream | 5.7 ns/sample | 6.0 ns/sample | 5.6 ns/sample |
-| swept once a call: the cutoff a knob | 5.6 ns/sample | 5.9 ns/sample | 5.7 ns/sample |
-| fixed: knobs | 3.3 ns/sample | 3.3 ns/sample | 3.3 ns/sample |
-| fixed: frozen | 3.3 ns/sample | 3.4 ns/sample | |
+| swept a sample: the cutoff a stream | 8.3 ns/sample | 8.3 ns/sample | 8.4 ns/sample |
+| swept once a call: the cutoff a knob | 7.8 ns/sample | 8.0 ns/sample | 8.3 ns/sample |
+| fixed: knobs | 3.4 ns/sample | 3.3 ns/sample | 3.4 ns/sample |
+| fixed: frozen | 3.3 ns/sample | 3.2 ns/sample | |
 
-(The swept rows include the LFO, a `sinf` and an `expf` a sample.)
+(The swept rows include the LFO, a `sinf` and an `expf` a sample, which FMinus's default math mode makes the runtime's,
+as the C++ calls them: each is lane 0 of a four-lane function, slower a call than libm's. With `--math libm` the swept
+rows take 5.9 ns, and with `--math fast` 5.6 to 5.7.)
 
 - **Every output is C++'s, bit for bit**, under each binding: the same operations in the same order, and the same
   `sinf` and `expf`, FMinus's runtime's (its default math mode), which the C++ calls as `fminus::math::sin` and `exp`.
@@ -75,15 +77,16 @@ In the dev build on an M5, 96,000 samples of noise, each time the best of 20 run
   folds it with the host's `sin` in double, rounded to float, which for about 1% of arguments is an ulp from `sinf`.)
 - **A sweep a sample costs a sine a sample, and it barely shows.** As a knob, the cutoff is a register, so LLVM moves
   `2 * sinf(w * cutoff[i])` out of the loop: one sine a call. As a stream it stays in the loop. But the coefficients
-  don't depend on the filter's state, so the processor computes them ahead while the recursion waits: 1–3% over the
+  don't depend on the filter's state, so the processor computes them ahead while the recursion waits: 4–6% over the
   knob's time.
 - **The difference is in the sound.** Swept once a call, the cutoff is a staircase, a step every call (zipper noise):
   the output is 0.0068 of its peak away from the sample-accurate one in calls of 64, and 0.034 in calls of 256.
 - **A knob is as fast as a constant.** It is loaded once, when the method starts, and is a register from then on.
-  Frozen, the filter loses its sine (computed at compile time), its `damping` load, and the branches on `shape`, which
-  leave the loop one block. None of that shows here: the filter is bound by its recursion, each sample waiting for the
-  last's `low` and `band`, a chain of dependent multiplies and adds. Freezing pays where a constant changes the code
-  that matters: a loop count that unrolls, a branch whose arms are long, a choice between two loops that vectorise.
+  Frozen, the filter loses its `damping` load and the branches on `shape`, which leave the loop one block; its sine, the
+  runtime's `sinf` of a constant, is called once before the loop, as a knob's is. None of that shows here: the filter is
+  bound by its recursion, each sample waiting for the last's `low` and `band`, a chain of dependent multiplies and adds.
+  Freezing pays where a constant changes the code that matters: a loop count that unrolls, a branch whose arms are long,
+  a choice between two loops that vectorise.
 
 ## Where FMinus leaves it
 

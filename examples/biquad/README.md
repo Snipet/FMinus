@@ -57,7 +57,8 @@ that nothing else the loop reads or writes is a field: `input` and `output` are 
 in an alias scope of their own (recipe 14), so none of them can be `s1` or `s2`. `restrict` changes nothing else here:
 the loop can't vectorise across samples, since each one needs the last one's state.
 
-In the dev build on an M5 (expect a few hundredths of noise between runs):
+In the dev build on an M5 (expect a few hundredths of noise between runs), as the kernel grew, before recipe 15: its
+`sinf` and `cosf` were LLVM's intrinsics, what `--math fast` gives now, and the C++ called libm's:
 
 | Kernel | FMinus | C++ | FMinus / C++ |
 |---|---|---|---|
@@ -79,6 +80,21 @@ sample on an M5. Out-of-order execution runs the next sample's `sinf`, `cosf` an
 so they cost little. C++ stand-ins measure it: holding the coefficients for 16 samples instead of recomputing them
 saves 0.4 ns of 2.8, and fused multiply-adds (`-ffp-contract=fast`) save nothing. Four channels in the lanes of a
 `float4` take 1.44 ns a channel's sample: twice the throughput, since four independent recursions run side by side.
+
+The module today, in each math mode (recipe 15), against the harness's C++, which calls the default mode's functions,
+`fminus::math::sin` and `cos` (the best of 20 runs, the median of three):
+
+| `--math` | FMinus | C++ | FMinus / C++ |
+|---|---|---|---|
+| `vector`, the default | 4.63 ns | 4.70 ns | 0.99× |
+| `libm` | 2.98 ns | | |
+| `fast` | 2.66 ns | | |
+
+The default mode costs about 2 ns a sample here. Its `sinf` and `cosf` are each lane 0 of the runtime's four-lane
+function, which costs more a call than libm's, and this loop calls them a sample at a time: the recursion keeps it from
+vectorising. What the mode buys is the next paragraph: an angle's sine is one float wherever it is computed. `--math
+libm` is libm's `sinf` and `cosf`, and `--math fast` the compiler before recipe 15, where `-O2` makes the two calls one
+`__sincosf_stret`.
 
 At every optimisation level the two outputs are bit-identical. FMinus's `sinf` and `cosf` are its runtime's (its
 default math mode), which give an angle one result wherever they are called, and the harness's C++ calls the same

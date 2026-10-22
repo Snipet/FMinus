@@ -81,9 +81,10 @@ FMinus's JIT compiles for the CPU it runs on.
 | rational, a `poly float` at a time | 0.44 | 1.33 | |
 
 Expect noise of a few ns between runs in the `tanhf` lines: this machine is shared. On an M5 (the dev build, the best of
-50 runs, the median of three), with the kernels as the module's methods: `tanhf` a sample at a time 0.80 ns, a `poly
-float` at a time 0.58, C++ 2.00 (FMinus's vector `tanhf`, below, against C++'s call a sample); the rational function
-0.38 either way, and C++ 0.38.
+50 runs, the median of three), with the kernels as the module's methods: `tanhf` a sample at a time 0.70 ns, a `poly
+float` at a time 0.54, C++ 2.22 (FMinus's vector `tanhf`, below, against C++'s call a sample of `fminus::math::tanh`,
+lane 0 of the same four-lane function); the rational function 0.35 a sample at a time and 0.36 a `poly float`, and C++
+0.35.
 
 - **The library call is the cost.** glibc has no vector `tanhf`, so 8 lanes are 8 calls, at 15 ns a sample either
   way. The rational function takes 0.44 ns, 35 times less, and is within 3.5e-7 of tanh (glibc's `tanhf`, about
