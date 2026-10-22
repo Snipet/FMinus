@@ -84,10 +84,10 @@ namespace fminus::ir
 
         // The target's data layout (TargetMachine::createDataLayout), which a module's layout and sizeof follow. Empty
         // is LLVM's default, which agrees with the 64-bit targets FMinus runs on for every type it has.
-        std::string dataLayout;
+        std::string dataLayout{};
 
         // Each parameter's binding, by its qualified name ("Lowpass::cutoff"); a parameter not listed is a knob.
-        std::map<std::string, ParamBinding> parameters;
+        std::map<std::string, ParamBinding> parameters{};
 
         // C's strict-aliasing rule, told to LLVM: every load and store of memory carries its type's TBAA tag
         // (Tbaa.cpp), so a store of a float cannot change an int or a pointer, and a loop over a module's buffer loads
@@ -107,7 +107,7 @@ namespace fminus::ir
         // The target's triple (TargetMachine::getTargetTriple), which says how an entry point sets the floating-point
         // mode under Denormals::Flush: FPCR on arm64, MXCSR on x86-64. Empty is this process's, which is what the JIT
         // and an executable built here run on. Only Flush reads it.
-        std::string targetTriple;
+        std::string targetTriple{};
     };
 
     // Lowers `program` into a new module in `context`, named after the diagnostics' file. Every FMinus function becomes

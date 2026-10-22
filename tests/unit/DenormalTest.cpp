@@ -59,18 +59,32 @@ namespace
     {
         asm volatile("msr fpcr, %0" : : "r"(value) : "memory");
     }
+
+    // What a wrapper for this host calls: a read of the mode, then a write to flush and one to restore it.
+    const std::vector<llvm::Intrinsic::ID> kModeIntrinsics{llvm::Intrinsic::aarch64_get_fpcr,
+                                                           llvm::Intrinsic::aarch64_set_fpcr,
+                                                           llvm::Intrinsic::aarch64_set_fpcr};
 #elif defined(__x86_64__)
     constexpr std::uint64_t kFlushBits = 0x8040;
+    // MXCSR's low six bits are its exception flags, not its mode: sticky, and set by the arithmetic itself (a subnormal
+    // result sets DE and UE, an inexact one PE), the host's and FMinus's alike. So the mode is the other bits. (FPCR
+    // has no flags: AArch64 keeps them in FPSR.)
+    constexpr std::uint64_t kExceptionFlags = 0x3F;
 
     std::uint64_t controlRegister()
     {
-        return _mm_getcsr();
+        return _mm_getcsr() & ~kExceptionFlags;
     }
 
     void setControlRegister(std::uint64_t value)
     {
         _mm_setcsr(static_cast<unsigned>(value));
     }
+
+    // What a wrapper for this host calls: a read of the mode, then a write to flush and one to restore it.
+    const std::vector<llvm::Intrinsic::ID> kModeIntrinsics{llvm::Intrinsic::x86_sse_stmxcsr,
+                                                           llvm::Intrinsic::x86_sse_ldmxcsr,
+                                                           llvm::Intrinsic::x86_sse_ldmxcsr};
 #else
 #error "the denormal tests read the floating-point control register of arm64 or x86-64"
 #endif
@@ -661,9 +675,7 @@ TEST_CASE("under Flush every definition is marked preservesign, and an entry poi
         REQUIRE(body != nullptr);
         CHECK(body->hasInternalLinkage());
         CHECK(body->hasFnAttribute(llvm::Attribute::NoInline));
-        CHECK(intrinsicsOf(*entry) == std::vector<llvm::Intrinsic::ID>{llvm::Intrinsic::aarch64_get_fpcr,
-                                                                      llvm::Intrinsic::aarch64_set_fpcr,
-                                                                      llvm::Intrinsic::aarch64_set_fpcr});
+        CHECK(intrinsicsOf(*entry) == kModeIntrinsics);   // the host's: the module is lowered for this process
         CHECK(writesInEntryBlock(*entry) == 0);   // each write behind the test of the caller's mode
         // Through its address passed through an empty asm, on each of the two paths, and never directly.
         CHECK(callsOfBody(*entry, *body) == std::pair{2, 0});

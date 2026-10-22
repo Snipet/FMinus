@@ -32,10 +32,14 @@ namespace
     }
 #elif defined(__x86_64__)
     constexpr std::uint64_t kFlushBits = 0x8040;
+    // MXCSR's low six bits are its exception flags, not its mode: sticky, and set by the arithmetic itself (a subnormal
+    // result sets DE and UE, an inexact one PE), the host's and FMinus's alike. So the mode is the other bits. (FPCR
+    // has no flags: AArch64 keeps them in FPSR.)
+    constexpr std::uint64_t kExceptionFlags = 0x3F;
 
     std::uint64_t controlRegister()
     {
-        return _mm_getcsr();
+        return _mm_getcsr() & ~kExceptionFlags;
     }
 
     void setControlRegister(std::uint64_t value)
