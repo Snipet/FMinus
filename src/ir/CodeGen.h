@@ -37,6 +37,19 @@ namespace fminus::ir
         double value = 0.0;   // a frozen parameter's, converted to its type as C converts
     };
 
+    // What a program does with subnormal floats (Denormals.cpp), the host's choice when it compiles:
+    //   Preserve  IEEE's gradual underflow, as C has it: a subnormal is a number like any other (the default)
+    //   Flush     flush-to-zero, as a plugin host usually runs: a subnormal input reads as 0, a subnormal result is 0,
+    //             each with its sign. Every function the program defines says so to LLVM (denormal_fpenv), so its
+    //             folding agrees with the hardware, and each entry point (a [[clang::nonblocking]] function that no
+    //             function of the program calls) sets the floating-point mode on entry and restores it on return.
+    //             Whatever else a host calls, it calls with the mode set itself.
+    enum class Denormals
+    {
+        Preserve,
+        Flush,
+    };
+
     struct Options
     {
         // The lanes of a poly float: the target's vector register width in floats (support/HostTarget.h: polyLanes
@@ -61,6 +74,13 @@ namespace fminus::ir
         // "fminus.knob-versions", to wherever the module is optimised. The copies compute what the method does, but
         // for math calls' last bits where a copy vectorises a loop the method did not (opt/KnobVersioning.h).
         unsigned knobVersions = 8;
+        // Subnormals preserved or flushed to zero (Denormals, above).
+        Denormals denormals = Denormals::Preserve;
+
+        // The target's triple (TargetMachine::getTargetTriple), which says how an entry point sets the floating-point
+        // mode under Denormals::Flush: FPCR on arm64, MXCSR on x86-64. Empty is this process's, which is what the JIT
+        // and an executable built here run on. Only Flush reads it.
+        std::string targetTriple;
     };
 
     // Lowers `program` into a new module in `context`, named after the diagnostics' file. Every FMinus function becomes

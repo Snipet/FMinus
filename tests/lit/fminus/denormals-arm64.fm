@@ -1,0 +1,79 @@
+// An entry point under --denormals=flush on arm64 (src/ir/Denormals.cpp): its wrapper reads FPCR, and unless FZ (bit
+// 24, 0x1000000) is set already, sets it, calls the body and writes FPCR back as it was; when it is, it only calls the
+// body (at -O2, a tail call). In the machine code, MRS, and MSR around a call: the body is never inlined into it. A
+// nonblocking method the program calls (OnePole::tick) has no wrapper, and under preserve nothing touches FPCR.
+// (x86-64's MXCSR wrapper is checked in tests/unit/DenormalTest.cpp, from its IR.)
+// REQUIRES: arm64
+// RUN: fminus %s -O0 --denormals=flush | FileCheck %s --implicit-check-not=tick.body
+// RUN: fminus %s --denormals=flush --emit asm -o - | FileCheck %s --check-prefix=ASM
+// RUN: fminus %s --emit asm -o - | FileCheck %s --check-prefix=PRESERVE --implicit-check-not=FPCR
+
+module OnePole
+{
+    float y;
+    float k;
+
+    float tick(float x) [[clang::nonblocking]]
+    {
+        return y += k * (x - y);
+    }
+
+    void process(const float* restrict in, float* restrict out, int n) [[clang::nonblocking]]
+    {
+        for (int i = 0; i < n; ++i)
+            out[i] = tick(in[i]);
+    }
+};
+
+bool gate(bool on, float x) [[clang::nonblocking]]
+{
+    return on && x > 0;
+}
+
+// CHECK:      define float @"OnePole::tick"(
+// CHECK:      define internal void @"OnePole::process.body"(
+// CHECK:      define internal zeroext i1 @gate.body(i1 zeroext %on, float %x)
+// CHECK-LABEL: define void @"OnePole::process"(ptr nonnull {{.*}} %this, ptr noalias %in, ptr noalias %out, i32 %n)
+// CHECK-NEXT: entry:
+// CHECK-NEXT:   %fpcr = call i64 @llvm.aarch64.get.fpcr()
+// CHECK-NEXT:   %fpcr.fz = or i64 %fpcr, 16777216
+// CHECK-NEXT:   %flushing = icmp eq i64 %fpcr, %fpcr.fz
+// CHECK-NEXT:   br i1 %flushing, label %run, label %flush
+// CHECK-EMPTY:
+// CHECK-NEXT: flush:
+// CHECK-NEXT:   call void @llvm.aarch64.set.fpcr(i64 %fpcr.fz)
+// CHECK-NEXT:   br label %run
+// CHECK-EMPTY:
+// CHECK-NEXT: run:
+// CHECK-NEXT:   call void @"OnePole::process.body"(ptr %this, ptr %in, ptr %out, i32 %n)
+// CHECK-NEXT:   br i1 %flushing, label %done, label %restore
+// CHECK-EMPTY:
+// CHECK-NEXT: restore:
+// CHECK-NEXT:   call void @llvm.aarch64.set.fpcr(i64 %fpcr)
+// CHECK-NEXT:   br label %done
+// CHECK-EMPTY:
+// CHECK-NEXT: done:
+// CHECK-NEXT:   ret void
+// CHECK-NEXT: }
+// CHECK-LABEL: define zeroext i1 @gate(i1 zeroext %on, float %x)
+// CHECK:        %result = call i1 @gate.body(i1 %on, float %x)
+// CHECK:        ret i1 %result
+
+// ASM-LABEL: OnePole::process{{"?}}:
+// ASM:         mrs [[SAVED:x[0-9]+]], FPCR
+// ASM-NEXT:    orr [[FZ:x[0-9]+]], [[SAVED]], #0x1000000
+// ASM-NEXT:    cmp [[SAVED]], [[FZ]]
+// ASM-NEXT:    b.ne [[SET:[A-Za-z0-9_]+]]
+// ASM:         b {{"?_?}}OnePole::process.body
+// ASM-NEXT:  [[SET]]:
+// ASM-NEXT:    msr FPCR, [[FZ]]
+// ASM-NEXT:    bl {{"?_?}}OnePole::process.body
+// ASM-NEXT:    msr FPCR, [[SAVED]]
+// ASM-LABEL: gate:
+// ASM:         mrs [[SAVED:x[0-9]+]], FPCR
+// ASM:         msr FPCR,
+// ASM-NEXT:    bl {{_?}}gate.body
+// ASM-NEXT:    msr FPCR, [[SAVED]]
+
+// PRESERVE:  OnePole::process{{"?}}:
+// PRESERVE:  gate:

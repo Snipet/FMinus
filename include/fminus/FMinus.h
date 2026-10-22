@@ -106,6 +106,22 @@ namespace fminus
             }
         };
 
+        // What the program does with subnormal floats, chosen when it compiles.
+        //   Preserve  IEEE's gradual underflow, as C has it: a subnormal is a number like any other. The default.
+        //   Flush     flush-to-zero, the mode a plugin's audio thread runs in: a subnormal input reads as 0 and a
+        //             subnormal result is 0, each with its sign. LLVM folds and optimises for that mode, and each entry
+        //             point, a function marked [[clang::nonblocking]] that no function of the program calls, sets it
+        //             when called and restores the caller's on return (FPCR.FZ on arm64, MXCSR's FTZ and DAZ on
+        //             x86-64). Writing the register is slow (about 18 ns a call on an M5), so an entry point called
+        //             in that mode already writes nothing (under 1 ns): set it around the block, as a host's ScopedFtz
+        //             does, and call anything else in it too. The code assumes the mode: run in IEEE's, a subnormal's
+        //             result may differ from what the compiler folded.
+        enum class Denormals
+        {
+            Preserve,
+            Flush,
+        };
+
         struct Options
         {
             int optimisation = 2;                  // -O0 to -O3: LLVM's pipeline at that level, as fminus -O<n>
@@ -125,6 +141,7 @@ namespace fminus
             // does, bit for bit, but for math functions' last bits: a copy's loop may vectorise where the method's
             // did not, and a vectorised sinf, expf, ... is the vector library's, not libm's.
             unsigned knobVersions = 8;
+            Denormals denormals = Denormals::Preserve;   // subnormals kept, or flushed to zero (above)
         };
 
         // Compiles `source`. Returns nullptr when it does not compile, with `errors` holding FMinus's messages, one a

@@ -1,0 +1,106 @@
+// tests/library/DenormalsTest.cpp: Program::Options::denormals, as a plugin host uses it (C++17, FMinus::FMinus alone).
+// Preserve, the default, keeps subnormals; Flush makes each entry point, a [[clang::nonblocking]] function nothing in
+// the program calls, run flushing and hand the host's floating-point mode back as it was.
+#include "fminus/FMinus.h"
+
+#include <catch2/catch_test_macros.hpp>
+
+#include <cmath>
+#include <cstdint>
+#include <string>
+
+#if defined(__x86_64__)
+#include <immintrin.h>
+#endif
+
+namespace
+{
+    // The host's floating-point control register: AArch64's FPCR (FZ, bit 24), x86's MXCSR (FTZ and DAZ).
+#if defined(__aarch64__)
+    constexpr std::uint64_t kFlushBits = std::uint64_t{1} << 24;
+
+    std::uint64_t controlRegister()
+    {
+        std::uint64_t value = 0;
+        asm volatile("mrs %0, fpcr" : "=r"(value) : : "memory");
+        return value;
+    }
+
+    void setControlRegister(std::uint64_t value)
+    {
+        asm volatile("msr fpcr, %0" : : "r"(value) : "memory");
+    }
+#elif defined(__x86_64__)
+    constexpr std::uint64_t kFlushBits = 0x8040;
+
+    std::uint64_t controlRegister()
+    {
+        return _mm_getcsr();
+    }
+
+    void setControlRegister(std::uint64_t value)
+    {
+        _mm_setcsr(static_cast<unsigned>(value));
+    }
+#else
+#error "the denormal tests read the floating-point control register of arm64 or x86-64"
+#endif
+
+    // A block kernel whose products underflow, and the per-sample helper it calls.
+    const char* const kScale = "float times(float a, float b) [[clang::nonblocking]] { return a * b; }\n"
+                               "\n"
+                               "void scale(const float* restrict in, float* restrict out, int n, float g)\n"
+                               "    [[clang::nonblocking]]\n"
+                               "{\n"
+                               "    for (int i = 0; i < n; ++i)\n"
+                               "        out[i] = times(in[i], g);\n"
+                               "}\n";
+
+    using Scale = void(const float*, float*, int, float);
+    using Times = float(float, float);
+
+    float processed(fminus::Program& program, float sample, float gain)
+    {
+        std::string errors;
+        auto* scale = program.function<Scale>("scale", errors);
+        REQUIRE(scale != nullptr);
+        float out = 1.0f;
+        scale(&sample, &out, 1, gain);
+        return out;
+    }
+} // namespace
+
+TEST_CASE("Options::denormals: Preserve keeps subnormals, Flush runs an entry point flushing", "[library][denormals]")
+{
+    const std::uint64_t host = controlRegister() & ~kFlushBits;   // an IEEE host
+    setControlRegister(host);
+
+    std::string errors;
+    fminus::Program::Options options;
+    CHECK(options.denormals == fminus::Program::Denormals::Preserve);   // the default
+    auto preserved = fminus::Program::compile(kScale, errors, options);
+    INFO(errors);
+    REQUIRE(preserved);
+    const float kept = processed(*preserved, 1e-30f, 1e-10f);
+    CHECK(std::fpclassify(kept) == FP_SUBNORMAL);
+
+    options.denormals = fminus::Program::Denormals::Flush;
+    auto flushed = fminus::Program::compile(kScale, errors, options);
+    REQUIRE(flushed);
+    CHECK(processed(*flushed, 1e-30f, 1e-10f) == 0.0f);
+    CHECK(processed(*flushed, 1e-20f, 1e-10f) == 1e-20f * 1e-10f);
+    CHECK(controlRegister() == host);   // handed back as it was
+
+    // times is called by scale, so it is no entry point: called from the host, it runs in the host's mode.
+    auto* times = flushed->function<Times>("times", errors);
+    REQUIRE(times != nullptr);
+    CHECK(std::fpclassify(times(1e-30f, 1e-10f)) == FP_SUBNORMAL);
+    CHECK(flushed->nonBlocking("scale"));
+
+    // A host that flushes already keeps flushing after the call.
+    setControlRegister(host | kFlushBits);
+    CHECK(processed(*flushed, 1e-30f, 1e-10f) == 0.0f);
+    const std::uint64_t after = controlRegister();
+    setControlRegister(host);
+    CHECK(after == (host | kFlushBits));
+}

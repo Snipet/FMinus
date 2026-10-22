@@ -150,6 +150,8 @@ namespace fminus
             lowering.parameters.emplace(name, lowered(binding));
         lowering.strictAliasing = options.strictAliasing;
         lowering.knobVersions = options.knobVersions;
+        lowering.denormals = options.denormals == Denormals::Flush ? ir::Denormals::Flush : ir::Denormals::Preserve;
+        lowering.targetTriple = (*machine)->getTargetTriple().str();   // which register an entry point sets
 
         auto context = std::make_unique<llvm::LLVMContext>();
         std::unique_ptr<llvm::Module> module = ir::lower(*program, *context, diagnostics, lowering);

@@ -12,6 +12,8 @@
 //     Modules.cpp       modules: their layout, fields, methods and calls of them, `this`, copies
 //     Effects.cpp       [[clang::nonallocating]] and [[clang::nonblocking]], checked over the calls
 //     Tbaa.cpp          C's strict aliasing, told to LLVM: the type tag (!tbaa) on every load and store of memory
+//     Denormals.cpp     Denormals::Flush: constants folded as flushing hardware computes them (Denormals.h), every
+//                       function marked so for LLVM, and each entry point setting the mode around its body
 // A new node is lowered in the file its kind belongs to. The build says which members still need it: a std::visit
 // without its lambda fails to compile, and a switch without its enumerator trips -Wswitch.
 #pragma once
@@ -19,6 +21,7 @@
 #include "frontend/Ast.h"
 #include "frontend/Diagnostics.h"
 #include "ir/CodeGen.h"
+#include "ir/Denormals.h"
 
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Intrinsics.h>
@@ -267,11 +270,14 @@ namespace fminus::ir::detail
         // ---- Tbaa.cpp -----------------------------------------------------------------------------------------------
         llvm::MDNode* accessTag(ast::Type type);
         void tag(llvm::Instruction* access, ast::Type type);
+        // ---- Denormals.cpp ------------------------------------------------------------------------------------------
+        void flushDenormals(const ast::Program& program);
+        void wrapEntry(llvm::Function& function, SourceLocation location, bool arm);
 
         // ---- the state of one lowering ----------------------------------------------------------------------------
         llvm::Module& module_;
         Diagnostics& diagnostics_;
-        llvm::IRBuilder<> builder_;
+        llvm::IRBuilder<DenormalFolder> builder_;                          // folds constants as the mode computes
         unsigned polyLanes_;                                                // a poly float's lanes
         std::unordered_map<std::string, const ast::Function*> functions_;   // the program's, by name
         std::vector<std::unordered_map<std::string, Binding>> scopes_;     // the current function's, inner last
@@ -285,5 +291,7 @@ namespace fminus::ir::detail
         std::vector<llvm::Instruction*> streamReads_;                      // its loads of its streams' samples
         bool strictAliasing_;                                              // whether loads and stores carry !tbaa
         std::map<unsigned, std::pair<llvm::Value*, llvm::Value*>> flatStreams_;   // its streams' null tests, values
+        Denormals denormals_;                                              // subnormals preserved or flushed
+        std::string targetTriple_;                                         // which mode register an entry point sets
     };
 } // namespace fminus::ir::detail

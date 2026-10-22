@@ -11,6 +11,7 @@
 //     fminus lowpass.fm --stream Lowpass::cutoff --freeze Lowpass::mode=2
 //                                           a parameter read from a buffer, one compiled in (a knob otherwise)
 //     fminus lowpass.fm --knob-versions 0   no copies of a method for its knobs' values (8 at most by default)
+//     fminus lowpass.fm --denormals=flush   subnormals flushed to zero: folded so, and set by the entry points
 #include "frontend/Frontend.h"
 #include "ir/CodeGen.h"
 #include "jit/Jit.h"
@@ -113,6 +114,7 @@ int main(int argc, char** argv)
     std::vector<std::string> freezes;
     bool noStrictAliasing = false;
     unsigned knobVersions = fminus::ir::Options{}.knobVersions;
+    std::string denormals = "preserve";
     app.add_option("input", input, "FMinus source file ('-' for stdin)")->required();
     app.add_option("args", runArgs, "The arguments of --run's function");
     app.add_option("-o,--output", output, "The output file ('-' is stdout)")->capture_default_str();
@@ -135,6 +137,11 @@ int main(int argc, char** argv)
     app.add_option("--knob-versions", knobVersions,
                    "At most this many copies of a method whose loop branches on an int or bool knob or a flat stream, "
                    "one for each value (0: none; from -O1)")
+        ->capture_default_str();
+    app.add_option("--denormals", denormals,
+                   "Subnormal floats: preserve (IEEE's, as in C) or flush (to zero: the code is folded for that mode, "
+                   "and each entry point, a nonblocking function nothing calls, sets it)")
+        ->check(CLI::IsMember({"preserve", "flush"}))
         ->capture_default_str();
     CLI11_PARSE(app, argc, argv);
     if (emit == "exe" && run.empty() && output == "-")
@@ -177,6 +184,8 @@ int main(int argc, char** argv)
             return fail("--freeze " + spec + ": not Module::name=value");
         options.parameters[name] = {fminus::ir::ParamBinding::Kind::Frozen, value};
     }
+    options.denormals = denormals == "flush" ? fminus::ir::Denormals::Flush : fminus::ir::Denormals::Preserve;
+    options.targetTriple = (*machine)->getTargetTriple().str();   // which register an entry point sets
 
     // Syntax tree -> LLVM IR.
     auto context = std::make_unique<llvm::LLVMContext>();

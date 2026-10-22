@@ -13,7 +13,8 @@
 // The parts are one class, Lowering (Lowering.h), whose members are defined by what they lower: types and conversions
 // (Types.cpp), functions (Functions.cpp), statements (Statements.cpp), expressions (Expressions.cpp), calls and
 // builtins (Calls.cpp), vectors (Vectors.cpp), memory (Memory.cpp), modules (Modules.cpp). This file runs them, and
-// then the check of the functions' effects (Effects.cpp), which needs every body's calls.
+// then the check of the functions' effects (Effects.cpp), which needs every body's calls, and under Denormals::Flush
+// the entry points' wrappers (Denormals.cpp), which need them too.
 #include "ir/CodeGen.h"
 
 #include "ir/Lowering.h"
@@ -31,16 +32,20 @@ namespace fminus::ir
         Lowering::Lowering(llvm::Module& module, Diagnostics& diagnostics, const Options& options)
             : module_(module)
             , diagnostics_(diagnostics)
-            , builder_(module.getContext())
+            , builder_(module.getContext(), DenormalFolder(options.denormals == Denormals::Flush))
             , polyLanes_(options.polyLanes)
             , bindings_(options.parameters)
             , strictAliasing_(options.strictAliasing)
+            , denormals_(options.denormals)
+            , targetTriple_(options.targetTriple)
         {
         }
 
         // The modules are laid out first, in order, since a function's types may name them. Pass 1 declares every
         // function (a module's methods among them), so calls may come before definitions; pass 2 lowers each
         // definition's body; then every function marked nonallocating or nonblocking is checked against its calls.
+        // Under Denormals::Flush, last, every definition is marked flushing and the entry points are wrapped, which
+        // needs every call known (Denormals.cpp).
         void Lowering::lower(const ast::Program& program)
         {
             layOut(program);
@@ -53,6 +58,8 @@ namespace fminus::ir
                     define(function);   // the accepted definition, not a rejected duplicate
             }
             checkEffects(program);
+            if (denormals_ == Denormals::Flush && !diagnostics_.hasErrors())
+                flushDenormals(program);
         }
     } // namespace detail
 
