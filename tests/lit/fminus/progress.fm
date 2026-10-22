@@ -1,0 +1,131 @@
+// Loops must make progress, as C11's do (6.8.5p6): a while or a for whose condition is not a constant expression
+// carries llvm.loop.mustprogress on its branches back to the condition (ir/Statements.cpp), as clang marks C's. LLVM
+// may then assume it ends, and delete it when nothing uses what it computes, though it cannot prove it ends. A loop
+// with a constant condition, or none, may run for ever, as in C, and carries nothing; nor is any function marked
+// mustprogress, which C does not imply.
+// RUN: fminus %s -O0 | FileCheck %s
+// RUN: fminus %s -O2 | FileCheck %s --check-prefix=OPT
+
+// The Collatz steps from n, which no one has proved always end, for nothing: n is a copy.
+void steps(int n)
+{
+    while (n != 1)
+        n = n % 2 == 0 ? n / 2 : 3 * n + 1;
+}
+
+// For a negative n or 0, this loop would never end: it is undefined, and the loop goes.
+void halves(int n)
+{
+    for (int k = 0; n != 1; ++k)
+        n /= 2;
+}
+
+// Both branches back, the body's end and the continue, carry the loop's one ID; the loop's result is used, so it stays.
+int count(int n)
+{
+    int k = 0;
+    while (n != 1)
+    {
+        ++k;
+        if (n % 2 == 0)
+        {
+            n /= 2;
+            continue;
+        }
+        n = 3 * n + 1;
+    }
+    return k;
+}
+
+// A const variable is not a constant expression in C (C++ differs), so this loop must make progress too.
+int limited(int n)
+{
+    const bool running = true;
+    int k = 0;
+    while (running && k < n)
+        ++k;
+    return k;
+}
+
+// Constant conditions, and none: these may run for ever.
+void forever(int n)
+{
+    while (1)
+        n = n % 2 == 0 ? n / 2 : 3 * n + 1;
+}
+
+void spin()
+{
+    for (;;)
+    {
+    }
+}
+
+int until(int n)
+{
+    int k = 0;
+    while (true)
+    {
+        if (n == 1)
+            break;
+        n /= 2;
+        ++k;
+    }
+    for (; 2 > 1 && !0;)
+        return k;
+    return -1;
+}
+
+float until_float(float x)
+{
+    while (1.5f)
+    {
+        if (x > 100)
+            return x;
+        x *= 2;
+    }
+    return -1;   // never reached, but FMinus's check that a function returns does not fold the condition
+}
+
+// CHECK-LABEL: define void @steps(
+// CHECK:         br label %while.cond, !llvm.loop [[STEPS:![0-9]+]]
+// CHECK-LABEL: define void @halves(
+// CHECK:         br label %for.cond{{$}}
+// CHECK:       for.inc:
+// CHECK:         br label %for.cond, !llvm.loop [[HALVES:![0-9]+]]
+// CHECK-LABEL: define i32 @count(
+// CHECK:         br label %while.cond{{$}}
+// CHECK:         br label %while.cond, !llvm.loop [[COUNT:![0-9]+]]
+// CHECK:         br label %while.cond, !llvm.loop [[COUNT]]
+// CHECK-LABEL: define i32 @limited(
+// CHECK:         br label %while.cond, !llvm.loop [[LIMITED:![0-9]+]]
+// CHECK-LABEL: define void @forever(
+// CHECK-NOT:     !llvm.loop
+// CHECK-LABEL: define void @spin(
+// CHECK-NOT:     !llvm.loop
+// CHECK-LABEL: define i32 @until(
+// CHECK-NOT:     !llvm.loop
+// CHECK-LABEL: define float @until_float(
+// CHECK-NOT:     !llvm.loop
+// CHECK:       }
+// CHECK-NOT:   mustprogress
+// CHECK:       [[STEPS]] = distinct !{[[STEPS]], [[PROGRESS:![0-9]+]]}
+// CHECK:       [[PROGRESS]] = !{!"llvm.loop.mustprogress"}
+// CHECK:       [[HALVES]] = distinct !{[[HALVES]], [[PROGRESS]]}
+// CHECK:       [[COUNT]] = distinct !{[[COUNT]], [[PROGRESS]]}
+// CHECK:       [[LIMITED]] = distinct !{[[LIMITED]], [[PROGRESS]]}
+
+// OPT-LABEL: define void @steps(
+// OPT-NEXT:  entry:
+// OPT-NEXT:    ret void
+// OPT-LABEL: define void @halves(
+// OPT-NEXT:  entry:
+// OPT-NEXT:    ret void
+// OPT-LABEL: define i32 @count(
+// OPT:         br i1 {{%.*}}, label %while.end, label %while.body, !llvm.loop
+// OPT-LABEL: define void @forever(
+// OPT:       while.cond:
+// OPT-NEXT:    br label %while.cond
+// OPT-LABEL: define void @spin(
+// OPT:       for.cond:
+// OPT-NEXT:    br label %for.cond

@@ -1,11 +1,94 @@
 // src/ir/Statements.cpp: statements. Blocks, declarations and return, and C's control flow: if, while, for, break and
-// continue, in blocks named as clang names them (if.then, while.cond, for.inc, ...).
+// continue, in blocks named as clang names them (if.then, while.cond, for.inc, ...). A loop whose condition is not a
+// constant expression must make progress, as in C11 (llvm.loop.mustprogress).
 #include "ir/Lowering.h"
 
 #include <llvm/IR/Constants.h>
+#include <llvm/IR/LLVMContext.h>
+#include <llvm/IR/Metadata.h>
 
 namespace fminus::ir::detail
 {
+    namespace
+    {
+        // Whether `expr` is a constant expression (C11 6.6): constants, sizeof, and operators, casts and ?: on
+        // constant expressions only, nothing the program computes as it runs. A variable is never one, const or not,
+        // as in C (C++ differs), and neither is a parameter, whatever the host's binding: a frozen one folds to a
+        // constant, but the program means the same as with a knob.
+        bool isConstant(const ast::Expr& expr)
+        {
+            return std::visit(
+                Overloaded{
+                    [](const ast::NumberExpr&) { return true; },
+                    [](const ast::BoolExpr&) { return true; },
+                    [](const ast::SizeofExpr&) { return true; },
+                    [](const ast::UnaryExpr& unary) {
+                        switch (unary.op)
+                        {
+                        case ast::UnaryOp::Negate:
+                        case ast::UnaryOp::Plus:
+                        case ast::UnaryOp::Not:
+                            return isConstant(*unary.operand);
+                        case ast::UnaryOp::Dereference:
+                        case ast::UnaryOp::AddressOf:
+                            return false;
+                        }
+                        return false;
+                    },
+                    [](const ast::BinaryExpr& binary) { return isConstant(*binary.lhs) && isConstant(*binary.rhs); },
+                    [](const ast::LogicalExpr& logical) {
+                        return isConstant(*logical.lhs) && isConstant(*logical.rhs);
+                    },
+                    [](const ast::ConditionalExpr& conditional) {
+                        return isConstant(*conditional.condition) && isConstant(*conditional.thenValue)
+                               && isConstant(*conditional.elseValue);
+                    },
+                    [](const ast::CastExpr& cast) { return isConstant(*cast.operand); },
+                    [](const ast::ConstructExpr& construct) {
+                        for (const ast::ExprPtr& arg : construct.args)
+                        {
+                            if (!isConstant(*arg))
+                                return false;
+                        }
+                        return true;
+                    },
+                    [](const ast::MemberExpr& member) { return !member.arrow && isConstant(*member.base); },   // v.x
+                    [](const ast::VariableExpr&) { return false; },
+                    [](const ast::IndexExpr&) { return false; },
+                    [](const ast::CallExpr&) { return false; },
+                    [](const ast::MethodCallExpr&) { return false; },
+                    [](const ast::ThisExpr&) { return false; },
+                    [](const ast::AssignExpr&) { return false; },
+                    [](const ast::IncrementExpr&) { return false; },
+                },
+                expr.node);
+        }
+
+        // C11 6.8.5p6: a loop whose controlling expression is not a constant expression, and which does no I/O and
+        // touches no volatile or atomic object, may be assumed to terminate. Clang tells LLVM so for C11 and later
+        // (CodeGenFunction::checkIfLoopMustProgress), and so does FMinus, with the same metadata on the same branches:
+        // every branch back to the loop's condition block, `header`, carries a loop ID that holds
+        // llvm.loop.mustprogress. `entry`, the branch into the loop, does not. A loop that runs for ever without
+        // effects is then undefined, and LLVM may delete a loop whose results go unused without proving that it
+        // ends. (FMinus has no volatile objects; its atomics are knob reads, once a call, and I/O is in external
+        // functions, which LLVM assumes may make progress.) A loop with a constant condition, `for (;;)` or
+        // `while (1)`, may run for ever, as in C; and no function is marked mustprogress, which C does not imply.
+        void mustProgress(llvm::BasicBlock* header, const llvm::Instruction* entry)
+        {
+            llvm::LLVMContext& context = header->getContext();
+            llvm::Metadata* operands[] = {
+                nullptr, llvm::MDNode::get(context, llvm::MDString::get(context, "llvm.loop.mustprogress"))};
+            llvm::MDNode* loop = llvm::MDNode::getDistinct(context, operands);
+            loop->replaceOperandWith(0, loop);   // a loop ID names itself, so that it is this loop's alone
+            for (llvm::User* user : header->users())
+            {
+                auto* branch = llvm::dyn_cast<llvm::Instruction>(user);
+                if (branch != nullptr && branch != entry && branch->isTerminator())
+                    branch->setMetadata(llvm::LLVMContext::MD_loop, loop);
+            }
+        }
+    } // namespace
+
     void Lowering::lowerStatements(const std::vector<ast::Stmt>& statements)
     {
         for (const ast::Stmt& stmt : statements)
@@ -124,13 +207,14 @@ namespace fminus::ir::detail
     }
 
     // while.cond tests and branches to while.body or while.end; the body goes back to while.cond. break goes
-    // to while.end, continue to while.cond.
+    // to while.end, continue to while.cond. The branches back carry llvm.loop.mustprogress unless the condition is a
+    // constant expression (mustProgress).
     void Lowering::lowerWhile(const ast::WhileStmt& loop)
     {
         llvm::BasicBlock* condBlock = newBlock("while.cond");
         llvm::BasicBlock* bodyBlock = newBlock("while.body");
         llvm::BasicBlock* endBlock = newBlock("while.end");
-        builder_.CreateBr(condBlock);
+        const llvm::Instruction* entry = builder_.CreateBr(condBlock);
 
         builder_.SetInsertPoint(condBlock);
         builder_.CreateCondBr(
@@ -142,12 +226,15 @@ namespace fminus::ir::detail
         lowerScoped(*loop.body);
         loops_.pop_back();
         fallThrough(condBlock);
+        if (!isConstant(*loop.condition))
+            mustProgress(condBlock, entry);
 
         builder_.SetInsertPoint(endBlock);
     }
 
     // for (init; cond; step) body: init, then for.cond -> for.body -> for.inc (the step) -> for.cond, until
-    // for.end. continue goes to for.inc, so the step still runs. The init's declarations are the loop's.
+    // for.end. continue goes to for.inc, so the step still runs. The init's declarations are the loop's. for.inc's
+    // branch back carries llvm.loop.mustprogress when there is a condition and it is not a constant expression.
     void Lowering::lowerFor(const ast::ForStmt& loop)
     {
         scopes_.emplace_back();
@@ -156,7 +243,7 @@ namespace fminus::ir::detail
         llvm::BasicBlock* bodyBlock = newBlock("for.body");
         llvm::BasicBlock* incBlock = newBlock("for.inc");
         llvm::BasicBlock* endBlock = newBlock("for.end");
-        builder_.CreateBr(condBlock);
+        const llvm::Instruction* entry = builder_.CreateBr(condBlock);
 
         builder_.SetInsertPoint(condBlock);
         if (loop.condition)
@@ -176,6 +263,8 @@ namespace fminus::ir::detail
         if (loop.step)
             lower(*loop.step);
         builder_.CreateBr(condBlock);
+        if (loop.condition && !isConstant(*loop.condition))
+            mustProgress(condBlock, entry);
 
         builder_.SetInsertPoint(endBlock);
         scopes_.pop_back();

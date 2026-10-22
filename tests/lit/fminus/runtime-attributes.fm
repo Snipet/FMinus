@@ -1,0 +1,128 @@
+// The runtime's functions are declared with what they do (ir/Calls.cpp, describeRuntime), each fact true of their code
+// (runtime/Runtime.cpp, runtime/Fft.cpp). A transform reads its plan and its input, writes its output, and touches
+// beyond them only the plan's own memory, which no FMinus code reaches; the heap's functions are C's allocator and
+// free, their blocks zeroed and aligned to 64; a plan is fresh memory, but fft_create is no allocator LLVM may remove.
+// -O0 shows the declarations; -O2 what LLVM does with them.
+// RUN: fminus %s -O0 | FileCheck %s
+// RUN: fminus %s -O2 | FileCheck %s --check-prefix=OPT
+
+module Analyser
+{
+    void* plan;
+    float gain;
+    float2 spectrum[17];
+
+    // gain is read before the transform and after it. The transform cannot change it, so LLVM reads it once.
+    float level(const float* in)
+    {
+        float2 bins[17];
+        const float before = gain;
+        fft_forward(plan, in, bins);
+        return before + gain + bins[1].x;
+    }
+
+    // The transform writes the module's own spectrum: what it held before is read again after.
+    float rewrite(const float* in)
+    {
+        const float before = spectrum[1].x;
+        fft_forward(plan, in, spectrum);
+        return before + spectrum[1].x;
+    }
+};
+
+// The other transforms, and the plans' functions.
+float back(void* plan, const float2* bins, float* out)
+{
+    fft_inverse(plan, bins, out);
+    return out[0];
+}
+
+void turn(void* plan, const float2* restrict x, float2* restrict y, float2* restrict z)
+{
+    fft_forward(plan, x, y);
+    fft_inverse(plan, y, z);
+}
+
+void* complex_plan(int n) { return fft_create_complex(n); }
+
+// A test of a plan against null makes the plan: its null says PFFFT takes no plan of the size.
+bool takes(int n)
+{
+    void* plan = fft_create(n);
+    void* none;
+    const bool made = plan != none;
+    fft_destroy(plan);
+    return made;
+}
+
+// A block the program never uses: LLVM removes it and its free, as it may C's.
+void unused(int n)
+{
+    float* p = calloc(n, sizeof(float));
+    free(p);
+}
+
+// A block reads 0 until written, malloc's too: LLVM folds the reads, and the block goes.
+float fresh(int n)
+{
+    float* p = malloc(n * sizeof(float));
+    p[0] = 2;
+    const float sum = p[0] + p[1];
+    free(p);
+    return sum;
+}
+
+// A removed block does not fail: the test against null is false, though the runtime would give null for a size of 0
+// (C's malloc(0) may give either). A block the program keeps or returns is made, and is null when refused.
+bool refused() { return !malloc(0); }
+
+// The declarations, in the order of the calls, and their attributes.
+// CHECK:      declare void @fminus_rt_fft_forward_real(
+// CHECK-SAME:   ptr readonly captures(none), ptr readonly captures(none), ptr writeonly captures(none))
+// CHECK-SAME:   [[TRANSFORM:#[0-9]+]]
+// CHECK:      declare void @fminus_rt_fft_inverse_real(
+// CHECK-SAME:   ptr readonly captures(none), ptr readonly captures(none), ptr writeonly captures(none)) [[TRANSFORM]]
+// CHECK:      declare void @fminus_rt_fft_forward_complex(
+// CHECK-SAME:   ptr readonly captures(none), ptr readonly captures(none), ptr writeonly captures(none)) [[TRANSFORM]]
+// CHECK:      declare void @fminus_rt_fft_inverse_complex(
+// CHECK-SAME:   ptr readonly captures(none), ptr readonly captures(none), ptr writeonly captures(none)) [[TRANSFORM]]
+// CHECK:      declare noalias noundef ptr @fminus_rt_fft_create_complex(i32) [[PLAN:#[0-9]+]]
+// CHECK:      declare noalias noundef ptr @fminus_rt_fft_create(i32) [[PLAN]]
+// CHECK:      declare void @fminus_rt_fft_destroy(ptr captures(none)) [[PLANEND:#[0-9]+]]
+// CHECK:      declare noalias noundef align 64 ptr @fminus_rt_calloc(i64, i64) [[CALLOC:#[0-9]+]]
+// CHECK:      declare void @fminus_rt_free(ptr allocptr captures(none)) [[FREE:#[0-9]+]]
+// CHECK:      declare noalias noundef align 64 ptr @fminus_rt_malloc(i64) [[MALLOC:#[0-9]+]]
+
+// CHECK:      attributes [[TRANSFORM]] = { nofree nosync nounwind willreturn
+// CHECK-SAME:   memory(argmem: readwrite, inaccessiblemem: readwrite) }
+// CHECK:      attributes [[PLAN]] = { nounwind willreturn memory(inaccessiblemem: readwrite, errnomem: write) }
+// CHECK:      attributes [[PLANEND]] = { nounwind willreturn memory(argmem: readwrite, inaccessiblemem: readwrite) }
+// CHECK:      attributes [[CALLOC]] = { nounwind willreturn allockind("alloc,zeroed") allocsize(0,1)
+// CHECK-SAME:   memory(inaccessiblemem: readwrite, errnomem: write) "alloc-family"="fminus_rt_malloc" }
+// CHECK:      attributes [[FREE]] = { nounwind willreturn allockind("free")
+// CHECK-SAME:   memory(argmem: readwrite, inaccessiblemem: readwrite) "alloc-family"="fminus_rt_malloc" }
+// CHECK:      attributes [[MALLOC]] = { nounwind willreturn allockind("alloc,zeroed") allocsize(0)
+// CHECK-SAME:   memory(inaccessiblemem: readwrite, errnomem: write) "alloc-family"="fminus_rt_malloc" }
+
+// OPT-LABEL: define {{.*}}float @"Analyser::level"(
+// OPT:         [[GAIN:%.*]] = load float, ptr
+// OPT:         call void @fminus_rt_fft_forward_real(
+// OPT-NOT:     load float
+// OPT:         fadd float [[GAIN]], [[GAIN]]
+// OPT-LABEL: define {{.*}}float @"Analyser::rewrite"(
+// OPT:         load <2 x float>, ptr [[BIN:%.*]], align 8
+// OPT:         call void @fminus_rt_fft_forward_real(
+// OPT-NEXT:    load <2 x float>, ptr [[BIN]], align 8
+// OPT-LABEL: define {{.*}} @takes(
+// OPT:         call ptr @fminus_rt_fft_create(i32 %n)
+// OPT:         icmp ne ptr
+// OPT:         call void @fminus_rt_fft_destroy(
+// OPT-LABEL: define void @unused(
+// OPT-NEXT:  entry:
+// OPT-NEXT:    ret void
+// OPT-LABEL: define {{.*}}float @fresh(
+// OPT-NEXT:  entry:
+// OPT-NEXT:    ret float 2.000000e+00
+// OPT-LABEL: define {{.*}} @refused(
+// OPT-NEXT:  entry:
+// OPT-NEXT:    ret i1 false

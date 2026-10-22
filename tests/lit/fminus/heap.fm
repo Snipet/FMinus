@@ -22,7 +22,7 @@ float main(float n)
 // CHECK:         [[COUNT:%.*]] = sext i32 {{%.*}} to i64
 // CHECK:         call ptr @fminus_rt_calloc(i64 [[COUNT]], i64 4)
 // CHECK:         call void @fminus_rt_free(ptr {{%.*}})
-// CHECK:       declare ptr @fminus_rt_calloc(i64, i64)
-// CHECK:       declare void @fminus_rt_free(ptr)
+// CHECK:       declare noalias noundef align 64 ptr @fminus_rt_calloc(i64, i64) #{{[0-9]+}}
+// CHECK:       declare void @fminus_rt_free(ptr allocptr captures(none)) #{{[0-9]+}}
 
 // RESULT: 499500

@@ -26,7 +26,11 @@ TEST_CASE("malloc, calloc and free are C's, on memory aligned to 64 bytes and ze
                        "}\n"
                        "float4* frames(int n) { return malloc(n * sizeof(float4)); }\n"   // zeroed too
                        "void release(void* p) { free(p); }\n"                               // any pointer, or null
-                       "bool refused() { return !malloc(0) && !calloc(-1, 4) && !calloc(1073741824, 64); }\n"   // 64 GiB
+                       // The refused blocks go to the host, so the calls are made: a block the program never uses
+                       // may be removed, as C's may, and a test of it against null is then false
+                       // (tests/lit/fminus/runtime-attributes.fm).
+                       "void* bytes(int size) { return malloc(size); }\n"
+                       "void* elements(int count, int size) { return calloc(count, size); }\n"
                        "bool same(float* a, void* b) { return a == b; }\n",                // a void* compares
                        &errors);
     INFO(errors);
@@ -52,7 +56,11 @@ TEST_CASE("malloc, calloc and free are C's, on memory aligned to 64 bytes and ze
 #if !defined(_WIN32)
     release(std::malloc(16));   // and FMinus may free the host's (not on Windows, where malloc's is not aligned memory)
 #endif
-    CHECK(lookup<bool()>(*jit, "refused")());
+    auto bytes = lookup<void*(int)>(*jit, "bytes");
+    auto elements = lookup<void*(int, int)>(*jit, "elements");
+    CHECK(bytes(0) == nullptr);
+    CHECK(elements(-1, 4) == nullptr);
+    CHECK(elements(1073741824, 64) == nullptr);   // 64 GiB
 }
 
 TEST_CASE("sizeof gives a type's size in bytes, an int", "[codegen][heap]")

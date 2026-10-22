@@ -2,12 +2,16 @@
 // where the class's names hide the others); then the builtins, in the order a call tries them: the reductions,
 // poly_lanes and poly_index, poly_load and poly_store, <math.h>'s float functions (LLVM intrinsics, overloaded on
 // vectors), <stdlib.h>'s heap (malloc, calloc and free) and the FFT (fft_create, fft_forward, ...), both on the
-// runtime's functions; then the program's own functions.
+// runtime's functions; then the program's own functions. The runtime's functions are declared with what they do
+// (describeRuntime), so LLVM does not take one for an unknown function that may read and write all memory.
 #include "ir/Lowering.h"
 
+#include <llvm/IR/Attributes.h>
 #include <llvm/IR/Constants.h>
+#include <llvm/Support/ModRef.h>
 
 #include <array>
+#include <optional>
 
 namespace fminus::ir::detail
 {
@@ -36,6 +40,126 @@ namespace fminus::ir::detail
         Fft{"fft_create", 1, true},  Fft{"fft_create_complex", 1, true}, Fft{"fft_destroy", 1, true},
         Fft{"fft_forward", 3, false}, Fft{"fft_inverse", 3, false},
     };
+
+    namespace
+    {
+        // What a runtime function the builtins call does with memory (describeRuntime gives its declaration the
+        // attributes that say so).
+        enum class RuntimeKind
+        {
+            Allocation,    // fminus_rt_malloc and fminus_rt_calloc (runtime/Runtime.cpp): a new block, or null
+            Release,       // fminus_rt_free: C's free
+            Plan,          // fminus_rt_fft_create, fminus_rt_fft_create_complex (runtime/Fft.cpp): a new plan, or null
+            PlanRelease,   // fminus_rt_fft_destroy
+            Transform,     // fminus_rt_fft_forward_real and the others: reads one buffer, writes another
+        };
+
+        struct RuntimeFacts
+        {
+            std::string_view symbol;
+            RuntimeKind kind;
+        };
+
+        constexpr std::array kRuntimeFacts{
+            RuntimeFacts{"fminus_rt_malloc", RuntimeKind::Allocation},
+            RuntimeFacts{"fminus_rt_calloc", RuntimeKind::Allocation},
+            RuntimeFacts{"fminus_rt_free", RuntimeKind::Release},
+            RuntimeFacts{"fminus_rt_fft_create", RuntimeKind::Plan},
+            RuntimeFacts{"fminus_rt_fft_create_complex", RuntimeKind::Plan},
+            RuntimeFacts{"fminus_rt_fft_destroy", RuntimeKind::PlanRelease},
+            RuntimeFacts{"fminus_rt_fft_forward_real", RuntimeKind::Transform},
+            RuntimeFacts{"fminus_rt_fft_inverse_real", RuntimeKind::Transform},
+            RuntimeFacts{"fminus_rt_fft_forward_complex", RuntimeKind::Transform},
+            RuntimeFacts{"fminus_rt_fft_inverse_complex", RuntimeKind::Transform},
+        };
+
+        // The heap's allocator family, named after its first function as LangRef asks: LLVM pairs an allocation with
+        // a free only within one family.
+        constexpr std::string_view kHeapFamily = "fminus_rt_malloc";
+
+        // Gives the runtime's function `function` (kRuntimeFacts) the attributes that are true of its code, so LLVM
+        // knows a call of it touches only what it touches: a call of fft_forward then changes no module's fields, and
+        // memory from calloc is fresh and zeroed. Each one must stay true of runtime/Runtime.cpp and runtime/Fft.cpp:
+        // an attribute that is not is a miscompile. Every one of them is noexcept (nounwind) and comes back
+        // (willreturn). None takes nonnull: a null plan is a plan that does nothing, and the heap's results may be
+        // null. Nor does an FFT buffer take noalias, though `out` must not overlap `in`: a program that transforms in
+        // place gets what PFFFT gives it, as before.
+        void describeRuntime(llvm::Function& function)
+        {
+            const RuntimeFacts* facts = nullptr;
+            for (const RuntimeFacts& candidate : kRuntimeFacts)
+            {
+                if (candidate.symbol == std::string_view(function.getName()))
+                    facts = &candidate;
+            }
+            if (facts == nullptr)
+                return;
+            llvm::LLVMContext& context = function.getContext();
+            const llvm::Attribute keepsNone = llvm::Attribute::getWithCaptureInfo(context, llvm::CaptureInfo::none());
+            function.setDoesNotThrow();
+            function.setWillReturn();
+            switch (facts->kind)
+            {
+            case RuntimeKind::Allocation:
+                // count * size bytes (malloc's: size), at least, aligned to 64 and zeroed, or null: C's allocator, as
+                // LLVM declares calloc (allockind, allocsize, a noalias result), zeroed for malloc too. So LLVM knows a
+                // block is fresh and reads 0 until written, and may remove one the program never uses, as it may C's
+                // (LangRef's allocation elision: the block comes from a "virtual" allocator, which does not fail).
+                // Beyond the new block, it changes only the system allocator's state and errno, which no FMinus code
+                // can read.
+                function.addFnAttr(
+                    llvm::Attribute::getWithAllocKind(context, llvm::AllocFnKind::Alloc | llvm::AllocFnKind::Zeroed));
+                function.addFnAttr(llvm::Attribute::getWithAllocSizeArgs(
+                    context, 0, function.arg_size() == 2 ? std::optional<unsigned>(1) : std::nullopt));
+                function.addFnAttr("alloc-family", kHeapFamily);
+                function.setMemoryEffects(
+                    llvm::MemoryEffects::inaccessibleOrErrnoMemOnly(llvm::ModRefInfo::ModRef, llvm::ModRefInfo::Mod));
+                function.addRetAttr(llvm::Attribute::NoAlias);
+                function.addRetAttr(llvm::Attribute::NoUndef);
+                function.addRetAttr(llvm::Attribute::getWithAlignment(context, llvm::Align(64)));
+                break;
+            case RuntimeKind::Release:
+                // C's free of a block of the same family (or of null, which does nothing). It keeps no pointer.
+                function.addFnAttr(llvm::Attribute::getWithAllocKind(context, llvm::AllocFnKind::Free));
+                function.addFnAttr("alloc-family", kHeapFamily);
+                function.setMemoryEffects(llvm::MemoryEffects::inaccessibleOrArgMemOnly());
+                function.addParamAttr(0, llvm::Attribute::AllocatedPointer);
+                function.addParamAttr(0, keepsNone);
+                break;
+            case RuntimeKind::Plan:
+                // A new plan, or null. It allocates, but it is no allocator LLVM may remove: its null says that PFFFT
+                // takes no plan of the size, every time, and a removed call would be taken for a plan made. What it
+                // changes, beyond the new plan, is the system allocator's state and errno.
+                function.setMemoryEffects(
+                    llvm::MemoryEffects::inaccessibleOrErrnoMemOnly(llvm::ModRefInfo::ModRef, llvm::ModRefInfo::Mod));
+                function.addRetAttr(llvm::Attribute::NoAlias);
+                function.addRetAttr(llvm::Attribute::NoUndef);
+                break;
+            case RuntimeKind::PlanRelease:
+                // Reads the plan and frees it, and the plan's own memory. It keeps no pointer.
+                function.setMemoryEffects(llvm::MemoryEffects::inaccessibleOrArgMemOnly());
+                function.addParamAttr(0, keepsNone);
+                break;
+            case RuntimeKind::Transform:
+                // Reads the plan and `in` and writes `out` (where it reads only what it wrote), keeping no pointer to
+                // any of them. Beyond them it touches only the plan's own memory, PFFFT's setup and the plan's three
+                // buffers, which only the plan points to: inaccessible memory, since a plan is opaque, a void* that a
+                // program hands to the FFT's builtins and reads nothing through. (One that converted it to a module
+                // pointer and read the runtime's struct through that would read an object as a type it is not, which
+                // C leaves undefined.) It allocates, frees and waits for nothing (the effects let it run on the audio
+                // thread), so it is nofree and nosync too.
+                function.setMemoryEffects(llvm::MemoryEffects::inaccessibleOrArgMemOnly());
+                function.setDoesNotFreeMemory();
+                function.setNoSync();
+                function.addParamAttr(0, llvm::Attribute::ReadOnly);
+                function.addParamAttr(1, llvm::Attribute::ReadOnly);
+                function.addParamAttr(2, llvm::Attribute::WriteOnly);
+                for (unsigned arg = 0; arg < 3; ++arg)
+                    function.addParamAttr(arg, keepsNone);
+                break;
+            }
+        }
+    } // namespace
 
     // The reductions of a float vector to one float: its sum (in lane order, so the result does not depend on
     // fast-math), its least and its greatest lane (NaN lanes ignored, as fminf and fmaxf ignore them).
@@ -242,25 +366,21 @@ namespace fminus::ir::detail
         if (args.size() != allocation.arity)
             return wrongArity(location, args.size(), allocation.arity);
         const ast::Type voidPointer = ast::Type::pointerTo(ast::Kind::Void, false);
-        llvm::Type* pointerType = builder_.getPtrTy();
+        const std::string runtime(allocation.runtime);
         if (allocation.name == "free")
         {
             llvm::Value* pointer = convert(args[0], voidPointer, location, Use::Passing);
-            const llvm::FunctionCallee free =
-                module_.getOrInsertFunction(allocation.runtime, builder_.getVoidTy(), pointerType);
-            return {builder_.CreateCall(free, {pointer}), ast::Type::Void};
+            return {callRuntime(runtime, builder_.getVoidTy(), {pointer}), ast::Type::Void};
         }
         std::vector<llvm::Value*> sizes;
-        std::vector<llvm::Type*> sizeTypes;
         for (const Value& arg : args)
         {
             llvm::Value* size = convert(arg, ast::Type::Int, location, Use::Passing);
             sizes.push_back(builder_.CreateSExt(size, builder_.getInt64Ty(), "size"));
-            sizeTypes.push_back(builder_.getInt64Ty());
         }
-        const llvm::FunctionCallee allocate =
-            module_.getOrInsertFunction(allocation.runtime, llvm::FunctionType::get(pointerType, sizeTypes, false));
-        return {builder_.CreateCall(allocate, sizes, std::string(allocation.name)), voidPointer};
+        llvm::CallInst* allocate = callRuntime(runtime, builder_.getPtrTy(), sizes);
+        allocate->setName(allocation.name);
+        return {allocate, voidPointer};
     }
 
     // fft_create(n) and fft_create_complex(n): a plan, a void* (null when the library takes no plan of that size);
@@ -308,15 +428,20 @@ namespace fminus::ir::detail
         return {callRuntime(runtime, builder_.getVoidTy(), {setup, input, output}), ast::Type::Void};
     }
 
-    // A call of the runtime's function `name` (runtime/Runtime.h), declared from the arguments' IR types.
+    // A call of the runtime's function `name` (runtime/Runtime.h), declared from the arguments' IR types, with the
+    // attributes that say what it does (describeRuntime). Not when the program declares a function of that name itself:
+    // its prototype may give other types, and its definition would be its own code, not the runtime's.
     llvm::CallInst* Lowering::callRuntime(const std::string& name, llvm::Type* result,
                                           const std::vector<llvm::Value*>& args)
     {
         std::vector<llvm::Type*> types;
         for (llvm::Value* arg : args)
             types.push_back(arg->getType());
-        const llvm::FunctionCallee function =
+        llvm::FunctionCallee function =
             module_.getOrInsertFunction(name, llvm::FunctionType::get(result, types, false));
+        if (auto* declared = llvm::dyn_cast<llvm::Function>(function.getCallee());
+            declared != nullptr && !functions_.contains(name))
+            describeRuntime(*declared);
         return builder_.CreateCall(function, args);
     }
 
