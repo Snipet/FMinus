@@ -1,0 +1,28 @@
+{
+  "name": "fminus-site",
+  "private": true,
+  "version": "0.0.0",
+  "description": "FMinus's documentation site: the public API, the grammar and the internals, generated from the repository",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "generate": "node scripts/generate.js",
+    "dev": "node scripts/generate.js && vite dev",
+    "build": "node scripts/generate.js && vite build",
+    "preview": "vite preview",
+    "check": "node scripts/check.js"
+  },
+  "devDependencies": {
+    "@shikijs/transformers": "4.5.0",
+    "@sveltejs/adapter-static": "3.0.10",
+    "@sveltejs/kit": "2.70.3",
+    "@sveltejs/vite-plugin-svelte": "7.3.1",
+    "github-slugger": "2.0.0",
+    "markdown-it": "15.0.3",
+    "shiki": "4.5.0",
+    "svelte": "5.57.2",
+    "vite": "8.3.3"
+  }
+}

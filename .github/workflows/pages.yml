@@ -1,0 +1,64 @@
+# The documentation site (site/), built from the repository and deployed to GitHub Pages:
+# https://snipet.github.io/FMinus/. It runs on every push to main, and by hand. There is no paths filter: the docs link
+# into most of the repository (examples/, tests/, tools/, cmake/, src/), and the build checks every link, so any change
+# can change the site or break it; a build takes seconds.
+# The repository's Pages source must be "GitHub Actions" (Settings > Pages).
+#
+# Each action is pinned to its release's full commit SHA, with the tag in a comment: a tag can be moved, a SHA cannot.
+# To update one, take the new release's commit (gh api repos/actions/checkout/commits/v7.0.1 --jq .sha).
+name: Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# nothing by default; each job asks for what it needs
+permissions: {}
+
+# one deployment at a time; a newer push waits for the one in flight instead of cancelling it
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # npm ci and the build run third-party code: this job can read the repository and nothing else
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: site
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+      - run: npm ci
+      - run: npm run build
+        env:
+          BASE_PATH: /FMinus
+      - run: npm run check
+        env:
+          BASE_PATH: /FMinus
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site/build
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

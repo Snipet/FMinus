@@ -1,0 +1,5 @@
+node_modules/
+.svelte-kit/
+build/
+# written by scripts/generate.js on every npm run dev and npm run build
+src/lib/generated/
