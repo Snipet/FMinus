@@ -346,15 +346,18 @@ namespace fminus::ir::detail
         llvm::Value* mask =
             args.size() > arity ? convert(args[arity], ast::Type::PolyBool, location, Use::Passing) : nullptr;
         llvm::Type* vector = typeOf(ast::Type::PolyFloat);
+        llvm::Instruction* access = nullptr;   // tagged as floats (Tbaa.cpp): a poly float is its lanes' type
         if (load && mask == nullptr)
-            return {builder_.CreateAlignedLoad(vector, pointer, align, "poly.load"), ast::Type::PolyFloat};
-        if (load)
-            return {builder_.CreateMaskedLoad(vector, pointer, align, mask, llvm::Constant::getNullValue(vector),
-                                              "poly.load"),
-                    ast::Type::PolyFloat};
-        if (mask == nullptr)
-            return {builder_.CreateAlignedStore(value, pointer, align), ast::Type::Void};
-        return {builder_.CreateMaskedStore(value, pointer, align, mask), ast::Type::Void};
+            access = builder_.CreateAlignedLoad(vector, pointer, align, "poly.load");
+        else if (load)
+            access = builder_.CreateMaskedLoad(vector, pointer, align, mask, llvm::Constant::getNullValue(vector),
+                                               "poly.load");
+        else if (mask == nullptr)
+            access = builder_.CreateAlignedStore(value, pointer, align);
+        else
+            access = builder_.CreateMaskedStore(value, pointer, align, mask);
+        tag(access, ast::Type::PolyFloat);
+        return load ? Value{access, ast::Type::PolyFloat} : Value{access, ast::Type::Void};
     }
 
     // malloc(size), calloc(count, size) and free(p): C's, with sizes in ints (C's are size_t), on the runtime's

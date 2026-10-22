@@ -110,6 +110,10 @@ namespace fminus
             // Each parameter's binding, by its qualified name ("Lowpass::cutoff"); one not named is a knob. A name
             // that is no parameter of the program, or a stream that is not a float, is a compile error.
             std::map<std::string, Binding> parameters;
+            // C's strict-aliasing rule, which the optimiser relies on: the program reads and writes memory only as the
+            // type it holds (a float vector as floats). Off, as clang's -fno-strict-aliasing, for a program that
+            // reads memory as another type; its loops over a module's buffers may then run several times slower.
+            bool strictAliasing = true;
         };
 
         // Compiles `source`. Returns nullptr when it does not compile, with `errors` holding FMinus's messages, one a

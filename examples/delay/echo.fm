@@ -26,24 +26,20 @@ module Echo
     }
 
     // n samples: the output is the input plus `mix` times the line's oldest sample, which the line replaces with the
-    // input plus `feedback` times it. The fields go into locals first: FMinus tells LLVM nothing about which types
-    // alias, so a store through the line could, as far as LLVM knows, change `line` or `position` themselves, and the
-    // loop would load them again every sample (examples/convolver/README.md). The knobs are registers already.
+    // input plus `feedback` times it. The knobs are registers through the loop. So are the fields `line` and `length`:
+    // a store through the line is a float's, which can't change a pointer or an int (C's strict-aliasing rule, which
+    // FMinus keeps), so the loop reads them once.
     void process(const float* restrict input, float* restrict output, int n) [[clang::nonblocking]]
     {
-        float* d = line;
-        const int size = length;
-        int w = position;
         for (int i = 0; i < n; ++i)
         {
-            const float delayed = d[w];
+            const float delayed = line[position];
             const float x = input[i];
-            d[w] = x + feedback[i] * delayed;
+            line[position] = x + feedback[i] * delayed;
             output[i] = x + mix[i] * delayed;
-            if (++w == size)
-                w = 0;
+            if (++position == length)
+                position = 0;
         }
-        position = w;
     }
 
     // Off the audio thread, at the end.

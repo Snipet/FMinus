@@ -91,15 +91,15 @@ module Chain
 // STREAM-LABEL: define void @"Lowpass::process"(
 // STREAM:         entry:
 // STREAM-NEXT:      call void @llvm.experimental.noalias.scope.decl(metadata [[SCOPES:![0-9]+]])
-// STREAM-NEXT:      %cutoff.stream = load ptr, ptr %this, align 8, !noalias [[SCOPES]]
+// STREAM-NEXT:      %cutoff.stream = load ptr, ptr %this, align 8, !tbaa {{![0-9]+}}, !noalias [[SCOPES]]
 // STREAM:         for.body:
 // STREAM:           %cutoff.at = getelementptr inbounds nuw [4 x i8], ptr %cutoff.stream, i64 %indvars.iv
-// STREAM-NEXT:      %cutoff = load float, ptr %cutoff.at, align 4, !alias.scope [[SCOPES]]
+// STREAM-NEXT:      %cutoff = load float, ptr %cutoff.at, align 4, !tbaa {{![0-9]+}}, !alias.scope [[SCOPES]]
 // STREAM-NOT:       store float {{%.*}}, ptr %y
 // STREAM:           br i1 %exitcond.not
-// STREAM:           store float {{%.*}}, ptr %y, align 8, !noalias [[SCOPES]]
+// STREAM:           store float {{%.*}}, ptr %y, align 8, !tbaa {{![0-9]+}}, !noalias [[SCOPES]]
 // STREAM-LABEL: define void @"Gain::process"(
-// STREAM:           %gain = load float, ptr %gain.at, align 4, !alias.scope
+// STREAM:           %gain = load float, ptr %gain.at, align 4, !tbaa {{![0-9]+}}, !alias.scope
 // STREAM:       [[SCOPES]] = !{[[SCOPE:![0-9]+]]}
 // STREAM:       [[SCOPE]] = distinct !{[[SCOPE]], [[DOMAIN:![0-9]+]], !"streams"}
 // STREAM:       [[DOMAIN]] = distinct !{[[DOMAIN]], !"Lowpass::process"}

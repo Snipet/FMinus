@@ -1,0 +1,164 @@
+// C's strict-aliasing rule, told to LLVM (src/ir/Tbaa.cpp): every load and store of a value carries its type's TBAA
+// tag, in FMinus's tree of four scalar types, float (float vectors and poly floats too), int, bool and any pointer. So
+// a store of a float can't change an int or a pointer: a method's loop over its fields' buffers loads the fields once,
+// before the loop, and runs on vectors. A module's copy and a declaration's zeroing carry no tag. With
+// --no-strict-aliasing nothing is tagged, and the fields are loaded again every iteration.
+// RUN: fminus %s -O0 --poly-lanes 4 | FileCheck %s --check-prefix=TAGS
+// RUN: fminus %s --poly-lanes 4 | FileCheck %s --check-prefix=LOOP
+// RUN: fminus %s -O0 --poly-lanes 4 --stream Gain::gain | FileCheck %s --check-prefix=STREAM
+// RUN: fminus %s -O0 --poly-lanes 4 --no-strict-aliasing | FileCheck %s --check-prefix=OFF
+// RUN: fminus %s --poly-lanes 4 --no-strict-aliasing | FileCheck %s --check-prefix=SLOW
+
+// The research's loop: two buffers and a length, all fields.
+module Acc
+{
+    float* tail;
+    float* result;
+    int size;
+
+    void add() [[clang::nonblocking]]
+    {
+        for (int i = 0; i < size; ++i)
+            tail[i] += result[i];
+    }
+};
+
+// A knob of each type, read where the method starts.
+module Gain
+{
+    param float gain;
+    param int mode;
+    param bool on;
+
+    float tick(float x)
+    {
+        return on[0] ? x * gain[0] + mode[0] : x;
+    }
+};
+
+// A store of a float can't change an int: the int is read once, and the difference is 0.
+int counted(float* p, int* count)
+{
+    const int before = count[0];
+    p[0] = 1;
+    return count[0] - before;
+}
+
+int ints(int* p, bool b)
+{
+    bool c = !b;
+    p[0] = c;
+    return p[1];
+}
+
+// Floats as floats, whatever their vector: an array's list, a float4 through its pointer, components, poly_load and
+// poly_store, masked and not.
+float vectors(float4* p, float* q, int n)
+{
+    float table[3] = {1, 2, 3};
+    float4 v = p[0];
+    v.yx = (float2)(table[0], table[2]);
+    p[1] = v;
+    poly_store(q, poly_load(q) * 2);
+    poly_store(q, poly_load(q + 4, poly_index() < n), poly_index() < n);
+    return v.w;
+}
+
+// A module's copy is a memcpy, which may touch any type: no tag.
+void copied(Acc* a, Acc* b)
+{
+    *b = *a;
+}
+
+// TAGS-LABEL: define void @"Acc::add"(
+// TAGS:         %this{{[0-9]+}} = load ptr, ptr %this.addr, align 8, !tbaa [[PTR:![0-9]+]]
+// TAGS:         load i32, ptr %size, align 4, !tbaa [[INT:![0-9]+]]
+// TAGS:         load ptr, ptr %result, align 8, !tbaa [[PTR]]
+// TAGS:         load float, ptr %arrayidx, align 4, !tbaa [[FLOAT:![0-9]+]]
+// TAGS:         load ptr, ptr %tail, align 8, !tbaa [[PTR]]
+// TAGS:         load float, ptr %arrayidx8, align 4, !tbaa [[FLOAT]]
+// TAGS:         store float {{%.*}}, ptr %arrayidx8, align 4, !tbaa [[FLOAT]]
+// TAGS-LABEL: define float @"Gain::tick"(
+// TAGS-DAG:     %gain = load atomic float, ptr {{%.*}} unordered, align 4, !tbaa [[FLOAT]]
+// TAGS-DAG:     %mode = load atomic i32, ptr {{%.*}} unordered, align 4, !tbaa [[INT]]
+// TAGS-DAG:     %on = load atomic i8, ptr {{%.*}} unordered, align 1, !tbaa [[BOOL:![0-9]+]]
+// TAGS:         %x{{[0-9]+}} = load float, ptr %x.addr, align 4, !tbaa [[FLOAT]]
+// TAGS-LABEL: define i32 @counted(
+// TAGS:         store float 1.000000e+00, ptr {{%.*}}, align 4, !tbaa [[FLOAT]]
+// TAGS-LABEL: define i32 @ints(
+// TAGS:         load i1, ptr %b.addr, align 1, !tbaa [[BOOL]]
+// TAGS:         store i32 {{%.*}}, ptr %arrayidx, align 4, !tbaa [[INT]]
+// TAGS:         load i32, ptr %arrayidx{{[0-9]+}}, align 4, !tbaa [[INT]]
+// TAGS-LABEL: define float @vectors(
+// TAGS:         call void @llvm.memset.p0.i64(ptr align 4 %table, i8 0, i64 12, i1 false){{$}}
+// TAGS:         store float 1.000000e+00, ptr %arrayinit, align 4, !tbaa [[FLOAT]]
+// TAGS:         load <4 x float>, ptr %arrayidx, align 16, !tbaa [[FLOAT]]
+// TAGS:         %v{{[0-9]+}} = load <4 x float>, ptr %v, align 16, !tbaa [[FLOAT]]
+// TAGS:         store <4 x float> {{%.*}}, ptr %v, align 16, !tbaa [[FLOAT]]
+// TAGS:         store <4 x float> {{%.*}}, ptr %arrayidx{{[0-9]+}}, align 16, !tbaa [[FLOAT]]
+// TAGS:         %poly.load = load <4 x float>, ptr {{%.*}}, align 4, !tbaa [[FLOAT]]
+// TAGS:         store <4 x float> {{%.*}}, ptr {{%.*}}, align 4, !tbaa [[FLOAT]]
+// TAGS:         call <4 x float> @llvm.masked.load.v4f32.p0({{.*}}), !tbaa [[FLOAT]]
+// TAGS:         call void @llvm.masked.store.v4f32.p0({{.*}}), !tbaa [[FLOAT]]
+// TAGS-LABEL: define void @copied(
+// TAGS:         call void @llvm.memcpy.p0.p0.i64({{.*}}){{$}}
+// TAGS-DAG:   [[INT]] = !{[[INTTYPE:![0-9]+]], [[INTTYPE]], i64 0}
+// TAGS-DAG:   [[INTTYPE]] = !{!"int", [[ROOT:![0-9]+]], i64 0}
+// TAGS-DAG:   [[ROOT]] = !{!"FMinus TBAA"}
+// TAGS-DAG:   [[PTR]] = !{[[PTRTYPE:![0-9]+]], [[PTRTYPE]], i64 0}
+// TAGS-DAG:   [[PTRTYPE]] = !{!"any pointer", [[ROOT]], i64 0}
+// TAGS-DAG:   [[FLOAT]] = !{[[FLOATTYPE:![0-9]+]], [[FLOATTYPE]], i64 0}
+// TAGS-DAG:   [[FLOATTYPE]] = !{!"float", [[ROOT]], i64 0}
+// TAGS-DAG:   [[BOOL]] = !{[[BOOLTYPE:![0-9]+]], [[BOOLTYPE]], i64 0}
+// TAGS-DAG:   [[BOOLTYPE]] = !{!"bool", [[ROOT]], i64 0}
+
+// The fields are loaded before the loop, which runs on vectors (with a check that the two buffers don't overlap); the
+// loop that finishes it loads no field either.
+// LOOP-LABEL: define void @"Acc::add"(
+// LOOP:         entry:
+// LOOP:           load i32, ptr %size, align 8, !tbaa [[INT:![0-9]+]]
+// LOOP:           load ptr, ptr %result, align 8, !tbaa [[PTR:![0-9]+]]
+// LOOP:           load ptr, ptr %this, align 8, !tbaa [[PTR]]
+// LOOP:         vector.memcheck:
+// LOOP:         vector.body:
+// LOOP-NOT:       load {{ptr|i32}}
+// LOOP:           load <{{[0-9]+}} x float>, ptr {{%.*}}, align 4, !tbaa [[FLOAT:![0-9]+]]
+// LOOP-NOT:       load {{ptr|i32}}
+// LOOP:           store <{{[0-9]+}} x float> {{%.*}}, ptr {{%.*}}, align 4, !tbaa [[FLOAT]]
+// LOOP:         for.body:
+// LOOP-NOT:       load {{ptr|i32}}
+// LOOP:           store float {{%.*}}, ptr {{%.*}}, align 4, !tbaa [[FLOAT]]
+// LOOP-NOT:       load {{ptr|i32}}
+// LOOP:           br i1 %exitcond.not
+// LOOP-LABEL: define {{.*}}i32 @counted(
+// LOOP:           store float 1.000000e+00, ptr %p, align 4, !tbaa [[FLOAT]]
+// LOOP-NEXT:      ret i32 0
+// LOOP-LABEL: define {{.*}}float @vectors(
+// LOOP:           call <4 x float> @llvm.masked.load.v4f32.p0({{.*}}), !tbaa [[FLOAT]]
+// LOOP:           call void @llvm.masked.store.v4f32.p0({{.*}}), !tbaa [[FLOAT]]
+
+// A stream's pointer is a pointer, its samples floats, in their alias scope as before.
+// STREAM-LABEL: define float @"Gain::tick"(
+// STREAM:         %gain.stream = load ptr, ptr {{%.*}}, align 8, !tbaa [[PTR:![0-9]+]], !noalias [[SCOPES:![0-9]+]]
+// STREAM:         %gain = load float, ptr %gain.at, align 4, !tbaa [[FLOAT:![0-9]+]], !alias.scope [[SCOPES]]
+// STREAM-DAG:   [[PTR]] = !{[[PTRTYPE:![0-9]+]], [[PTRTYPE]], i64 0}
+// STREAM-DAG:   [[PTRTYPE]] = !{!"any pointer", {{![0-9]+}}, i64 0}
+// STREAM-DAG:   [[FLOAT]] = !{[[FLOATTYPE:![0-9]+]], [[FLOATTYPE]], i64 0}
+// STREAM-DAG:   [[FLOATTYPE]] = !{!"float", {{![0-9]+}}, i64 0}
+
+// OFF-NOT: !tbaa
+// OFF-NOT: FMinus TBAA
+
+// Without the rule, a float store may change any field: the loop loads them again every iteration, and doesn't
+// vectorise; the int is read again after the float's store.
+// SLOW-LABEL: define void @"Acc::add"(
+// SLOW-NOT:       vector.body
+// SLOW:         for.body:
+// SLOW:           load ptr, ptr %result
+// SLOW:           load ptr, ptr %this
+// SLOW:           store float
+// SLOW:           load i32, ptr %size
+// SLOW:           br i1
+// SLOW-LABEL: define {{.*}}i32 @counted(
+// SLOW:           store float 1.000000e+00, ptr %p
+// SLOW-NEXT:      load i32, ptr %count

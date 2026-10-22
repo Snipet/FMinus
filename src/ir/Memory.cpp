@@ -199,7 +199,8 @@ namespace fminus::ir::detail
 
     // A load; for components, a load of the vector and the lanes taken out of it (an extractelement for one, a
     // shufflevector for several). An array is no load: its name stands for a pointer to its first element, const
-    // when the array is (C's decay). Nor is a module, whose value is its address.
+    // when the array is (C's decay). Nor is a module, whose value is its address. The load carries its type's TBAA
+    // tag (Tbaa.cpp), as every load and store of a value does.
     Lowering::Value Lowering::read(const LValue& source)
     {
         if (ast::isArray(source.type))
@@ -207,7 +208,8 @@ namespace fminus::ir::detail
                     ast::Type::pointerTo(ast::pointee(source.type), source.isConst)};
         if (ast::isModule(source.type))
             return {source.address, source.type};
-        llvm::Value* loaded = builder_.CreateLoad(typeOf(source.whole), source.address, source.name);
+        llvm::LoadInst* loaded = builder_.CreateLoad(typeOf(source.whole), source.address, source.name);
+        tag(loaded, source.whole);
         if (source.components.empty())
             return {loaded, source.type};
         if (source.components.size() == 1)
@@ -237,17 +239,19 @@ namespace fminus::ir::detail
         }
         if (target.components.empty())
         {
-            builder_.CreateStore(stored, target.address);
+            tag(builder_.CreateStore(stored, target.address), target.type);
             return stored;
         }
-        llvm::Value* vector = builder_.CreateLoad(typeOf(target.whole), target.address, target.name);
+        llvm::LoadInst* whole = builder_.CreateLoad(typeOf(target.whole), target.address, target.name);
+        tag(whole, target.whole);
+        llvm::Value* vector = whole;
         for (std::size_t i = 0; i < target.components.size(); ++i)
         {
             llvm::Value* element = target.components.size() == 1 ? stored : builder_.CreateExtractElement(stored, i);
             vector = builder_.CreateInsertElement(vector, element,
                                                   static_cast<std::uint64_t>(target.components[i]));
         }
-        builder_.CreateStore(vector, target.address);
+        tag(builder_.CreateStore(vector, target.address), target.whole);
         return stored;
     }
 
@@ -305,7 +309,7 @@ namespace fminus::ir::detail
         {
             const Value value = lower(*list[i]);
             llvm::Value* at = builder_.CreateConstInBoundsGEP2_64(typeOf(type), address, 0, i, "arrayinit");
-            builder_.CreateStore(convert(value, element, list[i]->location, Use::Initializing), at);
+            tag(builder_.CreateStore(convert(value, element, list[i]->location, Use::Initializing), at), element);
         }
     }
 

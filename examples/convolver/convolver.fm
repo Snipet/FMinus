@@ -86,38 +86,28 @@ module Convolver
     // A block: its spectrum, times the response's, back into samples and added onto the tail, whose first block is
     // then the one to play. The frame's samples past the block stay 0: the padding.
     //
-    // Each loop reads the fields it uses into locals first. A store through a float* could, as far as LLVM knows,
-    // change a field (FMinus tells it nothing about which types may alias), so a loop that indexed a field would load
-    // it again every iteration, and could not run on vectors. In locals, the loops vectorise (README.md).
+    // The loops index the fields themselves. A store of a float can't change a field that is a pointer or an int (C's
+    // strict-aliasing rule, which FMinus keeps), so each loop reads the fields it uses once, and runs on vectors.
     void convolve() [[clang::nonblocking]]
     {
-        const int b = block;
-        const int n = size;
-        float* f = frame;
-        float2* x = bins;
-        const float2* h = response;
-        float* r = result;
-        float* t = tail;
-        float* y = ready;
-        const float* g = gathered;
-        for (int i = 0; i < b; ++i)
-            f[i] = g[i];
-        fft_forward(plan, f, x);
-        for (int k = 0; k <= n / 2; ++k)
+        for (int i = 0; i < block; ++i)
+            frame[i] = gathered[i];
+        fft_forward(plan, frame, bins);
+        for (int k = 0; k <= size / 2; ++k)
         {
-            const float2 u = x[k];
-            const float2 v = h[k];
-            x[k] = (float2)(u.x * v.x - u.y * v.y, u.x * v.y + u.y * v.x);
+            const float2 u = bins[k];
+            const float2 v = response[k];
+            bins[k] = (float2)(u.x * v.x - u.y * v.y, u.x * v.y + u.y * v.x);
         }
-        fft_inverse(plan, x, r);
-        for (int i = 0; i < n; ++i)
-            t[i] += r[i];
-        for (int i = 0; i < b; ++i)
-            y[i] = t[i];
-        for (int i = 0; i < n - b; ++i)
-            t[i] = t[i + b];
-        for (int i = n - b; i < n; ++i)
-            t[i] = 0;
+        fft_inverse(plan, bins, result);
+        for (int i = 0; i < size; ++i)
+            tail[i] += result[i];
+        for (int i = 0; i < block; ++i)
+            ready[i] = tail[i];
+        for (int i = 0; i < size - block; ++i)
+            tail[i] = tail[i + block];
+        for (int i = size - block; i < size; ++i)
+            tail[i] = 0;
     }
 
     // Off the audio thread, at the end.

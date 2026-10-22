@@ -110,6 +110,7 @@ int main(int argc, char** argv)
     unsigned polyLanes = 0;
     std::vector<std::string> streams;
     std::vector<std::string> freezes;
+    bool noStrictAliasing = false;
     app.add_option("input", input, "FMinus source file ('-' for stdin)")->required();
     app.add_option("args", runArgs, "The arguments of --run's function");
     app.add_option("-o,--output", output, "The output file ('-' is stdout)")->capture_default_str();
@@ -126,6 +127,9 @@ int main(int argc, char** argv)
         ->allow_extra_args(false);
     app.add_option("--freeze", freezes, "Compile a parameter in as a constant: Module::name=value")
         ->allow_extra_args(false);
+    app.add_flag("--no-strict-aliasing", noStrictAliasing,
+                 "Emit no type-based alias metadata (clang's -fno-strict-aliasing): for a program that reads memory "
+                 "as a type other than the one it holds");
     CLI11_PARSE(app, argc, argv);
     if (emit == "exe" && run.empty() && output == "-")
         return fail("--emit exe: an executable needs a file name (-o)");
@@ -155,6 +159,7 @@ int main(int argc, char** argv)
     fminus::ir::Options options;
     options.polyLanes = polyLanes != 0 ? polyLanes : fminus::polyLanes(**machine);
     options.dataLayout = (*machine)->createDataLayout().getStringRepresentation();
+    options.strictAliasing = !noStrictAliasing;
     for (const std::string& name : streams)
         options.parameters[name] = {fminus::ir::ParamBinding::Kind::Stream, 0.0};
     for (const std::string& spec : freezes)

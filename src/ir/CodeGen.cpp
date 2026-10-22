@@ -33,6 +33,7 @@ namespace fminus::ir
             , builder_(module.getContext())
             , polyLanes_(options.polyLanes)
             , bindings_(options.parameters)
+            , strictAliasing_(options.strictAliasing)
         {
         }
 

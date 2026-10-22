@@ -11,6 +11,7 @@
 //     Memory.cpp        lvalues (variables, p[i], *p, components) read and written, arrays, &x, pointer arithmetic
 //     Modules.cpp       modules: their layout, fields, methods and calls of them, `this`, copies
 //     Effects.cpp       [[clang::nonallocating]] and [[clang::nonblocking]], checked over the calls
+//     Tbaa.cpp          C's strict aliasing, told to LLVM: the type tag (!tbaa) on every load and store of memory
 // A new node is lowered in the file its kind belongs to. The build says which members still need it: a std::visit
 // without its lambda fails to compile, and a switch without its enumerator trips -Wswitch.
 #pragma once
@@ -263,6 +264,10 @@ namespace fminus::ir::detail
                                                       std::vector<std::string>& looking);
         void checkEffects(const ast::Program& program);
 
+        // ---- Tbaa.cpp -----------------------------------------------------------------------------------------------
+        llvm::MDNode* accessTag(ast::Type type);
+        void tag(llvm::Instruction* access, ast::Type type);
+
         // ---- the state of one lowering ----------------------------------------------------------------------------
         llvm::Module& module_;
         Diagnostics& diagnostics_;
@@ -278,5 +283,6 @@ namespace fminus::ir::detail
         std::map<std::string, ParamBinding> bindings_;                     // the host's, by qualified name
         std::map<std::pair<unsigned, bool>, llvm::Value*> entryLoads_;     // the method's parameters, read at entry
         std::vector<llvm::Instruction*> streamReads_;                      // its loads of its streams' samples
+        bool strictAliasing_;                                              // whether loads and stores carry !tbaa
     };
 } // namespace fminus::ir::detail

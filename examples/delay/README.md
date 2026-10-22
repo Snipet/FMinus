@@ -73,19 +73,15 @@ module Echo
 
     void process(const float* restrict input, float* restrict output, int n) [[clang::nonblocking]]
     {
-        float* d = line;
-        const int size = length;
-        int w = position;
         for (int i = 0; i < n; ++i)
         {
-            const float delayed = d[w];
+            const float delayed = line[position];
             const float x = input[i];
-            d[w] = x + feedback[i] * delayed;
+            line[position] = x + feedback[i] * delayed;
             output[i] = x + mix[i] * delayed;
-            if (++w == size)
-                w = 0;
+            if (++position == length)
+                position = 0;
         }
-        position = w;
     }
 
     void end() { free(line); }                     // off the audio thread
@@ -97,9 +93,10 @@ module Echo
   takes only the buffers.
 - **The feedback and the mix are knobs**: values the host sets with `setValue`, from any thread, which `process`
   reads once when it starts. `feedback[i]` is the same value at every sample of a call, a register through the loop.
-- **The fields go into locals before the loop.** FMinus tells LLVM nothing about which types alias, so a store
-  through the line could, as far as LLVM knows, change `line` or `position` themselves, and the loop would load them
-  again every sample ([../convolver/README.md](../convolver/README.md), "Fields, locals, and what LLVM knows").
+- **The loop indexes the fields themselves.** A store through the line is a `float`'s, which can't change `line` or
+  `length`, a pointer and an int (C's strict-aliasing rule, which FMinus keeps and tells LLVM), so the loop reads them
+  once. Without that (`fminus --no-strict-aliasing`), the loop loaded them again every sample, and took 2.1 ns a
+  sample, three times as long ([../convolver/README.md](../convolver/README.md), "Fields, and what LLVM knows").
 
 ## Measurements
 

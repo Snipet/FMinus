@@ -24,16 +24,16 @@ spectrum there once, with the inverse FFT's 1/N folded into it. `process` runs o
 void convolve() [[clang::nonblocking]]
 {
     ...
-    fft_forward(plan, f, x);                                   // the block, padded with zeros
-    for (int k = 0; k <= n / 2; ++k)
+    fft_forward(plan, frame, bins);                            // the block, padded with zeros
+    for (int k = 0; k <= size / 2; ++k)
     {
-        const float2 u = x[k];
-        const float2 v = h[k];
-        x[k] = (float2)(u.x * v.x - u.y * v.y, u.x * v.y + u.y * v.x);   // times the response's spectrum
+        const float2 u = bins[k];
+        const float2 v = response[k];
+        bins[k] = (float2)(u.x * v.x - u.y * v.y, u.x * v.y + u.y * v.x);   // times the response's spectrum
     }
-    fft_inverse(plan, x, r);
-    for (int i = 0; i < n; ++i)
-        t[i] += r[i];                                          // added onto the tail
+    fft_inverse(plan, bins, result);
+    for (int i = 0; i < size; ++i)
+        tail[i] += result[i];                                  // added onto the tail
     ...
 }
 ```
@@ -65,22 +65,22 @@ In the dev build on an M5, 96,000 samples of noise, each time the best of 20 run
 - **FMinus is a little faster than C++** at every size. C++'s copies and adds are `std::copy` and plain loops, and
   FMinus's loops vectorise as well as clang's do.
 
-## Fields, locals, and what LLVM knows
+## Fields, and what LLVM knows
 
-`convolve` reads its module's fields into locals before its loops (`float* t = tail;`). Written the obvious way, with
-`tail[i] += result[i]` on the fields themselves, the same code takes 17.3 ns a sample at 2048 taps: 1.6 times C++'s,
-and no loop vectorises. A store through a `float*` might, as far as LLVM can tell, change the field `tail` itself, a
-pointer in the module, so every iteration loads the field again before it indexes it, and no loop can run on vectors.
-
-Clang knows better about C++'s fields: it marks every load and store with its type (TBAA metadata), and C's aliasing
-rules say a `float` store can't change a pointer. FMinus emits no TBAA yet. Until it does, read a field into a local
-before a loop that indexes it. The locals cost nothing: they live in registers.
+`convolve`'s loops index the module's fields themselves (`tail[i] += result[i]`), and still read each field once,
+before the loop, and run on vectors. FMinus marks every load and store with its type (TBAA metadata, as clang does),
+and C's strict-aliasing rule, which FMinus keeps, says a store of a `float` can't change a field that is a pointer
+(`tail`) or an int (`size`). Without the marks (`fminus --no-strict-aliasing`, or FMinus before it had them), a store
+through a `float*` might, as far as LLVM could tell, change the field `tail` itself, so every iteration loaded the
+field again, and no loop vectorised: the same code took 15.6 ns a sample at 2048 taps, against 9.8 with the fields
+read into locals first. With the marks, it takes 9.7, as the locals do.
 
 ## Where FMinus leaves it
 
-1. **TBAA.** Type-based alias metadata on FMinus's loads and stores, as clang's, would let the obvious code run at the
-   locals' speed. It also makes C's strict aliasing FMinus's rule: a `float` written through one pointer can't be read
-   as an `int` through another (FMinus has no pointer casts, but a `void*` converts to both).
+1. **What a call leaves.** `process` loads `ready`, `gathered` and `block` again every sample, because it calls
+   `convolve()`, which could change them as far as LLVM knows. A summary of the fields each method writes would keep
+   them in registers; FMinus could compute one, since a pointer field is written only by its name (FMinus has no
+   pointer to a pointer).
 2. **Partitioned convolution.** The latency is a block, and the FFT is as long as the response. Splitting the response
    into partitions of the block's length (uniformly partitioned overlap-save) keeps both small, and makes a long
    reverb's response cheap at a small block size.

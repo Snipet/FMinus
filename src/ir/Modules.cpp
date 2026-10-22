@@ -229,6 +229,7 @@ namespace fminus::ir::detail
             llvm::Value* sample = builder_.CreateInBoundsGEP(builder_.getFloatTy(), atEntry(field, true), offset,
                                                              parameter.name + ".at");
             llvm::LoadInst* load = builder_.CreateLoad(builder_.getFloatTy(), sample, parameter.name);
+            tag(load, ast::Type::Float);
             streamReads_.push_back(load);
             return {load, type};
         }
@@ -237,7 +238,8 @@ namespace fminus::ir::detail
     }
 
     // What the method reads of parameter `field` where it starts, once: its stream's pointer, or its value (an atomic
-    // load, a bool's byte compared with 0). From `this` itself, the method's first argument.
+    // load, a bool's byte compared with 0). From `this` itself, the method's first argument. Each load carries its
+    // type's TBAA tag (Tbaa.cpp): the pointer's, and the value's, as the parameter's type.
     //
     // The value's load is unordered, LLVM's weakest atomic ordering: it can't tear, so the method reads a value the
     // host stored, whole, however the host's thread races it; and unlike a monotonic (C++'s relaxed) load, LLVM may
@@ -262,8 +264,10 @@ namespace fminus::ir::detail
         llvm::Value* loaded = nullptr;
         if (stream)
         {
-            loaded =
+            llvm::LoadInst* load =
                 at.CreateLoad(builder_.getPtrTy(), at.CreateStructGEP(slotType, slot, 0), parameter.name + ".stream");
+            tag(load, ast::Type::pointerTo(ast::Kind::Float, true));
+            loaded = load;
         }
         else
         {
@@ -271,6 +275,7 @@ namespace fminus::ir::detail
                                                         llvm::Align(parameter.type == ast::Type::Bool ? 1 : 4),
                                                         parameter.name);
             load->setAtomic(llvm::AtomicOrdering::Unordered);
+            tag(load, parameter.type);
             loaded = parameter.type == ast::Type::Bool ? at.CreateICmpNE(load, at.getInt8(0), parameter.name + ".on")
                                                        : static_cast<llvm::Value*>(load);
         }
@@ -345,7 +350,10 @@ namespace fminus::ir::detail
     // The method's `this`: the address of the module it was called on (its parameter's slot holds it).
     llvm::Value* Lowering::self()
     {
-        return builder_.CreateLoad(builder_.getPtrTy(), find("this")->slot, "this");
+        const Binding* binding = find("this");
+        llvm::LoadInst* load = builder_.CreateLoad(builder_.getPtrTy(), binding->slot, "this");
+        tag(load, binding->type);
+        return load;
     }
 
     // `this`, a pointer to the method's module; outside a method, clang's error.

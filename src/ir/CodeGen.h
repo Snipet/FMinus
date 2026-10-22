@@ -49,6 +49,12 @@ namespace fminus::ir
 
         // Each parameter's binding, by its qualified name ("Lowpass::cutoff"); a parameter not listed is a knob.
         std::map<std::string, ParamBinding> parameters;
+
+        // C's strict-aliasing rule, told to LLVM: every load and store of memory carries its type's TBAA tag
+        // (Tbaa.cpp), so a store of a float cannot change an int or a pointer, and a loop over a module's buffer loads
+        // the module's fields once. Off, clang's -fno-strict-aliasing, nothing is tagged, and LLVM assumes any store
+        // may change anything: for a program that reads memory as a type other than the one it holds.
+        bool strictAliasing = true;
     };
 
     // Lowers `program` into a new module in `context`, named after the diagnostics' file. Every FMinus function becomes
