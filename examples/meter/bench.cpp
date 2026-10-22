@@ -39,8 +39,32 @@
 #include <string_view>
 #include <vector>
 
+#if defined(_WIN32)
+#include <malloc.h>   // _aligned_malloc, _aligned_free
+#endif
+
 namespace
 {
+    // C's aligned_alloc, and the free that goes with it. The Windows C runtime has no aligned_alloc: its aligned memory
+    // comes from _aligned_malloc and goes back to _aligned_free, not free (as the FMinus runtime's does).
+    void* alignedAlloc(std::size_t alignment, std::size_t size)
+    {
+#if defined(_WIN32)
+        return _aligned_malloc(size, alignment);
+#else
+        return std::aligned_alloc(alignment, size);
+#endif
+    }
+
+    void alignedFree(void* memory)
+    {
+#if defined(_WIN32)
+        _aligned_free(memory);
+#else
+        std::free(memory);
+#endif
+    }
+
     // Every kernel's C type: a reading of the n samples at input.
     using Measure = float(const float* input, int n);
 
@@ -87,7 +111,7 @@ namespace
     {
         void operator()(void* memory) const
         {
-            std::free(memory);
+            alignedFree(memory);
         }
     };
 
@@ -117,7 +141,7 @@ namespace
         }
     };
 
-    // The program's Meter, in memory a host allocates: aligned, and big enough. std::aligned_alloc takes an
+    // The program's Meter, in memory a host allocates: aligned, and big enough. aligned_alloc takes an
     // alignment of at least a pointer's on macOS, and a size that is a multiple of it.
     Meter makeMeter(fminus::Program& program, std::string& errors)
     {
@@ -136,7 +160,7 @@ namespace
         }
         const std::size_t alignment = std::max(meter.module->alignment, alignof(std::max_align_t));
         meter.memory.reset(
-            std::aligned_alloc(alignment, (meter.module->size + alignment - 1) / alignment * alignment));
+            alignedAlloc(alignment, (meter.module->size + alignment - 1) / alignment * alignment));
         return meter;
     }
 

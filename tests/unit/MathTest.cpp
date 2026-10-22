@@ -40,6 +40,10 @@
 #include <utility>
 #include <vector>
 
+#if defined(_WIN32)
+#include <malloc.h>   // _aligned_malloc, _aligned_free
+#endif
+
 #if defined(__APPLE__)
 // libsystem_m's, as runtime/Math.cpp declares them.
 extern "C" fminus_rt_float4 _simd_sin_f4(fminus_rt_float4 x) noexcept;
@@ -51,6 +55,26 @@ extern "C" fminus_rt_float4 _simd_log_f4(fminus_rt_float4 x) noexcept;
 
 namespace
 {
+    // C's aligned_alloc, and the free that goes with it. The Windows C runtime has no aligned_alloc: its aligned memory
+    // comes from _aligned_malloc and goes back to _aligned_free, not free (as the FMinus runtime's does).
+    void* alignedAlloc(std::size_t alignment, std::size_t size)
+    {
+#if defined(_WIN32)
+        return _aligned_malloc(size, alignment);
+#else
+        return std::aligned_alloc(alignment, size);
+#endif
+    }
+
+    void alignedFree(void* memory)
+    {
+#if defined(_WIN32)
+        _aligned_free(memory);
+#else
+        std::free(memory);
+#endif
+    }
+
     using Four = fminus_rt_float4 (*)(fminus_rt_float4) noexcept;
     using One = float (*)(float) noexcept;
 
@@ -472,7 +496,7 @@ namespace
     {
         void operator()(void* memory) const
         {
-            std::free(memory);
+            alignedFree(memory);
         }
     };
 
@@ -486,7 +510,7 @@ namespace
         const fminus::Program::Module& module = *program.module("Math");
         const std::size_t alignment = std::max(module.alignment, alignof(std::max_align_t));
         const std::unique_ptr<void, Free> instance(
-            std::aligned_alloc(alignment, (module.size + alignment - 1) / alignment * alignment));
+            alignedAlloc(alignment, (module.size + alignment - 1) / alignment * alignment));
         std::memset(instance.get(), 0, module.size);
         for (const fminus::Program::Parameter& p : module.parameters)
             fminus::Program::setValue(instance.get(), p, static_cast<double>(parameter));

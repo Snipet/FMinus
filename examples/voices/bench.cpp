@@ -34,8 +34,32 @@
 #include <string>
 #include <vector>
 
+#if defined(_WIN32)
+#include <malloc.h>   // _aligned_malloc, _aligned_free
+#endif
+
 namespace
 {
+    // C's aligned_alloc, and the free that goes with it. The Windows C runtime has no aligned_alloc: its aligned memory
+    // comes from _aligned_malloc and goes back to _aligned_free, not free (as the FMinus runtime's does).
+    void* alignedAlloc(std::size_t alignment, std::size_t size)
+    {
+#if defined(_WIN32)
+        return _aligned_malloc(size, alignment);
+#else
+        return std::aligned_alloc(alignment, size);
+#endif
+    }
+
+    void alignedFree(void* memory)
+    {
+#if defined(_WIN32)
+        _aligned_free(memory);
+#else
+        std::free(memory);
+#endif
+    }
+
     // voices.fm's modules in C++, field for field and line for line: the same fields in the same order, which C++
     // lays out as FMinus does (--check compares the two).
     struct Osc
@@ -238,7 +262,7 @@ namespace
         {
             const std::size_t alignment = std::max(module_.alignment, alignof(std::max_align_t));
             const std::size_t size = (module_.size + alignment - 1) / alignment * alignment;
-            memory_.reset(static_cast<unsigned char*>(std::aligned_alloc(alignment, size)));
+            memory_.reset(static_cast<unsigned char*>(alignedAlloc(alignment, size)));
             if (!memory_)
                 throw std::bad_alloc();
             std::memset(memory_.get(), 0, size);
@@ -253,7 +277,7 @@ namespace
     private:
         struct Free
         {
-            void operator()(unsigned char* p) const { std::free(p); }
+            void operator()(unsigned char* p) const { alignedFree(p); }
         };
 
         const fminus::Program::Module& module_;

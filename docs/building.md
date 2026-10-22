@@ -258,7 +258,9 @@ commands (`cmake --workflow --preset dev`), except `asan`, `tsan` and `xcode`. W
   `--link-arg=legacy_stdio_definitions.lib` (`tests/lit/smoke/build-exe.ll`).
 - **The heap.** The Windows C runtime has no `aligned_alloc`. FMinus's `malloc` and `calloc` come from
   `_aligned_malloc` there, and only `_aligned_free` releases that: a host frees FMinus's memory with `_aligned_free`
-  or FMinus's `free`, and FMinus's `free` cannot release the host's `malloc`'s (`src/runtime/Runtime.h`).
+  or FMinus's `free`, and FMinus's `free` cannot release the host's `malloc`'s (`src/runtime/Runtime.h`). The
+  harnesses and tests that make a module's instance do the same: their `alignedAlloc` and `alignedFree` are C's
+  `aligned_alloc` and `free`, and `_aligned_malloc` and `_aligned_free` on Windows.
 - **lit** runs through Python, `python build-dev\bin\fminus-lit -v tests\lit` (ctest does that itself). The tests of
   Apple's arm64 assembly (`REQUIRES: arm64`) and of its vector math library (`system-darwin`) are skipped; Windows
   names its architectures `AMD64` and `ARM64`, and its system `system-windows`. Windows has no `echo` or `sed`
@@ -288,3 +290,4 @@ commands (`cmake --workflow --preset dev`), except `asan`, `tsan` and `xcode`. W
 | Windows: `WinFlexBison ...: build failed` | the log it names has the compiler's error; WinFlexBison builds with this tree's C compiler, so the same prompt and clang-cl |
 | Windows: `LNK2038: mismatch detected for 'RuntimeLibrary'` | something asked for the debug C runtime (`/MDd`); FMinus and LLVM use the release one, `/MD`, in every configuration ([Windows](#windows)) |
 | Windows: `--emit exe` fails with `LNK1104: cannot open file 'msvcrt.lib'` | run from an x64 developer prompt, whose `LIB` names the C runtime's and the Windows SDK's libraries |
+| Windows: `no member named 'aligned_alloc' in namespace 'std'` | the Windows C runtime has none: `_aligned_malloc`, freed with `_aligned_free`, as `alignedAlloc` and `alignedFree` do in the examples' harnesses ([Windows](#windows)) |

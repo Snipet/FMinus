@@ -30,8 +30,32 @@
 #include <string>
 #include <vector>
 
+#if defined(_WIN32)
+#include <malloc.h>   // _aligned_malloc, _aligned_free
+#endif
+
 namespace
 {
+    // C's aligned_alloc, and the free that goes with it. The Windows C runtime has no aligned_alloc: its aligned memory
+    // comes from _aligned_malloc and goes back to _aligned_free, not free (as the FMinus runtime's does).
+    void* alignedAlloc(std::size_t alignment, std::size_t size)
+    {
+#if defined(_WIN32)
+        return _aligned_malloc(size, alignment);
+#else
+        return std::aligned_alloc(alignment, size);
+#endif
+    }
+
+    void alignedFree(void* memory)
+    {
+#if defined(_WIN32)
+        _aligned_free(memory);
+#else
+        std::free(memory);
+#endif
+    }
+
     // delay.fm's functions: the ones that allocate and free the state, and the one that runs a block on it.
     struct Functions
     {
@@ -123,17 +147,17 @@ namespace
     {
         void operator()(void* memory) const
         {
-            std::free(memory);
+            alignedFree(memory);
         }
     };
 
     // An instance of Echo, as a host makes one: aligned and zeroed, its parameters at their defaults, then set.
-    // std::aligned_alloc takes an alignment of at least a pointer's on macOS, and a size that is a multiple of it.
+    // aligned_alloc takes an alignment of at least a pointer's on macOS, and a size that is a multiple of it.
     std::unique_ptr<void, Free> makeEcho(const Module& kernel, float feedback, float mix)
     {
         const std::size_t alignment = std::max(kernel.echo->alignment, alignof(std::max_align_t));
         std::unique_ptr<void, Free> echo(
-            std::aligned_alloc(alignment, (kernel.echo->size + alignment - 1) / alignment * alignment));
+            alignedAlloc(alignment, (kernel.echo->size + alignment - 1) / alignment * alignment));
         if (echo)
         {
             std::memset(echo.get(), 0, kernel.echo->size);

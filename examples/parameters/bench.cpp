@@ -37,8 +37,32 @@
 #include <string>
 #include <vector>
 
+#if defined(_WIN32)
+#include <malloc.h>   // _aligned_malloc, _aligned_free
+#endif
+
 namespace
 {
+    // C's aligned_alloc, and the free that goes with it. The Windows C runtime has no aligned_alloc: its aligned memory
+    // comes from _aligned_malloc and goes back to _aligned_free, not free (as the FMinus runtime's does).
+    void* alignedAlloc(std::size_t alignment, std::size_t size)
+    {
+#if defined(_WIN32)
+        return _aligned_malloc(size, alignment);
+#else
+        return std::aligned_alloc(alignment, size);
+#endif
+    }
+
+    void alignedFree(void* memory)
+    {
+#if defined(_WIN32)
+        _aligned_free(memory);
+#else
+        std::free(memory);
+#endif
+    }
+
     using fminus::Program;
 
     // parameters.fm's Lfo in C++, line for line, its parameters arguments.
@@ -83,19 +107,19 @@ namespace
     {
         void operator()(void* memory) const
         {
-            std::free(memory);
+            alignedFree(memory);
         }
     };
 
     using Memory = std::unique_ptr<void, Free>;
 
     // An instance of a module, as a host makes one: aligned and zeroed (every field starts at 0), then each parameter
-    // at its fminus::default. std::aligned_alloc takes an alignment of at least a pointer's on macOS, and a size that
+    // at its fminus::default. aligned_alloc takes an alignment of at least a pointer's on macOS, and a size that
     // is a multiple of it.
     Memory instance(const Program::Module& module)
     {
         const std::size_t alignment = std::max(module.alignment, alignof(std::max_align_t));
-        Memory memory(std::aligned_alloc(alignment, (module.size + alignment - 1) / alignment * alignment));
+        Memory memory(alignedAlloc(alignment, (module.size + alignment - 1) / alignment * alignment));
         if (memory)
         {
             std::memset(memory.get(), 0, module.size);
