@@ -17,8 +17,32 @@
 #include <thread>
 #include <vector>
 
+#if defined(_WIN32)
+#include <malloc.h>   // _aligned_malloc, _aligned_free
+#endif
+
 namespace
 {
+    // C's aligned_alloc, and the free that goes with it. The Windows C runtime has no aligned_alloc: its aligned memory
+    // comes from _aligned_malloc and goes back to _aligned_free, not free (as the FMinus runtime's does).
+    void* alignedAlloc(std::size_t alignment, std::size_t size)
+    {
+#if defined(_WIN32)
+        return _aligned_malloc(size, alignment);
+#else
+        return std::aligned_alloc(alignment, size);
+#endif
+    }
+
+    void alignedFree(void* memory)
+    {
+#if defined(_WIN32)
+        _aligned_free(memory);
+#else
+        std::free(memory);
+#endif
+    }
+
     // FMinus's float4 at the C boundary: clang's ext_vector_type(4).
     using float4 = float __attribute__((ext_vector_type(4)));
 
@@ -286,7 +310,7 @@ TEST_CASE("a Program describes its modules, and a host runs their methods on mem
 
     // A voice in the host's memory: aligned, zeroed (every field starts at 0), then set up through a method and a
     // field the host writes itself.
-    void* memory = std::aligned_alloc(voice->alignment, voice->size);
+    void* memory = alignedAlloc(voice->alignment, voice->size);
     REQUIRE(memory != nullptr);
     std::memset(memory, 0, voice->size);
     auto* bytes = static_cast<unsigned char*>(memory);
@@ -299,7 +323,7 @@ TEST_CASE("a Program describes its modules, and a host runs their methods on mem
     for (float& y : out)
         y = tick(memory);
     CHECK(out == std::array<float, 5>{0.5f, 1.0f, 1.5f, 0.0f, 0.5f});
-    std::free(memory);
+    alignedFree(memory);
 }
 
 TEST_CASE("Programs compile, look up and run on several threads at once", "[library]")
@@ -348,13 +372,13 @@ namespace
 
     using Process = void(void*, const float*, float*, int);
 
-    // An instance of a module, as a host makes one: aligned, zeroed. std::aligned_alloc takes an alignment of at least
+    // An instance of a module, as a host makes one: aligned, zeroed. aligned_alloc takes an alignment of at least
     // a pointer's on macOS, and a size that is a multiple of it.
     struct Instance
     {
         explicit Instance(const fminus::Program::Module& module)
             : alignment(std::max(module.alignment, alignof(std::max_align_t)))
-            , memory(std::aligned_alloc(alignment, (module.size + alignment - 1) / alignment * alignment))
+            , memory(alignedAlloc(alignment, (module.size + alignment - 1) / alignment * alignment))
         {
             if (memory != nullptr)
                 std::memset(memory, 0, module.size);
@@ -362,7 +386,7 @@ namespace
 
         ~Instance()
         {
-            std::free(memory);
+            alignedFree(memory);
         }
 
         Instance(const Instance&) = delete;

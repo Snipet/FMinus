@@ -41,8 +41,32 @@
 #include <string_view>
 #include <vector>
 
+#if defined(_WIN32)
+#include <malloc.h>   // _aligned_malloc, _aligned_free
+#endif
+
 namespace
 {
+    // C's aligned_alloc, and the free that goes with it. The Windows C runtime has no aligned_alloc: its aligned memory
+    // comes from _aligned_malloc and goes back to _aligned_free, not free (as the FMinus runtime's does).
+    void* alignedAlloc(std::size_t alignment, std::size_t size)
+    {
+#if defined(_WIN32)
+        return _aligned_malloc(size, alignment);
+#else
+        return std::aligned_alloc(alignment, size);
+#endif
+    }
+
+    void alignedFree(void* memory)
+    {
+#if defined(_WIN32)
+        _aligned_free(memory);
+#else
+        std::free(memory);
+#endif
+    }
+
     // A C++ version's type: it saturates n samples from input into output, at `drive`.
     using Process = void(const float* input, float* output, int n, float drive);
 
@@ -63,13 +87,13 @@ namespace
     {
         void operator()(void* memory) const
         {
-            std::free(memory);
+            alignedFree(memory);
         }
     };
 
     // An instance of Saturator, as a host makes one: aligned and zeroed, its drive at its default. Every program this
     // harness compiles lays the module out alike (its one slot, the drive's), so one instance serves them all.
-    // std::aligned_alloc takes an alignment of at least a pointer's on macOS, and a size that is a multiple of it.
+    // aligned_alloc takes an alignment of at least a pointer's on macOS, and a size that is a multiple of it.
     struct Instance
     {
         std::unique_ptr<void, Free> memory;
@@ -83,7 +107,7 @@ namespace
         if (module == nullptr || (instance.drive = program.parameter("Saturator::drive")) == nullptr)
             return instance;
         const std::size_t alignment = std::max(module->alignment, alignof(std::max_align_t));
-        instance.memory.reset(std::aligned_alloc(alignment, (module->size + alignment - 1) / alignment * alignment));
+        instance.memory.reset(alignedAlloc(alignment, (module->size + alignment - 1) / alignment * alignment));
         if (instance.memory)
         {
             std::memset(instance.memory.get(), 0, module->size);
