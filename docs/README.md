@@ -6,12 +6,13 @@
 | [programs.md](programs.md) | Writing a whole program: `float main(...)`, running it in the JIT, building an executable, and how the compiler gives an executable its C entry point |
 | [extending.md](extending.md) | How to grow the C subset: the change checklist, the worked and verified recipes (a builtin and `%`; `bool` with comparisons, `&&` `\|\|` and `?:`; `if` `while` `for` `break` `continue`; `int`, `void` and pointers; the heap, and clang's `[[clang::nonblocking]]` checked to keep it off the audio thread; arrays and modules, FMinus's classes; an FFT from a C library built into the runtime; parameters, the host's values, read as a knob, a stream or a frozen constant; then the compiler's own: math that gives a float one result wherever it is computed, knob versioning and flat streams, C's strict aliasing told to LLVM, zero-init elision, what the runtime's calls and loops promise, and subnormals flushed for the audio thread, all in the compiler now; a runtime function and an LLVM pass, as a patch), the pitfalls, and design notes for what comes next (a type checker, more of arrays, modules, parameters, knob versioning, the math modes and zero-init elision, the host's allocator) |
 | [simd.md](simd.md) | SIMD, in detail: the hardware and LLVM's vector model, then the three recipes that are FMinus's SIMD, a guide to their code: `float2`/`float4`/`float8` (OpenCL C's vectors), a vector math library (now the fast math mode), and `poly float`, a vector as wide as the machine's; scalable vectors (SVE), the auto-vectorisers, pitfalls, next steps |
+| [threads.md](threads.md) | A design proposal, not yet in the compiler: multithreading as one checked attribute, `[[fminus::parallel]]`, on a `for` loop or a block, whose iterations the compiler proves race-free (an iteration writes only its own element) and the runtime runs on a real-time pool, with the same result at any thread count; what audio needs, the prior art, the rules, the lowering, the runtime, the tests, and the questions to decide |
 | [building.md](building.md) | Presets, the dependency cache and LLVM flavors, adding sources, tools, examples, tests and dependencies, warnings and sanitizers, Windows, troubleshooting |
 | [testing.md](testing.md) | The test layers (Catch2, lit + FileCheck, example harnesses, which call a block kernel once) and how to write each; inspecting and debugging the compiler's output with `fminus`, `opt`, `llc`, `llvm-mca` and lldb |
 | [recipes/](recipes/) | the recipes that aren't in the compiler (a runtime function, a pass), as a patch |
 
-To grow the language, read architecture.md, then extending.md, then simd.md. Use building.md and testing.md as
-reference. To write programs in it, read programs.md.
+To grow the language, read architecture.md, then extending.md, then simd.md; threads.md is the design for what comes
+next. Use building.md and testing.md as reference. To write programs in it, read programs.md.
 
 Elsewhere:
 
