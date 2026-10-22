@@ -1,6 +1,7 @@
 // src/support/HostTarget.cpp
 #include "support/HostTarget.h"
 
+#include "opt/ZeroInitElision.h"
 #include "support/LLVMInit.h"
 
 #include <llvm/Analysis/TargetLibraryInfo.h>
@@ -73,6 +74,19 @@ namespace fminus
             [](llvm::ModulePassManager& modulePasses, llvm::OptimizationLevel, llvm::ThinOrFullLTOPhase) {
                 modulePasses.addPass(llvm::createModuleToFunctionPassAdaptor(llvm::ReplaceWithVeclib()));
             });
+
+        // ---- Zero-init elision (src/opt/ZeroInitElision.h) ----------------------------------------------------------
+        // FMinus zeroes every local array where it is declared; this drops the memset when the program writes every
+        // element it reads first. At the end of each function's simplification (-O1 to -O3; -O0 builds no such
+        // pipeline), after the inliner has brought its callees in: the loop passes have rotated the loops and given
+        // them their induction variables, so ScalarEvolution can count their iterations, and at -O2 and -O3 LICM's
+        // loop adaptor has just put them back in loop-simplify form and DSE has removed what it can. It runs before
+        // the loop vectoriser, which would split a store loop into vector and remainder loops.
+        passes.registerScalarOptimizerLateEPCallback([](llvm::FunctionPassManager& functionPasses,
+                                                        llvm::OptimizationLevel) {
+            functionPasses.addPass(opt::ZeroInitElisionPass());
+        });
+        // ---- end of zero-init elision ------------------------------------------------------------------------------
 
         passes.registerModuleAnalyses(modules);
         passes.registerCGSCCAnalyses(cgsccs);

@@ -1,0 +1,375 @@
+// Zero-init elision (src/opt/ZeroInitElision.h): a local array is zeroed where it is declared (a memset), and from -O1
+// the memset goes when a loop, or a memset or memcpy LLVM made of one, writes every element from 0 as far as the
+// reads go, before any is read. It stays when an element may be read that nothing wrote since the declaration: the
+// writes stop short or skip one, a read comes first, or the array goes to a call. At -O0 every memset stays.
+// RUN: fminus %s -O0 | FileCheck %s --check-prefix=O0
+// RUN: fminus %s -O1 | FileCheck %s --check-prefixes=CHECK,O1
+// RUN: fminus %s -O2 | FileCheck %s --check-prefixes=CHECK,O2
+// RUN: fminus %s -O3 | FileCheck %s --check-prefixes=CHECK,O2
+
+// ---- Covered: the memset goes ----
+
+// The bound an argument, n == 0 included: no element is read then.
+module Smooth
+{
+    float y;
+    void process(const float* restrict in, float* restrict out, int n) [[clang::nonblocking]]
+    {
+        float tmp[256];
+        for (int i = 0; i < n; ++i)
+            tmp[i] = in[i] * 0.5f;
+        for (int i = 0; i < n; ++i)
+        {
+            y += 0.01f * (tmp[i] - y);
+            out[i] = y;
+        }
+    }
+};
+// O0-LABEL: define void @"Smooth::process"(
+// O0:         call void @llvm.memset.p0.i64(ptr align 4 %tmp, i8 0, i64 1024, i1 false)
+// CHECK-LABEL: define void @"Smooth::process"(
+// CHECK-NOT:     call void @llvm.memset.
+// CHECK:         store float {{.*}}, ptr %this
+
+// The method inlined into a loop over four of them.
+module Voices
+{
+    Smooth voices[4];
+    void process(const float* restrict in, float* restrict out, int n)
+    {
+        for (int v = 0; v < 4; ++v)
+            voices[v].process(in, out, n);
+    }
+};
+// CHECK-LABEL: define void @"Voices::process"(
+// CHECK-NOT:     call void @llvm.memset.
+
+// The bound a field, read after the declaration.
+module Counted
+{
+    int count;
+    float run(const float* restrict in)
+    {
+        float t[64];
+        for (int i = 0; i < count; ++i)
+            t[i] = in[i] * 2.0f;
+        float s = 0;
+        for (int i = 0; i < count; ++i)
+            s += t[i];
+        return s;
+    }
+};
+// CHECK-LABEL: define float @"Counted::run"(
+// CHECK-NOT:     call void @llvm.memset.
+
+// A constant bound.
+float sum64(const float* restrict in)
+{
+    float t[64];
+    for (int i = 0; i < 64; ++i)
+        t[i] = in[i] * 2.0f;
+    float s = 0;
+    for (int i = 0; i < 64; ++i)
+        s += t[i];
+    return s;
+}
+// CHECK-LABEL: define float @sum64(
+// CHECK-NOT:     call void @llvm.memset.
+
+// A copy, which LLVM's loop idiom pass makes a memcpy of n * 4 bytes.
+float copied(const float* restrict in, int n)
+{
+    float t[64];
+    for (int i = 0; i < n; ++i)
+        t[i] = in[i];
+    float s = 0;
+    for (int i = 0; i < n; ++i)
+        s += t[i] * 2.0f;
+    return s;
+}
+// CHECK-LABEL: define float @copied(
+// CHECK-NOT:     call void @llvm.memset.
+// CHECK:         call void @llvm.memcpy.p0.p0.i64(ptr {{.*}}%t, ptr {{.*}}%in,
+
+// A fill, which it makes a memset.pattern of n floats.
+float filled(int n)
+{
+    float t[64];
+    for (int i = 0; i < n; ++i)
+        t[i] = 1.5f;
+    float s = 0;
+    for (int i = 0; i < n; ++i)
+        s += t[i];
+    return s;
+}
+// CHECK-LABEL: define float @filled(
+// CHECK-NOT:     call void @llvm.memset.
+// CHECK:         call void @llvm.experimental.memset.pattern.p0.f32.i64(ptr {{.*}}%t, float 1.500000e+00,
+
+// Declared in a loop: zeroed again each iteration, and written again before it is read.
+void blocks(const float* restrict in, float* restrict out, int n, int count)
+{
+    for (int b = 0; b < count; ++b)
+    {
+        float tmp[64];
+        for (int i = 0; i < n; ++i)
+            tmp[i] = in[b * n + i] * 2.0f;
+        for (int i = 0; i < n; ++i)
+            out[b * n + i] = tmp[i] + 1.0f;
+    }
+}
+// CHECK-LABEL: define void @blocks(
+// CHECK-NOT:     call void @llvm.memset.
+
+// Declared before a loop whose iteration j writes j elements and reads as many.
+float triangle(const float* restrict in)
+{
+    float a[16];
+    float s = 0;
+    for (int j = 0; j < 16; ++j)
+    {
+        for (int i = 0; i < j; ++i)
+            a[i] = in[i] * 2.0f;
+        for (int i = 0; i < j; ++i)
+            s += a[i];
+    }
+    return s;
+}
+// CHECK-LABEL: define float @triangle(
+// CHECK-NOT:     call void @llvm.memset.
+
+// t[0] after the loop reads the memset's 0 when n <= 0. At -O1 that read is after the loop's guard rejoins, so the
+// memset stays; from -O2, GVN has already given that path its 0 and moved the load into the loop's exit, and it goes.
+float first(const float* restrict in, int n)
+{
+    float t[64];
+    for (int i = 0; i < n; ++i)
+        t[i] = in[i] * 3.0f;
+    return t[0];
+}
+// CHECK-LABEL: define float @first(
+// O1:            call void @llvm.memset.p0.i64(ptr {{.*}}%t, i8 0, i64 256, i1 false)
+// O2-NOT:        call void @llvm.memset.
+// O2:            phi float [ {{.*}} ], [ 0.000000e+00, %entry ]
+
+// ---- Not covered: the memset stays ----
+
+// The writes stop one short.
+float shorter(const float* restrict in, int n)
+{
+    float t[64];
+    for (int i = 0; i < n - 1; ++i)
+        t[i] = in[i] * 2.0f;
+    float s = 0;
+    for (int i = 0; i < n; ++i)
+        s += t[i];
+    return s;
+}
+// CHECK-LABEL: define float @shorter(
+// CHECK:         call void @llvm.memset.p0.i64(ptr {{.*}}%t, i8 0, i64 256, i1 false)
+
+// Each element is read before it is written.
+float accumulated(const float* restrict in, int n)
+{
+    float t[64];
+    for (int i = 0; i < n; ++i)
+        t[i] = t[i] + in[i];
+    float s = 0;
+    for (int i = 0; i < n; ++i)
+        s += t[i];
+    return s;
+}
+// CHECK-LABEL: define float @accumulated(
+// CHECK:         call void @llvm.memset.p0.i64(ptr {{.*}}%t, i8 0, i64 256, i1 false)
+
+// The store is conditional.
+float positive(const float* restrict in, int n)
+{
+    float t[64];
+    for (int i = 0; i < n; ++i)
+        if (in[i] > 0)
+            t[i] = in[i];
+    float s = 0;
+    for (int i = 0; i < n; ++i)
+        s += t[i];
+    return s;
+}
+// CHECK-LABEL: define float @positive(
+// CHECK:         call void @llvm.memset.p0.i64(ptr {{.*}}%t, i8 0, i64 256, i1 false)
+
+// The store loop may break early.
+float untilNegative(const float* restrict in, int n)
+{
+    float t[64];
+    for (int i = 0; i < n; ++i)
+    {
+        if (in[i] < 0)
+            break;
+        t[i] = in[i] * 2.0f;
+    }
+    float s = 0;
+    for (int i = 0; i < n; ++i)
+        s += t[i];
+    return s;
+}
+// CHECK-LABEL: define float @untilNegative(
+// CHECK:         call void @llvm.memset.p0.i64(ptr {{.*}}%t, i8 0, i64 256, i1 false)
+
+// Every other element.
+float evens(const float* restrict in, int n)
+{
+    float t[64];
+    for (int i = 0; i < n / 2; ++i)
+        t[2 * i] = in[i] * 2.0f;
+    float s = 0;
+    for (int i = 0; i < n; ++i)
+        s += t[i];
+    return s;
+}
+// CHECK-LABEL: define float @evens(
+// CHECK:         call void @llvm.memset.p0.i64(ptr {{.*}}%t, i8 0, i64 256, i1 false)
+
+// From element 1, or from element 2 of the array through a pointer.
+float fromOne(const float* restrict in, int n)
+{
+    float t[64];
+    for (int i = 1; i < n; ++i)
+        t[i] = in[i] * 2.0f;
+    float s = 0;
+    for (int i = 0; i < n; ++i)
+        s += t[i];
+    return s;
+}
+// CHECK-LABEL: define float @fromOne(
+// CHECK:         call void @llvm.memset.p0.i64(ptr {{.*}}%t, i8 0, i64 256, i1 false)
+
+float shifted(const float* restrict in, int n)
+{
+    float t[64];
+    float* p = t + 2;
+    for (int i = 0; i < n; ++i)
+        p[i] = in[i] * 2.0f;
+    float s = 0;
+    for (int i = 0; i < n; ++i)
+        s += t[i];
+    return s;
+}
+// CHECK-LABEL: define float @shifted(
+// CHECK:         call void @llvm.memset.p0.i64(ptr {{.*}}%t, i8 0, i64 256, i1 false)
+
+// The reads go one further than the writes: to i <= n, to t[n], to a bound grown by one, to another bound.
+float onePast(const float* restrict in, int n)
+{
+    float t[64];
+    for (int i = 0; i < n; ++i)
+        t[i] = in[i] * 2.0f;
+    float s = 0;
+    for (int i = 0; i <= n; ++i)
+        s += t[i];
+    return s;
+}
+// CHECK-LABEL: define float @onePast(
+// CHECK:         call void @llvm.memset.p0.i64(ptr {{.*}}%t, i8 0, i64 256, i1 false)
+
+float pastEnd(const float* restrict in, int n)
+{
+    float t[64];
+    for (int i = 0; i < n; ++i)
+        t[i] = in[i] * 2.0f;
+    return t[n];
+}
+// CHECK-LABEL: define float @pastEnd(
+// CHECK:         call void @llvm.memset.p0.i64(ptr {{.*}}%t, i8 0, i64 256, i1 false)
+
+float grown(const float* restrict in, int n)
+{
+    float t[64];
+    for (int i = 0; i < n; ++i)
+        t[i] = in[i] * 2.0f;
+    n = n + 1;
+    float s = 0;
+    for (int i = 0; i < n; ++i)
+        s += t[i];
+    return s;
+}
+// CHECK-LABEL: define float @grown(
+// CHECK:         call void @llvm.memset.p0.i64(ptr {{.*}}%t, i8 0, i64 256, i1 false)
+
+float twoBounds(const float* restrict in, int n, int m)
+{
+    float t[64];
+    for (int i = 0; i < n; ++i)
+        t[i] = in[i] * 2.0f;
+    float s = 0;
+    for (int i = 0; i < m; ++i)
+        s += t[i];
+    return s;
+}
+// CHECK-LABEL: define float @twoBounds(
+// CHECK:         call void @llvm.memset.p0.i64(ptr {{.*}}%t, i8 0, i64 256, i1 false)
+
+// Declared in a loop, and read further than this iteration wrote.
+float growing(const float* restrict in, int n)
+{
+    float s = 0;
+    for (int r = 0; r < 4; ++r)
+    {
+        float a[64];
+        for (int i = 0; i < r; ++i)
+            a[i] = in[i] * 2.0f;
+        for (int i = 0; i < n; ++i)
+            s += a[i];
+    }
+    return s;
+}
+// CHECK-LABEL: define float @growing(
+// CHECK:         call void @llvm.memset.p0.i64(ptr {{.*}}%a{{.*}}, i8 0, i64 256, i1 false)
+
+// Declared before a loop whose first iteration reads without writing.
+float alternate(const float* restrict in, int n)
+{
+    float t[64];
+    float s = 0;
+    for (int r = 0; r < 4; ++r)
+    {
+        int m = 0;
+        if (r % 2 == 1)
+            m = n;
+        for (int i = 0; i < m; ++i)
+            t[i] = in[i] * 2.0f;
+        for (int i = 0; i < n; ++i)
+            s += t[i];
+    }
+    return s;
+}
+// CHECK-LABEL: define float @alternate(
+// CHECK:         call void @llvm.memset.p0.i64(ptr {{.*}}%t, i8 0, i64 256, i1 false)
+
+// The array goes to calls, which may read every element: a C function, and the FFT (whose zero padding this is).
+float external(const float* p, int n);
+
+float passed(const float* restrict in, int n)
+{
+    float t[64];
+    for (int i = 0; i < n; ++i)
+        t[i] = in[i] * 2.0f;
+    return external(t, 64);
+}
+// CHECK-LABEL: define float @passed(
+// CHECK:         call void @llvm.memset.p0.i64(ptr {{.*}}%t, i8 0, i64 256, i1 false)
+// CHECK:         call float @external(ptr {{.*}}%t, i32 64)
+
+float padded(const float* restrict in, int n)
+{
+    float frame[64];
+    for (int i = 0; i < n; ++i)
+        frame[i] = in[i] * 2.0f;
+    void* plan = fft_create(64);
+    float2 bins[33];
+    fft_forward(plan, frame, bins);
+    fft_destroy(plan);
+    return bins[0].x;
+}
+// CHECK-LABEL: define float @padded(
+// CHECK:         call void @llvm.memset.p0.i64(ptr {{.*}}%frame, i8 0, i64 256, i1 false)
+// CHECK:         call void @fminus_rt_fft_forward_real(ptr {{.*}}, ptr {{.*}}%frame, ptr
