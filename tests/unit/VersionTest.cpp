@@ -3,9 +3,10 @@
 // compute what the method computes without the copies, bit for bit, for every value in the knob's domain and for an int
 // outside it. The budget caps the copies; a knob that steers no loop, a float, a wide int and a frozen parameter are
 // left alone; a versioned method stays nonblocking; the IR stays valid at every level. A stream whose pointer is null
-// reads the slot's value, at -O0 too, and a stream with samples reads them as before, bit for bit. (Bit for bit,
-// because no copy here vectorises a math call that the method's own loop keeps scalar: one that does calls the vector
-// library, whose last bits are not libm's; KnobVersioning.h.)
+// reads the slot's value, at -O0 too, and a stream with samples reads them as before, bit for bit. (Bit for bit with
+// math calls too, since the tests compile in the default, vector math mode: a math call is the runtime's function,
+// which gives a float the same result in a copy's vectorised loop as in the method's scalar one, and is never folded.
+// Only the fast mode could move a math call's last bits; KnobVersioning.h.)
 #include "Compile.h"
 
 #include "fminus/FMinus.h"
@@ -14,6 +15,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <llvm/Analysis/ValueTracking.h>
 #include <llvm/AsmParser/Parser.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/InstIterator.h>
@@ -33,6 +35,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <set>
@@ -169,6 +172,64 @@ namespace
                 callees.insert(call->getCalledOperand()->getName().str());
         }
         return callees;
+    }
+
+    // Runs the pass alone on `function`, and says whether the function is still valid IR.
+    bool versionAlone(llvm::Function& function)
+    {
+        {
+            // Declared in this order so they are destroyed in the reverse one (HostTarget.cpp's optimiseModule).
+            llvm::LoopAnalysisManager loops;
+            llvm::FunctionAnalysisManager functions;
+            llvm::CGSCCAnalysisManager cgsccs;
+            llvm::ModuleAnalysisManager modules;
+            llvm::PassBuilder passes;
+            passes.registerModuleAnalyses(modules);
+            passes.registerCGSCCAnalyses(cgsccs);
+            passes.registerFunctionAnalyses(functions);
+            passes.registerLoopAnalyses(loops);
+            passes.crossRegisterProxies(loops, functions, cgsccs, modules);
+            llvm::FunctionPassManager pipeline;
+            pipeline.addPass(fminus::opt::KnobVersioningPass());
+            pipeline.run(function, functions);
+        }
+        std::string problems;
+        llvm::raw_string_ostream os(problems);
+        const bool broken = llvm::verifyFunction(function, &os);
+        INFO(problems);
+        CHECK_FALSE(broken);
+        return !broken;
+    }
+
+    // Hand-written IR, parsed.
+    std::unique_ptr<llvm::Module> parsed(const char* ir, llvm::LLVMContext& context)
+    {
+        llvm::SMDiagnostic diagnostic;
+        std::unique_ptr<llvm::Module> module = llvm::parseAssemblyString(ir, diagnostic, context);
+        INFO(diagnostic.getMessage().str());
+        REQUIRE(module);
+        return module;
+    }
+
+    // The streams whose samples `name` loads four at a time, in their alias scope, by parameter: each such load's
+    // address, less its offsets, is a stream's pointer (%a.stream) or the base its reads select (%d.base, %d.base.i
+    // once inlined), named after the parameter.
+    std::set<std::string> vectorStreams(const llvm::Module& module, const char* name)
+    {
+        std::set<std::string> streams;
+        for (const llvm::Instruction& instruction : llvm::instructions(*module.getFunction(name)))
+        {
+            const auto* load = llvm::dyn_cast<llvm::LoadInst>(&instruction);
+            if (load == nullptr || !load->getType()->isVectorTy()
+                || !load->hasMetadata(llvm::LLVMContext::MD_alias_scope))
+                continue;
+            const llvm::Value* base = load->getPointerOperand();
+            while (const auto* address = llvm::dyn_cast<llvm::GetElementPtrInst>(base))
+                base = address->getPointerOperand();
+            const std::string named = base->getName().str();
+            streams.insert(named.substr(0, named.find('.')));
+        }
+        return streams;
     }
 
     // The bits of each float, so that a comparison is exact (-0 is not 0).
@@ -440,6 +501,78 @@ TEST_CASE("a knob that steers no loop is not versioned, nor a float, a wide int 
     CHECK(lookup<float(Plain*, float)>(*jit, "Plain::tick")(&plain, 5.0f) == -5.0f);
 }
 
+TEST_CASE("a stream read only before the loop is not versioned on, and leaves the budget to the knob that steers it",
+          "[codegen][versions][param]")
+{
+    // The streams' reads select on their tests where the method starts, outside the loop, which uses what they read:
+    // a value, not where the loop's loads are. So only the mode steers the loop: 3 copies. Counted as steering, the
+    // streams, chosen first, would take 4 of the 8 and leave no room for the mode's 3.
+    const char* source = "module Before\n"
+                         "{\n"
+                         "    param float a;\n"
+                         "    param float b;\n"
+                         "    param int mode [[fminus::range(0, 2)]];\n"
+                         "    float y;\n"
+                         "\n"
+                         "    void process(const float* restrict in, float* restrict out, int n)\n"
+                         "    {\n"
+                         "        const float ga = a[0];\n"
+                         "        const float gb = b[0];\n"
+                         "        for (int i = 0; i < n; ++i)\n"
+                         "        {\n"
+                         "            const float x = in[i] * ga + gb;\n"
+                         "            if (mode[i] == 0)\n"
+                         "                y = y * 0.5f + x;\n"
+                         "            else if (mode[i] == 1)\n"
+                         "                y = x - y;\n"
+                         "            else\n"
+                         "                y = y + x * x;\n"
+                         "            out[i] = y;\n"
+                         "        }\n"
+                         "    }\n"
+                         "};\n";
+    const auto streams = std::map<std::string, fminus::ir::ParamBinding>{{"Before::a", {Kind::Stream, 0.0}},
+                                                                         {"Before::b", {Kind::Stream, 0.0}}};
+    llvm::LLVMContext context;
+    CHECK(copiesOf(*optimised(source, versions(8, streams), context), "Before::process") == 3);
+
+    // Flat or with samples, each copy reads what the slot says, as the unversioned method does.
+    struct Before
+    {
+        Slot<float> a, b;
+        Slot<int> mode;
+        float y = 0.0f;
+    };
+    std::string errors;
+    auto versioned = compile(source, &errors, versions(8, streams));
+    auto plain = compile(source, &errors, versions(0, streams));
+    INFO(errors);
+    REQUIRE(versioned);
+    REQUIRE(plain);
+    const std::array<float, 4> in{1.0f, -2.0f, 3.0f, -4.0f};
+    const std::array<float, 1> samples{-1.5f};
+    for (const bool flat : {true, false})
+    {
+        for (const int mode : {0, 1, 2})
+        {
+            INFO((flat ? "flat, mode " : "samples, mode ") << mode);
+            std::array<std::array<float, 4>, 2> out{};
+            for (std::size_t which = 0; which < 2; ++which)
+            {
+                Before before;
+                before.a.value = 0.5f;
+                before.b.value = 0.25f;
+                before.a.stream = flat ? nullptr : samples.data();
+                before.mode.value = mode;
+                auto& jit = which == 0 ? *versioned : *plain;
+                const auto process = lookup<void(Before*, const float*, float*, int)>(jit, "Before::process");
+                process(&before, in.data(), out[which].data(), 4);
+            }
+            CHECK(out[0] == out[1]);
+        }
+    }
+}
+
 TEST_CASE("a frozen parameter is not versioned: it is a constant already", "[codegen][versions]")
 {
     const auto frozen = versions(8, {{"Shape::mode", {Kind::Frozen, 1.0}}, {"Shape::bypass", {Kind::Frozen, 0.0}}});
@@ -646,9 +779,9 @@ namespace
     };
 
     // A one-pole whose coefficient is a stream, its state a field (ParamTest.cpp's): no math function in it, so the C++
-    // below is an oracle in any build. (A biquad's sinf and cosf are not: from -O1 LLVM makes the two one call to
-    // __sincosf_stret, in the JIT and in an optimised C++ build, and a debug build calls sinf and cosf, whose last bits
-    // differ from it.)
+    // below is an oracle in any build. (A biquad's sinf and cosf would be one only through fminus::math: C++'s std::sin
+    // and std::cos are libm's, which the vector mode's are not, and from -O1 clang makes the two one call to
+    // __sincosf_stret, whose last bits differ from libm's sinf and cosf.)
     constexpr const char* kSmooth = "module Smooth\n"
                                     "{\n"
                                     "    param float k;\n"
@@ -787,67 +920,55 @@ TEST_CASE("a stream with samples reads them as before, bit for bit, and a flat o
     CHECK(bits(runBiquad(*plain, in, nullptr, 1000.0f)) == bits(still));
 }
 
-TEST_CASE("each copy of a body gets its own alias scope where the body declares one, and its own loop ID",
-          "[codegen][versions]")
+namespace
 {
     // IR written by hand, as FMinus's code generator never writes it: the scope declared inside the loop, as after
     // inlining, and a loop ID. An int over {0, 1}: two copies, and the original body for any other value. No module
     // flag: the default budget.
-    const char* ir = "define void @f(ptr %this, ptr noalias %out, i32 %n) {\n"
-                     "entry:\n"
-                     "  %mode = load atomic i32, ptr %this unordered, align 4, !fminus.domain !0\n"
-                     "  br label %loop\n"
-                     "loop:\n"
-                     "  %i = phi i32 [ 0, %entry ], [ %next, %latch ]\n"
-                     "  call void @llvm.experimental.noalias.scope.decl(metadata !1)\n"
-                     "  %one = icmp eq i32 %mode, 1\n"
-                     "  br i1 %one, label %then, label %else\n"
-                     "then:\n"
-                     "  store float 1.0, ptr %out, align 4, !alias.scope !1\n"
-                     "  br label %latch\n"
-                     "else:\n"
-                     "  store float 2.0, ptr %out, align 4, !alias.scope !1\n"
-                     "  br label %latch\n"
-                     "latch:\n"
-                     "  %next = add i32 %i, 1\n"
-                     "  %done = icmp eq i32 %next, %n\n"
-                     "  br i1 %done, label %exit, label %loop, !llvm.loop !4\n"
-                     "exit:\n"
-                     "  ret void\n"
-                     "}\n"
-                     "declare void @llvm.experimental.noalias.scope.decl(metadata)\n"
-                     "!0 = !{i32 0, i32 1}\n"
-                     "!1 = !{!2}\n"
-                     "!2 = distinct !{!2, !3, !\"scope\"}\n"
-                     "!3 = distinct !{!3, !\"domain\"}\n"
-                     "!4 = distinct !{!4, !5}\n"
-                     "!5 = !{!\"llvm.loop.mustprogress\"}\n";
-    llvm::LLVMContext context;
-    llvm::SMDiagnostic diagnostic;
-    std::unique_ptr<llvm::Module> module = llvm::parseAssemblyString(ir, diagnostic, context);
-    REQUIRE(module);
-    llvm::Function& function = *module->getFunction("f");
+    constexpr const char* kScopedIr = "define void @f(ptr %this, ptr noalias %out, i32 %n) {\n"
+                                      "entry:\n"
+                                      "  %mode = load atomic i32, ptr %this unordered, align 4, !fminus.domain !0\n"
+                                      "  br label %loop\n"
+                                      "loop:\n"
+                                      "  %i = phi i32 [ 0, %entry ], [ %next, %latch ]\n"
+                                      "  call void @llvm.experimental.noalias.scope.decl(metadata !1)\n"
+                                      "  %one = icmp eq i32 %mode, 1\n"
+                                      "  br i1 %one, label %then, label %else\n"
+                                      "then:\n"
+                                      "  store float 1.0, ptr %out, align 4, !alias.scope !1\n"
+                                      "  br label %latch\n"
+                                      "else:\n"
+                                      "  store float 2.0, ptr %out, align 4, !alias.scope !1\n"
+                                      "  br label %latch\n"
+                                      "latch:\n"
+                                      "  %next = add i32 %i, 1\n"
+                                      "  %done = icmp eq i32 %next, %n\n"
+                                      "  br i1 %done, label %exit, label %loop, !llvm.loop !4\n"
+                                      "exit:\n"
+                                      "  ret void\n"
+                                      "}\n"
+                                      "declare void @llvm.experimental.noalias.scope.decl(metadata)\n"
+                                      "!0 = !{i32 0, i32 1}\n"
+                                      "!1 = !{!2}\n"
+                                      "!2 = distinct !{!2, !3, !\"scope\"}\n"
+                                      "!3 = distinct !{!3, !\"domain\"}\n"
+                                      "!4 = distinct !{!4, !5}\n"
+                                      "!5 = !{!\"llvm.loop.mustprogress\"}\n";
+
+    // How many instructions `function` has.
+    std::size_t sizeOf(const llvm::Function& function)
     {
-        // Declared in this order so they are destroyed in the reverse one (HostTarget.cpp's optimiseModule).
-        llvm::LoopAnalysisManager loops;
-        llvm::FunctionAnalysisManager functions;
-        llvm::CGSCCAnalysisManager cgsccs;
-        llvm::ModuleAnalysisManager modules;
-        llvm::PassBuilder passes;
-        passes.registerModuleAnalyses(modules);
-        passes.registerCGSCCAnalyses(cgsccs);
-        passes.registerFunctionAnalyses(functions);
-        passes.registerLoopAnalyses(loops);
-        passes.crossRegisterProxies(loops, functions, cgsccs, modules);
-        llvm::FunctionPassManager pipeline;
-        pipeline.addPass(fminus::opt::KnobVersioningPass());
-        pipeline.run(function, functions);
+        return static_cast<std::size_t>(std::distance(llvm::inst_begin(function), llvm::inst_end(function)));
     }
-    std::string problems;
-    llvm::raw_string_ostream os(problems);
-    const bool broken = llvm::verifyFunction(function, &os);
-    INFO(problems);
-    CHECK_FALSE(broken);
+} // namespace
+
+TEST_CASE("each copy of a body gets its own alias scope where the body declares one, and its own loop ID",
+          "[codegen][versions]")
+{
+    llvm::LLVMContext context;
+    std::unique_ptr<llvm::Module> module = parsed(kScopedIr, context);
+    llvm::Function& function = *module->getFunction("f");
+    REQUIRE(versionAlone(function));
     CHECK(copiesOf(*module, "f") == 2);
 
     // Three bodies (the two copies and the original), each with its own scope and loop ID; each store in the scope
@@ -867,4 +988,370 @@ TEST_CASE("each copy of a body gets its own alias scope where the body declares 
     CHECK(declared.size() == 3);
     CHECK(stored == declared);
     CHECK(loopIDs.size() == 3);
+}
+
+TEST_CASE("the pass leaves a function it has versioned alone when it runs again", "[codegen][versions]")
+{
+    // FMinus's optimised IR optimised again (fminus x.fm | fminus-build -O3): the knob is still tagged, and the
+    // original body still branches on it, but the function has its copies already.
+    llvm::LLVMContext context;
+    std::unique_ptr<llvm::Module> module = parsed(kScopedIr, context);
+    llvm::Function& function = *module->getFunction("f");
+    REQUIRE(versionAlone(function));
+    const std::size_t once = sizeOf(function);
+    const std::size_t blocks = function.size();
+    REQUIRE(versionAlone(function));
+    CHECK(sizeOf(function) == once);
+    CHECK(function.size() == blocks);
+    CHECK(copiesOf(*module, "f") == 2);
+}
+
+TEST_CASE("a stream's base and stride, selected before the loop, are versioned on, and are constants in each copy",
+          "[codegen][versions][param]")
+{
+    // Two streams as the code generator reads them: each test selects a base and a stride where the function starts,
+    // and the loop uses only those, with no select or branch of its own on a test. The first stream's selects come
+    // before the second's test, the last knob: they move into the body, so each copy has its own. A stride's 1 is the
+    // opaque unit, which a copy for a stream with samples makes 1 again.
+    const char* ir = "define void @g(ptr %a, ptr %b, ptr %cell, ptr noalias %out, i32 %n) {\n"
+                     "entry:\n"
+                     "  %a.flat = icmp eq ptr %a, null, !fminus.domain !0\n"
+                     "  %a.unit = call i64 asm \"\", \"=r,0\"(i64 1) #0\n"
+                     "  %a.base = select i1 %a.flat, ptr %cell, ptr %a\n"
+                     "  %a.stride = select i1 %a.flat, i64 0, i64 %a.unit\n"
+                     "  %b.flat = icmp eq ptr %b, null, !fminus.domain !0\n"
+                     "  %b.unit = call i64 asm \"\", \"=r,0\"(i64 1) #0\n"
+                     "  %b.base = select i1 %b.flat, ptr %cell, ptr %b\n"
+                     "  %b.stride = select i1 %b.flat, i64 0, i64 %b.unit\n"
+                     "  %count = zext i32 %n to i64\n"
+                     "  br label %loop\n"
+                     "loop:\n"
+                     "  %i = phi i64 [ 0, %entry ], [ %next, %loop ]\n"
+                     "  %a.offset = mul i64 %i, %a.stride\n"
+                     "  %a.at = getelementptr float, ptr %a.base, i64 %a.offset\n"
+                     "  %x = load float, ptr %a.at, align 4\n"
+                     "  %b.offset = mul i64 %i, %b.stride\n"
+                     "  %b.at = getelementptr float, ptr %b.base, i64 %b.offset\n"
+                     "  %y = load float, ptr %b.at, align 4\n"
+                     "  %sum = fadd float %x, %y\n"
+                     "  %to = getelementptr float, ptr %out, i64 %i\n"
+                     "  store float %sum, ptr %to, align 4\n"
+                     "  %next = add i64 %i, 1\n"
+                     "  %done = icmp eq i64 %next, %count\n"
+                     "  br i1 %done, label %exit, label %loop\n"
+                     "exit:\n"
+                     "  ret void\n"
+                     "}\n"
+                     "attributes #0 = { nounwind willreturn nosync memory(none) }\n"
+                     "!0 = !{i1 false, i1 true}\n";
+    llvm::LLVMContext context;
+    std::unique_ptr<llvm::Module> module = parsed(ir, context);
+    llvm::Function& function = *module->getFunction("g");
+    REQUIRE(versionAlone(function));
+    CHECK(copiesOf(*module, "g") == 4);
+
+    // Four loops, each with a constant stride for each stream, 0 or 1: no select on a test is left, nor a use of a
+    // unit.
+    std::map<const llvm::BasicBlock*, std::pair<std::int64_t, std::int64_t>> loops;   // each loop's strides
+    for (const llvm::Instruction& instruction : llvm::instructions(function))
+    {
+        if (const auto* select = llvm::dyn_cast<llvm::SelectInst>(&instruction))
+            CHECK_FALSE(select->getCondition()->getName().ends_with(".flat"));
+        if (instruction.getOpcode() != llvm::Instruction::Mul)
+            continue;
+        const auto* stride = llvm::dyn_cast<llvm::ConstantInt>(instruction.getOperand(1));
+        INFO(instruction.getName().str());
+        REQUIRE(stride != nullptr);
+        auto [at, added] = loops.try_emplace(instruction.getParent(), -1, -1);
+        (instruction.getName().starts_with("a.") ? at->second.first : at->second.second) = stride->getSExtValue();
+    }
+    std::set<std::pair<std::int64_t, std::int64_t>> strides;
+    for (const auto& [loop, pair] : loops)
+        strides.insert(pair);
+    CHECK(strides == std::set<std::pair<std::int64_t, std::int64_t>>{{0, 0}, {0, 1}, {1, 0}, {1, 1}});
+    for (const char* unit : {"a.unit", "b.unit"})
+    {
+        for (const llvm::Instruction& instruction : llvm::instructions(function))
+        {
+            if (instruction.getName() == unit)
+                CHECK(instruction.use_empty());
+        }
+    }
+}
+
+namespace
+{
+    // Five streams in one loop: under the default budget, three of their tests are versioned on (8 copies), and the
+    // other two are read as unversioned code reads them, in every copy.
+    constexpr const char* kMix = "module Mix\n"
+                                 "{\n"
+                                 "    param float a;\n"
+                                 "    param float b;\n"
+                                 "    param float c;\n"
+                                 "    param float d;\n"
+                                 "    param float e;\n"
+                                 "\n"
+                                 "    void process(const float* restrict in, float* restrict out, int n)\n"
+                                 "        [[clang::nonblocking]]\n"
+                                 "    {\n"
+                                 "        for (int i = 0; i < n; ++i)\n"
+                                 "            out[i] = in[i] * a[i] + b[i] * c[i] + d[i] * e[i];\n"
+                                 "    }\n"
+                                 "};\n";
+
+    struct Mix
+    {
+        std::array<Slot<float>, 5> streams;
+    };
+
+    // Mix::process's output for one sample, in C++, one rounding at a time.
+    float mixed(float x, const std::array<float, 5>& at)
+    {
+        const float first = x * at[0];
+        const float second = at[1] * at[2];
+        const float both = first + second;
+        const float third = at[3] * at[4];
+        return both + third;
+    }
+
+    // A gain stage whose method has no loop, inlined into a loop that calls it a sample at a time.
+    constexpr const char* kRack = "module Amp\n"
+                                  "{\n"
+                                  "    param float gain;\n"
+                                  "    float apply(float x, int i) { return x * gain[i]; }\n"
+                                  "};\n"
+                                  "\n"
+                                  "module Rack\n"
+                                  "{\n"
+                                  "    Amp amp;\n"
+                                  "\n"
+                                  "    void process(const float* restrict in, float* restrict out, int n)\n"
+                                  "        [[clang::nonblocking]]\n"
+                                  "    {\n"
+                                  "        for (int i = 0; i < n; ++i)\n"
+                                  "            out[i] = amp.apply(in[i], i);\n"
+                                  "    }\n"
+                                  "};\n";
+
+    struct Rack
+    {
+        Slot<float> gain;
+    };
+
+    // A smoother over a scratch array, whose step a mode picks and whose input `invert` flips: six copies and the
+    // original body, each zeroing the array where it is declared and writing it before reading it.
+    constexpr const char* kScratch = "module Scratch\n"
+                                     "{\n"
+                                     "    param bool invert;\n"
+                                     "    param int mode [[fminus::range(0, 2)]];\n"
+                                     "    float y;\n"
+                                     "\n"
+                                     "    void process(const float* restrict in, float* restrict out, int n)\n"
+                                     "        [[clang::nonblocking]]\n"
+                                     "    {\n"
+                                     "        float tmp[256];\n"
+                                     "        for (int i = 0; i < n; ++i)\n"
+                                     "            tmp[i] = invert[i] ? -in[i] * 0.5f : in[i] * 0.5f;\n"
+                                     "        for (int i = 0; i < n; ++i)\n"
+                                     "        {\n"
+                                     "            const float k = mode[i] == 0 ? 0.01f : mode[i] == 1 ? 0.1f : 0.5f;\n"
+                                     "            y += k * (tmp[i] - y);\n"
+                                     "            out[i] = y;\n"
+                                     "        }\n"
+                                     "    }\n"
+                                     "};\n";
+
+    struct Scratch
+    {
+        Slot<bool> invert;
+        Slot<int> mode;
+        float y = 0.0f;
+    };
+
+    // Scratch::process in C++, one rounding at a time; the state last.
+    std::vector<float> scratchCpp(bool invert, int mode, const std::vector<float>& in)
+    {
+        const float k = mode == 0 ? 0.01f : mode == 1 ? 0.1f : 0.5f;
+        float y = 0.0f;
+        std::vector<float> out;
+        for (const float x : in)
+        {
+            const float half = invert ? -x * 0.5f : x * 0.5f;
+            const float step = k * (half - y);
+            y = y + step;
+            out.push_back(y);
+        }
+        out.push_back(y);
+        return out;
+    }
+} // namespace
+
+TEST_CASE("a loop over more streams than the budget versions on still vectorises, and reads each as it says",
+          "[codegen][versions][param]")
+{
+    std::map<std::string, fminus::ir::ParamBinding> streams;
+    for (const char* name : {"Mix::a", "Mix::b", "Mix::c", "Mix::d", "Mix::e"})
+        streams[name] = {Kind::Stream, 0.0};
+
+    // Every stream read four samples at a time, unversioned, on one test, and on three (the two left read at a stride
+    // the vectoriser checks is 1).
+    const std::set<std::string> all{"a", "b", "c", "d", "e"};
+    for (const auto& [budget, copies] : std::map<unsigned, int>{{0, 1}, {2, 2}, {8, 8}})
+    {
+        INFO("budget " << budget);
+        llvm::LLVMContext context;
+        const auto module = optimised(kMix, versions(budget, streams), context);
+        CHECK(copiesOf(*module, "Mix::process") == copies);
+        CHECK(vectorStreams(*module, "Mix::process") == all);
+    }
+
+    // Every combination of flat streams and streams with samples, over vector iterations and a remainder: what C++
+    // computes, bit for bit.
+    constexpr int kSamples = 67;
+    std::vector<float> in;
+    std::array<std::vector<float>, 5> samples;
+    for (int i = 0; i < kSamples; ++i)
+    {
+        in.push_back(0.25f * static_cast<float>(i % 9) - 1.0f);
+        for (std::size_t s = 0; s < samples.size(); ++s)
+        {
+            const float slope = s % 2 == 0 ? 0.013f : -0.017f;
+            samples[s].push_back(0.1f * static_cast<float>(s + 1) + slope * static_cast<float>(i));
+        }
+    }
+    const std::array<float, 5> flat{0.5f, -1.25f, 2.0f, 0.75f, -0.375f};
+    for (const unsigned budget : {8u, 0u})
+    {
+        std::string errors;
+        auto jit = compile(kMix, &errors, versions(budget, streams));
+        INFO(errors);
+        REQUIRE(jit);
+        const auto process = lookup<void(Mix*, const float*, float*, int)>(*jit, "Mix::process");
+        for (unsigned mask = 0; mask < 32; ++mask)   // bit s set: stream s is flat
+        {
+            INFO("budget " << budget << ", flat streams " << mask);
+            Mix mix;
+            for (std::size_t s = 0; s < 5; ++s)
+            {
+                const bool isFlat = ((mask >> s) & 1) != 0;
+                mix.streams[s].stream = isFlat ? nullptr : samples[s].data();
+                mix.streams[s].value = isFlat ? flat[s] : 1.0e9f;   // a stream with samples does not read its value
+            }
+            std::vector<float> out(kSamples);
+            process(&mix, in.data(), out.data(), kSamples);
+            std::vector<float> expected;
+            for (int i = 0; i < kSamples; ++i)
+            {
+                std::array<float, 5> at{};
+                for (std::size_t s = 0; s < 5; ++s)
+                    at[s] = ((mask >> s) & 1) != 0 ? flat[s] : samples[s][static_cast<std::size_t>(i)];
+                expected.push_back(mixed(in[static_cast<std::size_t>(i)], at));
+            }
+            CHECK(bits(out) == bits(expected));
+        }
+    }
+}
+
+TEST_CASE("a stream read in a method without a loop, inlined into its caller's loop, vectorises there",
+          "[codegen][versions][param]")
+{
+    const auto stream = std::map<std::string, fminus::ir::ParamBinding>{{"Amp::gain", {Kind::Stream, 0.0}}};
+    for (const unsigned budget : {8u, 0u})
+    {
+        INFO("budget " << budget);
+        llvm::LLVMContext context;
+        const auto module = optimised(kRack, versions(budget, stream), context);
+        CHECK(copiesOf(*module, "Amp::apply") == 1);   // no loop of its own
+        CHECK(vectorStreams(*module, "Rack::process") == std::set<std::string>{"gain"});
+
+        std::string errors;
+        auto jit = compile(kRack, &errors, versions(budget, stream));
+        INFO(errors);
+        REQUIRE(jit);
+        const auto process = lookup<void(Rack*, const float*, float*, int)>(*jit, "Rack::process");
+        std::vector<float> in;
+        std::vector<float> ramp;
+        for (int i = 0; i < 37; ++i)
+        {
+            in.push_back(static_cast<float>(i % 5) - 2.0f);
+            ramp.push_back(0.05f * static_cast<float>(i));
+        }
+        std::vector<float> out(in.size());
+        Rack rack;
+        rack.gain.stream = ramp.data();
+        rack.gain.value = 1.0e9f;
+        process(&rack, in.data(), out.data(), static_cast<int>(in.size()));
+        for (std::size_t i = 0; i < in.size(); ++i)
+            CHECK(std::bit_cast<std::uint32_t>(out[i]) == std::bit_cast<std::uint32_t>(in[i] * ramp[i]));
+        rack.gain.stream = nullptr;
+        rack.gain.value = 0.75f;
+        process(&rack, in.data(), out.data(), static_cast<int>(in.size()));
+        for (std::size_t i = 0; i < in.size(); ++i)
+            CHECK(std::bit_cast<std::uint32_t>(out[i]) == std::bit_cast<std::uint32_t>(in[i] * 0.75f));
+    }
+}
+
+TEST_CASE("each copy has locals of its own, so zero-init elision removes a local array's memset in every copy",
+          "[codegen][versions]")
+{
+    // One array shared by the copies would be zeroed in each, and read in all: no copy's memset would dominate the
+    // reads, and zero-init elision would keep every one, at every level. Each copy's own array has its lifetime
+    // marked, so the code generator gives them all one stack slot. At -O3 the original body, the fallback for a
+    // mode outside 0..2, keeps its memset, as the method without copies does at -O3.
+    for (const llvm::OptimizationLevel level :
+         {llvm::OptimizationLevel::O1, llvm::OptimizationLevel::O2, llvm::OptimizationLevel::O3})
+    {
+        const bool o3 = level == llvm::OptimizationLevel::O3;
+        INFO((o3 ? "-O3" : level == llvm::OptimizationLevel::O2 ? "-O2" : "-O1"));
+        llvm::LLVMContext context;
+        const auto module = optimised(kScratch, versions(8), context, level);
+        CHECK(copiesOf(*module, "Scratch::process") == 6);
+        int arrays = 0;
+        for (const llvm::Instruction& instruction : llvm::instructions(*module->getFunction("Scratch::process")))
+        {
+            if (const auto* local = llvm::dyn_cast<llvm::AllocaInst>(&instruction))
+            {
+                ++arrays;
+                CHECK(local->getParent()->isEntryBlock());
+                CHECK(llvm::any_of(local->users(), [](const llvm::User* user) {
+                    const auto* call = llvm::dyn_cast<llvm::IntrinsicInst>(user);
+                    return call != nullptr && call->getIntrinsicID() == llvm::Intrinsic::lifetime_start;
+                }));
+            }
+            if (const auto* memset = llvm::dyn_cast<llvm::MemSetInst>(&instruction))
+            {
+                const llvm::Value* local = llvm::getUnderlyingObject(memset->getDest());
+                INFO("a memset of " << local->getName().str());
+                CHECK((o3 && local->getName() == "tmp"));   // the fallback's, at -O3 only
+            }
+        }
+        CHECK(arrays == 7);   // the six copies' and the original body's
+    }
+
+    std::string errors;
+    auto versioned = compile(kScratch, &errors, versions(8));
+    auto plain = compile(kScratch, &errors, versions(0));
+    INFO(errors);
+    REQUIRE(versioned);
+    REQUIRE(plain);
+    const std::vector<float> in = testSignal();
+    const auto run = [&](fminus::jit::Jit& jit, bool invert, int mode) {
+        Scratch scratch;
+        scratch.invert.value = invert;
+        scratch.mode.value = mode;
+        std::vector<float> out(in.size());
+        lookup<void(Scratch*, const float*, float*, int)>(jit, "Scratch::process")(&scratch, in.data(), out.data(),
+                                                                                   static_cast<int>(in.size()));
+        out.push_back(scratch.y);
+        return out;
+    };
+    for (const bool invert : {false, true})
+    {
+        for (const int mode : {0, 1, 2, 7})
+        {
+            INFO("invert " << invert << ", mode " << mode);
+            CHECK(bits(run(*versioned, invert, mode)) == bits(run(*plain, invert, mode)));
+            CHECK(bits(run(*versioned, invert, mode)) == bits(scratchCpp(invert, mode, in)));
+        }
+    }
 }

@@ -3,8 +3,8 @@
 // reads go, before any is read. It stays when an element may be read that nothing wrote since the declaration: the
 // writes stop short or skip one, a read comes first, or the array goes to a call. At -O0 every memset stays.
 // RUN: fminus %s -O0 | FileCheck %s --check-prefix=O0
-// RUN: fminus %s -O1 | FileCheck %s --check-prefixes=CHECK,O1
-// RUN: fminus %s -O2 | FileCheck %s --check-prefixes=CHECK,O2
+// RUN: fminus %s -O1 | FileCheck %s --check-prefixes=CHECK,O1,O12
+// RUN: fminus %s -O2 | FileCheck %s --check-prefixes=CHECK,O2,O12
 // RUN: fminus %s -O3 | FileCheck %s --check-prefixes=CHECK,O2
 
 // ---- Covered: the memset goes ----
@@ -43,6 +43,36 @@ module Voices
 };
 // CHECK-LABEL: define void @"Voices::process"(
 // CHECK-NOT:     call void @llvm.memset.
+
+// A method with copies (knob versioning, versions.fm), one for each mode and each `invert`: each copy has an array of
+// its own (%tmp.invert0.mode0, ...), zeroed and then written in that copy, and loses its memset. (So does the original
+// body, the fallback for a mode outside 0..2, at -O1 and -O2 (O12); at -O3, where LLVM unswitches its loop on the
+// mode, it keeps it, as the method without copies does at -O3.)
+module Shaped
+{
+    param bool invert;
+    param int mode [[fminus::range(0, 2)]];
+    float y;
+    void process(const float* restrict in, float* restrict out, int n) [[clang::nonblocking]]
+    {
+        float tmp[256];
+        for (int i = 0; i < n; ++i)
+            tmp[i] = invert[i] ? -in[i] * 0.5f : in[i] * 0.5f;
+        for (int i = 0; i < n; ++i)
+        {
+            y += (mode[i] == 0 ? 0.01f : mode[i] == 1 ? 0.1f : 0.5f) * (tmp[i] - y);
+            out[i] = y;
+        }
+    }
+};
+// O0-LABEL: define void @"Shaped::process"(
+// O0:         call void @llvm.memset.p0.i64(ptr align 4 %tmp, i8 0, i64 1024, i1 false)
+// CHECK-LABEL: define void @"Shaped::process"(
+// CHECK:         %tmp.invert0.mode0 = alloca [256 x float]
+// CHECK-NOT:     call void @llvm.memset.p0.i64(ptr {{.*}}%tmp.
+// CHECK:         switch i32 %mode, label
+// CHECK-NOT:     call void @llvm.memset.p0.i64(ptr {{.*}}%tmp.
+// O12-NOT:       call void @llvm.memset.
 
 // The bound a field, read after the declaration.
 module Counted

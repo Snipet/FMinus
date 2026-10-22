@@ -6,12 +6,14 @@
 #include "Compile.h"
 
 #include "ir/Denormals.h"
+#include "support/HostTarget.h"
 
 #include <catch2/catch_test_macros.hpp>
 
 #include <llvm/ADT/FloatingPointMode.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/Function.h>
+#include <llvm/IR/InlineAsm.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/IntrinsicsAArch64.h>
@@ -19,6 +21,7 @@
 #include <llvm/IR/Verifier.h>
 
 #include <llvm/Support/raw_ostream.h>
+#include <llvm/Target/TargetMachine.h>
 
 #include <array>
 #include <bit>
@@ -124,6 +127,25 @@ namespace
         std::unique_ptr<llvm::Module> module =
             program ? fminus::ir::lower(*program, context, diagnostics, options) : nullptr;
         errors = diagnostics.format();
+        return module;
+    }
+
+    // The program lowered and optimised at `level` for this machine, as the JIT does it: to read what the pipeline
+    // made of it.
+    std::unique_ptr<llvm::Module> optimised(std::string_view source, const fminus::ir::Options& options,
+                                            llvm::LLVMContext& context, llvm::OptimizationLevel level)
+    {
+        fminus::Diagnostics diagnostics("test.fm");
+        const auto program = fminus::frontend::parse(source, diagnostics);
+        auto machine = llvm::cantFail(fminus::hostTargetMachine(fminus::codeGenLevel(level)));
+        fminus::ir::Options lowering = options;
+        lowering.dataLayout = machine->createDataLayout().getStringRepresentation();
+        std::unique_ptr<llvm::Module> module =
+            program ? fminus::ir::lower(*program, context, diagnostics, lowering) : nullptr;
+        INFO(diagnostics.format());
+        REQUIRE(module);
+        fminus::prepareModule(*module, *machine);
+        fminus::optimiseModule(*module, *machine, level);
         return module;
     }
 
@@ -242,6 +264,30 @@ namespace
             }
         }
         return writes;
+    }
+
+    // How a wrapper calls its body: through the body's address passed through an empty inline asm (the first count),
+    // and directly (the second), which a call that LLVM keeps between the writes of the register must not be.
+    std::pair<int, int> callsOfBody(const llvm::Function& entry, const llvm::Function& body)
+    {
+        int laundered = 0;
+        int direct = 0;
+        for (const llvm::BasicBlock& block : entry)
+        {
+            for (const llvm::Instruction& instruction : block)
+            {
+                const auto* call = llvm::dyn_cast<llvm::CallInst>(&instruction);
+                if (call == nullptr)
+                    continue;
+                if (call->getCalledOperand() == &body)
+                    ++direct;
+                const auto* address = llvm::dyn_cast<llvm::CallInst>(call->getCalledOperand());
+                if (address != nullptr && address->isInlineAsm() && address->getArgOperand(0) == &body
+                    && llvm::cast<llvm::InlineAsm>(address->getCalledOperand())->getAsmString().empty())
+                    ++laundered;
+            }
+        }
+        return {laundered, direct};
     }
 
     // The intrinsics a function calls, by ID, in order.
@@ -426,11 +472,87 @@ TEST_CASE("a nonblocking function the program calls is no entry point: it runs i
     }
 }
 
-TEST_CASE("under Flush a frozen parameter's folding agrees with a knob's run time, at -O0 and -O2",
+TEST_CASE("under Flush an entry point whose body touches no memory runs flushing too, at every level",
+          "[codegen][denormals]")
+{
+    // Each body is memory(none) once FunctionAttrs has run: a call LLVM may move, as it may an fmul, unless the
+    // wrapper's call is one it must keep between the writes of the register (Denormals.cpp). At -O1 InstCombine sank
+    // the call past the write that restores the caller's mode, so the body ran in an IEEE host's mode.
+    constexpr const char* source = "float scaled(float x) [[clang::nonblocking]] { return x * 1e-30f * 1e-10f; }\n"
+                                   "float soft(float x) [[clang::nonblocking]] { return tanhf(x) * 1e-10f; }\n"
+                                   "bool above(float x) [[clang::nonblocking]] { return x * 1e-30f > 0; }\n"
+                                   "float4 lanes(float4 v) [[clang::nonblocking]] { return v * 1e-30f * 1e-10f; }\n";
+    for (const auto& [level, name] : {std::pair{llvm::OptimizationLevel::O0, "-O0"},
+                                      std::pair{llvm::OptimizationLevel::O1, "-O1"},
+                                      std::pair{llvm::OptimizationLevel::O2, "-O2"},
+                                      std::pair{llvm::OptimizationLevel::O3, "-O3"}})
+    {
+        INFO(name);
+        if (level != llvm::OptimizationLevel::O0)
+        {
+            llvm::LLVMContext context;
+            const auto module = optimised(source, with(Denormals::Flush), context, level);
+            for (const char* function : {"scaled", "soft", "above", "lanes"})
+            {
+                INFO(function);
+                const llvm::Function* entry = module->getFunction(function);
+                const llvm::Function* body = module->getFunction(std::string(function) + ".body");
+                REQUIRE(entry != nullptr);
+                REQUIRE(body != nullptr);
+                CHECK(body->doesNotAccessMemory());   // the case this test is for
+                const auto [laundered, direct] = callsOfBody(*entry, *body);
+                CHECK(laundered >= 1);   // LLVM did not see through the asm
+                CHECK(direct == 0);
+            }
+        }
+        std::string errors;
+        auto jit = compileAt(source, level, with(Denormals::Flush), errors);
+        INFO(errors);
+        REQUIRE(jit);
+        auto* scaled = lookup<float(float)>(*jit, "scaled");
+        auto* soft = lookup<float(float)>(*jit, "soft");
+        auto* above = lookup<bool(float)>(*jit, "above");
+        auto* lanes = lookup<float4(float4)>(*jit, "lanes");
+        for (const bool flushing : {false, true})
+        {
+            INFO("the host " << (flushing ? "flushing" : "in IEEE mode"));
+            float tiny = 1.0f;
+            float negative = 1.0f;
+            float tanh = 1.0f;
+            bool positive = true;
+            std::array<float, 4> four{};
+            std::uint64_t before = 0;
+            std::uint64_t after = 0;
+            {
+                const ScopedMode host(flushing);
+                before = controlRegister();
+                tiny = scaled(1.0f);
+                negative = scaled(-1.0f);
+                tanh = soft(1e-30f);
+                positive = above(1e-10f);
+                four = lanesOf(lanes(float4{1.0f, -1.0f, 1e20f, 0.0f}));
+                after = controlRegister();
+            }
+            // Compared outside the host's scope: there a comparison would read a subnormal as 0 if it flushes.
+            CHECK(sameBits(tiny, 0.0f));
+            CHECK(sameBits(negative, -0.0f));
+            CHECK(sameBits(tanh, 0.0f));
+            CHECK_FALSE(positive);
+            CHECK(sameBits(four[0], 0.0f));
+            CHECK(sameBits(four[1], -0.0f));
+            CHECK(four[2] == opaque(1e20f) * opaque(1e-30f) * opaque(1e-10f));   // 1e-20: normal, as it was
+            CHECK(after == before);
+        }
+    }
+}
+
+TEST_CASE("under Flush a frozen parameter's folding agrees with a knob's run time, at -O0 to -O3",
           "[codegen][denormals]")
 {
     for (const auto& [level, name] : {std::pair{llvm::OptimizationLevel::O0, "-O0"},
-                                      std::pair{llvm::OptimizationLevel::O2, "-O2"}})
+                                      std::pair{llvm::OptimizationLevel::O1, "-O1"},
+                                      std::pair{llvm::OptimizationLevel::O2, "-O2"},
+                                      std::pair{llvm::OptimizationLevel::O3, "-O3"}})
     {
         INFO(name);
         std::string errors;
@@ -543,6 +665,8 @@ TEST_CASE("under Flush every definition is marked preservesign, and an entry poi
                                                                       llvm::Intrinsic::aarch64_set_fpcr,
                                                                       llvm::Intrinsic::aarch64_set_fpcr});
         CHECK(writesInEntryBlock(*entry) == 0);   // each write behind the test of the caller's mode
+        // Through its address passed through an empty asm, on each of the two paths, and never directly.
+        CHECK(callsOfBody(*entry, *body) == std::pair{2, 0});
     }
     // The C ABI's attributes go with the name: gate's bools are zeroext, process's `this` nonnull and its out noalias.
     const llvm::Function* gate = module->getFunction("gate");
@@ -603,7 +727,9 @@ TEST_CASE("on x86-64 an entry point sets MXCSR's FTZ and DAZ, through stack slot
         }
     }
     CHECK(setsBoth);
-    CHECK(modeOf(*module->getFunction("process.body")) == kPreserveSign);
+    const llvm::Function* body = module->getFunction("process.body");
+    CHECK(modeOf(*body) == kPreserveSign);
+    CHECK(callsOfBody(*entry, *body) == std::pair{2, 0});
 }
 
 TEST_CASE("Flush on a target whose mode FMinus cannot set is an error, and Preserve is not", "[codegen][denormals]")

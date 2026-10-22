@@ -1,10 +1,10 @@
 // Subnormals flushed to zero (--denormals=flush, src/ir/Denormals.cpp): every function the program defines is marked
 // denormal_fpenv(preservesign), at -O0 and after the pipeline; an entry point (twice, Tiny::scaled: nonblocking, and
 // called by nothing in the program) becomes an internal, noinline `.body` and a denormal_fpenv(dynamic) wrapper of its
-// name that calls it, while a nonblocking function the program calls (mul) and one that is not nonblocking (init) stay
-// as they are; a frozen parameter's 1e-30 * 1e-10 folds to 0, as it runs. Under preserve, the default, none of it: no
-// attribute, no wrapper, and the subnormal folded as IEEE computes it. The wrapper's instructions are target's own
-// (denormals-arm64.fm).
+// name that calls it, through its address passed through an empty inline asm, while a nonblocking function the program
+// calls (mul) and one that is not nonblocking (init) stay as they are; a frozen parameter's 1e-30 * 1e-10 folds to 0,
+// as it runs. Under preserve, the default, none of it: no attribute, no wrapper, and the subnormal folded as IEEE
+// computes it. The wrapper's instructions are target's own (denormals-arm64.fm).
 // RUN: fminus %s -O0 --denormals=flush --freeze Tiny::k=1e-30 \
 // RUN:   | FileCheck %s --check-prefix=FLUSH --implicit-check-not=@mul.body --implicit-check-not=@init.body
 // RUN: fminus %s --denormals=flush --freeze Tiny::k=1e-30 | FileCheck %s --check-prefix=OPTIMISED
@@ -20,8 +20,12 @@
 // RUN: fminus %s --denormals=flush | sed -n -e '/^define/{' -e 'x' -e 'p' -e 'x' -e '}' -e 'h' \
 // RUN:   | sed -e '/denormal_fpenv/d' | count 0
 //
-// Run through the JIT: the entry point flushes; mul, called by twice, runs in the driver's mode, IEEE's.
+// Run through the JIT: the entry point flushes, at every level (twice's body touches no memory, and at -O1 a plain call
+// of it was sunk below the write that restores the mode); mul, called by twice, runs in the driver's mode, IEEE's.
 // RUN: fminus %s --denormals=flush --run twice 1e-30 1e-10 | FileCheck %s --check-prefix=CALL-FLUSH
+// RUN: fminus %s -O0 --denormals=flush --run twice 1e-30 1e-10 | FileCheck %s --check-prefix=CALL-FLUSH
+// RUN: fminus %s -O1 --denormals=flush --run twice 1e-30 1e-10 | FileCheck %s --check-prefix=CALL-FLUSH
+// RUN: fminus %s -O3 --denormals=flush --run twice 1e-30 1e-10 | FileCheck %s --check-prefix=CALL-FLUSH
 // RUN: fminus %s --run twice 1e-30 1e-10 | FileCheck %s --check-prefix=CALL-PRESERVE
 // RUN: fminus %s --denormals=flush --run mul 1e-30 1e-10 | FileCheck %s --check-prefix=CALL-PRESERVE
 // RUN: not fminus %s --denormals=ieee 2>&1 | FileCheck %s --check-prefix=BAD
@@ -62,20 +66,32 @@ module Tiny
 // FLUSH:        ret float 0.000000e+00
 // FLUSH:      ; Function Attrs: denormal_fpenv(dynamic)
 // FLUSH-NEXT: define float @twice(float %a, float %b) #[[ENTRY:[0-9]+]] {
-// FLUSH:        %result = call float @twice.body(float %a, float %b)
-// FLUSH:        ret float %result
+// FLUSH:        %body = call ptr asm "", "=r,0"(ptr @twice.body)
+// FLUSH:        %result = call float %body(float %a, float %b)
+// FLUSH-NEXT:   ret float %result
+// FLUSH:        %flushed = call float %body(float %a, float %b)
+// FLUSH:        ret float %flushed
 // FLUSH:      define float @"Tiny::scaled"(ptr nonnull align 8 dereferenceable(16) %this) #[[ENTRY]] {
-// FLUSH:        %result = call float @"Tiny::scaled.body"(ptr %this)
+// FLUSH:        %body = call ptr asm "", "=r,0"(ptr @"Tiny::scaled.body")
+// FLUSH:        %result = call float %body(ptr nonnull align 8 dereferenceable(16) %this)
 // FLUSH:      attributes #[[FLUSHING]] = { denormal_fpenv(preservesign) }
 // FLUSH:      attributes #[[BODY]] = { noinline denormal_fpenv(preservesign) }
 // FLUSH:      attributes #[[ENTRY]] = { denormal_fpenv(dynamic) }
 
+// After the pipeline the body's constant is still 0, and each wrapper still calls its body through the asm's result
+// (the body's address escapes into it, so the body keeps C's calling convention).
 // OPTIMISED:       define float @mul(
-// OPTIMISED:       define internal fastcc float @twice.body(
+// OPTIMISED:       define internal float @twice.body(
+// OPTIMISED:       define internal noundef float @"Tiny::scaled.body"(
+// OPTIMISED-NEXT:  entry:
+// OPTIMISED-NEXT:    ret float 0.000000e+00
 // OPTIMISED-LABEL: define float @twice(
-// OPTIMISED:         call fastcc float @twice.body(
-// OPTIMISED-LABEL: define noundef float @"Tiny::scaled"(
-// OPTIMISED:         ret float 0.000000e+00
+// OPTIMISED:         %body = tail call ptr asm "", "=r,0"(ptr nonnull @twice.body)
+// OPTIMISED:         call float %body(float %a, float %b)
+// OPTIMISED:         call float %body(float %a, float %b)
+// OPTIMISED-LABEL: define float @"Tiny::scaled"(
+// OPTIMISED:         %body = tail call ptr asm "", "=r,0"(ptr nonnull @"Tiny::scaled.body")
+// OPTIMISED:         call float %body(ptr nonnull align 8 dereferenceable(16) %this)
 
 // PRESERVE:      define float @mul(float %a, float %b) {
 // PRESERVE:      define float @twice(float %a, float %b) {

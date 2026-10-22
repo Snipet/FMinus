@@ -158,9 +158,11 @@ namespace fminus
             // Knob versioning, from -O1: a method whose loop branches on a bool knob, an int knob whose fminus::range
             // holds at most 8 integers, or whether a stream is flat (setStream) gets a copy of its code for each of
             // their values, picked when it starts, in which the value is a constant, folded as a frozen one is (an int
-            // outside its range runs the method as written). At most this many copies a method; 0 turns it off. The copies cost code size and compile time, and compute what the method
-            // does, bit for bit, but for math functions' last bits: a copy's loop may vectorise where the method's
-            // did not, and a vectorised sinf, expf, ... is the vector library's, not libm's.
+            // outside its range runs the method as written). At most this many copies a method; 0 turns it off. The
+            // copies cost code size and compile time, and compute what the method does, bit for bit, in the Vector and
+            // Libm math modes. Only Math::Fast can move a math function's last bits: a copy's loop may vectorise where
+            // the method's did not, making its sinf, expf, ... the vector library's rather than libm's, and a knob's
+            // constant that reaches one is folded with the compiling machine's own functions.
             unsigned knobVersions = 8;
             Denormals denormals = Denormals::Preserve;   // subnormals kept, or flushed to zero (above)
         };

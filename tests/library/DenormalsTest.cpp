@@ -104,3 +104,31 @@ TEST_CASE("Options::denormals: Preserve keeps subnormals, Flush runs an entry po
     setControlRegister(host);
     CHECK(after == (host | kFlushBits));
 }
+
+TEST_CASE("Options::denormals: Flush runs an entry point flushing at each optimisation, one that reads no memory too",
+          "[library][denormals]")
+{
+    const std::uint64_t host = controlRegister() & ~kFlushBits;   // an IEEE host
+    setControlRegister(host);
+
+    // LLVM finds that scaled's code reads and writes no memory, so nothing orders a plain call of it with the writes of
+    // the control register: the entry point's call must be one it keeps between them.
+    const char* const source = "float scaled(float x) [[clang::nonblocking]] { return x * 1e-30f * 1e-10f; }\n";
+    for (int optimisation = 0; optimisation <= 3; ++optimisation)
+    {
+        INFO("-O" << optimisation);
+        std::string errors;
+        fminus::Program::Options options;
+        options.optimisation = optimisation;
+        options.denormals = fminus::Program::Denormals::Flush;
+        auto program = fminus::Program::compile(source, errors, options);
+        INFO(errors);
+        REQUIRE(program);
+        auto* scaled = program->function<float(float)>("scaled", errors);
+        REQUIRE(scaled != nullptr);
+        const float result = scaled(1.0f);
+        CHECK(result == 0.0f);
+        CHECK_FALSE(std::signbit(result));
+        CHECK(controlRegister() == host);
+    }
+}

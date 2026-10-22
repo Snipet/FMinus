@@ -284,6 +284,8 @@ namespace fminus::ir::detail
             }
             for (const Value& arg : args)
                 irArgs.push_back(convert(arg, type, location, Use::Passing));
+            if (!builtin->runtime.empty() && !checkMathNames(location, *builtin))
+                return poison(type);   // the program declares a function of a runtime function's name (Math.cpp)
             if (!builtin->runtime.empty() && math_ != Math::Fast)
                 return {lowerMath(*builtin, type, irArgs[0]), type};   // the runtime's function (Math.cpp)
             llvm::Function* intrinsic =

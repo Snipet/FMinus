@@ -85,15 +85,17 @@ namespace fminus
 
         // ---- Zero-init elision (src/opt/ZeroInitElision.h) ----------------------------------------------------------
         // FMinus zeroes every local array where it is declared; this drops the memset when the program writes every
-        // element it reads first. At the end of each function's simplification (-O1 to -O3; -O0 builds no such
-        // pipeline), after the inliner has brought its callees in: the loop passes have rotated the loops and given
-        // them their induction variables, so ScalarEvolution can count their iterations, and at -O2 and -O3 LICM's
-        // loop adaptor has just put them back in loop-simplify form and DSE has removed what it can. It runs before
-        // the loop vectoriser, which would split a store loop into vector and remainder loops.
-        passes.registerScalarOptimizerLateEPCallback([](llvm::FunctionPassManager& functionPasses,
-                                                        llvm::OptimizationLevel) {
-            functionPasses.addPass(opt::ZeroInitElisionPass());
-        });
+        // element it reads first. At the end of each function's simplification, from -O1 (LLVM's -O0 pipeline calls
+        // this callback too, and the pass stays out of it: -O0 keeps every memset), after the inliner has brought its
+        // callees in: the loop passes have rotated the loops and given them their induction variables, so
+        // ScalarEvolution can count their iterations, and at -O2 and -O3 LICM's loop adaptor has just put them back in
+        // loop-simplify form and DSE has removed what it can. It runs before the loop vectoriser, which would split a
+        // store loop into vector and remainder loops.
+        passes.registerScalarOptimizerLateEPCallback(
+            [](llvm::FunctionPassManager& functionPasses, llvm::OptimizationLevel level) {
+                if (level != llvm::OptimizationLevel::O0)
+                    functionPasses.addPass(opt::ZeroInitElisionPass());
+            });
         // ---- end of zero-init elision ------------------------------------------------------------------------------
         // ---- Knob versioning (opt/KnobVersioning.h), from -O1 -------------------------------------------------------
         // A method whose loop branches on an int or bool knob, or on whether a stream is flat, gets a copy of its body

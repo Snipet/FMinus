@@ -159,6 +159,17 @@ namespace fminus::ir::detail
             llvm::BasicBlock* continueTarget;
         };
 
+        // What a method's reads of one stream use, computed where it starts (Modules.cpp, atEntry): whether it is
+        // flat, the slot's value, and where sample i is, base + i * stride: the stream's pointer and 1, or, when the
+        // stream is flat, the slot's value field and 0.
+        struct StreamRead
+        {
+            llvm::Value* flat;
+            llvm::Value* value;
+            llvm::Value* base;
+            llvm::Value* stride;
+        };
+
         // The runtime functions behind a transcendental builtin (Math.cpp): the vector mode's scalar one
         // (fminus_rt_sinf) and its four lanes (fminus_rt_sin_f4), and the libm mode's (fminus_rt_libm_sinf).
         enum class MathFunction
@@ -257,6 +268,8 @@ namespace fminus::ir::detail
 
         // ---- Math.cpp -----------------------------------------------------------------------------------------------
         llvm::Value* lowerMath(const Builtin& builtin, ast::Type type, llvm::Value* x);
+        static std::string mathName(const Builtin& builtin, MathFunction which);
+        bool checkMathNames(SourceLocation location, const Builtin& builtin);
         llvm::FunctionCallee mathFunction(const Builtin& builtin, MathFunction which);
 
         // ---- Modules.cpp --------------------------------------------------------------------------------------------
@@ -309,7 +322,7 @@ namespace fminus::ir::detail
         std::map<std::pair<unsigned, bool>, llvm::Value*> entryLoads_;     // the method's parameters, read at entry
         std::vector<llvm::Instruction*> streamReads_;                      // its loads of its streams' samples
         bool strictAliasing_;                                              // whether loads and stores carry !tbaa
-        std::map<unsigned, std::pair<llvm::Value*, llvm::Value*>> flatStreams_;   // its streams' null tests, values
+        std::map<unsigned, StreamRead> flatStreams_;                       // what its streams' reads use
         Denormals denormals_;                                              // subnormals preserved or flushed
         std::string targetTriple_;                                         // which mode register an entry point sets
     };

@@ -16,8 +16,8 @@
 //   - Each entry point sets the mode itself: a [[clang::nonblocking]] function, what a host calls on its audio thread,
 //     that no function of the program calls. Its definition becomes an internal function, `<name>.body`, and the
 //     entry point `<name>` a wrapper that reads the control register and calls the body; when the caller does not
-//     flush already, it sets flush-to-zero first and restores the register after: one return, after any of the
-//     body's. Nothing in it can block: register moves, a compare and a call.
+//     flush already, it sets flush-to-zero first and restores the register after, so the register comes back as it
+//     was from any of the body's returns. Nothing in it can block: register moves, a compare and a call.
 //
 // Reading the register is free, and writing it is not: on the M5 an MSR to FPCR costs about 4 ns even when it changes
 // nothing, and setting FZ and clearing it again about 18 ns a call. So a host that flushes already, around its whole
@@ -33,10 +33,28 @@
 // floating-point environment arithmetic depends on no register, so it moves freely, across a write of the control
 // register too (llvm.aarch64.set.fpcr is ordered only against other side effects), and a body inlined into its
 // wrapper could start computing before the mode is set.
+//
+// For the same reason a plain call of the body is not enough either. LLVM orders a call by what it knows of the callee,
+// and of a body that touches no memory (`x * 1e-30f * 1e-10f`, `tanhf(x) * 1e-10f`) FunctionAttrs finds memory(none)
+// willreturn nounwind: a call ordered against nothing, which LLVM may move as it may an fmul. At -O1 InstCombine sank
+// such a call below the write that restores the caller's mode, into the block of the `ret` that uses its result, and
+// the body ran in an IEEE host's mode (the Sink pass would move it too). So the wrapper calls the body through its
+// address passed through an empty inline asm (`call ptr asm "", "=r,0"(ptr @<name>.body)`), which LLVM never looks
+// into: a call of a function it cannot see, of which it assumes that it may read and write any memory
+// (CallBase::getMemoryEffects reads the callee's attributes only when the callee is a Function). LLVM sees the writes
+// of the register the same way: set.fpcr is IntrNoMem with IntrHasSideEffects, which TableGen's IntrinsicEmitter makes
+// MemoryEffects::unknown(), and ldmxcsr declares no memory effects at all. No pass reorders two such calls (InstCombine
+// sinks no call that may write memory, SimplifyCFG hoists none past a side effect, GVN gives each its own value number
+// and does no PRE of it, EarlyCSE and LICM move none), and in machine code every call is a scheduling barrier and is
+// never moved. It costs little: the body's address in a register (two instructions on arm64), an indirect call (on
+// arm64 a tail call from -O1 on the path of a caller that flushes already, BR instead of B; on x86-64 the MXCSR's stack
+// slots escape into stmxcsr and ldmxcsr, and no call after them is a tail call), and C's calling convention for the
+// body, since LLVM no longer sees every call of it.
 #include "ir/Lowering.h"
 
 #include <llvm/ADT/FloatingPointMode.h>
 #include <llvm/IR/Constants.h>
+#include <llvm/IR/InlineAsm.h>
 #include <llvm/IR/IntrinsicsAArch64.h>
 #include <llvm/IR/IntrinsicsX86.h>
 #include <llvm/IR/Verifier.h>
@@ -174,29 +192,31 @@ namespace fminus::ir::detail
     }
 
     // `function`, an entry point, becomes `<name>.body`, internal and noinline, and `<name>` a wrapper of the same
-    // type and the same C ABI attributes (zeroext, noalias, this's nonnull) that runs it flushing. On arm64 (`arm`):
+    // type and the same C ABI attributes (zeroext, noalias, this's nonnull) that runs it flushing, and calls it through
+    // its address passed through an empty inline asm, a call LLVM keeps between the writes of the register (the top of
+    // this file). On arm64 (`arm`):
     //
     //   define float @"Lowpass::tick"(ptr %this, float %x) #1 {   ; denormal_fpenv(dynamic)
     //   entry:
     //     %fpcr = call i64 @llvm.aarch64.get.fpcr()
     //     %fpcr.fz = or i64 %fpcr, 16777216                        ; FZ, bit 24
     //     %flushing = icmp eq i64 %fpcr, %fpcr.fz                  ; the caller's mode flushes already
+    //     %body = call ptr asm "", "=r,0"(ptr @"Lowpass::tick.body") #2   ; memory(none) nounwind willreturn
     //     br i1 %flushing, label %run, label %flush
+    //   run:
+    //     %result = call float %body(ptr %this, float %x)
+    //     ret float %result
     //   flush:
     //     call void @llvm.aarch64.set.fpcr(i64 %fpcr.fz)
-    //     br label %run
-    //   run:
-    //     %result = call float @"Lowpass::tick.body"(ptr %this, float %x)
-    //     br i1 %flushing, label %done, label %restore
-    //   restore:
+    //     %flushed = call float %body(ptr %this, float %x)
     //     call void @llvm.aarch64.set.fpcr(i64 %fpcr)
-    //     br label %done
-    //   done:
-    //     ret float %result
+    //     ret float %flushed
     //   }
     //
     // On x86-64 the same through two stack slots, since STMXCSR and LDMXCSR go through memory: MXCSR with FTZ (bit 15)
-    // and DAZ (bit 6) set, both. Either way the register comes back as it was.
+    // and DAZ (bit 6) set, both. Either way the register comes back as it was. Each call of the body carries the
+    // body's return and parameter attributes, since an indirect call has no callee for the code generator to read
+    // zeroext from, and none of its function attributes, which are what would tell LLVM it touches no memory.
     void Lowering::wrapEntry(llvm::Function& function, SourceLocation location, bool arm)
     {
         const std::string name = function.getName().str();
@@ -212,10 +232,8 @@ namespace fminus::ir::detail
         entry->addFnAttrs(llvm::AttrBuilder(context).addDenormalFPEnvAttr(kCallersMode));
 
         llvm::BasicBlock* start = llvm::BasicBlock::Create(context, "entry", entry);
-        llvm::BasicBlock* flush = llvm::BasicBlock::Create(context, "flush", entry);
         llvm::BasicBlock* run = llvm::BasicBlock::Create(context, "run", entry);
-        llvm::BasicBlock* restore = llvm::BasicBlock::Create(context, "restore", entry);
-        llvm::BasicBlock* done = llvm::BasicBlock::Create(context, "done", entry);
+        llvm::BasicBlock* flush = llvm::BasicBlock::Create(context, "flush", entry);
         llvm::IRBuilder<> at(start);
 
         // The caller's mode and the flushing one, and what the register's write takes for each: the value itself for
@@ -248,32 +266,54 @@ namespace fminus::ir::detail
             toRestore = saved;
         }
         llvm::Value* flushing = at.CreateICmpEQ(mode, flushingMode, "flushing");
+
+        // The body's address, as the asm's output tied to its input: the same pointer, from a value LLVM cannot see
+        // into. The asm itself does nothing and touches nothing, so LLVM may move it as it likes; what matters is that
+        // the calls of its result are calls of an unknown function.
+        llvm::PointerType* pointer = llvm::PointerType::getUnqual(context);
+        llvm::InlineAsm* launder = llvm::InlineAsm::get(llvm::FunctionType::get(pointer, {pointer}, false), "", "=r,0",
+                                                        /*hasSideEffects=*/false);
+        llvm::CallInst* body = at.CreateCall(launder, {&function}, "body");
+        body->setDoesNotAccessMemory();
+        body->setDoesNotThrow();
+        body->addFnAttr(llvm::Attribute::WillReturn);
         at.CreateCondBr(flushing, run, flush);
 
-        at.SetInsertPoint(flush);
-        at.CreateCall(set, {toFlush});
-        at.CreateBr(run);
-
-        at.SetInsertPoint(run);
         std::vector<llvm::Value*> args;
         for (llvm::Argument& arg : entry->args())
         {
             arg.setName(function.getArg(arg.getArgNo())->getName());
             args.push_back(&arg);
         }
+        const llvm::AttributeList attributes = function.getAttributes();
+        std::vector<llvm::AttributeSet> parameters;
+        for (unsigned i = 0; i < function.arg_size(); ++i)
+            parameters.push_back(attributes.getParamAttrs(i));
+        const llvm::AttributeList callAttributes =
+            llvm::AttributeList::get(context, llvm::AttributeSet(), attributes.getRetAttrs(), parameters);
         const bool returns = !entry->getReturnType()->isVoidTy();
-        llvm::CallInst* result = at.CreateCall(&function, args, returns ? "result" : "");
-        at.CreateCondBr(flushing, done, restore);
+        const auto callBody = [&](const char* resultName) {
+            llvm::CallInst* call = at.CreateCall(function.getFunctionType(), body, args, returns ? resultName : "");
+            call->setAttributes(callAttributes);
+            call->setCallingConv(function.getCallingConv());
+            return call;
+        };
+        const auto finish = [&](llvm::Value* result) {
+            if (returns)
+                at.CreateRet(result);
+            else
+                at.CreateRetVoid();
+        };
 
-        at.SetInsertPoint(restore);
+        // The caller flushes already: the body is the whole call.
+        at.SetInsertPoint(run);
+        finish(callBody("result"));
+
+        at.SetInsertPoint(flush);
+        at.CreateCall(set, {toFlush});
+        llvm::CallInst* flushed = callBody("flushed");
         at.CreateCall(set, {toRestore});
-        at.CreateBr(done);
-
-        at.SetInsertPoint(done);
-        if (returns)
-            at.CreateRet(result);
-        else
-            at.CreateRetVoid();
+        finish(flushed);
 
         std::string problem;
         llvm::raw_string_ostream os(problem);

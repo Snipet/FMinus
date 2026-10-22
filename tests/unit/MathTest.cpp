@@ -7,11 +7,20 @@
 // call or in blocks of 61, at -O0 and -O2, in a poly float of 1 to 64 lanes, from a frozen parameter or a knob, for
 // each of the five functions, in loops that vectorise, loops that don't, float2, float4, float8 and poly code; and that
 // result is fminus::math's. Then the libm mode, C++'s std:: functions bit for bit, and the fast mode, LLVM's
-// intrinsics as they were.
+// intrinsics as they were. Last, the runtime's names: a program that calls a builtin declares no function of its
+// runtime functions' names, and one that calls none of them may declare and call them as it likes.
 #include "fminus/FMinus.h"
+#include "frontend/Diagnostics.h"
+#include "frontend/Frontend.h"
+#include "ir/CodeGen.h"
 #include "runtime/Runtime.h"
 
 #include <catch2/catch_test_macros.hpp>
+
+#include <llvm/IR/Attributes.h>
+#include <llvm/IR/Function.h>
+#include <llvm/IR/LLVMContext.h>
+#include <llvm/IR/Module.h>
 
 #include <array>
 #include <bit>
@@ -28,6 +37,7 @@
 #include <random>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #if defined(__APPLE__)
@@ -638,4 +648,188 @@ TEST_CASE("the fast math mode is LLVM's intrinsics, as before: libm for a float,
     CHECK(library == 0);
     // A constant's sine is folded, with the double function, rounded.
     CHECK(folded() == static_cast<float>(std::sin(0.5)));
+}
+
+TEST_CASE("a program that calls a math builtin declares no function of its runtime functions' names, in any mode",
+          "[math]")
+{
+    // Programs that compiled wrongly before the rule (ir/Math.cpp, checkMathNames): a definition of sinf's four-lane
+    // name of another type, which LoopVectorize took for fminus_rt_sinf's vector variant and asserted on at -O2, one
+    // of a float, which it asserted on too, and a prototype, which did the same in the JIT; a definition of the scalar
+    // name of the runtime's type, which took the runtime's attributes (memory(none), willreturn, speculatable), so
+    // that a call of it that could loop forever was removed; and the libm mode's name, refused in the other modes too.
+    // Each is an error at the builtin's call, in every mode, with a note at the program's function; cosf, whose names
+    // the program leaves to the runtime, is not.
+    struct Case
+    {
+        const char* source;
+        const char* errors;
+    };
+    const std::array cases{
+        Case{"int fminus_rt_sin_f4(int x)\n"
+             "{\n"
+             "    return x + 1;\n"
+             "}\n"
+             "void sines(const float* restrict in, float* restrict out, int n)\n"
+             "{\n"
+             "    for (int i = 0; i < n; ++i)\n"
+             "        out[i] = sinf(in[i]);\n"
+             "}\n"
+             "float one(float x) { return x; }\n",
+             "test.fm:8:18: error: 'sinf' reserves 'fminus_rt_sin_f4' for the runtime's function, and this program "
+             "declares a function of that name: rename it\n"
+             "test.fm:1:5: note: 'fminus_rt_sin_f4' declared here\n"},
+        Case{"float fminus_rt_sin_f4(float x) { return x + 1; }\n"
+             "void sines(const float* restrict in, float* restrict out, int n)\n"
+             "{\n"
+             "    for (int i = 0; i < n; ++i)\n"
+             "        out[i] = sinf(in[i]);\n"
+             "}\n",
+             "test.fm:5:18: error: 'sinf' reserves 'fminus_rt_sin_f4' for the runtime's function, and this program "
+             "declares a function of that name: rename it\n"
+             "test.fm:1:7: note: 'fminus_rt_sin_f4' declared here\n"},
+        Case{"float fminus_rt_sin_f4(float x);\n"
+             "void sines(const float* restrict in, float* restrict out, int n)\n"
+             "{\n"
+             "    for (int i = 0; i < n; ++i)\n"
+             "        out[i] = sinf(in[i]);\n"
+             "}\n"
+             "float one(float x) { return x; }\n",
+             "test.fm:5:18: error: 'sinf' reserves 'fminus_rt_sin_f4' for the runtime's function, and this program "
+             "declares a function of that name: rename it\n"
+             "test.fm:1:7: note: 'fminus_rt_sin_f4' declared here\n"},
+        Case{"float fminus_rt_sinf(float x)\n"
+             "{\n"
+             "    if (x > 100.0f)\n"
+             "    {\n"
+             "        while (1) {}\n"
+             "    }\n"
+             "    return x;\n"
+             "}\n"
+             "float f(float x) { return sinf(x) + cosf(x); }\n",
+             "test.fm:9:27: error: 'sinf' reserves 'fminus_rt_sinf' for the runtime's function, and this program "
+             "declares a function of that name: rename it\n"
+             "test.fm:1:7: note: 'fminus_rt_sinf' declared here\n"},
+        Case{"float fminus_rt_libm_expf(float x) { return x; }\n"
+             "float4 f(float4 x) { return expf(x); }\n",
+             "test.fm:2:29: error: 'expf' reserves 'fminus_rt_libm_expf' for the runtime's function, and this "
+             "program declares a function of that name: rename it\n"
+             "test.fm:1:7: note: 'fminus_rt_libm_expf' declared here\n"},
+    };
+    const std::array modes{std::pair{fminus::Program::Math::Vector, fminus::ir::Math::Vector},
+                           std::pair{fminus::Program::Math::Libm, fminus::ir::Math::Libm},
+                           std::pair{fminus::Program::Math::Fast, fminus::ir::Math::Fast}};
+    for (const auto& [mode, lowering] : modes)
+    {
+        for (const Case& c : cases)
+        {
+            INFO("mode " << static_cast<int>(mode) << ":\n" << c.source);
+            // The code generator alone, as fminus --emit obj and an executable meet it: an object file holds a
+            // program's definition of a runtime function's name, which the JIT refuses as a second definition of the
+            // runtime's symbol, so this is where the definitions above compiled.
+            fminus::Diagnostics diagnostics("test.fm");
+            const auto parsed = fminus::frontend::parse(c.source, diagnostics);
+            REQUIRE(parsed);
+            llvm::LLVMContext context;
+            fminus::ir::Options irOptions;
+            irOptions.math = lowering;
+            CHECK(fminus::ir::lower(*parsed, context, diagnostics, irOptions) == nullptr);
+            CHECK(diagnostics.format() == c.errors);
+            // The JIT, through the public API, at -O2.
+            fminus::Program::Options options;
+            options.math = mode;
+            options.fileName = "test.fm";
+            std::string errors;
+            CHECK(fminus::Program::compile(c.source, errors, options) == nullptr);
+            CHECK(errors == c.errors);
+        }
+    }
+}
+
+TEST_CASE("a program's own functions of the runtime's math names are left alone where it calls none of their builtins",
+          "[math]")
+{
+    // Prototypes of the runtime's own functions, called by name, as a program may call any of the runtime's: in the JIT
+    // they are the runtime's. (A definition of one is the program's own code, which the JIT refuses as a second
+    // definition of the runtime's symbol; an object file links it.) cosf beside them is the runtime's, in a loop too.
+    const char* source = "float fminus_rt_sinf(float x);\n"
+                         "float4 fminus_rt_sin_f4(float4 x);\n"
+                         "float fminus_rt_libm_sinf(float x);\n"
+                         "float own(float x) { return fminus_rt_sinf(x) + fminus_rt_libm_sinf(x); }\n"
+                         "float4 own4(float4 x) { return fminus_rt_sin_f4(x); }\n"
+                         "void cosines(const float* restrict in, float* restrict out, int n)\n"
+                         "{\n"
+                         "    for (int i = 0; i < n; ++i)\n"
+                         "        out[i] = cosf(in[i]);\n"
+                         "}\n";
+    using float4 = float __attribute__((ext_vector_type(4)));
+    for (const fminus::Program::Math mode :
+         {fminus::Program::Math::Vector, fminus::Program::Math::Libm, fminus::Program::Math::Fast})
+    {
+        INFO("mode " << static_cast<int>(mode));
+        fminus::Program::Options options;
+        options.math = mode;
+        std::string errors;
+        const auto program = fminus::Program::compile(source, errors, options);
+        INFO(errors);
+        REQUIRE(program);
+        auto* own = program->function<float(float)>("own", errors);
+        auto* own4 = program->function<float4(float4)>("own4", errors);
+        auto* cosines = program->function<void(const float*, float*, int)>("cosines", errors);
+        REQUIRE((own != nullptr && own4 != nullptr && cosines != nullptr));
+        Arguments arguments;
+        std::vector<float> in(1001);
+        for (float& x : in)
+            x = arguments.uniform(-10.0f, 10.0f);
+        std::vector<float> out(in.size());
+        cosines(in.data(), out.data(), static_cast<int>(in.size()));
+        long wrong = 0;
+        for (std::size_t i = 0; i + 4 <= in.size(); i += 4)
+        {
+            const float4 x{in[i], in[i + 1], in[i + 2], in[i + 3]};
+            const float4 y = own4(x);
+            const fminus_rt_float4 runtime = fminus_rt_sin_f4(fminus_rt_float4{x[0], x[1], x[2], x[3]});
+            for (int k = 0; k < 4; ++k)
+                wrong += same(y[k], runtime[k]) ? 0 : 1;
+        }
+        for (std::size_t i = 0; i < in.size(); ++i)
+        {
+            wrong += same(own(in[i]), fminus_rt_sinf(in[i]) + fminus_rt_libm_sinf(in[i])) ? 0 : 1;
+            if (mode == fminus::Program::Math::Vector)
+                wrong += same(out[i], fminus::math::cos(in[i])) ? 0 : 1;
+            else if (mode == fminus::Program::Math::Libm)
+                wrong += same(out[i], std::cos(in[i])) ? 0 : 1;
+        }
+        CHECK(wrong == 0);
+    }
+
+    // A definition of one, lowered: the program's code, with none of the runtime's attributes, and no builtin's vector
+    // variant; cosf's runtime function beside it has them.
+    fminus::Diagnostics diagnostics("test.fm");
+    const auto parsed = fminus::frontend::parse("float fminus_rt_sinf(float x) { return x * 2.0f; }\n"
+                                                "float4 fminus_rt_sin_f4(float4 x) { return x; }\n"
+                                                "float f(float x) { return fminus_rt_sinf(x) + cosf(x); }\n",
+                                                diagnostics);
+    llvm::LLVMContext context;
+    const std::unique_ptr<llvm::Module> module =
+        parsed ? fminus::ir::lower(*parsed, context, diagnostics) : nullptr;
+    INFO(diagnostics.format());
+    REQUIRE(module);
+    for (const char* name : {"fminus_rt_sinf", "fminus_rt_sin_f4"})
+    {
+        const llvm::Function* own = module->getFunction(name);
+        REQUIRE(own != nullptr);
+        INFO(name);
+        CHECK_FALSE(own->isDeclaration());
+        CHECK_FALSE(own->doesNotAccessMemory());
+        CHECK_FALSE(own->willReturn());
+        CHECK_FALSE(own->hasFnAttribute(llvm::Attribute::Speculatable));
+        CHECK_FALSE(own->hasFnAttribute("vector-function-abi-variant"));
+    }
+    const llvm::Function* cosine = module->getFunction("fminus_rt_cosf");
+    REQUIRE(cosine != nullptr);
+    CHECK(cosine->doesNotAccessMemory());
+    CHECK(cosine->hasFnAttribute(llvm::Attribute::Speculatable));
+    CHECK(cosine->getFnAttribute("vector-function-abi-variant").getValueAsString()
+          == "_ZGV_LLVM_N4v_fminus_rt_cosf(fminus_rt_cos_f4)");
 }

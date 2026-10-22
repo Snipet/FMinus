@@ -97,8 +97,9 @@ namespace fminus::ir
         // Knob versioning's budget (opt/KnobVersioning.h), from -O1: at most this many copies of a method's body, one
         // for each combination of the values of the int and bool knobs (and the streams' flat tests) its loops branch
         // on, so that each copy folds them as constants. 0 turns it off. It travels with the module, as the module flag
-        // "fminus.knob-versions", to wherever the module is optimised. The copies compute what the method does, but
-        // for math calls' last bits where a copy vectorises a loop the method did not (opt/KnobVersioning.h).
+        // "fminus.knob-versions", to wherever the module is optimised. The copies compute what the method does, bit
+        // for bit, in the Vector and Libm math modes; only Math::Fast can move a math call's last bits, where a copy
+        // vectorises a loop the method did not, or folds a knob's constant into a call (opt/KnobVersioning.h).
         unsigned knobVersions = 8;
         // Subnormals preserved or flushed to zero (Denormals, above).
         Denormals denormals = Denormals::Preserve;

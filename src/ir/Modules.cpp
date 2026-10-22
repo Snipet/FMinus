@@ -12,14 +12,18 @@
 // frozen parameter's constant. Loaded at the start, a knob's value and a stream's pointer are registers through the
 // method's loops, which then vectorise.
 //
-// A stream whose pointer is null is flat for the call: cutoff[i] is then the slot's value, read as a knob's is. And
+// A stream whose pointer is null is flat for the call: cutoff[i] is then the slot's value, read as a knob's is, with
+// no branch: sample i is a load from base + i * stride, the base and the stride chosen where the method starts (the
+// stream's pointer and 1, or the slot's value field and 0, whose load a select replaces with the value), so a loop
+// over a stream vectorises as before. And
 // the values a knob can take are tagged where it is read (!fminus.domain: a bool's two, an int's small range, a
 // stream's flat or not), for the knob versioning pass (opt/KnobVersioning.h), which gives a method whose loop branches
-// on them a copy of its body for each.
+// on them, or reads a stream, a copy of its body for each.
 #include "ir/Lowering.h"
 #include "opt/KnobVersioning.h"
 
 #include <llvm/IR/Constants.h>
+#include <llvm/IR/InlineAsm.h>
 #include <llvm/IR/InstIterator.h>
 #include <llvm/IR/MDBuilder.h>
 
@@ -72,6 +76,29 @@ namespace fminus::ir::detail
                         llvm::ConstantInt::getSigned(llvm::Type::getInt32Ty(context), v)));
             }
             value.setMetadata(opt::kDomainMetadata, llvm::MDNode::get(context, values));
+        }
+
+        // 1, as LLVM cannot see it: what an empty asm statement returns when given 1 in the register it returns
+        // (opt::kUnitConstraints; the optimisation barrier of benchmark::DoNotOptimize). A stream's stride is 0 when
+        // the stream is flat, and this otherwise. A stride LLVM sees is 0 or 1 does not last: its instruction
+        // combiner makes i * stride a select of 0 and i, and the loop vectoriser then sees no strided load, so a loop
+        // over a stream that knob versioning did not copy would stay scalar. This one stays a multiplication by a
+        // value LLVM does not know, on which the vectoriser versions the loop (a stride of 1: the vector loop). The
+        // statement emits no instruction and touches no memory. It is made where the method starts; inlined into a
+        // caller's loop, it leaves the loop with the rest of a stream's setup, unless the call sits under a condition
+        // there (an asm statement is not speculatable, so LICM keeps it). Knob versioning makes it 1 again in the
+        // copies it makes for a stream's samples.
+        llvm::Value* opaqueUnit(llvm::IRBuilderBase& at, const std::string& name)
+        {
+            llvm::Type* type = at.getInt64Ty();
+            llvm::InlineAsm* identity = llvm::InlineAsm::get(llvm::FunctionType::get(type, {type}, false), "",
+                                                             opt::kUnitConstraints, /*hasSideEffects=*/false);
+            llvm::CallInst* unit = at.CreateCall(identity, {at.getInt64(1)}, name);
+            unit->setDoesNotAccessMemory();
+            unit->setDoesNotThrow();
+            unit->addFnAttr(llvm::Attribute::WillReturn);
+            unit->addFnAttr(llvm::Attribute::NoSync);
+            return unit;
         }
     } // namespace
 
@@ -273,29 +300,26 @@ namespace fminus::ir::detail
             return {atEntry(field, false), type};
         case ParamBinding::Kind::Stream:
         {
-            // The slot's value when the stream is flat (its pointer null), and its i-th sample otherwise: a branch,
-            // so a null stream is never read. The test is made once, where the method starts, and knob versioning
-            // gives the method a copy for each answer, so from -O1 the branch is not in the loop.
+            // Sample i of the stream, or, when it is flat (its pointer null), the slot's value, with no branch: a
+            // load from base + i * stride, which atEntry chose where the method starts, and a select of the value
+            // read there when the stream is flat. The load is always valid: a flat stream's reads all read the slot's
+            // value field, and discard what they read. So a loop over a stream vectorises whether or not knob
+            // versioning gives the method a copy for each answer of the test (with its budget spent on other knobs,
+            // say, or in a method without a loop, inlined into its caller's): LLVM's loop vectoriser versions the
+            // loop on the stride being 1. In a copy the stride and the test are constants, and the read is the load
+            // alone, or the value.
             llvm::Value* offset = builder_.CreateSExt(convert(at, ast::Type::Int, location, Use::Initializing),
                                                       builder_.getInt64Ty(), "idxprom");
-            llvm::Value* stream = atEntry(field, true);
-            const auto [flat, value] = flatStreams_.at(field);
-            llvm::BasicBlock* flatEnd = builder_.GetInsertBlock();
-            llvm::BasicBlock* sampleBlock = newBlock((parameter.name + ".sample").c_str());
-            llvm::BasicBlock* endBlock = newBlock((parameter.name + ".end").c_str());
-            builder_.CreateCondBr(flat, endBlock, sampleBlock);
-            builder_.SetInsertPoint(sampleBlock);
+            atEntry(field, true);
+            const StreamRead stream = flatStreams_.at(field);
+            llvm::Value* step =   // i times 0 or 1: it never wraps
+                builder_.CreateMul(offset, stream.stride, parameter.name + ".offset", /*HasNUW=*/true, /*HasNSW=*/true);
             llvm::Value* sample =
-                builder_.CreateInBoundsGEP(builder_.getFloatTy(), stream, offset, parameter.name + ".at");
+                builder_.CreateInBoundsGEP(builder_.getFloatTy(), stream.base, step, parameter.name + ".at");
             llvm::LoadInst* load = builder_.CreateLoad(builder_.getFloatTy(), sample, parameter.name);
             tag(load, ast::Type::Float);
             streamReads_.push_back(load);
-            builder_.CreateBr(endBlock);
-            builder_.SetInsertPoint(endBlock);
-            llvm::PHINode* read = builder_.CreatePHI(builder_.getFloatTy(), 2, parameter.name + ".read");
-            read->addIncoming(value, flatEnd);
-            read->addIncoming(load, sampleBlock);
-            return {read, type};
+            return {builder_.CreateSelect(stream.flat, stream.value, load, parameter.name + ".read"), type};
         }
         }
         return poison(type);
@@ -303,9 +327,17 @@ namespace fminus::ir::detail
 
     // What the method reads of parameter `field` where it starts, once: its stream's pointer, or its value (an atomic
     // load, a bool's byte compared with 0). From `this` itself, the method's first argument. With a stream's pointer
-    // come its test for null and the slot's value, read as a knob's (flatStreams_), what a flat stream reads instead.
-    // A bool's value, an int's and a stream's test carry their domains (tagDomain), for knob versioning. Each load
+    // come its test for null, the slot's value, read as a knob's, and where its samples are (flatStreams_): when the
+    // stream is flat, at the slot's value field with a stride of 0, otherwise at the pointer with a stride of 1. A
+    // bool's value, an int's and a stream's test carry their domains (tagDomain), for knob versioning. Each load
     // carries its type's TBAA tag (Tbaa.cpp): the pointer's, and the value's, as the parameter's type.
+    //
+    // A flat stream's reads load the value field only so that the load is valid: lowerParameter's select replaces what
+    // they load with the value read here, once, for the whole call. So it does not matter that their loads are plain
+    // ones, which the host's thread may race (a plain load that races a store reads an undefined value), nor that they
+    // are in the streams' alias scope though the field is no stream's: a store the method makes through a pointer cast
+    // from `this` could reach the field unseen, and change only what the select discards. The stride's 1 is an opaque
+    // one (opaqueUnit), so that LLVM keeps the multiplication.
     //
     // The value's load is unordered, LLVM's weakest atomic ordering: it can't tear, so the method reads a value the
     // host stored, whole, however the host's thread races it; and unlike a monotonic (C++'s relaxed) load, LLVM may
@@ -334,14 +366,18 @@ namespace fminus::ir::detail
                 at.CreateLoad(builder_.getPtrTy(), at.CreateStructGEP(slotType, slot, 0), parameter.name + ".stream");
             tag(load, ast::Type::pointerTo(ast::Kind::Float, true));
             loaded = load;
-            llvm::LoadInst* flatValue = at.CreateAlignedLoad(value, at.CreateStructGEP(slotType, slot, 1),
-                                                             llvm::Align(4), parameter.name + ".value");
+            llvm::Value* valueField = at.CreateStructGEP(slotType, slot, 1);
+            llvm::LoadInst* flatValue =
+                at.CreateAlignedLoad(value, valueField, llvm::Align(4), parameter.name + ".value");
             flatValue->setAtomic(llvm::AtomicOrdering::Unordered);
             tag(flatValue, parameter.type);
             auto* flat = llvm::cast<llvm::Instruction>(at.CreateICmpEQ(
                 loaded, llvm::ConstantPointerNull::get(builder_.getPtrTy()), parameter.name + ".flat"));
             tagDomain(*flat, parameter, true);
-            flatStreams_.emplace(field, std::make_pair(flat, flatValue));
+            llvm::Value* base = at.CreateSelect(flat, valueField, loaded, parameter.name + ".base");
+            llvm::Value* unit = opaqueUnit(at, parameter.name + ".unit");
+            llvm::Value* stride = at.CreateSelect(flat, at.getInt64(0), unit, parameter.name + ".stride");
+            flatStreams_.emplace(field, StreamRead{flat, flatValue, base, stride});
         }
         else
         {

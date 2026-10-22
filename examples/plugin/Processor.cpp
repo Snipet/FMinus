@@ -97,11 +97,13 @@ namespace fminus_filter
         ++compilations_;
 
         // The bindings: the cutoff a stream, a value a sample; the sample rate frozen, a constant the optimiser folds
-        // (so the next rate compiles again); resonance and mode, which the options don't name, knobs.
+        // (so the next rate compiles again); resonance and mode, which the options don't name, knobs. Compiled for
+        // flush-to-zero, the mode processBlock runs in (ScopedNoDenormals), so process finds it set and writes nothing.
         fminus::Program::Options options;
         options.fileName = "filter.fm";
         options.parameters["Filter::cutoff"] = fminus::Program::Binding::stream();
         options.parameters["Filter::sampleRate"] = fminus::Program::Binding::frozen(sampleRate);
+        options.denormals = fminus::Program::Denormals::Flush;
         std::string errors;
         std::unique_ptr<fminus::Program> program = fminus::Program::compile(source_, errors, options);
         if (!program)

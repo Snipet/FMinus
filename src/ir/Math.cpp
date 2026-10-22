@@ -10,6 +10,9 @@
 //            them still vectorises; a float4 is one call of fminus_rt_sin_f4, and other widths are cut or padded into
 //            four lanes. The runtime makes the two agree: a lane of fminus_rt_sin_f4 is fminus_rt_sinf of that lane.
 //   libm     fminus_rt_libm_sinf, libm's sinf behind a name LLVM does not know, a lane at a time.
+//
+// The three names are the runtime's: a program that calls sinf may not declare a function of any of them itself, in
+// any mode (checkMathNames).
 #include "ir/Lowering.h"
 
 #include <llvm/Analysis/VectorUtils.h>
@@ -70,6 +73,43 @@ namespace fminus::ir::detail
         return llvm::concatenateVectors(builder_, parts);
     }
 
+    // The name of the builtin's runtime function `which`: fminus_rt_sinf, fminus_rt_sin_f4 or fminus_rt_libm_sinf.
+    std::string Lowering::mathName(const Builtin& builtin, MathFunction which)
+    {
+        const std::string stem(builtin.runtime);
+        return which == MathFunction::Scalar ? "fminus_rt_" + stem + "f"
+               : which == MathFunction::Four ? "fminus_rt_" + stem + "_f4"
+                                             : "fminus_rt_libm_" + stem + "f";
+    }
+
+    // Whether the program leaves the names of the builtin's three runtime functions to the runtime, as a call of the
+    // builtin at `location` needs; if it does not, the error says so there, with a note at the program's function.
+    // A program's own function of one of those names, a definition or a prototype of any type, would otherwise be the
+    // function the call reaches, or the one LLVM takes for the runtime's: it would get the runtime's attributes
+    // (memory(none), willreturn, speculatable, ...), which are false of a program's code, and the four-lane name would
+    // be the scalar function's vector variant, which the loop vectoriser calls with a <4 x float> whatever the
+    // program's function takes. So no program's function is ever given a runtime function's attributes, nor named as a
+    // vector variant. The names are refused in every math mode, the fast mode's too, which calls none of them, so that
+    // whether a program compiles does not depend on the mode. A program that calls its own function of such a name,
+    // and not the builtin, is left alone, as callRuntime leaves a program's own heap and FFT functions (Calls.cpp).
+    bool Lowering::checkMathNames(SourceLocation location, const Builtin& builtin)
+    {
+        for (const MathFunction which : {MathFunction::Scalar, MathFunction::Four, MathFunction::Libm})
+        {
+            const std::string name = mathName(builtin, which);
+            const auto found = functions_.find(name);
+            if (found == functions_.end())
+                continue;
+            diagnostics_.error(location,
+                               quoted(builtin.name) + " reserves " + quoted(name)
+                                   + " for the runtime's function, and this program declares a function of that name: "
+                                     "rename it",
+                               {Diagnostic{found->second->location, quoted(name) + " declared here", {}}});
+            return false;
+        }
+        return true;
+    }
+
     // The runtime function `which` of the builtin, declared once a module. It has the attributes LLVM gives the
     // intrinsic it stands for (llvm.sin): it reads and writes no memory, always returns, cannot unwind, makes no
     // poison of an argument that isn't, and is defined for every argument, so LICM hoists a call out of a loop, GVN
@@ -79,21 +119,17 @@ namespace fminus::ir::detail
     // parameter), which is what the loop and SLP vectorisers look for: a loop of fminus_rt_sinf calls vectorises into
     // calls of fminus_rt_sin_f4. The variant must be declared in the module when they look, and GlobalDCE removes a
     // declaration that nothing uses before they run, so it is kept in llvm.compiler.used, as LLVM's InjectTLIMappings
-    // keeps a vector library's.
+    // keeps a vector library's. The declaration is always the runtime's, of the runtime's type: the program has no
+    // function of the name, since checkMathNames refuses a call of the builtin when it has.
     llvm::FunctionCallee Lowering::mathFunction(const Builtin& builtin, MathFunction which)
     {
-        const std::string stem(builtin.runtime);
-        const std::string name = which == MathFunction::Scalar ? "fminus_rt_" + stem + "f"
-                                 : which == MathFunction::Four ? "fminus_rt_" + stem + "_f4"
-                                                               : "fminus_rt_libm_" + stem + "f";
+        const std::string name = mathName(builtin, which);
         llvm::Type* type = which == MathFunction::Four ? llvm::FixedVectorType::get(builder_.getFloatTy(), 4)
                                                        : builder_.getFloatTy();
         llvm::FunctionType* signature = llvm::FunctionType::get(type, {type}, false);
         llvm::FunctionCallee callee = module_.getOrInsertFunction(name, signature);
         auto* function = llvm::cast<llvm::Function>(callee.getCallee());
-        // Set up by an earlier call; or a program's own function of the name, of another type, which the call reaches
-        // as a C call through a mismatched declaration would (a program's prototype of the right type is set up).
-        if (function->doesNotAccessMemory() || function->getFunctionType() != signature)
+        if (function->doesNotAccessMemory())   // set up by an earlier call
             return callee;
         function->setDoesNotAccessMemory();
         function->setDoesNotThrow();

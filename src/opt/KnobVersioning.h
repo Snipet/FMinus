@@ -13,10 +13,12 @@
 // it was made for. The module flag "fminus.knob-versions" (ir::Options::knobVersions, which ir::lower writes) caps how
 // many copies one method gets: 8 when the module has none, and 0 or 1 turns the pass off.
 //
-// Each copy computes what the method does with its value, and the rest of the pipeline treats it as any other code:
-// where a copy's loop vectorises and the method's did not, a math call in it becomes the vector library's
-// (_simd_sin_f4), and where the knob's constant reaches one, LLVM folds it with the host's double functions (a frozen
-// parameter's pitfall). Either can move that call's last bit, until FMinus's math calls are the same everywhere.
+// Each copy computes what the method does with its value, and the rest of the pipeline treats it as any other code.
+// In the vector and libm math modes (ir::Math) that is bit for bit: a math call is the runtime's function, which gives
+// a float the same result in a vectorised loop as in a scalar one, and which LLVM cannot fold. Only the fast mode can
+// move a math call's last bits: where a copy's loop vectorises and the method's did not, a math call in it becomes the
+// vector library's (_simd_sin_f4), and where the knob's constant reaches one, LLVM folds it with the host's double
+// functions (a frozen parameter's pitfall).
 #pragma once
 
 #include <llvm/IR/PassManager.h>
@@ -33,7 +35,14 @@ namespace fminus::opt
     inline constexpr unsigned kDefaultVersions = 8;
 
     // The string attribute a versioned function gets: how many copies of its body it has, "3" for a mode over 0..2.
+    // The pass leaves a function that has it alone: FMinus's optimised IR, optimised again (fminus-build at -O3, say),
+    // is not versioned twice.
     inline constexpr const char* kVersionsAttribute = "fminus-knob-versions";
+
+    // The constraints of FMinus's opaque unit (src/ir/Modules.cpp, opaqueUnit), an empty asm statement whose result
+    // is its operand, in the same register: the 1 of a stream's stride when the stream is not flat, which LLVM cannot
+    // see is 1. In a copy for a stream with samples, the pass makes the stride 1 again.
+    inline constexpr const char* kUnitConstraints = "=r,0";
 
     // Versions one function on the knobs of its entry block that steer one of its loops (KnobVersioning.cpp). Run it
     // before the inliner, so that each method is versioned on its own knobs.

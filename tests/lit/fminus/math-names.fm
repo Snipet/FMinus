@@ -1,0 +1,28 @@
+// A program that calls a math builtin declares no function of its runtime functions' names (ir/Math.cpp,
+// checkMathNames). This one defines fminus_rt_sin_f4 of another type, which the loop vectoriser took for
+// fminus_rt_sinf's vector variant and asserted on at -O2, in an object file and in the JIT alike. Every mode reports it
+// at the call, with a note at the program's function, and compiles nothing.
+// RUN: not fminus %s -O2 --emit obj -o %t.o 2>&1 | FileCheck %s
+// RUN: not fminus %s -O2 --math libm --emit obj -o %t.o 2>&1 | FileCheck %s
+// RUN: not fminus %s -O2 --math fast --emit obj -o %t.o 2>&1 | FileCheck %s
+// RUN: not fminus %s --run one 1 2>&1 | FileCheck %s
+
+int fminus_rt_sin_f4(int x)
+{
+    return x + 1;
+}
+
+void sines(const float* restrict in, float* restrict out, int n)
+{
+    for (int i = 0; i < n; ++i)
+        out[i] = sinf(in[i]);
+}
+
+float one(float x)
+{
+    return x;
+}
+
+// CHECK: math-names.fm:18:18: error: 'sinf' reserves 'fminus_rt_sin_f4' for the runtime's function,
+// CHECK-SAME: and this program declares a function of that name: rename it
+// CHECK-NEXT: math-names.fm:10:5: note: 'fminus_rt_sin_f4' declared here
