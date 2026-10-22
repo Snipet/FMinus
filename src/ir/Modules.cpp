@@ -11,7 +11,13 @@
 // from another thread at any time); a stream's i-th sample, from the pointer the method also loads where it starts; a
 // frozen parameter's constant. Loaded at the start, a knob's value and a stream's pointer are registers through the
 // method's loops, which then vectorise.
+//
+// A stream whose pointer is null is flat for the call: cutoff[i] is then the slot's value, read as a knob's is. And
+// the values a knob can take are tagged where it is read (!fminus.domain: a bool's two, an int's small range, a
+// stream's flat or not), for the knob versioning pass (opt/KnobVersioning.h), which gives a method whose loop branches
+// on them a copy of its body for each.
 #include "ir/Lowering.h"
+#include "opt/KnobVersioning.h"
 
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/InstIterator.h>
@@ -26,6 +32,49 @@
 
 namespace fminus::ir::detail
 {
+    namespace
+    {
+        // The most values an int knob's domain lists: a range of more is not tagged, and its methods are not
+        // versioned on it.
+        constexpr double kLargestDomain = 8;
+
+        // Tags a knob's value where the method starts with the values it can take, for knob versioning: a bool's (or a
+        // stream's test for null, `isBool`) false and true, or an int's fminus::range when both its ends are integers
+        // and it holds at most kLargestDomain values. Anything else stays untagged: a float's values, or a wide int's,
+        // are too many to copy a method for. An int outside its range is still read, and still works: the pass sends
+        // it to the method's original body.
+        void tagDomain(llvm::Instruction& value, const ast::Field& parameter, bool isBool)
+        {
+            llvm::LLVMContext& context = value.getContext();
+            std::vector<llvm::Metadata*> values;
+            if (isBool)
+            {
+                values = {llvm::ConstantAsMetadata::get(llvm::ConstantInt::getFalse(context)),
+                          llvm::ConstantAsMetadata::get(llvm::ConstantInt::getTrue(context))};
+            }
+            else
+            {
+                std::optional<double> minimum, maximum;
+                for (const ast::Attribute& attribute : parameter.attributes)
+                {
+                    if (attribute.name != "fminus::range" || attribute.args.size() != 2)
+                        continue;
+                    minimum = ast::attributeNumber(attribute.args[0]);
+                    maximum = ast::attributeNumber(attribute.args[1]);
+                }
+                if (!minimum || !maximum || *minimum != std::trunc(*minimum) || *maximum != std::trunc(*maximum)
+                    || *minimum < double{std::numeric_limits<std::int32_t>::min()}
+                    || *maximum > double{std::numeric_limits<std::int32_t>::max()} || *maximum < *minimum
+                    || *maximum - *minimum + 1 > kLargestDomain)
+                    return;
+                for (auto v = static_cast<std::int64_t>(*minimum); v <= static_cast<std::int64_t>(*maximum); ++v)
+                    values.push_back(llvm::ConstantAsMetadata::get(
+                        llvm::ConstantInt::getSigned(llvm::Type::getInt32Ty(context), v)));
+            }
+            value.setMetadata(opt::kDomainMetadata, llvm::MDNode::get(context, values));
+        }
+    } // namespace
+
     // Every module's struct type, in declaration order, so a field may be a module declared before (whose layout is
     // known), or point to any. A second module of a name is an error (the parser gave the name to the first). A field
     // is refused when it has an initialiser or is const (nothing runs when a module is made, so it would only ever be
@@ -224,22 +273,39 @@ namespace fminus::ir::detail
             return {atEntry(field, false), type};
         case ParamBinding::Kind::Stream:
         {
+            // The slot's value when the stream is flat (its pointer null), and its i-th sample otherwise: a branch,
+            // so a null stream is never read. The test is made once, where the method starts, and knob versioning
+            // gives the method a copy for each answer, so from -O1 the branch is not in the loop.
             llvm::Value* offset = builder_.CreateSExt(convert(at, ast::Type::Int, location, Use::Initializing),
                                                       builder_.getInt64Ty(), "idxprom");
-            llvm::Value* sample = builder_.CreateInBoundsGEP(builder_.getFloatTy(), atEntry(field, true), offset,
-                                                             parameter.name + ".at");
+            llvm::Value* stream = atEntry(field, true);
+            const auto [flat, value] = flatStreams_.at(field);
+            llvm::BasicBlock* flatEnd = builder_.GetInsertBlock();
+            llvm::BasicBlock* sampleBlock = newBlock((parameter.name + ".sample").c_str());
+            llvm::BasicBlock* endBlock = newBlock((parameter.name + ".end").c_str());
+            builder_.CreateCondBr(flat, endBlock, sampleBlock);
+            builder_.SetInsertPoint(sampleBlock);
+            llvm::Value* sample =
+                builder_.CreateInBoundsGEP(builder_.getFloatTy(), stream, offset, parameter.name + ".at");
             llvm::LoadInst* load = builder_.CreateLoad(builder_.getFloatTy(), sample, parameter.name);
             tag(load, ast::Type::Float);
             streamReads_.push_back(load);
-            return {load, type};
+            builder_.CreateBr(endBlock);
+            builder_.SetInsertPoint(endBlock);
+            llvm::PHINode* read = builder_.CreatePHI(builder_.getFloatTy(), 2, parameter.name + ".read");
+            read->addIncoming(value, flatEnd);
+            read->addIncoming(load, sampleBlock);
+            return {read, type};
         }
         }
         return poison(type);
     }
 
     // What the method reads of parameter `field` where it starts, once: its stream's pointer, or its value (an atomic
-    // load, a bool's byte compared with 0). From `this` itself, the method's first argument. Each load carries its
-    // type's TBAA tag (Tbaa.cpp): the pointer's, and the value's, as the parameter's type.
+    // load, a bool's byte compared with 0). From `this` itself, the method's first argument. With a stream's pointer
+    // come its test for null and the slot's value, read as a knob's (flatStreams_), what a flat stream reads instead.
+    // A bool's value, an int's and a stream's test carry their domains (tagDomain), for knob versioning. Each load
+    // carries its type's TBAA tag (Tbaa.cpp): the pointer's, and the value's, as the parameter's type.
     //
     // The value's load is unordered, LLVM's weakest atomic ordering: it can't tear, so the method reads a value the
     // host stored, whole, however the host's thread races it; and unlike a monotonic (C++'s relaxed) load, LLVM may
@@ -268,6 +334,14 @@ namespace fminus::ir::detail
                 at.CreateLoad(builder_.getPtrTy(), at.CreateStructGEP(slotType, slot, 0), parameter.name + ".stream");
             tag(load, ast::Type::pointerTo(ast::Kind::Float, true));
             loaded = load;
+            llvm::LoadInst* flatValue = at.CreateAlignedLoad(value, at.CreateStructGEP(slotType, slot, 1),
+                                                             llvm::Align(4), parameter.name + ".value");
+            flatValue->setAtomic(llvm::AtomicOrdering::Unordered);
+            tag(flatValue, parameter.type);
+            auto* flat = llvm::cast<llvm::Instruction>(at.CreateICmpEQ(
+                loaded, llvm::ConstantPointerNull::get(builder_.getPtrTy()), parameter.name + ".flat"));
+            tagDomain(*flat, parameter, true);
+            flatStreams_.emplace(field, std::make_pair(flat, flatValue));
         }
         else
         {
@@ -278,6 +352,8 @@ namespace fminus::ir::detail
             tag(load, parameter.type);
             loaded = parameter.type == ast::Type::Bool ? at.CreateICmpNE(load, at.getInt8(0), parameter.name + ".on")
                                                        : static_cast<llvm::Value*>(load);
+            if (parameter.type != ast::Type::Float)
+                tagDomain(*llvm::cast<llvm::Instruction>(loaded), parameter, parameter.type == ast::Type::Bool);
         }
         entryLoads_.emplace(key, loaded);
         return loaded;

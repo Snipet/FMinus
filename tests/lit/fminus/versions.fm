@@ -1,0 +1,210 @@
+// Knob versioning (src/opt/KnobVersioning.h) and flat streams. The code generator tags each int and bool knob's read,
+// and each stream's test for null, with the values it can take (!fminus.domain); from -O1, a method whose loop branches
+// on one gets a copy of its body for each value, picked where it starts, with the knob a constant in each. An int
+// outside its domain runs the original body; the budget (--knob-versions) caps the copies. A null stream reads the
+// slot's value, and its copy computes what the stream fed (a sine, a cosine, divides) once, before its loop.
+// RUN: fminus %s -O0 --stream Biquad::cutoff | FileCheck %s --check-prefix=LOWER
+// RUN: fminus %s > %t.ll
+// RUN: FileCheck %s --check-prefix=COPIES < %t.ll
+// RUN: FileCheck %s --check-prefix=QUIET < %t.ll
+// RUN: FileCheck %s --check-prefix=BUDGET < %t.ll
+// RUN: fminus %s -O1 | FileCheck %s --check-prefix=O1
+// RUN: fminus %s --knob-versions 64 | FileCheck %s --check-prefix=BUDGET64
+// RUN: fminus %s --knob-versions 0 | FileCheck %s --check-prefix=OFF
+// RUN: fminus %s --stream Biquad::cutoff > %t.stream.ll
+// RUN: FileCheck %s --check-prefix=SAMPLES < %t.stream.ll
+// RUN: FileCheck %s --check-prefix=FLAT < %t.stream.ll
+
+// A one-pole whose mode shapes its step: a fraction, a soft clip or a hard clip. Its state keeps the loop from
+// vectorising, so each copy is one loop block.
+module Drive
+{
+    param int mode [[fminus::range(0, 2)]];
+    float y;
+
+    void process(const float* restrict in, float* restrict out, int n) [[clang::nonblocking]]
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            const float x = in[i] - y;
+            y += mode[i] == 0 ? 0.25f * x : mode[i] == 1 ? x / (1 + fabsf(x)) : fminf(fmaxf(x, -1), 1);
+            out[i] = y;
+        }
+    }
+};
+
+// `on` decides once, before the loop; `level` (a float) and `wide` (16 values) decide in it, but are not tagged. No
+// copies.
+module Quiet
+{
+    param bool on;
+    param float level;
+    param int wide [[fminus::range(0, 15)]];
+
+    void process(const float* restrict in, float* restrict out, int n)
+    {
+        const float g = on[0] ? 2 : 1;
+        for (int i = 0; i < n; ++i)
+            out[i] = level[i] > 1 || wide[i] == 3 ? g * in[i] : in[i];
+    }
+};
+
+// Three ints over 0..3: 64 combinations, of which a budget of 8 takes the first knob's 4.
+module Three
+{
+    param int a [[fminus::range(0, 3)]];
+    param int b [[fminus::range(0, 3)]];
+    param int c [[fminus::range(0, 3)]];
+
+    void process(const float* restrict in, float* restrict out, int n)
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            float x = in[i];
+            if (a[i] == 1)
+                x = x * 2;
+            if (b[i] == 2)
+                x = x + 1;
+            if (c[i] == 3)
+                x = -x;
+            out[i] = x;
+        }
+    }
+};
+
+// A biquad low-pass whose coefficients follow its cutoff, a sample at a time.
+module Biquad
+{
+    param float cutoff;
+    float s1;
+    float s2;
+
+    void process(const float* restrict in, float* restrict out, int n) [[clang::nonblocking]]
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            const float w = 6.2831853f * cutoff[i] / 48000;
+            const float c = cosf(w);
+            const float alpha = sinf(w) / 1.4142f;
+            const float a0 = 1 + alpha;
+            const float x = in[i];
+            const float y = (1 - c) / 2 / a0 * x + s1;
+            s1 = (1 - c) / a0 * x + 2 * c / a0 * y + s2;
+            s2 = (1 - c) / 2 / a0 * x - (1 - alpha) / a0 * y;
+            out[i] = y;
+        }
+    }
+};
+
+// The tags, as lowered: an int's range, a bool's two values, a stream's test for null; none for a float or a wide int.
+// A stream reads its value at the start too, and a sample only when its pointer is not null. The budget is a module
+// flag.
+// LOWER-LABEL: define void @"Drive::process"(
+// LOWER:         %mode = load atomic i32, ptr {{%.*}} unordered, align 4, {{(!tbaa ![0-9]+, )?}}!fminus.domain [[RANGE:![0-9]+]]
+// LOWER-LABEL: define void @"Quiet::process"(
+// LOWER-DAG:     %on.on = icmp ne i8 %on, 0, !fminus.domain [[BOOL:![0-9]+]]
+// LOWER-DAG:     %level = load atomic float, ptr {{%.*}} unordered, align 4{{(, !tbaa ![0-9]+)?}}{{$}}
+// LOWER-DAG:     %wide = load atomic i32, ptr {{%.*}} unordered, align 4{{(, !tbaa ![0-9]+)?}}{{$}}
+// LOWER-LABEL: define void @"Biquad::process"(
+// LOWER:         %cutoff.stream = load ptr, ptr {{%.*}}, align 8, {{(!tbaa ![0-9]+, )?}}!noalias [[SCOPES:![0-9]+]]
+// LOWER-NEXT:    {{%.*}} = getelementptr inbounds nuw { ptr, float }, ptr %cutoff.slot, i32 0, i32 1
+// LOWER-NEXT:    %cutoff.value = load atomic float, ptr {{%.*}} unordered, align 4, {{(!tbaa ![0-9]+, )?}}!noalias [[SCOPES]]
+// LOWER-NEXT:    %cutoff.flat = icmp eq ptr %cutoff.stream, null, !fminus.domain [[BOOL]]
+// LOWER:         br i1 %cutoff.flat, label %cutoff.end, label %cutoff.sample
+// LOWER:       cutoff.sample:
+// LOWER-NEXT:    %cutoff.at = getelementptr inbounds float, ptr %cutoff.stream, i64 %idxprom
+// LOWER-NEXT:    %cutoff = load float, ptr %cutoff.at, align 4, {{(!tbaa ![0-9]+, )?}}!alias.scope [[SCOPES]]
+// LOWER-NEXT:    br label %cutoff.end
+// LOWER:       cutoff.end:
+// LOWER-NEXT:    %cutoff.read = phi float [ %cutoff.value, %for.body ], [ %cutoff, %cutoff.sample ]
+// LOWER:       !{i32 8, !"fminus.knob-versions", i32 8}
+// LOWER-DAG:   [[RANGE]] = !{i32 0, i32 1, i32 2}
+// LOWER-DAG:   [[BOOL]] = !{i1 false, i1 true}
+
+// At -O2: a switch on the mode where the method starts, one loop for each mode with no trace of the mode in it, and
+// the original body, for any other mode, still switching a sample.
+// COPIES-LABEL: define void @"Drive::process"(
+// COPIES-SAME:    #[[DRIVE:[0-9]+]] {
+// COPIES:       entry:
+// COPIES:         %mode = load atomic i32, ptr {{%.*}} unordered, align 8, {{(!tbaa ![0-9]+, )?}}!fminus.domain
+// COPIES:         switch i32 %mode, label %{{.*}} [
+// COPIES-NEXT:      i32 0, label %for.cond.mode0.preheader
+// COPIES-NEXT:      i32 1, label %for.cond.mode1.preheader
+// COPIES-NEXT:      i32 2, label %for.cond.mode2.preheader
+// COPIES-NEXT:    ]
+// COPIES:       for.body:
+// COPIES:         switch i32 %mode, label
+// COPIES:       for.body.mode0:
+// COPIES-NOT:     %mode
+// COPIES:         fmul float {{%.*}}, 2.500000e-01
+// COPIES-NOT:     %mode
+// COPIES:         br i1 {{%.*}}, label {{%.*}}, label %for.body.mode0
+// COPIES:       for.body.mode1:
+// COPIES-NOT:     %mode
+// COPIES:         fdiv float
+// COPIES-NOT:     %mode
+// COPIES:         br i1 {{%.*}}, label {{%.*}}, label %for.body.mode1
+// COPIES:       for.body.mode2:
+// COPIES-NOT:     %mode
+// COPIES:         call float @llvm.minnum.f32
+// COPIES-NOT:     %mode
+// COPIES:         br i1 {{%.*}}, label {{%.*}}, label %for.body.mode2
+// COPIES:       attributes #[[DRIVE]] = { {{.*}}"fminus-knob-versions"="3"
+
+// Quiet has no copies: none of its blocks carries a knob's value in its name.
+// QUIET-LABEL: define void @"Quiet::process"(
+// QUIET-NOT:     {{\.on[01]}}
+// QUIET-NOT:     {{\.wide[0-9]}}
+// QUIET-NOT:     switch
+// QUIET-LABEL: define void @"Three::process"(
+
+// BUDGET-LABEL: define void @"Three::process"(
+// BUDGET-SAME:    #[[THREE:[0-9]+]] {
+// BUDGET:         switch i32 %a, label
+// BUDGET-NOT:     switch i32 %b
+// BUDGET-NOT:     switch i32 %c
+// BUDGET-LABEL: define void @"Biquad::process"(
+// BUDGET:       attributes #[[THREE]] = { {{.*}}"fminus-knob-versions"="4"
+
+// BUDGET64-LABEL: define void @"Three::process"(
+// BUDGET64-SAME:    #[[THREE:[0-9]+]] {
+// BUDGET64:       attributes #[[THREE]] = { {{.*}}"fminus-knob-versions"="64"
+
+// O1:           define void @"Drive::process"({{.*}} #[[DRIVE:[0-9]+]] {
+// O1:           switch i32 %mode, label
+// O1:           attributes #[[DRIVE]] = { {{.*}}"fminus-knob-versions"="3"
+
+// OFF-NOT:      "fminus-knob-versions"
+// OFF-LABEL:    define void @"Drive::process"(
+// OFF-NOT:        mode0
+// OFF:          for.body:
+// OFF:            switch i32 %mode, label
+// OFF:          !{i32 8, !"fminus.knob-versions", i32 0}
+
+// A stream with samples: its copy is the loop as it was, a sample's load in the streams' scope, then its sine and
+// cosine.
+// SAMPLES-LABEL: define void @"Biquad::process"(
+// SAMPLES:         %cutoff.stream = load ptr, ptr %this, align 8, {{(!tbaa ![0-9]+, )?}}!noalias
+// SAMPLES:         %cutoff.value = load atomic float, ptr {{%.*}} unordered, align 8, {{(!tbaa ![0-9]+, )?}}!noalias
+// SAMPLES:         %cutoff.flat = icmp eq ptr %cutoff.stream, null, !fminus.domain
+// SAMPLES:         br i1 %cutoff.flat, label %{{.*}}, label %for.cond.preheader
+// SAMPLES:       for.body:
+// SAMPLES:         %cutoff = load float, ptr %cutoff.at, align 4, {{(!tbaa ![0-9]+, )?}}!alias.scope
+// SAMPLES:         call float @llvm.cos.f32
+// SAMPLES:         call float @llvm.sin.f32
+// SAMPLES:         br i1 %exitcond.not, label %{{.*}}, label %for.body
+
+// A flat stream: its copy computes the coefficients from the value once, before its loop, which reads no stream and
+// calls and divides nothing.
+// FLAT-LABEL: define void @"Biquad::process"(
+// FLAT:         br i1 %cutoff.flat, label %for.cond.cutoff.flat1.preheader, label
+// FLAT:       cutoff.end.cutoff.flat1.lr.ph:
+// FLAT:         fmul float %cutoff.value,
+// FLAT:         call float @llvm.cos.f32
+// FLAT:         call float @llvm.sin.f32
+// FLAT:       cutoff.end.cutoff.flat1:
+// FLAT-NOT:     %cutoff.stream
+// FLAT-NOT:     call
+// FLAT-NOT:     fdiv
+// FLAT:         br i1 {{%.*}}, label %{{.*}}, label %cutoff.end.cutoff.flat1
+// FLAT:       attributes #{{[0-9]+}} = { {{.*}}"fminus-knob-versions"="2"

@@ -17,6 +17,7 @@
 #include "ir/CodeGen.h"
 
 #include "ir/Lowering.h"
+#include "opt/KnobVersioning.h"
 
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
@@ -62,6 +63,8 @@ namespace fminus::ir
         module->setSourceFileName(diagnostics.fileName());
         if (!options.dataLayout.empty())
             module->setDataLayout(options.dataLayout);
+        // Knob versioning's budget goes with the module: the JIT optimises it later, where only the module arrives.
+        module->addModuleFlag(llvm::Module::Min, opt::kVersionsFlag, options.knobVersions);
         detail::Lowering(*module, diagnostics, options).lower(program);
         if (diagnostics.hasErrors())
             return nullptr;

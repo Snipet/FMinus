@@ -1,6 +1,7 @@
 // src/support/HostTarget.cpp
 #include "support/HostTarget.h"
 
+#include "opt/KnobVersioning.h"
 #include "opt/ZeroInitElision.h"
 #include "support/LLVMInit.h"
 
@@ -87,6 +88,17 @@ namespace fminus
             functionPasses.addPass(opt::ZeroInitElisionPass());
         });
         // ---- end of zero-init elision ------------------------------------------------------------------------------
+        // ---- Knob versioning (opt/KnobVersioning.h), from -O1 -------------------------------------------------------
+        // A method whose loop branches on an int or bool knob, or on whether a stream is flat, gets a copy of its body
+        // for each value. Early: after the pipeline's first SimplifyCFG, SROA and EarlyCSE, which turn the code
+        // generator's stack slots into the SSA values the pass follows from a knob to its branch, and before IPSCCP and
+        // the inliner, so each method is versioned on its own knobs, and the whole pipeline then simplifies each copy.
+        passes.registerPipelineEarlySimplificationEPCallback(
+            [](llvm::ModulePassManager& modulePasses, llvm::OptimizationLevel level, llvm::ThinOrFullLTOPhase) {
+                if (level != llvm::OptimizationLevel::O0)
+                    modulePasses.addPass(llvm::createModuleToFunctionPassAdaptor(opt::KnobVersioningPass()));
+            });
+        // ---- end of knob versioning ---------------------------------------------------------------------------------
 
         passes.registerModuleAnalyses(modules);
         passes.registerCGSCCAnalyses(cgsccs);

@@ -125,6 +125,7 @@ namespace fminus::ir::detail
         scopes_.assign(1, {});   // the outermost scope: the parameters and the body's own declarations
         entryLoads_.clear();     // a method's module parameters, read where it starts (Modules.cpp)
         streamReads_.clear();
+        flatStreams_.clear();
 
         // Each parameter gets a slot, as a local does (clang names them x.addr), so it can be assigned.
         for (std::size_t i = 0; i < function.params.size(); ++i)

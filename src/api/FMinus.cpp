@@ -149,6 +149,7 @@ namespace fminus
         for (const auto& [name, binding] : options.parameters)
             lowering.parameters.emplace(name, lowered(binding));
         lowering.strictAliasing = options.strictAliasing;
+        lowering.knobVersions = options.knobVersions;
 
         auto context = std::make_unique<llvm::LLVMContext>();
         std::unique_ptr<llvm::Module> module = ir::lower(*program, *context, diagnostics, lowering);

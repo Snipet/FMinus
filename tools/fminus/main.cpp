@@ -10,6 +10,7 @@
 //     fminus unison.fm --poly-lanes 16      as if this machine's vectors held 16 floats (any target's poly float)
 //     fminus lowpass.fm --stream Lowpass::cutoff --freeze Lowpass::mode=2
 //                                           a parameter read from a buffer, one compiled in (a knob otherwise)
+//     fminus lowpass.fm --knob-versions 0   no copies of a method for its knobs' values (8 at most by default)
 #include "frontend/Frontend.h"
 #include "ir/CodeGen.h"
 #include "jit/Jit.h"
@@ -111,6 +112,7 @@ int main(int argc, char** argv)
     std::vector<std::string> streams;
     std::vector<std::string> freezes;
     bool noStrictAliasing = false;
+    unsigned knobVersions = fminus::ir::Options{}.knobVersions;
     app.add_option("input", input, "FMinus source file ('-' for stdin)")->required();
     app.add_option("args", runArgs, "The arguments of --run's function");
     app.add_option("-o,--output", output, "The output file ('-' is stdout)")->capture_default_str();
@@ -130,6 +132,10 @@ int main(int argc, char** argv)
     app.add_flag("--no-strict-aliasing", noStrictAliasing,
                  "Emit no type-based alias metadata (clang's -fno-strict-aliasing): for a program that reads memory "
                  "as a type other than the one it holds");
+    app.add_option("--knob-versions", knobVersions,
+                   "At most this many copies of a method whose loop branches on an int or bool knob or a flat stream, "
+                   "one for each value (0: none; from -O1)")
+        ->capture_default_str();
     CLI11_PARSE(app, argc, argv);
     if (emit == "exe" && run.empty() && output == "-")
         return fail("--emit exe: an executable needs a file name (-o)");
@@ -160,6 +166,7 @@ int main(int argc, char** argv)
     options.polyLanes = polyLanes != 0 ? polyLanes : fminus::polyLanes(**machine);
     options.dataLayout = (*machine)->createDataLayout().getStringRepresentation();
     options.strictAliasing = !noStrictAliasing;
+    options.knobVersions = knobVersions;
     for (const std::string& name : streams)
         options.parameters[name] = {fminus::ir::ParamBinding::Kind::Stream, 0.0};
     for (const std::string& spec : freezes)

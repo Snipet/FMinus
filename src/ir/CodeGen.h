@@ -55,6 +55,12 @@ namespace fminus::ir
         // the module's fields once. Off, clang's -fno-strict-aliasing, nothing is tagged, and LLVM assumes any store
         // may change anything: for a program that reads memory as a type other than the one it holds.
         bool strictAliasing = true;
+        // Knob versioning's budget (opt/KnobVersioning.h), from -O1: at most this many copies of a method's body, one
+        // for each combination of the values of the int and bool knobs (and the streams' flat tests) its loops branch
+        // on, so that each copy folds them as constants. 0 turns it off. It travels with the module, as the module flag
+        // "fminus.knob-versions", to wherever the module is optimised. The copies compute what the method does, but
+        // for math calls' last bits where a copy vectorises a loop the method did not (opt/KnobVersioning.h).
+        unsigned knobVersions = 8;
     };
 
     // Lowers `program` into a new module in `context`, named after the diagnostics' file. Every FMinus function becomes

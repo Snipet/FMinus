@@ -284,5 +284,6 @@ namespace fminus::ir::detail
         std::map<std::pair<unsigned, bool>, llvm::Value*> entryLoads_;     // the method's parameters, read at entry
         std::vector<llvm::Instruction*> streamReads_;                      // its loads of its streams' samples
         bool strictAliasing_;                                              // whether loads and stores carry !tbaa
+        std::map<unsigned, std::pair<llvm::Value*, llvm::Value*>> flatStreams_;   // its streams' null tests, values
     };
 } // namespace fminus::ir::detail

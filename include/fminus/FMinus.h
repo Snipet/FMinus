@@ -37,8 +37,9 @@
 //
 // Parameters: a module's `param float cutoff;` is a value the host sets, read in a method as cutoff[i], at sample i of
 // the call. How it reads is the host's choice when it compiles (Options::parameters, Binding): a knob (the value, read
-// once when the method starts, and safe to set from any thread), a stream (a buffer of samples, an LFO's say), or
-// frozen (a constant compiled in). Module::parameters describes each; setValue, setStream and setDefaults write them.
+// once when the method starts, and safe to set from any thread), a stream (a buffer of samples, an LFO's say, or null
+// for a call in which it holds still at its value), or frozen (a constant compiled in). Module::parameters describes
+// each; setValue, setStream and setDefaults write them.
 //
 //   Program::Options options;
 //   options.parameters["Lowpass::cutoff"] = Program::Binding::stream();   // modulated: a sample each
@@ -70,7 +71,10 @@ namespace fminus
         //           from any thread at any time (setValue), and the method sees one value it set, never a torn one.
         //           Held in a register from then on, as fast as a local. The default.
         //   Stream  a float parameter's buffer: cutoff[i] is samples[i], from the pointer the host sets before each
-        //           call (setStream). Sample-accurate: an audio-rate signal, an envelope, a smoothed knob.
+        //           call (setStream). Sample-accurate: an audio-rate signal, an envelope, a smoothed knob. A null
+        //           pointer is a flat call: cutoff[i] is then the slot's value (setValue), read as a knob's, so a host
+        //           whose smoother is idle passes no buffer, and the method runs its flat copy (Options::knobVersions),
+        //           with what it computes from the parameter out of its loop.
         //   Frozen  `value`, compiled in as a constant: a knob that will not move while this program plays. The
         //           optimiser folds it as it folds a constant (a branch on a frozen bool disappears); the host
         //           compiles again to move it.
@@ -114,6 +118,13 @@ namespace fminus
             // type it holds (a float vector as floats). Off, as clang's -fno-strict-aliasing, for a program that
             // reads memory as another type; its loops over a module's buffers may then run several times slower.
             bool strictAliasing = true;
+            // Knob versioning, from -O1: a method whose loop branches on a bool knob, an int knob whose fminus::range
+            // holds at most 8 integers, or whether a stream is flat (setStream) gets a copy of its code for each of
+            // their values, picked when it starts, in which the value is a constant, folded as a frozen one is (an int
+            // outside its range runs the method as written). At most this many copies a method; 0 turns it off. The copies cost code size and compile time, and compute what the method
+            // does, bit for bit, but for math functions' last bits: a copy's loop may vectorise where the method's
+            // did not, and a vectorised sinf, expf, ... is the vector library's, not libm's.
+            unsigned knobVersions = 8;
         };
 
         // Compiles `source`. Returns nullptr when it does not compile, with `errors` holding FMinus's messages, one a
@@ -202,8 +213,9 @@ namespace fminus
 
         // Sets a parameter's value in `instance`, an instance of its module: a relaxed atomic store, from any thread
         // at any time, which a method reads when it next starts. A float's rounded, an int's truncated toward 0 (and
-        // clamped to an int's range), a bool's true unless 0. A stream's or a frozen parameter's methods do not read
-        // it. No allocation, no lock: the audio thread may call it.
+        // clamped to an int's range), a bool's true unless 0. A frozen parameter's methods do not read it, and a
+        // stream's read it only in a call whose stream is null (setStream). No allocation, no lock: the audio thread
+        // may call it.
         static void setValue(void* instance, const Parameter& parameter, double value) noexcept;
 
         // The value setValue last set (a relaxed atomic load), as a double.
@@ -211,8 +223,9 @@ namespace fminus
 
         // Points a stream parameter at its samples for the next call: as many as the call reads, which a method that
         // processes n samples, reading cutoff[i] for i below n, is n. The thread that calls the method sets it,
-        // before the call; the method reads it when it starts. A knob's or a frozen parameter's methods do not read
-        // it.
+        // before the call; the method reads it when it starts. nullptr makes the call flat: every cutoff[i] is then
+        // the slot's value, as setValue last set it, and no sample is read. A knob's or a frozen parameter's methods
+        // do not read it.
         static void setStream(void* instance, const Parameter& parameter, const float* samples) noexcept;
 
         // Sets each of the module's parameters that has an fminus::default to it (setValue), in `instance`.
