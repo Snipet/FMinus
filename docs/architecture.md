@@ -16,7 +16,7 @@ stage to the next. [extending.md](extending.md) builds on this to show how to ad
      │  ir/                   ir::lower: syntax tree -> LLVM IR, reporting every semantic error
      ▼
  llvm::Module                 one function per FMinus function, C calling convention
-     │  support/HostTarget    prepareModule (triple, data layout) + optimiseModule (LLVM's O0-O3 pipeline)
+     │  support/HostTarget    prepareModule (triple, data layout) + optimiseModule (LLVM's O0-O3 pipeline + FMinus's)
      ├──────────────────────────────┐
      ▼                              ▼
  jit/Jit (ORC LLJIT)            support/Aot
@@ -173,23 +173,31 @@ on it without the code generator.
 
 `ir::lower(program, context, diagnostics, options)` (`CodeGen.h`) creates a module named after the file.
 `options.polyLanes` is a `poly float`'s width, which the driver gets from the target machine (`polyLanes`, below), and
-`options.parameters` the host's binding of each module parameter: a knob, a stream or a frozen constant. A
+`options.parameters` the host's binding of each module parameter: a knob, a stream or a frozen constant. The rest are
+the host's choices too: `math`, how the transcendental builtins compute; `strictAliasing`, whether loads and stores
+carry TBAA tags; `knobVersions`, knob versioning's budget; `denormals`, subnormals kept or flushed to zero, and
+`targetTriple`, which says what register an entry point sets then. `ir::lower` writes two module flags,
+`fminus.math` (the mode) and `fminus.knob-versions` (the budget), for the optimiser, where only the module arrives. A
 `Lowering` object then lays the modules out, runs two passes over the program, and checks the functions' effects after
-them. `Lowering` is one class (`Lowering.h`, internal to `src/ir/`, in `fminus::ir::detail`), but its members are
-defined across the directory by what they lower:
+them; under `Denormals::Flush` it then marks every definition flushing and wraps the entry points (`flushDenormals`),
+which needs every call known. `Lowering` is one class (`Lowering.h`, internal to `src/ir/`, in `fminus::ir::detail`),
+but its members are defined across the directory by what they lower:
 
 | File | Lowering's members for |
 |---|---|
 | `CodeGen.cpp` | `ir::lower()`, the constructor, and the passes: where the parts combine |
 | `Types.cpp` | FMinus's types as LLVM's (`typeOf`, `lanes`), the conversions (`convert`, `convertPointer`, `commonType`), errors and poison values |
 | `Functions.cpp` | declarations and prototypes (`declare`), bodies and parameters (`define`), stack slots and scopes |
-| `Statements.cpp` | blocks, declarations, `return`, `if`, `while`, `for`, `break` and `continue` |
+| `Statements.cpp` | blocks, declarations, `return`, `if`, `while`, `for`, `break` and `continue`; a loop's `llvm.loop.mustprogress` when its condition is not a constant expression (`isConstant`, `mustProgress`) |
 | `Expressions.cpp` | the expression `std::visit` (`lower`), constants, operators (`binary`, `arithmetic`), `&&` and `\|\|`, `?:`, casts, assignment, `++` and `--` |
-| `Calls.cpp` | the builtin tables, calls, reductions, `poly_lanes` and `poly_index`, `poly_load` and `poly_store`, the heap's `malloc`, `calloc` and `free`, the FFT's `fft_*` (`lowerFft`, on the runtime's), and `ir::builtins()` |
+| `Calls.cpp` | the builtin tables, calls, reductions, `poly_lanes` and `poly_index`, `poly_load` and `poly_store`, the heap's `malloc`, `calloc` and `free`, the FFT's `fft_*` (`lowerFft`, on the runtime's), and `ir::builtins()`; the heap's and the FFT's runtime calls through `callRuntime`, whose declaration says what the function does (`kRuntimeFacts`, `describeRuntime`) |
+| `Math.cpp` | `sinf`, `cosf`, `expf`, `tanhf` and `logf` in the vector and libm math modes: the runtime's functions, a float's or four lanes' (`lowerMath`), declared with their attributes and vector variant (`mathFunction`), and the names the runtime keeps for them, which a program that calls one may not declare (`checkMathNames`) |
 | `Vectors.cpp` | vector literals in both forms, swizzles, `?:` with a vector condition |
 | `Memory.cpp` | lvalues (`lvalue`, `read`, `write`): variables, elements (`p[i]`, `*p`), fields, components of any of them; arrays (a name that stands for a pointer, a list); `&x`; pointer arithmetic |
-| `Modules.cpp` | each module's struct type (`layOut`), fields (`field`), `this`, method calls (`callMethod`), copies; parameters, read by their binding (`lowerParameter`, `atEntry`), and their streams' alias scope (`scopeStreams`) |
+| `Modules.cpp` | each module's struct type (`layOut`), fields (`field`), `this`, method calls (`callMethod`), copies; parameters, read by their binding (`lowerParameter`, `atEntry`), a stream's null test, value, base and stride (a flat call, read with no branch; the stride's `opaqueUnit`), their domains for knob versioning (`tagDomain`), and their streams' alias scope (`scopeStreams`) |
 | `Effects.cpp` | `[[clang::nonallocating]]` and `[[clang::nonblocking]]`: each function's calls (recorded by `lowerCall`), checked once every body is lowered |
+| `Tbaa.cpp` | C's strict aliasing, told to LLVM: FMinus's tree of four types and each access's tag (`accessTag`, `tag`), which every load and store calls |
+| `Denormals.cpp` | `Denormals::Flush`: `DenormalFolder` (`Denormals.h`, the builder's constant folder, which flushes as the mode does), every definition marked `denormal_fpenv(preservesign)`, and each entry point wrapped to set the mode and call its body through an address LLVM cannot see into (`flushDenormals`, `wrapEntry`) |
 
 The header declares every member under the name of its file, so it doubles as the map. A new node goes in the file its
 kind belongs to, and the compiler finds the rest: `lower`'s `std::visit` in `Expressions.cpp` and the statement visit in
@@ -201,7 +209,16 @@ body, so a field may hold a module declared before it. A module's `sizeof` and a
 `options.dataLayout` (the driver's and the API's come from the target machine). A parameter's element is its slot,
 `{ ptr, float }` (or `i32`, or a `bool`'s `i8`): the stream's pointer and the value, the same under every binding, so
 one instance runs under programs that bind it differently. A method reads a knob's value, or a stream's pointer, once,
-in its entry block, so both are registers through its loops (extending.md, recipe 14).
+in its entry block, so both are registers through its loops (extending.md, recipe 14). With a stream's pointer it
+reads the slot's value and whether the pointer is null, a flat call, and picks where the samples are, a base and a
+stride: the pointer and 1, or, flat, the slot's value field and 0. `cutoff[i]` loads from `base + i * stride` and
+selects the value when the stream is flat, with no branch, so a loop over a stream vectorises even where knob
+versioning makes it no copy: LLVM's loop vectoriser checks that the stride is 1, and a flat call runs the scalar loop,
+a load and a select a sample. The 1 is an empty inline asm's result (`opaqueUnit`), so that LLVM keeps the
+multiplication: given a stride it can see is 0 or 1, InstCombine makes `i * stride` a select, and the loop stays
+scalar. A bool knob's read, an int knob's when its `fminus::range` has integer ends and holds at most 8 values, and the
+stream's test carry the values they can take (`!fminus.domain`), for knob versioning (recipe 16), which makes the stride
+a constant again in each copy. Any other int knob is left untagged, and no method is versioned on it.
 
 **Pass 1, declare.** Every function name gets one `llvm::Function`, with external linkage, its C name and the C
 calling convention (`float` is `float`, `int` is `i32`, a pointer is `ptr`, a `void` result is `void`). C++ therefore
@@ -215,7 +232,8 @@ prototypes and definition are C's:
 - a function with prototypes and no definition stays external, and is resolved when the code is linked. The JIT
   looks in the process, so `float atanf(float x);` calls libm's.
 
-**Pass 2, define.** Each definition's body is lowered with an `llvm::IRBuilder<>`:
+**Pass 2, define.** Each definition's body is lowered with an `llvm::IRBuilder<DenormalFolder>`, which folds constants
+as `ConstantFolder` does, and under `Denormals::Flush` as flushing hardware computes them:
 
 - **Variables are C's.** Every parameter and local gets a stack slot: an `alloca` at the top of the entry block
   (`allocate`), which is where mem2reg looks. Reads are loads, writes are stores, and a parameter's incoming value is
@@ -232,7 +250,9 @@ prototypes and definition are C's:
   stores to it (for components: load the vector, insert the lanes, store it back). A variable's value is a `read`, and
   so is `p[i]`'s; so a new kind of lvalue joins every use at once. Two kinds are never loaded whole: an array's `read`
   is a pointer to its first element (C's decay), and a module's is its address, which `write()` and a declaration copy
-  with a memcpy, as clang copies a struct.
+  with a memcpy, as clang copies a struct. Every load and store of a value carries its type's TBAA tag (`Tbaa.cpp`);
+  the copies and a declaration's zeroing, bytes of any type, carry none, nor do the stores that start a parameter's or
+  a declaration's slot, which mem2reg removes.
 - **Assignment** (`lowerAssign`) checks its target: it must be an lvalue ("expression is not assignable") that isn't
   `const` ("cannot assign to variable 'k' with const-qualified type 'const float'"; through a `const float*`, "read-only
   variable is not assignable"). It stores the value, and returns it as the expression's value, so `a = b = 0` works. A
@@ -272,17 +292,28 @@ to `bool` and to the same pointer with `const` added (`convertPointer`).
   `poly_load` and `poly_store` (vector loads and stores at a float's alignment, masked with a `poly bool`), then
   `kBuiltins`, a table from `<math.h>`'s float names to LLVM intrinsics (`fabsf` to `llvm.fabs`, `sinf` to
   `llvm.sin`, ...), declared with `Intrinsic::getOrInsertDeclaration` at the arguments' type, so `sinf` of a `float4`
-  is `llvm.sin.v4f32`. Then `kAllocations`, C's `malloc`, `calloc` and `free`, which call the runtime's functions
-  (below) with 64-bit sizes and give back a `void*`. Then they try the program's functions. Argument counts are
-  checked with clang's "too many/too few arguments to function call". Every call of the heap or of a program
-  function is recorded for the effects' check.
+  is `llvm.sin.v4f32`. That is the fast math mode's lowering, and the exact builtins' (`fabsf`, `sqrtf`, `floorf`,
+  `fminf`, `fmaxf`) in every mode; in the vector and libm modes `sinf`, `cosf`, `expf`, `tanhf` and `logf` are calls
+  of the runtime's functions instead (`Math.cpp`), which LLVM can neither fold nor pair, so a float gets one result
+  wherever it is computed (extending.md, recipe 15). Then `kAllocations`, C's `malloc`, `calloc` and `free`, which
+  call the runtime's functions (below) with 64-bit sizes and give back a `void*`. Then they try the program's
+  functions. Argument counts are checked with clang's "too many/too few arguments to function call". Every call of the
+  heap or of a program function is recorded for the effects' check. The heap's and the FFT's runtime functions are
+  declared through `callRuntime`, with the attributes that say what each does (an allocator of zeroed memory, a
+  transform that reads one buffer and writes another; recipe 19), unless the program declares a function of that name
+  itself. The math builtins' names are kept: a program that calls `sinf` may not declare a function named
+  `fminus_rt_sinf`, `fminus_rt_sin_f4` or `fminus_rt_libm_sinf` (each builtin has its three), in any math mode, the
+  fast one's too, so that whether a program compiles does not depend on the mode. `checkMathNames` reports it at the
+  call, with a note at the declaration, so no function of the program gets a runtime function's attributes or becomes
+  a vector variant.
 - **Effects** (`Effects.cpp`) run after every body: a function marked `[[clang::nonallocating]]` or
   `[[clang::nonblocking]]` (C23's syntax, after its parameters) is checked call by call, as clang's
   `-Wfunction-effects` checks it, down through the program's unmarked functions; a call that could reach the heap
   (or, nonblocking, an unmarked external function) is an error, with a note for each step down.
 - **Control flow** is blocks named as clang names them: `land.rhs` and `lor.rhs` for `&&` and `||`, `cond.true`,
   `cond.false` and `cond.end` for `?:`, `if.then`, `while.cond`, `for.inc`, ... A `?:` with a vector condition is a
-  `select` instead, lane by lane.
+  `select` instead, lane by lane. A loop whose condition is not a constant expression carries clang's
+  `llvm.loop.mustprogress` on its branches back, as C11 allows (recipe 19).
 - **On an error**, the lowering reports it, in clang's words, and returns `llvm::PoisonValue`. The IR stays
   well-formed, the next error is still found, and the module is thrown away at the end: `lower` returns null when
   `diagnostics.hasErrors()`.
@@ -297,9 +328,26 @@ to `bool` and to the same pointer with `const` added (`convertPointer`).
   read both.
 - **`optimiseModule(module, machine, level)`** runs `PassBuilder::buildPerModuleDefaultPipeline(level)`, which is
   clang's `-O<n>` pipeline, with loop and SLP vectorisation on. It passes the target machine, so the cost models know
-  the host's vector width and instruction costs. On Apple systems it also gives the pipeline libsystem_m's vector
-  math library, and runs `ReplaceWithVeclib` last, so `sinf` of a `float4` is one call to `_simd_sin_f4`
-  ([simd.md](simd.md), recipe 8). This is the place to plug in FMinus's own passes (extending.md, recipe 6).
+  the host's vector width and instruction costs. It is also where FMinus's own passes (`src/opt/`) join the pipeline,
+  through its extension points, each in a block of its own:
+  - **Knob versioning** (`KnobVersioningPass`, extending.md recipe 16), at the early simplification point
+    (`registerPipelineEarlySimplificationEPCallback`), from `-O1`: after the first SimplifyCFG, SROA and EarlyCSE,
+    before IPSCCP and the inliner, so each method is versioned on its own knobs. Its budget is the module flag
+    `fminus.knob-versions` (8 when there is none), spent on the streams' tests first. Each copy gets locals of its
+    own, their lifetimes marked, so the frame does not grow with the copies. A function it has versioned carries the
+    attribute `fminus-knob-versions`, and the pass leaves it alone when it runs again (`fminus-build -O3` on FMinus's
+    optimised IR, say).
+  - **Zero-init elision** (`ZeroInitElisionPass`, recipe 18), at the end of each function's simplification
+    (`registerScalarOptimizerLateEPCallback`): after the inliner and the loop passes, before the loop vectoriser. From
+    `-O1`: LLVM's `-O0` pipeline calls this point's callback too, and the pass stays out of it, so `fminus -O0` shows
+    every memset the lowering wrote.
+  - **The vector math library**, only for a module whose flag `fminus.math` is `"fast"`, or that has none (IR written
+    by hand): on Apple systems, libsystem_m's table in the target library analysis, and `ReplaceWithVeclib` last, so
+    `sinf` of a `float4` is one call to `_simd_sin_f4` ([simd.md](simd.md), recipe 8). The vector and libm modes'
+    calls are the runtime's, which neither knows.
+
+  The flags travel with the module, so the JIT, `fminus` and executables get them without a new argument. Recipe 6
+  adds a pass the same way.
 - **`polyLanes(machine)`** asks the machine's cost model how many floats its vector registers hold, the width LLVM's
   vectorisers use: a `poly float`'s lanes (4 on NEON).
 - **`codeGenLevel(level)`** maps an optimisation level to the code generator's level.
@@ -315,9 +363,10 @@ to `bool` and to the same pointer with `const` added (`convertPointer`).
   lives in, as a `ThreadSafeModule`. Nothing is compiled yet.
 - **`lookup(name)`** compiles what the symbol needs, on the calling thread, and returns its address. The caller casts
   the address to a function pointer (`address.toPtr<float (*)(float)>()`).
-- **Symbol resolution.** JIT'd code finds the FMinus runtime's functions by address (`defineRuntimeSymbols`), and
-  process symbols through LLJIT's default process-symbol link order. These include libm's `sinf` behind the `sinf`
-  builtin, and any external function a prototype declares (`float atanf(float x);`).
+- **Symbol resolution.** JIT'd code finds the FMinus runtime's functions by address (`defineRuntimeSymbols`), the
+  math builtins' among them in the vector and libm modes, and process symbols through LLJIT's default process-symbol
+  link order. These include libm's `sinf` and libsystem_m's `_simd_sin_f4` behind the `sinf` builtin in the fast mode,
+  and any external function a prototype declares (`float atanf(float x);`).
 - **Lifetimes.** The `Jit` owns its `TargetMachine` and `LLJIT` (destroyed in reverse order), and the `LLJIT` owns
   every module added. Function pointers stay valid as long as the `Jit` lives.
 
@@ -352,8 +401,12 @@ generated code calls. It contains no LLVM, and it holds the FFT: PFFFT's objects
 - `Runtime.h` declares the functions as `extern "C"`: a placeholder ABI version, the command line and result of an
   executable (`fminus_rt_main_args`, `fminus_rt_main_result`), and the heap that `malloc`, `calloc` and `free` call
   (`fminus_rt_malloc`, `fminus_rt_calloc`, `fminus_rt_free`: 64-byte aligned, zeroed, on C's `aligned_alloc`, or on
-  Windows, which has none, `_aligned_malloc`), and the FFT behind the `fft_*` builtins (`fminus_rt_fft_create`, ...,
-  `Fft.cpp`: a plan holds PFFFT's setup and buffers of its own, so a transform never allocates).
+  Windows, which has none, `_aligned_malloc`), the FFT behind the `fft_*` builtins (`fminus_rt_fft_create`, ...,
+  `Fft.cpp`: a plan holds PFFFT's setup and buffers of its own, so a transform never allocates), and the math
+  builtins' functions (`Math.cpp`). Those are the vector mode's `fminus_rt_sinf` ... `fminus_rt_logf` and their four
+  lanes, `fminus_rt_sin_f4` ... `fminus_rt_log_f4`, whose lanes are each the scalar function of that lane (on Apple
+  systems libsystem_m's vector functions, sin and cos guarded to stay lane-independent; elsewhere libm's), and the
+  libm mode's `fminus_rt_libm_sinf` and its kin. `fminus::math` in the public header calls the vector mode's.
 - `RuntimeSymbols.def` lists them, one `FMINUS_RUNTIME_SYMBOL(name)` each.
 - `support/JitRuntime.cpp` expands that list into absolute symbols in a JIT (`defineRuntimeSymbols`).
 - An executable gets the same functions by linking the archive.
@@ -371,6 +424,11 @@ Because the JIT and executables share one runtime, the two compile the same prog
 | `example-delay` | `examples/delay/bench.cpp` | delay.fm's functions and echo.fm's module, their lines allocated by the program, against C++, through `fminus::Program` |
 | `example-saturator` | `examples/saturator/bench.cpp` | saturator.fm's tanh, plain and `poly float` loops, against C++, through `fminus::Program` |
 | `example-meter` | `examples/meter/bench.cpp` | meter.fm's peak and RMS, plain and `poly float` loops, against C++, through `fminus::Program` |
+| `example-voices` | `examples/voices/bench.cpp` | voices.fm's synth, in memory the host allocates, against a C++ mirror of its modules, through `fminus::Program` |
+| `example-convolver` | `examples/convolver/bench.cpp` | convolver.fm's FIR by FFT, against C++ and a direct convolution, through `fminus::Program` |
+| `example-parameters` | `examples/parameters/bench.cpp` | parameters.fm's filter, its cutoff a knob, a stream or frozen, against C++, through `fminus::Program` |
+| `example-hello` | `examples/hello/main.cpp` | FMinus as a library at its smallest: a program compiled from a string, through `fminus::Program` |
+| (not built here) | `examples/plugin/` | FMinus Filter, a JUCE plugin, and its check `fminus-plugin-check`: a CMake project of its own, which `examples/CMakeLists.txt` skips, built with `cmake -S examples/plugin -B build-plugin` ([building.md](building.md)) |
 | `fminus-tests` | `tests/unit/`, `tests/smoke/` | Catch2 |
 | `fminus-library-tests` | `tests/library/` | Catch2, in C++17, against `FMinus::FMinus` alone: the public API as a host uses it |
 | lit suite | `tests/lit/` | `fminus`, `fminus-build`, FileCheck, LLVM's tools |
@@ -387,10 +445,10 @@ Because the JIT and executables share one runtime, the two compile the same prog
 `include/fminus/FMinus.h` is the public API: `fminus::Program` compiles a source (parse, lower for the machine's
 `poly float` width, add the module to a `jit::Jit`), looks its functions up as C function pointers, and says which are
 marked `nonblocking` or `nonallocating`; it describes each module and its parameters, and sets a parameter's value or
-stream in an instance. It has no LLVM in it and needs C++17, so `FMinus::FMinus` gives its users
-neither LLVM's include directories and definitions nor FMinus's C++23 (`fminus_target_defaults` makes a target's
-standard its own), only the libraries to link. The tree's tools, examples and tests use the stages directly, through
-`FMinus::Internal`.
+stream in an instance. `fminus::math` gives C++ the math builtins as the default math mode computes them. It has no
+LLVM in it and needs C++17, so `FMinus::FMinus` gives its users neither LLVM's include directories and definitions
+nor FMinus's C++23 (`fminus_target_defaults` makes a target's standard its own), only the libraries to link. The
+tree's tools, examples and tests use the stages directly, through `FMinus::Internal`.
 
 ## Invariants worth keeping
 
@@ -404,16 +462,34 @@ standard its own), only the libraries to link. The tree's tools, examples and te
 - **Every function is verified.** An invalid function is the compiler's bug: it is reported as an internal error
   instead of crashing in a later pass.
 - **Modules are prepared before they are optimised.** The pipeline's decisions depend on the triple and the data
-  layout.
+  layout, and on the module flags the code generator writes (`fminus.math`, `fminus.knob-versions`).
+- **Every load and store of a value is tagged with its type** (`tag`, `Tbaa.cpp`), unless strict aliasing is off. An
+  untagged access is safe, since it may alias anything, but a lowering that forgets the tag slows the loops around it;
+  `TbaaTest.cpp` walks a program that makes every kind of access and fails on one untagged. A tag that is wrong is a
+  miscompile.
+- **The runtime's declarations say only what is true of its code.** A runtime function that a builtin calls goes in
+  `RuntimeSymbols.def`, and its facts in `kRuntimeFacts` (`Calls.cpp`, through `callRuntime`: the heap's and the
+  FFT's) or in `mathFunction` (`Math.cpp`: the math builtins'). They change with its code: an attribute that is not
+  true is a miscompile (extending.md, recipes 15 and 19).
 - **Generated functions have the C calling convention, C names and external linkage.** That is the contract with C++
   callers, the JIT's `lookup` and the linker. A method's name is C++'s qualified one, `OnePole::tick`, with `this` as
   its first parameter: a symbol no C function can have, and what a host looks it up by. A new type at the boundary needs
   its C ABI attributes (extending.md, recipe 3: `bool` is `zeroext`; recipe 10: a `restrict` pointer is `noalias`;
   simd.md: `float8` goes through memory). The one exception is an executable's `main`, which `addEntryPoint` renames and
-  makes internal.
+  makes internal. (Under `Denormals::Flush` an entry point's definition becomes the internal `<name>.body`, behind a
+  wrapper that keeps the name, the type and the C ABI attributes. The wrapper calls the body through its address
+  passed through an empty inline asm, so that no pass can move the call across the writes of the control register;
+  with its address taken, the body keeps the C calling convention too. The call is indirect: under branch-target
+  enforcement (Arm BTI, x86 CET IBT) the body would need a landing pad, and neither the JIT's pages nor a binary linked
+  from FMinus's objects, which carry no BTI or IBT property, is enforced today; a link that forces the property on
+  (`-z force-bti`, say) would be.)
 - **Semantics follow C unless a deviation is documented.** The README lists the deviations: `float` and `int` are the
   only arithmetic types, an unsuffixed `1.5` is a `float`, pointers point to six types and convert only through
   `void*` or by adding `const`, the heap's memory is aligned and zeroed, `%` works on floats, calls may precede
   definitions, uninitialised variables are 0, falling off a non-void function's end is an error, a broken function
-  effect is an error, and `main` returns a `float` or a `bool` and takes floats.
+  effect is an error, C's strict aliasing is a little stricter (allocated memory keeps one type, there is no character
+  type, a vector is its elements' type), the math builtins' results are their math mode's (by default one result for
+  a float wherever it is computed), subnormals are flushed if the host asks, and `main` returns a `float` or a `bool`
+  and takes floats. As in C11 under clang, a loop whose condition is not a constant may be assumed to end, and a heap
+  block the program never uses may be removed.
 - **The runtime stays free of LLVM and real-time safe.** It runs inside the audio thread's call tree.

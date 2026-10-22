@@ -1,17 +1,21 @@
 diff --git a/src/ir/Calls.cpp b/src/ir/Calls.cpp
-index 5bbd76d..e972afd 100644
+index 6153c76..841439e 100644
 --- a/src/ir/Calls.cpp
 +++ b/src/ir/Calls.cpp
-@@ -2,7 +2,7 @@
+@@ -2,9 +2,9 @@
  // where the class's names hide the others); then the builtins, in the order a call tries them: the reductions,
  // poly_lanes and poly_index, poly_load and poly_store, <math.h>'s float functions (LLVM intrinsics, overloaded on
- // vectors), <stdlib.h>'s heap (malloc, calloc and free) and the FFT (fft_create, fft_forward, ...), both on the
--// runtime's functions; then the program's own functions.
-+// runtime's functions, and the runtime's other functions; then the program's own functions.
+ // vectors; the transcendental ones the runtime's functions, by the math mode: Math.cpp), <stdlib.h>'s heap (malloc,
+-// calloc and free) and the FFT (fft_create, fft_forward, ...), both on the runtime's functions; then the program's
+-// own functions. The runtime's functions are declared with what they do (describeRuntime), so LLVM does not take one
+-// for an unknown function that may read and write all memory.
++// calloc and free) and the FFT (fft_create, fft_forward, ...), both on the runtime's functions, and the runtime's
++// other functions; then the program's own functions. The runtime's functions are declared with what they do
++// (describeRuntime), so LLVM does not take one for an unknown function that may read and write all memory.
  #include "ir/Lowering.h"
  
- #include <llvm/IR/Constants.h>
-@@ -86,6 +86,21 @@ namespace fminus::ir::detail
+ #include <llvm/IR/Attributes.h>
+@@ -212,6 +212,21 @@ namespace fminus::ir::detail
          return nullptr;
      }
  
@@ -33,7 +37,7 @@ index 5bbd76d..e972afd 100644
      // What the effects refuse a nonallocating function (Effects.cpp): a builtin that allocates or frees.
      bool allocates(std::string_view name)
      {
-@@ -162,6 +177,17 @@ namespace fminus::ir::detail
+@@ -292,6 +307,17 @@ namespace fminus::ir::detail
                  llvm::Intrinsic::getOrInsertDeclaration(&module_, builtin->intrinsic, {typeOf(type)});
              return {builder_.CreateCall(intrinsic, irArgs), type};
          }
@@ -52,7 +56,7 @@ index 5bbd76d..e972afd 100644
          if (found == functions_.end())
          {
 diff --git a/src/ir/Functions.cpp b/src/ir/Functions.cpp
-index c2853e3..393783b 100644
+index bd3dcae..b0b47df 100644
 --- a/src/ir/Functions.cpp
 +++ b/src/ir/Functions.cpp
 @@ -29,7 +29,8 @@ namespace fminus::ir::detail
@@ -66,10 +70,10 @@ index c2853e3..393783b 100644
              error(function.location, quoted(function.name) + " is a builtin and cannot be redefined");
              return;
 diff --git a/src/ir/Lowering.h b/src/ir/Lowering.h
-index 65a3ac8..e9a3cdb 100644
+index 99d5701..5a2e07b 100644
 --- a/src/ir/Lowering.h
 +++ b/src/ir/Lowering.h
-@@ -67,10 +67,20 @@ namespace fminus::ir::detail
+@@ -78,10 +78,20 @@ namespace fminus::ir::detail
          bool allocates;
      };
  
@@ -90,9 +94,6 @@ index 65a3ac8..e9a3cdb 100644
      bool isReduction(std::string_view name);             // reduce_add, reduce_min, reduce_max
      bool isPolyQuery(std::string_view name);             // poly_lanes, poly_index
      bool isPolyMemory(std::string_view name);            // poly_load, poly_store
-diff --git a/src/opt/.gitkeep b/src/opt/.gitkeep
-deleted file mode 100644
-index e69de29..0000000
 diff --git a/src/opt/CountFlops.cpp b/src/opt/CountFlops.cpp
 new file mode 100644
 index 0000000..7c87262
@@ -213,47 +214,91 @@ index cb1b142..85828e8 100644
 +    return std::pow(10.0f, db / 20.0f);
 +}
 diff --git a/src/runtime/Runtime.h b/src/runtime/Runtime.h
-index 468d223..a67f388 100644
+index aa99903..189593f 100644
 --- a/src/runtime/Runtime.h
 +++ b/src/runtime/Runtime.h
-@@ -52,4 +52,8 @@ extern "C"
-     void fminus_rt_fft_inverse_real(void* plan, const float* in, float* out) noexcept;
-     void fminus_rt_fft_forward_complex(void* plan, const float* in, float* out) noexcept;
-     void fminus_rt_fft_inverse_complex(void* plan, const float* in, float* out) noexcept;
+@@ -84,4 +84,8 @@ extern "C"
+     float fminus_rt_libm_expf(float x) noexcept;
+     float fminus_rt_libm_tanhf(float x) noexcept;
+     float fminus_rt_libm_logf(float x) noexcept;
 +
 +    // Decibels to a linear gain: 10^(db / 20). FMinus code declares it (`float fminus_rt_db_to_gain(float db);`), or
 +    // calls it as the builtin db_to_gain (ir/Calls.cpp).
 +    float fminus_rt_db_to_gain(float db) noexcept;
  }
 diff --git a/src/runtime/RuntimeSymbols.def b/src/runtime/RuntimeSymbols.def
-index bc0f869..add6f3d 100644
+index bedb56f..86f3f5a 100644
 --- a/src/runtime/RuntimeSymbols.def
 +++ b/src/runtime/RuntimeSymbols.def
-@@ -15,3 +15,4 @@ FMINUS_RUNTIME_SYMBOL(fminus_rt_fft_forward_real)
- FMINUS_RUNTIME_SYMBOL(fminus_rt_fft_inverse_real)
- FMINUS_RUNTIME_SYMBOL(fminus_rt_fft_forward_complex)
- FMINUS_RUNTIME_SYMBOL(fminus_rt_fft_inverse_complex)
+@@ -30,3 +30,4 @@ FMINUS_RUNTIME_SYMBOL(fminus_rt_libm_cosf)
+ FMINUS_RUNTIME_SYMBOL(fminus_rt_libm_expf)
+ FMINUS_RUNTIME_SYMBOL(fminus_rt_libm_tanhf)
+ FMINUS_RUNTIME_SYMBOL(fminus_rt_libm_logf)
 +FMINUS_RUNTIME_SYMBOL(fminus_rt_db_to_gain)
 diff --git a/src/support/HostTarget.cpp b/src/support/HostTarget.cpp
-index a9819f6..61b676d 100644
+index a4ab49c..7402599 100644
 --- a/src/support/HostTarget.cpp
 +++ b/src/support/HostTarget.cpp
-@@ -1,6 +1,7 @@
- // src/support/HostTarget.cpp
+@@ -2,6 +2,7 @@
  #include "support/HostTarget.h"
  
+ #include "opt/KnobVersioning.h"
 +#include "opt/Passes.h"
+ #include "opt/ZeroInitElision.h"
  #include "support/LLVMInit.h"
  
- #include <llvm/Analysis/TargetLibraryInfo.h>
-@@ -56,6 +57,7 @@ namespace fminus
+@@ -59,6 +60,7 @@ namespace fminus
          tuning.LoopVectorization = true;
          tuning.SLPVectorization = true;
          llvm::PassBuilder passes(&machine, tuning);
 +        opt::registerPasses(passes);
  
-         // A vector math library. On Apple systems, libsystem_m's _simd_sin_f4, _simd_exp_f4, ... (in libSystem, which
-         // every process and executable links already): the target library analysis tells the loop vectoriser about
+         // A vector math library, in the fast math mode only (the module's kMathFlag; HostTarget.h). On Apple systems,
+         // libsystem_m's _simd_sin_f4, _simd_exp_f4, ... (in libSystem, which every process and executable links
+diff --git a/tests/lit/fminus/denormals.fm b/tests/lit/fminus/denormals.fm
+index 29fe887..898627d 100644
+--- a/tests/lit/fminus/denormals.fm
++++ b/tests/lit/fminus/denormals.fm
+@@ -61,8 +61,8 @@ module Tiny
+ // FLUSH-NEXT: define internal float @twice.body(float %a, float %b) #[[BODY:[0-9]+]] {
+ // FLUSH:        call float @mul(
+ // FLUSH:      ; Function Attrs: denormal_fpenv(preservesign)
+-// FLUSH-NEXT: define float @init(float %a) #[[FLUSHING]] {
+-// FLUSH:      define internal float @"Tiny::scaled.body"(ptr nonnull align 8 dereferenceable(16) %this) #[[BODY]] {
++// FLUSH-NEXT: define float @init(float %a) #[[INIT:[0-9]+]] {
++// FLUSH:      define internal float @"Tiny::scaled.body"(ptr nonnull align 8 dereferenceable(16) %this) #[[SCALED:[0-9]+]] {
+ // FLUSH:        ret float 0.000000e+00
+ // FLUSH:      ; Function Attrs: denormal_fpenv(dynamic)
+ // FLUSH-NEXT: define float @twice(float %a, float %b) #[[ENTRY:[0-9]+]] {
+@@ -74,9 +74,11 @@ module Tiny
+ // FLUSH:      define float @"Tiny::scaled"(ptr nonnull align 8 dereferenceable(16) %this) #[[ENTRY]] {
+ // FLUSH:        %body = call ptr asm "", "=r,0"(ptr @"Tiny::scaled.body")
+ // FLUSH:        %result = call float %body(ptr nonnull align 8 dereferenceable(16) %this)
+-// FLUSH:      attributes #[[FLUSHING]] = { denormal_fpenv(preservesign) }
+-// FLUSH:      attributes #[[BODY]] = { noinline denormal_fpenv(preservesign) }
+-// FLUSH:      attributes #[[ENTRY]] = { denormal_fpenv(dynamic) }
++// FLUSH:      attributes #[[FLUSHING]] = { denormal_fpenv(preservesign) "fminus-flops"="1" }
++// FLUSH:      attributes #[[BODY]] = { noinline denormal_fpenv(preservesign) "fminus-flops"="1" }
++// FLUSH:      attributes #[[INIT]] = { denormal_fpenv(preservesign) "fminus-flops"="0" }
++// FLUSH:      attributes #[[SCALED]] = { noinline denormal_fpenv(preservesign) "fminus-flops"="0" }
++// FLUSH:      attributes #[[ENTRY]] = { denormal_fpenv(dynamic) "fminus-flops"="0" }
+ 
+ // After the pipeline the body's constant is still 0, and each wrapper still calls its body through the asm's result
+ // (the body's address escapes into it, so the body keeps C's calling convention).
+@@ -93,10 +95,10 @@ module Tiny
+ // OPTIMISED:         %body = tail call ptr asm "", "=r,0"(ptr nonnull @"Tiny::scaled.body")
+ // OPTIMISED:         call float %body(ptr nonnull align 8 dereferenceable(16) %this)
+ 
+-// PRESERVE:      define float @mul(float %a, float %b) {
+-// PRESERVE:      define float @twice(float %a, float %b) {
++// PRESERVE:      define float @mul(float %a, float %b) #{{[0-9]+}} {
++// PRESERVE:      define float @twice(float %a, float %b) #{{[0-9]+}} {
+ // PRESERVE:        call float @mul(
+-// PRESERVE:      define float @"Tiny::scaled"(ptr nonnull align 8 dereferenceable(16) %this) {
++// PRESERVE:      define float @"Tiny::scaled"(ptr nonnull align 8 dereferenceable(16) %this) #{{[0-9]+}} {
+ // PRESERVE:        ret float 9.999940e-41
+ 
+ // PRESERVE-O2-LABEL: define noundef float @"Tiny::scaled"(
 diff --git a/tests/lit/fminus/flops.fm b/tests/lit/fminus/flops.fm
 new file mode 100644
 index 0000000..7a8a38a
@@ -272,10 +317,10 @@ index 0000000..7a8a38a
 +// CHECK: define float @softclip({{.*}} #[[ATTRS:[0-9]+]]
 +// CHECK: attributes #[[ATTRS]] = { {{.*}}"fminus-flops"="3"
 diff --git a/tests/unit/CodeGenTest.cpp b/tests/unit/CodeGenTest.cpp
-index c6c8659..51fb851 100644
+index 516948f..fce1dbf 100644
 --- a/tests/unit/CodeGenTest.cpp
 +++ b/tests/unit/CodeGenTest.cpp
-@@ -159,3 +159,18 @@ TEST_CASE("every semantic error is reported, in source order, as clang words it"
+@@ -160,3 +160,18 @@ TEST_CASE("every semantic error is reported, in source order, as clang words it"
               "test.fm:13:20: error: too many arguments to function call, expected 0, have 1\n"
               "test.fm:13:27: error: call to undeclared function 'q'\n");
  }

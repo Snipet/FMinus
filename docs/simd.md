@@ -8,7 +8,7 @@ and walks through them in the order a change moves through the compiler.
 | Recipe | Adds | Where |
 |---|---|---|
 | 7 | `float2`, `float4`, `float8`: OpenCL C's vector types, lane-wise operators, swizzles, masks, reductions | `Ast.h` (the types), `Lexer.l`, `Parser.y`; in `src/ir/`, `Lowering.h` (`Value`), `Types.cpp` (`convert`, `commonType`), `Expressions.cpp` (operators), `Vectors.cpp` (`lowerSelect`, `lowerConstruct`, `lowerBraces`, `lowerSwizzle`, `assignComponents`), `Calls.cpp` (the overloaded builtins, `lowerReduction`); `fminus --run`'s checks |
-| 8 | a vector math library: `sinf` on a `float4` is one call to libsystem_m's `_simd_sin_f4`, not four to `sinf` | `HostTarget.cpp` (`optimiseModule`) |
+| 8 | a vector math library: `sinf` on a `float4` is one call to libsystem_m's `_simd_sin_f4`, not four to `sinf`; since extending.md's recipe 15, the fast math mode's | `HostTarget.cpp` (`optimiseModule`) |
 | 9 | `poly float`: a vector as wide as the target's registers (4 floats on NEON, 16 on AVX-512), and rules that keep a program's meaning the same at any width | `Ast.h`, `Parser.y`, `CodeGen.h` (`ir::Options`), `Types.cpp` (`lanes`, `polyMismatch`), `Calls.cpp` (`poly_lanes`, `poly_index`, `poly_load`, `poly_store`), `HostTarget.cpp` (`polyLanes`), the driver (`--poly-lanes`) |
 
 After the recipes: the examples that use them, scalable vectors (SVE, RISC-V V) and how they relate to
@@ -76,7 +76,8 @@ maps them onto the target's registers.
    auto-vectorisers").
 2. **Fixed-width vector types** (recipe 7): the programmer writes `float4`, and gets exactly four lanes on every
    target. Good for data that is four-wide by nature: four channels, a 4×4 matrix row, a filter's four states.
-3. **A vector math library** (recipe 8): `sinf` of a vector becomes one call to a vectorised `sinf`.
+3. **A vector math library** (recipe 8): `sinf` of a vector becomes one call to a vectorised `sinf`. In the default
+   math mode the vectorised `sinf` is the runtime's, whose lanes are each the scalar `sinf` (extending.md, recipe 15).
 4. **Width-agnostic vectors** (recipe 9): the programmer writes `poly float`, and the compiler picks the width for the
    machine it compiles on. Good for data that has no natural width: a buffer of samples, a bank of voices.
 
@@ -546,14 +547,27 @@ arguments, with scalars broadcast. `fminf(v, 1)` is `llvm.minnum.v4f32(v, splat 
                     }
                     for (const Value& arg : args)
                         irArgs.push_back(convert(arg, type, location, Use::Passing));
+                    if (!builtin->runtime.empty() && !checkMathNames(location, *builtin))
+                        return poison(type);   // the program declares a function of a runtime function's name (Math.cpp)
+                    if (!builtin->runtime.empty() && math_ != Math::Fast)
+                        return {lowerMath(*builtin, type, irArgs[0]), type};   // the runtime's function (Math.cpp)
                     llvm::Function* intrinsic =
                         llvm::Intrinsic::getOrInsertDeclaration(&module_, builtin->intrinsic, {typeOf(type)});
                     return {builder_.CreateCall(intrinsic, irArgs), type};
 ```
 
 `fabsf`, `sqrtf`, `floorf`, `fminf` and `fmaxf` become one NEON instruction each (`fabs.4s`, `fsqrt.4s`, `frintm.4s`,
-`fminnm.4s`, `fmaxnm.4s`). `sinf`, `cosf`, `expf`, `logf` and `tanhf` have no instruction, so the backend scalarises
-them: four calls to `sinf`, with the lanes moved in and out around each. Recipe 8 replaces those with one call.
+`fminnm.4s`, `fmaxnm.4s`). `sinf`, `cosf`, `expf`, `logf` and `tanhf` have no instruction. As intrinsics, the backend
+scalarises them: four calls to `sinf`, with the lanes moved in and out around each. Recipe 8 replaces those with one
+call to a vector library, and that is now the fast math mode. The four lines before the intrinsic are extending.md's
+recipe 15. In the default math mode, a vector `sinf` is a call of the runtime's four-lane `fminus_rt_sin_f4` for each
+four lanes (a `float2` padded, a `float8` cut in two), whose every lane is the scalar `sinf` of that lane. First,
+`checkMathNames` refuses the call when the program declares a function of a name the runtime keeps for the builtin (for
+`sinf`: `fminus_rt_sinf`, `fminus_rt_sin_f4` and the libm mode's `fminus_rt_libm_sinf`), which the call would otherwise
+reach, or LLVM take for the runtime's. It does so in every math mode, the fast one too, which calls none of them, so
+that whether a program compiles does not depend on the mode: "'sinf' reserves 'fminus_rt_sin_f4' for the runtime's
+function, and this program declares a function of that name: rename it", at the call, with a note at the program's
+declaration.
 
 The program's own functions are not overloaded (nor recipe 5's runtime functions). Their parameter types are what
 they declare.
@@ -593,7 +607,7 @@ The names are refused as function names ("'reduce_add' is a builtin and cannot b
 
 ```llvm
 ; fminus softclip4.fm -O0
-  %drive2 = load float, ptr %drive.addr, align 4
+  %drive2 = load float, ptr %drive.addr, align 4, !tbaa !2
   %splat.splatinsert = insertelement <4 x float> poison, float %drive2, i64 0
   %splat.splat = shufflevector <4 x float> %splat.splatinsert, <4 x float> poison, <4 x i32> zeroinitializer
   %0 = fmul <4 x float> %x1, %splat.splat
@@ -724,7 +738,12 @@ arm64, the assembly (`fmul.4s v0, v0, v1[0]`, `fcmgt.4s`, two `fmul.4s` for a `f
 
 ## Recipe 8: a vector math library
 
-*In the compiler. Tests: `VectorTest.cpp` (`[simd]`), `tests/lit/fminus/veclib.fm`.*
+*In the compiler, as the fast math mode (`Program::Options::math = Fast`, `fminus --math fast`). Tests:
+`VectorTest.cpp` (`[simd]`), `tests/lit/fminus/veclib.fm`.*
+
+Since extending.md's recipe 15 this is one of three math modes, `Fast`, which leaves LLVM's intrinsics to LLVM, as
+clang does. The default, `Vector`, reaches the same library for `float4`s and loops through the runtime's own
+functions, and gives a float one result wherever it is computed.
 
 After recipe 7, `sinf` of a `float4` is `llvm.sin.v4f32`, and the backend scalarises it:
 
@@ -785,31 +804,29 @@ error in ulps against the exact result, computed in double, over 4 million point
 
 Accelerate's and libsystem_m's results are identical, so they share an implementation; libsystem_m is the one without
 the unwanted mappings. The vector functions are 2.5 to 3.6 times faster and up to about 3 ulp from the exact result,
-where libm is within 1. For audio that is a good trade, but it is a trade: `sinf(v).x` is no longer bit-identical to
-`sinf(v.x)`. In a dependent chain (each call waiting for the last), the two take about the same time; the gain is
-throughput.
+where libm is within 1. For audio that is a good trade, but it is a trade: in this mode `sinf(v).x` is no longer
+bit-identical to `sinf(v.x)`. In a dependent chain (each call waiting for the last), the two take about the same time;
+the gain is throughput. (In the default mode the scalar `sinf` is lane 0 of the vector function too, so the two are
+the same again: extending.md, recipe 15.)
 
 ### The code
 
-It goes into `optimiseModule` (`src/support/HostTarget.cpp`), so the JIT, `fminus` and executables all get it:
+It goes into `optimiseModule` (`src/support/HostTarget.cpp`), so the JIT, `fminus` and executables all get it. Since
+recipe 15 it is there only for a module whose math flag says `"fast"`, or that has none (IR written by hand):
 
 ```cpp
-        // A vector math library. On Apple systems, libsystem_m's _simd_sin_f4, _simd_exp_f4, ... (in libSystem, which
-        // every process and executable links already): the target library analysis tells the loop vectoriser about
-        // them, and ReplaceWithVeclib, last, turns the vector intrinsics that float4 builtins lower to
-        // (llvm.sin.v4f32) into calls to them, where the backend would call sinf once per lane. They are about three
-        // times faster, and up to 3 ulp from the exact result where sinf is within 1. They take four lanes only: a
-        // float2 or float8 call is still one sinf per lane. (Accelerate's mapping, the other on Apple systems, also
-        // replaces llvm.fabs and llvm.sqrt, which NEON does in one instruction, with calls.)
+        const auto* math = llvm::dyn_cast_or_null<llvm::MDString>(module.getModuleFlag(kMathFlag));
+        const bool vectorLibrary = math == nullptr || math->getString() == "fast";
         llvm::TargetLibraryInfoImpl library(machine.getTargetTriple());
-        if (machine.getTargetTriple().isOSDarwin())
+        if (vectorLibrary && machine.getTargetTriple().isOSDarwin())
             library.addVectorizableFunctionsFromVecLib(llvm::VectorLibrary::DarwinLibSystemM,
                                                        machine.getTargetTriple());
         functions.registerPass([&] { return llvm::TargetLibraryAnalysis(library); });   // before the default one
-        passes.registerOptimizerLastEPCallback(
-            [](llvm::ModulePassManager& modulePasses, llvm::OptimizationLevel, llvm::ThinOrFullLTOPhase) {
-                modulePasses.addPass(llvm::createModuleToFunctionPassAdaptor(llvm::ReplaceWithVeclib()));
-            });
+        if (vectorLibrary)
+            passes.registerOptimizerLastEPCallback(
+                [](llvm::ModulePassManager& modulePasses, llvm::OptimizationLevel, llvm::ThinOrFullLTOPhase) {
+                    modulePasses.addPass(llvm::createModuleToFunctionPassAdaptor(llvm::ReplaceWithVeclib()));
+                });
 ```
 
 - **Register the analysis first.** `PassBuilder::registerFunctionAnalyses` registers a default
@@ -827,7 +844,7 @@ its own `ReplaceWithVeclib` (TargetPassConfig adds it), but with a library info 
 finds nothing more to replace.
 
 ```asm
-_sines:                             ; after recipe 8
+_sines:                             ; after recipe 8 (fminus --math fast)
 	stp	x29, x30, [sp, #-16]!
 	adrp	x8, __simd_sin_f4@GOTPAGE
 	ldr	x8, [x8, __simd_sin_f4@GOTPAGEOFF]
@@ -848,21 +865,24 @@ _shape:                             ; tanhf(x) + sqrtf(fabsf(x)): only tanhf bec
 
 - **Only four lanes.** Every Apple entry is `FIXED(4)`, and `ReplaceWithVeclib` needs the exact width. A `float8`
   `sinf` stays `llvm.sin.v8f32`, which the backend splits and scalarises: eight calls to `sinf`. Splitting the call into
-  two `float4` halves before the replacement (a few lines in a pass of your own, recipe 6's pattern) would give two
-  calls. The same holds for a `float2`, and for a `poly float` that isn't four wide (recipe 9).
+  two `float4` halves before the replacement would give two calls. The same holds for a `float2`, and for a
+  `poly float` that isn't four wide (recipe 9). The default math mode does the splitting itself (`lowerMath`,
+  extending.md's recipe 15): a `float8` is two four-lane calls there, and a `float2` one, padded.
 - **Scalar loops.** With recipe 10's pointers, the loop vectoriser can use the table too: a loop of `sinf` calls over
-  a buffer becomes one `_simd_sin_f4` call each four samples.
-- **No choice.** The recipe turns the library on for every program. A real compiler would make it an option, as clang's
-  `-fveclib=` is, or a function attribute, for code that needs libm's accuracy or bit-identical scalar and vector
-  results.
+  a buffer becomes one `_simd_sin_f4` call each four samples, and its remainder calls libm's `sinf`, so where a block
+  ends decides which function a sample meets.
+- **One result for a float.** Those are the trades recipe 15 removes, in the default mode, together with constant
+  folding by the host's double functions and the pairing of `sinf` and `cosf` into `__sincosf_stret`. The choice the
+  first version of this recipe lacked is now `Program::Options::math`, as clang's `-fveclib=` is an option.
 
 ### Tests
 
-`VectorTest.cpp`'s `sinf` check from recipe 7 changes from exact equality to Catch2's
-`WithinULP(std::sin(x), 3)`, and a new test case sweeps `sinf` and `tanhf` over [-100, 100] the same way. It also checks
-that a `float8` `sinf` is still exactly eight calls to `sinf`, in lane order. `tests/lit/fminus/veclib.fm` checks the
-IR (`@_simd_sin_f4`, `@_simd_tanh_f4`, `llvm.fabs.v4f32` and `llvm.sqrt.v4f32` left alone, `llvm.sin.v8f32` left
-alone) and, on arm64, the calls in the assembly. It is `REQUIRES: system-darwin`, a feature the recipe added to
+`VectorTest.cpp`'s test case of this recipe compiles in the fast mode (`{.math = fminus::ir::Math::Fast}`). It sweeps
+`sinf` and `tanhf` over [-100, 100] with Catch2's `WithinULP(std::sin(x), 3)`, and checks that a `float8` `sinf` is
+still exactly eight calls to `sinf`, in lane order. Recipe 7's `sinf` check is exact again, against `fminus::math`, as
+the default mode computes it. `tests/lit/fminus/veclib.fm` runs `fminus --math fast` and checks the IR
+(`@_simd_sin_f4`, `@_simd_tanh_f4`, `llvm.fabs.v4f32` and `llvm.sqrt.v4f32` left alone, `llvm.sin.v8f32` left alone)
+and, on arm64, the calls in the assembly. It is `REQUIRES: system-darwin`, a feature the recipe added to
 `tests/lit/lit.cfg.py` (`"system-" + platform.system().lower()`).
 
 ## Recipe 9: `poly float`
@@ -1061,13 +1081,13 @@ them, they touch only the lanes it sets: `llvm.masked.load` gives 0 in the other
 and its tail are:
 
 ```llvm
-  %poly.load = load <4 x float>, ptr %add.ptr9, align 4                ; fminus -O2 --poly-lanes 4
+  %poly.load = load <4 x float>, ptr %add.ptr9, align 4, !tbaa !2      ; fminus -O2 --poly-lanes 4
   %1 = fmul <4 x float> %.pre47, %poly.load
-  store <4 x float> %1, ptr %add.ptr, align 4
+  store <4 x float> %1, ptr %add.ptr, align 4, !tbaa !2
   ...
   %poly.load29 = tail call <4 x float> @llvm.masked.load.v4f32.p0(ptr align 4 %add.ptr27, <4 x i1> %cmp18,
-                                                                  <4 x float> zeroinitializer)
-  tail call void @llvm.masked.store.v4f32.p0(<4 x float> %4, ptr align 4 %add.ptr22, <4 x i1> %cmp18)
+                                                                  <4 x float> zeroinitializer), !tbaa !2
+  tail call void @llvm.masked.store.v4f32.p0(<4 x float> %4, ptr align 4 %add.ptr22, <4 x i1> %cmp18), !tbaa !2
 ```
 
 Why the loop is in two parts, unmasked steps and one masked: x86 with AVX-512 has masked loads and stores in
@@ -1110,9 +1130,12 @@ This is inherent in width-agnostic code, and it is the main thing to design for:
   integer vectors. The test's `peak` (a maximum) is bit-identical at every width.
 - **Float sums across lanes are not.** If the result must not depend on the machine, fix the number of partial sums in
   the program (accumulate in a `float8`, or in a fixed number of `poly float`-sized blocks), or sum in a wider type.
-- **The math library depends on the width too.** With recipe 8, `sinf` of a 4-lane `poly float` calls
-  `_simd_sin_f4`, while other widths call `sinf` per lane, and the two differ by up to about 3 ulp. Writing this
-  recipe's test ran into it: a maximum of `sinf`s, order-independent, still came out different at 4 lanes.
+- **The math library depended on the width too.** With recipe 8, `sinf` of a 4-lane `poly float` called
+  `_simd_sin_f4`, while other widths called `sinf` per lane, and the two differ by up to about 3 ulp. Writing this
+  recipe's test ran into it: a maximum of `sinf`s, order-independent, still came out different at 4 lanes. That is
+  still so in the fast math mode. In the default mode every width calls the runtime's four-lane function, four lanes
+  at a time, and each lane is the scalar `sinf` of that lane, so such a maximum is the same at every width
+  (extending.md, recipe 15).
 
 For a synthesizer that must render the same audio everywhere, this decides where `poly float` goes: across voices or
 channels (lane-independent), not across the terms of one sum.
@@ -1185,7 +1208,8 @@ float4 frequencies(float4 notes)
 }
 ```
 
-At `-O2` that is one `call <4 x float> @_simd_exp_f4`. A literal rearranges the lanes:
+At `-O2` that is one `call <4 x float> @fminus_rt_exp_f4`, the runtime's four-lane `expf`, which on Apple systems is
+libsystem_m's `_simd_exp_f4` (with `--math fast`, a call of `_simd_exp_f4` straight). A literal rearranges the lanes:
 `(float4)(chord.yz, chord.w, chord.x * 2)` is the chord's first inversion, from a `float2`, a `float` and a product.
 `reduce_max(chord) / reduce_min(chord)` is its span. `main` picks one note with nested `?:` over `chord.x` to
 `chord.w`, since a lane can't be chosen by a variable yet. `fminus examples/chord/chord.fm --run main 60 1` prints
@@ -1310,7 +1334,11 @@ servers (Graviton, Neoverse) and RISC-V, with its own tests on such a machine.
   loops (recipe 4), and memory to load and store (recipe 10's pointers). `tests/lit/fminus/pointers.fm` shows it on
   FMinus: a gain loop over a buffer gets a `vector.body` of `fmul <4 x float>` on NEON, four of them interleaved,
   with no overlap check when the buffers are `restrict`. (`tests/lit/smoke/opt-vectorize.ll` shows the same on
-  hand-written IR.)
+  hand-written IR.) A module's stream parameter (extending.md, recipes 14 and 16) is read at a stride, 0 when the stream
+  is flat and otherwise a 1 that LLVM cannot see, so a loop that reads one and that knob versioning made no copy for
+  (more streams in the loop than the budget takes, `--knob-versions 0`, or the read inlined from a method without a
+  loop) is versioned by the vectoriser itself: the vector loop when the stride is 1 (`ident.check`), and the scalar
+  loop, a load and a select a sample, when the stream is flat.
 - **The SLP vectoriser** packs independent scalar operations of the same kind into vector operations. Four separate
   `fmul`s on four separate values can become one `fmul <4 x float>`, if loading and storing them as a vector is
   cheap. Without memory, that is rare.
@@ -1330,11 +1358,11 @@ and the backend legalises both the same way.
 | Bison: "useless associativity for ".", use %precedence" | `%left "."`: the swizzle rule ends in an identifier, so no conflict compares `"."` with itself | `%precedence "."` |
 | `fabsf` on a `float4` becomes a call to `vfabsf` | Accelerate's vector library maps `llvm.fabs` and `llvm.sqrt`, and `ReplaceWithVeclib` replaces every mapped intrinsic | `VectorLibrary::DarwinLibSystemM` |
 | The vector library is never used | the custom `TargetLibraryAnalysis` was registered after `registerFunctionAnalyses`, whose default one wins | register it first |
-| A `float8` `sinf` is eight calls | the library has only four-lane functions, and `ReplaceWithVeclib` needs the exact width | split into `float4` halves first, or accept it |
-| `sinf(v).x != sinf(v.x)` | the vector function and libm round differently (up to about 3 ulp) | a tolerance in tests; an option for code that needs libm's results |
-| A `poly` result changes between machines | the width changed the order of a float sum, or which `sinf` ran | lane-independent work, order-independent reductions, a fixed number of partial sums |
+| A `float8` `sinf` is eight calls, in the fast math mode | the library has only four-lane functions, and `ReplaceWithVeclib` needs the exact width | the default mode, which splits it into two four-lane calls (`lowerMath`) |
+| `sinf(v).x != sinf(v.x)`, in the fast math mode | the vector function and libm round differently (up to about 3 ulp) | the default mode, where the scalar `sinf` is lane 0 of the vector function; or `--math libm`, libm's in every lane |
+| A `poly` result changes between machines | the width changed the order of a float sum, or (in the fast math mode) which `sinf` ran | lane-independent work, order-independent reductions, a fixed number of partial sums |
 | C++ reads garbage from a `float8` function | FMinus passes `<8 x float>` in registers; the C ABI passes it through memory | keep `float8` inside FMinus, or lower exported ones with `sret` as clang does |
-| A test of `sinf` on vectors fails by a few ulp after recipe 8 | it compared with `std::sin` exactly | `Catch::Matchers::WithinULP(expected, 3)` |
+| A test of `sinf` on vectors fails by a few ulp after recipe 8 | it compared with `std::sin` exactly | compare with `fminus::math::sin` exactly (the default mode); in the fast mode, `Catch::Matchers::WithinULP(expected, 3)` |
 | The top-level syntax error loses its "expecting ..." list | `poly` is a fifth way to start a function; Bison lists at most four | update the test |
 | A local variable stops compiling after adding a member function | `std::vector<int> lanes` hides the member `lanes(type)` | rename the local |
 | `llc` crashes on scalable vectors with `-mattr=+sme` | streaming mode lacks `fadda`, and LLVM 23 can't expand an ordered scalable reduction | SVE for scalable code; fixed widths on Apple silicon |

@@ -8,7 +8,8 @@ its options.
 
 macOS on Apple silicon with Xcode's command line tools (clang, make, m4), CMake 3.30 or later, Ninja, and Python 3
 for lit. Nothing else needs to be installed: LLVM, Bison, Flex, PFFFT, CLI11 and Catch2 are all fetched and built by
-the build itself. The first configure needs the network.
+the build itself (and JUCE by the plugin example's, [below](#the-plugin-example)). The first configure needs the
+network.
 
 On Windows: Visual Studio 2022 or later (or its Build Tools) with the "Desktop development with C++" workload and
 its "C++ Clang tools for Windows" (clang-cl; "C++ Clang Compiler for Windows" under Individual components), CMake 3.30
@@ -127,7 +128,7 @@ Every source list is a glob, so adding a file never edits CMake. Configure picks
 | a grammar | `src/<dir>/X.y` (one per directory), scanners beside it as `*.l` | generated into the library: `"<dir>/X.tab.hpp"`, `"<dir>/Y.yy.hpp"` |
 | a runtime function | `src/runtime/` (and a line in `RuntimeSymbols.def`) | part of `libfminus_runtime.a` |
 | a tool | `tools/<name>/*.cpp` | the executable `bin/<name>`, linked with `FMinus::Internal` and CLI11 |
-| an example | `examples/<name>/*.cpp`, and its FMinus sources | `bin/example-<name>`, told its directory as `FMINUS_EXAMPLE_DIR`, with a ctest `example.<name>` running `--check` |
+| an example | `examples/<name>/*.cpp`, and its FMinus sources | `bin/example-<name>`, told its directory as `FMINUS_EXAMPLE_DIR`, with a ctest `example.<name>` running `--check`; a directory with a `CMakeLists.txt` of its own is a separate project, which `examples/CMakeLists.txt` skips (`examples/plugin/`, [below](#the-plugin-example)) |
 | a unit test | `tests/unit/*.cpp` | part of `fminus-tests`; each `TEST_CASE` is a ctest test |
 | a lit test | `tests/lit/**/*.{fm,ll,test}` | part of the lit suite |
 | a public header | `include/fminus/` | `"fminus/..."`, for code embedding FMinus (FMinus.h: C++17, no LLVM) |
@@ -148,7 +149,9 @@ header needs.
 
 ## Adding a dependency
 
-Every dependency comes through FetchContent, pinned by version, URL and SHA-256. That's the project's rule.
+Every dependency comes through FetchContent, pinned by version, URL and SHA-256. That's the project's rule. The one
+exception is JUCE, which only the plugin example uses: it is pinned by version and git commit, since FetchContent
+clones it, and git names a commit by the hash of its contents ([below](#the-plugin-example)).
 
 1. **Pin it** in `cmake/FMinusPins.cmake`: `FMINUS_<NAME>_VERSION`, `_URL` and `_SHA256`. A GitHub release asset
    shows its digest (`gh api repos/<owner>/<repo>/releases/tags/<tag> --jq '.assets[] | [.name, .digest]'`). For a
@@ -177,6 +180,34 @@ Every dependency comes through FetchContent, pinned by version, URL and SHA-256.
    whose objects the runtime library takes.
 3. **Include the module** from `CMakeLists.txt`, under the option that needs it, and link its target where it's used.
 4. **Note it** in README.md's dependency table and its License section.
+
+## The plugin example
+
+`examples/plugin/` is FMinus Filter, a JUCE plugin (AU, VST3 and Standalone, on macOS), and a CMake project of its
+own, outside FMinus's build: `examples/CMakeLists.txt` skips a directory that has a `CMakeLists.txt`, and FMinus's
+ctest doesn't run it. It takes the LLVM that FMinus's own build installed in the deps cache, so build FMinus once
+first; then, from the checkout's root:
+
+```bash
+cmake -S examples/plugin -B build-plugin -G Ninja
+cmake --build build-plugin -j6
+ctest --test-dir build-plugin                      # plugin.check: fminus-plugin-check, the processor headless
+```
+
+- **JUCE 8.0.4** comes through FetchContent, pinned in `cmake/FMinusPins.cmake` by version and commit
+  (`FMINUS_JUCE_VERSION`, `FMINUS_JUCE_REPOSITORY`, `FMINUS_JUCE_COMMIT`), and the first configure clones it into the
+  plugin's build tree. `-DFETCHCONTENT_SOURCE_DIR_JUCE=<a JUCE 8.0.4 checkout>` uses one you have instead. Either way
+  configure checks the version in JUCE's header, the commit (`HEAD`) and the tracked files (`git status`), and fails
+  on any other; a JUCE that isn't a git checkout gets a warning that only its version can be checked.
+- **FMinus** is this checkout, added as a subproject: its library and runtime only. The plugin links `FMinus::FMinus`.
+- **LLVM** comes in FMinus's `system` mode from `<FMINUS_DEPS_DIR>/install/`, a Release build of it: for a Release
+  build of the plugin (the default), the flavor without assertions if there is one (the `release` preset's), else the
+  `dev` preset's, and for any other build the other way round; `-DLLVM_DIR=<install>/lib/cmake/llvm` chooses one by
+  hand. Bison and Flex come from the same cache.
+
+The bundles land in `build-plugin/FMinusFilter_artefacts/Release/`, signed ad hoc, and nothing is installed.
+[examples/plugin/README.md](../examples/plugin/README.md) has the rest: trying it in a DAW, what the check checks, and
+the caveats.
 
 ## Warnings, sanitizers, tools
 

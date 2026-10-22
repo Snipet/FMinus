@@ -1,19 +1,22 @@
 # Extending the compiler
 
 How to add to FMinus. First, how a change moves through the compiler, and the few rules that keep that easy. Then
-eleven worked recipes, which grow the C subset from a one-line builtin to C's control flow, a custom LLVM pass, `int`,
-`void` and pointers, the heap with the attributes that keep it off the audio thread, arrays and modules, FMinus's
-classes, an FFT from a C library built into the runtime, and parameters, the values a plugin's host sets. Then the
-pitfalls those recipes ran into, and design notes for what comes next. [simd.md](simd.md) has recipes 7 to 9, for
-vectors.
+seventeen worked recipes. Eleven grow the C subset from a one-line builtin to C's control flow, a custom LLVM pass,
+`int`, `void` and pointers, the heap with the attributes that keep it off the audio thread, arrays and modules,
+FMinus's classes, an FFT from a C library built into the runtime, and parameters, the values a plugin's host sets. Six
+more are about the compiler rather than the language: math that gives a float one result wherever it is computed,
+knob versioning and flat streams, C's strict aliasing told to LLVM, zero-init elision, what the runtime's calls and
+loops promise, and subnormals flushed for the audio thread. Then the pitfalls those recipes ran into, and design notes
+for what comes next. [simd.md](simd.md) has recipes 7 to 9, for vectors.
 
 Recipes 1 to 4 are in the compiler now (`tanhf` and `%`; `bool` and its operators; `if`, `while` and `for`), and so are
 simd.md's 7 to 9, recipe 10 (`int`, `void` and pointers), recipe 11 (the heap), recipe 12 (arrays and modules),
-recipe 13 (the FFT) and recipe 14 (parameters), so their sections describe how the code you have got there: read a
-section beside the files it names. Recipes 5 and 6, a runtime function and a pass, are not part of the language; they
-live in [recipes/](recipes/) as a patch, so you can apply them to see them work. None of these are sketches: each
-was applied to this repository, built with `-Werror`, and tested in the dev and asan presets, every test passing.
-[architecture.md](architecture.md) describes the stages they touch.
+recipe 13 (the FFT), recipe 14 (parameters) and recipes 15 to 20 (the math modes, knob versioning, TBAA, zero-init
+elision, the runtime's attributes and loop progress, denormal control), so their sections describe how the code you
+have got there: read a section beside the files it names. Recipes 5 and 6, a runtime function and a pass, are not part
+of the language; they live in [recipes/](recipes/) as a patch, so you can apply them to see them work. None of these
+are sketches: each was applied to this repository, built with `-Werror`, and tested in the dev and asan presets, every
+test passing. [architecture.md](architecture.md) describes the stages they touch.
 
 FMinus follows C. When a recipe has a semantic choice to make, it makes C's: conversions, short-circuiting, which
 `if` an `else` belongs to, what `continue` does in a `for`. And it reports errors in clang's words. The README lists
@@ -29,8 +32,8 @@ Most language features touch the same places, in this order:
 | 2 | `src/frontend/Parser.y` | the tokens (`%token`), their precedence if they are operators, and the grammar rules with their actions |
 | 3 | `src/frontend/Ast.h` | a node: an alternative of `Expr::node` or `Stmt::node`, or an enumerator of `UnaryOp`, `BinaryOp`, `AssignOp`, `IncrementOp`, `Kind` (a type's) |
 | 4 | `src/frontend/Ast.cpp` | its `dump` |
-| 5 | `src/ir/` | its conversions and checks, and its lowering to LLVM IR, in the file its kind belongs to (`Lowering.h` lists them: types, functions, statements, expressions, calls, vectors, memory, effects) |
-| 6 | `src/runtime/` | if it needs C++ at run time, a runtime function (recipe 5) |
+| 5 | `src/ir/` | its conversions and checks, and its lowering to LLVM IR, in the file its kind belongs to (`Lowering.h` lists them: types, functions, statements, expressions, calls, the math modes, vectors, memory, modules, effects, TBAA, denormals); a load or store of memory gets its type's tag (`tag`, recipe 17) |
+| 6 | `src/runtime/` | if it needs C++ at run time, a runtime function (recipe 5); if a builtin calls it, its facts: in `kRuntimeFacts`, through `callRuntime` (recipe 19), or for a math builtin's, in `mathFunction` (`Math.cpp`, recipe 15) |
 | 7 | `tools/fminus/main.cpp`, `src/support/Aot.cpp` | for a new type: whether `--run` can pass and print it (its `switch` over the result type), and whether an executable's `main` may take or return it (`addEntryPoint`) |
 | 8 | `tests/` | a dump in `FrontendTest.cpp`; results in `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `IntTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `VectorTest.cpp` or `PolyTest.cpp` (their helpers are in `Compile.h`); IR or errors in `tests/lit/fminus/` |
 | 9 | `examples/` | a program that uses it, and a line in `tests/lit/fminus/examples.test` that runs it |
@@ -49,8 +52,9 @@ Each feature has an example to read beside its recipe: `examples/comparison/` fo
 `examples/waveforms/` for every statement (recipe 4), `examples/chord/` for `float4` and the vector math library
 (recipes 7 and 8), `examples/unison/` for `poly float` (recipe 9), `examples/biquad/` for a block of samples a
 call, through pointers (recipe 10), `examples/delay/` for state on the heap and a kernel that can't allocate
-(recipe 11), and `examples/saturator/` and `examples/meter/` for `poly float` through a buffer, against plain loops
-(recipes 9 and 10).
+(recipe 11), `examples/saturator/` and `examples/meter/` for `poly float` through a buffer, against plain loops
+(recipes 9 and 10), and `examples/convolver/` and `examples/delay/echo.fm` for loops over a module's fields
+(recipe 17).
 
 ## Ground rules
 
@@ -90,21 +94,31 @@ checks the argument count, and refuses a definition that tries to reuse the name
 would have, is accepted. LLVM lowers `llvm.tanh.f32` to a call to libm's `tanhf`, which the JIT resolves from the
 process.
 
+(This is the row as recipe 1 wrote it, and how the fast math mode still lowers it. Recipe 15 gave a transcendental
+builtin a fourth field, the stem of its runtime functions, `Builtin{"tanhf", llvm::Intrinsic::tanh, 1, "tanh"}`: in
+the default mode `tanhf` is a call of the runtime's `fminus_rt_tanhf`, which gives a float one result wherever it is
+computed. An exact builtin, such as `fabsf`, still needs only the three.)
+
 Before the row, a program could already call `tanhf` C's way, through a prototype, `float tanhf(float x);`: an
 external function, which the JIT finds in libm. (Any `<math.h>` function that isn't a builtin still works that way,
 `atanf` for one.) The builtin makes it part of the language: no declaration is needed, and the call is the intrinsic
 that LLVM's passes treat uniformly. `IntrinsicEnums.inc`, in the LLVM install's `include/llvm/IR/`, lists the
-intrinsics. `exp2f` (`exp2`), `powf` (`pow`), `copysignf` (`copysign`) and `fmaf` (`fma`, three parameters) are one
-row each.
+intrinsics. An exact one is one row: `copysignf` (`copysign`), or `fmaf` (`fma`, three parameters). A transcendental
+one, `exp2f`, is not since recipe 15: a bare row would be LLVM's intrinsic in every math mode, which LLVM folds with
+the host's double functions, so it needs a stem and its runtime functions too (`fminus_rt_exp2f`, `fminus_rt_exp2_f4`,
+`fminus_rt_libm_exp2f`), as recipe 15 gives the others. `powf`, of two arguments, also needs `lowerMath` and
+`mathFunction` to take two.
 
 Update the count in `CodeGenTest.cpp` (`builtins().size()`), then test the value, in the builtins' test case:
 
 ```cpp
                        "float h(float x) { return tanhf(x); }\n");
     ...
-    CHECK(lookup<float(float)>(*jit, "h")(0.5f) == std::tanh(0.5f));
+    CHECK(lookup<float(float)>(*jit, "h")(0.5f) == fminus::math::tanh(0.5f));   // the default math mode (MathTest.cpp)
     CHECK(fminus::ir::builtins().size() == 10);
 ```
+
+The test compared with `std::tanh` until recipe 15; `fminus::math::tanh` is what the default mode computes.
 
 ## Recipe 2: an operator (`%` and `%=`)
 
@@ -510,10 +524,10 @@ land.end:
   %land = phi i1 [ false, %entry ], [ %cmp3, %land.rhs ]
   br i1 %land, label %cond.true, label %cond.false
 cond.true:
-  %x4 = load float, ptr %x.addr, align 4
+  %x4 = load float, ptr %x.addr, align 4, !tbaa !2
   br label %cond.end
 cond.false:
-  %y5 = load float, ptr %y.addr, align 4
+  %y5 = load float, ptr %y.addr, align 4, !tbaa !2
   br label %cond.end
 cond.end:
   %cond = phi float [ %x4, %cond.true ], [ %y5, %cond.false ]
@@ -793,6 +807,10 @@ into the body.
 `for (;;) { }` never reaches for.end. A function that ends with it therefore needs no `return`, again because the end
 isn't reachable.
 
+(These are the two functions as recipe 4 wrote them. Recipe 19 keeps the branch each enters its loop by, and when the
+condition is not a constant expression, `mustProgress` marks the branches back with `llvm.loop.mustprogress`, as
+clang does in C11: such a loop may be assumed to end. That is the `!llvm.loop` on the branches back below.)
+
 ### The loop, before and after
 
 ```llvm
@@ -802,7 +820,7 @@ for.cond:                                         ; preds = %for.inc, %entry
 for.body:                                         ; preds = %for.cond
   br label %for.inc
 for.inc:                                          ; preds = %for.body
-  br label %for.cond
+  br label %for.cond, !llvm.loop !5
 for.end:                                          ; preds = %for.cond
   ret float %total6
 
@@ -813,7 +831,7 @@ for.body:                                         ; preds = %entry, %for.body
   %0 = fadd float %total.08, %i.09
   %1 = fadd float %i.09, 1.000000e+00
   %cmp = fcmp ugt float %1, %n
-  br i1 %cmp, label %for.end, label %for.body
+  br i1 %cmp, label %for.end, label %for.body, !llvm.loop !2
 ```
 
 ### Tests
@@ -916,13 +934,20 @@ statically and export it. A plugin that hides its symbols or dead-strips the unu
 Runtime functions run inside the audio thread's call tree. Keep them free of allocation, locks and system calls,
 and `noexcept`.
 
+The declaration above, from `getOrInsertFunction`, is bare: LLVM takes the function to read and write any memory,
+which is always safe. The builtins' runtime functions say what they do (`kRuntimeFacts`, recipe 19, and the math
+builtins' `mathFunction`, recipe 15); this one could say `nounwind willreturn nosync nofree memory(errnomem: write)`,
+which is true of it (`std::pow` may set `errno`).
+
 ## Recipe 6: an LLVM pass of your own (`CountFlopsPass`)
 
 *Patch: [recipes/5-runtime-function-and-pass.patch](recipes/5-runtime-function-and-pass.patch).*
 
-`src/opt/` holds FMinus's own LLVM passes. The example counts a function's floating-point operations after
-optimisation and records the count as a string attribute, `"fminus-flops"="3"`. That's handy for watching what
-LLVM leaves of a kernel; the biquad's coefficient math, for instance.
+`src/opt/` holds FMinus's own LLVM passes. Two are in the compiler, registered straight in `optimiseModule`: knob
+versioning (recipe 16, at the early simplification extension point) and zero-init elision (recipe 18, at the scalar
+optimiser's late one). The example here counts a function's floating-point operations after optimisation and records
+the count as a string attribute, `"fminus-flops"="3"`. That's handy for watching what LLVM leaves of a kernel; the
+biquad's coefficient math, for instance.
 
 **A pass** is a class with a `run` method (the new pass manager's `PassInfoMixin`):
 
@@ -1013,7 +1038,8 @@ on:
   instead of the code generator reading types off LLVM's.
 - **Recipe 8, a vector math library**: `sinf` of a `float4` becomes one call to libsystem_m's `_simd_sin_f4`,
   through LLVM's target library information and `ReplaceWithVeclib`, about three times faster than four calls to
-  `sinf`. Why not Accelerate, measured.
+  `sinf`. Why not Accelerate, measured. Since recipe 15 it is the fast math mode's; the default mode reaches the same
+  library through the runtime, with one result for a float wherever it is computed.
 - **Recipe 9, `poly float`**: a vector as wide as the target's registers (4 floats on NEON, 16 on AVX-512), chosen by
   LLVM's cost model, with rules that keep a program's meaning the same at every width, `poly_lanes()` and
   `poly_index()`, and what does change with the width (the order of float sums).
@@ -1404,14 +1430,18 @@ for the call, and gives back a `void*`:
 
 ```cpp
         std::vector<llvm::Value*> sizes;
-        std::vector<llvm::Type*> sizeTypes;
         for (const Value& arg : args)
         {
             llvm::Value* size = convert(arg, ast::Type::Int, location, Use::Passing);
             sizes.push_back(builder_.CreateSExt(size, builder_.getInt64Ty(), "size"));
-            sizeTypes.push_back(builder_.getInt64Ty());
         }
+        llvm::CallInst* allocate = callRuntime(runtime, builder_.getPtrTy(), sizes);
+        allocate->setName(allocation.name);
+        return {allocate, voidPointer};
 ```
+
+`callRuntime`, which the FFT's builtins call too (recipe 13), declares the runtime's function from its arguments'
+types, and since recipe 19 gives the declaration what is true of it: an allocator of zeroed memory, aligned to 64.
 
 The runtime functions join `RuntimeSymbols.def`, so the JIT defines them by address and an executable links them
 from `libfminus_runtime.a`, as recipe 5's `db_to_gain` would be. What they do is FMinus's choice:
@@ -1430,7 +1460,8 @@ from `libfminus_runtime.a`, as recipe 5's `db_to_gain` would be. What they do is
   the audio thread never takes a page fault on the memory later, as it could on fresh pages from the system.
 - **Null** when a count or size is not positive, when the block would be more than 16 GiB (a mistake, which zeroing
   would turn into the machine's whole memory; ASan's allocator aborts on such a request), or when the memory isn't
-  there.
+  there. A block the program never uses is another matter: LLVM may remove it, as it may C's, and a removed block
+  does not fail, so a test of it against null is false (recipe 19).
 - **C's memory**: `aligned_alloc`'s blocks are `free`'s, so a C++ host may free what FMinus allocated, and FMinus may
   free the host's `malloc`'s (`HeapTest.cpp` does both). Not on Windows, whose C runtime has no `aligned_alloc`: there
   the blocks come from `_aligned_malloc`, which only `_aligned_free` releases, so `fminus_rt_free` calls that, a host
@@ -1508,16 +1539,16 @@ Notes are new in `Diagnostics`: an error carries them (`Diagnostic::notes`), and
 it, wherever they point. The errors sort by their own locations, and the notes stay with their error.
 
 What the check does not see is what happens inside external functions that say they are nonblocking (it takes their
-word, as clang does) and inside the JIT'd code LLVM generates (calls to `fmodf` for `%` and to the vector math
-library, which allocate nothing). At run time, clang's RealtimeSanitizer (`-fsanitize=realtime`) checks the same
-attribute in C++; FMinus has no run-time check.
+word, as clang does) and inside the JIT'd code LLVM generates (calls to `fmodf` for `%`, and to the math functions,
+the runtime's or the vector math library's, which allocate nothing). At run time, clang's RealtimeSanitizer
+(`-fsanitize=realtime`) checks the same attribute in C++; FMinus has no run-time check.
 
 ### Tests
 
 - `tests/unit/HeapTest.cpp`: memory from `calloc` and `malloc`, aligned and zeroed, freed by C++ and by FMinus, and
-  the host's freed by FMinus; null for sizes that aren't positive or overflow; `sizeof` of each kind, `poly float`'s at
-  4 and 16 lanes; a delay line's state across two blocks; the errors (a redefined `malloc`, `void*`'s, `sizeof(void)`,
-  a `const` pointer to `free`).
+  the host's freed by FMinus; null for sizes that aren't positive or overflow (the blocks returned to the host, which
+  tests them: recipe 19); `sizeof` of each kind, `poly float`'s at 4 and 16 lanes; a delay line's state across two
+  blocks; the errors (a redefined `malloc`, `void*`'s, `sizeof(void)`, a `const` pointer to `free`).
 - `tests/unit/EffectTest.cpp`: a nonblocking kernel calling `sinf`, a marked prototype, and unmarked functions that
   don't allocate, recursion included; the errors and their notes, clang's, for an inferred function, an external one,
   `free`, a merely nonallocating prototype under `nonblocking`, and an unknown attribute.
@@ -1734,7 +1765,7 @@ of a loop:
 ```llvm
 define float @"OnePole::tick"(ptr nonnull align 4 dereferenceable(8) %this, float %x) {
   ...
-  %this1 = load ptr, ptr %this.addr, align 8
+  %this1 = load ptr, ptr %this.addr, align 8, !tbaa !2
   %k = getelementptr inbounds nuw %OnePole, ptr %this1, i32 0, i32 1
 ```
 
@@ -1763,7 +1794,9 @@ LLVM can load and store a struct whole, but clang copies a C struct with a memcp
   call void @llvm.memcpy.p0.p0.i64(ptr align 4 %copy, ptr align 4 %local, i64 8, i1 false)
 ```
 
-Each declaration of an array or a module starts with a memset of 0, the aggregate form of every variable's zero. The
+Each declaration of an array or a module starts with a memset of 0, the aggregate form of every variable's zero.
+From `-O1`, recipe 18 removes one where nothing can read a byte of it: an array's that loops overwrite, and a
+module's that a copy overwrites, as `copy`'s memcpy does here, unless a call then takes `copy`'s address. The
 same representation decides what is an error. `convert` refuses a module to anything but its own type; a module as a
 parameter or a result is refused in `declare()`, which then declares a `ptr` there, so the IR stays valid while the
 other errors are found; `?:` refuses two modules, since its phi would join two addresses where a copy was meant (choose
@@ -1903,7 +1936,9 @@ formats:
 
 `fft_create`, `fft_create_complex`, `fft_destroy`, `fft_forward` and `fft_inverse` are builtins, as `malloc` is: a
 table in `Calls.cpp`, `kFfts`, and `lowerFft`, which calls the runtime's functions through `callRuntime` (declared
-from the arguments' IR types). The transforms are overloaded on their buffers, as a math builtin is on its arguments:
+from the arguments' IR types, and since recipe 19 with what each does: a transform reads its plan and its input,
+writes its output, and touches nothing of the program's besides). The transforms are overloaded on their buffers, as
+a math builtin is on its arguments:
 
 ```cpp
         const Value& decides = forward ? args[1] : args[2];   // the floats' side
@@ -1967,7 +2002,7 @@ program, not the program's (`Program::Options::parameters`, by qualified name; `
 | Binding | `cutoff[i]` is | Costs | For |
 |---|---|---|---|
 | a knob (the default) | the value the host set, read once when the method starts, atomically | a load a call | a control that moves now and then, set from any thread |
-| a stream | `samples[i]`, from the pointer the host set before the call | a load a sample | modulation, automation, a smoothed control: sample-accurate |
+| a stream | `samples[i]`, from the pointer the host set before the call; with a null pointer, the slot's value, for the whole call (recipe 16) | a load a sample; a flat call, a knob's in its copy (recipe 16) | modulation, automation, a smoothed control: sample-accurate |
 | frozen | a constant | nothing: the optimiser folds it | a setting that won't move while this program plays: a sample rate, a mode |
 
 So one source serves a plugin whose cutoff is a plain knob, one that modulates it, and one that compiles again with
@@ -2055,8 +2090,12 @@ or as `this->cutoff`. `lowerParameter` then lowers it by its binding:
   it out, once for the synth's call, and the loop vectorises; monotonic, it stays, a load every sample. Four such
   methods in a chain ran 6.4 times slower monotonic (0.378 ns a sample, against 0.059 unordered or with plain fields).
   A knob is then read once a call of the method that runs the loop, which a relaxed load was already allowed to see.
-- **A stream** loads its pointer at the method's start the same way (`atEntry(field, true)`), and `cutoff[i]` is a load
-  from it, as `p[i]` is.
+- **A stream** loads its pointer at the method's start the same way (`atEntry(field, true)`), and with it the slot's
+  value, as a knob's, and `%cutoff.flat`, whether the pointer is null. From that test it chooses there where the
+  samples are: a base, the pointer or, when the stream is flat, the slot's value field, and a stride, 1 or 0.
+  `cutoff[i]` has no branch: it is a load from base + i * stride, as `p[i]` is from `p`, and a select of the value when
+  the stream is flat. From `-O1`, knob versioning gives a method whose loop reads the stream a copy for each answer, as
+  the budget allows, in which the read is the load alone, or the value (recipe 16).
 
 A parameter is the host's to write: `cutoff[0] = 1` and `&cutoff[0]` are "parameter 'cutoff' is the host's: a method
 reads it, and cannot assign it or take its address" (`lvalue`, `Memory.cpp`), and `cutoff` without its sample is
@@ -2074,18 +2113,19 @@ then go back to memory every sample, to be read again as the next sample of the 
 `scopeStreams` tells it the way the inliner tells it about an inlined `restrict` argument: one alias scope for the
 method's streams, the streams' loads in it (`!alias.scope`), every other access to memory outside it (`!noalias`), and
 the scope declared where the method starts (`llvm.experimental.noalias.scope.decl`), so that a copy of the method
-inlined into a loop gets a scope for each call. In `params.fm`, the one-pole's state stays in a register:
+inlined into a loop gets a scope for each call. In `params.fm`, the one-pole's state stays in a register (in the
+method's copy for a stream with samples, recipe 16; each access also carries its type's tag, recipe 17):
 
 ```llvm
 for.body:
-  %cutoff = load float, ptr %cutoff.at, align 4, !alias.scope !0
-  %1 = load float, ptr %arrayidx, align 4, !noalias !0
+  %cutoff = load float, ptr %cutoff.at, align 4, !tbaa !8, !alias.scope !2
+  %2 = load float, ptr %arrayidx, align 4, !tbaa !8, !noalias !2
   ...
-  store float %4, ptr %arrayidx13, align 4, !noalias !0
-  br i1 %exitcond.not, label %for.cond.for.end_crit_edge, label %for.body
+  store float %5, ptr %arrayidx13, align 4, !tbaa !8, !noalias !2
+  br i1 %exitcond.not, label %for.cond.common.ret.loopexit19_crit_edge, label %for.body, !llvm.loop !11
 
-for.cond.for.end_crit_edge:
-  store float %4, ptr %y, align 8, !noalias !0                   ; y, once, after the loop
+for.cond.common.ret.loopexit19_crit_edge:
+  store float %5, ptr %y, align 8, !tbaa !8, !noalias !2         ; y, once, after the loop
 ```
 
 ### The host's side
@@ -2114,6 +2154,8 @@ fminus::Program::setValue(instance, bypass, 1.0);
 
 `setValue` converts as the binding's constant does (a float rounded, an int truncated, a bool unless 0) and stores
 with `std::atomic_ref`; `value` reads it back. The header still needs only C++17: the atomics are in `FMinus.cpp`.
+`setStream(instance, cutoff, nullptr)` makes the next call flat: every `cutoff[i]` is then the value `setValue` last
+set, and no sample is read (recipe 16).
 
 ### Tests
 
@@ -2126,9 +2168,1345 @@ with `std::atomic_ref`; `value` reads it back. The header still needs only C++17
   conversions, `setDefaults` and `setStream`; one instance under two programs; the binding errors; a knob set from
   another thread, every block showing one value whole.
 - `tests/lit/fminus/params.fm`: the slots, the knob's unordered load at the start and the vectorised loop (and out of
-  the loop of a method it is inlined into), the stream's alias scope and its state kept out of memory, the frozen
-  parameters folded (a frozen `bool` turns a loop into a `memcpy`), and the driver's options.
+  the loop of a method it is inlined into), the stream's alias scope and its state kept out of memory (and, with
+  recipe 16, `Gain::process`'s copy for a stream with samples vectorised), the frozen parameters folded (a frozen
+  `bool` turns a loop into a `memcpy`), and the driver's options.
 - `example.parameters`: the parameters example's `--check`.
+
+## Recipe 15: math that gives a float one result
+
+*In the compiler. Examples: the C++ references of the harnesses whose kernels call a math builtin (biquad, saturator,
+parameters, voices) call `fminus::math`, and `example-biquad`, `-saturator` and `-parameters` take `--math`. Tests:
+`tests/unit/MathTest.cpp` (`[math]`), `tests/library/ProgramTest.cpp`, `tests/lit/fminus/math.fm` and
+`math-names.fm`; `veclib.fm` is now the fast mode's.*
+
+After recipe 8, the last bits of a math builtin's result depended on more than its argument:
+
+- **Where a block ended.** The loop vectoriser runs a loop's body on `_simd_tanh_f4` and its remainder on libm's
+  `tanhf`, so moving the end of a block moved samples from one to the other. The saturator's `--check` had to allow
+  3 ulp across block sizes.
+- **The optimisation level.** At `-O2` the backend pairs `sinf` and `cosf` of one angle into Apple's
+  `__sincosf_stret`, whose sine is not always `sinf`'s; at `-O0` it calls the two. The biquad's `-O0` output was 3e-6
+  from its `-O2` one.
+- **A `poly float`'s width.** A 4-lane `sinf` was `_simd_sin_f4`; a `float8`, or 8 lanes or more, was scalarised to
+  `sinf` a lane.
+- **Freezing.** LLVM folds `llvm.sin` of a constant with the compiling machine's double `sin`, rounded, which is an ulp
+  from libm's `sinf` for about 1% of arguments. A frozen parameter could move an output against the same value as a
+  knob.
+
+A host meets all four. It compares a plugin with a C++ reference, renders in buffers of any size, compiles for the
+machine it is on, and freezes settings that stop moving, and none of that should move a sample. C and clang promise
+nothing of the kind (clang's `-fveclib` has every one of these), so the promise is FMinus's. It is also one FMinus can
+keep cheaply: it compiles on the machine the code runs on, and knows the library there.
+
+### The idea, and its premise
+
+A vector function is *lane-independent* when lane k of its result depends on lane k of its argument alone. A float
+then gets the same result in any lane, beside any neighbours, and so in lane 0 of a vector of four copies of itself.
+So the scalar function is lane 0 of the vector function of a splat, every vector call is the vector function four
+lanes at a time, and LLVM never sees `sinf` at all: it can neither fold it, nor pair it, nor hand it to another
+library.
+
+The premise was measured. libsystem_m's `_simd_exp_f4`, `_simd_tanh_f4` and `_simd_log_f4` are lane-independent,
+checked exhaustively on an M5: every float, in every lane, beside awkward neighbours (NaN, infinities, huge and
+subnormal values). `_simd_sin_f4` and `_simd_cos_f4` are not. A vector takes a fast path when every lane is finite and
+at most 1e6 in magnitude, and a slow path for all four lanes otherwise. The two paths disagree on about 37% of
+arguments, by up to 3 ulp, so one large lane changes its three neighbours' results; each path alone is
+lane-independent. So the runtime guards sin and cos: a vector goes to libsystem_m whole only when every lane is within
+`kSinCosLimit`, 2^16, and lane by lane otherwise. The limit leaves Apple's edge room to come down by a factor of 15 in
+a later macOS, and costs audio nothing: a sine at 65536 radians has already lost its phase to float's spacing there
+(2^-7 rad). `MathTest.cpp` checks the premise again on every run, so a macOS that changes it fails a test rather than
+a program's last bits.
+
+### The runtime: `src/runtime/Math.cpp`
+
+Fifteen functions, in `Runtime.h` and `RuntimeSymbols.def`: the vector mode's `fminus_rt_sinf` to `fminus_rt_logf`,
+their four lanes, `fminus_rt_sin_f4` to `fminus_rt_log_f4`, and the libm mode's `fminus_rt_libm_sinf` to
+`fminus_rt_libm_logf`. A four-lane vector is `fminus_rt_float4`, GCC's and clang's `vector_size(16)` float vector,
+which the C ABI passes in one register as it does FMinus's `<4 x float>`. On Apple systems:
+
+```cpp
+extern "C" float fminus_rt_sinf(float x) noexcept
+{
+    return _simd_sin_f4(splat(x))[0];
+}
+...
+extern "C" fminus_rt_float4 fminus_rt_sin_f4(fminus_rt_float4 x) noexcept
+{
+    return withinLimit(x) ? _simd_sin_f4(x) : eachLane(fminus_rt_sinf, x);
+}
+```
+
+The scalar function is lane 0 of the four-lane one on either path, since four copies are within the limit together or
+not at all. On arm64 `withinLimit` is `fabs`, NEON's `fmaxv` (which, unlike `fmaxnmv`, gives NaN when a lane is NaN),
+a compare and a branch. `eachLane` is out of line, and libsystem_m's functions are declared `noexcept` (they are C), so
+the fast path is a tail call with no stack frame: from a `noexcept` function, a call of one that might throw sits in a
+`std::terminate` landing pad. The four-lane exp, tanh and log call libsystem_m's straight. They go through the runtime
+all the same, so that the generated IR is the same on every target, and the functions `MathTest.cpp` checks are the
+ones programs call. Elsewhere than Apple systems the vector mode's functions are libm's, a lane at a time.
+
+### The code generator: `src/ir/Math.cpp`
+
+A transcendental builtin's row in `kBuiltins` gains the stem of its runtime functions. The exact ones (`fabsf`,
+`sqrtf`, `floorf`, `fminf`, `fmaxf`) have none, and are their intrinsics in every mode:
+
+```cpp
+        Builtin{"sinf", llvm::Intrinsic::sin, 1, "sin"},   Builtin{"cosf", llvm::Intrinsic::cos, 1, "cos"},
+```
+
+`lowerCall` converts the arguments as before, then hands a builtin with a stem to `lowerMath`, unless the mode is
+fast. In the vector mode:
+
+- a `float` is one call of `fminus_rt_sinf`;
+- a `float4`, or a `poly float` of 4 lanes, is one call of `fminus_rt_sin_f4`;
+- a `float8`, or a `poly float` of 8 to 64 lanes, is cut into four-lane pieces (`shufflevector`), a call each, joined
+  in order (`llvm::concatenateVectors`);
+- a `float2`, or a `poly float` of 1 or 2 lanes, is padded to four lanes with zeros, which keep sin and cos on the fast
+  path, and its own lanes are taken back.
+
+So no vector is scalarised to libm, and every lane of every width is the scalar function of that lane. In the libm
+mode every lane is a call of `fminus_rt_libm_sinf`.
+
+`mathFunction` declares each runtime function once a module, with the attributes LLVM gives `llvm.sin` itself:
+`memory(none) nounwind willreturn speculatable nosync nofree nocallback nocreateundeforpoison`. LICM takes a call out
+of a loop, GVN merges two calls of one argument, and an unused one goes; but nothing evaluates one, since LLVM does not
+know the function. The scalar function also names its vector variant, in LLVM's vector function ABI:
+
+```llvm
+declare float @fminus_rt_sinf(float) local_unnamed_addr #2
+attributes #2 = { ... memory(none) "vector-function-abi-variant"="_ZGV_LLVM_N4v_fminus_rt_sinf(fminus_rt_sin_f4)" }
+```
+
+`_ZGV`, the `LLVM` ISA, `N` for unmasked, `4` lanes, `v` for one vector parameter, then the two names. That is what
+the loop and SLP vectorisers look for (`VFABI::getVectorVariantNames`, `VFDatabase`), with no entry in the target
+library information. So a scalar loop of `sinf` still vectorises, into four-lane calls, with scalar ones in its
+remainder:
+
+```llvm
+vector.body:                                      ; fminus math.fm -O2: sines()
+  %4 = tail call <4 x float> @fminus_rt_sin_f4(<4 x float> %wide.load)
+  %5 = tail call <4 x float> @fminus_rt_sin_f4(<4 x float> %wide.load17)
+  ...
+for.body:
+  %18 = tail call float @fminus_rt_sinf(float %17)
+```
+
+The variant has to be declared in the module when the vectorisers look for it, and the module simplification
+pipeline's `GlobalDCE` removes a declaration nothing uses before they run. So it goes into `llvm.compiler.used`
+(`llvm::appendToCompilerUsed`), as LLVM's own `InjectTLIMappings` keeps a vector library's declarations.
+
+A builtin's three names (`sinf`'s `fminus_rt_sinf`, `fminus_rt_sin_f4` and `fminus_rt_libm_sinf`) are the runtime's, and
+a program that calls the builtin may not declare a function of any of them itself, a definition or a prototype, of any
+type. Such a function would be the one the call reaches, or the one LLVM takes for the runtime's: it would get the
+runtime's attributes, which are false of a program's code (a call of one that could loop forever was removed, as
+`willreturn`), and the four-lane name would be the scalar function's vector variant, which the loop vectoriser calls
+with a `<4 x float>` whatever the program's function takes (it asserted on one that took an `int`). So `lowerCall` runs
+`checkMathNames` before any mode's lowering, and each call of the builtin is an error, with a note at the program's
+function:
+
+```
+math-names.fm:18:18: error: 'sinf' reserves 'fminus_rt_sin_f4' for the runtime's function, and this program declares a function of that name: rename it
+math-names.fm:10:5: note: 'fminus_rt_sin_f4' declared here
+```
+
+Every mode refuses all three names, the fast mode too, which calls none of them, so that whether a program compiles
+does not depend on its mode. Only the names of the builtins a program calls are refused: a program that declares
+`fminus_rt_sinf` and calls only `cosf` is left alone, as `callRuntime` leaves a program's own heap and FFT functions
+(recipe 19), and a module's method of such a name (`M::fminus_rt_sin_f4`) has another name. So `mathFunction` only
+ever finds the runtime's own declaration.
+
+### The option, and the optimiser
+
+`ir::lower` records the mode in a module flag, `fminus.math` (`kMathFlag`, `HostTarget.h`): `"vector"`, `"libm"` or
+`"fast"`, with LLVM's `Error` behaviour, so two modules of different modes cannot be linked. `optimiseModule` gives the
+pipeline recipe 8's vector library (`DarwinLibSystemM` and `ReplaceWithVeclib`) only for `"fast"`, or for a module
+without the flag (hand-written IR, which `fminus-build` takes). The other modes' calls are the runtime's, which
+neither knows; the library would only vectorise a loop of a prototype's libm function (`float atanf(float x);`), and
+give it one result in the loop's body and another in its remainder. The flag travels with the module, so the JIT,
+`fminus` and executables need no new argument.
+
+| `Program::Options::math`, `fminus --math` | `sinf` ... `logf` are | One result for a float? | Constants folded? | Loops of them vectorise? | Error |
+|---|---|---|---|---|---|
+| `Vector`, `vector` (the default) | the runtime's: libsystem_m's vector functions on Apple systems, made lane-independent; libm's elsewhere | yes | no | yes, into four-lane calls | up to about 3 ulp (Apple) |
+| `Libm`, `libm` | the runtime's wrappers of libm's, a lane at a time | yes | no | no | libm's (within 1 ulp) |
+| `Fast`, `fast` | LLVM's intrinsics, as recipe 8 left them | no | yes, with the host's double functions | yes, into `_simd_*_f4` | either |
+
+`ir::Options::math` (`ir::Math`) is the same choice. The fast mode is the compiler before this recipe: the same IR, the
+same pipeline, and the module flag, but for the runtime's math names, which it refuses too (above).
+
+### What changes for programs and hosts
+
+- **Results move in their last bits.** A scalar `sinf` in the default mode was libm's (within 1 ulp of the exact
+  result); it is now the vector function's lane (within about 3), the same as a vector call's. `waveforms.fm`'s
+  `main 0.25 1000` is 0.48676, where libm gives 0.4867599 (`examples.test` accepts both).
+- **C++ references** call `fminus::math::sin` ... `log` (`include/fminus/FMinus.h`), which compute what the default
+  mode does, and agree bit for bit at any block size, level, width and binding. They are `[[gnu::const]]` for GCC and
+  clang (`FMINUS_MATH_CONST`): without it an opaque function is called every time, and the biquad's reference, which
+  recomputes its sine and cosine for each coefficient, went from 2.65 to 16.5 ns a sample.
+- **A frozen parameter's `sinf`** is no longer folded. It is a call, which LICM takes out of the loop, once a method
+  call, and the output is the knob's bit for bit (`examples/parameters/`'s `--check` now checks it).
+- **Vectors of other widths are faster**: a `float8` `sinf` was eight `sinf` calls, and is two four-lane ones.
+- **Scalar calls that can't vectorise are slower**: each computes four lanes of a vector function, whose latency is two
+  to six times libm's (Measurements).
+- **A prototype's libm function** (`atanf`, `powf`) gets the vector library only in the fast mode.
+- **Elsewhere than Apple systems** the vector mode's results are libm's: the IR is the same, and the four-lane
+  functions loop over libm. Neither Linux nor Windows has been run with it.
+- **The runtime** has fifteen more functions, which a host that hides or strips symbols must keep
+  (`RuntimeSymbols.def`, which `defineRuntimeSymbols` reads).
+- **Their names are reserved.** A program that calls `sinf` and declares a function named `fminus_rt_sinf`,
+  `fminus_rt_sin_f4` or `fminus_rt_libm_sinf` (or one of another builtin's three that it calls) is an error, in every
+  mode: rename the function.
+
+### Tests
+
+- `tests/unit/MathTest.cpp`, the premise and the promise. Each four-lane function against its scalar one, lane by
+  lane, over 10^6 vectors of mixed arguments: phases, audio's ranges, zeros of both signs, subnormals, infinities, NaN
+  payloads, the floats either side of the limit and of 1e6, and any float at all. libsystem_m's own lane-independence,
+  where the runtime relies on it (skipped elsewhere). Then, a test case a function, seven kernels (a loop that
+  vectorises, a recursion that doesn't, a parameter's function, `float2`, `float4`, `float8` and `poly float` code),
+  at `-O0` and `-O2`, at 1 to 64 lanes, the parameter a knob and frozen, in one call and in blocks of 61: every output
+  `fminus::math`'s, bit for bit. The libm mode runs the same matrix against C++'s `std::`, and the fast mode is checked
+  as it was. Raising the limit above Apple's edge, or compiling the promise in the fast mode, makes them fail. Then
+  the reserved names: five programs that declare one (the four-lane name of an `int` and of a `float`, a prototype of
+  it, the scalar name with a body that may loop forever, the libm name), each an error with its note in every mode,
+  through the code generator and the public API; and a program's own prototypes of the three, called by name beside a
+  loop of `cosf`, left alone.
+- `tests/library/ProgramTest.cpp`: through the public API in C++17, a block of all five against `fminus::math` in the
+  default mode and against `std::` in the libm mode, at `-O0` and `-O2`.
+- `tests/lit/fminus/math.fm`: each mode's IR (the vectorised loop and its remainder, `float2`, `float4`, `float8` and
+  16- and 1-lane poly calls, a constant not folded, a frozen parameter's call out of the loop, the attributes and the
+  flag, no `_simd_` outside the fast mode), the assembly (two calls where the fast mode has one `__sincosf_stret`),
+  `--run` at `-O0` and `-O2`, and `--math`'s error.
+- `tests/lit/fminus/math-names.fm`: a program that defines `fminus_rt_sin_f4` of another type and calls `sinf` in a
+  loop, which LLVM asserted on: the error and its note for an object file at `-O2` in each mode, and for `--run` in the
+  default mode.
+- Changed: `veclib.fm` runs `--math fast`; `VectorTest.cpp`'s recipe 8 test compiles in the fast mode, and its other
+  `sinf` check is exact against `fminus::math`; `CodeGenTest.cpp` and `ModuleTest.cpp` compare with `fminus::math`.
+
+### Measurements
+
+The dev build on an M5, with other work running, so about ±10%. Nanoseconds a sample, the best of three runs; the fast
+mode is the compiler before this recipe:
+
+| Kernel | fast | vector | libm |
+|---|---|---|---|
+| biquad, `-O2` (a sine and a cosine a sample, in a recursion) | 2.72 | 4.63 | 2.88 |
+| saturator: `tanhf` a sample at a time (vectorised) | 0.66 | 0.66 | 2.58 |
+| parameters: swept a sample (the LFO's `sinf` and `expf` a sample) | 5.84 | 8.31 | 5.98 |
+
+Where code is vector, the vector mode costs nothing: the saturator's loops run as fast as before, and now give the same
+output as each other and as C++, in any blocks. Where a scalar call is on a recursion's critical path, it costs. A
+call computes four lanes, its latency about 11–16 ns against libm's 2–10, so the biquad pays about 70% and the LFO
+about 40%. The libm mode is as consistent, costs the biquad about 6% (the `__sincosf_stret` pairing it gives up), and
+is about four times slower where the code is vector. So the default stays the vector mode, and the libm mode is the
+one to recommend for a program of scalar recursive kernels (filters with coefficients a sample, LFOs, envelopes):
+consistent too, and C++'s `std::` bit for bit.
+
+## Recipe 16: knob versioning, and flat streams
+
+*In the compiler. Code: `src/opt/KnobVersioning.h` and `KnobVersioning.cpp`, registered in `optimiseModule`
+(`src/support/HostTarget.cpp`); the tags and the flat stream in `src/ir/Modules.cpp` (`tagDomain`, `atEntry`,
+`opaqueUnit`, `lowerParameter`). Tests: `tests/unit/VersionTest.cpp` (`[versions]`), `tests/lit/fminus/versions.fm`,
+and one check each in `params.fm` and `zeroinit.fm`.*
+
+A mode is a knob that a loop branches on (`rational_tanh` is a function of the program, a ratio of polynomials):
+
+```c
+module Shape
+{
+    param int mode [[fminus::range(0, 2)]];   // a gain, a soft clip, a hard clip
+    param float gain;
+
+    void process(const float* restrict in, float* restrict out, int n) [[clang::nonblocking]]
+    {
+        for (int i = 0; i < n; ++i)
+            out[i] = mode[i] == 0 ? gain[i] * in[i]
+                   : mode[i] == 1 ? rational_tanh(gain[i] * in[i])
+                                  : fminf(fmaxf(gain[i] * in[i], -1), 1);
+    }
+};
+```
+
+Recipe 14 reads `mode` once, where the method starts, so the branch on it goes the same way every sample; but LLVM
+keeps it in the loop. At `-O2` it if-converts the loop and vectorises it, so every mode pays for the tanh: about
+0.41 ns a sample, whichever is set. Taking the branch out of the loop means a copy of the loop for each way it goes,
+which LLVM 23 makes only at `-O3` (`SimpleLoopUnswitchPass(/* NonTrivial */ Level == O3)`, to a cost of 50), and
+FunctionSpecialization copies a function for a constant argument, never for a load.
+
+FMinus knows three things LLVM doesn't. A knob is one value a call, so a copy picked where the method starts, by that
+value, runs the whole call as the method would have. A knob's values are few and known: a `bool`'s two, an `int`'s
+`fminus::range`. And the host decides how much code it will pay for. So the method gets one copy of its body for each
+value, picked where it starts:
+
+```llvm
+; fminus versions.fm: Drive::process, a one-pole whose mode shapes its step
+entry:
+  %0 = getelementptr inbounds nuw i8, ptr %this, i64 8
+  %mode = load atomic i32, ptr %0 unordered, align 8, !tbaa !2, !fminus.domain !5
+  %cmp43 = icmp sgt i32 %n, 0
+  switch i32 %mode, label %for.cond.preheader [          ; any other mode: the method as written
+    i32 0, label %for.cond.mode0.preheader
+    i32 1, label %for.cond.mode1.preheader
+    i32 2, label %for.cond.mode2.preheader
+  ]
+```
+
+In each copy `mode` is a constant, which the rest of the pipeline folds as it folds a frozen parameter: the shaper's
+mode 0 is a vectorised gain, about 6.5 times faster. A stream gets the same treatment, through a new meaning for its
+null pointer (below).
+
+### What a knob can be: `!fminus.domain`
+
+`atEntry` tags each knob's read with the values the knob can take:
+
+| Parameter | The tagged value | Its domain |
+|---|---|---|
+| `param bool on` | `%on.on = icmp ne i8 %on, 0` | `!{i1 false, i1 true}` |
+| `param int mode [[fminus::range(0, 2)]]` | `%mode = load atomic i32 ...` | `!{i32 0, i32 1, i32 2}` |
+| a stream (below) | `%cutoff.flat = icmp eq ptr %cutoff.stream, null` | `!{i1 false, i1 true}` |
+| a float, an int without a range, one whose ends are not integers, or one of more than 8 values | none | |
+
+- **A hint, not a promise.** LLVM's own `!range` would make a value outside it poison, and a host may set any int
+  (`setValue` never clamps to a range). `!fminus.domain` is FMinus's own kind, which LLVM ignores. A value outside it
+  runs the method's original body, so a copy only ever runs with the value it was made for, and a wrong domain costs
+  speed, never correctness.
+- **A list, not a range**, so that an `enum`'s values can be one later.
+- **At most 8 values** (`kLargestDomain`, `Modules.cpp`): a wider int's copies would cost more than its branch.
+
+### The budget
+
+`ir::Options::knobVersions` (8 by default) caps the copies of one method: the product of the domains it is versioned
+on. 0 turns versioning off. A host sets it in `Program::Options::knobVersions`, and the driver takes
+`--knob-versions N`. `ir::lower` writes it into the module as a module flag, `fminus.knob-versions` (behaviour `Min`),
+where the pass reads it: the JIT optimises a module later, in its IR transform layer, where only the module arrives, so
+the flag keeps `optimiseModule`'s signature as it was. A module without the flag (hand-written IR) gets 8.
+
+The pass chooses greedily: first each stream's test for null, then the knobs in the order they are declared (their
+slots' order, read from the load's offset from `this`). Each is taken while the product still fits, and one that does
+not is skipped, not the end of the choice:
+
+```cpp
+        std::ranges::stable_sort(knobs, {}, [](const Knob& knob) { return std::pair(!testsStream(knob), knob.order); });
+        std::vector<Knob> chosen;
+        std::uint64_t copies = 1;
+        for (const Knob& knob : knobs)
+        {
+            if (copies * knob.domain.size() > budget)
+                continue;
+            copies *= knob.domain.size();
+            chosen.push_back(knob);
+        }
+```
+
+So three ints over 0..3 and then a `bool` get 4 copies under a budget of 4, 8 (the first int and the bool) under 8,
+and 16 (two ints) under 16. Streams come first because a test left out costs more than a knob left out. Uncopied, a
+stream's read is a load at a stride the loop vectoriser checks is 1 before its vector loop, and a select of the value
+(below): a stream with samples still vectorises, but a flat one runs LLVM's scalar loop, a load and a select a sample,
+where its copy would have taken its work out of the loop. A knob left out leaves the method as it was. An int's
+original body, for the values outside its domain, comes on top of the budget.
+
+### The pass
+
+**Where.** `optimiseModule` registers it, in a block of its own, at the early simplification extension point, from
+`-O1`:
+
+```cpp
+        passes.registerPipelineEarlySimplificationEPCallback(
+            [](llvm::ModulePassManager& modulePasses, llvm::OptimizationLevel level, llvm::ThinOrFullLTOPhase) {
+                if (level != llvm::OptimizationLevel::O0)
+                    modulePasses.addPass(llvm::createModuleToFunctionPassAdaptor(opt::KnobVersioningPass()));
+            });
+```
+
+That is after the pipeline's first SimplifyCFG, SROA and EarlyCSE, and before IPSCCP and the inliner. Before the
+inliner, so that each method is versioned on its own knobs, and the whole pipeline then simplifies each copy. After
+SROA, because at the pipeline's very start the IR is the code generator's `-O0` form, where `const int m = mode[0];`
+stores the knob to a stack slot, and the knob would not reach its branch through SSA values.
+
+**Which knobs.** `KnobVersioningPass::run` takes each tagged instruction of the entry block, and keeps those that steer
+a loop (`steersLoop`): whose value reaches, through casts, comparisons, logic on bools and `freeze`, the condition of a
+branch, a switch or a select in a block that `LoopInfo` puts in a loop. A stream's test also steers a loop through
+where its samples are: its base and its stride are selects made where the method starts, outside every loop, and when
+a loop uses one (`addressesStream`: a select of a pointer, or of the stride's unit), the loop reads the stream. A
+stream read only before the loop (`const float g = a[0];`) uses its base and stride there alone, and its read, a select
+on the test outside the loop too, is data to the loop: it steers nothing, and leaves the budget to the knobs that do.
+A knob that decides once, before the loop, or is data in it (`out[i] = in[i] * mode[i]`), gains nothing from a copy,
+and is left alone. So is a function marked `optnone`, `optsize` or `minsize`, and one the pass has versioned already
+(below).
+
+**The copies** (`version`):
+
+1. Split the entry block after the last chosen knob's read. What comes before (the knobs' reads, the streams' pointers
+   and values, the streams' alias scope declaration) stays in the entry block, shared by every copy. Two things move
+   first. What the entry block computes from a chosen knob before the last one's read (a stream's base and stride, which
+   its test selects, when a chosen knob's read follows them: another stream's test, or an int's or a bool's read, of a
+   parameter the method reads before the stream, since `atEntry` puts each parameter's reads at the top of the entry
+   block) moves after it, into the body, so that each copy computes it with its own values (`sinkDerived`); an
+   instruction that touches memory, or that the entry block still needs where it is, stays. And the static allocas after
+   the split move up: an alloca outside the entry block is dynamic, and SROA no longer promotes it.
+2. The body is every block the split's second half reaches. For each combination of the knobs' values, clone it block by
+   block, with each knob mapped to its value:
+
+   ```cpp
+                for (std::size_t k = 0; k < knobs.size(); ++k)
+                {
+                    map[knobs[k].value] = values[k];
+                    suffix += label(knobs[k], *values[k]);
+                }
+                ...                                    // each local cloned and mapped (below)
+                std::vector<llvm::BasicBlock*> copy;
+                for (llvm::BasicBlock* block : body)
+                {
+                    llvm::BasicBlock* clone = llvm::CloneBasicBlock(block, map, suffix, &function);
+                    map[block] = clone;
+                    copy.push_back(clone);
+                }
+                llvm::remapInstructionsInBlocks(copy, map);
+   ```
+
+   `CloneBasicBlock` copies each instruction's metadata, so the copies' accesses keep their TBAA tags, `!alias.scope`
+   and `!noalias`. A scope declared inside the body (an inlined call's, or hand-written IR's) is cloned for each copy
+   (`cloneAndAdaptNoAliasScopes`), and a loop's `!llvm.loop` is made anew for each, since no two loops may share one.
+   The copies' names carry their values: `for.body.mode0`, `%arrayidx.cutoff.flat1`.
+
+   Each copy has locals of its own: the entry block's static allocas that only the body uses are cloned for each copy,
+   beside the original, and mapped as the knobs are (`%tmp.invert0.mode0`). A local the copies shared would be stored
+   in one copy and loaded in all, so no copy's store would dominate its loads, and zero-init elision (recipe 18), which
+   needs a local's memset to dominate its loads, would remove none. Each copy's locals, and the original body's, are
+   marked live from the copy's start to its returns (`llvm.lifetime.start` and `llvm.lifetime.end`, `markLifetimes`):
+   no two copies run at once, so the code generator gives their locals one stack slot (stack colouring), and the frame
+   does not grow with the copies. Seven copies of a 16 KB array take a 16 KB frame; unmarked, they took 112 KB.
+
+   In each copy a stream's stride, whose test is now a constant, becomes a constant too: 0 where the stream is flat, and
+   1, the opaque unit's value, where it has samples (`foldUnits`; flat streams, below). So the copy for a stream's
+   samples reads them a sample after another, as the method did before a stream could be flat.
+3. Pick the copy where the entry block branched to the body (`choose`): a switch on each int, whose default is the
+   original body, and a branch on each bool, nested, the first knob's values slowest.
+4. When every chosen knob is a bool, no value falls back, and the original body would be dead. It becomes the first
+   combination's copy instead, so a stream's copy for samples is the method as it was, with its names.
+
+The function gets `"fminus-knob-versions"="3"`, its number of copies, which the tests read, and which the pass looks
+for first: it leaves a function that has it alone. FMinus's optimised IR, optimised again (`fminus-build -O3`, say),
+still has its knobs tagged, and an int's fallback still branches on one, but it is not versioned twice. Everything
+happens inside the one function, so it keeps its name, its attributes, its callers and its effects: a
+`[[clang::nonblocking]]` method calls nothing in its copies that it did not call before.
+
+### Flat streams
+
+A stream is a buffer of samples a call (recipe 14). A host often has nothing to put in it: a smoother that has settled,
+an automation lane that holds still. Before, it filled a buffer with one value anyway, and the method computed the
+stream's per-sample work (a biquad's coefficients) for each sample. Now a null stream is a flat call:
+
+```cpp
+fminus::Program::setValue(instance, cutoff, 1000.0);         // the value a flat call reads
+fminus::Program::setStream(instance, cutoff, nullptr);       // this call is flat: cutoff[i] is 1000 for every i
+process(instance, in, out, n);
+```
+
+Before, a null stream was a null dereference. `atEntry(field, true)` now loads, where the method starts, the stream's
+pointer, the slot's value with a knob's unordered atomic load (`%cutoff.value`), and the test `%cutoff.flat`, tagged as
+a bool is. From the test it chooses there where the samples are: the base, `%cutoff.base`, the stream's pointer or,
+when it is null, the slot's value field; and the stride, `%cutoff.stride`, 1 or 0. `flatStreams_` keeps the test, the
+value, the base and the stride for the method's reads. Each `cutoff[i]` is then a load from base + i * stride, in the
+streams' alias scope, and a select of the value when the stream is flat, with no branch:
+
+```llvm
+; fminus versions.fm -O0 --stream Biquad::cutoff
+entry:
+  ...
+  %cutoff.stream = load ptr, ptr %0, align 8, !tbaa !6, !noalias !18
+  %1 = getelementptr inbounds nuw { ptr, float }, ptr %cutoff.slot, i32 0, i32 1
+  %cutoff.value = load atomic float, ptr %1 unordered, align 4, !tbaa !8, !noalias !18
+  %cutoff.flat = icmp eq ptr %cutoff.stream, null, !fminus.domain !14
+  %cutoff.base = select i1 %cutoff.flat, ptr %1, ptr %cutoff.stream
+  %cutoff.unit = call i64 asm "", "=r,0"(i64 1) #4                 ; 1, which LLVM cannot see
+  %cutoff.stride = select i1 %cutoff.flat, i64 0, i64 %cutoff.unit
+  ...
+for.body:
+  ...
+  %cutoff.offset = mul nuw nsw i64 %idxprom, %cutoff.stride
+  %cutoff.at = getelementptr inbounds float, ptr %cutoff.base, i64 %cutoff.offset
+  %cutoff = load float, ptr %cutoff.at, align 4, !tbaa !8, !alias.scope !18
+  %cutoff.read = select i1 %cutoff.flat, float %cutoff.value, float %cutoff
+```
+
+The load is always valid: a flat stream's reads all load the value field, and the select discards what they load. So
+it does not matter that they are plain loads, which the host's thread may race (in LLVM a plain load that races a store
+reads an undefined value, not undefined behaviour), nor that they are in the streams' alias scope though the field is
+no stream's: a store the method made through a pointer cast from `this` could reach the field unseen, and change only
+what the select discards.
+
+The stride's 1 is `%cutoff.unit`, an empty inline asm statement whose result is its operand, in the same register
+(`opaqueUnit`, with the constraints `"=r,0"`, `kUnitConstraints`): it emits no instruction and touches no memory, but
+LLVM cannot see that it is 1. A stride that LLVM can see is 0 or 1 does not last: InstCombine makes `i * stride` a
+select of 0 and `i`, and the loop vectoriser then sees no strided load, so a loop over a stream that knob versioning did
+not copy would stay scalar. Opaque, the stride stays a multiplication, and the vectoriser versions the loop on it
+itself: it checks at run time that the stride is 1 and runs its vector loop, or, for a flat stream, its scalar loop, a
+load and a select a sample. Two kinds of loop rely on it, besides every loop over a stream when versioning is off: one
+over more streams than the budget takes (`versions.fm`'s `Mix`: five streams, three tests chosen, the other two read at
+a checked stride in each copy), and the caller's loop that a method without a loop of its own, which the pass gives no
+copies, is inlined into: the stream's base and stride leave the loop with the rest of its setup, and the loop vectorises
+(`versions.fm`'s `Rack`, which calls `Amp::apply` a sample). An asm statement is not speculatable, so where the inlined
+call sits under a condition in the loop, LICM leaves the unit in the loop.
+
+In `Biquad` the test steers the loop, so the method gets two copies. In the flat one the read is `%cutoff.value`, a
+register, and LICM takes everything computed from it out of the loop; in the other it is the load alone, at a stride of
+1, and the loop is the method as it was:
+
+```llvm
+; fminus versions.fm --stream Biquad::cutoff
+entry:
+  ...
+  br i1 %cutoff.flat, label %for.cond.cutoff.flat1.preheader, label %for.cond.preheader
+
+for.body.cutoff.flat1.lr.ph:                      ; the flat copy, before its loop
+  %1 = fmul float %cutoff.value, f0x40C90FDB
+  %2 = fdiv float %1, 4.800000e+04
+  %3 = tail call float @fminus_rt_cosf(float %2)
+  %4 = tail call float @fminus_rt_sinf(float %2)
+  ...                                             ; and five more divides
+for.body:                                         ; the stream's copy: as before
+  %cutoff.at = getelementptr inbounds nuw [4 x i8], ptr %cutoff.stream, i64 %indvars.iv
+  %cutoff = load float, ptr %cutoff.at, align 4, !tbaa !6, !alias.scope !38
+```
+
+### What it changes for programs and hosts
+
+- **Options.** `Program::Options::knobVersions` and `ir::Options::knobVersions` (8), and `fminus --knob-versions N`.
+- **Streams.** `setStream(instance, parameter, nullptr)` makes a call flat: every `cutoff[i]` is then the slot's value,
+  as `setValue` last set it, and no sample is read.
+- **Bit for bit.** Each copy computes what the method computes with its value: the tests' outputs are identical,
+  versioned or not, for every value in a domain and for an int outside it. In the vector and libm math modes that
+  holds for math calls too (recipe 15). In the fast mode two things can still move a math call's last bit: a copy's
+  loop may vectorise a `sinf` that the method's kept scalar, and a knob's constant may reach one, which LLVM then folds
+  with the host's double functions.
+- **Code size and compile time** grow with the copies (below). A method that no knob steers is unchanged:
+  `examples/voices/` has float knobs only.
+- **The IR.** Every module has the flag; `fminus -O0` shows the tags, and each stream's base, unit and stride; the
+  copies' names carry their values. Where the unit is still used (at `-O0`, for a stream the pass gave no copies, in an
+  int's fallback), its asm statement shows in `--emit asm` as an `InlineAsm Start` and `InlineAsm End` comment, with no
+  instruction of its own.
+- **Knob versioning off** (`knobVersions = 0`), or a stream the budget leaves out, costs a flat stream its copy: a loop
+  over a stream with samples still vectorises, on the vectoriser's check that its stride is 1, but a flat one runs
+  LLVM's scalar loop, a load and a select a sample, with its work still in the loop. Four streams in one loop
+  (`out[i] = in[i] * a[i] + b[i] * c[i] + d[i]`) took about 0.10 ns a sample with samples in all four, and 0.42 with the
+  fourth, the one a budget of 8 leaves out, flat (one run each, on a loaded machine). The pass takes the streams' tests
+  first, in the order they are declared, so the k-th stream a method's loops read gets its copies from a budget of 2^k:
+  where a flat stream runs in a vectorisable loop, give the budget that much.
+
+### Tests
+
+- `tests/unit/VersionTest.cpp`: a mode and a bool over a shaper, whose 6 copies give the unversioned output for every
+  combination, bit for bit, and C++'s; an int outside its range (-1, 3, 7, `INT_MIN`, `INT_MAX`) runs the original body;
+  the budget from 0 to 200 over three ints and a bool; a stream's test chosen before an int over 0..7, its loads still
+  vectorised; what is not versioned (a knob that decides before the loop, one that is data in it, a float, a wide int,
+  an int without a range or with one whose end is not an integer, a method without a loop, a frozen parameter); a
+  nonblocking biquad that stays nonblocking and calls nothing new; an FIR whose length is a knob, with a local array,
+  valid at `-O1` to `-O3`; a null stream that reads the slot's value at `-O0` and `-O2`, versioned or not; a stream read
+  only before the loop, not versioned on, so the mode that steers the loop gets its 3 copies; and the pass alone on
+  hand-written IR: a scope declared in the body and a loop ID, one of each per copy; the pass run twice, the second time
+  leaving the function as it was; and two streams whose bases and strides alone reach the loop, versioned on, each copy
+  with its own, constant. Then five streams in one loop under budgets of 0, 2 and 8, giving 1, 2 and 8 copies, each
+  stream read four samples at a time somewhere in the method (`vectorStreams`), and every combination of flat streams
+  against C++, bit for bit; a stream read in a method without a loop, inlined into its caller's loop, which vectorises,
+  at budgets 8 and 0; and a local array in 6 copies, each copy's own, in the entry block with its lifetime marked,
+  zeroed in no copy at `-O1` to `-O3` (the fallback keeps its memset at `-O3`), the outputs the unversioned method's and
+  C++'s.
+- `tests/lit/fminus/versions.fm`: the tags and the branch-free flat lowering at `-O0` (base, unit, stride, the load
+  and its select), the module flag; at `-O2` the switch, one loop a mode with no trace of the mode, the original body
+  still switching; no copies for a method no knob steers; the budget at 8 and 64; `-O1`; `--knob-versions 0`, with no
+  function versioned; the stream's copy as before, at a stride of 1 with no select, and the flat copy with its
+  coefficients before its loop; five streams, eight copies and the other two streams' strides checked, and the same
+  loop unversioned (`Mix`); and a stream read in a method without a loop, inlined into a vectorised loop (`Rack`).
+- `tests/lit/fminus/zeroinit.fm`'s `Shaped`: a local array in each copy of a method versioned on a bool and a mode,
+  none zeroed at `-O1` to `-O3`, and at `-O1` and `-O2` no memset in the method at all, its fallback included.
+- `tests/lit/fminus/params.fm`: `Gain::process`, its gain a stream and `on` a bool, is now versioned on both, and its
+  copy for `on` with samples vectorises: the check reads a `<4 x float>` load in the streams' scope.
+
+### Measurements
+
+The dev build on an M5, with five other builds running, so about ±10% and more; the best of 30 runs, measured before
+recipe 15, with LLVM's intrinsics for `sinf` and `cosf`, and before a stream's read lost its branch: the biquad's
+unversioned rows branched on `%cutoff.flat` a sample, where its read is now a load and a select. "Unversioned" is
+`knobVersions = 0`. Every pair gave the same output, bit for bit.
+
+| Kernel | Versioned | Unversioned | |
+|---|---|---|---|
+| the shaper above, mode 0 (a gain), calls of 256 | 0.062 ns/sample | 0.407 | 6.5× |
+| the shaper, mode 5 (outside the range: the original body) | 0.407 | 0.407 | |
+| a biquad, its cutoff flat, calls of 64 and 256 | 2.29–2.36 | 2.72–2.76 | 15% |
+| the same, its cutoff samples | 2.70–2.76 | 2.73–2.77 | the same: this copy is the old code |
+| an FIR of 8 taps, its length a knob over 1..8 | 1.02 (frozen: 1.02) | 1.60 | 36% less time |
+| `examples/parameters`' filter, `shape` over 0..2 | 3.44–3.49 | 3.43–3.45 | latency-bound: nothing |
+
+The copies cost code and compile time. The shaper's `__TEXT` grows from 960 bytes to 2072, and its `Program::compile`
+from about 6 ms to 12; `examples/parameters/` from 416 bytes to 756 (and 5.5 ms against 3.7).
+
+## Recipe 17: C's strict aliasing, told to LLVM (TBAA)
+
+*In the compiler. Code: `src/ir/Tbaa.cpp`, and the loads and stores in `Memory.cpp`, `Calls.cpp` and `Modules.cpp`.
+Examples: `examples/convolver/convolver.fm` and `examples/delay/echo.fm`, which now index their fields in their loops.
+Tests: `tests/unit/TbaaTest.cpp` (`[tbaa]`), `tests/library/StrictAliasingTest.cpp`, `tests/lit/fminus/tbaa.fm`.*
+
+A method's loop over its module's buffers is the most ordinary code in DSP:
+
+```c
+module Acc
+{
+    float* tail;
+    float* result;
+    int size;
+
+    void add() [[clang::nonblocking]]
+    {
+        for (int i = 0; i < size; ++i)
+            tail[i] += result[i];
+    }
+};
+```
+
+Without help, LLVM runs it badly. `tail[i] += ...` stores a `float` through a pointer that came out of the module, and
+for all LLVM knows that pointer points at the module itself: at `tail`, `result` or `size`. So after every store it
+loads all three fields again, and a loop that reloads its own bounds and bases can't run on vectors. At `-O2` every
+iteration was this:
+
+```llvm
+for.body:
+  %1 = load ptr, ptr %result, align 8
+  %2 = load float, ptr %arrayidx, align 4
+  %3 = load ptr, ptr %this, align 8
+  ...
+  store float %5, ptr %arrayidx8, align 4
+  ...
+  %6 = load i32, ptr %size, align 8
+```
+
+C has the answer, and clang gives it to LLVM: the strict-aliasing rule. An object is accessed only through an lvalue
+of its own type, so a store of a `float` cannot change an `int` or a pointer. Clang tags every load and store with its
+type (`!tbaa` metadata), and LLVM's type-based alias analysis (`TypeBasedAA`, in every default pipeline) reads the
+tags. FMinus now does the same. With the tags, the fields are loaded once, before the loop, and the loop vectorises,
+with a run-time check that the two buffers don't overlap:
+
+```llvm
+iter.check:
+  %result = getelementptr inbounds nuw i8, ptr %this, i64 8
+  %1 = load ptr, ptr %result, align 8, !tbaa !5
+  %2 = load ptr, ptr %this, align 8, !tbaa !5
+  ...
+vector.body:
+  %wide.load = load <4 x float>, ptr %4, align 4, !tbaa !7, !alias.scope !9
+  ...
+  store <4 x float> %12, ptr %8, align 4, !tbaa !7, !alias.scope !12, !noalias !9
+```
+
+It is about 4.8 times faster at 64 elements and 7.3 times at 512. The convolver and the echo no longer copy their
+fields into locals before their loops: written the obvious way, they now run as fast as the locals did.
+
+### The rule
+
+The rule is a language decision, not only an optimisation: TBAA is sound only for programs that keep it. FMinus keeps
+C's (C11 6.5p6-7, the effective type), with FMinus's types in it:
+
+- **Memory is read and written as the type it holds.** A `float` through `float` lvalues, an `int` through `int`s, a
+  `bool` through `bool`s, a pointer through pointers (of any pointee, `void*` too). A float vector or a `poly float`
+  counts as its elements' type, `float`: a `float4*` over a float buffer, `poly_load` and `poly_store`, and the FFT's
+  `float2` bins all read and write float memory, and floats read them back. Lane masks count as `bool`s.
+- **Anything else is undefined**: an `int` read as a `float` through a `void*`, or a module's memory reached as floats
+  through one (`void* v = this; float* f = v; f[0] = 1;`).
+- **Modules and arrays are their fields and elements.** Each is accessed as its own type. A module's copy (`a = b`) is
+  a byte copy, which may read and write any type, as a `char` copy may in C.
+
+FMinus is stricter than C in three places:
+
+- **Allocated memory keeps one type at each place**, from its first access until it is freed. C lets a store give
+  memory from `malloc` a new effective type; in FMinus that is undefined. Free it and allocate again to change its
+  type.
+- **There is no character type**, so nothing but a module's copy (and a declaration's zeroing) reads or writes bytes of
+  any type. C's `char` lvalues may alias anything; FMinus has none to offer.
+- **Vectors are their elements' type**, the OpenCL C reading: C has no vectors, and a float vector must reach the floats
+  it covers.
+
+**Turning it off**, as clang's `-fno-strict-aliasing` does: `fminus --no-strict-aliasing`,
+`Program::Options::strictAliasing = false` or `ir::Options::strictAliasing = false`. Nothing is then tagged, and the IR
+is what FMinus wrote before this recipe, byte for byte (checked for every example and lit test at `-O2`). It is for a
+program that does read memory as another type; its loops over a module's buffers then run as slowly as they did.
+
+### A tree of four types
+
+LLVM's TBAA metadata is a tree of type nodes, and each access is tagged with a node: two accesses whose types are
+different nodes, neither an ancestor of the other, don't alias. FMinus's tree is a root with four scalar types under
+it, in clang's style and with clang's names:
+
+```llvm
+!4 = !{!"FMinus TBAA"}                 ; the root
+!3 = !{!"int", !4, i64 0}
+!6 = !{!"any pointer", !4, i64 0}
+!8 = !{!"float", !4, i64 0}            ; float, float2, float4, float8, poly float
+!2 = !{!3, !3, i64 0}                  ; a tag: base type, access type, offset (here int's)
+```
+
+and `bool`'s node, for `bool` and the lane masks, when a program uses one.
+
+- **Its own root.** Tags from two trees are taken to alias, so FMinus's rule never reaches C++ code, should the two
+  meet in one module.
+- **One pointer type.** FMinus has no pointer to a pointer, so a pointer in memory is only ever reached as itself, and
+  telling a `float*` field from an `int*` one would buy nothing.
+- **Scalar tags.** Each tag's base type is its access type, at offset 0. Struct-path tags (clang's `%struct.S` nodes
+  with a field offset) would also tell two `float` fields of one module apart; BasicAA already does that when both are
+  reached from the same `this`, and no measured loop needed more. No tag is marked immutable: memory a `const float*`
+  reads may change through another pointer.
+
+`Tbaa.cpp` builds the nodes with `llvm::MDBuilder`. The context uniques metadata, so asking again for a type's tag gives
+the same node, and the tree appears once a module, made of the nodes the program uses:
+
+```cpp
+    llvm::MDNode* Lowering::accessTag(ast::Type type)
+    {
+        const char* name = tbaaTypeName(type.kind);
+        if (name == nullptr)
+            return nullptr;
+        llvm::MDBuilder md(module_.getContext());
+        llvm::MDNode* access = md.createTBAAScalarTypeNode(name, md.createTBAARoot("FMinus TBAA"));
+        return md.createTBAAStructTagNode(access, access, 0);
+    }
+```
+
+`tbaaTypeName` is a `switch` over `ast::Kind` with no `default:`, so a new kind of type stops the build there until it
+says which node it belongs to.
+
+### Where the tags go
+
+Every load and store of a value the code generator writes calls `tag(access, type)` with the FMinus type of what is in
+memory:
+
+| Where | What | Tagged as |
+|---|---|---|
+| `read()`, `write()`, `Memory.cpp` | a variable, `p[i]`, `*p`, a field; components load and store the whole vector | its type (`whole`) |
+| `initializeArray`, `Memory.cpp` | `float c[4] = {1, 2};`, each element's store | the element's type |
+| `lowerPolyMemory`, `Calls.cpp` | `poly_load`, `poly_store`, and their masked forms | `float` |
+| `atEntry`, `Modules.cpp` | a knob's value, a stream's pointer and value | the parameter's type; `any pointer` |
+| `lowerParameter`, `Modules.cpp` | a stream's sample, `cutoff[i]` | `float`, beside its alias scope |
+| `self()`, `Modules.cpp` | `this`, from its stack slot | `any pointer` |
+
+A masked load or store is a call, and LLVM reads a call's `!tbaa` as it reads a load's (`TypeBasedAAResult::
+getModRefInfo`), so the masked forms carry it too. The loop vectoriser keeps the scalar tag on the vector loads and
+stores it makes, which is why a float vector is a `float` access in the first place. A stream's sample keeps its alias
+scope (recipe 14): the two kinds of metadata say different things, and LLVM uses both.
+
+What stays untagged is safe, since an untagged access may alias anything: a module's copy (a `memcpy`) and a
+declaration's zeroing (a `memset`), bytes of whatever types; and the stores that start a stack slot, a parameter's
+(`Functions.cpp`) and a scalar declaration's (`Statements.cpp`), which mem2reg removes from `-O1` on. A unit test walks
+a lowered program that uses every kind of access, and fails on any other untagged load or store, so a new lowering
+that forgets `tag` shows up there.
+
+### What LLVM does with it, and what it still can't
+
+- **The fields leave the loop.** LICM and GVN hoist a pointer or int field's load past `float` stores, and the loop
+  vectorises (`tbaa.fm`'s `Acc::add`, the convolver's four loops in `convolve`).
+- **An int field written in a loop of float stores stays in step.** The echo's `position` is loaded once, before the
+  loop. Its store stays in the loop, untagged: SimplifyCFG speculates `if (++position == length) position = 0;` into
+  one store of a `select`, and drops the tag doing it. It costs nothing measurable here.
+- **A call still clobbers everything.** `Convolver::process` loads `ready`, `gathered` and `block` again every sample,
+  because it calls `convolve()` (not inlined), which could write them as far as LLVM knows. TBAA says nothing about
+  calls; a summary of the fields each method writes would.
+
+### For programs and hosts
+
+- **Programs** that keep the rule compute what they did, bit for bit: every example's `--check` still passes, the
+  convolver and the echo bit-identical to their C++ references. A loop over a module's buffers may index its fields
+  directly; the advice to copy fields into locals first is obsolete.
+- **Hosts** get `Program::Options::strictAliasing` (on by default). Nothing changes at the boundary: the host's own C++
+  is compiled apart from the JIT's code, and what a host writes into an instance (`setValue`, `setDefaults`,
+  `setStream`) is written as the types the program reads.
+- **The IR.** Every load and store prints a tag: a check that matches such a line to its end, or a metadata number,
+  changes (`params.fm`'s stream checks accept `!tbaa {{![0-9]+}}` before `!alias.scope` and `!noalias`).
+
+### Tests
+
+- `tests/lit/fminus/tbaa.fm`: at `-O0`, the tags on a module's field loads, its buffer's loads and stores, a knob of
+  each type, a bool variable, an `int*`'s store and load, an array's list, a `float4` through its pointer and through
+  components, `poly_load` and `poly_store` masked and not; the `memset` and a module copy's `memcpy` with none; the tree
+  node by node. At `-O2`, `Acc::add` with its field loads before the loop and a `vector.body`, and a float's store that
+  can't change an int, so `count[0] - before` folds to `ret i32 0`. A stream's pointer and samples. And
+  `--no-strict-aliasing`: no `!tbaa`, the fields loaded in the loop, no `vector.body`.
+- `tests/unit/TbaaTest.cpp`, every program under both settings, at `-O2`, against C++: `Acc::add` with a gain and a
+  counted int field, at sizes 0 to 513, over two buffers, one buffer, and two overlapping by a float; a delay whose
+  write position is a pointer field it moves while storing floats through it; floats and float vectors over one
+  memory, at 4 and 8 lanes; the FFT's `float2` bins in `calloc`'d memory, written as floats and as `float2`s; a
+  module's copy among tagged field accesses; and the structural check above, which also counts exactly four types.
+- `tests/library/StrictAliasingTest.cpp`: `Program::Options::strictAliasing` defaults to on, and off gives the same
+  result, in memory the host owns.
+
+### Measurements
+
+The dev build on an M5, while five other builds ran, so about ±10%:
+
+- **`Acc::add`**, ahead of time (`fminus --emit obj`, linked with a C harness, the best of 15): 0.33 ns an element
+  before, 0.069 with the tags at 64 elements (4.8×) and 0.046 at 512 (7.3×). `--no-strict-aliasing` is the before.
+- **The convolver** (`example-convolver`, 2048 taps, blocks of 256, the best of 20 runs): its fields indexed in the
+  loops took 15.6 ns a sample before and 9.7 with the tags, the same as with its fields in locals (9.8), and C++ 10.5.
+  With the tags, `convolve` vectorises the same four loops the locals did.
+- **The echo** (`example-delay --module`): its fields indexed took 2.10 ns a sample before, 0.70 with the tags, as the
+  plain-C functions and C++ do.
+- **Everything else**: the optimised IR of every other example is the same with the tags stripped as without the rule.
+  They had been written around the gap, or had no loop it touched.
+
+## Recipe 18: zero-init elision, an optimisation of FMinus's own
+
+*In the compiler. Pass: `src/opt/ZeroInitElision.h` and `ZeroInitElision.cpp`, registered in `optimiseModule`
+(`src/support/HostTarget.cpp`). Tests: `tests/unit/ZeroInitTest.cpp` (`[zeroinit]`), `tests/lit/fminus/zeroinit.fm`.*
+
+FMinus starts every variable at 0, where C leaves a local indeterminate (the README's deviations). For an array that is
+a memset where it is declared (`zero()`, `Memory.cpp`), and the memset runs every time the declaration does: once a
+call, or once an iteration for an array declared in a loop body. A scratch buffer pays for it on every block:
+
+```c
+module Smooth
+{
+    float y;
+    void process(const float* restrict in, float* restrict out, int n) [[clang::nonblocking]]
+    {
+        float tmp[256];                   // zeroed, all 1 KB, every call
+        for (int i = 0; i < n; ++i)
+            tmp[i] = in[i] * 0.5f;        // ... then overwritten, as far as n
+        for (int i = 0; i < n; ++i)
+        {
+            y += 0.01f * (tmp[i] - y);    // ... before anything reads it, no further than n
+            out[i] = y;
+        }
+    }
+};
+```
+
+LLVM's DSE removes a memset that later stores are known to overwrite, but only when it sees that they cover it: here
+they cover `n * 4` bytes, `n` known only at run time, so the memset stays at every level. Only a constant bound helps,
+and only at `-O3`, which unrolls the loop fully. Clang never has the problem, since C does not zero the array; under
+`-ftrivial-auto-var-init=zero` it has, and LLVM's `MoveAutoInitPass` then moves the zeroing towards its uses, but never
+removes it. The zeroing is FMinus's rule, so removing it where nothing can see it is FMinus's optimisation: a pass of
+its own, which says a memset is dead when no load can read a byte it stored.
+
+### The proof
+
+`ZeroInitElisionPass` is a function pass (`PassInfoMixin`, recipe 6). For each local, an entry-block static `alloca`,
+it first follows the address through `getelementptr`s and collects what the function does with it: loads, stores,
+memsets, memset.patterns, memcpys and memmoves into it, comparisons of addresses and lifetime markers. Any other use (a
+call's argument, a phi, a store of the address itself, a memcpy out of it) is an escape, and the local keeps its
+memsets. This scan asks for no analysis, so a function without a memset of a local costs nothing more.
+
+Then it looks for a **writer**, something that writes every byte of `[0, end)`:
+
+- a **loop** that stores element i on every iteration i, counting from 0 by one element: the store's pointer, as a
+  SCEV less the local's address, is `{0,+,size}<loop>`, its block dominates the latch, and the latch is the loop's only
+  exit. It writes `size * (count + 1)` bytes, `count` being its exact backedge-taken count;
+- a **fill**: a memset, memset.pattern, memcpy or memmove whose destination is the local's start, which LLVM's loop
+  idiom pass makes of `for (...) t[i] = in[i];` and `for (...) t[i] = 1.5f;`.
+
+A memset M can go when some writer proves three things, about the function as it is:
+
+1. **Order.** M dominates every load, and none is reachable from M without completing the writer. The search walks
+   blocks from just after M, and stops at M again, at the loop's exit block or at the fill:
+
+   ```cpp
+                    for (llvm::BasicBlock* next : llvm::successors(&current))
+                    {
+                        if (next == writer.exit || (skipping && &current == writer.guard && next == writer.skip))
+                            continue;
+                        if (queued.insert(next).second)
+                            work.push_back(next);
+                    }
+   ```
+
+   A load inside the writer's loop is found (a read before the write, `t[i] = t[i] + x`), and so is one on a path that
+   goes around it.
+2. **Stability.** The values `end` is computed from have, at each load, the values the writer saw. A leaf of `end`'s
+   SCEV whose definition dominates M is never defined again between M and a load; any other must pass the same search
+   from its definition. That covers a bound read from a module's field after the declaration (`i < count`).
+3. **Range.** Every load reads within `[0, end)`. A load in a loop entered after M, at `{start,+,step}<loop>`, reads
+   furthest on its last iteration; the pass evaluates it there (`evaluateAtIteration`) and asks ScalarEvolution whether
+   that, plus the load's size, is at most `end` (`isKnownPredicateAt`). For the usual shape both are `4 * (zext n)`.
+
+**The zero-trip case.** A rotated loop sits under a guard, `if (n > 0)`, whose other edge goes around it. At `-O2` jump
+threading has usually sent that edge past the reading loop too. At `-O1` it joins the loop's exit, and the reading loop
+has a guard of its own, `n > 0` again. The pass then tries a second proof: the skipping edge is a stop as well, and
+every load reachable from it must be known to need the guard's condition, which a skip, taken only when `n <= 0`, rules
+out. With `n == 0` nothing is read, and nothing needs the zeros.
+
+**The ranges are exact.** An access outside the local is undefined behaviour, so in an execution without any, every
+offset the writer and the loads use lies inside it. The pass checks, in 128-bit arithmetic, that the writer's largest
+length and each load's furthest offset stay below 2^62, so no 64-bit SCEV it compares wraps. The top of
+`ZeroInitElision.cpp` has the argument that the three proofs are enough, in a paragraph.
+
+### Where it runs
+
+```cpp
+        passes.registerScalarOptimizerLateEPCallback(
+            [](llvm::FunctionPassManager& functionPasses, llvm::OptimizationLevel level) {
+                if (level != llvm::OptimizationLevel::O0)
+                    functionPasses.addPass(opt::ZeroInitElisionPass());
+            });
+```
+
+The scalar-optimiser-late extension point is the end of the function simplification pipeline, which runs in the
+inliner's CGSCC walk, on each function after its callees are inlined into it. By then the loop passes have rotated the
+loops, made their induction variables canonical, and turned copy and fill loops into memcpys and memset.patterns; at
+`-O2` and `-O3` LICM's loop adaptor has just put every loop into loop-simplify form, so the analyses the pass asks for
+are fresh, and DSE has removed what it can (`-O1` has no DSE, and the pass removes a memset of a local nothing reads
+too). The loop vectoriser has not run yet: it would split a store loop into a vector loop and a remainder, a shape the
+pass does not prove. A method's memset goes before the method is inlined into its caller.
+
+`-O0` has no simplification pipeline, but `buildO0DefaultPipeline` still runs the passes registered at this extension
+point, so the callback adds the pass from `-O1` only. At `-O0` every memset stays, and `fminus x.fm -O0` shows exactly
+what the lowering wrote. The pass would prove little there anyway: a loop's index is loaded from its stack slot on
+every iteration, which ScalarEvolution cannot count, so no loop is a writer.
+
+### What it changes
+
+- **For programs**, nothing they can observe: an element nothing wrote still reads 0. A local array whose reads all
+  follow a writer no longer pays for its zeroing.
+- **For hosts**, nothing: no option. The pass is semantics-preserving, so there is nothing to choose. `fminus -O0`
+  shows every memset the code generator writes.
+
+What it leaves, by design or for later:
+
+- **A partial cover keeps the whole memset.** `for (i < n - 1)` writes and `for (i < n)` reads: element `n - 1` needs
+  its 0, and so, as far as the pass knows, does every other.
+- **A writer is one loop, or one fill.** Two loops that each write half, a loop writing two elements an iteration, or a
+  nest (`t[j * n + i]`) keep the memset; so do reads two loops deep (`t[i + j]`).
+- **A store loop must not break early, nor store conditionally**, and must start at element 0.
+- **A module written field by field.** A module declared as a local is zeroed by a memset too, and the pass takes it as
+  any local: its memset goes when a copy of a whole module (`M b = a;`, or `b = a` before any read of `b`) writes it,
+  a fill like any other. Its fields written one by one are stores at constant offsets, which no writer covers; SROA and
+  DSE already handle them.
+
+### Tests
+
+- `tests/unit/ZeroInitTest.cpp`: the memset gone, at `-O1`, `-O2` and `-O3`, for `Smooth`, the same method inlined into
+  a loop over four voices, a bound read from a field, a constant bound, a copy and a fill, an array declared in a
+  loop, and one declared before a loop whose iterations write and read; their results against the same filter with
+  the buffer a field, bit for bit, at every block size from 0 to 256. Then every case that must keep its memset, run
+  through the JIT at each level: writes one short, a read before the write, a conditional store, a `break`, every other
+  element, from element 1, reads to `i <= n` or to `t[n]`, `t[0]` after a loop that may not run, an array an FFT reads
+  whole; and `ArrayTest.cpp`'s zeroed arrays again. Last, the pass alone on hand-written IR.
+- Every call runs on a **dirty stack**: `dirtyStack()` fills 64 KB below the caller with 1e6, and `padded()` calls the
+  function from below a kilobyte of padding, so a wrongly removed memset reads 1e6, not a lucky 0. A test of a
+  hand-written local nothing zeroes checks that the harness works: all 256 of its elements read 1e6 (skipped under
+  ThreadSanitizer, whose runtime writes that stack). A pass that removed every memset fails 204 checks.
+- `tests/lit/fminus/zeroinit.fm`: the IR at `-O0` (every memset) and `-O1` to `-O3`: no memset in each covered function,
+  with the memcpy and memset.pattern left as the writers, and the memset kept in each uncovered one, an array passed to
+  an external C function and to the FFT included; and `Shaped`, a method that knob versioning copies, whose copies'
+  arrays (`%tmp.invert0.mode0`, ...) lose their memsets.
+- `tests/unit/VersionTest.cpp`: a local array in each of 6 copies of a versioned method, each copy's own, with no
+  memset left in any copy at `-O1` to `-O3`, nor in the fallback but at `-O3` (recipe 16).
+
+### Measurements
+
+`zeroinit.fm`'s `Smooth`, built by `fminus --emit obj` (`-O2`) and timed by a C harness, the best of 7 runs of 20
+million samples, on an M5 with other builds running (about ±10%):
+
+| Block size | before | after | the array a field instead |
+|---|---|---|---|
+| 16 | 2.33 ns/sample | 1.68 (28% less) | 1.67–1.71 |
+| 64 | 1.93 | 1.71 (12%) | 1.69–1.73 |
+| 256 | 1.76 | 1.68 (5%) | 1.68 |
+
+With the memset gone, a local array costs what a field does: the difference was the 1 KB memset. A `float t[64]` written
+and summed by constant-bound loops went from about 14 ns a call to 10. Compile times did not move beyond the noise.
+
+## Recipe 19: what the runtime's calls and loops promise
+
+*In the compiler. Code: `src/ir/Calls.cpp` (`kRuntimeFacts`, `describeRuntime`, `callRuntime`) and
+`src/ir/Statements.cpp` (`isConstant`, `mustProgress`). Tests: `tests/unit/AttributeTest.cpp` (`[attributes]`,
+`[progress]`), `tests/lit/fminus/runtime-attributes.fm`, `tests/lit/fminus/progress.fm`; `HeapTest.cpp` and `heap.fm`
+changed.*
+
+LLVM optimises what it can prove, and it proves little about a call to a function it can't see, or about a loop it
+can't count. FMinus knows two things LLVM doesn't:
+
+- **What the runtime's functions do.** It wrote them (`src/runtime/`). It declared them bare,
+  `declare void @fminus_rt_fft_forward_real(ptr, ptr, ptr)`, so LLVM had to assume that an FFT may read and write every
+  field of every module and all of the heap, and that `calloc` is just some function that returns a pointer.
+- **That its loops end.** C11 says an implementation may assume it (6.8.5p6), and clang tells LLVM so. FMinus said
+  nothing.
+
+Both are a fact on a declaration or a branch, and neither adds a pass: LLVM's own passes do the rest.
+
+### The runtime's declarations
+
+Every call of the heap's and the FFT's runtime functions goes through `callRuntime`, the heap's too now
+(`lowerAllocation`), which declares the function from its arguments' types and gives the declaration its attributes
+(the math builtins' functions have theirs from `mathFunction`, recipe 15):
+
+```cpp
+        llvm::FunctionCallee function =
+            module_.getOrInsertFunction(name, llvm::FunctionType::get(result, types, false));
+        if (auto* declared = llvm::dyn_cast<llvm::Function>(function.getCallee());
+            declared != nullptr && !functions_.contains(name))
+            describeRuntime(*declared);
+```
+
+The test of `functions_` matters. A program may declare a function with the runtime's name itself (recipe 5 calls
+`fminus_rt_db_to_gain` through a prototype): its types may not be the runtime's, and a definition would be the
+program's code, of which the runtime's facts are not true. So the program's declaration stays as the program wrote it.
+A math builtin's functions are the other way round: a program that calls the builtin may not declare a function of
+their names at all (`checkMathNames`, recipe 15), since its calls of the builtin must reach the runtime's.
+
+`describeRuntime` looks the function up in `kRuntimeFacts`, which names each of the heap's and the FFT's runtime
+functions and its kind (`Allocation`, `Release`, `Plan`, `PlanRelease`, `Transform`), and sets that kind's attributes
+through `llvm::Function`'s own setters; it leaves any other function bare. Every one of the ten is `noexcept`, so
+`nounwind`, and comes back, so `willreturn`:
+
+| Function | Attributes | Why it is true |
+|---|---|---|
+| `fminus_rt_fft_forward_real` and the other three transforms | `memory(argmem: readwrite, inaccessiblemem: readwrite) nofree nosync`; the plan and `in` `readonly captures(none)`, `out` `writeonly captures(none)` | `Fft.cpp` reads the plan and `in`, writes `out`, and keeps none of the pointers. Its other memory is PFFFT's setup and the plan's buffers, which only the plan points to. It allocates, frees and waits for nothing |
+| `fminus_rt_malloc`, `fminus_rt_calloc` | `allockind("alloc,zeroed") allocsize(0)` (calloc's `allocsize(0,1)`) `"alloc-family"="fminus_rt_malloc" memory(inaccessiblemem: readwrite, errnomem: write)`; the result `noalias noundef align 64` | `aligned_alloc(64, ...)` and a `memset` to 0, or null: how LLVM declares C's `calloc`, with `zeroed` for `malloc` too, since FMinus's is |
+| `fminus_rt_free` | `allockind("free") "alloc-family"="fminus_rt_malloc" memory(argmem: readwrite, inaccessiblemem: readwrite)`; the pointer `allocptr captures(none)` | C's `free`, as LLVM declares it |
+| `fminus_rt_fft_create`, `_create_complex` | `memory(inaccessiblemem: readwrite, errnomem: write)`; the result `noalias noundef` | a fresh plan, or null |
+| `fminus_rt_fft_destroy` | `memory(argmem: readwrite, inaccessiblemem: readwrite)`; the plan `captures(none)` | reads the plan, frees it and its own memory |
+
+What is left out matters as much, since an attribute that is not true is a miscompile:
+
+- **No `nonnull`.** A transform on a null plan does nothing, and the heap's results and a plan may be null.
+- **No `noalias` on an FFT's buffers.** `Runtime.h` says `out` must not overlap `in`, but a program that transforms in
+  place gets what PFFFT gives it, as before. `readonly` and `writeonly` stay true even then.
+- **No allocator attributes on `fft_create`.** Its result is fresh, but it is no allocator LLVM may remove: its null
+  says that PFFFT takes no plan of that size, every time. Given `allockind`, LLVM removes a plan that is made, tested
+  and destroyed, and takes the test for a plan made: `fft_create(7)`, tested against null inside FMinus, would then be
+  a plan. `AttributeTest.cpp` runs it.
+
+The rule this rests on is that **a plan's memory is the runtime's**: `inaccessiblemem` is memory no FMinus code
+reaches. A program could convert a plan to a module pointer whose fields line up with the runtime's `Plan` and read
+the buffers' addresses out, but that reads an object as a type it is not, which C leaves undefined (recipe 17). A
+program hands a plan to the FFT's builtins, and reads or writes nothing through it.
+
+`runtime-attributes.fm` shows what LLVM does with them:
+
+- **A module's fields survive a transform.** A method that reads a field, transforms into a local array and reads the
+  field again reads it once: the call writes only its output and the plan's own memory. A transform into the module's
+  own field is read again after, as it must be.
+- **The heap's blocks are fresh, and zeroed.** `float* p = malloc(n * 4); p[0] = 2; return p[0] + p[1];` (with its
+  `free`) is `ret float 2.0`, and the block goes. A `calloc` and `free` with nothing between them go too.
+- **A store just before a `free` is dead.**
+
+**Allocation elision is C's freedom, and it changes one thing.** LangRef lets LLVM remove a call of a function with
+`allockind` and serve the block from a "virtual" allocator, which does not fail. Clang's `malloc` has the same
+attributes, so a C program gets the same: C doesn't spell the freedom out, as C++ does ([expr.new]), but nothing in it
+says an unused allocation must happen, or fail. So a block that the program only tests and frees may be removed, and
+the test is then false, where the runtime would have given null:
+
+```c
+bool refused() { float* p = calloc(-1, 4); float* none; const bool r = p == none; free(p); return r; }
+```
+
+`fminus file.fm --run refused` prints `true` at `-O0` and `false` at `-O2`. A block the program keeps, stores into a
+module or returns is made, and is null when the runtime refuses it, as `HeapTest.cpp` now checks from the host.
+
+### Loops must make progress
+
+C11 6.8.5p6 lets an implementation assume that a loop ends when its controlling expression is not a constant
+expression and it does no I/O, touches no volatile object and does no synchronising or atomic operation. A loop with a
+constant condition (`while (1)`, or `for (;;)`, whose omitted condition counts as a nonzero constant) may run for ever.
+Clang (`CodeGenFunction::checkIfLoopMustProgress`) marks the loops that must end with metadata on their branches back
+to the header, and FMinus does the same: `lowerWhile` and `lowerFor` call `mustProgress` on their condition block when
+the condition is not a constant expression, and it marks the branches:
+
+```cpp
+            llvm::Metadata* operands[] = {
+                nullptr, llvm::MDNode::get(context, llvm::MDString::get(context, "llvm.loop.mustprogress"))};
+            llvm::MDNode* loop = llvm::MDNode::getDistinct(context, operands);
+            loop->replaceOperandWith(0, loop);   // a loop ID names itself, so that it is this loop's alone
+            for (llvm::User* user : header->users())
+            {
+                auto* branch = llvm::dyn_cast<llvm::Instruction>(user);
+                if (branch != nullptr && branch != entry && branch->isTerminator())
+                    branch->setMetadata(llvm::LLVMContext::MD_loop, loop);
+            }
+```
+
+Every branch back to the condition block but the one into the loop gets the ID: a `while`'s fall-through and its
+`continue`s share it, as a loop's latches must for `Loop::getLoopID` to find it, and a `for`'s only branch back is
+`for.inc`'s. `isConstant` decides what a constant expression is, on the syntax tree, as C11 6.6 does: numbers, `true`
+and `false`, `sizeof`, and operators, casts, `?:` and vector literals whose operands all are, in a `std::visit` with a
+lambda for each kind of expression. Three choices follow from C:
+
+- **A variable is never a constant expression, `const` or not**, as in C (C++ differs).
+- **Nor is a parameter, whatever its binding.** A frozen one folds to a constant in the IR, but the program means the
+  same as with a knob, so `while (enabled[0])` gets the metadata under every binding.
+- **`1 || x` is not one**, as C reads 6.6, though clang folds it; and `while (1.5f)` is one, where clang, which asks for
+  an integer, marks it. Neither is a loop anyone writes.
+
+The rest of 6.8.5p6 needs no test: FMinus has no `volatile`, its only atomics are knob reads, once a call where a
+method starts, and I/O happens in external functions, which LLVM takes to have any effect unless it knows them. No
+function is marked `mustprogress`, which C does not imply (C++ does).
+
+So a loop with a non-constant condition that runs for ever without effects is undefined, as in C, and LLVM may delete a
+loop whose results go unused without proving that it ends. In `progress.fm`, the Collatz steps, which no one has proved
+end, are deleted at `-O2`, and the same body under `while (1)` is kept, an infinite loop:
+
+```c
+void steps(int n)
+{
+    while (n != 1)
+        n = n % 2 == 0 ? n / 2 : 3 * n + 1;
+}
+```
+
+### What it changes for hosts and programs
+
+No option: both are C's semantics. For a program, an unused block may be elided, and an unused loop with no effects
+deleted. For a runtime function, its facts must stay true of its code, and change with it: the heap's and the FFT's in
+`kRuntimeFacts`, the math builtins' in `mathFunction` (`Math.cpp`). Recipe 5's `db_to_gain`, declared there with
+`getOrInsertFunction`, is bare, which is safe; it could say what is true of it, `nounwind willreturn nosync nofree
+memory(errnomem: write)` (`std::pow` may set `errno`).
+
+### Tests
+
+- `tests/lit/fminus/runtime-attributes.fm`: every runtime declaration and its attributes at `-O0`; at `-O2`, a field
+  read once across a transform, the transform's output read again, an unused `calloc` and `free` removed, a block's
+  unwritten floats read as 0, a removed block's test against null folded to false, and `fft_create`'s call and test
+  kept.
+- `tests/lit/fminus/progress.fm`: the metadata on a `while`, on a `for`'s `for.inc`, on a `while`'s two branches back,
+  and on a loop whose condition reads a `const` variable; none on `while (1)`, `for (;;)`, `while (true)`,
+  `for (; 2 > 1 && !0;)` and `while (1.5f)`, and no function marked `mustprogress`; at `-O2`, two unused loops deleted
+  and the infinite ones kept.
+- `tests/unit/AttributeTest.cpp`, in the JIT, what must not change: a field read across a transform, a module's own
+  spectrum as the transform's output, a store into the input just before a transform, a round trip through two
+  transforms; `fft_create(7)` still null inside FMinus; a block reads 0 until written; loops with a `continue`, a `?:`,
+  `while (1)` with a `break` and `for (;;)` with a `return`; a program's own prototype of `fminus_rt_free`, with other
+  types.
+- Changed: `HeapTest.cpp`'s refused sizes return their blocks to the host, which tests them for null;
+  `heap.fm`'s `declare` lines carry their attributes.
+
+### Measurements
+
+None of FMinus's kernels speeds up: every example's audio path compiles to the same `-O2` IR but for the loop
+metadata, and the convolver runs at about 9.9 ns a sample before and after (2048 taps, blocks of 256). Its
+transforms write through pointers loaded from its own fields, which may point into the module as far as LLVM knows,
+so a field read after one is read again anyway. What changed is the functions that allocate or free (`echo_create`,
+`Echo::init`, ...), on which LLVM now infers `noalias`, `noundef` and `dereferenceable_or_null`, and the IR in the lit
+tests: a field read across a transform into a local, a scratch block a program could do without, a loop nobody reads.
+
+## Recipe 20: subnormals, flushed for the audio thread
+
+*In the compiler. Code: `src/ir/Denormals.cpp` and `Denormals.h`. Tests: `tests/unit/DenormalTest.cpp`
+(`[denormals]`), `tests/library/DenormalsTest.cpp`, `tests/lit/fminus/denormals.fm`,
+`tests/lit/fminus/denormals-arm64.fm`.*
+
+C's floats underflow gradually. Below the least normal float, 2^-126 (about 1.18e-38), come the subnormals, down to
+2^-149, and a product too small for a normal float lands among them instead of on 0. FMinus follows C, and that stays
+the default. Audio has two reasons not to want it:
+
+- **A subnormal can be slow.** On an M5 a chain of multiplies on one runs about 13% slower, two `float4` chains 34%;
+  on x86 an operation on one can take a microcode assist of a hundred cycles or more (Intel's figure).
+- **A silent filter never reaches 0.** A one-pole `y += k * (0 - y)` decays into the subnormals and stops where
+  `k * y` rounds to nothing: at 7e-44, for ever, every sample on a subnormal.
+
+So a plugin host runs its audio thread with flush-to-zero: a subnormal input reads as 0 and a subnormal result is 0,
+each keeping its sign (AArch64's FPCR.FZ; x86's MXCSR.FTZ for results and DAZ for inputs), set around each block by a
+scoped guard. FMinus neither set that mode nor told LLVM about it, and LLVM assumes IEEE's: it folds a frozen
+parameter's `1e-30 * 1e-10` to the subnormal 1e-40, where the same code reading the value from a knob computes 0 in
+the host. The option makes the mode part of the program:
+
+| `Program::Options::denormals`, `fminus --denormals=` | Subnormals | The mode |
+|---|---|---|
+| `Preserve`, `preserve` (the default) | numbers, as in C: IEEE's gradual underflow | the host's, untouched; LLVM assumes IEEE's |
+| `Flush`, `flush` | an input reads as 0 and a result is 0, with its sign | assumed by every function, and set by each entry point |
+
+Under Flush a program means what C means under clang's `-fdenormal-fp-math=preserve-sign` with the mode set, which
+clang's `-ffast-math` arranges on Linux for a whole executable by linking `crtfastmath.o`. FMinus has no process to
+start, so it sets the mode per entry point instead. Preserve changes nothing at all: the IR of every example and lit
+program is the same, byte for byte, at `-O0`, `-O2` and `-O3`, as before the option.
+
+`ir::Options` gains `denormals` and `targetTriple` (`CodeGen.h`): which register an entry point sets, FPCR on arm64 and
+MXCSR on x86-64, since lowering never sees a TargetMachine. The driver and `Program::compile` pass the machine's
+triple; empty is this process's. On a target whose mode FMinus cannot set, Flush is one error at 1:1: `cannot flush
+subnormals to zero on riscv64: FMinus sets the floating-point mode on arm64 and x86-64`. `Lowering::lower` runs
+`flushDenormals` last, after `checkEffects`, since it needs every call. It has three parts.
+
+### The attribute: every definition assumes the mode
+
+LLVM 23's function attribute `denormal_fpenv` (an `llvm::DenormalFPEnv`, which replaced the `"denormal-fp-math"`
+string) holds the mode a function runs in: output mode, then input mode, each `ieee`, `preservesign`, `positivezero` or
+`dynamic`. Flush is `preservesign`, both ways: AArch64's FZ (with FPCR.AH clear, as macOS and Linux leave it) and x86's
+FTZ with DAZ. It prints as `denormal_fpenv(preservesign)`, and `flushDenormals` gives it to every function the program
+defines:
+
+```cpp
+        constexpr llvm::DenormalFPEnv kFlushing{llvm::DenormalMode::getPreserveSign()};
+        ...
+            definition->addFnAttrs(llvm::AttrBuilder(module_.getContext()).addDenormalFPEnvAttr(kFlushing));
+```
+
+Declarations get none: a prototype's body is someone else's. The attribute sets no hardware. What it changes is what
+LLVM may assume: `ConstantFoldFPInstOperands` flushes a subnormal operand to a signed zero before it folds, and a
+subnormal result after, reading the mode from the instruction's function; InstSimplify and InstCombine fold through it.
+All the program's functions share one mode, so the inliner inlines among them as before.
+
+### Folding as it is built: `DenormalFolder`
+
+The attribute is not enough. `IRBuilder<>` folds an operation on two constants as it builds it, with `ConstantFolder`,
+in IEEE arithmetic: there is no instruction yet, so no function to read a mode from. A frozen parameter is a constant
+(recipe 14), so `k[i] * 1e-10f` with `k` frozen at 1e-30 is built as 1e-40 before any attribute can stop it. Leaving
+the constants unfolded would not help: at `-O0` nothing folds the IR again, and AArch64's GlobalISel folds what reaches
+it in IEEE arithmetic whatever `denormal_fpenv` says.
+
+So the code generator's builder is `llvm::IRBuilder<DenormalFolder>` (`Lowering.h`). `DenormalFolder` holds a
+`ConstantFolder` (which is `final`) and forwards every fold to it, except, under Flush, the ones that see subnormals:
+
+```cpp
+    llvm::Value* DenormalFolder::FoldBinOp(llvm::Instruction::BinaryOps opcode, llvm::Value* lhs,
+                                           llvm::Value* rhs) const
+    {
+        if (!flush_ || !isFloatArithmetic(opcode))
+            return folder_.FoldBinOp(opcode, lhs, rhs);
+        ...
+        a = flushed(a);
+        b = flushed(b);
+        ...
+        auto* result = llvm::dyn_cast_or_null<llvm::Constant>(folder_.FoldBinOp(opcode, a, b));
+        return result != nullptr ? flushed(result) : nullptr;
+    }
+```
+
+`FoldBinOpFMF` is the same, and `FoldCmp` flushes an `fcmp`'s operands, so `1e-40f > 0` folds to false, as FCMP and
+UCOMISS compute it flushing. That is `ConstantFoldFPInstOperands` under preservesign, step for step, so a constant
+folds the same whether the code generator or LLVM folds it, at any level. `fneg` and casts are left alone: a sign flip
+does not flush, and a subnormal is 0 as an `int` either way. Under Preserve the folder is `ConstantFolder`, call for
+call.
+
+### Entry points: the wrappers
+
+An entry point is a function marked `[[clang::nonblocking]]`, what a host calls on its audio thread, that no function of
+the program calls. "Called" is one set, from the calls the effects' check already records (`calls_`). `wrapEntry`
+renames the definition to `<name>.body`, makes it internal and `noinline`, and creates `<name>` again as a wrapper with
+the same type and the same C ABI attributes (`zeroext`, `noalias`, `this`'s `nonnull`), so a host's function pointer
+type does not change. The wrapper calls the body through its address, passed through an empty inline asm statement.
+On arm64:
+
+```llvm
+define float @"Lowpass::tick"(ptr nonnull align 4 dereferenceable(8) %this, float %x) #1 {   ; denormal_fpenv(dynamic)
+entry:
+  %fpcr = call i64 @llvm.aarch64.get.fpcr()
+  %fpcr.fz = or i64 %fpcr, 16777216                           ; FZ, bit 24
+  %flushing = icmp eq i64 %fpcr, %fpcr.fz                     ; the caller's mode flushes already
+  %body = call ptr asm "", "=r,0"(ptr @"Lowpass::tick.body") #3   ; nounwind willreturn memory(none)
+  br i1 %flushing, label %run, label %flush
+run:
+  %result = call float %body(ptr nonnull align 4 dereferenceable(8) %this, float %x)
+  ret float %result
+flush:
+  call void @llvm.aarch64.set.fpcr(i64 %fpcr.fz)
+  %flushed = call float %body(ptr nonnull align 4 dereferenceable(8) %this, float %x)
+  call void @llvm.aarch64.set.fpcr(i64 %fpcr)
+  ret float %flushed
+}
+```
+
+On x86-64 it is the same with `llvm.x86.sse.stmxcsr` and `ldmxcsr`, through two stack slots, setting FTZ (bit 15) and
+DAZ (bit 6). Every return of the body is covered, since the body returns to the wrapper, which restores the register
+before it returns on the path that set it, so the register comes back exactly as it was. Each call of the body carries
+the body's return and parameter attributes, since an indirect call has no callee for the code generator to read
+`zeroext` from, and none of its function attributes, which would tell LLVM that it touches no memory. Nothing in the
+wrapper can block. Four details carry the design:
+
+- **The body stays behind a call.** In LLVM's default floating-point environment arithmetic depends on no register, so
+  it may move across `llvm.aarch64.set.fpcr`, which is ordered only against other side effects. A body inlined into its
+  wrapper could compute before the mode is set. The body is `noinline`, and the wrapper is `denormal_fpenv(dynamic)`,
+  into which the inliner refuses to inline a `preservesign` function anyway.
+- **A call LLVM cannot see into.** A plain call of the body is not enough either. LLVM orders a call by what it knows
+  of the callee, and of a body that touches no memory (`x * 1e-30f * 1e-10f`, `tanhf(x) * 1e-10f`) FunctionAttrs finds
+  `memory(none)`: a call ordered against nothing, which LLVM may move as it may an `fmul`. At `-O1` InstCombine sank
+  such a call below the write that restores the caller's mode, into the block of the `ret` that used its result, and
+  the body ran in an IEEE host's mode (the Sink pass would move it too). Through the asm statement's result, which LLVM
+  never looks into, the call is of a function LLVM cannot see, which may read and write any memory
+  (`CallBase::getMemoryEffects` reads a callee's attributes only when the callee is a `Function`). The register's
+  writes are the same to LLVM: `set.fpcr` is `IntrNoMem` with `IntrHasSideEffects`, which TableGen makes
+  `MemoryEffects::unknown()`, and `ldmxcsr` declares no memory effects. No pass reorders two such calls (InstCombine
+  sinks no call that may write memory, SimplifyCFG hoists none past a side effect, GVN gives each its own value number
+  and does no PRE of it, EarlyCSE and LICM move none), and in machine code every call is a scheduling barrier and is
+  never moved.
+- **Writes only when needed.** Reading FPCR costs nothing; writing it costs about 4 ns even when the value does not
+  change, and setting FZ then clearing it about 18 ns a call. A host that flushes already, around its whole block, pays
+  a compare and a call; one that doesn't pays the two writes, once a call.
+- **Called functions are not entry points.** `OnePole::tick`, nonblocking and called a sample at a time from
+  `process`, runs in the mode `process` set. A host might call it too, a sample at a time, and a wrapper would then
+  write the register every sample. So a function the program calls keeps its plain definition, and a host that calls it
+  (or anything else that is not an entry point, an `init`) sets the mode around the call itself.
+
+The asm statement costs little at run time: the body's address in a register (two instructions on arm64, ADRP and an
+LDR from the GOT or an ADD), and an indirect call. On arm64 that call is a tail call from `-O1` on the path of a caller
+that flushes already (`BR` to the register, not `B` to the body); on x86-64 it is a plain call there, since the two
+MXCSR stack slots escape into `stmxcsr` and `ldmxcsr`, and LLVM marks no call after an escape `tail`. What LLVM no
+longer sees costs it some optimisation, never a result: the body, whose address escapes, keeps C's calling convention
+rather than `fastcc`; a constant result of the body is no longer folded into the wrapper (a frozen `Tiny::scaled` in
+`denormals.fm`, whose body returns 0, still calls it); and the wrapper is not inferred `nounwind` or `willreturn`. One
+caveat: under branch-target enforcement (Arm's BTI, x86's CET IBT) the target of an indirect call needs a landing pad,
+which the body does not have. Neither the JIT's code nor FMinus's object files, which ask for no such enforcement, are
+enforced today; a link that forces enforcement onto objects without it (`-z force-bti`, `-z force-ibt`) would be.
+
+Ahead of time, `fminus --denormals=flush --emit exe` on a nonblocking `main` works as it is: `addEntryPoint` renames the
+wrapper and adds the C `main`, which inlines the wrapper, never the body.
+
+### What it changes for programs and hosts
+
+- **Semantics.** Under Flush a subnormal input of an arithmetic operation or comparison reads as a zero of its sign,
+  and a subnormal result is a zero of its sign, in every function of the program, and constants fold the same way.
+  `fneg` and `fabsf` keep a subnormal (they are sign-bit operations), as do loads, stores and moves.
+- **The contract.** Every function assumes the flushing mode; only entry points establish it. A host that calls
+  anything else calls it with the mode set, or a subnormal's result may differ from what the compiler folded. The
+  pattern to recommend is the usual one, FTZ (and DAZ) around the whole block, which also makes every entry point's
+  check free.
+- **Driver and API.** `fminus prog.fm --denormals=flush` (with `--run` and `--emit` too);
+  `options.denormals = fminus::Program::Denormals::Flush;` before `Program::compile`.
+- **Known limits.** Arm's FZ flushes a result that is tiny before rounding, LLVM's folding one that is subnormal after
+  rounding: they differ only for results that round up to 2^-126 (`(1 - 2^-24) * FLT_MIN` is 0 under FZ, and folds to
+  `FLT_MIN`); x86 detects tininess after rounding, as LLVM does. In the fast math mode, LLVM folds `sinf` and the others
+  of constants with the host's double functions whatever the mode. A constant operation that first appears inside
+  SelectionDAG is folded there in IEEE arithmetic; none was seen in FMinus's programs. With FPCR.AH set, FZ no longer
+  flushes inputs, and macOS and Linux leave it clear. An entry point reaches its body by an indirect call, so a link
+  that enforces branch targets (BTI, CET's IBT) would need a landing pad in the body, which FMinus does not emit.
+
+### Tests
+
+- `tests/unit/DenormalTest.cpp`, against C++ computing in the same mode (a `ScopedMode` guard that sets FPCR or MXCSR,
+  as a host's would): an entry point gives 0 for `1e-30f * 1e-10f`, -0 for its negative, 0 for a subnormal operand;
+  the caller's register comes back from every return, under an IEEE host and a flushing one; Preserve keeps subnormals
+  bit for bit; a one-pole sticks at a subnormal under Preserve and at a normal number under Flush, bit for bit with
+  C++ in each mode; a nonblocking function the program calls runs in the host's mode; entry points whose bodies touch
+  no memory (a product, a `tanhf`, a comparison, a `float4`), flushing at `-O0` to `-O3` under an IEEE host and a
+  flushing one, each body `memory(none)` after the pipeline and its wrapper still calling it through the asm's result,
+  never directly; a frozen parameter's results equal a knob's at run time, at `-O0` to `-O3`; the IR (every definition
+  `preservesign`, each wrapper `dynamic` with its body internal and `noinline`, called twice through the asm and never
+  directly, nothing under Preserve); x86-64's wrapper; the error on riscv64; and `DenormalFolder` itself.
+- `tests/library/DenormalsTest.cpp`: `Program::Options::denormals` from C++17, and an entry point that reads no memory
+  running flushing at each optimisation level.
+- `tests/lit/fminus/denormals.fm`: the attribute and the wrappers at `-O0`, each calling its body through the asm's
+  result, and after the pipeline; the frozen product folded to 0 at `-O0` and `-O2` and to `9.999940e-41` under
+  Preserve, every `define` carrying the attribute, `--run` at `-O0` to `-O3`, and the bad value. `denormals-arm64.fm`
+  (`REQUIRES: arm64`): the wrapper's IR block by block, and its machine code: from `-O1`, MRS, ORR, the body's address,
+  CMP, the tail call `BR` when the caller flushes already, and MSR, BLR, MSR otherwise; at `-O0`, through the stack, a
+  `BLR` with no write on the first path, and MSR, BLR, MSR on the other.
+
+### Measurements
+
+The M5, the dev build, with other builds running (about ±10%). The wrapper, a call through the JIT's pointer: `x + 1`
+takes about 0.5 ns under Preserve, 19 ns under Flush in an IEEE host (two FPCR writes), and 0.7–1.1 ns in a host
+that flushes already. A first version without the check of the caller's mode wrote twice always, about 7 ns a call
+even in a flushing host. Calling the body through its address cost nothing measurable: through an object file at `-O2`,
+the best of 7 runs of 20 million calls, `x + 1` took 18.2–18.8 ns in an IEEE host against 18.6–18.9 with the direct
+call, and 0.70 ns in a flushing one against 1.02–1.17. Three programs written for the measurement, and not kept in the
+repository: a chain of multiplies, two `float4` chains and a one-pole, each a nonblocking function of 300 million
+iterations, run by `fminus --run` (its 28 ms of compilation subtracted):
+
+| Program | Preserve | Flush |
+|---|---|---|
+| a chain of multiplies, normal | 0.70 ns/iteration | 0.70 ns |
+| the same, subnormal (1e-39) | 0.79 ns (+13%), stays 1e-39 | 0.70 ns, 0 |
+| two `float4` chains, subnormal (1e-40) | 0.93 ns (+34%) | 0.70 ns, 0 |
+| a one-pole from 1, k = 0.01 | 1.74 ns, stuck at 7e-44 (subnormal) | 1.73 ns, stuck at 1.17e-36 (normal) |
+
+Flush-to-zero removes the subnormal penalty; the one-pole, whose time is its dependency chain, runs at the same speed
+either way, and its state under Flush is a normal number but still not 0. Flushing removes the slowdown, not the
+residue. Compile time is unchanged.
 
 ## Pitfalls
 
@@ -2162,7 +3540,7 @@ Each of these was hit while writing the language or its recipes. [simd.md](simd.
 | A C++ reference differs from FMinus in the last bit, though the formulas match | clang's default `-ffp-contract=on` fuses `y + k * (x - y)` written as one expression into a multiply-add; FMinus never fuses | build the reference with `-ffp-contract=off` (the examples are), or round once a statement (`ModuleTest.cpp`'s `next`) |
 | A host's `aligned_alloc` returns null for a module | macOS's wants an alignment of at least a pointer's, and every implementation a size that is a multiple of it | round both up to `alignof(std::max_align_t)` (`examples/voices/bench.cpp`) |
 | One error in a module hides every other | an error the parser reports (a redefined module) stops the run before the code generator | report it in the code generator (`layOut`), and the parser carries on |
-| A method's loop over a field's buffer (`tail[i] += result[i]`) runs at half C++'s speed, and doesn't vectorise | FMinus emits no TBAA, so LLVM assumes a `float` store may change the field, a pointer, and loads it again every iteration | read the field into a local before the loop (`examples/convolver/`, "Fields, locals, and what LLVM knows") |
+| A method's loop over a field's buffer (`tail[i] += result[i]`) runs at half C++'s speed, and doesn't vectorise | without TBAA, LLVM assumes a `float` store may change the field, a pointer, and loads it again every iteration | the type's tag on every load and store (recipe 17); under `--no-strict-aliasing`, read the field into a local before the loop |
 | An arm64 build of a SIMD C library runs at scalar speed, with no error | PFFFT uses NEON only when asked (`PFFFT_ENABLE_NEON`); it says otherwise only in a `#pragma message` | define it (`cmake/FMinusFft.cmake`), and check `pffft_simd_arch()` once |
 | A third-party file fills the build log with warnings | PFFFT's SIMD headers announce themselves with `#pragma message`, which clang reports as warnings | `-Wno-#pragma-messages` for that object library only |
 | A debug build aborts in `pffft_new_setup` | it asserts on more than 2^26 points | refuse the size before calling it (`Fft.cpp`) |
@@ -2170,8 +3548,39 @@ Each of these was hit while writing the language or its recipes. [simd.md](simd.
 | `fminus-tests "a module's methods, and ..."` runs no test | Catch2 splits a filter at its commas | run by tag (`"[module]"`), or escape the comma (`\,`) |
 | A knob read in a loop is loaded every iteration, and the loop doesn't vectorise | a monotonic atomic load where `cutoff[i]` is, or in a method inlined into the loop: LLVM neither hoists nor merges monotonic loads | load it once, in the entry block (`atEntry`, recipe 14), and unordered, which LLVM may move out of a loop it was inlined into |
 | A method's state (`y += ...`) goes back to memory every sample once a parameter is a stream | the stream's pointer comes from the module, so LLVM can't tell its samples from the module's fields | an alias scope for the streams (`scopeStreams`, recipe 14) |
-| A frozen parameter moves an output's last bit, against the same value as a knob | LLVM constant-folds `sinf`, `cosf`, `expf` and `tanhf` of a constant with the host's double functions, rounded to float, not with libm's float ones, which differ from them by an ulp for about 1% of arguments | compare a frozen program with a knob's within a tolerance (`examples/parameters/`); exact folding would need FMinus's own math functions |
+| A frozen parameter moves an output's last bit, against the same value as a knob | LLVM constant-folds `sinf`, `cosf`, `expf` and `tanhf` of a constant with the host's double functions, rounded to float, not with libm's float ones, which differ from them by an ulp for about 1% of arguments | the vector or libm math mode (recipe 15), whose calls LLVM can't fold; in the fast mode, compare within a tolerance |
 | FileCheck reports a bad variable on a line that checks `[[fminus::range(0, 1)]]` | `[[...]]` is FileCheck's own syntax | match the brackets as regexes: `{{\[\[}}fminus::range(0, 1){{\]\]}}` (`params.fm`) |
+| A loop of a runtime function with a vector variant stays scalar | the variant's declaration had no use, and `GlobalDCE` removed it before the loop vectoriser ran | `llvm::appendToCompilerUsed` (`Math.cpp`, as `InjectTLIMappings` does) |
+| A four-lane runtime function's fast path calls libsystem_m and returns, with a stack frame, rather than branching to it | from a `noexcept` function, a call of a function not known not to throw is inside a `std::terminate` landing pad | declare the C functions it calls `noexcept` (`runtime/Math.cpp`) |
+| A C++ reference that calls `fminus::math` runs six times slower than with `std::sin` | an opaque function is called every time; clang merged `std::sin`'s repeated calls | `[[gnu::const]]` on the declarations (`FMINUS_MATH_CONST`) |
+| C++'s `std::sin(x)` differs from libm's `sinf(x)` by an ulp, in a function that also takes `std::cos(x)`, and only in an optimised build | clang pairs the two into `__sincosf_stret` from `-O1` on Apple systems; a debug build calls the two | compare with `fminus::math` (recipe 15); against libm, call through pointers clang can't see through (`ProgramTest.cpp`) |
+| A lane's `_simd_sin_f4` changes when its neighbour is 2e6, an infinity or a NaN | libsystem_m takes another path for all four lanes when any is past 1e6 or not finite | the runtime's guard: such vectors lane by lane (`kSinCosLimit`) |
+| LLVM asserts on a loop of `sinf`, or removes a call of a program's `fminus_rt_sinf` that may loop forever | the program declared a function of a runtime math name: the four-lane one became the scalar function's vector variant, the scalar one took the runtime's attributes | refuse the names of a called builtin's runtime functions, in every mode (`checkMathNames`, recipe 15) |
+| `BranchInst` is deprecated | LLVM 23 splits it into `CondBrInst` and `UncondBrInst` | `llvm::dyn_cast<llvm::CondBrInst>`, and its `getCondition()` |
+| A local array goes back to memory in every copy of a versioned method | the split left its alloca after the entry block, where it is dynamic | move the static allocas into the entry block before splitting (`KnobVersioning.cpp`) |
+| A copy's values are named `%cutoff.at.cutoff.flat1` | `CloneBasicBlock` suffixes every name | when no value falls back, make the original body one of the copies: the common one keeps its names |
+| Knob versioning finds no knob at the pipeline's start | the `-O0` IR keeps a knob copied into a local in a stack slot | run after the first SROA (the early simplification extension point) |
+| A loop over a stream that knob versioning did not copy stays scalar, though its stride is 0 or 1 | InstCombine makes `i * stride` a select of 0 and `i`, and the loop vectoriser then sees no strided load | an opaque 1, an empty asm statement's (`opaqueUnit`), on which the vectoriser versions the loop; the pass makes it 1 again in its copies (`foldUnits`) |
+| A stream read only before the loop is versioned on, and crowds out of the budget a mode that steers the loop | its read selects on its test outside every loop, and the loop uses what it read | count as steering only a select of where the samples are, the base or the stride, that a loop uses (`addressesStream`) |
+| A local array keeps its memset in every copy of a versioned method | the copies shared one alloca, zeroed in each copy and read in all, so no copy's memset dominates the loads | a local of its own in each copy, its lifetime marked so that the frame does not grow (`markLifetimes`) |
+| ASan's container-overflow in `std::vector<PassConcept>`, on an `addPass` in a callback | LLVM's vector, built without ASan's annotations, grown by instrumented code | a false positive: the asan preset's `ASAN_OPTIONS` has `detect_container_overflow=0`; set it when running `fminus-tests` by hand |
+| A versioned output differs in its last bits | in the fast math mode, a copy's loop vectorised a math call that the method's loop kept scalar | the default math mode (recipe 15); or compare within a tolerance |
+| A test that a local reads 0 passes even when its memset is wrongly removed | fresh stack pages are 0, and so is much of a stack a test has not used | run each call on a dirty stack (`dirtyStack()`, `padded()` in `ZeroInitTest.cpp`) |
+| The dirty stack reaches all of a callee's local but its top few elements | the painting function's own saved registers and stack canary sit at the top of what it painted | call through a frame of padding |
+| The padding frame is 16 bytes, or not there at all | SROA splits a `volatile` array touched at two constant offsets into two bytes, and the call through it became a tail call | escape the padding's address through an empty `asm volatile`, before and after the call |
+| A memset zero-init elision proves dead at `-O2` stays at `-O1` | at `-O1` no jump threading has run, so the loop's guard skips into the code that reads | the guarded proof: block the skipping edge, and ask that each load reachable from it need the guard's condition |
+| A bound read from a field (`i < count`) keeps the memset | the field's load comes after the declaration, so its definition does not dominate the memset | a value defined after the memset is stable if the order search from its definition reaches no load |
+| `t[0]` after a loop keeps its memset at `-O1` but not at `-O2` | GVN at `-O2` forwards the memset's 0 into the path where the loop does not run | correct both ways: check each level's IR separately (`zeroinit.fm`'s `O1` and `O2` prefixes) |
+| `fminus -O0` shows fewer memsets than the lowering wrote | LLVM's `-O0` pipeline (`buildO0DefaultPipeline`) runs the passes registered at the scalar-optimiser-late extension point too | add the pass from `-O1` only (`level != O0` in the callback) |
+| A test that a function returns null for a refused size starts failing at `-O2` | the block is never used, so LLVM removes it (allocation elision), and a removed block does not fail | give the block to the host, or use it, so the call is made (`HeapTest.cpp`) |
+| A loop's `!llvm.loop` is missing from the `-O2` IR | passes that duplicate a latch (JumpThreading unfolding a `select` in a loop with `?:`) do not always copy it | check the metadata at `-O0`, where the lowering wrote it (`progress.fm`) |
+| `candidate.symbol == function.getName()` does not compile | `std::string_view == llvm::StringRef` is ambiguous | compare `std::string_view(function.getName())` |
+| A frozen parameter's subnormal result differs from a knob's, though every function is `denormal_fpenv(preservesign)` | IRBuilder's `ConstantFolder` folds two constants in IEEE arithmetic as it builds them, and at `-O0` GlobalISel folds what is left in IEEE too | fold as the mode computes, as the IR is built (`DenormalFolder`) |
+| An entry point costs about 7 ns a call even in a host that flushes already | it wrote FPCR twice, and an MSR to FPCR costs about 4 ns on Apple cores even when it changes nothing; MRS is free | write only when the caller's mode does not flush: compare first |
+| An entry point computes in the host's mode at `-O1`, though it sets the flushing one | its body touches no memory, so LLVM orders its call against nothing, and InstCombine sank it below the write that restores the caller's mode | call the body through its address passed through an empty inline asm: a call of a function LLVM cannot see (`wrapEntry`) |
+| `fpclassify` says a subnormal is 0, or `==` says it equals 0, in a test | under FZ (or DAZ), the comparisons C++ compiles them to flush their operand too | classify and compare outside the flushing scope |
+| A C++ reference computed under FZ comes out IEEE | the compiler moved the arithmetic across the `msr`, which orders only memory | compute in a `noinline` function from `volatile` inputs into a `volatile` result |
+| `1e-38f` is flushed in a test meant to stay normal | 1e-38 is below 2^-126 (1.18e-38): a subnormal | use 1e-37 and up for a normal product |
 
 ## Where to go next
 
@@ -2208,7 +3617,8 @@ lowering it, so it would need a type checker first (above), or a lowering into a
 
 **The host's allocator.** `fminus_rt_malloc` and `fminus_rt_free` are where a plugin would plug in its own memory:
 an arena it hands each instance, freed all at once, or memory it has locked so the audio thread never faults on it. A
-runtime function that sets the allocator, or one arena per JIT, would do it.
+runtime function that sets the allocator, or one arena per JIT, would do it. It must keep what recipe 19 tells LLVM of
+them true (zeroed blocks, aligned to 64, one allocator family), or change `kRuntimeFacts` with it.
 
 **A run-time check.** Recipe 11's check is static. Clang's RealtimeSanitizer (`-fsanitize=realtime`) catches the rest
 at run time: a function marked `nonblocking` that, while it runs, allocates or takes a lock anywhere, in a library
@@ -2225,14 +3635,11 @@ declaration be its interface. *Interfaces* (a table of function pointers per mod
 module of a type parameter, `Delay<float4>`) are the large ones; for DSP, generics over the vector width are the more
 useful, and `poly float` already covers much of it.
 
-**Type-based alias analysis.** FMinus's loads and stores carry no TBAA metadata, so LLVM assumes a `float` store may
-change anything, a module's pointer fields included. A method's loop over `tail[i]` then loads `tail` again every
-iteration and doesn't vectorise: `examples/convolver/` measures 1.6 times C++'s time for it, and reads its fields into
-locals instead. Clang tags each access with its type's node in a tree rooted at "omnipotent char"
-(`llvm::MDBuilder::createTBAAScalarTypeNode`, and a struct-path node per field); doing the same in `read()` and
-`write()` (`Memory.cpp`) would let the obvious code run as fast. It makes C's strict aliasing FMinus's rule too: FMinus
-has no pointer casts, but a `void*` converts to any pointer, so a program could still write floats and read them back
-as ints.
+**What a call leaves.** Recipe 17's tags tell a `float` store from a field's, but say nothing about calls: a method
+that calls another (not inlined) loads its fields again after the call, as `Convolver::process` does every sample. A
+summary of the fields each method writes would keep them in registers; FMinus could compute one, since a pointer
+field is written only by its name (it has no pointer to a pointer). Struct-path tags (clang's `%struct.S` nodes with a
+field offset) would also tell two `float` fields apart where BasicAA can't, and so far no measured loop needed them.
 
 **More of parameters.** Recipe 14's parameters are `float`s, `int`s and `bool`s, and only a `float` streams. *A
 smoothed knob*: a binding that ramps from the value the last call read to this call's across the block, computed at
@@ -2241,6 +3648,37 @@ or a `bool` that changes at a sample inside a block, is a list of (sample, value
 instances*: a voice reading its filter's cutoff (`filter.cutoff[i]`) needs the read's own load, an atomic one for a
 knob, where the method's own are at its start. *A table of them* (`Program::parameters()`, every module's, with a
 stable id each) is what a plugin's parameter list is built from; `Module::parameters` already has what it needs.
+
+**More of knob versioning.** Recipe 16 leaves four things. *A cold fallback*: an int's original body runs only for
+values outside its range, yet it is optimised, unrolled and vectorised like the copies, and in the shaper it is the
+largest; `llvm.loop.vectorize.enable` false and `llvm.loop.unroll.disable` on its loops would shrink it. *Methods
+without a loop of their own*: a voice's `tick()`, inlined into its synth's sample loop, is not versioned, since the
+pass runs before the inliner; its knobs' loads leave the loop, but their branches stay, and a stream read there,
+though the loop vectorises on its stride, runs LLVM's scalar loop when it is flat. Versioning the caller after
+inlining, on the tags its callees brought, would take the branches out, and give a flat stream its copy. *Guarded
+freezing*: the host compiles a copy with a knob frozen, behind a test of its value; the dispatch here is that test,
+made at compile time for every value. And *a budget per program*, not per method, with a domain for an `enum`.
+
+**More of the math modes.** Recipe 15's mode is the program's. *A mode a function*, as an attribute
+(`[[fminus::math(libm)]]`), would let a kernel choose libm for its scalar recursion and the vector functions for its
+vector code; each function would still give a float one result, but one `sinf` would give two in one program. *Sine
+and cosine together*: libsystem_m's `_simd_sincos_f4` is not `_simd_sin_f4` and `_simd_cos_f4` (they differ in about
+7% of vectors), so it would break the promise unless a program took both from it everywhere. *FMinus's own math
+functions*, written in FMinus's arithmetic as SLEEF's deterministic ones are, and used to fold constants too, would give
+the same results on every platform, at every width, with fast scalar calls. And *Linux's libmvec* behind the same
+runtime functions, once the same premise tests pass there.
+
+**More of zero-init elision.** Recipe 18 removes a whole memset or nothing. *Shortening* it to `[end, size)`, with the
+same proof and `MemSetInst::setDest` and `setLength`, would keep only the bytes that can be read, and cover `t[n]`
+past a loop. *Writers in more shapes*: several stores an iteration whose offsets tile the step, two loops writing
+consecutive ranges, a nest writing a 2-D block. *A front-end analysis* (definite assignment over the syntax tree)
+would see a `for` with a constant bound before LLVM unrolls it, at `-O1` as at `-O3`. And *an opt-out*,
+`float tmp[256] [[fminus::uninitialized]];` as clang's `[[clang::uninitialized]]`, for the shapes no proof will reach.
+
+**State hygiene.** Recipe 20's flush-to-zero removes the subnormals' slowdown, not their residue: a one-pole gone silent
+sticks at a normal number above 0. An attribute on a field (`[[fminus::flush]]`) could zero a tiny value or reset a
+non-finite one once a call, where LICM writes the field back after its loop. A `Program` query of which functions set
+the mode themselves would tell a host which ones it must call with the mode set.
 
 **More of the FFT.** Recipe 13's transforms give their bins in the usual order. For convolution, PFFFT's own order is
 about 10% faster again: `pffft_transform` without its reorder, and `pffft_zconvolve_accumulate` to multiply two
@@ -2274,14 +3712,17 @@ objects with the debugger (`llvm::orc::enableDebuggerSupport`).
 
 **Compile time.** The JIT compiles on the thread that looks a symbol up, and a plugin needs that to be fast and
 predictable. Measure the time from `parse` to `lookup` for real programs. The levers are the optimisation level,
-LLJIT's concurrent compilation, and caching objects between runs (`llvm::ObjectCache`).
+LLJIT's concurrent compilation, and caching objects between runs (`llvm::ObjectCache`). Knob versioning (recipe 16)
+is one more: a method it copies takes about twice as long to compile, and `knobVersions` caps it.
 
 ## Reference solutions
 
 The recipes in the compiler are their own reference: their code is in `src/`, and their tests in `tests/unit/`
 (`FrontendTest.cpp`, and `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `IntTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`,
 `EffectTest.cpp`, `ArrayTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `ParamTest.cpp`, `VectorTest.cpp` and `PolyTest.cpp`
-for the code generator) and `tests/lit/fminus/`. [recipes/](recipes/) holds the two that aren't, 5 and 6, as one patch
+for the code generator; `MathTest.cpp`, `VersionTest.cpp`, `TbaaTest.cpp`, `ZeroInitTest.cpp`, `AttributeTest.cpp` and
+`DenormalTest.cpp` for recipes 15 to 20), `tests/library/` (`ProgramTest.cpp`, `StrictAliasingTest.cpp`,
+`DenormalsTest.cpp`) and `tests/lit/fminus/`. [recipes/](recipes/) holds the two that aren't, 5 and 6, as one patch
 against the compiler as it is ([recipes/README.md](recipes/README.md)):
 
 ```bash
