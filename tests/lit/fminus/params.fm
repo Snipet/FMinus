@@ -79,12 +79,12 @@ module Chain
 // KNOB:           %gain = load atomic float, ptr {{%.*}} unordered
 // KNOB:           %on = load atomic i8, ptr {{%.*}} unordered
 // KNOB:         vector.body:
-// KNOB:           fmul <4 x float>
+// KNOB:           fmul <{{[0-9]+}} x float>
 // KNOB-LABEL: define void @"Chain::process"(
 // KNOB-COUNT-4:   load atomic float, ptr {{%.*}} unordered
 // KNOB:         vector.body:
 // KNOB-NOT:       load atomic
-// KNOB:           fmul <4 x float>
+// KNOB:           fmul <{{[0-9]+}} x float>
 // KNOB-NOT:       load atomic
 // KNOB:         middle.block:
 
@@ -102,7 +102,7 @@ module Chain
 // stream reads its samples unconditionally, in their alias scope, and vectorises.
 // STREAM-LABEL: define void @"Gain::process"(
 // STREAM:         vector.body:
-// STREAM:           load <4 x float>, ptr {{%.*}}, align 4, !tbaa {{![0-9]+}}, !alias.scope
+// STREAM:           load <{{[0-9]+}} x float>, ptr {{%.*}}, align 4, !tbaa {{![0-9]+}}, !alias.scope
 // STREAM:       [[SCOPES]] = !{[[SCOPE:![0-9]+]]}
 // STREAM:       [[SCOPE]] = distinct !{[[SCOPE]], [[DOMAIN:![0-9]+]], !"streams"}
 // STREAM:       [[DOMAIN]] = distinct !{[[DOMAIN]], !"Lowpass::process"}

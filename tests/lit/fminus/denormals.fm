@@ -14,11 +14,22 @@
 // RUN:   | FileCheck %s --check-prefix=PRESERVE-O2 --implicit-check-not=denormal_fpenv --implicit-check-not=.body
 //
 // Every define carries the attribute: the line before each (its "; Function Attrs:" comment) names it, at -O0 and -O2.
-// RUN: fminus %s -O0 --denormals=flush | sed -n -e '/^define/{' -e 'x' -e 'p' -e 'x' -e '}' -e 'h' | count 6
-// RUN: fminus %s -O0 --denormals=flush | sed -n -e '/^define/{' -e 'x' -e 'p' -e 'x' -e '}' -e 'h' \
-// RUN:   | sed -e '/denormal_fpenv/d' | count 0
-// RUN: fminus %s --denormals=flush | sed -n -e '/^define/{' -e 'x' -e 'p' -e 'x' -e '}' -e 'h' \
-// RUN:   | sed -e '/denormal_fpenv/d' | count 0
+// Six defines, each right after such a line, and no other anywhere (the implicit check). FileCheck alone, no sed: Git
+// for Windows' sed, which lit uses there, gets an argument with a brace mangled by its runtime's globbing.
+// RUN: fminus %s -O0 --denormals=flush | FileCheck %s --check-prefix=ATTRS --implicit-check-not='{{^}}define'
+// RUN: fminus %s --denormals=flush | FileCheck %s --check-prefix=ATTRS --implicit-check-not='{{^}}define'
+// ATTRS:      {{^}}; Function Attrs: {{.*}}denormal_fpenv
+// ATTRS-NEXT: {{^}}define
+// ATTRS:      {{^}}; Function Attrs: {{.*}}denormal_fpenv
+// ATTRS-NEXT: {{^}}define
+// ATTRS:      {{^}}; Function Attrs: {{.*}}denormal_fpenv
+// ATTRS-NEXT: {{^}}define
+// ATTRS:      {{^}}; Function Attrs: {{.*}}denormal_fpenv
+// ATTRS-NEXT: {{^}}define
+// ATTRS:      {{^}}; Function Attrs: {{.*}}denormal_fpenv
+// ATTRS-NEXT: {{^}}define
+// ATTRS:      {{^}}; Function Attrs: {{.*}}denormal_fpenv
+// ATTRS-NEXT: {{^}}define
 //
 // Run through the JIT: the entry point flushes, at every level (twice's body touches no memory, and at -O1 a plain call
 // of it was sunk below the write that restores the mode); mul, called by twice, runs in the driver's mode, IEEE's.

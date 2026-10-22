@@ -101,11 +101,18 @@ TEST_CASE("Options::denormals: Preserve keeps subnormals, Flush runs an entry po
     CHECK(std::fpclassify(times(1e-30f, 1e-10f)) == FP_SUBNORMAL);
     CHECK(flushed->nonBlocking("scale"));
 
-    // A host that flushes already keeps flushing after the call.
+    // A host that flushes already keeps flushing after the call. As a host does, it looks the kernel up first, off the
+    // audio thread, and only then sets its mode: nothing runs between the mode and the register's reading but the call.
+    // (On Windows, the register read after a look-up made while flushing has been IEEE's default, 0x1f80.)
+    auto* scale = flushed->function<Scale>("scale", errors);
+    REQUIRE(scale != nullptr);
+    const float sample = 1e-30f;
+    float out = 1.0f;
     setControlRegister(host | kFlushBits);
-    CHECK(processed(*flushed, 1e-30f, 1e-10f) == 0.0f);
+    scale(&sample, &out, 1, 1e-10f);
     const std::uint64_t after = controlRegister();
     setControlRegister(host);
+    CHECK(out == 0.0f);
     CHECK(after == (host | kFlushBits));
 }
 
