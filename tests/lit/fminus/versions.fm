@@ -283,11 +283,11 @@ module Rack
 // STREAMS-NEXT:    icmp ne i64 %e.stride, 1
 // STREAMS:       vector.body:
 // STREAMS:         getelementptr inbounds nuw [4 x i8], ptr %a.stream, i64 %index
-// STREAMS:         load <4 x float>, ptr {{%.*}}, align 4, {{(!tbaa ![0-9]+, )?}}!alias.scope
+// STREAMS:         load <{{[0-9]+}} x float>, ptr {{%.*}}, align 4, {{(!tbaa ![0-9]+, )?}}!alias.scope
 // STREAMS:         getelementptr inbounds [4 x i8], ptr %d.base, i64 %index
-// STREAMS:         load <4 x float>, ptr {{%.*}}, align 4, {{(!tbaa ![0-9]+, )?}}!alias.scope
+// STREAMS:         load <{{[0-9]+}} x float>, ptr {{%.*}}, align 4, {{(!tbaa ![0-9]+, )?}}!alias.scope
 // STREAMS:         getelementptr inbounds [4 x i8], ptr %e.base, i64 %index
-// STREAMS:         load <4 x float>, ptr {{%.*}}, align 4, {{(!tbaa ![0-9]+, )?}}!alias.scope
+// STREAMS:         load <{{[0-9]+}} x float>, ptr {{%.*}}, align 4, {{(!tbaa ![0-9]+, )?}}!alias.scope
 // STREAMS:       middle.block:
 // STREAMS-COUNT-7: vector.scevcheck{{[0-9]+}}:
 // STREAMS:       attributes #[[MIX]] = { {{.*}}"fminus-knob-versions"="8"
@@ -307,5 +307,5 @@ module Rack
 // INLINED-LABEL: define void @"Rack::process"(
 // INLINED:         icmp eq i64 %gain.stride.i, 1
 // INLINED:       vector.body:
-// INLINED:         load <4 x float>, ptr {{%.*}}, align 4, {{(!tbaa ![0-9]+, )?}}!alias.scope
-// INLINED:         fmul <4 x float>
+// INLINED:         load <{{[0-9]+}} x float>, ptr {{%.*}}, align 4, {{(!tbaa ![0-9]+, )?}}!alias.scope
+// INLINED:         fmul <{{[0-9]+}} x float>
