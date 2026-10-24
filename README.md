@@ -200,6 +200,7 @@ float half(float x) { x /= 2; return x; }
 | expressions | constants, names, calls, `( )`, unary `-` `+` `!`, `++` and `--` (before or after), casts `(int)x` `(float)x` `(bool)x`, `* / %`, `+ -`, `< <= > >=`, `== !=`, `&&`, `\|\|` (both short-circuit), `?:` (only the branch taken runs), and `= += -= *= /= %=` (right to left; an assignment's value is the one stored), with C's precedence; pointers' `p[i]`, `*p`, `&x`, `p + i`, `p - q` and comparisons; an array's `a[i]` (its name stands for a pointer to its first element); a module's fields `m.y` and `p->y`, its methods `m.tick(x)` and `p->tick(x)`, and `this`; `sizeof(type)`, an `int`; vector literals, OpenCL C's `(float4)(a, b, c, d)` and C's `(float4){a, b}` (the lanes left out are 0), and swizzles `v.wzyx`, `v.s0` |
 | constants | C's: floating ones are floats (`1.5`, `1.`, `.5`, `2e3`, `1.5e-3f`, hex floats `0x1.8p1`, `0x1p-3f`), integer ones ints (`2`, `010` in octal, `0x1F` in hex); `true` and `false` |
 | comments | `// ...` and `/* ... */` |
+| directives | `#include "file"`, the file read where the line is, as in C, and once only (as if every file began with `#pragma once`), found where the host says: `fminus` looks beside the including file, then in `-I`'s directories; `#pragma`, ignored |
 | types | `float` (IEEE single precision), `int` (32 bits, signed: C's `/` and `%`, overflow undefined) and `bool` (C23's: 0 or 1, computed as an int; a number is `x != 0` as a bool); `void`, a function's result; pointers to `float`, `int`, `float2`, `float4`, `float8` and modules, `const` (`const float*`, read-only through it) and `restrict` (C99's promise that nothing else reaches it), and `void*` (an address with no type, which converts to and from any pointer); arrays of `float`, `int`, the float vectors and modules; modules, by name (`OnePole`), from their declaration on; `float2`, `float4`, `float8` (OpenCL C's vectors, lane by lane, scalars broadcast); `poly float` and `poly bool`, as many lanes as the machine's vectors ([docs/simd.md](docs/simd.md)) |
 | builtins | `fabsf sqrtf floorf fminf fmaxf` (LLVM intrinsics, exact) and `sinf cosf expf logf tanhf` (by the math mode: the runtime's, with one result for a float wherever it is computed, by default), on floats and vectors; `malloc calloc free` (C's, with `int` sizes); `reduce_add reduce_min reduce_max` (a vector to a float); `poly_lanes` (an int) and `poly_index`; `poly_load poly_store` (a poly float from or to a `float*`, with an optional mask); the FFT: `fft_create(n)` and `fft_create_complex(n)` (a plan, a `void*`; they allocate), `fft_forward(plan, in, out)` and `fft_inverse(plan, in, out)` (real when one side is floats, complex when both are `float2`s; unnormalised), `fft_destroy(plan)` |
 
@@ -278,6 +279,11 @@ Where FMinus differs from C, it is on purpose:
   and a module's that a copy of another overwrites. `-O0` keeps every one ([docs/extending.md](docs/extending.md),
   recipe 18).
 - **A non-void function that can reach its end is an error**, as in C++. Clang only warns in C.
+- **The preprocessor is `#include "file"` alone**: no macros, no `#if`, and no `#include <...>`, as FMinus has no
+  system headers. They are errors, and `#pragma` is ignored, as C ignores the pragmas it doesn't know. Each file is
+  read once, as if it began with `#pragma once`: two files that both include a third (a module both use) read it the
+  first time only, where C would define everything in it twice. A directive's errors are clang's, `extra tokens at end
+  of #include directive` too, which clang only warns of ([docs/extending.md](docs/extending.md), recipe 21).
 - **Arithmetic is IEEE single precision**, with no contraction into fused multiply-adds (clang's
   `-ffp-contract=off`), and subnormals as IEEE has them unless the host flushes them (above).
 
@@ -321,6 +327,7 @@ build-dev/bin/fminus lp.fm --knob-versions 0       # no copies of a method for i
 build-dev/bin/fminus synth.fm --math libm          # sinf, cosf, ... as libm's (vector, the default; fast: LLVM's own)
 build-dev/bin/fminus lp.fm --denormals=flush       # subnormals flushed to zero: folded so, and set by entry points
 build-dev/bin/fminus lp.fm --no-strict-aliasing    # no TBAA: for a program that reads memory as another type
+build-dev/bin/fminus synth.fm -I lib               # #include "name": beside the including file, then in lib/
 ```
 
 How it fits together: `frontend::parse` (Lexer.l, then Parser.y) gives an `ast::Program`, and `ir::lower` (in
@@ -387,11 +394,13 @@ gain(in, out, n, 0.5f);                                       // one call a bloc
   more, through memory, and FMinus in registers, so keep those inside FMinus. Nothing is checked at the boundary: a
   signature that does not match the declaration is undefined behaviour. The header has the table.
 - **Options.** `Program::Options` sets the optimisation level (`-O2` by default, as for `fminus`), a `poly float`'s
-  lanes (this machine's by default, which `polyLanes()` reports), and the file name the errors give. `math` is how
-  `sinf` and the other transcendental builtins compute (`Math::Vector` by default, `Libm` or `Fast`), `strictAliasing`
-  whether the optimiser relies on C's strict-aliasing rule (`true`), `knobVersions` how many copies of a method knob
-  versioning may make (8; 0 turns it off), and `denormals` whether subnormals are kept or flushed to zero
-  (`Denormals::Preserve` or `Flush`). The header says what each costs.
+  lanes (this machine's by default, which `polyLanes()` reports), and the file name the errors give. `include` is
+  where `#include "name"` finds its file: a function from the name and the including file's name to the file's name
+  and text, so a host keeps its files where it likes, on disk or in memory (with none, the default, no `#include`
+  finds a file). `math` is how `sinf` and the other transcendental builtins compute (`Math::Vector` by default,
+  `Libm` or `Fast`), `strictAliasing` whether the optimiser relies on C's strict-aliasing rule (`true`),
+  `knobVersions` how many copies of a method knob versioning may make (8; 0 turns it off), and `denormals` whether
+  subnormals are kept or flushed to zero (`Denormals::Preserve` or `Flush`). The header says what each costs.
 - **Threads.** `compile()` and the first look-up of each function run LLVM's optimiser and code generator on the
   calling thread: they take milliseconds and allocate. Different programs may compile on different threads at once.
   In a plugin, compile off the audio thread and hand the pointer over (below).

@@ -1,22 +1,23 @@
 # Extending the compiler
 
 How to add to FMinus. First, how a change moves through the compiler, and the few rules that keep that easy. Then
-seventeen worked recipes. Eleven grow the C subset from a one-line builtin to C's control flow, a custom LLVM pass,
+eighteen worked recipes. Eleven grow the C subset from a one-line builtin to C's control flow, a custom LLVM pass,
 `int`, `void` and pointers, the heap with the attributes that keep it off the audio thread, arrays and modules,
 FMinus's classes, an FFT from a C library built into the runtime, and parameters, the values a plugin's host sets. Six
 more are about the compiler rather than the language: math that gives a float one result wherever it is computed,
 knob versioning and flat streams, C's strict aliasing told to LLVM, zero-init elision, what the runtime's calls and
-loops promise, and subnormals flushed for the audio thread. Then the pitfalls those recipes ran into, and design notes
-for what comes next. [simd.md](simd.md) has recipes 7 to 9, for vectors.
+loops promise, and subnormals flushed for the audio thread. The last, `#include`, splits a program into files. Then
+the pitfalls those recipes ran into, and design notes for what comes next. [simd.md](simd.md) has recipes 7 to 9, for
+vectors.
 
 Recipes 1 to 4 are in the compiler now (`tanhf` and `%`; `bool` and its operators; `if`, `while` and `for`), and so are
-simd.md's 7 to 9, recipe 10 (`int`, `void` and pointers), recipe 11 (the heap), recipe 12 (arrays and modules),
-recipe 13 (the FFT), recipe 14 (parameters) and recipes 15 to 20 (the math modes, knob versioning, TBAA, zero-init
-elision, the runtime's attributes and loop progress, denormal control), so their sections describe how the code you
-have got there: read a section beside the files it names. Recipes 5 and 6, a runtime function and a pass, are not part
-of the language; they live in [recipes/](recipes/) as a patch, so you can apply them to see them work. None of these
-are sketches: each was applied to this repository, built with `-Werror`, and tested in the dev and asan presets, every
-test passing. [architecture.md](architecture.md) describes the stages they touch.
+simd.md's 7 to 9, recipe 10 (`int`, `void` and pointers), recipe 11 (the heap), recipe 12 (arrays and modules), recipe
+13 (the FFT), recipe 14 (parameters), recipes 15 to 20 (the math modes, knob versioning, TBAA, zero-init elision, the
+runtime's attributes and loop progress, denormal control) and recipe 21 (`#include`), so their sections describe how the
+code you have got there: read a section beside the files it names. Recipes 5 and 6, a runtime function and a pass, are
+not part of the language; they live in [recipes/](recipes/) as a patch, so you can apply them to see them work. None of
+these are sketches: each was applied to this repository, built with `-Werror`, and tested in the dev and asan presets,
+every test passing. [architecture.md](architecture.md) describes the stages they touch.
 
 FMinus follows C. When a recipe has a semantic choice to make, it makes C's: conversions, short-circuiting, which
 `if` an `else` belongs to, what `continue` does in a `for`. And it reports errors in clang's words. The README lists
@@ -3508,6 +3509,113 @@ iterations, run by `fminus --run` (its 28 ms of compilation subtracted):
 Flush-to-zero removes the subnormal penalty; the one-pole, whose time is its dependency chain, runs at the same speed
 either way, and its state under Flush is a normal number but still not 0. Flushing removes the slowdown, not the
 residue. Compile time is unchanged.
+
+## Recipe 21: `#include`, a program in several files
+
+*In the compiler. Code: `src/frontend/Lexer.l` (the directive rule, `<<EOF>>` and `directive`), `Scanner.h`,
+`Frontend.h`, `Diagnostics.h`; `Program::Options::include` (`include/fminus/FMinus.h`); `-I` (`tools/fminus/main.cpp`).
+Tests: `tests/unit/IncludeTest.cpp` (`[include]`), `tests/library/IncludeTest.cpp`, `tests/lit/fminus/include.fm` (with
+`Inputs/include/`).*
+
+A module worth reusing, a one-pole or an oscillator, wants a file of its own, and C's way to use one is the
+preprocessor's `#include "file"`: the file's text is read in place of the line. FMinus does what C does there and no
+more: no macros and no conditional compilation, which a language with modules, `const` and parameters needs less than
+C does. Two choices are its own, both because FMinus has no headers:
+
+- **Each file is read once**, as if every file began with `#pragma once`. In C, a header without a guard included
+  twice declares everything twice: harmless for prototypes, an error for definitions. FMinus's files hold definitions
+  (a module and its methods), so a second `#include` of a file reads nothing. That settles the diamond, `a.fm` and
+  `b.fm` both including `pole.fm`, and the cycle: the program's own file counts as read, so a file that includes it
+  gets nothing.
+- **Where a name is found is the host's.** `Program::Options::include` is a function from the name and the including
+  file's name to the file, its name (as the messages give it) and its text, or nothing. A plugin can keep its files in
+  memory; `fminus` looks where C's quoted form does, beside the including file, then in each `-I` directory.
+
+| Line | What it does | Its errors (clang's words) |
+|---|---|---|
+| `#include "file"` | reads the file there, once | `'file' file not found`, `empty filename`, `expected "FILENAME" or <FILENAME>`, `extra tokens at end of #include directive` (clang warns), `#include nested too deeply` (200 files) |
+| `#include <file>` | an error: FMinus has no system headers | |
+| `#pragma ...` | nothing, as C ignores the pragmas it doesn't know; `#pragma once` is what every file does anyway | |
+| `#` | nothing: C's null directive | |
+| `#define`, `#if`, `#ifdef`, ... | an error: `#define is not supported: FMinus's directives are #include and #pragma` | |
+| any other `#name` | `invalid preprocessing directive` | |
+
+A directive is a line whose first character, after spaces, is `#`, followed by spaces and comments only. A `#`
+anywhere else is still `unexpected character '#'`. An `#include` may be any line, inside a function's body too, as in
+C. A missing file stops the parse there, as clang's fatal error does.
+
+### One buffer a file
+
+The directive is one scanner rule, `^[ \t]*"#"[^\n]*`: Flex's `^` matches at a line's start, a buffer's first line
+too. `directive()`, in Lexer.l's last section, reads the line by hand: the name, the quoted file, then nothing but
+spaces and comments. For an `#include` it asks the resolver, skips a file read already, registers a new one, and hands
+it back to the rule's action, which uses Flex's own way of reading another input:
+
+- `yy_scan_bytes` makes a buffer of the file's text (a copy) and switches to it, and the scan goes on in it from the
+  same action. `ScannerState::open` keeps, for each file being read, its buffer, the buffer it interrupted (Flex's
+  current buffer, `YY_CURRENT_BUFFER`), and the location at the `#include`.
+- At a buffer's end, `<<EOF>>` deletes it, switches back with `yy_switch_to_buffer` and restores the location. Only the
+  program's own end returns `YYEOF`. The parser never knows: it sees one stream of tokens.
+- A block comment ends with its file: `<BLOCK_COMMENT><<EOF>>` is `unterminated /* comment`, as in C.
+- When a syntax error stops the parser inside an included file, `ScannerHandle`'s destructor deletes the buffers
+  still open, the innermost (Flex's current) first.
+
+### Locations that know their file
+
+`SourceLocation` gains `file`, an index into the compilation's files (0 the program's own), and `Diagnostics` holds the
+files: `addFile(name, includedFrom)` registers one with the location of its `#include`.
+
+Bison's positions carry a file already, `position::filename`, a `const std::string*` by default.
+`%define api.filename.type {const fminus::frontend::SourceFile}` makes it a pointer to a `SourceFile`
+(`ParseContext.h`), which holds the index. `ScannerState::files` is a `std::deque` of them, so the pointers stay valid
+as files are added, and the program's own file is null. Locations then flow through the parser unchanged (Bison's
+`YYLLOC_DEFAULT` copies the first symbol's start), and `at()` reads the index through `sourceLocation` (`Scanner.h`).
+The code generator needs nothing new: its errors take the nodes' locations, which carry their file.
+
+Bison's `location.hh` compares the two ends' files with `!=` in its `operator<<`. FMinus never prints a location, but
+that template's body is checked where it is defined, so `SourceFile` needs an `operator==` (defaulted).
+
+### Messages in reading order
+
+`format()` sorts its errors into the order the text is read: for each location, the line and column of each `#include`
+on the way to it, from the program's file in, then its own, compared as a sequence. An included file's errors sort
+where its `#include` is. Before a line in an included file comes clang's include stack, outermost first, when the line
+before it was in another file:
+
+```
+In file included from bad.fm:2:
+In file included from sub/c.fm:1:
+lib/d.fm:3:16: error: use of undeclared identifier 'z'
+bad.fm:3:27: error: use of undeclared identifier 'y'
+```
+
+### Where the files are found
+
+`frontend::IncludeResolver` (`Frontend.h`) and its public twin, `Program::IncludeResolver`, are
+`std::function<std::optional<IncludedFile>(std::string_view name, std::string_view from)>`. The scanner asks for every
+`#include` it reads, a file read already too, and knows a file by the name the resolver gives it: only the resolver can
+tell that `../pole.fm` and `pole.fm` are one file. With no resolver, every `#include` is `file not found`.
+
+`fminus`'s `DiskIncludes` looks beside the including file, then in each `-I` directory in order; an absolute name is
+itself. A file found is named by its path with `./` and `../` removed, and one found again by another path (its real
+path the same) goes by the first name, so the scanner reads it once; the program's own file is known from the start.
+Standard input has no directory, so its names start from the current one.
+
+### Tests
+
+- `tests/unit/IncludeTest.cpp`: the dump with a file read where its `#include` is, a module's name a type after it,
+  an `#include` in a function's body, spaces and comments around the directive, and lines counted on after it; each
+  file once (the diamond, a file included twice, the program's own file included by itself and by another), with the
+  resolver asked for every `#include` with the including file's name; pragmas ignored; `file not found` at the name,
+  with no resolver too; errors in included files after their include stack, an unterminated comment and a missing file
+  inside one; `format()`'s order and stacks over three files with notes; every directive error; and the depth limit.
+- `tests/library/IncludeTest.cpp`: `Program::Options::include` from C++17, a host's files in memory: a module from an
+  included file run through the JIT, an included file's error, a file not found, and the default without a resolver.
+- `tests/lit/fminus/include.fm`: `fminus` with `-I`, a file beside the test and one in the `-I` directory that
+  includes the first again, the test including itself, `--run` and `--emit ast` (one `Pole`), `file not found` without
+  `-I`, and the include stack.
+
+A program without directives scans as before: the suite's other tests are unchanged.
 
 ## Pitfalls
 

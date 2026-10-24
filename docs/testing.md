@@ -156,6 +156,10 @@ On PATH: `fminus`, `fminus-build`, `fminus-hostinfo`, then `FileCheck`, `not`, `
 A check prefix can't be `RUN` (FileCheck refuses it), and lit's `%t` names a file per test, so several executables
 take suffixes: `%t.none`, `%t.note`.
 
+A test that needs files of its own keeps them in an `Inputs/` directory beside it, which `lit.cfg.py` excludes, so lit
+never runs them as tests. RUN lines name them through `%S`: `include.fm` runs `fminus %s -I %S/Inputs/include/lib` and
+includes `"Inputs/include/pole.fm"`, beside itself.
+
 **Writing IR checks that last:**
 
 - Match the stable parts: names you gave (`%doubled`), opcodes, types, constants.

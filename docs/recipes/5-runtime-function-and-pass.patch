@@ -256,10 +256,10 @@ index a4ab49c..7402599 100644
          // A vector math library, in the fast math mode only (the module's kMathFlag; HostTarget.h). On Apple systems,
          // libsystem_m's _simd_sin_f4, _simd_exp_f4, ... (in libSystem, which every process and executable links
 diff --git a/tests/lit/fminus/denormals.fm b/tests/lit/fminus/denormals.fm
-index 29fe887..898627d 100644
+index c0d59c8..73ee6f8 100644
 --- a/tests/lit/fminus/denormals.fm
 +++ b/tests/lit/fminus/denormals.fm
-@@ -61,8 +61,8 @@ module Tiny
+@@ -72,8 +72,8 @@ module Tiny
  // FLUSH-NEXT: define internal float @twice.body(float %a, float %b) #[[BODY:[0-9]+]] {
  // FLUSH:        call float @mul(
  // FLUSH:      ; Function Attrs: denormal_fpenv(preservesign)
@@ -270,7 +270,7 @@ index 29fe887..898627d 100644
  // FLUSH:        ret float 0.000000e+00
  // FLUSH:      ; Function Attrs: denormal_fpenv(dynamic)
  // FLUSH-NEXT: define float @twice(float %a, float %b) #[[ENTRY:[0-9]+]] {
-@@ -74,9 +74,11 @@ module Tiny
+@@ -85,9 +85,11 @@ module Tiny
  // FLUSH:      define float @"Tiny::scaled"(ptr nonnull align 8 dereferenceable(16) %this) #[[ENTRY]] {
  // FLUSH:        %body = call ptr asm "", "=r,0"(ptr @"Tiny::scaled.body")
  // FLUSH:        %result = call float %body(ptr nonnull align 8 dereferenceable(16) %this)
@@ -284,9 +284,9 @@ index 29fe887..898627d 100644
 +// FLUSH:      attributes #[[ENTRY]] = { denormal_fpenv(dynamic) "fminus-flops"="0" }
  
  // After the pipeline the body's constant is still 0, and each wrapper still calls its body through the asm's result
- // (the body's address escapes into it, so the body keeps C's calling convention).
-@@ -93,10 +95,10 @@ module Tiny
- // OPTIMISED:         %body = tail call ptr asm "", "=r,0"(ptr nonnull @"Tiny::scaled.body")
+ // (the body's address escapes into it, so the body keeps C's calling convention). On x86-64 the wrapper keeps the mode
+@@ -105,10 +107,10 @@ module Tiny
+ // OPTIMISED:         %body = {{(tail )?}}call ptr asm "", "=r,0"(ptr nonnull @"Tiny::scaled.body")
  // OPTIMISED:         call float %body(ptr nonnull align 8 dereferenceable(16) %this)
  
 -// PRESERVE:      define float @mul(float %a, float %b) {

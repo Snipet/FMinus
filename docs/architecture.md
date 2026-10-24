@@ -32,7 +32,7 @@ see the whole flow. For a host, the public API strings parse, lower and the JIT 
 
 | Stage | Entry point | Input | Output | Errors |
 |---|---|---|---|---|
-| parse | `frontend::parse` (`Frontend.h`) | `std::string_view` | `std::optional<ast::Program>` | `Diagnostics`; stops at the first syntax error |
+| parse | `frontend::parse` (`Frontend.h`) | `std::string_view`, and an `IncludeResolver` for its `#include`s | `std::optional<ast::Program>` | `Diagnostics`; stops at the first syntax error, and at an `#include` that finds no file |
 | lower | `ir::lower` (`CodeGen.h`) | `const ast::Program&`, `llvm::LLVMContext&` | `std::unique_ptr<llvm::Module>` (null on error) | `Diagnostics`; every error in one run |
 | optimise | `prepareModule`, `optimiseModule` (`HostTarget.h`) | `llvm::Module&`, `llvm::TargetMachine&`, level | the module, rewritten | none (the module is valid by now) |
 | JIT | `jit::Jit::create`, `add`, `lookup` (`Jit.h`) | module + its context | `llvm::orc::ExecutorAddr` | `llvm::Error` |
@@ -42,14 +42,19 @@ see the whole flow. For a host, the public API strings parse, lower and the JIT 
 
 `frontend/Diagnostics.h` holds what every stage reports into.
 
-- `SourceLocation` is a line and a column, both counted from 1 (the column counts bytes).
-- `Diagnostics` belongs to one compilation of one file. `error(location, message, notes)` records an error, with the
-  notes that explain it (clang's: `[[clang::nonblocking]]`'s errors have one for each call down to the `malloc`).
-  `hasErrors()` tells a stage whether to hand over a result. `format()` renders `file:line:column: error: message`
-  lines, sorted into source order, each followed by its `file:line:column: note: message` lines, wherever they
-  point.
+- `SourceLocation` is a line and a column, both counted from 1 (the column counts bytes), and a file: an index into
+  the compilation's files, 0 for the program's own.
+- `Diagnostics` belongs to one compilation: the program's file, and the files its `#include`s read, each added by
+  the scanner (`addFile(name, includedFrom)`) with the location of the `#include` that read it. `error(location,
+  message, notes)` records an error, with the notes that explain it (clang's: `[[clang::nonblocking]]`'s errors have
+  one for each call down to the `malloc`). `hasErrors()` tells a stage whether to hand over a result. `format()`
+  renders `file:line:column: error: message` lines, sorted into source order, each followed by its
+  `file:line:column: note: message` lines, wherever they point. A line in an included file comes after clang's include
+  stack, `In file included from main.fm:2:` for each `#include` on the way to it, when the line before it was in
+  another file.
 - The sort matters because the code generator reports in two passes (declarations, then bodies), so its errors
-  arrive out of order. `errors()` keeps the order of reporting, for tests that care about it.
+  arrive out of order. Source order is the order the text is read in: an included file's lines sort where its
+  `#include` is. `errors()` keeps the order of reporting, for tests that care about it.
 
 Errors are values, not exceptions. The parser stops at the first syntax error (Bison has no error recovery rules
 yet), but the code generator carries on after each error with a placeholder value (below). So one run of `fminus`
@@ -62,7 +67,7 @@ Flex generates `Lexer.yy.cpp` and `Lexer.yy.hpp` into `build-*/src/generated/fro
 - **Reentrant, prefixed, from memory.** `%option reentrant` keeps all state in a `yyscan_t` handle, so two
   compilations can run at once. `prefix="fminus"` renames Flex's API (`fminuslex_init_extra`, `fminus_scan_bytes`,
   ...), so it can't clash with another scanner in the same binary. `Frontend.cpp` scans a string with
-  `fminus_scan_bytes`, never a file or stdin.
+  `fminus_scan_bytes`, never a file or stdin, and so does an `#include`, whose file's text the resolver gives.
 - **Locations.** `%option extra-type` gives every scanner a `ScannerState` (`Scanner.h`), which holds Bison's
   `location`. `YY_USER_ACTION` advances it by each match's length. The block at the top of the rules section calls
   `step()` at the start of every token, and newlines call `lines()`.
@@ -80,6 +85,15 @@ Flex generates `Lexer.yy.cpp` and `Lexer.yy.hpp` into `build-*/src/generated/fro
   identifier.
 - **Errors.** An unexpected character throws `Parser::syntax_error`. The parser catches it and reports it through
   `Parser::error`, like any syntax error.
+- **Directives.** A line whose first character after spaces is `#` is one rule, `^[ \t]*"#"[^\n]*`, which
+  `directive()` (at the end of Lexer.l) reads by hand: `#include "file"` asks the front end's `IncludeResolver`
+  (`Frontend.h`) for the file, `#pragma` is ignored, and anything else is an error. An included file is read from a
+  buffer of its own (`yy_scan_bytes`, which switches to it); `ScannerState::open` keeps the buffer it interrupted and
+  the location at the `#include`, and at the buffer's end `<<EOF>>` switches back, so the parser sees one stream of
+  tokens. Each file is read once: `ScannerState::read` holds the names of the files read, the program's own first, and
+  an `#include` of one of them reads nothing. Bison's positions carry the file (`api.filename.type` is
+  `const SourceFile`, which holds its index in the `Diagnostics`; null is the program's own file), and the parser's
+  `at()` turns a location into a `SourceLocation` with `sourceLocation` (`Scanner.h`). Recipe 21 has the details.
 
 `Scanner.h` is the glue between the scanner and the parser:
 
@@ -128,7 +142,8 @@ subset of C's, is written out as EBNF in the file's header comment.
   "syntax error, unexpected X, expecting Y or Z". The expected list appears only when it has at most four tokens.
   LAC (`parse.lac full`) keeps that list accurate.
 - **Running it.** `frontend::parse` (`Frontend.cpp`) creates the scanner through an RAII `ScannerHandle` and runs
-  `Parser::parse()`. It returns the program, or `std::nullopt` once anything has been reported.
+  `Parser::parse()`. It returns the program, or `std::nullopt` once anything has been reported. The handle also
+  deletes the buffers of the `#include`s still being read when a syntax error stopped the parser.
 
 Bison's own diagnostics run at build time: `-Wall -Wcounterexamples` (`FMINUS_BISON_FLAGS`). A conflict fails
 nothing, but Bison prints it with an example input, and `Parser.output` lists every state.
