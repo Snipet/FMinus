@@ -171,12 +171,14 @@ function scanPattern(src, i, fail) {
 	return i;
 }
 
-/** What an action does, as the docs show it. */
+/** What an action does, as the docs show it. A directive's rule reads an #include's file from a buffer of its own
+ * (yy_scan_bytes); the end of the input's goes back to the file an #include interrupted (yy_switch_to_buffer). */
 function outcome(action) {
 	const tokens = [...action.matchAll(/\bmake_([A-Za-z_][A-Za-z0-9_]*)\s*\(/g)].map((m) => m[1]);
 	const begin = action.match(/\bBEGIN\s*\(?\s*([A-Za-z_]\w*)/);
 	const thrown = action.match(/\bsyntax_error\s*\(([\s\S]*)\)\s*;/);
-	if (tokens.length) return { kind: 'tokens', tokens };
+	if (/\byy_scan_bytes\s*\(/.test(action)) return { kind: 'include' };
+	if (tokens.length) return { kind: 'tokens', tokens, resumes: /\byy_switch_to_buffer\s*\(/.test(action) };
 	if (thrown) {
 		const literals = [...thrown[1].matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((m) => m[1].replace(/\\(.)/g, '$1'));
 		return { kind: 'error', message: literals.join('…') };

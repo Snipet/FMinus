@@ -4,6 +4,7 @@
     "fileTypes": ["fm"],
     "patterns": [
         { "include": "#comments" },
+        { "include": "#directives" },
         { "include": "#attributes" },
         { "include": "#numbers" },
         { "include": "#modules" },
@@ -32,6 +33,32 @@
                     "end": "$",
                     "beginCaptures": { "0": { "name": "punctuation.definition.comment.fminus" } },
                     "patterns": [{ "include": "#lit-directive" }]
+                }
+            ]
+        },
+        "directives": {
+            "comment": "Lexer.l's directives, a line that starts with #: #include \"file\" and #pragma (ignored). FMinus has no other; C's are errors.",
+            "patterns": [
+                {
+                    "name": "meta.preprocessor.include.fminus",
+                    "match": "^\\s*(#)\\s*(include)\\b\\s*(\"[^\"]*\")?",
+                    "captures": {
+                        "1": { "name": "punctuation.definition.directive.fminus" },
+                        "2": { "name": "keyword.control.directive.include.fminus" },
+                        "3": { "name": "string.quoted.double.include.fminus" }
+                    }
+                },
+                {
+                    "name": "meta.preprocessor.pragma.fminus",
+                    "match": "^\\s*(#)\\s*(pragma)\\b",
+                    "captures": {
+                        "1": { "name": "punctuation.definition.directive.fminus" },
+                        "2": { "name": "keyword.control.directive.pragma.fminus" }
+                    }
+                },
+                {
+                    "name": "invalid.illegal.directive.fminus",
+                    "match": "^\\s*#\\s*\\w*"
                 }
             ]
         },
