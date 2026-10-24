@@ -1,0 +1,7 @@
+// include.fm's: found through -I, and including a file read already (../pole.fm).
+#include "../pole.fm"
+
+float gain(float x)
+{
+    return 2.0f * x;
+}

@@ -8,6 +8,13 @@
  * (not on 2; in 0x1F the F is a digit), and is kept in the spelling.
  * To add a token: a rule here, its %token in Parser.y. Keywords come before {IDENTIFIER}: with equal lengths, Flex
  * picks the earlier rule. An identifier that names a module declared so far is a type, MODULE_NAME (ParseContext.h).
+ *
+ * A line that starts with # (after spaces) is a directive, C's preprocessor's, of which FMinus has two:
+ * `#include "file"` reads the file there, as C does (through the IncludeResolver the front end was given), and
+ * `#pragma ...` is ignored, as C ignores the pragmas it does not know. Each file is read once: an #include of a file
+ * read already (the program's own too) reads nothing, as if every file began with #pragma once. The scanner reads an
+ * included file from a buffer of its own and goes back to the one it interrupted at the file's end; its locations
+ * point at the file (SourceFile), whose index in the Diagnostics names it in the messages.
  */
 %option reentrant noyywrap nounput noinput nounistd never-interactive batch
 %option prefix="fminus"
@@ -21,10 +28,23 @@
 }
 
 %{
+#include <algorithm>
+#include <climits>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 
 using Parser = fminus::frontend::Parser;
+
+namespace
+{
+    // The directive on one line, `text` (its first # after spaces), at the scanner's location: the file an #include
+    // reads, registered with the Diagnostics and the scanner's files, or nothing (a #pragma, an #include of a file
+    // read already, C's empty directive #). Throws the directive's error.
+    std::optional<fminus::frontend::IncludedFile> directive(fminus::frontend::ScannerState& state,
+                                                            std::string_view text);
+} // namespace
 
 // Every match advances the location by its length; rules call step() to start the next token there.
 #define YY_USER_ACTION yyextra->where.columns(static_cast<int>(yyleng));
@@ -45,6 +65,22 @@ IDENTIFIER  [A-Za-z_][A-Za-z0-9_]*
 [ \t\r]+                    { yyextra->where.step(); }
 \n+                         { yyextra->where.lines(static_cast<int>(yyleng)); yyextra->where.step(); }
 "//".*                      { yyextra->where.step(); }
+
+^[ \t]*"#"[^\n]*            {
+                                std::optional<fminus::frontend::IncludedFile> file
+                                    = directive(*yyextra, std::string_view(yytext, static_cast<std::size_t>(yyleng)));
+                                if (!file)
+                                    yyextra->where.step();
+                                else
+                                {
+                                    // Read the file from here (Flex copies its text), then come back after the
+                                    // #include (<<EOF>>).
+                                    yyextra->open.push_back({nullptr, YY_CURRENT_BUFFER, yyextra->where});
+                                    yyextra->open.back().buffer = yy_scan_bytes(
+                                        file->text.data(), static_cast<int>(file->text.size()), yyscanner);
+                                    yyextra->where.initialize(&yyextra->files.back());
+                                }
+                            }
 
 "/*"                        { yyextra->commentStart = yyextra->where; BEGIN(BLOCK_COMMENT); }
 <BLOCK_COMMENT>"*/"         { yyextra->where.step(); BEGIN(INITIAL); }
@@ -139,6 +175,133 @@ IDENTIFIER  [A-Za-z_][A-Za-z0-9_]*
                                 const std::string character(yytext, yyleng);
                                 throw Parser::syntax_error(yyextra->where, "unexpected character '" + character + "'");
                             }
-<<EOF>>                     { return Parser::make_YYEOF(yyextra->where); }
+<<EOF>>                     {
+                                if (yyextra->open.empty())
+                                    return Parser::make_YYEOF(yyextra->where);
+                                // The end of an included file: back to the file it interrupted, after its #include.
+                                const fminus::frontend::OpenInclude done = yyextra->open.back();
+                                yyextra->open.pop_back();
+                                yy_delete_buffer(YY_CURRENT_BUFFER, yyscanner);
+                                yy_switch_to_buffer(static_cast<YY_BUFFER_STATE>(done.outer), yyscanner);
+                                yyextra->where = done.where;
+                                yyextra->where.step();
+                            }
 
 %%
+
+namespace
+{
+    using fminus::frontend::location;
+
+    constexpr std::size_t kMaxIncludeDepth = 200;   // clang's
+
+    // C's directives FMinus does not have.
+    constexpr std::string_view kDirectivesOfC[] = {"define", "undef", "if",   "ifdef", "ifndef", "elif",    "elifdef",
+                                                   "elifndef", "else", "endif", "line", "error", "warning", "embed"};
+
+    bool isSpace(char c)
+    {
+        return c == ' ' || c == '\t' || c == '\r' || c == '\f' || c == '\v';
+    }
+
+    bool isIdentifierChar(char c)
+    {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+    }
+
+    // The `length` bytes at `offset` in the token at `where`, a line's.
+    location within(const location& where, std::size_t offset, std::size_t length)
+    {
+        location at = where;
+        at.begin.column += static_cast<int>(offset);
+        at.end = at.begin;
+        at.end.column += static_cast<int>(length);
+        return at;
+    }
+
+    // Whether the rest of the line from `i` is spaces and comments: // to its end, and /* */ closed on it.
+    bool onlyComments(std::string_view text, std::size_t i)
+    {
+        while (true)
+        {
+            while (i < text.size() && isSpace(text[i]))
+                ++i;
+            if (i == text.size() || text.substr(i, 2) == "//")
+                return true;
+            if (text.substr(i, 2) != "/*")
+                return false;
+            const std::size_t end = text.find("*/", i + 2);
+            if (end == std::string_view::npos)
+                return false;
+            i = end + 2;
+        }
+    }
+
+    std::optional<fminus::frontend::IncludedFile> directive(fminus::frontend::ScannerState& state,
+                                                            std::string_view text)
+    {
+        const location& where = state.where;
+        std::size_t i = 0;
+        const auto skipSpaces = [&] {
+            while (i < text.size() && isSpace(text[i]))
+                ++i;
+        };
+        skipSpaces();
+        const std::size_t hash = i++;
+        skipSpaces();
+        const std::size_t nameStart = i;
+        while (i < text.size() && isIdentifierChar(text[i]))
+            ++i;
+        const std::string name(text.substr(nameStart, i - nameStart));
+        if (name.empty() && onlyComments(text, i))
+            return std::nullopt;   // C's null directive
+        if (name == "pragma")
+            return std::nullopt;   // C ignores the pragmas it does not know; once is what FMinus does for every file
+        if (name != "include")
+        {
+            for (const std::string_view other : kDirectivesOfC)
+                if (name == other)
+                    throw Parser::syntax_error(within(where, nameStart, name.size()),
+                                               "#" + name + " is not supported: FMinus's directives are #include and "
+                                                            "#pragma");
+            throw Parser::syntax_error(within(where, nameStart, std::max<std::size_t>(name.size(), 1)),
+                                       "invalid preprocessing directive");
+        }
+
+        skipSpaces();
+        if (i < text.size() && text[i] == '<')
+            throw Parser::syntax_error(within(where, i, 1), "#include <...> is not supported: FMinus has no system "
+                                                            "headers (write #include \"file\")");
+        const std::size_t close = i < text.size() && text[i] == '"' ? text.find('"', i + 1) : std::string_view::npos;
+        if (close == std::string_view::npos)
+            throw Parser::syntax_error(within(where, i, 1), "expected \"FILENAME\" or <FILENAME>");
+        const location quoted = within(where, i, close - i + 1);
+        const std::string file(text.substr(i + 1, close - i - 1));
+        if (file.empty())
+            throw Parser::syntax_error(quoted, "empty filename");
+        if (!onlyComments(text, close + 1))
+        {
+            std::size_t extra = close + 1;
+            while (extra < text.size() && isSpace(text[extra]))
+                ++extra;
+            throw Parser::syntax_error(within(where, extra, text.size() - extra),
+                                       "extra tokens at end of #include directive");
+        }
+
+        // The file: found, not read yet, and not too deep.
+        const fminus::SourceLocation from = fminus::frontend::sourceLocation(within(where, hash, 1));
+        if (state.open.size() >= kMaxIncludeDepth)
+            throw Parser::syntax_error(quoted, "#include nested too deeply");
+        std::optional<fminus::frontend::IncludedFile> found;
+        if (state.include != nullptr)
+            found = (*state.include)(file, state.diagnostics->file(from.file).name);
+        if (!found)
+            throw Parser::syntax_error(quoted, "'" + file + "' file not found");
+        if (found->text.size() > static_cast<std::size_t>(INT_MAX))
+            throw Parser::syntax_error(quoted, "'" + file + "' is too long");
+        if (!state.read.insert(found->name).second)
+            return std::nullopt;   // read once
+        state.files.push_back({state.diagnostics->addFile(found->name, from)});
+        return found;
+    }
+} // namespace

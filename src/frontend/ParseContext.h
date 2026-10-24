@@ -11,6 +11,15 @@
 
 namespace fminus::frontend
 {
+    // A file the scanner reads, as Bison's locations point at it (Parser.y's api.filename.type): its index among the
+    // Diagnostics' files. A location that points at none is in the program's own file.
+    struct SourceFile
+    {
+        int index = 0;
+
+        friend bool operator==(const SourceFile&, const SourceFile&) = default;   // Bison compares positions so
+    };
+
     struct ParseContext
     {
         ast::Program program;

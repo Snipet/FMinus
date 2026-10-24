@@ -52,6 +52,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -142,12 +143,31 @@ namespace fminus
             Fast,
         };
 
+        // A file an #include reads: its name, as the error messages give it, and its text. The name is also how the
+        // compiler knows a file it has read: each is read once, as if it began with #pragma once, so a second
+        // #include of the same name (or of Options::fileName, the program's own) reads nothing.
+        struct IncludedFile
+        {
+            std::string fileName;   // what the error messages call it, and how a second #include of it is known
+            std::string source;     // its text
+        };
+
+        // The file of `#include "name"` in the file named `from` (Options::fileName, or an IncludedFile's fileName),
+        // or nothing when there is none: the error "'name' file not found". It runs on the compiling thread, once for
+        // each #include read.
+        using IncludeResolver =
+            std::function<std::optional<IncludedFile>(std::string_view name, std::string_view from)>;
+
         struct Options
         {
             int optimisation = 2;                  // -O0 to -O3: LLVM's pipeline at that level, as fminus -O<n>
             unsigned polyLanes = 0;                // a poly float's lanes (1, 2, 4, ... 64); 0 is this machine's
             Math math = Math::Vector;              // how the math builtins compute (above), as fminus --math
             std::string fileName = "program.fm";   // what the error messages call the source
+            // Where #include "name" finds its file (above). Without one, no #include finds a file: a host decides
+            // where the files are, a directory of its own or files it keeps in memory, as fminus reads them from disk
+            // (beside the including file, then -I's directories).
+            IncludeResolver include;
             // Each parameter's binding, by its qualified name ("Lowpass::cutoff"); one not named is a knob. A name
             // that is no parameter of the program, or a stream that is not a float, is a compile error.
             std::map<std::string, Binding> parameters;

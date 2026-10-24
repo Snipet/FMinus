@@ -52,6 +52,7 @@
 %locations
 
 %define api.namespace {fminus::frontend}
+%define api.filename.type {const fminus::frontend::SourceFile}   // which file a location is in (ParseContext.h)
 %define api.parser.class {Parser}
 %define api.value.type variant
 %define api.value.automove
@@ -144,7 +145,7 @@
     {
         fminus::SourceLocation at(const fminus::frontend::location& where)
         {
-            return {where.begin.line, where.begin.column};
+            return fminus::frontend::sourceLocation(where);
         }
 
         fminus::ast::ExprPtr binary(const fminus::frontend::location& where, fminus::ast::BinaryOp op,

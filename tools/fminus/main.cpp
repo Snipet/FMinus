@@ -14,6 +14,7 @@
 //     fminus lowpass.fm --denormals=flush   subnormals flushed to zero: folded so, and set by the entry points
 //     fminus synth.fm --math libm           sinf, cosf, ... as libm's (--math vector, the default: the same result
 //                                           wherever computed; --math fast: LLVM's intrinsics, as clang's)
+//     fminus synth.fm -I lib                #include "name" looks beside the including file, then in lib/
 #include "frontend/Frontend.h"
 #include "ir/CodeGen.h"
 #include "jit/Jit.h"
@@ -28,14 +29,18 @@
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/InitLLVM.h>
 #include <llvm/Support/MemoryBuffer.h>
+#include <llvm/Support/Path.h>
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Target/TargetMachine.h>
 
 #include <array>
 #include <cstdlib>
 #include <format>
+#include <map>
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -86,6 +91,64 @@ namespace
         return !number.empty() && end == number.c_str() + number.size();
     }
 
+    // Where #include "name" finds its file, as C's quoted form looks: beside the including file, then in each of
+    // `directories` in turn (an absolute name is itself). A file is named as found (the directory and the name, its
+    // ./ and ../ removed), except one read already by another name: the first name it was found by, so that the
+    // scanner reads it once (the program's own file, `input`, is read already).
+    class DiskIncludes
+    {
+    public:
+        DiskIncludes(std::vector<std::string> directories, const std::string& input)
+            : directories_(std::move(directories))
+        {
+            if (input != "<stdin>")
+                remember(input);
+        }
+
+        std::optional<fminus::frontend::IncludedFile> operator()(std::string_view name, std::string_view from)
+        {
+            std::vector<llvm::SmallString<256>> candidates;
+            if (llvm::sys::path::is_absolute(name))
+                candidates.emplace_back(name);
+            else
+            {
+                llvm::SmallString<256> beside(from == "<stdin>" ? llvm::StringRef()
+                                                                : llvm::sys::path::parent_path(from));
+                llvm::sys::path::append(beside, name);
+                candidates.push_back(beside);
+                for (const std::string& directory : directories_)
+                {
+                    llvm::SmallString<256> inside(directory);
+                    llvm::sys::path::append(inside, name);
+                    candidates.push_back(inside);
+                }
+            }
+            for (llvm::SmallString<256>& candidate : candidates)
+            {
+                llvm::sys::path::remove_dots(candidate, true);
+                if (llvm::sys::fs::is_directory(candidate))
+                    continue;
+                llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> file = llvm::MemoryBuffer::getFile(candidate, true);
+                if (file)
+                    return fminus::frontend::IncludedFile{remember(std::string(candidate)), (*file)->getBuffer().str()};
+            }
+            return std::nullopt;
+        }
+
+    private:
+        // The name the file at `path` goes by: the first it was found by.
+        std::string remember(const std::string& path)
+        {
+            llvm::SmallString<256> real;
+            if (llvm::sys::fs::real_path(path, real))
+                return path;
+            return names_.try_emplace(std::string(real), path).first->second;
+        }
+
+        std::vector<std::string> directories_;
+        std::map<std::string, std::string> names_;   // a file's real path, and the name it goes by
+    };
+
     int writeText(const std::string& path, const std::string& text)
     {
         std::error_code ec;
@@ -118,6 +181,7 @@ int main(int argc, char** argv)
     unsigned knobVersions = fminus::ir::Options{}.knobVersions;
     std::string denormals = "preserve";
     std::string math = "vector";
+    std::vector<std::string> includeDirectories;
     app.add_option("input", input, "FMinus source file ('-' for stdin)")->required();
     app.add_option("args", runArgs, "The arguments of --run's function");
     app.add_option("-o,--output", output, "The output file ('-' is stdout)")->capture_default_str();
@@ -151,6 +215,9 @@ int main(int argc, char** argv)
                    "library where there is one), libm (the C library's, a lane at a time) or fast (LLVM's intrinsics)")
         ->check(CLI::IsMember({"vector", "libm", "fast"}))
         ->capture_default_str();
+    app.add_option("-I", includeDirectories,
+                   "Where #include \"name\" looks after the including file's directory, in order (clang's -I)")
+        ->allow_extra_args(false);
     CLI11_PARSE(app, argc, argv);
     if (emit == "exe" && run.empty() && output == "-")
         return fail("--emit exe: an executable needs a file name (-o)");
@@ -164,7 +231,8 @@ int main(int argc, char** argv)
     if (!source)
         return fail("cannot read " + input + ": " + source.getError().message());
     fminus::Diagnostics diagnostics(input == "-" ? "<stdin>" : input);
-    std::optional<fminus::ast::Program> program = fminus::frontend::parse((*source)->getBuffer(), diagnostics);
+    std::optional<fminus::ast::Program> program = fminus::frontend::parse(
+        (*source)->getBuffer(), diagnostics, DiskIncludes(includeDirectories, diagnostics.fileName()));
     if (!program)
     {
         llvm::errs() << diagnostics.format();

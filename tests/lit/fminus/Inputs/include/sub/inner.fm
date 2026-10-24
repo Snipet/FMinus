@@ -1,0 +1,4 @@
+float inner(float x)
+{
+    return x * q;
+}

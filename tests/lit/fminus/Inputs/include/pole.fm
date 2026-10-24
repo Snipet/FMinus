@@ -1,0 +1,10 @@
+// include.fm's: a one-pole smoother, beside the file that includes it.
+module Pole
+{
+    float y;
+
+    float tick(float x, float k)
+    {
+        return y += k * (x - y);
+    }
+};

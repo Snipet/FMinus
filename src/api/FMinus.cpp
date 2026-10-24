@@ -141,7 +141,16 @@ namespace fminus
         }
 
         Diagnostics diagnostics(options.fileName);
-        const std::optional<ast::Program> program = frontend::parse(source, diagnostics);
+        frontend::IncludeResolver include;
+        if (options.include)
+            include = [&options](std::string_view name,
+                                 std::string_view from) -> std::optional<frontend::IncludedFile> {
+                std::optional<IncludedFile> file = options.include(name, from);
+                if (!file)
+                    return std::nullopt;
+                return frontend::IncludedFile{std::move(file->fileName), std::move(file->source)};
+            };
+        const std::optional<ast::Program> program = frontend::parse(source, diagnostics, include);
         if (!program)
         {
             errors = diagnostics.format();

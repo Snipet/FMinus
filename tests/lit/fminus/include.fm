@@ -1,0 +1,29 @@
+// #include "file" reads the file where the directive is: found beside the including file, then in -I's directories,
+// and read once (Inputs/include/). Its errors name it, after clang's include stack.
+// RUN: fminus %s -I %S/Inputs/include/lib --run smooth 4 | FileCheck %s --check-prefix=CALL
+// RUN: fminus %s -I %S/Inputs/include/lib --emit ast | FileCheck %s --check-prefix=AST
+// RUN: not fminus %s 2>&1 | FileCheck %s --check-prefix=NOT-FOUND
+// RUN: not fminus %S/Inputs/include/broken.fm 2>&1 | FileCheck %s --check-prefix=STACK
+
+#include "Inputs/include/pole.fm"   // beside this file
+#include "gain.fm"                  // in -I's directory, and including pole.fm again: read once
+#include "include.fm"               // this file: read already
+
+float smooth(float x)
+{
+    Pole p;
+    p.tick(x, 0.5f);
+    return gain(p.tick(x, 0.5f));
+}
+
+// CALL: 6
+
+// AST: (module Pole
+// AST-NOT: (module Pole
+// AST: (function float gain
+// AST: (function float smooth
+
+// NOT-FOUND: include.fm:9:10: error: 'gain.fm' file not found
+
+// STACK: In file included from {{.*}}broken.fm:1:
+// STACK-NEXT: {{.*}}inner.fm:3:16: error: use of undeclared identifier 'q'
