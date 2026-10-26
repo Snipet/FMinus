@@ -13,6 +13,10 @@
 // which the C ABI passes and returns in one register on arm64 and x86-64, as it does clang's ext_vector_type(4).
 typedef float fminus_rt_float4 __attribute__((vector_size(16)));
 
+// A parallel region's body (ir/Parallel.cpp): runs its iterations, or its statements, begin to end - 1, over what its
+// context holds.
+typedef void (*fminus_rt_task)(void* context, std::int32_t begin, std::int32_t end);
+
 extern "C"
 {
     // The runtime's ABI version, for generated code to check against the one it was compiled for.
@@ -76,6 +80,26 @@ extern "C"
     fminus_rt_float4 fminus_rt_exp_f4(fminus_rt_float4 x) noexcept;
     fminus_rt_float4 fminus_rt_tanh_f4(fminus_rt_float4 x) noexcept;
     fminus_rt_float4 fminus_rt_log_f4(fminus_rt_float4 x) noexcept;
+
+    // FMinus's parallel for and parallel { } (Parallel.cpp): runs task(context, ...) over the iterations begin to
+    // end - 1, spread over the pool's threads and the calling thread, in chunks each thread takes as it finishes its
+    // last, and returns when every one has run. `threads` is the most threads that take part, the caller's among them;
+    // 0 is all there are. Every chunk runs in the caller's floating-point mode (FPCR on arm64, MXCSR on x86-64). It runs
+    // the whole range on the calling thread, in order, when the pool is not started, when `threads` is 1, for one
+    // iteration, inside a chunk of another region the pool runs, and when another region holds the pool (a host's
+    // other audio thread's). It allocates nothing and takes no lock, so the audio thread may call it: at the end it
+    // spins for the chunks other threads are still running, and pool threads asleep (no region for 50 us) it wakes
+    // with a system call that does not block.
+    void fminus_rt_parallel_for(fminus_rt_task task, void* context, std::int32_t begin, std::int32_t end,
+                                std::int32_t threads) noexcept;
+
+    // The pool, started, or one more user of it counted: a thread for every core but one, asleep until a region
+    // needs it. Each start needs its stop. Not for the audio thread: it makes threads. Returns how many threads a
+    // region can run on, the caller's among them (1 on a machine of one core).
+    std::int32_t fminus_rt_parallel_start() noexcept;
+
+    // A start's end. The last stops the pool's threads and waits for them: no region may be running then.
+    void fminus_rt_parallel_stop() noexcept;
 
     // The libm mode's: libm's sinf, cosf, ..., which C++'s std::sin of a float calls, under names LLVM does not know,
     // so that it neither folds nor vectorises them.

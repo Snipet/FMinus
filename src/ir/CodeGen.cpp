@@ -41,6 +41,7 @@ namespace fminus::ir
             , strictAliasing_(options.strictAliasing)
             , denormals_(options.denormals)
             , targetTriple_(options.targetTriple)
+            , threads_(options.threads)
         {
         }
 

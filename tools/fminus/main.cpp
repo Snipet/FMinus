@@ -15,9 +15,12 @@
 //     fminus synth.fm --math libm           sinf, cosf, ... as libm's (--math vector, the default: the same result
 //                                           wherever computed; --math fast: LLVM's intrinsics, as clang's)
 //     fminus synth.fm -I lib                #include "name" looks beside the including file, then in lib/
+//     fminus voices.fm --threads 4          a parallel for or parallel { } on 4 threads at most (0, the default:
+//                                           one for each core; 1: each region on the calling thread alone)
 #include "frontend/Frontend.h"
 #include "ir/CodeGen.h"
 #include "jit/Jit.h"
+#include "runtime/Runtime.h"
 #include "support/Aot.h"
 #include "support/HostTarget.h"
 
@@ -58,6 +61,25 @@ namespace
     {
         return fail(llvm::toString(std::move(error)));
     }
+
+    // The runtime's pool (runtime/Parallel.cpp), for a program with a parallel region: started while it lives.
+    struct RuntimePool
+    {
+        explicit RuntimePool(bool start) : started(start)
+        {
+            if (started)
+                fminus_rt_parallel_start();
+        }
+        ~RuntimePool()
+        {
+            if (started)
+                fminus_rt_parallel_stop();
+        }
+        RuntimePool(const RuntimePool&) = delete;
+        RuntimePool& operator=(const RuntimePool&) = delete;
+
+        bool started;
+    };
 
     // Calls the JIT'd Result(float, ...) at `address` with args.size() arguments: Result is float, bool or int.
     template <typename Result, std::size_t... I>
@@ -182,6 +204,7 @@ int main(int argc, char** argv)
     std::string denormals = "preserve";
     std::string math = "vector";
     std::vector<std::string> includeDirectories;
+    unsigned threads = 0;
     app.add_option("input", input, "FMinus source file ('-' for stdin)")->required();
     app.add_option("args", runArgs, "The arguments of --run's function");
     app.add_option("-o,--output", output, "The output file ('-' is stdout)")->capture_default_str();
@@ -218,6 +241,10 @@ int main(int argc, char** argv)
     app.add_option("-I", includeDirectories,
                    "Where #include \"name\" looks after the including file's directory, in order (clang's -I)")
         ->allow_extra_args(false);
+    app.add_option("--threads", threads,
+                   "The most threads a parallel for or parallel { } runs on, the calling thread's among them (0: one "
+                   "for each core; 1: each region on the calling thread alone)")
+        ->capture_default_str();
     CLI11_PARSE(app, argc, argv);
     if (emit == "exe" && run.empty() && output == "-")
         return fail("--emit exe: an executable needs a file name (-o)");
@@ -265,6 +292,7 @@ int main(int argc, char** argv)
     }
     options.denormals = denormals == "flush" ? fminus::ir::Denormals::Flush : fminus::ir::Denormals::Preserve;
     options.targetTriple = (*machine)->getTargetTriple().str();   // which register an entry point sets
+    options.threads = threads;
 
     // Syntax tree -> LLVM IR.
     auto context = std::make_unique<llvm::LLVMContext>();
@@ -298,6 +326,8 @@ int main(int argc, char** argv)
                                         fminus::ast::typeName(param.type)));
         }
 
+        // A program with a parallel region runs it on the runtime's pool, started for the call (runtime/Runtime.h).
+        const RuntimePool pool(module->getFunction("fminus_rt_parallel_for") != nullptr && threads != 1);
         auto jit = fminus::jit::Jit::create(optimisation);
         if (!jit)
             return fail(jit.takeError());

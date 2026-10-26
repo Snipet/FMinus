@@ -108,6 +108,11 @@ namespace fminus::ir
         // mode under Denormals::Flush: FPCR on arm64, MXCSR on x86-64. Empty is this process's, which is what the JIT
         // and an executable built here run on. Only Flush reads it.
         std::string targetTriple{};
+
+        // The most threads a parallel for or parallel { } runs on, the calling thread's among them (Parallel.cpp):
+        // 0 is as many as the runtime's pool has, 1 runs each region on the calling thread alone. Each region hands
+        // it to fminus_rt_parallel_for (runtime/Runtime.h), which also runs every region alone until the pool starts.
+        unsigned threads = 0;
     };
 
     // Lowers `program` into a new module in `context`, named after the diagnostics' file. Every FMinus function becomes

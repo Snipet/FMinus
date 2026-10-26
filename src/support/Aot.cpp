@@ -152,7 +152,13 @@ namespace fminus::aot
         std::vector<llvm::Value*> values;
         for (unsigned i = 0; i < count; ++i)
             values.push_back(builder.CreateLoad(floatType, builder.CreateConstInBoundsGEP2_32(argsType, args, 0, i)));
+        // A program with a parallel region runs it on the runtime's pool, there while main runs.
+        const bool parallel = module.getFunction("fminus_rt_parallel_for") != nullptr;
+        if (parallel)
+            builder.CreateCall(module.getOrInsertFunction("fminus_rt_parallel_start", intType));
         llvm::Value* result = builder.CreateCall(program, values, "result");
+        if (parallel)
+            builder.CreateCall(module.getOrInsertFunction("fminus_rt_parallel_stop", builder.getVoidTy()));
         llvm::CallInst* print = builder.CreateCall(printResult, {result});
         if (printsBool)
             print->addParamAttr(0, llvm::Attribute::ZExt);

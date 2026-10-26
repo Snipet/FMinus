@@ -22,6 +22,8 @@
 //     statement    : block | expr ";" | "return" expr? ";" | ";"
 //                  | "if" "(" expr ")" statement ("else" statement)? | "while" "(" expr ")" statement
 //                  | "for" "(" (declaration | expr? ";") expr? ";" expr? ")" statement | "break" ";" | "continue" ";"
+//                  | "parallel" "for" "(" (declaration | expr? ";") expr? ";" expr? ")" statement
+//                  | "parallel" block                    FMinus's: the iterations, or the statements, at once
 //     expr         : NUMBER | "true" | "false" | IDENTIFIER | IDENTIFIER "(" (expr ("," expr)*)? ")" | "(" expr ")"
 //                  | ("-" | "+" | "!" | "*" | "&") expr | expr "[" expr "]"         *p, &x, p[i]
 //                  | "sizeof" "(" "const"? type pointer ")"                          a type's size, an int
@@ -222,7 +224,7 @@
 %token FLOAT "float" CONST "const" RETURN "return" BOOL "bool" INT "int" VOID "void" TRUE "true" FALSE "false"
 %token RESTRICT "restrict" AMPERSAND "&" LBRACKET "[" RBRACKET "]" SIZEOF "sizeof" COLONCOLON "::"
 %token LT "<" LE "<=" GT ">" GE ">=" EQ "==" NE "!=" NOT "!" AND "&&" OR "||" QUESTION "?" COLON ":"
-%token IF "if" ELSE "else" WHILE "while" FOR "for" BREAK "break" CONTINUE "continue"
+%token IF "if" ELSE "else" WHILE "while" FOR "for" BREAK "break" CONTINUE "continue" PARALLEL "parallel"
 %token MODULE "module" THIS "this" ARROW "->" PARAM "param"
 %token <ast::Type> MODULE_NAME "module name"
 %token <ast::Type> VECTOR_TYPE "vector type"
@@ -559,6 +561,11 @@ statement
                                             { $$ = ast::Stmt{at(@1), ast::ForStmt{$3, $4, $6, ast::own($8)}}; }
     | "break" ";"                           { $$ = ast::Stmt{at(@1), ast::BreakStmt{}}; }
     | "continue" ";"                        { $$ = ast::Stmt{at(@1), ast::ContinueStmt{}}; }
+    | "parallel" "for" "(" for_init optional_expr ";" optional_expr ")" statement
+                                            {
+                                                $$ = ast::Stmt{at(@1), ast::ParallelForStmt{$4, $5, $7, ast::own($9)}};
+                                            }
+    | "parallel" block                      { $$ = ast::Stmt{at(@1), ast::ParallelBlockStmt{$2}}; }
     ;
 
 // The first clause of a for: a declaration (its ; included), an expression and ;, or just ;.

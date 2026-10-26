@@ -189,6 +189,10 @@ namespace fminus::ir::detail
             if (effectOf(function.name) == Effect::NonBlocking && !called.contains(function.name))
                 wrapEntry(*definition, function.location, arm);
         }
+        // A parallel region's body runs in its caller's mode, on whichever thread (runtime/Parallel.cpp), and is never
+        // an entry point.
+        for (llvm::Function* body : outlined_)
+            body->addFnAttrs(llvm::AttrBuilder(module_.getContext()).addDenormalFPEnvAttr(kFlushing));
     }
 
     // `function`, an entry point, becomes `<name>.body`, internal and noinline, and `<name>` a wrapper of the same

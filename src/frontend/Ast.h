@@ -534,11 +534,30 @@ namespace fminus::ast
     {
     };
 
+    // `parallel for (int i = first; i < end; ++i) body`: FMinus's, not C's. Its iterations run at once, spread over the
+    // machine's cores, and all of them have finished when the loop ends. The fields are a ForStmt's; the code
+    // generator (ir/Parallel.cpp) takes only that counting form (i <= end too, i++ and i += 1), with the bounds
+    // computed once, before the first iteration.
+    struct ParallelForStmt
+    {
+        std::vector<Stmt> init;
+        ExprPtr condition;
+        ExprPtr step;
+        StmtPtr body;
+    };
+
+    // `parallel { a = f(x); b = g(y); }`: FMinus's too. Each statement of the block, a task, runs at once with the
+    // others, and all of them have finished at the closing brace.
+    struct ParallelBlockStmt
+    {
+        std::vector<Stmt> tasks;
+    };
+
     struct Stmt
     {
         SourceLocation location;
         std::variant<DeclStmt, ExprStmt, ReturnStmt, BlockStmt, EmptyStmt, IfStmt, WhileStmt, ForStmt, BreakStmt,
-                     ContinueStmt>
+                     ContinueStmt, ParallelForStmt, ParallelBlockStmt>
             node;
     };
 

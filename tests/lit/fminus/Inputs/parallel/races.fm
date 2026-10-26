@@ -1,0 +1,36 @@
+// What would race, refused (parallel.fm runs it): an outer variable every iteration assigns, a method that changes its
+// module called on one, the loop variable assigned, two statements of a block on one variable, and a declaration as a
+// statement.
+module OnePole
+{
+    float y;
+    float k;
+    float tick(float x) { y += k * (x - y); return y; }
+};
+
+float f(float* out, int n)
+{
+    float total = 0;
+    OnePole filter;
+    parallel for (int i = 0; i < n; ++i)
+    {
+        total += out[i];
+        filter.tick(out[i]);
+        i = 0;
+    }
+    float a = 0;
+    parallel
+    {
+        a = 1;
+        out[0] = a;
+        float c = 2;
+    }
+    return total;
+}
+
+// CHECK:      races.fm:17:9: error: every iteration of the parallel for assigns 'total', and the iterations run at once: give each an element of its own (an array indexed by the loop variable), or combine them after the loop
+// CHECK-NEXT: races.fm:18:16: error: every iteration of the parallel for calls 'OnePole::tick' on 'filter', which changes it, and the iterations run at once: give each iteration a module of its own (an array of them, indexed by the loop variable)
+// CHECK-NEXT: races.fm:19:9: error: cannot assign 'i', the loop variable of a parallel for: each iteration has its own
+// CHECK-NEXT: races.fm:25:18: error: the statements of a parallel block run at once: this one uses 'a', which another changes
+// CHECK-NEXT: races.fm:24:9: note: 'a' is changed here
+// CHECK-NEXT: races.fm:26:15: error: a statement of a parallel block cannot declare a variable ('c' would end with it): declare it before the block, and assign it in one of the block's statements

@@ -109,6 +109,7 @@ IDENTIFIER  [A-Za-z_][A-Za-z0-9_]*
 "for"                       { return Parser::make_FOR(yyextra->where); }
 "break"                     { return Parser::make_BREAK(yyextra->where); }
 "continue"                  { return Parser::make_CONTINUE(yyextra->where); }
+"parallel"                  { return Parser::make_PARALLEL(yyextra->where); }
 "module"                    { return Parser::make_MODULE(yyextra->where); }
 "this"                      { return Parser::make_THIS(yyextra->where); }
 "param"                     { return Parser::make_PARAM(yyextra->where); }

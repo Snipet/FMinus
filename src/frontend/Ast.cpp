@@ -238,6 +238,21 @@ namespace fminus::ast
                                   },
                                   [&](const BreakStmt&) { return indent + "(break)"; },
                                   [&](const ContinueStmt&) { return indent + "(continue)"; },
+                                  [&](const ParallelForStmt& loop) {
+                                      std::string init;
+                                      for (const Stmt& item : loop.init)
+                                          init += (init.empty() ? "" : " ") + dump(item, "");
+                                      return indent + "(parallel-for (" + init + ") "
+                                             + (loop.condition ? dump(*loop.condition) : "()") + " "
+                                             + (loop.step ? dump(*loop.step) : "()") + "\n"
+                                             + dump(*loop.body, indent + "  ") + ")";
+                                  },
+                                  [&](const ParallelBlockStmt& block) {
+                                      std::string text = indent + "(parallel";
+                                      for (const Stmt& task : block.tasks)
+                                          text += "\n" + dump(task, indent + "  ");
+                                      return text + ")";
+                                  },
                               },
                               stmt.node);
         }

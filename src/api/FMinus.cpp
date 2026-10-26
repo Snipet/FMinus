@@ -113,6 +113,17 @@ namespace fminus
         unsigned polyLanes = 4;
         std::map<std::string, Effect, std::less<>> effects;   // the functions a declaration marks
         std::vector<Module> modules;
+        bool pool = false;   // a user of the runtime's pool, for its parallel regions (runtime/Parallel.cpp)
+
+        Impl() = default;
+        Impl(const Impl&) = delete;
+        Impl& operator=(const Impl&) = delete;
+        ~Impl()
+        {
+            jit.reset();
+            if (pool)
+                fminus_rt_parallel_stop();
+        }
     };
 
     Program::Program(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
@@ -177,6 +188,7 @@ namespace fminus
         lowering.knobVersions = options.knobVersions;
         lowering.denormals = options.denormals == Denormals::Flush ? ir::Denormals::Flush : ir::Denormals::Preserve;
         lowering.targetTriple = (*machine)->getTargetTriple().str();   // which register an entry point sets
+        lowering.threads = options.threads;
 
         auto context = std::make_unique<llvm::LLVMContext>();
         std::unique_ptr<llvm::Module> module = ir::lower(*program, *context, diagnostics, lowering);
@@ -222,6 +234,8 @@ namespace fminus
                 info.methods.push_back(declared->name + "::" + method);
         }
 
+        // A program with a parallel region runs it on the runtime's pool, from now until it is destroyed.
+        const bool parallel = module->getFunction("fminus_rt_parallel_for") != nullptr && options.threads != 1;
         auto created = jit::Jit::create(level);
         if (!created)
         {
@@ -236,6 +250,11 @@ namespace fminus
 
         auto impl = std::make_unique<Impl>();
         impl->jit = std::move(*created);
+        if (parallel)
+        {
+            fminus_rt_parallel_start();
+            impl->pool = true;
+        }
         impl->polyLanes = lowering.polyLanes;
         impl->modules = std::move(modules);
         for (const ast::Function& function : program->functions)

@@ -207,8 +207,24 @@ namespace fminus::ir::detail
         return scopes_.back().emplace(name, binding).second;
     }
 
-    // The innermost binding of `name`, or nullptr.
-    const Lowering::Binding* Lowering::find(const std::string& name) const
+    // The innermost binding of `name`, or nullptr. In a parallel region's body, a variable of the function around the
+    // region is captured (Parallel.cpp), and the binding is the region's.
+    const Lowering::Binding* Lowering::find(const std::string& name)
+    {
+        for (std::size_t i = scopes_.size(); i-- > 0;)
+        {
+            const auto found = scopes_[i].find(name);
+            if (found == scopes_[i].end())
+                continue;
+            if (regions_.empty() || i >= regions_.back().base)
+                return &found->second;
+            return capture(name, found->second);
+        }
+        return nullptr;
+    }
+
+    // The innermost binding of `name`, or nullptr, wherever it is: a look that captures nothing.
+    const Lowering::Binding* Lowering::lookup(const std::string& name) const
     {
         for (auto scope = scopes_.rbegin(); scope != scopes_.rend(); ++scope)
         {

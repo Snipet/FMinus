@@ -36,6 +36,10 @@ target_include_directories(fminus_runtime PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_sources(fminus_runtime PRIVATE $<TARGET_OBJECTS:fminus_pffft>)
 target_include_directories(fminus_runtime SYSTEM PRIVATE "${FMINUS_PFFFT_INCLUDE_DIR}")
 target_compile_definitions(fminus_runtime PRIVATE PFFFT_STATIC_DEFINE)
+# The pool behind parallel for and parallel { } (runtime/Parallel.cpp) makes threads: the system's thread library, on a
+# system where it is one of its own.
+find_package(Threads REQUIRED)
+target_link_libraries(fminus_runtime PUBLIC Threads::Threads)
 
 # ---- the library ----------------------------------------------------------------------------------------------------
 add_library(fminus_lib STATIC ${_fminus_sources} ${_fminus_public_headers})

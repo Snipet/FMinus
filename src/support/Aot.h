@@ -48,7 +48,8 @@ namespace fminus::aot
     // `int main(int, char**)`, so the program's main is renamed fminus.main (a name no FMinus function can have) and
     // made internal, free to be inlined, and a new C main runs it: it reads main's arguments from the command line,
     // calls it and prints its result, a float or true or false (fminus_rt_main_args, fminus_rt_main_result,
-    // fminus_rt_main_bool_result: runtime/Runtime.h), exiting with 0, or with 2 when the arguments are wrong. Call it
+    // fminus_rt_main_bool_result: runtime/Runtime.h), exiting with 0, or with 2 when the arguments are wrong. A program
+    // with a parallel region gets the runtime's pool around the call (fminus_rt_parallel_start and _stop). Call it
     // before prepareModule and optimising. Fails when the module defines no main, or a main that takes anything but
     // floats or returns anything but a float or a bool.
     llvm::Error addEntryPoint(llvm::Module& module);

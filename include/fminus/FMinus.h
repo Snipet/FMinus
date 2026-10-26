@@ -32,6 +32,12 @@
 // [[clang::nonblocking]], and FMinus refuses any that could reach malloc, calloc or free. Different Programs may
 // compile and look up on different threads at once.
 //
+// A program's own threads: its parallel for loops and parallel { } blocks run on FMinus's pool, a thread for each core
+// but one, shared by every Program in the process. The first Program with a parallel region starts it when it
+// compiles, and the last one's destructor stops it. The thread that calls into the program works on each region too,
+// and the region has finished when the statement has. Running one allocates nothing and takes no lock, so a
+// nonblocking process() may have them (Options::threads limits them).
+//
 // Lifetime: a function pointer is valid while its Program lives. Destroy a Program only when no thread can still be
 // running its code.
 //
@@ -185,6 +191,11 @@ namespace fminus
             // constant that reaches one is folded with the compiling machine's own functions.
             unsigned knobVersions = 8;
             Denormals denormals = Denormals::Preserve;   // subnormals kept, or flushed to zero (above)
+            // The most threads a parallel for or parallel { } runs on, the calling thread's among them: 0 is as many
+            // as the pool has (one for each core), 1 runs every region on the calling thread alone, in order, and
+            // starts no pool. A region runs in its caller's floating-point mode on every thread (Denormals::Flush's
+            // flush-to-zero too).
+            unsigned threads = 0;
         };
 
         // Compiles `source`. Returns nullptr when it does not compile, with `errors` holding FMinus's messages, one a

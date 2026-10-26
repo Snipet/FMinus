@@ -249,7 +249,7 @@ namespace fminus::ir::detail
         std::string name;
         if (const auto* variable = std::get_if<ast::VariableExpr>(&base.node))
         {
-            if (find(variable->name) != nullptr)
+            if (lookup(variable->name) != nullptr)
                 return std::nullopt;
             name = variable->name;
         }
@@ -350,6 +350,8 @@ namespace fminus::ir::detail
         const auto key = std::make_pair(field, stream);
         if (const auto found = entryLoads_.find(key); found != entryLoads_.end())
             return found->second;
+        if (!regions_.empty())   // the method's read, handed to the region (Parallel.cpp)
+            return capturedParameter(field, stream);
         const ast::Module& module = *function_->module;
         const ast::Field& parameter = module.fields[field];
         llvm::Function* function = builder_.GetInsertBlock()->getParent();

@@ -54,6 +54,7 @@ namespace fminus::ir::detail
             Plan,          // fminus_rt_fft_create, fminus_rt_fft_create_complex (runtime/Fft.cpp): a new plan, or null
             PlanRelease,   // fminus_rt_fft_destroy
             Transform,     // fminus_rt_fft_forward_real and the others: reads one buffer, writes another
+            Parallel,      // fminus_rt_parallel_for (runtime/Parallel.cpp): runs a region's body, which does anything
         };
 
         struct RuntimeFacts
@@ -73,6 +74,7 @@ namespace fminus::ir::detail
             RuntimeFacts{"fminus_rt_fft_inverse_real", RuntimeKind::Transform},
             RuntimeFacts{"fminus_rt_fft_forward_complex", RuntimeKind::Transform},
             RuntimeFacts{"fminus_rt_fft_inverse_complex", RuntimeKind::Transform},
+            RuntimeFacts{"fminus_rt_parallel_for", RuntimeKind::Parallel},
         };
 
         // The heap's allocator family, named after its first function as LangRef asks: LLVM pairs an allocation with
@@ -82,10 +84,11 @@ namespace fminus::ir::detail
         // Gives the runtime's function `function` (kRuntimeFacts) the attributes that are true of its code, so LLVM
         // knows a call of it touches only what it touches: a call of fft_forward then changes no module's fields, and
         // memory from calloc is fresh and zeroed. Each one must stay true of runtime/Runtime.cpp and runtime/Fft.cpp:
-        // an attribute that is not is a miscompile. Every one of them is noexcept (nounwind) and comes back
-        // (willreturn). None takes nonnull: a null plan is a plan that does nothing, and the heap's results may be
-        // null. Nor does an FFT buffer take noalias, though `out` must not overlap `in`: a program that transforms in
-        // place gets what PFFFT gives it, as before.
+        // an attribute that is not is a miscompile. Every one of them is noexcept (nounwind), and all but
+        // fminus_rt_parallel_for come back (willreturn): it runs a region's body, which may loop for ever, as a loop
+        // with a constant condition may. None takes nonnull: a null plan is a plan that does nothing, and the heap's
+        // results may be null. Nor does an FFT buffer take noalias, though `out` must not overlap `in`: a program that
+        // transforms in place gets what PFFFT gives it, as before.
         void describeRuntime(llvm::Function& function)
         {
             const RuntimeFacts* facts = nullptr;
@@ -99,7 +102,8 @@ namespace fminus::ir::detail
             llvm::LLVMContext& context = function.getContext();
             const llvm::Attribute keepsNone = llvm::Attribute::getWithCaptureInfo(context, llvm::CaptureInfo::none());
             function.setDoesNotThrow();
-            function.setWillReturn();
+            if (facts->kind != RuntimeKind::Parallel)
+                function.setWillReturn();
             switch (facts->kind)
             {
             case RuntimeKind::Allocation:
@@ -158,6 +162,10 @@ namespace fminus::ir::detail
                 function.addParamAttr(2, llvm::Attribute::WriteOnly);
                 for (unsigned arg = 0; arg < 3; ++arg)
                     function.addParamAttr(arg, keepsNone);
+                break;
+            case RuntimeKind::Parallel:
+                // The body reads and writes what its context reaches, and calls what it calls: LLVM's default, any
+                // memory, is what is true of it.
                 break;
             }
         }

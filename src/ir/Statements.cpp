@@ -63,31 +63,31 @@ namespace fminus::ir::detail
                 },
                 expr.node);
         }
-
-        // C11 6.8.5p6: a loop whose controlling expression is not a constant expression, and which does no I/O and
-        // touches no volatile or atomic object, may be assumed to terminate. Clang tells LLVM so for C11 and later
-        // (CodeGenFunction::checkIfLoopMustProgress), and so does FMinus, with the same metadata on the same branches:
-        // every branch back to the loop's condition block, `header`, carries a loop ID that holds
-        // llvm.loop.mustprogress. `entry`, the branch into the loop, does not. A loop that runs for ever without
-        // effects is then undefined, and LLVM may delete a loop whose results go unused without proving that it
-        // ends. (FMinus has no volatile objects; its atomics are knob reads, once a call, and I/O is in external
-        // functions, which LLVM assumes may make progress.) A loop with a constant condition, `for (;;)` or
-        // `while (1)`, may run for ever, as in C; and no function is marked mustprogress, which C does not imply.
-        void mustProgress(llvm::BasicBlock* header, const llvm::Instruction* entry)
-        {
-            llvm::LLVMContext& context = header->getContext();
-            llvm::Metadata* operands[] = {
-                nullptr, llvm::MDNode::get(context, llvm::MDString::get(context, "llvm.loop.mustprogress"))};
-            llvm::MDNode* loop = llvm::MDNode::getDistinct(context, operands);
-            loop->replaceOperandWith(0, loop);   // a loop ID names itself, so that it is this loop's alone
-            for (llvm::User* user : header->users())
-            {
-                auto* branch = llvm::dyn_cast<llvm::Instruction>(user);
-                if (branch != nullptr && branch != entry && branch->isTerminator())
-                    branch->setMetadata(llvm::LLVMContext::MD_loop, loop);
-            }
-        }
     } // namespace
+
+    // C11 6.8.5p6: a loop whose controlling expression is not a constant expression, and which does no I/O and
+    // touches no volatile or atomic object, may be assumed to terminate. Clang tells LLVM so for C11 and later
+    // (CodeGenFunction::checkIfLoopMustProgress), and so does FMinus, with the same metadata on the same branches:
+    // every branch back to the loop's condition block, `header`, carries a loop ID that holds
+    // llvm.loop.mustprogress. `entry`, the branch into the loop, does not. A loop that runs for ever without
+    // effects is then undefined, and LLVM may delete a loop whose results go unused without proving that it
+    // ends. (FMinus has no volatile objects; its atomics are knob reads, once a call, and I/O is in external
+    // functions, which LLVM assumes may make progress.) A loop with a constant condition, `for (;;)` or
+    // `while (1)`, may run for ever, as in C; and no function is marked mustprogress, which C does not imply.
+    void mustProgress(llvm::BasicBlock* header, const llvm::Instruction* entry)
+    {
+        llvm::LLVMContext& context = header->getContext();
+        llvm::Metadata* operands[] = {
+            nullptr, llvm::MDNode::get(context, llvm::MDString::get(context, "llvm.loop.mustprogress"))};
+        llvm::MDNode* loop = llvm::MDNode::getDistinct(context, operands);
+        loop->replaceOperandWith(0, loop);   // a loop ID names itself, so that it is this loop's alone
+        for (llvm::User* user : header->users())
+        {
+            auto* branch = llvm::dyn_cast<llvm::Instruction>(user);
+            if (branch != nullptr && branch != entry && branch->isTerminator())
+                branch->setMetadata(llvm::LLVMContext::MD_loop, loop);
+        }
+    }
 
     void Lowering::lowerStatements(const std::vector<ast::Stmt>& statements)
     {
@@ -124,15 +124,24 @@ namespace fminus::ir::detail
                        [&](const ast::BreakStmt&) {
                            if (loops_.empty())
                                error(stmt.location, "'break' statement not in loop or switch statement");
+                           else if (loops_.back().breakTarget == nullptr)   // a parallel region's body (Parallel.cpp)
+                               error(stmt.location, regions_.back().loop
+                                                        ? "'break' cannot leave a parallel for: its iterations run "
+                                                          "at once, and none can end the others"
+                                                        : "'break' cannot leave a statement of a parallel block");
                            else
                                builder_.CreateBr(loops_.back().breakTarget);
                        },
                        [&](const ast::ContinueStmt&) {
                            if (loops_.empty())
                                error(stmt.location, "'continue' statement not in loop statement");
+                           else if (loops_.back().continueTarget == nullptr)
+                               error(stmt.location, "'continue' cannot leave a statement of a parallel block");
                            else
                                builder_.CreateBr(loops_.back().continueTarget);
                        },
+                       [&](const ast::ParallelForStmt& loop) { lowerParallelFor(stmt.location, loop); },
+                       [&](const ast::ParallelBlockStmt& block) { lowerParallelBlock(stmt.location, block); },
                    },
                    stmt.node);
     }
@@ -149,6 +158,17 @@ namespace fminus::ir::detail
     // kind of function refuses the other's, as C does.
     void Lowering::lowerReturn(SourceLocation location, const ast::ReturnStmt& ret)
     {
+        if (!regions_.empty())   // in a parallel region's body, a function of its own (Parallel.cpp)
+        {
+            error(location, regions_.back().loop
+                                ? "cannot return from a parallel for: its iterations run at once, and none can end "
+                                  "the function"
+                                : "cannot return from a statement of a parallel block");
+            if (ret.value != nullptr)
+                lower(*ret.value);   // for its own errors
+            builder_.CreateRetVoid();
+            return;
+        }
         const ast::Type result = function_->returnType;
         const bool returnsVoid = result == ast::Type::Void;
         if (ret.value == nullptr)

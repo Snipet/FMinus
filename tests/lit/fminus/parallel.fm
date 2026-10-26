@@ -1,0 +1,58 @@
+// parallel for and parallel { } (extending.md, recipe 22): the syntax tree; each region's body a function of its own,
+// internal, of the runtime's task type, which fminus_rt_parallel_for runs over the iterations (or the statements); what
+// the body uses of its function captured in a context, by value or by reference; run by the JIT and as an executable,
+// on all the threads and on one; and what would race refused (Inputs/parallel/races.fm).
+// RUN: fminus %s --emit ast | FileCheck %s --check-prefix=AST
+// RUN: fminus %s -O0 | FileCheck %s --check-prefix=IR
+// RUN: fminus %s --run main 10 | FileCheck %s --check-prefix=RESULT
+// RUN: fminus %s --run main 10 --threads 1 | FileCheck %s --check-prefix=RESULT
+// RUN: fminus %s --emit exe -o %t.exe
+// RUN: %t.exe 10 | FileCheck %s --check-prefix=RESULT
+// RUN: not fminus %S/Inputs/parallel/races.fm 2>&1 | FileCheck %S/Inputs/parallel/races.fm
+
+float main(float n)
+{
+    float squares[64];
+    int count = (int)n;
+    float scale = 1;
+    parallel for (int i = 0; i < count; ++i)
+        squares[i] = scale * i * i;
+    float evens = 0;
+    float odds = 0;
+    parallel
+    {
+        for (int i = 0; i < count; i += 2)
+            evens += squares[i];
+        for (int i = 1; i < count; i += 2)
+            odds += squares[i];
+    }
+    return evens - odds;
+}
+
+// AST:      (parallel-for ((decl int i 0)) (< i count) (pre++ i)
+// AST-NEXT:   (= ([] squares i) (* (* scale i) i)))
+// AST:      (parallel
+// AST-NEXT:   (for ((decl int i 0)) (< i count) (+= i 2)
+// AST-NEXT:     (+= evens ([] squares i)))
+// AST-NEXT:   (for ((decl int i 1)) (< i count) (+= i 2)
+// AST-NEXT:     (+= odds ([] squares i))))
+
+// scale, read only, by value; the array by reference; then the block's: count by value, the sums by reference.
+// IR-LABEL: define float @main(float %n)
+// IR:         %main.parallel.1.context = alloca [16 x i8], align 8
+// IR:         store float %{{.*}}, ptr %{{.*}}, align 4
+// IR:         store ptr %squares, ptr %{{.*}}, align 8
+// IR:         call void @fminus_rt_parallel_for(ptr @main.parallel.1, ptr %main.parallel.1.context, i32 0, i32 %{{.*}}, i32 0)
+// IR:         call void @fminus_rt_parallel_for(ptr @main.parallel.2, ptr %main.parallel.2.context, i32 0, i32 2, i32 0)
+// IR:       define internal void @main.parallel.1(ptr noalias readonly captures(none) %context, i32 %begin, i32 %end)
+// IR:         %scale = load float, ptr %scale.at, align 4
+// IR:         %squares.ref = load ptr, ptr %squares.ref.at, align 8
+// IR:         icmp slt i32 %{{.*}}, %end
+// IR:       define internal void @main.parallel.2(ptr noalias readonly captures(none) %context, i32 %begin, i32 %end)
+// IR:         switch i32 %{{.*}}, label %parallel.inc [
+// IR-NEXT:      i32 0, label %parallel.statement
+// IR-NEXT:      i32 1, label %parallel.statement{{[0-9]+}}
+// IR-NEXT:    ]
+
+// 0 - 1 + 4 - 9 + 16 - 25 + 36 - 49 + 64 - 81
+// RESULT: -45

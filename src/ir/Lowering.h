@@ -12,6 +12,8 @@
 //     Memory.cpp        lvalues (variables, p[i], *p, components) read and written, arrays, &x, pointer arithmetic
 //     Modules.cpp       modules: their layout, fields, methods and calls of them, `this`, copies
 //     Effects.cpp       [[clang::nonallocating]] and [[clang::nonblocking]], checked over the calls
+//     Parallel.cpp      parallel for and parallel { }: what would race refused, each body a function of its own that
+//                       the runtime's pool runs, and what the body uses of the function around it captured
 //     Tbaa.cpp          C's strict aliasing, told to LLVM: the type tag (!tbaa) on every load and store of memory
 //     Denormals.cpp     Denormals::Flush: constants folded as flushing hardware computes them (Denormals.h), every
 //                       function marked so for LLVM, and each entry point setting the mode around its body
@@ -28,12 +30,14 @@
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/Module.h>
 
+#include <cstdint>
 #include <map>
 #include <optional>
 #include <string>
 #include <utility>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace fminus::ir::detail
@@ -86,6 +90,9 @@ namespace fminus::ir::detail
     bool isPolyQuery(std::string_view name);             // poly_lanes, poly_index
     bool isPolyMemory(std::string_view name);            // poly_load, poly_store
 
+    // A loop's branches back to `header`, but not `entry`, marked llvm.loop.mustprogress (Statements.cpp).
+    void mustProgress(llvm::BasicBlock* header, const llvm::Instruction* entry);
+
     class Lowering
     {
     public:
@@ -112,10 +119,12 @@ namespace fminus::ir::detail
             ast::Type type = ast::Type::Float;
         };
 
-        // A variable in scope: its stack slot, whether it may be assigned, and its type.
+        // A variable in scope: where it is (its stack slot; in a parallel region, the region's own slot for a copy of
+        // a variable of the function around it, or that variable's address: Parallel.cpp), whether it may be
+        // assigned, and its type.
         struct Binding
         {
-            llvm::AllocaInst* slot;
+            llvm::Value* slot;
             bool isConst;
             ast::Type type;
         };
@@ -152,7 +161,8 @@ namespace fminus::ir::detail
             std::string callee;
         };
 
-        // The loops around the statement being lowered, innermost last: where break and continue go.
+        // The loops around the statement being lowered, innermost last: where break and continue go. A parallel
+        // region's body is one too, whose break (and a parallel { }'s continue) goes nowhere: an error.
         struct Loop
         {
             llvm::BasicBlock* breakTarget;
@@ -168,6 +178,44 @@ namespace fminus::ir::detail
             llvm::Value* value;
             llvm::Value* base;
             llvm::Value* stride;
+        };
+
+        // What a parallel region's body uses of the function around it (Parallel.cpp), in the context the function
+        // fills for it: a variable's value or its address, or what a method read of a parameter where it starts.
+        struct Capture
+        {
+            enum class Kind
+            {
+                Value,       // a variable the region only reads: a copy
+                Reference,   // one it assigns or takes the address of, an array or a module: its address
+                Parameter,   // a knob's value, or one of what a stream's reads use (StreamRead's, in order)
+            };
+            Kind kind = Kind::Value;
+            std::string name;           // the variable's, or the parameter's
+            unsigned field = 0;         // the parameter's field
+            bool stream = false;        // a stream's: then part is 0 flat, 1 value, 2 base, 3 stride
+            unsigned part = 0;
+            std::uint64_t offset = 0;   // where it is in the context, in bytes
+        };
+
+        // A parallel for or a parallel { } being lowered (Parallel.cpp). Its body goes into a function of its own, of
+        // the runtime's task type, which reaches what it uses of the function around it through the context.
+        struct Region
+        {
+            SourceLocation location;                       // the statement's
+            bool loop = true;                              // a parallel for; else a parallel { }
+            std::size_t base = 0;                          // scopes_[base] on are the region's own
+            llvm::Function* function = nullptr;            // the body's
+            llvm::BasicBlock* body = nullptr;              // where its code starts, after the captures
+            std::vector<Capture> captures;
+            std::unordered_set<std::string> byReference;   // the variables from outside it assigns or takes & of
+            std::uint64_t size = 0;                        // the context's bytes so far
+            llvm::Align align = llvm::Align(1);
+            llvm::IRBuilderBase::InsertPoint resume;       // where the function around it goes on
+            // The function around it's reads of its parameters (atEntry), set aside while the region has its own.
+            std::map<std::pair<unsigned, bool>, llvm::Value*> entryLoads;
+            std::map<unsigned, StreamRead> flatStreams;
+            std::vector<llvm::Instruction*> streamReads;
         };
 
         // The runtime functions behind a transcendental builtin (Math.cpp): the vector mode's scalar one
@@ -203,7 +251,8 @@ namespace fminus::ir::detail
         llvm::AllocaInst* allocate(llvm::Type* type, const std::string& name);
         static bool reachable(llvm::BasicBlock* block);
         bool bind(const std::string& name, Binding binding);
-        const Binding* find(const std::string& name) const;
+        const Binding* find(const std::string& name);
+        const Binding* lookup(const std::string& name) const;
 
         // ---- Statements.cpp -----------------------------------------------------------------------------------------
         void lowerStatements(const std::vector<ast::Stmt>& statements);
@@ -298,6 +347,19 @@ namespace fminus::ir::detail
                                                       std::vector<std::string>& looking);
         void checkEffects(const ast::Program& program);
 
+        // ---- Parallel.cpp -------------------------------------------------------------------------------------------
+        void lowerParallelFor(SourceLocation location, const ast::ParallelForStmt& loop);
+        void lowerParallelBlock(SourceLocation location, const ast::ParallelBlockStmt& block);
+        std::unordered_set<std::string> checkParallelFor(const ast::ParallelForStmt& loop, const std::string& counter);
+        std::unordered_set<std::string> checkParallelBlock(const ast::ParallelBlockStmt& block);
+        bool changesModule(const std::string& method);
+        void beginRegion(SourceLocation location, bool loop, std::unordered_set<std::string> byReference);
+        void endRegion(llvm::Value* begin, llvm::Value* end);
+        const Binding* capture(const std::string& name, const Binding& outer);
+        llvm::Value* captured(Capture capture, llvm::Type* type, const std::string& name);
+        llvm::Value* capturedParameter(unsigned field, bool stream);
+        llvm::Value* outerValue(const Capture& capture);
+
         // ---- Tbaa.cpp -----------------------------------------------------------------------------------------------
         llvm::MDNode* accessTag(ast::Type type);
         void tag(llvm::Instruction* access, ast::Type type);
@@ -325,5 +387,10 @@ namespace fminus::ir::detail
         std::map<unsigned, StreamRead> flatStreams_;                       // what its streams' reads use
         Denormals denormals_;                                              // subnormals preserved or flushed
         std::string targetTriple_;                                         // which mode register an entry point sets
+        unsigned threads_;                                                 // the most threads a parallel region uses
+        std::vector<Region> regions_;                                      // the parallel regions being lowered
+        std::vector<llvm::Function*> outlined_;                            // every region's function
+        std::unordered_map<std::string, unsigned> regionCount_;            // each function's regions so far
+        std::optional<std::unordered_map<std::string, bool>> changes_;     // whether each method changes its module
     };
 } // namespace fminus::ir::detail
