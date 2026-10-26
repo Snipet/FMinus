@@ -1,0 +1,74 @@
+// examples/ensemble/ensemble.fm: sixteen voices rendered at once (docs/extending.md, recipe 22). Each voice is a
+// band-limited sawtooth, its partials summed, which renders a block into a buffer of its own; the voices don't touch
+// each other, so `parallel for` spreads them over the machine's cores, and the mix after it has every voice's block.
+// The mix itself is two loops, the left channel's (the even voices) and the right's (the odd ones), which
+// `parallel { }` runs at once. The host (bench.cpp) compiles this twice, on all the threads and on one, and compares
+// the two, bit for bit: each voice computes what it would alone, whichever thread runs it.
+
+module Voice
+{
+    float phase;       // 0 to 1
+    float step;        // the frequency, in periods a sample
+    float level;       // the note's
+    float partials;    // how many harmonics: as many as fit below half the rate, 32 at most
+    float out[1024];   // the block, rendered
+
+    void start(float frequency, float rate, float velocity) [[clang::nonblocking]]
+    {
+        phase = 0;
+        step = frequency / rate;
+        level = velocity;
+        partials = fminf(32, floorf(0.5f * rate / frequency));
+    }
+
+    // n samples (at most 1024) into out: the sawtooth's partials, each 1/h as loud as the first.
+    void render(int n) [[clang::nonblocking]]
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            float x = 0;
+            for (int h = 1; h <= (int)partials; ++h)
+                x += sinf(6.28318531f * h * phase) / h;
+            out[i] = level * x;
+            phase += step;
+            if (phase >= 1)
+                phase -= 1;
+        }
+    }
+};
+
+module Ensemble
+{
+    param float gain [[fminus::range(0, 1)]] [[fminus::default(0.1)]];           // the mix's level
+    param float rate [[fminus::range(8000, 384000)]] [[fminus::default(48000)]];  // Hz
+    Voice voices[16];
+
+    void note_on(int v, float frequency, float velocity) [[clang::nonblocking]]
+    {
+        voices[v].start(frequency, rate[0], velocity);
+    }
+
+    // n samples (at most 1024) of every voice, rendered at once, then mixed: the even voices left, the odd right.
+    void process(float* restrict left, float* restrict right, int n) [[clang::nonblocking]]
+    {
+        parallel for (int v = 0; v < 16; ++v)   // each voice, its own block: an element each
+            voices[v].render(n);
+        parallel                                // the two channels at once: each writes its own buffer
+        {
+            for (int i = 0; i < n; ++i)
+            {
+                float sum = 0;
+                for (int v = 0; v < 16; v += 2)
+                    sum += voices[v].out[i];
+                left[i] = gain[i] * sum;
+            }
+            for (int i = 0; i < n; ++i)
+            {
+                float sum = 0;
+                for (int v = 1; v < 16; v += 2)
+                    sum += voices[v].out[i];
+                right[i] = gain[i] * sum;
+            }
+        }
+    }
+};

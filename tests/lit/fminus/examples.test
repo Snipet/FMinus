@@ -1,5 +1,5 @@
 # The examples run, and give what their comments say (examples/*/*.fm). main.fm runs note and comparison; the biquad,
-# delay, saturator and meter have harnesses of their own (ctest's example.biquad, ...).
+# delay, saturator, meter and ensemble have harnesses of their own (ctest's example.biquad, ...).
 # RUN: fminus %S/../../../examples/waveforms/waveforms.fm --run main 0.25 1000 | FileCheck %s --check-prefix=SAW
 # RUN: fminus %S/../../../examples/waveforms/waveforms.fm --run main 0.25 10000 | FileCheck %s --check-prefix=SAW2
 # RUN: fminus %S/../../../examples/waveforms/waveforms.fm --run square 0.25 1000 48000 | FileCheck %s --check-prefix=SQ
