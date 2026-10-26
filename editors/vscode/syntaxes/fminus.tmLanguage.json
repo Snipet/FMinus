@@ -116,7 +116,7 @@
         },
         "keywords": {
             "patterns": [
-                { "name": "keyword.control.fminus", "match": "\\b(?:if|else|while|for|break|continue|return)\\b" },
+                { "name": "keyword.control.fminus", "match": "\\b(?:if|else|while|for|break|continue|return|parallel)\\b" },
                 { "name": "variable.language.this.fminus", "match": "\\bthis\\b" }
             ]
         },
