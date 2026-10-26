@@ -17,7 +17,8 @@ Most of the recipes in [../extending.md](../extending.md) and [../simd.md](../si
 - recipe 18 (zero-init elision);
 - recipe 19 (the runtime's attributes, and loops that must make progress);
 - recipe 20 (denormal control: subnormals flushed to zero);
-- recipe 21 (`#include`, each file read once).
+- recipe 21 (`#include`, each file read once);
+- recipe 22 (`parallel for` and `parallel { }`, a program's own threads, on the runtime's pool).
 
 Their code is in `src/`, and their tests in `tests/`.
 
@@ -27,7 +28,7 @@ One patch is left, for the two recipes that aren't part of the language:
 |---|---|---|
 | `5-runtime-function-and-pass.patch` | 5, 6 | a runtime function (`db_to_gain`, by prototype or builtin); an LLVM pass (`CountFlopsPass`, which records each function's floating-point operations as an attribute) |
 
-It applies, with no whitespace errors, to the compiler as it is, with all of the above. The suite then has 166 tests,
+It applies, with no whitespace errors, to the compiler as it is, with all of the above. The suite then has 181 tests,
 which pass in the dev and asan presets.
 
 ```bash

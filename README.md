@@ -11,16 +11,19 @@ on. It has functions over `float`, `int` and `bool`, and `void` ones; declaratio
 take a C++ host's buffers and process a whole block in one call, C's arrays, and C's heap (`malloc`, `calloc`, `free`),
 with clang's `[[clang::nonblocking]]` checked so that the code on the audio thread can't reach it. It has modules, its
 classes: fields and methods, as C++'s structs with member functions, which hold each other and arrays of each other and
-live wherever their host puts them, and parameters, the values a plugin's host sets, which a method reads a sample at
-a time and the host compiles as knobs, as streams or as constants. It has an FFT, real and complex, whose plans are
-made off the audio thread and whose transforms run on it (PFFFT, compiled into FMinus's runtime library). It has SIMD:
-OpenCL C's `float2`, `float4` and `float8`, and `poly float`, a vector as wide as the machine's. A program with a
-`float main(...)` also builds into an executable. Its compiler has optimisations of its own, from `-O1`: a method gets a
-copy of its code for each value of a knob that steers its loop, and a local's zeroing (an array's, or a module's
-overwritten whole) is removed where nothing reads the zeros. It tells LLVM C's strict-aliasing rule, that a loop whose
-condition is not a constant may be assumed to end, and what the runtime's functions do. Its math builtins give a float
-one result wherever it is computed, and a host may have subnormals flushed to zero. `examples/plugin/` is a JUCE plugin
-whose DSP is an FMinus program. The build, the dependencies and the toolchain's smoke tests are in place around it.
+live wherever their host puts them, and parameters, the values a plugin's host sets, which a method reads a sample at a
+time and the host compiles as knobs, as streams or as constants. It has an FFT, real and complex, whose plans are made
+off the audio thread and whose transforms run on it (PFFFT, compiled into FMinus's runtime library). It has SIMD: OpenCL
+C's `float2`, `float4` and `float8`, and `poly float`, a vector as wide as the machine's. It has threads of its own,
+structured: `parallel for` spreads a loop's iterations over the machine's cores and `parallel { }` runs a block's
+statements at once, each finished where it ends, with the races the compiler can see refused, on a pool of threads that
+a `[[clang::nonblocking]]` function may use. A program with a `float main(...)` also builds into an executable. Its
+compiler has optimisations of its own, from `-O1`: a method gets a copy of its code for each value of a knob that steers
+its loop, and a local's zeroing (an array's, or a module's overwritten whole) is removed where nothing reads the zeros.
+It tells LLVM C's strict-aliasing rule, that a loop whose condition is not a constant may be assumed to end, and what
+the runtime's functions do. Its math builtins give a float one result wherever it is computed, and a host may have
+subnormals flushed to zero. `examples/plugin/` is a JUCE plugin whose DSP is an FMinus program. The build, the
+dependencies and the toolchain's smoke tests are in place around it.
 
 Documentation: [docs/](docs/README.md). It covers the architecture, writing a program with `main`, a guide to
 extending the compiler with worked recipes, SIMD (vector types, a vector math library, and vectors as wide as the
@@ -196,7 +199,7 @@ float half(float x) { x /= 2; return x; }
 |---|---|
 | program | function definitions, `float name(float a, const float b) { ... }` or `void name(...)`, and prototypes, `float name(float);`; `f(void)` is C's empty list; after the parameters, clang's `[[clang::nonallocating]]` or `[[clang::nonblocking]]`, checked: the function may not reach the heap (nor, nonblocking, an external function not marked so); modules, `module OnePole { float y; float tick(float x) { return y += x; } };`, whose fields are declarations without initialisers and whose methods are functions that see the fields by name (`this` is the module's address); a module's parameters, `param float cutoff [[fminus::range(20, 20000)]] [[fminus::default(1000)]];` (a `float`, `int` or `bool`), which the host sets and a method reads as `cutoff[i]`, its value at sample i of the call |
 | declarations | `float x = e;`, `const float k = e;`, `float* p = out;`, several at once (`float a = 1, b;`; in `float *p, x;` only `p` is a pointer, as in C); arrays, `float h[16];` and `int k[3] = {1, 2, 3};` (the elements left out are 0); modules, `OnePole lp;` and `OnePole b = a;` (a copy); block-scoped, shadowing allowed in an inner block |
-| statements | `{ ... }`, `e;`, `return e;` and `return;`, `;`, `if (c) s else s` (an `else` closes the nearest `if`), `while (c) s`, `for (init; c; step) s` (its declarations are the loop's), `break;`, `continue;`; a `while` or `for` whose condition is not a constant expression may be assumed to end, as in C11 (6.8.5p6), and `while (1)` and `for (;;)` may run for ever |
+| statements | `{ ... }`, `e;`, `return e;` and `return;`, `;`, `if (c) s else s` (an `else` closes the nearest `if`), `while (c) s`, `for (init; c; step) s` (its declarations are the loop's), `break;`, `continue;`; a `while` or `for` whose condition is not a constant expression may be assumed to end, as in C11 (6.8.5p6), and `while (1)` and `for (;;)` may run for ever; FMinus's `parallel for (int i = first; i < end; ++i) s`, its iterations at once over the machine's cores, and `parallel { s1 s2 ... }`, its statements at once, each finished, all of it, where it ends (below) |
 | expressions | constants, names, calls, `( )`, unary `-` `+` `!`, `++` and `--` (before or after), casts `(int)x` `(float)x` `(bool)x`, `* / %`, `+ -`, `< <= > >=`, `== !=`, `&&`, `\|\|` (both short-circuit), `?:` (only the branch taken runs), and `= += -= *= /= %=` (right to left; an assignment's value is the one stored), with C's precedence; pointers' `p[i]`, `*p`, `&x`, `p + i`, `p - q` and comparisons; an array's `a[i]` (its name stands for a pointer to its first element); a module's fields `m.y` and `p->y`, its methods `m.tick(x)` and `p->tick(x)`, and `this`; `sizeof(type)`, an `int`; vector literals, OpenCL C's `(float4)(a, b, c, d)` and C's `(float4){a, b}` (the lanes left out are 0), and swizzles `v.wzyx`, `v.s0` |
 | constants | C's: floating ones are floats (`1.5`, `1.`, `.5`, `2e3`, `1.5e-3f`, hex floats `0x1.8p1`, `0x1p-3f`), integer ones ints (`2`, `010` in octal, `0x1F` in hex); `true` and `false` |
 | comments | `// ...` and `/* ... */` |
@@ -269,6 +272,23 @@ Where FMinus differs from C, it is on purpose:
   `(float4)(a, b, c, d)`, and in C's, `(float4){a, b, c, d}` (with clang's `ext_vector_type`). They differ: C reads
   `(float4)(...)` as a cast of a comma expression. `poly float`, a vector as wide as the machine's, is FMinus's own
   ([docs/simd.md](docs/simd.md)).
+- **Threads are FMinus's own, and structured**, as OpenMP's `parallel for` and `sections` are, where C has a library
+  (C11's `<threads.h>`: threads a program makes, joins and locks around). `parallel for (int i = first; i < end; ++i) s`
+  runs its iterations at once, spread over the machine's cores, and `parallel { a = f(x); b = g(y); }` its statements,
+  each a task; either has finished, every iteration or statement, where it ends. A loop counts up by one from an `int`
+  it declares (`i < end` or `i <= end`; `++i`, `i++` or `i += 1`), and its bounds are computed once, before it starts,
+  where C tests a `for`'s condition before each iteration. The compiler refuses what it can see would race: an iteration
+  that assigns a variable from outside the loop (every iteration would), assigns its own loop variable, or calls a
+  method that changes its module on one; two statements of a block of which one changes a variable that the other uses;
+  `break` and `return` out of either, and a declaration as a block's statement. What an iteration reaches through an
+  index or a pointer (`out[i]`, `voices[v].render(n)`) is its own to keep apart from the others', as with OpenMP: the
+  compiler sees which variable, not which element. There are no reductions: an iteration writes its own element, and the
+  code after the loop combines them. A program without races computes what it would on one thread, bit for bit. A
+  program's regions run on one pool for the process, a thread for each core but one, which the first `Program` with a
+  region starts when it compiles (the calling thread works too); a region allocates nothing and takes no lock, so a
+  `[[clang::nonblocking]]` `process` may have one, and every thread runs it in its caller's floating-point mode.
+  `parallel` is a keyword: nothing can be named `parallel`; and a program with a region may not declare a function named
+  `fminus_rt_parallel_for`, the runtime's ([docs/extending.md](docs/extending.md), recipe 22).
 - **`%` works on floats**, with `fmodf`'s semantics: the result has the sign of the dividend, so `-7.5 % 2` is
   `-1.5`. C allows `%` on integers only; HLSL allows it on floats. `%=` goes with it.
 - **A function may be called before its definition** without a prototype, because the compiler declares every
@@ -297,14 +317,14 @@ unused, while `while (1)` and `for (;;)` may run for ever. A function as a whole
 C++ one is.
 
 A v0 program with `f` suffixes, with prototypes for calls ahead of a definition, with vectors only in C's form (braces,
-given clang's `ext_vector_type`), and without `%` on floats, `poly`, modules or `main`, is therefore also a valid C
-program with the same meaning, given `<math.h>` (`<stdlib.h>` for the heap; C23 for the attributes) and
+given clang's `ext_vector_type`), and without `%` on floats, `poly`, modules, `parallel` or `main`, is therefore also a
+valid C program with the same meaning, given `<math.h>` (`<stdlib.h>` for the heap; C23 for the attributes) and
 `-ffp-contract=off`. The example above and `examples/delay/delay.fm` compile as C under `-Wall -Wextra -Werror`, the
 latter with clang's `-Wfunction-effects` too. One with modules is C++ instead, spelled `struct` for `module` and
 `__restrict` for `restrict`, as long as no module has parameters, which are FMinus's own: `examples/voices/voices.fm`'s
 modules but `Synth` compile so, with `-Wno-perf-constraint-implies-noexcept` (C++ wants a nonblocking function
-`noexcept` too). The other examples use modules with parameters, `poly`, FMinus's own builtins (the convolver's FFT)
-or a `main`; hello's one function is C.
+`noexcept` too). The other examples use modules with parameters, `poly`, `parallel`, FMinus's own builtins (the
+convolver's FFT) or a `main`; hello's one function is C.
 
 Every FMinus function becomes an external LLVM function of the same name with the C calling convention (a `float` is
 LLVM's `float`, an `int` an `i32`, a pointer a `ptr`), so C++ calls JIT'd code through a pointer of the matching type:
@@ -328,6 +348,7 @@ build-dev/bin/fminus synth.fm --math libm          # sinf, cosf, ... as libm's (
 build-dev/bin/fminus lp.fm --denormals=flush       # subnormals flushed to zero: folded so, and set by entry points
 build-dev/bin/fminus lp.fm --no-strict-aliasing    # no TBAA: for a program that reads memory as another type
 build-dev/bin/fminus synth.fm -I lib               # #include "name": beside the including file, then in lib/
+build-dev/bin/fminus voices.fm --threads 4         # a parallel region on 4 threads at most (0: every core; 1: alone)
 ```
 
 How it fits together: `frontend::parse` (Lexer.l, then Parser.y) gives an `ast::Program`, and `ir::lower` (in
@@ -347,18 +368,20 @@ types:
    `Lowering.h` has the list).
 4. Its tests: a dump in `tests/unit/FrontendTest.cpp`, a result in the code generator's tests (`CodeGenTest.cpp`,
    `ControlFlowTest.cpp`, `IntTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`,
-   `ModuleTest.cpp`, `FftTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`, which share `Compile.h`), IR or errors in
+   `ModuleTest.cpp`, `FftTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`, `ParallelTest.cpp`, which share `Compile.h`),
+   IR or errors in
    `tests/lit/fminus/*.fm` (`// RUN:` lines, checked by FileCheck).
 
-`examples/biquad/` is a kernel to grow the language around. It is a biquad low-pass module with coefficients
-recomputed every sample, its cutoff a stream, which filters a block a call, with a harness that calls it once,
-compares it with C++ and times both, and a plan of features in its README. `examples/delay/` is a feedback delay whose
-line the program allocates, with a kernel marked `[[clang::nonblocking]]`, written as plain C and as a module.
-`examples/saturator/` (tanh) and `examples/meter/` (peak and RMS) each run a loop over samples against a loop over
-`poly float`s, and time both. `examples/voices/` is a synth of eight voices in modules, its controls knobs, which a
-host of the public API allocates and runs. `examples/convolver/` convolves with an impulse response
-by FFT. `examples/parameters/` sweeps a filter's cutoff with an LFO, through a knob once a call or a stream a sample,
-and freezes a fixed one.
+`examples/biquad/` is a kernel to grow the language around. It is a biquad low-pass module with coefficients recomputed
+every sample, its cutoff a stream, which filters a block a call, with a harness that calls it once, compares it with C++
+and times both, and a plan of features in its README. `examples/delay/` is a feedback delay whose line the program
+allocates, with a kernel marked `[[clang::nonblocking]]`, written as plain C and as a module. `examples/saturator/`
+(tanh) and `examples/meter/` (peak and RMS) each run a loop over samples against a loop over `poly float`s, and time
+both. `examples/voices/` is a synth of eight voices in modules, its controls knobs, which a host of the public API
+allocates and runs. `examples/convolver/` convolves with an impulse response by FFT. `examples/ensemble/` renders
+sixteen voices at once with a `parallel for`, and checks that every core gives what one thread does, bit for bit.
+`examples/parameters/` sweeps a filter's cutoff with an LFO, through a knob once a call or a stream a sample, and
+freezes a fixed one.
 
 `examples/plugin/` is FMinus inside a plugin: FMinus Filter, a JUCE effect (AU, VST3 and Standalone on macOS) whose
 DSP, a state-variable filter, is an FMinus program that its processor compiles in `prepareToPlay`, with the cutoff a
@@ -399,11 +422,16 @@ gain(in, out, n, 0.5f);                                       // one call a bloc
   and text, so a host keeps its files where it likes, on disk or in memory (with none, the default, no `#include`
   finds a file). `math` is how `sinf` and the other transcendental builtins compute (`Math::Vector` by default,
   `Libm` or `Fast`), `strictAliasing` whether the optimiser relies on C's strict-aliasing rule (`true`),
-  `knobVersions` how many copies of a method knob versioning may make (8; 0 turns it off), and `denormals` whether
-  subnormals are kept or flushed to zero (`Denormals::Preserve` or `Flush`). The header says what each costs.
+  `knobVersions` how many copies of a method knob versioning may make (8; 0 turns it off), `denormals` whether
+  subnormals are kept or flushed to zero (`Denormals::Preserve` or `Flush`), and `threads` the most threads a parallel
+  region runs on (0, the default, is every core; 1 runs each on the calling thread alone). The header says what each
+  costs.
 - **Threads.** `compile()` and the first look-up of each function run LLVM's optimiser and code generator on the
   calling thread: they take milliseconds and allocate. Different programs may compile on different threads at once.
-  In a plugin, compile off the audio thread and hand the pointer over (below).
+  In a plugin, compile off the audio thread and hand the pointer over (below). A program's `parallel for` and
+  `parallel { }` run on FMinus's pool, shared by every `Program` in the process: the first with a region starts it
+  when it compiles (a thread for each core but one) and the last one's destructor stops it. The thread that calls the
+  program works on each region too.
 - **Effects.** `nonBlocking(name)` and `nonAllocating(name)` say whether a function is marked
   `[[clang::nonblocking]]` or `[[clang::nonallocating]]`, which FMinus has then checked, so a host can refuse to run
   anything else on its audio thread.
@@ -500,7 +528,7 @@ build-dev/bin/fminus-lit -v tests/lit               # lit directly; a source pat
 | `debug` | Debug | Release + assertions | stepping through FMinus |
 | `release` | Release | Release | measuring |
 | `asan` | Debug + ASan + UBSan | Release + assertions | memory errors in FMinus's code |
-| `tsan` | RelWithDebInfo + TSan | Release + assertions | compiling on a background thread |
+| `tsan` | RelWithDebInfo + TSan | Release + assertions | compiling on a background thread, the parallel regions' pool |
 | `inline` | RelWithDebInfo | in-tree, -O2 -g, assertions | stepping into LLVM |
 | `xcode` | Xcode project | Release + assertions | Xcode's debugger and Instruments |
 
@@ -512,7 +540,7 @@ preset has a workflow (`cmake --workflow --preset <name>`) except `xcode`, which
 ## Handy
 
 - `build-dev/bin/fminus-hostinfo [--features]`: the triple, CPU, features and data layout the JIT targets here.
-- VSCode: `python3 editors/vscode/package.py`, then `code --install-extension build-vscode/fminus-0.7.0.vsix`, for
+- VSCode: `python3 editors/vscode/package.py`, then `code --install-extension build-vscode/fminus-0.9.0.vsix`, for
   FMinus syntax highlighting, lit's `RUN:` and `CHECK:` lines included
   ([editors/vscode/README.md](editors/vscode/README.md)).
 - `build-dev/bin/fminus`: FMinus source to its tree, IR, assembly or an object, or run in the JIT (above).
@@ -537,6 +565,15 @@ These are constraints a plugin runs into. `examples/plugin/`, a JUCE plugin, mee
   code is then folded for that mode, and each entry point sets it if the caller has not
   ([docs/extending.md](docs/extending.md), recipe 20). The plugin does: its `processBlock` flushes (JUCE's
   `ScopedNoDenormals`), and it compiles with `Flush`, so its `process` finds the mode set and writes nothing.
+- **Parallel regions on the audio thread.** A `parallel for` or `parallel { }` runs on FMinus's pool and the audio
+  thread together, in the audio thread's floating-point mode, and allocates and locks nothing. The audio thread starts
+  on its own share at once; pool threads that slept (no region for 50 µs) it wakes with a system call that does not
+  block; at the end it spins for the chunks other threads are still running. The pool's threads run at the
+  user-interactive quality of service on macOS: they are not real-time threads, and join no audio workgroup, so the
+  system may run them late, and the audio thread then takes their chunks itself. A region costs about 4 µs on an M5
+  with every core (under 2 µs on two) against a plain call: worth it when its iterations take tens of microseconds
+  together, a synth's voices, not a block's samples. A host whose other audio threads run regions too gets one region
+  on the pool at a time; the others run on their own threads. `Program::Options::threads` limits or turns them off.
 - **Size and symbols.** Static LLVM adds tens of megabytes. Export only the plugin's entry points (an
   exported-symbols list), so LLVM's symbols cannot clash with another copy of LLVM in the host process.
 - **Bit-exactness across machines.** FMinus fuses and reassociates nothing, and in its default math mode a float's

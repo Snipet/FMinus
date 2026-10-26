@@ -1,5 +1,5 @@
 diff --git a/src/ir/Calls.cpp b/src/ir/Calls.cpp
-index 6153c76..841439e 100644
+index 3397578..e42e82f 100644
 --- a/src/ir/Calls.cpp
 +++ b/src/ir/Calls.cpp
 @@ -2,9 +2,9 @@
@@ -15,7 +15,7 @@ index 6153c76..841439e 100644
  #include "ir/Lowering.h"
  
  #include <llvm/IR/Attributes.h>
-@@ -212,6 +212,21 @@ namespace fminus::ir::detail
+@@ -220,6 +220,21 @@ namespace fminus::ir::detail
          return nullptr;
      }
  
@@ -37,7 +37,7 @@ index 6153c76..841439e 100644
      // What the effects refuse a nonallocating function (Effects.cpp): a builtin that allocates or frees.
      bool allocates(std::string_view name)
      {
-@@ -292,6 +307,17 @@ namespace fminus::ir::detail
+@@ -300,6 +315,17 @@ namespace fminus::ir::detail
                  llvm::Intrinsic::getOrInsertDeclaration(&module_, builtin->intrinsic, {typeOf(type)});
              return {builder_.CreateCall(intrinsic, irArgs), type};
          }
@@ -56,7 +56,7 @@ index 6153c76..841439e 100644
          if (found == functions_.end())
          {
 diff --git a/src/ir/Functions.cpp b/src/ir/Functions.cpp
-index bd3dcae..b0b47df 100644
+index 7fc05f5..c602be7 100644
 --- a/src/ir/Functions.cpp
 +++ b/src/ir/Functions.cpp
 @@ -29,7 +29,8 @@ namespace fminus::ir::detail
@@ -70,10 +70,10 @@ index bd3dcae..b0b47df 100644
              error(function.location, quoted(function.name) + " is a builtin and cannot be redefined");
              return;
 diff --git a/src/ir/Lowering.h b/src/ir/Lowering.h
-index 99d5701..5a2e07b 100644
+index 0f57516..5999899 100644
 --- a/src/ir/Lowering.h
 +++ b/src/ir/Lowering.h
-@@ -78,10 +78,20 @@ namespace fminus::ir::detail
+@@ -82,10 +82,20 @@ namespace fminus::ir::detail
          bool allocates;
      };
  
@@ -214,10 +214,10 @@ index cb1b142..85828e8 100644
 +    return std::pow(10.0f, db / 20.0f);
 +}
 diff --git a/src/runtime/Runtime.h b/src/runtime/Runtime.h
-index aa99903..189593f 100644
+index 60e6905..d99060d 100644
 --- a/src/runtime/Runtime.h
 +++ b/src/runtime/Runtime.h
-@@ -84,4 +84,8 @@ extern "C"
+@@ -108,4 +108,8 @@ extern "C"
      float fminus_rt_libm_expf(float x) noexcept;
      float fminus_rt_libm_tanhf(float x) noexcept;
      float fminus_rt_libm_logf(float x) noexcept;
@@ -227,13 +227,13 @@ index aa99903..189593f 100644
 +    float fminus_rt_db_to_gain(float db) noexcept;
  }
 diff --git a/src/runtime/RuntimeSymbols.def b/src/runtime/RuntimeSymbols.def
-index bedb56f..86f3f5a 100644
+index 7dd76a6..23f3bee 100644
 --- a/src/runtime/RuntimeSymbols.def
 +++ b/src/runtime/RuntimeSymbols.def
-@@ -30,3 +30,4 @@ FMINUS_RUNTIME_SYMBOL(fminus_rt_libm_cosf)
- FMINUS_RUNTIME_SYMBOL(fminus_rt_libm_expf)
- FMINUS_RUNTIME_SYMBOL(fminus_rt_libm_tanhf)
- FMINUS_RUNTIME_SYMBOL(fminus_rt_libm_logf)
+@@ -33,3 +33,4 @@ FMINUS_RUNTIME_SYMBOL(fminus_rt_libm_logf)
+ FMINUS_RUNTIME_SYMBOL(fminus_rt_parallel_for)
+ FMINUS_RUNTIME_SYMBOL(fminus_rt_parallel_start)
+ FMINUS_RUNTIME_SYMBOL(fminus_rt_parallel_stop)
 +FMINUS_RUNTIME_SYMBOL(fminus_rt_db_to_gain)
 diff --git a/src/support/HostTarget.cpp b/src/support/HostTarget.cpp
 index a4ab49c..7402599 100644

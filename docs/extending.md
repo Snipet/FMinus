@@ -1,23 +1,24 @@
 # Extending the compiler
 
 How to add to FMinus. First, how a change moves through the compiler, and the few rules that keep that easy. Then
-eighteen worked recipes. Eleven grow the C subset from a one-line builtin to C's control flow, a custom LLVM pass,
-`int`, `void` and pointers, the heap with the attributes that keep it off the audio thread, arrays and modules,
-FMinus's classes, an FFT from a C library built into the runtime, and parameters, the values a plugin's host sets. Six
-more are about the compiler rather than the language: math that gives a float one result wherever it is computed,
-knob versioning and flat streams, C's strict aliasing told to LLVM, zero-init elision, what the runtime's calls and
-loops promise, and subnormals flushed for the audio thread. The last, `#include`, splits a program into files. Then
-the pitfalls those recipes ran into, and design notes for what comes next. [simd.md](simd.md) has recipes 7 to 9, for
-vectors.
+nineteen worked recipes. Eleven grow the C subset from a one-line builtin to C's control flow, a custom LLVM pass,
+`int`, `void` and pointers, the heap with the attributes that keep it off the audio thread, arrays and modules, FMinus's
+classes, an FFT from a C library built into the runtime, and parameters, the values a plugin's host sets. Six more are
+about the compiler rather than the language: math that gives a float one result wherever it is computed, knob versioning
+and flat streams, C's strict aliasing told to LLVM, zero-init elision, what the runtime's calls and loops promise, and
+subnormals flushed for the audio thread. The last two grow the language again: `#include`, which splits a program into
+files, and `parallel for` and `parallel { }`, a program's own threads. Then the pitfalls those recipes ran into, and
+design notes for what comes next. [simd.md](simd.md) has recipes 7 to 9, for vectors.
 
 Recipes 1 to 4 are in the compiler now (`tanhf` and `%`; `bool` and its operators; `if`, `while` and `for`), and so are
 simd.md's 7 to 9, recipe 10 (`int`, `void` and pointers), recipe 11 (the heap), recipe 12 (arrays and modules), recipe
 13 (the FFT), recipe 14 (parameters), recipes 15 to 20 (the math modes, knob versioning, TBAA, zero-init elision, the
-runtime's attributes and loop progress, denormal control) and recipe 21 (`#include`), so their sections describe how the
-code you have got there: read a section beside the files it names. Recipes 5 and 6, a runtime function and a pass, are
-not part of the language; they live in [recipes/](recipes/) as a patch, so you can apply them to see them work. None of
-these are sketches: each was applied to this repository, built with `-Werror`, and tested in the dev and asan presets,
-every test passing. [architecture.md](architecture.md) describes the stages they touch.
+runtime's attributes and loop progress, denormal control), recipe 21 (`#include`) and recipe 22 (`parallel for` and
+`parallel { }`), so their sections describe how the code you have got there: read a section beside the files it names.
+Recipes 5 and 6, a runtime function and a pass, are not part of the language; they live in [recipes/](recipes/) as a
+patch, so you can apply them to see them work. None of these are sketches: each was applied to this repository, built
+with `-Werror`, and tested in the dev and asan presets, every test passing. [architecture.md](architecture.md) describes
+the stages they touch.
 
 FMinus follows C. When a recipe has a semantic choice to make, it makes C's: conversions, short-circuiting, which
 `if` an `else` belongs to, what `continue` does in a `for`. And it reports errors in clang's words. The README lists
@@ -33,10 +34,10 @@ Most language features touch the same places, in this order:
 | 2 | `src/frontend/Parser.y` | the tokens (`%token`), their precedence if they are operators, and the grammar rules with their actions |
 | 3 | `src/frontend/Ast.h` | a node: an alternative of `Expr::node` or `Stmt::node`, or an enumerator of `UnaryOp`, `BinaryOp`, `AssignOp`, `IncrementOp`, `Kind` (a type's) |
 | 4 | `src/frontend/Ast.cpp` | its `dump` |
-| 5 | `src/ir/` | its conversions and checks, and its lowering to LLVM IR, in the file its kind belongs to (`Lowering.h` lists them: types, functions, statements, expressions, calls, the math modes, vectors, memory, modules, effects, TBAA, denormals); a load or store of memory gets its type's tag (`tag`, recipe 17) |
+| 5 | `src/ir/` | its conversions and checks, and its lowering to LLVM IR, in the file its kind belongs to (`Lowering.h` lists them: types, functions, statements, expressions, calls, the math modes, vectors, memory, modules, effects, parallel regions, TBAA, denormals); a load or store of memory gets its type's tag (`tag`, recipe 17); a statement that holds code walks it in `Parallel.cpp`'s `Walker` too |
 | 6 | `src/runtime/` | if it needs C++ at run time, a runtime function (recipe 5); if a builtin calls it, its facts: in `kRuntimeFacts`, through `callRuntime` (recipe 19), or for a math builtin's, in `mathFunction` (`Math.cpp`, recipe 15) |
 | 7 | `tools/fminus/main.cpp`, `src/support/Aot.cpp` | for a new type: whether `--run` can pass and print it (its `switch` over the result type), and whether an executable's `main` may take or return it (`addEntryPoint`) |
-| 8 | `tests/` | a dump in `FrontendTest.cpp`; results in `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `IntTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `VectorTest.cpp` or `PolyTest.cpp` (their helpers are in `Compile.h`); IR or errors in `tests/lit/fminus/` |
+| 8 | `tests/` | a dump in `FrontendTest.cpp`; results in `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `IntTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp` or `ParallelTest.cpp` (their helpers are in `Compile.h`); IR or errors in `tests/lit/fminus/` |
 | 9 | `examples/` | a program that uses it, and a line in `tests/lit/fminus/examples.test` that runs it |
 | 10 | `editors/vscode/syntaxes/fminus.tmLanguage.json` | a new keyword, type or builtin, so VSCode highlights it (its README says where) |
 | 11 | `README.md` | the language table, and the deviations from C if any |
@@ -54,8 +55,8 @@ Each feature has an example to read beside its recipe: `examples/comparison/` fo
 (recipes 7 and 8), `examples/unison/` for `poly float` (recipe 9), `examples/biquad/` for a block of samples a
 call, through pointers (recipe 10), `examples/delay/` for state on the heap and a kernel that can't allocate
 (recipe 11), `examples/saturator/` and `examples/meter/` for `poly float` through a buffer, against plain loops
-(recipes 9 and 10), and `examples/convolver/` and `examples/delay/echo.fm` for loops over a module's fields
-(recipe 17).
+(recipes 9 and 10), `examples/convolver/` and `examples/delay/echo.fm` for loops over a module's fields
+(recipe 17), and `examples/ensemble/` for `parallel for` and `parallel { }` (recipe 22).
 
 ## Ground rules
 
@@ -3617,6 +3618,249 @@ Standard input has no directory, so its names start from the current one.
 
 A program without directives scans as before: the suite's other tests are unchanged.
 
+## Recipe 22: `parallel for` and `parallel { }`, a program's own threads
+
+*In the compiler. Code: `src/frontend/Lexer.l` and `Parser.y` (`parallel`), `Ast.h` (`ParallelForStmt`,
+`ParallelBlockStmt`); `src/ir/Parallel.cpp` (the checks, the outlined bodies, the captures), `Functions.cpp` (`find`
+captures, `lookup` does not), `Statements.cpp` (`break`, `continue` and `return` in a region), `Modules.cpp`
+(`atEntry` in a region), `Denormals.cpp`, `Calls.cpp` (`RuntimeKind::Parallel`); `src/runtime/Parallel.cpp` (the
+pool); `Program::Options::threads` (`include/fminus/FMinus.h`), `--threads` (`tools/fminus/main.cpp`),
+`addEntryPoint` (`src/support/Aot.cpp`). Tests: `tests/unit/ParallelTest.cpp` (`[parallel]`),
+`tests/library/ParallelTest.cpp`, `tests/lit/fminus/parallel.fm` (with `Inputs/parallel/`). Example:
+`examples/ensemble/`.*
+
+A synth's voices are independent: each renders its own buffer from its own state, and only the mix after them needs
+them all. A machine has ten cores, and a block's voices run on one. C's threads are a library, C11's `<threads.h>`:
+threads a program makes, joins and locks around, none of which an audio thread may do. FMinus's are in the language,
+and structured, as OpenMP's `parallel for` and `sections` are: a region's threads join where the region ends, so no
+thread outlives a statement, and the program never names one.
+
+```c
+module Synth
+{
+    Voice voices[16];
+    void process(float* restrict left, float* restrict right, int n) [[clang::nonblocking]]
+    {
+        parallel for (int v = 0; v < 16; ++v)    // each voice on whichever core is free
+            voices[v].render(n);
+        mix(left, right, n);                     // every voice has rendered
+    }
+};
+```
+
+```c
+parallel
+{
+    l = left.tick(x);     // the two filters at once
+    r = right.tick(y);    // the block ends when both have
+}
+```
+
+Three decisions shape the rest. The threads are made once, when the program compiles, never on the audio thread: a
+region hands work to a pool of them. A region never waits for the pool: when another holds it, a region runs on its
+own thread, and so does a region inside a region. And what the compiler can see would race is an error, before
+anything runs.
+
+### Tokens, grammar and nodes
+
+`parallel` is a keyword, before `{IDENTIFIER}` in Lexer.l, and starts two statements in Parser.y, with no conflict
+(nothing else starts with it):
+
+```yacc
+statement
+    : ...
+    | "parallel" "for" "(" for_init optional_expr ";" optional_expr ")" statement
+    | "parallel" block
+    ;
+```
+
+`ParallelForStmt` has `ForStmt`'s fields: the grammar takes any `for`, and the code generator checks the counting
+form, so that a wrong one gets a sentence that says what to write rather than a syntax error. `ParallelBlockStmt`
+holds the block's statements, each a task. They dump as `(parallel-for (...) cond step body)` and `(parallel ...)`.
+
+### A region is a function of its own
+
+`lowerParallelFor` and `lowerParallelBlock` (`Parallel.cpp`) put the region's body into a function,
+`<function>.parallel.<n>`, internal, of the runtime's task type `void(ptr context, i32 begin, i32 end)`: a loop's
+runs the iterations `begin` to `end - 1`, a block's its statements `begin` to `end - 1` (a `switch` on each one's
+number). Where the statement was, the function fills the context and calls the runtime:
+
+```llvm
+define void @scale(ptr %out, i32 %n, float %k) {
+entry:
+  %scale.parallel.1.context = alloca [16 x i8], align 8
+  ...
+  %k2 = load float, ptr %k.addr, align 4, !tbaa !5
+  %0 = getelementptr inbounds i8, ptr %scale.parallel.1.context, i64 0
+  store float %k2, ptr %0, align 4                         ; k, which the body reads: a copy
+  %out3 = load ptr, ptr %out.addr, align 8, !tbaa !7
+  %1 = getelementptr inbounds i8, ptr %scale.parallel.1.context, i64 8
+  store ptr %out3, ptr %1, align 8                         ; out, a pointer: a copy of it
+  call void @fminus_rt_parallel_for(ptr @scale.parallel.1, ptr %scale.parallel.1.context, i32 0, i32 %n1, i32 0)
+  ret void
+}
+
+define internal void @scale.parallel.1(ptr noalias readonly captures(none) %context, i32 %begin, i32 %end) {
+entry:
+  %out.addr = alloca ptr, align 8                          ; the body's own slots, as a parameter's
+  %k.addr = alloca float, align 4
+  %i = alloca i32, align 4
+  %k.at = getelementptr inbounds i8, ptr %context, i64 0
+  %k = load float, ptr %k.at, align 4
+  store float %k, ptr %k.addr, align 4
+  %out.at = getelementptr inbounds i8, ptr %context, i64 8
+  %out = load ptr, ptr %out.at, align 8
+  store ptr %out, ptr %out.addr, align 8
+  br label %start
+start:
+  store i32 %begin, ptr %i, align 4                        ; for (int i = begin; i < end; ++i) body
+  br label %parallel.cond
+  ...
+}
+```
+
+That is the source `void scale(float* out, int n, float k) { parallel for (int i = 0; i < n; ++i) out[i] *= k; }` at
+`-O0`. At `-O2` mem2reg makes the copies registers, and the body's loop vectorises as any loop over a range does. The
+last argument is `Options::threads`, the most threads the region may use.
+
+- **Captures, as the body finds them.** A variable of the function around the region is found by `find()`, which
+  captures it (`capture()`) when the binding it finds lives in a scope below the region's own (`Region::base`): it
+  makes the region's binding, in the region's outermost scope, where the next look finds it. A capture takes the next
+  place in the context (at its type's alignment) and its load where the body starts. When the region ends
+  (`endRegion`), the function around it fills the context at the statement's place: by then every capture is known.
+  `lookup()` finds a binding without capturing, for the checks and for `parameterOf`, which only asks whether a local
+  hides a parameter.
+- **By value, or by reference.** A variable the region only reads is copied, into a slot of the body's own: its
+  loads, inside the body's loops, read memory nothing else writes. An array or a module goes by reference, its address
+  (its value is its address anyway), and so does a variable the region assigns or takes the address of, which the
+  checks' walk lists (`Region::byReference`). `Binding::slot` became an `llvm::Value*` for that: a captured
+  reference's slot is the address the context holds.
+- **A method's own reads.** `this` is a variable (`self()` finds it). What a method reads of a parameter where it
+  starts, `atEntry`'s knob values and a stream's pointer, test, base and stride, is the method's to read, once, so
+  that every iteration sees what the call does: in a region, `atEntry` returns the region's copy of the method's read
+  (`capturedParameter`), and the region's stream loads get the body's own alias scope (`scopeStreams`).
+- **Regions in regions.** A region inside another captures from the one around it; when it ends, `find()` in the one
+  around it captures there in turn. Each region sets aside the parameter reads of the code around it
+  (`Region::entryLoads`, `flatStreams`, `streamReads`) and the builder's place (`Region::resume`), and gives them back.
+- **The rest of the function goes on as before.** The body's calls are recorded under the function's name, so a
+  `[[clang::nonblocking]]` `process` can't reach `malloc` through its region; the runtime's call itself is no call of
+  the program's (the pool allocates nothing). Under `Denormals::Flush` the body is marked flushing, as every definition
+  is, and runs in its caller's mode, which the runtime sets on each thread. LLVM knows of `fminus_rt_parallel_for`
+  only that it does not throw (`RuntimeKind::Parallel` in `Calls.cpp`): the body may read and write anything its
+  context reaches, and need not return. Its name is the runtime's, as the math builtins' are (recipe 15): a program
+  with a region that declares a function `fminus_rt_parallel_for` is told to rename it, with a note at the
+  declaration.
+
+### What would race
+
+`check()` is a walk (`Walker`, in `Parallel.cpp`) of the region before it lowers: every access the code makes to what
+it did not declare itself, as a place and a kind. A place is a variable from outside the region (`Outer`), a field of
+the method's module through `this` (`Self`), or one of the region's own (`Local`, not recorded); with the fields
+followed from it (`m.y.z`), and whether an index was (`buffer[i]`, `voices[v].y`): an element. A kind is a read, a
+write (`=`, `+=`, `++`), an address (`&x`, an array's name as a pointer, `this` as a value) or a call of a method on
+the place.
+
+| In a `parallel for` | refused | why |
+|---|---|---|
+| `total += out[i];` (`total` from outside) | every iteration of the parallel for assigns 'total' | every iteration would, at once |
+| `level = 2;` (a field) | the same, for 'level' | |
+| `filter.tick(x);` | ... calls 'OnePole::tick' on 'filter', which changes it | `tick` writes its module |
+| `bump();` (a method of the module) | ... calls 'Synth::bump', which changes the module it is called on ('this') | |
+| `i = 3;` | cannot assign 'i', the loop variable of a parallel for | each iteration has its own |
+| `break;`, `return;` | 'break' cannot leave a parallel for; cannot return from a parallel for | the others run on |
+| `out[i] = f(in[i]);`, `voices[v].render(n);`, `*p += 1;`, `continue;` | allowed | an element, through an index or a pointer, is the program's to keep apart |
+
+In a `parallel { }`, a statement that changes a place (a write, an address, a call that changes its module) and
+another that uses it, the same place or one inside the other (`m` and `m.y`, not `m.x` and `m.y`), are an error at
+the later one, with a note at the earlier: `the statements of a parallel block run at once: this one uses 'a', which
+another changes`. So is a declaration as a statement (it would end with the statement), and `break`, `continue` and
+`return` out of one.
+
+Whether a method changes its module (`changesModule`) is worked out once, for every method, the first time a region
+asks: the same walk over each method's body, whose fields are `Self`. One that writes a field, an element of an array
+field too, or takes the address of one or of the module, changes it; then, until nothing changes, so does one that
+calls such a method on its module or on a module among its fields. What a method writes through a pointer field is
+not its module's. `gain()`, which only reads `k`, may run in every iteration; `tick()` may not, on one module.
+
+What is not checked is what C with OpenMP does not check either: elements, which iteration reaches which (the compiler
+sees `out[i]`, not that `i` is the loop's own), and memory through pointers. A program that races there gets what
+threads give it.
+
+### The pool
+
+`runtime/Parallel.cpp` runs one region at a time, on one pool for the process: a thread for each core but one, made by
+the first `fminus_rt_parallel_start` and joined by the last `fminus_rt_parallel_stop`. `Program::compile` starts it
+when the module calls `fminus_rt_parallel_for` (and `threads` is not 1), and `~Program` stops it; `fminus --run` and an
+executable's `main` start it around the call. A host of `jit::Jit` or of an object file starts it itself, or every
+region runs on the calling thread, in order, which computes the same.
+
+A call publishes the region (the task, the context, the range, a chunk's size, the caller's floating-point mode), then
+the cursor, `generation << 32 | next`, which releases them; bumps `signal`, which idle threads watch; and takes chunks
+itself. A chunk is about a quarter of a thread's share, taken with a compare-and-swap of the cursor as each thread
+comes free, so a slow core holds up only its own. When none is left, the caller closes the cursor and spins until the
+threads still inside have finished. A pool thread counts itself `inside` before it reads anything of the region, and
+reads it only while the cursor is open: the region's caller writes the next region only when no thread is inside.
+Both are sequentially consistent, which is what makes the two meet: a thread counted before the caller looks is waited
+for, and one counted after finds the cursor closed.
+
+A call runs alone, on its own thread, when there is no pool, when `threads` is 1, for one iteration, inside a chunk of a
+region the pool runs (a nested region: so it never waits for itself), and when another caller holds the pool (a
+host's other audio thread). It allocates nothing and takes no lock.
+
+Each pool thread copies the caller's control register (FPCR on arm64, MXCSR on x86-64) while it runs chunks, so an
+iteration computes on any thread what it would on the caller's: flush-to-zero under `Denormals::Flush`, the rounding
+mode, everything. After a region it spins on `signal` for 50 µs, so the next region in the same block starts at once,
+then sleeps on it (`std::atomic::wait`); a caller that finds threads asleep wakes them, a system call that does not
+block, and starts on its chunks without waiting for them. On macOS the threads run at the user-interactive quality of
+service.
+
+### What it changes for programs and hosts
+
+- `parallel` is a keyword: a program that named something `parallel` must rename it.
+- A program whose iterations write only their own elements, and read only what none writes, computes what it would on
+  one thread, bit for bit, whatever the number of threads and the order they run in: the tests compare every result
+  against `threads = 1`.
+- A region is a call, a context, and its synchronisation: about 4 µs on an M5 with every core taking part, and under
+  2 µs with two (below), against 0.05 µs run alone. A region is worth it when its iterations take tens of microseconds
+  together, a synth's voices, not a block's samples.
+- `Program::Options::threads` (`fminus --threads`) is the most threads a region uses, the caller's among them: 1 turns
+  the regions into plain loops on the calling thread, and starts no pool.
+- Knob versioning copies a method with a region as any other; the region's body is not copied, and reads the copy's
+  constant through the context.
+
+### Tests
+
+- `tests/unit/ParallelTest.cpp`: through the JIT with the pool started, every iteration once over ranges empty,
+  reversed, negative and long, `<=`, `continue`, and a block's statements, a block of two loops, a grid of nested
+  loops; a synth whose voices render in a region (and each voice's own region inside it), against the same program
+  with `threads = 1`, bit for bit, state and all; a knob, a stream (flat and not) and the method's variables read in a
+  region; `Denormals::Flush` flushing on every thread; every error's text and place, and the code that passes. And the
+  pool from C++: every chunk once over many ranges, several threads at most `threads` of them, the caller's mode on
+  every thread, a region in a region on its own thread, two callers at once, 20,000 small regions, and none of the
+  pool's threads left after the last stop.
+- `tests/library/ParallelTest.cpp`: `Program::compile` of a synth whose nonblocking `process` has a `parallel for` and
+  a `parallel { }`, with a knob and a stream, against `threads = 1`, bit for bit; two Programs run from two threads at
+  once, three times over.
+- `tests/lit/fminus/parallel.fm`: the dump, the `-O0` IR (the context, the call, the bodies, the block's `switch`), the
+  result through `--run`, with `--threads 1`, and from an executable; `Inputs/parallel/races.fm`'s errors.
+
+Run them under `tsan` too (`ctest --preset tsan -R parallel`): the pool's protocol is what ThreadSanitizer checks, and
+the stress test is there for it.
+
+### Measurements
+
+On an M5 (four performance cores, six efficiency cores), `fminus --run`, the median of three runs:
+
+| Program | 1 thread | 2 | 4 | 10 (every core) |
+|---|---|---|---|---|
+| 16 voices of 32 partials, 4,096 samples a block, 500 blocks | 2.63 s | 1.41 s | 0.87 s | 0.63 s (4.2×) |
+| 200,000 regions of 16 iterations that do nothing | 0.01 s | 0.28 s | 0.57 s | 0.78 s |
+
+The voices scale with the performance cores, and less with the efficiency cores, which take fewer chunks. The empty
+regions are the cost of the synchronisation alone, which grows with the threads that take part: a chunk's
+compare-and-swap and the count of who is inside travel between the cores' caches. It depends on where the system puts
+the threads, too: a run whose two or four threads all landed on one cluster's cores took 0.09 s.
+
 ## Pitfalls
 
 Each of these was hit while writing the language or its recipes. [simd.md](simd.md) has the vector ones.
@@ -3690,6 +3934,9 @@ Each of these was hit while writing the language or its recipes. [simd.md](simd.
 | `fpclassify` says a subnormal is 0, or `==` says it equals 0, in a test | under FZ (or DAZ), the comparisons C++ compiles them to flush their operand too | classify and compare outside the flushing scope |
 | A C++ reference computed under FZ comes out IEEE | the compiler moved the arithmetic across the `msr`, which orders only memory | compute in a `noinline` function from `volatile` inputs into a `volatile` result |
 | `1e-38f` is flushed in a test meant to stay normal | 1e-38 is below 2^-126 (1.18e-38): a subnormal | use 1e-37 and up for a normal product |
+| `fminus_rt_parallel_stop` waits for ever on a pool thread asleep in `std::atomic::wait`, now and then, under load | the system ran the thread for the first time after the stop had bumped `signal`, and the thread took the bumped value for where it started | hand a thread `signal` as it was when it was made, and look at `stopping` before sleeping (`runtime/Parallel.cpp`'s `work`) |
+| A test that a region ran on two threads or more fails now and then, on a busy machine | the pool's threads may not run before the caller has taken every chunk itself | a few tries, and check that one of them ran on two (`ParallelTest.cpp`) |
+| A capture's binding goes stale, or a region captures a variable twice | a reference into `regions_` kept across the body's lowering, whose own regions push onto it | take what a region needs (its function) before lowering its body; `endRegion` takes the region off the stack |
 
 ## Where to go next
 
@@ -3757,6 +4004,17 @@ or a `bool` that changes at a sample inside a block, is a list of (sample, value
 instances*: a voice reading its filter's cutoff (`filter.cutoff[i]`) needs the read's own load, an atomic one for a
 knob, where the method's own are at its start. *A table of them* (`Program::parameters()`, every module's, with a
 stable id each) is what a plugin's parameter list is built from; `Module::parameters` already has what it needs.
+
+**More of parallel regions.** Recipe 22 leaves four things. *Reductions*: a sum over the iterations,
+`parallel for (...) reduce(+: total)` in OpenMP's terms, would give each thread its own `total`, combined in a fixed
+order at the end so that the result does not depend on the threads; today an iteration writes its own element and the
+code after the loop adds them. *Real-time threads*: on macOS a pool thread could join the audio workgroup of the
+device's thread (`os_workgroup_join`, given by the host), which tells the scheduler that its work has the audio
+thread's deadline; a plugin host would pass its workgroup in through the API. *The checks* see variables, not
+elements: an index that is the loop variable (`out[i]`) is each iteration's own, and one that is a constant (`out[0]`)
+is every iteration's, which a pass over the indices could tell apart. *Knob versioning inside a region*: the region's
+body reads a versioned method's constant through the context, as a value; versioning the body on its knobs, as the
+method is, would fold them there too.
 
 **More of knob versioning.** Recipe 16 leaves four things. *A cold fallback*: an int's original body runs only for
 values outside its range, yet it is optimised, unrolled and vectorised like the copies, and in the shaper it is the

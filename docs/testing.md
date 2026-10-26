@@ -40,9 +40,9 @@ Each file states what it tests in its first line, then has a few helpers and the
   strings, so a parser test reads as input → tree.
 - `compile(source, &errors)` (`Compile.h`, which the code generator's tests share: `CodeGenTest.cpp`,
   `ControlFlowTest.cpp`, `IntTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`,
-  `ModuleTest.cpp`, `FftTest.cpp`, `ParamTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`, and the compiler's own:
-  `VersionTest.cpp`, `TbaaTest.cpp`, `ZeroInitTest.cpp`, `AttributeTest.cpp`, `DenormalTest.cpp`) parses, lowers and
-  JIT-compiles at -O2, and returns the `Jit`, or null with the formatted errors.
+  `ModuleTest.cpp`, `FftTest.cpp`, `ParamTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`, `ParallelTest.cpp`, and the
+  compiler's own: `VersionTest.cpp`, `TbaaTest.cpp`, `ZeroInitTest.cpp`, `AttributeTest.cpp`, `DenormalTest.cpp`)
+  parses, lowers and JIT-compiles at -O2, and returns the `Jit`, or null with the formatted errors.
   `lookup<float(float)>(*jit, "f")` gives a callable function, and `lookup<void(const float*, float*, int)>(*jit, "g")`
   one that takes a test's buffers (`std::array::data()`). A third parameter, the `ir::Options`, compiles at a chosen
   `poly float` width, `compile(source, &errors, {.polyLanes = 16})`, in another math mode (`{.math =
@@ -50,8 +50,8 @@ Each file states what it tests in its first line, then has a few helpers and the
   `ParamTest.cpp`); the tests of knob versioning, TBAA and denormals set `knobVersions`, `strictAliasing` and
   `denormals` the same way, to compare a program with itself under both settings. `MathTest.cpp` compiles through
   `fminus::Program`, as a host does, at each level, width and binding, and its test of the names the runtime reserves
-  for the math builtins (extending.md, recipe 15) through `ir::lower` alone too, as `fminus --emit obj` meets a
-  program: the JIT would refuse a program's definition of a runtime symbol's name anyway.
+  for the math builtins (extending.md, recipe 15) through `ir::lower` alone too, as `fminus --emit obj` meets a program:
+  the JIT would refuse a program's definition of a runtime symbol's name anyway.
 - `errorsOf(source)` returns the errors of a program that must fail.
 
 ```cpp
@@ -79,7 +79,8 @@ TEST_CASE("functions compute what they say", "[codegen]")
   of an executable's entry), `[grammar]`, `[simd]` (vectors and the vector math library), `[poly]`, `[int]`,
   `[pointer]`, `[heap]`, `[effects]`, `[math]` (the math modes), `[versions]` (knob versioning and flat streams),
   `[tbaa]`, `[zeroinit]`, `[attributes]` and `[progress]` (the runtime's attributes and loop progress),
-  `[denormals]`. Add new ones freely.
+  `[denormals]`, `[parallel]` (parallel regions, and `[runtime]` among them for the pool on its own). Add new ones
+  freely.
 - **A test that something reads 0** must not run on a fresh stack, which is 0 already. `ZeroInitTest.cpp` calls each
   function on a dirty one: `dirtyStack()` fills 64 KB below the caller with 1e6, and `padded()` calls the function
   from below a kilobyte of padding, so a wrongly removed zeroing reads 1e6. A test of a hand-written local that
@@ -89,6 +90,11 @@ TEST_CASE("functions compute what they say", "[codegen]")
   boundary ([simd.md](simd.md)).
 - `INFO(errors)` before a `REQUIRE(jit)` prints the compiler's errors when the compile fails, and saves a debugging
   round-trip.
+- **Parallel regions** run alone, on the calling thread, unless the pool is started: `ParallelTest.cpp`'s `Pool`
+  starts it for a test, as `Program::compile` does for a host. A region's result is checked against the same program
+  compiled with `threads = 1`, bit for bit, and a test that a region used several threads tries a few times, since a
+  busy machine (ctest's `-j`) may not run a pool thread before the caller has done the work. Run them under `tsan`
+  too: the pool is what it checks.
 
 ## lit and FileCheck
 

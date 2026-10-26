@@ -191,7 +191,8 @@ on it without the code generator.
 `options.parameters` the host's binding of each module parameter: a knob, a stream or a frozen constant. The rest are
 the host's choices too: `math`, how the transcendental builtins compute; `strictAliasing`, whether loads and stores
 carry TBAA tags; `knobVersions`, knob versioning's budget; `denormals`, subnormals kept or flushed to zero, and
-`targetTriple`, which says what register an entry point sets then. `ir::lower` writes two module flags,
+`targetTriple`, which says what register an entry point sets then; `threads`, the most threads a parallel region runs
+on. `ir::lower` writes two module flags,
 `fminus.math` (the mode) and `fminus.knob-versions` (the budget), for the optimiser, where only the module arrives. A
 `Lowering` object then lays the modules out, runs two passes over the program, and checks the functions' effects after
 them; under `Denormals::Flush` it then marks every definition flushing and wraps the entry points (`flushDenormals`),
@@ -202,8 +203,8 @@ but its members are defined across the directory by what they lower:
 |---|---|
 | `CodeGen.cpp` | `ir::lower()`, the constructor, and the passes: where the parts combine |
 | `Types.cpp` | FMinus's types as LLVM's (`typeOf`, `lanes`), the conversions (`convert`, `convertPointer`, `commonType`), errors and poison values |
-| `Functions.cpp` | declarations and prototypes (`declare`), bodies and parameters (`define`), stack slots and scopes |
-| `Statements.cpp` | blocks, declarations, `return`, `if`, `while`, `for`, `break` and `continue`; a loop's `llvm.loop.mustprogress` when its condition is not a constant expression (`isConstant`, `mustProgress`) |
+| `Functions.cpp` | declarations and prototypes (`declare`), bodies and parameters (`define`), stack slots and scopes (`find`, which captures a variable for a parallel region, and `lookup`, which does not) |
+| `Statements.cpp` | blocks, declarations, `return`, `if`, `while`, `for`, `break` and `continue` (none of which leaves a parallel region); a loop's `llvm.loop.mustprogress` when its condition is not a constant expression (`isConstant`, `mustProgress`) |
 | `Expressions.cpp` | the expression `std::visit` (`lower`), constants, operators (`binary`, `arithmetic`), `&&` and `\|\|`, `?:`, casts, assignment, `++` and `--` |
 | `Calls.cpp` | the builtin tables, calls, reductions, `poly_lanes` and `poly_index`, `poly_load` and `poly_store`, the heap's `malloc`, `calloc` and `free`, the FFT's `fft_*` (`lowerFft`, on the runtime's), and `ir::builtins()`; the heap's and the FFT's runtime calls through `callRuntime`, whose declaration says what the function does (`kRuntimeFacts`, `describeRuntime`) |
 | `Math.cpp` | `sinf`, `cosf`, `expf`, `tanhf` and `logf` in the vector and libm math modes: the runtime's functions, a float's or four lanes' (`lowerMath`), declared with their attributes and vector variant (`mathFunction`), and the names the runtime keeps for them, which a program that calls one may not declare (`checkMathNames`) |
@@ -211,6 +212,7 @@ but its members are defined across the directory by what they lower:
 | `Memory.cpp` | lvalues (`lvalue`, `read`, `write`): variables, elements (`p[i]`, `*p`), fields, components of any of them; arrays (a name that stands for a pointer, a list); `&x`; pointer arithmetic |
 | `Modules.cpp` | each module's struct type (`layOut`), fields (`field`), `this`, method calls (`callMethod`), copies; parameters, read by their binding (`lowerParameter`, `atEntry`), a stream's null test, value, base and stride (a flat call, read with no branch; the stride's `opaqueUnit`), their domains for knob versioning (`tagDomain`), and their streams' alias scope (`scopeStreams`) |
 | `Effects.cpp` | `[[clang::nonallocating]]` and `[[clang::nonblocking]]`: each function's calls (recorded by `lowerCall`), checked once every body is lowered |
+| `Parallel.cpp` | `parallel for` and `parallel { }`: what would race refused (`Walker`, `checkParallelFor`, `checkParallelBlock`, and whether a method changes its module, `changesModule`), each region's body a function of the runtime's task type (`beginRegion`, `endRegion`), and what the body uses of the function around it captured into a context, by value or by reference (`capture`, `captured`, `capturedParameter`, `outerValue`) |
 | `Tbaa.cpp` | C's strict aliasing, told to LLVM: FMinus's tree of four types and each access's tag (`accessTag`, `tag`), which every load and store calls |
 | `Denormals.cpp` | `Denormals::Flush`: `DenormalFolder` (`Denormals.h`, the builder's constant folder, which flushes as the mode does), every definition marked `denormal_fpenv(preservesign)`, and each entry point wrapped to set the mode and call its body through an address LLVM cannot see into (`flushDenormals`, `wrapEntry`) |
 
@@ -325,6 +327,12 @@ to `bool` and to the same pointer with `const` added (`convertPointer`).
   `[[clang::nonblocking]]` (C23's syntax, after its parameters) is checked call by call, as clang's
   `-Wfunction-effects` checks it, down through the program's unmarked functions; a call that could reach the heap
   (or, nonblocking, an unmarked external function) is an error, with a note for each step down.
+- **Parallel regions** (`Parallel.cpp`) are checked, then lowered into a function of their own each,
+  `<function>.parallel.<n>`, `void(ptr context, i32 begin, i32 end)`, which runs a loop's iterations or a block's
+  statements from `begin` to `end - 1`. Where the statement was, the function fills the context, a frame of its own,
+  with what the body found of it (a variable it only reads, copied; one it changes, an array or a module, its address;
+  what a method read of its parameters where it started), and calls `fminus_rt_parallel_for` (extending.md, recipe
+  22).
 - **Control flow** is blocks named as clang names them: `land.rhs` and `lor.rhs` for `&&` and `||`, `cond.true`,
   `cond.false` and `cond.end` for `?:`, `if.then`, `while.cond`, `for.inc`, ... A `?:` with a vector condition is a
   `select` instead, lane by lane. A loop whose condition is not a constant expression carries clang's
@@ -401,7 +409,8 @@ The same module can be written to disk instead, for development:
 - **`addEntryPoint(module)`** makes a program's `float main(float, ...)` or `bool main(float, ...)` the executable's
   entry. C's entry is `int main(int, char**)`, so it renames the program's `main` to `fminus.main` (internal, so the
   inliner can fold it) and adds a C `main` that reads the arguments through `fminus_rt_main_args`, calls it, and prints
-  the result through `fminus_rt_main_result` (or `fminus_rt_main_bool_result`, as `true` or `false`). It runs before
+  the result through `fminus_rt_main_result` (or `fminus_rt_main_bool_result`, as `true` or `false`); a program with a
+  parallel region gets the runtime's pool around the call (`fminus_rt_parallel_start`, `_stop`). It runs before
   `prepareModule` and `optimiseModule`, so the entry is optimised with the rest. [programs.md](programs.md) shows the
   IR.
 
@@ -421,7 +430,12 @@ generated code calls. It contains no LLVM, and it holds the FFT: PFFFT's objects
   builtins' functions (`Math.cpp`). Those are the vector mode's `fminus_rt_sinf` ... `fminus_rt_logf` and their four
   lanes, `fminus_rt_sin_f4` ... `fminus_rt_log_f4`, whose lanes are each the scalar function of that lane (on Apple
   systems libsystem_m's vector functions, sin and cos guarded to stay lane-independent; elsewhere libm's), and the
-  libm mode's `fminus_rt_libm_sinf` and its kin. `fminus::math` in the public header calls the vector mode's.
+  libm mode's `fminus_rt_libm_sinf` and its kin. `fminus::math` in the public header calls the vector mode's. And the
+  pool behind `parallel for` and `parallel { }` (`Parallel.cpp`): `fminus_rt_parallel_for` runs a region's body over
+  its iterations on the pool's threads and the caller's, one region at a time (a region that finds the pool held, or
+  that a chunk of another starts, runs on its caller's thread alone), in the caller's floating-point mode, allocating
+  nothing and taking no lock; `fminus_rt_parallel_start` and `fminus_rt_parallel_stop` count its users, the first
+  making a thread for each core but one, the last joining them.
 - `RuntimeSymbols.def` lists them, one `FMINUS_RUNTIME_SYMBOL(name)` each.
 - `support/JitRuntime.cpp` expands that list into absolute symbols in a JIT (`defineRuntimeSymbols`).
 - An executable gets the same functions by linking the archive.
@@ -499,12 +513,15 @@ tree's tools, examples and tests use the stages directly, through `FMinus::Inter
   from FMinus's objects, which carry no BTI or IBT property, is enforced today; a link that forces the property on
   (`-z force-bti`, say) would be.)
 - **Semantics follow C unless a deviation is documented.** The README lists the deviations: `float` and `int` are the
-  only arithmetic types, an unsuffixed `1.5` is a `float`, pointers point to six types and convert only through
-  `void*` or by adding `const`, the heap's memory is aligned and zeroed, `%` works on floats, calls may precede
-  definitions, uninitialised variables are 0, falling off a non-void function's end is an error, a broken function
-  effect is an error, C's strict aliasing is a little stricter (allocated memory keeps one type, there is no character
-  type, a vector is its elements' type), the math builtins' results are their math mode's (by default one result for
-  a float wherever it is computed), subnormals are flushed if the host asks, and `main` returns a `float` or a `bool`
-  and takes floats. As in C11 under clang, a loop whose condition is not a constant may be assumed to end, and a heap
-  block the program never uses may be removed.
-- **The runtime stays free of LLVM and real-time safe.** It runs inside the audio thread's call tree.
+  only arithmetic types, an unsuffixed `1.5` is a `float`, pointers point to six types and convert only through `void*`
+  or by adding `const`, the heap's memory is aligned and zeroed, `%` works on floats, calls may precede definitions,
+  uninitialised variables are 0, falling off a non-void function's end is an error, a broken function effect is an
+  error, C's strict aliasing is a little stricter (allocated memory keeps one type, there is no character type, a vector
+  is its elements' type), the math builtins' results are their math mode's (by default one result for a float wherever
+  it is computed), subnormals are flushed if the host asks, threads are `parallel` regions, structured and checked for
+  what would race, and `main` returns a `float` or a `bool` and takes floats. As in C11 under clang, a loop whose
+  condition is not a constant may be assumed to end, and a heap block the program never uses may be removed.
+- **The runtime stays free of LLVM and real-time safe.** It runs inside the audio thread's call tree. The pool's
+  `fminus_rt_parallel_for` is too: it waits for nothing but the chunks it handed out, never for the pool, and its one
+  system call wakes threads without blocking; making and joining threads is `fminus_rt_parallel_start`'s and
+  `_stop`'s, off the audio thread.
