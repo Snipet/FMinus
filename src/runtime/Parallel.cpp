@@ -76,8 +76,10 @@ namespace
     // running one may be waiting for the core.
     constexpr unsigned kPausesBeforeYielding = 1u << 14;
 
-    // One step of a spin: tells the core the loop is waiting (arm64's YIELD, x86's PAUSE).
-    inline void pause() noexcept
+    // One step of a spin: tells the core the loop is waiting (arm64's YIELD, x86's PAUSE). Not `pause`: POSIX's
+    // <unistd.h> declares a pause(void), which glibc's headers bring in, and a call from outside this namespace
+    // (fminus_rt_parallel_for's) would be ambiguous.
+    inline void spinPause() noexcept
     {
 #if defined(__aarch64__)
         asm volatile("yield" ::: "memory");
@@ -212,7 +214,7 @@ namespace
             const auto until = std::chrono::steady_clock::now() + kSpinBeforeSleeping;
             for (unsigned spins = 1; now == seen; ++spins)
             {
-                pause();
+                spinPause();
                 now = pool.signal.load(std::memory_order_acquire);
                 if (now == seen && spins % 64 == 0 && std::chrono::steady_clock::now() >= until)
                     break;
@@ -288,7 +290,7 @@ extern "C" void fminus_rt_parallel_for(fminus_rt_task task, void* context, std::
     for (unsigned looks = 0; pool->inside.load(std::memory_order_acquire) != 0; ++looks)
     {
         if (looks < kPausesBeforeYielding)
-            pause();
+            spinPause();
         else
             std::this_thread::yield();
     }
