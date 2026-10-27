@@ -4,6 +4,8 @@
 #
 # It looks for clang-cl in Visual Studio first, whose "C++ Clang Compiler for Windows" matches its C++ library: in a
 # developer prompt, that prompt's Visual Studio; in any other prompt, the newest one with the component (vswhere).
+# There, though, clang-cl takes the C++ library of the newest Visual Studio installed, with the component or not, and a
+# newer library may refuse an older clang (STL1000; docs/building.md, "Two Visual Studios").
 # Then on PATH, then in LLVM's installer's directory. It sets CMAKE_C_COMPILER and CMAKE_CXX_COMPILER to the one it
 # finds. clang-cl finds MSVC's and the Windows SDK's headers and libraries itself when no developer prompt names them.
 # A developer prompt for x86 is refused: its libraries are 32-bit, and FMinus builds for x64 (or arm64).

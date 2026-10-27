@@ -236,6 +236,12 @@ commands (`cmake --workflow --preset dev`), except `asan`, `tsan` and `xcode`. W
   tests and examples use clang's `ext_vector_type`, which FMinus's `float2`, `float4` and `float8` match. MSVC's own
   `cl` is refused at configure time, with the fix. A Visual Studio generator, instead of the presets' Ninja, takes
   `-T ClangCL`.
+- **Two Visual Studios.** Outside a developer prompt, clang-cl takes its C++ library from the newest Visual Studio
+  installed, whichever one it came from, and a build tree keeps the clang-cl its first configure found. A newer
+  library can refuse an older clang: Visual Studio 2026's wants clang 20 or newer, and 2022's clang-cl is clang 19,
+  so with 2026 installed beside it every file stops on `STL1000`. Build from the developer prompt of the Visual
+  Studio whose clang-cl the tree uses (configure prints it), or add "C++ Clang tools for Windows" to the newest one
+  and configure a fresh build tree. `.deps/` stays: the compiler is not part of LLVM's flavor.
 - **Bison and Flex** come from WinFlexBison, built with CMake ([Bison and Flex](#bison-and-flex)). Flex runs with
   `--nounistd`: Windows has no `<unistd.h>`, and a scanner's `%option nounistd` keeps it out of the scanner but not
   out of the header Flex writes for it. A scanner on Windows does without `<unistd.h>`, as FMinus's do.
@@ -290,4 +296,5 @@ commands (`cmake --workflow --preset dev`), except `asan`, `tsan` and `xcode`. W
 | Windows: `WinFlexBison ...: build failed` | the log it names has the compiler's error; WinFlexBison builds with this tree's C compiler, so the same prompt and clang-cl |
 | Windows: `LNK2038: mismatch detected for 'RuntimeLibrary'` | something asked for the debug C runtime (`/MDd`); FMinus and LLVM use the release one, `/MD`, in every configuration ([Windows](#windows)) |
 | Windows: `--emit exe` fails with `LNK1104: cannot open file 'msvcrt.lib'` | run from an x64 developer prompt, whose `LIB` names the C runtime's and the Windows SDK's libraries |
+| Windows: `error STL1000: Unexpected compiler version, expected Clang 20 or newer` | the clang-cl is an older Visual Studio's than the C++ library it found ([Windows](#windows), "Two Visual Studios"): build from that Visual Studio's developer prompt, or add "C++ Clang tools for Windows" to the newest Visual Studio and delete `build-<preset>/` |
 | Windows: `no member named 'aligned_alloc' in namespace 'std'` | the Windows C runtime has none: `_aligned_malloc`, freed with `_aligned_free`, as `alignedAlloc` and `alignedFree` do in the examples' harnesses ([Windows](#windows)) |
