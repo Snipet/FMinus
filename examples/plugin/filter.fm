@@ -60,10 +60,10 @@ module Filter
             highMix += fminf(fmaxf(toHigh - highMix, -glide), glide);
 
             // g = tan(pi fc / fs), with the cutoff held between 10 Hz and just below the Nyquist frequency, where the
-            // tangent stays finite. FMinus has no tanf: a sine over a cosine.
+            // tangent stays finite.
             const float fc = fminf(fmaxf(cutoff[i], 10.0f), 0.49f * sampleRate[i]);
             const float w = (3.14159265f / sampleRate[i]) * fc;
-            const float g = sinf(w) / cosf(w);
+            const float g = tanf(w);
             const float k = 2.0f - 1.96f * resonance[i];   // 1 / Q: 2 at resonance 0, 0.04 at 1
             const float a1 = 1.0f / (1.0f + g * (g + k));
             const float a2 = g * a1;

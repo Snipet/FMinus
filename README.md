@@ -260,10 +260,13 @@ Where FMinus differs from C, it is on purpose:
   machine. C promises no such thing. By default they are FMinus's own kernels, one sequence of IEEE operations each,
   within 1.56 ulp of the exact result (tan 3.35, exp 1.05, log 0.99; libm's are within 1), inline from `-O1`;
   `fminus::math` computes the same in C++ ([docs/extending.md](docs/extending.md), recipes 23 and 24).
-  `Program::Options::math` (`fminus --math`) chooses `Libm`, libm's results bit for bit, or `Fast`, LLVM's intrinsics
-  as clang compiles `<math.h>`. The runtime keeps three names for each of them (`fminus_rt_sinf`, `fminus_rt_sin_f4`
-  and `fminus_rt_libm_sinf` for `sinf`): a program that calls one may not declare a function of any of its names, in
-  any math mode. The call is then an error, with a note at the declaration.
+  `tanf` became a builtin with the kernels: a prototype of it, `float tanf(float x);`, which called libm's, now calls
+  the builtin, as a prototype of any builtin does, and a program's own function named `tanf` is an error ("'tanf' is a
+  builtin and cannot be redefined"): rename it. `Program::Options::math` (`fminus --math`) chooses `Libm`, libm's
+  results bit for bit, or `Fast`, LLVM's intrinsics as clang compiles `<math.h>`. The runtime keeps three names for
+  each of them (`fminus_rt_sinf`, `fminus_rt_sin_f4` and `fminus_rt_libm_sinf` for `sinf`): a program that calls one
+  may not declare a function of any of its names, in any math mode. The call is then an error, with a note at the
+  declaration.
 - **Subnormals are C's unless the host asks for flush-to-zero** (`Program::Options::denormals`,
   `fminus --denormals=flush`): then a subnormal input reads as 0 and a subnormal result is 0, each with its sign, in
   folding as at run time, and each entry point (a `[[clang::nonblocking]]` function the program does not call) sets

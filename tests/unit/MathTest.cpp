@@ -7,7 +7,8 @@
 // flush-to-zero, a subnormal argument gives what its signed zero gives and a subnormal result is a zero. Then the
 // promise itself: a program gives a float one result wherever it computes it, in one call or in blocks of 61, at -O0
 // and -O2, in a poly float of 1 to 64 lanes, from a frozen parameter or a knob, for each of the six functions, in
-// loops that vectorise, loops that don't, float2, float4, float8 and poly code; and that result is fminus::math's.
+// loops that vectorise, loops that don't, float2, float4, float8 and poly code; and that result is fminus::math's
+// (tanf's through a prototype too, now that it is a builtin).
 // Then the libm mode, C++'s std:: functions bit for bit, and the fast mode, LLVM's intrinsics as they were. Last, the
 // runtime's names: a program that calls a builtin declares no function of its runtime functions' names, and one that
 // calls none of them may declare and call them as it likes.
@@ -1030,6 +1031,57 @@ TEST_CASE("logf gives a float one result wherever a program computes it: fminus:
 TEST_CASE("tanf gives a float one result wherever a program computes it: fminus::math::tan's", "[math]")
 {
     checkEverywhere(function("tanf"), fminus::Program::Math::Vector, fminus::math::tan);
+}
+
+TEST_CASE("tanf is a builtin: a program's prototype of it calls the builtin, not libm's, and its own tanf is refused",
+          "[math]")
+{
+    // Before recipe 23 a prototype of tanf called libm's, as one of any other libm function does, and a program could
+    // define its own (a sine over a cosine, as examples/plugin's filter did). A prototype of a builtin declares nothing
+    // new: the call is the math mode's, and no function named tanf is declared, in any mode; in the vector mode it is
+    // fminus::math::tan. A definition of tanf is the error a definition of sinf is.
+    const char* source = "float tanf(float x);\n"
+                         "float t(float x) { return tanf(x); }\n";
+    const std::array modes{std::pair{fminus::Program::Math::Vector, fminus::ir::Math::Vector},
+                           std::pair{fminus::Program::Math::Libm, fminus::ir::Math::Libm},
+                           std::pair{fminus::Program::Math::Fast, fminus::ir::Math::Fast}};
+    for (const auto& [mode, lowering] : modes)
+    {
+        INFO("mode " << static_cast<int>(mode));
+        fminus::Diagnostics diagnostics("test.fm");
+        const auto parsed = fminus::frontend::parse(source, diagnostics);
+        REQUIRE(parsed);
+        llvm::LLVMContext context;
+        fminus::ir::Options irOptions;
+        irOptions.math = lowering;
+        const auto module = fminus::ir::lower(*parsed, context, diagnostics, irOptions);
+        INFO(diagnostics.format());
+        REQUIRE(module);
+        CHECK(module->getFunction("tanf") == nullptr);
+
+        fminus::Program::Options options;
+        options.math = mode;
+        options.fileName = "test.fm";
+        std::string errors;
+        CHECK(fminus::Program::compile("float tanf(float x) { return sinf(x) / cosf(x); }\n", errors, options)
+              == nullptr);
+        CHECK(errors == "test.fm:1:7: error: 'tanf' is a builtin and cannot be redefined\n");
+    }
+
+    std::string errors;
+    const auto program = fminus::Program::compile(source, errors);
+    INFO(errors);
+    REQUIRE(program);
+    auto* t = program->function<float(float)>("t", errors);
+    REQUIRE(t != nullptr);
+    Arguments arguments;
+    long wrong = 0;
+    for (int i = 0; i < 1000; ++i)
+    {
+        const float x = arguments.next();
+        wrong += same(t(x), fminus::math::tan(x)) ? 0 : 1;
+    }
+    CHECK(wrong == 0);
 }
 
 TEST_CASE("the libm math mode is C++'s std:: functions of floats, bit for bit, wherever a program computes them",

@@ -90,14 +90,15 @@ through `processBlock` and exits 1 unless all of these hold:
 - A program that doesn't compile is refused, and so is one whose `process` isn't `[[clang::nonblocking]]`. In both
   cases the audio passes through untouched and the error is logged once.
 
-It also prints what `processBlock` costs: 6.8 ns per sample per channel on an M5 (it varies from run to run, and much
-more with the machine's load), about 0.07% of a core for stereo at 48 kHz. That includes a sine, a cosine and two
-divisions per sample. The sine and cosine were 2.1 ns of it when this was measured: in FMinus's default math mode each
-was lane 0 of libsystem_m's four-lane function, which costs more a call than libm's, in a loop that the filter's
-recursion keeps from vectorising. Compiled with `Program::Options::math = Libm` the filter took 4.7 ns and passed the
-same checks. The default mode's are FMinus's own kernels now, inline (docs/extending.md, recipes 23 and 24), which in
-the biquad example cost about what libm's do. The modes' crossfade adds about 0.4 ns. Flush-to-zero costs nothing:
-`process` finds the mode set (the same 6.8 ns compiled with `Preserve`).
+It also prints what `processBlock` costs: 5.0 ns per sample per channel on an M5 (it varies from run to run, and much
+more with the machine's load), about 0.05% of a core for stereo at 48 kHz. That includes a tangent and a division per
+sample. In FMinus's default math mode the tangent is FMinus's own kernel, inline (docs/extending.md, recipes 23 and 24),
+in a loop that the filter's recursion keeps from vectorising. Compiled with `Program::Options::math = Libm`, a call of
+libm's `tanf`, the filter takes 4.4 ns and passes the same checks. Before `tanf` was a builtin, the filter computed
+`sinf(w) / cosf(w)`: the same speed in the default mode (5.1 ns), as the two kernels inline share one reduction,
+with 15% more instructions in `process`. When the default mode's sine and cosine were lane 0 of libsystem_m's
+four-lane functions, it took 6.8 ns, and 4.7 in the libm mode. The modes' crossfade added about 0.4 ns when that was
+measured. Flush-to-zero costs nothing: `process` finds the mode set (4.9 ns compiled with `Preserve`).
 
 ## How FMinus is used
 
@@ -124,8 +125,8 @@ module Filter
 The filter is a state-variable filter integrated by the trapezoidal rule. Zavalishin calls this topology-preserving;
 the form, with the integrators' states held as "equivalent currents", is Andrew Simper's. Chamberlin's filter in
 `examples/parameters/` holds only up to about a sixth of the sample rate. This one is stable at every cutoff below the
-Nyquist frequency, which a cutoff control that reaches 20 kHz needs. FMinus has no `tanf`, so its `g = tan(pi fc / fs)`
-is a sine over a cosine. `process` filters a channel's samples in place.
+Nyquist frequency, which a cutoff control that reaches 20 kHz needs. Its `g = tan(pi fc / fs)` is `tanf`, FMinus's
+builtin. `process` filters a channel's samples in place.
 
 Two more things in `process` keep the filter from clicking or sticking, and both work a sample at a time, so the
 output doesn't depend on how the host splits it into blocks:
@@ -137,10 +138,10 @@ output doesn't depend on how the host splits it into blocks:
 - **A bad input sample is taken as 0.** That covers a NaN, an infinity, or anything of 1e30 or more. Otherwise it would
   make the integrators' states NaN, or overflow them, and every later output would be NaN. The test is on the input, off
   the chain that carries the states from one sample to the next, so it costs next to nothing. The same test on the
-  states sits on that chain, and makes `processBlock` about 30% slower in the libm math mode (6.1 ns a sample a channel
-  against 4.7); in the default mode it costs nothing measurable (6.7 against 6.8). If a state goes bad anyway, say
-  through a parameter out of its range, which this processor never sets, a test after the loop restarts the filter from
-  rest for the next call.
+  states sits on that chain, and made `processBlock` about 30% slower in the libm math mode (6.1 ns a sample a channel
+  against 4.7, measured with a sine over a cosine); in the default mode it cost nothing measurable (6.7 against 6.8). If
+  a state goes bad anyway, say through a parameter out of its range, which this processor never sets, a test after the
+  loop restarts the filter from rest for the next call.
 
 The processor chooses each parameter's binding when it compiles (`Program::Options::parameters`):
 
