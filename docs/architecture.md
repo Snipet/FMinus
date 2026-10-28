@@ -207,7 +207,7 @@ but its members are defined across the directory by what they lower:
 | `Statements.cpp` | blocks, declarations, `return`, `if`, `while`, `for`, `break` and `continue` (none of which leaves a parallel region); a loop's `llvm.loop.mustprogress` when its condition is not a constant expression (`isConstant`, `mustProgress`) |
 | `Expressions.cpp` | the expression `std::visit` (`lower`), constants, operators (`binary`, `arithmetic`), `&&` and `\|\|`, `?:`, casts, assignment, `++` and `--` |
 | `Calls.cpp` | the builtin tables, calls, reductions, `poly_lanes` and `poly_index`, `poly_load` and `poly_store`, the heap's `malloc`, `calloc` and `free`, the FFT's `fft_*` (`lowerFft`, on the runtime's), and `ir::builtins()`; the heap's and the FFT's runtime calls through `callRuntime`, whose declaration says what the function does (`kRuntimeFacts`, `describeRuntime`) |
-| `Math.cpp` | `sinf`, `cosf`, `tanf`, `expf`, `tanhf` and `logf` in the vector and libm math modes: the runtime's functions, a float's or four lanes' (`lowerMath`), declared with their attributes and vector variant (`mathFunction`), and the names the runtime keeps for them, which a program that calls one may not declare (`checkMathNames`) |
+| `Math.cpp` | `sinf`, `cosf`, `tanf`, `expf`, `tanhf` and `logf` in the vector and libm math modes: calls of the vector mode's math intrinsics (`fminus.sin.f32`, `fminus.sin.v4f32`) or the libm mode's runtime function, a float's or four lanes' (`lowerMath`), declared with their attributes and vector variant (`mathFunction`), and the names the runtime keeps for them, which a program that calls one may not declare (`checkMathNames`) |
 | `Vectors.cpp` | vector literals in both forms, swizzles, `?:` with a vector condition |
 | `Memory.cpp` | lvalues (`lvalue`, `read`, `write`): variables, elements (`p[i]`, `*p`), fields, components of any of them; arrays (a name that stands for a pointer, a list); `&x`; pointer arithmetic |
 | `Modules.cpp` | each module's struct type (`layOut`), fields (`field`), `this`, method calls (`callMethod`), copies; parameters, read by their binding (`lowerParameter`, `atEntry`), a stream's null test, value, base and stride (a flat call, read with no branch; the stride's `opaqueUnit`), their domains for knob versioning (`tagDomain`), and their streams' alias scope (`scopeStreams`) |
@@ -311,8 +311,9 @@ to `bool` and to the same pointer with `const` added (`convertPointer`).
   `llvm.sin`, ...), declared with `Intrinsic::getOrInsertDeclaration` at the arguments' type, so `sinf` of a `float4`
   is `llvm.sin.v4f32`. That is the fast math mode's lowering, and the exact builtins' (`fabsf`, `sqrtf`, `floorf`,
   `fminf`, `fmaxf`) in every mode; in the vector and libm modes `sinf`, `cosf`, `tanf`, `expf`, `tanhf` and `logf` are
-  calls of the runtime's functions instead (`Math.cpp`), which LLVM can neither fold nor pair, so a float gets one
-  result wherever it is computed (extending.md, recipe 15). Then `kAllocations`, C's `malloc`, `calloc` and `free`,
+  calls of functions LLVM does not know (`Math.cpp`), which it can neither fold nor pair, so a float gets one result
+  wherever it is computed (extending.md, recipe 15): the vector mode's math intrinsics, which become FMinus's kernels
+  at the end of the pipeline (below), or the libm mode's. Then `kAllocations`, C's `malloc`, `calloc` and `free`,
   which call the runtime's functions (below) with 64-bit sizes and give back a `void*`. Then they try the program's
   functions. Argument counts are checked with clang's "too many/too few arguments to function call". Every call of the
   heap or of a program function is recorded for the effects' check. The heap's and the FFT's runtime functions are
@@ -367,7 +368,15 @@ to `bool` and to the same pointer with `const` added (`convertPointer`).
   - **The vector math library**, only for a module whose flag `fminus.math` is `"fast"`, or that has none (IR written
     by hand): on Apple systems, libsystem_m's table in the target library analysis, and `ReplaceWithVeclib` last, so
     `sinf` of a `float4` is one call to `_simd_sin_f4` ([simd.md](simd.md), recipe 8). The vector and libm modes'
-    calls are the runtime's, which neither knows.
+    calls are of functions neither knows.
+  - **The math kernels** (`MathKernelsPass`, `src/opt/MathKernels.h`, extending.md recipe 24), last
+    (`registerOptimizerLastEPCallback`), after the vectorisers, at every level: each call of a math intrinsic
+    (`fminus.sin.f32`, `fminus.sin.v4f32`, the vector mode's) becomes FMinus's kernel, inline, built from the template
+    the runtime's functions instantiate (`runtime/MathKernels.h`), from `-O1`; at `-O0` a call of the runtime's
+    function. Then EarlyCSE, InstSimplify and SimplifyCFG tidy the functions it changed: sine and cosine of one angle
+    share their reduction, and a constant's kernel folds, flushing as the function does (`DenormalFolder`). An
+    argument of sin, cos or tan past 2^16 takes an unlikely branch to the runtime's function, through a
+    `preserve_allcc` wrapper (`fminus.large.sin`) so that the loop around it spills nothing.
 
   The flags travel with the module, so the JIT, `fminus` and executables get them without a new argument. Recipe 6
   adds a pass the same way.
@@ -430,7 +439,8 @@ generated code calls. It contains no LLVM, and it holds the FFT: PFFFT's objects
   builtins' functions (`Math.cpp`). Those are the vector mode's `fminus_rt_sinf` ... `fminus_rt_logf` and their four
   lanes, `fminus_rt_sin_f4` ... `fminus_rt_log_f4`, whose lanes are each the scalar function of that lane: FMinus's
   own kernels (`MathKernels.h`, extending.md recipe 23), one sequence of IEEE operations each, written once as a
-  template that the scalar and the four-lane function both instantiate, the same on every target; and the libm mode's
+  template that the scalar and the four-lane function both instantiate and `MathKernelsPass` builds as IR, the same on
+  every target (a program calls the functions at `-O0`, and for sin, cos or tan past 2^16); and the libm mode's
   `fminus_rt_libm_sinf` and its kin. `fminus::math` in the public header calls the vector mode's. And the
   pool behind `parallel for` and `parallel { }` (`Parallel.cpp`): `fminus_rt_parallel_for` runs a region's body over
   its iterations on the pool's threads and the caller's, one region at a time (a region that finds the pool held, or

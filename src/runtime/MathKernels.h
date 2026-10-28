@@ -58,9 +58,9 @@ namespace fminus::kernels
     inline constexpr float kExpHigh = 89.0f;
 
     // tanh: below atanh(1/2) a polynomial, above it (1 - e^-2|x|) / (1 + e^-2|x|), which loses nothing to cancellation
-    // there; -2|x| is clamped at -87, where e^-2|x| is still a normal float.
+    // there; |x| is clamped at 43.5, where e^-2|x| is still a normal float.
     inline constexpr float kTanhSmall = 0x1.193ea8p-1f;   // 0.549306154
-    inline constexpr float kTanhLow = -87.0f;
+    inline constexpr float kTanhLarge = 43.5f;
 
     inline constexpr std::uint32_t kSign = 0x80000000u;
     inline constexpr std::uint32_t kOne = 0x3f800000u;   // 1.0f's bits
@@ -96,9 +96,12 @@ namespace fminus::kernels
     //
     //   F c(float), I ci(uint32_t)                     a constant in every lane
     //   F add, sub, mul, div (F, F); F fma(F, F, F)    rounded once each; fma(a, b, c) is a * b + c
-    //   F abs(F)                                       the sign bit cleared
+    //   F abs(F), F neg(F)                             the sign bit cleared, and flipped
+    //   F flipSign(F x, I sign)                        x's sign bit flipped where sign's top bit is set
+    //   F min(F a, F b)                                the lesser; b when a is NaN (b is never NaN)
     //   M lt, gt, eq, ge (F, F)                        ordered comparisons: false when either is NaN
     //   M signBit(I)                                   the lane's top bit is set
+    //   M ult(I, I)                                    an unsigned comparison
     //   F select(M, F, F)                              per lane: the first where the mask is set
     //   I bits(F), F fromBits(I)                       the same 32 bits, read as the other type
     //   I iadd, isub, iand, ixor (I, I); I shl, ashr (I, int)
@@ -141,13 +144,6 @@ namespace fminus::kernels
         return terms[0];
     }
 
-    // x with its sign bit flipped where `sign`'s is set.
-    template <class O>
-    typename O::F flipSign(O& o, typename O::F x, typename O::I sign)
-    {
-        return o.fromBits(o.ixor(o.bits(x), o.iand(sign, o.ci(kSign))));
-    }
-
     // sin(r) and cos(r) for r in [-pi/4, pi/4]. sin's last operation is the add of r, so a subnormal r gives its
     // signed zero under flush-to-zero, folded or not; cos(r) is near 1.
     template <class O>
@@ -170,7 +166,7 @@ namespace fminus::kernels
         using F = typename O::F;
         const F z = o.mul(r, r);
         const F value = o.select(o.signBit(o.shl(q, 31)), cosPolynomial(o, z), sinPolynomial(o, r, z));
-        return flipSign(o, value, o.ixor(o.shl(q, 30), negate));
+        return o.flipSign(value, o.ixor(o.shl(q, 30), negate));
     }
 
     // tan(r) for r in [-pi/4, pi/4] of a quadrant q: sin r / cos r when q is even, -cos r / sin r when it is odd (the
@@ -232,13 +228,15 @@ namespace fminus::kernels
         F t;
         const F r = reduce(o, a, t);
         const typename O::I odd = o.shl(o.bits(t), 31);
-        const F result = flipSign(o, tanPolynomial(o, r, odd), o.ixor(odd, o.bits(x)));
+        const F result = o.flipSign(tanPolynomial(o, r, odd), o.ixor(odd, o.bits(x)));
         return o.large(o.gt(a, o.c(kLargeArgument)), x, result, Large::Tan);
     }
 
     // e^x for x already within [kExpLow, kExpHigh] (or NaN): x = k ln2 + r, e^r by its polynomial, scaled by 2^k in
     // two steps, so that a result among the subnormals is rounded once, as IEEE rounds it (and is a zero under
     // flush-to-zero). Both scales are normal floats for every k from -150 to 128, and a NaN stays a NaN through both.
+    // The first scale is in the fused multiply-add that adds 1: 2^k1 (1 + s) rounds as 1 + s does, scaled, so it is
+    // that sum's rounding, one operation shorter.
     template <class O>
     typename O::F expClamped(O& o, typename O::F x)
     {
@@ -249,13 +247,13 @@ namespace fminus::kernels
         F r = o.fma(k, o.c(-kLn2Hi), x);
         r = o.fma(k, o.c(-kLn2Lo), r);
         const F r2 = o.mul(r, r);
-        const F e = o.add(o.c(1.0f), o.fma(estrin(o, r, r2, kExpQ), r2, r));
+        const F s = o.fma(estrin(o, r, r2, kExpQ), r2, r);   // e^r - 1
         const I ki = o.isub(o.bits(t), o.bits(o.c(kRound)));
         const I k1 = o.ashr(ki, 1);
         const I k2 = o.isub(ki, k1);
         const F s1 = o.fromBits(o.iadd(o.shl(k1, 23), o.ci(kOne)));
         const F s2 = o.fromBits(o.iadd(o.shl(k2, 23), o.ci(kOne)));
-        return o.mul(o.mul(e, s1), s2);
+        return o.mul(o.fma(s, s1, s1), s2);
     }
 
     // e^x. The clamps keep a NaN (a comparison with it is false).
@@ -269,34 +267,35 @@ namespace fminus::kernels
 
     // tanh(x): of |x|, x's sign copied on. Below kTanhSmall its polynomial, ending with an add for a subnormal x;
     // above, (1 - u) / (1 + u) with u = e^-2|x|, which goes to 0, and the result to 1, as |x| grows. u needs no scale
-    // below 2^-126: from e^-87 on (|x| over 43.5, where tanh is 1 to a float's precision) it stays there, so it is one
-    // multiply. A NaN takes the polynomial's side of the select, and stays a NaN.
+    // below 2^-126: from e^-87 on (|x| from 43.5, where tanh is 1 to a float's precision) it stays there, so its 2^k is
+    // in the fused multiply-add that adds 1 (exp's, above). The -2 is in the constant, which takes x 2 log2(e)
+    // exactly. A NaN takes the polynomial's side of the select, and stays a NaN.
     template <class O>
     typename O::F tanh(O& o, typename O::F x)
     {
         using F = typename O::F;
-        using I = typename O::I;
         const F a = o.abs(x);
         const F z = o.mul(a, a);
         const F small = o.add(a, o.mul(o.mul(a, z), horner(o, z, kTanhT)));
-        F minus = o.mul(a, o.c(-2.0f));
-        minus = o.select(o.lt(minus, o.c(kTanhLow)), o.c(kTanhLow), minus);
-        const F t = o.fma(minus, o.c(kLog2e), o.c(kRound));
+        const F clamped = o.min(a, o.c(kTanhLarge));
+        const F t = o.fma(clamped, o.c(-2.0f * kLog2e), o.c(kRound));
         const F k = o.sub(t, o.c(kRound));
-        F r = o.fma(k, o.c(-kLn2Hi), minus);
+        F r = o.fma(k, o.c(-kLn2Hi), o.mul(clamped, o.c(-2.0f)));
         r = o.fma(k, o.c(-kLn2Lo), r);
         const F r2 = o.mul(r, r);
-        const F e = o.add(o.c(1.0f), o.fma(estrin(o, r, r2, kExpQ), r2, r));
-        const I scale = o.iadd(o.shl(o.isub(o.bits(t), o.bits(o.c(kRound))), 23), o.ci(kOne));
-        const F u = o.mul(e, o.fromBits(scale));
+        const F s = o.fma(estrin(o, r, r2, kExpQ), r2, r);   // e^r - 1
+        const F scale = o.fromBits(o.iadd(o.shl(o.isub(o.bits(t), o.bits(o.c(kRound))), 23), o.ci(kOne)));
+        const F u = o.fma(s, scale, scale);
         const F large = o.div(o.sub(o.c(1.0f), u), o.add(o.c(1.0f), u));
         const F result = o.select(o.ge(a, o.c(kTanhSmall)), large, small);
-        return o.fromBits(o.ixor(o.bits(result), o.iand(o.bits(x), o.ci(kSign))));
+        return o.flipSign(result, o.bits(x));
     }
 
     // log(x): x = 2^e m with m in [sqrt(1/2), sqrt(2)), log(x) = e ln2 + log(1 + f) with f = m - 1. A subnormal x is
-    // scaled by 2^23 first, a multiply, which also makes it a zero under flush-to-zero. Then the special cases: +inf
-    // for +inf, -inf for a zero of either sign, and NaN for a NaN or anything negative.
+    // scaled by 2^23 first, a multiply, which also makes it a zero under flush-to-zero. Then the special cases, chosen
+    // by one select, off the polynomial's path: +inf for +inf, -inf for a zero of either sign, and NaN for a NaN or
+    // anything negative. (The scaled argument is never subnormal, so its bits tell the cases apart as comparisons
+    // would.)
     template <class O>
     typename O::F log(O& o, typename O::F x)
     {
@@ -311,11 +310,12 @@ namespace fminus::kernels
         const F ef = o.sub(o.toFloat(e), o.select(tiny, o.c(23.0f), o.c(0.0f)));
         const F f2 = o.mul(f, f);
         const F lp = o.fma(f2, estrin(o, f, f2, kLogP), f);
-        F result = o.fma(ef, o.c(kLn2Hi), o.fma(ef, o.c(kLn2Lo), lp));
+        const F result = o.fma(ef, o.c(kLn2Hi), o.fma(ef, o.c(kLn2Lo), lp));
         const F infinity = o.c(std::bit_cast<float>(0x7f800000u));
-        result = o.select(o.eq(xs, infinity), infinity, result);
-        result = o.select(o.eq(xs, o.c(0.0f)), o.c(-std::bit_cast<float>(0x7f800000u)), result);
-        return o.select(o.ge(xs, o.c(0.0f)), result, o.c(std::bit_cast<float>(0x7fc00000u)));
+        const F special = o.select(o.eq(xs, o.c(0.0f)), o.c(-std::bit_cast<float>(0x7f800000u)),
+                                   o.select(o.eq(xs, infinity), infinity, o.c(std::bit_cast<float>(0x7fc00000u))));
+        const auto finite = o.ult(o.isub(o.bits(xs), o.ci(1)), o.ci(0x7f7fffffu));   // 0 < xs < +inf
+        return o.select(finite, result, special);
     }
 
     // ---- The reduction of a large argument --------------------------------------------------------------------------
@@ -405,6 +405,18 @@ namespace fminus::kernels
         {
             return std::bit_cast<F>(std::bit_cast<I>(a) & ~kSign);
         }
+        static F neg(F a)
+        {
+            return -a;
+        }
+        static F min(F a, F b)
+        {
+            return a < b ? a : b;
+        }
+        static F flipSign(F x, I sign)
+        {
+            return static_cast<std::int32_t>(sign) < 0 ? -x : x;
+        }
         static M lt(F a, F b)
         {
             return a < b;
@@ -461,6 +473,10 @@ namespace fminus::kernels
         {
             return static_cast<std::int32_t>(a) < 0;
         }
+        static M ult(I a, I b)
+        {
+            return a < b;
+        }
         static F toFloat(I a)
         {
             return static_cast<F>(static_cast<std::int32_t>(a));
@@ -511,6 +527,18 @@ namespace fminus::kernels
         static F abs(F a)
         {
             return fromBits(bits(a) & ~kSign);
+        }
+        static F neg(F a)
+        {
+            return -a;
+        }
+        static F min(F a, F b)
+        {
+            return select(a < b, a, b);
+        }
+        static F flipSign(F x, I sign)
+        {
+            return fromBits(bits(x) ^ (sign & kSign));
         }
         static M lt(F a, F b)
         {
@@ -569,6 +597,10 @@ namespace fminus::kernels
         {
             return std::bit_cast<S>(a) < 0;
         }
+        static M ult(I a, I b)
+        {
+            return a < b;
+        }
         static F toFloat(I a)
         {
             return __builtin_convertvector(std::bit_cast<S>(a), F);
@@ -602,7 +634,7 @@ namespace fminus::kernels
         case Large::Tan:
         {
             const std::uint32_t odd = reduced.q << 31;
-            return flipSign(o, tanPolynomial(o, reduced.r, odd), odd ^ Scalar::bits(x));
+            return o.flipSign(tanPolynomial(o, reduced.r, odd), odd ^ Scalar::bits(x));
         }
         }
         return x;

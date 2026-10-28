@@ -20,12 +20,15 @@
 # SQ: 0.97351{{[0-9]*}}
 # SAWNEG: -0.4867{{[0-9]*}}
 
-# G4, and the span of the inversion: 2^(8/12). One vector expf for the four notes: one call of the runtime's
-# four-lane exp (the default math mode).
+# G4, and the span of the inversion: 2^(8/12). One vector expf for the four notes: FMinus's exp kernel on four lanes,
+# inline (the default math mode), with no call.
 # CHORD: 391.995{{[0-9]*}}
 # SPAN: 1.5874{{[0-9]*}}
 # CHORDIR-LABEL: define <4 x float> @frequencies(
-# CHORDIR: call <4 x float> @fminus_rt_exp_f4(<4 x float>
+# CHORDIR-NOT:   call {{.*}}@fminus
+# CHORDIR:       call <4 x float> @llvm.fma.v4f32(<4 x float>
+# CHORDIR-NOT:   call {{.*}}@fminus
+# CHORDIR:       ret <4 x float>
 
 # The mean of 7 detuned saws; the last digits depend on the width.
 # MIX: -0.799592{{[0-9]*}}

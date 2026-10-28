@@ -68,7 +68,8 @@ src/                    the fminus library: every .cpp is a source, every gramma
   runtime/              the FMinus runtime: its own library, libfminus_runtime.a, with no LLVM in it; the C
                         functions generated code calls, listed in RuntimeSymbols.def (a placeholder ABI version,
                         an executable's command line and result, the heap, the FFT, Fft.cpp, on PFFFT's objects,
-                        which the library holds, and the math builtins' functions, Math.cpp)
+                        which the library holds, and the math builtins' functions, Math.cpp, on FMinus's math
+                        kernels, MathKernels.h)
   frontend/             FMinus v0's front end: Lexer.l, Parser.y, Ast.h (the syntax tree), Diagnostics.h,
                         Frontend.h (parse), Scanner.h (the glue between scanner and parser)
   ir/                   the syntax tree to LLVM IR: CodeGen.h (ir::lower), Lowering.h (the code generator's class
@@ -76,8 +77,9 @@ src/                    the fminus library: every .cpp is a source, every gramma
                         Calls, Math (the math modes), Vectors, Memory, Modules, Effects, Tbaa (strict aliasing's
                         tags) and Denormals (flush-to-zero; with Denormals.h) .cpp
   jit/                  Jit: LLJIT for FMinus modules (host CPU, pipeline, runtime)
-  opt/                  FMinus's own LLVM passes: KnobVersioning (a method's copies for its knobs' values) and
-                        ZeroInitElision (a local's zeroing, removed where nothing reads it)
+  opt/                  FMinus's own LLVM passes: KnobVersioning (a method's copies for its knobs' values),
+                        ZeroInitElision (a local's zeroing, removed where nothing reads it) and MathKernels (the
+                        math builtins' kernels, inline)
 tools/<name>/           one executable per directory, with CLI11 for its command line: fminus (the driver),
                         fminus-build and fminus-hostinfo
 examples/<name>/        one example per directory: an FMinus program, and a harness if it has .cpp files
@@ -256,8 +258,8 @@ Where FMinus differs from C, it is on purpose:
 - **`sinf`, `cosf`, `tanf`, `expf`, `logf` and `tanhf` give a float one result wherever it is computed**: in a scalar
   loop or its vectorised body, in a vector of any width, at any optimisation level, from a constant or not, on any
   machine. C promises no such thing. By default they are FMinus's own kernels, one sequence of IEEE operations each,
-  within 1.56 ulp of the exact result (tan 3.35, exp 1.05, log 0.99; libm's are within 1); `fminus::math` computes the
-  same in C++ ([docs/extending.md](docs/extending.md), recipe 23).
+  within 1.56 ulp of the exact result (tan 3.35, exp 1.05, log 0.99; libm's are within 1), inline from `-O1`;
+  `fminus::math` computes the same in C++ ([docs/extending.md](docs/extending.md), recipes 23 and 24).
   `Program::Options::math` (`fminus --math`) chooses `Libm`, libm's results bit for bit, or `Fast`, LLVM's intrinsics
   as clang compiles `<math.h>`. The runtime keeps three names for each of them (`fminus_rt_sinf`, `fminus_rt_sin_f4`
   and `fminus_rt_libm_sinf` for `sinf`): a program that calls one may not declare a function of any of its names, in

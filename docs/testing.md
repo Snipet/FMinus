@@ -246,15 +246,17 @@ delay's first reference was 35 % slower than FMinus for that alone.
 `opt`, `llc`, `llvm-mca` and `llvm-objdump` are in the flavor's `bin/`
 (`.deps/install/llvm-23.1.3-Release-assert-*/bin`), and on lit's PATH. `-O0` IR is the input for `opt`: it's what the
 code generator wrote, every memset included, since FMinus's own passes, knob versioning and zero-init elision
-(extending.md, recipes 16 and 18), run from `-O1`. The one exception is the fast math mode's vector library, which on
-Apple systems replaces a `float4`'s `llvm.sin.v4f32` with `_simd_sin_f4` at `-O0` too (simd.md, recipe 8).
+(extending.md, recipes 16 and 18), run from `-O1`. The exceptions are the math builtins': the fast math mode's vector
+library, which on Apple systems replaces a `float4`'s `llvm.sin.v4f32` with `_simd_sin_f4` at `-O0` too (simd.md,
+recipe 8), and the default mode's math intrinsics, which every level replaces (extending.md, recipe 24): at `-O0` with
+calls of the runtime's functions, which carry no vector variant, so `opt` cannot vectorise a loop of them.
 `opt -passes='default<O2>'` runs LLVM's pipeline without FMinus's passes, and without what `fminus` gives the pipeline:
 the host's CPU (`opt` builds a generic target machine for the IR's triple), and in the fast math mode the vector
 library. So it reproduces `fminus -O2` closely only where those passes find nothing: it makes no copies of a method
 whose loop a knob steers or reads a stream (no `"fminus-knob-versions"` attribute; a stream's loop that vectorises does
-so behind the loop vectoriser's check that the stream's stride is 1, `ident.check`), and keeps the memsets of local
-arrays that `fminus` removes. Add `-mtriple=$(fminus-hostinfo | sed -n 's/^triple: //p') -mcpu=apple-m5` for the same
-cost model.
+so behind the loop vectoriser's check that the stream's stride is 1, `ident.check`), keeps the memsets of local
+arrays that `fminus` removes, and calls the math builtins' runtime functions where `fminus` has their kernels inline.
+Add `-mtriple=$(fminus-hostinfo | sed -n 's/^triple: //p') -mcpu=apple-m5` for the same cost model.
 
 For `llvm-mca`, keep only the kernel's instructions: cut the function body out of the assembly and leave out calls
 and branches. It reports the throughput of one iteration (IPC, the block's reciprocal throughput) on the CPU's

@@ -31,6 +31,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -315,6 +316,33 @@ TEST_CASE("the vector math mode's four-lane functions give each lane the scalar 
 
 namespace
 {
+    using float4 = float __attribute__((ext_vector_type(4)));
+
+    // A program's kernels of one function at -O2, where opt/MathKernels.cpp builds them inline from the runtime's
+    // template: of a float, `one`, and of a float4, `four`. Each runs in its caller's floating-point mode.
+    struct InlineKernels
+    {
+        std::unique_ptr<fminus::Program> program;
+        float (*one)(float) = nullptr;
+        float4 (*four)(float4) = nullptr;
+    };
+
+    InlineKernels inlineKernels(const Function& f)
+    {
+        const std::string name(f.builtin);
+        InlineKernels kernels;
+        std::string errors;
+        kernels.program = fminus::Program::compile("float one(float x) { return " + name + "(x); }\n"
+                                                   "float4 four(float4 x) { return " + name + "(x); }\n",
+                                                   errors);
+        if (kernels.program)
+        {
+            kernels.one = kernels.program->function<float(float)>("one", errors);
+            kernels.four = kernels.program->function<float4(float4)>("four", errors);
+        }
+        return kernels;
+    }
+
     // Each kernel's largest error over every float, against the exact result, in ulps: the bounds docs/extending.md
     // (recipe 23) states, measured with every float through the kernel against the double function, whose own error,
     // 2^-53, does not show at this scale.
@@ -522,13 +550,103 @@ TEST_CASE("under flush-to-zero, the kernels read a subnormal argument as its zer
     }
 }
 
-TEST_CASE("every float, through every kernel: the bounds, the lanes and flush-to-zero", "[.][exhaustive][math]")
+TEST_CASE("the kernels inline in a program give every float the runtime's result, of a float and in four lanes",
+          "[math]")
+{
+    // From -O1 a program's sinf is FMinus's kernel itself, built as IR from the template the runtime's functions
+    // instantiate (opt/MathKernels.cpp): every 127th float, of either sign and any magnitude, through a program's
+    // kernel of a float and of a float4 (beside three other floats), against the runtime's function.
+    for (const Function& f : kFunctions)
+    {
+        INFO(f.builtin);
+        const InlineKernels kernels = inlineKernels(f);
+        REQUIRE((kernels.one != nullptr && kernels.four != nullptr));
+        long wrong = 0;
+        for (std::uint64_t bits = 0; bits + 3 * 127 < (std::uint64_t{1} << 32); bits += 4 * 127)
+        {
+            float4 x;
+            for (int k = 0; k < 4; ++k)
+                x[k] = std::bit_cast<float>(static_cast<std::uint32_t>(bits + static_cast<std::uint64_t>(k) * 127));
+            const float4 four = kernels.four(x);
+            for (int k = 0; k < 4; ++k)
+            {
+                const float expected = f.scalar(x[k]);
+                const float one = kernels.one(x[k]);
+                if (same(one, expected) && same(four[k], expected))
+                    continue;
+                if (wrong++ == 0)
+                    UNSCOPED_INFO("first at " << x[k] << ": " << one << " and a lane's " << four[k] << ", not "
+                                              << expected);
+            }
+        }
+        CHECK(wrong == 0);
+    }
+}
+
+TEST_CASE("a constant's kernel folds to what the processor computes, flushing subnormals or not", "[math][denormals]")
+{
+    // A literal's or a frozen parameter's sinf is a kernel of constants from -O1, which the code generator's folder
+    // and LLVM fold. Under Denormals::Flush that must be what the processor computes flushing (and under Preserve,
+    // what it computes in IEEE's mode): the arguments where the two differ, subnormals of either sign, the least
+    // normals, small normals whose powers underflow, and exp's subnormal results, each a function of its own.
+    const std::array arguments{std::numeric_limits<float>::denorm_min(), -std::numeric_limits<float>::denorm_min(),
+                               0x1.8p-140f, -0x1.8p-130f, 0x1p-126f, -0x1p-126f, 0x1.000002p-126f, 1e-38f, 0x1p-75f,
+                               1e-20f, -87.5f, -95.0f, -103.5f, -103.972076f, 0.5f};
+    for (const Function& f : kFunctions)
+    {
+        for (const bool flush : {false, true})
+        {
+            INFO(f.builtin << (flush ? ", flushing" : ", IEEE's"));
+            std::string source;
+            for (std::size_t i = 0; i < arguments.size(); ++i)
+            {
+                std::array<char, 64> literal{};
+                std::snprintf(literal.data(), literal.size(), "%a", static_cast<double>(arguments[i]));
+                source += "float c" + std::to_string(i) + "(void) { return " + std::string(f.builtin) + "(" +
+                          literal.data() + "f); }\n";
+            }
+            fminus::Program::Options options;
+            options.denormals = flush ? fminus::Program::Denormals::Flush : fminus::Program::Denormals::Preserve;
+            std::string errors;
+            const auto program = fminus::Program::compile(source, errors, options);
+            INFO(errors);
+            REQUIRE(program);
+            std::vector<float (*)()> constants;
+            for (std::size_t i = 0; i < arguments.size(); ++i)
+                constants.push_back(program->function<float()>("c" + std::to_string(i), errors));
+            std::vector<float> got(arguments.size());
+            if (flush)
+            {
+                const FlushToZero mode;
+                for (std::size_t i = 0; i < arguments.size(); ++i)
+                    got[i] = constants[i]();
+            }
+            else
+            {
+                for (std::size_t i = 0; i < arguments.size(); ++i)
+                    got[i] = constants[i]();
+            }
+            for (std::size_t i = 0; i < arguments.size(); ++i)
+            {
+                const float expected =
+                    flush ? flushed(f.scalar(flushed(arguments[i]))) : f.scalar(arguments[i]);
+                INFO("of " << arguments[i] << ": " << got[i] << ", not " << expected);
+                CHECK(same(got[i], expected));
+            }
+        }
+    }
+}
+
+TEST_CASE("every float, through every kernel: the bounds, the lanes and flush-to-zero", "[.][exhaustive]")
 {
     // Hidden from ctest (about ten minutes on an M5's ten cores): run it after changing a kernel,
     // `fminus-tests "[exhaustive]"`. What the tests above sample, every float of them: each function's largest error
-    // against its bound, each float in each lane of the four-lane function beside other floats, and each float's
-    // result under flush-to-zero against its flushed argument's, flushed.
-    const unsigned threads = std::max(1u, std::thread::hardware_concurrency());
+    // against its bound, each float in each lane of the four-lane function beside other floats, the kernel inline in a
+    // program (a float's and a float4's, at -O2) against the runtime's, and each float's result under flush-to-zero
+    // against its flushed argument's, flushed. On every core, or on FMINUS_TEST_THREADS of them.
+    unsigned threads = std::max(1u, std::thread::hardware_concurrency());
+    if (const char* limit = std::getenv("FMINUS_TEST_THREADS"); limit != nullptr && std::atoi(limit) > 0)
+        threads = static_cast<unsigned>(std::atoi(limit));
     for (const Function& f : kFunctions)
     {
         struct Found
@@ -536,13 +654,16 @@ TEST_CASE("every float, through every kernel: the bounds, the lanes and flush-to
             double worst = 0;
             float at = 0;
             long lanes = 0;
+            long inlined = 0;
             long flushing = 0;
         };
+        const InlineKernels kernels = inlineKernels(f);
+        REQUIRE((kernels.one != nullptr && kernels.four != nullptr));
         std::vector<Found> found(threads);
         std::vector<std::thread> workers;
         for (unsigned t = 0; t < threads; ++t)
         {
-            workers.emplace_back([&f, &found, t, threads] {
+            workers.emplace_back([&f, &found, &kernels, t, threads] {
                 Found& mine = found[t];
                 const std::uint64_t all = std::uint64_t{1} << 32;
                 const std::uint64_t begin = all / threads * t / 4 * 4;
@@ -557,10 +678,12 @@ TEST_CASE("every float, through every kernel: the bounds, the lanes and flush-to
                     for (int k = 0; k < 4; ++k)
                         v[(k + turn) & 3] = x[k];
                     const fminus_rt_float4 y4 = f.four(v);
+                    const float4 inline4 = kernels.four(float4{v[0], v[1], v[2], v[3]});
                     for (int k = 0; k < 4; ++k)
                     {
                         const float y = f.scalar(x[k]);
                         mine.lanes += same(y4[(k + turn) & 3], y) ? 0 : 1;
+                        mine.inlined += same(inline4[(k + turn) & 3], y) && same(kernels.one(x[k]), y) ? 0 : 1;
                         const double error = ulpError(y, f.exact(static_cast<double>(x[k])));
                         if (error > mine.worst)
                         {
@@ -597,11 +720,13 @@ TEST_CASE("every float, through every kernel: the bounds, the lanes and flush-to
                 all.at = part.at;
             }
             all.lanes += part.lanes;
+            all.inlined += part.inlined;
             all.flushing += part.flushing;
         }
         INFO(f.builtin << ": largest error " << all.worst << " ulp, at " << all.at);
         CHECK(all.worst <= boundOf(f.builtin));
         CHECK(all.lanes == 0);
+        CHECK(all.inlined == 0);
         CHECK(all.flushing == 0);
     }
 }
@@ -914,7 +1039,6 @@ TEST_CASE("the fast math mode is LLVM's intrinsics, as before: libm for a float,
                                                   errors, options);
     INFO(errors);
     REQUIRE(program);
-    using float4 = float __attribute__((ext_vector_type(4)));
     auto* one = program->function<float(float)>("one", errors);
     auto* four = program->function<float4(float4)>("four", errors);
     auto* folded = program->function<float()>("folded", errors);
@@ -1058,7 +1182,6 @@ TEST_CASE("a program's own functions of the runtime's math names are left alone 
                          "    for (int i = 0; i < n; ++i)\n"
                          "        out[i] = cosf(in[i]);\n"
                          "}\n";
-    using float4 = float __attribute__((ext_vector_type(4)));
     for (const fminus::Program::Math mode :
          {fminus::Program::Math::Vector, fminus::Program::Math::Libm, fminus::Program::Math::Fast})
     {
@@ -1100,7 +1223,7 @@ TEST_CASE("a program's own functions of the runtime's math names are left alone 
     }
 
     // A definition of one, lowered: the program's code, with none of the runtime's attributes, and no builtin's vector
-    // variant; cosf's runtime function beside it has them.
+    // variant; cosf's math intrinsic beside it has them.
     fminus::Diagnostics diagnostics("test.fm");
     const auto parsed = fminus::frontend::parse("float fminus_rt_sinf(float x) { return x * 2.0f; }\n"
                                                 "float4 fminus_rt_sin_f4(float4 x) { return x; }\n"
@@ -1122,10 +1245,10 @@ TEST_CASE("a program's own functions of the runtime's math names are left alone 
         CHECK_FALSE(own->hasFnAttribute(llvm::Attribute::Speculatable));
         CHECK_FALSE(own->hasFnAttribute("vector-function-abi-variant"));
     }
-    const llvm::Function* cosine = module->getFunction("fminus_rt_cosf");
+    const llvm::Function* cosine = module->getFunction("fminus.cos.f32");
     REQUIRE(cosine != nullptr);
     CHECK(cosine->doesNotAccessMemory());
     CHECK(cosine->hasFnAttribute(llvm::Attribute::Speculatable));
     CHECK(cosine->getFnAttribute("vector-function-abi-variant").getValueAsString()
-          == "_ZGV_LLVM_N4v_fminus_rt_cosf(fminus_rt_cos_f4)");
+          == "_ZGV_LLVM_N4v_fminus.cos.f32(fminus.cos.v4f32)");
 }

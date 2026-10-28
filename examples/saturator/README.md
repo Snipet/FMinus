@@ -48,9 +48,9 @@ module Saturator
 The poly loop takes `poly_lanes()` samples a step through `poly_load` and `poly_store`, and the last, partial step
 under a mask, which keeps its loads and stores inside the buffer (docs/simd.md, "Loads and stores"). The tanh:
 
-- **`tanhf`**, `<math.h>`'s: `process_tanhf` and `process_tanhf_poly`. LLVM can only call it: FMinus's runtime's
-  `tanhf` (its default math mode). Of a `poly float` it is one call of the runtime's four-lane `tanhf` each four lanes:
-  FMinus's own kernel, on every target (docs/extending.md, recipe 23).
+- **`tanhf`**, `<math.h>`'s: `process_tanhf` and `process_tanhf_poly`. FMinus's own kernel (its default math mode),
+  inline, the same on every target (docs/extending.md, recipes 23 and 24). Of a `poly float` it is one four-lane kernel
+  each four lanes.
 - **A rational function**, `rational_tanh`: x times a polynomial of degree 12 in x over one of degree 6 (Eigen's
   fast tanh for float, with its coefficients), x clamped first to ±7.905311, past which tanh is ±1 in float. It is
   multiplies, adds, a divide and a clamp, so of a `poly float` it is one vector instruction each. Evaluated in its
@@ -84,7 +84,9 @@ Expect noise of a few ns between runs in the `tanhf` lines: this machine is shar
 50 runs, the median of three), with the kernels as the module's methods: `tanhf` a sample at a time 0.70 ns, a `poly
 float` at a time 0.54, C++ 2.22 (FMinus's vector `tanhf`, below, against C++'s call a sample of `fminus::math::tanh`,
 lane 0 of the same four-lane function); the rational function 0.35 a sample at a time and 0.36 a `poly float`, and C++
-0.35.
+0.35. With FMinus's own kernels inline (docs/extending.md, recipe 24), on a busier day: `tanhf` 0.58 ns a sample at a
+time and 0.56 a `poly float` at a time, where libsystem_m's took 0.81 to 1.19 and 0.58 to 0.87 in the same session; the
+C++, which calls the kernel out of line, 2.40.
 
 - **The library call is the cost.** glibc has no vector `tanhf`, so 8 lanes are 8 calls, at 15 ns a sample either
   way. The rational function takes 0.44 ns, 35 times less, and is within 3.5e-7 of tanh (glibc's `tanhf`, about
@@ -105,12 +107,12 @@ lane 0 of the same four-lane function); the rational function 0.35 a sample at a
   poly kernel gives the scalar one's output at every width from 1 to 64, and every kernel gives the same output in
   blocks of 64 and 61 as in one call, which `--check` checks.
 
-The `tanhf` lines are vector code too: the runtime's four-lane `tanhf` is the 4-lane poly loop's call and the scalar
-loop's vectorised body's, and its scalar `tanhf` the remainder's, the same kernel (docs/extending.md, recipe 23; the
-table's numbers were measured with libsystem_m's `_simd_tanh_f4` behind both, before it). It differs from the C
-library's `tanhf` in the last bits, by at most 1.52 ulp from the exact result; but it gives a float one result wherever
-it is computed, so `--check` holds all four kernels to the same output bit for bit, in any blocks and at any width,
-and to C++'s `fminus::math::tanh`. (With `--math fast`, LLVM's intrinsics, the plain loop's body calls
+The `tanhf` lines are vector code too: FMinus's four-lane `tanhf` kernel, inline, is the 4-lane poly loop's and the
+scalar loop's vectorised body's, and its scalar kernel the remainder's, the same operations (docs/extending.md, recipes
+23 and 24; the table's numbers were measured with libsystem_m's `_simd_tanh_f4` behind both, before them). It differs
+from the C library's `tanhf` in the last bits, by at most 1.52 ulp from the exact result; but it gives a float one
+result wherever it is computed, so `--check` holds all four kernels to the same output bit for bit, in any blocks and at
+any width, and to C++'s `fminus::math::tanh`. (With `--math fast`, LLVM's intrinsics, the plain loop's body calls
 `_simd_tanh_f4` and its remainder the C library's `tanhf`, so moving the end of a block moves samples from one to the
 other: 2 ulp apart here.)
 

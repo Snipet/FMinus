@@ -1,9 +1,9 @@
 // examples/chord/chord.fm: the four notes of a chord, computed together in a float4. One vector expf gives all four
-// frequencies (the runtime's four-lane expf, FMinus's own kernel on four lanes: docs/simd.md); literals and swizzles
-// rearrange the lanes; reductions read across them.
+// frequencies (FMinus's own expf kernel on four lanes, inline: docs/simd.md); literals and swizzles rearrange the
+// lanes; reductions read across them.
 //     fminus examples/chord/chord.fm --run main 60 1      note 1 of a C major seventh, first inversion: G4, 392 Hz
 //     fminus examples/chord/chord.fm --run span 60        how far its top is above its bottom, as a ratio
-//     fminus examples/chord/chord.fm --emit asm -o -      four frequencies, one call
+//     fminus examples/chord/chord.fm --emit asm -o -      four frequencies, one kernel
 
 // MIDI note numbers to frequencies, four at a time: 440 * 2^((note - 69) / 12), lane by lane. A scalar meeting a
 // vector is broadcast: 69, 12, ln2 and 440 apply to every lane.

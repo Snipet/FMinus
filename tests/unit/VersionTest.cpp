@@ -4,9 +4,9 @@
 // outside it. The budget caps the copies; a knob that steers no loop, a float, a wide int and a frozen parameter are
 // left alone; a versioned method stays nonblocking; the IR stays valid at every level. A stream whose pointer is null
 // reads the slot's value, at -O0 too, and a stream with samples reads them as before, bit for bit. (Bit for bit with
-// math calls too, since the tests compile in the default, vector math mode: a math call is the runtime's function,
-// which gives a float the same result in a copy's vectorised loop as in the method's scalar one, and is never folded.
-// Only the fast mode could move a math call's last bits; KnobVersioning.h.)
+// math calls too, since the tests compile in the default, vector math mode: a math call is FMinus's kernel, which
+// gives a float the same result in a copy's vectorised loop as in the method's scalar one, and folds a constant to that
+// result exactly. Only the fast mode could move a math call's last bits; KnobVersioning.h.)
 #include "Compile.h"
 
 #include "fminus/FMinus.h"

@@ -191,9 +191,13 @@ run:
   %2 = fadd float %1, -6.900000e+01
   %3 = fdiv float %2, 1.200000e+01
   %4 = fmul float %3, f0x3F317218
-  %5 = call float @fminus_rt_expf(float %4)
-  %6 = fmul float %5, 4.400000e+02
-  call void @fminus_rt_main_result(float %6)
+  %exp = fcmp ogt float %4, 8.900000e+01
+  %exp1 = select i1 %exp, float 8.900000e+01, float %4
+  ...
+  %exp25 = call float @llvm.fma.f32(float %exp14, float %exp21, float %exp21)
+  %exp26 = fmul float %exp25, %exp24
+  %5 = fmul float %exp26, 4.400000e+02
+  call void @fminus_rt_main_result(float %5)
   br label %common.ret
 }
 ```
@@ -202,11 +206,13 @@ Then `aot::emitExecutable` writes the object to a temporary file and links it wi
 was configured with, against `libfminus_runtime.a` (and, in the `asan` and `tsan` presets, the sanitizer runtimes).
 That is the same path `fminus-build` takes for hand-written IR; README.md's "Executables" has the details.
 
-In the `-O2` listing, `expf` is a call of the runtime's `fminus_rt_expf`, the default math mode's (README.md's "The
-language (v0)" has the modes). The runtime keeps that name for itself, with `fminus_rt_exp_f4` and
-`fminus_rt_libm_expf`, as it keeps three for each of `sinf`, `cosf`, `tanf`, `logf` and `tanhf`: a program that calls
-one of these builtins may not declare a function of any of its three names, in any math mode. The program at the top of
-this page, with `float fminus_rt_expf(float x) { return x; }` added as its first line, is refused at the call:
+In the `-O2` listing, `expf` is the default math mode's (README.md's "The language (v0)" has the modes): FMinus's own
+kernel, inline, `%exp` to `%exp26`, 27 instructions of fused multiply-adds, IEEE arithmetic and bit operations. At `-O0`
+it is a call of the runtime's `fminus_rt_expf`, which computes the same. The runtime keeps that name for itself, with
+`fminus_rt_exp_f4` and `fminus_rt_libm_expf`, as it keeps three for each of `sinf`, `cosf`, `tanf`, `logf` and `tanhf`:
+a program that calls one of these builtins may not declare a function of any of its three names, in any math mode. The
+program at the top of this page, with `float fminus_rt_expf(float x) { return x; }` added as its first line, is refused
+at the call:
 
 ```
 note.fm:6:18: error: 'expf' reserves 'fminus_rt_expf' for the runtime's function, and this program declares a function of that name: rename it

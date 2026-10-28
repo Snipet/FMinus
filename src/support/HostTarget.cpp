@@ -2,6 +2,7 @@
 #include "support/HostTarget.h"
 
 #include "opt/KnobVersioning.h"
+#include "opt/MathKernels.h"
 #include "opt/ZeroInitElision.h"
 #include "support/LLVMInit.h"
 
@@ -108,6 +109,17 @@ namespace fminus
                     modulePasses.addPass(llvm::createModuleToFunctionPassAdaptor(opt::KnobVersioningPass()));
             });
         // ---- end of knob versioning ---------------------------------------------------------------------------------
+        // ---- Math kernels (opt/MathKernels.h), at every level -------------------------------------------------------
+        // The vector math mode's builtins are calls of FMinus's math intrinsics, which LLVM hoists, merges and
+        // vectorises as it would llvm.sin's but cannot evaluate. Last, after the vectorisers, every call becomes the
+        // kernel itself, inline, from the template the runtime's functions instantiate (runtime/MathKernels.h): the
+        // backend schedules it with the code around it, and keeps its constants out of loops. At -O0 it becomes a call
+        // of the runtime's function instead. Nothing defines the intrinsics, so this runs at every level.
+        passes.registerOptimizerLastEPCallback(
+            [](llvm::ModulePassManager& modulePasses, llvm::OptimizationLevel level, llvm::ThinOrFullLTOPhase) {
+                modulePasses.addPass(opt::MathKernelsPass(level != llvm::OptimizationLevel::O0));
+            });
+        // ---- end of math kernels ------------------------------------------------------------------------------------
 
         passes.registerModuleAnalyses(modules);
         passes.registerCGSCCAnalyses(cgsccs);

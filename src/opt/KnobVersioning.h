@@ -14,9 +14,10 @@
 // many copies one method gets: 8 when the module has none, and 0 or 1 turns the pass off.
 //
 // Each copy computes what the method does with its value, and the rest of the pipeline treats it as any other code.
-// In the vector and libm math modes (ir::Math) that is bit for bit: a math call is the runtime's function, which gives
-// a float the same result in a vectorised loop as in a scalar one, and which LLVM cannot fold. Only the fast mode can
-// move a math call's last bits: where a copy's loop vectorises and the method's did not, a math call in it becomes the
+// In the vector and libm math modes (ir::Math) that is bit for bit: a math call is FMinus's math intrinsic or the
+// runtime's function, which gives a float the same result in a vectorised loop as in a scalar one, and which LLVM
+// cannot fold; the vector mode's kernel, inline from the end of the pipeline (opt/MathKernels.h), folds a constant to
+// the runtime's result exactly. Only the fast mode can move a math call's last bits: where a copy's loop vectorises and the method's did not, a math call in it becomes the
 // vector library's (_simd_sin_f4), and where the knob's constant reaches one, LLVM folds it with the host's double
 // functions (a frozen parameter's pitfall).
 #pragma once

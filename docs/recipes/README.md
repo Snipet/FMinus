@@ -19,7 +19,8 @@ Most of the recipes in [../extending.md](../extending.md) and [../simd.md](../si
 - recipe 20 (denormal control: subnormals flushed to zero);
 - recipe 21 (`#include`, each file read once);
 - recipe 22 (`parallel for` and `parallel { }`, a program's own threads, on the runtime's pool);
-- recipe 23 (math kernels of FMinus's own, the same in every lane and on every target).
+- recipe 23 (math kernels of FMinus's own, the same in every lane and on every target);
+- recipe 24 (the math kernels inline).
 
 Their code is in `src/`, and their tests in `tests/`.
 
