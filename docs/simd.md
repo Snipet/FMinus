@@ -557,9 +557,9 @@ arguments, with scalars broadcast. `fminf(v, 1)` is `llvm.minnum.v4f32(v, splat 
 ```
 
 `fabsf`, `sqrtf`, `floorf`, `fminf` and `fmaxf` become one NEON instruction each (`fabs.4s`, `fsqrt.4s`, `frintm.4s`,
-`fminnm.4s`, `fmaxnm.4s`). `sinf`, `cosf`, `expf`, `logf` and `tanhf` have no instruction. As intrinsics, the backend
-scalarises them: four calls to `sinf`, with the lanes moved in and out around each. Recipe 8 replaces those with one
-call to a vector library, and that is now the fast math mode. The four lines before the intrinsic are extending.md's
+`fminnm.4s`, `fmaxnm.4s`). `sinf`, `cosf`, `tanf`, `expf`, `logf` and `tanhf` have no instruction. As intrinsics, the
+backend scalarises them: four calls to `sinf`, with the lanes moved in and out around each. Recipe 8 replaces those with
+one call to a vector library, and that is now the fast math mode. The four lines before the intrinsic are extending.md's
 recipe 15. In the default math mode, a vector `sinf` is a call of the runtime's four-lane `fminus_rt_sin_f4` for each
 four lanes (a `float2` padded, a `float8` cut in two), whose every lane is the scalar `sinf` of that lane. First,
 `checkMathNames` refuses the call when the program declares a function of a name the runtime keeps for the builtin (for
@@ -1208,10 +1208,10 @@ float4 frequencies(float4 notes)
 }
 ```
 
-At `-O2` that is one `call <4 x float> @fminus_rt_exp_f4`, the runtime's four-lane `expf`, FMinus's own kernel on
-four lanes (with `--math fast`, a call of libsystem_m's `_simd_exp_f4` straight, on Apple systems). A literal rearranges the lanes:
-`(float4)(chord.yz, chord.w, chord.x * 2)` is the chord's first inversion, from a `float2`, a `float` and a product.
-`reduce_max(chord) / reduce_min(chord)` is its span. `main` picks one note with nested `?:` over `chord.x` to
+At `-O2` that is one `call <4 x float> @fminus_rt_exp_f4`, the runtime's four-lane `expf`, FMinus's own kernel on four
+lanes (with `--math fast`, a call of libsystem_m's `_simd_exp_f4` straight, on Apple systems). A literal rearranges the
+lanes: `(float4)(chord.yz, chord.w, chord.x * 2)` is the chord's first inversion, from a `float2`, a `float` and a
+product. `reduce_max(chord) / reduce_min(chord)` is its span. `main` picks one note with nested `?:` over `chord.x` to
 `chord.w`, since a lane can't be chosen by a variable yet. `fminus examples/chord/chord.fm --run main 60 1` prints
 `391.99542`, G4.
 

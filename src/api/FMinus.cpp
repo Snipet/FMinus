@@ -386,6 +386,11 @@ namespace fminus::math
         return fminus_rt_cosf(x);
     }
 
+    float tan(float x) noexcept
+    {
+        return fminus_rt_tanf(x);
+    }
+
     float exp(float x) noexcept
     {
         return fminus_rt_expf(x);

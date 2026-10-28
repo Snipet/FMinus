@@ -71,12 +71,14 @@ TEST_CASE("builtins are <math.h>'s float functions: LLVM's intrinsics, and the r
 {
     auto jit = compile("float f(float x) { return sqrtf(x) + fabsf(-x) + floorf(x / 2) + fminf(x, 1) + fmaxf(x, 1); }\n"
                        "float g(float x) { return sinf(x) * sinf(x) + cosf(x) * cosf(x) + logf(expf(x)); }\n"
-                       "float h(float x) { return tanhf(x); }\n");
+                       "float h(float x) { return tanhf(x); }\n"
+                       "float t(float x) { return tanf(x); }\n");
     REQUIRE(jit);
     CHECK(lookup<float(float)>(*jit, "f")(9.0f) == 3.0f + 9.0f + 4.0f + 1.0f + 9.0f);
     CHECK(std::abs(lookup<float(float)>(*jit, "g")(0.25f) - 1.25f) < 1e-6f);
     CHECK(lookup<float(float)>(*jit, "h")(0.5f) == fminus::math::tanh(0.5f));   // the default math mode (MathTest.cpp)
-    CHECK(fminus::ir::builtins().size() == 10);
+    CHECK(lookup<float(float)>(*jit, "t")(0.5f) == fminus::math::tan(0.5f));
+    CHECK(fminus::ir::builtins().size() == 11);
 }
 
 TEST_CASE("% is fmodf's remainder: the sign of the dividend", "[codegen]")

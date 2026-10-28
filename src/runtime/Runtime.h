@@ -61,8 +61,8 @@ extern "C"
     void fminus_rt_fft_forward_complex(void* plan, const float* in, float* out) noexcept;
     void fminus_rt_fft_inverse_complex(void* plan, const float* in, float* out) noexcept;
 
-    // The math builtins sinf, cosf, expf, tanhf and logf (Math.cpp), as the code generator's math modes call them
-    // (ir::Options::math, ir/Math.cpp). None allocates, locks or makes a system call; each is a function of its
+    // The math builtins sinf, cosf, tanf, expf, tanhf and logf (Math.cpp), as the code generator's math modes call
+    // them (ir::Options::math, ir/Math.cpp). None allocates, locks or makes a system call; each is a function of its
     // argument alone, which the code generator tells LLVM (it reads no memory and is defined for every argument).
     //
     // The vector mode's, FMinus's default: FMinus's own kernels (MathKernels.h), the same IEEE operations on every
@@ -74,11 +74,13 @@ extern "C"
     float fminus_rt_expf(float x) noexcept;
     float fminus_rt_tanhf(float x) noexcept;
     float fminus_rt_logf(float x) noexcept;
+    float fminus_rt_tanf(float x) noexcept;
     fminus_rt_float4 fminus_rt_sin_f4(fminus_rt_float4 x) noexcept;
     fminus_rt_float4 fminus_rt_cos_f4(fminus_rt_float4 x) noexcept;
     fminus_rt_float4 fminus_rt_exp_f4(fminus_rt_float4 x) noexcept;
     fminus_rt_float4 fminus_rt_tanh_f4(fminus_rt_float4 x) noexcept;
     fminus_rt_float4 fminus_rt_log_f4(fminus_rt_float4 x) noexcept;
+    fminus_rt_float4 fminus_rt_tan_f4(fminus_rt_float4 x) noexcept;
 
     // FMinus's parallel for and parallel { } (Parallel.cpp): runs task(context, ...) over the iterations begin to
     // end - 1, spread over the pool's threads and the calling thread, in chunks each thread takes as it finishes its
@@ -107,4 +109,5 @@ extern "C"
     float fminus_rt_libm_expf(float x) noexcept;
     float fminus_rt_libm_tanhf(float x) noexcept;
     float fminus_rt_libm_logf(float x) noexcept;
+    float fminus_rt_libm_tanf(float x) noexcept;
 }

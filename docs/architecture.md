@@ -207,7 +207,7 @@ but its members are defined across the directory by what they lower:
 | `Statements.cpp` | blocks, declarations, `return`, `if`, `while`, `for`, `break` and `continue` (none of which leaves a parallel region); a loop's `llvm.loop.mustprogress` when its condition is not a constant expression (`isConstant`, `mustProgress`) |
 | `Expressions.cpp` | the expression `std::visit` (`lower`), constants, operators (`binary`, `arithmetic`), `&&` and `\|\|`, `?:`, casts, assignment, `++` and `--` |
 | `Calls.cpp` | the builtin tables, calls, reductions, `poly_lanes` and `poly_index`, `poly_load` and `poly_store`, the heap's `malloc`, `calloc` and `free`, the FFT's `fft_*` (`lowerFft`, on the runtime's), and `ir::builtins()`; the heap's and the FFT's runtime calls through `callRuntime`, whose declaration says what the function does (`kRuntimeFacts`, `describeRuntime`) |
-| `Math.cpp` | `sinf`, `cosf`, `expf`, `tanhf` and `logf` in the vector and libm math modes: the runtime's functions, a float's or four lanes' (`lowerMath`), declared with their attributes and vector variant (`mathFunction`), and the names the runtime keeps for them, which a program that calls one may not declare (`checkMathNames`) |
+| `Math.cpp` | `sinf`, `cosf`, `tanf`, `expf`, `tanhf` and `logf` in the vector and libm math modes: the runtime's functions, a float's or four lanes' (`lowerMath`), declared with their attributes and vector variant (`mathFunction`), and the names the runtime keeps for them, which a program that calls one may not declare (`checkMathNames`) |
 | `Vectors.cpp` | vector literals in both forms, swizzles, `?:` with a vector condition |
 | `Memory.cpp` | lvalues (`lvalue`, `read`, `write`): variables, elements (`p[i]`, `*p`), fields, components of any of them; arrays (a name that stands for a pointer, a list); `&x`; pointer arithmetic |
 | `Modules.cpp` | each module's struct type (`layOut`), fields (`field`), `this`, method calls (`callMethod`), copies; parameters, read by their binding (`lowerParameter`, `atEntry`), a stream's null test, value, base and stride (a flat call, read with no branch; the stride's `opaqueUnit`), their domains for knob versioning (`tagDomain`), and their streams' alias scope (`scopeStreams`) |
@@ -310,19 +310,19 @@ to `bool` and to the same pointer with `const` added (`convertPointer`).
   `kBuiltins`, a table from `<math.h>`'s float names to LLVM intrinsics (`fabsf` to `llvm.fabs`, `sinf` to
   `llvm.sin`, ...), declared with `Intrinsic::getOrInsertDeclaration` at the arguments' type, so `sinf` of a `float4`
   is `llvm.sin.v4f32`. That is the fast math mode's lowering, and the exact builtins' (`fabsf`, `sqrtf`, `floorf`,
-  `fminf`, `fmaxf`) in every mode; in the vector and libm modes `sinf`, `cosf`, `expf`, `tanhf` and `logf` are calls
-  of the runtime's functions instead (`Math.cpp`), which LLVM can neither fold nor pair, so a float gets one result
-  wherever it is computed (extending.md, recipe 15). Then `kAllocations`, C's `malloc`, `calloc` and `free`, which
-  call the runtime's functions (below) with 64-bit sizes and give back a `void*`. Then they try the program's
+  `fminf`, `fmaxf`) in every mode; in the vector and libm modes `sinf`, `cosf`, `tanf`, `expf`, `tanhf` and `logf` are
+  calls of the runtime's functions instead (`Math.cpp`), which LLVM can neither fold nor pair, so a float gets one
+  result wherever it is computed (extending.md, recipe 15). Then `kAllocations`, C's `malloc`, `calloc` and `free`,
+  which call the runtime's functions (below) with 64-bit sizes and give back a `void*`. Then they try the program's
   functions. Argument counts are checked with clang's "too many/too few arguments to function call". Every call of the
   heap or of a program function is recorded for the effects' check. The heap's and the FFT's runtime functions are
   declared through `callRuntime`, with the attributes that say what each does (an allocator of zeroed memory, a
   transform that reads one buffer and writes another; recipe 19), unless the program declares a function of that name
   itself. The math builtins' names are kept: a program that calls `sinf` may not declare a function named
-  `fminus_rt_sinf`, `fminus_rt_sin_f4` or `fminus_rt_libm_sinf` (each builtin has its three), in any math mode, the
-  fast one's too, so that whether a program compiles does not depend on the mode. `checkMathNames` reports it at the
-  call, with a note at the declaration, so no function of the program gets a runtime function's attributes or becomes
-  a vector variant.
+  `fminus_rt_sinf`, `fminus_rt_sin_f4` or `fminus_rt_libm_sinf` (each builtin has its three), in any math mode, the fast
+  one's too, so that whether a program compiles does not depend on the mode. `checkMathNames` reports it at the call,
+  with a note at the declaration, so no function of the program gets a runtime function's attributes or becomes a vector
+  variant.
 - **Effects** (`Effects.cpp`) run after every body: a function marked `[[clang::nonallocating]]` or
   `[[clang::nonblocking]]` (C23's syntax, after its parameters) is checked call by call, as clang's
   `-Wfunction-effects` checks it, down through the program's unmarked functions; a call that could reach the heap

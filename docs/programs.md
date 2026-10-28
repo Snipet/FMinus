@@ -204,9 +204,9 @@ That is the same path `fminus-build` takes for hand-written IR; README.md's "Exe
 
 In the `-O2` listing, `expf` is a call of the runtime's `fminus_rt_expf`, the default math mode's (README.md's "The
 language (v0)" has the modes). The runtime keeps that name for itself, with `fminus_rt_exp_f4` and
-`fminus_rt_libm_expf`, as it keeps three for each of `sinf`, `cosf`, `logf` and `tanhf`: a program that calls one of
-these builtins may not declare a function of any of its three names, in any math mode. The program at the top of this
-page, with `float fminus_rt_expf(float x) { return x; }` added as its first line, is refused at the call:
+`fminus_rt_libm_expf`, as it keeps three for each of `sinf`, `cosf`, `tanf`, `logf` and `tanhf`: a program that calls
+one of these builtins may not declare a function of any of its three names, in any math mode. The program at the top of
+this page, with `float fminus_rt_expf(float x) { return x; }` added as its first line, is refused at the call:
 
 ```
 note.fm:6:18: error: 'expf' reserves 'fminus_rt_expf' for the runtime's function, and this program declares a function of that name: rename it

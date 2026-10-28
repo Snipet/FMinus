@@ -50,7 +50,7 @@ namespace fminus::ir
         Flush,
     };
 
-    // How sinf, cosf, expf, tanhf and logf compute, scalar or vector (ir/Math.cpp lowers them, runtime/Math.cpp
+    // How sinf, cosf, tanf, expf, tanhf and logf compute, scalar or vector (ir/Math.cpp lowers them, runtime/Math.cpp
     // computes them). fabsf, sqrtf, floorf, fminf and fmaxf are exact, so they are LLVM's intrinsics in every mode.
     //   Vector   the runtime's functions (runtime/Runtime.h, fminus_rt_sinf and fminus_rt_sin_f4), which give a float
     //            the same result wherever it is: in a scalar loop or its vectorised body, a float4 or a poly float of

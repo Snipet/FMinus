@@ -205,7 +205,7 @@ float half(float x) { x /= 2; return x; }
 | comments | `// ...` and `/* ... */` |
 | directives | `#include "file"`, the file read where the line is, as in C, and once only (as if every file began with `#pragma once`), found where the host says: `fminus` looks beside the including file, then in `-I`'s directories; `#pragma`, ignored |
 | types | `float` (IEEE single precision), `int` (32 bits, signed: C's `/` and `%`, overflow undefined) and `bool` (C23's: 0 or 1, computed as an int; a number is `x != 0` as a bool); `void`, a function's result; pointers to `float`, `int`, `float2`, `float4`, `float8` and modules, `const` (`const float*`, read-only through it) and `restrict` (C99's promise that nothing else reaches it), and `void*` (an address with no type, which converts to and from any pointer); arrays of `float`, `int`, the float vectors and modules; modules, by name (`OnePole`), from their declaration on; `float2`, `float4`, `float8` (OpenCL C's vectors, lane by lane, scalars broadcast); `poly float` and `poly bool`, as many lanes as the machine's vectors ([docs/simd.md](docs/simd.md)) |
-| builtins | `fabsf sqrtf floorf fminf fmaxf` (LLVM intrinsics, exact) and `sinf cosf expf logf tanhf` (by the math mode: the runtime's, with one result for a float wherever it is computed, by default), on floats and vectors; `malloc calloc free` (C's, with `int` sizes); `reduce_add reduce_min reduce_max` (a vector to a float); `poly_lanes` (an int) and `poly_index`; `poly_load poly_store` (a poly float from or to a `float*`, with an optional mask); the FFT: `fft_create(n)` and `fft_create_complex(n)` (a plan, a `void*`; they allocate), `fft_forward(plan, in, out)` and `fft_inverse(plan, in, out)` (real when one side is floats, complex when both are `float2`s; unnormalised), `fft_destroy(plan)` |
+| builtins | `fabsf sqrtf floorf fminf fmaxf` (LLVM intrinsics, exact) and `sinf cosf tanf expf logf tanhf` (by the math mode: the runtime's, with one result for a float wherever it is computed, by default), on floats and vectors; `malloc calloc free` (C's, with `int` sizes); `reduce_add reduce_min reduce_max` (a vector to a float); `poly_lanes` (an int) and `poly_index`; `poly_load poly_store` (a poly float from or to a `float*`, with an optional mask); the FFT: `fft_create(n)` and `fft_create_complex(n)` (a plan, a `void*`; they allocate), `fft_forward(plan, in, out)` and `fft_inverse(plan, in, out)` (real when one side is floats, complex when both are `float2`s; unnormalised), `fft_destroy(plan)` |
 
 Where FMinus differs from C, it is on purpose:
 
@@ -253,11 +253,11 @@ Where FMinus differs from C, it is on purpose:
   freed (C lets a store give it a new one); and there is no character type, so only a module's copy and a declaration's
   zeroing read or write bytes of any type. `--no-strict-aliasing` or `Program::Options::strictAliasing = false` turns
   the rule off, as clang's `-fno-strict-aliasing` does.
-- **`sinf`, `cosf`, `expf`, `logf` and `tanhf` give a float one result wherever it is computed**: in a scalar loop or
-  its vectorised body, in a vector of any width, at any optimisation level, from a constant or not, on any machine. C
-  promises no such thing. By default they are FMinus's own kernels, one sequence of IEEE operations each, within 1.56
-  ulp of the exact result (exp 1.05, log 0.99; libm's are within 1); `fminus::math` computes the same in C++
-  ([docs/extending.md](docs/extending.md), recipe 23).
+- **`sinf`, `cosf`, `tanf`, `expf`, `logf` and `tanhf` give a float one result wherever it is computed**: in a scalar
+  loop or its vectorised body, in a vector of any width, at any optimisation level, from a constant or not, on any
+  machine. C promises no such thing. By default they are FMinus's own kernels, one sequence of IEEE operations each,
+  within 1.56 ulp of the exact result (tan 3.35, exp 1.05, log 0.99; libm's are within 1); `fminus::math` computes the
+  same in C++ ([docs/extending.md](docs/extending.md), recipe 23).
   `Program::Options::math` (`fminus --math`) chooses `Libm`, libm's results bit for bit, or `Fast`, LLVM's intrinsics
   as clang compiles `<math.h>`. The runtime keeps three names for each of them (`fminus_rt_sinf`, `fminus_rt_sin_f4`
   and `fminus_rt_libm_sinf` for `sinf`): a program that calls one may not declare a function of any of its names, in
@@ -541,7 +541,7 @@ preset has a workflow (`cmake --workflow --preset <name>`) except `xcode`, which
 ## Handy
 
 - `build-dev/bin/fminus-hostinfo [--features]`: the triple, CPU, features and data layout the JIT targets here.
-- VSCode: `python3 editors/vscode/package.py`, then `code --install-extension build-vscode/fminus-0.9.0.vsix`, for
+- VSCode: `python3 editors/vscode/package.py`, then `code --install-extension build-vscode/fminus-0.10.0.vsix`, for
   FMinus syntax highlighting, lit's `RUN:` and `CHECK:` lines included
   ([editors/vscode/README.md](editors/vscode/README.md)).
 - `build-dev/bin/fminus`: FMinus source to its tree, IR, assembly or an object, or run in the JIT (above).

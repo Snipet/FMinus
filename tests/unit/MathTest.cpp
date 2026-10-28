@@ -6,7 +6,7 @@
 // result (docs/extending.md, recipe 23, which has the bounds over every float); the special values; and under
 // flush-to-zero, a subnormal argument gives what its signed zero gives and a subnormal result is a zero. Then the
 // promise itself: a program gives a float one result wherever it computes it, in one call or in blocks of 61, at -O0
-// and -O2, in a poly float of 1 to 64 lanes, from a frozen parameter or a knob, for each of the five functions, in
+// and -O2, in a poly float of 1 to 64 lanes, from a frozen parameter or a knob, for each of the six functions, in
 // loops that vectorise, loops that don't, float2, float4, float8 and poly code; and that result is fminus::math's.
 // Then the libm mode, C++'s std:: functions bit for bit, and the fast mode, LLVM's intrinsics as they were. Last, the
 // runtime's names: a program that calls a builtin declares no function of its runtime functions' names, and one that
@@ -81,7 +81,7 @@ namespace
     using Four = fminus_rt_float4 (*)(fminus_rt_float4) noexcept;
     using One = float (*)(float) noexcept;
 
-    // One of the five, by every name it has.
+    // One of the six, by every name it has.
     struct Function
     {
         std::string_view builtin;   // FMinus's: "sinf"
@@ -114,6 +114,10 @@ namespace
     {
         return std::log(x);
     }
+    float stdTan(float x)
+    {
+        return std::tan(x);
+    }
     double doubleSin(double x)
     {
         return std::sin(x);
@@ -134,13 +138,18 @@ namespace
     {
         return std::log(x);
     }
+    double doubleTan(double x)
+    {
+        return std::tan(x);
+    }
 
-    const std::array<Function, 5> kFunctions{
+    const std::array<Function, 6> kFunctions{
         Function{"sinf", fminus_rt_sinf, fminus_rt_sin_f4, fminus::math::sin, stdSin, doubleSin, -50.0f, 50.0f},
         Function{"cosf", fminus_rt_cosf, fminus_rt_cos_f4, fminus::math::cos, stdCos, doubleCos, -50.0f, 50.0f},
         Function{"expf", fminus_rt_expf, fminus_rt_exp_f4, fminus::math::exp, stdExp, doubleExp, -30.0f, 30.0f},
         Function{"tanhf", fminus_rt_tanhf, fminus_rt_tanh_f4, fminus::math::tanh, stdTanh, doubleTanh, -10.0f, 10.0f},
         Function{"logf", fminus_rt_logf, fminus_rt_log_f4, fminus::math::log, stdLog, doubleLog, 0.0f, 100.0f},
+        Function{"tanf", fminus_rt_tanf, fminus_rt_tan_f4, fminus::math::tan, stdTan, doubleTan, -1.5f, 1.5f},
     };
 
     const Function& function(std::string_view builtin)
@@ -316,7 +325,7 @@ namespace
     };
 
     constexpr std::array kBounds{Bound{"sinf", 1.56}, Bound{"cosf", 1.56}, Bound{"expf", 1.05},
-                                 Bound{"tanhf", 1.52}, Bound{"logf", 0.99}};
+                                 Bound{"tanhf", 1.52}, Bound{"logf", 0.99}, Bound{"tanf", 3.35}};
 
     double boundOf(std::string_view builtin)
     {
@@ -425,6 +434,7 @@ TEST_CASE("the vector math mode's kernels give C's special values", "[math]")
     for (const float zero : {0.0f, -0.0f})
     {
         CHECK(is(fminus_rt_sinf(zero), zero));   // the zero's sign kept
+        CHECK(is(fminus_rt_tanf(zero), zero));
         CHECK(is(fminus_rt_cosf(zero), 1.0f));
         CHECK(is(fminus_rt_expf(zero), 1.0f));
         CHECK(is(fminus_rt_tanhf(zero), zero));
@@ -434,6 +444,7 @@ TEST_CASE("the vector math mode's kernels give C's special values", "[math]")
     {
         CHECK(std::isnan(fminus_rt_sinf(infinity)));
         CHECK(std::isnan(fminus_rt_cosf(infinity)));
+        CHECK(std::isnan(fminus_rt_tanf(infinity)));
         CHECK(is(fminus_rt_tanhf(infinity), std::copysign(1.0f, infinity)));
     }
     CHECK(is(fminus_rt_expf(kInfinity), kInfinity));
@@ -874,6 +885,11 @@ TEST_CASE("tanhf gives a float one result wherever a program computes it: fminus
 TEST_CASE("logf gives a float one result wherever a program computes it: fminus::math::log's", "[math]")
 {
     checkEverywhere(function("logf"), fminus::Program::Math::Vector, fminus::math::log);
+}
+
+TEST_CASE("tanf gives a float one result wherever a program computes it: fminus::math::tan's", "[math]")
+{
+    checkEverywhere(function("tanf"), fminus::Program::Math::Vector, fminus::math::tan);
 }
 
 TEST_CASE("the libm math mode is C++'s std:: functions of floats, bit for bit, wherever a program computes them",

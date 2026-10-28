@@ -110,8 +110,8 @@ that LLVM's passes treat uniformly. `IntrinsicEnums.inc`, in the LLVM install's 
 intrinsics. An exact one is one row: `copysignf` (`copysign`), or `fmaf` (`fma`, three parameters). A transcendental
 one, `exp2f`, is not since recipe 15: a bare row would be LLVM's intrinsic in every math mode, which LLVM folds with
 the host's double functions, so it needs a stem and its runtime functions too (`fminus_rt_exp2f`, `fminus_rt_exp2_f4`,
-`fminus_rt_libm_exp2f`), as recipe 15 gives the others. `powf`, of two arguments, also needs `lowerMath` and
-`mathFunction` to take two.
+`fminus_rt_libm_exp2f`), as recipe 15 gives the others, and recipe 23 gave `tanf`. `powf`, of two arguments, also
+needs `lowerMath` and `mathFunction` to take two.
 
 Update the count in `CodeGenTest.cpp` (`builtins().size()`), then test the value, in the builtins' test case:
 
@@ -119,7 +119,7 @@ Update the count in `CodeGenTest.cpp` (`builtins().size()`), then test the value
                        "float h(float x) { return tanhf(x); }\n");
     ...
     CHECK(lookup<float(float)>(*jit, "h")(0.5f) == fminus::math::tanh(0.5f));   // the default math mode (MathTest.cpp)
-    CHECK(fminus::ir::builtins().size() == 10);
+    CHECK(fminus::ir::builtins().size() == 11);
 ```
 
 The test compared with `std::tanh` until recipe 15; `fminus::math::tanh` is what the default mode computes.
@@ -2223,11 +2223,11 @@ lane-independent by construction and the same on every target, which retired the
 
 ### The runtime: `src/runtime/Math.cpp`
 
-Fifteen functions, in `Runtime.h` and `RuntimeSymbols.def`: the vector mode's `fminus_rt_sinf` to `fminus_rt_logf`,
-their four lanes, `fminus_rt_sin_f4` to `fminus_rt_log_f4`, and the libm mode's `fminus_rt_libm_sinf` to
-`fminus_rt_libm_logf`. A four-lane vector is `fminus_rt_float4`, GCC's and clang's `vector_size(16)` float vector,
-which the C ABI passes in one register as it does FMinus's `<4 x float>`. Since recipe 23 the vector mode's are one
-kernel each, run on a float and on four:
+Fifteen functions (eighteen with recipe 23's `tanf`), in `Runtime.h` and `RuntimeSymbols.def`: the vector mode's
+`fminus_rt_sinf` to `fminus_rt_logf`, their four lanes, `fminus_rt_sin_f4` to `fminus_rt_log_f4`, and the libm mode's
+`fminus_rt_libm_sinf` to `fminus_rt_libm_logf`. A four-lane vector is `fminus_rt_float4`, GCC's and clang's
+`vector_size(16)` float vector, which the C ABI passes in one register as it does FMinus's `<4 x float>`. Since recipe
+23 the vector mode's are one kernel each, run on a float and on four:
 
 ```cpp
 extern "C" float fminus_rt_sinf(float x) noexcept
@@ -3867,8 +3867,8 @@ the threads, too: a run whose two or four threads all landed on one cluster's co
 ## Recipe 23: math kernels of FMinus's own
 
 *In the compiler. Code: `src/runtime/MathKernels.h` (the kernels), `src/runtime/Math.cpp` (the runtime's functions on
-them), and the runtime's `-ffp-contract=off` (`src/CMakeLists.txt`). Tests: `tests/unit/MathTest.cpp` (`[math]`, and
-`[exhaustive]` on demand). Fits: `Scripts/fit-math-kernels.py`.*
+them), and the runtime's `-ffp-contract=off` (`src/CMakeLists.txt`); `tanf`'s row in `kBuiltins` (`src/ir/Calls.cpp`).
+Tests: `tests/unit/MathTest.cpp` (`[math]`, and `[exhaustive]` on demand). Fits: `Scripts/fit-math-kernels.py`.*
 
 Recipe 15's vector mode keeps its promise, one result for a float wherever it is computed, and it kept it by trusting a
 library: libsystem_m's vector functions were lane-independent (or made so, for sin and cos), so a scalar `sinf` could
@@ -3910,7 +3910,7 @@ functions are written, and MathTest.cpp only confirms it. What makes it hold on 
   C++ does. An x86-64 without FMA (before Haswell) computes `fmaf` in its C library, which C requires to round
   correctly: the same bits, more slowly.
 - **No branches.** The special cases (NaN, infinities, zeros, the ends of a function's range) are selects, so every
-  lane runs every operation. The one exception is an argument of sin or cos past `kLargeArgument` (below).
+  lane runs every operation. The one exception is an argument of sin, cos or tan past `kLargeArgument` (below).
 - **A whole number without a rounding instruction.** Adding 1.5 × 2^23 (`kRound`) to a float under 2^22 in magnitude
   rounds it to an integer (to even, as IEEE's rounding does), which the sum's low bits hold, and subtracting it again
   gives the integer as a float: two adds, where SSE2 has no rounding instruction, and the integer's bits come with
@@ -3921,6 +3921,7 @@ functions are written, and MathTest.cpp only confirms it. What makes it hold on 
 | Function | Argument reduced | Approximated | Then |
 |---|---|---|---|
 | `sinf`, `cosf` | \|x\| = q π/2 + r, r in [-π/4, π/4]: q by `kRound`, r by three fused multiply-adds with π/2 in three floats (Cody and Waite), the first exact, so nothing cancels | sin r = r + r³ P(r²), P of degree 2, and cos r = 1 + r² Q(r²), Q of degree 3 | one of the two by q's parity (cos: q + 1's), the sign by q's second bit (and x's, for sin) |
+| `tanf` | as sin's | sin r and cos r, as above | sin r / cos r for an even q, -cos r / sin r for an odd one: one divide; x's sign |
 | `expf` | x = k ln 2 + r, r in [-ln2/2, ln2/2]: k by `kRound`, r by two fused multiply-adds | e^r = 1 + r + r² Q(r), Q of degree 4, in Estrin's form | × 2^k in two multiplies, so a subnormal result is rounded once |
 | `logf` | x = 2^e m, m in [√½, √2), by its bits (a subnormal x scaled by 2^23 first) | log(1 + f) = f + f² P(f), f = m - 1, P of degree 9, Estrin's form | + e ln 2 in two fused multiply-adds |
 | `tanhf` | none | below atanh ½ (0.549), \|x\| + \|x\|³ T(x²), T of degree 4; above, (1 - u) / (1 + u) with u = e^-2\|x\| by exp's polynomial | x's sign |
@@ -3932,7 +3933,7 @@ coefficients joined by powers of the argument) halves the chain of dependent fus
 polynomials.
 
 **Arguments past 2^16.** Three floats of π/2 hold the reduction to a float's precision a little past 2^16. Past
-`kLargeArgument`, 2^16, and for an infinity, sin and cos reduce out of line, exactly (`largeKernel`): |x| = m 2^s,
+`kLargeArgument`, 2^16, and for an infinity, sin, cos and tan reduce out of line, exactly (`largeKernel`): |x| = m 2^s,
 with m a 24-bit integer, times the 128 bits of 2/π that start where its lowest bit meets them, is |x| 2/π mod 4 to 64
 bits past the point, in integer multiplies (Payne and Hanek's reduction, `reduceLarge`); then the same polynomials. A
 vector takes that path for its lanes past the limit, and the other lanes keep their result. A sine at 2^16 radians has
@@ -3951,32 +3952,51 @@ at this scale); the old vector mode, libsystem_m's functions on an M5 with macOS
 | `expf` | 1.05 ulp | 0.40% | 1.79 ulp, 2.1% |
 | `tanhf` | 1.52 ulp | 0.78% | 2.78 ulp, 4.0% |
 | `logf` | 0.99 ulp | 0.28% | 0.82 ulp, 0.32% |
+| `tanf` | 3.35 ulp | 22.2% | none (`_simd_tan_f4`, the fast mode's: 3.90 ulp, 25.8%) |
 
 libm's are within 1 ulp. What is left in sin and cos is the reduced argument's own rounding: near a result of 1/2, r's
-last bit is worth nearly an ulp of the result. A double-float r (its rounding error carried in a second float) would
+last bit is worth nearly an ulp of the result. tan has it twice over, since tan's slope is 2 at a quadrant's edge, and
+the quotient adds its own rounding and its terms'. A double-float r (its rounding error carried in a second float) would
 take it out, at about twice the reduction's work in a vector; the kernels do not.
 
-The special values are C's (Annex F): sin and tanh keep a zero's sign; cos(±0) and exp(±0) are 1; sin and cos of an
-infinity are NaN; exp(+∞) is +∞ and exp(-∞) is +0, and exp's last finite result is at 88.7228317 and its last nonzero
-one at -103.972076, as the exact function rounds; tanh(±∞) is ±1; log(±0) is -∞, log(+∞) is +∞, and log of anything
-negative is NaN; and a NaN gives a NaN. A NaN's payload is not kept.
+The special values are C's (Annex F): sin, tan and tanh keep a zero's sign; cos(±0) and exp(±0) are 1; sin, cos and tan
+of an infinity are NaN; exp(+∞) is +∞ and exp(-∞) is +0, and exp's last finite result is at 88.7228317 and its last
+nonzero one at -103.972076, as the exact function rounds; tanh(±∞) is ±1; log(±0) is -∞, log(+∞) is +∞, and log of
+anything negative is NaN; and a NaN gives a NaN. A NaN's payload is not kept.
 
 **Flush-to-zero.** Under `Denormals::Flush` (recipe 20), a subnormal argument reads as its signed zero and a subnormal
 result is a zero, and a constant must fold to what the processor computes. LLVM folds an add, subtract, multiply,
 divide or comparison flushing, and a fused multiply-add not (`ConstantFoldScalarCall`). So a kernel reads a subnormal
 argument only where both give the same result, and an odd function's last operation, the one that gives x for a tiny
-x, is an add (sin, tanh), never an fma: sin(r) is `r + (r z) P(z)`. Each kernel run with FPCR.FZ set
+x, is an add (sin, tanh) or a divide (tan), never an fma: sin(r) is `r + (r z) P(z)`. Each kernel run with FPCR.FZ set
 gives, for every float, what it gives without it of the argument flushed, flushed. Where Arm and x86 flush differently
 (Arm by the result before rounding, x86 after), only an exact result just below 2^-126 tells them apart, and no
 kernel's last operation makes one (exp's last multiply is exact for a normal result).
+
+### `tanf`, a builtin
+
+A filter in the topology-preserving form (an SVF, a ladder, a one-pole) needs g = tan(π fc / fs), every sample while
+its cutoff moves. With five transcendental builtins it was `sinf(w) / cosf(w)`: two calls, a divide, and two
+reductions of one angle. `tanf` is a builtin now, the way recipes 1 and 15 add one: a row with its stem,
+`Builtin{"tanf", llvm::Intrinsic::tan, 1, "tan"}`; three runtime functions, `fminus_rt_tanf`, `fminus_rt_tan_f4` and
+`fminus_rt_libm_tanf` (in `Runtime.h` and `RuntimeSymbols.def`), whose names a program that calls it may not declare;
+`fminus::math::tan`; and the builtin count in `CodeGenTest.cpp`, a row in `MathTest.cpp`'s table and the VSCode
+grammar's list. In the fast mode it is `llvm.tan` (LLVM 19 added it): libm's `tanf` for a float, and on Apple systems
+libsystem_m's `_simd_tan_f4` for a `float4`. Its kernel is sin's and cos's reduction and polynomials, and a divide.
 
 ### What it changes for programs and hosts
 
 - **Every program's results move in their last bits, once.** The vector mode's sines are now FMinus's: `waveforms.fm`'s
   `main 0.25 1000` is 0.4867599, libm's, where libsystem_m's gave 0.48676.
+- **`tanf` is a builtin.** A program's prototype of it, `float tanf(float x);`, calls the builtin now, as a prototype
+  of any builtin does; a program's own function named `tanf` is an error ("'tanf' is a builtin and cannot be
+  redefined"): rename it.
 - **The default mode's results are the same on every machine**: an x86-64 computes what an arm64 does, where before
   it computed libm's, a lane at a time. (Neither Linux nor Windows has been run with it.)
-- **`fminus::math` is the kernels**, so a C++ reference still agrees with a program bit for bit.
+- **`fminus::math` is the kernels**, so a C++ reference still agrees with a program bit for bit; `fminus::math::tan`
+  is new, with `tanf`.
+- **The runtime has three more functions**, `tanf`'s, which a host that hides or strips symbols must keep
+  (`RuntimeSymbols.def`).
 - **Nothing depends on the system's library**: the premise test, the `kSinCosLimit` guard, and the declarations of
   libsystem_m's functions are gone from the vector mode (the fast mode still uses them, recipe 8).
 - **A call costs about what it did.** Out of line, a scalar kernel computes one lane, not four, but makes its fifteen

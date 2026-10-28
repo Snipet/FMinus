@@ -1,4 +1,4 @@
-// src/runtime/MathKernels.h: FMinus's own math kernels, sin, cos, exp, tanh and log, for the vector math mode
+// src/runtime/MathKernels.h: FMinus's own math kernels, sin, cos, tan, exp, tanh and log, for the vector math mode
 // (runtime/Math.cpp). Each is one sequence of IEEE operations, written once as a template over the operations it uses
 // (`O`, below), so that everything that computes it computes the same operations in the same order, and gives a float
 // the same result: the scalar function, and each lane of a vector function, whatever the other lanes hold. Nothing in
@@ -11,13 +11,13 @@
 //   - every fused multiply-add is an explicit O::fma, and no multiply and add are ever fused otherwise: each operation
 //     is a call of its own, and the runtime builds with -ffp-contract=off. (An x86-64 without FMA, from before Haswell,
 //     computes fma in the C library's fmaf, which C requires to round correctly: the same bits, slowly.)
-//   - no branch, but to reduce an argument of sin or cos past kLargeArgument (O::large): every special case is a
+//   - no branch, but to reduce an argument of sin, cos or tan past kLargeArgument (O::large): every special case is a
 //     select, so a vector's lanes never take different paths, and a lane's result depends on that lane alone.
 //   - under flush-to-zero (Program::Options::denormals), a subnormal argument gives what its signed zero gives and a
 //     subnormal result is a zero, both when the processor computes and when a compiler folds a constant. LLVM folds an
 //     add, subtract, multiply, divide or comparison flushing, and an fma not (ConstantFoldScalarCall). So a kernel
 //     reads a subnormal argument only where either gives the same result, and an odd function's last operation, the
-//     one that gives x for a tiny x, is an add (sin, tanh), never an fma.
+//     one that gives x for a tiny x, is an add (sin, tanh) or a divide (tan), never an fma.
 //
 // Each function's largest error over every float, against the exact result, and its special values are in
 // docs/extending.md (recipe 23). MathTest.cpp checks both, and that each lane is the scalar function.
@@ -42,7 +42,7 @@ namespace fminus::kernels
     inline constexpr float kHalfPi3 = -0x1.ee59dap-50f;
     inline constexpr float kTwoOverPi = 0x1.45f306p-1f;  // 2 / pi
 
-    // Past this magnitude sin and cos reduce their argument exactly instead, out of line (largeKernel): three
+    // Past this magnitude sin, cos and tan reduce their argument exactly instead, out of line (largeKernel): three
     // floats of pi/2 no longer hold the reduction to a float's precision far beyond it. Audio's arguments, phases and
     // angular frequencies, are a few radians.
     inline constexpr float kLargeArgument = 0x1p+16f;
@@ -69,7 +69,7 @@ namespace fminus::kernels
     // its relative error, with float coefficients, as Scripts/fit-math-kernels.py prints them. Their own error is under
     // 0.1 ulp; the roundings of the operations make the rest (recipe 23).
     //
-    // sin(r) = r + r^3 P(r^2) and cos(r) = 1 + r^2 Q(r^2) on [-pi/4, pi/4], for sin and cos.
+    // sin(r) = r + r^3 P(r^2) and cos(r) = 1 + r^2 Q(r^2) on [-pi/4, pi/4], for sin, cos and tan.
     inline constexpr float kSinP[] = {-0x1.555546p-3f, 0x1.110778p-7f, -0x1.995408p-13f};
     inline constexpr float kCosP[] = {-0x1p-1f, 0x1.55554ap-5f, -0x1.6c0c28p-10f, 0x1.99e80cp-16f};
     // e^r = 1 + r + r^2 Q(r) on [-ln2/2, ln2/2].
@@ -87,6 +87,7 @@ namespace fminus::kernels
     {
         Sin,
         Cos,
+        Tan,
     };
 
     // ---- The operations ---------------------------------------------------------------------------------------------
@@ -172,6 +173,19 @@ namespace fminus::kernels
         return flipSign(o, value, o.ixor(o.shl(q, 30), negate));
     }
 
+    // tan(r) for r in [-pi/4, pi/4] of a quadrant q: sin r / cos r when q is even, -cos r / sin r when it is odd (the
+    // sign is the caller's). `odd` holds q's parity in its sign bit.
+    template <class O>
+    typename O::F tanPolynomial(O& o, typename O::F r, typename O::I odd)
+    {
+        using F = typename O::F;
+        const F z = o.mul(r, r);
+        const F s = sinPolynomial(o, r, z);
+        const F c = cosPolynomial(o, z);
+        const auto swap = o.signBit(odd);
+        return o.div(o.select(swap, c, s), o.select(swap, s, c));
+    }
+
     // |x| reduced by the nearest multiple q of pi/2, to r in [-pi/4, pi/4]: three fused multiply-adds, the first exact
     // (Cody and Waite). `t` is kRound + q, q in its low bits.
     template <class O>
@@ -206,6 +220,20 @@ namespace fminus::kernels
         const F r = reduce(o, a, t);
         const F result = sinOfQuadrant(o, r, o.iadd(o.bits(t), o.ci(1)), o.ci(0));
         return o.large(o.gt(a, o.c(kLargeArgument)), x, result, Large::Cos);
+    }
+
+    // tan(x): of |x|, with x's sign, and -1 / tan in the odd quadrants. Its divide is its last operation, which flushes
+    // a subnormal x's zero.
+    template <class O>
+    typename O::F tan(O& o, typename O::F x)
+    {
+        using F = typename O::F;
+        const F a = o.abs(x);
+        F t;
+        const F r = reduce(o, a, t);
+        const typename O::I odd = o.shl(o.bits(t), 31);
+        const F result = flipSign(o, tanPolynomial(o, r, odd), o.ixor(odd, o.bits(x)));
+        return o.large(o.gt(a, o.c(kLargeArgument)), x, result, Large::Tan);
     }
 
     // e^x for x already within [kExpLow, kExpHigh] (or NaN): x = k ln2 + r, e^r by its polynomial, scaled by 2^k in
@@ -556,8 +584,8 @@ namespace fminus::kernels
         }
     };
 
-    // sin or cos of x past kLargeArgument (or infinite: NaN), reduced exactly, then by the fast path's own polynomials
-    // and signs.
+    // sin, cos or tan of x past kLargeArgument (or infinite: NaN), reduced exactly, then by the fast path's own
+    // polynomials and signs.
     inline float largeKernel(Large which, float x)
     {
         Scalar o;
@@ -571,6 +599,11 @@ namespace fminus::kernels
             return sinOfQuadrant(o, reduced.r, reduced.q, Scalar::bits(x));
         case Large::Cos:
             return sinOfQuadrant(o, reduced.r, reduced.q + 1, 0u);
+        case Large::Tan:
+        {
+            const std::uint32_t odd = reduced.q << 31;
+            return flipSign(o, tanPolynomial(o, reduced.r, odd), odd ^ Scalar::bits(x));
+        }
         }
         return x;
     }

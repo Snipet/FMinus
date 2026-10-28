@@ -18,13 +18,15 @@ namespace fminus::ir::detail
 {
     // <math.h>'s float functions -> the LLVM intrinsic each lowers to, overloaded on float, and for the transcendental
     // ones the stem of the runtime functions the vector and libm math modes call instead (Math.cpp). fabsf, sqrtf,
-    // floorf, fminf and fmaxf become instructions, exact in every mode; sinf, cosf, expf, logf and tanhf have none.
+    // floorf, fminf and fmaxf become instructions, exact in every mode; sinf, cosf, expf, logf, tanhf and tanf have
+    // none.
     constexpr std::array kBuiltins{
         Builtin{"fabsf", llvm::Intrinsic::fabs, 1},        Builtin{"sqrtf", llvm::Intrinsic::sqrt, 1},
         Builtin{"sinf", llvm::Intrinsic::sin, 1, "sin"},   Builtin{"cosf", llvm::Intrinsic::cos, 1, "cos"},
         Builtin{"expf", llvm::Intrinsic::exp, 1, "exp"},   Builtin{"logf", llvm::Intrinsic::log, 1, "log"},
         Builtin{"floorf", llvm::Intrinsic::floor, 1},      Builtin{"fminf", llvm::Intrinsic::minnum, 2},
         Builtin{"fmaxf", llvm::Intrinsic::maxnum, 2},      Builtin{"tanhf", llvm::Intrinsic::tanh, 1, "tanh"},
+        Builtin{"tanf", llvm::Intrinsic::tan, 1, "tan"},
     };
 
     // C's heap, <stdlib.h>'s functions, on the runtime's (runtime/Runtime.h): memory aligned to 64 bytes and zeroed.

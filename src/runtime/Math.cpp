@@ -49,6 +49,12 @@ extern "C" float fminus_rt_logf(float x) noexcept
     return fminus::kernels::log(o, x);
 }
 
+extern "C" float fminus_rt_tanf(float x) noexcept
+{
+    Scalar o;
+    return fminus::kernels::tan(o, x);
+}
+
 extern "C" fminus_rt_float4 fminus_rt_sin_f4(fminus_rt_float4 x) noexcept
 {
     Four o;
@@ -79,6 +85,12 @@ extern "C" fminus_rt_float4 fminus_rt_log_f4(fminus_rt_float4 x) noexcept
     return fminus::kernels::log(o, x);
 }
 
+extern "C" fminus_rt_float4 fminus_rt_tan_f4(fminus_rt_float4 x) noexcept
+{
+    Four o;
+    return fminus::kernels::tan(o, x);
+}
+
 // libm's, every target. std::sin of a float is sinf.
 extern "C" float fminus_rt_libm_sinf(float x) noexcept
 {
@@ -103,4 +115,9 @@ extern "C" float fminus_rt_libm_tanhf(float x) noexcept
 extern "C" float fminus_rt_libm_logf(float x) noexcept
 {
     return std::log(x);
+}
+
+extern "C" float fminus_rt_libm_tanf(float x) noexcept
+{
+    return std::tan(x);
 }

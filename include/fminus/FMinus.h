@@ -129,8 +129,8 @@ namespace fminus
             Flush,
         };
 
-        // How sinf, cosf, expf, tanhf and logf compute, chosen when the program compiles (fabsf, sqrtf, floorf, fminf
-        // and fmaxf are exact, and the same in every mode).
+        // How sinf, cosf, tanf, expf, tanhf and logf compute, chosen when the program compiles (fabsf, sqrtf, floorf,
+        // fminf and fmaxf are exact, and the same in every mode).
         //   Vector  a float gets one result wherever the program computes it: in a loop's vectorised body or its
         //           remainder, so wherever a block ends; in a float4, a float8 or a poly float of any width; at any
         //           optimisation level; from a frozen parameter or a knob; on arm64 and x86-64 alike. What it computes
@@ -311,13 +311,13 @@ namespace fminus
         std::unique_ptr<Impl> impl_;
     };
 
-    // sinf, cosf, expf, tanhf and logf as a program compiled in the default math mode (Program::Math::Vector) computes
-    // them, wherever it does: a C++ reference that calls these gets a program's results bit for bit, on any machine.
-    // They are FMinus's own kernels, the same IEEE operations on every target: sin, cos and tanh within 1.56 ulp of
-    // the exact result, exp within 1.05 and log within 0.99 (libm's are within 1; docs/extending.md, recipe 23). None
-    // allocates or locks: the audio thread may call them. Each depends on its argument alone and does nothing else,
-    // which FMINUS_MATH_CONST tells GCC and clang (their const attribute), so that two calls of one argument are one,
-    // as they are of std::sin.
+    // sinf, cosf, tanf, expf, tanhf and logf as a program compiled in the default math mode (Program::Math::Vector)
+    // computes them, wherever it does: a C++ reference that calls these gets a program's results bit for bit, on any
+    // machine. They are FMinus's own kernels, the same IEEE operations on every target: `sin`, `cos` and `tanh` within
+    // 1.56 ulp of the exact result, `tan` within 3.35, `exp` within 1.05 and `log` within 0.99 (libm's are within 1;
+    // docs/extending.md, recipe 23). None allocates or locks: the audio thread may call them. Each depends on its
+    // argument alone and does nothing else, which FMINUS_MATH_CONST tells GCC and clang (their const attribute), so
+    // that two calls of one argument are one, as they are of std::sin.
 #if defined(__GNUC__) || defined(__clang__)
 #define FMINUS_MATH_CONST [[gnu::const]]
 #else
@@ -327,6 +327,7 @@ namespace fminus
     {
         FMINUS_MATH_CONST float sin(float x) noexcept;
         FMINUS_MATH_CONST float cos(float x) noexcept;
+        FMINUS_MATH_CONST float tan(float x) noexcept;
         FMINUS_MATH_CONST float exp(float x) noexcept;
         FMINUS_MATH_CONST float tanh(float x) noexcept;
         FMINUS_MATH_CONST float log(float x) noexcept;

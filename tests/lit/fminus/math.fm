@@ -1,8 +1,8 @@
-// The math builtins' modes (--math; ir::Options::math). vector, the default: sinf, cosf, expf, tanhf and logf call the
-// runtime's functions, which LLVM can neither fold nor pair, a scalar call naming its four-lane variant, so a loop of
-// them vectorises into four-lane calls; every vector width is four-lane calls. libm: the runtime's wrappers of libm, a
-// lane at a time, and nothing vectorises. fast: LLVM's intrinsics, folded, paired into sincos, and given the vector
-// library (veclib.fm). fabsf and sqrtf stay intrinsics in every mode.
+// The math builtins' modes (--math; ir::Options::math). vector, the default: sinf, cosf, tanf, expf, tanhf and logf
+// call the runtime's functions, which LLVM can neither fold nor pair, a scalar call naming its four-lane variant, so a
+// loop of them vectorises into four-lane calls; every vector width is four-lane calls. libm: the runtime's wrappers of
+// libm, a lane at a time, and nothing vectorises. fast: LLVM's intrinsics, folded, paired into sincos, and given the
+// vector library (veclib.fm). fabsf and sqrtf stay intrinsics in every mode.
 // RUN: fminus %s -O2 | FileCheck %s --check-prefixes=VECTOR,EXACT --implicit-check-not=_simd_
 // RUN: fminus %s -O0 | FileCheck %s --check-prefixes=VECTOR0,EXACT --implicit-check-not=_simd_
 // RUN: fminus %s -O2 --math vector --poly-lanes 16 | FileCheck %s --check-prefix=WIDE
@@ -65,6 +65,18 @@ float turn(float x, float angle)
 // FASTASM-NOT:     _sinf
 // FASTASM:         ret
 // TURN: 2.2345905
+
+// tanf, a builtin as the others are: the runtime's in the vector and libm modes, LLVM's llvm.tan in the fast one.
+float tangent(float w) { return tanf(w); }
+
+// VECTOR-LABEL: define float @tangent(
+// VECTOR:         call float @fminus_rt_tanf(float %w)
+// VECTOR0-LABEL: define float @tangent(
+// VECTOR0:        call float @fminus_rt_tanf(float
+// LIBM-LABEL: define float @tangent(
+// LIBM:           call float @fminus_rt_libm_tanf(float %w)
+// FAST-LABEL: define float @tangent(
+// FAST:           call float @llvm.tan.f32(float %w)
 
 // A float4 is one four-lane call; a float8 two; a float2 one, padded with zeros.
 float4 four(float4 x) { return tanhf(x); }

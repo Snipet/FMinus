@@ -1,4 +1,5 @@
-// src/ir/Math.cpp: sinf, cosf, expf, tanhf and logf in the vector and libm math modes (ir::Options::math, CodeGen.h).
+// src/ir/Math.cpp: sinf, cosf, tanf, expf, tanhf and logf in the vector and libm math modes (ir::Options::math,
+// CodeGen.h).
 // Each is a call of a function of the runtime (runtime/Runtime.h, runtime/Math.cpp), never LLVM's intrinsic: LLVM
 // knows llvm.sin, and folds it with the host's double sin when its argument is a constant, pairs it with llvm.cos into
 // one sincos call at -O2, and hands it to the target's vector math library when it vectorises. Each of those gives the
