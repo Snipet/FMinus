@@ -1,8 +1,9 @@
 // The math builtins' modes (--math; ir::Options::math). vector, the default: sinf, cosf, tanf, expf, tanhf and logf
-// are calls of FMinus's math intrinsics (fminus.sin.f32, a scalar call naming its four-lane variant fminus.sin.v4f32,
-// so a loop of them vectorises into four-lane calls; every vector width is four-lane calls), which LLVM can neither
-// fold nor pair; at the pipeline's end each becomes FMinus's kernel, inline (opt/MathKernels.cpp), or at -O0 a call of
-// the runtime's function of its width. Only sin's, cos's and tan's branch for a large argument calls the runtime from
+// are calls of FMinus's math intrinsics (fminus.sin.f32, a scalar call naming its two- and four-lane variants
+// fminus.sin.v2f32 and fminus.sin.v4f32, so a loop of them vectorises into four-lane calls and SLP pairs two; a float2
+// is a two-lane call, wider vectors four-lane calls), which LLVM can neither fold nor pair; at the pipeline's end each
+// becomes FMinus's kernel, inline (opt/MathKernels.cpp), or at -O0 a call of the runtime's function (a call a lane for
+// two lanes). Only sin's, cos's and tan's branch for a large argument calls the runtime from
 // -O1. libm: the runtime's wrappers of libm, a lane at a time, and nothing vectorises. fast: LLVM's intrinsics,
 // folded, paired into sincos, and given the vector library (veclib.fm). fabsf and sqrtf stay intrinsics in every mode.
 // RUN: fminus %s -O2 | FileCheck %s --check-prefixes=VECTOR,EXACT --implicit-check-not=_simd_ --implicit-check-not='@fminus.{{(sin|cos|tan|exp|tanh|log)}}.'
@@ -18,8 +19,8 @@
 // RUN: fminus %s --run turn 2 0.5 -O0 | FileCheck %s --check-prefix=TURN
 // RUN: not fminus %s --math slow 2>&1 | FileCheck %s --check-prefix=OPTION
 
-// The four-lane variants are kept in the module until the vectorisers have looked for them (the fast mode's, of the
-// vector library, by InjectTLIMappings), and go with the intrinsics' calls.
+// The variants are kept in the module until the vectorisers have looked for them (the fast mode's, of the vector
+// library, by InjectTLIMappings), and go with the intrinsics' calls.
 // VECTOR-NOT: @llvm.compiler.used
 // LIBM-NOT: @llvm.compiler.used
 
@@ -100,7 +101,7 @@ float tangent(float w) { return tanf(w); }
 // FAST-LABEL: define float @tangent(
 // FAST:           call float @llvm.tan.f32(float %w)
 
-// A float4 is one four-lane kernel; a float8 two; a float2 one, padded with zeros.
+// A float4 is one four-lane kernel; a float8 two; a float2 one two-lane kernel (two calls at -O0).
 float4 four(float4 x) { return tanhf(x); }
 float8 eight(float8 x) { return expf(x); }
 float2 two(float2 x) { return logf(x); }
@@ -117,11 +118,17 @@ float2 two(float2 x) { return logf(x); }
 // VECTOR-NOT:     call {{.*}}@fminus
 // VECTOR:         ret <8 x float>
 // VECTOR-LABEL: define <2 x float> @two(
-// VECTOR:         shufflevector <2 x float> %x, <2 x float> <float 0.0{{0*}}e+00, {{.*}}>,
-// VECTOR-SAME:    <4 x i32> <i32 0, i32 1, i32 2, i32 2>
-// VECTOR:         shufflevector <4 x float> {{%.*}}, <4 x float> poison, <2 x i32> <i32 0, i32 1>
+// VECTOR-NEXT:  entry:
+// VECTOR-NEXT:    fcmp olt <2 x float> %x, splat (float f0x00800000)
+// VECTOR-NOT:     shufflevector
+// VECTOR-NOT:     call {{.*}}@fminus
+// VECTOR:         ret <2 x float>
 // VECTOR0-LABEL: define <4 x float> @four(
 // VECTOR0:         call <4 x float> @fminus_rt_tanh_f4(
+// VECTOR0-LABEL: define <2 x float> @two(
+// VECTOR0-COUNT-2: call float @fminus_rt_logf(float
+// VECTOR0-NOT:     call
+// VECTOR0:         ret <2 x float>
 // LIBM-LABEL: define <4 x float> @four(
 // LIBM-COUNT-4:   call float @fminus_rt_libm_tanhf(float
 // LIBM-NOT:       call
@@ -131,8 +138,7 @@ float2 two(float2 x) { return logf(x); }
 // FAST-LABEL: define <8 x float> @eight(
 // FAST:           call <8 x float> @llvm.exp.v8f32(
 
-// A poly float of 16 lanes is four kernels, each with its branch for a large argument; of one, a kernel padded with
-// zeros.
+// A poly float of 16 lanes is four kernels, each with its branch for a large argument; of one, the float's kernel.
 poly float lanes(poly float x) { return sinf(x); }
 
 // WIDE-LABEL: define <16 x float> @lanes(
@@ -141,9 +147,36 @@ poly float lanes(poly float x) { return sinf(x); }
 // WIDE:           ret <16 x float>
 // NARROW-LABEL: define <1 x float> @lanes(
 // NARROW-NEXT:  entry:
-// NARROW-NEXT:    shufflevector <1 x float> %x, <1 x float> zeroinitializer, <4 x i32> <i32 0, i32 1, i32 1, i32 1>
-// NARROW-NEXT:    call <4 x float> @llvm.fabs.v4f32(
+// NARROW-NEXT:    [[LANE:%.*]] = extractelement <1 x float> %x, i64 0
+// NARROW-NEXT:    call float @llvm.fabs.f32(float [[LANE]])
+// NARROW-NOT:     <4 x float>
 // NARROW:         ret <1 x float>
+
+// Two channels' tanh, each in its own recursion, which the loop vectoriser leaves alone: SLP pairs the two calls into
+// one of the two-lane variant, so the two channels are one two-lane kernel.
+module Drive
+{
+    float left;
+    float right;
+
+    void process(float* restrict l, float* restrict r, int n)
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            left += 0.1f * (tanhf(2.0f * l[i]) - left);
+            right += 0.1f * (tanhf(2.0f * r[i]) - right);
+            l[i] = left;
+            r[i] = right;
+        }
+    }
+};
+
+// VECTOR-LABEL: define void @"Drive::process"(
+// VECTOR:         call <2 x float> @llvm.fabs.v2f32(
+// VECTOR-NOT:     call float @llvm.fabs.f32(
+// VECTOR:         ret void
+// VECTOR0-LABEL: define void @"Drive::process"(
+// VECTOR0-COUNT-2: call float @fminus_rt_tanhf(float
 
 // A constant's sine: in the vector mode its kernel of constants, folded to what the runtime computes (sin 0.5 is
 // 0x3EF57744 there, as in libm); a call at run time in the libm mode; folded with the host's double sin in the fast

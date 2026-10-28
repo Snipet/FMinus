@@ -1,13 +1,14 @@
 // src/opt/MathKernels.h: the vector math mode's builtins, inline. The code generator lowers sinf, cosf, tanf, expf,
-// tanhf and logf to calls of FMinus's math intrinsics, functions no module defines: fminus.sin.f32 for a float and
-// fminus.sin.v4f32 for four lanes (ir/Math.cpp), which LLVM treats as it treats llvm.sin's calls (they read and write
-// no memory, and a scalar one names its four-lane one as its vector variant), so it hoists them out of loops, merges
-// two of one argument, and vectorises loops of them, but evaluates none. At the end of the pipeline this pass replaces
-// every call of one: from -O1 by the kernel itself (runtime/MathKernels.h), built here as IR from the same template the
-// runtime's functions instantiate, so that it computes the same operations in the same order, and gives every float
-// the runtime's result; at -O0 by a call of the runtime's function of that width (fminus_rt_sinf, fminus_rt_sin_f4).
-// An argument of sin, cos or tan past kernels::kLargeArgument takes a branch, which the kernel marks unlikely, to a
-// call of the runtime's scalar function for each lane. The intrinsics' declarations go with their calls.
+// tanhf and logf to calls of FMinus's math intrinsics, functions no module defines: fminus.sin.f32 for a float,
+// fminus.sin.v2f32 for two lanes and fminus.sin.v4f32 for four (ir/Math.cpp), which LLVM treats as it treats llvm.sin's
+// calls (they read and write no memory, and a scalar one names the other two as its vector variants), so it hoists them
+// out of loops, merges two of one argument, vectorises loops of them and pairs two, but evaluates none. At the end of
+// the pipeline this pass replaces every call of one: from -O1 by the kernel itself (runtime/MathKernels.h), built here
+// as IR from the same template the runtime's functions instantiate, so that it computes the same operations in the same
+// order, and gives every float the runtime's result; at -O0 by a call of the runtime's function of that width
+// (fminus_rt_sinf, fminus_rt_sin_f4; a call a lane of two lanes). An argument of sin, cos or tan past
+// kernels::kLargeArgument takes a branch, which the kernel marks unlikely, to a call of the runtime's scalar function
+// for each lane. The intrinsics' declarations go with their calls.
 #pragma once
 
 #include <llvm/IR/PassManager.h>

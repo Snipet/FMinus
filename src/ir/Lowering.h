@@ -55,9 +55,9 @@ namespace fminus::ir::detail
     }
 
     // A builtin function (Calls.cpp): its name, the LLVM intrinsic it lowers to, and its parameter count. A
-    // transcendental one also names its stem (Math.cpp): "sin" for the math intrinsics fminus.sin.f32 and
-    // fminus.sin.v4f32 and the runtime functions fminus_rt_sinf, fminus_rt_sin_f4 and fminus_rt_libm_sinf, which the
-    // vector and libm modes call instead of LLVM's intrinsic. An exact one (fabsf, sqrtf, ...) has none, and is its
+    // transcendental one also names its stem (Math.cpp): "sin" for the math intrinsics fminus.sin.f32, fminus.sin.v2f32
+    // and fminus.sin.v4f32 and the runtime functions fminus_rt_sinf, fminus_rt_sin_f4 and fminus_rt_libm_sinf, which
+    // the vector and libm modes call instead of LLVM's intrinsic. An exact one (fabsf, sqrtf, ...) has none, and is its
     // intrinsic in every mode.
     struct Builtin
     {
@@ -220,12 +220,14 @@ namespace fminus::ir::detail
             std::vector<llvm::Instruction*> streamReads;
         };
 
-        // The functions behind a transcendental builtin (Math.cpp): the vector mode's scalar one and its four lanes
-        // (the math intrinsics fminus.sin.f32 and fminus.sin.v4f32, whose runtime functions are fminus_rt_sinf and
-        // fminus_rt_sin_f4), and the libm mode's (fminus_rt_libm_sinf).
+        // The functions behind a transcendental builtin (Math.cpp): the vector mode's scalar one, its two lanes and its
+        // four (the math intrinsics fminus.sin.f32, fminus.sin.v2f32 and fminus.sin.v4f32; the runtime's functions
+        // fminus_rt_sinf and fminus_rt_sin_f4 compute the first and the last), and the libm mode's
+        // (fminus_rt_libm_sinf).
         enum class MathFunction
         {
             Scalar,
+            Two,
             Four,
             Libm,
         };

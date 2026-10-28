@@ -2267,7 +2267,7 @@ fast. In the vector mode:
 - a `float8`, or a `poly float` of 8 to 64 lanes, is cut into four-lane pieces (`shufflevector`), a call each, joined
   in order (`llvm::concatenateVectors`);
 - a `float2`, or a `poly float` of 1 or 2 lanes, is padded to four lanes with zeros, which keep sin and cos on the fast
-  path, and its own lanes are taken back.
+  path, and its own lanes are taken back (since recipe 24, a two-lane call, or the float's).
 
 So no vector is scalarised to libm, and every lane of every width is the scalar function of that lane. In the libm
 mode every lane is a call of `fminus_rt_libm_sinf`.
@@ -2275,8 +2275,8 @@ mode every lane is a call of `fminus_rt_libm_sinf`.
 Since recipe 24 the vector mode's two calls are of FMinus's math intrinsics, `fminus.sin.f32` and `fminus.sin.v4f32`,
 which stand for the runtime's two functions until the end of the pipeline: a pass then replaces each call with the
 kernel itself, inline, or at `-O0` with the call of the runtime's function that this section describes. The intrinsics
-are declared as below, with the same attributes and the same variant (`_ZGV_LLVM_N4v_fminus.sin.f32(fminus.sin.v4f32)`),
-and the IR below is what the vectorisers see.
+are declared as below, with the same attributes and the same variant (`_ZGV_LLVM_N4v_fminus.sin.f32(fminus.sin.v4f32)`,
+and a two-lane one), and the IR below is what the vectorisers see.
 
 `mathFunction` declares each runtime function once a module, with the attributes LLVM gives `llvm.sin` itself:
 `memory(none) nounwind willreturn speculatable nosync nofree nocallback nocreateundeforpoison`. LICM takes a call out
@@ -4079,8 +4079,8 @@ So the code generator still emits a call, of a function no module defines, FMinu
   %1 = call <4 x float> @fminus.sin.v4f32(<4 x float> %v)    ; a float4's
 
 declare float @fminus.sin.f32(float) #1
-; #1: nounwind speculatable willreturn memory(none) ..., and its four-lane variant:
-;     "vector-function-abi-variant"="_ZGV_LLVM_N4v_fminus.sin.f32(fminus.sin.v4f32)"
+; #1: nounwind speculatable willreturn memory(none) ..., and its two- and four-lane variants (below, Two lanes):
+;     "vector-function-abi-variant"="_ZGV_LLVM_N2v_fminus.sin.f32(fminus.sin.v2f32),_ZGV_LLVM_N4v_fminus.sin.f32(...)"
 ```
 
 They have the attributes recipe 15 gave the runtime's functions, so LLVM does with them what it does with `llvm.sin`
@@ -4139,9 +4139,33 @@ Four details carry it:
   `Denormals::Flush` a constant folds to what the processor computes, flushing.
 - **Sharing.** EarlyCSE merges identical instructions, so `sinf(w)` and `cosf(w)`, the reduction and both polynomials,
   are one kernel and two selects: a filter's `sinf(w) / cosf(w)` costs one reduction.
-- **Every width.** The pass builds the kernel at whatever width the call has. The code generator's calls are a float's
-  and four lanes' (a `float8` or a wide `poly float` cut into fours, a `float2` padded to four, as recipe 15 did), and
-  so are the loop vectoriser's.
+- **Every width.** The pass builds the kernel at whatever width the call has: a float's, two lanes' or four lanes'
+  (below; a `float8` or a wide `poly float` is cut into fours, as recipe 15 did), the vectorisers' as the code
+  generator's.
+
+### Two lanes
+
+A stereo effect runs two recursions side by side, one a channel (a drive's two one-poles, a filter's two states), so
+the loop vectoriser leaves its loop alone, and each channel's `tanhf` is a scalar kernel. The SLP vectoriser can pair
+the two channels' work into two-lane vectors, but pairs a call only at a width that has a vector variant, and the
+scalar intrinsic named only the four-lane one. So it names the two-lane one too, `fminus.sin.v2f32`, declared and kept
+like the other (`mathFunction`), and `lowerMath` calls it for a `float2` and a two-lane `poly float`, which recipe 15
+padded to four; a one-lane `poly float` is the float's call. The pass builds a two-lane kernel as any other, and at
+`-O0` calls the runtime's scalar function a lane, since the runtime has no two-lane function (none is needed: nothing
+but the pass calls one). The drive's loop, at `-O2`, is one recursion of two lanes:
+
+```llvm
+  %1 = phi <2 x float> [ %0, %for.body.lr.ph ], [ %9, %for.body ]   ; left and right
+  ...
+  %tanh = call <2 x float> @llvm.fabs.v2f32(<2 x float> %6)
+  ...
+```
+
+A lane computes what a float does, so nothing changes but the time: every program measured gives the same output as
+with recipe 24's four-lane variant alone, and the drive takes 125 instructions a sample where it took 153, and 21.8
+cycles where it took 30.3 (-28%). The other fourteen programs run the same code, but for the three-band EQ, which
+takes 13% more instructions to compile. Whether SLP pairs two calls is its cost model's choice: in the drive it took
+the two whole recursions; in the shaper it paired nothing.
 
 ### Shorter chains
 
@@ -4178,15 +4202,16 @@ rewritten where that shortens the chain and leaves every result as it was (check
 ### Tests
 
 - `tests/unit/MathTest.cpp`: the promise's matrix (recipe 15's) now runs the kernels inline from `-O1`, against
-  `fminus::math`, bit for bit; every 127th float through a program's kernel of a float and of a `float4` at `-O2`,
-  against the runtime's function; and constants: fifteen arguments where flushing shows (subnormals of either sign,
-  the least normals, exp's subnormal results), each a literal's kernel, folded under `Denormals::Preserve` and `Flush`,
-  against what the processor computes in that mode. The `[exhaustive]` test runs the inline kernels too.
+  `fminus::math`, bit for bit; every 127th float through a program's kernel of a float, a `float2` and a `float4` at
+  `-O2`, against the runtime's function; and constants: fifteen arguments where flushing shows (subnormals of either
+  sign, the least normals, exp's subnormal results), each a literal's kernel, folded under `Denormals::Preserve` and
+  `Flush`, against what the processor computes in that mode. The `[exhaustive]` test runs the inline kernels too.
 - `tests/lit/fminus/math.fm`: the kernels in the vectorised loop and its remainder, their branch for a large argument
   and `fminus.large.sin` (`preserve_allcc`, not speculatable, the branch unlikely); `turn`'s cosine and sine sharing
-  their reduction; `tanf`'s divide; `float4`, `float8`, `float2` and 16- and 1-lane `poly float` kernels; a constant
-  folded to `0x3EF57744`; the frozen parameter's sine gone from its loop; `-O0`'s runtime calls; no intrinsic left at
-  either level.
+  their reduction; `tanf`'s divide; `float4`, `float8`, `float2` (two lanes, no padding) and 16- and 1-lane
+  `poly float` kernels; a drive's two channels' `tanhf` paired into one two-lane kernel; a constant folded to
+  `0x3EF57744`; the frozen parameter's sine gone from its loop; `-O0`'s runtime calls; no intrinsic left at either
+  level.
 - `versions.fm` and `examples.test` check the kernels where they checked the runtime's calls.
 
 ### Measurements

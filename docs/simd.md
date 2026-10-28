@@ -561,9 +561,10 @@ arguments, with scalars broadcast. `fminf(v, 1)` is `llvm.minnum.v4f32(v, splat 
 backend scalarises them: four calls to `sinf`, with the lanes moved in and out around each. Recipe 8 replaces those with
 one call to a vector library, and that is now the fast math mode. The four lines before the intrinsic are extending.md's
 recipe 15. In the default math mode, a vector `sinf` is a four-lane `sinf` of FMinus's own for each four lanes (a
-`float2` padded, a `float8` cut in two), whose every lane is the scalar `sinf` of that lane: a call of the math
-intrinsic `fminus.sin.v4f32`, which becomes the kernel itself, inline, at the end of the pipeline (from `-O1`;
-extending.md's recipes 23 and 24), or a call of the runtime's `fminus_rt_sin_f4` at `-O0`. First,
+`float2` two lanes, a `float8` cut in two), whose every lane is the scalar `sinf` of that lane: a call of the math
+intrinsic `fminus.sin.v4f32` (`fminus.sin.v2f32`), which becomes the kernel itself, inline, at the end of the pipeline
+(from `-O1`; extending.md's recipes 23 and 24), or a call of the runtime's `fminus_rt_sin_f4` at `-O0` (a float2's, a
+call of `fminus_rt_sinf` a lane). First,
 `checkMathNames` refuses the call when the program declares a function of a name the runtime keeps for the builtin (for
 `sinf`: `fminus_rt_sinf`, `fminus_rt_sin_f4` and the libm mode's `fminus_rt_libm_sinf`), which the call would otherwise
 reach, or LLVM take for the runtime's. It does so in every math mode, the fast one too, which calls none of them, so
@@ -869,7 +870,7 @@ _shape:                             ; tanhf(x) + sqrtf(fabsf(x)): only tanhf bec
   `sinf` stays `llvm.sin.v8f32`, which the backend splits and scalarises: eight calls to `sinf`. Splitting the call into
   two `float4` halves before the replacement would give two calls. The same holds for a `float2`, and for a
   `poly float` that isn't four wide (recipe 9). The default math mode does the splitting itself (`lowerMath`,
-  extending.md's recipe 15): a `float8` is two four-lane kernels there, and a `float2` one, padded.
+  extending.md's recipe 15): a `float8` is two four-lane kernels there, and a `float2` one two-lane kernel.
 - **Scalar loops.** With recipe 10's pointers, the loop vectoriser can use the table too: a loop of `sinf` calls over
   a buffer becomes one `_simd_sin_f4` call each four samples, and its remainder calls libm's `sinf`, so where a block
   ends decides which function a sample meets.

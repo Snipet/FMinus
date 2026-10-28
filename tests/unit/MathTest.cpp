@@ -316,14 +316,17 @@ TEST_CASE("the vector math mode's four-lane functions give each lane the scalar 
 
 namespace
 {
+    using float2 = float __attribute__((ext_vector_type(2)));
     using float4 = float __attribute__((ext_vector_type(4)));
 
     // A program's kernels of one function at -O2, where opt/MathKernels.cpp builds them inline from the runtime's
-    // template: of a float, `one`, and of a float4, `four`. Each runs in its caller's floating-point mode.
+    // template: of a float, `one`, of a float2, `two`, and of a float4, `four`. Each runs in its caller's
+    // floating-point mode.
     struct InlineKernels
     {
         std::unique_ptr<fminus::Program> program;
         float (*one)(float) = nullptr;
+        float2 (*two)(float2) = nullptr;
         float4 (*four)(float4) = nullptr;
     };
 
@@ -333,11 +336,13 @@ namespace
         InlineKernels kernels;
         std::string errors;
         kernels.program = fminus::Program::compile("float one(float x) { return " + name + "(x); }\n"
+                                                   "float2 two(float2 x) { return " + name + "(x); }\n"
                                                    "float4 four(float4 x) { return " + name + "(x); }\n",
                                                    errors);
         if (kernels.program)
         {
             kernels.one = kernels.program->function<float(float)>("one", errors);
+            kernels.two = kernels.program->function<float2(float2)>("two", errors);
             kernels.four = kernels.program->function<float4(float4)>("four", errors);
         }
         return kernels;
@@ -550,17 +555,19 @@ TEST_CASE("under flush-to-zero, the kernels read a subnormal argument as its zer
     }
 }
 
-TEST_CASE("the kernels inline in a program give every float the runtime's result, of a float and in four lanes",
+TEST_CASE("the kernels inline in a program give every float the runtime's result, of a float and in two and four "
+          "lanes",
           "[math]")
 {
     // From -O1 a program's sinf is FMinus's kernel itself, built as IR from the template the runtime's functions
     // instantiate (opt/MathKernels.cpp): every 127th float, of either sign and any magnitude, through a program's
-    // kernel of a float and of a float4 (beside three other floats), against the runtime's function.
+    // kernel of a float, of a float2 (beside another float) and of a float4 (beside three), against the runtime's
+    // function.
     for (const Function& f : kFunctions)
     {
         INFO(f.builtin);
         const InlineKernels kernels = inlineKernels(f);
-        REQUIRE((kernels.one != nullptr && kernels.four != nullptr));
+        REQUIRE((kernels.one != nullptr && kernels.two != nullptr && kernels.four != nullptr));
         long wrong = 0;
         for (std::uint64_t bits = 0; bits + 3 * 127 < (std::uint64_t{1} << 32); bits += 4 * 127)
         {
@@ -568,15 +575,18 @@ TEST_CASE("the kernels inline in a program give every float the runtime's result
             for (int k = 0; k < 4; ++k)
                 x[k] = std::bit_cast<float>(static_cast<std::uint32_t>(bits + static_cast<std::uint64_t>(k) * 127));
             const float4 four = kernels.four(x);
+            const float2 low = kernels.two(float2{x[0], x[1]});
+            const float2 high = kernels.two(float2{x[2], x[3]});
             for (int k = 0; k < 4; ++k)
             {
                 const float expected = f.scalar(x[k]);
                 const float one = kernels.one(x[k]);
-                if (same(one, expected) && same(four[k], expected))
+                const float two = k < 2 ? low[k] : high[k - 2];
+                if (same(one, expected) && same(two, expected) && same(four[k], expected))
                     continue;
                 if (wrong++ == 0)
-                    UNSCOPED_INFO("first at " << x[k] << ": " << one << " and a lane's " << four[k] << ", not "
-                                              << expected);
+                    UNSCOPED_INFO("first at " << x[k] << ": " << one << ", a pair's " << two << " and a lane's "
+                                              << four[k] << ", not " << expected);
             }
         }
         CHECK(wrong == 0);
@@ -642,7 +652,8 @@ TEST_CASE("every float, through every kernel: the bounds, the lanes and flush-to
     // Hidden from ctest (about ten minutes on an M5's ten cores): run it after changing a kernel,
     // `fminus-tests "[exhaustive]"`. What the tests above sample, every float of them: each function's largest error
     // against its bound, each float in each lane of the four-lane function beside other floats, the kernel inline in a
-    // program (a float's and a float4's, at -O2) against the runtime's, and each float's result under flush-to-zero
+    // program (a float's, a float2's and a float4's, at -O2) against the runtime's, and each float's result under
+    // flush-to-zero
     // against its flushed argument's, flushed. On every core, or on FMINUS_TEST_THREADS of them.
     unsigned threads = std::max(1u, std::thread::hardware_concurrency());
     if (const char* limit = std::getenv("FMINUS_TEST_THREADS"); limit != nullptr && std::atoi(limit) > 0)
@@ -658,7 +669,7 @@ TEST_CASE("every float, through every kernel: the bounds, the lanes and flush-to
             long flushing = 0;
         };
         const InlineKernels kernels = inlineKernels(f);
-        REQUIRE((kernels.one != nullptr && kernels.four != nullptr));
+        REQUIRE((kernels.one != nullptr && kernels.two != nullptr && kernels.four != nullptr));
         std::vector<Found> found(threads);
         std::vector<std::thread> workers;
         for (unsigned t = 0; t < threads; ++t)
@@ -679,11 +690,15 @@ TEST_CASE("every float, through every kernel: the bounds, the lanes and flush-to
                         v[(k + turn) & 3] = x[k];
                     const fminus_rt_float4 y4 = f.four(v);
                     const float4 inline4 = kernels.four(float4{v[0], v[1], v[2], v[3]});
+                    const float2 inline2[2] = {kernels.two(float2{v[0], v[1]}), kernels.two(float2{v[2], v[3]})};
                     for (int k = 0; k < 4; ++k)
                     {
                         const float y = f.scalar(x[k]);
-                        mine.lanes += same(y4[(k + turn) & 3], y) ? 0 : 1;
-                        mine.inlined += same(inline4[(k + turn) & 3], y) && same(kernels.one(x[k]), y) ? 0 : 1;
+                        const int lane = (k + turn) & 3;
+                        mine.lanes += same(y4[lane], y) ? 0 : 1;
+                        const bool inlined = same(inline4[lane], y) && same(inline2[lane >> 1][lane & 1], y)
+                                             && same(kernels.one(x[k]), y);
+                        mine.inlined += inlined ? 0 : 1;
                         const double error = ulpError(y, f.exact(static_cast<double>(x[k])));
                         if (error > mine.worst)
                         {
@@ -1250,5 +1265,5 @@ TEST_CASE("a program's own functions of the runtime's math names are left alone 
     CHECK(cosine->doesNotAccessMemory());
     CHECK(cosine->hasFnAttribute(llvm::Attribute::Speculatable));
     CHECK(cosine->getFnAttribute("vector-function-abi-variant").getValueAsString()
-          == "_ZGV_LLVM_N4v_fminus.cos.f32(fminus.cos.v4f32)");
+          == "_ZGV_LLVM_N2v_fminus.cos.f32(fminus.cos.v2f32),_ZGV_LLVM_N4v_fminus.cos.f32(fminus.cos.v4f32)");
 }
