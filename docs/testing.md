@@ -143,7 +143,7 @@ float gain(float x, float g)
 
 | Feature | |
 |---|---|
-| `REQUIRES: arm64` (or `x86_64`) | the host architecture, for assembly checks (Windows names them `ARM64` and `AMD64`, so these skip there) |
+| `REQUIRES: arm64` (or `x86_64`) | the host architecture, for assembly checks, and IR checks that hang on its cost model (`slp.fm`) (Windows names them `ARM64` and `AMD64`, so these skip there) |
 | `REQUIRES: asserts` | LLVM built with assertions |
 | `REQUIRES: asan`, `ubsan`, `tsan` | the sanitizer build |
 | `REQUIRES: system-darwin` (or `system-linux`) | the host's system (`veclib.fm`, which runs `--math fast`, needs Apple's vector math library) |

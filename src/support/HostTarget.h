@@ -33,7 +33,10 @@ namespace fminus
     inline constexpr const char* kMathFlag = "fminus.math";
 
     // Runs LLVM's default pipeline at `level` (O0 to O3, as clang -O<n> would), with loop and SLP vectorisation, using
-    // the machine's TargetTransformInfo: what lets the vectorisers see the host's vector unit. On Apple systems it also
+    // the machine's TargetTransformInfo: what lets the vectorisers see the host's vector unit. SLP's cost threshold is
+    // 10, not LLVM's 0, so that it no longer packs independent recurrences (a stereo filter's two channels) into one
+    // vector: LLVM's option -slp-threshold, which is the process's, set before the first pipeline runs unless the host
+    // set it on LLVM's command line itself (HostTarget.cpp says why 10). On Apple systems it also
     // gives the pipeline libsystem_m's vector math library, for a module whose kMathFlag is "fast" or that has none
     // (LLVM IR written by hand, as fminus-build takes): a module in the vector or the libm mode calls the runtime's
     // math functions instead, and the library would only make the loops of a prototype's libm function (atanf) give

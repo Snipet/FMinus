@@ -1,0 +1,88 @@
+// The SLP vectoriser's threshold (support/HostTarget.cpp, raiseSlpThreshold; simd.md, "The auto-vectorisers"). At
+// LLVM's 0, SLP packs the two channels of a stereo filter, independent recurrences, into one <4 x float> with shuffles
+// on the path from each sample to the next, and the loop runs slower than the two scalar chains. At FMinus's 10 the
+// channels stay scalar, in every math mode, and four calls of one math builtin are still one four-lane call. The
+// costs are NEON's.
+// REQUIRES: arm64
+// RUN: fminus %s -O2 | FileCheck %s
+// RUN: fminus %s -O2 --math fast | FileCheck %s --check-prefix=FAST
+
+module Svf
+{
+    float ic1;
+    float ic2;
+
+    float tick(float x, float a1, float a2, float a3)
+    {
+        const float v3 = x - ic2;
+        const float v1 = a1 * ic1 + a2 * v3;
+        const float v2 = ic2 + a2 * ic1 + a3 * v3;
+        ic1 = 2 * v1 - ic1;
+        ic2 = 2 * v2 - ic2;
+        return v2;
+    }
+};
+
+module Stereo
+{
+    Svf l;
+    Svf r;
+
+    void process(float* restrict left, float* restrict right, int n, float g)
+    {
+        const float a1 = 1 / (1 + g * (g + 0.6f));
+        const float a2 = g * a1;
+        const float a3 = g * a2;
+        for (int i = 0; i < n; ++i)
+        {
+            left[i] = l.tick(left[i], a1, a2, a3);
+            right[i] = r.tick(right[i], a1, a2, a3);
+        }
+    }
+};
+
+// Four partials, each its own phase: four sinf calls a sample, one four-lane call.
+module Partials
+{
+    float p1;
+    float p2;
+    float p3;
+    float p4;
+
+    void process(float* restrict out, int n)
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            p1 = (p1 + 0.01f) % 1.0f;
+            p2 = (p2 + 0.02f) % 1.0f;
+            p3 = (p3 + 0.03f) % 1.0f;
+            p4 = (p4 + 0.05f) % 1.0f;
+            out[i] = sinf(6.2831853f * p1) + 0.5f * sinf(6.2831853f * p2) + 0.25f * sinf(6.2831853f * p3)
+                     + 0.125f * sinf(6.2831853f * p4);
+        }
+    }
+};
+
+// CHECK-LABEL: define void @"Stereo::process"(
+// CHECK-NOT:     shufflevector
+// CHECK-NOT:     phi <4 x float>
+// CHECK:         phi float
+// CHECK-NOT:     phi <4 x float>
+// CHECK-NOT:     shufflevector
+// CHECK-LABEL: define void @"Partials::process"(
+// CHECK-NOT:     call float @fminus_rt_sinf(
+// CHECK:         call <4 x float> @fminus_rt_sin_f4(
+// CHECK-NOT:     call float @fminus_rt_sinf(
+// CHECK:         ret void
+
+// FAST-LABEL: define void @"Stereo::process"(
+// FAST-NOT:     shufflevector
+// FAST-NOT:     phi <4 x float>
+// FAST:         phi float
+// FAST-NOT:     phi <4 x float>
+// FAST-NOT:     shufflevector
+// FAST-LABEL: define void @"Partials::process"(
+// FAST-NOT:     call float @llvm.sin.f32(
+// FAST:         call <4 x float> @{{_simd_sin_f4|llvm.sin.v4f32}}(
+// FAST-NOT:     call float @llvm.sin.f32(
+// FAST:         ret void
