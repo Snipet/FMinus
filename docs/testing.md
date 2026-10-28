@@ -78,7 +78,7 @@ TEST_CASE("functions compute what they say", "[codegen]")
 - **Tags**: `[frontend]`, `[codegen]`, `[smoke]`, `[jit]`, `[aot]` (the AOT smoke test, and `AotTest.cpp`'s checks
   of an executable's entry), `[grammar]`, `[simd]` (vectors and the vector math library), `[poly]`, `[int]`,
   `[pointer]`, `[heap]`, `[effects]`, `[math]` (the math modes), `[versions]` (knob versioning and flat streams),
-  `[tbaa]`, `[zeroinit]`, `[attributes]` and `[progress]` (the runtime's attributes and loop progress),
+  `[tbaa]`, `[zeroinit]`, `[attributes]` and `[progress]` (the runtime's and libm's attributes, and loop progress),
   `[denormals]`, `[parallel]` (parallel regions, and `[runtime]` among them for the pool on its own). Add new ones
   freely.
 - **A test that something reads 0** must not run on a fresh stack, which is 0 already. `ZeroInitTest.cpp` calls each
