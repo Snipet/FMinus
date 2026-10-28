@@ -77,10 +77,13 @@ TEST_CASE("functions compute what they say", "[codegen]")
 - **Error tests compare the whole formatted text**, locations included. A moved column is a real change.
 - **Tags**: `[frontend]`, `[codegen]`, `[smoke]`, `[jit]`, `[aot]` (the AOT smoke test, and `AotTest.cpp`'s checks
   of an executable's entry), `[grammar]`, `[simd]` (vectors and the vector math library), `[poly]`, `[int]`,
-  `[pointer]`, `[heap]`, `[effects]`, `[math]` (the math modes), `[versions]` (knob versioning and flat streams),
-  `[tbaa]`, `[zeroinit]`, `[attributes]` and `[progress]` (the runtime's attributes and loop progress),
+  `[pointer]`, `[heap]`, `[effects]`, `[math]` (the math modes and their kernels), `[versions]` (knob versioning and
+  flat streams), `[tbaa]`, `[zeroinit]`, `[attributes]` and `[progress]` (the runtime's attributes and loop progress),
   `[denormals]`, `[parallel]` (parallel regions, and `[runtime]` among them for the pool on its own). Add new ones
   freely.
+- **A hidden test** carries the tags `[.]` and a name: ctest never runs it, and `fminus-tests "[name]"` does.
+  `[exhaustive]` runs every float through every math kernel, on every core, against its error bound, in every lane, and
+  under flush-to-zero (extending.md, recipe 23): about ten minutes, for after a change to a kernel.
 - **A test that something reads 0** must not run on a fresh stack, which is 0 already. `ZeroInitTest.cpp` calls each
   function on a dirty one: `dirtyStack()` fills 64 KB below the caller with 1e6, and `padded()` calls the function
   from below a kilobyte of padding, so a wrongly removed zeroing reads 1e6. A test of a hand-written local that
@@ -243,15 +246,17 @@ delay's first reference was 35 % slower than FMinus for that alone.
 `opt`, `llc`, `llvm-mca` and `llvm-objdump` are in the flavor's `bin/`
 (`.deps/install/llvm-23.1.3-Release-assert-*/bin`), and on lit's PATH. `-O0` IR is the input for `opt`: it's what the
 code generator wrote, every memset included, since FMinus's own passes, knob versioning and zero-init elision
-(extending.md, recipes 16 and 18), run from `-O1`. The one exception is the fast math mode's vector library, which on
-Apple systems replaces a `float4`'s `llvm.sin.v4f32` with `_simd_sin_f4` at `-O0` too (simd.md, recipe 8).
+(extending.md, recipes 16 and 18), run from `-O1`. The exceptions are the math builtins': the fast math mode's vector
+library, which on Apple systems replaces a `float4`'s `llvm.sin.v4f32` with `_simd_sin_f4` at `-O0` too (simd.md,
+recipe 8), and the default mode's math intrinsics, which every level replaces (extending.md, recipe 24): at `-O0` with
+calls of the runtime's functions, which carry no vector variant, so `opt` cannot vectorise a loop of them.
 `opt -passes='default<O2>'` runs LLVM's pipeline without FMinus's passes, and without what `fminus` gives the pipeline:
 the host's CPU (`opt` builds a generic target machine for the IR's triple), and in the fast math mode the vector
 library. So it reproduces `fminus -O2` closely only where those passes find nothing: it makes no copies of a method
 whose loop a knob steers or reads a stream (no `"fminus-knob-versions"` attribute; a stream's loop that vectorises does
-so behind the loop vectoriser's check that the stream's stride is 1, `ident.check`), and keeps the memsets of local
-arrays that `fminus` removes. Add `-mtriple=$(fminus-hostinfo | sed -n 's/^triple: //p') -mcpu=apple-m5` for the same
-cost model.
+so behind the loop vectoriser's check that the stream's stride is 1, `ident.check`), keeps the memsets of local
+arrays that `fminus` removes, and calls the math builtins' runtime functions where `fminus` has their kernels inline.
+Add `-mtriple=$(fminus-hostinfo | sed -n 's/^triple: //p') -mcpu=apple-m5` for the same cost model.
 
 For `llvm-mca`, keep only the kernel's instructions: cut the function body out of the assembly and leave out calls
 and branches. It reports the throughput of one iteration (IPC, the block's reciprocal throughput) on the CPU's

@@ -119,7 +119,7 @@ TEST_CASE("vector arithmetic works lane by lane, broadcasting scalars, with buil
     CHECK(lanesOf(lookup<float4(float4)>(*jit, "halfwave")(x)) == std::array{-0.0f, -0.0f, 0.5f, 2.0f});
     const float4 angles = {0.0f, 0.5f, 1.0f, 2.0f};
     const float4 sines = lookup<float4(float4)>(*jit, "sines")(angles);
-    for (int i = 0; i < 4; ++i)   // one call of the runtime's four-lane sin: each lane what a float gets (MathTest.cpp)
+    for (int i = 0; i < 4; ++i)   // one four-lane kernel of sin: each lane what a float gets (MathTest.cpp)
         CHECK(sines[i] == fminus::math::sin(angles[i]));
     CHECK(lookup<float(float)>(*jit, "wide")(1.0f) == 72.0f);
 }

@@ -22,8 +22,8 @@ It is declarative: three JSON files, no code, nothing that runs on your files.
 ## Installing
 
 ```bash
-python3 editors/vscode/package.py                               # build-vscode/fminus-0.9.0.vsix
-code --install-extension build-vscode/fminus-0.9.0.vsix
+python3 editors/vscode/package.py                               # build-vscode/fminus-0.10.0.vsix
+code --install-extension build-vscode/fminus-0.10.0.vsix
 ```
 
 Then reload the window (Developer: Reload Window). `code` comes with VSCode; if it isn't on PATH, run "Shell Command:

@@ -1,10 +1,13 @@
-// The math builtins' modes (--math; ir::Options::math). vector, the default: sinf, cosf, expf, tanhf and logf call the
-// runtime's functions, which LLVM can neither fold nor pair, a scalar call naming its four-lane variant, so a loop of
-// them vectorises into four-lane calls; every vector width is four-lane calls. libm: the runtime's wrappers of libm, a
-// lane at a time, and nothing vectorises. fast: LLVM's intrinsics, folded, paired into sincos, and given the vector
-// library (veclib.fm). fabsf and sqrtf stay intrinsics in every mode.
-// RUN: fminus %s -O2 | FileCheck %s --check-prefixes=VECTOR,EXACT --implicit-check-not=_simd_
-// RUN: fminus %s -O0 | FileCheck %s --check-prefixes=VECTOR0,EXACT --implicit-check-not=_simd_
+// The math builtins' modes (--math; ir::Options::math). vector, the default: sinf, cosf, tanf, expf, tanhf and logf
+// are calls of FMinus's math intrinsics (fminus.sin.f32, a scalar call naming its two- and four-lane variants
+// fminus.sin.v2f32 and fminus.sin.v4f32, so a loop of them vectorises into four-lane calls and SLP pairs two; a float2
+// is a two-lane call, wider vectors four-lane calls), which LLVM can neither fold nor pair; at the pipeline's end each
+// becomes FMinus's kernel, inline (opt/MathKernels.cpp), or at -O0 a call of the runtime's function (a call a lane for
+// two lanes). Only sin's, cos's and tan's branch for a large argument calls the runtime from
+// -O1. libm: the runtime's wrappers of libm, a lane at a time, and nothing vectorises. fast: LLVM's intrinsics,
+// folded, paired into sincos, and given the vector library (veclib.fm). fabsf and sqrtf stay intrinsics in every mode.
+// RUN: fminus %s -O2 | FileCheck %s --check-prefixes=VECTOR,EXACT --implicit-check-not=_simd_ --implicit-check-not='@fminus.{{(sin|cos|tan|exp|tanh|log)}}.'
+// RUN: fminus %s -O0 | FileCheck %s --check-prefixes=VECTOR0,EXACT --implicit-check-not=_simd_ --implicit-check-not=@fminus.
 // RUN: fminus %s -O2 --math vector --poly-lanes 16 | FileCheck %s --check-prefix=WIDE
 // RUN: fminus %s -O2 --poly-lanes 1 | FileCheck %s --check-prefix=NARROW
 // RUN: fminus %s -O2 --freeze Lfo::rate=0.25 | FileCheck %s --check-prefix=FROZEN
@@ -16,12 +19,13 @@
 // RUN: fminus %s --run turn 2 0.5 -O0 | FileCheck %s --check-prefix=TURN
 // RUN: not fminus %s --math slow 2>&1 | FileCheck %s --check-prefix=OPTION
 
-// The four-lane variants are kept in the module until the vectorisers look for them (the fast mode's, of the vector
-// library, by InjectTLIMappings).
-// VECTOR: @llvm.compiler.used = appending global {{.*}}ptr @fminus_rt_sin_f4{{.*}}, section "llvm.metadata"
+// The variants are kept in the module until the vectorisers have looked for them (the fast mode's, of the vector
+// library, by InjectTLIMappings), and go with the intrinsics' calls.
+// VECTOR-NOT: @llvm.compiler.used
 // LIBM-NOT: @llvm.compiler.used
 
-// A loop of sinf over a buffer. In the vector mode its body is four-lane calls, and its remainder scalar ones.
+// A loop of sinf over a buffer. In the vector mode its body is four-lane kernels, and its remainder scalar ones; a
+// lane past 2^16 takes the branch to the runtime's exact reduction, a call a lane (through fminus.large.sin, below).
 void sines(const float* restrict in, float* restrict out, int n)
 {
     for (int i = 0; i < n; ++i)
@@ -30,9 +34,15 @@ void sines(const float* restrict in, float* restrict out, int n)
 
 // VECTOR-LABEL: define void @sines(
 // VECTOR:       vector.body:
-// VECTOR:         call <4 x float> @fminus_rt_sin_f4(<4 x float>
+// VECTOR:         call <4 x float> @llvm.fma.v4f32(<4 x float> %{{.*}}, <4 x float> splat (float f0x3F22F983),
+// VECTOR:         [[ANY:%.*]] = call i1 @llvm.vector.reduce.or.v4i1(
+// VECTOR-NEXT:    br i1 [[ANY]], label %[[LARGE:sin.large[0-9]*]], label %{{.*}}, !prof ![[UNLIKELY:[0-9]+]]
+// VECTOR:       [[LARGE]]:
+// VECTOR:         call preserve_allcc float @fminus.large.sin(float
 // VECTOR:       for.body:
-// VECTOR:         call float @fminus_rt_sinf(float
+// VECTOR:         call float @llvm.fma.f32(float %{{.*}}, float f0x3F22F983, float f0x4B400000)
+// VECTOR:       sin.large:
+// VECTOR-NEXT:    call preserve_allcc float @fminus.large.sin(float
 // VECTOR0-LABEL: define void @sines(
 // VECTOR0:         call float @fminus_rt_sinf(float
 // LIBM-LABEL: define void @sines(
@@ -45,50 +55,80 @@ void sines(const float* restrict in, float* restrict out, int n)
 // FAST:           call <{{[0-9]+}} x float> @{{_simd_sin_f4|llvm\.sin\.v[0-9]+f32}}(<{{[0-9]+}} x float>
 // FAST:           call float @llvm.sin.f32(float
 
-// A cosine and a sine of one angle: two calls in the vector mode, at -O2 as at -O0; one __sincosf_stret in the fast
-// mode at -O2, on Apple systems.
+// A cosine and a sine of one angle: in the vector mode one reduction and one pair of polynomials, which the two
+// kernels share (EarlyCSE, after the pass), two calls at -O0; one __sincosf_stret in the fast mode at -O2, on Apple
+// systems.
 float turn(float x, float angle)
 {
     return x * cosf(angle) + sinf(angle);
 }
 
 // VECTOR-LABEL: define float @turn(
-// VECTOR:         call float @fminus_rt_cosf(float %angle)
-// VECTOR:         call float @fminus_rt_sinf(float %angle)
+// VECTOR:         [[A:%.*]] = call float @llvm.fabs.f32(float %angle)
+// VECTOR-NEXT:    call float @llvm.fma.f32(float [[A]], float f0x3F22F983, float f0x4B400000)
+// VECTOR-NOT:     @llvm.fabs.f32(float %angle)
+// VECTOR:       cos.large:
+// VECTOR-NEXT:    call preserve_allcc float @fminus.large.cos(float %angle)
+// VECTOR:       sin.large:
+// VECTOR-NEXT:    call preserve_allcc float @fminus.large.sin(float %angle)
+// VECTOR:         ret float
+// VECTOR0-LABEL: define float @turn(
+// VECTOR0:         call float @fminus_rt_cosf(float
+// VECTOR0:         call float @fminus_rt_sinf(float
 // ASM-LABEL:  _turn:
-// ASM:          _fminus_rt_cosf@GOTPAGE
-// ASM:          _fminus_rt_sinf@GOTPAGE
 // ASM-NOT:      sincos
 // ASM:          ret
+// ASM:          bl _fminus.large.cos
+// ASM:          bl _fminus.large.sin
 // FASTASM-LABEL: _turn:
 // FASTASM:         ___sincosf_stret@GOTPAGE
 // FASTASM-NOT:     _sinf
 // FASTASM:         ret
 // TURN: 2.2345905
 
-// A float4 is one four-lane call; a float8 two; a float2 one, padded with zeros.
+// tanf, a builtin as the others are: FMinus's kernel in the vector mode, a divide its last operation; libm's in the
+// libm mode, LLVM's llvm.tan in the fast one.
+float tangent(float w) { return tanf(w); }
+
+// VECTOR-LABEL: define float @tangent(
+// VECTOR:         fdiv float
+// VECTOR:       tan.large:
+// VECTOR-NEXT:    call preserve_allcc float @fminus.large.tan(float %w)
+// VECTOR0-LABEL: define float @tangent(
+// VECTOR0:        call float @fminus_rt_tanf(float
+// LIBM-LABEL: define float @tangent(
+// LIBM:           call float @fminus_rt_libm_tanf(float %w)
+// FAST-LABEL: define float @tangent(
+// FAST:           call float @llvm.tan.f32(float %w)
+
+// A float4 is one four-lane kernel; a float8 two; a float2 one two-lane kernel (two calls at -O0).
 float4 four(float4 x) { return tanhf(x); }
 float8 eight(float8 x) { return expf(x); }
 float2 two(float2 x) { return logf(x); }
 
 // VECTOR-LABEL: define <4 x float> @four(
 // VECTOR-NEXT:  entry:
-// VECTOR-NEXT:    [[R:%.*]] = tail call <4 x float> @fminus_rt_tanh_f4(<4 x float> %x)
-// VECTOR-NEXT:    ret <4 x float> [[R]]
+// VECTOR-NEXT:    call <4 x float> @llvm.fabs.v4f32(<4 x float> %x)
+// VECTOR:         fdiv <4 x float>
+// VECTOR-NOT:     call {{.*}}@fminus
+// VECTOR:         ret <4 x float>
 // VECTOR-LABEL: define <8 x float> @eight(
 // VECTOR:         shufflevector <8 x float> %x, <8 x float> poison, <4 x i32> <i32 0, i32 1, i32 2, i32 3>
-// VECTOR:         call <4 x float> @fminus_rt_exp_f4(
 // VECTOR:         shufflevector <8 x float> %x, <8 x float> poison, <4 x i32> <i32 4, i32 5, i32 6, i32 7>
-// VECTOR:         call <4 x float> @fminus_rt_exp_f4(
-// VECTOR-NOT:     call
+// VECTOR-NOT:     call {{.*}}@fminus
 // VECTOR:         ret <8 x float>
 // VECTOR-LABEL: define <2 x float> @two(
-// VECTOR:         shufflevector <2 x float> %x, <2 x float> <float 0.0{{0*}}e+00, {{.*}}>,
-// VECTOR-SAME:    <4 x i32> <i32 0, i32 1, i32 2, i32 2>
-// VECTOR:         call <4 x float> @fminus_rt_log_f4(
-// VECTOR:         shufflevector <4 x float> {{%.*}}, <4 x float> poison, <2 x i32> <i32 0, i32 1>
+// VECTOR-NEXT:  entry:
+// VECTOR-NEXT:    fcmp olt <2 x float> %x, splat (float f0x00800000)
+// VECTOR-NOT:     shufflevector
+// VECTOR-NOT:     call {{.*}}@fminus
+// VECTOR:         ret <2 x float>
 // VECTOR0-LABEL: define <4 x float> @four(
 // VECTOR0:         call <4 x float> @fminus_rt_tanh_f4(
+// VECTOR0-LABEL: define <2 x float> @two(
+// VECTOR0-COUNT-2: call float @fminus_rt_logf(float
+// VECTOR0-NOT:     call
+// VECTOR0:         ret <2 x float>
 // LIBM-LABEL: define <4 x float> @four(
 // LIBM-COUNT-4:   call float @fminus_rt_libm_tanhf(float
 // LIBM-NOT:       call
@@ -98,24 +138,56 @@ float2 two(float2 x) { return logf(x); }
 // FAST-LABEL: define <8 x float> @eight(
 // FAST:           call <8 x float> @llvm.exp.v8f32(
 
-// A poly float of 16 lanes is four calls; of one, a call padded with zeros.
+// A poly float of 16 lanes is four kernels, each with its branch for a large argument; of one, the float's kernel.
 poly float lanes(poly float x) { return sinf(x); }
 
 // WIDE-LABEL: define <16 x float> @lanes(
-// WIDE-COUNT-4:   call <4 x float> @fminus_rt_sin_f4(
-// WIDE-NOT:       call
+// WIDE-COUNT-4:   call i1 @llvm.vector.reduce.or.v4i1(
+// WIDE-NOT:       call i1 @llvm.vector.reduce.or
 // WIDE:           ret <16 x float>
 // NARROW-LABEL: define <1 x float> @lanes(
-// NARROW:         call <4 x float> @fminus_rt_sin_f4(
-// NARROW-NOT:     call
+// NARROW-NEXT:  entry:
+// NARROW-NEXT:    [[LANE:%.*]] = extractelement <1 x float> %x, i64 0
+// NARROW-NEXT:    call float @llvm.fabs.f32(float [[LANE]])
+// NARROW-NOT:     <4 x float>
 // NARROW:         ret <1 x float>
 
-// A constant's sine: a call at run time in the vector and libm modes, folded with the host's double sin in the fast
+// Two channels' tanh, each in its own recursion, which the loop vectoriser leaves alone: SLP pairs the two calls into
+// one of the two-lane variant, so the two channels are one two-lane kernel.
+module Drive
+{
+    float left;
+    float right;
+
+    void process(float* restrict l, float* restrict r, int n)
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            left += 0.1f * (tanhf(2.0f * l[i]) - left);
+            right += 0.1f * (tanhf(2.0f * r[i]) - right);
+            l[i] = left;
+            r[i] = right;
+        }
+    }
+};
+
+// VECTOR-LABEL: define void @"Drive::process"(
+// VECTOR:         call <2 x float> @llvm.fabs.v2f32(
+// VECTOR-NOT:     call float @llvm.fabs.f32(
+// VECTOR:         ret void
+// VECTOR0-LABEL: define void @"Drive::process"(
+// VECTOR0-COUNT-2: call float @fminus_rt_tanhf(float
+
+// A constant's sine: in the vector mode its kernel of constants, folded to what the runtime computes (sin 0.5 is
+// 0x3EF57744 there, as in libm); a call at run time in the libm mode; folded with the host's double sin in the fast
 // one.
 float constant(void) { return sinf(0.5f); }
 
 // VECTOR-LABEL: define {{.*}}float @constant(
-// VECTOR:         call float @fminus_rt_sinf(float 5.000000e-01)
+// VECTOR-NEXT:  entry:
+// VECTOR-NEXT:    ret float f0x3EF57744
+// VECTOR0-LABEL: define {{.*}}float @constant(
+// VECTOR0:         call float @fminus_rt_sinf(float 5.000000e-01)
 // LIBM-LABEL: define {{.*}}float @constant(
 // LIBM:           call float @fminus_rt_libm_sinf(float 5.000000e-01)
 // FAST-LABEL: define {{.*}}float @constant(
@@ -129,7 +201,7 @@ float exact(float x) { return sqrtf(fabsf(x)); }
 // EXACT:         call float @llvm.fabs.f32(
 // EXACT:         call float @llvm.sqrt.f32(
 
-// A frozen parameter's sine is a call of a constant, which LICM takes out of the loop: what a knob's would be.
+// A frozen parameter's sine is a kernel of a constant, folded: what a knob's computes, out of the loop.
 module Lfo
 {
     param float rate;
@@ -142,18 +214,26 @@ module Lfo
 };
 
 // FROZEN-LABEL: define void @"Lfo::process"(
-// FROZEN:         call float @fminus_rt_sinf(float 2.500000e-01)
+// FROZEN-NOT:     call
 // FROZEN:       vector.body:
 // FROZEN-NOT:     call
 // FROZEN:         br
 
-// The scalar functions name their four-lane variants, and every runtime function has llvm.sin's attributes.
-// VECTOR: declare float @fminus_rt_sinf(float) {{.*}}#[[SCALAR:[0-9]+]]
-// VECTOR: declare <4 x float> @fminus_rt_sin_f4(<4 x float>) {{.*}}#[[FOUR:[0-9]+]]
-// VECTOR: attributes #[[SCALAR]] = { {{.*}}nounwind speculatable willreturn memory(none)
-// VECTOR-SAME: "vector-function-abi-variant"="_ZGV_LLVM_N4v_fminus_rt_sinf(fminus_rt_sin_f4)" }
-// VECTOR: attributes #[[FOUR]] = { {{.*}}nounwind speculatable willreturn memory(none) }
+// A large argument's branch is unlikely, and calls fminus.large.sin, of the preserve_all calling convention, which
+// calls the runtime's function: the loop around the branch keeps its values in registers that a call of C's
+// convention would take. Neither function is speculatable, so nothing hoists them out of the branch. (The intrinsics'
+// attributes, and their vector variants, are MathTest.cpp's to check, after ir::lower: no output of fminus has them.)
+// VECTOR: declare float @fminus_rt_sinf(float) {{.*}}#[[RUNTIME:[0-9]+]]
+// VECTOR: define internal preserve_allcc float @fminus.large.sin(float %0) #[[LARGE:[0-9]+]] {
+// VECTOR-NEXT: entry:
+// VECTOR-NEXT:   [[R:%.*]] = call float @fminus_rt_sinf(float %0)
+// VECTOR-NEXT:   ret float [[R]]
+// VECTOR: attributes #[[RUNTIME]] = { nocallback nofree nosync nounwind willreturn memory(none) }
+// VECTOR: attributes #[[LARGE]] = { cold nofree noinline nosync nounwind willreturn memory(none) }
 // VECTOR: !{i32 1, !"fminus.math", !"vector"}
+// VECTOR: ![[UNLIKELY]] = !{!"branch_weights", i32 1, i32 1048575}
+// VECTOR0: declare float @fminus_rt_sinf(float) {{.*}}#[[RUNTIME0:[0-9]+]]
+// VECTOR0: attributes #[[RUNTIME0]] = { nocallback nofree nosync nounwind willreturn memory(none) }
 // LIBM: declare float @fminus_rt_libm_sinf(float) {{.*}}#[[LIBMF:[0-9]+]]
 // LIBM: attributes #[[LIBMF]] = { {{.*}}nounwind speculatable willreturn memory(none) }
 // LIBM: !{i32 1, !"fminus.math", !"libm"}

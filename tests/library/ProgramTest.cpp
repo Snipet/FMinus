@@ -201,14 +201,16 @@ TEST_CASE("a Program's options: the optimisation level, a poly float's lanes, an
     CHECK(errors == "fminus::Program: polyLanes 3 is not 0 (this machine's) or a power of two from 1 to 64\n");
 }
 
-TEST_CASE("fminus::math is what a Program's sinf, cosf, expf, tanhf and logf compute; Options::math picks another",
+TEST_CASE("fminus::math is what a Program's sinf, cosf, tanf, expf, tanhf and logf compute; Options::math picks "
+          "another",
           "[library][math]")
 {
     // A block of each, the loop FMinus's (and vectorised, at -O2), against C++ a sample at a time.
     const char* const kMath = "void math(const float* restrict in, float* restrict out, int n)\n"
                               "{\n"
                               "    for (int i = 0; i < n; ++i)\n"
-                              "        out[i] = sinf(in[i]) + cosf(in[i]) + expf(in[i]) + tanhf(in[i]) + logf(in[i]);\n"
+                              "        out[i] = sinf(in[i]) + cosf(in[i]) + expf(in[i]) + tanhf(in[i]) + logf(in[i])\n"
+                              "               + tanf(in[i]);\n"
                               "}\n";
     using Math = void(const float*, float*, int);
     std::vector<float> in(1001);
@@ -219,8 +221,8 @@ TEST_CASE("fminus::math is what a Program's sinf, cosf, expf, tanhf and logf com
     // of one argument one call of Apple's __sincosf_stret, whose sine is an ulp from sinf's for some arguments (one of
     // these).
     using Function = float (*)(float);
-    const auto expected = [&](Function sin, Function cos, Function exp, Function tanh, Function log) {
-        volatile Function opaque[5] = {sin, cos, exp, tanh, log};
+    const auto expected = [&](Function sin, Function cos, Function exp, Function tanh, Function log, Function tan) {
+        volatile Function opaque[6] = {sin, cos, exp, tanh, log, tan};
         std::vector<float> out(in.size());
         for (std::size_t i = 0; i < in.size(); ++i)
         {
@@ -228,7 +230,8 @@ TEST_CASE("fminus::math is what a Program's sinf, cosf, expf, tanhf and logf com
             sum = sum + opaque[1](in[i]);
             sum = sum + opaque[2](in[i]);
             sum = sum + opaque[3](in[i]);
-            out[i] = sum + opaque[4](in[i]);
+            sum = sum + opaque[4](in[i]);
+            out[i] = sum + opaque[5](in[i]);
         }
         return out;
     };
@@ -243,11 +246,11 @@ TEST_CASE("fminus::math is what a Program's sinf, cosf, expf, tanhf and logf com
             program->function<Math>("math", errors)(in.data(), out.data(), static_cast<int>(in.size()));
         return out;
     };
-    const std::vector<float> vector =
-        expected(fminus::math::sin, fminus::math::cos, fminus::math::exp, fminus::math::tanh, fminus::math::log);
+    const std::vector<float> vector = expected(fminus::math::sin, fminus::math::cos, fminus::math::exp,
+                                               fminus::math::tanh, fminus::math::log, fminus::math::tan);
     const std::vector<float> libm = expected([](float x) { return std::sin(x); }, [](float x) { return std::cos(x); },
                                              [](float x) { return std::exp(x); }, [](float x) { return std::tanh(x); },
-                                             [](float x) { return std::log(x); });
+                                             [](float x) { return std::log(x); }, [](float x) { return std::tan(x); });
     for (const int level : {0, 2})
     {
         INFO("-O" << level);

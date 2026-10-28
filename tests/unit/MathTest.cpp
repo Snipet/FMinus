@@ -1,18 +1,22 @@
-// tests/unit/MathTest.cpp: the math builtins' modes (ir::Options::math, Program::Math; ir/Math.cpp, runtime/Math.cpp).
+// tests/unit/MathTest.cpp: the math builtins' modes (ir::Options::math, Program::Math; ir/Math.cpp, runtime/Math.cpp,
+// runtime/MathKernels.h).
 //
-// First the premise the vector mode stands on, checked again on every run, so that a macOS whose libsystem_m changed
-// fails here rather than in a program's last bits: each lane of the runtime's four-lane functions is the scalar
-// function of that lane, whatever the other lanes hold, and libsystem_m's own functions are lane-independent where the
-// runtime calls them whole. Then the promise itself: a program gives a float one result wherever it computes it, in one
-// call or in blocks of 61, at -O0 and -O2, in a poly float of 1 to 64 lanes, from a frozen parameter or a knob, for
-// each of the five functions, in loops that vectorise, loops that don't, float2, float4, float8 and poly code; and that
-// result is fminus::math's. Then the libm mode, C++'s std:: functions bit for bit, and the fast mode, LLVM's
-// intrinsics as they were. Last, the runtime's names: a program that calls a builtin declares no function of its
-// runtime functions' names, and one that calls none of them may declare and call them as it likes.
+// First the vector mode's kernels themselves, FMinus's own: each lane of the runtime's four-lane functions is the
+// scalar function of that lane, whatever the other lanes hold; each function is within its stated error of the exact
+// result (docs/extending.md, recipe 23, which has the bounds over every float); the special values; and under
+// flush-to-zero, a subnormal argument gives what its signed zero gives and a subnormal result is a zero. Then the
+// promise itself: a program gives a float one result wherever it computes it, in one call or in blocks of 61, at -O0
+// and -O2, in a poly float of 1 to 64 lanes, from a frozen parameter or a knob, for each of the six functions, in
+// loops that vectorise, loops that don't, float2, float4, float8 and poly code; and that result is fminus::math's
+// (tanf's through a prototype too, now that it is a builtin).
+// Then the libm mode, C++'s std:: functions bit for bit, and the fast mode, LLVM's intrinsics as they were. Last, the
+// runtime's names: a program that calls a builtin declares no function of its runtime functions' names, and one that
+// calls none of them may declare and call them as it likes.
 #include "fminus/FMinus.h"
 #include "frontend/Diagnostics.h"
 #include "frontend/Frontend.h"
 #include "ir/CodeGen.h"
+#include "runtime/MathKernels.h"
 #include "runtime/Runtime.h"
 
 #include <catch2/catch_test_macros.hpp>
@@ -28,6 +32,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -37,20 +42,20 @@
 #include <random>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
 #if defined(_WIN32)
 #include <malloc.h>   // _aligned_malloc, _aligned_free
 #endif
+#if defined(__x86_64__)
+#include <xmmintrin.h>   // _mm_getcsr, _mm_setcsr
+#endif
 
 #if defined(__APPLE__)
-// libsystem_m's, as runtime/Math.cpp declares them.
+// libsystem_m's sine, which the fast mode's vector library calls for a float4 (support/HostTarget.cpp).
 extern "C" fminus_rt_float4 _simd_sin_f4(fminus_rt_float4 x) noexcept;
-extern "C" fminus_rt_float4 _simd_cos_f4(fminus_rt_float4 x) noexcept;
-extern "C" fminus_rt_float4 _simd_exp_f4(fminus_rt_float4 x) noexcept;
-extern "C" fminus_rt_float4 _simd_tanh_f4(fminus_rt_float4 x) noexcept;
-extern "C" fminus_rt_float4 _simd_log_f4(fminus_rt_float4 x) noexcept;
 #endif
 
 namespace
@@ -78,7 +83,7 @@ namespace
     using Four = fminus_rt_float4 (*)(fminus_rt_float4) noexcept;
     using One = float (*)(float) noexcept;
 
-    // One of the five, by every name it has.
+    // One of the six, by every name it has.
     struct Function
     {
         std::string_view builtin;   // FMinus's: "sinf"
@@ -111,6 +116,10 @@ namespace
     {
         return std::log(x);
     }
+    float stdTan(float x)
+    {
+        return std::tan(x);
+    }
     double doubleSin(double x)
     {
         return std::sin(x);
@@ -131,13 +140,18 @@ namespace
     {
         return std::log(x);
     }
+    double doubleTan(double x)
+    {
+        return std::tan(x);
+    }
 
-    const std::array<Function, 5> kFunctions{
+    const std::array<Function, 6> kFunctions{
         Function{"sinf", fminus_rt_sinf, fminus_rt_sin_f4, fminus::math::sin, stdSin, doubleSin, -50.0f, 50.0f},
         Function{"cosf", fminus_rt_cosf, fminus_rt_cos_f4, fminus::math::cos, stdCos, doubleCos, -50.0f, 50.0f},
         Function{"expf", fminus_rt_expf, fminus_rt_exp_f4, fminus::math::exp, stdExp, doubleExp, -30.0f, 30.0f},
         Function{"tanhf", fminus_rt_tanhf, fminus_rt_tanh_f4, fminus::math::tanh, stdTanh, doubleTanh, -10.0f, 10.0f},
         Function{"logf", fminus_rt_logf, fminus_rt_log_f4, fminus::math::log, stdLog, doubleLog, 0.0f, 100.0f},
+        Function{"tanf", fminus_rt_tanf, fminus_rt_tan_f4, fminus::math::tan, stdTan, doubleTan, -1.5f, 1.5f},
     };
 
     const Function& function(std::string_view builtin)
@@ -150,10 +164,11 @@ namespace
         return kFunctions[0];
     }
 
-    // The largest magnitude runtime/Math.cpp hands libsystem_m's sin and cos a whole vector at, and the edge of their
-    // fast path (macOS 27, an M5): the arguments around both are where a mistake would show.
-    constexpr float kSinCosLimit = 65536.0f;
-    constexpr float kAppleEdge = 1e6f;
+    // Where sin and cos leave their fast reduction for the exact one, out of line (runtime/MathKernels.h), and where
+    // the fast one's rounding to a whole number of quarter turns would stop working: the arguments around both are
+    // where a mistake would show.
+    constexpr float kLargeArgument = fminus::kernels::kLargeArgument;
+    constexpr float kRoundingEdge = 0x1p+22f * 1.57079637f;
 
     // The same float: the same bits, or both NaN (whose payloads say nothing about the function).
     bool same(float a, float b)
@@ -171,8 +186,8 @@ namespace
         return x;
     }
 
-    // Arguments for the premise: phases and audio's other arguments, the edges of each function and of the runtime's
-    // and Apple's paths, subnormals, infinities, NaNs, huge values, and any float at all.
+    // Arguments for the premise: phases and audio's other arguments, the edges of each function and of the kernels'
+    // paths, subnormals, infinities, NaNs, huge values, and any float at all.
     struct Arguments
     {
         std::mt19937_64 random{20261021};
@@ -203,10 +218,10 @@ namespace
                 105414350.0f,   // where sinf's argument reduction changes method
                 3.14159265f,
                 1.57079637f,
-                88.7228394f,    // expf's last finite result
-                88.7228470f,    // its first infinite one
+                88.7228317f,    // expf's last finite result (exactly: past it e^x rounds to infinity)
+                88.7228394f,    // its first infinite one
                 -87.3365479f,   // its first subnormal one
-                -103.972084f,   // its last nonzero one
+                -103.972076f,   // its last nonzero one (e^x is just over half the least subnormal)
                 9.01f,          // tanhf about to round to 1
                 1.0f,
                 -1.0f,
@@ -224,8 +239,8 @@ namespace
                 return kEdges[(r >> 8) % kEdges.size()];
             case 4:
             {
-                // Around the runtime's limit and Apple's edge, a few floats either side, of either sign.
-                const float around = (r >> 8) % 2 == 0 ? kSinCosLimit : kAppleEdge;
+                // Around the kernels' limit and the rounding's edge, a few floats either side, of either sign.
+                const float around = (r >> 8) % 2 == 0 ? kLargeArgument : kRoundingEdge;
                 const float near = step(around, static_cast<int>((r >> 9) % 9) - 4);
                 return (r >> 13) % 2 == 0 ? near : -near;
             }
@@ -238,13 +253,6 @@ namespace
             default:
                 return std::bit_cast<float>(static_cast<std::uint32_t>(r >> 32) & 0x807fffffu);   // subnormal, zero
             }
-        }
-
-        // Within the limit, for libsystem_m's sin and cos whole: the same mix, any lane past it brought back.
-        float within(float limit)
-        {
-            const float x = next();
-            return std::isfinite(x) && std::fabs(x) <= limit ? x : uniform(-limit, limit);
         }
     };
 
@@ -307,36 +315,436 @@ TEST_CASE("the vector math mode's four-lane functions give each lane the scalar 
     }
 }
 
-TEST_CASE("libsystem_m's vector functions are lane-independent where the runtime calls them whole", "[math]")
+namespace
 {
-#if defined(__APPLE__)
-    // Lane k of _simd_sin_f4(x) is lane 0 of _simd_sin_f4 of four copies of x[k], for vectors whose every lane is
-    // within the runtime's limit: what fminus_rt_sin_f4 relies on when it hands over a whole vector. (Past Apple's
-    // edge, one lane sends the whole vector down another path, which is why the runtime has a limit at all.)
-    const struct
+    using float2 = float __attribute__((ext_vector_type(2)));
+    using float4 = float __attribute__((ext_vector_type(4)));
+
+    // A program's kernels of one function at -O2, where opt/MathKernels.cpp builds them inline from the runtime's
+    // template: of a float, `one`, of a float2, `two`, and of a float4, `four`. Each runs in its caller's
+    // floating-point mode.
+    struct InlineKernels
     {
-        const char* name;
-        Four simd;
-        bool limited;   // sin and cos: within kSinCosLimit only; exp, tanh and log: every float
-    } kLibrary[] = {
-        {"_simd_sin_f4", _simd_sin_f4, true},    {"_simd_cos_f4", _simd_cos_f4, true},
-        {"_simd_exp_f4", _simd_exp_f4, false},   {"_simd_tanh_f4", _simd_tanh_f4, false},
-        {"_simd_log_f4", _simd_log_f4, false},
+        std::unique_ptr<fminus::Program> program;
+        float (*one)(float) = nullptr;
+        float2 (*two)(float2) = nullptr;
+        float4 (*four)(float4) = nullptr;
     };
-    for (const auto& library : kLibrary)
+
+    InlineKernels inlineKernels(const Function& f)
     {
-        INFO(library.name);
-        Arguments arguments;
-        std::string first;
-        const auto splat = [&](float x) { return library.simd(fminus_rt_float4{x, x, x, x})[0]; };
-        const auto draw = [&] { return library.limited ? arguments.within(kSinCosLimit) : arguments.next(); };
-        const long mismatches = laneMismatches(library.simd, splat, kVectors, draw, first);
-        INFO(first);
-        CHECK(mismatches == 0);
+        const std::string name(f.builtin);
+        InlineKernels kernels;
+        std::string errors;
+        kernels.program = fminus::Program::compile("float one(float x) { return " + name + "(x); }\n"
+                                                   "float2 two(float2 x) { return " + name + "(x); }\n"
+                                                   "float4 four(float4 x) { return " + name + "(x); }\n",
+                                                   errors);
+        if (kernels.program)
+        {
+            kernels.one = kernels.program->function<float(float)>("one", errors);
+            kernels.two = kernels.program->function<float2(float2)>("two", errors);
+            kernels.four = kernels.program->function<float4(float4)>("four", errors);
+        }
+        return kernels;
     }
+
+    // Each kernel's largest error over every float, against the exact result, in ulps: the bounds docs/extending.md
+    // (recipe 23) states, measured with every float through the kernel against the double function, whose own error,
+    // 2^-53, does not show at this scale.
+    struct Bound
+    {
+        std::string_view builtin;
+        double ulps;
+    };
+
+    constexpr std::array kBounds{Bound{"sinf", 1.56}, Bound{"cosf", 1.56}, Bound{"expf", 1.05},
+                                 Bound{"tanhf", 1.52}, Bound{"logf", 0.99}, Bound{"tanf", 3.35}};
+
+    double boundOf(std::string_view builtin)
+    {
+        for (const Bound& bound : kBounds)
+        {
+            if (bound.builtin == builtin)
+                return bound.ulps;
+        }
+        return 0;
+    }
+
+    // y's distance from the exact value e (a double), in ulps of a float of e's magnitude (the least subnormal's
+    // below the normals). An e past the greatest float wants y to be what e rounds to, infinity or the greatest float.
+    double ulpError(float y, double e)
+    {
+        if (std::isnan(e))
+            return std::isnan(y) ? 0 : std::numeric_limits<double>::infinity();
+        if (std::fabs(e) > static_cast<double>(std::numeric_limits<float>::max()) || std::isinf(y))
+            return same(y, static_cast<float>(e)) ? 0 : std::numeric_limits<double>::infinity();
+        int exponent = 0;
+        std::frexp(e, &exponent);   // e = f 2^exponent, f in [0.5, 1)
+        return std::fabs(static_cast<double>(y) - e) / std::ldexp(1.0, std::max(exponent - 24, -149));
+    }
+
+    // A zero of x's sign where x is a subnormal: what flush-to-zero reads and writes.
+    float flushed(float x)
+    {
+        return std::fpclassify(x) == FP_SUBNORMAL ? std::copysign(0.0f, x) : x;
+    }
+
+    // The floating-point mode a plugin's audio thread runs in, around a scope: flush-to-zero (FPCR.FZ on arm64; MXCSR's
+    // FTZ and DAZ on x86-64), the caller's mode back after.
+    class FlushToZero
+    {
+    public:
+        FlushToZero() : saved_(read())
+        {
+            write(saved_ | kFlush);
+        }
+        ~FlushToZero()
+        {
+            write(saved_);
+        }
+        FlushToZero(const FlushToZero&) = delete;
+        FlushToZero& operator=(const FlushToZero&) = delete;
+
+    private:
+#if defined(__aarch64__)
+        static constexpr std::uint64_t kFlush = std::uint64_t{1} << 24;
+        static std::uint64_t read()
+        {
+            std::uint64_t value = 0;
+            asm volatile("mrs %0, fpcr" : "=r"(value) : : "memory");
+            return value;
+        }
+        static void write(std::uint64_t value)
+        {
+            asm volatile("msr fpcr, %0" : : "r"(value) : "memory");
+        }
+#elif defined(__x86_64__)
+        static constexpr std::uint64_t kFlush = 0x8040;
+        static std::uint64_t read()
+        {
+            return _mm_getcsr();
+        }
+        static void write(std::uint64_t value)
+        {
+            _mm_setcsr(static_cast<unsigned>(value));
+        }
 #else
-    SKIP("no libsystem_m here: the vector mode's functions are libm's, lane by lane");
+#error "the flush-to-zero test sets the floating-point mode of arm64 or x86-64"
 #endif
+        std::uint64_t saved_;
+    };
+} // namespace
+
+TEST_CASE("the vector math mode's kernels are within their stated error of the exact result", "[math]")
+{
+    // Every 127th float, of every sign and magnitude (the bounds come from all of them; docs/extending.md, recipe 23).
+    for (const Function& f : kFunctions)
+    {
+        INFO(f.builtin);
+        double worst = 0;
+        float at = 0;
+        for (std::uint64_t bits = 0; bits < (std::uint64_t{1} << 32); bits += 127)
+        {
+            const float x = std::bit_cast<float>(static_cast<std::uint32_t>(bits));
+            const double error = ulpError(f.scalar(x), f.exact(static_cast<double>(x)));
+            if (error > worst)
+            {
+                worst = error;
+                at = x;
+            }
+        }
+        INFO("largest error " << worst << " ulp, at " << at);
+        CHECK(worst <= boundOf(f.builtin));
+        CHECK(worst > 0.5);   // they are not correctly rounded, and say so
+    }
+}
+
+TEST_CASE("the vector math mode's kernels give C's special values", "[math]")
+{
+    constexpr float kInfinity = std::numeric_limits<float>::infinity();
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const auto is = [](float y, float expected) { return same(y, expected); };
+    for (const float zero : {0.0f, -0.0f})
+    {
+        CHECK(is(fminus_rt_sinf(zero), zero));   // the zero's sign kept
+        CHECK(is(fminus_rt_tanf(zero), zero));
+        CHECK(is(fminus_rt_cosf(zero), 1.0f));
+        CHECK(is(fminus_rt_expf(zero), 1.0f));
+        CHECK(is(fminus_rt_tanhf(zero), zero));
+        CHECK(is(fminus_rt_logf(zero), -kInfinity));
+    }
+    for (const float infinity : {kInfinity, -kInfinity})
+    {
+        CHECK(std::isnan(fminus_rt_sinf(infinity)));
+        CHECK(std::isnan(fminus_rt_cosf(infinity)));
+        CHECK(std::isnan(fminus_rt_tanf(infinity)));
+        CHECK(is(fminus_rt_tanhf(infinity), std::copysign(1.0f, infinity)));
+    }
+    CHECK(is(fminus_rt_expf(kInfinity), kInfinity));
+    CHECK(is(fminus_rt_expf(-kInfinity), 0.0f));
+    CHECK(is(fminus_rt_logf(kInfinity), kInfinity));
+    CHECK(std::isnan(fminus_rt_logf(-kInfinity)));
+    CHECK(std::isnan(fminus_rt_logf(-1.0f)));
+    CHECK(std::isnan(fminus_rt_logf(-std::numeric_limits<float>::denorm_min())));
+    CHECK(is(fminus_rt_logf(1.0f), 0.0f));
+    for (const Function& f : kFunctions)
+        CHECK(std::isnan(f.scalar(nan)));
+    // exp's edges: its last finite result and its first infinite one, and down through the subnormals to 0.
+    CHECK(std::isfinite(fminus_rt_expf(88.7228317f)));
+    CHECK(is(fminus_rt_expf(88.7228394f), kInfinity));
+    CHECK(std::fpclassify(fminus_rt_expf(-87.4f)) == FP_SUBNORMAL);
+    CHECK(is(fminus_rt_expf(-103.972076f), std::numeric_limits<float>::denorm_min()));
+    CHECK(is(fminus_rt_expf(-103.972084f), 0.0f));   // just under half the least subnormal
+    CHECK(is(fminus_rt_expf(-1e30f), 0.0f));
+    // tanh is 1 to a float's precision from about 9, and never more.
+    CHECK(is(fminus_rt_tanhf(20.0f), 1.0f));
+    CHECK(is(fminus_rt_tanhf(-1e30f), -1.0f));
+    // log of a subnormal: its exponent's own (the least subnormal is 2^-149).
+    CHECK(ulpError(fminus_rt_logf(std::numeric_limits<float>::denorm_min()), -149 * std::log(2.0)) <= 1.0);
+}
+
+TEST_CASE("under flush-to-zero, the kernels read a subnormal argument as its zero and give a zero for a subnormal "
+          "result",
+          "[math][denormals]")
+{
+    // A program compiled with Denormals::Flush runs its kernels in that mode, inline or in the runtime: what they give
+    // there is what they give of the argument flushed, flushed (and what LLVM folds a constant to; DenormalTest.cpp).
+    std::vector<float> arguments;
+    for (std::uint32_t bits = 1; bits < 0x00800000u; bits += 7)   // subnormals of either sign
+    {
+        arguments.push_back(std::bit_cast<float>(bits));
+        arguments.push_back(std::bit_cast<float>(bits | 0x80000000u));
+    }
+    for (std::uint32_t bits = 0x00800000u; bits < 0x00800000u + 4096; ++bits)   // the least normals
+        arguments.push_back(std::bit_cast<float>(bits));
+    for (float x = -87.3f; x > -104.5f; x -= 0.0007f)   // exp's subnormal results
+        arguments.push_back(x);
+    for (std::uint64_t bits = 0; bits < (std::uint64_t{1} << 32); bits += 4099)   // and every 4099th float
+        arguments.push_back(std::bit_cast<float>(static_cast<std::uint32_t>(bits)));
+    for (const Function& f : kFunctions)
+    {
+        INFO(f.builtin);
+        std::vector<float> expected(arguments.size());
+        for (std::size_t i = 0; i < arguments.size(); ++i)
+            expected[i] = flushed(f.scalar(flushed(arguments[i])));
+        std::vector<float> scalar(arguments.size());
+        std::vector<float> lanes(arguments.size());
+        {
+            const FlushToZero mode;
+            for (std::size_t i = 0; i < arguments.size(); ++i)
+                scalar[i] = f.scalar(arguments[i]);
+            for (std::size_t i = 0; i + 4 <= arguments.size(); i += 4)
+            {
+                const fminus_rt_float4 y =
+                    f.four(fminus_rt_float4{arguments[i], arguments[i + 1], arguments[i + 2], arguments[i + 3]});
+                for (int k = 0; k < 4; ++k)
+                    lanes[i + static_cast<std::size_t>(k)] = y[k];
+            }
+        }
+        long wrong = 0;
+        for (std::size_t i = 0; i < arguments.size(); ++i)
+        {
+            const bool lane = i + 4 > arguments.size() - arguments.size() % 4 || same(lanes[i], expected[i]);
+            if (same(scalar[i], expected[i]) && lane)
+                continue;
+            if (wrong++ == 0)
+                UNSCOPED_INFO("first at " << arguments[i] << ": " << scalar[i] << " (a lane: " << lanes[i]
+                                          << "), not " << expected[i]);
+        }
+        CHECK(wrong == 0);
+    }
+}
+
+TEST_CASE("the kernels inline in a program give every float the runtime's result, of a float and in two and four "
+          "lanes",
+          "[math]")
+{
+    // From -O1 a program's sinf is FMinus's kernel itself, built as IR from the template the runtime's functions
+    // instantiate (opt/MathKernels.cpp): every 127th float, of either sign and any magnitude, through a program's
+    // kernel of a float, of a float2 (beside another float) and of a float4 (beside three), against the runtime's
+    // function.
+    for (const Function& f : kFunctions)
+    {
+        INFO(f.builtin);
+        const InlineKernels kernels = inlineKernels(f);
+        REQUIRE((kernels.one != nullptr && kernels.two != nullptr && kernels.four != nullptr));
+        long wrong = 0;
+        for (std::uint64_t bits = 0; bits + 3 * 127 < (std::uint64_t{1} << 32); bits += 4 * 127)
+        {
+            float4 x;
+            for (int k = 0; k < 4; ++k)
+                x[k] = std::bit_cast<float>(static_cast<std::uint32_t>(bits + static_cast<std::uint64_t>(k) * 127));
+            const float4 four = kernels.four(x);
+            const float2 low = kernels.two(float2{x[0], x[1]});
+            const float2 high = kernels.two(float2{x[2], x[3]});
+            for (int k = 0; k < 4; ++k)
+            {
+                const float expected = f.scalar(x[k]);
+                const float one = kernels.one(x[k]);
+                const float two = k < 2 ? low[k] : high[k - 2];
+                if (same(one, expected) && same(two, expected) && same(four[k], expected))
+                    continue;
+                if (wrong++ == 0)
+                    UNSCOPED_INFO("first at " << x[k] << ": " << one << ", a pair's " << two << " and a lane's "
+                                              << four[k] << ", not " << expected);
+            }
+        }
+        CHECK(wrong == 0);
+    }
+}
+
+TEST_CASE("a constant's kernel folds to what the processor computes, flushing subnormals or not", "[math][denormals]")
+{
+    // A literal's or a frozen parameter's sinf is a kernel of constants from -O1, which the code generator's folder
+    // and LLVM fold. Under Denormals::Flush that must be what the processor computes flushing (and under Preserve,
+    // what it computes in IEEE's mode): the arguments where the two differ, subnormals of either sign, the least
+    // normals, small normals whose powers underflow, and exp's subnormal results, each a function of its own.
+    const std::array arguments{std::numeric_limits<float>::denorm_min(), -std::numeric_limits<float>::denorm_min(),
+                               0x1.8p-140f, -0x1.8p-130f, 0x1p-126f, -0x1p-126f, 0x1.000002p-126f, 1e-38f, 0x1p-75f,
+                               1e-20f, -87.5f, -95.0f, -103.5f, -103.972076f, 0.5f};
+    for (const Function& f : kFunctions)
+    {
+        for (const bool flush : {false, true})
+        {
+            INFO(f.builtin << (flush ? ", flushing" : ", IEEE's"));
+            std::string source;
+            for (std::size_t i = 0; i < arguments.size(); ++i)
+            {
+                std::array<char, 64> literal{};
+                std::snprintf(literal.data(), literal.size(), "%a", static_cast<double>(arguments[i]));
+                source += "float c" + std::to_string(i) + "(void) { return " + std::string(f.builtin) + "(" +
+                          literal.data() + "f); }\n";
+            }
+            fminus::Program::Options options;
+            options.denormals = flush ? fminus::Program::Denormals::Flush : fminus::Program::Denormals::Preserve;
+            std::string errors;
+            const auto program = fminus::Program::compile(source, errors, options);
+            INFO(errors);
+            REQUIRE(program);
+            std::vector<float (*)()> constants;
+            for (std::size_t i = 0; i < arguments.size(); ++i)
+                constants.push_back(program->function<float()>("c" + std::to_string(i), errors));
+            std::vector<float> got(arguments.size());
+            if (flush)
+            {
+                const FlushToZero mode;
+                for (std::size_t i = 0; i < arguments.size(); ++i)
+                    got[i] = constants[i]();
+            }
+            else
+            {
+                for (std::size_t i = 0; i < arguments.size(); ++i)
+                    got[i] = constants[i]();
+            }
+            for (std::size_t i = 0; i < arguments.size(); ++i)
+            {
+                const float expected =
+                    flush ? flushed(f.scalar(flushed(arguments[i]))) : f.scalar(arguments[i]);
+                INFO("of " << arguments[i] << ": " << got[i] << ", not " << expected);
+                CHECK(same(got[i], expected));
+            }
+        }
+    }
+}
+
+TEST_CASE("every float, through every kernel: the bounds, the lanes and flush-to-zero", "[.][exhaustive]")
+{
+    // Hidden from ctest (about ten minutes on an M5's ten cores): run it after changing a kernel,
+    // `fminus-tests "[exhaustive]"`. What the tests above sample, every float of them: each function's largest error
+    // against its bound, each float in each lane of the four-lane function beside other floats, the kernel inline in a
+    // program (a float's, a float2's and a float4's, at -O2) against the runtime's, and each float's result under
+    // flush-to-zero
+    // against its flushed argument's, flushed. On every core, or on FMINUS_TEST_THREADS of them.
+    unsigned threads = std::max(1u, std::thread::hardware_concurrency());
+    if (const char* limit = std::getenv("FMINUS_TEST_THREADS"); limit != nullptr && std::atoi(limit) > 0)
+        threads = static_cast<unsigned>(std::atoi(limit));
+    for (const Function& f : kFunctions)
+    {
+        struct Found
+        {
+            double worst = 0;
+            float at = 0;
+            long lanes = 0;
+            long inlined = 0;
+            long flushing = 0;
+        };
+        const InlineKernels kernels = inlineKernels(f);
+        REQUIRE((kernels.one != nullptr && kernels.two != nullptr && kernels.four != nullptr));
+        std::vector<Found> found(threads);
+        std::vector<std::thread> workers;
+        for (unsigned t = 0; t < threads; ++t)
+        {
+            workers.emplace_back([&f, &found, &kernels, t, threads] {
+                Found& mine = found[t];
+                const std::uint64_t all = std::uint64_t{1} << 32;
+                const std::uint64_t begin = all / threads * t / 4 * 4;
+                const std::uint64_t end = t + 1 == threads ? all : all / threads * (t + 1) / 4 * 4;
+                for (std::uint64_t bits = begin; bits < end; bits += 4)
+                {
+                    float x[4];
+                    for (int k = 0; k < 4; ++k)
+                        x[k] = std::bit_cast<float>(static_cast<std::uint32_t>(bits + static_cast<std::uint64_t>(k)));
+                    const int turn = static_cast<int>((bits >> 2) & 3);   // each float meets each lane in turn
+                    fminus_rt_float4 v{};
+                    for (int k = 0; k < 4; ++k)
+                        v[(k + turn) & 3] = x[k];
+                    const fminus_rt_float4 y4 = f.four(v);
+                    const float4 inline4 = kernels.four(float4{v[0], v[1], v[2], v[3]});
+                    const float2 inline2[2] = {kernels.two(float2{v[0], v[1]}), kernels.two(float2{v[2], v[3]})};
+                    for (int k = 0; k < 4; ++k)
+                    {
+                        const float y = f.scalar(x[k]);
+                        const int lane = (k + turn) & 3;
+                        mine.lanes += same(y4[lane], y) ? 0 : 1;
+                        const bool inlined = same(inline4[lane], y) && same(inline2[lane >> 1][lane & 1], y)
+                                             && same(kernels.one(x[k]), y);
+                        mine.inlined += inlined ? 0 : 1;
+                        const double error = ulpError(y, f.exact(static_cast<double>(x[k])));
+                        if (error > mine.worst)
+                        {
+                            mine.worst = error;
+                            mine.at = x[k];
+                        }
+                    }
+                }
+                // Flush-to-zero over every subnormal and the least normals, and every 61st float.
+                std::vector<float> arguments;
+                for (std::uint64_t bits = begin; bits < end; ++bits)
+                {
+                    if ((bits & 0x7fffffffu) < 0x00801000u || bits % 61 == 0)
+                        arguments.push_back(std::bit_cast<float>(static_cast<std::uint32_t>(bits)));
+                }
+                std::vector<float> flushing(arguments.size());
+                {
+                    const FlushToZero mode;
+                    for (std::size_t i = 0; i < arguments.size(); ++i)
+                        flushing[i] = f.scalar(arguments[i]);
+                }
+                for (std::size_t i = 0; i < arguments.size(); ++i)
+                    mine.flushing += same(flushing[i], flushed(f.scalar(flushed(arguments[i])))) ? 0 : 1;
+            });
+        }
+        for (std::thread& worker : workers)
+            worker.join();
+        Found all;
+        for (const Found& part : found)
+        {
+            if (part.worst > all.worst)
+            {
+                all.worst = part.worst;
+                all.at = part.at;
+            }
+            all.lanes += part.lanes;
+            all.inlined += part.inlined;
+            all.flushing += part.flushing;
+        }
+        INFO(f.builtin << ": largest error " << all.worst << " ulp, at " << all.at);
+        CHECK(all.worst <= boundOf(f.builtin));
+        CHECK(all.lanes == 0);
+        CHECK(all.inlined == 0);
+        CHECK(all.flushing == 0);
+    }
 }
 
 namespace
@@ -453,7 +861,7 @@ namespace
     }
 
     // A function's arguments for the kernels: its usual range, and every 37th sample an edge: zeros, a subnormal,
-    // infinities, a NaN, and values past the runtime's limit and Apple's edge, which send a vector lane by lane.
+    // infinities, a NaN, and values past the kernels' limit, which take sin and cos out of line.
     std::vector<float> inputFor(const Function& f, std::size_t samples)
     {
         static constexpr std::array kEdges{0.0f, -0.0f, 1e-40f, std::numeric_limits<float>::infinity(),
@@ -620,6 +1028,62 @@ TEST_CASE("logf gives a float one result wherever a program computes it: fminus:
     checkEverywhere(function("logf"), fminus::Program::Math::Vector, fminus::math::log);
 }
 
+TEST_CASE("tanf gives a float one result wherever a program computes it: fminus::math::tan's", "[math]")
+{
+    checkEverywhere(function("tanf"), fminus::Program::Math::Vector, fminus::math::tan);
+}
+
+TEST_CASE("tanf is a builtin: a program's prototype of it calls the builtin, not libm's, and its own tanf is refused",
+          "[math]")
+{
+    // Before recipe 23 a prototype of tanf called libm's, as one of any other libm function does, and a program could
+    // define its own (a sine over a cosine, as examples/plugin's filter did). A prototype of a builtin declares nothing
+    // new: the call is the math mode's, and no function named tanf is declared, in any mode; in the vector mode it is
+    // fminus::math::tan. A definition of tanf is the error a definition of sinf is.
+    const char* source = "float tanf(float x);\n"
+                         "float t(float x) { return tanf(x); }\n";
+    const std::array modes{std::pair{fminus::Program::Math::Vector, fminus::ir::Math::Vector},
+                           std::pair{fminus::Program::Math::Libm, fminus::ir::Math::Libm},
+                           std::pair{fminus::Program::Math::Fast, fminus::ir::Math::Fast}};
+    for (const auto& [mode, lowering] : modes)
+    {
+        INFO("mode " << static_cast<int>(mode));
+        fminus::Diagnostics diagnostics("test.fm");
+        const auto parsed = fminus::frontend::parse(source, diagnostics);
+        REQUIRE(parsed);
+        llvm::LLVMContext context;
+        fminus::ir::Options irOptions;
+        irOptions.math = lowering;
+        const auto module = fminus::ir::lower(*parsed, context, diagnostics, irOptions);
+        INFO(diagnostics.format());
+        REQUIRE(module);
+        CHECK(module->getFunction("tanf") == nullptr);
+
+        fminus::Program::Options options;
+        options.math = mode;
+        options.fileName = "test.fm";
+        std::string errors;
+        CHECK(fminus::Program::compile("float tanf(float x) { return sinf(x) / cosf(x); }\n", errors, options)
+              == nullptr);
+        CHECK(errors == "test.fm:1:7: error: 'tanf' is a builtin and cannot be redefined\n");
+    }
+
+    std::string errors;
+    const auto program = fminus::Program::compile(source, errors);
+    INFO(errors);
+    REQUIRE(program);
+    auto* t = program->function<float(float)>("t", errors);
+    REQUIRE(t != nullptr);
+    Arguments arguments;
+    long wrong = 0;
+    for (int i = 0; i < 1000; ++i)
+    {
+        const float x = arguments.next();
+        wrong += same(t(x), fminus::math::tan(x)) ? 0 : 1;
+    }
+    CHECK(wrong == 0);
+}
+
 TEST_CASE("the libm math mode is C++'s std:: functions of floats, bit for bit, wherever a program computes them",
           "[math]")
 {
@@ -642,7 +1106,6 @@ TEST_CASE("the fast math mode is LLVM's intrinsics, as before: libm for a float,
                                                   errors, options);
     INFO(errors);
     REQUIRE(program);
-    using float4 = float __attribute__((ext_vector_type(4)));
     auto* one = program->function<float(float)>("one", errors);
     auto* four = program->function<float4(float4)>("four", errors);
     auto* folded = program->function<float()>("folded", errors);
@@ -786,7 +1249,6 @@ TEST_CASE("a program's own functions of the runtime's math names are left alone 
                          "    for (int i = 0; i < n; ++i)\n"
                          "        out[i] = cosf(in[i]);\n"
                          "}\n";
-    using float4 = float __attribute__((ext_vector_type(4)));
     for (const fminus::Program::Math mode :
          {fminus::Program::Math::Vector, fminus::Program::Math::Libm, fminus::Program::Math::Fast})
     {
@@ -828,7 +1290,7 @@ TEST_CASE("a program's own functions of the runtime's math names are left alone 
     }
 
     // A definition of one, lowered: the program's code, with none of the runtime's attributes, and no builtin's vector
-    // variant; cosf's runtime function beside it has them.
+    // variant; cosf's math intrinsic beside it has them.
     fminus::Diagnostics diagnostics("test.fm");
     const auto parsed = fminus::frontend::parse("float fminus_rt_sinf(float x) { return x * 2.0f; }\n"
                                                 "float4 fminus_rt_sin_f4(float4 x) { return x; }\n"
@@ -850,10 +1312,10 @@ TEST_CASE("a program's own functions of the runtime's math names are left alone 
         CHECK_FALSE(own->hasFnAttribute(llvm::Attribute::Speculatable));
         CHECK_FALSE(own->hasFnAttribute("vector-function-abi-variant"));
     }
-    const llvm::Function* cosine = module->getFunction("fminus_rt_cosf");
+    const llvm::Function* cosine = module->getFunction("fminus.cos.f32");
     REQUIRE(cosine != nullptr);
     CHECK(cosine->doesNotAccessMemory());
     CHECK(cosine->hasFnAttribute(llvm::Attribute::Speculatable));
     CHECK(cosine->getFnAttribute("vector-function-abi-variant").getValueAsString()
-          == "_ZGV_LLVM_N4v_fminus_rt_cosf(fminus_rt_cos_f4)");
+          == "_ZGV_LLVM_N2v_fminus.cos.f32(fminus.cos.v2f32),_ZGV_LLVM_N4v_fminus.cos.f32(fminus.cos.v4f32)");
 }

@@ -65,15 +65,19 @@ In the dev build on an M5, 96,000 samples of noise, each time the best of 20 run
 | fixed: frozen | 3.3 ns/sample | 3.2 ns/sample | |
 
 (The swept rows include the LFO, a `sinf` and an `expf` a sample, which FMinus's default math mode makes the runtime's,
-as the C++ calls them: each is lane 0 of a four-lane function, slower a call than libm's. With `--math libm` the swept
-rows take 5.9 ns, and with `--math fast` 5.6 to 5.7.)
+as the C++ calls them: when this was measured, each was lane 0 of libsystem_m's four-lane function, slower a call than
+libm's. With `--math libm` the swept rows took 5.9 ns, and with `--math fast` 5.6 to 5.7. They are FMinus's own kernels
+now, inline (docs/extending.md, recipes 23 and 24): on a busier machine, in calls of 64, the swept rows take 7.4 and
+7.0 ns where libsystem_m's calls took 9.1 and 8.7 in the same session, and `--math libm` 7.5, `--math fast` 7.3 and
+7.1; the C++, which calls the kernels out of line, 8.0.)
 
 - **Every output is C++'s, bit for bit**, under each binding: the same operations in the same order, and the same
   `sinf` and `expf`, FMinus's runtime's (its default math mode), which the C++ calls as `fminus::math::sin` and `exp`.
   The sample-accurate output is also the same in calls of 61, of 256, or one call for the whole run, which `--check`
   compares; the once-a-call output isn't, since its cutoff moves where the calls start. The frozen filter's output is
-  the knobs' at the same values, bit for bit, which `--check` checks: the coefficient, 2 sin(pi 1000 / 48000), is a
-  call of the runtime's `sinf` either way, which LLVM moves out of the loop but cannot fold. (With `--math fast`, LLVM
+  the knobs' at the same values, bit for bit, which `--check` checks: the coefficient, 2 sin(pi 1000 / 48000), is
+  FMinus's `sinf` kernel either way, which LLVM moves out of the loop for a knob, and folds for a frozen cutoff to the
+  float the kernel computes, since its operations are IEEE's, which LLVM folds exactly. (With `--math fast`, LLVM
   folds it with the host's `sin` in double, rounded to float, which for about 1% of arguments is an ulp from `sinf`.)
 - **A sweep a sample costs a sine a sample, and it barely shows.** As a knob, the cutoff is a register, so LLVM moves
   `2 * sinf(w * cutoff[i])` out of the loop: one sine a call. As a stream it stays in the loop. But the coefficients

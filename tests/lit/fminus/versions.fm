@@ -241,7 +241,7 @@ module Rack
 // UNVERSIONED-NOT: "fminus-knob-versions"
 
 // A stream with samples: its copy is the loop as it was, a sample's load in the streams' scope, then its sine and
-// cosine.
+// cosine, inline, which share one reduction of the angle (its first fused multiply-add, once).
 // SAMPLES-LABEL: define void @"Biquad::process"(
 // SAMPLES:         %cutoff.stream = load ptr, ptr %this, align 8, {{(!tbaa ![0-9]+, )?}}!noalias
 // SAMPLES:         %cutoff.value = load atomic float, ptr {{%.*}} unordered, align 8, {{(!tbaa ![0-9]+, )?}}!noalias
@@ -251,19 +251,17 @@ module Rack
 // SAMPLES-NOT:     select
 // SAMPLES:         %cutoff.at = getelementptr inbounds nuw [4 x i8], ptr %cutoff.stream, i64 %indvars.iv
 // SAMPLES-NEXT:    %cutoff = load float, ptr %cutoff.at, align 4, {{(!tbaa ![0-9]+, )?}}!alias.scope
-// SAMPLES:         call float @fminus_rt_cosf
-// SAMPLES:         call float @fminus_rt_sinf
-// SAMPLES-NOT:     select
+// SAMPLES:         call float @llvm.fma.f32(float %{{.*}}, float f0x3F22F983, float f0x4B400000)
+// SAMPLES-NOT:     f0x3F22F983
 // SAMPLES:         br i1 %exitcond.not, label %{{.*}}, label %for.body
 
-// A flat stream: its copy computes the coefficients from the value once, before its loop, which reads no stream and
-// calls and divides nothing.
+// A flat stream: its copy computes the coefficients from the value once, before its loop (the sine and cosine inline,
+// their reduction shared), and the loop reads no stream and calls and divides nothing.
 // FLAT-LABEL: define void @"Biquad::process"(
 // FLAT:         br i1 %cutoff.flat, label %for.cond.cutoff.flat1.preheader, label
 // FLAT:       for.body.cutoff.flat1.lr.ph:
 // FLAT:         fmul float %cutoff.value,
-// FLAT:         call float @fminus_rt_cosf
-// FLAT:         call float @fminus_rt_sinf
+// FLAT:         call float @llvm.fma.f32(float %{{.*}}, float f0x3F22F983, float f0x4B400000)
 // FLAT:       for.body.cutoff.flat1:
 // FLAT-NOT:     %cutoff.stream
 // FLAT-NOT:     call

@@ -13,18 +13,22 @@
 # RUN: fminus %S/../../../examples/unison/unison.fm --poly-lanes 16 --run lanes | FileCheck %s --check-prefix=LANES16
 
 # 23 harmonics below 24 kHz approach the ideal 0.5; at 10 kHz only two fit, and the sum is exactly 2/pi. The last
-# digit is the math library's: 0.48676 with Apple's vector functions (the default math mode), 0.4867599 with libm's.
+# digits are the math functions': 0.4867599 with FMinus's kernels (the default math mode) and with libm's, 0.48676 with
+# Apple's vector functions (the fast mode's).
 # SAW: 0.4867{{[0-9]*}}
 # SAW2: 0.63661975
 # SQ: 0.97351{{[0-9]*}}
 # SAWNEG: -0.4867{{[0-9]*}}
 
-# G4, and the span of the inversion: 2^(8/12). One vector expf for the four notes: one call of the runtime's
-# four-lane exp (the default math mode).
+# G4, and the span of the inversion: 2^(8/12). One vector expf for the four notes: FMinus's exp kernel on four lanes,
+# inline (the default math mode), with no call.
 # CHORD: 391.995{{[0-9]*}}
 # SPAN: 1.5874{{[0-9]*}}
 # CHORDIR-LABEL: define <4 x float> @frequencies(
-# CHORDIR: call <4 x float> @fminus_rt_exp_f4(<4 x float>
+# CHORDIR-NOT:   call {{.*}}@fminus
+# CHORDIR:       call <4 x float> @llvm.fma.v4f32(<4 x float>
+# CHORDIR-NOT:   call {{.*}}@fminus
+# CHORDIR:       ret <4 x float>
 
 # The mean of 7 detuned saws; the last digits depend on the width.
 # MIX: -0.799592{{[0-9]*}}
