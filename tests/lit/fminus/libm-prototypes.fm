@@ -31,7 +31,7 @@ float others(float x, int* q) { return ldexpf(x, 3) + remquof(x, 2, q) + atanf(1
 // CHECK-DAG: declare float @remquof(float, float, ptr writeonly captures(none)) [[ARGS:#[0-9]+]]
 // CHECK-DAG: declare float @atanf(i32){{$}}
 // CHECK-DAG: declare float @mystery(float){{$}}
-// CHECK-DAG: define float @coshf(float %x) {
+// CHECK-DAG: define float @coshf(float %x){{( #[0-9]+)?}} {
 // CHECK-DAG: attributes [[NONE]] = { nocallback nofree nosync nounwind willreturn memory(none) }
 // CHECK-DAG: attributes [[ARGS]] = { nocallback nofree nosync nounwind willreturn memory(argmem: write) }
 
