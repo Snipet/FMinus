@@ -4190,6 +4190,8 @@ rewritten where that shortens the chain and leaves every result as it was (check
 - **Programs are faster**: of fifteen measured, twelve call a math builtin every sample, and take 10% to 48% fewer
   instructions a sample and up to 31% fewer cycles, but one, tremolo, 20% more cycles (Measurements); a vectorised loop
   of the builtins runs about twice as fast.
+- **Two channels can share a kernel** (Two lanes): the SLP vectoriser pairs a stereo pair's calls into one two-lane
+  kernel where its cost model finds it worth it, and a `float2` is two lanes, no longer four.
 - **Constants fold, exactly.** A frozen parameter's `sinf`, `expf`, ... folds to the runtime's result; recipe 15's
   vector mode could only call it. A frozen copy of a program can stay in the vector mode now, bit for bit.
 - **Compilation takes longer**: every call is now its kernel in the backend, in every knob-versioned copy and in every
@@ -4428,10 +4430,16 @@ made at compile time for every value. And *a budget per program*, not per method
 
 **More of the math modes.** Recipe 15's mode is the program's. *A mode a function*, as an attribute
 (`[[fminus::math(libm)]]`), would let a kernel choose libm for its scalar recursion and the vector functions for its
-vector code; each function would still give a float one result, but one `sinf` would give two in one program. *More
-kernels of FMinus's own* (recipe 23): `powf`, `atanf`, `exp2f`, `log2f`, `sinhf`, each one sequence of IEEE operations,
-as builtins with their three names. *A more accurate sine and cosine*: carrying the reduced argument's rounding error
-in a second float would take them from 1.56 ulp to under 1, at about twice the reduction's work in a vector.
+vector code; each function would still give a float one result, but one `sinf` would give two in one program (and
+since recipe 24 the vector mode's scalar kernels cost about what libm's do). *More kernels of FMinus's own* (recipes 23
+and 24): `powf`, `atanf`, `exp2f`, `log2f`, `sinhf`, each one sequence of IEEE operations, as builtins with their
+three names and a stem the pass knows. *A more accurate sine and cosine*: carrying the reduced argument's rounding
+error in a second float would take them from 1.56 ulp to under 1, at about twice the reduction's work in a vector.
+*Less compile time*: the kernels inline cost 39% more instructions to compile (recipe 24), most of it the backend's
+work on the kernels in every copy a loop is cut into (a vectorised body, its epilogue and remainder) and in every
+knob-versioned copy. Inlining only the kernels in loops, calling the runtime elsewhere, saved 9% of the compile in an
+experiment; a remainder's or an epilogue's kernels could call the runtime instead, at the cost of a call a sample
+there.
 
 **More of zero-init elision.** Recipe 18 removes a whole memset or nothing. *Shortening* it to `[end, size)`, with the
 same proof and `MemSetInst::setDest` and `setLength`, would keep only the bytes that can be read, and cover `t[n]`
