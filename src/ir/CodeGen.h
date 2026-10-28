@@ -105,8 +105,9 @@ namespace fminus::ir
         Denormals denormals = Denormals::Preserve;
 
         // The target's triple (TargetMachine::getTargetTriple), which says how an entry point sets the floating-point
-        // mode under Denormals::Flush: FPCR on arm64, MXCSR on x86-64. Empty is this process's, which is what the JIT
-        // and an executable built here run on. Only Flush reads it.
+        // mode under Denormals::Flush: FPCR on arm64, MXCSR on x86-64; and whether libm sets errno, which a prototype
+        // of libm's function then says it writes (on Darwin it sets none: Functions.cpp, describeLibm). Empty is this
+        // process's, which is what the JIT and an executable built here run on.
         std::string targetTriple{};
 
         // The most threads a parallel for or parallel { } runs on, the calling thread's among them (Parallel.cpp):

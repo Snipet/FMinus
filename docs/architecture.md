@@ -203,7 +203,7 @@ but its members are defined across the directory by what they lower:
 |---|---|
 | `CodeGen.cpp` | `ir::lower()`, the constructor, and the passes: where the parts combine |
 | `Types.cpp` | FMinus's types as LLVM's (`typeOf`, `lanes`), the conversions (`convert`, `convertPointer`, `commonType`), errors and poison values |
-| `Functions.cpp` | declarations and prototypes (`declare`), bodies and parameters (`define`), stack slots and scopes (`find`, which captures a variable for a parallel region, and `lookup`, which does not) |
+| `Functions.cpp` | declarations and prototypes (`declare`), libm's prototypes' attributes (`describeLibm`), bodies and parameters (`define`), stack slots and scopes (`find`, which captures a variable for a parallel region, and `lookup`, which does not) |
 | `Statements.cpp` | blocks, declarations, `return`, `if`, `while`, `for`, `break` and `continue` (none of which leaves a parallel region); a loop's `llvm.loop.mustprogress` when its condition is not a constant expression (`isConstant`, `mustProgress`) |
 | `Expressions.cpp` | the expression `std::visit` (`lower`), constants, operators (`binary`, `arithmetic`), `&&` and `\|\|`, `?:`, casts, assignment, `++` and `--` |
 | `Calls.cpp` | the builtin tables, calls, reductions, `poly_lanes` and `poly_index`, `poly_load` and `poly_store`, the heap's `malloc`, `calloc` and `free`, the FFT's `fft_*` (`lowerFft`, on the runtime's), and `ir::builtins()`; the heap's and the FFT's runtime calls through `callRuntime`, whose declaration says what the function does (`kRuntimeFacts`, `describeRuntime`) |
@@ -247,7 +247,9 @@ prototypes and definition are C's:
 - a second definition is "redefinition of 'f'";
 - a prototype of a builtin, as `<math.h>` has, declares nothing new, but a definition of a builtin is refused;
 - a function with prototypes and no definition stays external, and is resolved when the code is linked. The JIT
-  looks in the process, so `float atanf(float x);` calls libm's.
+  looks in the process, so `float atanf(float x);` calls libm's. On Darwin, whose libm sets no `errno`, such a
+  prototype of a math function of libm's gets LLVM's attributes for it without `errno` (`memory(none)` for `atanf`),
+  after pass 2 (`describeLibm`; extending.md, recipe 19).
 
 **Pass 2, define.** Each definition's body is lowered with an `llvm::IRBuilder<DenormalFolder>`, which folds constants
 as `ConstantFolder` does, and under `Denormals::Flush` as flushing hardware computes them:

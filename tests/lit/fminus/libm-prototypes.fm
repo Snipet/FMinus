@@ -1,0 +1,52 @@
+// A prototype of libm's function (ir/Functions.cpp, describeLibm; extending.md, recipe 19). On Darwin, whose libm sets
+// no errno, the declaration says it writes no memory (or only through its pointers), as clang declares <math.h>'s
+// there; LLVM then computes tanf and powf of a loop's invariants once, before the loop, which vectorises. A prototype
+// whose type is not libm's, a name libm does not have, and a definition are left alone. Elsewhere libm sets errno, and
+// the declarations stay as the program wrote them, so the calls stay in the loop.
+// RUN: %if system-darwin %{ fminus %s -O0 | FileCheck %s %}
+// RUN: %if system-darwin %{ fminus %s -O2 | FileCheck %s --check-prefix=OPT %}
+// RUN: %if !system-darwin %{ fminus %s -O0 | FileCheck %s --check-prefix=BARE %}
+// RUN: %if !system-darwin %{ fminus %s -O2 | FileCheck %s --check-prefix=LOOP %}
+
+float tanf(float x);
+float powf(float x, float y);
+float ldexpf(float x, int e);
+float remquof(float x, float y, int* quotient);
+float atanf(int x);
+float mystery(float x);
+float coshf(float x);
+float coshf(float x) { return x + mystery(x); }
+
+void tone(float* restrict out, const float* restrict in, int n, float cutoff, float level)
+{
+    for (int i = 0; i < n; ++i)
+        out[i] = in[i] * tanf(3.14159265f * cutoff / 48000) * powf(10, level / 20);
+}
+
+float others(float x, int* q) { return ldexpf(x, 3) + remquof(x, 2, q) + atanf(1) + coshf(x); }
+
+// CHECK-DAG: declare float @tanf(float) [[NONE:#[0-9]+]]
+// CHECK-DAG: declare float @powf(float, float) [[NONE]]
+// CHECK-DAG: declare float @ldexpf(float, i32) [[NONE]]
+// CHECK-DAG: declare float @remquof(float, float, ptr writeonly captures(none)) [[ARGS:#[0-9]+]]
+// CHECK-DAG: declare float @atanf(i32){{$}}
+// CHECK-DAG: declare float @mystery(float){{$}}
+// CHECK-DAG: define float @coshf(float %x) {
+// CHECK-DAG: attributes [[NONE]] = { nocallback nofree nosync nounwind willreturn memory(none) }
+// CHECK-DAG: attributes [[ARGS]] = { nocallback nofree nosync nounwind willreturn memory(argmem: write) }
+
+// OPT-LABEL: define void @tone(
+// OPT:         call float @tanf(
+// OPT:         call float @powf(float 1.000000e+01,
+// OPT:       vector.body:
+// OPT-NOT:     call float @tanf(
+// OPT-NOT:     call float @powf(
+// OPT:         ret void
+
+// BARE-DAG: declare float @tanf(float){{$}}
+// BARE-DAG: declare float @powf(float, float){{$}}
+
+// LOOP-LABEL: define void @tone(
+// LOOP:       for.body:
+// LOOP:         call float @tanf(
+// LOOP:         call float @powf(

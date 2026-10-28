@@ -293,7 +293,10 @@ Where FMinus differs from C, it is on purpose:
   `-1.5`. C allows `%` on integers only; HLSL allows it on floats. `%=` goes with it.
 - **A function may be called before its definition** without a prototype, because the compiler declares every
   function first. A prototype with no definition declares an external C function, as in C: the JIT resolves it in
-  the process (`float atanf(float x);` calls libm's), and the linker resolves it in an executable.
+  the process (`float atanf(float x);` calls libm's), and the linker resolves it in an executable. On Apple systems,
+  whose libm sets no `errno`, a prototype of libm's function says it writes no memory, as clang's `<math.h>` says
+  there, so a call on a loop's invariants is made once, before the loop ([docs/extending.md](docs/extending.md),
+  recipe 19).
 - **A declaration without an initialiser starts at 0**, and a pointer at null. C leaves the variable indeterminate.
   From `-O1`, the optimiser removes a local's zeroing where nothing reads the zeros: an array's that loops overwrite,
   and a module's that a copy of another overwrites. `-O0` keeps every one ([docs/extending.md](docs/extending.md),
