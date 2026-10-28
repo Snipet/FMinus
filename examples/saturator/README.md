@@ -50,7 +50,7 @@ under a mask, which keeps its loads and stores inside the buffer (docs/simd.md, 
 
 - **`tanhf`**, `<math.h>`'s: `process_tanhf` and `process_tanhf_poly`. LLVM can only call it: FMinus's runtime's
   `tanhf` (its default math mode). Of a `poly float` it is one call of the runtime's four-lane `tanhf` each four lanes:
-  on Apple systems libsystem_m's `_simd_tanh_f4`, elsewhere the C library's `tanhf`, a lane at a time.
+  FMinus's own kernel, on every target (docs/extending.md, recipe 23).
 - **A rational function**, `rational_tanh`: x times a polynomial of degree 12 in x over one of degree 6 (Eigen's
   fast tanh for float, with its coefficients), x clamped first to ±7.905311, past which tanh is ±1 in float. It is
   multiplies, adds, a divide and a clamp, so of a `poly float` it is one vector instruction each. Evaluated in its
@@ -105,12 +105,12 @@ lane 0 of the same four-lane function); the rational function 0.35 a sample at a
   poly kernel gives the scalar one's output at every width from 1 to 64, and every kernel gives the same output in
   blocks of 64 and 61 as in one call, which `--check` checks.
 
-On an Apple Silicon Mac, the `tanhf` lines are vector code too: the runtime's four-lane `tanhf`, libsystem_m's
-`_simd_tanh_f4`, is the 4-lane poly loop's call and the scalar loop's vectorised body's, and its scalar `tanhf`, lane
-0 of the same function, the remainder's. It differs from the C library's `tanhf` in the last bits, by at most 3 ulp,
-for about 170 million of the 4.3 billion floats, over every finite float on an M5; but it gives a float one result
-wherever it is computed, so `--check` holds all four kernels to the same output bit for bit, in any blocks and at any
-width, and to C++'s `fminus::math::tanh`. (With `--math fast`, LLVM's intrinsics, the plain loop's body calls
+The `tanhf` lines are vector code too: the runtime's four-lane `tanhf` is the 4-lane poly loop's call and the scalar
+loop's vectorised body's, and its scalar `tanhf` the remainder's, the same kernel (docs/extending.md, recipe 23; the
+table's numbers were measured with libsystem_m's `_simd_tanh_f4` behind both, before it). It differs from the C
+library's `tanhf` in the last bits, by at most 1.52 ulp from the exact result; but it gives a float one result wherever
+it is computed, so `--check` holds all four kernels to the same output bit for bit, in any blocks and at any width,
+and to C++'s `fminus::math::tanh`. (With `--math fast`, LLVM's intrinsics, the plain loop's body calls
 `_simd_tanh_f4` and its remainder the C library's `tanhf`, so moving the end of a block moves samples from one to the
 other: 2 ulp apart here.)
 

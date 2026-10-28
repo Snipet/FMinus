@@ -54,8 +54,8 @@ namespace fminus::ir
     // computes them). fabsf, sqrtf, floorf, fminf and fmaxf are exact, so they are LLVM's intrinsics in every mode.
     //   Vector   the runtime's functions (runtime/Runtime.h, fminus_rt_sinf and fminus_rt_sin_f4), which give a float
     //            the same result wherever it is: in a scalar loop or its vectorised body, a float4 or a poly float of
-    //            any width, at any optimisation level, a constant or not. On Apple systems they are libsystem_m's
-    //            vector functions (_simd_sin_f4, ...), made lane-independent; elsewhere libm's, lane by lane. Scalar
+    //            any width, at any optimisation level, a constant or not, on any target. They are FMinus's own kernels
+    //            (runtime/MathKernels.h), one sequence of IEEE operations each, which every lane computes alike. Scalar
     //            calls name the four-lane function as their vector variant, so loops of them still vectorise. The
     //            default.
     //   Libm     libm's sinf, cosf, ... (through the runtime, so that nothing folds them), a lane at a time: C++'s

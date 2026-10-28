@@ -234,8 +234,9 @@ int main(int argc, char** argv)
         ->check(CLI::IsMember({"preserve", "flush"}))
         ->capture_default_str();
     app.add_option("--math", math,
-                   "How sinf, cosf, expf, tanhf and logf compute: vector (one result wherever computed; Apple's vector "
-                   "library where there is one), libm (the C library's, a lane at a time) or fast (LLVM's intrinsics)")
+                   "How sinf, cosf, expf, tanhf and logf compute: vector (one result wherever computed, on any "
+                   "machine: FMinus's own kernels), libm (the C library's, a lane at a time) or fast (LLVM's "
+                   "intrinsics)")
         ->check(CLI::IsMember({"vector", "libm", "fast"}))
         ->capture_default_str();
     app.add_option("-I", includeDirectories,

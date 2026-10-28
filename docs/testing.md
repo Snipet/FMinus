@@ -77,10 +77,13 @@ TEST_CASE("functions compute what they say", "[codegen]")
 - **Error tests compare the whole formatted text**, locations included. A moved column is a real change.
 - **Tags**: `[frontend]`, `[codegen]`, `[smoke]`, `[jit]`, `[aot]` (the AOT smoke test, and `AotTest.cpp`'s checks
   of an executable's entry), `[grammar]`, `[simd]` (vectors and the vector math library), `[poly]`, `[int]`,
-  `[pointer]`, `[heap]`, `[effects]`, `[math]` (the math modes), `[versions]` (knob versioning and flat streams),
-  `[tbaa]`, `[zeroinit]`, `[attributes]` and `[progress]` (the runtime's attributes and loop progress),
+  `[pointer]`, `[heap]`, `[effects]`, `[math]` (the math modes and their kernels), `[versions]` (knob versioning and
+  flat streams), `[tbaa]`, `[zeroinit]`, `[attributes]` and `[progress]` (the runtime's attributes and loop progress),
   `[denormals]`, `[parallel]` (parallel regions, and `[runtime]` among them for the pool on its own). Add new ones
   freely.
+- **A hidden test** carries the tags `[.]` and a name: ctest never runs it, and `fminus-tests "[name]"` does.
+  `[exhaustive]` runs every float through every math kernel, on every core, against its error bound, in every lane, and
+  under flush-to-zero (extending.md, recipe 23): about ten minutes, for after a change to a kernel.
 - **A test that something reads 0** must not run on a fresh stack, which is 0 already. `ZeroInitTest.cpp` calls each
   function on a dirty one: `dirtyStack()` fills 64 KB below the caller with 1e6, and `padded()` calls the function
   from below a kilobyte of padding, so a wrongly removed zeroing reads 1e6. A test of a hand-written local that

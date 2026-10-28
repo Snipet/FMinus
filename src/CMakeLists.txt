@@ -32,6 +32,13 @@ add_library(fminus_runtime STATIC ${_fminus_runtime_sources})
 add_library(FMinus::Runtime ALIAS fminus_runtime)
 fminus_target_defaults(fminus_runtime)
 target_include_directories(fminus_runtime PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+# The math kernels (runtime/MathKernels.h) fuse a multiply and an add only where they say so, as FMinus's IR does, so
+# they compute the same operations on every target. (clang-cl takes clang's spelling through /clang:.)
+if(FMINUS_MSVC_FRONTEND)
+  target_compile_options(fminus_runtime PRIVATE /clang:-ffp-contract=off)
+else()
+  target_compile_options(fminus_runtime PRIVATE -ffp-contract=off)
+endif()
 # The FFT, PFFFT (cmake/FMinusFft.cmake): its objects go into this library, so it holds the FFT itself.
 target_sources(fminus_runtime PRIVATE $<TARGET_OBJECTS:fminus_pffft>)
 target_include_directories(fminus_runtime SYSTEM PRIVATE "${FMINUS_PFFFT_INCLUDE_DIR}")

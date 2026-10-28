@@ -65,11 +65,10 @@ extern "C"
     // (ir::Options::math, ir/Math.cpp). None allocates, locks or makes a system call; each is a function of its
     // argument alone, which the code generator tells LLVM (it reads no memory and is defined for every argument).
     //
-    // The vector mode's, FMinus's default. A lane of a four-lane function is the scalar function of that lane, bit for
-    // bit, whatever the other lanes hold: so a float gets one result in a scalar loop and in its vectorised body, in a
-    // float4, and in a poly float of any width. On Apple systems they are libsystem_m's vector functions
-    // (_simd_sin_f4, ...), whose sin and cos are made lane-independent here, and a scalar call is lane 0 of the vector
-    // function of four copies of its argument; elsewhere they are libm's sinf, cosf, ..., lane by lane.
+    // The vector mode's, FMinus's default: FMinus's own kernels (MathKernels.h), the same IEEE operations on every
+    // target. A lane of a four-lane function is the scalar function of that lane, bit for bit, whatever the other lanes
+    // hold: so a float gets one result in a scalar loop and in its vectorised body, in a float4, and in a poly float of
+    // any width, on arm64 and on x86-64.
     float fminus_rt_sinf(float x) noexcept;
     float fminus_rt_cosf(float x) noexcept;
     float fminus_rt_expf(float x) noexcept;

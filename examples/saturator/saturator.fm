@@ -11,9 +11,8 @@
 //   Saturator::process              a rational function for tanh, written below, one sample at a time
 //   Saturator::process_poly         the same rational function of a poly float, poly_lanes() samples a step
 //
-// tanhf is a call into FMinus's runtime: on Apple systems libsystem_m's vector tanh, _simd_tanh_f4, four lanes a call
-// (a float is lane 0 of one), and elsewhere the C library's tanhf, a lane a call. Either way it gives a float one
-// result in any lane, so the output is the same at any width (FMinus's default math mode). The rational function is
+// tanhf is a call into FMinus's runtime, its own kernel, four lanes a call or one: it gives a float one result in any
+// lane, so the output is the same at any width (FMinus's default math mode). The rational function is
 // multiplies, adds and one divide, so of a poly float it is one vector instruction each, and its output is the same at
 // any width too.
 //

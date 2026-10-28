@@ -428,9 +428,10 @@ generated code calls. It contains no LLVM, and it holds the FFT: PFFFT's objects
   Windows, which has none, `_aligned_malloc`), the FFT behind the `fft_*` builtins (`fminus_rt_fft_create`, ...,
   `Fft.cpp`: a plan holds PFFFT's setup and buffers of its own, so a transform never allocates), and the math
   builtins' functions (`Math.cpp`). Those are the vector mode's `fminus_rt_sinf` ... `fminus_rt_logf` and their four
-  lanes, `fminus_rt_sin_f4` ... `fminus_rt_log_f4`, whose lanes are each the scalar function of that lane (on Apple
-  systems libsystem_m's vector functions, sin and cos guarded to stay lane-independent; elsewhere libm's), and the
-  libm mode's `fminus_rt_libm_sinf` and its kin. `fminus::math` in the public header calls the vector mode's. And the
+  lanes, `fminus_rt_sin_f4` ... `fminus_rt_log_f4`, whose lanes are each the scalar function of that lane: FMinus's
+  own kernels (`MathKernels.h`, extending.md recipe 23), one sequence of IEEE operations each, written once as a
+  template that the scalar and the four-lane function both instantiate, the same on every target; and the libm mode's
+  `fminus_rt_libm_sinf` and its kin. `fminus::math` in the public header calls the vector mode's. And the
   pool behind `parallel for` and `parallel { }` (`Parallel.cpp`): `fminus_rt_parallel_for` runs a region's body over
   its iterations on the pool's threads and the caller's, one region at a time (a region that finds the pool held, or
   that a chunk of another starts, runs on its caller's thread alone), in the caller's floating-point mode, allocating

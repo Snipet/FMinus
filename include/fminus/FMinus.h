@@ -133,9 +133,9 @@ namespace fminus
         // and fmaxf are exact, and the same in every mode).
         //   Vector  a float gets one result wherever the program computes it: in a loop's vectorised body or its
         //           remainder, so wherever a block ends; in a float4, a float8 or a poly float of any width; at any
-        //           optimisation level; from a frozen parameter or a knob. What it computes is fminus::math's (below):
-        //           on Apple systems, libsystem_m's vector functions (up to 3 ulp from the exact result), and loops
-        //           of them vectorise; elsewhere libm's. The default.
+        //           optimisation level; from a frozen parameter or a knob; on arm64 and x86-64 alike. What it computes
+        //           is fminus::math's (below): FMinus's own kernels, within 1.56 ulp of the exact result, and loops of
+        //           them vectorise. The default.
         //   Libm    the C library's sinf, cosf, ..., a lane at a time, so C++'s std::sin of a float, bit for bit, on
         //           every target. Loops of them don't vectorise. (A C++ std::sin and std::cos of one argument are
         //           not sinf and cosf at -O1 and up on Apple systems: clang makes them one __sincosf_stret.)
@@ -312,11 +312,12 @@ namespace fminus
     };
 
     // sinf, cosf, expf, tanhf and logf as a program compiled in the default math mode (Program::Math::Vector) computes
-    // them, wherever it does: a C++ reference that calls these gets a program's results bit for bit. On Apple systems
-    // they are libsystem_m's vector functions, a call of four lanes for one float (up to 3 ulp from the exact
-    // result, where libm's sinf is within 1); elsewhere libm's. None allocates or locks: the audio thread may call
-    // them. Each depends on its argument alone and does nothing else, which FMINUS_MATH_CONST tells GCC and clang
-    // (their const attribute), so that two calls of one argument are one, as they are of std::sin.
+    // them, wherever it does: a C++ reference that calls these gets a program's results bit for bit, on any machine.
+    // They are FMinus's own kernels, the same IEEE operations on every target: sin, cos and tanh within 1.56 ulp of
+    // the exact result, exp within 1.05 and log within 0.99 (libm's are within 1; docs/extending.md, recipe 23). None
+    // allocates or locks: the audio thread may call them. Each depends on its argument alone and does nothing else,
+    // which FMINUS_MATH_CONST tells GCC and clang (their const attribute), so that two calls of one argument are one,
+    // as they are of std::sin.
 #if defined(__GNUC__) || defined(__clang__)
 #define FMINUS_MATH_CONST [[gnu::const]]
 #else

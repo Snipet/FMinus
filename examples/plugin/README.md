@@ -92,9 +92,9 @@ through `processBlock` and exits 1 unless all of these hold:
 
 It also prints what `processBlock` costs: 6.8 ns per sample per channel on an M5 (it varies from run to run, and much
 more with the machine's load), about 0.07% of a core for stereo at 48 kHz. That includes a sine, a cosine and two
-divisions per sample. The sine and cosine are 2.1 ns of it: in FMinus's default math mode each is lane 0 of the
-runtime's four-lane function, which costs more a call than libm's, in a loop that the filter's recursion keeps from
-vectorising. Compiled with `Program::Options::math = Libm` the filter takes 4.7 ns and passes the same checks. The
+divisions per sample. The sine and cosine are 2.1 ns of it: in FMinus's default math mode each was, when this was
+measured, lane 0 of libsystem_m's four-lane function (FMinus's own kernels since: docs/extending.md, recipe 23), which
+costs more a call than libm's, in a loop that the filter's recursion keeps from vectorising. Compiled with `Program::Options::math = Libm` the filter takes 4.7 ns and passes the same checks. The
 modes' crossfade adds about 0.4 ns. Flush-to-zero costs nothing: `process` finds the mode set (the same 6.8 ns compiled
 with `Preserve`).
 

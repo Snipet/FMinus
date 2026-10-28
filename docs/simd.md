@@ -806,8 +806,8 @@ Accelerate's and libsystem_m's results are identical, so they share an implement
 the unwanted mappings. The vector functions are 2.5 to 3.6 times faster and up to about 3 ulp from the exact result,
 where libm is within 1. For audio that is a good trade, but it is a trade: in this mode `sinf(v).x` is no longer
 bit-identical to `sinf(v.x)`. In a dependent chain (each call waiting for the last), the two take about the same time;
-the gain is throughput. (In the default mode the scalar `sinf` is lane 0 of the vector function too, so the two are
-the same again: extending.md, recipe 15.)
+the gain is throughput. (In the default mode the scalar `sinf` and every lane of the vector one are FMinus's own
+kernel, so the two are the same again: extending.md, recipes 15 and 23.)
 
 ### The code
 
@@ -1208,8 +1208,8 @@ float4 frequencies(float4 notes)
 }
 ```
 
-At `-O2` that is one `call <4 x float> @fminus_rt_exp_f4`, the runtime's four-lane `expf`, which on Apple systems is
-libsystem_m's `_simd_exp_f4` (with `--math fast`, a call of `_simd_exp_f4` straight). A literal rearranges the lanes:
+At `-O2` that is one `call <4 x float> @fminus_rt_exp_f4`, the runtime's four-lane `expf`, FMinus's own kernel on
+four lanes (with `--math fast`, a call of libsystem_m's `_simd_exp_f4` straight, on Apple systems). A literal rearranges the lanes:
 `(float4)(chord.yz, chord.w, chord.x * 2)` is the chord's first inversion, from a `float2`, a `float` and a product.
 `reduce_max(chord) / reduce_min(chord)` is its span. `main` picks one note with nested `?:` over `chord.x` to
 `chord.w`, since a lane can't be chosen by a variable yet. `fminus examples/chord/chord.fm --run main 60 1` prints
@@ -1359,7 +1359,7 @@ and the backend legalises both the same way.
 | `fabsf` on a `float4` becomes a call to `vfabsf` | Accelerate's vector library maps `llvm.fabs` and `llvm.sqrt`, and `ReplaceWithVeclib` replaces every mapped intrinsic | `VectorLibrary::DarwinLibSystemM` |
 | The vector library is never used | the custom `TargetLibraryAnalysis` was registered after `registerFunctionAnalyses`, whose default one wins | register it first |
 | A `float8` `sinf` is eight calls, in the fast math mode | the library has only four-lane functions, and `ReplaceWithVeclib` needs the exact width | the default mode, which splits it into two four-lane calls (`lowerMath`) |
-| `sinf(v).x != sinf(v.x)`, in the fast math mode | the vector function and libm round differently (up to about 3 ulp) | the default mode, where the scalar `sinf` is lane 0 of the vector function; or `--math libm`, libm's in every lane |
+| `sinf(v).x != sinf(v.x)`, in the fast math mode | the vector function and libm round differently (up to about 3 ulp) | the default mode, where the scalar `sinf` and every lane are FMinus's own kernel; or `--math libm`, libm's in every lane |
 | A `poly` result changes between machines | the width changed the order of a float sum, or (in the fast math mode) which `sinf` ran | lane-independent work, order-independent reductions, a fixed number of partial sums |
 | C++ reads garbage from a `float8` function | FMinus passes `<8 x float>` in registers; the C ABI passes it through memory | keep `float8` inside FMinus, or lower exported ones with `sret` as clang does |
 | A test of `sinf` on vectors fails by a few ulp after recipe 8 | it compared with `std::sin` exactly | compare with `fminus::math::sin` exactly (the default mode); in the fast mode, `Catch::Matchers::WithinULP(expected, 3)` |

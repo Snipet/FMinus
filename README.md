@@ -254,9 +254,10 @@ Where FMinus differs from C, it is on purpose:
   zeroing read or write bytes of any type. `--no-strict-aliasing` or `Program::Options::strictAliasing = false` turns
   the rule off, as clang's `-fno-strict-aliasing` does.
 - **`sinf`, `cosf`, `expf`, `logf` and `tanhf` give a float one result wherever it is computed**: in a scalar loop or
-  its vectorised body, in a vector of any width, at any optimisation level, from a constant or not. C promises no
-  such thing. By default they are libsystem_m's vector functions on Apple systems (within about 3 ulp of the exact
-  result, where libm's are within 1), and libm's elsewhere; `fminus::math` computes the same in C++.
+  its vectorised body, in a vector of any width, at any optimisation level, from a constant or not, on any machine. C
+  promises no such thing. By default they are FMinus's own kernels, one sequence of IEEE operations each, within 1.56
+  ulp of the exact result (exp 1.05, log 0.99; libm's are within 1); `fminus::math` computes the same in C++
+  ([docs/extending.md](docs/extending.md), recipe 23).
   `Program::Options::math` (`fminus --math`) chooses `Libm`, libm's results bit for bit, or `Fast`, LLVM's intrinsics
   as clang compiles `<math.h>`. The runtime keeps three names for each of them (`fminus_rt_sinf`, `fminus_rt_sin_f4`
   and `fminus_rt_libm_sinf` for `sinf`): a program that calls one may not declare a function of any of its names, in
@@ -577,9 +578,9 @@ These are constraints a plugin runs into. `examples/plugin/`, a JUCE plugin, mee
 - **Size and symbols.** Static LLVM adds tens of megabytes. Export only the plugin's entry points (an
   exported-symbols list), so LLVM's symbols cannot clash with another copy of LLVM in the host process.
 - **Bit-exactness across machines.** FMinus fuses and reassociates nothing, and in its default math mode a float's
-  `sinf` is the same at any width, level or block size. But the JIT tunes code for the CPU it runs on, the math
-  functions are libsystem_m's on Apple systems and libm's elsewhere, and a `poly float`'s width orders its float sums
-  ([docs/simd.md](docs/simd.md)). Decide what a "same output" test means early.
+  `sinf` is the same at any width, level or block size, and on arm64 and x86-64 alike (its own kernels). But the JIT
+  tunes code for the CPU it runs on, the libm and fast math modes' functions are the system's, and a `poly float`'s
+  width orders its float sums ([docs/simd.md](docs/simd.md)). Decide what a "same output" test means early.
 
 ## License
 

@@ -1,20 +1,22 @@
 # Extending the compiler
 
 How to add to FMinus. First, how a change moves through the compiler, and the few rules that keep that easy. Then
-nineteen worked recipes. Eleven grow the C subset from a one-line builtin to C's control flow, a custom LLVM pass,
+twenty worked recipes. Eleven grow the C subset from a one-line builtin to C's control flow, a custom LLVM pass,
 `int`, `void` and pointers, the heap with the attributes that keep it off the audio thread, arrays and modules, FMinus's
 classes, an FFT from a C library built into the runtime, and parameters, the values a plugin's host sets. Six more are
 about the compiler rather than the language: math that gives a float one result wherever it is computed, knob versioning
 and flat streams, C's strict aliasing told to LLVM, zero-init elision, what the runtime's calls and loops promise, and
-subnormals flushed for the audio thread. The last two grow the language again: `#include`, which splits a program into
-files, and `parallel for` and `parallel { }`, a program's own threads. Then the pitfalls those recipes ran into, and
-design notes for what comes next. [simd.md](simd.md) has recipes 7 to 9, for vectors.
+subnormals flushed for the audio thread. Two more grow the language again: `#include`, which splits a program into
+files, and `parallel for` and `parallel { }`, a program's own threads. The last returns to the math: kernels of FMinus's
+own, the same in every lane and on every target. Then the pitfalls those recipes ran into, and design notes for what
+comes next. [simd.md](simd.md) has recipes 7 to 9, for vectors.
 
 Recipes 1 to 4 are in the compiler now (`tanhf` and `%`; `bool` and its operators; `if`, `while` and `for`), and so are
 simd.md's 7 to 9, recipe 10 (`int`, `void` and pointers), recipe 11 (the heap), recipe 12 (arrays and modules), recipe
 13 (the FFT), recipe 14 (parameters), recipes 15 to 20 (the math modes, knob versioning, TBAA, zero-init elision, the
-runtime's attributes and loop progress, denormal control), recipe 21 (`#include`) and recipe 22 (`parallel for` and
-`parallel { }`), so their sections describe how the code you have got there: read a section beside the files it names.
+runtime's attributes and loop progress, denormal control), recipe 21 (`#include`), recipe 22 (`parallel for` and
+`parallel { }`) and recipe 23 (math kernels of FMinus's own), so their sections describe how the code you have got
+there: read a section beside the files it names.
 Recipes 5 and 6, a runtime function and a pass, are not part of the language; they live in [recipes/](recipes/) as a
 patch, so you can apply them to see them work. None of these are sketches: each was applied to this repository, built
 with `-Werror`, and tested in the dev and asan presets, every test passing. [architecture.md](architecture.md) describes
@@ -2209,43 +2211,43 @@ So the scalar function is lane 0 of the vector function of a splat, every vector
 lanes at a time, and LLVM never sees `sinf` at all: it can neither fold it, nor pair it, nor hand it to another
 library.
 
-The premise was measured. libsystem_m's `_simd_exp_f4`, `_simd_tanh_f4` and `_simd_log_f4` are lane-independent,
-checked exhaustively on an M5: every float, in every lane, beside awkward neighbours (NaN, infinities, huge and
-subnormal values). `_simd_sin_f4` and `_simd_cos_f4` are not. A vector takes a fast path when every lane is finite and
-at most 1e6 in magnitude, and a slow path for all four lanes otherwise. The two paths disagree on about 37% of
-arguments, by up to 3 ulp, so one large lane changes its three neighbours' results; each path alone is
-lane-independent. So the runtime guards sin and cos: a vector goes to libsystem_m whole only when every lane is within
-`kSinCosLimit`, 2^16, and lane by lane otherwise. The limit leaves Apple's edge room to come down by a factor of 15 in
-a later macOS, and costs audio nothing: a sine at 65536 radians has already lost its phase to float's spacing there
-(2^-7 rad). `MathTest.cpp` checks the premise again on every run, so a macOS that changes it fails a test rather than
-a program's last bits.
+The premise, as this recipe first met it, was a library's, and was measured. libsystem_m's `_simd_exp_f4`,
+`_simd_tanh_f4` and `_simd_log_f4` were lane-independent, checked exhaustively on an M5: every float, in every lane,
+beside awkward neighbours (NaN, infinities, huge and subnormal values). `_simd_sin_f4` and `_simd_cos_f4` were not. A
+vector took a fast path when every lane was finite and at most 1e6 in magnitude, and a slow path for all four lanes
+otherwise; the two paths disagreed on about 37% of arguments, by up to 3 ulp, so one large lane changed its three
+neighbours' results. So the runtime guarded sin and cos: a vector went to libsystem_m whole only when every lane was
+within 2^16, and lane by lane otherwise, and `MathTest.cpp` checked the premise again on every run. Elsewhere than Apple
+systems the functions were libm's, a lane at a time. Recipe 23 replaced the library with kernels of FMinus's own,
+lane-independent by construction and the same on every target, which retired the premise, the guard and its test.
 
 ### The runtime: `src/runtime/Math.cpp`
 
 Fifteen functions, in `Runtime.h` and `RuntimeSymbols.def`: the vector mode's `fminus_rt_sinf` to `fminus_rt_logf`,
 their four lanes, `fminus_rt_sin_f4` to `fminus_rt_log_f4`, and the libm mode's `fminus_rt_libm_sinf` to
 `fminus_rt_libm_logf`. A four-lane vector is `fminus_rt_float4`, GCC's and clang's `vector_size(16)` float vector,
-which the C ABI passes in one register as it does FMinus's `<4 x float>`. On Apple systems:
+which the C ABI passes in one register as it does FMinus's `<4 x float>`. Since recipe 23 the vector mode's are one
+kernel each, run on a float and on four:
 
 ```cpp
 extern "C" float fminus_rt_sinf(float x) noexcept
 {
-    return _simd_sin_f4(splat(x))[0];
+    Scalar o;
+    return fminus::kernels::sin(o, x);
 }
 ...
 extern "C" fminus_rt_float4 fminus_rt_sin_f4(fminus_rt_float4 x) noexcept
 {
-    return withinLimit(x) ? _simd_sin_f4(x) : eachLane(fminus_rt_sinf, x);
+    Four o;
+    return fminus::kernels::sin(o, x);
 }
 ```
 
-The scalar function is lane 0 of the four-lane one on either path, since four copies are within the limit together or
-not at all. On arm64 `withinLimit` is `fabs`, NEON's `fmaxv` (which, unlike `fmaxnmv`, gives NaN when a lane is NaN),
-a compare and a branch. `eachLane` is out of line, and libsystem_m's functions are declared `noexcept` (they are C), so
-the fast path is a tail call with no stack frame: from a `noexcept` function, a call of one that might throw sits in a
-`std::terminate` landing pad. The four-lane exp, tanh and log call libsystem_m's straight. They go through the runtime
-all the same, so that the generated IR is the same on every target, and the functions `MathTest.cpp` checks are the
-ones programs call. Elsewhere than Apple systems the vector mode's functions are libm's, a lane at a time.
+As this recipe first wrote them, on Apple systems, the scalar function was lane 0 of libsystem_m's four-lane function
+of four copies of its argument (`_simd_sin_f4(splat(x))[0]`), and the four-lane one handed libsystem_m a whole vector
+only within the guard's limit. The libm mode's functions are libm's on every target. The functions go through the
+runtime even where a library could be called straight, so that the generated IR is the same on every target, and the
+functions `MathTest.cpp` checks are the ones programs call.
 
 ### The code generator: `src/ir/Math.cpp`
 
@@ -2329,7 +2331,7 @@ give it one result in the loop's body and another in its remainder. The flag tra
 
 | `Program::Options::math`, `fminus --math` | `sinf` ... `logf` are | One result for a float? | Constants folded? | Loops of them vectorise? | Error |
 |---|---|---|---|---|---|
-| `Vector`, `vector` (the default) | the runtime's: libsystem_m's vector functions on Apple systems, made lane-independent; libm's elsewhere | yes | no | yes, into four-lane calls | up to about 3 ulp (Apple) |
+| `Vector`, `vector` (the default) | the runtime's: FMinus's own kernels, the same on every target (recipe 23) | yes | no | yes, into four-lane calls | up to 1.56 ulp (recipe 23) |
 | `Libm`, `libm` | the runtime's wrappers of libm's, a lane at a time | yes | no | no | libm's (within 1 ulp) |
 | `Fast`, `fast` | LLVM's intrinsics, as recipe 8 left them | no | yes, with the host's double functions | yes, into `_simd_*_f4` | either |
 
@@ -2339,8 +2341,9 @@ same pipeline, and the module flag, but for the runtime's math names, which it r
 ### What changes for programs and hosts
 
 - **Results move in their last bits.** A scalar `sinf` in the default mode was libm's (within 1 ulp of the exact
-  result); it is now the vector function's lane (within about 3), the same as a vector call's. `waveforms.fm`'s
-  `main 0.25 1000` is 0.48676, where libm gives 0.4867599 (`examples.test` accepts both).
+  result); it became the vector function's lane (within about 3), the same as a vector call's. `waveforms.fm`'s
+  `main 0.25 1000` was 0.48676, where libm gives 0.4867599 (`examples.test` accepts both). Recipe 23's kernels moved
+  them once more, to within 1.56 ulp, and the same on every target.
 - **C++ references** call `fminus::math::sin` ... `log` (`include/fminus/FMinus.h`), which compute what the default
   mode does, and agree bit for bit at any block size, level, width and binding. They are `[[gnu::const]]` for GCC and
   clang (`FMINUS_MATH_CONST`): without it an opaque function is called every time, and the biquad's reference, which
@@ -2349,10 +2352,10 @@ same pipeline, and the module flag, but for the runtime's math names, which it r
   call, and the output is the knob's bit for bit (`examples/parameters/`'s `--check` now checks it).
 - **Vectors of other widths are faster**: a `float8` `sinf` was eight `sinf` calls, and is two four-lane ones.
 - **Scalar calls that can't vectorise are slower**: each computes four lanes of a vector function, whose latency is two
-  to six times libm's (Measurements).
+  to six times libm's (Measurements). (Recipe 23's kernels compute one lane, and recipe 24 puts them inline.)
 - **A prototype's libm function** (`atanf`, `powf`) gets the vector library only in the fast mode.
-- **Elsewhere than Apple systems** the vector mode's results are libm's: the IR is the same, and the four-lane
-  functions loop over libm. Neither Linux nor Windows has been run with it.
+- **Elsewhere than Apple systems** the vector mode's results were libm's, the four-lane functions a loop over libm,
+  until recipe 23 made them FMinus's own everywhere.
 - **The runtime** has fifteen more functions, which a host that hides or strips symbols must keep
   (`RuntimeSymbols.def`, which `defineRuntimeSymbols` reads).
 - **Their names are reserved.** A program that calls `sinf` and declares a function named `fminus_rt_sinf`,
@@ -2363,12 +2366,12 @@ same pipeline, and the module flag, but for the runtime's math names, which it r
 
 - `tests/unit/MathTest.cpp`, the premise and the promise. Each four-lane function against its scalar one, lane by
   lane, over 10^6 vectors of mixed arguments: phases, audio's ranges, zeros of both signs, subnormals, infinities, NaN
-  payloads, the floats either side of the limit and of 1e6, and any float at all. libsystem_m's own lane-independence,
-  where the runtime relies on it (skipped elsewhere). Then, a test case a function, seven kernels (a loop that
+  payloads, the floats either side of the limits, and any float at all (and, until recipe 23, libsystem_m's own
+  lane-independence, where the runtime relied on it). Then, a test case a function, seven kernels (a loop that
   vectorises, a recursion that doesn't, a parameter's function, `float2`, `float4`, `float8` and `poly float` code),
   at `-O0` and `-O2`, at 1 to 64 lanes, the parameter a knob and frozen, in one call and in blocks of 61: every output
   `fminus::math`'s, bit for bit. The libm mode runs the same matrix against C++'s `std::`, and the fast mode is checked
-  as it was. Raising the limit above Apple's edge, or compiling the promise in the fast mode, makes them fail. Then
+  as it was. Compiling the promise in the fast mode makes them fail. Then
   the reserved names: five programs that declare one (the four-lane name of an `int` and of a `float`, a prototype of
   it, the scalar name with a body that may loop forever, the libm name), each an error with its note in every mode,
   through the code generator and the public API; and a program's own prototypes of the three, called by name beside a
@@ -3861,6 +3864,158 @@ regions are the cost of the synchronisation alone, which grows with the threads 
 compare-and-swap and the count of who is inside travel between the cores' caches. It depends on where the system puts
 the threads, too: a run whose two or four threads all landed on one cluster's cores took 0.09 s.
 
+## Recipe 23: math kernels of FMinus's own
+
+*In the compiler. Code: `src/runtime/MathKernels.h` (the kernels), `src/runtime/Math.cpp` (the runtime's functions on
+them), and the runtime's `-ffp-contract=off` (`src/CMakeLists.txt`). Tests: `tests/unit/MathTest.cpp` (`[math]`, and
+`[exhaustive]` on demand). Fits: `Scripts/fit-math-kernels.py`.*
+
+Recipe 15's vector mode keeps its promise, one result for a float wherever it is computed, and it kept it by trusting a
+library: libsystem_m's vector functions were lane-independent (or made so, for sin and cos), so a scalar `sinf` could
+be lane 0 of the four-lane function of four copies of its argument. That had three costs. Every scalar call computed
+four lanes to keep one. The promise held on Apple systems only: elsewhere the mode was libm's, a lane at a time, so a
+program's last bits depended on the machine. And a macOS whose library changed would change them; MathTest.cpp could
+only notice. This recipe gives the vector mode functions of FMinus's own, lane-independent by construction and the same
+on every target. Recipe 24 then puts them inline, which is where the time goes.
+
+### One sequence of operations, written once
+
+Each function is a template over the operations it uses (`MathKernels.h`):
+
+```cpp
+    template <class O>
+    typename O::F sin(O& o, typename O::F x)
+    {
+        using F = typename O::F;
+        const F a = o.abs(x);
+        F t;
+        const F r = reduce(o, a, t);
+        const F result = sinOfQuadrant(o, r, o.bits(t), o.bits(x));
+        return o.large(o.gt(a, o.c(kLargeArgument)), x, result, Large::Sin);
+    }
+```
+
+`O` is `Scalar`, whose `F` is a float and whose `o.fma(a, b, c)` is one fused multiply-add, or `Vector<4>`, whose `F`
+is clang's four-float vector and whose operations are each one operation a lane. The runtime's `fminus_rt_sinf` is
+`sin<Scalar>`, and `fminus_rt_sin_f4` is `sin<Vector<4>>`. A lane goes through the same IEEE operations as the scalar
+function, in the same order, so it gets the same result, whatever its neighbours hold: it follows from how the
+functions are written, and MathTest.cpp only confirms it. What makes it hold on every target:
+
+- **IEEE's basic operations only**: add, subtract, multiply, divide and fused multiply-add, each rounded once to
+  nearest, comparisons, an int's conversion to a float, and bit operations (abs, the sign, the exponent field). No
+  libm, and no instruction whose result is an approximation (NEON's FRECPE and x86's RCPPS differ). An x86-64 computes
+  each of them as an arm64 does.
+- **Fused multiply-adds where the kernel says so, and nowhere else.** `o.fma` is the only place a multiply and an add
+  are fused: each operation is a call of its own, and the runtime compiles with `-ffp-contract=off`, as the examples'
+  C++ does. An x86-64 without FMA (before Haswell) computes `fmaf` in its C library, which C requires to round
+  correctly: the same bits, more slowly.
+- **No branches.** The special cases (NaN, infinities, zeros, the ends of a function's range) are selects, so every
+  lane runs every operation. The one exception is an argument of sin or cos past `kLargeArgument` (below).
+- **A whole number without a rounding instruction.** Adding 1.5 × 2^23 (`kRound`) to a float under 2^22 in magnitude
+  rounds it to an integer (to even, as IEEE's rounding does), which the sum's low bits hold, and subtracting it again
+  gives the integer as a float: two adds, where SSE2 has no rounding instruction, and the integer's bits come with
+  them, for the quadrant and for exp's power of two.
+
+### The kernels
+
+| Function | Argument reduced | Approximated | Then |
+|---|---|---|---|
+| `sinf`, `cosf` | \|x\| = q π/2 + r, r in [-π/4, π/4]: q by `kRound`, r by three fused multiply-adds with π/2 in three floats (Cody and Waite), the first exact, so nothing cancels | sin r = r + r³ P(r²), P of degree 2, and cos r = 1 + r² Q(r²), Q of degree 3 | one of the two by q's parity (cos: q + 1's), the sign by q's second bit (and x's, for sin) |
+| `expf` | x = k ln 2 + r, r in [-ln2/2, ln2/2]: k by `kRound`, r by two fused multiply-adds | e^r = 1 + r + r² Q(r), Q of degree 4, in Estrin's form | × 2^k in two multiplies, so a subnormal result is rounded once |
+| `logf` | x = 2^e m, m in [√½, √2), by its bits (a subnormal x scaled by 2^23 first) | log(1 + f) = f + f² P(f), f = m - 1, P of degree 9, Estrin's form | + e ln 2 in two fused multiply-adds |
+| `tanhf` | none | below atanh ½ (0.549), \|x\| + \|x\|³ T(x²), T of degree 4; above, (1 - u) / (1 + u) with u = e^-2\|x\| by exp's polynomial | x's sign |
+
+The polynomials are minimax fits, from Remez's exchange in 60-digit decimal arithmetic, with float coefficients:
+`Scripts/fit-math-kernels.py` fits them again (it needs no package). Each one's own error is under 0.1 ulp; the rest
+of a function's error is the rounding of its operations. Horner's form takes the fewest operations; Estrin's (pairs of
+coefficients joined by powers of the argument) halves the chain of dependent fused multiply-adds, for the two long
+polynomials.
+
+**Arguments past 2^16.** Three floats of π/2 hold the reduction to a float's precision a little past 2^16. Past
+`kLargeArgument`, 2^16, and for an infinity, sin and cos reduce out of line, exactly (`largeKernel`): |x| = m 2^s,
+with m a 24-bit integer, times the 128 bits of 2/π that start where its lowest bit meets them, is |x| 2/π mod 4 to 64
+bits past the point, in integer multiplies (Payne and Hanek's reduction, `reduceLarge`); then the same polynomials. A
+vector takes that path for its lanes past the limit, and the other lanes keep their result. A sine at 2^16 radians has
+already lost its phase to float's spacing (2^-7 there), so audio does not meet it; a phase that grows without wrapping
+does, after 23 seconds of 440 Hz, and then pays for the exact reduction, correct and slower.
+
+### Accuracy, and the special values
+
+Every float through every kernel, against the exact result (the double function, whose own error, 2^-53, does not show
+at this scale); the old vector mode, libsystem_m's functions on an M5 with macOS 27, over every fourth float:
+
+| Function | Largest error | Not correctly rounded | Recipe 15's vector mode (Apple) |
+|---|---|---|---|
+| `sinf` | 1.56 ulp | 7.9% | 2.73 ulp, 17.8% |
+| `cosf` | 1.56 ulp | 8.0% | 2.70 ulp, 63.2% |
+| `expf` | 1.05 ulp | 0.40% | 1.79 ulp, 2.1% |
+| `tanhf` | 1.52 ulp | 0.78% | 2.78 ulp, 4.0% |
+| `logf` | 0.99 ulp | 0.28% | 0.82 ulp, 0.32% |
+
+libm's are within 1 ulp. What is left in sin and cos is the reduced argument's own rounding: near a result of 1/2, r's
+last bit is worth nearly an ulp of the result. A double-float r (its rounding error carried in a second float) would
+take it out, at about twice the reduction's work in a vector; the kernels do not.
+
+The special values are C's (Annex F): sin and tanh keep a zero's sign; cos(±0) and exp(±0) are 1; sin and cos of an
+infinity are NaN; exp(+∞) is +∞ and exp(-∞) is +0, and exp's last finite result is at 88.7228317 and its last nonzero
+one at -103.972076, as the exact function rounds; tanh(±∞) is ±1; log(±0) is -∞, log(+∞) is +∞, and log of anything
+negative is NaN; and a NaN gives a NaN. A NaN's payload is not kept.
+
+**Flush-to-zero.** Under `Denormals::Flush` (recipe 20), a subnormal argument reads as its signed zero and a subnormal
+result is a zero, and a constant must fold to what the processor computes. LLVM folds an add, subtract, multiply,
+divide or comparison flushing, and a fused multiply-add not (`ConstantFoldScalarCall`). So a kernel reads a subnormal
+argument only where both give the same result, and an odd function's last operation, the one that gives x for a tiny
+x, is an add (sin, tanh), never an fma: sin(r) is `r + (r z) P(z)`. Each kernel run with FPCR.FZ set
+gives, for every float, what it gives without it of the argument flushed, flushed. Where Arm and x86 flush differently
+(Arm by the result before rounding, x86 after), only an exact result just below 2^-126 tells them apart, and no
+kernel's last operation makes one (exp's last multiply is exact for a normal result).
+
+### What it changes for programs and hosts
+
+- **Every program's results move in their last bits, once.** The vector mode's sines are now FMinus's: `waveforms.fm`'s
+  `main 0.25 1000` is 0.4867599, libm's, where libsystem_m's gave 0.48676.
+- **The default mode's results are the same on every machine**: an x86-64 computes what an arm64 does, where before
+  it computed libm's, a lane at a time. (Neither Linux nor Windows has been run with it.)
+- **`fminus::math` is the kernels**, so a C++ reference still agrees with a program bit for bit.
+- **Nothing depends on the system's library**: the premise test, the `kSinCosLimit` guard, and the declarations of
+  libsystem_m's functions are gone from the vector mode (the fast mode still uses them, recipe 8).
+- **A call costs about what it did.** Out of line, a scalar kernel computes one lane, not four, but makes its fifteen
+  or so constants again on every call (Measurements).
+
+### Tests
+
+`tests/unit/MathTest.cpp`:
+
+- each lane of the four-lane functions against the scalar function, over a million vectors of mixed arguments (phases,
+  audio's ranges, zeros of both signs, subnormals, infinities, NaN payloads, the floats around 2^16 and around 2^22 π/2,
+  and any float at all), and the scalar function as lane 0 of four copies;
+- each function's largest error over every 127th float, against its bound (the table above), and above 0.5 ulp;
+- the special values, exp's edges among them;
+- under flush-to-zero (FPCR.FZ, or MXCSR's FTZ and DAZ), every seventh subnormal of either sign, the least normals,
+  exp's subnormal results and every 4099th float, scalar and in lanes, against the flushed argument's result, flushed.
+
+A hidden test, `fminus-tests "[exhaustive]"`, runs the bounds, the lanes and flush-to-zero over every float, on every
+core (about ten minutes on an M5); run it after changing a kernel. The promise's tests (recipe 15's) run unchanged.
+
+### Measurements
+
+The M5, the dev build, with other builds running (load averages of 90 to 180, so times are unreliable; instruction
+counts are not). Each runtime function called from C++, instructions a float:
+
+| Function | libsystem_m, scalar | kernel, scalar | libsystem_m, four lanes | kernel, four lanes |
+|---|---|---|---|---|
+| `sinf` | 66 | 75 | 17.0 | 22.8 |
+| `cosf` | 69 | 75 | 17.8 | 22.8 |
+| `expf` | 72 | 68 | 17.0 | 17.0 |
+| `tanhf` | 73 | 96 | 17.3 | 23.3 |
+| `logf` | 97 | 90 | 23.3 | 22.3 |
+
+A scalar call of libsystem_m computed four lanes behind a splat; the kernel computes one, but materialises its constants
+in every call, a third of its instructions. Apple's four-lane functions are leaner than the kernels' (sin and cos
+compute both polynomials). Fifteen audio programs (recipe 24 has them) take 3% to 29% more instructions a sample than
+with libsystem_m, the most where `tanhf` is called a sample at a time. Recipe 24 inlines the kernels: their constants
+leave the loops, and the call with them.
+
 ## Pitfalls
 
 Each of these was hit while writing the language or its recipes. [simd.md](simd.md) has the vector ones.
@@ -4028,12 +4183,10 @@ made at compile time for every value. And *a budget per program*, not per method
 
 **More of the math modes.** Recipe 15's mode is the program's. *A mode a function*, as an attribute
 (`[[fminus::math(libm)]]`), would let a kernel choose libm for its scalar recursion and the vector functions for its
-vector code; each function would still give a float one result, but one `sinf` would give two in one program. *Sine
-and cosine together*: libsystem_m's `_simd_sincos_f4` is not `_simd_sin_f4` and `_simd_cos_f4` (they differ in about
-7% of vectors), so it would break the promise unless a program took both from it everywhere. *FMinus's own math
-functions*, written in FMinus's arithmetic as SLEEF's deterministic ones are, and used to fold constants too, would give
-the same results on every platform, at every width, with fast scalar calls. And *Linux's libmvec* behind the same
-runtime functions, once the same premise tests pass there.
+vector code; each function would still give a float one result, but one `sinf` would give two in one program. *More
+kernels of FMinus's own* (recipe 23): `powf`, `atanf`, `exp2f`, `log2f`, `sinhf`, each one sequence of IEEE operations,
+as builtins with their three names. *A more accurate sine and cosine*: carrying the reduced argument's rounding error
+in a second float would take them from 1.56 ulp to under 1, at about twice the reduction's work in a vector.
 
 **More of zero-init elision.** Recipe 18 removes a whole memset or nothing. *Shortening* it to `[end, size)`, with the
 same proof and `MemSetInst::setDest` and `setLength`, would keep only the bytes that can be read, and cover `t[n]`

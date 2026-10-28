@@ -90,9 +90,9 @@ The module today, in each math mode (recipe 15), against the harness's C++, whic
 | `libm` | 2.98 ns | | |
 | `fast` | 2.66 ns | | |
 
-The default mode costs about 2 ns a sample here. Its `sinf` and `cosf` are each lane 0 of the runtime's four-lane
-function, which costs more a call than libm's, and this loop calls them a sample at a time: the recursion keeps it from
-vectorising. What the mode buys is the next paragraph: an angle's sine is one float wherever it is computed. `--math
+The default mode cost about 2 ns a sample here. Its `sinf` and `cosf` were each lane 0 of libsystem_m's four-lane
+function when this was measured (FMinus's own kernels since, docs/extending.md, recipe 23), which costs more a call
+than libm's, and this loop calls them a sample at a time: the recursion keeps it from vectorising. What the mode buys is the next paragraph: an angle's sine is one float wherever it is computed. `--math
 libm` is libm's `sinf` and `cosf`, and `--math fast` the compiler before recipe 15, where `-O2` makes the two calls one
 `__sincosf_stret`.
 
@@ -131,8 +131,8 @@ FMinus has so far.
 6. **Vectors across channels**, the next big win: four channels at once, their samples, states and coefficients one
    `float4` each (`const float4* input`, four channels' state in two `float4` fields), or as many as the machine holds
    with `poly float`. Channels are lane-independent, so the output stays the same at any width, and `sinf`/`cosf` of a
-   `float4` is one call to libsystem_m's vector functions (recipe 8). In C++ it doubles the throughput, to 1.44 ns a
-   channel's sample.
+   `float4` is one call of the runtime's four-lane kernel. In C++ it doubles the throughput, to 1.44 ns a channel's
+   sample.
 7. **Cheaper transcendentals**: `sinf` and `cosf` written in FMinus, as polynomials with range reduction (`floorf`,
    `fminf`, `fmaxf`, comparisons and `?:` exist already). Accuracy becomes something to trade, and the harness prints
    the error against double. For one channel it buys little (above), but it counts once step 6 makes the

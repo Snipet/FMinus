@@ -65,8 +65,9 @@ In the dev build on an M5, 96,000 samples of noise, each time the best of 20 run
 | fixed: frozen | 3.3 ns/sample | 3.2 ns/sample | |
 
 (The swept rows include the LFO, a `sinf` and an `expf` a sample, which FMinus's default math mode makes the runtime's,
-as the C++ calls them: each is lane 0 of a four-lane function, slower a call than libm's. With `--math libm` the swept
-rows take 5.9 ns, and with `--math fast` 5.6 to 5.7.)
+as the C++ calls them: when this was measured, each was lane 0 of libsystem_m's four-lane function, slower a call than
+libm's, since replaced by FMinus's own kernels (docs/extending.md, recipe 23). With `--math libm` the swept rows take
+5.9 ns, and with `--math fast` 5.6 to 5.7.)
 
 - **Every output is C++'s, bit for bit**, under each binding: the same operations in the same order, and the same
   `sinf` and `expf`, FMinus's runtime's (its default math mode), which the C++ calls as `fminus::math::sin` and `exp`.
