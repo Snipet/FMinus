@@ -2339,7 +2339,7 @@ every level and whatever the flag: only the vector mode's calls are of its intri
 
 | `Program::Options::math`, `fminus --math` | `sinf` ... `logf` are | One result for a float? | Constants folded? | Loops of them vectorise? | Error |
 |---|---|---|---|---|---|
-| `Vector`, `vector` (the default) | FMinus's own kernels, the same on every target (recipe 23), inline from `-O1` (recipe 24) | yes | yes, to the kernels' results (since recipe 24) | yes, into four-lane kernels | up to 1.56 ulp (recipe 23) |
+| `Vector`, `vector` (the default) | FMinus's own kernels, the same on every target (recipe 23), inline from `-O1` (recipe 24) | yes | yes, to the kernels' results (since recipe 24) | yes, into four-lane kernels | up to 1.56 ulp, `tanf` 3.35 (recipe 23) |
 | `Libm`, `libm` | the runtime's wrappers of libm's, a lane at a time | yes | no | no | libm's (within 1 ulp) |
 | `Fast`, `fast` | LLVM's intrinsics, as recipe 8 left them | no | yes, with the host's double functions | yes, into `_simd_*_f4` | either |
 

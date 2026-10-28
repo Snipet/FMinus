@@ -134,8 +134,8 @@ namespace fminus
         //   Vector  a float gets one result wherever the program computes it: in a loop's vectorised body or its
         //           remainder, so wherever a block ends; in a float4, a float8 or a poly float of any width; at any
         //           optimisation level; from a frozen parameter or a knob; on arm64 and x86-64 alike. What it computes
-        //           is fminus::math's (below): FMinus's own kernels, within 1.56 ulp of the exact result, and loops of
-        //           them vectorise. The default.
+        //           is fminus::math's (below): FMinus's own kernels, within 1.56 ulp of the exact result (tanf within
+        //           3.35), and loops of them vectorise. The default.
         //   Libm    the C library's sinf, cosf, ..., a lane at a time, so C++'s std::sin of a float, bit for bit, on
         //           every target. Loops of them don't vectorise. (A C++ std::sin and std::cos of one argument are
         //           not sinf and cosf at -O1 and up on Apple systems: clang makes them one __sincosf_stret.)
