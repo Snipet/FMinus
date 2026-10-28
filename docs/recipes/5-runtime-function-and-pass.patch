@@ -1,5 +1,5 @@
 diff --git a/src/ir/Calls.cpp b/src/ir/Calls.cpp
-index 3397578..e42e82f 100644
+index 33cb1ca..1a15ca6 100644
 --- a/src/ir/Calls.cpp
 +++ b/src/ir/Calls.cpp
 @@ -2,9 +2,9 @@
@@ -15,7 +15,7 @@ index 3397578..e42e82f 100644
  #include "ir/Lowering.h"
  
  #include <llvm/IR/Attributes.h>
-@@ -220,6 +220,21 @@ namespace fminus::ir::detail
+@@ -222,6 +222,21 @@ namespace fminus::ir::detail
          return nullptr;
      }
  
@@ -37,7 +37,7 @@ index 3397578..e42e82f 100644
      // What the effects refuse a nonallocating function (Effects.cpp): a builtin that allocates or frees.
      bool allocates(std::string_view name)
      {
-@@ -300,6 +315,17 @@ namespace fminus::ir::detail
+@@ -302,6 +317,17 @@ namespace fminus::ir::detail
                  llvm::Intrinsic::getOrInsertDeclaration(&module_, builtin->intrinsic, {typeOf(type)});
              return {builder_.CreateCall(intrinsic, irArgs), type};
          }
@@ -70,10 +70,10 @@ index 7fc05f5..c602be7 100644
              error(function.location, quoted(function.name) + " is a builtin and cannot be redefined");
              return;
 diff --git a/src/ir/Lowering.h b/src/ir/Lowering.h
-index 0f57516..5999899 100644
+index be8c50a..8e84988 100644
 --- a/src/ir/Lowering.h
 +++ b/src/ir/Lowering.h
-@@ -82,10 +82,20 @@ namespace fminus::ir::detail
+@@ -84,10 +84,20 @@ namespace fminus::ir::detail
          bool allocates;
      };
  
@@ -214,40 +214,40 @@ index cb1b142..85828e8 100644
 +    return std::pow(10.0f, db / 20.0f);
 +}
 diff --git a/src/runtime/Runtime.h b/src/runtime/Runtime.h
-index 60e6905..d99060d 100644
+index f03a680..081ac39 100644
 --- a/src/runtime/Runtime.h
 +++ b/src/runtime/Runtime.h
-@@ -108,4 +108,8 @@ extern "C"
-     float fminus_rt_libm_expf(float x) noexcept;
+@@ -110,4 +110,8 @@ extern "C"
      float fminus_rt_libm_tanhf(float x) noexcept;
      float fminus_rt_libm_logf(float x) noexcept;
+     float fminus_rt_libm_tanf(float x) noexcept;
 +
 +    // Decibels to a linear gain: 10^(db / 20). FMinus code declares it (`float fminus_rt_db_to_gain(float db);`), or
 +    // calls it as the builtin db_to_gain (ir/Calls.cpp).
 +    float fminus_rt_db_to_gain(float db) noexcept;
  }
 diff --git a/src/runtime/RuntimeSymbols.def b/src/runtime/RuntimeSymbols.def
-index 7dd76a6..23f3bee 100644
+index 4257e9f..095b2a5 100644
 --- a/src/runtime/RuntimeSymbols.def
 +++ b/src/runtime/RuntimeSymbols.def
-@@ -33,3 +33,4 @@ FMINUS_RUNTIME_SYMBOL(fminus_rt_libm_logf)
+@@ -36,3 +36,4 @@ FMINUS_RUNTIME_SYMBOL(fminus_rt_libm_tanf)
  FMINUS_RUNTIME_SYMBOL(fminus_rt_parallel_for)
  FMINUS_RUNTIME_SYMBOL(fminus_rt_parallel_start)
  FMINUS_RUNTIME_SYMBOL(fminus_rt_parallel_stop)
 +FMINUS_RUNTIME_SYMBOL(fminus_rt_db_to_gain)
 diff --git a/src/support/HostTarget.cpp b/src/support/HostTarget.cpp
-index a4ab49c..7402599 100644
+index 1f6422e..f09b122 100644
 --- a/src/support/HostTarget.cpp
 +++ b/src/support/HostTarget.cpp
-@@ -2,6 +2,7 @@
- #include "support/HostTarget.h"
+@@ -3,6 +3,7 @@
  
  #include "opt/KnobVersioning.h"
+ #include "opt/MathKernels.h"
 +#include "opt/Passes.h"
  #include "opt/ZeroInitElision.h"
  #include "support/LLVMInit.h"
  
-@@ -59,6 +60,7 @@ namespace fminus
+@@ -60,6 +61,7 @@ namespace fminus
          tuning.LoopVectorization = true;
          tuning.SLPVectorization = true;
          llvm::PassBuilder passes(&machine, tuning);
@@ -317,10 +317,10 @@ index 0000000..7a8a38a
 +// CHECK: define float @softclip({{.*}} #[[ATTRS:[0-9]+]]
 +// CHECK: attributes #[[ATTRS]] = { {{.*}}"fminus-flops"="3"
 diff --git a/tests/unit/CodeGenTest.cpp b/tests/unit/CodeGenTest.cpp
-index 516948f..fce1dbf 100644
+index 40f58aa..0d5c503 100644
 --- a/tests/unit/CodeGenTest.cpp
 +++ b/tests/unit/CodeGenTest.cpp
-@@ -160,3 +160,18 @@ TEST_CASE("every semantic error is reported, in source order, as clang words it"
+@@ -162,3 +162,18 @@ TEST_CASE("every semantic error is reported, in source order, as clang words it"
               "test.fm:13:20: error: too many arguments to function call, expected 0, have 1\n"
               "test.fm:13:27: error: call to undeclared function 'q'\n");
  }

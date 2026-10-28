@@ -30,7 +30,7 @@ One patch is left, for the two recipes that aren't part of the language:
 |---|---|---|
 | `5-runtime-function-and-pass.patch` | 5, 6 | a runtime function (`db_to_gain`, by prototype or builtin); an LLVM pass (`CountFlopsPass`, which records each function's floating-point operations as an attribute) |
 
-It applies, with no whitespace errors, to the compiler as it is, with all of the above. The suite then has 181 tests,
+It applies, with no whitespace errors, to the compiler as it is, with all of the above. The suite then has 186 tests,
 which pass in the dev and asan presets.
 
 ```bash
