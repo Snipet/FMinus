@@ -570,8 +570,9 @@ These are constraints a plugin runs into. `examples/plugin/`, a JUCE plugin, mee
   `ScopedNoDenormals`), and it compiles with `Flush`, so its `process` finds the mode set and writes nothing.
 - **Parallel regions on the audio thread.** A `parallel for` or `parallel { }` runs on FMinus's pool and the audio
   thread together, in the audio thread's floating-point mode, and allocates and locks nothing. The audio thread starts
-  on its own share at once; pool threads that slept (no region for 50 µs) it wakes with a system call that does not
-  block; at the end it spins for the chunks other threads are still running. The pool's threads run at the
+  on its own share at once; of the pool threads that slept (no region for 50 µs), it wakes only as many as the region
+  has seats for (a region of two iterations, one), a system call each that does not block; at the end it spins for the
+  chunks other threads are still running. The pool's threads run at the
   user-interactive quality of service on macOS: they are not real-time threads, and join no audio workgroup, so the
   system may run them late, and the audio thread then takes their chunks itself. A region costs about 4 µs on an M5
   with every core (under 2 µs on two) against a plain call: worth it when its iterations take tens of microseconds

@@ -11,7 +11,7 @@
 //
 //   publish   the caller holding the pool (`busy`) writes the region's fields, then the cursor, generation << 32 | 0,
 //             the next iteration to take: a store that releases the fields to whoever reads the cursor. Then it bumps
-//             `signal`, which idle threads watch, and wakes those asleep on it.
+//             `signal`, which idle threads watch, and wakes as many of those asleep as the region has seats left for.
 //   take      a thread takes the chunk [next, next + grain) with a compare-and-swap of the cursor that also checks the
 //             generation, and runs it; then the next, until none is left. Chunks are taken as threads come free, so a
 //             slow core (an efficiency core, a thread the system stopped) holds up only the chunk it has.
@@ -29,12 +29,26 @@
 // so an iteration computes on any thread what it would on the caller's. That is what Denormals::Flush needs, whose code
 // assumes the mode its entry point set.
 //
-// Waiting. A pool thread that has run a region spins on `signal` for kSpinBeforeSleeping, so regions that follow one
-// another closely (two in one block) start at once, and then sleeps on it (std::atomic::wait: a futex, __ulock on
-// macOS). A caller that finds threads asleep wakes them with a system call that does not block; it does not wait for
-// them to wake, and starts on its chunks at once, so a region that is over before they are up costs it only that call.
-// On macOS the threads run at the user-interactive quality of service, the highest a thread can ask for; they are not
-// real-time threads, and an audio workgroup they do not join may run them late, while the caller takes their chunks.
+// Waiting. A pool thread that has taken a seat in a region, or that a caller woke for one, spins on `signal` for
+// kSpinBeforeSleeping, so regions that follow one another closely (two in one block) start at once. Then it sleeps, on
+// a word of its own, its bed (std::atomic::wait: a futex, __ulock on macOS), so that a caller can wake one thread and
+// no other. A region seats `seats` pool threads: the caller counts the threads still awake, which will look at the
+// region themselves, and wakes only as many sleepers as the seats left, the first beds first, a system call each that
+// does not block. It does not wait for them to wake, and starts on its chunks at once, so a region that is over before
+// they are up costs it only those calls. A thread that finds no seat in a region (more were awake than it seats) goes
+// on spinning only for what was left of its time, and sleeps: a region of two iterations keeps one pool thread busy,
+// not every one. On macOS the threads run at the user-interactive quality of service, the highest a thread can ask
+// for; they are not real-time threads, and an audio workgroup they do not join may run them late, while the caller
+// takes their chunks.
+//
+// Sleeping, and waking, on a bed, whose state is kAwake, kAsleep or kWoken (sequentially consistent, as `signal`):
+//
+//   sleep     the thread sets its bed kAsleep, then looks at `signal` again: a region published since it last looked
+//             it joins without sleeping; otherwise it waits while the bed is kAsleep.
+//   wake      the caller bumps `signal`, then looks at the beds: one kAsleep it sets kWoken with a compare-and-swap,
+//             and notifies. Either the caller sees the bed kAsleep and wakes the thread, or the thread, which set it
+//             before looking, sees the new `signal`: no thread sleeps through a region it was counted for.
+//   stop      as wake, for every bed, after `stopping`.
 #include "runtime/Runtime.h"
 
 #include <algorithm>
@@ -42,6 +56,7 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <new>
 #include <thread>
@@ -69,8 +84,14 @@ namespace
     // enough that the compare-and-swap that takes one stays rare.
     constexpr std::int64_t kChunksPerThread = 4;
 
-    // How long a pool thread spins for the next region before it sleeps.
+    // How long a pool thread spins for the next region before it sleeps: from when it last took a seat in one, or was
+    // woken for one.
     constexpr std::chrono::microseconds kSpinBeforeSleeping{50};
+
+    // A bed's states (the top of this file).
+    constexpr std::uint32_t kAwake = 0;    // running, or spinning on `signal`
+    constexpr std::uint32_t kAsleep = 1;   // asleep on the bed, or about to be: a caller may wake it
+    constexpr std::uint32_t kWoken = 2;    // a caller (or the stop) has woken it
 
     // How long the caller spins (pauses) for the last chunks before it yields its core between looks: a thread
     // running one may be waiting for the core.
@@ -113,6 +134,13 @@ namespace
 #endif
     }
 
+    // A pool thread's own word to sleep on, on a cache line of its own, so that a caller wakes the threads it wants
+    // and no others.
+    struct alignas(64) Bed
+    {
+        std::atomic<std::uint32_t> state{kAwake};
+    };
+
     struct Pool
     {
         // The region, as its caller wrote it: read by a pool thread only while it is inside (the top of this file).
@@ -127,11 +155,15 @@ namespace
         std::atomic<std::uint64_t> cursor{kClosed};   // generation << 32 | the next iteration, from begin
         std::atomic<std::int32_t> inside{0};          // pool threads in the region
         std::atomic<std::uint32_t> signal{0};         // bumped for each region (and to stop): what idle threads watch
-        std::atomic<std::int32_t> sleeping{0};        // pool threads asleep on `signal`
         std::atomic<bool> busy{false};                // a caller holds the pool
         std::atomic<bool> stopping{false};
         std::atomic<std::int32_t> workers{0};         // pool threads running, for a caller's look
         std::uint32_t generation = 0;                 // the last region's: the caller holding the pool writes it
+
+        // A bed for each thread the pool may make, made with the pool and never freed: a caller that read `workers`
+        // before a stop looks at beds still there.
+        std::unique_ptr<Bed[]> beds;
+        std::size_t bedCount = 0;
 
         // Under `made` (below): starting and stopping.
         std::vector<std::thread> threads;
@@ -166,18 +198,19 @@ namespace
         }
     }
 
-    // A pool thread's part in the region its caller published, if there is still room in it, and chunks. A thread that
-    // comes when the region is closed already leaves without counting itself, which its caller would wait for.
-    void join(Pool& pool) noexcept
+    // A pool thread's part in the region its caller published, if there is still room in it, and chunks; whether it
+    // took a seat. A thread that comes when the region is closed already leaves without counting itself, which its
+    // caller would wait for.
+    bool join(Pool& pool) noexcept
     {
         if (static_cast<std::uint32_t>(pool.cursor.load(std::memory_order_acquire)) == kClosed)
-            return;
+            return false;
         const std::int32_t before = pool.inside.fetch_add(1, std::memory_order_seq_cst);
         const std::uint64_t cursor = pool.cursor.load(std::memory_order_seq_cst);
         if (static_cast<std::uint32_t>(cursor) == kClosed || before >= pool.seats.load(std::memory_order_relaxed))
         {
             pool.inside.fetch_sub(1, std::memory_order_release);
-            return;
+            return false;
         }
         const fminus_rt_task task = pool.task.load(std::memory_order_relaxed);
         void* context = pool.context.load(std::memory_order_relaxed);
@@ -194,11 +227,12 @@ namespace
         if (own != mode)
             setFloatMode(own);
         pool.inside.fetch_sub(1, std::memory_order_release);   // what the caller's acquire waits for
+        return true;
     }
 
     // A pool thread: waits for a region, joins it, and waits for the next, until the pool stops. `seen` is `signal` as
     // it was when the thread was made: a thread the system runs late, after the pool has stopped, still sees the stop.
-    void work(Pool& pool, std::uint32_t seen) noexcept
+    void work(Pool& pool, Bed& bed, std::uint32_t seen) noexcept
     {
 #if defined(__APPLE__)
         pthread_setname_np("fminus parallel");
@@ -206,10 +240,10 @@ namespace
 #elif defined(__linux__)
         pthread_setname_np(pthread_self(), "fminus parallel");
 #endif
+        auto until = std::chrono::steady_clock::now() + kSpinBeforeSleeping;
         for (;;)
         {
             std::uint32_t now = pool.signal.load(std::memory_order_acquire);
-            const auto until = std::chrono::steady_clock::now() + kSpinBeforeSleeping;
             for (unsigned spins = 1; now == seen; ++spins)
             {
                 pause();
@@ -217,20 +251,49 @@ namespace
                 if (now == seen && spins % 64 == 0 && std::chrono::steady_clock::now() >= until)
                     break;
             }
-            // Asleep. The count goes up before the wait looks at `signal` again, and a caller bumps `signal` before it
-            // looks at the count: so either the caller sees this thread asleep and wakes it, or the wait sees the
-            // region (both sequentially consistent).
+            // Asleep, on the bed (the top of this file): marked before `signal` is looked at again, as a caller bumps
+            // `signal` before it looks at the beds.
+            bool woken = false;
             while (now == seen && !pool.stopping.load(std::memory_order_acquire))
             {
-                pool.sleeping.fetch_add(1, std::memory_order_seq_cst);
-                pool.signal.wait(seen, std::memory_order_seq_cst);
-                pool.sleeping.fetch_sub(1, std::memory_order_seq_cst);
+                bed.state.store(kAsleep, std::memory_order_seq_cst);
+                now = pool.signal.load(std::memory_order_seq_cst);
+                if (now == seen && !pool.stopping.load(std::memory_order_seq_cst))
+                {
+                    bed.state.wait(kAsleep, std::memory_order_seq_cst);
+                    woken = true;
+                }
+                bed.state.store(kAwake, std::memory_order_relaxed);
                 now = pool.signal.load(std::memory_order_acquire);
             }
             if (pool.stopping.load(std::memory_order_acquire))
                 return;
             seen = now;
-            join(pool);
+            // Spinning goes on after a seat, or a wake for one; a thread that found none keeps what time it had left.
+            if (join(pool) || woken)
+                until = std::chrono::steady_clock::now() + kSpinBeforeSleeping;
+        }
+    }
+
+    // Wakes the sleepers a region has seats for, after its caller bumped `signal`: `seats` less the threads awake,
+    // which look at the region themselves; the first beds first, so the same few threads take the small regions.
+    void wake(Pool& pool, std::int32_t workers, std::int32_t seats) noexcept
+    {
+        const std::size_t beds = std::min(static_cast<std::size_t>(workers), pool.bedCount);
+        std::int32_t wanted = seats;
+        for (std::size_t i = 0; i < beds && wanted > 0; ++i)
+        {
+            if (pool.beds[i].state.load(std::memory_order_seq_cst) != kAsleep)
+                --wanted;
+        }
+        for (std::size_t i = 0; i < beds && wanted > 0; ++i)
+        {
+            std::uint32_t asleep = kAsleep;
+            if (pool.beds[i].state.compare_exchange_strong(asleep, kWoken, std::memory_order_seq_cst))
+            {
+                pool.beds[i].state.notify_one();
+                --wanted;
+            }
         }
     }
 } // namespace
@@ -277,8 +340,7 @@ extern "C" void fminus_rt_parallel_for(fminus_rt_task task, void* context, std::
     pool->mode.store(floatMode(), std::memory_order_relaxed);
     pool->cursor.store(std::uint64_t{generation} << 32, std::memory_order_seq_cst);
     pool->signal.fetch_add(1, std::memory_order_seq_cst);
-    if (pool->sleeping.load(std::memory_order_seq_cst) > 0)
-        pool->signal.notify_all();
+    wake(*pool, workers, seats);
 
     // Take chunks too, then close and wait for the last ones.
     inRegion = true;
@@ -299,21 +361,28 @@ extern "C" std::int32_t fminus_rt_parallel_start() noexcept
 {
     const std::lock_guard<std::mutex> lock(made);
     Pool* pool = thePool.load(std::memory_order_relaxed);
+    const unsigned cores = std::thread::hardware_concurrency();
+    const std::size_t wanted = cores > 1 ? cores - 1 : 0;
     if (pool == nullptr)
     {
         pool = new (std::nothrow) Pool;
         if (pool == nullptr)
             return 1;
+        pool->beds.reset(new (std::nothrow) Bed[wanted]);
+        pool->bedCount = pool->beds != nullptr ? wanted : 0;
         thePool.store(pool, std::memory_order_release);
     }
     if (pool->users++ == 0)
     {
-        const unsigned cores = std::thread::hardware_concurrency();
-        const std::size_t wanted = cores > 1 ? cores - 1 : 0;
         try
         {
-            while (pool->threads.size() < wanted)
-                pool->threads.emplace_back(work, std::ref(*pool), pool->signal.load(std::memory_order_acquire));
+            while (pool->threads.size() < pool->bedCount)
+            {
+                Bed& bed = pool->beds[pool->threads.size()];
+                bed.state.store(kAwake, std::memory_order_relaxed);
+                pool->threads.emplace_back(work, std::ref(*pool), std::ref(bed),
+                                           pool->signal.load(std::memory_order_acquire));
+            }
         }
         catch (...)
         {
@@ -338,7 +407,12 @@ extern "C" void fminus_rt_parallel_stop() noexcept
         std::this_thread::yield();
     pool->stopping.store(true, std::memory_order_release);
     pool->signal.fetch_add(1, std::memory_order_seq_cst);
-    pool->signal.notify_all();
+    for (std::size_t i = 0; i < pool->threads.size(); ++i)
+    {
+        Bed& bed = pool->beds[i];
+        if (bed.state.exchange(kWoken, std::memory_order_seq_cst) == kAsleep)
+            bed.state.notify_one();
+    }
     for (std::thread& thread : pool->threads)
         thread.join();
     pool->threads.clear();

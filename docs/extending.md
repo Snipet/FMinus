@@ -3868,10 +3868,17 @@ host's other audio thread). It allocates nothing and takes no lock.
 
 Each pool thread copies the caller's control register (FPCR on arm64, MXCSR on x86-64) while it runs chunks, so an
 iteration computes on any thread what it would on the caller's: flush-to-zero under `Denormals::Flush`, the rounding
-mode, everything. After a region it spins on `signal` for 50 µs, so the next region in the same block starts at once,
-then sleeps on it (`std::atomic::wait`); a caller that finds threads asleep wakes them, a system call that does not
-block, and starts on its chunks without waiting for them. On macOS the threads run at the user-interactive quality of
-service.
+mode, everything. A pool thread that took a seat in a region, or that a caller woke for one, spins on `signal` for
+50 µs, so the next region in the same block starts at once; then it sleeps (`std::atomic::wait`), on a word of its own,
+its bed, so that a caller can wake one thread and no other. A region has `seats` places for pool threads, its
+`threads` less the caller, and no more than its iterations less one. The caller counts the threads still awake, which
+will look at the region themselves, and wakes only as many sleepers as the seats left, the first beds first, so the
+same few threads take the small regions: a system call each, which does not block, and it starts on its chunks
+without waiting for them. A thread that finds no seat (more were awake than the region seats) spins only for what was
+left of its 50 µs, and sleeps. Sleeping and waking meet as joining and closing do: the thread marks its bed asleep and
+then looks at `signal` again; the caller bumps `signal` and then looks at the beds, and wakes a bed marked asleep with
+a compare-and-swap; both sequentially consistent, so either the caller wakes the thread or the thread sees the region.
+The stop wakes every bed the same way. On macOS the threads run at the user-interactive quality of service.
 
 ### What it changes for programs and hosts
 
@@ -3896,7 +3903,10 @@ service.
   region; `Denormals::Flush` flushing on every thread; every error's text and place, and the code that passes. And the
   pool from C++: every chunk once over many ranges, several threads at most `threads` of them, the caller's mode on
   every thread, a region in a region on its own thread, two callers at once, 20,000 small regions, and none of the
-  pool's threads left after the last stop.
+  pool's threads left after the last stop; and, paced as an audio callback runs them with every pool thread asleep
+  before each, that a region of two iterations costs the pool's threads under 150 µs of CPU time (one thread's spin,
+  where waking all of them cost each its 50 µs), and that a region with work for every thread still runs on several
+  (on five threads or more, and not on Windows, which has no POSIX clocks).
 - `tests/library/ParallelTest.cpp`: `Program::compile` of a synth whose nonblocking `process` has a `parallel for` and
   a `parallel { }`, with a knob and a stream, against `threads = 1`, bit for bit; two Programs run from two threads at
   once, three times over.
@@ -3919,6 +3929,21 @@ The voices scale with the performance cores, and less with the efficiency cores,
 regions are the cost of the synchronisation alone, which grows with the threads that take part: a chunk's
 compare-and-swap and the count of who is inside travel between the cores' caches. It depends on where the system puts
 the threads, too: a run whose two or four threads all landed on one cluster's cores took 0.09 s.
+
+Paced as an audio callback runs them, one region every 1,333 µs (64 samples at 48 kHz), so that every pool thread
+sleeps before each: a host of the runtime alone, 2,000 regions a run, three runs of each (two of the four-iteration
+one), on an M5 under a load average of about 130 from other builds. Before, a caller woke every sleeping thread for
+every region, and each spun its 50 µs after it, whether it found a seat or not; now it wakes only those the region
+seats:
+
+| Region | The pool's CPU a block, before | now | The caller's time in it (median), before | now |
+|---|---|---|---|---|
+| 2 iterations of 5 µs (one seat) | 519 to 534 µs | 60 µs | 18 to 19 µs | 8 to 10 µs |
+| 4 iterations of 10 µs (three seats) | 519 to 539 µs | 192 µs | 24 to 25 µs | 18 to 20 µs |
+| 16 iterations of 20 µs (nine seats, every thread) | 575 to 595 µs | 593 to 622 µs | 53 to 100 µs | 61 to 70 µs |
+
+A region that seats every thread wakes them as before, with a system call each where one woke them all; within this
+machine's noise, it costs the same.
 
 ## Pitfalls
 

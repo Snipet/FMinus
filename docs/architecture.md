@@ -527,6 +527,6 @@ tree's tools, examples and tests use the stages directly, through `FMinus::Inter
   what would race, and `main` returns a `float` or a `bool` and takes floats. As in C11 under clang, a loop whose
   condition is not a constant may be assumed to end, and a heap block the program never uses may be removed.
 - **The runtime stays free of LLVM and real-time safe.** It runs inside the audio thread's call tree. The pool's
-  `fminus_rt_parallel_for` is too: it waits for nothing but the chunks it handed out, never for the pool, and its one
-  system call wakes threads without blocking; making and joining threads is `fminus_rt_parallel_start`'s and
-  `_stop`'s, off the audio thread.
+  `fminus_rt_parallel_for` is too: it waits for nothing but the chunks it handed out, never for the pool, and its
+  system calls, one for each sleeping thread the region has a seat for, wake threads without blocking; making and
+  joining threads is `fminus_rt_parallel_start`'s and `_stop`'s, off the audio thread.
