@@ -911,7 +911,8 @@ namespace circuits
                              static_cast<int>(i));
                 }
                 r.line(poisonedUntil && std::isfinite(readFloat(again.get(), x)),
-                       std::format("x_C1 stays NaN from tick {} to the guard's check at tick {}, and is finite after it",
+                       std::format("x_C1 stays NaN from tick {} to the guard's check at tick {}, and is finite "
+                                   "after it",
                                    poisoned, reset));
                 std::string differ;
                 for (const fminus::Program::Module::Field& f : c->module->fields)
@@ -948,7 +949,8 @@ namespace circuits
                 std::size_t differ = 0;
                 for (std::size_t i = 0; i < n; ++i)
                     differ += std::memcmp(&parts[i], &one[i], sizeof(float)) != 0 ? 1 : 0;
-                r.line(differ == 0, std::format("calls of {}: {} of {} samples differ from calls of 1", call, differ, n));
+                r.line(differ == 0,
+                       std::format("calls of {}: {} of {} samples differ from calls of 1", call, differ, n));
             }
             // .channels 2: a NaN in one lane resets both
             {
@@ -968,8 +970,8 @@ namespace circuits
                 bool same = true;
                 for (std::size_t i = reset; i < n; ++i)
                     same = same && ya[i] == one[i] && yb[i] == one[i];
-                r.line(same, "float2: a NaN in x_C1's second lane resets both lanes at the same tick: from it, each lane "
-                             "is the scalar module's after its reset, bit for bit");
+                r.line(same, "float2: a NaN in x_C1's second lane resets both lanes at the same tick: from it, each "
+                             "lane is the scalar module's after its reset, bit for bit");
             }
         }
 
@@ -1006,7 +1008,8 @@ namespace circuits
         Report r;
         generation(r);
         dc(r);
-        const Figures dt = gates(r, "as shipped", netlist("diodetone.cir"), "diodetone.cir", "tone", {-93.7, -79.8, -0.08});
+        const Figures dt =
+            gates(r, "as shipped", netlist("diodetone.cir"), "diodetone.cir", "tone", {-93.7, -79.8, -0.08});
         const Figures ts =
             gates(r, "as shipped", netlist("screamer-clip.cir"), "screamer-clip.cir", "drive", {-81.2, -75.1, -0.06});
         // Phase 0's defaults, now the provisional configuration: the netlists without their configuration lines
@@ -1016,10 +1019,10 @@ namespace circuits
                 text = withDirective(text, d, "");
             return text;
         };
-        gates(r, "on Phase 0's defaults", defaults(netlist("diodetone.cir")), "diodetone.cir", "tone",
+        gates(r, "provisional (Phase 0's defaults)", defaults(netlist("diodetone.cir")), "diodetone.cir", "tone",
               {-97.0, -113.9, -0.02});
-        gates(r, "on Phase 0's defaults", defaults(netlist("screamer-clip.cir")), "screamer-clip.cir", "drive",
-              {-94.4, -72.9, -0.00});
+        gates(r, "provisional (Phase 0's defaults)", defaults(netlist("screamer-clip.cir")), "screamer-clip.cir",
+              "drive", {-94.4, -72.9, -0.00});
         chain(r);
         decision(r);
         halfbands(r);

@@ -184,7 +184,8 @@ namespace circuits
         {
             const int count = std::min(size, n - start);
             const auto s = static_cast<std::size_t>(start);
-            c.ticks(self.get(), in.data() + s, nullptr, potBuffer.data() + s * p, nullptr, out.data() + s, count, start);
+            c.ticks(self.get(), in.data() + s, nullptr, potBuffer.data() + s * p, nullptr, out.data() + s, count,
+                    start);
         }
         return {out.begin(), out.end()};
     }

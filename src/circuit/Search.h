@@ -250,8 +250,8 @@ namespace fminus::circuit
     // The directives that pin a choice's open dimensions: ".oversample 4, .adaa on, .solver omega(1)".
     std::string directivesOf(const Config& open, const Choice& choice);
 
-    // The steps a stage takes: the 64x references (a unit T2 reads); one configuration's T1 references; one candidate's runs (its steps
-    // and its ticks, each oversample x the host's samples).
+    // The steps a stage takes: the 64x references (a unit T2 reads); one configuration's T1 references; one
+    // candidate's runs (its steps and its ticks, each oversample x the host's samples).
     std::int64_t steps64(const StressMatrix& matrix);
     std::int64_t stepsT1(const StressMatrix& matrix, int oversample);
     std::int64_t stepsCandidate(const StressMatrix& matrix, int oversample);

@@ -46,8 +46,9 @@ namespace fminus::circuit
             if (o.chosen)
             {
                 const Choice& c = *o.chosen;
-                const bool hex = c.key.size() == 16 && std::all_of(c.key.begin(), c.key.end(), [](char k)
-                                                                   { return (k >= '0' && k <= '9') || (k >= 'a' && k <= 'f'); });
+                const bool hex =
+                    c.key.size() == 16 && std::all_of(c.key.begin(), c.key.end(), [](char k)
+                                                      { return (k >= '0' && k <= '9') || (k >= 'a' && k <= 'f'); });
                 if (!hex)
                     fail("Options::chosen's key '" + c.key + "' is not 16 hex digits");
                 if (c.oversample != 1 && c.oversample != 2 && c.oversample != 4 && c.oversample != 8)

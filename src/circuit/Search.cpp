@@ -97,8 +97,8 @@ namespace fminus::circuit
 
         bool isKey(std::string_view key)
         {
-            return key.size() == 16 &&
-                   std::all_of(key.begin(), key.end(), [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); });
+            return key.size() == 16 && std::all_of(key.begin(), key.end(),
+                                                   [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); });
         }
     } // namespace
 
@@ -384,8 +384,9 @@ namespace fminus::circuit
         const std::vector<double> y = simulateChain(chain, signalSamples(matrix, signal, factor, n), o, &stats);
         if (stats.stopped)
             return r;
-        const std::span<const double> window = std::span<const double>(y).subspan(
-            static_cast<std::size_t>(factor) * matrix.shape.warm, static_cast<std::size_t>(factor) * matrix.shape.window);
+        const auto rate = static_cast<std::size_t>(factor);
+        const std::span<const double> window =
+            std::span<const double>(y).subspan(rate * matrix.shape.warm, rate * matrix.shape.window);
         r.h1 = binMagnitude(window, signal.bin);
         r.h3 = binMagnitude(window, 3 * signal.bin);
         r.power = bandPower(decimateWindow(y, factor, matrix.shape.warm, matrix.shape.window));
@@ -430,7 +431,8 @@ namespace fminus::circuit
         UnitVerdict v;
         v.ran = true;
         const auto isFinite = [](double x) { return std::isfinite(x); };
-        v.finite = std::all_of(steps.begin(), steps.end(), isFinite) && std::all_of(ticks.begin(), ticks.end(), isFinite);
+        v.finite =
+            std::all_of(steps.begin(), steps.end(), isFinite) && std::all_of(ticks.begin(), ticks.end(), isFinite);
         if (!v.finite)
             return v;
         const StressSignal& signal = matrix.signal(unit);
@@ -581,10 +583,12 @@ namespace fminus::circuit
         std::vector<Candidate> out;
         if (!c.anyOpen())
             return out;
-        const std::vector<int> factors = c.oversampleOpen ? std::vector<int>{1, 2, 4, 8} : std::vector<int>{c.oversample};
+        const std::vector<int> factors =
+            c.oversampleOpen ? std::vector<int>{1, 2, 4, 8} : std::vector<int>{c.oversample};
         const std::vector<bool> adaas = c.adaaOpen ? std::vector<bool>{false, true} : std::vector<bool>{c.adaa};
-        const std::vector<Solver> solvers = c.solverOpen ? std::vector<Solver>{{Solver::Guess::Omega, 1}, {Solver::Guess::Omega, 2}}
-                                                         : std::vector<Solver>{c.solver};
+        const std::vector<Solver> solvers = c.solverOpen
+                                                ? std::vector<Solver>{{Solver::Guess::Omega, 1}, {Solver::Guess::Omega, 2}}
+                                                : std::vector<Solver>{c.solver};
         for (int os : factors)
         {
             for (bool adaa : adaas)
@@ -599,7 +603,8 @@ namespace fminus::circuit
 
     void orderCandidates(std::vector<Candidate>& out)
     {
-        std::stable_sort(out.begin(), out.end(), [](const Candidate& a, const Candidate& b) { return a.cost < b.cost; });
+        std::stable_sort(out.begin(), out.end(),
+                         [](const Candidate& a, const Candidate& b) { return a.cost < b.cost; });
         // within 5 % of the cheapest of a group: ADAA first, then fewer Newton steps
         for (std::size_t i = 0; i < out.size();)
         {

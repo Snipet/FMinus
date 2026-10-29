@@ -1,8 +1,8 @@
 // examples/circuits/harness.h: what example-circuits' three modes (--check, --tables, the cost table) share: the
 // example's netlists, a generated module compiled through fminus::Program with the self-test's runners appended
-// (src/circuit/Runners.h: fm_steps, the oversampled region's step over a buffer; fm_ticks, tick over a buffer with set()
-// on the absolute 16-sample grid from a pot buffer: one call a run, testing.md's rule), and the double reference of a
-// plan's blocks (src/circuit/Reference.h).
+// (src/circuit/Runners.h: fm_steps, the oversampled region's step over a buffer; fm_ticks, tick over a buffer with
+// set() on the absolute 16-sample grid from a pot buffer: one call a run, testing.md's rule), and the double reference
+// of a plan's blocks (src/circuit/Reference.h).
 #pragma once
 
 #include "circuit/Analysis.h"

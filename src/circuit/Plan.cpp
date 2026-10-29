@@ -87,7 +87,8 @@ namespace fminus::circuit
         return std::format("{:016x}", fnv1a(keyText(netlist, options)));
     }
 
-    std::string configurationText(int oversample, Halfband halfband, bool adaa, const Solver& solver, bool withHalfband)
+    std::string configurationText(int oversample, Halfband halfband, bool adaa, const Solver& solver,
+                                  bool withHalfband)
     {
         std::string text = std::to_string(oversample) + "x";
         if (withHalfband)

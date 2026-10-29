@@ -188,7 +188,8 @@ namespace fminus::circuit
     std::string keyOf(const Netlist& netlist, const Options& options);
 
     // A configuration as the notes give it: "8x IIR, ADAA, omega(1)" (`halfband`: with the halfbands' kind).
-    std::string configurationText(int oversample, Halfband halfband, bool adaa, const Solver& solver, bool withHalfband);
+    std::string configurationText(int oversample, Halfband halfband, bool adaa, const Solver& solver,
+                                  bool withHalfband);
 
     // Names a pot or an input may not take: FMinus's keywords and builtins, and the names the module uses.
     bool isReservedName(std::string_view name);

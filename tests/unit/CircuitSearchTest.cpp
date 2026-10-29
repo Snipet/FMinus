@@ -1,5 +1,5 @@
-// tests/unit/CircuitSearchTest.cpp: the circuit compiler's self-test (src/circuit/Search.h, src/api/CircuitSelfTest.cpp):
-// the candidates' cost-model order, the ordered search and the no-configuration choice on stub measures, the key, a
+// tests/unit/CircuitSearchTest.cpp: the circuit compiler's self-test (src/circuit/Search.h,
+// src/api/CircuitSelfTest.cpp): the candidates' cost-model order, the ordered search and the no-configuration choice on stub measures, the key, a
 // Choice's text and what generate makes of one, and the self-test itself, run through the JIT on a small stress shape:
 // its answer the same for any number of threads, its cancel and its budget.
 #include "api/CircuitSelfTest.h"
@@ -354,8 +354,8 @@ TEST_CASE("a Choice's text, and what generate makes of one", "[circuit]")
     options.chosen = eight;
     const fc::Result kept = fc::generate(two, "diodetone.cir", options);
     REQUIRE(kept.errors.empty());
-    CHECK(kept.configuration.rfind("configuration: .oversample 2 (the netlist); .adaa on, .solver omega(1) (the self-test",
-                                   0) == 0);
+    CHECK(kept.configuration.rfind(
+              "configuration: .oversample 2 (the netlist); .adaa on, .solver omega(1) (the self-test", 0) == 0);
     CHECK(kept.source.find("at 2 rate") != std::string::npos);
     // a malformed answer is an error of the Options
     fc::Choice bad = four;

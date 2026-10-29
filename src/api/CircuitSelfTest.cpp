@@ -1,6 +1,6 @@
-// src/api/CircuitSelfTest.cpp: fminus::circuit::selfTest (include/fminus/Circuit.h), the part of the circuit compiler's
-// self-test that needs the JIT, so it lives in fminus_lib rather than fminus_circuit. It plans the netlist, then runs the
-// search of src/circuit/Search.h: the shared references first (the 64x chain for each unit T3 reads; the converged
+// src/api/CircuitSelfTest.cpp: fminus::circuit::selfTest (include/fminus/Circuit.h), the part of the circuit
+// compiler's self-test that needs the JIT, so it lives in fminus_lib rather than fminus_circuit. It plans the netlist,
+// then runs the search of src/circuit/Search.h: the shared references first (the 64x chain for each unit T3 reads; the converged
 // region at each rate, ADAA and integrator a candidate needs, for T1), then each candidate in order, generated with
 // Options::chosen, compiled here through fminus::Program (on the calling thread, as the report's bench compiled them:
 // Math::Vector, subnormals flushed, one thread, -O2) with the runners appended (src/circuit/Runners.h), and run on
@@ -213,8 +213,8 @@ namespace fminus::circuit
                     used += need;
                     return true;
                 }
-                notes.note({}, std::format("the self-test stops before {}: it needs {} steps more, and {} of its budget "
-                                           "of {} are spent; no answer",
+                notes.note({}, std::format("the self-test stops before {}: it needs {} steps more, and {} of its "
+                                           "budget of {} are spent; no answer",
                                            what, need, used, budget));
                 return false;
             };
@@ -278,7 +278,8 @@ namespace fminus::circuit
                 const std::vector<ReferenceT1>& refs = t1.at(key);
                 if (cancelled())
                     return std::nullopt;
-                if (!afford(stepsCandidate(matrix, c.oversample), "candidate " + std::to_string(index) + ", " + c.text()))
+                const std::string name = "candidate " + std::to_string(index) + ", " + c.text();
+                if (!afford(stepsCandidate(matrix, c.oversample), name))
                 {
                     overBudget = true;
                     return std::nullopt;
@@ -317,7 +318,8 @@ namespace fminus::circuit
                         const std::vector<float> in = floats(signalSamples(matrix, signal, 1, host));
                         std::vector<float> potBuffer(host * pots);
                         for (std::size_t i = 0; i < host; ++i)
-                            std::copy(potValues.begin(), potValues.end(), potBuffer.begin() + static_cast<long>(i * pots));
+                            std::copy(potValues.begin(), potValues.end(),
+                                      potBuffer.begin() + static_cast<long>(i * pots));
                         std::vector<float> ticksOut(host);
                         Instance self(*compiled.module);
                         compiled.init(self.get(), static_cast<float>(kHostRate));
