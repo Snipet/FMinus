@@ -8,8 +8,9 @@
 | [simd.md](simd.md) | SIMD, in detail: the hardware and LLVM's vector model, then the three recipes that are FMinus's SIMD, a guide to their code: `float2`/`float4`/`float8` (OpenCL C's vectors), a vector math library (now the fast math mode), and `poly float`, a vector as wide as the machine's; scalable vectors (SVE), the auto-vectorisers, pitfalls, next steps |
 | [building.md](building.md) | Presets, the dependency cache and LLVM flavors, adding sources, tools, examples, tests and dependencies, warnings and sanitizers, Windows, troubleshooting |
 | [testing.md](testing.md) | The test layers (Catch2, lit + FileCheck, example harnesses, which call a block kernel once) and how to write each; inspecting and debugging the compiler's output with `fminus`, `opt`, `llc`, `llvm-mca` and lldb |
+| [circuits.md](circuits.md) | The circuit compiler, Phase 0 as built: SPICE-style netlists (`.cir`) to FMinus modules (`fminus x.cir --emit fm`, `#include "x.cir"`, `fminus::circuit::generate`), the netlist subset, the generated module, the configuration and why, how it computes, and the checks that reproduce the research's tables and costs |
 | [recipes/](recipes/) | the recipes that aren't in the compiler (a runtime function, a pass), as a patch |
-| [research/analog-circuits/](research/analog-circuits/README.md) | Research, not a feature: a compiler from SPICE-style netlists to FMinus source for analog circuits (pedals, synth filters), its methods, solvers, antialiasing and costs measured on FMinus at `c75caab`, with the four notes it draws on and the experiments' sources |
+| [research/analog-circuits/](research/analog-circuits/README.md) | The research behind it: a compiler from SPICE-style netlists to FMinus source for analog circuits (pedals, synth filters), its methods, solvers, antialiasing and costs measured on FMinus at `c75caab`, with the four notes it draws on and the experiments' sources. Its Phase 0 is built: [circuits.md](circuits.md) |
 
 To grow the language, read architecture.md, then extending.md, then simd.md. Use building.md and testing.md as
 reference. To write programs in it, read programs.md.

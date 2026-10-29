@@ -5,7 +5,8 @@ The sources of the experiments that [An analog circuit compiler for FMinus](../R
 2026-10-29: not part of FMinus's build (no CMake reaches `docs/`), not wrapped to FMinus's 120 columns, not tested. The
 C++ needs only the standard library, except `fmbench.cpp`, a host of FMinus's C++ API (below); the FMinus programs ran
 on FMinus at `c75caab`, or on the 2026-10-23 build where [fminus.md](../notes/fminus.md#61-what-the-experiments-show)
-says so.
+says so. One exception to "not tested": FMinus's suite now compiles [`ex1c.fm`](ex1c.fm) and [`ts2.fm`](ts2.fm) beside
+the modules the circuit compiler generates (`tests/lit/circuit/equiv-*.fm`), so an edit of either can fail it.
 
 ## Running them
 

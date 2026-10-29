@@ -1,8 +1,8 @@
 # Circuits: SPICE netlists as FMinus modules
 
 The circuit compiler's example ([docs/circuits.md](../../docs/circuits.md)): the netlists of the report
-([docs/research/analog-circuits/README.md](../../docs/research/analog-circuits/README.md)), and `example-circuits`, which
-checks the modules `fminus::circuit` generates from them against the report's targets, and reprints the report's
+([docs/research/analog-circuits/README.md](../../docs/research/analog-circuits/README.md)), and `example-circuits`,
+which checks the modules `fminus::circuit` generates from them against the report's targets, and reprints the report's
 accuracy and cost tables from emitted code.
 
 | Netlist | What | Configuration |
@@ -13,10 +13,10 @@ accuracy and cost tables from emitted code.
 | `clipper.cir` | Yeh's RC diode clipper, the circuit of fminus.md's Tables 1 to 3 | Phase 0's defaults: 8x IIR, plain omega3 + 2 steps |
 
 ```bash
-build-dev/bin/fminus examples/circuits/diodetone.cir --emit fm      # the generated module
-build-dev/bin/example-circuits --check                               # the targets T1-T4 and the rest (ctest's run)
-build-dev/bin/example-circuits --tables                              # report §5.2's table, fminus.md's Tables 1-3 (minutes)
-build-dev/bin/example-circuits                                       # the cost table (on a quiet machine)
+build-dev/bin/fminus examples/circuits/diodetone.cir --emit fm   # the generated module
+build-dev/bin/example-circuits --check                            # the targets T1-T4 and the rest (ctest's run)
+build-dev/bin/example-circuits --tables                           # report §5.2's table, fminus.md's Tables 1-3
+build-dev/bin/example-circuits                                    # the cost table (on a quiet machine)
 build-dev/bin/example-circuits --all --only adaa --reps 7 --samples 1000000 --math fast
 ```
 

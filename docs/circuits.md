@@ -1,0 +1,307 @@
+# Circuits: SPICE netlists to FMinus modules (Phase 0, as built)
+
+`fminus::circuit` turns a SPICE-style netlist (a `.cir` file) into the text of one FMinus module, which compiles like
+any other source. It is Phase 0 of the analog circuit compiler that
+[research/analog-circuits/](research/analog-circuits/README.md) proposes (its §11): the 1-port generator, both of the
+report's examples through `fminus --emit fm`, and the report's accuracy and cost tables reprinted from emitted code.
+This page says what it does, how to use it, what it decided where the design left a choice or the code proved the design
+wrong, and what is not built yet.
+
+## Status
+
+- **Built:** netlists of resistors, capacitors, pots, ideal op amps and antiparallel diode pairs, cut into blocks at the
+  op amps; each block's equations (modified nodal analysis, trapezoidal companions, the diode pair as one nonlinear port
+  in Holters' form) eliminated with a pivot order fixed at generation and printed as straight-line float code; the
+  closed-form omega3 guess with fixed Newton steps; Holters' antiderivative antialiasing (ADAA); IIR or FIR halfband
+  oversampling of the region that needs it; `.channels 2`.
+- **Checked:** the parser, the plan and the equations against hand derivations, Yeh's eq. 24 and textbook responses
+  (`tests/unit/CircuitTest.cpp`); the emitted coefficients against the double derivation, every configuration compiling
+  nonblocking (`tests/unit/CircuitEmitTest.cpp`); the text, the driver and the equivalence with the research's
+  hand-written modules (`tests/lit/circuit/`); the report's targets on its full stress set, through the JIT
+  (`example-circuits --check`).
+- **Not built:** Phase 1 and later, at the end of this page.
+
+## Use
+
+```bash
+build-dev/bin/fminus examples/circuits/diodetone.cir --emit fm        # the generated module
+build-dev/bin/fminus examples/circuits/diodetone.cir                  # compiled, as that text would be (--emit ll)
+build-dev/bin/fminus play.fm -I examples/circuits --run dc 1          # a program that does #include "diodetone.cir"
+```
+
+`fminus` reads a `.cir` input (any case) as the text the circuit compiler generates from it: `--emit fm` prints that
+text (to `-o`), and `--emit ll`, `asm`, `ast`, `obj` and `--run` compile it, with FMinus's messages citing
+`<file>.cir.fm`, the lines `--emit fm` prints. An `#include "x.cir"` generates too: the file is read as `x.cir.fm`,
+once. The circuit compiler's errors and warnings go to stderr, as clang words them (`pedal.cir:7:1: error: ...`), and an
+error stops `fminus` before FMinus's own messages. `--emit fm` on anything but a `.cir` is an error.
+
+From C++, `include/fminus/Circuit.h` (C++17, no LLVM; a host links `FMinus::FMinus`):
+
+```cpp
+const fminus::circuit::Result result = fminus::circuit::generate(netlist, "pedal.cir");
+if (!result.errors.empty())
+    return report(result.errors);                        // "pedal.cir:7:1: error: ..."
+auto program = fminus::Program::compile(result.source, errors);
+```
+
+`Result` also holds `warnings`, `notes` (the plan: each block, its rate and solver, the latency), `module` (its name)
+and `pots` (`set()`'s arguments, in order). `Options` override the netlist's directives. `generate()` is pure and
+deterministic (the same text and options give the same `Result`, byte for byte, on any machine), safe on any thread,
+and allocates: call it off the audio thread. A host that serves `#include` itself generates in its resolver, as the
+playground would:
+
+```cpp
+options.include = [&](std::string_view name, std::string_view from) -> std::optional<fminus::Program::IncludedFile> {
+    std::optional<std::string> text = readFile(name, from);              // the host's files
+    if (!text)
+        return std::nullopt;
+    if (name.size() < 4 || name.substr(name.size() - 4) != ".cir")
+        return fminus::Program::IncludedFile{std::string(name), *text};
+    const fminus::circuit::Result r = fminus::circuit::generate(*text, name);
+    circuitErrors += r.errors;                                           // the resolver cannot report them itself
+    return fminus::Program::IncludedFile{std::string(name) + ".fm", r.source};
+};
+```
+
+`tests/library/CircuitTest.cpp` does this; `examples/circuits/` has the report's netlists.
+
+## The netlist
+
+A hand-written line scanner reads it (`src/circuit/Netlist.cpp`): SPICE is line-oriented, with continuations,
+case-folding and unit suffixes, which Flex and Bison fit poorly.
+
+- **Lines.** A line whose first non-blank character is `*` is a comment, and `;` starts one anywhere. A line starting
+  with `+` continues the one before; every token keeps its own line and column. `.end` stops reading. There is no
+  implicit title line. Element kinds, directives, models, nodes, parts and pots compare without case and are spelled as
+  first written. `0` and `gnd` are ground.
+- **Numbers.** `[+-]digits[.digits][e[+-]digits][suffix][letters]`: suffixes `t g meg k m u n p f` (`meg` before `m`),
+  trailing letters ignored (`10nF`, `2.2kohm`, `-60dB`). `1M` is milli, as in SPICE: an R or P value under 1 ohm written
+  with `m` or `M` warns `'1M' is 1 milliohm in SPICE; write 1meg for a megohm`.
+- **Expressions** `{...}` over the pots: numbers, pot names, `+ - * /`, unary minus, `( )`, and `^` with an integer
+  exponent 0 to 8 (`-x^2` is `-(x^2)`; `^` prints as repeated products). They evaluate in double and print as FMinus
+  over the clamped pots. One that names no pot is a constant.
+
+| Element | Meaning |
+|---|---|
+| `R<name> n+ n- value` | a resistor (positive); `R<name> n+ n- {expr}` one whose resistance is the expression of pots |
+| `C<name> n+ n- value` | a capacitor: a trapezoidal companion, `gc = 2 C fs'`, its history injected into n+ and drawn from n- |
+| `D<name> anode cathode model` | a diode: it must pair with an antiparallel twin of the same model, the pair one port, `i = 2 IS sinh(v / N Vt)` |
+| `P<name> e1 w e2 value {expr} [taper=...]` | a pot: `R(e1-w) = (1 - t) value`, `R(w-e2) = t value` |
+| `P<name> a b value {expr} [taper=...]` | a rheostat: `R = t value` |
+| `X<name> inp inn out opamp` | an ideal op amp (a nullor): `V(inp) = V(inn)`, any output current, no input current |
+
+`t = taper(clamp01(expr))`: `lin` x; `audio` (81^x - 1) / 80, emitted as `(expf(4.394449f * x) - 1) * 0.0125f`; `rlog`
+1 - audio(1 - x). The taper is the P line's `taper=`, else the `.pot`'s word when `{expr}` is that pot alone, else lin
+(a warning when both are given and differ). L, V, I, E, F, G, H, Q, J, M, S, K, T and B elements, and `opamp(...)`
+parameters, are refused: "the inductor L1 is not supported yet (Phase 1)".
+
+| Directive | Meaning |
+|---|---|
+| `.title NAME` | the module's name (default: the file's stem, its first letter capitalised) |
+| `.input NAME node [scale=x]` | exactly one: a voltage source from node to ground; sample 1.0 is `scale` volts; tick's argument |
+| `.output NAME node [scale=x]` | exactly one: tick returns V(node) / scale; the last block must compute it |
+| `.pot NAME [default] [lin\|audio\|rlog]` | `set()`'s arguments, in this order (default 0.5); an unused pot warns |
+| `.model NAME D(IS=x N=x ...)` | a diode model: IS (1e-14) and N (1); RS other than 0 is an error (Phase 1); CJO, TT, BV, IBV, M, VJ, EG, XTI, FC, KF and AF warn "ignored" |
+| `.oversample 1\|2\|4\|8\|auto [iir\|fir] [blocks=auto\|nonlinear\|all]` | the oversampling factor, the halfbands, and which blocks run oversampled |
+| `.adaa on\|off\|auto` | Holters' first-order ADAA on the port |
+| `.solver omega\|omega(K)\|newton(K)\|auto` | the port's solver: the omega3 guess or the previous step's solution, then K Newton steps |
+| `.channels 1\|2` | 2: tick and step take and return `float2`s |
+| `.method tr` | the integrator; `bdf2` and `be` are Phase 1 |
+| `.target [solver=xdB] [alias=xdB] [level=xV] [freq=xHz]` | echoed in the header; `examples/circuits` checks against it |
+
+`.op` warns that it is ignored (Phase 1: the DC operating point); SPICE's simulator directives (`.tran`, `.ac`,
+`.print`, ...) are ignored with a note; `.subckt`, `.param`, `.include`, `.lib`, `.options`, `.temp`, `.ic`, `.nodeset`
+and `.func` are errors, as is any other directive. `auto` in `.oversample`, `.adaa` and `.solver` resolves to Phase 0's
+default, with a note.
+
+**Checks**, with the report's wording: a node with one connection; a node that reaches ground only through capacitors
+("its DC voltage is undefined (add 10meg to ground)"); an unknown model (with the list); a diode without an
+antiparallel partner, or a pair of different models; an op amp without negative feedback, or whose output is driven
+twice or is `.input`'s node; two nonlinear ports in a block (Phase 1); a feedback loop that crosses blocks; a block that
+reads two inputs or none, or that is off the chain from `.input` to `.output`; a singular block ("its equations are
+singular at drive=0, 44.1 kHz: an op amp without negative feedback, or a node cut off from the rest"); pot and input
+names that are FMinus keywords, builtins or names the module uses (`set`, `tick`, `b2`, `p`, `v`, `ua`, ...).
+
+## The module
+
+```c
+module DiodeTone                     // .title
+{
+    void init(float rate)            // the host's rate; every state at 0 V (no bias in Phase 0); the pots' defaults
+    void set(float tone)             // the pots, 0 to 1, in .pot order (clamped): on the absolute 16-sample grid
+    float tick(float u)              // one host sample: .input's volts to .output's
+    float step(float u)              // one step of the oversampled region (absent if there is none)
+    void clear()                     // back to 0 V
+    void b1_set(float tone)          // block 1's coefficients, from its pots
+    float b1(float u)                // one step of block 1 at its rate
+    void hb1_up(float x, float* restrict o)   float hb1_down(float v0, float v1)   // the halfbands
+};
+```
+
+- **Names.** States `x_<C>` (C's trapezoidal state); with ADAA `xo_<C>`, `uo_<input>`, `p_<D>` and `c_<D>`; the port's
+  last voltage `v_<D>` (always stored: the previous-solution guess, ADAA's v(n-1), what `trace` reads); rates `gc_<C>` =
+  2 C fs' and `g2_<C>` = 2 gc; coefficients `<readout>_by_<source>` (`p_D1_by_x_C1`, `n_b_by_v_D1`, `vc_C3_by_n_p1`) and
+  `ka_`, `kb_`, `lna_`, `kc_<D>`; halfband state `hb<s>u_*` and `hb<s>d_*`; the region's samples `os1`, `os2_0`, ...
+  Characters outside `[A-Za-z0-9_]` in part and node names become `_`.
+- **Layout.** It depends on the netlist and the options only, never on a pot's value or `.pot` default, so a frozen copy
+  of a program keeps its layout.
+- **Rates.** Region blocks run at oversample x the rate, the others at the host's; an ADAA port block is designed at
+  2/3 of its rate (Holters 2020). Rate factors (`gc_`, `g2_`) are init's; a block's coefficients are its
+  `b<N>_set`'s, or init's when it has no pots.
+- **The region** is one run of the block chain, through one up and one down halfband chain: `blocks=nonlinear` the
+  first to last nonlinear block, `all` every block, `auto` (the default) those widened to every linear block that fails
+  the 1x check: its trapezoidal response `H(j 2 fs tan(pi f / fs))` against the analog `H(j 2 pi f)`, at 44.1 kHz, over
+  20 Hz-20 kHz in 1.01x steps at each point of its pot grid, counting only within 40 dB of the maximum, fails above
+  0.5 dB (T3's tolerance). The Tube Screamer's tone block (13.4 dB off at 44.1 kHz, 0.38 dB at 4x) joins the region;
+  its two 15.9 Hz and 1.6 Hz high-passes stay at 1x. A linear-only netlist runs at 1x, with a warning naming its error.
+- **Latency** of the IIR halfbands' round trip at 1 kHz: 2.7, 3.5 and 3.8 host samples at 2x, 4x and 8x (the phase is
+  not linear); of the FIR's, 40, 47 and 49.5; ADAA adds 0.5 / oversample. The header prints it. (The report's 3.2 / 4.3
+  / 4.7 for the IIR count each decimator's group delay without the half high-rate sample its polyphase structure
+  advances by: `tests/unit/CircuitTest.cpp` measures both.)
+- **Determinism.** Straight-line float code with fixed step counts: the output never depends on how a host splits its
+  blocks, and `set()` belongs on the absolute 16-sample grid (`example-circuits --check`, h).
+
+### DC
+
+A Phase 0 circuit has no bias: every state starts and clears to 0 V. The DC output is where the solver's fixed point
+lands, which is not exactly the circuit's DC point:
+
+| Example 1, tone 1, DC in | plain omega3 + 2 steps at 4x (as shipped) | ADAA, omega3 + 1 step at 4x | exact |
+|---|---|---|---|
+| 0.1 V | 0.0999503 | 0.0999503 | 0.0999503 |
+| 1 V | 0.5155959 | 0.5156211 | 0.5155961 |
+| 5 V | 0.6154355 | 0.61540 to 0.61566 (does not settle) | 0.6154227 |
+
+With ADAA and one Newton step, the mean of ADAA switches to the midpoint ½ (v(n) + v(n-1)) when |p(n) - p(n-1)| falls
+under 1e-5 V. The midpoint carries the step's first-order error (about 1 mV at 5 V), while the closed form is exact to
+second order. At high DC levels the two disagree by more than the switch can settle, and the output wanders by about
+0.2 mV around a mean near the exact root; float and double wander apart. A Newton step more (or no ADAA) removes it.
+`example-circuits --check` (b) shows both, and `tests/lit/circuit/run.test` pins the shipped values.
+
+## Configuration, and why
+
+The defaults are Phase 0's for a 1-port exp-affine block (the only kind Phase 0 has): **8x, IIR halfbands, no ADAA,
+omega3 + 2 Newton steps**, `blocks=auto`, one channel. `.adaa on` without `.solver` takes omega3 + 1 step. `Options`
+override the netlist's directives, which override the defaults; the header records where each choice came from.
+
+The design set ADAA at 4x with omega3 + 1 step as the default (the report's §5.2 measured it best on the TS). On
+report §2's full stress set it fails T3 on example 1: H3 droops 0.57 dB at 0.3 V, 3 kHz, tone 0 (the converged double
+ADAA reference shows the same; the report measured three cases, -0.24 dB at worst). Plain omega3 + 2 at 4x passes
+example 1 but fails T2 on the TS (-53.3 dB, the report's -53.6). 8x plain omega3 + 2 meets T1-T4 on both blocks' stress
+sets (`example-circuits --check`, c and e), at about twice the 4x cost. Phase 1's self-test is what should choose per
+circuit; meanwhile the shipped netlists name their own:
+
+| Netlist | Configuration | Why |
+|---|---|---|
+| `diodetone.cir` | 4x, plain omega3 + 2 | the report's example-1 row (912 cycles); passes T1-T4 |
+| `screamer.cir`, `screamer-clip.cir` | 4x, ADAA, omega3 + 1 | the report's choice for the TS (903 / 907 cycles); passes T1-T4 |
+| `clipper.cir` | the defaults | |
+
+The rulings the implementation follows (the design's R1-R11):
+
+- **R1 Rate and pots at run time.** Each block's equations are eliminated in float in its `b<N>_set` (or init), with
+  the pivot order fixed at generation; there is no Woodbury update (Phase 1).
+- **R2 One derivation.** `solve<T>` and `derive<T>` (`src/circuit/Mna.h`) run on doubles (the reference's matrices),
+  `std::complex` (a linear block's H(s)) and `Val` (the FMinus text), over the same system and pivots.
+- **R3 Variable resistors in the impedance form**: a pot section's current is an unknown, with the row
+  `V(a) - V(b) - r i = 0`, so its 0-ohm end is exact. No clamp or floor.
+- **R4 The port is a voltage source v** (Holters' v-form): structural values come out exact (example 1's C1 voltage
+  is v; the TS block's V(n1) = u, V(v2) = u - v). `K = -1 / (dj/dv)` must be positive.
+- **R5 Defaults:** above (changed from the design's, for the reason above).
+- **R6 N Vt is physical:** N k 300.15 / q (SPICE's 27 C), 45.315 mV for the 1N914's N = 1.752. The research's 45.3 and
+  45.0 mV are N = 1.75140653 and 1.73980781; the tables and the equivalence tests rewrite N so.
+- **R7** The shipped TS netlist has the report's §9.1 tone-pot line, `Ptone tn tw t1 20k {tone}`.
+- **R8 The region**, above.
+- **R9 Literals** are `std::to_chars`'s shortest round trip of a float (locale-free), with `.0` when integral and `f`;
+  small integers print as ints (`2 * gc_C1`). Each re-reads to the float it names. ln 81 is a literal.
+- **R10** `src/circuit/` is its own library, `fminus_circuit` (`FMinus::Circuit`), with no LLVM and no grammar.
+- **R11 Names:** pots and inputs are `[A-Za-z][A-Za-z0-9]*`, not an FMinus keyword or builtin, not each other's or the
+  module's, and not a name the module uses; generated names carry `_` or are `t<N>` temporaries, which skip pot names.
+
+Two more choices the code made:
+
+- **Pivots.** An exact +-1 entry is preferred (least Markowitz cost) only where it is at least 0.1 of its column at
+  every point of the block's grid of rates (22.05-384 kHz x its factors) and pots (threshold pivoting); otherwise the
+  entry with the largest worst-case ratio to its column is. The design's "+-1 first" alone pivoted the tone block on a
+  KCL entry of 1 beside a pot's 20k, and its float coefficients lost three digits (`CircuitEmitTest.cpp` caught it);
+  with the threshold the worst coefficient is within 1e-5 of the double derivation, row-normalised. An order is
+  accepted when every pivot is at least 1e-9 of its column on the grid and the double residual is under 1e-9.
+- **The code builder** shares identical subexpressions and folds a temporary into the field assignment that uses it
+  once, so `b<N>_set` reads like the hand-written modules (`p_D1_by_x_C1 = t16;`, `kb_D1 = 22.067577f * ka_D1;`).
+
+## How it computes
+
+| Stage | File | What |
+|---|---|---|
+| parse | `src/circuit/Netlist.*` | the line scanner, numbers, expressions; `Messages` (clang's format) |
+| plan | `src/circuit/Plan.*` | diode pairs into ports, pots into variable branches, the checks, the partition at op amps (a union-find over the nodes no source drives; each op amp in its inverting input's network), the chain, the configuration, the region and the 1x check |
+| equations | `src/circuit/Mna.*` | each block's stamps (KCL rows, nullor rows, variable-branch rows, the port row; sources: the input, the states, v), the pivots, `solve<T>`, `derive<T>`, `holters()`, `analog()` |
+| text | `src/circuit/Emit.*` | `Val` and the code builder, then the module: fields, init, clear, set, `b<N>_set`, `b<N>`, the halfbands, step, tick |
+| halfbands | `src/circuit/Halfbands.*` | the S1-S3 FIR and IIR coefficients of `experiments/hb-coefs.txt`, their responses, their FMinus |
+| generate | `src/circuit/Generate.cpp` | `generate()`: parse, plan, each block's derivation, emit; errors stop it before emission |
+| reference | `src/circuit/Reference.*` | a block in Holters' form in double, converged from the closed-form guess or with the emitted steps, plain or ADAA; a chain |
+| analysis | `src/circuit/Analysis.*` | the FFT, the windowed-sinc decimator, in-band error, inharmonic energy, H1 and H3, the stress signals |
+
+The invariant: every emitted coefficient is `derive<Val>` of the derivation the reference runs as `derive<double>`.
+
+## The checks, and the report's tables
+
+`example-circuits --check` (ctest's `example.circuits`) runs the generated modules through the JIT, a call a run, and
+prints each check's worst value, where it fell, and the report's figure beside it:
+
+- **a.** every shipped netlist generates with no error or warning, and its methods are nonblocking;
+- **b.** DC, as above;
+- **c.** report §2's targets on both 1-port blocks, as shipped and on the defaults, over the full stress set (sines at
+  L/15, L/4.5, L/2.25, L and 2.2 L on odd bins at 105, 996 and 3012 Hz, a sweep and noise at L, each pot at 0, 0.5 and
+  1): **T1** the emitted step against the converged double of the same configuration, in band, at most -60 dB;
+  **T2** the emitted tick's inharmonic energy at most -60 dB for sines up to L; **T3** H1 and H3 within 0.5 dB of a
+  converged 64x reference; **T4** finite on every signal; the references converge on every sample;
+- **d.** the TS chain: T3 against a converged 64x chain at drive x tone {0, 0.5, 1}, and tone 1 is 16.4 dB brighter at
+  5 kHz than tone 0 (report §9.1's orientation);
+- **e.** the report's decision: example 1 plain omega(2) at 4x passes; the TS plain omega(2) at 4x and ADAA omega(1) at
+  2x fail T2, and pass at 8x; example 1 with ADAA at 4x fails T3 on the stress set;
+- **f.** tick against step through each oversampler (the halfbands' indexing); **g.** `.channels 2`, lane for lane,
+  bit for bit; **h.** calls of 64 and 61 samples against one, a pot gliding on the 16-sample grid, bit for bit.
+
+As built, the TS block at 4x with ADAA measures T1 -78.7, T2 -73.5 (converged -73.6; the report -75.1) and T3 0.14 dB;
+example 1 as shipped T1 -93.1, T2 -79.0 (the report -79.8), T3 0.10 dB; the decision's failures -53.3 and -52.7 dB (the
+report -53.6 and -52.6).
+
+`example-circuits --tables` reprints report §5.2's worst-case table (on `diodetone.cir` and `screamer-clip.cir` at
+N Vt 45.3 mV) and fminus.md's Tables 1-3 (on `clipper.cir` and `screamer-clip.cir` at drive 1, at 45.0 mV), the solver
+columns from emitted code and the converged ones from the reference, each beside the source's numbers. It takes about
+a minute and a half on an M5. Acceptance, by eye: §5.2's entries within 1 dB, and solver columns below -80 dB within
+3 dB. As built: every alias, H1 and H3 entry is the report's to 0.1 dB; Tables 1-3 within 0.5 dB; the solver columns
+within 1 dB down to about -95 dB. Deeper entries are float's own floor (-100 to -150 dB), where the emitted code and
+the experiments' float emulation differ by up to 12 dB in either direction (§5.2 at 4x and 8x, prev K3-K6; Table 3's
+omega + 2 at 4x and 8x), all far below the -60 dB gate.
+
+`example-circuits` with no flags prints the cost table in `experiments/fmbench.cpp`'s method (subnormals flushed, one
+thread, the best of 7 x 10^6 host samples; cycles and instructions from `proc_pid_rusage` on macOS), each row named as
+`experiments/mkbench.py` names its bench and printed beside `experiments/timing1.out`'s measurement; `--all` runs
+mkbench's whole matrix, `--only <regex>` some rows, `--math fast` the frozen copy's mode. Acceptance, by eye: within
+10 % of timing1.out on an idle M-series Mac. The emitted shapes are mkbench's (the omega3, Newton and ADAA text, field
+arrays in tick), in one module with methods, with fewer coefficients. As built (an M5 at load 2): every row within 7 %
+of timing1.out, mostly a few percent faster; the TS clipping stage at 4x with ADAA 904 cycles a host sample (the report
+903), the TS chain 905-906 whatever the region (the report 905-907: the tone block in the region costs nothing), example
+1 as shipped 863 (899), and Phase 0's defaults on the TS stage, 8x plain omega3 + 2, 1,803 (1,865).
+
+## Not built yet
+
+Refused with "not supported yet" wherever a netlist can ask for them:
+
+- multi-port blocks, BLT and tearing, decompositions, feedback across op-amp cuts (Phase 1-2);
+- BJTs, JFETs, triodes (Phase 2-3); biased circuits: V and I sources, the DC operating point and `.op`, the offset
+  formulation (Phase 1-2);
+- inductors, E/F/G/H sources, the OTA macro, `.input kind=cv|current`, switches (Phase 1);
+- single diodes, series strings, asymmetric or parallel pairs, RS, a model library;
+- soft and GBW op amps, `.subckt`, `.param`, `.include`, `.temp`, `.method bdf2|be`;
+- the self-test (the stress matrix at compile time, run asynchronously and cached, the ordered search, the run-time
+  guard beyond the bracket, the no-configuration warning), and `auto` as a real choice;
+- Woodbury pot updates, and pots as ports for audio-rate resistances;
+- magnitude-matched linear blocks at 1x, oversampled linear-only netlists, several regions, several inputs or outputs;
+- designing halfbands (the coefficients are gen.cpp's, embedded);
+- `.channels 4` voice banks; FMinus additions (`#line`, `fmaf`, `expm1f`, `omegaf`, file-scope `const` arrays); a
+  `latency()` in the host's contract;
+- the playground (`.cir` in its Sources, its include resolver, `Lang.h`, `lint.layers`, a `fminus.circuit` probe, the
+  circuits guide part); `.cir` highlighting in `editors/vscode`; `Circuit.h` on the site's API page; ngspice goldens.
