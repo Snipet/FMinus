@@ -19,6 +19,7 @@
 #include <functional>
 #include <limits>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -598,6 +599,41 @@ TEST_CASE("the self-test stops when cancelled, and within its budget", "[circuit
     CHECK(pinned.key.size() == 16);
     CHECK(pinned.notes == "diodetone.cir: note: self-test " + pinned.key +
                               ": the netlist names its whole configuration (or has no port): nothing to choose\n");
+}
+
+TEST_CASE("a job's exception comes back to the self-test's caller", "[circuit]")
+{
+    // a pool with no try/catch that runs every job on threads of its own; a job throws there (through `cancelled`,
+    // which the jobs poll, as std::bad_alloc would from a unit's buffers): the test returns an internal error
+    fc::Options options;
+    options.oversample = 4;
+    fc::SelfTestOptions test;
+    test.parallel = [](int count, const std::function<void(int)>& job)
+    {
+        std::atomic<int> next{0};
+        std::vector<std::thread> ts;
+        for (int k = 0; k < 2; ++k)
+            ts.emplace_back(
+                [&]
+                {
+                    for (int i = next++; i < count; i = next++)
+                        job(i);
+                });
+        for (std::thread& t : ts)
+            t.join();
+    };
+    const std::thread::id caller = std::this_thread::get_id();
+    test.cancelled = [caller]
+    {
+        if (std::this_thread::get_id() != caller)
+            throw std::runtime_error("a job failed");
+        return false;
+    };
+    const fc::SelfTestResult r = fc::selfTestWith(kPotClipper, "clip.cir", options, test, small());
+    CHECK(r.errors == "clip.cir:1:1: error: internal error: a job failed\n");
+    CHECK(!r.choice);
+    CHECK(!r.cancelled);
+    CHECK(r.key == fc::selfTestKey(kPotClipper, "clip.cir", options));
 }
 
 TEST_CASE("the guard's names are the module's", "[circuit]")

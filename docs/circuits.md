@@ -370,8 +370,10 @@ slots are reduced in index order, so the answer and the notes are the same, byte
 cancelled, the test returns `cancelled` and no answer. The budget is in steps (the references' and the candidates'),
 never wall time, and is checked before each stage: a test that would go over stops there, with no answer and a note
 (diodetone.cir's with a budget of 1000: `the self-test stops before the 64x references: it needs 11943936 steps more,
-and 0 of its budget of 1000 are spent; no answer`). FMinus owns no threads and no cache for it: a host runs it, stores `Choice::text()` under the key, and
-generates again with `Choice::parse()` of what it stored (above).
+and 0 of its budget of 1000 are spent; no answer`). What a job throws (`std::bad_alloc` on a unit's buffers, say) is
+caught on the job's thread and rethrown on the caller's, the lowest unit's first, as an internal error in
+`SelfTestResult::errors`: a host's pool needs no try/catch. FMinus owns no threads and no cache for it: a host runs it,
+stores `Choice::text()` under the key, and generates again with `Choice::parse()` of what it stored (above).
 
 `Choice::text()` is one line (diodetone.cir's, without its directives: `fminus-circuit-choice 1 key=d603a5e6059d602d
 oversample=4 adaa=off solver=omega(2) method=tr met=yes t1=-93.0903786120034 t2=-79.0209349673603

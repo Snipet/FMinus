@@ -196,14 +196,34 @@ namespace fminus::circuit
             {
                 return test.cancelled && test.cancelled();
             };
+            // A job's exception (std::bad_alloc on a unit's buffers, say) is caught on the job's own thread, so a
+            // host's pool needs no try/catch, and rethrown here, the lowest index's, so the error is the same for
+            // any number of threads.
             auto run = [&](int count, const std::function<void(int)>& job)
             {
+                std::vector<std::exception_ptr> failed(static_cast<std::size_t>(count));
+                const std::function<void(int)> guarded = [&](int i)
+                {
+                    try
+                    {
+                        job(i);
+                    }
+                    catch (...)
+                    {
+                        failed[static_cast<std::size_t>(i)] = std::current_exception();
+                    }
+                };
                 if (test.parallel)
-                    test.parallel(count, job);
+                    test.parallel(count, guarded);
                 else
                 {
                     for (int i = 0; i < count; ++i)
-                        job(i);
+                        guarded(i);
+                }
+                for (const std::exception_ptr& e : failed)
+                {
+                    if (e)
+                        std::rethrow_exception(e);
                 }
             };
             auto afford = [&](std::int64_t need, const std::string& what)
@@ -373,6 +393,13 @@ namespace fminus::circuit
             SelfTestResult failed;
             failed.key = out.key;
             failed.errors = file + ":1:1: error: internal error: " + e.what() + "\n";
+            return failed;
+        }
+        catch (...)
+        {
+            SelfTestResult failed;
+            failed.key = out.key;
+            failed.errors = file + ":1:1: error: internal error: an exception that is not a std::exception\n";
             return failed;
         }
     }

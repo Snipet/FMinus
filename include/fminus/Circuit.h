@@ -207,7 +207,8 @@ namespace fminus
         {
             // Runs job(0) to job(count - 1), each once, in any order and on any threads, and returns when all have
             // returned. Empty: in order, on the calling thread. The jobs write only their own results, so the answer
-            // is the same, byte for byte, for any number of threads.
+            // is the same, byte for byte, for any number of threads. A job never throws: what one would throw is
+            // carried back to selfTest()'s caller as an internal error in SelfTestResult::errors.
             std::function<void(int count, const std::function<void(int)>& job)> parallel;
             // Polled between jobs and every 4096 steps of a reference, on the calling thread and on parallel's: true
             // stops the test (no answer).
