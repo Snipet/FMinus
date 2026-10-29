@@ -212,12 +212,22 @@ through 0), so every iterate is finite for any `p`. The single diode and the asy
   uA; the i-form, `(x + i) / G`, -97 dB. `kd`, the OTA's loop, is `-dv/di`; an open-loop OTA (`kd = 0`) is refused.
 - **ADAA** (Holters 2020) means the port's source over each step: a diode pair's `v`, an OTA's `i`. An OTA's mean
   current is `(p - G(p)) / kd`'s mean over `[p_P, p]`, written as the midpoint's, `wm / kd` with `wm = kg (th + t_P) /
-  2` from the law (not from `p - v`, a small difference), plus a correction, `(kgv dl - wm (v - v_P)) / dp`; `dl = log
-  cosh x - log cosh x_P` is `log1p(z)`, `z = cosh x / cosh x_P - 1 = 2 sinh(h) (t_P cosh(h) + sinh(h))` with `h = (x -
-  x_P) / 2` from the stored `v`s' own difference, and log1p in Kahan's form, `log(1 + z) z / ((1 + z) - 1)` (FMinus has
-  no `log1pf`). Two rounded `log cosh` (or `tanh`) values differ by their rounding where `x` is near `x_P`, which
-  ruined the mean (T1 -26 dB); this form gives -94 to -136 dB, as the plain solve does. Below `|dp| = 1e-5 V` the mean
-  is the midpoint's, as Phase 0's. Every ADAA block is designed at 2/3 of its rate.
+  2` from the law (not from `p - v`, a small difference), plus a correction, `(kgv dl - wm (v - v_P)) / dp`. `dl = log
+  cosh x - log cosh x_P` takes one of two forms by the step:
+  - below `|x - x_P| = 1`, `log1p(z)`, `z = cosh x / cosh x_P - 1 = 2 sinh(h) (t_P cosh(h) + sinh(h))` with `h = (x -
+    x_P) / 2` from the stored `v`s' own difference, `sinh(h)` a polynomial, and log1p in Kahan's form, `log(1 + z) z /
+    ((1 + z) - 1)` (FMinus has no `log1pf`). Two rounded `log cosh` (or `tanh`) values differ by their rounding where
+    `x` is near `x_P`, which ruined the mean (T1 -26 dB); this form gives -94 to -136 dB, as the plain solve does;
+  - from 1 on, the stored values' difference, `lc - lc_P`, with `lc = |x| - log(1 + |tanh x|)`, log cosh in a form
+    that cannot overflow (a `logf` a step, where the polynomial saves the `expf` a sinh took). There `z` alone
+    cancels: once `t_P` has rounded to +-1 (`|x_P| > 9`, 0.47 V of control voltage), a step back toward 0 of `|h| > 4`
+    gave `1 + z <= 0` and a NaN, or `dl = 0` for -39: an OTA driven that hard played NaNs and the guard's resets with
+    ADAA (a review found it; otalp.cir's stages, at 25 mV, never get there). A step that long has no cancellation to
+    fear.
+
+  Over `x_P` and `x` in `[-40, 40]` the emitted tail's mean is within 3e-6 kg of the double one
+  (`CircuitEmitTest.cpp`). Below `|dp| = 1e-5 V` the mean is the midpoint's, as Phase 0's. Every ADAA block is designed
+  at 2/3 of its rate.
 - **The carry.** ADAA's mean pairs the stored point (`v_P`, `p_P`) with this step's on one curve, `p = v + k phi(v)`.
   When `k` moves (a pot moving a diode pair's K, an OTA's law input or a pot moving `kd g`), the point moves onto the
   new curve with `v_P` held, keeping its Newton residual (the lead's ruling): a diode pair's in `b<N>_set` (Phase 0's
@@ -526,7 +536,7 @@ Where the design left a choice, or the code (the self-test, measuring the JIT-co
 - **ADAA's tail for tanh** is the mean of the current, the midpoint's plus a correction, with `log cosh`'s difference
   computed from `v - v_P` itself (above). The design's `lc(v / 2 Vt) - lc_P`, stored and differenced, measured T1 -26
   dB; a tanh from `(1 - e^-2|x|) / (1 + e^-2|x|)` cancels where |x| is small too (tanhf's polynomial does not). The
-  step stores `t_P` and `kgo_P` (`kd g`), not `lc_P` and `g_P`.
+  step stores `t_P`, `kgo_P` (`kd g`, not `g_P`) and `lc_P`, which only a step of `|x - x_P| >= 1` reads.
 - **One carry a step**, on `kd g`: it covers the law input's move and a pot's move of `kd` (the design's two carries,
   one in `b<N>_set` for `kd`, one a step for `g`, sum to it), and keeps the residual exactly as the lead ruled.
 - **The reference runs an OTA block in its i-form.** With the carry, the i-form's mean pairs the moved point with the

@@ -49,7 +49,7 @@ namespace fminus::circuit
     std::vector<LawLine> adaaText(const PortDef& port, const LawOperands& o);
 
     // What the step stores after its states: with ADAA, the point (p_P, and a pair's c_P = 2 cosh(v / N Vt); an OTA's
-    // t_P = tanh(v / 2 Vt) and kgo_P = kd g). v_P is the caller's.
+    // t_P = tanh(v / 2 Vt), lc_P = log cosh(v / 2 Vt) and kgo_P = kd g). v_P is the caller's.
     std::vector<LawLine> storeText(const PortDef& port, const LawOperands& o);
 
     // The fields ADAA adds for the law, after v_P and p_P: (name, its type, its comment, its value at clear).

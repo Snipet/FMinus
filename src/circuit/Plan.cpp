@@ -105,12 +105,12 @@ namespace fminus::circuit
         if (isFMinusKeyword(name))
             return true;
         // the methods, the step's locals (an exp-affine port's, then an OTA's: kd g, its slope and its 2 Vt multiple,
-        // Newton's tanh, the tanh at v and the current (or ADAA's mean of it), ADAA's half step in x, its square, e^h,
-        // sinh(h), z, 1 + z, the log cosh difference and the midpoint's p - v), and os1, the one field without a '_'
-        // (tick's region sample)
+        // Newton's tanh, the tanh at v and the current (or ADAA's mean of it), ADAA's log cosh at v, its half step in
+        // x, its square, sinh(h), z, 1 + z, the log cosh difference and the midpoint's p - v), and os1, the one field
+        // without a '_' (tick's region sample)
         static constexpr std::array<std::string_view, 37> kModule{
             "init", "clear", "set", "tick", "step", "p",  "q",  "arg", "w",   "v",  "lo", "hi", "e",  "ei", "f",  "d",
-            "ec",   "c",     "dp",  "vm",   "vb",   "ua", "kg", "kgs", "kgv", "tn", "th", "ib", "hh", "h2", "eh", "s2",
+            "ec",   "c",     "dp",  "vm",   "vb",   "ua", "kg", "kgs", "kgv", "tn", "th", "ib", "lc", "hh", "h2", "s2",
             "z",    "zu",    "dl",  "wm",   "os1"};
         if (std::find(kModule.begin(), kModule.end(), name) != kModule.end())
             return true;

@@ -114,30 +114,37 @@ namespace fminus::circuit
         if (port.smooth())
         {
             // the mean of the current i = (p - G(p)) / kd over [p(n-1), p(n)]: (p - G)'s mean is the midpoint's, wm =
-            // (w + w_P) / 2, plus (kd (Phi(v) - Phi(v_P)) - wm (v - v_P)) / dp (report §5.1's closed form, rearranged),
-            // with w = p - v = kg tanh(v / 2 Vt) from the law, not from p and v (their difference is small). Phi's
-            // difference, kg 2 Vt (log cosh x - log cosh x_P), is log1p(z) with z = cosh x / cosh x_P - 1 = 2 sinh(h)
-            // (t_P cosh(h) + sinh(h)), h = (x - x_P) / 2: from the stored v's own difference, so it agrees with v -
-            // v_P (two rounded tanh or log cosh values do not, where x - x_P is small), and log1p as Kahan's log(1 + z)
-            // z / ((1 + z) - 1). sinh is a polynomial below |h| = 0.5 (exp's difference cancels there), h is kept
-            // within 40 (where e^h is a float), and cosh(h) = sqrt(1 + sinh^2).
+            // (w + w_P) / 2, plus (kd (Phi(v) - Phi(v_P)) - wm (v - v_P)) / dp (report §5.1's closed form,
+            // rearranged), with w = p - v = kg tanh(v / 2 Vt) from the law, not from p and v (their difference is
+            // small). Phi's difference, kg 2 Vt (log cosh x - log cosh x_P), takes one of two forms by the step
+            // |x - x_P|:
+            // - below 1, log1p(z) with z = cosh x / cosh x_P - 1 = 2 sinh(h) (t_P cosh(h) + sinh(h)), h = (x - x_P) /
+            //   2: from the stored v's own difference, so it agrees with v - v_P (two rounded log cosh values do not,
+            //   where x - x_P is small), sinh(h) a polynomial (|h| < 0.5), cosh(h) = sqrt(1 + sinh^2), and log1p as
+            //   Kahan's log(1 + z) z / ((1 + z) - 1). There z is at least e^-1 - 1 (t_P = -1, h = 0.5), so 1 + z
+            //   loses nothing;
+            // - from 1 on, the stored log cosh values' difference, lc - lc_P, lc = |x| - log(1 + |tanh x|) (log cosh
+            //   in the form that cannot overflow): a step that large has no cancellation to fear, where z cancels to
+            //   1 + z <= 0 once t_P has rounded to -+1 and the step runs back toward 0 (|x_P| > 9, |h| > 4).
             out.push_back({"p_" + P + " = p_" + P + " + (kg - kgo_" + P + ") * t_" + P + ";",
                            "ADAA: the last point onto this step's curve (kd g moved), its residual kept"});
             out.push_back({"const " + T + " th = tanhf(v * " + ivt + ");",
                            "ADAA: the mean of the current over [p(n-1), p(n)], closed form"});
+            out.push_back({"const " + T + " lc = fabsf(v * " + ivt + ") - logf(1 + fabsf(th));",
+                           "log cosh(v / 2 Vt), which cannot overflow"});
             out.push_back({"const " + T + " hh = fminf(fmaxf((v - v_" + P + ") * " + literal(0.5 / port.nvt) +
-                               ", -40), 40);",
-                           "(x - x_P) / 2, x = v / 2 Vt"});
+                               ", -0.5f), 0.5f);",
+                           "(x - x_P) / 2, x = v / 2 Vt, held to the polynomial's range"});
             out.push_back({"const " + T + " h2 = hh * hh;", ""});
-            out.push_back({"const " + T + " eh = expf(hh);", ""});
-            out.push_back({"const " + T + " s2 = fabsf(hh) < 0.5f ? hh * (1 + h2 * (" + literal(1.0 / 6) + " + h2 * (" +
-                               literal(1.0 / 120) + " + h2 * " + literal(1.0 / 5040) + "))) : 0.5f * (eh - 1 / eh);",
+            out.push_back({"const " + T + " s2 = hh * (1 + h2 * (" + literal(1.0 / 6) + " + h2 * (" +
+                               literal(1.0 / 120) + " + h2 * " + literal(1.0 / 5040) + ")));",
                            "sinh(h)"});
             out.push_back({"const " + T + " z = 2 * s2 * (t_" + P + " * sqrtf(1 + s2 * s2) + s2);",
                            "cosh x / cosh x_P - 1"});
             out.push_back({"const " + T + " zu = 1 + z;", ""});
-            out.push_back({"const " + T + " dl = zu == 1 ? z : logf(zu) * z / (zu - 1);",
-                           "log cosh x - log cosh x_P = log1p(z)"});
+            out.push_back({"const " + T + " dl = fabsf(hh) < 0.5f ? (zu == 1 ? z : logf(zu) * z / (zu - 1)) : lc - " +
+                               "lc_" + P + ";",
+                           "log cosh x - log cosh x_P: log1p(z), or from |x - x_P| = 1 on the difference"});
             out.push_back({"const " + T + " dp = p - p_" + P + ";", ""});
             out.push_back({"const " + T + " wm = 0.5f * kg * (th + t_" + P + ");",
                            "p - v at the midpoint, from the law: kd times its current"});
@@ -168,6 +175,7 @@ namespace fminus::circuit
         if (port.smooth())
         {
             out.push_back({"t_" + P + " = th;", ""});
+            out.push_back({"lc_" + P + " = lc;", ""});
             out.push_back({"kgo_" + P + " = kg;", ""});
         }
         else
@@ -181,6 +189,7 @@ namespace fminus::circuit
         if (!port.smooth())
             return {{"c_" + P, true, "ADAA: 2 cosh(v_" + P + " / N Vt)", "2"}};
         return {{"t_" + P, true, "ADAA: tanh(v_" + P + " / 2 Vt), for the carry and the mean", "0"},
+                {"lc_" + P, true, "ADAA: log cosh(v_" + P + " / 2 Vt), for the mean of a long step", "0"},
                 {"kgo_" + P, false, "ADAA: kd g at the last step", "0"}};
     }
 

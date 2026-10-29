@@ -1283,7 +1283,7 @@ TEST_CASE("prewarp applies to a one-state OTA block, and warns elsewhere", "[cir
 TEST_CASE("an OTA module's step names are refused as names", "[circuit]")
 {
     // every name the OTA's step, its law-input lines and its ADAA tail use, as a pot, an input and the module
-    for (const char* name : {"kg", "kgs", "kgv", "tn", "th", "ib", "hh", "h2", "eh", "s2", "z", "zu", "dl", "wm"})
+    for (const char* name : {"kg", "kgs", "kgv", "tn", "th", "ib", "lc", "hh", "h2", "s2", "z", "zu", "dl", "wm"})
     {
         INFO(name);
         CHECK(fc::isReservedName(name));

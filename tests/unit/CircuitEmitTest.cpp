@@ -3,9 +3,11 @@
 // nonblocking, and generation deterministic with a layout that no pot value changes.
 #include "circuit/Emit.h"
 #include "circuit/Halfbands.h"
+#include "circuit/Laws.h"
 #include "circuit/Mna.h"
 #include "circuit/Netlist.h"
 #include "circuit/Plan.h"
+#include "circuit/Reference.h"
 #include "CircuitNetlists.h"
 #include "fminus/Circuit.h"
 #include "fminus/FMinus.h"
@@ -21,6 +23,7 @@
 #include <locale>
 #include <map>
 #include <memory>
+#include <numbers>
 #include <optional>
 #include <regex>
 #include <sstream>
@@ -622,6 +625,154 @@ TEST_CASE("the bracket keeps every law's iterates finite in float, through the J
                     CHECK(v <= std::fmax(0.0f, p));
                 }
             }
+        }
+    }
+}
+
+TEST_CASE("an OTA's ADAA mean is the double one wherever its control voltage goes, through the JIT", "[circuit]")
+{
+    // The emitted tail (Laws.cpp's text: the carry, the mean, what the step stores) in a module of its own, kd = 1 (the
+    // mean of the current is then kg tanh's): a step from a point (p_P, v_P) to (p, v) on the curve p = v + kg tanh(x),
+    // x = v / 2 Vt, with x_P and x over [-40, 40] (a 5 V control voltage is x = 97; tanhf is +-1 from |x| = 9), on a
+    // grid and from 1e-4 to 5 either way from each x_P. The mean is finite and within 1e-5 kg of the double one
+    // (Reference.cpp's, log cosh differenced in double; measured 2.9e-6 kg, float's rounding of x near 33). The log1p
+    // form alone gave NaN, or 0 for -39 in log cosh's difference, on a long step back from saturation.
+    const fc::Plan plan = planned(fc::test::otaStage("", "1m"));
+    const fc::PortDef& port = *plan.blocks.front().port;
+    fc::LawOperands o;
+    o.type = "float";
+    o.port = port.name;
+    o.kd = "1";
+    o.g = "1";
+    o.solver = fc::Solver{fc::Solver::Guess::Previous, 1};
+    o.adaa = true;
+    const std::string& P = port.name;
+    std::string text = "module Tail\n{\n    float v_" + P + ";\n    float p_" + P + ";\n";
+    for (const fc::LawField& f : fc::adaaFields(port))
+        text += "    float " + f.name + ";\n";
+    text += "    float mean(float p, float v, float kg) [[clang::nonblocking]]\n    {\n";
+    text += "        const float kgv = kg * " + fc::literal(port.nvt) + ";\n";
+    for (const fc::LawLine& l : fc::adaaText(port, o))
+        text += "        " + l.text + "\n";
+    text += "        v_" + P + " = v;\n";
+    for (const fc::LawLine& l : fc::storeText(port, o))
+        text += "        " + l.text + "\n";
+    text += "        return ib;\n    }\n};\n";
+    INFO(text);
+    std::string errors;
+    auto program = Program::compile(text, errors);
+    INFO(errors);
+    REQUIRE(program);
+    const Program::Module& m = *program->module("Tail");
+    auto mean = program->function<float(void*, float, float, float)>("Tail::mean", errors);
+    const double s = port.nvt;
+    for (const double kg : {0.05, 0.5, 5.0})
+    {
+        double worst = 0;
+        std::string where;
+        std::size_t pairs = 0;
+        auto pair = [&](double xp, double x)
+        {
+            if (std::fabs(x) > 40)
+                return;
+            const auto vpf = static_cast<float>(xp * s);
+            const auto vf = static_cast<float>(x * s);
+            const auto ppf =
+                static_cast<float>(static_cast<double>(vpf) + kg * std::tanh(static_cast<double>(vpf) / s));
+            const auto pf = static_cast<float>(static_cast<double>(vf) + kg * std::tanh(static_cast<double>(vf) / s));
+            auto self = instance(m);
+            mean(self.get(), ppf, vpf, static_cast<float>(kg));
+            const auto got = static_cast<double>(mean(self.get(), pf, vf, static_cast<float>(kg)));
+            // the reference's mean (Reference.cpp's stepTanh), kd = 1, on the same floats
+            const auto vp = static_cast<double>(vpf);
+            const auto v = static_cast<double>(vf);
+            const auto pp = static_cast<double>(ppf);
+            const auto p = static_cast<double>(pf);
+            const double vm = 0.5 * (v + vp);
+            const double pm = 0.5 * (p + pp);
+            const double dlc = fc::logCosh(v / s) - fc::logCosh(vp / s);
+            const double vbar = std::fabs(p - pp) > 1e-5 ? vm + ((v - vp) * (pm - vm) - kg * s * dlc) / (p - pp) : vm;
+            const double error = std::isfinite(got) ? std::fabs(got - (pm - vbar)) / kg : 1e30;
+            ++pairs;
+            if (error > worst)
+            {
+                worst = error;
+                where = std::format("x_P {:g}, x {:g}: {:g}, not {:g}", xp, x, got, pm - vbar);
+            }
+        };
+        for (int i = -80; i <= 80; ++i)
+        {
+            for (int j = -80; j <= 80; ++j)
+                pair(0.5 * i, 0.5 * j);
+            for (const double d : {1e-4, 1e-3, 0.01, 0.1, 0.49, 0.999, 1.0, 1.001, 2.0, 5.0})
+            {
+                pair(0.5 * i, 0.5 * i + d);
+                pair(0.5 * i, 0.5 * i - d);
+            }
+        }
+        INFO("kg " << kg << ", " << pairs << " steps; worst " << worst << " kg at " << where);
+        CHECK(worst <= 1e-5);
+    }
+}
+
+TEST_CASE("an OTA driven far past its linear range runs finite with ADAA, and as the double reference does",
+          "[circuit]")
+{
+    // otaStage with 10k / 10k attenuators (att = 1/2): a 5 V sine drives the control voltage to 2.5 V (x = 48), and a
+    // step of its ADAA mean from saturation back toward 0 crosses tanhf's +-1. At 1x, newton(3), 10 uA and 2 mA, a 3
+    // kHz sine: every output finite, and within 2e-5 V of the double reference run with the same steps and ADAA
+    // (Reference.cpp's simulate, the block's Holters form at its design rate, 2/3 of 48 kHz; measured 3.9e-6 V). At 4x
+    // (a region, its halfbands) a 10 kHz sine: finite. The log1p form alone gave 7500 outputs of 12000 non-finite.
+    std::string hot = fc::test::otaStage();
+    for (const char* from : {"R1 in a1 100k\nR2 a1 0 220\nR3 yb a2 100k\nR4 a2 0 220\n"})
+        hot = withLine(hot, from, "R1 in a1 10k\nR2 a1 0 10k\nR3 yb a2 10k\nR4 a2 0 10k\n");
+    for (const int oversample : {1, 4})
+    {
+        fc::Options o;
+        o.oversample = oversample;
+        o.adaa = true;
+        o.solver = fc::Solver{fc::Solver::Guess::Previous, 3};
+        const fc::Result r = fc::generate(hot, "t.cir", o);
+        auto program = compiled(r);
+        std::string errors;
+        const Program::Module& m = *program->module(r.module);
+        auto init = program->function<void(void*, float)>(r.module + "::init", errors);
+        auto tick = program->function<float(void*, float, float)>(r.module + "::tick", errors);
+        const fc::Plan plan = planned(hot, o);
+        for (const double iabc : {1e-5, 2e-3})
+        {
+            const double f = oversample == 1 ? 3000 : 10000;
+            std::vector<double> u(4800);
+            for (std::size_t i = 0; i < u.size(); ++i)
+                u[i] = 5 * std::sin(2 * std::numbers::pi * f * static_cast<double>(i) / 48000);
+            auto self = instance(m);
+            init(self.get(), 48000);
+            std::vector<double> y(u.size());
+            std::size_t notFinite = 0;
+            for (std::size_t i = 0; i < u.size(); ++i)
+            {
+                y[i] = static_cast<double>(tick(self.get(), static_cast<float>(u[i]), static_cast<float>(iabc)));
+                notFinite += std::isfinite(y[i]) ? 0 : 1;
+            }
+            INFO(oversample << "x, iabc " << iabc);
+            CHECK(notFinite == 0);
+            if (oversample != 1)
+                continue;
+            const std::vector<double> laws{iabc};
+            const fc::Holters h = fc::holters(plan, 0, 48000.0 * 2 / 3, {}, laws);
+            fc::RefOptions ro;
+            ro.adaa = true;
+            ro.steps = 3;
+            ro.guess = fc::Solver::Guess::Previous;
+            std::vector<double> uf(u.size());
+            for (std::size_t i = 0; i < u.size(); ++i)
+                uf[i] = static_cast<double>(static_cast<float>(u[i]));
+            const std::vector<double> ref = fc::simulate(h, uf, ro);
+            double worst = 0;
+            for (std::size_t i = 0; i < u.size(); ++i)
+                worst = std::max(worst, std::fabs(y[i] - ref[i]));
+            INFO("worst " << worst << " V");
+            CHECK(worst <= 2e-5);
         }
     }
 }
