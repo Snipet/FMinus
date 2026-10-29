@@ -275,6 +275,10 @@ TEST_CASE("the self-test's key", "[circuit]")
              replaced(base, ".title DiodeTone", ".title Other"),
              replaced(base, ".title DiodeTone", ".title DiodeTone\n.channels 2\n.op"),
              replaced(base, "N=1.752)", "N = 1.752)"),
+             // a .model card's parentheses and commas separate, as the parser reads them
+             replaced(base, "D(IS=2.52n N=1.752)", "D (IS=2.52n  N=1.752 )"),
+             replaced(base, "D(IS=2.52n N=1.752)", "d( is=2.52n, n=1.752)"),
+             replaced(base, "D(IS=2.52n N=1.752)", "D IS=2.52n N=1.752"),
              base + "\n\n",
          })
     {

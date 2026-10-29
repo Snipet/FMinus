@@ -433,6 +433,30 @@ namespace fminus::circuit
             return out;
         }
 
+        // A .model line's card after the name, split at ( ) and , as SPICE allows (each piece keeping its column),
+        // its key = value pieces joined: D(IS=2.52n N=1.752), D (IS=2.52n, N=1.752 ) and D IS=2.52n N=1.752 give the
+        // same pieces.
+        std::vector<Token> modelCard(const std::vector<Token>& t)
+        {
+            std::vector<Token> pieces;
+            for (std::size_t i = 2; i < t.size(); ++i)
+            {
+                const std::string& s = t[i].text;
+                std::size_t k = 0;
+                while (k < s.size())
+                {
+                    while (k < s.size() && (s[k] == '(' || s[k] == ')' || s[k] == ','))
+                        ++k;
+                    const std::size_t first = k;
+                    while (k < s.size() && s[k] != '(' && s[k] != ')' && s[k] != ',')
+                        ++k;
+                    if (k > first)
+                        pieces.push_back({s.substr(first, k - first), {t[i].loc.line, t[i].loc.column + int(first)}});
+                }
+            }
+            return joinAssignments(std::move(pieces));
+        }
+
         // ---- numbers ------------------------------------------------------------------------------------------------
 
         struct Number
@@ -1194,24 +1218,7 @@ namespace fminus::circuit
                 error(head.loc, "expected '.model NAME D(IS=... N=...)'");
                 return;
             }
-            // The card after the name, split at ( ) and , as SPICE allows, each piece keeping its column.
-            std::vector<Token> pieces;
-            for (std::size_t i = 2; i < t.size(); ++i)
-            {
-                const std::string& s = t[i].text;
-                std::size_t k = 0;
-                while (k < s.size())
-                {
-                    while (k < s.size() && (s[k] == '(' || s[k] == ')' || s[k] == ','))
-                        ++k;
-                    const std::size_t first = k;
-                    while (k < s.size() && s[k] != '(' && s[k] != ')' && s[k] != ',')
-                        ++k;
-                    if (k > first)
-                        pieces.push_back({s.substr(first, k - first), {t[i].loc.line, t[i].loc.column + int(first)}});
-                }
-            }
-            pieces = joinAssignments(std::move(pieces));
+            std::vector<Token> pieces = modelCard(t);
             if (pieces.empty())
             {
                 error(head.loc, "expected '.model NAME D(IS=... N=...)'");
@@ -1689,17 +1696,29 @@ namespace fminus::circuit
                 ".plot",  ".probe",    ".save",   ".meas", ".measure", ".control", ".endc"};
             if (std::find(kLeftOut.begin(), kLeftOut.end(), head) != kLeftOut.end())
                 return std::nullopt;
-            std::string out;
-            for (const Token& t : joinAssignments(tokens))
+            auto word = [](const Token& t)
             {
-                std::string word;
+                std::string w;
                 for (char c : folded(t.text))
                 {
                     if (c != ' ' && c != '\t')
-                        word += c;
+                        w += c;
                 }
-                out += (out.empty() ? "" : " ") + word;
+                return w;
+            };
+            std::string out;
+            // a .model card as the parser reads it (its parentheses and commas are separators, so the spacing next
+            // to them is spacing), written in one form: ".model 1n914 d(is=2.52n n=1.752)"
+            if (head == ".model" && tokens.size() > 2)
+            {
+                const std::vector<Token> card = modelCard(tokens);
+                out = word(tokens[0]) + " " + word(tokens[1]);
+                for (std::size_t i = 0; i < card.size(); ++i)
+                    out += (i == 0 ? " " : i == 1 ? "(" : " ") + word(card[i]);
+                return card.size() > 1 ? out + ")" : out;
             }
+            for (const Token& t : joinAssignments(tokens))
+                out += (out.empty() ? "" : " ") + word(t);
             return out;
         }
     } // namespace

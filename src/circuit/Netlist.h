@@ -214,7 +214,8 @@ namespace fminus::circuit
         TargetLine target;
         // The lines a self-test's key reads (Circuit.h's selfTestKey): each logical line up to .end, continuations
         // joined, comments dropped, its tokens lowercased and joined by one space (spaces inside {...} and around
-        // '=' removed), without .title, .channels, .op, .end and simulator directives.
+        // '=' removed; a .model card split at its parentheses and commas, as the parser reads it, and written
+        // "d(is=2.52n n=1.752)"), without .title, .channels, .op, .end and simulator directives.
         std::vector<std::string> canonical;
     };
 

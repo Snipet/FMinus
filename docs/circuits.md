@@ -292,11 +292,12 @@ about twice the 4x cost: costly, but safe to play while the self-test runs.
 
 **The key** a self-test's answer goes by (`selfTestKey()`, `Result::selfTestKey`) is 16 hex digits of FNV-1a 64 over
 `kSelfTestVersion`, the netlist's lines as SPICE reads them (continuations joined, comments and blank lines dropped,
-tokens lowercased and single-spaced, the spaces inside `{...}` and around `=` removed; `.title`, `.channels`, `.op`,
-`.end` and simulator directives left out) and the `Options` that change the answer (all but `moduleName`, `channels`
-and `chosen`). A comment, spacing, case or a new title keeps it; a value, a directive, a model's parameter, a pot's
-default or `.target` changes it, and so does any change of the gates, the candidates or the emitted arithmetic, which
-bumps `kSelfTestVersion` (1 until Phase 1's branch merges).
+tokens lowercased and single-spaced, the spaces inside `{...}` and around `=` removed, a `.model` card read as the
+parser reads it, its parentheses and commas separators, and written as `d(is=2.52n n=1.752)`; `.title`, `.channels`,
+`.op`, `.end` and simulator directives left out) and the `Options` that change the answer (all but `moduleName`,
+`channels` and `chosen`). A comment, spacing, case or a new title keeps it; a value, a directive, a model's parameter,
+a pot's default or `.target` changes it, and so does any change of the gates, the candidates or the emitted
+arithmetic, which bumps `kSelfTestVersion` (1 until Phase 1's branch merges).
 
 **The stress matrix** (report §2; `src/circuit/Search.h`) is a unit for each point and signal:
 
@@ -443,9 +444,10 @@ prints each check's worst value, where it fell, and the report's figure beside i
 - **b.** DC, as above;
 - **c.** report §2's targets on both 1-port blocks, as shipped and on the provisional configuration (Phase 0's
   defaults), over the full stress set (sines at L/15, L/4.5, L/2.25, L and 2.2 L on odd bins at 105, 996 and 3012 Hz, a
-  sweep and noise at L, each pot at 0, 0.5 and 1): **T1** the emitted step against the converged double of the same configuration, in band, at most -60 dB;
-  **T2** the emitted tick's inharmonic energy at most -60 dB for sines up to L; **T3** H1 and H3 within 0.5 dB of a
-  converged 64x reference; **T4** finite on every signal; the references converge on every sample;
+  sweep and noise at L, each pot at 0, 0.5 and 1): **T1** the emitted step against the converged double of the same
+  configuration, in band, at most -60 dB; **T2** the emitted tick's inharmonic energy at most -60 dB for sines up to L;
+  **T3** H1 and H3 within 0.5 dB of a converged 64x reference; **T4** finite on every signal; the references converge
+  on every sample;
 - **d.** the TS chain: T3 against a converged 64x chain at drive x tone {0, 0.5, 1}, and tone 1 is 16.4 dB brighter at
   5 kHz than tone 0 (report §9.1's orientation);
 - **e.** the report's decision: example 1 plain omega(2) at 4x passes; the TS plain omega(2) at 4x and ADAA omega(1) at
