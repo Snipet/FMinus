@@ -1,0 +1,10 @@
+float lookup(float x, int i)
+{
+    const float t[8] = { 0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f, 0.8f };
+    return x * t[i];
+}
+float tapsum(float* restrict d)
+{
+    const float h[4] = { 0.5f, 0.25f, 0.125f, 0.0625f };
+    return h[0] * d[0] + h[1] * d[1] + h[2] * d[2] + h[3] * d[3];
+}

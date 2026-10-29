@@ -1,0 +1,1431 @@
+module IirS1Up
+{
+    float sx[6];
+    float sy[6];
+    void clear()
+    {
+        for (int i = 0; i < 6; ++i)
+        {
+            sx[i] = 0;
+            sy[i] = 0;
+        }
+    }
+    void up(float x, float* restrict o)
+    {
+        float s0 = x;
+        float s1 = x;
+        {
+            const float t = s0;
+            s0 = (s0 - sy[0]) * 0.0441819091f + sx[0];
+            sx[0] = t;
+            sy[0] = s0;
+        }
+        {
+            const float t = s1;
+            s1 = (s1 - sy[1]) * 0.16418886f + sx[1];
+            sx[1] = t;
+            sy[1] = s1;
+        }
+        {
+            const float t = s0;
+            s0 = (s0 - sy[2]) * 0.330744162f + sx[2];
+            sx[2] = t;
+            sy[2] = s0;
+        }
+        {
+            const float t = s1;
+            s1 = (s1 - sy[3]) * 0.515086943f + sx[3];
+            sx[3] = t;
+            sy[3] = s1;
+        }
+        {
+            const float t = s0;
+            s0 = (s0 - sy[4]) * 0.702052852f + sx[4];
+            sx[4] = t;
+            sy[4] = s0;
+        }
+        {
+            const float t = s1;
+            s1 = (s1 - sy[5]) * 0.894889642f + sx[5];
+            sx[5] = t;
+            sy[5] = s1;
+        }
+        o[0] = s0;
+        o[1] = s1;
+    }
+};
+
+module IirS1Down
+{
+    float sx[6];
+    float sy[6];
+    void clear()
+    {
+        for (int i = 0; i < 6; ++i)
+        {
+            sx[i] = 0;
+            sy[i] = 0;
+        }
+    }
+    float down(float v0, float v1)
+    {
+        float s0 = v1;
+        float s1 = v0;
+        {
+            const float t = s0;
+            s0 = (s0 - sy[0]) * 0.0441819091f + sx[0];
+            sx[0] = t;
+            sy[0] = s0;
+        }
+        {
+            const float t = s1;
+            s1 = (s1 - sy[1]) * 0.16418886f + sx[1];
+            sx[1] = t;
+            sy[1] = s1;
+        }
+        {
+            const float t = s0;
+            s0 = (s0 - sy[2]) * 0.330744162f + sx[2];
+            sx[2] = t;
+            sy[2] = s0;
+        }
+        {
+            const float t = s1;
+            s1 = (s1 - sy[3]) * 0.515086943f + sx[3];
+            sx[3] = t;
+            sy[3] = s1;
+        }
+        {
+            const float t = s0;
+            s0 = (s0 - sy[4]) * 0.702052852f + sx[4];
+            sx[4] = t;
+            sy[4] = s0;
+        }
+        {
+            const float t = s1;
+            s1 = (s1 - sy[5]) * 0.894889642f + sx[5];
+            sx[5] = t;
+            sy[5] = s1;
+        }
+        return 0.5f * (s0 + s1);
+    }
+};
+
+module IirS1x4Up
+{
+    float4 sx[6];
+    float4 sy[6];
+    void clear()
+    {
+        for (int i = 0; i < 6; ++i)
+        {
+            sx[i] = 0;
+            sy[i] = 0;
+        }
+    }
+    void up(float4 x, float4* restrict o)
+    {
+        float4 s0 = x;
+        float4 s1 = x;
+        {
+            const float4 t = s0;
+            s0 = (s0 - sy[0]) * 0.0441819091f + sx[0];
+            sx[0] = t;
+            sy[0] = s0;
+        }
+        {
+            const float4 t = s1;
+            s1 = (s1 - sy[1]) * 0.16418886f + sx[1];
+            sx[1] = t;
+            sy[1] = s1;
+        }
+        {
+            const float4 t = s0;
+            s0 = (s0 - sy[2]) * 0.330744162f + sx[2];
+            sx[2] = t;
+            sy[2] = s0;
+        }
+        {
+            const float4 t = s1;
+            s1 = (s1 - sy[3]) * 0.515086943f + sx[3];
+            sx[3] = t;
+            sy[3] = s1;
+        }
+        {
+            const float4 t = s0;
+            s0 = (s0 - sy[4]) * 0.702052852f + sx[4];
+            sx[4] = t;
+            sy[4] = s0;
+        }
+        {
+            const float4 t = s1;
+            s1 = (s1 - sy[5]) * 0.894889642f + sx[5];
+            sx[5] = t;
+            sy[5] = s1;
+        }
+        o[0] = s0;
+        o[1] = s1;
+    }
+};
+
+module IirS1x4Down
+{
+    float4 sx[6];
+    float4 sy[6];
+    void clear()
+    {
+        for (int i = 0; i < 6; ++i)
+        {
+            sx[i] = 0;
+            sy[i] = 0;
+        }
+    }
+    float4 down(float4 v0, float4 v1)
+    {
+        float4 s0 = v1;
+        float4 s1 = v0;
+        {
+            const float4 t = s0;
+            s0 = (s0 - sy[0]) * 0.0441819091f + sx[0];
+            sx[0] = t;
+            sy[0] = s0;
+        }
+        {
+            const float4 t = s1;
+            s1 = (s1 - sy[1]) * 0.16418886f + sx[1];
+            sx[1] = t;
+            sy[1] = s1;
+        }
+        {
+            const float4 t = s0;
+            s0 = (s0 - sy[2]) * 0.330744162f + sx[2];
+            sx[2] = t;
+            sy[2] = s0;
+        }
+        {
+            const float4 t = s1;
+            s1 = (s1 - sy[3]) * 0.515086943f + sx[3];
+            sx[3] = t;
+            sy[3] = s1;
+        }
+        {
+            const float4 t = s0;
+            s0 = (s0 - sy[4]) * 0.702052852f + sx[4];
+            sx[4] = t;
+            sy[4] = s0;
+        }
+        {
+            const float4 t = s1;
+            s1 = (s1 - sy[5]) * 0.894889642f + sx[5];
+            sx[5] = t;
+            sy[5] = s1;
+        }
+        return 0.5f * (s0 + s1);
+    }
+};
+
+module Svf_torn2_s
+{
+    float h1, h2, v1, v2;
+    float iG, g2C, K11, K12, K21, att, kq, attiG, attkqiG;
+    void init(float rate)
+    {
+        const float gC = 2.0f * 1e-9f * rate;
+        iG = 1.0f / (gC + 1e-7f);
+        g2C = 2.0f * gC;
+        att = 220.0f / 100220.0f;
+        h1 = 0;
+        h2 = 0;
+        v1 = 0;
+        v2 = 0;
+        set(0.04f);
+    }
+    void set(float k)
+    {
+        kq = k;
+        K11 = -att * kq * iG;
+        K12 = -att * iG;
+        K21 = att * iG;
+        attiG = att * iG;
+        attkqiG = att * kq * iG;
+    }
+    float step(float in, float g)
+    {
+        const float p1 = att * in - attiG * h2 - attkqiG * h1;
+        const float p2 = attiG * h1;
+        const float gi = g * 19.3423598f;          // g / (2 Vt)
+        float x = v1;
+        float y = v2;
+        float i1 = 0;
+        float i2 = 0;
+        float d1 = 0;
+        float d2 = 0;
+        float xo = 0;
+        {
+            const float t1 = tanhf(x * 19.3423598f);
+            i1 = g * t1;
+            d1 = gi * (1 - t1 * t1);
+            y = p2 + K21 * i1;
+            const float t2 = tanhf(y * 19.3423598f);
+            i2 = g * t2;
+            d2 = gi * (1 - t2 * t2);
+            const float r = x - p1 - K11 * i1 - K12 * i2;
+            const float dr = 1 - K11 * d1 - K12 * d2 * K21 * d1;
+            xo = x;
+            x = x - r / dr;
+        }
+        {
+            const float t1 = tanhf(x * 19.3423598f);
+            i1 = g * t1;
+            d1 = gi * (1 - t1 * t1);
+            y = p2 + K21 * i1;
+            const float t2 = tanhf(y * 19.3423598f);
+            i2 = g * t2;
+            d2 = gi * (1 - t2 * t2);
+            const float r = x - p1 - K11 * i1 - K12 * i2;
+            const float dr = 1 - K11 * d1 - K12 * d2 * K21 * d1;
+            xo = x;
+            x = x - r / dr;
+        }
+        i1 = g * tanhf(x * 19.3423598f);
+        y = p2 + K21 * i1;
+        i2 = g * tanhf(y * 19.3423598f);
+        const float b = (i1 + h1) * iG;
+        const float l = (i2 + h2) * iG;
+        h1 = g2C * b - h1;
+        h2 = g2C * l - h2;
+        v1 = x;
+        v2 = y;
+        return l;
+    }
+};
+
+module Voice_torn2_s_1x
+{
+    Svf_torn2_s f;
+    float ph, lfo;
+    float dph, dlfo;
+    void init(float rate)
+    {
+        f.init(1 * rate);
+        ph = 0;
+        lfo = 0;
+        dph = 110.0f / (1 * rate);
+        dlfo = 0.3f / (1 * rate);
+    }
+    float sub()
+    {
+        ph = ph + dph;
+        ph = ph >= 1 ? ph - 1 : ph;
+        lfo = lfo + dlfo;
+        lfo = lfo >= 1 ? lfo - 1 : lfo;
+        const float cv = 2.0f * sinf(6.28318531f * lfo);      // +-2 octaves
+        const float g = 5.9e-4f * expf(0.693147181f * cv);  // expo converter: Iabc for ~4 kHz at cv 0
+        return f.step(10.0f * ph - 5.0f, g);
+    }
+    float tick()
+    {
+        return sub();
+    }
+};
+
+float v_torn2_s_1x(float n)
+{
+    Voice_torn2_s_1x w;
+    w.init(48000);
+    float sum = 0;
+    for (int i = 0; i < (int)n; ++i)
+    {
+        const float y = w.tick();
+        sum += y;
+    }
+    return sum;
+}
+
+module Voice_torn2_s_2x
+{
+    Svf_torn2_s f;
+    IirS1Down d1;
+    float ph, lfo;
+    float dph, dlfo;
+    void init(float rate)
+    {
+        f.init(2 * rate);
+        d1.clear();
+        ph = 0;
+        lfo = 0;
+        dph = 110.0f / (2 * rate);
+        dlfo = 0.3f / (2 * rate);
+    }
+    float sub()
+    {
+        ph = ph + dph;
+        ph = ph >= 1 ? ph - 1 : ph;
+        lfo = lfo + dlfo;
+        lfo = lfo >= 1 ? lfo - 1 : lfo;
+        const float cv = 2.0f * sinf(6.28318531f * lfo);      // +-2 octaves
+        const float g = 5.9e-4f * expf(0.693147181f * cv);  // expo converter: Iabc for ~4 kHz at cv 0
+        return f.step(10.0f * ph - 5.0f, g);
+    }
+    float tick()
+    {
+        const float a = sub();
+        const float b = sub();
+        return d1.down(a, b);
+    }
+};
+
+float v_torn2_s_2x(float n)
+{
+    Voice_torn2_s_2x w;
+    w.init(48000);
+    float sum = 0;
+    for (int i = 0; i < (int)n; ++i)
+    {
+        const float y = w.tick();
+        sum += y;
+    }
+    return sum;
+}
+
+module Svf_torn2_p4
+{
+    float4 h1, h2, v1, v2;
+    float iG, g2C, K11, K12, K21, att, kq, attiG, attkqiG;
+    void init(float rate)
+    {
+        const float gC = 2.0f * 1e-9f * rate;
+        iG = 1.0f / (gC + 1e-7f);
+        g2C = 2.0f * gC;
+        att = 220.0f / 100220.0f;
+        h1 = 0;
+        h2 = 0;
+        v1 = 0;
+        v2 = 0;
+        set(0.04f);
+    }
+    void set(float k)
+    {
+        kq = k;
+        K11 = -att * kq * iG;
+        K12 = -att * iG;
+        K21 = att * iG;
+        attiG = att * iG;
+        attkqiG = att * kq * iG;
+    }
+    float4 step(float4 in, float4 g)
+    {
+        const float4 p1 = att * in - attiG * h2 - attkqiG * h1;
+        const float4 p2 = attiG * h1;
+        const float4 gi = g * 19.3423598f;          // g / (2 Vt)
+        float4 x = v1;
+        float4 y = v2;
+        float4 i1 = 0;
+        float4 i2 = 0;
+        float4 d1 = 0;
+        float4 d2 = 0;
+        float4 xo = 0;
+        {
+            const float4 t1 = tanhf(x * 19.3423598f);
+            i1 = g * t1;
+            d1 = gi * (1 - t1 * t1);
+            y = p2 + K21 * i1;
+            const float4 t2 = tanhf(y * 19.3423598f);
+            i2 = g * t2;
+            d2 = gi * (1 - t2 * t2);
+            const float4 r = x - p1 - K11 * i1 - K12 * i2;
+            const float4 dr = 1 - K11 * d1 - K12 * d2 * K21 * d1;
+            xo = x;
+            x = x - r / dr;
+        }
+        {
+            const float4 t1 = tanhf(x * 19.3423598f);
+            i1 = g * t1;
+            d1 = gi * (1 - t1 * t1);
+            y = p2 + K21 * i1;
+            const float4 t2 = tanhf(y * 19.3423598f);
+            i2 = g * t2;
+            d2 = gi * (1 - t2 * t2);
+            const float4 r = x - p1 - K11 * i1 - K12 * i2;
+            const float4 dr = 1 - K11 * d1 - K12 * d2 * K21 * d1;
+            xo = x;
+            x = x - r / dr;
+        }
+        i1 = g * tanhf(x * 19.3423598f);
+        y = p2 + K21 * i1;
+        i2 = g * tanhf(y * 19.3423598f);
+        const float4 b = (i1 + h1) * iG;
+        const float4 l = (i2 + h2) * iG;
+        h1 = g2C * b - h1;
+        h2 = g2C * l - h2;
+        v1 = x;
+        v2 = y;
+        return l;
+    }
+};
+
+module Voice_torn2_p4_1x
+{
+    Svf_torn2_p4 f;
+    float4 ph, lfo;
+    float4 dph, dlfo;
+    void init(float rate)
+    {
+        f.init(1 * rate);
+        ph = 0;
+        lfo = 0;
+        dph = (float4)(110.0f / (1 * rate), 138.6f / (1 * rate), 164.8f / (1 * rate), 207.7f / (1 * rate));
+        dlfo = (float4)(0.3f / (1 * rate), 0.37f / (1 * rate), 0.41f / (1 * rate), 0.53f / (1 * rate));
+    }
+    float4 sub()
+    {
+        ph = ph + dph;
+        ph = ph >= 1 ? ph - 1 : ph;
+        lfo = lfo + dlfo;
+        lfo = lfo >= 1 ? lfo - 1 : lfo;
+        const float4 cv = 2.0f * sinf(6.28318531f * lfo);      // +-2 octaves
+        const float4 g = 5.9e-4f * expf(0.693147181f * cv);  // expo converter: Iabc for ~4 kHz at cv 0
+        return f.step(10.0f * ph - 5.0f, g);
+    }
+    float4 tick()
+    {
+        return sub();
+    }
+};
+
+float v_torn2_p4_1x(float n)
+{
+    Voice_torn2_p4_1x w;
+    w.init(48000);
+    float sum = 0;
+    for (int i = 0; i < (int)n; ++i)
+    {
+        const float4 y = w.tick();
+        sum += y.x + y.y + y.z + y.w;
+    }
+    return sum;
+}
+
+module Voice_torn2_p4_2x
+{
+    Svf_torn2_p4 f;
+    IirS1x4Down d1;
+    float4 ph, lfo;
+    float4 dph, dlfo;
+    void init(float rate)
+    {
+        f.init(2 * rate);
+        d1.clear();
+        ph = 0;
+        lfo = 0;
+        dph = (float4)(110.0f / (2 * rate), 138.6f / (2 * rate), 164.8f / (2 * rate), 207.7f / (2 * rate));
+        dlfo = (float4)(0.3f / (2 * rate), 0.37f / (2 * rate), 0.41f / (2 * rate), 0.53f / (2 * rate));
+    }
+    float4 sub()
+    {
+        ph = ph + dph;
+        ph = ph >= 1 ? ph - 1 : ph;
+        lfo = lfo + dlfo;
+        lfo = lfo >= 1 ? lfo - 1 : lfo;
+        const float4 cv = 2.0f * sinf(6.28318531f * lfo);      // +-2 octaves
+        const float4 g = 5.9e-4f * expf(0.693147181f * cv);  // expo converter: Iabc for ~4 kHz at cv 0
+        return f.step(10.0f * ph - 5.0f, g);
+    }
+    float4 tick()
+    {
+        const float4 a = sub();
+        const float4 b = sub();
+        return d1.down(a, b);
+    }
+};
+
+float v_torn2_p4_2x(float n)
+{
+    Voice_torn2_p4_2x w;
+    w.init(48000);
+    float sum = 0;
+    for (int i = 0; i < (int)n; ++i)
+    {
+        const float4 y = w.tick();
+        sum += y.x + y.y + y.z + y.w;
+    }
+    return sum;
+}
+
+module Svf_tornlin2_s
+{
+    float h1, h2, v1, v2;
+    float iG, g2C, K11, K12, K21, att, kq, attiG, attkqiG;
+    void init(float rate)
+    {
+        const float gC = 2.0f * 1e-9f * rate;
+        iG = 1.0f / (gC + 1e-7f);
+        g2C = 2.0f * gC;
+        att = 220.0f / 100220.0f;
+        h1 = 0;
+        h2 = 0;
+        v1 = 0;
+        v2 = 0;
+        set(0.04f);
+    }
+    void set(float k)
+    {
+        kq = k;
+        K11 = -att * kq * iG;
+        K12 = -att * iG;
+        K21 = att * iG;
+        attiG = att * iG;
+        attkqiG = att * kq * iG;
+    }
+    float step(float in, float g)
+    {
+        const float p1 = att * in - attiG * h2 - attkqiG * h1;
+        const float p2 = attiG * h1;
+        const float gi = g * 19.3423598f;          // g / (2 Vt)
+        float x = v1;
+        float y = v2;
+        float i1 = 0;
+        float i2 = 0;
+        float d1 = 0;
+        float d2 = 0;
+        float xo = 0;
+        {
+            const float t1 = tanhf(x * 19.3423598f);
+            i1 = g * t1;
+            d1 = gi * (1 - t1 * t1);
+            y = p2 + K21 * i1;
+            const float t2 = tanhf(y * 19.3423598f);
+            i2 = g * t2;
+            d2 = gi * (1 - t2 * t2);
+            const float r = x - p1 - K11 * i1 - K12 * i2;
+            const float dr = 1 - K11 * d1 - K12 * d2 * K21 * d1;
+            xo = x;
+            x = x - r / dr;
+        }
+        {
+            const float t1 = tanhf(x * 19.3423598f);
+            i1 = g * t1;
+            d1 = gi * (1 - t1 * t1);
+            y = p2 + K21 * i1;
+            const float t2 = tanhf(y * 19.3423598f);
+            i2 = g * t2;
+            d2 = gi * (1 - t2 * t2);
+            const float r = x - p1 - K11 * i1 - K12 * i2;
+            const float dr = 1 - K11 * d1 - K12 * d2 * K21 * d1;
+            xo = x;
+            x = x - r / dr;
+        }
+        const float i1n = i1 + d1 * (x - xo);
+        i2 = i2 + d2 * K21 * (i1n - i1);
+        i1 = i1n;
+        y = p2 + K21 * i1;
+        const float b = (i1 + h1) * iG;
+        const float l = (i2 + h2) * iG;
+        h1 = g2C * b - h1;
+        h2 = g2C * l - h2;
+        v1 = x;
+        v2 = y;
+        return l;
+    }
+};
+
+module Voice_tornlin2_s_1x
+{
+    Svf_tornlin2_s f;
+    float ph, lfo;
+    float dph, dlfo;
+    void init(float rate)
+    {
+        f.init(1 * rate);
+        ph = 0;
+        lfo = 0;
+        dph = 110.0f / (1 * rate);
+        dlfo = 0.3f / (1 * rate);
+    }
+    float sub()
+    {
+        ph = ph + dph;
+        ph = ph >= 1 ? ph - 1 : ph;
+        lfo = lfo + dlfo;
+        lfo = lfo >= 1 ? lfo - 1 : lfo;
+        const float cv = 2.0f * sinf(6.28318531f * lfo);      // +-2 octaves
+        const float g = 5.9e-4f * expf(0.693147181f * cv);  // expo converter: Iabc for ~4 kHz at cv 0
+        return f.step(10.0f * ph - 5.0f, g);
+    }
+    float tick()
+    {
+        return sub();
+    }
+};
+
+float v_tornlin2_s_1x(float n)
+{
+    Voice_tornlin2_s_1x w;
+    w.init(48000);
+    float sum = 0;
+    for (int i = 0; i < (int)n; ++i)
+    {
+        const float y = w.tick();
+        sum += y;
+    }
+    return sum;
+}
+
+module Voice_tornlin2_s_2x
+{
+    Svf_tornlin2_s f;
+    IirS1Down d1;
+    float ph, lfo;
+    float dph, dlfo;
+    void init(float rate)
+    {
+        f.init(2 * rate);
+        d1.clear();
+        ph = 0;
+        lfo = 0;
+        dph = 110.0f / (2 * rate);
+        dlfo = 0.3f / (2 * rate);
+    }
+    float sub()
+    {
+        ph = ph + dph;
+        ph = ph >= 1 ? ph - 1 : ph;
+        lfo = lfo + dlfo;
+        lfo = lfo >= 1 ? lfo - 1 : lfo;
+        const float cv = 2.0f * sinf(6.28318531f * lfo);      // +-2 octaves
+        const float g = 5.9e-4f * expf(0.693147181f * cv);  // expo converter: Iabc for ~4 kHz at cv 0
+        return f.step(10.0f * ph - 5.0f, g);
+    }
+    float tick()
+    {
+        const float a = sub();
+        const float b = sub();
+        return d1.down(a, b);
+    }
+};
+
+float v_tornlin2_s_2x(float n)
+{
+    Voice_tornlin2_s_2x w;
+    w.init(48000);
+    float sum = 0;
+    for (int i = 0; i < (int)n; ++i)
+    {
+        const float y = w.tick();
+        sum += y;
+    }
+    return sum;
+}
+
+module Svf_tornlin2_p4
+{
+    float4 h1, h2, v1, v2;
+    float iG, g2C, K11, K12, K21, att, kq, attiG, attkqiG;
+    void init(float rate)
+    {
+        const float gC = 2.0f * 1e-9f * rate;
+        iG = 1.0f / (gC + 1e-7f);
+        g2C = 2.0f * gC;
+        att = 220.0f / 100220.0f;
+        h1 = 0;
+        h2 = 0;
+        v1 = 0;
+        v2 = 0;
+        set(0.04f);
+    }
+    void set(float k)
+    {
+        kq = k;
+        K11 = -att * kq * iG;
+        K12 = -att * iG;
+        K21 = att * iG;
+        attiG = att * iG;
+        attkqiG = att * kq * iG;
+    }
+    float4 step(float4 in, float4 g)
+    {
+        const float4 p1 = att * in - attiG * h2 - attkqiG * h1;
+        const float4 p2 = attiG * h1;
+        const float4 gi = g * 19.3423598f;          // g / (2 Vt)
+        float4 x = v1;
+        float4 y = v2;
+        float4 i1 = 0;
+        float4 i2 = 0;
+        float4 d1 = 0;
+        float4 d2 = 0;
+        float4 xo = 0;
+        {
+            const float4 t1 = tanhf(x * 19.3423598f);
+            i1 = g * t1;
+            d1 = gi * (1 - t1 * t1);
+            y = p2 + K21 * i1;
+            const float4 t2 = tanhf(y * 19.3423598f);
+            i2 = g * t2;
+            d2 = gi * (1 - t2 * t2);
+            const float4 r = x - p1 - K11 * i1 - K12 * i2;
+            const float4 dr = 1 - K11 * d1 - K12 * d2 * K21 * d1;
+            xo = x;
+            x = x - r / dr;
+        }
+        {
+            const float4 t1 = tanhf(x * 19.3423598f);
+            i1 = g * t1;
+            d1 = gi * (1 - t1 * t1);
+            y = p2 + K21 * i1;
+            const float4 t2 = tanhf(y * 19.3423598f);
+            i2 = g * t2;
+            d2 = gi * (1 - t2 * t2);
+            const float4 r = x - p1 - K11 * i1 - K12 * i2;
+            const float4 dr = 1 - K11 * d1 - K12 * d2 * K21 * d1;
+            xo = x;
+            x = x - r / dr;
+        }
+        const float4 i1n = i1 + d1 * (x - xo);
+        i2 = i2 + d2 * K21 * (i1n - i1);
+        i1 = i1n;
+        y = p2 + K21 * i1;
+        const float4 b = (i1 + h1) * iG;
+        const float4 l = (i2 + h2) * iG;
+        h1 = g2C * b - h1;
+        h2 = g2C * l - h2;
+        v1 = x;
+        v2 = y;
+        return l;
+    }
+};
+
+module Voice_tornlin2_p4_1x
+{
+    Svf_tornlin2_p4 f;
+    float4 ph, lfo;
+    float4 dph, dlfo;
+    void init(float rate)
+    {
+        f.init(1 * rate);
+        ph = 0;
+        lfo = 0;
+        dph = (float4)(110.0f / (1 * rate), 138.6f / (1 * rate), 164.8f / (1 * rate), 207.7f / (1 * rate));
+        dlfo = (float4)(0.3f / (1 * rate), 0.37f / (1 * rate), 0.41f / (1 * rate), 0.53f / (1 * rate));
+    }
+    float4 sub()
+    {
+        ph = ph + dph;
+        ph = ph >= 1 ? ph - 1 : ph;
+        lfo = lfo + dlfo;
+        lfo = lfo >= 1 ? lfo - 1 : lfo;
+        const float4 cv = 2.0f * sinf(6.28318531f * lfo);      // +-2 octaves
+        const float4 g = 5.9e-4f * expf(0.693147181f * cv);  // expo converter: Iabc for ~4 kHz at cv 0
+        return f.step(10.0f * ph - 5.0f, g);
+    }
+    float4 tick()
+    {
+        return sub();
+    }
+};
+
+float v_tornlin2_p4_1x(float n)
+{
+    Voice_tornlin2_p4_1x w;
+    w.init(48000);
+    float sum = 0;
+    for (int i = 0; i < (int)n; ++i)
+    {
+        const float4 y = w.tick();
+        sum += y.x + y.y + y.z + y.w;
+    }
+    return sum;
+}
+
+module Voice_tornlin2_p4_2x
+{
+    Svf_tornlin2_p4 f;
+    IirS1x4Down d1;
+    float4 ph, lfo;
+    float4 dph, dlfo;
+    void init(float rate)
+    {
+        f.init(2 * rate);
+        d1.clear();
+        ph = 0;
+        lfo = 0;
+        dph = (float4)(110.0f / (2 * rate), 138.6f / (2 * rate), 164.8f / (2 * rate), 207.7f / (2 * rate));
+        dlfo = (float4)(0.3f / (2 * rate), 0.37f / (2 * rate), 0.41f / (2 * rate), 0.53f / (2 * rate));
+    }
+    float4 sub()
+    {
+        ph = ph + dph;
+        ph = ph >= 1 ? ph - 1 : ph;
+        lfo = lfo + dlfo;
+        lfo = lfo >= 1 ? lfo - 1 : lfo;
+        const float4 cv = 2.0f * sinf(6.28318531f * lfo);      // +-2 octaves
+        const float4 g = 5.9e-4f * expf(0.693147181f * cv);  // expo converter: Iabc for ~4 kHz at cv 0
+        return f.step(10.0f * ph - 5.0f, g);
+    }
+    float4 tick()
+    {
+        const float4 a = sub();
+        const float4 b = sub();
+        return d1.down(a, b);
+    }
+};
+
+float v_tornlin2_p4_2x(float n)
+{
+    Voice_tornlin2_p4_2x w;
+    w.init(48000);
+    float sum = 0;
+    for (int i = 0; i < (int)n; ++i)
+    {
+        const float4 y = w.tick();
+        sum += y.x + y.y + y.z + y.w;
+    }
+    return sum;
+}
+
+module Svf_2d2_s
+{
+    float h1, h2, v1, v2;
+    float iG, g2C, K11, K12, K21, att, kq, attiG, attkqiG;
+    void init(float rate)
+    {
+        const float gC = 2.0f * 1e-9f * rate;
+        iG = 1.0f / (gC + 1e-7f);
+        g2C = 2.0f * gC;
+        att = 220.0f / 100220.0f;
+        h1 = 0;
+        h2 = 0;
+        v1 = 0;
+        v2 = 0;
+        set(0.04f);
+    }
+    void set(float k)
+    {
+        kq = k;
+        K11 = -att * kq * iG;
+        K12 = -att * iG;
+        K21 = att * iG;
+        attiG = att * iG;
+        attkqiG = att * kq * iG;
+    }
+    float step(float in, float g)
+    {
+        const float p1 = att * in - attiG * h2 - attkqiG * h1;
+        const float p2 = attiG * h1;
+        const float gi = g * 19.3423598f;          // g / (2 Vt)
+        float x = v1;
+        float y = v2;
+        float i1 = 0;
+        float i2 = 0;
+        float d1 = 0;
+        float d2 = 0;
+        float xo = 0;
+        {
+            const float t1 = tanhf(x * 19.3423598f);
+            const float t2 = tanhf(y * 19.3423598f);
+            i1 = g * t1;
+            i2 = g * t2;
+            d1 = gi * (1 - t1 * t1);
+            d2 = gi * (1 - t2 * t2);
+            const float r1 = x - p1 - K11 * i1 - K12 * i2;
+            const float r2 = y - p2 - K21 * i1;
+            const float a11 = 1 - K11 * d1;
+            const float a12 = -K12 * d2;
+            const float a21 = -K21 * d1;
+            const float idet = 1 / (a11 - a12 * a21);
+            x = x - (r1 - a12 * r2) * idet;
+            y = y - (a11 * r2 - a21 * r1) * idet;
+        }
+        {
+            const float t1 = tanhf(x * 19.3423598f);
+            const float t2 = tanhf(y * 19.3423598f);
+            i1 = g * t1;
+            i2 = g * t2;
+            d1 = gi * (1 - t1 * t1);
+            d2 = gi * (1 - t2 * t2);
+            const float r1 = x - p1 - K11 * i1 - K12 * i2;
+            const float r2 = y - p2 - K21 * i1;
+            const float a11 = 1 - K11 * d1;
+            const float a12 = -K12 * d2;
+            const float a21 = -K21 * d1;
+            const float idet = 1 / (a11 - a12 * a21);
+            x = x - (r1 - a12 * r2) * idet;
+            y = y - (a11 * r2 - a21 * r1) * idet;
+        }
+        i1 = g * tanhf(x * 19.3423598f);
+        i2 = g * tanhf(y * 19.3423598f);
+        const float b = (i1 + h1) * iG;
+        const float l = (i2 + h2) * iG;
+        h1 = g2C * b - h1;
+        h2 = g2C * l - h2;
+        v1 = x;
+        v2 = y;
+        return l;
+    }
+};
+
+module Voice_2d2_s_1x
+{
+    Svf_2d2_s f;
+    float ph, lfo;
+    float dph, dlfo;
+    void init(float rate)
+    {
+        f.init(1 * rate);
+        ph = 0;
+        lfo = 0;
+        dph = 110.0f / (1 * rate);
+        dlfo = 0.3f / (1 * rate);
+    }
+    float sub()
+    {
+        ph = ph + dph;
+        ph = ph >= 1 ? ph - 1 : ph;
+        lfo = lfo + dlfo;
+        lfo = lfo >= 1 ? lfo - 1 : lfo;
+        const float cv = 2.0f * sinf(6.28318531f * lfo);      // +-2 octaves
+        const float g = 5.9e-4f * expf(0.693147181f * cv);  // expo converter: Iabc for ~4 kHz at cv 0
+        return f.step(10.0f * ph - 5.0f, g);
+    }
+    float tick()
+    {
+        return sub();
+    }
+};
+
+float v_2d2_s_1x(float n)
+{
+    Voice_2d2_s_1x w;
+    w.init(48000);
+    float sum = 0;
+    for (int i = 0; i < (int)n; ++i)
+    {
+        const float y = w.tick();
+        sum += y;
+    }
+    return sum;
+}
+
+module Voice_2d2_s_2x
+{
+    Svf_2d2_s f;
+    IirS1Down d1;
+    float ph, lfo;
+    float dph, dlfo;
+    void init(float rate)
+    {
+        f.init(2 * rate);
+        d1.clear();
+        ph = 0;
+        lfo = 0;
+        dph = 110.0f / (2 * rate);
+        dlfo = 0.3f / (2 * rate);
+    }
+    float sub()
+    {
+        ph = ph + dph;
+        ph = ph >= 1 ? ph - 1 : ph;
+        lfo = lfo + dlfo;
+        lfo = lfo >= 1 ? lfo - 1 : lfo;
+        const float cv = 2.0f * sinf(6.28318531f * lfo);      // +-2 octaves
+        const float g = 5.9e-4f * expf(0.693147181f * cv);  // expo converter: Iabc for ~4 kHz at cv 0
+        return f.step(10.0f * ph - 5.0f, g);
+    }
+    float tick()
+    {
+        const float a = sub();
+        const float b = sub();
+        return d1.down(a, b);
+    }
+};
+
+float v_2d2_s_2x(float n)
+{
+    Voice_2d2_s_2x w;
+    w.init(48000);
+    float sum = 0;
+    for (int i = 0; i < (int)n; ++i)
+    {
+        const float y = w.tick();
+        sum += y;
+    }
+    return sum;
+}
+
+module Svf_2d2_p4
+{
+    float4 h1, h2, v1, v2;
+    float iG, g2C, K11, K12, K21, att, kq, attiG, attkqiG;
+    void init(float rate)
+    {
+        const float gC = 2.0f * 1e-9f * rate;
+        iG = 1.0f / (gC + 1e-7f);
+        g2C = 2.0f * gC;
+        att = 220.0f / 100220.0f;
+        h1 = 0;
+        h2 = 0;
+        v1 = 0;
+        v2 = 0;
+        set(0.04f);
+    }
+    void set(float k)
+    {
+        kq = k;
+        K11 = -att * kq * iG;
+        K12 = -att * iG;
+        K21 = att * iG;
+        attiG = att * iG;
+        attkqiG = att * kq * iG;
+    }
+    float4 step(float4 in, float4 g)
+    {
+        const float4 p1 = att * in - attiG * h2 - attkqiG * h1;
+        const float4 p2 = attiG * h1;
+        const float4 gi = g * 19.3423598f;          // g / (2 Vt)
+        float4 x = v1;
+        float4 y = v2;
+        float4 i1 = 0;
+        float4 i2 = 0;
+        float4 d1 = 0;
+        float4 d2 = 0;
+        float4 xo = 0;
+        {
+            const float4 t1 = tanhf(x * 19.3423598f);
+            const float4 t2 = tanhf(y * 19.3423598f);
+            i1 = g * t1;
+            i2 = g * t2;
+            d1 = gi * (1 - t1 * t1);
+            d2 = gi * (1 - t2 * t2);
+            const float4 r1 = x - p1 - K11 * i1 - K12 * i2;
+            const float4 r2 = y - p2 - K21 * i1;
+            const float4 a11 = 1 - K11 * d1;
+            const float4 a12 = -K12 * d2;
+            const float4 a21 = -K21 * d1;
+            const float4 idet = 1 / (a11 - a12 * a21);
+            x = x - (r1 - a12 * r2) * idet;
+            y = y - (a11 * r2 - a21 * r1) * idet;
+        }
+        {
+            const float4 t1 = tanhf(x * 19.3423598f);
+            const float4 t2 = tanhf(y * 19.3423598f);
+            i1 = g * t1;
+            i2 = g * t2;
+            d1 = gi * (1 - t1 * t1);
+            d2 = gi * (1 - t2 * t2);
+            const float4 r1 = x - p1 - K11 * i1 - K12 * i2;
+            const float4 r2 = y - p2 - K21 * i1;
+            const float4 a11 = 1 - K11 * d1;
+            const float4 a12 = -K12 * d2;
+            const float4 a21 = -K21 * d1;
+            const float4 idet = 1 / (a11 - a12 * a21);
+            x = x - (r1 - a12 * r2) * idet;
+            y = y - (a11 * r2 - a21 * r1) * idet;
+        }
+        i1 = g * tanhf(x * 19.3423598f);
+        i2 = g * tanhf(y * 19.3423598f);
+        const float4 b = (i1 + h1) * iG;
+        const float4 l = (i2 + h2) * iG;
+        h1 = g2C * b - h1;
+        h2 = g2C * l - h2;
+        v1 = x;
+        v2 = y;
+        return l;
+    }
+};
+
+module Voice_2d2_p4_1x
+{
+    Svf_2d2_p4 f;
+    float4 ph, lfo;
+    float4 dph, dlfo;
+    void init(float rate)
+    {
+        f.init(1 * rate);
+        ph = 0;
+        lfo = 0;
+        dph = (float4)(110.0f / (1 * rate), 138.6f / (1 * rate), 164.8f / (1 * rate), 207.7f / (1 * rate));
+        dlfo = (float4)(0.3f / (1 * rate), 0.37f / (1 * rate), 0.41f / (1 * rate), 0.53f / (1 * rate));
+    }
+    float4 sub()
+    {
+        ph = ph + dph;
+        ph = ph >= 1 ? ph - 1 : ph;
+        lfo = lfo + dlfo;
+        lfo = lfo >= 1 ? lfo - 1 : lfo;
+        const float4 cv = 2.0f * sinf(6.28318531f * lfo);      // +-2 octaves
+        const float4 g = 5.9e-4f * expf(0.693147181f * cv);  // expo converter: Iabc for ~4 kHz at cv 0
+        return f.step(10.0f * ph - 5.0f, g);
+    }
+    float4 tick()
+    {
+        return sub();
+    }
+};
+
+float v_2d2_p4_1x(float n)
+{
+    Voice_2d2_p4_1x w;
+    w.init(48000);
+    float sum = 0;
+    for (int i = 0; i < (int)n; ++i)
+    {
+        const float4 y = w.tick();
+        sum += y.x + y.y + y.z + y.w;
+    }
+    return sum;
+}
+
+module Voice_2d2_p4_2x
+{
+    Svf_2d2_p4 f;
+    IirS1x4Down d1;
+    float4 ph, lfo;
+    float4 dph, dlfo;
+    void init(float rate)
+    {
+        f.init(2 * rate);
+        d1.clear();
+        ph = 0;
+        lfo = 0;
+        dph = (float4)(110.0f / (2 * rate), 138.6f / (2 * rate), 164.8f / (2 * rate), 207.7f / (2 * rate));
+        dlfo = (float4)(0.3f / (2 * rate), 0.37f / (2 * rate), 0.41f / (2 * rate), 0.53f / (2 * rate));
+    }
+    float4 sub()
+    {
+        ph = ph + dph;
+        ph = ph >= 1 ? ph - 1 : ph;
+        lfo = lfo + dlfo;
+        lfo = lfo >= 1 ? lfo - 1 : lfo;
+        const float4 cv = 2.0f * sinf(6.28318531f * lfo);      // +-2 octaves
+        const float4 g = 5.9e-4f * expf(0.693147181f * cv);  // expo converter: Iabc for ~4 kHz at cv 0
+        return f.step(10.0f * ph - 5.0f, g);
+    }
+    float4 tick()
+    {
+        const float4 a = sub();
+        const float4 b = sub();
+        return d1.down(a, b);
+    }
+};
+
+float v_2d2_p4_2x(float n)
+{
+    Voice_2d2_p4_2x w;
+    w.init(48000);
+    float sum = 0;
+    for (int i = 0; i < (int)n; ++i)
+    {
+        const float4 y = w.tick();
+        sum += y.x + y.y + y.z + y.w;
+    }
+    return sum;
+}
+
+module Svf_torn1_s
+{
+    float h1, h2, v1, v2;
+    float iG, g2C, K11, K12, K21, att, kq, attiG, attkqiG;
+    void init(float rate)
+    {
+        const float gC = 2.0f * 1e-9f * rate;
+        iG = 1.0f / (gC + 1e-7f);
+        g2C = 2.0f * gC;
+        att = 220.0f / 100220.0f;
+        h1 = 0;
+        h2 = 0;
+        v1 = 0;
+        v2 = 0;
+        set(0.04f);
+    }
+    void set(float k)
+    {
+        kq = k;
+        K11 = -att * kq * iG;
+        K12 = -att * iG;
+        K21 = att * iG;
+        attiG = att * iG;
+        attkqiG = att * kq * iG;
+    }
+    float step(float in, float g)
+    {
+        const float p1 = att * in - attiG * h2 - attkqiG * h1;
+        const float p2 = attiG * h1;
+        const float gi = g * 19.3423598f;          // g / (2 Vt)
+        float x = v1;
+        float y = v2;
+        float i1 = 0;
+        float i2 = 0;
+        float d1 = 0;
+        float d2 = 0;
+        float xo = 0;
+        {
+            const float t1 = tanhf(x * 19.3423598f);
+            i1 = g * t1;
+            d1 = gi * (1 - t1 * t1);
+            y = p2 + K21 * i1;
+            const float t2 = tanhf(y * 19.3423598f);
+            i2 = g * t2;
+            d2 = gi * (1 - t2 * t2);
+            const float r = x - p1 - K11 * i1 - K12 * i2;
+            const float dr = 1 - K11 * d1 - K12 * d2 * K21 * d1;
+            xo = x;
+            x = x - r / dr;
+        }
+        i1 = g * tanhf(x * 19.3423598f);
+        y = p2 + K21 * i1;
+        i2 = g * tanhf(y * 19.3423598f);
+        const float b = (i1 + h1) * iG;
+        const float l = (i2 + h2) * iG;
+        h1 = g2C * b - h1;
+        h2 = g2C * l - h2;
+        v1 = x;
+        v2 = y;
+        return l;
+    }
+};
+
+module Voice_torn1_s_1x
+{
+    Svf_torn1_s f;
+    float ph, lfo;
+    float dph, dlfo;
+    void init(float rate)
+    {
+        f.init(1 * rate);
+        ph = 0;
+        lfo = 0;
+        dph = 110.0f / (1 * rate);
+        dlfo = 0.3f / (1 * rate);
+    }
+    float sub()
+    {
+        ph = ph + dph;
+        ph = ph >= 1 ? ph - 1 : ph;
+        lfo = lfo + dlfo;
+        lfo = lfo >= 1 ? lfo - 1 : lfo;
+        const float cv = 2.0f * sinf(6.28318531f * lfo);      // +-2 octaves
+        const float g = 5.9e-4f * expf(0.693147181f * cv);  // expo converter: Iabc for ~4 kHz at cv 0
+        return f.step(10.0f * ph - 5.0f, g);
+    }
+    float tick()
+    {
+        return sub();
+    }
+};
+
+float v_torn1_s_1x(float n)
+{
+    Voice_torn1_s_1x w;
+    w.init(48000);
+    float sum = 0;
+    for (int i = 0; i < (int)n; ++i)
+    {
+        const float y = w.tick();
+        sum += y;
+    }
+    return sum;
+}
+
+module Svf_torn1_p4
+{
+    float4 h1, h2, v1, v2;
+    float iG, g2C, K11, K12, K21, att, kq, attiG, attkqiG;
+    void init(float rate)
+    {
+        const float gC = 2.0f * 1e-9f * rate;
+        iG = 1.0f / (gC + 1e-7f);
+        g2C = 2.0f * gC;
+        att = 220.0f / 100220.0f;
+        h1 = 0;
+        h2 = 0;
+        v1 = 0;
+        v2 = 0;
+        set(0.04f);
+    }
+    void set(float k)
+    {
+        kq = k;
+        K11 = -att * kq * iG;
+        K12 = -att * iG;
+        K21 = att * iG;
+        attiG = att * iG;
+        attkqiG = att * kq * iG;
+    }
+    float4 step(float4 in, float4 g)
+    {
+        const float4 p1 = att * in - attiG * h2 - attkqiG * h1;
+        const float4 p2 = attiG * h1;
+        const float4 gi = g * 19.3423598f;          // g / (2 Vt)
+        float4 x = v1;
+        float4 y = v2;
+        float4 i1 = 0;
+        float4 i2 = 0;
+        float4 d1 = 0;
+        float4 d2 = 0;
+        float4 xo = 0;
+        {
+            const float4 t1 = tanhf(x * 19.3423598f);
+            i1 = g * t1;
+            d1 = gi * (1 - t1 * t1);
+            y = p2 + K21 * i1;
+            const float4 t2 = tanhf(y * 19.3423598f);
+            i2 = g * t2;
+            d2 = gi * (1 - t2 * t2);
+            const float4 r = x - p1 - K11 * i1 - K12 * i2;
+            const float4 dr = 1 - K11 * d1 - K12 * d2 * K21 * d1;
+            xo = x;
+            x = x - r / dr;
+        }
+        i1 = g * tanhf(x * 19.3423598f);
+        y = p2 + K21 * i1;
+        i2 = g * tanhf(y * 19.3423598f);
+        const float4 b = (i1 + h1) * iG;
+        const float4 l = (i2 + h2) * iG;
+        h1 = g2C * b - h1;
+        h2 = g2C * l - h2;
+        v1 = x;
+        v2 = y;
+        return l;
+    }
+};
+
+module Voice_torn1_p4_1x
+{
+    Svf_torn1_p4 f;
+    float4 ph, lfo;
+    float4 dph, dlfo;
+    void init(float rate)
+    {
+        f.init(1 * rate);
+        ph = 0;
+        lfo = 0;
+        dph = (float4)(110.0f / (1 * rate), 138.6f / (1 * rate), 164.8f / (1 * rate), 207.7f / (1 * rate));
+        dlfo = (float4)(0.3f / (1 * rate), 0.37f / (1 * rate), 0.41f / (1 * rate), 0.53f / (1 * rate));
+    }
+    float4 sub()
+    {
+        ph = ph + dph;
+        ph = ph >= 1 ? ph - 1 : ph;
+        lfo = lfo + dlfo;
+        lfo = lfo >= 1 ? lfo - 1 : lfo;
+        const float4 cv = 2.0f * sinf(6.28318531f * lfo);      // +-2 octaves
+        const float4 g = 5.9e-4f * expf(0.693147181f * cv);  // expo converter: Iabc for ~4 kHz at cv 0
+        return f.step(10.0f * ph - 5.0f, g);
+    }
+    float4 tick()
+    {
+        return sub();
+    }
+};
+
+float v_torn1_p4_1x(float n)
+{
+    Voice_torn1_p4_1x w;
+    w.init(48000);
+    float sum = 0;
+    for (int i = 0; i < (int)n; ++i)
+    {
+        const float4 y = w.tick();
+        sum += y.x + y.y + y.z + y.w;
+    }
+    return sum;
+}

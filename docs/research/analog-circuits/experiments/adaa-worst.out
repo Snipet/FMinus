@@ -1,0 +1,10 @@
+== Example 1 (DiodeTone) worst case ==
+ 1x | alias plain  -42.0 ADAA  -58.0 | H3 plain -1.23 ADAA -3.74, H1 ADAA -0.40 dB | solver plain w K0/K1/K2  -33.8  -54.0  -93.2 | prev K1..K6   -2.7   -5.0   -7.7   -9.7  -11.5  -13.2 | ADAA w K0/K1/K2  -51.3  -89.1  -83.5
+ 2x | alias plain  -52.4 ADAA  -81.9 | H3 plain -0.33 ADAA -0.91, H1 ADAA -0.12 dB | solver plain w K0/K1/K2  -34.0  -54.2  -93.9 | prev K1..K6  -18.0  -24.4  -29.1  -33.2  -36.5  -40.2 | ADAA w K0/K1/K2  -45.9  -83.2  -99.6
+ 4x | alias plain  -79.8 ADAA -107.6 | H3 plain -0.08 ADAA -0.24, H1 ADAA -0.04 dB | solver plain w K0/K1/K2  -34.5  -54.5  -93.7 | prev K1..K6  -38.4  -46.6  -55.0  -69.5  -97.0 -127.0 | ADAA w K0/K1/K2  -45.8  -84.2  -99.5
+ 8x | alias plain -113.9 ADAA -140.5 | H3 plain -0.02 ADAA -0.08, H1 ADAA -0.01 dB | solver plain w K0/K1/K2  -34.6  -55.9  -97.0 | prev K1..K6  -53.7  -72.2 -106.2 -118.1 -118.1 -118.1 | ADAA w K0/K1/K2  -47.2  -84.9  -98.9
+== Example 2 block 2 (TS clip) worst case ==
+ 1x | alias plain  -22.7 ADAA  -35.9 | H3 plain -0.03 ADAA -0.58, H1 ADAA -0.12 dB | solver plain w K0/K1/K2  -30.8  -51.7  -92.2 | prev K1..K6   27.3   26.4   27.6   26.3   27.6   25.3 | ADAA w K0/K1/K2  -43.4  -83.4  -89.2
+ 2x | alias plain  -31.1 ADAA  -52.6 | H3 plain -0.01 ADAA -0.17, H1 ADAA -0.04 dB | solver plain w K0/K1/K2  -29.5  -49.8  -89.4 | prev K1..K6    7.5    5.1    2.6    0.3   -0.7   -1.4 | ADAA w K0/K1/K2  -46.3  -83.7  -88.0
+ 4x | alias plain  -53.6 ADAA  -75.1 | H3 plain -0.02 ADAA -0.06, H1 ADAA -0.01 dB | solver plain w K0/K1/K2  -29.8  -51.1  -91.8 | prev K1..K6  -13.7  -17.1  -19.9  -22.4  -24.4  -26.4 | ADAA w K0/K1/K2  -44.3  -81.2  -89.4
+ 8x | alias plain  -72.9 ADAA  -89.7 | H3 plain -0.00 ADAA -0.03, H1 ADAA -0.00 dB | solver plain w K0/K1/K2  -34.0  -54.4  -94.4 | prev K1..K6  -32.2  -38.2  -43.2  -47.1  -51.0  -56.7 | ADAA w K0/K1/K2  -42.3  -82.6  -92.6

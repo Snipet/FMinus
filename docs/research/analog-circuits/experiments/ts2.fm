@@ -1,0 +1,68 @@
+// Stand-in for the library's oversampler (its API only; the real one is two halfband stages each way).
+module Oversample4
+{
+    float last;
+    void up(float x, float* restrict o4)        // one input sample -> four
+    {
+        o4[0] = x;
+        o4[1] = x;
+        o4[2] = x;
+        o4[3] = x;
+        last = x;
+    }
+    float down(const float* restrict i4)        // four -> one
+    {
+        return 0.25f * (i4[0] + i4[1] + i4[2] + i4[3]);
+    }
+    void clear() { last = 0; }
+};
+
+module ScreamerClip                   // block 2; Screamer holds it with blocks 1, 3, 4 and an Oversample4
+{
+    float x_C3, x_C4;
+    float g4, gc3, gc4, inA;          // 1/R4, 2 C3 fs, 2 C4 fs, 1 / (g4 + gc3)
+    float invB, k2, kvt, lna;         // drive-dependent: 1 / (gf + gc4), 2 Is K, 2 Is K / (N Vt), log(Is K / (N Vt))
+
+    void init(float rate)             // rate: the oversampled rate
+    {
+        g4 = 1.0f / 4700.0f;
+        gc3 = 2.0f * 47e-9f * rate;
+        gc4 = 2.0f * 51e-12f * rate;
+        inA = 1.0f / (g4 + gc3);
+        x_C3 = 0;
+        x_C4 = 0;
+        set(0.5f);
+    }
+
+    void set(float drive)             // the audio taper as the compiler emits it: (81^x - 1) / 80
+    {
+        const float d = fminf(fmaxf(drive, 0), 1);
+        const float gf = 1.0f / (51000.0f + 500000.0f * (expf(4.39444915f * d) - 1) * 0.0125f);
+        invB = 1.0f / (gf + gc4);
+        k2 = 5.04e-9f * invB;
+        kvt = k2 * 22.0750552f;
+        lna = logf(0.5f * kvt);
+    }
+
+    float step(float vin)
+    {
+        const float va = (vin * g4 + x_C3) * inA;                   // the R4-C3 node
+        const float p = ((vin - va) * g4 + x_C4) * invB;            // the port's open-circuit voltage
+        const float q = fabsf(p);
+        const float a = 0.5f * k2;
+        const float arg = (q + a) * 22.0750552f + lna;
+        const float w = arg <= -3.34145955f ? 0
+                      : arg < 8 ? ((-1.31429315e-3f * arg + 4.77593136e-2f) * arg + 3.63195266e-1f) * arg + 6.31318346e-1f
+                                : arg - logf(fmaxf(arg, 8));
+        float v = q + a - 0.0453f * w;
+        v = p < 0 ? -v : v;
+        const float e = expf(v * 22.0750552f);
+        const float ei = 1 / e;
+        const float f = v - p + k2 * 0.5f * (e - ei);
+        const float dd = 1 + kvt * 0.5f * (e + ei);
+        v = fminf(fmaxf(v - f / dd, fminf(p, 0)), fmaxf(p, 0));
+        x_C3 = 2 * gc3 * va - x_C3;
+        x_C4 = 2 * gc4 * v - x_C4;
+        return vin + v;                                             // Vout = Vin + V
+    }
+};

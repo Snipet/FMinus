@@ -1,0 +1,39 @@
+// calibration: dependent chains of known shape
+float addchain(float n)
+{
+    float x = 0;
+    for (int i = 0; i < (int)n; ++i)
+    {
+        x = x + 1e-7f; x = x + 1e-7f; x = x + 1e-7f; x = x + 1e-7f;
+        x = x + 1e-7f; x = x + 1e-7f; x = x + 1e-7f; x = x + 1e-7f;
+    }
+    return x;
+}
+float expchain(float n)
+{
+    float x = 0.3f;
+    for (int i = 0; i < (int)n; ++i)
+        x = expf(x) * 0.5f + 0.75f - expf(1.0f) * 0.5f + 0.2f;
+    return x;
+}
+float expchain2(float n)
+{
+    float x = 0.3f;
+    for (int i = 0; i < (int)n; ++i)
+        x = expf(-x) * 0.5f + 0.75f;
+    return x;
+}
+float logchain(float n)
+{
+    float x = 0.3f;
+    for (int i = 0; i < (int)n; ++i)
+        x = logf(x + 2.0f) * 0.5f + 0.75f;
+    return x;
+}
+float divchain(float n)
+{
+    float x = 0.3f;
+    for (int i = 0; i < (int)n; ++i)
+        x = 1.0f / (x + 1.5f);
+    return x;
+}
