@@ -1,10 +1,11 @@
 # The experiments
 
 The sources of the experiments that [An analog circuit compiler for FMinus](../README.md) (the report) and its
-[notes](../notes/) cite, and the results the report quotes. They are research code, kept as it was run on 2026-10-28
-and 2026-10-29: not part of FMinus's build (no CMake reaches `docs/`), not wrapped to FMinus's 120 columns, not tested.
-The C++ needs only the standard library; the FMinus programs ran on FMinus at `c75caab`, or on the 2026-10-23 build
-where [fminus.md](../notes/fminus.md#61-what-the-experiments-show) says so.
+[notes](../notes/) cite, and the results the report quotes. They are research code, kept as it was run on 2026-10-28 and
+2026-10-29: not part of FMinus's build (no CMake reaches `docs/`), not wrapped to FMinus's 120 columns, not tested. The
+C++ needs only the standard library, except `fmbench.cpp`, a host of FMinus's C++ API (below); the FMinus programs ran
+on FMinus at `c75caab`, or on the 2026-10-23 build where [fminus.md](../notes/fminus.md#61-what-the-experiments-show)
+says so.
 
 ## Running them
 
@@ -12,8 +13,8 @@ Work on a copy, since the generators write into the current directory:
 
 ```bash
 cp -R docs/research/analog-circuits/experiments ../analog-experiments && cd ../analog-experiments
-clang++ -std=c++20 -O2 -ffp-contract=off adaa.cpp -o adaa      # every .cpp builds alone, so
-./adaa worst                                                  # this prints adaa-worst.out's table
+clang++ -std=c++20 -O2 -ffp-contract=off adaa.cpp -o adaa      # all but fmbench.cpp and tone_lib.cpp build alone
+./adaa worst                                                  # prints adaa-worst.out's table
 fminus check.fm --run dc 1                                    # an FMinus program, in the JIT
 python3 mkbench.py ts                                         # writes bench_ts.fm and bench_ts.names
 fmbench bench_ts.fm vector 1000000 7 $(cat bench_ts.names)    # the report's cycle counts: 10^6 samples, best of 7

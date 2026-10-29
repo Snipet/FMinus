@@ -87,9 +87,9 @@ unmeasured judgement.
 - The tools: `measure_output` (effect metrics include `thd_db` of one fixed 220 Hz, −12 dBFS sine), `view_sound`,
   `set_checks`, `tune_dials`, `compare`, `trace`, `capture`, `listen`. The same tools reach Claude Desktop through MCP.
 
-**FSynth's own data** (`docs/research/B-filters.md` §2.2) [H]: on a tanh ladder, two Newton steps from the previous
-sample stay within −50 dB at 48 kHz and −85 dB at 96 kHz. One step reached +24 dB at 12 kHz. A tanh saturates; a
-diode's exponential does not, and that is where the previous-sample guess breaks down (section 6.1).
+**Earlier unpublished measurements** [H]: on a tanh ladder, two Newton steps from the previous sample stay within −50 dB
+at 48 kHz and −85 dB at 96 kHz. One step reached +24 dB at 12 kHz. A tanh saturates; a diode's exponential does not, and
+that is where the previous-sample guess breaks down (section 6.1).
 
 ## 2. The methods, in one page
 
@@ -144,9 +144,9 @@ WD Newton's convergence basin depends on the port resistances (Bernardini et al.
 **Aliasing** [H, Yeh–Abel–Smith DAFx-07]. They write that "typical digital implementations of distortion upsample by a
 factor of eight or ten". The same paper cuts a circuit into stages wherever an active element with a low source
 impedance drives a high-impedance load. Antiderivative antialiasing has been extended to stateful systems, but to
-one-port (Holters 2020) or two-port (Carson) nonlinearities [M]. It adds half a sample of delay inside loops (FSynth B
-§2.3) and can change the frequency response (La Pastina–D'Angelo 2022) [M]. It is a later option for single-port blocks
-at 1x, not a default.
+one-port (Holters 2020) or two-port (Carson) nonlinearities [M]. It adds half a sample of delay inside loops and can
+change the frequency response (La Pastina–D'Angelo 2022) [M]. It is a later option for single-port blocks at 1x, not a
+default.
 
 **Choice:** the generalized state-space formulation, because it handles op-amps and arbitrary devices, keeps physical
 states (which pot moves and switch ramps rely on), reduces the nonlinear work to `m` ports, and produces straight-line
@@ -661,9 +661,8 @@ for pedals, and the playground should report a program's latency (§7).
    the compiler's own test. Counts are fixed, so cost is predictable, `float2` lanes stay together, and the output is
    the same however blocks are split.
 4. **Pots by Woodbury at control rate.** A rheostat is rank 1, a 3-terminal pot rank 2. Updates run on the absolute
-   16-sample grid, which FSynth's control grid also uses. A still dial is a flat stream and its `set` costs nothing; a
-   frozen one folds. Switches are ramped resistors (rank 1), so a topology change never steps, and it costs what a pot
-   costs.
+   16-sample grid. A still dial is a flat stream and its `set` costs nothing; a frozen one folds. Switches are ramped
+   resistors (rank 1), so a topology change never steps, and it costs what a pot costs.
 5. **Emit sparse straight-line code.** LLVM folds `x * 1.0f`, but not `x * 0.0f` or `x + 0.0f` without
    `nnan`/`nsz`, which FMinus never sets, so the compiler drops structural zeros itself. Divides by constants become
    products by reciprocals, because FMinus keeps `x / c` exact, so it stays a divide. Constants
@@ -735,7 +734,7 @@ bitwise operators (the fast-log tricks of D'Angelo et al. are beaten by the inli
   20 ms (rank-1 updates), not topology steps. The states are physical (companion histories that depend on `C` and
   `T`, not on any pot), so a coefficient change acts as a moving pot acts. Programs crossfade in the Engine and start
   at the DC point.
-- **Voices summed exactly.** That is FSynth's rule (int64); the playground sums voices in float in a fixed slot order.
+- **Voices summed exactly.** An exact sum would use int64; the playground sums voices in float in a fixed slot order.
   A circuit voice only has to be deterministic per instance, which it is. In a `Voice`, `start` resets to the DC
   point only when the voice was silent, as the playground's practice says for any state.
 - **Finite output.** The 1-port bracket keeps iterates finite. Multi-port blocks clamp junction voltages to the rails
@@ -845,7 +844,7 @@ In-house:
   [`docs/architecture.md`](../../../architecture.md), [`src/ir/Calls.cpp`](../../../../src/ir/Calls.cpp) [H]
 - TestingPlayground `README.md`, `CLAUDE.md`, `Source/fminus/Patch.h`, `Patch.cpp`, `Source/dsp/Engine.h`,
   `Measure.cpp`, `Source/plugin/ChatPrompt.cpp`, `ChatAgent.cpp` [H]
-- FSynth `docs/research/B-filters.md` §2 [H]
+- Earlier unpublished measurements of a tanh ladder [H]
 
 ## Appendix A: the experiments (reproducible)
 

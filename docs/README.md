@@ -9,7 +9,7 @@
 | [building.md](building.md) | Presets, the dependency cache and LLVM flavors, adding sources, tools, examples, tests and dependencies, warnings and sanitizers, Windows, troubleshooting |
 | [testing.md](testing.md) | The test layers (Catch2, lit + FileCheck, example harnesses, which call a block kernel once) and how to write each; inspecting and debugging the compiler's output with `fminus`, `opt`, `llc`, `llvm-mca` and lldb |
 | [recipes/](recipes/) | the recipes that aren't in the compiler (a runtime function, a pass), as a patch |
-| [research/analog-circuits/](research/analog-circuits/) | Research, not a feature: a compiler from SPICE-style netlists to FMinus source for analog circuits (pedals, synth filters), its methods, solvers, antialiasing and costs measured on FMinus at `c75caab`, with the four notes it draws on and the experiments' sources |
+| [research/analog-circuits/](research/analog-circuits/README.md) | Research, not a feature: a compiler from SPICE-style netlists to FMinus source for analog circuits (pedals, synth filters), its methods, solvers, antialiasing and costs measured on FMinus at `c75caab`, with the four notes it draws on and the experiments' sources |
 
 To grow the language, read architecture.md, then extending.md, then simd.md. Use building.md and testing.md as
 reference. To write programs in it, read programs.md.

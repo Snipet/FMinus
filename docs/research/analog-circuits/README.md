@@ -9,8 +9,8 @@ cost on FMinus at commit `c75caab`. This folder holds the report, the four resea
 The report draws together the four notes ([landscape.md](notes/landscape.md), [methods.md](notes/methods.md),
 [optimization.md](notes/optimization.md), [fminus.md](notes/fminus.md)) and settles the points where they disagree. It
 adds a second round of experiments:
-- costs measured with FMinus at `c75caab`, the commit the playground (TestingPlayground, a plugin whose effect and synth
-  are FMinus programs) pins;
+- costs measured with FMinus at `c75caab`, the commit the playground (TestingPlayground: two plugins, an effect and a
+  synth, whose DSP is an FMinus program) pins;
 - stateful antiderivative antialiasing (ADAA);
 - a self-test run against a stress matrix;
 - a synth filter;
@@ -344,7 +344,7 @@ The self-test measures the candidates each row names.
 |---|---|---|---|---|---|
 | M = 0 (linear) | none | – | 1x only with a magnitude-matched design (bilinear prewarped at the highest pole, or MZT/Vicanek-style, from the analog H(s, pots)); otherwise 2x TR | – | coefficients as closed-form functions of the pots (Lcapy/SymPy at compile time, §8.6); dials by grid, audio-rate R by pot-as-port |
 | M = 1, EA | ω3 + Newton, kept in the bracket [min(0, p), max(0, p)] | 1, 2 | 1, 2, 4, 8 | yes (closed-form F) | TR; offset form if biased |
-| M = 1, SM | previous sample + Newton | 1, 2, 3 | 1, 2, 4 | yes (F with log cosh) | TR. Precedent: FSynth B §2.2, 2 Newton steps within −50 dB at 48 kHz [H] |
+| M = 1, SM | previous sample + Newton | 1, 2, 3 | 1, 2, 4 | yes (F with log cosh) | TR. Precedent: a measured tanh ladder (unpublished), 2 Newton steps within −50 dB at 48 kHz [H] |
 | M = 2–4 with a structural chain (some K_jj = 0, or K triangular after BLT) | both the full M-D Newton and the torn 1-D Newton, from the previous sample | 1, 2, 3 | 1, 2, 4 | no | pick by measured cycles; on an out-of-order core the M-D form often wins (§8.4) |
 | M = 2–4, MP dense (BJT stages, global feedback) | M-D Newton from the previous sample, junction steps capped at 4nV_t, junction capacitances added (with a note) if the model lacks them | 2–8 | 4, 8 | no | offset form, mandatory when biased; a table instead if d ≤ 2 (K-method, file-scope const) |
 | M ≥ 5 | decompose first (BLT, then Holters' F_q decomposition), then apply the rows above to each sub-block | – | – | – | if a sub-block keeps M ≥ 5: warn, and use M-D Newton with K = 8 |
@@ -419,7 +419,7 @@ Measured on the TS block, single-threaded, in C++ ([`selftest.cpp`](experiments/
 
 ### 7.1 Example 3: an OTA state-variable filter (LM13700-style), as a netlist
 
-```spice
+```
 * otasvf.cir: 2-pole OTA SVF voice filter. Cutoff by Iabc (a per-sample CV), resonance a pot.
 .title OtaSvf
 .input  u    in   scale=1
@@ -675,7 +675,7 @@ side is R_l = T·20k.
 [fminus.md](notes/fminus.md#4-b-the-syntax)'s convention R(e1–w) = (1 − t)R, puts (1 − tone)·20k on the input side. That
 reverses the knob: the two orientations differ by 16.4 dB at T = 0 and 1, and tone = 1 was dark. The corrected line
 (tone = 1 bright; T = 1 gives +0.5 dB at 1 kHz and −3.6 dB at 5 kHz):
-```spice
+```
 Ptone  tn  tw  t1  20k {tone}       ; R(tw-t1) = tone*20k on the + input side, as Yeh's R_l = T*20k
 ```
 
