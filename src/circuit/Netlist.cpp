@@ -185,6 +185,12 @@ namespace fminus::circuit
         return x;
     }
 
+    std::vector<ModelCard> builtinModels()
+    {
+        // Yeh, DAFx-07 (as examples/circuits' netlists write them): both are the same small-signal silicon diode
+        return {{"1N914", {}, 2.52e-9, 1.752, 0}, {"1N4148", {}, 2.52e-9, 1.752, 0}};
+    }
+
     // ---- expressions ------------------------------------------------------------------------------------------------
 
     double evaluate(const Expr& expr, const std::function<double(const std::string&)>& pot)
@@ -925,6 +931,38 @@ namespace fminus::circuit
                 return false;
             }
 
+            // An E's or a linear G's gain: a number (not 0, at most 1e30 and at least 1e-30 in size: a float
+            // coefficient) or an {expression} of pots.
+            bool gain(Element& e, const Token& t, const std::string& part)
+            {
+                e.valueLoc = t.loc;
+                if (t.text.front() == '{')
+                {
+                    e.expr = expression(t);
+                    if (!e.expr)
+                        return false;
+                    if (!potsOf(*e.expr).empty())
+                        return true;
+                    e.value = evaluate(*e.expr, [](const std::string&) { return 0.0; });
+                    e.expr.reset();
+                }
+                else
+                {
+                    const std::optional<Number> v = parseNumber(t.text);
+                    if (!v)
+                    {
+                        error(t.loc, "'" + t.text + "' is not a number (" + part + "'s gain)");
+                        return false;
+                    }
+                    e.value = v->value;
+                }
+                if (std::fabs(e.value) >= 1e-30 && std::fabs(e.value) <= 1e30)
+                    return true;
+                error(t.loc, part + "'s gain " + t.text +
+                                 " is out of range for float coefficients (1e-30 to 1e30 in size; not 0)");
+                return false;
+            }
+
             bool defined(const std::string& name, Loc loc)
             {
                 const std::string key = folded(name);
@@ -959,22 +997,14 @@ namespace fminus::circuit
             std::map<std::string, Loc> names_;   // element names, folded
         };
 
-        // The element kinds Phase 0 refuses, with what to say.
+        // The element kinds refused, with what to say.
         const char* unsupported(char kind)
         {
             switch (kind)
             {
-            case 'l':
-                return "the inductor %s is not supported yet (Phase 1)";
-            case 'v':
-                return "the voltage source %s is not supported yet (Phase 1; the input is .input's)";
-            case 'i':
-                return "the current source %s is not supported yet (Phase 1)";
-            case 'e':
             case 'f':
-            case 'g':
             case 'h':
-                return "the controlled source %s is not supported yet (Phase 1)";
+                return "the current-controlled source %s is not supported yet (Phase 2)";
             case 'q':
                 return "the transistor %s is not supported yet (Phase 2)";
             case 'j':
@@ -984,7 +1014,7 @@ namespace fminus::circuit
             case 's':
                 return "the switch %s is not supported yet (Phase 1)";
             case 'k':
-                return "the coupling %s is not supported yet (Phase 1)";
+                return "the coupling %s is not supported yet (Phase 2)";
             case 't':
                 return "the transmission line %s is not supported yet";
             case 'b':
@@ -1020,8 +1050,7 @@ namespace fminus::circuit
             e.loc = head.loc;
             for (const Token& token : t)
                 e.text += (e.text.empty() ? "" : " ") + token.text;
-            const bool ota = kind == 'g' && t.size() >= 4 && folded(t[3].text) == "ota";
-            if (const char* what = unsupported(kind); what != nullptr && !ota)
+            if (const char* what = unsupported(kind); what != nullptr)
             {
                 error(head.loc, replaced(what, head.text));
                 return;
@@ -1093,6 +1122,94 @@ namespace fminus::circuit
                     return;
                 }
                 if (!e.expr && !inRange(e.value, t[3], head.text))
+                    return;
+                break;
+            }
+            case 'l':
+            {
+                if (t.size() != 4 || !nodeTokensOk(1, 2))
+                {
+                    error(head.loc, head.text + ": expected 'L<name> n+ n- value'");
+                    return;
+                }
+                e.kind = Element::Kind::Inductor;
+                nodesFrom(1, 2);
+                e.valueLoc = t[3].loc;
+                const std::optional<Number> v = parseNumber(t[3].text);
+                if (!v)
+                {
+                    error(t[3].loc, "'" + t[3].text + "' is not a number (" + head.text + "'s value)");
+                    return;
+                }
+                e.value = v->value;
+                if (!(e.value > 0))
+                {
+                    error(t[3].loc, head.text + "'s value is " + t[3].text + ": an inductor needs a positive value");
+                    return;
+                }
+                if (!inRange(e.value, t[3], head.text))
+                    return;
+                break;
+            }
+            case 'v':
+            case 'i':
+            {
+                // V<name> n+ n- [DC] value, I<name> n+ n- [DC] value: DC only (the signal is .input's)
+                const bool voltage = kind == 'v';
+                for (std::size_t i = 3; i < t.size(); ++i)
+                {
+                    const std::string w = folded(t[i].text);
+                    static constexpr std::array<std::string_view, 7> kSpecs{"ac",  "sin", "pulse", "pwl",
+                                                                            "exp(", "sffm", "am("};
+                    if (std::any_of(kSpecs.begin(), kSpecs.end(), [&](std::string_view k)
+                                    { return w == k || (k != "ac" && w.rfind(k, 0) == 0); }))
+                    {
+                        std::string spec;   // the rest of the line
+                        for (std::size_t j = i; j < t.size(); ++j)
+                            spec += (spec.empty() ? "" : " ") + t[j].text;
+                        error(t[i].loc, "'" + spec + "': a" + std::string(voltage ? " V" : "n I") +
+                                            " source is DC: the signal is .input's");
+                        return;
+                    }
+                }
+                const std::size_t at = t.size() == 5 && folded(t[3].text) == "dc" ? 4 : 3;
+                if (t.size() != at + 1 || !nodeTokensOk(1, 2))
+                {
+                    error(head.loc, head.text + (voltage ? ": expected 'V<name> n+ n- [DC] value'"
+                                                         : ": expected 'I<name> n+ n- [DC] value'"));
+                    return;
+                }
+                e.kind = voltage ? Element::Kind::Voltage : Element::Kind::Current;
+                nodesFrom(1, 2);
+                e.valueLoc = t[at].loc;
+                const std::optional<Number> v = parseNumber(t[at].text);
+                if (!v)
+                {
+                    error(t[at].loc, "'" + t[at].text + "' is not a number (" + head.text + "'s value)");
+                    return;
+                }
+                e.value = v->value;
+                // a DC volt or amp value: 0 or negative too, finite, and within float's reach
+                if (!std::isfinite(e.value) || std::fabs(e.value) > 1e30)
+                {
+                    error(t[at].loc, head.text + "'s value " + t[at].text +
+                                         " is out of range for float coefficients (at most 1e30 in size)");
+                    return;
+                }
+                break;
+            }
+            case 'e':
+            {
+                // E<name> n+ n- nc+ nc- gain|{expr}: a VCVS
+                if (t.size() != 6 || !nodeTokensOk(1, 4))
+                {
+                    error(head.loc, head.text + ": expected 'E<name> n+ n- nc+ nc- gain' (gain in V/V, or {expr} of "
+                                                "pots)");
+                    return;
+                }
+                e.kind = Element::Kind::Vcvs;
+                nodesFrom(1, 4);
+                if (!gain(e, t[5], head.text))
                     return;
                 break;
             }
@@ -1179,12 +1296,25 @@ namespace fminus::circuit
             }
             case 'g':
             {
+                // G<name> n+ n- nc+ nc- gain|{expr}: a linear VCCS, its current leaving n+ and entering n- (SPICE's G
+                // direction)
+                if (t.size() == 6 && folded(t[3].text) != "ota")
+                {
+                    if (!nodeTokensOk(1, 4))
+                        return;
+                    e.kind = Element::Kind::Vccs;
+                    nodesFrom(1, 4);
+                    if (!gain(e, t[5], head.text))
+                        return;
+                    break;
+                }
                 // G<name> n+ n- OTA nc+ nc- gain|{expr}: the OTA macro (report §7.1), SPICE's G direction (its current
                 // leaves n+ and enters n-)
-                if (t.size() != 7 || !nodeTokensOk(1, 2) || !nodeTokensOk(4, 2))
+                if (t.size() != 7 || folded(t[3].text) != "ota" || !nodeTokensOk(1, 2) || !nodeTokensOk(4, 2))
                 {
-                    error(head.loc, head.text + ": expected 'G<name> n+ n- OTA nc+ nc- gain' (gain in amps, or {expr} "
-                                                "of pots and law inputs)");
+                    error(head.loc, head.text + ": expected 'G<name> n+ n- nc+ nc- gain' (a VCCS, gain in A/V, or "
+                                                "{expr} of pots) or 'G<name> n+ n- OTA nc+ nc- gain' (gain in amps, "
+                                                "or {expr} of pots and law inputs)");
                     return;
                 }
                 e.kind = Element::Kind::Ota;
@@ -1316,15 +1446,17 @@ namespace fminus::circuit
                     card.n = v->value;
                 else if (key == "rs")
                 {
-                    if (v->value != 0)
+                    // a series resistance: an internal node and a resistor (0: none)
+                    if (!(v->value == 0 || (v->value >= 1e-30 && v->value <= 1e30)))
                     {
-                        error(p.loc, "RS is not supported yet (Phase 1)");
+                        error(p.loc, "'" + p.text + "': RS is 0 or a resistance from 1e-30 to 1e30 ohms");
                         return;
                     }
+                    card.rs = v->value;
                 }
                 else if (std::find(kIgnored.begin(), kIgnored.end(), key) != kIgnored.end())
-                    messages_.warning(p.loc, p.text.substr(0, eq) + " is ignored (Phase 0's diode is Shockley's: IS "
-                                                                    "and N)");
+                    messages_.warning(p.loc, p.text.substr(0, eq) + " is ignored (the diode model is Shockley's: IS, "
+                                                                    "N and RS)");
                 else
                 {
                     error(p.loc, "unknown diode parameter '" + p.text.substr(0, eq) + "'");
@@ -1758,7 +1890,10 @@ namespace fminus::circuit
             }
             if (name == ".op")
             {
-                messages_.warning(head.loc, "'.op' is ignored (Phase 1: the DC operating point)");
+                // the DC operating point, as notes (Dc.h)
+                if (!arity(0, 0, ".op"))
+                    return true;
+                n_.op = head.loc;
                 return true;
             }
             static constexpr std::array<std::string_view, 11> kSimulator{

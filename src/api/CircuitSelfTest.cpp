@@ -356,7 +356,14 @@ namespace fminus::circuit
                                        pots > 0 ? potBuffer.data() : nullptr, nullptr, ticksOut.data(),
                                        static_cast<int>(host), 0);
                         const auto unit = static_cast<std::size_t>(u);
-                        results[unit] = measureUnit(matrix, u, c.oversample, doubles(stepsOut), doubles(ticksOut),
+                        // tick adds the output's DC operating point back; the references run in the offsets
+                        std::vector<double> ticked = doubles(ticksOut);
+                        if (p.outputDc != 0)
+                        {
+                            for (double& y : ticked)
+                                y -= p.outputDc;
+                        }
+                        results[unit] = measureUnit(matrix, u, c.oversample, doubles(stepsOut), ticked,
                                                     signal.t1 ? &refs[unit] : nullptr,
                                                     signal.t2 ? &ref64[unit] : nullptr);
                     });

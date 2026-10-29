@@ -366,6 +366,15 @@ namespace fminus::circuit
             else
                 bc.rLines.push_back("const float r_" + br.ident + " = " + literal(br.value) + " * " + t + ";");
         }
+        // The gains pots move: k_<E>, an expression of the (clamped) pots.
+        for (const Controlled& c : block.controlled)
+        {
+            if (!c.expr)
+                continue;
+            const Element& el = plan.netlist.elements[static_cast<std::size_t>(c.element)];
+            bc.rLines.push_back(withComment("const float k_" + c.ident + " = " + printExpr(*c.expr, potName) + ";",
+                                            el.text));
+        }
         std::vector<Val> symbols;
         for (const System::Symbol& s : bc.system.symbols)
             symbols.push_back(Val::var(s.name, &code));
@@ -555,7 +564,7 @@ namespace fminus::circuit
                 {
                     for (const Branch& br : b.branches)
                     {
-                        if (br.kind == Branch::Kind::Capacitor)
+                        if (br.state())
                             fields.emplace_back("x_" + br.ident, 0);
                     }
                 }
@@ -566,7 +575,7 @@ namespace fminus::circuit
                     {
                         for (const Branch& br : b.branches)
                         {
-                            if (br.kind == Branch::Kind::Capacitor)
+                            if (br.state())
                                 fields.emplace_back("xo_" + br.ident, 0);
                         }
                     }
@@ -597,12 +606,21 @@ namespace fminus::circuit
                 return b.port.has_value() && plan.config.adaa;
             }
 
-            // Whether block i's set() moves its ADAA port's curve: ka is a field its b<N>_set computes.
+            // Whether block i's set() moves its ADAA port's curve: ka (an asymmetric pair's kr too) is a field its
+            // b<N>_set computes.
             bool movesPortCurve(std::size_t i) const
             {
                 const Block& b = plan.blocks[i];
                 return adaaBlock(b) && !b.port->smooth() && !b.pots.empty() &&
                        coefficient(i, "ka_" + b.port->name).kind == Val::Kind::Var;
+            }
+
+            // Whether its other diode's kr moves too (an asymmetric pair).
+            bool movesReverse(std::size_t i) const
+            {
+                const Block& b = plan.blocks[i];
+                return movesPortCurve(i) && b.port->law == PortDef::Law::Asym &&
+                       coefficient(i, "kr_" + b.port->name).kind == Val::Kind::Var;
             }
 
             Val coefficient(std::size_t b, const std::string& name) const
@@ -665,6 +683,11 @@ namespace fminus::circuit
                 const Val lna = coefficient(i, "lna_" + P);
                 o.plusLna =
                     lna.kind == Val::Kind::Const && lna.c < 0 ? " - " + literal(-lna.c) : " + " + operandText(lna);
+                o.lna = operandText(lna);
+                o.kr = operandText(coefficient(i, "kr_" + P));
+                o.ks = operandText(coefficient(i, "ks_" + P));
+                o.kcr = operandText(coefficient(i, "kcr_" + P));
+                o.lnr = operandText(coefficient(i, "lnr_" + P));
                 o.kd = operandText(coefficient(i, "kd_" + P));
                 o.g = gainField(b) ? "g_" + P : literal(b.port->gainValue);
                 return o;
@@ -786,7 +809,7 @@ namespace fminus::circuit
             {
                 for (const Branch& br : b.branches)
                 {
-                    if (br.kind == Branch::Kind::Capacitor)
+                    if (br.state())
                     {
                         states += (states.empty() ? "" : ", ") + br.part;
                         ++stateCount;
@@ -810,11 +833,25 @@ namespace fminus::circuit
                     ports += (ports.empty() ? "" : "; ") + b.port->parts + ": an OTA, g tanh(v / 2 Vt), 2 Vt " +
                              engineering(b.port->nvt, "V") + " at 27 C, g = " + gain;
                 }
-                else if (b.port)
+                else if (b.port && b.port->law == PortDef::Law::Pair)
                 {
                     ++portCount;
                     ports += (ports.empty() ? "" : "; ") + b.port->parts + ": 2 Is sinh(v / N Vt), Is " +
                              engineering(b.port->is, "A") + ", N Vt " + engineering(b.port->nvt, "V") + " at 27 C";
+                }
+                else if (b.port && b.port->law == PortDef::Law::Single)
+                {
+                    ++portCount;
+                    ports += (ports.empty() ? "" : "; ") + b.port->parts + ": Is (e^(v / N Vt) - 1), Is " +
+                             engineering(b.port->is, "A") + ", N Vt " + engineering(b.port->nvt, "V") + " at 27 C";
+                }
+                else if (b.port)
+                {
+                    ++portCount;
+                    ports += (ports.empty() ? "" : "; ") + b.port->parts +
+                             ": Is (e^(v / N Vt) - 1) - Is2 (e^(-v / N2 Vt) - 1), Is " + engineering(b.port->is, "A") +
+                             ", N Vt " + engineering(b.port->nvt, "V") + ", Is2 " + engineering(b.port->is2, "A") +
+                             ", N2 Vt " + engineering(b.port->nvt2, "V") + " at 27 C";
                 }
             }
             std::string pots;
@@ -835,9 +872,13 @@ namespace fminus::circuit
                 if (i > 0)
                 {
                     const Block& before = plan.blocks[i - 1];
-                    const bool opampOut =
+                    const bool driven =
                         std::find(before.driven.begin(), before.driven.end(), b.input) != before.driven.end();
-                    text += opampOut ? "cut at an op amp's output (exact); " : "cut at an op amp's + input (exact); ";
+                    const Node& in = plan.nodes[static_cast<std::size_t>(b.input)];
+                    std::string driver = "an op amp's";
+                    if (in.source == Node::Source::Vcvs)
+                        driver = plan.netlist.elements[static_cast<std::size_t>(in.element)].name + "'s";
+                    text += driven ? "cut at " + driver + " output (exact); " : "cut at an op amp's + input (exact); ";
                 }
                 if (b.port)
                 {
@@ -910,16 +951,22 @@ namespace fminus::circuit
         void Writer::fields()
         {
             bool first = true;
+            bool firstL = true;
             for (const Block& b : plan.blocks)
             {
                 for (const Branch& br : b.branches)
                 {
-                    if (br.kind != Branch::Kind::Capacitor)
+                    if (!br.state())
                         continue;
                     at = elementLine(br.element);
-                    line("    " + type + " x_" + br.ident + ";",
-                         first ? br.part + "'s companion state (trapezoidal): x <- 2 gc v - x" : "", 31);
-                    first = false;
+                    const bool inductor = br.kind == Branch::Kind::Inductor;
+                    std::string note;
+                    if (inductor && firstL)
+                        note = br.part + "'s companion state (trapezoidal): x <- 2 rl i - x";
+                    else if (!inductor && first)
+                        note = br.part + "'s companion state (trapezoidal): x <- 2 gc v - x";
+                    line("    " + type + " x_" + br.ident + ";", note, 31);
+                    (inductor ? firstL : first) = false;
                 }
             }
             for (std::size_t i = 0; i < plan.blocks.size(); ++i)
@@ -930,7 +977,7 @@ namespace fminus::circuit
                 bool firstX = true;
                 for (const Branch& br : b.branches)
                 {
-                    if (br.kind != Branch::Kind::Capacitor)
+                    if (!br.state())
                         continue;
                     at = elementLine(br.element);
                     line("    " + type + " xo_" + br.ident + ";",
@@ -1006,6 +1053,19 @@ namespace fminus::circuit
                     first = false;
                 }
             }
+            first = true;
+            for (const Block& b : plan.blocks)
+            {
+                for (const Branch& br : b.branches)
+                {
+                    if (br.kind != Branch::Kind::Inductor)
+                        continue;
+                    at = elementLine(br.element);
+                    line("    float rl_" + br.ident + ";", first ? "2 L fs', the companion's resistance" : "", 31);
+                    line("    float r2_" + br.ident + ";", first ? "2 rl" : "", 31);
+                    first = false;
+                }
+            }
             for (std::size_t i = 0; i < plan.blocks.size(); ++i)
             {
                 bool firstField = true;
@@ -1077,6 +1137,21 @@ namespace fminus::circuit
             }
             for (const Block& b : plan.blocks)
             {
+                for (const Branch& br : b.branches)
+                {
+                    if (br.kind != Branch::Kind::Inductor)
+                        continue;
+                    const double factor = 2 * br.l * b.rateFactor * b.designFactor;
+                    const std::string fs =
+                        (b.rateFactor == 1 ? std::string("rate") : std::to_string(b.rateFactor) + " rate") +
+                        (b.designFactor != 1 ? " 2/3" : "");
+                    line("        rl_" + br.ident + " = " + literal(factor) + " * rate;",
+                         "2 " + br.part + " fs', fs' = " + fs);
+                    line("        r2_" + br.ident + " = 2 * rl_" + br.ident + ";");
+                }
+            }
+            for (const Block& b : plan.blocks)
+            {
                 if (!b.port || !b.port->prewarp)
                     continue;
                 const std::string& P = b.port->name;
@@ -1104,6 +1179,8 @@ namespace fminus::circuit
                 if (movesPortCurve(i))
                     line("        ka_" + plan.blocks[i].port->name + " = 0;",
                          "a number for b" + std::to_string(plan.blocks[i].index) + "_set's first move (v is 0 then)");
+                if (movesReverse(i))
+                    line("        kr_" + plan.blocks[i].port->name + " = 0;");
             }
             line("        clear();");
             if (!plan.pots.empty())
@@ -1123,7 +1200,8 @@ namespace fminus::circuit
         void Writer::clear()
         {
             at = titleLine();
-            line("    void clear() [[clang::nonblocking]]", "the DC operating point: no bias, 0 V everywhere");
+            line("    void clear() [[clang::nonblocking]]",
+                 "the DC operating point: 0 in the offsets the module runs in");
             line("    {");
             line("        ck_ = 0;");
             line("        fd_ = 1;");
@@ -1131,7 +1209,7 @@ namespace fminus::circuit
             {
                 for (const Branch& br : b.branches)
                 {
-                    if (br.kind == Branch::Kind::Capacitor)
+                    if (br.state())
                         line("        x_" + br.ident + " = 0;");
                 }
             }
@@ -1142,7 +1220,7 @@ namespace fminus::circuit
                 {
                     for (const Branch& br : b.branches)
                     {
-                        if (br.kind == Branch::Kind::Capacitor)
+                        if (br.state())
                             line("        xo_" + br.ident + " = 0;");
                     }
                 }
@@ -1225,6 +1303,8 @@ namespace fminus::circuit
             const std::string P = b.port ? b.port->name : std::string();
             if (shift)
                 line("        const float kprev_" + P + " = ka_" + P + ";", "ADAA: the port's curve before the move");
+            if (movesReverse(i))
+                line("        const float krprev_" + P + " = kr_" + P + ";");
             for (const std::string& l : blocks[i].rLines)
                 line("        " + l);
             for (const std::string& l : blocks[i].lines)
@@ -1240,14 +1320,13 @@ namespace fminus::circuit
             }
             if (shift)
             {
-                // ADAA's mean pairs (v_P, p_P) with the next step's (v, p) on one curve, p = v + 2 ka sinh(v / N Vt):
-                // when ka moves, p_P moves onto the new curve with v_P held (its Newton residual kept), or the closed
-                // form's (F(p) - F(p_P)) / (p - p_P) spikes as |p - p_P| falls toward its threshold. A held pot
-                // gives the same ka, so this changes nothing.
-                line("        {", "ADAA: the last point onto the new curve");
-                line("            const " + type + " e = expf(v_" + P + " * " + literal(1 / b.port->nvt) + ");");
-                line("            p_" + P + " = p_" + P + " + (ka_" + P + " - kprev_" + P + ") * (e - 1 / e);");
-                line("        }");
+                // ADAA's mean pairs (v_P, p_P) with the next step's (v, p) on one curve, p = v + K f(v): when K moves,
+                // p_P moves onto the new curve with v_P held (its Newton residual kept), or the closed form's (F(p) -
+                // F(p_P)) / (p - p_P) spikes as |p - p_P| falls toward its threshold. A held pot gives the same K, so
+                // this changes nothing.
+                LawOperands o = operands(i);
+                for (const LawLine& l : carryText(*b.port, o))
+                    line("        " + l.text, l.note);
             }
             line("    }");
         }
@@ -1278,9 +1357,14 @@ namespace fminus::circuit
                     rText.push_back(adaa ? "xa_" + src.name.substr(2) : src.name);
                     break;
                 case System::Source::Kind::Port:
-                    // a diode pair's v (ADAA: its mean, vb); an OTA's current (its mean with ADAA), ib
+                    // a diode's v (ADAA: its mean, vb); an OTA's current (its mean with ADAA), ib
                     pText.push_back("v");
                     rText.push_back(s.iForm ? "ib" : adaa ? "vb" : "v");
+                    break;
+                case System::Source::Kind::Constant:
+                    // the DC operating point's alone (the offsets have none)
+                    pText.push_back("0");
+                    rText.push_back("0");
                     break;
                 }
             }
@@ -1356,13 +1440,16 @@ namespace fminus::circuit
                 }
                 const std::string ident = src.name.substr(2);
                 const Branch& br = b.branches[static_cast<std::size_t>(src.branch)];
+                const bool inductor = br.kind == Branch::Kind::Inductor;
                 std::string note;
-                if ((vc == "v" || vc == "vb") && !s.iForm)
+                if (inductor)
+                    note = br.part + "'s current is " + s.readouts[static_cast<std::size_t>(readout)].label;
+                else if ((vc == "v" || vc == "vb") && !s.iForm)
                     note = br.part + " across the port: its voltage is v";
                 else
                     note = br.part + "'s voltage is " + s.readouts[static_cast<std::size_t>(readout)].label;
-                line("        " + src.name + " = " + (negative ? "-" : "") + "g2_" + ident + " * " + vc + " - " +
-                         (adaa ? "xa_" + ident : src.name) + ";",
+                line("        " + src.name + " = " + (negative ? "-" : "") + (inductor ? "r2_" : "g2_") + ident +
+                         " * " + vc + " - " + (adaa ? "xa_" + ident : src.name) + ";",
                      note);
             }
             if (b.port)
@@ -1570,7 +1657,16 @@ namespace fminus::circuit
                 line("        " + l);
             line("        const float gain_ = fd_;", "the guard's fade");
             line("        fd_ = fminf(fd_ + fdstep_, 1);");
-            line("        return gain_ < 1 ? " + current + " * gain_ : " + current + ";");
+            if (plan.outputDc != 0)
+                // the module runs in offsets from the DC operating point: the output's own DC is added back, after
+                // the fade (a reset returns the circuit to its DC point, not to 0 V)
+                line("        return (gain_ < 1 ? " + current + " * gain_ : " + current + ") + " +
+                         literal(plan.outputDc) + ";",
+                     std::format("V({})'s DC operating point, {:g} V", plan.nodes[static_cast<std::size_t>(
+                                                                         plan.outputNode)].name,
+                                 plan.outputDc * plan.outputScale));
+            else
+                line("        return gain_ < 1 ? " + current + " * gain_ : " + current + ";");
             line("    }");
         }
 

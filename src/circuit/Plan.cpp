@@ -2,6 +2,7 @@
 // the configuration and the oversampled region (Plan.h).
 #include "circuit/Plan.h"
 
+#include "circuit/Dc.h"
 #include "circuit/Emit.h"
 #include "circuit/Mna.h"
 
@@ -104,14 +105,15 @@ namespace fminus::circuit
     {
         if (isFMinusKeyword(name))
             return true;
-        // the methods, the step's locals (an exp-affine port's, then an OTA's: kd g, its slope and its 2 Vt multiple,
+        // the methods, the step's locals (an exp-affine port's; an asymmetric pair's conducting side's Is K, 1 / N Vt,
+        // log and N Vt, its two exponentials and ADAA's second; then an OTA's: kd g, its slope and its 2 Vt multiple,
         // Newton's tanh, the tanh at v and the current (or ADAA's mean of it), ADAA's log cosh at v, its half step in
         // x, its square, sinh(h), z, 1 + z, the log cosh difference and the midpoint's p - v), and os1, the one field
         // without a '_' (tick's region sample)
-        static constexpr std::array<std::string_view, 37> kModule{
-            "init", "clear", "set", "tick", "step", "p",  "q",  "arg", "w",   "v",  "lo", "hi", "e",  "ei", "f",  "d",
-            "ec",   "c",     "dp",  "vm",   "vb",   "ua", "kg", "kgs", "kgv", "tn", "th", "ib", "lc", "hh", "h2", "s2",
-            "z",    "zu",    "dl",  "wm",   "os1"};
+        static constexpr std::array<std::string_view, 44> kModule{
+            "init", "clear", "set", "tick", "step", "p",  "q",  "arg", "w",   "v",  "lo", "hi", "e",  "ei", "f",
+            "d",    "ec",    "c",   "dp",   "vm",   "vb", "sa", "si",  "sl",  "sn", "ef", "er", "cr", "ua", "kg",
+            "kgs",  "kgv",   "tn",  "th",   "ib",   "lc", "hh", "h2",  "s2",  "z",  "zu", "dl", "wm", "os1"};
         if (std::find(kModule.begin(), kModule.end(), name) != kModule.end())
             return true;
         // b<N> (a block's step), y<k> and z<k> (tick's locals)
@@ -213,11 +215,254 @@ namespace fminus::circuit
             }
 
             Branch branch;
-            bool port = false;    // a port's: a diode pair's (anode, cathode), or an OTA's (n+, n-)
+            bool port = false;    // a port's: a diode's or a pair's (anode, cathode), or an OTA's (n+, n-)
             bool ota = false;     // an OTA's: no DC path through it; its four nodes join one block
-            std::vector<int> nodes;   // an OTA's n+, n-, nc+, nc-
+            int controlled = -1;  // a G's or an E's that is not driven (into the plan's list): its four nodes join
+            std::vector<int> nodes;   // an OTA's, a G's or an E's n+, n-, nc+, nc-
             int pair = -1;        // which port
+
+            // Whether its nodes join one block (an OTA's, a G's, a floating E's), rather than a branch's two.
+            bool joinsAll() const
+            {
+                return ota || controlled >= 0;
+            }
         };
+
+        // A node's name as SPICE compares it: folded, and gnd is 0.
+        std::string nodeKey(std::string_view name)
+        {
+            std::string key = folded(name);
+            return key == "gnd" ? "0" : key;
+        }
+
+        // The model a diode names: a .model card's, else a built-in's (1N914, 1N4148).
+        std::optional<ModelCard> modelNamed(const Netlist& netlist, const std::string& name)
+        {
+            for (const ModelCard& m : netlist.models)
+            {
+                if (folded(m.name) == folded(name))
+                    return m;
+            }
+            for (const ModelCard& m : builtinModels())
+            {
+                if (folded(m.name) == folded(name))
+                    return m;
+            }
+            return std::nullopt;
+        }
+
+        // A diode port, before its nodes are numbered: its strings each way (element indices, anode to cathode),
+        // and their models (one diode's each).
+        struct DiodeGroup
+        {
+            std::vector<int> forward;   // the port's direction: its anode is the first's anode
+            std::vector<int> reverse;   // the antiparallel string, or none
+            ModelCard fwd;
+            ModelCard rev;
+        };
+
+        // A list of names: "D1+D2".
+        std::string joinedNames(const std::vector<Element>& elements, const std::vector<int>& list, const char* by)
+        {
+            std::string out;
+            for (int e : list)
+                out += (out.empty() ? "" : by) + elements[static_cast<std::size_t>(e)].name;
+            return out;
+        }
+
+        // The diodes, elaborated on the netlist's node names (so a resistor RS needs can be written into it before
+        // the nodes are numbered, as the netlist would write it): each diode's model (a card's, or a built-in's);
+        // series strings, n diodes of one model through nodes nothing else touches (not .input's or .output's), each
+        // one diode of n N; antiparallel strings paired; and a model's RS as a resistor RS_<D> to a new node rs_<D> at
+        // the port's anode (one for a pair, whose two RS must be equal: the usual approximation, said in a note).
+        // `absorbed` gets the strings' inner nodes, by key.
+        std::vector<DiodeGroup> elaborateDiodes(Netlist& netlist, Messages& messages, std::set<std::string>& absorbed)
+        {
+            std::vector<Element>& elements = netlist.elements;
+            const std::size_t count = elements.size();
+            std::vector<std::optional<ModelCard>> model(count);
+            std::vector<int> diodes;
+            for (std::size_t e = 0; e < count; ++e)
+            {
+                const Element& el = elements[e];
+                if (el.kind != Element::Kind::Diode)
+                    continue;
+                model[e] = modelNamed(netlist, el.model);
+                if (!model[e])
+                {
+                    std::string list;
+                    for (const ModelCard& m : netlist.models)
+                        list += (list.empty() ? "" : ", ") + m.name;
+                    std::string builtin;
+                    for (const ModelCard& m : builtinModels())
+                        builtin += (builtin.empty() ? "" : ", ") + m.name;
+                    messages.error(el.modelLoc, "unknown model '" + el.model + "' (" +
+                                                    (list.empty() ? std::string("no .model cards")
+                                                                  : "the models: " + list) +
+                                                    "; built in: " + builtin + ")");
+                    continue;
+                }
+                if (nodeKey(el.nodes[0]) == nodeKey(el.nodes[1]))
+                {
+                    messages.error(el.loc, el.name + "'s anode and cathode are one node, '" + el.nodes[0] + "'");
+                    continue;
+                }
+                diodes.push_back(static_cast<int>(e));
+            }
+            // each node's terminals: (element, which)
+            std::map<std::string, std::vector<std::pair<int, int>>> terminals;
+            for (std::size_t e = 0; e < count; ++e)
+            {
+                const Element& el = elements[e];
+                for (std::size_t k = 0; k < el.nodes.size(); ++k)
+                    terminals[nodeKey(el.nodes[k])].emplace_back(static_cast<int>(e), static_cast<int>(k));
+                if (el.kind == Element::Kind::Pot && el.nodes.size() == 3)
+                    terminals[nodeKey(el.nodes[1])].emplace_back(static_cast<int>(e), 1);
+            }
+            const std::string inputKey = netlist.input ? nodeKey(netlist.input->node) : std::string();
+            const std::string outputKey = netlist.output ? nodeKey(netlist.output->node) : std::string();
+            auto known = [&](int e)
+            {
+                return std::find(diodes.begin(), diodes.end(), e) != diodes.end();
+            };
+            // strings: a node that two diodes alone touch, one's cathode and the other's anode
+            std::vector<int> next(count, -1);
+            std::vector<int> prev(count, -1);
+            for (const auto& [key, list] : terminals)
+            {
+                if (key == "0" || key == inputKey || key == outputKey || list.size() != 2)
+                    continue;
+                const auto [e0, k0] = list[0];
+                const auto [e1, k1] = list[1];
+                if (e0 == e1 || !known(e0) || !known(e1) || k0 == k1)
+                    continue;
+                const int from = k0 == 1 ? e0 : e1;   // its cathode is the node
+                const int to = k0 == 1 ? e1 : e0;     // its anode is
+                const Element& a = elements[static_cast<std::size_t>(from)];
+                const Element& b = elements[static_cast<std::size_t>(to)];
+                if (folded(a.model) != folded(b.model))
+                {
+                    messages.error(b.loc, "diodes " + a.name + " and " + b.name + " in series through node '" +
+                                              a.nodes[1] + "' have different models (" + a.model + ", " + b.model +
+                                              "): a series string is of one model");
+                    continue;
+                }
+                next[static_cast<std::size_t>(from)] = to;
+                prev[static_cast<std::size_t>(to)] = from;
+            }
+            struct Chain
+            {
+                std::vector<int> d;
+                std::string anode;   // keys
+                std::string cathode;
+            };
+            std::vector<Chain> chains;
+            std::vector<bool> done(count, false);
+            for (int start : diodes)
+            {
+                if (prev[static_cast<std::size_t>(start)] >= 0)
+                    continue;
+                Chain c;
+                for (int at = start; at >= 0 && !done[static_cast<std::size_t>(at)];
+                     at = next[static_cast<std::size_t>(at)])
+                {
+                    done[static_cast<std::size_t>(at)] = true;
+                    c.d.push_back(at);
+                }
+                chains.push_back(c);
+            }
+            for (int d : diodes)   // a ring of diodes, each node touched by two of them alone: each its own
+            {
+                if (!done[static_cast<std::size_t>(d)])
+                    chains.push_back({{d}, {}, {}});
+            }
+            std::stable_sort(chains.begin(), chains.end(), [](const Chain& a, const Chain& b) { return a.d < b.d; });
+            for (Chain& c : chains)
+            {
+                c.anode = nodeKey(elements[static_cast<std::size_t>(c.d.front())].nodes[0]);
+                c.cathode = nodeKey(elements[static_cast<std::size_t>(c.d.back())].nodes[1]);
+                for (std::size_t k = 0; k + 1 < c.d.size(); ++k)
+                    absorbed.insert(nodeKey(elements[static_cast<std::size_t>(c.d[k])].nodes[1]));
+            }
+            // antiparallel strings pair, the first of each in netlist order
+            std::vector<DiodeGroup> groups;
+            std::vector<bool> paired(chains.size(), false);
+            for (std::size_t i = 0; i < chains.size(); ++i)
+            {
+                if (paired[i])
+                    continue;
+                DiodeGroup g;
+                g.forward = chains[i].d;
+                g.fwd = *model[static_cast<std::size_t>(g.forward.front())];
+                for (std::size_t j = i + 1; j < chains.size(); ++j)
+                {
+                    if (!paired[j] && chains[j].anode == chains[i].cathode && chains[j].cathode == chains[i].anode)
+                    {
+                        paired[j] = true;
+                        g.reverse = chains[j].d;
+                        g.rev = *model[static_cast<std::size_t>(g.reverse.front())];
+                        break;
+                    }
+                }
+                paired[i] = true;
+                groups.push_back(std::move(g));
+            }
+            // RS: a resistor to a new node at the port's anode
+            std::set<std::string> nodeKeys{"0"};
+            std::set<std::string> elementKeys;
+            for (const Element& el : elements)
+            {
+                elementKeys.insert(folded(el.name));
+                for (const std::string& n : el.nodes)
+                    nodeKeys.insert(nodeKey(n));
+            }
+            auto fresh = [](std::set<std::string>& taken, const std::string& name, bool node)
+            {
+                std::string candidate = name;
+                for (int k = 2; taken.count(node ? nodeKey(candidate) : folded(candidate)); ++k)
+                    candidate = name + "_" + std::to_string(k);
+                taken.insert(node ? nodeKey(candidate) : folded(candidate));
+                return candidate;
+            };
+            for (DiodeGroup& g : groups)
+            {
+                const double rsF = static_cast<double>(g.forward.size()) * g.fwd.rs;
+                const double rsR = g.reverse.empty() ? rsF : static_cast<double>(g.reverse.size()) * g.rev.rs;
+                const std::string parts = joinedNames(elements, g.forward, "+") +
+                                          (g.reverse.empty() ? "" : "|" + joinedNames(elements, g.reverse, "+"));
+                if (rsF != rsR)
+                {
+                    messages.error(elements[static_cast<std::size_t>(g.reverse.front())].loc,
+                                   std::format("antiparallel {} have unequal RS ({:g} and {:g} ohm): a pair shares one "
+                                               "series resistor",
+                                               parts, rsF, rsR));
+                    continue;
+                }
+                if (rsF == 0)
+                    continue;
+                Element& first = elements[static_cast<std::size_t>(g.forward.front())];
+                const std::string anode = first.nodes[0];
+                const std::string node = fresh(nodeKeys, "rs_" + first.name, true);
+                Element r;
+                r.kind = Element::Kind::Resistor;
+                r.name = fresh(elementKeys, "RS_" + first.name, false);
+                r.loc = first.loc;
+                r.nodes = {anode, node};
+                r.nodeLocs = {first.nodeLocs[0], first.nodeLocs[0]};
+                r.value = rsF;
+                r.valueLoc = first.modelLoc;
+                r.text = r.name + " " + anode + " " + node + " " + std::format("{:g}", rsF);
+                first.nodes[0] = node;
+                if (!g.reverse.empty())
+                    elements[static_cast<std::size_t>(g.reverse.back())].nodes[1] = node;
+                if (!g.reverse.empty())
+                    messages.note({}, std::format("{}: RS {:g} ohm is one series resistor, {}, for the pair (each "
+                                                  "diode's RS where it conducts: the usual approximation)",
+                                                  parts, rsF, r.name));
+                elements.push_back(std::move(r));
+            }
+            return groups;
+        }
     } // namespace
 
     double LawInfo::middle() const
@@ -507,6 +752,10 @@ namespace fminus::circuit
             p.module = name;
         }
 
+        // ---- diodes: models, series strings, pairs, and RS as a resistor written into the netlist ----
+        std::set<std::string> absorbedKeys;
+        const std::vector<DiodeGroup> diodeGroups = elaborateDiodes(p.netlist, messages, absorbedKeys);
+
         // ---- nodes ----
         p.nodes.push_back({"0", "0", Node::Source::None, -1, 0});
         std::map<std::string, int> nodeOf;
@@ -632,9 +881,10 @@ namespace fminus::circuit
         for (std::size_t e = 0; e < elements.size(); ++e)
             elementIdent[e] = unique(identOf(elements[e].name), partIdents);
         std::vector<Piece> pieces;
-        std::vector<PortDef> ports;   // the diode pairs' and the OTAs'
+        std::vector<PortDef> ports;   // the diodes' and the OTAs'
         std::vector<OpAmp> opamps;
-        std::vector<std::size_t> diodes;
+        std::vector<Controlled> controlled;   // the E and linear G sources
+        std::vector<std::size_t> voltages;    // the V sources
         for (std::size_t e = 0; e < elements.size(); ++e)
         {
             const Element& el = elements[e];
@@ -734,21 +984,35 @@ namespace fminus::circuit
                 break;
             }
             case Element::Kind::Diode:
+                break;   // the diode groups', below
+            case Element::Kind::Inductor:
+                b.kind = Branch::Kind::Inductor;
+                b.a = nn[0];
+                b.b = nn[1];
+                b.l = el.value;
+                pieces.push_back({b});
+                break;
+            case Element::Kind::Voltage:
+                voltages.push_back(e);   // grounded (a node driven) or floating (a branch), once the drivers are known
+                break;
+            case Element::Kind::Current:
+                p.currents.push_back({el.name, static_cast<int>(e), nn[0], nn[1], el.value});
+                break;
+            case Element::Kind::Vcvs:
+            case Element::Kind::Vccs:
             {
-                bool found = false;
-                for (const ModelCard& m : netlist.models)
-                    found = found || folded(m.name) == folded(el.model);
-                if (!found)
-                {
-                    std::string list;
-                    for (const ModelCard& m : netlist.models)
-                        list += (list.empty() ? "" : ", ") + m.name;
-                    messages.error(
-                        el.modelLoc,
-                        "unknown model '" + el.model + "' (" +
-                            (list.empty() ? std::string("there are no .model cards") : "the models: " + list) + ")");
-                }
-                diodes.push_back(e);
+                Controlled c;
+                c.kind = el.kind == Element::Kind::Vcvs ? Controlled::Kind::Vcvs : Controlled::Kind::Vccs;
+                c.name = el.name;
+                c.ident = elementIdent[e];
+                c.element = static_cast<int>(e);
+                c.p = nn[0];
+                c.n = nn[1];
+                c.cp = nn[2];
+                c.cn = nn[3];
+                c.gain = el.value;
+                c.expr = el.expr;
+                controlled.push_back(c);
                 break;
             }
             case Element::Kind::OpAmp:
@@ -816,66 +1080,42 @@ namespace fminus::circuit
             }
         }
 
-        // ---- diode pairs ----
-        std::vector<int> pairOf(elements.size(), -1);
-        for (std::size_t i = 0; i < diodes.size(); ++i)
+        // ---- diode ports: a single diode, a series string, a pair (or an asymmetric one) ----
+        for (const std::string& key : absorbedKeys)
         {
-            const std::size_t di = diodes[i];
-            if (pairOf[di] >= 0)
-                continue;
-            const std::vector<int>& ni = elementNodes[di];
-            std::size_t partner = elements.size();
-            for (std::size_t j = i + 1; j < diodes.size(); ++j)
-            {
-                const std::size_t dj = diodes[j];
-                if (pairOf[dj] >= 0)
-                    continue;
-                const std::vector<int>& nj = elementNodes[dj];
-                if (nj[0] == ni[1] && nj[1] == ni[0])
-                {
-                    partner = dj;
-                    break;
-                }
-            }
-            if (partner == elements.size())
-            {
-                messages.error(elements[di].loc, elements[di].name +
-                                                     " has no antiparallel partner: Phase 0 solves antiparallel diode "
-                                                     "pairs only");
-                continue;
-            }
-            if (folded(elements[di].model) != folded(elements[partner].model))
-            {
-                pairOf[di] = pairOf[partner] = static_cast<int>(elements.size());   // reported: no second error
-                messages.error(elements[partner].loc, "antiparallel diodes " + elements[di].name + ", " +
-                                                          elements[partner].name +
-                                                          " have different models: not supported yet");
-                continue;
-            }
+            if (const auto it = nodeOf.find(key); it != nodeOf.end())
+                p.nodes[static_cast<std::size_t>(it->second)].absorbed = true;
+        }
+        for (const DiodeGroup& g : diodeGroups)
+        {
             PortDef port;
-            port.name = elementIdent[di];
-            port.parts = elements[di].name + "|" + elements[partner].name;
-            port.anode = ni[0];
-            port.cathode = ni[1];
-            port.from = ni[0];   // a two-terminal port: its current flows anode to cathode, through it
-            port.to = ni[1];
-            for (const ModelCard& m : netlist.models)
-            {
-                if (folded(m.name) == folded(elements[di].model))
-                {
-                    port.is = m.is;
-                    port.n = m.n;
-                }
-            }
+            const auto first = static_cast<std::size_t>(g.forward.front());
+            port.name = elementIdent[first];
+            port.parts = joinedNames(elements, g.forward, "+") +
+                         (g.reverse.empty() ? "" : "|" + joinedNames(elements, g.reverse, "+"));
+            port.anode = elementNodes[first][0];
+            port.cathode = elementNodes[static_cast<std::size_t>(g.forward.back())][1];
+            port.from = port.anode;   // a two-terminal port: its current flows anode to cathode, through it
+            port.to = port.cathode;
+            port.is = g.fwd.is;
+            port.n = static_cast<double>(g.forward.size()) * g.fwd.n;
             port.nvt = thermalVoltage(port.n);
-            port.elements = {static_cast<int>(di), static_cast<int>(partner)};
-            pairOf[di] = static_cast<int>(ports.size());
-            pairOf[partner] = static_cast<int>(ports.size());
+            if (g.reverse.empty())
+                port.law = PortDef::Law::Single;
+            else
+            {
+                port.is2 = g.rev.is;
+                port.n2 = static_cast<double>(g.reverse.size()) * g.rev.n;
+                port.nvt2 = thermalVoltage(port.n2);
+                port.law = port.is2 == port.is && port.n2 == port.n ? PortDef::Law::Pair : PortDef::Law::Asym;
+            }
+            port.elements = g.forward;
+            port.elements.insert(port.elements.end(), g.reverse.begin(), g.reverse.end());
             Piece piece;
             piece.branch.a = port.anode;
             piece.branch.b = port.cathode;
             piece.branch.part = port.parts;
-            piece.branch.element = static_cast<int>(di);
+            piece.branch.element = static_cast<int>(first);
             piece.port = true;
             piece.pair = static_cast<int>(ports.size());
             pieces.push_back(piece);
@@ -903,8 +1143,77 @@ namespace fminus::circuit
             !elements.empty())
             messages.error({}, "nothing connects to ground (0 or gnd)");
 
-        // ---- op amps: their outputs are sources ----
-        std::map<int, std::size_t> driverOf;
+        auto nodeName = [&](int n)
+        {
+            return p.nodes[static_cast<std::size_t>(n)].name;
+        };
+
+        // ---- loops of voltage sources, E outputs and inductors (their DC current is undefined) ----
+        {
+            UnionFind loops(p.nodes.size());
+            std::vector<std::vector<std::pair<int, std::size_t>>> tree(p.nodes.size());   // node -> (node, element)
+            for (std::size_t e = 0; e < elements.size(); ++e)
+            {
+                const Element::Kind kind = elements[e].kind;
+                if (kind != Element::Kind::Voltage && kind != Element::Kind::Inductor && kind != Element::Kind::Vcvs)
+                    continue;
+                const int a = elementNodes[e][0];
+                const int b = elementNodes[e][1];
+                if (loops.find(static_cast<std::size_t>(a)) != loops.find(static_cast<std::size_t>(b)))
+                {
+                    loops.join(static_cast<std::size_t>(a), static_cast<std::size_t>(b));
+                    tree[static_cast<std::size_t>(a)].emplace_back(b, e);
+                    tree[static_cast<std::size_t>(b)].emplace_back(a, e);
+                    continue;
+                }
+                // the loop: the tree's path from a to b, then this element
+                std::vector<int> from(p.nodes.size(), -2);
+                std::vector<std::size_t> via(p.nodes.size(), 0);
+                std::vector<int> queue{a};
+                from[static_cast<std::size_t>(a)] = -1;
+                for (std::size_t q = 0; q < queue.size(); ++q)
+                {
+                    for (const auto& [to, element] : tree[static_cast<std::size_t>(queue[q])])
+                    {
+                        if (from[static_cast<std::size_t>(to)] != -2)
+                            continue;
+                        from[static_cast<std::size_t>(to)] = queue[q];
+                        via[static_cast<std::size_t>(to)] = element;
+                        queue.push_back(to);
+                    }
+                }
+                std::vector<std::size_t> loop;
+                for (int at = b; at != a && at >= 0 && from[static_cast<std::size_t>(at)] != -2;
+                     at = from[static_cast<std::size_t>(at)])
+                    loop.push_back(via[static_cast<std::size_t>(at)]);
+                std::sort(loop.begin(), loop.end());
+                loop.push_back(e);
+                std::string names;
+                for (std::size_t k : loop)
+                    names += (names.empty() ? "" : ", ") + elements[k].name;
+                messages.error(elements[e].loc, "a loop of voltage sources, E outputs and inductors (" + names +
+                                                    "): its DC current is undefined");
+            }
+        }
+
+        // ---- driven nodes: op amps' outputs, grounded E sources' and V sources' ----
+        std::map<int, std::size_t> driverOf;   // op amp outputs
+        std::map<int, std::string> drivenBy;   // every driven node, and what drives it
+        auto drive = [&](int node, const std::string& what, Loc loc)
+        {
+            if (node == p.inputNode)
+            {
+                messages.error(loc, what + " drives .input's node '" + nodeName(node) + "'");
+                return false;
+            }
+            if (const auto it = drivenBy.find(node); it != drivenBy.end())
+            {
+                messages.error(loc, "node '" + nodeName(node) + "' is driven by " + it->second + " and by " + what);
+                return false;
+            }
+            drivenBy.emplace(node, what);
+            return true;
+        };
         for (std::size_t k = 0; k < opamps.size(); ++k)
         {
             const OpAmp& op = opamps[k];
@@ -912,37 +1221,135 @@ namespace fminus::circuit
             if (op.out == 0)
                 messages.error(loc, "op amp " + op.name + "'s output is ground");
             else if (op.out == p.inputNode)
-                messages.error(loc, "op amp " + op.name + " drives .input's node '" +
-                                        p.nodes[static_cast<std::size_t>(op.out)].name + "'");
+                messages.error(loc, "op amp " + op.name + " drives .input's node '" + nodeName(op.out) + "'");
             else if (const auto it = driverOf.find(op.out); it != driverOf.end())
-                messages.error(loc, "node '" + p.nodes[static_cast<std::size_t>(op.out)].name +
-                                        "' is driven by two op amps (" + opamps[it->second].name + ", " + op.name +
-                                        ")");
+                messages.error(loc, "node '" + nodeName(op.out) + "' is driven by two op amps (" +
+                                        opamps[it->second].name + ", " + op.name + ")");
             else
             {
                 driverOf.emplace(op.out, k);
+                drivenBy.emplace(op.out, "op amp " + op.name);
                 p.nodes[static_cast<std::size_t>(op.out)].source = Node::Source::OpAmp;
             }
         }
+        for (Controlled& c : controlled)
+        {
+            if (c.kind != Controlled::Kind::Vcvs || (c.p != 0 && c.n != 0))
+                continue;
+            const Loc loc = elements[static_cast<std::size_t>(c.element)].loc;
+            if (c.p == 0 && c.n == 0)
+            {
+                messages.error(loc, c.name + "'s output terminals are both ground");
+                continue;
+            }
+            // an output terminal grounded: the other is driven, V(out) = sign gain (V(cp) - V(cn))
+            c.out = c.p == 0 ? c.n : c.p;
+            c.sign = c.p == 0 ? -1 : 1;
+            if (!drive(c.out, c.name, loc))
+                continue;
+            c.driven = true;
+            p.nodes[static_cast<std::size_t>(c.out)].source = Node::Source::Vcvs;
+            p.nodes[static_cast<std::size_t>(c.out)].element = c.element;
+        }
+        std::vector<Branch> voltageBranches;
+        for (std::size_t e : voltages)
+        {
+            const Element& el = elements[e];
+            const int a = elementNodes[e][0];
+            const int b = elementNodes[e][1];
+            if (a == p.inputNode || b == p.inputNode)
+            {
+                messages.error(el.loc, "the V source " + el.name + " is across .input's node '" +
+                                           nodeName(p.inputNode) + "': the signal is .input's");
+                continue;
+            }
+            if (a == 0 || b == 0)
+            {
+                // a terminal grounded: the other node is a constant (ground in the offsets)
+                const int at = a == 0 ? b : a;
+                if (at == 0 || !drive(at, el.name, el.loc))
+                    continue;
+                Node& n = p.nodes[static_cast<std::size_t>(at)];
+                n.source = Node::Source::Dc;
+                n.value = a == 0 ? -el.value : el.value;
+                n.element = static_cast<int>(e);
+                continue;
+            }
+            Branch v;
+            v.kind = Branch::Kind::Voltage;
+            v.a = a;
+            v.b = b;
+            v.dc = el.value;
+            v.part = el.name;
+            v.ident = elementIdent[e];
+            v.partIdent = elementIdent[e];
+            v.element = static_cast<int>(e);
+            voltageBranches.push_back(v);
+        }
         auto isSource = [&](int n)
         {
-            return n == p.inputNode || driverOf.count(n) > 0;
+            return n == p.inputNode || drivenBy.count(n) > 0;
         };
+        for (const Branch& v : voltageBranches)
+        {
+            if (isSource(v.a) && isSource(v.b))
+                messages.error(elements[static_cast<std::size_t>(v.element)].loc,
+                               "the V source " + v.part + " joins '" + nodeName(v.a) + "' and '" + nodeName(v.b) +
+                                   "', which are both driven");
+            else
+                pieces.push_back({v});
+        }
+        for (std::size_t k = 0; k < controlled.size(); ++k)
+        {
+            const Controlled& c = controlled[k];
+            if (c.driven || (c.kind == Controlled::Kind::Vcvs && (c.p == 0 || c.n == 0)))
+                continue;
+            if (c.kind == Controlled::Kind::Vcvs && isSource(c.p) && isSource(c.n))
+            {
+                messages.error(elements[static_cast<std::size_t>(c.element)].loc,
+                               c.name + "'s output joins '" + nodeName(c.p) + "' and '" + nodeName(c.n) +
+                                   "', which are both driven");
+                continue;
+            }
+            Piece piece;
+            piece.branch.a = c.p;
+            piece.branch.b = c.n;
+            piece.branch.part = c.name;
+            piece.branch.element = c.element;
+            piece.controlled = static_cast<int>(k);
+            piece.nodes = {c.p, c.n, c.cp, c.cn};
+            pieces.push_back(piece);
+        }
 
-        // ---- DC paths: every node reaches ground, .input or an op amp's output through R, P or a diode pair ----
+        // ---- DC paths: every node reaches ground, .input or a driven node through R, P, L, a diode or a source ----
         {
             UnionFind dc(p.nodes.size());
-            for (const Piece& piece : pieces)
+            for (std::size_t e = 0; e < elements.size(); ++e)
             {
-                // a resistor's, a pot's or a diode pair's; not a capacitor's, nor an OTA's (a current source)
-                if ((piece.branch.kind != Branch::Kind::Capacitor || piece.port) && !piece.ota)
-                    dc.join(static_cast<std::size_t>(piece.branch.a), static_cast<std::size_t>(piece.branch.b));
+                // not a capacitor, nor a current source (I, a G, an OTA)
+                const std::vector<int>& nn = elementNodes[e];
+                switch (elements[e].kind)
+                {
+                case Element::Kind::Resistor:
+                case Element::Kind::Diode:
+                case Element::Kind::Inductor:
+                case Element::Kind::Voltage:
+                case Element::Kind::Vcvs:
+                    dc.join(static_cast<std::size_t>(nn[0]), static_cast<std::size_t>(nn[1]));
+                    break;
+                case Element::Kind::Pot:
+                    for (std::size_t k = 0; k + 1 < nn.size(); ++k)
+                        dc.join(static_cast<std::size_t>(nn[k]), static_cast<std::size_t>(nn[k + 1]));
+                    break;
+                default:
+                    break;
+                }
             }
             std::set<std::size_t> anchored{dc.find(0)};
             if (p.inputNode > 0)
                 anchored.insert(dc.find(static_cast<std::size_t>(p.inputNode)));
-            for (const auto& [out, k] : driverOf)
-                anchored.insert(dc.find(static_cast<std::size_t>(out)));
+            for (const auto& [driven, what] : drivenBy)
+                anchored.insert(dc.find(static_cast<std::size_t>(driven)));
             std::set<std::size_t> reported;
             for (std::size_t n = 1; n < p.nodes.size(); ++n)
             {
@@ -951,26 +1358,35 @@ namespace fminus::circuit
                     continue;
                 reported.insert(root);
                 std::string caps;
+                bool currents = false;
+                bool capacitors = false;
                 Loc loc;
-                for (const Piece& piece : pieces)
+                for (std::size_t e = 0; e < elements.size(); ++e)
                 {
-                    const Branch& b = piece.branch;
-                    if (b.kind != Branch::Kind::Capacitor || piece.port || piece.ota)
+                    const Element::Kind kind = elements[e].kind;
+                    const bool current = kind == Element::Kind::Current || kind == Element::Kind::Vccs ||
+                                         kind == Element::Kind::Ota;
+                    if (kind != Element::Kind::Capacitor && !current)
                         continue;
-                    if (dc.find(static_cast<std::size_t>(b.a)) == root ||
-                        dc.find(static_cast<std::size_t>(b.b)) == root)
-                    {
-                        caps += (caps.empty() ? "" : ", ") + b.part;
-                        if (loc.line == 0)
-                            loc = elements[static_cast<std::size_t>(b.element)].loc;
-                    }
+                    const std::vector<int>& nn = elementNodes[e];
+                    if (dc.find(static_cast<std::size_t>(nn[0])) != root &&
+                        dc.find(static_cast<std::size_t>(nn[1])) != root)
+                        continue;
+                    caps += (caps.empty() ? "" : ", ") + elements[e].name;
+                    currents = currents || current;
+                    capacitors = capacitors || !current;
+                    if (loc.line == 0)
+                        loc = elements[e].loc;
                 }
+                const std::string through = capacitors && currents ? "capacitors and current sources"
+                                            : currents             ? "current sources"
+                                                                   : "capacitors";
                 if (caps.empty())
                     messages.error(loc,
                                    "node '" + p.nodes[n].name +
                                        "' has no path to ground: its DC voltage is undefined (add 10meg to ground)");
                 else
-                    messages.error(loc, "node '" + p.nodes[n].name + "' reaches ground only through capacitors (" +
+                    messages.error(loc, "node '" + p.nodes[n].name + "' reaches ground only through " + through + " (" +
                                             caps + "): its DC voltage is undefined (add 10meg to ground)");
             }
         }
@@ -981,14 +1397,14 @@ namespace fminus::circuit
         UnionFind uf(p.nodes.size());
         auto regular = [&](int n)
         {
-            return n != 0 && !isSource(n);
+            return n != 0 && !isSource(n) && !p.nodes[static_cast<std::size_t>(n)].absorbed;
         };
         for (const Piece& piece : pieces)
         {
             const Branch& b = piece.branch;
-            if (piece.ota)
+            if (piece.joinsAll())
             {
-                // an OTA joins its four nodes into one block (those no source drives)
+                // an OTA, a G or a floating E joins its four nodes into one block (those no source drives)
                 int first = -1;
                 for (int n : piece.nodes)
                 {
@@ -1008,7 +1424,9 @@ namespace fminus::circuit
         std::map<std::size_t, int> componentOf;   // root (or followerKey) -> component
         std::vector<std::vector<std::size_t>> componentPieces;
         std::vector<std::vector<std::size_t>> componentOpAmps;
+        std::vector<std::vector<std::size_t>> componentDriven;   // the driven E sources (into `controlled`)
         const std::size_t followerBase = p.nodes.size();
+        const std::size_t bufferBase = followerBase + opamps.size();   // a driven E's own block
         auto component = [&](std::size_t key)
         {
             const auto it = componentOf.find(key);
@@ -1018,6 +1436,7 @@ namespace fminus::circuit
             componentOf.emplace(key, c);
             componentPieces.emplace_back();
             componentOpAmps.emplace_back();
+            componentDriven.emplace_back();
             return c;
         };
         // In netlist order: the order of the first element of each component.
@@ -1030,17 +1449,23 @@ namespace fminus::circuit
         {
             const Branch& b = pieces[i].branch;
             int c = -1;
-            if (pieces[i].ota)
+            if (pieces[i].joinsAll())
             {
                 for (int n : pieces[i].nodes)
                 {
                     if (c < 0 && regular(n))
                         c = component(uf.find(static_cast<std::size_t>(n)));
                 }
-                if (c < 0)
+                if (c < 0 && pieces[i].ota)
                 {
                     messages.error(elements[static_cast<std::size_t>(element)].loc,
                                    "OTA " + b.part + "'s nodes are all ground or driven: nothing solves for it");
+                    continue;
+                }
+                if (c < 0)
+                {
+                    messages.warning(elements[static_cast<std::size_t>(element)].loc,
+                                     b.part + "'s nodes are all ground or driven: it changes nothing");
                     continue;
                 }
             }
@@ -1070,10 +1495,15 @@ namespace fminus::circuit
             else if (regular(op.inn))
             {
                 c = component(uf.find(static_cast<std::size_t>(op.inn)));
-                // its feedback: some branch of inn's component reaches out
+                // its feedback: some branch (or source) of inn's component reaches out
                 bool reaches = false;
                 for (std::size_t i : componentPieces[static_cast<std::size_t>(c)])
-                    reaches = reaches || pieces[i].branch.a == op.out || pieces[i].branch.b == op.out;
+                {
+                    const Piece& piece = pieces[i];
+                    reaches = reaches || piece.branch.a == op.out || piece.branch.b == op.out ||
+                              (piece.joinsAll() &&
+                               std::find(piece.nodes.begin(), piece.nodes.end(), op.out) != piece.nodes.end());
+                }
                 if (!reaches)
                     c = -1;
             }
@@ -1083,6 +1513,29 @@ namespace fminus::circuit
                 continue;
             }
             componentOpAmps[static_cast<std::size_t>(c)].push_back(k);
+        }
+        // a driven E: in its controls' block (the one their nodes are in), or a buffer block of its own when both are
+        // driven (or ground)
+        for (std::size_t k = 0; k < controlled.size(); ++k)
+        {
+            const Controlled& e = controlled[k];
+            if (!e.driven)
+                continue;
+            std::set<int> comps;
+            for (int n : {e.cp, e.cn})
+            {
+                if (regular(n))
+                    comps.insert(component(uf.find(static_cast<std::size_t>(n))));
+            }
+            if (comps.size() > 1)
+            {
+                messages.error(elements[static_cast<std::size_t>(e.element)].loc,
+                               e.name + "'s controls, '" + nodeName(e.cp) + "' and '" + nodeName(e.cn) +
+                                   "', are in two blocks: an E reads one block's nodes (or its input)");
+                continue;
+            }
+            const int c = comps.empty() ? component(bufferBase + k) : *comps.begin();
+            componentDriven[static_cast<std::size_t>(c)].push_back(k);
         }
         if (messages.hasErrors())
             return std::nullopt;
@@ -1112,12 +1565,17 @@ namespace fminus::circuit
                     for (int e : block.port->elements)
                         parts.insert(e);
                 }
+                else if (piece.controlled >= 0)
+                {
+                    block.controlled.push_back(controlled[static_cast<std::size_t>(piece.controlled)]);
+                    parts.insert(piece.branch.element);
+                }
                 else
                 {
                     block.branches.push_back(piece.branch);
                     parts.insert(piece.branch.element);
                 }
-                for (int n : piece.ota ? piece.nodes : std::vector<int>{piece.branch.a, piece.branch.b})
+                for (int n : piece.joinsAll() ? piece.nodes : std::vector<int>{piece.branch.a, piece.branch.b})
                 {
                     if (regular(n))
                         nodeSet.insert(n);
@@ -1129,10 +1587,18 @@ namespace fminus::circuit
                 block.driven.push_back(opamps[k].out);
                 parts.insert(opamps[k].element);
             }
+            for (std::size_t k : componentDriven[c])
+            {
+                block.controlled.push_back(controlled[k]);
+                block.driven.push_back(controlled[k].out);
+                parts.insert(controlled[k].element);
+            }
             block.elements.assign(parts.begin(), parts.end());
             block.nodes.assign(nodeSet.begin(), nodeSet.end());   // node indices are in order of first appearance
             std::stable_sort(block.branches.begin(), block.branches.end(),
                              [](const Branch& a, const Branch& b) { return a.element < b.element; });
+            std::stable_sort(block.controlled.begin(), block.controlled.end(),
+                             [](const Controlled& a, const Controlled& b) { return a.element < b.element; });
             if (!block.elements.empty())
                 firstElement[c] = block.elements.front();
         }
@@ -1155,7 +1621,9 @@ namespace fminus::circuit
             std::vector<int> found;
             auto read = [&](int n)
             {
-                if (n == 0 || holder[static_cast<std::size_t>(n)] == static_cast<int>(c))
+                // a DC source's node is a constant, not an input
+                if (n == 0 || holder[static_cast<std::size_t>(n)] == static_cast<int>(c) ||
+                    p.nodes[static_cast<std::size_t>(n)].source == Node::Source::Dc)
                     return;
                 if (std::find(found.begin(), found.end(), n) == found.end())
                     found.push_back(n);
@@ -1174,6 +1642,11 @@ namespace fminus::circuit
             }
             for (const OpAmp& op : block.opamps)
                 read(op.inp);
+            for (const Controlled& k : block.controlled)
+            {
+                for (int n : k.driven ? std::vector<int>{k.cp, k.cn} : std::vector<int>{k.p, k.n, k.cp, k.cn})
+                    read(n);
+            }
             Loc loc;
             if (!block.elements.empty())
                 loc = elements[static_cast<std::size_t>(block.elements.front())].loc;
@@ -1316,6 +1789,14 @@ namespace fminus::circuit
             }
             if (block.port)
                 keys.insert(block.port->gainPots.begin(), block.port->gainPots.end());
+            for (const Controlled& k : block.controlled)
+            {
+                if (k.expr)
+                {
+                    for (const std::string& key : potsOf(*k.expr))
+                        keys.insert(key);
+                }
+            }
             for (const PotInfo& pot : p.pots)
             {
                 if (keys.count(pot.key))
@@ -1398,6 +1879,10 @@ namespace fminus::circuit
             }
         }
         if (messages.hasErrors())
+            return std::nullopt;
+
+        // ---- the DC operating point: the module runs in offsets from it ----
+        if (!dcPoint(p, messages))
             return std::nullopt;
 
         // ---- the configuration: Options, then the netlist, then the self-test's answer, then the provisional ----

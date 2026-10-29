@@ -123,11 +123,11 @@ TEST_CASE("a netlist becomes a module a host runs", "[circuit]")
 TEST_CASE("a broken netlist gives no source and clang-style errors", "[circuit]")
 {
     const fminus::circuit::Result result =
-        fminus::circuit::generate(".input u in\n.output y a\nR1 in a 2.2k\nD1 a 0 DM\n.model DM D\n", "pedal.cir");
+        fminus::circuit::generate(".input u in\n.output y a\nR1 in a 2.2k\nD1 a 0 DX\n.model DM D\n", "pedal.cir");
     CHECK(result.source.empty());
     CHECK(result.module.empty());
     CHECK(result.errors ==
-          "pedal.cir:4:1: error: D1 has no antiparallel partner: Phase 0 solves antiparallel diode pairs only\n");
+          "pedal.cir:4:8: error: unknown model 'DX' (the models: DM; built in: 1N914, 1N4148)\n");
     fminus::circuit::Options options;
     options.oversample = 3;
     CHECK(fminus::circuit::generate(kClipper, "clipper.cir", options).errors ==

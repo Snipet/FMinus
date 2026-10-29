@@ -63,6 +63,47 @@ namespace
         return program;
     }
 
+    // E and G with gains pots move, an E's output driving the next block, a G stamped in its block.
+    const std::string kGains = R"(.title Gains
+.input u in
+.output y o3
+.pot g 0.5
+.pot h 0.2
+E1 m 0 in 0 {1 + 10 * g}
+R1 m out 1k
+C1 out 0 10n
+G1 o2 0 out 0 {1m + 2m * h}
+R3 o2 0 1k
+X2 o2 o3 o3 opamp
+)";
+
+    // One diode whose K a pot moves (R1 from 100 ohm to 20k), and an asymmetric pair's (ADAA on: b1_set's carry).
+    const std::string kSinglePot = R"(.title SinglePot
+.input u in
+.output y a
+.pot drive 0.5
+.oversample 4
+.adaa on
+.solver omega(1)
+R1 in a {100 + 20k * drive}
+C1 a 0 10n
+D1 a 0 1N4148
+)";
+
+    const std::string kAsymPot = R"(.title AsymPot
+.input u in
+.output y a
+.pot drive 0.5
+.oversample 4
+.adaa on
+.solver omega(1)
+R1 in a {100 + 20k * drive}
+C1 a 0 10n
+D1 a 0 1N914
+D2 0 m 1N914
+D3 m a 1N914
+)";
+
     fc::Plan planned(const std::string& text, const fc::Options& options = {})
     {
         fc::Messages messages;
@@ -95,13 +136,17 @@ namespace
         return 0;
     }
 
-    // Calls set() with the pots, whatever their count (1 to 3 in these netlists).
+    // Calls set() with the pots, whatever their count (0 to 3 in these netlists: none, no call).
     void callSet(Program& program, const std::string& module, void* self, const std::vector<float>& pots)
     {
         std::string errors;
         const std::string name = module + "::set";
+        if (pots.empty())
+            return;
         if (pots.size() == 1)
             program.function<void(void*, float)>(name, errors)(self, pots[0]);
+        else if (pots.size() == 2)
+            program.function<void(void*, float, float)>(name, errors)(self, pots[0], pots[1]);
         else if (pots.size() == 3)
             program.function<void(void*, float, float, float)>(name, errors)(self, pots[0], pots[1], pots[2]);
         else
@@ -111,9 +156,20 @@ namespace
 
 TEST_CASE("the emitted coefficients are the double derivation's, in float", "[circuit]")
 {
-    const std::string netlists[] = {fc::test::kDiodeTone, fc::test::kScreamer,
+    // Phase 0's, and Phase 1's elements: an inductor (the wah's tank, a pot damping it), a DC source and an E, a
+    // pot's gain in an E and a G, one diode and an asymmetric pair whose K a pot moves, with and without ADAA
+    const std::string netlists[] = {fc::test::kDiodeTone,
+                                    fc::test::kScreamer,
                                     withLine(fc::test::kDiodeTone, ".adaa off", ".adaa on"),
-                                    withLine(fc::test::kScreamer, ".adaa on", ".adaa off")};
+                                    withLine(fc::test::kScreamer, ".adaa on", ".adaa off"),
+                                    fc::test::kWah,
+                                    fc::test::kRlLowpass,
+                                    fc::test::kDivider,
+                                    kGains,
+                                    kSinglePot,
+                                    withLine(kSinglePot, ".adaa on", ".adaa off"),
+                                    kAsymPot,
+                                    withLine(kAsymPot, ".adaa on", ".adaa off")};
     for (const std::string& text : netlists)
     {
         const fc::Result result = fc::generate(text, "t.cir");
@@ -155,13 +211,16 @@ TEST_CASE("the emitted coefficients are the double derivation's, in float", "[ci
                         if (by == std::string::npos)
                             continue;
                         const std::string source = name.substr(by + 4);
+                        // a capacitor's state is a current (gc volts); an inductor's a voltage (rl i + v)
                         double scale = 1;
                         if (source.rfind("x_", 0) == 0)
-                            scale = symbols[static_cast<std::size_t>(
-                                std::find_if(code->system.symbols.begin(), code->system.symbols.end(),
-                                             [&](const fc::System::Symbol& s)
-                                             { return s.name == "gc_" + source.substr(2); }) -
-                                code->system.symbols.begin())];
+                        {
+                            const auto gc = std::find_if(code->system.symbols.begin(), code->system.symbols.end(),
+                                                         [&](const fc::System::Symbol& s)
+                                                         { return s.name == "gc_" + source.substr(2); });
+                            if (gc != code->system.symbols.end())
+                                scale = symbols[static_cast<std::size_t>(gc - code->system.symbols.begin())];
+                        }
                         auto& row = rows[name.substr(0, by)];
                         row.second += std::fabs(d) * scale;
                         const auto field = std::find_if(code->coefficients.begin(), code->coefficients.end(),
@@ -179,7 +238,7 @@ TEST_CASE("the emitted coefficients are the double derivation's, in float", "[ci
                     }
                     if (block.port)
                     {
-                        for (const char* k : {"ka_", "kb_", "lna_", "kc_"})
+                        for (const char* k : {"ka_", "kb_", "lna_", "kc_", "kr_", "ks_", "lnr_", "kcr_"})
                         {
                             const std::string name = k + block.port->name;
                             if (!expected.count(name))
@@ -599,7 +658,20 @@ TEST_CASE("the bracket keeps every law's iterates finite in float, through the J
           {fc::Solver::Guess::Omega, 3}}},
         {fc::test::otaStage("", "2m"),
          "G1",
-         {{fc::Solver::Guess::Previous, 1}, {fc::Solver::Guess::Previous, 2}, {fc::Solver::Guess::Previous, 3}}}};
+         {{fc::Solver::Guess::Previous, 1}, {fc::Solver::Guess::Previous, 2}, {fc::Solver::Guess::Previous, 3}}},
+        // one diode and an asymmetric pair (halfwave.cir, asym.cir: p is the input's times p_D1_by_u)
+        {fc::test::kHalfWave,
+         "D1",
+         {{fc::Solver::Guess::Omega, 0},
+          {fc::Solver::Guess::Omega, 1},
+          {fc::Solver::Guess::Omega, 3},
+          {fc::Solver::Guess::Previous, 2}}},
+        {fc::test::kAsym,
+         "D1",
+         {{fc::Solver::Guess::Omega, 0},
+          {fc::Solver::Guess::Omega, 1},
+          {fc::Solver::Guess::Omega, 3},
+          {fc::Solver::Guess::Previous, 2}}}};
     for (const Law& l : laws)
     {
         for (const fc::Solver& solver : l.solvers)
@@ -629,7 +701,8 @@ TEST_CASE("the bracket keeps every law's iterates finite in float, through the J
                     }
                     else
                     {
-                        callSet(*program, r.module, self.get(), {1.0f});
+                        if (!r.pots.empty())
+                            callSet(*program, r.module, self.get(), {1.0f});
                         const float k = readFloat(self.get(), m, "p_D1_by_u");
                         const float u = static_cast<float>(sign * mag) / k;
                         program->function<float(void*, float)>(r.module + "::tick", errors)(self.get(), u);
@@ -790,6 +863,119 @@ TEST_CASE("an OTA driven far past its linear range runs finite with ADAA, and as
                 worst = std::max(worst, std::fabs(y[i] - ref[i]));
             INFO("worst " << worst << " V");
             CHECK(worst <= 2e-5);
+        }
+    }
+}
+
+TEST_CASE("Phase 1's elements and diode laws compile nonblocking, in both channel counts", "[circuit]")
+{
+    // an inductor, DC sources (V, I, a floating V), E and G sources with constant and pot gains, one diode, a string,
+    // an asymmetric pair, RS: each with ADAA off and on, each solver's guess, .channels 1 and 2
+    const std::string sources = ".title Sources\n.input u in\n.output y out\n.pot x 0.3\nC0 in b 1u\nV1 vcc 0 9\n"
+                                "R1 vcc b 10k\nR2 b 0 10k\nI1 0 b 10u\nV2 c b 0\nR3 c 0 1meg\nL1 c d 10m\nR4 d 0 1k\n"
+                                "C4 d e0 1u\nR7 e0 0 10k\nE1 e 0 e0 0 {2 + x}\nR5 e f 1k\nC5 f 0 10n\nD1 f 0 1N4148\n"
+                                "X1 f out out opamp\n";
+    const std::string rs = ".title Rs\n.input u in\n.output y c\nR1 in a 2.2k\nC1 a 0 10n\nD1 a m DR\nD2 m 0 DR\n"
+                           "X1 a b b opamp\nR2 b c 1k\nC2 c 0 10n\nD3 c 0 DR\nD4 0 c DR\n"
+                           ".model DR D(IS=2.52n N=1.752 RS=5)\n";
+    int count = 0;
+    int index = 0;
+    for (const std::string& text : {fc::test::kWah, fc::test::kRlLowpass, fc::test::kDivider, kGains,
+                                    fc::test::kHalfWave, fc::test::kAsym, kSinglePot, kAsymPot, sources, rs})
+    {
+        for (bool adaa : {false, true})
+        {
+            for (int channels : {1, 2})
+            {
+                fc::Options o;
+                o.adaa = adaa;
+                o.channels = channels;
+                o.oversample = index % 3 == 0 ? 1 : index % 3 == 1 ? 2 : 4;
+                o.solver = index % 2 == 0 ? fc::Solver{fc::Solver::Guess::Omega, 1 + index % 3}
+                                          : fc::Solver{fc::Solver::Guess::Previous, 1 + index % 3};
+                ++index;
+                const fc::Result result = fc::generate(text, "t.cir", o);
+                INFO("config " << index << ":\n" << result.errors << result.source);
+                auto program = compiled(result);
+                for (const char* method : {"init", "set", "tick", "step", "clear"})
+                {
+                    const std::string name = result.module + "::" + method;
+                    const auto& methods = program->module(result.module)->methods;
+                    if (std::find(methods.begin(), methods.end(), name) == methods.end())
+                        continue;
+                    INFO(name);
+                    CHECK(program->nonBlocking(name));
+                }
+                ++count;
+            }
+        }
+    }
+    CHECK(count == 40);
+}
+
+TEST_CASE("a pot's move keeps one diode's and an asymmetric pair's ADAA point on the curve", "[circuit]")
+{
+    // b<N>_set's carry, p_D1 += (ka' - ka) (c_D1 - 1) (and the other diode's - (kr' - kr) (cr_D1 - 1)): the last
+    // step's Newton residual, p_D1 - v_D1 - K f(v_D1), is kept to 1e-5 of p_D1 as the pot glides 0 -> 1 (R1 100 ohm
+    // to 20.1k: K moves by 4.8 times), as check h's for the pair
+    for (const std::string& text : {kSinglePot, kAsymPot})
+    {
+        const fc::Result r = fc::generate(text, "t.cir");
+        auto program = compiled(r);
+        const Program::Module* m = program->module(r.module);
+        REQUIRE(m);
+        std::string errors;
+        auto* init = program->function<void(void*, float)>(r.module + "::init", errors);
+        auto* set = program->function<void(void*, float)>(r.module + "::set", errors);
+        auto* tick = program->function<float(void*, float)>(r.module + "::tick", errors);
+        REQUIRE(init);
+        auto self = instance(*m);
+        init(self.get(), 48000);
+        set(self.get(), 0);
+        const bool asym = r.module == "AsymPot";
+        const double s = fc::thermalVoltage(1.752);
+        const double s2 = fc::thermalVoltage(2 * 1.752);
+        struct Point
+        {
+            double residual;
+            double p;
+            double curve;
+        };
+        auto point = [&]
+        {
+            const auto v = static_cast<double>(readFloat(self.get(), *m, "v_D1"));
+            const auto p = static_cast<double>(readFloat(self.get(), *m, "p_D1"));
+            double curve = static_cast<double>(readFloat(self.get(), *m, "ka_D1")) * (std::exp(v / s) - 1);
+            if (asym)
+                curve -= static_cast<double>(readFloat(self.get(), *m, "kr_D1")) * (std::exp(-v / s2) - 1);
+            return Point{p - v - curve, p, curve};
+        };
+        // a 2 V, 996 Hz sine, to where the diode conducts (its forward side, and the asymmetric pair's other side)
+        for (double side : {1.0, -1.0})
+        {
+            set(self.get(), 0);
+            bool conducting = false;
+            for (int i = 0; i < 9600 && !conducting; ++i)
+            {
+                tick(self.get(), static_cast<float>(2 * std::sin(2 * std::numbers::pi * 996 * i / 48000)));
+                const float v = readFloat(self.get(), *m, "v_D1");
+                conducting = i >= 2400 && side * static_cast<double>(v) > (side > 0 ? 0.5 : 0.95);
+            }
+            if (!asym && side < 0)
+                continue;   // one diode: no reverse conduction
+            INFO(r.module << " side " << side);
+            REQUIRE(conducting);
+            const Point before = point();
+            set(self.get(), 1);
+            const Point after = point();
+            INFO("residual " << before.residual << " -> " << after.residual << ", p " << before.p << " -> " << after.p);
+            CHECK(std::fabs(after.curve - before.curve) > 0.1 * std::fabs(before.p));   // the move is large
+            CHECK(std::fabs(after.residual - before.residual) <=
+                  1e-5 * std::fmax(std::fabs(before.p), std::fabs(after.p)));
+            // a pot held changes nothing, bit for bit
+            const float p = readFloat(self.get(), *m, "p_D1");
+            set(self.get(), 1);
+            CHECK(readFloat(self.get(), *m, "p_D1") == p);
         }
     }
 }

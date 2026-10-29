@@ -131,16 +131,24 @@ namespace fminus::circuit
             Pot,         // P<name> e1 w e2 value {expr} [taper=...], or P<name> a b value {expr} [taper=...]
             OpAmp,       // X<name> inp inn out opamp
             Ota,         // G<name> n+ n- OTA nc+ nc- gain|{expr}: i = gain tanh((V(nc+) - V(nc-)) / 2 Vt), n+ to n-
+            Inductor,    // L<name> n+ n- value
+            Voltage,     // V<name> n+ n- [DC] value: V(n+) - V(n-) = value
+            Current,     // I<name> n+ n- [DC] value: value amps from n+ through it to n- (SPICE's direction)
+            Vcvs,        // E<name> n+ n- nc+ nc- gain|{expr}: V(n+) - V(n-) = gain (V(nc+) - V(nc-))
+            Vccs,        // G<name> n+ n- nc+ nc- gain|{expr}: gain (V(nc+) - V(nc-)) amps from n+ through it to n-
         };
 
         Kind kind = Kind::Resistor;
         std::string name;   // as written: "R1"
         Loc loc;
-        std::vector<std::string> nodes;   // as written (an OTA's: n+, n-, nc+, nc-)
+        std::vector<std::string> nodes;   // as written (an OTA's, an E's and a G's: n+, n-, nc+, nc-)
         std::vector<Loc> nodeLocs;
-        double value = 0;   // ohms or farads (a pot's whole resistance), or an OTA's constant gain in amps
+        // ohms, farads or henries (a pot's whole resistance), an OTA's constant gain in amps, a V or I source's DC
+        // volts or amps (0 or negative too), an E's or a G's constant gain (V/V, A/V)
+        double value = 0;
         Loc valueLoc;
-        std::optional<Expr> expr;     // a variable resistor's resistance, a pot's position, or an OTA's gain
+        // a variable resistor's resistance, a pot's position, an OTA's gain, or an E's or a G's gain
+        std::optional<Expr> expr;
         std::optional<Taper> taper;   // a pot's taper=
         Loc taperLoc;
         std::string model;   // a diode's, as written
@@ -155,7 +163,12 @@ namespace fminus::circuit
         Loc loc;
         double is = 1e-14;   // IS, amps
         double n = 1;        // N
+        double rs = 0;       // RS, ohms: a series resistor (0: none)
     };
+
+    // The diode models built in, used where no .model card names them: 1N914 and 1N4148 (IS 2.52 nA, N 1.752: Yeh,
+    // DAFx-07), in this order. A card of one's name replaces it.
+    std::vector<ModelCard> builtinModels();
 
     // A .pot line.
     struct PotLine
@@ -219,6 +232,7 @@ namespace fminus::circuit
         Setting<Method> method;   // .method tr|bdf2|auto
         Setting<bool> prewarp;    // .prewarp on|off: an OTA's cutoff law prewarped (off: the analog circuit's)
         TargetLine target;
+        Loc op;   // .op's: the DC operating point as notes (line 0: none)
         // The lines a self-test's key reads (Circuit.h's selfTestKey): each logical line up to .end, continuations
         // joined, comments dropped, its tokens lowercased and joined by one space (spaces inside {...} and around
         // '=' removed; a .model card split at its parentheses and commas, as the parser reads it, and written

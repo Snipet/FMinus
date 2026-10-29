@@ -1,0 +1,13 @@
+* broken-dc.cir: errors.test's DC operating point errors of the topology: a loop of a V source and an inductor (their
+* DC current is undefined), and a node a current source and a capacitor alone reach (its DC voltage is)
+.title Broken
+.input  u    in
+.output vout a
+R1     in  a   10k
+R2     a   0   1k
+V1     b   0   1
+L1     b   0   1m
+R3     b   a   1k
+I1     0   x   1m
+C1     x   0   1n
+.end

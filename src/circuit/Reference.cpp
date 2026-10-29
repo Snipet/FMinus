@@ -58,6 +58,7 @@ namespace fminus::circuit
             double t1 = 0;    // an OTA's tanh(v(n-1) / 2 Vt)
             double lc1 = 0;   // and log cosh
             double kg1 = 0;   // its k g at n-1
+            double g1 = 0;    // one diode's or an asymmetric pair's G(v(n-1)), the law's antiderivative
 
             Runner(const Holters& block, const RefOptions& options, RefStats* s)
                 : h(block)
@@ -69,10 +70,27 @@ namespace fminus::circuit
             {
                 if (!h.port)
                     o.adaa = false;
+                if (h.port && (h.law == PortDef::Law::Single || h.law == PortDef::Law::Asym))
+                    g1 = lawAntiderivative(lawShape(h, 1), 0);
             }
 
             double solve(double p, double kg)
             {
+                if (h.law == PortDef::Law::Single || h.law == PortDef::Law::Asym)
+                {
+                    const LawShape shape = lawShape(h, 1);
+                    if (o.steps >= 0)
+                        return lawStepsOf(shape, p, o.guess, v1, o.steps);
+                    long unconverged = 0;
+                    int iterations = 0;
+                    const double v = lawConvergedOf(shape, p, v1, &unconverged, &iterations);
+                    if (stats != nullptr)
+                    {
+                        stats->unconverged += unconverged;
+                        stats->maxIterations = std::max(stats->maxIterations, iterations);
+                    }
+                    return v;
+                }
                 if (h.law == PortDef::Law::Tanh)
                 {
                     if (o.steps >= 0)
@@ -195,16 +213,18 @@ namespace fminus::circuit
                     return y;
                 }
                 // first-order ADAA of the solved map, in the cancellation-free form:
-                //   vbar = vm + [dv (pm - vm) - k nvt (c - c1)] / dp
+                //   vbar = vm + [dv (pm - vm) - (G(v) - G(v1))] / dp, G the law's antiderivative (a pair's k nvt cosh)
+                const bool pair = h.law == PortDef::Law::Pair;
                 const double e = std::exp(v / h.nvt);
                 const double c = 0.5 * (e + 1 / e);
+                const double g = pair ? 0 : lawAntiderivative(lawShape(h, 1), v);
                 const double dpv = p - p1;
                 const double dv = v - v1;
                 const double vm = 0.5 * (v + v1);
                 const double pm = 0.5 * (p + p1);
                 double vbar = vm;
                 if (std::fabs(dpv) > o.eps)
-                    vbar = vm + (dv * (pm - vm) - h.k * h.nvt * (c - c1)) / dpv;
+                    vbar = vm + (dv * (pm - vm) - (pair ? h.k * h.nvt * (c - c1) : g - g1)) / dpv;
                 const double ua = 0.5 * (u + u1);
                 double y = h.dy * ua + h.wy * vbar;
                 for (std::size_t i = 0; i < n; ++i)
@@ -222,6 +242,7 @@ namespace fminus::circuit
                 p1 = p;
                 v1 = v;
                 c1 = c;
+                g1 = g;
                 return y;
             }
         };

@@ -1,8 +1,10 @@
 // include/fminus/Circuit.h: analog circuits as FMinus source. fminus::circuit::generate turns a SPICE-style netlist
-// (a .cir file: resistors, capacitors, antiparallel diode pairs with their .model, OTAs, ideal op amps, pots, law
-// inputs, and the directives docs/circuits.md lists) into the text of one FMinus module, which Program::compile
-// compiles like any other source. It is the circuit compiler of docs/research/analog-circuits/README.md (Phase 1 of
-// its §11, in slices). No LLVM, C++17, as FMinus.h; the host links FMinus::FMinus.
+// (a .cir file: resistors, capacitors, inductors, DC voltage and current sources, E and G controlled sources, diodes
+// (one, a series string, a pair, an asymmetric pair, with RS) with their .model or a built-in one (1N914, 1N4148),
+// OTAs, ideal op amps, pots, law inputs, and the directives docs/circuits.md lists) into the text of one FMinus
+// module, which Program::compile compiles like any other source. It is the circuit compiler of
+// docs/research/analog-circuits/README.md (Phase 1 of its §11, in slices). No LLVM, C++17, as FMinus.h; the host links
+// FMinus::FMinus.
 //
 //   const fminus::circuit::Result result = fminus::circuit::generate(netlist, "pedal.cir");
 //   if (!result.errors.empty())
@@ -10,21 +12,23 @@
 //   auto program = fminus::Program::compile(result.source, errors);
 //
 // The module (named by .title):
-//   void init(float rate)        the host's rate; every state at the DC operating point (0 V: no bias yet), the pots
-//                                at their .pot defaults
+//   void init(float rate)        the host's rate; every state at the DC operating point (0: the module runs in
+//                                offsets from it), the pots at their .pot defaults
 //   void set(float drive, ...)   the pots, 0 to 1, in .pot order (clamped), then the switches' int positions
 //                                (Result::switches): call it on the absolute 16-sample grid, and every grid tick while
 //                                a switch ramps
-//   float tick(float u, ...)     one host-rate sample: .input's volts (1.0 = scale volts) to .output's; the law inputs
-//                                (Result::inputs after the first: floats, in .input order, broadcast to float2 with
-//                                .channels 2) follow the signal, each clamped to its range (a NaN is its low end)
-//                                and held over the host sample's oversampled steps
+//   float tick(float u, ...)     one host-rate sample: .input's volts (1.0 = scale volts) to .output's (its DC
+//                                operating point added back, a constant: step and the fields are offsets); the law
+//                                inputs (Result::inputs after the first: floats, in .input order, broadcast to float2
+//                                with .channels 2) follow the signal, each clamped to its range (a NaN is its low
+//                                end) and held over the host sample's oversampled steps
 //   float step(float u, ...)     one step of the oversampled region, at .oversample times the rate (absent if none)
 //   void clear()                 back to the DC operating point
-// Fields are named after the parts (x_C1: C1's state; v_D1: the voltage across the pair D1|D2). .channels 2 makes
-// tick and step take and return float2s. The code is straight-line float code with fixed step counts: its output
-// never depends on how a host splits blocks. generate() is pure and deterministic (the same text and options give
-// the same Result, byte for byte, on any machine), safe on any thread, and allocates: call it off the audio thread.
+// Fields are named after the parts (x_C1: C1's state; v_D1: the voltage across the pair D1|D2) and hold offsets from
+// the DC operating point. .channels 2 makes tick and step take and return float2s. The code is straight-line float
+// code with fixed step counts: its output never depends on how a host splits blocks. generate() is pure and
+// deterministic (the same text and options give the same Result, byte for byte, on any machine), safe on any thread,
+// and allocates: call it off the audio thread.
 //
 // The guard: every module checks, once every 16 ticks (counted from init and clear), that the fields it carries from
 // sample to sample are finite. If one is not (a NaN or an infinity from a host's input, say), tick calls clear() and

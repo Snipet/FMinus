@@ -172,6 +172,78 @@ C2 b 0 10n
 X1 b out out opamp
 )";
 
+    // Phase 1's elements. An RL low-pass, R / (R + s L).
+    inline const std::string kRlLowpass = R"(.title RlLowpass
+.input u in
+.output y o
+L1 in o 10m
+R1 o 0 1k
+)";
+
+    // examples/circuits/wah.cir: an RLC band-pass, its tank damped by a pot, buffered.
+    inline const std::string kWah = R"(.title Wah
+.input u in
+.output y out
+.pot res 0.5 audio
+R1 in a 10k
+L1 a 0 500m
+C1 a 0 47n
+R2 a d 1k
+Pq d 0 22k {res}
+X1 a out out opamp
+)";
+
+    // A 9 V divider into a follower, the signal coupled in through C1: V(b) = V(out) = 4.5 V at DC.
+    inline const std::string kDivider = R"(.title Divider
+.input u in
+.output y out
+V1 vcc 0 9
+R2 vcc b 10k
+R3 b 0 10k
+C1 in b 1u
+X1 b out out opamp
+)";
+
+    // examples/circuits/halfwave.cir: one diode (a built-in model, no card) across C1.
+    inline const std::string kHalfWave = R"(.title HalfWave
+.input u in
+.output y a
+.oversample 4 iir blocks=auto
+.adaa off
+.solver omega(1)
+R1 in a 2.2k
+C1 a 0 10n
+D1 a 0 1N4148
+)";
+
+    // examples/circuits/asym.cir: one diode against two in series, an asymmetric pair.
+    inline const std::string kAsym = R"(.title Asym
+.input u in
+.output y a
+.oversample 4 iir blocks=auto
+.adaa on
+.solver omega(1)
+R1 in a 2.2k
+C1 a 0 10n
+D1 a 0 1N914
+D2 0 m 1N914
+D3 m a 1N914
+.model 1N914 D(IS=2.52n N=1.752)
+)";
+
+    // kScreamer with its 4.5 V reference drawn (examples/circuits/screamer-biased.cir): V1, and R1 and R8 to it.
+    inline std::string screamerBiased()
+    {
+        std::string text = kScreamer;
+        auto replace = [&](const std::string& from, const std::string& to)
+        {
+            text.replace(text.find(from), from.size(), to);
+        };
+        replace("C1     in  p1  1u\nR1     p1  0   10k", "V1     vb  0   4.5\nC1     in  p1  1u\nR1     p1  vb  10k");
+        replace("R8     t1  0   10k", "R8     t1  vb  10k");
+        return text;
+    }
+
     // ---- adaa.cpp's hand-derived blocks (Holters' form) ----
 
     struct HandBlock

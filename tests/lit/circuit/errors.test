@@ -10,19 +10,19 @@
 # RUN: not fminus %S/Inputs/broken-negative.cir --emit fm 2>&1 | FileCheck %s --check-prefix=NEGATIVE --match-full-lines
 # RUN: not fminus %S/Inputs/play-broken.fm 2>&1 | FileCheck %s --check-prefix=PLAY --implicit-check-not=error: --implicit-check-not="not found"
 
-# PARSE:      {{.*}}broken-parse.cir:7:1: error: the inductor L1 is not supported yet (Phase 1)
+# PARSE:      {{.*}}broken-parse.cir:7:19: error: 'AC 1': a V source is DC: the signal is .input's
 # PARSE-NEXT: {{.*}}broken-parse.cir:8:19: error: unknown pot 'tonee' (the pots: tone)
 # PARSE-NEXT: {{.*}}broken-parse.cir:9:20: error: the exponent of '^' is an integer from 0 to 8
-# PARSE-NEXT: {{.*}}broken-parse.cir:10:22: error: RS is not supported yet (Phase 1)
+# PARSE-NEXT: {{.*}}broken-parse.cir:10:22: error: 'RS=-10': RS is 0 or a resistance from 1e-30 to 1e30 ohms
 # PARSE-NEXT: {{.*}}broken-parse.cir:11:9: error: '.method bdf2' is not supported yet (Phase 1)
 # PARSE-NEXT: {{.*}}broken-parse.cir:12:1: error: '.subckt' is not supported yet
 # PARSE-NEXT: {{.*}}broken-parse.cir:13:1: error: unknown directive '.foo'
 
 # PLAN:      {{.*}}broken-plan.cir:6:1: error: node 'f1' has one connection (R6); a node needs two
 # PLAN-NEXT: {{.*}}broken-plan.cir:7:1: error: node 'z2' reaches ground only through capacitors (C3, C9): its DC voltage is undefined (add 10meg to ground)
-# PLAN-NEXT: {{.*}}broken-plan.cir:9:16: error: unknown model '1N4148X' (the models: 1N914)
-# PLAN-NEXT: {{.*}}broken-plan.cir:10:16: error: unknown model '1N4148X' (the models: 1N914)
-# PLAN-NEXT: {{.*}}broken-plan.cir:11:1: error: D3 has no antiparallel partner: Phase 0 solves antiparallel diode pairs only
+# PLAN-NEXT: {{.*}}broken-plan.cir:9:16: error: unknown model '1N4148X' (the models: 1N914; built in: 1N914, 1N4148)
+# PLAN-NEXT: {{.*}}broken-plan.cir:10:16: error: unknown model '1N4148X' (the models: 1N914; built in: 1N914, 1N4148)
+# PLAN-NEXT: {{.*}}broken-plan.cir:12:1: error: diodes D3 and D4 in series through node 'k' have different models (1N914, 1N4148): a series string is of one model
 
 # FEEDBACK: {{.*}}broken-feedback.cir:7:1: error: op amp XU1 has no negative feedback: an ideal op amp needs one
 
@@ -56,6 +56,25 @@
 
 # OMEGA: {{.*}}broken-omega.cir:6:1: error: '.solver omega(1)': an OTA's port is solved from the previous step's v: .solver newton(K)
 
+# Phase 1's elements and DC operating point: a loop of a V source and an inductor, and a node only a current source
+# and a capacitor reach (the topology's checks); a pair with unequal RS, and a series string of two models (the diode
+# forms'); an E whose controls are in two blocks (the partition's); a diode a supply biases (the DC point's: the
+# offset formulation is Phase 2's). broken-parse.cir has an AC spec on a V source.
+# RUN: not fminus %S/Inputs/broken-dc.cir --emit fm 2>&1 | FileCheck %s --check-prefix=TOPOLOGY --match-full-lines
+# RUN: not fminus %S/Inputs/broken-diodes.cir --emit fm 2>&1 | FileCheck %s --check-prefix=DIODES --match-full-lines
+# RUN: not fminus %S/Inputs/broken-controls.cir --emit fm 2>&1 | FileCheck %s --check-prefix=CONTROLS --match-full-lines
+# RUN: not fminus %S/Inputs/broken-biased.cir --emit fm 2>&1 | FileCheck %s --check-prefix=BIASED --match-full-lines
+
+# TOPOLOGY:      {{.*}}broken-dc.cir:9:1: error: a loop of voltage sources, E outputs and inductors (V1, L1): its DC current is undefined
+# TOPOLOGY-NEXT: {{.*}}broken-dc.cir:11:1: error: node 'x' reaches ground only through capacitors and current sources (I1, C1): its DC voltage is undefined (add 10meg to ground)
+
+# DIODES:      {{.*}}broken-diodes.cir:8:1: error: antiparallel D1|D2 have unequal RS (10 and 5 ohm): a pair shares one series resistor
+# DIODES-NEXT: {{.*}}broken-diodes.cir:11:1: error: diodes D3 and D4 in series through node 'm' have different models (1N914, 1N4148): a series string is of one model
+
+# CONTROLS: {{.*}}broken-controls.cir:12:1: error: E1's controls, 'a' and 'b', are in two blocks: an E reads one block's nodes (or its input)
+
+# BIASED: {{.*}}broken-biased.cir:8:1: error: port D1 is biased at DC (0.573 V): biased ports need the offset formulation (Phase 2)
+
 # --emit fm is a netlist's: on an FMinus source it is an error.
 # RUN: not fminus %S/Inputs/play.fm --emit fm 2>&1 | FileCheck %s --check-prefix=NOTCIR --match-full-lines
 # NOTCIR: fminus: --emit fm: {{.*}}play.fm is not a circuit netlist (.cir)
@@ -71,9 +90,9 @@
 # Through #include: the circuit's errors, and no FMinus error after them.
 # PLAY: {{.*}}broken-plan.cir:6:1: error: node 'f1' has one connection (R6); a node needs two
 # PLAY: {{.*}}broken-plan.cir:7:1: error: node 'z2' reaches ground only through capacitors (C3, C9): its DC voltage is undefined (add 10meg to ground)
-# PLAY: {{.*}}broken-plan.cir:9:16: error: unknown model '1N4148X' (the models: 1N914)
-# PLAY: {{.*}}broken-plan.cir:10:16: error: unknown model '1N4148X' (the models: 1N914)
-# PLAY: {{.*}}broken-plan.cir:11:1: error: D3 has no antiparallel partner: Phase 0 solves antiparallel diode pairs only
+# PLAY: {{.*}}broken-plan.cir:9:16: error: unknown model '1N4148X' (the models: 1N914; built in: 1N914, 1N4148)
+# PLAY: {{.*}}broken-plan.cir:10:16: error: unknown model '1N4148X' (the models: 1N914; built in: 1N914, 1N4148)
+# PLAY: {{.*}}broken-plan.cir:12:1: error: diodes D3 and D4 in series through node 'k' have different models (1N914, 1N4148): a series string is of one model
 
 # FMinus's messages on a generated module are re-cited at the netlist's line the generated line comes from
 # (Result::lines): play-redefine.fm declares its own module PotClipper before #include "clipper-pot.cir", and the

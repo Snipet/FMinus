@@ -99,7 +99,7 @@ namespace fminus::circuit
             {
                 int states = 0;
                 for (const Branch& br : b.branches)
-                    states += br.kind == Branch::Kind::Capacitor ? 1 : 0;
+                    states += br.state() ? 1 : 0;
                 std::string text = "block " + std::to_string(b.index) + " (" + partsText(plan, b) +
                                    "): " + std::to_string(states) + (states == 1 ? " state, " : " states, ");
                 const std::string rate =

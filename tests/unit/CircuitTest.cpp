@@ -5,6 +5,7 @@
 #include "fminus/Circuit.h"
 
 #include "circuit/Analysis.h"
+#include "circuit/Dc.h"
 #include "circuit/Emit.h"
 #include "circuit/Halfbands.h"
 #include "circuit/Laws.h"
@@ -17,6 +18,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <complex>
 #include <map>
@@ -264,12 +266,37 @@ TEST_CASE("the netlist subset parses", "[circuit]")
     CHECK(plan.nodes.size() == 3);   // ground, in, out: compared without case, named as first written
     CHECK(plan.nodes[1].name == "in");
     CHECK(plan.nodes[2].name == "out");
-    // a model card with its parameters spaced, and the ones Phase 0 ignores
-    const Parsed m = parsed(".model D1N4148 D ( IS = 4.352n N=1.906 CJO=4p )\n");
+    // a model card with its parameters spaced, and the ones the diode ignores
+    const Parsed m = parsed(".model D1N4148 D ( IS = 4.352n N=1.906 RS=0.5 CJO=4p )\n");
     REQUIRE(m.netlist.models.size() == 1);
     CHECK_THAT(m.netlist.models[0].is, WithinRel(4.352e-9, 1e-15));
     CHECK(m.netlist.models[0].n == 1.906);
-    CHECK(m.warnings == "t.cir:1:40: warning: CJO is ignored (Phase 0's diode is Shockley's: IS and N)\n");
+    CHECK(m.netlist.models[0].rs == 0.5);
+    CHECK(m.warnings == "t.cir:1:47: warning: CJO is ignored (the diode model is Shockley's: IS, N and RS)\n");
+    // Phase 1's elements: L, V and I (DC), E and a linear G, each with its value
+    const Parsed e = parsed(".input u in\n.output y o\n.pot g\nL1 in o 10m\nV1 b 0 DC -4.5\nI1 b 0 2m\n"
+                            "E1 o2 0 o 0 11\nG1 o3 0 o 0 {1m * g}\nV2 c 0 0\n");
+    REQUIRE(e.errors.empty());
+    REQUIRE(e.netlist.elements.size() == 6);
+    CHECK(e.netlist.elements[0].kind == fc::Element::Kind::Inductor);
+    CHECK(e.netlist.elements[0].value == 0.01);
+    CHECK(e.netlist.elements[1].kind == fc::Element::Kind::Voltage);
+    CHECK(e.netlist.elements[1].value == -4.5);
+    CHECK(e.netlist.elements[2].kind == fc::Element::Kind::Current);
+    CHECK(e.netlist.elements[2].value == 0.002);
+    CHECK(e.netlist.elements[3].kind == fc::Element::Kind::Vcvs);
+    CHECK(e.netlist.elements[3].nodes == (std::vector<std::string>{"o2", "0", "o", "0"}));
+    CHECK(e.netlist.elements[3].value == 11);
+    CHECK(e.netlist.elements[4].kind == fc::Element::Kind::Vccs);
+    CHECK(e.netlist.elements[4].expr);
+    CHECK(e.netlist.elements[5].value == 0);   // a 0 V source: a short
+    // the built-in models, when no card names them
+    const std::vector<fc::ModelCard> builtin = fc::builtinModels();
+    REQUIRE(builtin.size() == 2);
+    CHECK(builtin[0].name == "1N914");
+    CHECK(builtin[1].name == "1N4148");
+    CHECK(builtin[1].is == 2.52e-9);
+    CHECK(builtin[1].n == 1.752);
 }
 
 TEST_CASE("netlist errors, as clang words them", "[circuit]")
@@ -287,12 +314,18 @@ TEST_CASE("netlist errors, as clang words them", "[circuit]")
          "t.cir:4:1: error: node 'z2' reaches ground only through capacitors (C3, C9): its DC voltage is undefined "
          "(add 10meg to ground)\n"},
         {head + "R1 in o 1k\nD1 o 0 1N4148X\nD2 0 o 1N4148X\n.model 1N914 D(IS=2.52n N=1.752)\n",
-         "t.cir:4:8: error: unknown model '1N4148X' (the models: 1N914)\n"
-         "t.cir:5:8: error: unknown model '1N4148X' (the models: 1N914)\n"},
-        {head + "R1 in o 1k\nD3 o 0 1N914\n.model 1N914 D(IS=2.52n N=1.752)\n",
-         "t.cir:4:1: error: D3 has no antiparallel partner: Phase 0 solves antiparallel diode pairs only\n"},
-        {head + "R1 in o 1k\nD1 o 0 A\nD2 0 o B\n.model A D(IS=1n)\n.model B D(IS=2n)\n",
-         "t.cir:5:1: error: antiparallel diodes D1, D2 have different models: not supported yet\n"},
+         "t.cir:4:8: error: unknown model '1N4148X' (the models: 1N914; built in: 1N914, 1N4148)\n"
+         "t.cir:5:8: error: unknown model '1N4148X' (the models: 1N914; built in: 1N914, 1N4148)\n"},
+        {head + "R1 in o 1k\nD3 o 0 BAT41\n",
+         "t.cir:4:8: error: unknown model 'BAT41' (no .model cards; built in: 1N914, 1N4148)\n"},
+        // a series string is of one model, and a pair's two RS must be equal (one resistor serves the pair)
+        {head + "R1 in o 1k\nD1 o m 1N914\nD2 m 0 1N4148\n",
+         "t.cir:5:1: error: diodes D1 and D2 in series through node 'm' have different models (1N914, 1N4148): a "
+         "series string is of one model\n"},
+        {head + "R1 in o 1k\nD1 o 0 A\nD2 0 o B\n.model A D(IS=1n RS=10)\n.model B D(IS=2n RS=5)\n",
+         "t.cir:5:1: error: antiparallel D1|D2 have unequal RS (10 and 5 ohm): a pair shares one series resistor\n"},
+        {head + "R1 in o 1k\nD1 o o 1N914\nR2 o 0 1k\n",
+         "t.cir:4:1: error: D1's anode and cathode are one node, 'o'\n"},
         {head + "R1 in n 1k\nR2 n 0 1k\nXU1 n 0 o opamp\nR3 o 0 1k\n",
          "t.cir:5:1: error: op amp XU1 has no negative feedback: an ideal op amp needs one\n"},
         {head + "R1 in o 1k\nR2 o 0 1k\nD1 o 0 M\nD2 0 o M\nD3 o 0 M\nD4 0 o M\n.model M D(IS=1n)\n",
@@ -300,11 +333,12 @@ TEST_CASE("netlist errors, as clang words them", "[circuit]")
         {".input u in\nR1 in o 1k\nR2 o 0 1k\n", "t.cir: error: the netlist has no .output\n"},
         {".output y o\nR1 o 0 1k\nR2 o 0 2k\n", "t.cir: error: the netlist has no .input\n"},
         {head + "R1 in o 1k\nR2 o 0 1k\n.foo 3\n", "t.cir:5:1: error: unknown directive '.foo'\n"},
-        {head + "R1 in o 1k\nL1 o 0 1m\n", "t.cir:4:1: error: the inductor L1 is not supported yet (Phase 1)\n"},
+        {head + "R1 in o 1k\nF1 o 0 V1 2\n",
+         "t.cir:4:1: error: the current-controlled source F1 is not supported yet (Phase 2)\n"},
         {head + "R1 in o 1k\nQ1 o in 0 2N3904\n",
          "t.cir:4:1: error: the transistor Q1 is not supported yet (Phase 2)\n"},
-        {head + "R1 in o 1k\nR2 o 0 1k\n.model M D(IS=1n RS=10)\n",
-         "t.cir:5:18: error: RS is not supported yet (Phase 1)\n"},
+        {head + "R1 in o 1k\nR2 o 0 1k\n.model M D(IS=1n RS=-10)\n",
+         "t.cir:5:18: error: 'RS=-10': RS is 0 or a resistance from 1e-30 to 1e30 ohms\n"},
         {head + "R1 in o 1k\nR2 o 0 1k\n.method bdf2\n",
          "t.cir:5:9: error: '.method bdf2' is not supported yet (Phase 1)\n"},
         {head + "R1 in o 1k\nR2 o 0 1k\n.method be\n", "t.cir:5:9: error: '.method be': tr, bdf2 or auto\n"},
@@ -380,7 +414,7 @@ TEST_CASE("netlist warnings and notes", "[circuit]")
          "t.cir:5:19: warning: P1's taper=audio differs from pot 'tone''s lin: taper=audio is used\n"},
         {head + "R9 in 0 1k\n",
          "t.cir:5:1: warning: R9 joins 'in' and ground, which are both driven: it changes nothing\n"},
-        {head + ".op\n", "t.cir:5:1: warning: '.op' is ignored (Phase 1: the DC operating point)\n"},
+
     };
     for (const Case& c : cases)
     {
@@ -1109,8 +1143,10 @@ TEST_CASE("the OTA's and the law inputs' errors, as clang words them", "[circuit
          "negative\n"},
         {fc::test::otaStage("", "0"),
          "t.cir:9:18: error: G1's gain is 0: an OTA's gain (its bias current) is positive\n"},
-        {".input u in\n.output y o\nR1 in o 1k\nG1 o 0 in 0 1m\n",
-         "t.cir:4:1: error: the controlled source G1 is not supported yet (Phase 1)\n"},
+        // a linear G's gain is no OTA's: a law input may not enter it
+        {".input u in\n" + law + ".output y o\nR1 in o 1k\nG1 o 0 in 0 {iabc}\n",
+         "t.cir:5:14: error: law input 'iabc' in G1's value: a law input enters an OTA's gain only (pot-as-port is "
+         "Phase 2)\n"},
         {".input u in\n.input step - kind=cv\n.output y o\nR1 in o 1k\nR2 o 0 1k\n",
          "t.cir:2:8: error: law input 'step' is an FMinus keyword or builtin, or a name the module uses: rename it\n"},
     };
@@ -1299,5 +1335,468 @@ TEST_CASE("an OTA module's step names are refused as names", "[circuit]")
         CHECK(errorsOf(".title " + std::string(name) + "\n" + head + "R1 in o 1k\nR2 o 0 1k\n") ==
               "t.cir:1:8: error: the module's name '" + std::string(name) +
                   "', from .title, is a name the module uses: rename it\n");
+    }
+}
+
+// ---- Phase 1's elements, the DC operating point and the diode forms ------------------------------------------------
+
+namespace
+{
+    // The DC point at the plan's default pots (it must have one).
+    fc::DcPoint dcOf(const fc::Plan& plan)
+    {
+        std::vector<double> pots;
+        for (const fc::PotInfo& p : plan.pots)
+            pots.push_back(p.defaultValue);
+        fc::Messages messages;
+        const std::optional<fc::DcPoint> point = fc::solveDc(plan, pots, messages);
+        INFO(messages.format("t.cir", fc::Severity::Error));
+        REQUIRE(point);
+        return *point;
+    }
+
+    double nodeDc(const fc::Plan& plan, const std::string& name)
+    {
+        for (std::size_t n = 0; n < plan.nodes.size(); ++n)
+        {
+            if (plan.nodes[n].name == name)
+                return plan.dc[n];
+        }
+        FAIL("no node " << name);
+        return 0;
+    }
+
+    std::string partsOf(const fc::Plan& plan, const fc::Block& b)
+    {
+        std::string out;
+        for (int e : b.elements)
+            out += (out.empty() ? "" : " ") + plan.netlist.elements[static_cast<std::size_t>(e)].name;
+        return out;
+    }
+} // namespace
+
+TEST_CASE("an inductor, an E and a G stamp as their equations say", "[circuit]")
+{
+    // L1 in -> o, R1 o -> 0: the unknowns V(o) and i(L1); KCL o: V(o) / 1k - i(L1) = 0; L1's row in the impedance
+    // form: V(in) - V(o) - rl i(L1) = -x_L1, rl = 2 L fs' a symbol
+    const fc::Plan rl = planned(fc::test::kRlLowpass);
+    REQUIRE(rl.blocks.size() == 1);
+    const fc::System s = fc::assemble(rl, 0);
+    CHECK(s.unknownNames == (std::vector<std::string>{"V(o)", "i(L1)"}));
+    CHECK(s.rowNames == (std::vector<std::string>{"KCL o", "L1"}));
+    REQUIRE(s.symbols.size() == 1);
+    CHECK(s.symbols[0].name == "rl_L1");
+    CHECK(s.symbols[0].kind == fc::System::Symbol::Kind::Rl);
+    CHECK(s.a[0][0].constant == 1 / 1000.0);
+    CHECK(s.a[0][1].constant == -1);
+    CHECK(s.a[1][0].constant == -1);
+    CHECK(s.a[1][1].constant == 0);
+    CHECK(s.a[1][1].terms == (std::vector<std::pair<int, double>>{{0, -1.0}}));
+    REQUIRE(s.sources.size() == 2);
+    CHECK(s.sources[1].name == "x_L1");
+    CHECK(s.rhs[0][1].constant == -1);   // V(in), on the right
+    CHECK(s.rhs[1][1].constant == -1);   // -x_L1
+    CHECK(s.rhs[1][0].isZero());
+    REQUIRE(s.capacitor.size() == 1);   // the state's update reads the inductor's current
+    CHECK(s.readouts[static_cast<std::size_t>(s.capacitor[0].first)].name == "il_L1");
+    // at DC (rate 0, rl = 0) an exact short: V(o) = V(in)
+    CHECK(fc::symbolValues(s, rl, 0, 0.0, {}) == std::vector<double>{0.0});
+    CHECK(fc::symbolValues(s, rl, 0, 48000.0, {}) == std::vector<double>{2 * 0.01 * 48000});
+
+    // E1: V(out) = 11 V(in), a buffer block of its own (both controls the input and ground): its row
+    const fc::Plan e = planned(".input u in\n.output y out\nE1 out 0 in 0 11\nR1 out 0 1k\n");
+    REQUIRE(e.blocks.size() == 1);
+    const fc::System se = fc::assemble(e, 0);
+    CHECK(se.unknownNames == std::vector<std::string>{"V(out)"});
+    CHECK(se.rowNames == std::vector<std::string>{"E1"});
+    CHECK(se.a[0][0].constant == 1);
+    CHECK(se.rhs[0][0].constant == 11);
+    for (double f : {20.0, 1000.0, 20000.0})
+        CHECK(std::abs(fc::analog(e, 0, Complex(0, 2 * std::numbers::pi * f), {}) - Complex(11)) <= 1e-12 * 11);
+
+    // G1 into R1: 2 mA/V of V(in) leaving o, so V(o) = -g R V(in) = -2 V(in); its control the block's input, a
+    // right-hand side
+    const fc::Plan g = planned(".input u in\n.output y o\nG1 o 0 in 0 2m\nR1 o 0 1k\n");
+    const fc::System sg = fc::assemble(g, 0);
+    CHECK(sg.rowNames == std::vector<std::string>{"KCL o"});
+    CHECK(sg.a[0][0].constant == 1 / 1000.0);
+    CHECK(sg.rhs[0][0].constant == -0.002);
+    CHECK(std::abs(fc::analog(g, 0, Complex(0, 1000), {}) - Complex(-2)) <= 1e-12 * 2);
+    // a pot moves its gain: k_G1, a symbol
+    const fc::Plan gp = planned(".input u in\n.output y o\n.pot x\nG1 o 0 in 0 {1m + 2m * x}\nR1 o 0 1k\n");
+    const fc::System sgp = fc::assemble(gp, 0);
+    REQUIRE(sgp.symbols.size() == 1);
+    CHECK(sgp.symbols[0].name == "k_G1");
+    CHECK(sgp.symbols[0].kind == fc::System::Symbol::Kind::Gain);
+    CHECK(fc::symbolValues(sgp, gp, 0, 48000, {0.25}) == std::vector<double>{0.001 + 0.002 * 0.25});
+    CHECK(std::abs(fc::analog(gp, 0, Complex(0, 1000), {1.0}) - Complex(-3)) <= 1e-12 * 3);
+
+    // a floating E (neither output terminal ground) is a row in its block, with its current an unknown: V(a) - V(b) =
+    // 2 V(c), R3 and R4 to ground, so V(b) = -V(c) = -V(in) / 2
+    const fc::Plan fe =
+        planned(".input u in\n.output y b\nR1 in c 1k\nR2 c 0 1k\nE1 a b c 0 2\nR3 a 0 1k\nR4 b 0 1k\n");
+    REQUIRE(fe.blocks.size() == 1);
+    CHECK(partsOf(fe, fe.blocks[0]) == "R1 R2 E1 R3 R4");
+    const fc::System sfe = fc::assemble(fe, 0);
+    CHECK(sfe.unknownNames.back() == "i(E1)");
+    CHECK(sfe.rowNames.back() == "E1");
+    CHECK(std::abs(fc::analog(fe, 0, Complex(0, 1000), {}) - Complex(-0.5)) <= 1e-12);
+
+    // a grounded E cuts like an op amp's output: its controls' block drives b, the next block reads it
+    const fc::Plan cut = planned(".input u in\n.output y c\nR1 in a 1k\nR2 a 0 1k\nE1 b 0 a 0 2\nR3 b c 1k\n"
+                                 "C1 c 0 1n\n");
+    REQUIRE(cut.blocks.size() == 2);
+    CHECK(partsOf(cut, cut.blocks[0]) == "R1 R2 E1");
+    CHECK(partsOf(cut, cut.blocks[1]) == "R3 C1");
+    CHECK(cut.nodes[static_cast<std::size_t>(cut.blocks[1].input)].name == "b");
+    CHECK(std::abs(fc::analog(cut, 0, Complex(0, 1000), {}) - Complex(1)) <= 1e-12);   // 2 x the divider's 1/2
+    CHECK(fc::generate(".input u in\n.output y c\nR1 in a 1k\nR2 a 0 1k\nE1 b 0 a 0 2\nR3 b c 1k\nC1 c 0 1n\n",
+                       "t.cir")
+              .source.find("cut at E1's output (exact)") != std::string::npos);
+    // its n+ grounded: V(n-) = -gain V(control)
+    const fc::Plan flipped = planned(".input u in\n.output y b\nE1 0 b in 0 3\nR1 b 0 1k\n");
+    CHECK(std::abs(fc::analog(flipped, 0, Complex(0, 1000), {}) - Complex(-3)) <= 1e-12 * 3);
+}
+
+TEST_CASE("with inductors, the trapezoidal blocks are the bilinear map of their analog response", "[circuit]")
+{
+    // the emitted derivation's response (its Holters form, in double) is H(j 2 fs tan(pi f / fs)) within 1e-9
+    // relative from 20 Hz to 20 kHz: an RL low-pass and the wah's RLC band-pass, at each point of its pot grid
+    for (const std::string& text : {fc::test::kRlLowpass, fc::test::kWah})
+    {
+        const fc::Plan plan = planned(text);
+        REQUIRE(plan.blocks.size() == 1);
+        for (double fs : {44100.0, 48000.0, 96000.0})
+        {
+            for (const std::vector<double>& pots : fc::potGrid(plan, plan.blocks[0]))
+            {
+                const fc::Holters h = fc::holters(plan, 0, fs, pots);
+                double worst = 0;
+                for (double f = 20; f <= 20000; f *= 1.05)
+                {
+                    const Complex digital = stateSpace(h, std::polar(1.0, 2 * std::numbers::pi * f / fs));
+                    const Complex analog =
+                        fc::analog(plan, 0, Complex(0, 2 * fs * std::tan(std::numbers::pi * f / fs)), pots);
+                    worst = std::fmax(worst, std::abs(digital - analog) / std::abs(analog));
+                }
+                INFO(plan.module << " at " << fs);
+                CHECK(worst < 1e-9);
+            }
+        }
+    }
+    // and the analog responses are the textbook's: R / (R + s L); the tank's, a band-pass peaking at 1 / (2 pi
+    // sqrt(L C)) with V(a) / V(in) = Rd / (R1 + Rd) there (Rd = R2 + Pq: the reactances cancel)
+    const fc::Plan rl = planned(fc::test::kRlLowpass);
+    for (double f : {20.0, 1000.0, 15915.5, 20000.0})
+    {
+        const Complex s(0, 2 * std::numbers::pi * f);
+        CHECK(std::abs(fc::analog(rl, 0, s, {}) - 1000.0 / (1000.0 + s * 0.01)) <= 1e-12);
+    }
+    const fc::Plan wah = planned(fc::test::kWah);
+    const double f0 = 1 / (2 * std::numbers::pi * std::sqrt(0.5 * 47e-9));
+    for (double res : {0.0, 0.5, 1.0})
+    {
+        const double rd = 1000 + 22000 * fc::taperValue(fc::Taper::Audio, res);
+        const Complex h = fc::analog(wah, 0, Complex(0, 2 * std::numbers::pi * f0), {res});
+        CHECK(std::abs(h - rd / (10000 + rd)) <= 1e-9);
+    }
+}
+
+TEST_CASE("the DC operating point, by hand", "[circuit]")
+{
+    // a 9 V divider into a follower: every node to 1e-12 V; V1 supplies 450 uA (SPICE's i(V1), into n+: -450 uA)
+    const fc::Plan divider = planned(fc::test::kDivider);
+    CHECK(std::fabs(nodeDc(divider, "vcc") - 9) <= 1e-12);
+    CHECK(std::fabs(nodeDc(divider, "b") - 4.5) <= 1e-12);
+    CHECK(std::fabs(nodeDc(divider, "out") - 4.5) <= 1e-12);
+    CHECK(nodeDc(divider, "in") == 0);
+    CHECK(std::fabs(divider.outputDc - 4.5) <= 1e-12);
+    const fc::DcPoint dp = dcOf(divider);
+    REQUIRE(dp.sources.size() == 1);
+    CHECK(dp.sources[0].first == "V1");
+    CHECK(std::fabs(dp.sources[0].second + 450e-6) <= 1e-12 * 450e-6);
+    // tick adds the output's DC, and says so
+    const fc::Result r = fc::generate(fc::test::kDivider, "t.cir");
+    REQUIRE(r.errors.empty());
+    CHECK(r.source.find("return (gain_ < 1 ? z0 * gain_ : z0) + 4.5f;") != std::string::npos);
+    CHECK(r.notes.find("t.cir: note: the output's DC operating point, V(out) = 4.5 V, is tick's constant") !=
+          std::string::npos);
+    // an inductor's DC current is V / R, to 1e-12: at DC it shorts
+    const fc::Plan l = planned(".input u in\n.output y b\nC0 in b 1u\nV1 a 0 9\nL1 a b 1m\nR1 b 0 1k\n");
+    const fc::DcPoint lp = dcOf(l);
+    const fc::System ls = fc::assemble(l, 0, true);
+    const auto at = static_cast<std::size_t>(
+        std::find(ls.unknownNames.begin(), ls.unknownNames.end(), "i(L1)") - ls.unknownNames.begin());
+    REQUIRE(at < ls.unknownNames.size());
+    CHECK(std::fabs(lp.unknowns[0][at] - 9e-3) <= 1e-12 * 9e-3);
+    CHECK(std::fabs(nodeDc(l, "b") - 9) <= 1e-12);
+    // an I source, and a floating V source: 1 mA into b (R1, 1k), and c 2 V above b, R2 (1 MEG) drawing V(c) / 1 MEG
+    // through V1 from b: V(b) / 1k + (V(b) + 2) / 1 MEG = 1 mA
+    const fc::Plan iv = planned(".input u in\n.output y c\nC0 in b 1u\nI1 0 b 1m\nR1 b 0 1k\nV1 c b 2\nR2 c 0 1meg\n");
+    CHECK(std::fabs(nodeDc(iv, "b") - (1e-3 - 2e-6) / 1.001e-3) <= 1e-12);
+    CHECK(std::fabs(nodeDc(iv, "c") - nodeDc(iv, "b") - 2) <= 1e-12);
+    // no DC source: every value 0, the module as Phase 0's
+    const fc::Plan none = planned(fc::test::kDiodeTone);
+    CHECK(std::all_of(none.dc.begin(), none.dc.end(), [](double v) { return v == 0; }));
+    CHECK(none.outputDc == 0);
+}
+
+TEST_CASE("the offset form: a biased netlist's module is the unbiased one's", "[circuit]")
+{
+    // screamer.cir with its 4.5 V reference drawn generates screamer.cir's module but for the comments
+    const fc::Result plain = fc::generate(fc::test::kScreamer, "screamer.cir");
+    const fc::Result biased = fc::generate(fc::test::screamerBiased(), "screamer.cir");
+    REQUIRE(biased.errors.empty());
+    CHECK(biased.warnings.empty());
+    CHECK(biased.source == plain.source);
+    // its DC point: 4.5 V at the op amps' inputs and outputs, 0 V across the port and at the output (after C7)
+    const fc::Plan p = planned(fc::test::screamerBiased());
+    for (const char* node : {"p1", "n1", "v2", "t1", "tn", "v3"})
+    {
+        INFO(node);
+        CHECK(std::fabs(nodeDc(p, node) - 4.5) <= 1e-9);
+    }
+    CHECK(std::fabs(nodeDc(p, "out")) <= 1e-9);
+    const fc::DcPoint point = dcOf(p);
+    REQUIRE(point.ports.size() == 1);
+    CHECK(point.ports[0].first == "D1|D2");
+    CHECK(point.ports[0].second == 0);
+    // .op: the point as notes
+    const fc::Result op = fc::generate(".op\n" + fc::test::screamerBiased(), "t.cir");
+    CHECK(op.notes.find("t.cir: note: .op: V(n1) = 4.5 V\n") != std::string::npos);
+    CHECK(op.notes.find("t.cir: note: .op: i(V1) = 0 A\n") != std::string::npos);
+    CHECK(op.notes.find("t.cir: note: .op: port D1|D2: v = 0 V\n") != std::string::npos);
+}
+
+TEST_CASE("the DC operating point's errors", "[circuit]")
+{
+    const std::string head = ".input u in\n.output y a\n";
+    struct Case
+    {
+        std::string netlist;
+        std::string errors;
+    };
+    const Case cases[] = {
+        // a diode biased through a resistor from a supply
+        {head + "R1 in a 10k\nV1 vb 0 9\nR2 vb a 10k\nD1 a 0 1N914\n",
+         "t.cir:6:1: error: port D1 is biased at DC (0.573 V): biased ports need the offset formulation (Phase 2)\n"},
+        // an integrator with a DC source at its input: its output has no DC point
+        {head + "R1 in a 10k\nC1 a o 1n\nX1 0 a o opamp\nV1 b 0 1\nR3 b a 1k\n",
+         "t.cir:3:1: error: block 1 (R1, C1, X1, R3): its DC operating point is undefined: its equations are singular "
+         "at DC (an op amp with only capacitors around it, or a node only capacitors reach)\n"},
+        // a pot that moves the DC point: the offsets are from one
+        {head + ".pot x\nC1 in a 1u\nV1 vb 0 9\nP1 vb a 0 10k {x}\n",
+         "t.cir:3:6: error: pot 'x' moves the DC operating point (V(a) is 4.5 at x 0.5, 0 at 0): the module runs in "
+         "offsets from one DC point (one a pot moves is Phase 2's)\n"},
+        // the topology's: loops of voltage sources and inductors, cut-sets of capacitors and current sources, a
+        // source across the signal's node, a node driven twice
+        {head + "R1 in a 10k\nR2 a 0 1k\nV1 b 0 1\nL1 b 0 1m\nR3 b a 1k\n",
+         "t.cir:6:1: error: a loop of voltage sources, E outputs and inductors (V1, L1): its DC current is "
+         "undefined\n"},
+        {head + "R1 in a 10k\nR2 a 0 1k\nI1 0 x 1m\nC1 x 0 1n\n",
+         "t.cir:5:1: error: node 'x' reaches ground only through capacitors and current sources (I1, C1): its DC "
+         "voltage is undefined (add 10meg to ground)\n"},
+        {head + "R1 in a 10k\nR2 a 0 1k\nV1 in 0 1\n",
+         "t.cir:5:1: error: the V source V1 is across .input's node 'in': the signal is .input's\n"},
+        {head + "R1 in a 10k\nX1 0 a b opamp\nR2 b a 1k\nV1 b 0 1\n",
+         "t.cir:6:1: error: node 'b' is driven by op amp X1 and by V1\n"},
+        {head + "R1 in a 10k\nR2 a 0 1k\nV1 b 0 DC 0 AC 1\nR3 b a 1k\n",
+         "t.cir:5:13: error: 'AC 1': a V source is DC: the signal is .input's\n"},
+        {head + "R1 in a 10k\nR2 a 0 1k\nI1 b 0 SIN(0 1m 1k)\nR3 b a 1k\n",
+         "t.cir:5:8: error: 'SIN(0 1m 1k)': an I source is DC: the signal is .input's\n"},
+        // E's controls in two blocks
+        {head + "R1 in a 10k\nR2 a 0 1k\nX1 a n o1 opamp\nR3 o1 n 1k\nR4 n 0 1k\nR5 o1 b 1k\nR6 b 0 1k\n"
+                "E1 c 0 a b 2\nR7 c 0 1k\n",
+         "t.cir:10:1: error: E1's controls, 'a' and 'b', are in two blocks: an E reads one block's nodes (or its "
+         "input)\n"},
+        // values float coefficients cannot hold
+        {head + "R1 in a 1k\nL1 a 0 2e30\n",
+         "t.cir:4:8: error: L1's value 2e30 is out of range for float coefficients (1e-30 to 1e30)\n"},
+        {head + "R1 in a 1k\nR2 a 0 1k\nV1 b 0 1e31\nR3 b a 1k\n",
+         "t.cir:5:8: error: V1's value 1e31 is out of range for float coefficients (at most 1e30 in size)\n"},
+        {head + "R1 in a 1k\nR2 a 0 1k\nE1 b 0 a 0 0\nR3 b 0 1k\n",
+         "t.cir:5:12: error: E1's gain 0 is out of range for float coefficients (1e-30 to 1e30 in size; not 0)\n"},
+    };
+    for (const Case& c : cases)
+    {
+        INFO(c.netlist);
+        CHECK(errorsOf(c.netlist) == c.errors);
+    }
+}
+
+TEST_CASE("a series string is one diode of n N, and an asymmetric pair is two laws", "[circuit]")
+{
+    // D1 + D2 through m (which nothing else touches) against one diode of N = 2 x 1.752: the same block, to 1e-12
+    const fc::Plan string = planned(".input u in\n.output y a\nR1 in a 2.2k\nC1 a 0 10n\nD1 a m DM\nD2 m 0 DM\n"
+                                    ".model DM D(IS=2.52n N=1.752)\n");
+    const fc::Plan one = planned(".input u in\n.output y a\nR1 in a 2.2k\nC1 a 0 10n\nD1 a 0 DN\n"
+                                 ".model DN D(IS=2.52n N=3.504)\n");
+    REQUIRE(string.blocks.size() == 1);
+    REQUIRE(string.blocks[0].port);
+    CHECK(string.blocks[0].port->parts == "D1+D2");
+    CHECK(string.blocks[0].port->law == fc::PortDef::Law::Single);
+    CHECK(string.blocks[0].port->n == 2 * 1.752);
+    for (std::size_t n = 0; n < string.nodes.size(); ++n)
+        CHECK(string.nodes[n].absorbed == (string.nodes[n].name == "m"));
+    for (double fs : {48000.0, 192000.0})
+    {
+        const fc::Holters a = fc::holters(string, 0, fs, {});
+        const fc::Holters b = fc::holters(one, 0, fs, {});
+        CHECK(a.law == b.law);
+        CHECK_THAT(a.k, WithinRel(b.k, 1e-12));
+        CHECK_THAT(a.nvt, WithinRel(b.nvt, 1e-12));
+        CHECK_THAT(a.cp[0], WithinRel(b.cp[0], 1e-12));
+        CHECK_THAT(a.dp, WithinRel(b.dp, 1e-12));
+        CHECK_THAT(a.a[0][0], WithinRel(b.a[0][0], 1e-12));
+        for (double p : {-3.0, -0.1, 0.05, 1.0, 4.5})
+            CHECK_THAT(fc::lawConvergedOf(fc::lawShape(a, 1), p, 0, nullptr, nullptr),
+                       WithinRel(fc::lawConvergedOf(fc::lawShape(b, 1), p, 0, nullptr, nullptr), 1e-12));
+    }
+    // two strings each way of one law are a pair; of two, an asymmetric pair
+    const fc::Plan pair = planned(".input u in\n.output y a\nR1 in a 2.2k\nC1 a 0 10n\nD1 a m 1N914\nD2 m 0 1N914\n"
+                                  "D3 0 k 1N914\nD4 k a 1N914\n");
+    CHECK(pair.blocks[0].port->parts == "D1+D2|D3+D4");
+    CHECK(pair.blocks[0].port->law == fc::PortDef::Law::Pair);
+    CHECK(pair.blocks[0].port->n == 2 * 1.752);
+    // asym.cir: one diode against two in series. K = 1 / (1 / R1 + gc) at fs' (R1 || C1's companion); its law is
+    // Is K (e^(v / N Vt) - 1) - Is K (e^(-v / 2 N Vt) - 1)
+    const fc::Plan asym = planned(fc::test::kAsym);
+    REQUIRE(asym.blocks[0].port);
+    const fc::PortDef& port = *asym.blocks[0].port;
+    CHECK(port.parts == "D1|D2+D3");
+    CHECK(port.law == fc::PortDef::Law::Asym);
+    CHECK(port.is == 2.52e-9);
+    CHECK(port.is2 == 2.52e-9);
+    CHECK(port.nvt == fc::thermalVoltage(1.752));
+    CHECK(port.nvt2 == fc::thermalVoltage(2 * 1.752));
+    const double fs = 4 * 48000 * 2.0 / 3.0;
+    const fc::Holters h = fc::holters(asym, 0, fs, {});
+    const double k = 1 / (1 / 2200.0 + 2 * 10e-9 * fs);
+    CHECK_THAT(h.k, WithinRel(2.52e-9 * k, 1e-12));
+    CHECK_THAT(h.k2, WithinRel(2.52e-9 * k, 1e-12));
+    CHECK_THAT(h.dp, WithinRel(k / 2200.0, 1e-12));
+    CHECK_THAT(h.cp[0], WithinRel(k, 1e-12));
+    const fc::LawShape shape = fc::lawShape(h, 1);
+    for (double v : {-0.9, -0.2, 0.0, 0.3, 0.6})
+    {
+        const double law = 2.52e-9 * k * (std::exp(v / port.nvt) - 1) - 2.52e-9 * k * (std::exp(-v / port.nvt2) - 1);
+        CHECK(std::fabs(fc::lawValue(shape, v) - law) <= 1e-15 + 1e-12 * std::fabs(law));
+    }
+}
+
+TEST_CASE("RS is a resistor to an internal node, and the built-in models need no card", "[circuit]")
+{
+    // a diode with RS gives the module the explicit resistor it stands for gives: RS_D1 from its anode to rs_D1
+    const std::string head = ".title Rs\n.input u in\n.output y a\n.oversample 4\n.adaa off\n.solver omega(2)\n"
+                             "R1 in a 2.2k\nC1 a 0 10n\n";
+    const fc::Result rs = fc::generate(head + "D1 a 0 DM\n.model DM D(IS=2.52n N=1.752 RS=10)\n", "t.cir");
+    const fc::Result explicitR =
+        fc::generate(head + "D1 rs_D1 0 DM\n.model DM D(IS=2.52n N=1.752)\nRS_D1 a rs_D1 10\n", "t.cir");
+    REQUIRE(rs.errors.empty());
+    CHECK(rs.warnings.empty());
+    CHECK(!rs.source.empty());
+    CHECK(rs.source == explicitR.source);
+    // a pair's equal RS: one resistor, and a note of the approximation
+    const fc::Result pair =
+        fc::generate(head + "D1 a 0 DM\nD2 0 a DM\n.model DM D(IS=2.52n N=1.752 RS=10)\n", "t.cir");
+    REQUIRE(pair.errors.empty());
+    CHECK(pair.notes.find("t.cir: note: D1|D2: RS 10 ohm is one series resistor, RS_D1, for the pair (each diode's RS "
+                          "where it conducts: the usual approximation)") != std::string::npos);
+    // a string's RS adds: 2 x 5 ohm
+    const fc::Plan string = planned(head + "D1 a m DM\nD2 m 0 DM\n.model DM D(IS=2.52n N=1.752 RS=5)\n");
+    CHECK(string.netlist.elements.back().name == "RS_D1");
+    CHECK(string.netlist.elements.back().value == 10);
+    // D1 a 0 1N4148 with no .model card generates (and 1N914), and a card of a built-in's name replaces it
+    const fc::Result builtin = fc::generate(fc::test::kHalfWave, "halfwave.cir");
+    INFO(builtin.errors);
+    CHECK(builtin.errors.empty());
+    CHECK(builtin.source.find("D1: Is (e^(v / N Vt) - 1), Is 2.52 nA, N Vt 45.315 mV at 27 C") != std::string::npos);
+    const fc::Plan replaced = planned(".input u in\n.output y a\nR1 in a 2.2k\nD1 a 0 1N4148\n"
+                                      ".model 1N4148 D(IS=4.352n N=1.906)\n");
+    CHECK_THAT(replaced.blocks[0].port->is, WithinRel(4.352e-9, 1e-15));
+}
+
+TEST_CASE("each diode law's F is its antiderivative, and its bracket holds, in double", "[circuit]")
+{
+    // F(p) = p v - H(v), H = v^2 / 2 + G(v), v solving v + g(v) = p: dF/dp = v (report §5.1), at 200 points over
+    // +-20 V, for one diode and an asymmetric pair (as for the pair and tanh above)
+    const double s = fc::thermalVoltage(1.752);
+    const double k = 2.52e-9 * 2200;
+    for (const fc::LawShape& law : {fc::LawShape{fc::PortDef::Law::Single, k, s, 0, 1},
+                                    fc::LawShape{fc::PortDef::Law::Asym, k, s, 0.5 * k, 2 * s},
+                                    fc::LawShape{fc::PortDef::Law::Pair, 2 * k, s, 0, 1}})
+    {
+        auto v = [&](double p)
+        {
+            return fc::lawConvergedOf(law, p, 0, nullptr, nullptr);
+        };
+        auto f = [&](double p)
+        {
+            const double x = v(p);
+            return p * x - (0.5 * x * x + fc::lawAntiderivative(law, x));
+        };
+        double worst = 0;
+        for (int i = 0; i < 200; ++i)
+        {
+            const double p = -20 + 40 * (i + 0.5) / 200;
+            const double h = 1e-5;
+            worst = std::max(worst, std::fabs((f(p + h) - f(p - h)) / (2 * h) - v(p)));
+        }
+        INFO(static_cast<int>(law.law));
+        CHECK(worst <= 1e-7);
+        // converged, and the derivative is the law's
+        for (double p : {-4.5, -0.3, 1e-4, 0.7, 6.0})
+        {
+            const double x = v(p);
+            CHECK(std::fabs(x + fc::lawValue(law, x) - p) <= 1e-12 * std::fmax(1, std::fabs(p)));
+            const double d = (fc::lawValue(law, x + 1e-7) - fc::lawValue(law, x - 1e-7)) / 2e-7;
+            CHECK(std::fabs(d - fc::lawDerivative(law, x)) <= 1e-4 * std::fmax(1, fc::lawDerivative(law, x)));
+        }
+        // the bracket: every iterate in [min(0, p), max(0, p)] and finite, from any start, 0 to 3 Newton steps
+        for (int steps = 0; steps <= 3; ++steps)
+        {
+            for (double mag = 1e-6; mag <= 1e6; mag *= 10)
+            {
+                for (double p : {mag, -mag})
+                {
+                    for (fc::Solver::Guess guess : {fc::Solver::Guess::Omega, fc::Solver::Guess::Previous})
+                    {
+                        for (double previous : {0.0, p, -p, 1e30})
+                        {
+                            const double x = fc::lawStepsOf(law, p, guess, previous, steps);
+                            CHECK(std::isfinite(x));
+                            CHECK(x >= std::fmin(0.0, p));
+                            CHECK(x <= std::fmax(0.0, p));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("the diode forms' and the new elements' emitted names are refused as names", "[circuit]")
+{
+    // an asymmetric pair's step locals, and its ADAA's second exponential
+    for (const char* name : {"sa", "si", "sl", "sn", "ef", "er", "cr"})
+    {
+        INFO(name);
+        CHECK(fc::isReservedName(name));
+        CHECK(fc::isModuleWord(name));
+        const std::string head = ".input u in\n.output y o\n";
+        CHECK(errorsOf(head + ".pot " + name + "\nR1 in o {1k + " + name + "}\nR2 o 0 1k\n") ==
+              "t.cir:3:6: error: pot '" + std::string(name) +
+                  "' is an FMinus keyword or builtin, or a name the module uses: rename it\n");
+        CHECK(errorsOf(".title " + std::string(name) + "\n" + head + "R1 in o 1k\nR2 o 0 1k\n") ==
+              "t.cir:1:8: error: the module's name '" + std::string(name) +
+                  "', from .title, is a name the module uses: rename it\n");
+    }
+    // every name the new elements' fields and locals use has a '_', which no pot or module name has
+    for (const std::string& text : {fc::test::kWah, fc::test::kAsym, fc::test::kDivider})
+    {
+        const fc::Result r = fc::generate(text, "t.cir");
+        for (const char* field : {"x_L1", "rl_L1", "r2_L1", "il_L1", "kr_D1", "ks_D1", "lnr_D1", "kcr_D1", "cr_D1"})
+            CHECK(!fc::isPlainName(field));
+        CHECK(r.errors.empty());
     }
 }

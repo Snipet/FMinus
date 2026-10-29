@@ -248,10 +248,10 @@ namespace fminus::circuit
     };
 
     // The report's §3.2 model, in cycles a host sample: each region block times its rate (a port block: p, 10 + 2 a
-    // state; the guess, omega 65 or the previous 5; each Newton step, 70 for a diode pair, 60 for an OTA's tanh;
-    // ADAA's tail, 57 for an exp-affine law, 100 for tanh's log cosh; the state update, 5. A linear block: 5 + 3 a
-    // state), each block outside the region at 1x, and 12 for each sample a halfband stage runs at its high rate, up
-    // and down together.
+    // state (a capacitor's or an inductor's); the guess, omega 65 or the previous 5; each Newton step, 70 for a diode
+    // pair or one diode, 110 for an asymmetric pair (two exponentials), 60 for an OTA's tanh; ADAA's tail, 57 for an
+    // exp-affine law, 100 for tanh's log cosh; the state update, 5. A linear block: 5 + 3 a state), each block outside
+    // the region at 1x, and 12 for each sample a halfband stage runs at its high rate, up and down together.
     double modelCost(const Plan& plan, int oversample, bool adaa, const Solver& solver);
 
     // The candidates of the plan's open dimensions (report §6.2: an exp-affine port's 1, 2, 4 and 8x, ADAA off and on,

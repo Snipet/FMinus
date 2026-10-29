@@ -1,8 +1,10 @@
-// src/circuit/Plan.h: the circuit compiler's second stage. A Netlist is elaborated (diode pairs merged into ports,
-// pots into variable resistors, models and tapers resolved), checked (connections, DC paths, op amps' feedback), cut
-// into blocks at ideal op amps, and ordered as a chain from .input to .output. The plan also holds the
-// configuration (Options over directives over defaults, with where each choice came from), which blocks run in the
-// oversampled region, and each linear block's 1x check.
+// src/circuit/Plan.h: the circuit compiler's second stage. A Netlist is elaborated (diodes into ports: one, a series
+// string, a pair, an asymmetric pair, RS written in as a resistor; pots into variable resistors; V sources into driven
+// nodes or branches; E, G and I sources; models and tapers resolved), checked (connections, DC paths, loops of
+// sources and inductors, op amps' feedback), cut into blocks at ideal op amps and grounded E sources, and ordered as a
+// chain from .input to .output. The plan also holds the DC operating point (Dc.h), the configuration (Options over
+// directives over defaults, with where each choice came from), which blocks run in the oversampled region, and each
+// linear block's 1x check.
 #pragma once
 
 #include "circuit/Netlist.h"
@@ -21,6 +23,8 @@ namespace fminus::circuit
             None,    // a node a block solves for
             Input,   // .input's: a voltage source to ground
             OpAmp,   // an op amp's output: driven, whatever its load
+            Vcvs,    // an E's output, the E's other output terminal grounded: driven, as an op amp's
+            Dc,      // a DC voltage source's (V<name> with a terminal grounded): a constant, ground in the offsets
         };
 
         std::string name;    // as first written
@@ -28,6 +32,9 @@ namespace fminus::circuit
         Source source = Source::None;
         int owner = -1;   // the block (chain index) that solves for or drives it; -1 for ground and .input
         int connections = 0;
+        double value = 0;      // Dc: its volts
+        int element = -1;      // Vcvs, Dc: the element that drives it
+        bool absorbed = false;   // inside a series string of diodes (D1+D2): the string's law covers it
     };
 
     // A two-terminal branch of a block's network.
@@ -38,6 +45,10 @@ namespace fminus::circuit
             Conductance,   // a constant resistor: g = 1 / R
             Capacitor,     // a trapezoidal companion: gc = 2 C fs', and its state
             Variable,      // a resistance that moves with pots: its current is an unknown (the impedance form)
+            Inductor,      // the impedance form: its current an unknown, V(a) - V(b) - rl i = -x, rl = 2 L fs' (TR),
+                           // and its state, x <- 2 rl i - x; at DC (rl = 0) an exact short
+            Voltage,       // a DC voltage source neither terminal of which is ground: its current an unknown, V(a) -
+                           // V(b) = dc (0 in the offsets: a short)
         };
 
         Kind kind = Kind::Conductance;
@@ -45,6 +56,8 @@ namespace fminus::circuit
         int b = 0;
         double g = 0;        // Conductance
         double c = 0;        // Capacitor, farads
+        double l = 0;        // Inductor, henries
+        double dc = 0;       // Voltage: volts
         std::string part;    // the part's name, as written
         std::string ident;       // its FMinus form, unique among the parts': "C1", "Ptone_a"
         std::string partIdent;   // its element's FMinus form: "Ptone" for both of a pot's sections
@@ -55,14 +68,62 @@ namespace fminus::circuit
         double value = 0;
         Expr expr;
         Taper taper = Taper::Lin;
+
+        // Whether it carries a state from step to step: a capacitor or an inductor.
+        bool state() const
+        {
+            return kind == Kind::Capacitor || kind == Kind::Inductor;
+        }
+    };
+
+    // A controlled source: an E (a VCVS, V(p) - V(n) = gain (V(cp) - V(cn))) or a linear G (a VCCS, gain (V(cp) -
+    // V(cn)) amps from p through it to n, SPICE's direction), its gain a constant or an expression of pots.
+    //   driven  an E with an output terminal grounded: its other terminal, `out`, is driven (a cut, as an op amp's
+    //           output), the E in the block of its controls (or a buffer block of its own when both are driven)
+    //   else    an E's row in its block (its current an unknown), or a G's stamp
+    struct Controlled
+    {
+        enum class Kind
+        {
+            Vcvs,
+            Vccs,
+        };
+
+        Kind kind = Kind::Vcvs;
+        std::string name;    // as written: "E1"
+        std::string ident;   // its FMinus form: k_<ident> is its gain's local where pots move it
+        int element = -1;
+        int p = 0;   // its output terminals
+        int n = 0;
+        int cp = 0;   // its control nodes
+        int cn = 0;
+        double gain = 0;            // a constant gain
+        std::optional<Expr> expr;   // or one of pots
+        bool driven = false;
+        int out = 0;          // driven: the node it drives
+        double sign = 1;      // driven: V(out) = sign gain (V(cp) - V(cn)) (-1 when p is the grounded one)
+    };
+
+    // A DC current source (I<name> n+ n- value): value amps from a through it to b. It is open in the offsets the
+    // module runs in, and only the DC operating point (Dc.h) sees it.
+    struct CurrentSource
+    {
+        std::string name;
+        int element = -1;
+        int a = 0;
+        int b = 0;
+        double value = 0;
     };
 
     // A nonlinear port: its voltage v = V(anode) - V(cathode) and its current j = f(v), which flows through it from
     // `from` to `to`. The port's equation, once its block is reduced, is v + kd f(v) = p (report §6.1), kd > 0.
-    //   Pair  an antiparallel diode pair, f = 2 Is sinh(v / N Vt) (the exp-affine family, EA)
-    //   Tanh  an OTA (G<name> n+ n- OTA nc+ nc- gain), f = g tanh(v / 2 Vt) with g its gain, which may move every
-    //         sample with a law input (the smooth-monotone family, SM)
-    // (Single and Asym, a single diode and an asymmetric pair, are the next slice's.) Form V is a two-terminal port,
+    //   Pair    an antiparallel diode pair, f = 2 Is sinh(v / N Vt) (the exp-affine family, EA)
+    //   Single  one diode, f = Is (e^(v / N Vt) - 1) (EA)
+    //   Asym    an antiparallel pair of two laws, f = Is (e^(v / N Vt) - 1) - Is2 (e^(-v / N2 Vt) - 1) (EA)
+    //   Tanh    an OTA (G<name> n+ n- OTA nc+ nc- gain), f = g tanh(v / 2 Vt) with g its gain, which may move every
+    //           sample with a law input (the smooth-monotone family, SM)
+    // A series string of one model (D1+D2: n diodes through nodes nothing else touches) is one diode of n N; a pair of
+    // strings of one law each way is a Pair, of two laws an Asym. Form V is a two-terminal port,
     // whose current flows between the terminals its voltage is across (a diode: from = anode, to = cathode), stamped
     // in Holters' v-form (Mna.h: v a source, j an unknown); Form I is a controlled source, its voltage across its
     // control nodes and its current between two others (an OTA: anode, cathode = nc+, nc-; from, to = n+, n-, SPICE's
@@ -91,9 +152,12 @@ namespace fminus::circuit
         int cathode = 0;
         int from = 0;   // j flows from `from` to `to`: a diode's anode and cathode, an OTA's n+ and n-
         int to = 0;
-        double is = 0;    // Pair: IS
-        double n = 1;     // Pair: N
-        double nvt = 0;   // Pair: N k T / q at 27 C; Tanh: 2 Vt (k T / q at 27 C, twice)
+        double is = 0;    // Pair, Single, Asym: IS (Asym: the anode-to-cathode diode's)
+        double n = 1;     // and N (a string's: n N)
+        double nvt = 0;   // and N k T / q at 27 C; Tanh: 2 Vt (k T / q at 27 C, twice)
+        double is2 = 0;   // Asym: the cathode-to-anode diode's IS
+        double n2 = 1;    // its N
+        double nvt2 = 0;  // its N k T / q
         // Tanh: the gain, amps: a constant, or an expression of pots and law inputs
         std::optional<Expr> gain;
         double gainValue = 0;              // the constant
@@ -126,10 +190,11 @@ namespace fminus::circuit
     {
         int index = 0;                  // 1, 2, ... in chain order
         std::vector<int> nodes;         // the nodes it solves for, in netlist order
-        std::vector<int> driven;        // the op amp outputs it drives
+        std::vector<int> driven;        // the op amp outputs it drives, then its driven E outputs
         std::vector<int> elements;      // its parts, in netlist order
         std::vector<Branch> branches;   // in netlist order
         std::vector<OpAmp> opamps;
+        std::vector<Controlled> controlled;   // its E and G sources, in netlist order
         std::optional<PortDef> port;
         int input = -1;                  // the node it reads (.input's, or the block before's output)
         int output = -1;                 // the node the next block reads, or .output's
@@ -226,6 +291,11 @@ namespace fminus::circuit
         double inputScale = 1;
         double outputScale = 1;
         std::string key;   // the self-test's key (Circuit.h's selfTestKey): the netlist's and the Options'
+        std::vector<CurrentSource> currents;   // the DC current sources, in netlist order
+        // The DC operating point (Dc.h) at the default pots: each node's volts. The module runs in offsets from it:
+        // its states, ports and signals are differences from these, so init and clear set 0.
+        std::vector<double> dc;
+        double outputDc = 0;   // V(.output's node) / its scale at the DC point: tick adds it (0: nothing)
     };
 
     // The physical N Vt of a diode, N k 300.15 / q (CODATA's k and q, SPICE's TNOM of 27 C).

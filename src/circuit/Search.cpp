@@ -732,7 +732,8 @@ namespace fminus::circuit
             double perState = 2;      // and each state in it
             double omega = 65;        // omega3's guess
             double previous = 5;      // the previous step's solution
-            double newtonPair = 70;   // a Newton step of a diode pair (2 Is sinh)
+            double newtonPair = 70;   // a Newton step of a diode pair (2 Is sinh) or of one diode (an exp)
+            double newtonAsym = 110;  // and of an asymmetric pair (two exps)
             double newtonTanh = 60;   // a Newton step of an OTA's tanh
             double adaaEa = 57;       // ADAA's tail on an exp-affine law
             double adaaSm = 100;      // and on tanh's (log cosh: an expf and a logf)
@@ -746,8 +747,8 @@ namespace fminus::circuit
 
         int statesOf(const Block& b)
         {
-            return static_cast<int>(std::count_if(b.branches.begin(), b.branches.end(),
-                                                  [](const Branch& br) { return br.kind == Branch::Kind::Capacitor; }));
+            return static_cast<int>(
+                std::count_if(b.branches.begin(), b.branches.end(), [](const Branch& br) { return br.state(); }));
         }
     } // namespace
 
@@ -762,9 +763,11 @@ namespace fminus::circuit
             if (b.port)
             {
                 const bool smooth = b.port->smooth();
+                const double newton = smooth                                  ? kCost.newtonTanh
+                                      : b.port->law == PortDef::Law::Asym ? kCost.newtonAsym
+                                                                          : kCost.newtonPair;
                 step = kCost.p + kCost.perState * states +
-                       (solver.guess == Solver::Guess::Omega ? kCost.omega : kCost.previous) +
-                       (smooth ? kCost.newtonTanh : kCost.newtonPair) * solver.steps +
+                       (solver.guess == Solver::Guess::Omega ? kCost.omega : kCost.previous) + newton * solver.steps +
                        (adaa ? (smooth ? kCost.adaaSm : kCost.adaaEa) : 0) + kCost.update;
             }
             else
