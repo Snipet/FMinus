@@ -41,7 +41,8 @@ namespace circuits
     {
         struct Row
         {
-            std::string circuit;   // "DT" (diodetone.cir), "TS" (screamer-clip.cir), "TSF" (screamer.cir, the chain)
+            std::string circuit;   // "DT" (diodetone.cir), "TS" (screamer-clip.cir), "TSF" (screamer.cir, the chain),
+                                   // "OTA" (otalp.cir, iabc moving each sample)
             fc::Solver solver;
             bool adaa = false;
             int m = 4;
@@ -57,6 +58,8 @@ namespace circuits
                 const std::string g = std::format("{}{}{}", solver.guess == fc::Solver::Guess::Omega ? "w" : "p",
                                                   solver.steps, adaa ? "_adaa" : "");
                 const std::string k = kind == fc::Halfband::Iir ? "iir" : "fir";
+                if (circuit == "OTA")
+                    return std::format("b_OTA_{}_{}x_{}{}", g, m, k, prewarp ? "_prewarp" : "");
                 if (circuit == "TSF")
                     return std::format("f_TS_{}_{}x_{}_{}", g, m, k,
                                        region == fc::Region::All         ? "all"
@@ -65,9 +68,13 @@ namespace circuits
                 return std::format("b_{}_{}_{}x_{}", circuit, g, m, k);
             }
 
+            bool prewarp = false;   // OTA: .prewarp on
+
             std::string section() const
             {
                 const std::string mode = math == fminus::Program::Math::Fast ? "fast" : "vector";
+                if (circuit == "OTA")
+                    return "ota " + mode;
                 if (circuit == "TSF")
                     return "tsfull " + mode;
                 if (circuit == "TS")
@@ -161,6 +168,19 @@ namespace circuits
             add({"TSF", {G::Omega, 2}, false, 8, fc::Halfband::Fir, 1, fc::Region::All, {}, "§4.1 row 6: 1,865"});
             add({"DT", {G::Omega, 1}, false, 4, fc::Halfband::Iir, 1, fc::Region::Auto, {}, "§4.1 row 7: omega + 1"});
             add({"DT", {G::Omega, 2}, false, 4, fc::Halfband::Iir, 1, fc::Region::Auto, {}, "§4.1 row 7: omega + 2"});
+            // the synth path: otalp.cir's two OTA one-poles, iabc moving each sample (an expf, the expo converter);
+            // report §7.4 measured its 2-port SVF, 248 cycles a voice at 1x with 2 steps, not comparable
+            add({"OTA", {G::Previous, 2}, false, 1, fc::Halfband::Iir, 1, fc::Region::Auto, {}, "1x, newton(2)"});
+            add({"OTA", {G::Previous, 2}, false, 2, fc::Halfband::Iir, 1, fc::Region::Auto, {}, "the provisional"});
+            add({"OTA", {G::Previous, 1}, false, 4, fc::Halfband::Iir, 1, fc::Region::Auto, {}, "as shipped"});
+            add({"OTA", {G::Previous, 1}, true, 4, fc::Halfband::Iir, 1, fc::Region::Auto, {}, "ADAA"});
+            add({"OTA", {G::Previous, 2}, false, 1, fc::Halfband::Iir, 2, fc::Region::Auto, {}, "float2"});
+            {
+                Row warped{"OTA", {G::Previous, 2}, false, 1, fc::Halfband::Iir, 1, fc::Region::Auto, {},
+                           "prewarp (one tanf a sample)"};
+                warped.prewarp = true;
+                add(warped);
+            }
             return rows;
         }
 
@@ -295,6 +315,52 @@ float fm_baseline(float n)
                                module, a, setCall);
         }
 
+        // The OTA's bench: tick with a 1 kHz sine at amp and iabc from an expo converter, 2^(2 sin) around 141 uA at
+        // 37 Hz (one expf a sample, as a synth's voice computes it).
+        std::string otaBenchSource(const std::string& module, double amp, int channels)
+        {
+            const std::string a = fc::literal(amp);
+            const std::string x = channels == 2 ? "(float2)(" + a + " * sinf(ph), " + a + " * cosf(ph))" : a + " * sinf(ph)";
+            const std::string type = channels == 2 ? "float2" : "float";
+            const std::string sq = channels == 2 ? "y.x * y.x + y.y * y.y" : "y * y";
+            return std::format(R"(
+float fm_bench(float n)
+{{
+    {0} w;
+    w.init(48000);
+    float sum = 0;
+    float ph = 0;
+    float lph = 0;
+    for (int i = 0; i < (int)n; ++i)
+    {{
+        const {2} x = {1};
+        ph += 0.130899694f;
+        ph = ph > 6.28318531f ? ph - 6.28318531f : ph;
+        lph += 0.00484346f;
+        lph = lph > 6.28318531f ? lph - 6.28318531f : lph;
+        const float iabc = 0.000141421f * expf(1.38629436f * sinf(lph));
+        const {2} y = w.tick(x, iabc);
+        sum += {3};
+    }}
+    return sum;
+}}
+float fm_baseline(float n)
+{{
+    float sum = 0;
+    float ph = 0;
+    for (int i = 0; i < (int)n; ++i)
+    {{
+        const float x = 4.5f * sinf(ph);
+        ph += 0.130899694f;
+        ph = ph > 6.28318531f ? ph - 6.28318531f : ph;
+        sum += x * x;
+    }}
+    return sum;
+}}
+)",
+                               module, x, type, sq);
+        }
+
         struct Timing
         {
             double ns = 0;
@@ -348,7 +414,7 @@ float fm_baseline(float n)
         void generateTimes()
         {
             std::printf("generate(): ms a netlist, the best of 20\n");
-            for (const char* name : {"diodetone.cir", "screamer.cir", "screamer-clip.cir", "clipper.cir"})
+            for (const char* name : {"diodetone.cir", "screamer.cir", "screamer-clip.cir", "clipper.cir", "otalp.cir"})
             {
                 const std::string shipped = netlist(name);
                 std::string open = shipped;
@@ -376,7 +442,7 @@ float fm_baseline(float n)
             std::printf("selfTest(): wall seconds on 1, 2, 4 and 8 threads (the netlists without their configuration "
                         "directives; %u cores)\n",
                         std::thread::hardware_concurrency());
-            for (const char* name : {"diodetone.cir", "screamer-clip.cir"})
+            for (const char* name : {"diodetone.cir", "screamer-clip.cir", "otalp.cir"})
             {
                 std::string text = netlist(name);
                 for (const char* d : {".oversample", ".adaa", ".solver"})
@@ -445,9 +511,10 @@ float fm_baseline(float n)
                                                                          : "";
             if (!std::regex_search(name + mode + (row.channels == 2 ? " float2 " : " ") + row.note, only))
                 continue;
-            const std::string file = row.circuit == "DT"   ? "diodetone.cir"
-                                     : row.circuit == "TS" ? "screamer-clip.cir"
-                                                           : "screamer.cir";
+            const std::string file = row.circuit == "DT"    ? "diodetone.cir"
+                                     : row.circuit == "TS"  ? "screamer-clip.cir"
+                                     : row.circuit == "OTA" ? "otalp.cir"
+                                                            : "screamer.cir";
             fc::Options o;
             o.oversample = row.m;
             o.halfband = row.kind;
@@ -455,7 +522,9 @@ float fm_baseline(float n)
             o.solver = row.solver;
             o.channels = row.channels;
             o.region = row.region;
-            const double amp = row.circuit == "DT" ? 4.5 : 0.45;
+            if (row.prewarp)
+                o.prewarp = true;
+            const double amp = row.circuit == "DT" ? 4.5 : row.circuit == "OTA" ? 5 : 0.45;
             // mkbench.py's settings: tone 0.5 (DiodeTone), drive 1 (the TS)
             const std::string setCall = row.circuit == "DT"   ? "w.set(0.5f);"
                                         : row.circuit == "TS" ? "w.set(1);"
@@ -471,8 +540,9 @@ float fm_baseline(float n)
             po.denormals = fminus::Program::Denormals::Flush;
             po.threads = 1;
             std::string errors;
-            auto program =
-                fminus::Program::compile(r.source + benchSource(r.module, amp, row.channels, setCall), errors, po);
+            const std::string bench = row.circuit == "OTA" ? otaBenchSource(r.module, amp, row.channels)
+                                                           : benchSource(r.module, amp, row.channels, setCall);
+            auto program = fminus::Program::compile(r.source + bench, errors, po);
             if (!program)
             {
                 std::printf("%-30s does not compile:\n%s", name.c_str(), errors.c_str());
