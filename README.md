@@ -432,9 +432,9 @@ gain(in, out, n, 0.5f);                                       // one call a bloc
   finds a file). `math` is how `sinf` and the other transcendental builtins compute (`Math::Vector` by default,
   `Libm` or `Fast`), `strictAliasing` whether the optimiser relies on C's strict-aliasing rule (`true`),
   `knobVersions` how many copies of a method knob versioning may make (8; 0 turns it off), `denormals` whether
-  subnormals are kept or flushed to zero (`Denormals::Preserve` or `Flush`), and `threads` the most threads a parallel
-  region runs on (0, the default, is every core; 1 runs each on the calling thread alone). The header says what each
-  costs.
+  subnormals are kept or flushed to zero (`Denormals::Preserve` or `Flush`), `threads` the most threads a parallel
+  region runs on (0, the default, is every core; 1 runs each on the calling thread alone), and `keepIr` which of the
+  program's LLVM IR to keep as text (below). The header says what each costs.
 - **Threads.** `compile()` and the first look-up of each function run LLVM's optimiser and code generator on the
   calling thread: they take milliseconds and allocate. Different programs may compile on different threads at once.
   In a plugin, compile off the audio thread and hand the pointer over (below). A program's `parallel for` and
@@ -457,6 +457,12 @@ gain(in, out, n, 0.5f);                                       // one call a bloc
 - **Math.** `fminus::math::sin`, `cos`, `exp`, `tanh` and `log` compute what a program in the default math mode does,
   bit for bit, so a C++ reference that calls them agrees with the program at any block size, level and width. They
   are `[[gnu::const]]` for GCC and clang (`FMINUS_MATH_CONST`), so two calls of one argument are one.
+- **IR.** For a host that shows what FMinus made of a program, `Options::keepIr` keeps its LLVM IR as text:
+  `KeepIr::Lowered`, `Optimised` or `Both` (`None`, the default, prints and holds nothing). `loweredIr()` is the IR as
+  the code generator wrote it, set up for this machine, before any pass; `optimisedIr()` is what the JIT generates the
+  machine code from, after the pipeline at `optimisation`, and the same text as `fminus --emit ll` prints for the same
+  source and options, the file named as `fileName`. Each is empty when not kept. To print the optimised IR,
+  `compile()` runs the optimiser itself, and the first look-up then only the code generator.
 - **Lifetime.** A function pointer is valid while its `Program` lives.
 
 The header has no LLVM in it and needs C++17. In CMake, a host links `FMinus::FMinus`, and gets FMinus's include
