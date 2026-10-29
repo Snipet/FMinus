@@ -385,6 +385,15 @@ TEST_CASE("netlist warnings and notes", "[circuit]")
     CHECK(errorsOf(head + ".model Q1 NPN(BF=100)\n") ==
           "t.cir:5:11: error: model type 'NPN' is not supported yet (Phase 2): Phase 0 has diodes (D)\n");
     CHECK(errorsOf(head + ".model D9 D(IS=1n XYZ=3)\n") == "t.cir:5:19: error: unknown diode parameter 'XYZ'\n");
+    // ADAA delays each port block it runs in by half a step: two clipping stages at 4x, a quarter of a host sample
+    const fc::Result two = fc::generate(".input u in\n.output y b\n.oversample 4\n.adaa on\nR1 in a 1k\nC1 a 0 10n\n"
+                                        "D1 a 0 DD\nD2 0 a DD\nX1 a o o opamp\nR2 o b 1k\nC2 b 0 10n\nD3 b 0 DD\n"
+                                        "D4 0 b DD\n.model DD D(IS=2.52n N=1.752)\n",
+                                        "t.cir");
+    INFO(two.errors);
+    CHECK(two.errors.empty());
+    CHECK(two.notes.find("(IIR halfbands), plus 0.25 (ADAA)") != std::string::npos);
+    CHECK(two.source.find("phase not linear), plus 0.25 (ADAA)") != std::string::npos);
 }
 
 TEST_CASE("the plan cuts at ideal op amps", "[circuit]")

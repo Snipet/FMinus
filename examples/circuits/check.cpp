@@ -2,16 +2,18 @@
 // against the double reference of the same configuration and against a converged 64x one, on the report's targets
 // (docs/research/analog-circuits/README.md §2): T1 solver <= -60 dB in band, T2 alias <= -60 dB, T3 H1 and H3 within
 // 0.5 dB, T4 finite; with the generation itself, the DC point, the TS chain, the report's decision, the halfbands'
-// indexing, float2, and block-split invariance. Each line prints the worst value, where it fell, and the report's
-// figure beside it; a failure exits 1. Nothing is timed.
+// indexing, float2, block-split invariance and a pot's glide under ADAA. Each line prints the worst value, where it
+// fell, and the report's figure beside it; a failure exits 1. Nothing is timed.
 #include "harness.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <format>
 #include <limits>
 #include <numeric>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -604,6 +606,111 @@ namespace circuits
                        std::format("calls of {}: {} of {} samples differ from one call", call, differ, n));
             }
         }
+
+        // A pot that moves K moves the ADAA port's curve, p = v + 2 ka sinh(v / N Vt), and b<N>_set moves the last
+        // point (v_D1, p_D1) onto the new one, keeping its Newton residual p_D1 - v_D1 - 2 ka sinh(v_D1 / N Vt);
+        // otherwise ADAA's closed-form mean pairs a point of the old curve with the new curve's, and spikes when the
+        // signal's move cancels the curve's, leaving |p - p_D1| small (rare, and bound to the stimulus: about one in 60
+        // to 200 such glides of a 996 Hz sine computed in float clicks by 0.1 to 0.4 V, against 0.07 V held; none of
+        // these does).
+        // screamer-clip.cir as shipped, on a 0.45 V, 996 Hz sine, drive a triangle 0 -> 1 -> 0 of 960 samples a ramp
+        // after 0.1 s at 0: (1) each set() keeps the residual, the gate on the cause; (2) end to end, against itself
+        // without ADAA (omega(3)), the worst departure over 512 ramps against the worst with drive held at 0 and at 1
+        // (what ADAA's eighth of a sample's delay, and its smaller alias, give).
+        void glide(Report& r)
+        {
+            std::printf("h. a glide under ADAA: screamer-clip.cir, a 0.45 V, 996 Hz sine, drive a triangle 0 -> 1 -> 0 "
+                        "of 960-sample ramps\n");
+            auto adaa = buildOrReport(r, netlist("screamer-clip.cir"), "screamer-clip.cir");
+            fc::Options plainOptions;
+            plainOptions.adaa = false;
+            plainOptions.solver = fc::Solver{fc::Solver::Guess::Omega, 3};
+            auto plain = buildOrReport(r, netlist("screamer-clip.cir"), "screamer-clip.cir", plainOptions);
+            if (!adaa || !plain)
+                return;
+            constexpr std::size_t warm = 4800;
+            constexpr std::size_t ramp = 960;
+            auto triangle = [](std::size_t i)
+            {
+                if (i < warm)
+                    return 0.0;
+                const std::size_t k = (i - warm) % (2 * ramp);
+                return static_cast<double>(k < ramp ? k : 2 * ramp - k) / ramp;
+            };
+            // (1) the residual across each set(), read from the instance's fields
+            {
+                const fc::PortDef& port = *adaa->plan.blocks.front().port;
+                auto offsetOf = [&](const std::string& name)
+                {
+                    for (const fminus::Program::Module::Field& f : adaa->module->fields)
+                    {
+                        if (f.name == name)
+                            return f.offset;
+                    }
+                    throw std::runtime_error("no field " + name);
+                };
+                const std::size_t v = offsetOf("v_" + port.name);
+                const std::size_t p = offsetOf("p_" + port.name);
+                const std::size_t ka = offsetOf("ka_" + port.name);
+                Instance self(*adaa->module);
+                adaa->init(self.get(), 48000);
+                auto read = [&](std::size_t offset)
+                {
+                    float f = 0;
+                    std::memcpy(&f, static_cast<const char*>(self.get()) + offset, sizeof f);
+                    return static_cast<double>(f);
+                };
+                auto curve = [&] { return read(ka) * 2 * std::sinh(read(v) / port.nvt); };
+                const std::size_t n = warm + 4 * ramp;
+                const std::vector<double> u = fc::sine(0.45, 85, kWindow, 1, n);
+                double worst = 0;
+                double moved = 0;
+                for (std::size_t i = 0; i < n; ++i)
+                {
+                    if (i % 16 == 0)
+                    {
+                        const double pBefore = read(p);
+                        const double cBefore = curve();
+                        const double drive = triangle(i);
+                        adaa->callSet(self.get(), std::span<const double>(&drive, 1));
+                        const double scale = std::max({std::fabs(pBefore), std::fabs(read(p)), 1e-3});
+                        const double residualChange = (read(p) - curve()) - (pBefore - cBefore);   // v is held
+                        worst = std::max(worst, std::fabs(residualChange) / scale);
+                        moved = std::max(moved, std::fabs(curve() - cBefore) / scale);
+                    }
+                    const float x = static_cast<float>(u[i]);
+                    const float pot = 0;
+                    float y = 0;
+                    adaa->ticks(self.get(), &x, &pot, &y, 1, 1);   // start 1: no set() inside
+                }
+                r.line(worst <= 1e-5 && moved > 1e-3,
+                       std::format("each set() of 4 ramps keeps the last point's Newton residual: it moves {:.1e} of "
+                                   "|p_D1| at worst (gate 1e-5), where the curve moves up to {:.1e}",
+                                   worst, moved));
+            }
+            // (2) end to end, against the plain module
+            auto departure = [&](std::size_t ramps, auto drive)
+            {
+                const std::size_t n = warm + ramps * ramp;
+                const std::vector<double> u = fc::sine(0.45, 85, kWindow, 1, n);
+                std::vector<float> pots(n);
+                for (std::size_t i = 0; i < n; ++i)
+                    pots[i] = static_cast<float>(drive(i));
+                const std::vector<double> a = runTicksWith(*adaa, u, pots);
+                const std::vector<double> b = runTicksWith(*plain, u, pots);
+                double worst = 0;
+                for (std::size_t i = warm; i < n; ++i)
+                    worst = std::max(worst, std::fabs(a[i] - b[i]));
+                return worst;
+            };
+            const double held = std::max(departure(64, [](std::size_t) { return 0.0; }),
+                                         departure(64, [](std::size_t i) { return i < warm ? 0.0 : 1.0; }));
+            const double moving = departure(512, triangle);
+            r.line(moving <= 1.1 * held,
+                   std::format("against the plain omega(3) module over 512 ramps: {:.4f} V at worst, {:.4f} V with "
+                               "drive held: within 1.1x",
+                               moving, held));
+        }
     } // namespace
 
     int check()
@@ -629,6 +736,7 @@ namespace circuits
         halfbands(r);
         stereo(r);
         blocks(r);
+        glide(r);
         std::printf("%s: %d check(s) failed\n", r.failures == 0 ? "passed" : "FAILED", r.failures);
         return r.failures == 0 ? 0 : 1;
     }

@@ -165,11 +165,17 @@ module DiodeTone                     // .title
   0.5 dB (T3's tolerance). The Tube Screamer's tone block (13.4 dB off at 44.1 kHz, 0.38 dB at 4x) joins the region;
   its two 15.9 Hz and 1.6 Hz high-passes stay at 1x. A linear-only netlist runs at 1x, with a warning naming its error.
 - **Latency** of the IIR halfbands' round trip at 1 kHz: 2.7, 3.5 and 3.8 host samples at 2x, 4x and 8x (the phase is
-  not linear); of the FIR's, 40, 47 and 49.5; ADAA adds 0.5 / oversample. The header prints it. (The report's 3.2 / 4.3
+  not linear); of the FIR's, 40, 47 and 49.5; ADAA adds 0.5 / oversample for each port block it runs in. The header
+  prints it. (The report's 3.2 / 4.3
   / 4.7 for the IIR count each decimator's group delay without the half high-rate sample its polyphase structure
   advances by: `tests/unit/CircuitTest.cpp` measures both.)
 - **Determinism.** Straight-line float code with fixed step counts: the output never depends on how a host splits its
   blocks, and `set()` belongs on the absolute 16-sample grid (`example-circuits --check`, h).
+- **Pots under ADAA.** ADAA's closed-form mean pairs the last step's point (`v_D1`, `p_D1`) with this step's on one
+  curve, `p = v + 2 ka sinh(v / N Vt)`. A pot that moves K moves the curve, so `b<N>_set` moves `p_D1` onto the new one
+  with `v_D1` held (its Newton residual kept); without it the mean spikes when the signal's move happens to cancel the
+  curve's (on the TS's drive glides, about one glide in 60 to 200 clicks by 0.1 to 0.4 V, against an error of 0.07 V
+  with the pot held). A held pot gives the same `ka`, and changes nothing.
 
 ### DC
 
@@ -273,7 +279,10 @@ prints each check's worst value, where it fell, and the report's figure beside i
 - **e.** the report's decision: example 1 plain omega(2) at 4x passes; the TS plain omega(2) at 4x and ADAA omega(1) at
   2x fail T2, and pass at 8x; example 1 with ADAA at 4x fails T3 on the stress set;
 - **f.** tick against step through each oversampler (the halfbands' indexing); **g.** `.channels 2`, lane for lane,
-  bit for bit; **h.** calls of 64 and 61 samples against one, a pot gliding on the 16-sample grid, bit for bit.
+  bit for bit; **h.** calls of 64 and 61 samples against one, a pot gliding on the 16-sample grid, bit for bit; and a
+  glide under ADAA (the TS block's drive, a triangle): each `set()` keeps the last point's Newton residual (to 1e-5 of
+  `p_D1`, where the curve moves up to 1.6e-2), and over 512 ramps the output stays within 1.1x of the held error against
+  a plain omega3 + 3 module.
 
 As built, the TS block at 4x with ADAA measures T1 -78.7, T2 -73.5 (converged -73.6; the report -75.1) and T3 0.14 dB;
 example 1 as shipped T1 -93.1, T2 -79.0 (the report -79.8), T3 0.10 dB; the decision's failures -53.3 and -52.7 dB (the

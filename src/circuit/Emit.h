@@ -118,6 +118,9 @@ namespace fminus::circuit
     // The module's text.
     std::string emit(const Plan& plan, const std::vector<BlockCode>& blocks);
 
+    // The delay ADAA adds, in host samples: half a step at the region's rate for each port block it runs in.
+    double adaaLatency(const Plan& plan);
+
     // The FMinus keywords and builtins (a pot, an input or the module may not be named one).
     bool isFMinusKeyword(std::string_view name);
 } // namespace fminus::circuit

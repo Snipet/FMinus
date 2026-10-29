@@ -384,6 +384,16 @@ namespace fminus::circuit
 
     // ---- the module -------------------------------------------------------------------------------------------------
 
+    double adaaLatency(const Plan& plan)
+    {
+        if (!plan.config.adaa || plan.regionFirst < 0)
+            return 0;
+        int ports = 0;
+        for (int i = plan.regionFirst; i <= plan.regionLast; ++i)
+            ports += plan.blocks[static_cast<std::size_t>(i)].port ? 1 : 0;
+        return ports * 0.5 / plan.config.oversample;
+    }
+
     namespace
     {
         std::string engineering(double value, const char* unit)
@@ -471,6 +481,14 @@ namespace fminus::circuit
             bool adaaBlock(const Block& b) const
             {
                 return b.port.has_value() && plan.config.adaa;
+            }
+
+            // Whether block i's set() moves its ADAA port's curve: ka is a field its b<N>_set computes.
+            bool movesPortCurve(std::size_t i) const
+            {
+                const Block& b = plan.blocks[i];
+                return adaaBlock(b) && !b.pots.empty() &&
+                       coefficient(i, "ka_" + b.port->name).kind == Val::Kind::Var;
             }
 
             Val coefficient(std::size_t b, const std::string& name) const
@@ -670,11 +688,8 @@ namespace fminus::circuit
                                                      roundTripDelay(c.oversample, c.halfband, 1000),
                                                      c.halfband == Halfband::Iir ? "IIR halfbands, phase not linear"
                                                                                  : "FIR halfbands, linear phase");
-                bool adaa = false;
-                for (int i = plan.regionFirst; i <= plan.regionLast; ++i)
-                    adaa = adaa || adaaBlock(plan.blocks[static_cast<std::size_t>(i)]);
-                if (adaa)
-                    text += std::format(", plus {:g} (ADAA)", 0.5 / c.oversample);
+                if (const double adaa = adaaLatency(plan); adaa > 0)
+                    text += std::format(", plus {:g} (ADAA)", adaa);
                 line(text);
             }
             else
@@ -814,6 +829,12 @@ namespace fminus::circuit
                     line("            " + l);
                 line("        }");
             }
+            for (std::size_t i = 0; i < plan.blocks.size(); ++i)
+            {
+                if (movesPortCurve(i))
+                    line("        ka_" + plan.blocks[i].port->name + " = 0;",
+                         "a number for b" + std::to_string(plan.blocks[i].index) + "_set's first move (v is 0 then)");
+            }
             line("        clear();");
             if (!plan.pots.empty())
             {
@@ -920,10 +941,25 @@ namespace fminus::circuit
             line("    void b" + std::to_string(b.index) + "_set(" + params + ") [[clang::nonblocking]]",
                  "block " + std::to_string(b.index) + "'s coefficients");
             line("    {");
+            const bool shift = movesPortCurve(i);
+            const std::string P = b.port ? b.port->name : std::string();
+            if (shift)
+                line("        const float kprev_" + P + " = ka_" + P + ";", "ADAA: the port's curve before the move");
             for (const std::string& l : blocks[i].rLines)
                 line("        " + l);
             for (const std::string& l : blocks[i].lines)
                 line("        " + l);
+            if (shift)
+            {
+                // ADAA's mean pairs (v_P, p_P) with the next step's (v, p) on one curve, p = v + 2 ka sinh(v / N Vt):
+                // when ka moves, p_P moves onto the new curve with v_P held (its Newton residual kept), or the closed
+                // form's (F(p) - F(p_P)) / (p - p_P) spikes as |p - p_P| falls toward its threshold. A held pot
+                // gives the same ka, so this changes nothing.
+                line("        {", "ADAA: the last point onto the new curve");
+                line("            const " + type + " e = expf(v_" + P + " * " + literal(1 / b.port->nvt) + ");");
+                line("            p_" + P + " = p_" + P + " + (ka_" + P + " - kprev_" + P + ") * (e - 1 / e);");
+                line("        }");
+            }
             line("    }");
         }
 

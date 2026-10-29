@@ -85,8 +85,8 @@ namespace fminus::circuit
                 std::string text = std::format("latency: about {:.1f} host samples at 1 kHz ({} halfbands)",
                                                roundTripDelay(c.oversample, c.halfband, 1000),
                                                c.halfband == Halfband::Iir ? "IIR" : "FIR");
-                if (c.adaa)
-                    text += std::format(", plus {:g} (ADAA)", 0.5 / c.oversample);
+                if (const double adaa = adaaLatency(plan); adaa > 0)
+                    text += std::format(", plus {:g} (ADAA)", adaa);
                 messages.note({}, text);
             }
         }

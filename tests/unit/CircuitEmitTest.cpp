@@ -378,6 +378,58 @@ TEST_CASE("a port block whose K is a constant compiles and runs", "[circuit]")
     }
 }
 
+TEST_CASE("a pot's move keeps ADAA's last point on the port's curve", "[circuit]")
+{
+    // b<N>_set moves p_D1 with ka, so that p_D1 - v_D1 - 2 ka sinh(v_D1 / N Vt), the last step's Newton residual,
+    // stays what it was: otherwise ADAA's closed-form mean pairs a point of the old curve with the new curve's.
+    const fc::Result r = fc::generate(fc::test::kScreamerClip, "screamer-clip.cir");
+    auto program = compiled(r);
+    const Program::Module* m = program->module(r.module);
+    REQUIRE(m);
+    std::string errors;
+    auto* init = program->function<void(void*, float)>(r.module + "::init", errors);
+    auto* set = program->function<void(void*, float)>(r.module + "::set", errors);
+    auto* tick = program->function<float(void*, float)>(r.module + "::tick", errors);
+    REQUIRE(init);
+    REQUIRE(set);
+    REQUIRE(tick);
+    auto self = instance(*m);
+    init(self.get(), 48000);
+    set(self.get(), 0);
+    // a 0.45 V, 996 Hz sine, to a sample where the diodes conduct
+    const double nvt = fc::thermalVoltage(1.752);
+    bool conducting = false;
+    for (int i = 0; i < 9600 && !conducting; ++i)
+    {
+        tick(self.get(), static_cast<float>(0.45 * std::sin(2 * 3.141592653589793 * 996 * i / 48000)));
+        conducting = i >= 2400 && std::fabs(readFloat(self.get(), *m, "v_D1")) > 0.4f;
+    }
+    REQUIRE(conducting);
+    struct Point
+    {
+        double residual;
+        double p;
+        double curve;   // 2 ka sinh(v / N Vt)
+    };
+    auto point = [&]
+    {
+        const auto v = static_cast<double>(readFloat(self.get(), *m, "v_D1"));
+        const auto p = static_cast<double>(readFloat(self.get(), *m, "p_D1"));
+        const double curve = static_cast<double>(readFloat(self.get(), *m, "ka_D1")) * 2 * std::sinh(v / nvt);
+        return Point{p - v - curve, p, curve};
+    };
+    const Point before = point();
+    set(self.get(), 1);
+    const Point after = point();
+    INFO("residual " << before.residual << " -> " << after.residual << ", p " << before.p << " -> " << after.p);
+    CHECK(std::fabs(after.curve - before.curve) > 0.1 * std::fabs(before.p));   // the move is large
+    CHECK(std::fabs(after.residual - before.residual) <= 1e-5 * std::fmax(std::fabs(before.p), std::fabs(after.p)));
+    // a pot held changes nothing, bit for bit
+    const float p = readFloat(self.get(), *m, "p_D1");
+    set(self.get(), 1);
+    CHECK(readFloat(self.get(), *m, "p_D1") == p);
+}
+
 TEST_CASE("names keep their case, and a pot's sections have names of their own", "[circuit]")
 {
     // FMinus's names keep their case: a pot tone in module Tone, a pot u beside .input U
