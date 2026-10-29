@@ -179,7 +179,12 @@ namespace fminus::circuit
     std::optional<Plan> plan(const Netlist& netlist, const Options& options, std::string_view fileName,
                              Messages& messages);
 
-    // The self-test's key of a parsed netlist with `options` (Circuit.h's selfTestKey): FNV-1a 64, as 16 hex digits.
+    // The text a self-test's key hashes: "fminus-circuit-selftest <kSelfTestVersion>", the netlist's canonical lines,
+    // and the Options that change the answer, a line each.
+    std::string keyText(const Netlist& netlist, const Options& options);
+
+    // The self-test's key of a parsed netlist with `options` (Circuit.h's selfTestKey): FNV-1a 64 of keyText, as 16
+    // hex digits.
     std::string keyOf(const Netlist& netlist, const Options& options);
 
     // A configuration as the notes give it: "8x IIR, ADAA, omega(1)" (`halfband`: with the halfbands' kind).

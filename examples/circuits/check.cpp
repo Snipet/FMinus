@@ -567,7 +567,7 @@ namespace circuits
             std::vector<float> pa(kHost);
             std::vector<float> pb(kHost);
             const std::vector<float> potBuffer(kHost, 0.3f);
-            pair->ticks2(self.get(), fa.data(), fb.data(), potBuffer.data(), pa.data(), pb.data(),
+            pair->ticks2(self.get(), fa.data(), fb.data(), nullptr, potBuffer.data(), nullptr, pa.data(), pb.data(),
                          static_cast<int>(kHost), 0);
             std::size_t differ = 0;
             for (std::size_t i = 0; i < kHost; ++i)
@@ -681,7 +681,7 @@ namespace circuits
                     const float x = static_cast<float>(u[i]);
                     const float pot = 0;
                     float y = 0;
-                    adaa->ticks(self.get(), &x, &pot, &y, 1, 1);   // start 1: no set() inside
+                    adaa->ticks(self.get(), &x, nullptr, &pot, nullptr, &y, 1, 1);   // start 1: no set() inside
                 }
                 r.line(worst <= 1e-5 && moved > 1e-3,
                        std::format("each set() of 4 ramps keeps the last point's Newton residual: it moves {:.1e} of "

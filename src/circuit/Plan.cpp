@@ -56,7 +56,7 @@ namespace fminus::circuit
         }
     } // namespace
 
-    std::string keyOf(const Netlist& netlist, const Options& options)
+    std::string keyText(const Netlist& netlist, const Options& options)
     {
         std::string text = "fminus-circuit-selftest " + std::to_string(kSelfTestVersion) + "\n";
         for (const std::string& line : netlist.canonical)
@@ -79,8 +79,12 @@ namespace fminus::circuit
             text += std::string(" method=") + (*options.method == Method::Tr ? "tr" : "bdf2");
         if (options.prewarp)
             text += std::string(" prewarp=") + (*options.prewarp ? "on" : "off");
-        text += "\n";
-        return std::format("{:016x}", fnv1a(text));
+        return text + "\n";
+    }
+
+    std::string keyOf(const Netlist& netlist, const Options& options)
+    {
+        return std::format("{:016x}", fnv1a(keyText(netlist, options)));
     }
 
     std::string configurationText(int oversample, Halfband halfband, bool adaa, const Solver& solver, bool withHalfband)

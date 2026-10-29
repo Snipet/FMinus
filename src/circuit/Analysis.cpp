@@ -1,6 +1,7 @@
 // src/circuit/Analysis.cpp: the measurements (Analysis.h), as adaa.cpp computes them.
 #include "circuit/Analysis.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <numbers>
@@ -137,6 +138,33 @@ namespace fminus::circuit
                 other += e;
         }
         return 10 * std::log10(other / (harmonic + other) + 1e-40);
+    }
+
+    std::vector<double> bandPower(std::span<const double> y)
+    {
+        const std::vector<Complex> a = spectrum(y, false);
+        std::vector<double> out(topBin(y.size()) + 1);
+        for (std::size_t b = 0; b < out.size(); ++b)
+            out[b] = std::norm(a[b]);
+        return out;
+    }
+
+    double inharmonicExcessDb(std::span<const double> y, std::span<const double> ref, int bin)
+    {
+        const std::vector<Complex> a = spectrum(y, false);
+        const std::size_t top = topBin(y.size());
+        if (ref.size() != top + 1)
+            throw std::invalid_argument("inharmonicExcessDb: the reference's bins differ");
+        double all = 0;
+        double other = 0;
+        for (std::size_t b = 1; b <= top; ++b)
+        {
+            const double e = std::norm(a[b]);
+            all += e;
+            if (b % static_cast<std::size_t>(bin) != 0)
+                other += std::max(0.0, e - ref[b]);
+        }
+        return 10 * std::log10(other / all + 1e-40);
     }
 
     void harmonicDiffDb(std::span<const double> y, std::span<const double> ref, int bin, double* h1, double* h3)

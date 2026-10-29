@@ -7,6 +7,7 @@
 
 #include "circuit/Mna.h"
 
+#include <functional>
 #include <span>
 #include <vector>
 
@@ -18,13 +19,17 @@ namespace fminus::circuit
         int steps = -1;      // -1: solved to convergence; otherwise the emitted Newton steps
         Solver::Guess guess = Solver::Guess::Omega;
         double eps = 1e-5;   // ADAA's |dp| below which the mean is the midpoint (volts)
+        // Polled every 4096 steps: true stops the run where it is (the rest of the output is 0, and stats->stopped
+        // is set). Empty: never.
+        std::function<bool()> stop;
     };
 
     struct RefStats
     {
         long unconverged = 0;   // samples whose converged solve ran out of steps (every check wants 0)
-        long samples = 0;
+        long samples = 0;       // the steps run (each block's, in a chain)
         int maxIterations = 0;
+        bool stopped = false;   // RefOptions::stop stopped a run
     };
 
     // omega3's guess for v + k sinh(v / nvt) = p (adaa.cpp's omegaGuess).

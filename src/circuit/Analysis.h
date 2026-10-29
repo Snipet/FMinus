@@ -28,6 +28,14 @@ namespace fminus::circuit
     // The energy below 20 kHz that is not on a harmonic of bin `bin`, relative to all the energy below 20 kHz, in dB.
     double inharmonicDb(std::span<const double> y, int bin);
 
+    // The energy of y's bins below 20 kHz (|Y(b)|^2 for b = 0 to 20 kHz's bin), a rectangular window.
+    std::vector<double> bandPower(std::span<const double> y);
+
+    // inharmonicDb's energy in excess of a reference's, bin by bin: the sum over the bins below 20 kHz that are not on
+    // a harmonic of `bin` of max(0, |Y(b)|^2 - ref[b]) (ref: bandPower of a reference of the same signal, which holds
+    // what the circuit's linear transients put there), relative to all of y's energy below 20 kHz, in dB.
+    double inharmonicExcessDb(std::span<const double> y, std::span<const double> ref, int bin);
+
     // y's first and third harmonics of bin `bin` against ref's, in dB.
     void harmonicDiffDb(std::span<const double> y, std::span<const double> ref, int bin, double* h1, double* h3);
 

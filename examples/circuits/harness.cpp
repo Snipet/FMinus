@@ -104,41 +104,6 @@ namespace circuits
         }
     }
 
-    namespace
-    {
-        // The runners, in FMinus, for a module with `pots` pots and `channels` channels.
-        std::string runners(const std::string& module, int pots, int channels, bool step)
-        {
-            std::string call;
-            for (int k = 0; k < pots; ++k)
-                call += (k == 0 ? "" : ", ") + std::string("pots[i * ") + std::to_string(pots) + " + " +
-                        std::to_string(k) + "]";
-            const std::string set =
-                pots == 0 ? "" : "        if ((start + i) % 16 == 0)\n            c->set(" + call + ");\n";
-            std::string out = "\n// example-circuits' runners: a buffer a call.\n";
-            if (step && channels == 1)
-                out += "void fm_steps(" + module +
-                       "* c, const float* restrict u, float* restrict y, int n) "
-                       "[[clang::nonblocking]]\n{\n    for (int i = 0; i < n; ++i)\n        y[i] = c->step(u[i]);\n}\n";
-            if (channels == 1)
-                out +=
-                    "void fm_ticks(" + module +
-                    "* c, const float* restrict u, const float* restrict pots, "
-                    "float* restrict y, int n, int start) [[clang::nonblocking]]\n{\n    for (int i = 0; i < n; ++i)\n"
-                    "    {\n" +
-                    set + "        y[i] = c->tick(u[i]);\n    }\n}\n";
-            else
-                out += "void fm_ticks2(" + module +
-                       "* c, const float* restrict a, const float* restrict b, "
-                       "const float* restrict pots, float* restrict ya, float* restrict yb, int n, int start) "
-                       "[[clang::nonblocking]]\n{\n    for (int i = 0; i < n; ++i)\n    {\n" +
-                       set +
-                       "        const float2 y = c->tick((float2)(a[i], b[i]));\n        ya[i] = y.x;\n"
-                       "        yb[i] = y.y;\n    }\n}\n";
-            return out;
-        }
-    } // namespace
-
     std::unique_ptr<Circuit> build(const std::string& text, const std::string& fileName, const fc::Options& options,
                                    std::string& errors, fminus::Program::Math math, const std::string& extra)
     {
@@ -165,8 +130,12 @@ namespace circuits
         o.denormals = fminus::Program::Denormals::Flush;
         o.threads = 1;
         std::string fmErrors;
-        c->program = fminus::Program::compile(
-            c->result.source + runners(c->result.module, c->pots(), channels, region) + extra, fmErrors, o);
+        fc::RunnerShape shape;
+        shape.module = c->result.module;
+        shape.pots = c->pots();
+        shape.channels = channels;
+        shape.step = region;
+        c->program = fminus::Program::compile(c->result.source + fc::runnerSource(shape) + extra, fmErrors, o);
         if (!c->program)
         {
             errors += fmErrors;
@@ -179,14 +148,13 @@ namespace circuits
         if (c->pots() > 0)
             c->set = c->program->address(m + "::set", fmErrors);
         if (region && channels == 1)
-            c->steps = c->program->function<void(void*, const float*, float*, int)>("fm_steps", fmErrors);
+            c->steps = c->program->function<void(void*, const float*, const float*, float*, int)>("fm_steps", fmErrors);
         if (channels == 1)
-            c->ticks =
-                c->program->function<void(void*, const float*, const float*, float*, int, int)>("fm_ticks", fmErrors);
+            c->ticks = c->program->function<void(void*, const float*, const float*, const float*, const int*, float*,
+                                                 int, int)>("fm_ticks", fmErrors);
         else
-            c->ticks2 =
-                c->program->function<void(void*, const float*, const float*, const float*, float*, float*, int, int)>(
-                    "fm_ticks2", fmErrors);
+            c->ticks2 = c->program->function<void(void*, const float*, const float*, const float*, const float*,
+                                                  const int*, float*, float*, int, int)>("fm_ticks2", fmErrors);
         errors += fmErrors;
         return c;
     }
@@ -198,7 +166,7 @@ namespace circuits
         c.callSet(self.get(), pots);
         std::vector<float> in(u.begin(), u.end());
         std::vector<float> out(u.size());
-        c.steps(self.get(), in.data(), out.data(), static_cast<int>(in.size()));
+        c.steps(self.get(), in.data(), nullptr, out.data(), static_cast<int>(in.size()));
         return {out.begin(), out.end()};
     }
 
@@ -216,7 +184,7 @@ namespace circuits
         {
             const int count = std::min(size, n - start);
             const auto s = static_cast<std::size_t>(start);
-            c.ticks(self.get(), in.data() + s, potBuffer.data() + s * p, out.data() + s, count, start);
+            c.ticks(self.get(), in.data() + s, nullptr, potBuffer.data() + s * p, nullptr, out.data() + s, count, start);
         }
         return {out.begin(), out.end()};
     }

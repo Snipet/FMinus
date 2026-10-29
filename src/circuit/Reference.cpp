@@ -176,7 +176,15 @@ namespace fminus::circuit
         Runner r(block, options, stats);
         std::vector<double> out(u.size());
         for (std::size_t n = 0; n < u.size(); ++n)
+        {
+            if ((n & 4095) == 0 && options.stop && options.stop())
+            {
+                if (stats != nullptr)
+                    stats->stopped = true;
+                break;
+            }
             out[n] = r.step(u[n]);
+        }
         return out;
     }
 
@@ -190,6 +198,12 @@ namespace fminus::circuit
         std::vector<double> out(u.size());
         for (std::size_t n = 0; n < u.size(); ++n)
         {
+            if ((n & 4095) == 0 && options.stop && options.stop())
+            {
+                if (stats != nullptr)
+                    stats->stopped = true;
+                break;
+            }
             double s = u[n];
             for (Runner& r : runners)
                 s = r.step(s);

@@ -1,14 +1,15 @@
 // examples/circuits/harness.h: what example-circuits' three modes (--check, --tables, the cost table) share: the
-// example's netlists, a generated module compiled through fminus::Program with runners appended (fm_steps, the
-// oversampled region's step over a buffer; fm_ticks, tick over a buffer with set() on the absolute 16-sample grid from
-// a pot buffer: one call a run, testing.md's rule), and the double reference of a plan's blocks
-// (src/circuit/Reference.h).
+// example's netlists, a generated module compiled through fminus::Program with the self-test's runners appended
+// (src/circuit/Runners.h: fm_steps, the oversampled region's step over a buffer; fm_ticks, tick over a buffer with set()
+// on the absolute 16-sample grid from a pot buffer: one call a run, testing.md's rule), and the double reference of a
+// plan's blocks (src/circuit/Reference.h).
 #pragma once
 
 #include "circuit/Analysis.h"
 #include "circuit/Mna.h"
 #include "circuit/Plan.h"
 #include "circuit/Reference.h"
+#include "circuit/Runners.h"
 #include "fminus/Circuit.h"
 #include "fminus/FMinus.h"
 
@@ -59,12 +60,15 @@ namespace circuits
         const fminus::Program::Module* module = nullptr;
         void (*init)(void*, float) = nullptr;
         void (*clear)(void*) = nullptr;
-        // fm_steps(c, u, y, n): y[i] = step(u[i]) (absent without a region, or with .channels 2)
-        void (*steps)(void*, const float*, float*, int) = nullptr;
-        // fm_ticks(c, u, pots, y, n, start): set(pots[i P ...]) where (start + i) % 16 == 0, then y[i] = tick(u[i])
-        void (*ticks)(void*, const float*, const float*, float*, int, int) = nullptr;
-        // fm_ticks2(c, a, b, pots, ya, yb, n, start): the same on (a[i], b[i]) as a float2 (.channels 2)
-        void (*ticks2)(void*, const float*, const float*, const float*, float*, float*, int, int) = nullptr;
+        // fm_steps(c, u, law, y, n): y[i] = step(u[i]) (absent without a region, or with .channels 2)
+        void (*steps)(void*, const float*, const float*, float*, int) = nullptr;
+        // fm_ticks(c, u, law, pots, switches, y, n, start): set(pots[i P ...]) where (start + i) % 16 == 0, then
+        // y[i] = tick(u[i])
+        void (*ticks)(void*, const float*, const float*, const float*, const int*, float*, int, int) = nullptr;
+        // fm_ticks2(c, a, b, law, pots, switches, ya, yb, n, start): the same on (a[i], b[i]) as a float2
+        // (.channels 2)
+        void (*ticks2)(void*, const float*, const float*, const float*, const float*, const int*, float*, float*, int,
+                       int) = nullptr;
         std::uintptr_t set = 0;
 
         int pots() const
