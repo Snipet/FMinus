@@ -7,6 +7,7 @@
 #include "circuit/Analysis.h"
 #include "circuit/Emit.h"
 #include "circuit/Halfbands.h"
+#include "circuit/Laws.h"
 #include "circuit/Mna.h"
 #include "circuit/Netlist.h"
 #include "circuit/Plan.h"
@@ -18,6 +19,7 @@
 
 #include <cmath>
 #include <complex>
+#include <map>
 #include <cstddef>
 #include <numbers>
 #include <optional>
@@ -122,6 +124,12 @@ namespace
         for (std::size_t i = 0; i < n; ++i)
             y += h.cy[i] * m[i][n] / m[i][i];
         return y;
+    }
+
+    // `text` with `lines` appended.
+    std::string withLineAdded(const std::string& text, const std::string& lines)
+    {
+        return text + lines;
     }
 
     // Within 1e-12 of the larger, or of `scale`: the largest entry of the matrix compared, for an entry that is a
@@ -288,7 +296,7 @@ TEST_CASE("netlist errors, as clang words them", "[circuit]")
         {head + "R1 in n 1k\nR2 n 0 1k\nXU1 n 0 o opamp\nR3 o 0 1k\n",
          "t.cir:5:1: error: op amp XU1 has no negative feedback: an ideal op amp needs one\n"},
         {head + "R1 in o 1k\nR2 o 0 1k\nD1 o 0 M\nD2 0 o M\nD3 o 0 M\nD4 0 o M\n.model M D(IS=1n)\n",
-         "t.cir:3:1: error: block 1 has 2 nonlinear ports (D1|D2, D3|D4): not supported yet (Phase 1)\n"},
+         "t.cir:3:1: error: block 1 has 2 nonlinear ports (D1|D2, D3|D4): multi-port Newton is Phase 2\n"},
         {".input u in\nR1 in o 1k\nR2 o 0 1k\n", "t.cir: error: the netlist has no .output\n"},
         {".output y o\nR1 o 0 1k\nR2 o 0 2k\n", "t.cir: error: the netlist has no .input\n"},
         {head + "R1 in o 1k\nR2 o 0 1k\n.foo 3\n", "t.cir:5:1: error: unknown directive '.foo'\n"},
@@ -300,10 +308,9 @@ TEST_CASE("netlist errors, as clang words them", "[circuit]")
         {head + "R1 in o 1k\nR2 o 0 1k\n.method bdf2\n",
          "t.cir:5:9: error: '.method bdf2' is not supported yet (Phase 1)\n"},
         {head + "R1 in o 1k\nR2 o 0 1k\n.method be\n", "t.cir:5:9: error: '.method be': tr, bdf2 or auto\n"},
-        {head + "R1 in o 1k\nR2 o 0 1k\n.prewarp on\n",
-         "t.cir:5:10: error: '.prewarp on' is not supported yet (Phase 1)\n"},
         {".input u in kind=cv\n.output y o\nR1 in o 1k\nR2 o 0 1k\n",
-         "t.cir:1:13: error: a law input (.input kind=cv) is not supported yet (Phase 1)\n"},
+         "t.cir:1:10: error: 'in': a law input (kind=cv) has no node; write '-' (it enters an OTA's gain, not the "
+         "netlist)\n"},
         {".input u in range=0:1\n.output y o\nR1 in o 1k\nR2 o 0 1k\n",
          "t.cir:1:13: error: 'range=0:1': range= is a law input's (kind=cv|current)\n"},
         {head + "R1 in o 1k\nR2 o 0 1k\n.subckt foo a b\n", "t.cir:5:1: error: '.subckt' is not supported yet\n"},
@@ -311,7 +318,7 @@ TEST_CASE("netlist errors, as clang words them", "[circuit]")
         // a feedback loop that crosses blocks: X1 reads X2's output and X2 reads X1's
         {".input u in\n.output y m\nR1 in m 1k\nR2 m 0 1k\nX1 o2 n1 o1 opamp\nR3 o1 n1 1k\nR4 n1 0 1k\n"
          "X2 o1 n2 o2 opamp\nR5 o2 n2 1k\nR6 n2 0 1k\n",
-         "t.cir:5:1: error: a feedback loop around X1 crosses blocks: not supported yet\n"},
+         "t.cir:5:1: error: a feedback loop around X1 crosses blocks: not supported yet (Phase 2)\n"},
         // two op amps whose nullors say the same thing: a singular block
         {".input u in\n.output y o1\nX1 in n o1 opamp\nX2 in n o2 opamp\nR1 o1 n 1k\nR2 o2 n 1k\nR3 n 0 1k\n",
          "t.cir:3:1: error: block 1 (X1, X2, R1, R2, ...): its equations are singular (nothing determines V(o2)): an "
@@ -994,5 +1001,301 @@ TEST_CASE("the reference converges from the closed form", "[circuit]")
         const std::vector<double> ya = fc::simulate(fc::holters(plan, 0, 4 * 48000.0 * 2 / 3, potsAt(plan, "tone", 1)),
                                                     std::vector<double>(48000, u), adaa);
         CHECK_THAT(ya.back(), WithinAbs(root(u), 1e-9));
+    }
+}
+
+TEST_CASE("the OTA and law inputs parse, and Result lists the inputs", "[circuit]")
+{
+    const Parsed p = parsed(fc::test::otaStage());
+    INFO(p.errors);
+    REQUIRE(p.errors.empty());
+    const fc::Element& g = p.netlist.elements[4];
+    CHECK(g.kind == fc::Element::Kind::Ota);
+    CHECK(g.nodes == std::vector<std::string>{"0", "y", "a1", "a2"});
+    REQUIRE(g.expr);
+    CHECK(fc::potsOf(*g.expr) == std::vector<std::string>{"iabc"});
+    REQUIRE(p.netlist.input);
+    CHECK(p.netlist.input->name == "u");
+    REQUIRE(p.netlist.laws.size() == 1);
+    CHECK(p.netlist.laws[0].name == "iabc");
+    CHECK(p.netlist.laws[0].kind == fc::Input::Kind::Current);
+    CHECK_THAT(p.netlist.laws[0].low, WithinRel(1e-5, 1e-15));
+    CHECK_THAT(p.netlist.laws[0].high, WithinRel(2e-3, 1e-15));
+    // a cv input's range is 0:1 unless it says; a constant gain is a number
+    const Parsed cv = parsed(".input u in\n.input c - kind=cv scale=2m\n.output y yb\nR1 in a1 100k\nR2 a1 0 220\n"
+                             "G1 0 y OTA a1 yb {c}\nC1 y 0 1n\nR5 y 0 10meg\nX1 y yb yb opamp\n");
+    REQUIRE(cv.netlist.laws.size() == 1);
+    CHECK(cv.netlist.laws[0].low == 0);
+    CHECK(cv.netlist.laws[0].high == 1);
+    CHECK(cv.netlist.laws[0].scale == 2e-3);
+    CHECK(parsed(fc::test::otaStage("", "1m")).netlist.elements[4].value == 1e-3);
+
+    // tick's and step's arguments: the signal, then the law inputs, in .input order
+    const fc::Result r = fc::generate(fc::test::kOtaLp, "otalp.cir");
+    INFO(r.errors);
+    REQUIRE(r.inputs.size() == 2);
+    CHECK(r.inputs[0].name == "u");
+    CHECK(r.inputs[0].kind == fc::Input::Kind::Voltage);
+    CHECK(r.inputs[1].name == "iabc");
+    CHECK(r.inputs[1].kind == fc::Input::Kind::Current);
+    CHECK_THAT(r.inputs[1].low, WithinRel(1e-5, 1e-15));
+    CHECK_THAT(r.inputs[1].high, WithinRel(2e-3, 1e-15));
+    CHECK(r.source.find("float tick(float u, float iabc)") != std::string::npos);
+    CHECK(r.source.find("float step(float u, float iabc)") != std::string::npos);
+}
+
+TEST_CASE("the OTA's and the law inputs' errors, as clang words them", "[circuit]")
+{
+    struct Case
+    {
+        std::string netlist;
+        std::string errors;
+    };
+    const std::string stage = fc::test::otaStage();
+    const std::string law = ".input iabc - kind=current range=10u:2m\n";
+    // two OTA stages into one capacitor: one block, two ports
+    const std::string twoOtas = ".input u in\n" + law +
+                                ".output y yb\nR1 in a1 100k\nR2 a1 0 220\nR3 yb a2 100k\nR4 a2 0 220\n"
+                                "G1 0 y OTA a1 a2 {iabc}\nG2 0 y OTA a1 a2 {iabc}\nC1 y 0 1n\nR5 y 0 10meg\n"
+                                "X1 y yb yb opamp\n";
+    // a VCA: nothing the OTA drives reaches its inputs
+    const std::string openLoop = ".input u in\n" + law +
+                                 ".output y y\nR1 in a1 100k\nR2 a1 0 220\nG1 0 y OTA a1 0 {iabc}\nR5 y 0 10k\n";
+    // a diode clipper, then an OTA stage
+    const std::string mixed = ".input u in\n" + law +
+                              ".output y yb\nR0 in c 2.2k\nC0 c 0 10n\nD1 c 0 DM\nD2 0 c DM\nX0 c in2 in2 opamp\n"
+                              "R1 in2 a1 100k\nR2 a1 0 220\nR3 yb a2 100k\nR4 a2 0 220\nG1 0 y OTA a1 a2 {iabc}\n"
+                              "C1 y 0 1n\nR5 y 0 10meg\nX1 y yb yb opamp\n.model DM D(IS=2.52n N=1.752)\n";
+    // the OTA's output into its + input's side: positive feedback
+    const std::string positive = ".input u in\n" + law +
+                                 ".output y yb\nR1 in a1 100k\nR2 a1 0 220\nR3 yb a2 100k\nR4 a2 0 220\n"
+                                 "G1 0 y OTA a2 a1 {iabc}\nC1 y 0 1n\nR5 y 0 10meg\nX1 y yb yb opamp\n";
+    const Case cases[] = {
+        {twoOtas, "t.cir:4:1: error: block 1 has 2 nonlinear ports (G1, G2): multi-port Newton is Phase 2\n"},
+        {openLoop, "t.cir:6:1: error: OTA G1 has no feedback around it (an open-loop OTA, a VCA): Phase 2\n"},
+        {mixed, "t.cir:13:1: error: the oversampled region mixes diode ports (D1|D2) and OTA ports (G1): one solver "
+                "serves a region (per-family solvers are Phase 2)\n"},
+        {positive, "t.cir:8:1: error: OTA G1 sees positive feedback (kd = -24.86 ohm at 22.05 kHz): its output drives "
+                   "its + input; not supported yet\n"},
+        {fc::test::otaStage(".solver omega(1)\n"),
+         "t.cir:5:1: error: '.solver omega(1)': an OTA's port is solved from the previous step's v: .solver "
+         "newton(K)\n"},
+        {fc::test::otaStage(".solver omega\n"),
+         "t.cir:5:1: error: '.solver omega': an OTA's port is solved from the previous step's v: .solver newton(K)\n"},
+        {".input u in\n.input iabc - kind=current\n.output y o\nR1 in o 1k\nR2 o 0 1k\n",
+         "t.cir:2:15: error: law input 'iabc' is a current: it needs its range in amps, range=lo:hi (as "
+         "range=10u:2m)\n"},
+        {".input u in\n" + law + ".output y o\nR1 in o {1k + 1meg * iabc}\nR2 o 0 1k\n",
+         "t.cir:4:22: error: law input 'iabc' in R1's value: a law input enters an OTA's gain only (pot-as-port is "
+         "Phase 2)\n"},
+        {".input u in\n.input c in kind=cv\n.output y o\nR1 in o 1k\nR2 o 0 1k\n",
+         "t.cir:2:10: error: 'in': a law input (kind=cv) has no node; write '-' (it enters an OTA's gain, not the "
+         "netlist)\n"},
+        {".input u -\n.output y o\nR1 in o 1k\nR2 o 0 1k\n",
+         "t.cir:1:10: error: '-' is a law input's node: a law input says kind=cv or kind=current\n"},
+        {".input u in\n.input c - kind=cv range=1:0\n.output y o\nR1 in o 1k\nR2 o 0 1k\n",
+         "t.cir:2:20: error: 'range=1:0': range=lo:hi, two numbers with lo below hi\n"},
+        {".input u in\n.input u - kind=cv\n.output y o\nR1 in o 1k\nR2 o 0 1k\n",
+         "t.cir:2:8: error: input 'u' is defined twice (first at line 1)\n"},
+        {".input u in\n.input v in\n.output y o\nR1 in o 1k\nR2 o 0 1k\n",
+         "t.cir:2:1: error: a second voltage .input (the first at line 1): a netlist has one signal (law inputs are "
+         "kind=cv|current)\n"},
+        {".input u in\n.pot iabc\n" + law + ".output y o\nR1 in o {1k + iabc}\nR2 o 0 1k\n",
+         "t.cir:3:8: error: law input 'iabc' has pot 'iabc''s name (line 2)\n"},
+        {fc::test::otaStage("", "{iabcc}"),
+         "t.cir:9:19: error: unknown pot or law input 'iabcc' (there are no pots; the law inputs: iabc)\n"},
+        {fc::test::otaStage("", "{iabc - 1m}"),
+         "t.cir:9:1: error: OTA G1's gain is -0.00099 A at iabc 1e-05: an OTA's gain (its bias current) is not "
+         "negative\n"},
+        {fc::test::otaStage("", "0"),
+         "t.cir:9:18: error: G1's gain is 0: an OTA's gain (its bias current) is positive\n"},
+        {".input u in\n.output y o\nR1 in o 1k\nG1 o 0 in 0 1m\n",
+         "t.cir:4:1: error: the controlled source G1 is not supported yet (Phase 1)\n"},
+        {".input u in\n.input step - kind=cv\n.output y o\nR1 in o 1k\nR2 o 0 1k\n",
+         "t.cir:2:8: error: law input 'step' is an FMinus keyword or builtin, or a name the module uses: rename it\n"},
+    };
+    for (const Case& c : cases)
+    {
+        INFO(c.netlist);
+        CHECK(errorsOf(c.netlist) == c.errors);
+    }
+    // an unused law input warns, as an unused pot does
+    const fc::Result r = fc::generate(".input u in\n.input cv - kind=cv\n.output y o\nR1 in o 1k\nR2 o 0 1k\n", "t.cir");
+    CHECK(r.errors.empty());
+    CHECK(r.warnings == "t.cir:2:8: warning: law input 'cv' is never used\n");
+}
+
+TEST_CASE("the OTA port is §7.2's", "[circuit]")
+{
+    // one buffered stage: v = att (u - y), att = 220 / 100220; C1's KCL G y = x + i, G = 2 C fs + 1 / 10 MEG; so p =
+    // att u - att x / G and kd = att / G (the hand derivation of report §7.2, with the buffer's y)
+    const fc::Plan p = planned(fc::test::otaStage());
+    REQUIRE(p.blocks.size() == 1);
+    REQUIRE(p.blocks[0].port);
+    CHECK(p.blocks[0].port->law == fc::PortDef::Law::Tanh);
+    CHECK(p.blocks[0].port->form == fc::PortDef::Form::I);
+    CHECK(p.smooth);
+    const fc::System s = fc::assemble(p, 0);
+    CHECK(s.iForm);
+    fc::Messages messages;
+    const std::optional<fc::Pivots> pivots = fc::choosePivots(s, p, 0, messages);
+    REQUIRE(pivots);
+    CHECK(fc::checkPort(s, *pivots, p, 0, messages));
+    const double att = 220.0 / 100220.0;
+    for (double fs : {44100.0, 96000.0, 384000.0})
+    {
+        const fc::Linear<double> l = fc::solve(s, *pivots, fc::symbolValues(s, p, 0, fs, {}));
+        std::map<std::string, double> c;
+        for (const auto& [name, value] : fc::derive(s, l, p.blocks[0], false))
+            c[name] = value;
+        const double g = 2 * 1e-9 * fs + 1e-7;
+        INFO(fs);
+        CHECK(near(c["kd_G1"], att / g, 0));
+        CHECK(c["kd_G1"] > 0);
+        CHECK(near(c["p_G1_by_u"], att, 0));
+        CHECK(near(c["p_G1_by_x_C1"], -att / g, 0));
+        // the output and C1's voltage are (x + i) / G: no term in u, and so no difference of u and v
+        CHECK(!c.count("n_yb_by_u"));
+        CHECK(near(c["n_yb_by_x_C1"], 1 / g, 0));
+        CHECK(near(c["n_yb_by_i_G1"], 1 / g, 0));
+    }
+    // the prewarp's fit: the pole a + b g, a = -1 / (10 MEG 1 nF), b = -att / (2 Vt 1 nF)
+    const fc::Plan warped = planned(fc::test::otaStage(".prewarp on\n"));
+    const fc::PortDef& port = *warped.blocks[0].port;
+    REQUIRE(port.prewarp);
+    CHECK_THAT(port.poleA, WithinRel(-1 / (10e6 * 1e-9), 1e-9));
+    CHECK_THAT(port.poleB, WithinRel(-att / (2 * fc::thermalVoltage(1) * 1e-9), 1e-9));
+}
+
+TEST_CASE("F is the antiderivative of each law's solution", "[circuit]")
+{
+    // F(p) = p v - H(v), H = v^2 / 2 + k Phi(v), v solving v + k phi(v) = p: dF/dp = v (report §5.1), for the pair
+    // (k = 2 Is K, phi = sinh(v / N Vt)) and tanh (k = kd g, phi = tanh(v / 2 Vt)), at 200 points over +-20 V
+    struct Law
+    {
+        fc::PortDef::Law law;
+        double k;
+        double s;
+    };
+    for (const Law& l : {Law{fc::PortDef::Law::Pair, 2 * 2.52e-9 * 2200, fc::thermalVoltage(1.752)},
+                         Law{fc::PortDef::Law::Tanh, 0.0686, 2 * fc::thermalVoltage(1)}})
+    {
+        auto v = [&](double p)
+        {
+            return fc::lawConverged(l.law, p, l.k, l.s, 0, nullptr, nullptr);
+        };
+        auto f = [&](double p)
+        {
+            const double x = v(p);
+            return p * x - (0.5 * x * x + l.k * fc::lawIntegral(l.law, x, l.s));
+        };
+        double worst = 0;
+        for (int i = 0; i < 200; ++i)
+        {
+            const double p = -20 + 40 * (i + 0.5) / 200;
+            const double h = 1e-5;
+            worst = std::max(worst, std::fabs((f(p + h) - f(p - h)) / (2 * h) - v(p)));
+        }
+        INFO(static_cast<int>(l.law));
+        CHECK(worst <= 1e-7);
+    }
+}
+
+TEST_CASE("the bracket keeps every law's iterates finite, in double", "[circuit]")
+{
+    // v stays in [min(0, p), max(0, p)] for p from 1e-6 to 1e6 V, either sign, 0 to 3 Newton steps, from any start
+    for (fc::PortDef::Law law : {fc::PortDef::Law::Pair, fc::PortDef::Law::Tanh})
+    {
+        const double s = law == fc::PortDef::Law::Pair ? fc::thermalVoltage(1.752) : 2 * fc::thermalVoltage(1);
+        for (double k : {1e-9, 1e-3, 1.0, 1e3})
+        {
+            for (int steps = 0; steps <= 3; ++steps)
+            {
+                for (double mag = 1e-6; mag <= 1e6; mag *= 10)
+                {
+                    for (double p : {mag, -mag})
+                    {
+                        for (double previous : {0.0, p, -p, 1e30})
+                        {
+                            const fc::Solver::Guess guess = law == fc::PortDef::Law::Pair ? fc::Solver::Guess::Omega
+                                                                                          : fc::Solver::Guess::Previous;
+                            const double v = fc::lawSteps(law, p, k, s, guess, previous, steps);
+                            INFO(static_cast<int>(law) << " k " << k << " steps " << steps << " p " << p);
+                            CHECK(std::isfinite(v));
+                            CHECK(v >= std::fmin(0.0, p));
+                            CHECK(v <= std::fmax(0.0, p));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("the carry keeps the stored point's Newton residual, in double", "[circuit]")
+{
+    // a step of the law input moves the curve, p = v + kg tanh(v / 2 Vt); the carry p_P += (kg - kg_P) t_P (t_P =
+    // tanh(v_P / 2 Vt)) moves the stored point onto the new one, its residual p_P - v_P - kg t_P unchanged
+    const double s = 2 * fc::thermalVoltage(1);
+    for (double p : {1e-4, 3e-3, 0.02, -0.05})
+    {
+        for (int steps : {1, 2})
+        {
+            const double kg0 = 0.0686 * 0.3;
+            const double v = fc::lawSteps(fc::PortDef::Law::Tanh, p, kg0, s, fc::Solver::Guess::Previous, 0, steps);
+            const double t = std::tanh(v / s);
+            const double before = p - v - kg0 * t;
+            for (double kg1 : {kg0 * 4, kg0 / 4, 0.0})
+            {
+                const double carried = p + (kg1 - kg0) * t;
+                const double after = carried - v - kg1 * t;
+                CHECK(std::fabs(after - before) <= 1e-12 * std::fabs(p));
+            }
+        }
+    }
+}
+
+TEST_CASE("prewarp applies to a one-state OTA block, and warns elsewhere", "[circuit]")
+{
+    // off by default (the user's ruling): the module's cutoff law is the circuit's
+    const fc::Result off = fc::generate(fc::test::otaStage(), "t.cir");
+    CHECK(off.source.find("pw1_") == std::string::npos);
+    CHECK(off.configuration.find(".prewarp off (default)") != std::string::npos);
+    const fc::Result on = fc::generate(fc::test::otaStage(".prewarp on\n"), "t.cir");
+    INFO(on.errors);
+    CHECK(on.warnings.empty());
+    CHECK(on.source.find("g_G1 = pw1_(l_iabc);") != std::string::npos);
+    CHECK(on.notes.find("t.cir: note: OTA G1: prewarp; its small-signal pole is a + b g, a = -100 rad/s, b = "
+                        "-4.243528e+07 rad/s per A (g 1e-05 to 0.002 A)") != std::string::npos);
+    // two states in the block: ignored, with a warning at the OTA
+    const std::string twoStates = withLineAdded(fc::test::otaStage(".prewarp on\n"), "C2 y z 1n\nR6 z 0 1k\n");
+    const fc::Result two = fc::generate(twoStates, "t.cir");
+    INFO(two.errors);
+    CHECK(two.warnings ==
+          "t.cir:10:1: warning: prewarp is ignored for OTA G1: its block has 2 states (it prewarps a one-pole's "
+          "cutoff)\n");
+    // and a netlist without an OTA
+    CHECK(fc::generate(".input u in\n.output y o\n.prewarp on\nR1 in o 1k\nR2 o 0 1k\n", "t.cir").warnings ==
+          "t.cir:3:1: warning: '.prewarp on' is ignored: it prewarps an OTA's cutoff, and the netlist has none\n");
+}
+
+TEST_CASE("an OTA module's step names are refused as names", "[circuit]")
+{
+    // every name the OTA's step, its law-input lines and its ADAA tail use, as a pot, an input and the module
+    for (const char* name : {"kg", "kgs", "kgv", "tn", "th", "ib", "hh", "h2", "eh", "s2", "z", "zu", "dl", "wm"})
+    {
+        INFO(name);
+        CHECK(fc::isReservedName(name));
+        CHECK(fc::isModuleWord(name));
+        const std::string head = ".input u in\n.output y o\n";
+        CHECK(errorsOf(head + ".pot " + name + "\nR1 in o {1k + " + name + "}\nR2 o 0 1k\n") ==
+              "t.cir:3:6: error: pot '" + std::string(name) +
+                  "' is an FMinus keyword or builtin, or a name the module uses: rename it\n");
+        CHECK(errorsOf(".input " + std::string(name) + " in\n.output y o\nR1 in o 1k\nR2 o 0 1k\n") ==
+              "t.cir:1:8: error: .input '" + std::string(name) +
+                  "' is an FMinus keyword or builtin, or a name the module uses: rename it\n");
+        CHECK(errorsOf(".title " + std::string(name) + "\n" + head + "R1 in o 1k\nR2 o 0 1k\n") ==
+              "t.cir:1:8: error: the module's name '" + std::string(name) +
+                  "', from .title, is a name the module uses: rename it\n");
     }
 }

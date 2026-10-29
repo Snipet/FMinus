@@ -133,6 +133,7 @@ namespace circuits
         fc::RunnerShape shape;
         shape.module = c->result.module;
         shape.pots = c->pots();
+        shape.laws = c->laws();
         shape.channels = channels;
         shape.step = region;
         c->program = fminus::Program::compile(c->result.source + fc::runnerSource(shape) + extra, fmErrors, o);
@@ -159,19 +160,47 @@ namespace circuits
         return c;
     }
 
-    std::vector<double> runSteps(const Circuit& c, std::span<const double> u, std::span<const double> pots)
+    namespace
+    {
+        // The law buffer a run reads: `law`, or each law input at its low end.
+        std::vector<float> lawsOf(const Circuit& c, std::span<const float> law, std::size_t n)
+        {
+            if (!law.empty() || c.laws() == 0)
+                return {law.begin(), law.end()};
+            std::vector<double> lows;
+            for (const fc::LawInfo& l : c.plan.laws)
+                lows.push_back(l.low);
+            return heldLaws(lows, n);
+        }
+    } // namespace
+
+    std::vector<float> heldLaws(std::span<const double> values, std::size_t n)
+    {
+        std::vector<float> out;
+        out.reserve(n * values.size());
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            for (double v : values)
+                out.push_back(static_cast<float>(v));
+        }
+        return out;
+    }
+
+    std::vector<double> runSteps(const Circuit& c, std::span<const double> u, std::span<const double> pots,
+                                 std::span<const float> law)
     {
         Instance self(*c.module);
         c.init(self.get(), 48000);
         c.callSet(self.get(), pots);
         std::vector<float> in(u.begin(), u.end());
         std::vector<float> out(u.size());
-        c.steps(self.get(), in.data(), nullptr, out.data(), static_cast<int>(in.size()));
+        const std::vector<float> laws = lawsOf(c, law, u.size());
+        c.steps(self.get(), in.data(), laws.empty() ? nullptr : laws.data(), out.data(), static_cast<int>(in.size()));
         return {out.begin(), out.end()};
     }
 
     std::vector<double> runTicksWith(const Circuit& c, std::span<const double> u, std::span<const float> potBuffer,
-                                     int call)
+                                     int call, std::span<const float> law)
     {
         Instance self(*c.module);
         c.init(self.get(), 48000);
@@ -180,17 +209,20 @@ namespace circuits
         std::vector<float> out(u.size());
         const int size = call <= 0 ? n : call;
         const auto p = static_cast<std::size_t>(c.pots());
+        const auto l = static_cast<std::size_t>(c.laws());
+        const std::vector<float> laws = lawsOf(c, law, u.size());
         for (int start = 0; start < n; start += size)
         {
             const int count = std::min(size, n - start);
             const auto s = static_cast<std::size_t>(start);
-            c.ticks(self.get(), in.data() + s, nullptr, potBuffer.data() + s * p, nullptr, out.data() + s, count,
-                    start);
+            c.ticks(self.get(), in.data() + s, laws.empty() ? nullptr : laws.data() + s * l,
+                    potBuffer.data() + s * p, nullptr, out.data() + s, count, start);
         }
         return {out.begin(), out.end()};
     }
 
-    std::vector<double> runTicks(const Circuit& c, std::span<const double> u, std::span<const double> pots, int call)
+    std::vector<double> runTicks(const Circuit& c, std::span<const double> u, std::span<const double> pots, int call,
+                                 std::span<const float> law)
     {
         std::vector<float> buffer;
         buffer.reserve(u.size() * pots.size());
@@ -199,7 +231,7 @@ namespace circuits
             for (double v : pots)
                 buffer.push_back(static_cast<float>(v));
         }
-        return runTicksWith(c, u, buffer, call);
+        return runTicksWith(c, u, buffer, call, law);
     }
 
     std::vector<double> potsWith(const fc::Plan& plan, const std::string& key, double value)
@@ -210,14 +242,16 @@ namespace circuits
         return point;
     }
 
-    std::vector<fc::Holters> chainAt(const fc::Plan& plan, std::span<const double> pots, double rate, bool adaa)
+    std::vector<fc::Holters> chainAt(const fc::Plan& plan, std::span<const double> pots, double rate, bool adaa,
+                                     std::span<const double> laws)
     {
         std::vector<fc::Holters> blocks;
         const std::vector<double> point(pots.begin(), pots.end());
+        const std::vector<double> lawPoint(laws.begin(), laws.end());
         for (std::size_t b = 0; b < plan.blocks.size(); ++b)
         {
             const double design = plan.blocks[b].port && adaa ? rate * 2 / 3 : rate;
-            blocks.push_back(fc::holters(plan, static_cast<int>(b), design, point));
+            blocks.push_back(fc::holters(plan, static_cast<int>(b), design, point, lawPoint));
         }
         return blocks;
     }

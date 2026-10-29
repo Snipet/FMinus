@@ -26,15 +26,35 @@
 
 # FEEDBACK: {{.*}}broken-feedback.cir:7:1: error: op amp XU1 has no negative feedback: an ideal op amp needs one
 
-# PORTS: {{.*}}broken-ports.cir:5:1: error: block 1 has 2 nonlinear ports (D1|D2, D3|D4): not supported yet (Phase 1)
+# PORTS: {{.*}}broken-ports.cir:5:1: error: block 1 has 2 nonlinear ports (D1|D2, D3|D4): multi-port Newton is Phase 2
 
-# CYCLE: {{.*}}broken-cycle.cir:7:1: error: a feedback loop around XU1 crosses blocks: not supported yet
+# CYCLE: {{.*}}broken-cycle.cir:7:1: error: a feedback loop around XU1 crosses blocks: not supported yet (Phase 2)
 
 # SINGULAR: {{.*}}broken-singular.cir:5:1: error: block 1 (XU1, XU2, R1, R2, ...): its equations are singular (nothing determines V(o2)): an op amp without negative feedback, or a node cut off from the rest
 
 # NOOUTPUT: {{.*}}broken-nooutput.cir: error: the netlist has no .output
 
 # NEGATIVE: {{.*}}broken-negative.cir:7:1: error: port D1|D2 sees a negative resistance (K = -123.2 ohm at 22.05 kHz): positive feedback around XU1 is not supported yet
+
+# The synth path's refusals (an OTA, G<name> n+ n- OTA nc+ nc- gain, and law inputs, .input NAME - kind=cv|current):
+# a current input without its range and a law input outside an OTA's gain (the parser's), two OTAs in one block, an
+# open-loop OTA, diode and OTA ports in one region, and omega3 asked of an OTA (the plan's).
+# RUN: not fminus %S/Inputs/broken-laws.cir --emit fm 2>&1 | FileCheck %s --check-prefix=LAWS --match-full-lines
+# RUN: not fminus %S/Inputs/broken-otas.cir --emit fm 2>&1 | FileCheck %s --check-prefix=OTAS --match-full-lines
+# RUN: not fminus %S/Inputs/broken-openloop.cir --emit fm 2>&1 | FileCheck %s --check-prefix=OPEN --match-full-lines
+# RUN: not fminus %S/Inputs/broken-mixed.cir --emit fm 2>&1 | FileCheck %s --check-prefix=MIXED --match-full-lines
+# RUN: not fminus %S/Inputs/broken-omega.cir --emit fm 2>&1 | FileCheck %s --check-prefix=OMEGA --match-full-lines
+
+# LAWS:      {{.*}}broken-laws.cir:3:19: error: law input 'iabc' is a current: it needs its range in amps, range=lo:hi (as range=10u:2m)
+# LAWS-NEXT: {{.*}}broken-laws.cir:6:27: error: law input 'cv' in R1's value: a law input enters an OTA's gain only (pot-as-port is Phase 2)
+
+# OTAS: {{.*}}broken-otas.cir:6:1: error: block 1 has 2 nonlinear ports (G1, G2): multi-port Newton is Phase 2
+
+# OPEN: {{.*}}broken-openloop.cir:8:1: error: OTA G1 has no feedback around it (an open-loop OTA, a VCA): Phase 2
+
+# MIXED: {{.*}}broken-mixed.cir:15:1: error: the oversampled region mixes diode ports (D1|D2) and OTA ports (G1): one solver serves a region (per-family solvers are Phase 2)
+
+# OMEGA: {{.*}}broken-omega.cir:6:1: error: '.solver omega(1)': an OTA's port is solved from the previous step's v: .solver newton(K)
 
 # --emit fm is a netlist's: on an FMinus source it is an error.
 # RUN: not fminus %S/Inputs/play.fm --emit fm 2>&1 | FileCheck %s --check-prefix=NOTCIR --match-full-lines

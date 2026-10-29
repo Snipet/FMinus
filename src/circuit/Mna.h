@@ -108,8 +108,10 @@ namespace fminus::circuit
         std::vector<std::vector<Affine>> rhs;   // [source][row]
         std::vector<Readout> readouts;
         int input = -1;                                  // the input's source index
-        int port = -1;                                   // v's source index
-        int portCurrent = -1;                            // j's readout
+        int port = -1;                                   // the port's source: v (the v-form), or i (the i-form)
+        int portCurrent = -1;                            // its readout: j (the v-form), or v (the i-form)
+        bool iForm = false;                              // the port is a controlled source (an OTA): its current
+                                                         // the source i, its control voltage the readout v
         int output = -1;                                 // the output's readout
         std::vector<std::pair<int, double>> capacitor;   // per state source: its voltage's readout, and a sign
     };
@@ -329,15 +331,33 @@ namespace fminus::circuit
     template <typename T>
     using Coefficients = std::vector<std::pair<std::string, T>>;
 
-    // The module's coefficients for one block. With a port P: from j = (p - v) / K, K = -1 / (dj/dv) (the port's
-    // self-impedance) and p_P_by_s = (dj/ds) K for each source s but v; ka_P = Is K, kb_P = ka / (N Vt), lna_P =
-    // log(kb), and kc_P = ka N Vt with ADAA. Then <readout>_by_<source> for the output and each capacitor's voltage.
-    // A zero coefficient is left out.
+    // The module's coefficients for one block. With a diode pair P (the v-form): from j = (p - v) / K, K = -1 / (dj/dv)
+    // (the port's self-impedance, kd in v + kd f(v) = p) and p_P_by_s = (dj/ds) K for each source s but v; ka_P = Is
+    // K, kb_P = ka / (N Vt), lna_P = log(kb), and kc_P = ka N Vt with ADAA. With an OTA P (the i-form): from its
+    // control voltage v = p - kd i, p_P_by_s = dv/ds for each source s but i, and kd_P = -dv/di (its gain g multiplies
+    // it in the step, where a law input may move it every sample). Then <readout>_by_<source> for the output and each
+    // capacitor's voltage, on every source (an OTA's i too). A zero coefficient is left out.
     template <typename T>
     Coefficients<T> derive(const System& system, const Linear<T>& linear, const Block& block, bool adaa)
     {
         Coefficients<T> out;
-        if (block.port)
+        if (block.port && system.iForm)
+        {
+            // the i-form: v = p - kd i, read off the control voltage's readout
+            const auto r = static_cast<std::size_t>(system.portCurrent);
+            const auto i = static_cast<std::size_t>(system.port);
+            T kd = -linear.coef[r][i];
+            annotate(kd, "kd, the OTA's loop: its control voltage per unit of its current, negated");
+            for (std::size_t s = 0; s < system.sources.size(); ++s)
+            {
+                if (s == i || isZero(linear.coef[r][s]))
+                    continue;
+                const std::string name = "p_" + block.port->name + "_by_" + system.sources[s].name;
+                out.emplace_back(name, bindField(name, linear.coef[r][s]));
+            }
+            out.emplace_back("kd_" + block.port->name, bindField("kd_" + block.port->name, kd));
+        }
+        else if (block.port)
         {
             const auto j = static_cast<std::size_t>(system.portCurrent);
             const auto v = static_cast<std::size_t>(system.port);
@@ -375,10 +395,12 @@ namespace fminus::circuit
     }
 
     // A block in Holters' form (adaa.cpp's Block, generalised): N states, one input, one output, at most one port.
-    //   p = Cp x(n-1) + dp u(n);  v solves v + k sinh(v / nvt) = p, k = 2 Is K
+    //   p = Cp x(n-1) + dp u(n);  v solves v + k sinh(v / nvt) = p, k = 2 Is K (a diode pair), or
+    //                             v + k g tanh(v / nvt) = p, k = K and nvt = 2 Vt (an OTA, g its gain)
     //   x(n) = A x(n-1) + B u(n) + W v;  y(n) = Cy x(n-1) + Dy u(n) + wy v
     struct Holters
     {
+        PortDef::Law law = PortDef::Law::Pair;
         int states = 0;
         bool port = false;
         std::vector<double> cp;
@@ -391,12 +413,26 @@ namespace fminus::circuit
         double wy = 0;
         double is = 0;
         double nvt = 0;
-        double k = 0;   // 2 Is K
+        double k = 0;   // 2 Is K (a pair), K (an OTA: kd)
+        double g = 1;   // an OTA's gain, amps, when no stream of gains is given (Reference.h)
+        // An OTA's block in its own i-form as well (the matrices above are its v-form, v for i substituted): x(n) = Ai
+        // x(n-1) + Bi u(n) + Wi i, y(n) = Cyi x(n-1) + Dyi u(n) + wyi i, i its current, g tanh(v / 2 Vt). The
+        // reference runs this one, as the emitted code does (with ADAA, the mean of i, not of v).
+        bool iForm = false;
+        std::vector<std::vector<double>> ai;
+        std::vector<double> bi;
+        std::vector<double> wi;
+        std::vector<double> cyi;
+        double dyi = 0;
+        double wyi = 0;
     };
 
-    // Block `block`'s Holters form at the design rate fs' (the rate its capacitors see) and pots (a point as
-    // potGrid's).
-    Holters holters(const Plan& plan, int block, double designRate, const std::vector<double>& pots);
+    // Block `block`'s Holters form at the design rate fs' (the rate its capacitors see), pots (a point as potGrid's)
+    // and law inputs (an OTA's gain's, in plan.laws' order; empty: each at its low end).
+    Holters holters(const Plan& plan, int block, double designRate, const std::vector<double>& pots,
+                    const std::vector<double>& laws = {});
+
+
 
     // A linear block's analog response at s: its output per volt of its input, with each capacitor an admittance s C.
     std::complex<double> analog(const Plan& plan, int block, std::complex<double> s, const std::vector<double>& pots);

@@ -1,0 +1,20 @@
+* broken-mixed.cir: a diode clipper, then an OTA stage, in one region (lit errors.test)
+.title Broken
+.input  u    in
+.input  iabc -    kind=current range=10u:2m
+.output y    yb
+R0   in  c   2.2k
+C0   c   0   10n
+D1   c   0   DM
+D2   0   c   DM
+X0   c   in2 in2 opamp
+R1   in2 a1  100k
+R2   a1  0   220
+R3   yb  a2  100k
+R4   a2  0   220
+G1   0   y   OTA a1 a2 {iabc}
+C1   y   0   1n
+R5   y   0   10meg
+X1   y   yb  yb  opamp
+.model DM D(IS=2.52n N=1.752)
+.end

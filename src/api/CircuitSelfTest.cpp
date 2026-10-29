@@ -256,6 +256,8 @@ namespace fminus::circuit
                 {
                     if (!matrix.signal(u).t2 || cancelled())
                         return;
+                    if (!matrix.runs(u))
+                        return;
                     ref64[static_cast<std::size_t>(u)] = reference64(p, matrix, u, stop);
                 });
             if (cancelled())
@@ -286,7 +288,7 @@ namespace fminus::circuit
                     run(units,
                         [&](int u)
                         {
-                            if (!matrix.signal(u).t1 || cancelled())
+                            if (!matrix.signal(u).t1 || !matrix.runs(u) || cancelled())
                                 return;
                             refs[static_cast<std::size_t>(u)] =
                                 referenceT1(p, matrix, u, c.oversample, c.adaa, c.method, stop);
@@ -317,22 +319,27 @@ namespace fminus::circuit
                 run(units,
                     [&](int u)
                     {
-                        if (cancelled())
+                        if (cancelled() || !matrix.runs(u))
                             return;
                         const StressPoint& point = matrix.point(u);
                         const StressSignal& signal = matrix.signal(u);
                         const std::vector<float> potValues = floats(point.pots);
-                        // the region's step at its rate, on what the region sees (T1's reference's input)
+                        const bool laws = !p.laws.empty();
+                        // the region's step at its rate, on what the region sees (T1's reference's input), the law
+                        // inputs held over each host sample's steps
                         std::vector<float> stepsOut;
                         if (compiled.steps != nullptr)
                         {
                             const std::size_t n = static_cast<std::size_t>(c.oversample) * host;
                             const std::vector<float> in = floats(regionInput(p, matrix, u, c.oversample, stop));
+                            const std::vector<float> law =
+                                laws ? floats(lawSamples(p, matrix, u, c.oversample, n)) : std::vector<float>{};
                             stepsOut.resize(n);
                             Instance self(*compiled.module);
                             compiled.init(self.get(), static_cast<float>(kHostRate));
                             compiled.set(self.get(), pots > 0 ? potValues.data() : nullptr, nullptr);
-                            compiled.steps(self.get(), in.data(), nullptr, stepsOut.data(), static_cast<int>(n));
+                            compiled.steps(self.get(), in.data(), laws ? law.data() : nullptr, stepsOut.data(),
+                                           static_cast<int>(n));
                         }
                         // tick at the host's, set() on the grid
                         const std::vector<float> in = floats(signalSamples(matrix, signal, 1, host));
@@ -341,10 +348,13 @@ namespace fminus::circuit
                             std::copy(potValues.begin(), potValues.end(),
                                       potBuffer.begin() + static_cast<long>(i * pots));
                         std::vector<float> ticksOut(host);
+                        const std::vector<float> law =
+                            laws ? floats(lawSamples(p, matrix, u, 1, host)) : std::vector<float>{};
                         Instance self(*compiled.module);
                         compiled.init(self.get(), static_cast<float>(kHostRate));
-                        compiled.ticks(self.get(), in.data(), nullptr, pots > 0 ? potBuffer.data() : nullptr, nullptr,
-                                       ticksOut.data(), static_cast<int>(host), 0);
+                        compiled.ticks(self.get(), in.data(), laws ? law.data() : nullptr,
+                                       pots > 0 ? potBuffer.data() : nullptr, nullptr, ticksOut.data(),
+                                       static_cast<int>(host), 0);
                         const auto unit = static_cast<std::size_t>(u);
                         results[unit] = measureUnit(matrix, u, c.oversample, doubles(stepsOut), doubles(ticksOut),
                                                     signal.t1 ? &refs[unit] : nullptr,

@@ -193,7 +193,7 @@ namespace fminus::circuit
         {
         case Expr::Op::Number:
             return expr.value;
-        case Expr::Op::Pot:
+        case Expr::Op::Name:
             return pot(expr.pot);
         case Expr::Op::Neg:
             return -evaluate(expr.args[0], pot);
@@ -222,7 +222,7 @@ namespace fminus::circuit
     {
         void collectPots(const Expr& expr, std::vector<std::string>& out)
         {
-            if (expr.op == Expr::Op::Pot)
+            if (expr.op == Expr::Op::Name)
             {
                 if (std::find(out.begin(), out.end(), expr.pot) == out.end())
                     out.push_back(expr.pot);
@@ -248,7 +248,7 @@ namespace fminus::circuit
             case Expr::Op::Pow:   // printed as a product
                 return e.exponent == 0 ? 4 : e.exponent == 1 ? precedence(e.args[0]) : 2;
             case Expr::Op::Number:
-            case Expr::Op::Pot:
+            case Expr::Op::Name:
                 return 4;
             }
             return 4;
@@ -274,7 +274,7 @@ namespace fminus::circuit
             {
             case Expr::Op::Number:
                 return literal(e.value);
-            case Expr::Op::Pot:
+            case Expr::Op::Name:
                 return pot(e.pot);
             case Expr::Op::Neg:
                 return "-" + printOperand(e.args[0], 3, pot);
@@ -823,7 +823,7 @@ namespace fminus::circuit
                     while (end < text_.size() && (isLetter(text_[end]) || isDigit(text_[end]) || text_[end] == '_'))
                         ++end;
                     Expr e;
-                    e.op = Expr::Op::Pot;
+                    e.op = Expr::Op::Name;
                     e.pot = folded(text_.substr(pos_, end - pos_));
                     e.spelling = std::string(text_.substr(pos_, end - pos_));
                     e.loc = locAt(p);
@@ -1020,7 +1020,8 @@ namespace fminus::circuit
             e.loc = head.loc;
             for (const Token& token : t)
                 e.text += (e.text.empty() ? "" : " ") + token.text;
-            if (const char* what = unsupported(kind))
+            const bool ota = kind == 'g' && t.size() >= 4 && folded(t[3].text) == "ota";
+            if (const char* what = unsupported(kind); what != nullptr && !ota)
             {
                 error(head.loc, replaced(what, head.text));
                 return;
@@ -1176,6 +1177,51 @@ namespace fminus::circuit
                 }
                 break;
             }
+            case 'g':
+            {
+                // G<name> n+ n- OTA nc+ nc- gain|{expr}: the OTA macro (report §7.1), SPICE's G direction (its current
+                // leaves n+ and enters n-)
+                if (t.size() != 7 || !nodeTokensOk(1, 2) || !nodeTokensOk(4, 2))
+                {
+                    error(head.loc, head.text + ": expected 'G<name> n+ n- OTA nc+ nc- gain' (gain in amps, or {expr} "
+                                                "of pots and law inputs)");
+                    return;
+                }
+                e.kind = Element::Kind::Ota;
+                nodesFrom(1, 2);
+                nodesFrom(4, 2);
+                e.valueLoc = t[6].loc;
+                if (t[6].text.front() == '{')
+                {
+                    e.expr = expression(t[6]);
+                    if (!e.expr)
+                        return;
+                    if (potsOf(*e.expr).empty())
+                    {
+                        e.value = evaluate(*e.expr, [](const std::string&) { return 0.0; });
+                        e.expr.reset();
+                    }
+                }
+                else
+                {
+                    const std::optional<Number> v = parseNumber(t[6].text);
+                    if (!v)
+                    {
+                        error(t[6].loc, "'" + t[6].text + "' is not a number (" + head.text + "'s gain)");
+                        return;
+                    }
+                    e.value = v->value;
+                }
+                if (!e.expr && !(e.value > 0))
+                {
+                    error(t[6].loc, head.text + "'s gain is " + t[6].text + ": an OTA's gain (its bias current) is "
+                                                                             "positive");
+                    return;
+                }
+                if (!e.expr && !inRange(e.value, t[6], head.text))
+                    return;
+                break;
+            }
             case 'x':
             {
                 if (t.size() != 5 || !nodeTokensOk(1, 3))
@@ -1324,14 +1370,13 @@ namespace fminus::circuit
             if (name == ".input" || name == ".output")
             {
                 const bool input = name == ".input";
-                if (!arity(2, 4, input ? ".input NAME node [kind=voltage] [scale=x]" : ".output NAME node [scale=x]"))
+                if (!arity(2, 5, input ? ".input NAME node [kind=voltage] [scale=x]' or '.input NAME - kind=cv|current "
+                                         "[scale=x] [range=lo:hi]"
+                                       : ".output NAME node [scale=x]"))
                     return true;
-                std::optional<IoLine>& slot = input ? n_.input : n_.output;
-                if (slot)
+                if (!input && t.size() > 4)
                 {
-                    error(head.loc, std::string(input ? "a second .input" : "a second .output") +
-                                        " (the first at line " + std::to_string(slot->loc.line) +
-                                        "): Phase 0 has one of each");
+                    error(head.loc, "expected '.output NAME node [scale=x]'");
                     return true;
                 }
                 IoLine io;
@@ -1339,13 +1384,16 @@ namespace fminus::circuit
                 io.loc = t[1].loc;
                 io.node = t[2].text;
                 io.nodeLoc = t[2].loc;
+                bool ranged = false;
+                Loc rangeLoc;
+                std::string rangeText;
                 for (std::size_t i = 3; i < t.size(); ++i)
                 {
                     std::string value;
                     if (isKeyValue(t[i], "scale", value))
                     {
                         const std::optional<Number> v = parseNumber(value);
-                        if (!v || !(v->value != 0))
+                        if (!v || !(v->value != 0) || !std::isfinite(v->value))
                         {
                             error(t[i].loc, "'" + value + "' is not a nonzero number (scale)");
                             return true;
@@ -1355,12 +1403,12 @@ namespace fminus::circuit
                     else if (input && isKeyValue(t[i], "kind", value))
                     {
                         const std::string k = folded(value);
-                        if (k == "cv" || k == "current")
-                        {
-                            error(t[i].loc, "a law input (.input kind=" + value + ") is not supported yet (Phase 1)");
-                            return true;
-                        }
-                        if (k != "voltage")
+                        io.kindLoc = t[i].loc;
+                        if (k == "cv")
+                            io.kind = Input::Kind::Cv;
+                        else if (k == "current")
+                            io.kind = Input::Kind::Current;
+                        else if (k != "voltage")
                         {
                             error(t[i].loc, "'kind=" + value + "': voltage, cv or current");
                             return true;
@@ -1368,13 +1416,32 @@ namespace fminus::circuit
                     }
                     else if (input && isKeyValue(t[i], "range", value))
                     {
-                        error(t[i].loc, "'" + t[i].text + "': range= is a law input's (kind=cv|current)");
-                        return true;
+                        // lo:hi, two numbers with SPICE's suffixes, lo below hi, each a float
+                        const std::size_t colon = value.find(':');
+                        const std::optional<Number> lo =
+                            colon == std::string::npos ? std::nullopt : parseNumber(value.substr(0, colon));
+                        const std::optional<Number> hi =
+                            colon == std::string::npos ? std::nullopt : parseNumber(value.substr(colon + 1));
+                        auto isFloat = [](double x)
+                        {
+                            return std::isfinite(x) && std::fabs(x) <= 1e30;
+                        };
+                        if (!lo || !hi || !isFloat(lo->value) || !isFloat(hi->value) || !(lo->value < hi->value))
+                        {
+                            error(t[i].loc, "'" + t[i].text + "': range=lo:hi, two numbers with lo below hi");
+                            return true;
+                        }
+                        io.low = lo->value;
+                        io.high = hi->value;
+                        ranged = true;
+                        rangeLoc = t[i].loc;
+                        rangeText = t[i].text;
                     }
                     else
                     {
                         error(t[i].loc, "'" + t[i].text + "': expected " +
-                                            (input ? std::string("kind=voltage or scale=x") : std::string("scale=x")));
+                                            (input ? std::string("kind=voltage|cv|current, scale=x or range=lo:hi")
+                                                   : std::string("scale=x")));
                         return true;
                     }
                 }
@@ -1382,6 +1449,63 @@ namespace fminus::circuit
                 {
                     error(io.loc, std::string(input ? ".input" : ".output") + " '" + io.name +
                                       "': a name is a letter, then letters and digits");
+                    return true;
+                }
+                const bool law = io.kind != Input::Kind::Voltage;
+                if (law && io.node != "-")
+                {
+                    error(io.nodeLoc, "'" + io.node + "': a law input (kind=" +
+                                          (io.kind == Input::Kind::Cv ? "cv" : "current") +
+                                          ") has no node; write '-' (it enters an OTA's gain, not the netlist)");
+                    return true;
+                }
+                if (!law && io.node == "-")
+                {
+                    error(io.nodeLoc, "'-' is a law input's node: a law input says kind=cv or kind=current");
+                    return true;
+                }
+                if (!law && ranged)
+                {
+                    error(rangeLoc, "'" + rangeText + "': range= is a law input's (kind=cv|current)");
+                    return true;
+                }
+                if (io.kind == Input::Kind::Current && !ranged)
+                {
+                    error(io.kindLoc, "law input '" + io.name + "' is a current: it needs its range in amps, "
+                                                                "range=lo:hi (as range=10u:2m)");
+                    return true;
+                }
+                if (io.kind == Input::Kind::Cv && !ranged)
+                {
+                    io.low = 0;
+                    io.high = 1;
+                }
+                if (input)
+                {
+                    auto taken = [&](const IoLine& other)
+                    {
+                        if (folded(other.name) != folded(io.name))
+                            return false;
+                        error(io.loc, "input '" + io.name + "' is defined twice (first at line " +
+                                          std::to_string(other.loc.line) + ")");
+                        return true;
+                    };
+                    if ((n_.input && taken(*n_.input)) ||
+                        std::any_of(n_.laws.begin(), n_.laws.end(), [&](const IoLine& l) { return taken(l); }))
+                        return true;
+                }
+                if (law)
+                {
+                    n_.laws.push_back(io);
+                    return true;
+                }
+                std::optional<IoLine>& slot = input ? n_.input : n_.output;
+                if (slot)
+                {
+                    error(head.loc, std::string(input ? "a second voltage .input" : "a second .output") +
+                                        " (the first at line " + std::to_string(slot->loc.line) + "): " +
+                                        (input ? "a netlist has one signal (law inputs are kind=cv|current)"
+                                               : "a netlist has one output"));
                     return true;
                 }
                 slot = io;
@@ -1585,10 +1709,8 @@ namespace fminus::circuit
                 if (!once(n_.prewarp, head) || !arity(1, 1, ".prewarp on|off"))
                     return true;
                 const std::string w = folded(t[1].text);
-                if (w == "off")
-                    n_.prewarp.value = false;
-                else if (w == "on")
-                    error(t[1].loc, "'.prewarp on' is not supported yet (Phase 1)");
+                if (w == "off" || w == "on")
+                    n_.prewarp.value = w == "on";
                 else
                     error(t[1].loc, "'.prewarp " + t[1].text + "': on or off");
                 return true;
@@ -1659,28 +1781,60 @@ namespace fminus::circuit
 
         void Parser::finish()
         {
-            // Every pot an {expression} names must be a .pot (they may come in any order).
+            // Every name an {expression} reads must be a .pot, or (in an OTA's gain only) a law input; they may come
+            // in any order.
             std::string list;
             for (const PotLine& p : n_.pots)
                 list += (list.empty() ? "" : ", ") + p.name;
+            std::string laws;
+            for (const IoLine& l : n_.laws)
+                laws += (laws.empty() ? "" : ", ") + l.name;
             std::set<std::string> known;
             for (const PotLine& p : n_.pots)
                 known.insert(folded(p.name));
+            std::set<std::string> lawNames;
+            for (const IoLine& l : n_.laws)
+                lawNames.insert(folded(l.name));
+            const Element* in = nullptr;
             std::function<void(const Expr&)> check = [&](const Expr& e)
             {
-                if (e.op == Expr::Op::Pot && !known.count(e.pot))
+                if (e.op == Expr::Op::Name && !known.count(e.pot))
                 {
                     // the name as written: the loc's column points at it in the line
-                    error(e.loc, "unknown pot '" + e.spelling + "' (" +
-                                     (list.empty() ? std::string("there are no pots") : "the pots: " + list) + ")");
+                    if (lawNames.count(e.pot))
+                    {
+                        if (in->kind != Element::Kind::Ota)
+                            error(e.loc, "law input '" + e.spelling + "' in " + in->name +
+                                             "'s value: a law input enters an OTA's gain only (pot-as-port is Phase "
+                                             "2)");
+                    }
+                    else if (laws.empty())
+                        error(e.loc, "unknown pot '" + e.spelling + "' (" +
+                                         (list.empty() ? std::string("there are no pots") : "the pots: " + list) +
+                                         ")");
+                    else
+                        error(e.loc, "unknown pot or law input '" + e.spelling + "' (" +
+                                         (list.empty() ? std::string("there are no pots") : "the pots: " + list) +
+                                         "; the law inputs: " + laws + ")");
                 }
                 for (const Expr& a : e.args)
                     check(a);
             };
             for (const Element& e : n_.elements)
             {
+                in = &e;
                 if (e.expr)
                     check(*e.expr);
+            }
+            // a pot and a law input of one name
+            for (const PotLine& p : n_.pots)
+            {
+                for (const IoLine& l : n_.laws)
+                {
+                    if (folded(p.name) == folded(l.name))
+                        error(l.loc, "law input '" + l.name + "' has pot '" + p.name + "''s name (line " +
+                                         std::to_string(p.loc.line) + ")");
+                }
             }
         }
     } // namespace

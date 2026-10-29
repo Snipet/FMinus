@@ -1,6 +1,7 @@
-// tests/unit/CircuitNetlists.h: the netlists the circuit compiler's tests share (CircuitTest.cpp, CircuitEmitTest.cpp),
-// as strings: the report's two examples (docs/research/analog-circuits/notes/fminus.md §4, with the report's §9.1
-// tone-pot line), TS's clipping stage alone, and synthetic circuits with textbook responses. makeDT and makeTS are
+// tests/unit/CircuitNetlists.h: the netlists the circuit compiler's tests share (CircuitTest.cpp, CircuitEmitTest.cpp,
+// CircuitSearchTest.cpp), as strings: the report's two examples (docs/research/analog-circuits/notes/fminus.md §4, with
+// the report's §9.1 tone-pot line), TS's clipping stage alone, the synth path's OTA low-pass and one of its stages, and
+// synthetic circuits with textbook responses. makeDT and makeTS are
 // docs/research/analog-circuits/experiments/adaa.cpp's hand-derived Holters forms of the two 1-port blocks, copied
 // from there, so that the generator's derivation is checked against an independent one.
 #pragma once
@@ -88,6 +89,45 @@ D2     v2  n1  1N914
 .model 1N914 D(IS=2.52n N=1.752)
 .end
 )";
+
+    // The synth path's example, as examples/circuits/otalp.cir ships it: two buffered OTA one-poles, the cutoff set by
+    // the law input iabc (report §7).
+    inline const std::string kOtaLp = R"(* otalp.cir: two buffered OTA one-poles
+.title OtaLp
+.input  u    in   scale=1
+.input  iabc -    kind=current range=10u:2m
+.output vout y2b
+.oversample 4 iir blocks=auto
+.adaa off
+.solver newton(1)
+.target solver=-60dB alias=-60dB level=5V freq=3k
+R1   in   a1   100k
+R2   a1   0    220
+R3   y1b  m1   100k
+R4   m1   0    220
+G1   0    y1   OTA a1 m1 {iabc}
+C1   y1   0    1n
+R5   y1   0    10meg
+X1   y1   y1b  y1b  opamp
+R6   y1b  a2   100k
+R7   a2   0    220
+R8   y2b  m2   100k
+R9   m2   0    220
+G2   0    y2   OTA a2 m2 {iabc}
+C2   y2   0    1n
+R10  y2   0    10meg
+X2   y2   y2b  y2b  opamp
+.end
+)";
+
+    // One of its stages: an OTA one-pole, its output buffered, 100k / 220 attenuators at both inputs (att = 220 /
+    // 100220), 1 nF and the OTA's 10 MEG. `lines` adds directives; `gain` is G1's.
+    inline std::string otaStage(const std::string& lines = "", const std::string& gain = "{iabc}")
+    {
+        return ".title OtaStage\n.input u in\n.input iabc - kind=current range=10u:2m\n.output y yb\n" + lines +
+               "R1 in a1 100k\nR2 a1 0 220\nR3 yb a2 100k\nR4 a2 0 220\nG1 0 y OTA a1 a2 " + gain +
+               "\nC1 y 0 1n\nR5 y 0 10meg\nX1 y yb yb opamp\n";
+    }
 
     // A netlist with its .model's N replaced (1.75140653 gives adaa.cpp's 45.3 mV).
     inline std::string withN(std::string netlist, const std::string& n)

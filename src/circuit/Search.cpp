@@ -12,6 +12,7 @@
 #include <cmath>
 #include <format>
 #include <locale>
+#include <numbers>
 #include <sstream>
 #include <stdexcept>
 #include <system_error>
@@ -245,6 +246,14 @@ namespace fminus::circuit
         }
     } // namespace
 
+    bool StressMatrix::runs(int unit) const
+    {
+        const StressSignal& s = signal(unit);
+        if (s.kind != StressSignal::Kind::Modulated)
+            return true;
+        return point(unit).lawLevels[static_cast<std::size_t>(s.law)] == 1;
+    }
+
     StressMatrix stressMatrix(const Plan& plan, const StressShape& shape)
     {
         StressMatrix m;
@@ -260,8 +269,16 @@ namespace fminus::circuit
             m.levelFrom = ".input's scale (full scale)";
         }
         m.upstream = std::max(plan.regionFirst, 0);
-        // the pots the region and the blocks before it read, in .pot order
-        std::vector<std::size_t> axes;
+        m.inputScale = std::fabs(plan.inputScale);
+        m.outputScale = std::fabs(plan.outputScale);
+        // the axes: the pots the region and the blocks before it read, in .pot order, then the law inputs the OTAs'
+        // gains read, in .input order
+        struct Axis
+        {
+            bool law = false;
+            std::size_t index = 0;
+        };
+        std::vector<Axis> axes;
         const int last = plan.regionFirst >= 0 ? plan.regionLast : static_cast<int>(plan.blocks.size()) - 1;
         for (std::size_t i = 0; i < plan.pots.size(); ++i)
         {
@@ -272,19 +289,45 @@ namespace fminus::circuit
                 read = read || std::find(keys.begin(), keys.end(), plan.pots[i].key) != keys.end();
             }
             if (read)
-                axes.push_back(i);
+                axes.push_back({false, i});
         }
-        std::vector<double> defaults;
+        for (std::size_t i = 0; i < plan.laws.size(); ++i)
+        {
+            if (plan.laws[i].used)
+                axes.push_back({true, i});
+        }
+        StressPoint defaults;
         for (const PotInfo& p : plan.pots)
-            defaults.push_back(p.defaultValue);
-        auto label = [&](const std::vector<double>& pots)
+            defaults.pots.push_back(p.defaultValue);
+        for (const LawInfo& l : plan.laws)
+        {
+            defaults.laws.push_back(l.middle());
+            defaults.lawLevels.push_back(1);
+        }
+        // an axis at level 0, 1 or 2: a pot's 0, 0.5 and 1, a law input's low end, middle and high end
+        auto setAxis = [&](StressPoint& point, const Axis& a, int level)
+        {
+            if (!a.law)
+            {
+                point.pots[a.index] = 0.5 * level;
+                return;
+            }
+            const LawInfo& l = plan.laws[a.index];
+            point.laws[a.index] = level == 0 ? l.low : level == 1 ? l.middle() : l.high;
+            point.lawLevels[a.index] = level;
+        };
+        auto label = [&](StressPoint& point)
         {
             std::string text;
-            for (std::size_t i : axes)
-                text += (text.empty() ? "" : ", ") + plan.pots[i].name + std::format(" {:g}", pots[i]);
-            return text;
+            for (const Axis& a : axes)
+            {
+                text += text.empty() ? "" : ", ";
+                text += a.law ? std::format("{} {:.3g}", plan.laws[a.index].name, point.laws[a.index])
+                              : std::format("{} {:g}", plan.pots[a.index].name, point.pots[a.index]);
+            }
+            point.label = text;
+            return point;
         };
-        const double values[] = {0.0, 0.5, 1.0};
         if (axes.size() <= 3)
         {
             std::size_t count = 1;
@@ -292,33 +335,33 @@ namespace fminus::circuit
                 count *= 3;
             for (std::size_t k = 0; k < count; ++k)
             {
-                std::vector<double> point = defaults;
+                StressPoint point = defaults;
                 std::size_t rest = k;
-                for (std::size_t i : axes)
+                for (const Axis& a : axes)
                 {
-                    point[i] = values[rest % 3];
+                    setAxis(point, a, static_cast<int>(rest % 3));
                     rest /= 3;
                 }
-                m.points.push_back({point, label(point)});
+                m.points.push_back(label(point));
             }
         }
         else
         {
-            for (std::size_t i : axes)
+            for (const Axis& a : axes)
             {
-                for (double v : values)
+                for (int level : {0, 1, 2})
                 {
-                    std::vector<double> point = defaults;
-                    point[i] = v;
-                    m.points.push_back({point, label(point)});
+                    StressPoint point = defaults;
+                    setAxis(point, a, level);
+                    m.points.push_back(label(point));
                 }
             }
-            for (double v : {0.0, 1.0})
+            for (int level : {0, 2})
             {
-                std::vector<double> point = defaults;
-                for (std::size_t i : axes)
-                    point[i] = v;
-                m.points.push_back({point, label(point)});
+                StressPoint point = defaults;
+                for (const Axis& a : axes)
+                    setAxis(point, a, level);
+                m.points.push_back(label(point));
             }
         }
         const double scale = std::fabs(plan.inputScale);
@@ -348,6 +391,33 @@ namespace fminus::circuit
             s.name = std::format("{} at {:.3g} V", kind == StressSignal::Kind::Sweep ? "sweep" : "noise", level);
             m.signals.push_back(s);
         }
+        if (std::any_of(plan.laws.begin(), plan.laws.end(), [](const LawInfo& l) { return l.used; }))
+        {
+            // a synth's: a band-limited saw at L (T1, T2, T4), and each law input modulated under a sine (T1, T4)
+            StressSignal saw;
+            saw.kind = StressSignal::Kind::Saw;
+            saw.amp = level / scale;
+            saw.bin = shape.bins.front();
+            saw.name = std::format("saw at {:.3g} V, {:.0f} Hz", level,
+                                   saw.bin * kHostRate / static_cast<double>(shape.window));
+            saw.t2 = true;
+            m.signals.push_back(saw);
+            for (std::size_t i = 0; i < plan.laws.size(); ++i)
+            {
+                if (!plan.laws[i].used)
+                    continue;
+                StressSignal mod;
+                mod.kind = StressSignal::Kind::Modulated;
+                mod.amp = level / scale;
+                mod.bin = shape.bins.size() > 1 ? shape.bins[1] : shape.bins.front();
+                mod.law = static_cast<int>(i);
+                mod.name = std::format("{:.0f} Hz at {:.3g} V, {} {} at 37 Hz",
+                                       mod.bin * kHostRate / static_cast<double>(shape.window), level,
+                                       plan.laws[i].name,
+                                       plan.laws[i].low > 0 ? "+-2 octaves" : "over its range");
+                m.signals.push_back(mod);
+            }
+        }
         return m;
     }
 
@@ -365,9 +435,86 @@ namespace fminus::circuit
             v.resize(n);
             return v;
         }
+        case StressSignal::Kind::Saw:
+            return saw(signal.amp, signal.bin, matrix.shape.window, m, n);
+        case StressSignal::Kind::Modulated:
+            return sine(signal.amp, signal.bin, matrix.shape.window, m, n);
         }
         return {};
     }
+
+    std::vector<double> lawSamples(const Plan& plan, const StressMatrix& matrix, int unit, int m, std::size_t n)
+    {
+        const std::size_t laws = plan.laws.size();
+        std::vector<double> out(n * laws);
+        const StressPoint& point = matrix.point(unit);
+        const StressSignal& signal = matrix.signal(unit);
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            const std::size_t host = i / static_cast<std::size_t>(m);   // held over the host sample's m steps
+            for (std::size_t k = 0; k < laws; ++k)
+            {
+                double x = point.laws[k];
+                if (signal.kind == StressSignal::Kind::Modulated && static_cast<std::size_t>(signal.law) == k)
+                {
+                    const LawInfo& l = plan.laws[k];
+                    const double phase = 2 * std::numbers::pi * 37 * static_cast<double>(host) / kHostRate;
+                    x = l.low > 0 ? l.middle() * std::exp2(2 * std::sin(phase))
+                                  : l.low + (l.high - l.low) * (0.5 + 0.5 * std::sin(phase));
+                }
+                out[i * laws + k] = x;
+            }
+        }
+        return out;
+    }
+
+    namespace
+    {
+        // Blocks [first, last] in Holters' form at the unit's point, each designed at `rate` (times 2/3 for a port
+        // block with ADAA), and, where the unit's law inputs move (a modulated signal), each OTA block's gain a step
+        // (prewarped at its design rate when `prewarp` and its port's .prewarp), as simulateChain takes them; a
+        // constant gain (prewarped so) is the block's Holters::g.
+        struct ChainForm
+        {
+            std::vector<Holters> blocks;
+            std::vector<std::vector<double>> gains;
+        };
+
+        ChainForm chainForm(const Plan& plan, const StressMatrix& matrix, int unit, int first, int last, double rate,
+                            int m, std::size_t n, bool adaa, bool prewarp)
+        {
+            ChainForm c;
+            const StressPoint& point = matrix.point(unit);
+            const bool moves = matrix.signal(unit).kind == StressSignal::Kind::Modulated;
+            const std::vector<double> laws = moves ? lawSamples(plan, matrix, unit, m, n) : std::vector<double>{};
+            const std::size_t count = plan.laws.size();
+            for (int b = first; b <= last; ++b)
+            {
+                const Block& block = plan.blocks[static_cast<std::size_t>(b)];
+                const double design = rate * (adaa && block.port ? 2.0 / 3.0 : 1.0);
+                Holters h = holters(plan, b, design, point.pots, point.laws);
+                const bool warp = prewarp && block.port && block.port->prewarp;
+                if (warp)
+                    h.g = prewarped(*block.port, h.g, design);
+                std::vector<double> stream;
+                if (moves && block.port && block.port->smooth() && !block.port->gainLaws.empty())
+                {
+                    stream.resize(n);
+                    std::vector<double> at(count);
+                    for (std::size_t i = 0; i < n; ++i)
+                    {
+                        std::copy(laws.begin() + static_cast<long>(i * count),
+                                  laws.begin() + static_cast<long>((i + 1) * count), at.begin());
+                        const double g = gainAt(plan, *block.port, point.pots, at);
+                        stream[i] = warp ? prewarped(*block.port, g, design) : g;
+                    }
+                }
+                c.blocks.push_back(std::move(h));
+                c.gains.push_back(std::move(stream));
+            }
+            return c;
+        }
+    } // namespace
 
     // ---- the references ---------------------------------------------------------------------------------------------
 
@@ -376,14 +523,14 @@ namespace fminus::circuit
         Reference64 r;
         const StressSignal& signal = matrix.signal(unit);
         const int factor = matrix.shape.referenceFactor;
-        std::vector<Holters> chain;
-        for (std::size_t b = 0; b < plan.blocks.size(); ++b)
-            chain.push_back(holters(plan, static_cast<int>(b), kHostRate * factor, matrix.point(unit).pots));
         const std::size_t n = static_cast<std::size_t>(factor) * matrix.shape.host();
+        const ChainForm chain = chainForm(plan, matrix, unit, 0, static_cast<int>(plan.blocks.size()) - 1,
+                                          kHostRate * factor, factor, n, false, false);
         RefOptions o;
         o.stop = stop;
         RefStats stats;
-        const std::vector<double> y = simulateChain(chain, signalSamples(matrix, signal, factor, n), o, &stats);
+        const std::vector<double> y =
+            simulateChain(chain.blocks, signalSamples(matrix, signal, factor, n), o, &stats, chain.gains);
         if (stats.stopped)
             return r;
         const auto rate = static_cast<std::size_t>(factor);
@@ -426,18 +573,13 @@ namespace fminus::circuit
         const std::vector<double> u = regionInput(plan, matrix, unit, oversample, stop, &stopped);
         if (stopped)
             return r;
-        std::vector<Holters> region;
-        for (int b = plan.regionFirst; b <= plan.regionLast; ++b)
-        {
-            const double design = kHostRate * oversample *
-                                  (adaa && plan.blocks[static_cast<std::size_t>(b)].port ? 2.0 / 3.0 : 1.0);
-            region.push_back(holters(plan, b, design, matrix.point(unit).pots));
-        }
+        const ChainForm region = chainForm(plan, matrix, unit, plan.regionFirst, plan.regionLast, kHostRate * oversample,
+                                           oversample, u.size(), adaa, true);
         RefOptions o;
         o.adaa = adaa;
         o.stop = stop;
         RefStats stats;
-        const std::vector<double> y = simulateChain(region, u, o, &stats);
+        const std::vector<double> y = simulateChain(region.blocks, u, o, &stats, region.gains);
         if (stats.stopped)
             return r;
         r.window = decimateWindow(y, oversample, matrix.shape.warm, matrix.shape.window);
@@ -463,7 +605,9 @@ namespace fminus::circuit
         if (signal.t1 && t1 != nullptr)
         {
             const std::vector<double> yd = decimateWindow(steps, oversample, shape.warm, shape.window);
-            v.t1 = bandErrorDb(yd, t1->window, 0, signal.kind != StressSignal::Kind::Sine);
+            // rectangular for the periodic signals (the sines and the saw), Hann for the rest
+            const bool periodic = signal.kind == StressSignal::Kind::Sine || signal.kind == StressSignal::Kind::Saw;
+            v.t1 = bandErrorDb(yd, t1->window, 0, !periodic);
         }
         const std::span<const double> window = ticks.subspan(shape.warm, shape.window);
         if (signal.t2 && t3 != nullptr)
@@ -473,7 +617,9 @@ namespace fminus::circuit
             const double h1 = std::fabs(20 * std::log10(binMagnitude(window, signal.bin) / t3->h1));
             v.t3 = h1;
             v.t3Which = "H1";
-            if (t3->h3 / t3->h1 >= 1e-5)   // H3 counts within 100 dB of H1
+            // H3 counts within 100 dB of H1 and at least -120 dB of the input sine (kH3FloorDb)
+            const double floor = std::pow(10.0, kH3FloorDb / 20) * signal.amp * matrix.inputScale;
+            if (t3->h3 / t3->h1 >= 1e-5 && t3->h3 * matrix.outputScale >= floor)
             {
                 const double h3 = std::fabs(20 * std::log10(binMagnitude(window, 3 * signal.bin) / t3->h3));
                 if (h3 > h1)
@@ -578,7 +724,9 @@ namespace fminus::circuit
             double omega = 65;        // omega3's guess
             double previous = 5;      // the previous step's solution
             double newtonPair = 70;   // a Newton step of a diode pair (2 Is sinh)
+            double newtonTanh = 60;   // a Newton step of an OTA's tanh
             double adaaEa = 57;       // ADAA's tail on an exp-affine law
+            double adaaSm = 100;      // and on tanh's (log cosh: an expf and a logf)
             double update = 5;        // the state update
             double linear = 5;        // a linear block's step
             double linearPerState = 3;
@@ -603,9 +751,13 @@ namespace fminus::circuit
             const int states = statesOf(b);
             double step = 0;
             if (b.port)
+            {
+                const bool smooth = b.port->smooth();
                 step = kCost.p + kCost.perState * states +
                        (solver.guess == Solver::Guess::Omega ? kCost.omega : kCost.previous) +
-                       kCost.newtonPair * solver.steps + (adaa ? kCost.adaaEa : 0) + kCost.update;
+                       (smooth ? kCost.newtonTanh : kCost.newtonPair) * solver.steps +
+                       (adaa ? (smooth ? kCost.adaaSm : kCost.adaaEa) : 0) + kCost.update;
+            }
             else
                 step = kCost.linear + kCost.linearPerState * states;
             total += rate * step;
@@ -621,12 +773,16 @@ namespace fminus::circuit
         std::vector<Candidate> out;
         if (!c.anyOpen())
             return out;
-        const std::vector<int> factors =
-            c.oversampleOpen ? std::vector<int>{1, 2, 4, 8} : std::vector<int>{c.oversample};
+        // report §6.2's rows: exp-affine (a diode's), smooth monotone (an OTA's)
+        const std::vector<int> row = plan.smooth ? std::vector<int>{1, 2, 4} : std::vector<int>{1, 2, 4, 8};
+        const std::vector<Solver> rowSolvers =
+            plan.smooth ? std::vector<Solver>{{Solver::Guess::Previous, 1},
+                                              {Solver::Guess::Previous, 2},
+                                              {Solver::Guess::Previous, 3}}
+                        : std::vector<Solver>{{Solver::Guess::Omega, 1}, {Solver::Guess::Omega, 2}};
+        const std::vector<int> factors = c.oversampleOpen ? row : std::vector<int>{c.oversample};
         const std::vector<bool> adaas = c.adaaOpen ? std::vector<bool>{false, true} : std::vector<bool>{c.adaa};
-        const std::vector<Solver> solvers = c.solverOpen
-                                                ? std::vector<Solver>{{Solver::Guess::Omega, 1}, {Solver::Guess::Omega, 2}}
-                                                : std::vector<Solver>{c.solver};
+        const std::vector<Solver> solvers = c.solverOpen ? rowSolvers : std::vector<Solver>{c.solver};
         for (int os : factors)
         {
             for (bool adaa : adaas)
@@ -758,7 +914,7 @@ namespace fminus::circuit
         std::int64_t n = 0;
         for (int u = 0; u < matrix.units(); ++u)
         {
-            if (matrix.signal(u).t2)
+            if (matrix.signal(u).t2 && matrix.runs(u))
                 n += static_cast<std::int64_t>(matrix.shape.referenceFactor) *
                      static_cast<std::int64_t>(matrix.shape.host());
         }
@@ -770,7 +926,7 @@ namespace fminus::circuit
         std::int64_t n = 0;
         for (int u = 0; u < matrix.units(); ++u)
         {
-            if (matrix.signal(u).t1)
+            if (matrix.signal(u).t1 && matrix.runs(u))
                 n += static_cast<std::int64_t>(oversample) * static_cast<std::int64_t>(matrix.shape.host());
         }
         return n;
@@ -778,7 +934,9 @@ namespace fminus::circuit
 
     std::int64_t stepsCandidate(const StressMatrix& matrix, int oversample)
     {
-        return static_cast<std::int64_t>(matrix.units()) * (matrix.upstream > 0 ? 3 : 2) * oversample *
-               static_cast<std::int64_t>(matrix.shape.host());
+        std::int64_t units = 0;
+        for (int u = 0; u < matrix.units(); ++u)
+            units += matrix.runs(u) ? 1 : 0;
+        return units * (matrix.upstream > 0 ? 3 : 2) * oversample * static_cast<std::int64_t>(matrix.shape.host());
     }
 } // namespace fminus::circuit

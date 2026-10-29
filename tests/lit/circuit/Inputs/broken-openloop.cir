@@ -1,0 +1,10 @@
+* broken-openloop.cir: an OTA whose output reaches nothing at its inputs, a VCA (lit errors.test)
+.title Broken
+.input  u    in
+.input  iabc -    kind=current range=10u:2m
+.output y    y
+R1   in  a1  100k
+R2   a1  0   220
+G1   0   y   OTA a1 0 {iabc}
+R5   y   0   10k
+.end

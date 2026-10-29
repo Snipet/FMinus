@@ -62,8 +62,13 @@ namespace fminus::circuit
                 s.unknownNames.push_back("i(" + block.branches[b].ident + ")");
             }
         }
+        // A two-terminal port (a diode pair) is Holters' v-form: its voltage the source v, its current an unknown j. A
+        // controlled source (an OTA) is the i-form: its current the source i, its control voltage a readout, so the
+        // block's readouts are sums of its states and i, never small differences of the input and v.
+        const bool iForm = block.port && block.port->form == PortDef::Form::I;
+        s.iForm = iForm;
         int portCurrent = -1;
-        if (block.port)
+        if (block.port && !iForm)
         {
             portCurrent = s.n++;
             s.unknownNames.push_back("j(" + block.port->parts + ")");
@@ -94,7 +99,7 @@ namespace fminus::circuit
             }
         }
         int portRow = -1;
-        if (block.port)
+        if (block.port && !iForm)
         {
             portRow = row++;
             s.rowNames.push_back(block.port->parts);
@@ -120,7 +125,7 @@ namespace fminus::circuit
         if (block.port)
         {
             s.port = static_cast<int>(s.sources.size());
-            s.sources.push_back({"v_" + block.port->name, System::Source::Kind::Port, -1});
+            s.sources.push_back({(iForm ? "i_" : "v_") + block.port->name, System::Source::Kind::Port, -1});
         }
         s.rhs.assign(s.sources.size(), std::vector<Affine>(un));
 
@@ -246,12 +251,23 @@ namespace fminus::circuit
             voltage(nullorRow[k], block.opamps[k].inp, 1);
             voltage(nullorRow[k], block.opamps[k].inn, -1);
         }
-        if (block.port)
+        if (block.port && !iForm)
         {
-            current(block.port->anode, block.port->cathode, portCurrent);
+            // the v-form: j, the port's current (an unknown), flows from anode to cathode through it, and its row
+            // V(anode) - V(cathode) = v makes its voltage the source v
+            current(block.port->from, block.port->to, portCurrent);
             voltage(portRow, block.port->anode, 1);
             voltage(portRow, block.port->cathode, -1);
             s.rhs[static_cast<std::size_t>(s.port)][static_cast<std::size_t>(portRow)].add(1);
+        }
+        else if (block.port)
+        {
+            // the i-form: the source i leaves `from` (n+) and enters `to` (n-), SPICE's G direction
+            const auto i = static_cast<std::size_t>(s.port);
+            if (const auto it = kclRow.find(block.port->from); it != kclRow.end())
+                s.rhs[i][static_cast<std::size_t>(it->second)].add(-1);
+            if (const auto it = kclRow.find(block.port->to); it != kclRow.end())
+                s.rhs[i][static_cast<std::size_t>(it->second)].add(1);
         }
 
         // Readouts: the port's current, the output, each capacitor's voltage (one readout a node pair).
@@ -278,13 +294,23 @@ namespace fminus::circuit
                 return "-V(" + nodeName(q) + ")";
             return "V(" + nodeName(p) + ") - V(" + nodeName(q) + ")";
         };
-        if (block.port)
+        if (block.port && !iForm)
         {
             System::Readout r;
             r.name = "j_" + block.port->name;
             r.kind = System::Readout::Kind::PortCurrent;
             r.label = "j(" + block.port->parts + ")";
             r.unknowns.emplace_back(portCurrent, 1);
+            s.portCurrent = static_cast<int>(s.readouts.size());
+            s.readouts.push_back(r);
+        }
+        else if (block.port)
+        {
+            // the OTA's control voltage, V(nc+) - V(nc-): v = p - kd i
+            System::Readout r = formOf(block.port->anode, block.port->cathode, 1);
+            r.name = "vp_" + block.port->name;
+            r.kind = System::Readout::Kind::PortCurrent;
+            r.label = label(block.port->anode, block.port->cathode);
             s.portCurrent = static_cast<int>(s.readouts.size());
             s.readouts.push_back(r);
         }
@@ -698,14 +724,24 @@ namespace fminus::circuit
         {
             const Linear<double> l =
                 solve(system, pivots, symbolValues(system, plan, blockIndex, g.designRate, g.pots));
-            const double k = 1 / -l.coef[j][v];
+            // kd: the v-form's 1 / -(dj/dv); the i-form's -(dv/di)
+            const double k = system.iForm ? -l.coef[j][v] : 1 / -l.coef[j][v];
             if (k > 0 && std::isfinite(k))
                 continue;
             Loc loc;
             if (!block.elements.empty())
                 loc = plan.netlist.elements[static_cast<std::size_t>(block.elements.front())].loc;
             const std::string around = block.opamps.empty() ? std::string() : " around " + block.opamps.front().name;
-            if (k < 0)
+            if (k == 0 && system.iForm)
+                messages.error(plan.netlist.elements[static_cast<std::size_t>(block.port->elements.front())].loc,
+                               "OTA " + block.port->parts +
+                                   " has no feedback around it (an open-loop OTA, a VCA): Phase 2");
+            else if (k < 0 && block.port->form == PortDef::Form::I)
+                messages.error(plan.netlist.elements[static_cast<std::size_t>(block.port->elements.front())].loc,
+                               std::format("OTA {} sees positive feedback (kd = {:.4g} ohm at {}): its output drives "
+                                           "its + input; not supported yet",
+                                           block.port->parts, k, pointText(plan, block, g)));
+            else if (k < 0)
                 messages.error(loc, std::format("port {} sees a negative resistance (K = {:.4g} ohm at {}): positive "
                                                 "feedback{} is not supported yet",
                                                 block.port->parts, k, pointText(plan, block, g), around));
@@ -785,7 +821,8 @@ namespace fminus::circuit
         }
     } // namespace
 
-    Holters holters(const Plan& plan, int blockIndex, double designRate, const std::vector<double>& pots)
+    Holters holters(const Plan& plan, int blockIndex, double designRate, const std::vector<double>& pots,
+                    const std::vector<double>& laws)
     {
         const Block& block = plan.blocks.at(static_cast<std::size_t>(blockIndex));
         const System system = assemble(plan, blockIndex);
@@ -803,22 +840,41 @@ namespace fminus::circuit
         const auto in = static_cast<std::size_t>(system.input);
         const auto out = static_cast<std::size_t>(system.output);
         double kSelf = 0;
+        // each readout's coefficient on a source as the v-form has it: the i-form's i = (v - p) / Ki substituted (in
+        // double, where its differences cost nothing), so the reference runs both forms as one
+        const auto port = static_cast<std::size_t>(system.port);
+        const auto pr = static_cast<std::size_t>(system.portCurrent);
+        auto onV = [&](std::size_t ro)
+        {
+            return system.iForm ? l.coef[ro][port] / l.coef[pr][port] : l.coef[ro][port];
+        };
+        auto on = [&](std::size_t ro, std::size_t src)
+        {
+            if (!h.port || !system.iForm)
+                return l.coef[ro][src];
+            return l.coef[ro][src] - l.coef[ro][port] * l.coef[pr][src] / l.coef[pr][port];
+        };
         if (h.port)
         {
-            const auto j = static_cast<std::size_t>(system.portCurrent);
-            const auto v = static_cast<std::size_t>(system.port);
-            kSelf = 1 / -l.coef[j][v];
+            const auto j = pr;
+            const auto v = port;
+            kSelf = system.iForm ? -l.coef[j][v] : 1 / -l.coef[j][v];
             for (std::size_t s : states)
-                h.cp.push_back(l.coef[j][s] * kSelf);
-            h.dp = l.coef[j][in] * kSelf;
+                h.cp.push_back(system.iForm ? l.coef[j][s] : l.coef[j][s] * kSelf);
+            h.dp = system.iForm ? l.coef[j][in] : l.coef[j][in] * kSelf;
+            h.law = block.port->law;
             h.is = block.port->is;
             h.nvt = block.port->nvt;
-            h.k = 2 * block.port->is * kSelf;
-            h.wy = l.coef[out][v];
+            // the pair's v + 2 Is K sinh(v / N Vt); an OTA's v + K g tanh(v / 2 Vt), g its gain (at the point's pots
+            // and the law inputs `laws`)
+            h.k = block.port->smooth() ? kSelf : 2 * block.port->is * kSelf;
+            if (block.port->smooth())
+                h.g = gainAt(plan, *block.port, pots, laws);
+            h.wy = onV(out);
         }
         for (std::size_t s : states)
-            h.cy.push_back(l.coef[out][s]);
-        h.dy = l.coef[out][in];
+            h.cy.push_back(on(out, s));
+        h.dy = on(out, in);
         h.a.assign(states.size(), std::vector<double>(states.size(), 0.0));
         h.b.assign(states.size(), 0.0);
         h.w.assign(states.size(), 0.0);
@@ -829,10 +885,32 @@ namespace fminus::circuit
             const auto [readout, sign] = system.capacitor[i];
             const auto ro = static_cast<std::size_t>(readout);
             for (std::size_t j = 0; j < states.size(); ++j)
-                h.a[i][j] = g2 * sign * l.coef[ro][states[j]] - (i == j ? 1 : 0);
-            h.b[i] = g2 * sign * l.coef[ro][in];
+                h.a[i][j] = g2 * sign * on(ro, states[j]) - (i == j ? 1 : 0);
+            h.b[i] = g2 * sign * on(ro, in);
             if (h.port)
-                h.w[i] = g2 * sign * l.coef[ro][static_cast<std::size_t>(system.port)];
+                h.w[i] = g2 * sign * onV(ro);
+        }
+        if (h.port && system.iForm)
+        {
+            h.iForm = true;
+            h.ai.assign(states.size(), std::vector<double>(states.size(), 0.0));
+            h.bi.assign(states.size(), 0.0);
+            h.wi.assign(states.size(), 0.0);
+            for (std::size_t i = 0; i < states.size(); ++i)
+            {
+                const Branch& br = block.branches[static_cast<std::size_t>(system.sources[states[i]].branch)];
+                const double g2 = 4 * br.c * designRate;
+                const auto [readout, sign] = system.capacitor[i];
+                const auto ro = static_cast<std::size_t>(readout);
+                for (std::size_t j = 0; j < states.size(); ++j)
+                    h.ai[i][j] = g2 * sign * l.coef[ro][states[j]] - (i == j ? 1 : 0);
+                h.bi[i] = g2 * sign * l.coef[ro][in];
+                h.wi[i] = g2 * sign * l.coef[ro][port];
+            }
+            for (std::size_t s : states)
+                h.cyi.push_back(l.coef[out][s]);
+            h.dyi = l.coef[out][in];
+            h.wyi = l.coef[out][port];
         }
         return h;
     }

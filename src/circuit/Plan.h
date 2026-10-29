@@ -57,17 +57,58 @@ namespace fminus::circuit
         Taper taper = Taper::Lin;
     };
 
-    // A nonlinear port: an antiparallel diode pair, i = 2 Is sinh(v / N Vt), v = V(anode) - V(cathode).
+    // A nonlinear port: its voltage v = V(anode) - V(cathode) and its current j = f(v), which flows through it from
+    // `from` to `to`. The port's equation, once its block is reduced, is v + kd f(v) = p (report §6.1), kd > 0.
+    //   Pair  an antiparallel diode pair, f = 2 Is sinh(v / N Vt) (the exp-affine family, EA)
+    //   Tanh  an OTA (G<name> n+ n- OTA nc+ nc- gain), f = g tanh(v / 2 Vt) with g its gain, which may move every
+    //         sample with a law input (the smooth-monotone family, SM)
+    // (Single and Asym, a single diode and an asymmetric pair, are the next slice's.) Form V is a two-terminal port,
+    // whose current flows between the terminals its voltage is across (a diode: from = anode, to = cathode); Form I is a
+    // controlled source, its voltage across its control nodes and its current between two others (an OTA: anode, cathode
+    // = nc+, nc-; from, to = n+, n-, SPICE's G direction). Both are stamped as Holters' v-form (Mna.h): v a source, j an
+    // unknown.
     struct PortDef
     {
-        std::string name;    // the first diode's, "D1" (its ident)
-        std::string parts;   // "D1|D2"
-        int anode = 0;
+        enum class Law
+        {
+            Pair,
+            Single,
+            Asym,
+            Tanh,
+        };
+
+        enum class Form
+        {
+            V,
+            I,
+        };
+
+        std::string name;    // the first part's ident: "D1", "G1"
+        std::string parts;   // "D1|D2", "G1"
+        Law law = Law::Pair;
+        Form form = Form::V;
+        int anode = 0;   // v = V(anode) - V(cathode): a diode's terminals, an OTA's control inputs
         int cathode = 0;
-        double is = 0;
-        double n = 1;
-        double nvt = 0;   // N k T / q at 27 C
+        int from = 0;   // j flows from `from` to `to`: a diode's anode and cathode, an OTA's n+ and n-
+        int to = 0;
+        double is = 0;    // Pair: IS
+        double n = 1;     // Pair: N
+        double nvt = 0;   // Pair: N k T / q at 27 C; Tanh: 2 Vt (k T / q at 27 C, twice)
+        // Tanh: the gain, amps: a constant, or an expression of pots and law inputs
+        std::optional<Expr> gain;
+        double gainValue = 0;              // the constant
+        std::vector<std::string> gainPots;   // the pots it reads, folded, in .pot order
+        std::vector<std::string> gainLaws;   // the law inputs it reads, folded, in .input order
+        // Tanh, .prewarp on: the small-signal pole, a + b g rad/s (an affine fit at generation), and whether it applies
+        bool prewarp = false;
+        double poleA = 0;
+        double poleB = 0;
         std::vector<int> elements;
+
+        bool smooth() const
+        {
+            return law == Law::Tanh;
+        }
     };
 
     // An ideal op amp (a nullor): V(inp) = V(inn), any output current, no input current.
@@ -92,7 +133,7 @@ namespace fminus::circuit
         std::optional<PortDef> port;
         int input = -1;                  // the node it reads (.input's, or the block before's output)
         int output = -1;                 // the node the next block reads, or .output's
-        std::vector<std::string> pots;   // the pots it reads, folded, in .pot order
+        std::vector<std::string> pots;   // the pots it reads (its network's and its OTA's gain), folded, in .pot order
         bool inRegion = false;
         int rateFactor = 1;        // runs at rateFactor x the host's rate
         double designFactor = 1;   // designed at designFactor x that (2/3 with ADAA)
@@ -109,12 +150,30 @@ namespace fminus::circuit
         bool used = false;
     };
 
+    // A law input (.input NAME - kind=cv|current): tick's and step's floats after the signal, sample x scale clamped
+    // to [low, high] where it is used.
+    struct LawInfo
+    {
+        std::string name;   // as written: the parameter's name
+        std::string key;    // folded
+        Input::Kind kind = Input::Kind::Cv;
+        double scale = 1;
+        double low = 0;
+        double high = 1;
+        Loc loc;
+        bool used = false;
+
+        // The geometric middle of the range, or the arithmetic one when it starts at 0 or below.
+        double middle() const;
+    };
+
     // The configuration, and where each choice came from: "the netlist", "Options", "the self-test <key>",
     // "provisional" or "default". The searched dimensions (oversample, adaa, solver, method) are open when neither
     // the Options nor the netlist name them (or the netlist writes auto): Options::chosen fills them when its key is
     // the netlist's, and otherwise the provisional configuration does. The provisional configuration for a 1-port
     // exp-affine block is Phase 0's measured default, the one that meets the report's targets (T1-T4) on both of its
-    // examples' full stress sets: 8x, IIR halfbands, plain omega3 + 2 Newton steps (docs/circuits.md).
+    // examples' full stress sets: 8x, IIR halfbands, plain omega3 + 2 Newton steps (docs/circuits.md); for a smooth-
+    // monotone (OTA) port it is 2x, the previous step's v + 2 Newton steps.
     struct Config
     {
         int oversample = 8;
@@ -124,6 +183,8 @@ namespace fminus::circuit
         bool adaa = false;
         int channels = 1;
         Method method = Method::Tr;
+        bool prewarp = false;   // .prewarp: an OTA's cutoff law prewarped
+        bool otas = false;      // the ports are OTAs: configText names .prewarp
         std::string oversampleFrom = "default";
         std::string halfbandFrom = "default";
         std::string regionFrom = "default";
@@ -131,6 +192,7 @@ namespace fminus::circuit
         std::string adaaFrom = "default";
         std::string channelsFrom = "default";
         std::string methodFrom = "default";
+        std::string prewarpFrom = "default";
         // Which searched dimensions are open (the self-test's to choose); none for a netlist without a port.
         bool oversampleOpen = false;
         bool adaaOpen = false;
@@ -153,7 +215,9 @@ namespace fminus::circuit
         std::vector<Node> nodes;   // [0] is ground
         Config config;
         std::vector<PotInfo> pots;   // in .pot order
+        std::vector<LawInfo> laws;   // in .input order
         std::vector<Block> blocks;   // in chain order
+        bool smooth = false;         // its ports are OTAs (the SM family); otherwise diodes (EA), or none
         int regionFirst = -1;        // the oversampled run of blocks, chain indices; -1: none
         int regionLast = -1;
         int inputNode = 0;
@@ -174,6 +238,15 @@ namespace fminus::circuit
 
     // A pot's value by folded name, from a point of potGrid (or the defaults).
     double potValue(const Plan& plan, const std::vector<double>& point, const std::string& key);
+
+    // An OTA port's gain, amps, at `pots` (a point as potGrid's) and `laws` (each law input's value, in plan.laws'
+    // order, clamped to its range as tick clamps it; empty: each at its low end). A constant gain is its value.
+    double gainAt(const Plan& plan, const PortDef& port, const std::vector<double>& pots,
+                  const std::vector<double>& laws);
+
+    // A prewarped gain (.prewarp on, docs/circuits.md): g' with a + b g' = sign(a + b g) 2 fs' tan(w), w = |a + b g| /
+    // (2 fs') below 1.5, at the design rate fs'; the same arithmetic as the emitted code's, in double.
+    double prewarped(const PortDef& port, double g, double designRate);
 
     // The plan, or nothing when the netlist has errors (in `messages`).
     std::optional<Plan> plan(const Netlist& netlist, const Options& options, std::string_view fileName,

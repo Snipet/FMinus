@@ -1,7 +1,8 @@
 // src/circuit/Search.h: the self-test's arithmetic (Circuit.h's selfTest; report §2, §3.2, §6): the stress matrix (its
 // points and signals, and the units, one of each), the double references a unit is measured against, a unit's gates
 // (T1-T4) from the emitted module's output, their reduction into a Verdict, the candidates of the open dimensions in
-// the report's cost-model order, the ordered search, the no-configuration choice, and the step budget. No LLVM: what
+// the report's cost-model order (the exp-affine row and the smooth-monotone one), the ordered search, the
+// no-configuration choice, and the step budget. No LLVM: what
 // compiles and runs a candidate is src/api/CircuitSelfTest.cpp, which hands this file the samples it ran.
 #pragma once
 
@@ -22,6 +23,11 @@ namespace fminus::circuit
     // The gates (report §2): T1 and T2 at most -60 dB, T3 within 0.5 dB (the user's ruling: H1 and H3).
     inline constexpr double kGateDb = -60;
     inline constexpr double kResponseDb = 0.5;
+    // T3's H3 counts within 100 dB of H1 (Phase 0's rule) and at least 1e-6 of the input sine's amplitude (-120 dB):
+    // below that, float's own rounding (about -140 dB of the circuit's largest signals, filtered by it) is a
+    // measurable part of it, and a filter's H3 there (an OTA low-pass's at 3 kHz with its cutoff at 83 Hz, -160 dB) is
+    // not a response anyone hears.
+    inline constexpr double kH3FloorDb = -120;
     // The no-configuration cap (report §6.5): 4 % of a core a channel at 48 kHz, in model cycles a host sample.
     inline constexpr double kCostCap = 3500;
     // The budget when SelfTestOptions::budget is 0, in steps.
@@ -43,10 +49,13 @@ namespace fminus::circuit
         }
     };
 
-    // A point of the matrix: every pot's value (plan.pots' order), and how the notes name it ("drive 1").
+    // A point of the matrix: every pot's value (plan.pots' order), every law input's (plan.laws' order; each at its
+    // low end, middle or high end, lawLevels' 0, 1 or 2), and how the notes name it ("drive 1", "iabc 0.000141").
     struct StressPoint
     {
         std::vector<double> pots;
+        std::vector<double> laws;
+        std::vector<int> lawLevels;
         std::string label;
     };
 
@@ -58,15 +67,18 @@ namespace fminus::circuit
             Sine,
             Sweep,
             Noise,
+            Saw,         // band-limited, on an odd bin (law inputs only: a synth's stress)
+            Modulated,   // a sine at L with law input `law` moving +-2 octaves at 37 Hz around its middle
         };
 
-        std::string name;   // "2.2 V, 3012 Hz", "sweep at 4.5 V"
+        std::string name;   // "2.2 V, 3012 Hz", "sweep at 4.5 V", "996 Hz at 5 V, iabc +-2 octaves at 37 Hz"
         Kind kind = Kind::Sine;
         double amp = 0;
         int bin = 0;
+        int law = -1;            // Modulated: which law input moves (plan.laws' index)
         bool overload = false;   // 2.2 L: T4 only
         bool t1 = true;          // measured on T1
-        bool t2 = false;         // on T2 (sines up to L), against the 64x reference
+        bool t2 = false;         // on T2 (sines up to L, and the saw), against the 64x reference
         bool t3 = false;         // on T3 (sines up to L, on bins 85 and 257)
     };
 
@@ -76,6 +88,8 @@ namespace fminus::circuit
         StressShape shape;
         double level = 1;          // L, volts
         std::string levelFrom;     // ".target level" or ".input's scale"
+        double inputScale = 1;     // volts a sample, in and out (T3's H3 floor compares them in volts)
+        double outputScale = 1;
         int upstream = 0;          // the blocks before the region, which T1's input runs through (regionInput)
         std::vector<StressPoint> points;
         std::vector<StressSignal> signals;
@@ -97,16 +111,27 @@ namespace fminus::circuit
 
         // "2.2 V, 3012 Hz, drive 1"
         std::string where(int unit) const;
+
+        // Whether the unit is measured: a modulated signal only at the points where its law input is at its middle
+        // (around which it moves); every other unit.
+        bool runs(int unit) const;
     };
 
-    // The plan's matrix (report §2): the pots the region and the blocks before it read, at 0, 0.5 and 1 (with three
-    // axes or fewer the full grid; otherwise each alone, the others at their defaults, then all low and all high);
-    // sines at L/15, L/4.5, L/2.25, L and 2.2 L on the shape's bins, a 20 Hz-20 kHz log sweep and band-limited noise
-    // at L. L is .target level, else .input's scale (full scale).
+    // The plan's matrix (report §2): the axes are the pots the region and the blocks before it read, at 0, 0.5 and 1,
+    // and the law inputs, at their low end, middle (geometric; arithmetic when the range starts at 0) and high end
+    // (with three axes or fewer the full grid; otherwise each alone, the others at their defaults (a law input at its
+    // middle), then all low and all high); sines at L/15, L/4.5, L/2.25, L and 2.2 L on the shape's bins, a 20 Hz-20
+    // kHz log sweep and band-limited noise at L; with law inputs, a synth's too: a band-limited saw at L on the first
+    // bin (105 Hz), and for each law input a 996 Hz sine at L with that input moving +-2 octaves at 37 Hz around its
+    // middle (linearly over its range when it starts at 0). L is .target level, else .input's scale (full scale).
     StressMatrix stressMatrix(const Plan& plan, const StressShape& shape = {});
 
     // A unit's signal at m times the host rate, n samples.
     std::vector<double> signalSamples(const StressMatrix& matrix, const StressSignal& signal, int m, std::size_t n);
+
+    // A unit's law inputs at m times the host rate, n samples, each host sample's value held over its m: law L of
+    // sample i at [i * laws + L] (the runners' law_ buffer). The point's values, or the modulated input's motion.
+    std::vector<double> lawSamples(const Plan& plan, const StressMatrix& matrix, int unit, int m, std::size_t n);
 
     // What stops a reference: polled every 4096 steps.
     using Stop = std::function<bool()>;
@@ -218,14 +243,16 @@ namespace fminus::circuit
     };
 
     // The report's §3.2 model, in cycles a host sample: each region block times its rate (a port block: p, 10 + 2 a
-    // state; the guess, omega 65 or the previous 5; each Newton step, 70 for a diode pair; ADAA's tail, 57; the
-    // state update, 5. A linear block: 5 + 3 a state), each block outside the region at 1x, and 12 for each sample
-    // a halfband stage runs at its high rate, up and down together.
+    // state; the guess, omega 65 or the previous 5; each Newton step, 70 for a diode pair, 60 for an OTA's tanh;
+    // ADAA's tail, 57 for an exp-affine law, 100 for tanh's log cosh; the state update, 5. A linear block: 5 + 3 a
+    // state), each block outside the region at 1x, and 12 for each sample a halfband stage runs at its high rate, up
+    // and down together.
     double modelCost(const Plan& plan, int oversample, bool adaa, const Solver& solver);
 
-    // The candidates of the plan's open dimensions (report §6.2; an exp-affine port: 1, 2, 4 and 8x, ADAA off and on,
-    // omega3 + 1 or 2 Newton steps), the pinned ones at the plan's values, cheapest first by modelCost; candidates
-    // within 5 % of the cheapest of their group go ADAA first, then fewer steps.
+    // The candidates of the plan's open dimensions (report §6.2: an exp-affine port's 1, 2, 4 and 8x, ADAA off and on,
+    // omega3 + 1 or 2 Newton steps; a smooth-monotone port's (an OTA's) 1, 2 and 4x, ADAA off and on, the previous
+    // step's v + 1, 2 or 3), the pinned ones at the plan's values, cheapest first by modelCost; candidates within 5 % of
+    // the cheapest of their group go ADAA first, then fewer steps.
     std::vector<Candidate> candidates(const Plan& plan);
 
     // candidates()'s order on any list: by cost, then within 5 % of the cheapest of a group, ADAA first, then fewer

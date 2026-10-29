@@ -4,12 +4,14 @@
 #include "circuit/Emit.h"
 
 #include "circuit/Halfbands.h"
+#include "circuit/Laws.h"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
 #include <format>
+#include <functional>
 #include <map>
 #include <stdexcept>
 
@@ -301,15 +303,8 @@ namespace fminus::circuit
 
     namespace
     {
-        // omega3's breakpoints and cubic (D'Angelo, Gabrielli, Turchet, DAFx-19), as adaa.cpp has them; ln 81, the
-        // audio taper's (81^x - 1) / 80 as exp; ADAA's |dp| below which the mean is the midpoint's.
-        constexpr double kOmegaLow = -3.341459552768620;
-        constexpr double kOmegaA = -1.314293149877800e-3;
-        constexpr double kOmegaB = 4.775931364975583e-2;
-        constexpr double kOmegaC = 3.631952663804445e-1;
-        constexpr double kOmegaD = 6.313183464296682e-1;
+        // ln 81, the audio taper's (81^x - 1) / 80 as exp (the laws' constants are Laws.cpp's).
         constexpr double kLn81 = 4.394449154672439;
-        constexpr double kAdaaEpsilon = 1e-5;
     } // namespace
 
     // ---- a block's coefficients -------------------------------------------------------------------------------------
@@ -455,6 +450,8 @@ namespace fminus::circuit
              c.solverFrom},
             {std::string(".method ") + (c.method == Method::Tr ? "tr" : "bdf2"), c.methodFrom},
         };
+        if (c.otas || c.prewarpFrom != "default")
+            items.push_back({std::string(".prewarp ") + (c.prewarp ? "on" : "off"), c.prewarpFrom});
         if (c.channels != 1 || c.channelsFrom != "default")
             items.push_back({".channels " + std::to_string(c.channels), c.channelsFrom});
         // grouped by where they came from, in the order of precedence
@@ -579,7 +576,8 @@ namespace fminus::circuit
                     if (!adaaBlock(b))
                         continue;
                     fields.emplace_back("p_" + b.port->name, 0);
-                    fields.emplace_back("c_" + b.port->name, 0);
+                    for (const LawField& f : adaaFields(*b.port))
+                        fields.emplace_back(f.name, 0);
                     if (usesInput(i))
                         fields.emplace_back("uo_" + blocks[i].system.sources[0].name, 0);
                 }
@@ -603,7 +601,7 @@ namespace fminus::circuit
             bool movesPortCurve(std::size_t i) const
             {
                 const Block& b = plan.blocks[i];
-                return adaaBlock(b) && !b.pots.empty() &&
+                return adaaBlock(b) && !b.port->smooth() && !b.pots.empty() &&
                        coefficient(i, "ka_" + b.port->name).kind == Val::Kind::Var;
             }
 
@@ -615,6 +613,73 @@ namespace fminus::circuit
                         return v;
                 }
                 return Val();
+            }
+
+            // A pot's name, by its folded key.
+            std::string potName(const std::string& key) const
+            {
+                for (const PotInfo& p : plan.pots)
+                {
+                    if (p.key == key)
+                        return p.name;
+                }
+                return key;
+            }
+
+            // An OTA's gain as FMinus text: its pots spelled by `pot`, its law inputs as l_<name> (tick's and step's
+            // clamped values); prewarped through pw<N>_ when .prewarp applies to it.
+            std::string gainText(const Block& b, const std::function<std::string(const std::string&)>& pot) const
+            {
+                const PortDef& port = *b.port;
+                std::string text = port.gain ? printExpr(*port.gain,
+                                                         [&](const std::string& key)
+                                                         {
+                                                             for (const LawInfo& l : plan.laws)
+                                                             {
+                                                                 if (l.key == key)
+                                                                     return "l_" + l.name;
+                                                             }
+                                                             return pot(key);
+                                                         })
+                                             : literal(port.gainValue);
+                if (port.prewarp)
+                    text = "pw" + std::to_string(b.index) + "_(" + text + ")";
+                return text;
+            }
+
+            // Block i's law's operands: its constants as fields or literals (a pair's when K is a constant), its gain.
+            LawOperands operands(std::size_t i) const
+            {
+                LawOperands o;
+                const Block& b = plan.blocks[i];
+                o.type = type;
+                o.solver = plan.config.solver;
+                o.adaa = adaaBlock(b);
+                if (!b.port)
+                    return o;
+                const std::string& P = b.port->name;
+                o.port = P;
+                o.ka = operandText(coefficient(i, "ka_" + P));
+                o.kb = operandText(coefficient(i, "kb_" + P));
+                o.kc = operandText(coefficient(i, "kc_" + P));
+                const Val lna = coefficient(i, "lna_" + P);
+                o.plusLna = lna.kind == Val::Kind::Const && lna.c < 0 ? " - " + literal(-lna.c) : " + " + operandText(lna);
+                o.kd = operandText(coefficient(i, "kd_" + P));
+                o.g = gainField(b) ? "g_" + P : literal(b.port->gainValue);
+                return o;
+            }
+
+            // Whether an OTA's gain is a field: it moves (with pots, set's; with law inputs, each sample's), or is
+            // prewarped (init's, at the rate).
+            static bool gainField(const Block& b)
+            {
+                return b.port && b.port->smooth() && (b.port->gain.has_value() || b.port->prewarp);
+            }
+
+            // Whether an OTA's gain reads law inputs (tick and step compute it, every host sample).
+            static bool lawGain(const Block& b)
+            {
+                return b.port && b.port->smooth() && !b.port->gainLaws.empty();
             }
 
             // Whether a readout or a state of block i reads its input (ADAA then keeps it a step).
@@ -699,6 +764,11 @@ namespace fminus::circuit
             void step();
             void tick();
             void guard();
+            std::string regionCall(const std::string& x) const;
+            std::string lawParameters() const;
+            void lawLines();
+            bool hasLawGains() const;
+            void prewarpMethods();
         };
 
         void Writer::header()
@@ -721,7 +791,25 @@ namespace fminus::circuit
                         ++stateCount;
                     }
                 }
-                if (b.port)
+                if (b.port && b.port->smooth())
+                {
+                    ++portCount;
+                    const std::string gain =
+                        b.port->gain ? printExpr(*b.port->gain,
+                                                 [&](const std::string& key)
+                                                 {
+                                                     for (const LawInfo& l : plan.laws)
+                                                     {
+                                                         if (l.key == key)
+                                                             return l.name;
+                                                     }
+                                                     return potName(key);
+                                                 })
+                                     : engineering(b.port->gainValue, "A");
+                    ports += (ports.empty() ? "" : "; ") + b.port->parts + ": an OTA, g tanh(v / 2 Vt), 2 Vt " +
+                             engineering(b.port->nvt, "V") + " at 27 C, g = " + gain;
+                }
+                else if (b.port)
                 {
                     ++portCount;
                     ports += (ports.empty() ? "" : "; ") + b.port->parts + ": 2 Is sinh(v / N Vt), Is " +
@@ -757,7 +845,11 @@ namespace fminus::circuit
                     const std::string across = b.port->cathode == 0 ? "V(" + an + ")"
                                                : b.port->anode == 0 ? "-V(" + ca + ")"
                                                                     : "V(" + an + ") - V(" + ca + ")";
-                    text += "port " + b.port->parts + " at " + across + "; at " + rateText(b);
+                    text += "port " + b.port->parts + " at " + across;
+                    if (b.port->form == PortDef::Form::I)
+                        text += ", its current from " + plan.nodes[static_cast<std::size_t>(b.port->from)].name +
+                                " to " + plan.nodes[static_cast<std::size_t>(b.port->to)].name;
+                    text += "; at " + rateText(b);
                     if (adaaBlock(b))
                         text += ", designed at " + rateText(b) + " 2/3 (ADAA)";
                 }
@@ -856,10 +948,33 @@ namespace fminus::circuit
                 if (!adaaBlock(b))
                     continue;
                 line("    " + type + " p_" + p + ";", "ADAA: the port's open-circuit voltage at the last step", 31);
-                line("    " + type + " c_" + p + ";", "ADAA: 2 cosh(v_" + p + " / N Vt)", 31);
+                for (const LawField& f : adaaFields(*b.port))
+                    line("    " + (f.vector ? type : std::string("float")) + " " + f.name + ";", f.note, 31);
                 if (usesInput(i))
                     line("    " + type + " uo_" + blocks[i].system.sources[0].name + ";",
                          "ADAA: block " + std::to_string(b.index) + "'s input a step earlier", 31);
+            }
+            for (const Block& b : plan.blocks)
+            {
+                if (!gainField(b))
+                    continue;
+                const std::string& p = b.port->name;
+                at = portLine(b);
+                line("    float g_" + p + ";",
+                     b.port->parts + "'s gain, amps: " +
+                         (lawGain(b) ? std::string("each host sample's") : b.port->gain ? "set's" : "init's") +
+                         (b.port->prewarp ? ", prewarped" : ""),
+                     31);
+                if (b.port->prewarp)
+                {
+                    line("    float pws_" + p + ";", "prewarp: 2 fs', the rate its block is designed at, twice", 31);
+                    line("    float pwk_" + p + ";", "1 / (2 fs')", 31);
+                }
+                if (lawGain(b))
+                {
+                    for (const std::string& key : b.port->gainPots)
+                        line("    float pv_" + potName(key) + ";", "pot " + potName(key) + ", clamped, for tick", 31);
+                }
             }
             first = true;
             for (const Block& b : plan.blocks)
@@ -954,6 +1069,20 @@ namespace fminus::circuit
                         line("        g2_" + br.ident + " = 2 * gc_" + br.ident + ";");
                 }
             }
+            for (const Block& b : plan.blocks)
+            {
+                if (!b.port || !b.port->prewarp)
+                    continue;
+                const std::string& P = b.port->name;
+                const std::string fs = (b.rateFactor == 1 ? std::string("rate") : std::to_string(b.rateFactor) + " rate") +
+                                       (b.designFactor != 1 ? " 2/3" : "");
+                line("        pws_" + P + " = " + literal(2 * b.rateFactor * b.designFactor) + " * rate;",
+                     "prewarp: 2 fs', fs' = " + fs);
+                line("        pwk_" + P + " = 1 / pws_" + P + ";");
+                if (!b.port->gain)
+                    line("        g_" + P + " = " + gainText(b, [](const std::string& k) { return k; }) + ";",
+                         b.port->parts + "'s gain, prewarped at this rate");
+            }
             for (std::size_t i = 0; i < plan.blocks.size(); ++i)
             {
                 if (!plan.blocks[i].pots.empty() || blocks[i].lines.empty())
@@ -1017,7 +1146,8 @@ namespace fminus::circuit
                 if (!adaaBlock(b))
                     continue;
                 line("        p_" + p + " = 0;");
-                line("        c_" + p + " = 2;");
+                for (const LawField& f : adaaFields(*b.port))
+                    line("        " + f.name + " = " + f.clear + ";");
                 if (usesInput(i))
                     line("        uo_" + blocks[i].system.sources[0].name + " = 0;");
             }
@@ -1092,6 +1222,15 @@ namespace fminus::circuit
                 line("        " + l);
             for (const std::string& l : blocks[i].lines)
                 line("        " + l);
+            if (gainField(b) && b.port->gain && !lawGain(b))
+                line("        g_" + P + " = " + gainText(b, [&](const std::string& k) { return potName(k); }) + ";",
+                     b.port->parts + "'s gain, amps" + (b.port->prewarp ? ", prewarped" : ""));
+            if (lawGain(b))
+            {
+                for (const std::string& key : b.port->gainPots)
+                    line("        pv_" + potName(key) + " = " + potName(key) + ";",
+                         "for " + b.port->parts + "'s gain, which tick computes");
+            }
             if (shift)
             {
                 // ADAA's mean pairs (v_P, p_P) with the next step's (v, p) on one curve, p = v + 2 ka sinh(v / N Vt):
@@ -1132,25 +1271,16 @@ namespace fminus::circuit
                     rText.push_back(adaa ? "xa_" + src.name.substr(2) : src.name);
                     break;
                 case System::Source::Kind::Port:
+                    // a diode pair's v (ADAA: its mean, vb); an OTA's current (its mean with ADAA), ib
                     pText.push_back("v");
-                    rText.push_back(adaa ? "vb" : "v");
+                    rText.push_back(s.iForm ? "ib" : adaa ? "vb" : "v");
                     break;
                 }
             }
+            const LawOperands law = operands(i);
             if (b.port)
             {
                 const std::string& P = b.port->name;
-                const std::string ivt = literal(1 / b.port->nvt);
-                const std::string nvt = literal(b.port->nvt);
-                // The port's constants, each a field, or a literal when K is a constant (a block with no capacitor
-                // and no pot): " + lna" with its sign
-                const std::string ka = operandText(coefficient(i, "ka_" + P));
-                const std::string kb = operandText(coefficient(i, "kb_" + P));
-                const std::string kc = operandText(coefficient(i, "kc_" + P));
-                const Val lnaVal = coefficient(i, "lna_" + P);
-                const std::string plusLna = lnaVal.kind == Val::Kind::Const && lnaVal.c < 0
-                                                ? " - " + literal(-lnaVal.c)
-                                                : " + " + operandText(lnaVal);
                 std::vector<std::pair<Val, std::string>> pTerms;
                 for (std::size_t k = 0; k < s.sources.size(); ++k)
                 {
@@ -1158,49 +1288,12 @@ namespace fminus::circuit
                         pTerms.emplace_back(coefficient(i, "p_" + P + "_by_" + s.sources[k].name), pText[k]);
                 }
                 line("        const " + T + " p = " + linear(pTerms) + ";");
-                const Solver& solver = plan.config.solver;
-                if (solver.guess == Solver::Guess::Omega)
-                {
-                    line("        const " + T + " q = fabsf(p);",
-                         "omega3 (D'Angelo et al. 2019): the conducting diode alone");
-                    line("        const " + T + " arg = (q + " + ka + ") * " + ivt + plusLna + ";");
-                    line("        const " + T + " w = arg <= " + literal(kOmegaLow) + " ? 0");
-                    line("                      : arg < 8 ? ((" + literal(kOmegaA) + " * arg + " + literal(kOmegaB) +
-                         ") * arg + " + literal(kOmegaC) + ") * arg + " + literal(kOmegaD));
-                    line("                                : arg - logf(fmaxf(arg, 8));");
-                    line("        " + T + " v = q + " + ka + " - " + nvt + " * w;");
-                    line("        v = p < 0 ? -v : v;");
-                    line("        const " + T + " lo = fminf(p, 0);");
-                    line("        const " + T + " hi = fmaxf(p, 0);");
-                    if (solver.steps == 0)
-                        line("        v = fminf(fmaxf(v, lo), hi);", "no Newton step: the guess, in the bracket");
-                }
-                else
-                {
-                    line("        const " + T + " lo = fminf(p, 0);");
-                    line("        const " + T + " hi = fmaxf(p, 0);");
-                    line("        " + T + " v = fminf(fmaxf(v_" + P + ", lo), hi);",
-                         "the previous step's solution, in the bracket");
-                }
-                for (int k = 1; k <= solver.steps; ++k)
-                {
-                    line("        {", std::format("Newton step {} of {}, kept in the bracket", k, solver.steps));
-                    line("            const " + T + " e = expf(v * " + ivt + ");");
-                    line("            const " + T + " ei = 1 / e;");
-                    line("            const " + T + " f = v - p + " + ka + " * (e - ei);");
-                    line("            const " + T + " d = 1 + " + kb + " * (e + ei);");
-                    line("            v = fminf(fmaxf(v - f / d, lo), hi);");
-                    line("        }");
-                }
+                for (const LawLine& l : solveText(*b.port, law))
+                    line("        " + l.text, l.note);
                 if (adaa)
                 {
-                    line("        const " + T + " ec = expf(v * " + ivt + ");",
-                         "ADAA: the mean of G over [p(n-1), p(n)], closed form");
-                    line("        const " + T + " c = ec + 1 / ec;");
-                    line("        const " + T + " dp = p - p_" + P + ";");
-                    line("        const " + T + " vm = 0.5f * (v + v_" + P + ");");
-                    line("        const " + T + " vb = fabsf(dp) > " + literal(kAdaaEpsilon) + " ? vm + ((v - v_" + P +
-                         ") * (0.5f * (p + p_" + P + ") - vm) - " + kc + " * (c - c_" + P + ")) / dp : vm;");
+                    for (const LawLine& l : adaaText(*b.port, law))
+                        line("        " + l.text, l.note);
                 }
             }
             const bool input = adaa && usesInput(i);
@@ -1257,7 +1350,7 @@ namespace fminus::circuit
                 const std::string ident = src.name.substr(2);
                 const Branch& br = b.branches[static_cast<std::size_t>(src.branch)];
                 std::string note;
-                if (vc == "v" || vc == "vb")
+                if ((vc == "v" || vc == "vb") && !s.iForm)
                     note = br.part + " across the port: its voltage is v";
                 else
                     note = br.part + "'s voltage is " + s.readouts[static_cast<std::size_t>(readout)].label;
@@ -1269,11 +1362,8 @@ namespace fminus::circuit
             {
                 const std::string& P = b.port->name;
                 line("        v_" + P + " = v;");
-                if (adaa)
-                {
-                    line("        p_" + P + " = p;");
-                    line("        c_" + P + " = c;");
-                }
+                for (const LawLine& l : storeText(*b.port, law))
+                    line("        " + l.text, l.note);
                 if (input)
                     line("        uo_" + s.sources[0].name + " = " + in + ";");
             }
@@ -1281,24 +1371,99 @@ namespace fminus::circuit
             line("    }");
         }
 
+        // The region's blocks on `x`: b3(b2(x)).
+        std::string Writer::regionCall(const std::string& x) const
+        {
+            std::string call = x;
+            for (int i = plan.regionFirst; i <= plan.regionLast; ++i)
+                call = "b" + std::to_string(i + 1) + "(" + call + ")";
+            return call;
+        }
+
+        // ", float iabc": the law inputs, tick's and step's parameters after the signal (floats with .channels 2 too,
+        // broadcast where they meet a float2).
+        std::string Writer::lawParameters() const
+        {
+            std::string text;
+            for (const LawInfo& l : plan.laws)
+                text += ", float " + l.name;
+            return text;
+        }
+
+        // The law inputs, clamped to their ranges (fmaxf first: a NaN is the low end), and the gains of the OTAs that
+        // read them: what tick does once a host sample, and step once a call, before the region's blocks run. The
+        // gains are held over a host sample's region steps.
+        void Writer::lawLines()
+        {
+            if (!hasLawGains())
+                return;
+            for (const LawInfo& l : plan.laws)
+            {
+                if (!l.used)
+                    continue;
+                const std::string x = l.scale == 1 ? l.name : l.name + " * " + literal(l.scale);
+                line("        const float l_" + l.name + " = fminf(fmaxf(" + x + ", " + literal(l.low) + "), " +
+                         literal(l.high) + ");",
+                     ".input " + l.name + ", clamped to " + std::format("{:g}:{:g}", l.low, l.high) +
+                         " (a NaN is its low end)");
+            }
+            for (const Block& b : plan.blocks)
+            {
+                if (lawGain(b))
+                    line("        g_" + b.port->name + " = " +
+                             gainText(b, [&](const std::string& k) { return "pv_" + potName(k); }) + ";",
+                         b.port->parts + "'s gain, amps" + (b.port->prewarp ? ", prewarped" : ""));
+            }
+        }
+
+        bool Writer::hasLawGains() const
+        {
+            return std::any_of(plan.blocks.begin(), plan.blocks.end(), [](const Block& b) { return lawGain(b); });
+        }
+
+        void Writer::prewarpMethods()
+        {
+            for (const Block& b : plan.blocks)
+            {
+                if (!b.port || !b.port->prewarp)
+                    continue;
+                const PortDef& port = *b.port;
+                const std::string& P = port.name;
+                const std::string a = literal(port.poleA);
+                at = portLine(b);
+                line("    float pw" + std::to_string(b.index) + "_(float g_) [[clang::nonblocking]]",
+                     port.parts + "'s gain prewarped (.prewarp on): the trapezoidal rule's pole at the analog one's");
+                line("    {");
+                const std::string plusB = (port.poleB < 0 ? " - " : " + ") + literal(std::fabs(port.poleB));
+                const std::string minusA = (port.poleA < 0 ? " + " : " - ") + literal(std::fabs(port.poleA));
+                line("        const float pole_ = " + a + plusB + " * g_;",
+                     std::format("its small-signal pole, a + b g rad/s (a = {:.7g}, b = {:.7g})", port.poleA,
+                                 port.poleB));
+                line("        const float w_ = fminf(fabsf(pole_) * pwk_" + P + ", 1.5f);",
+                     "|pole| / 2 fs', below 1.5 (tan's pole is at pi / 2)");
+                line("        const float t_ = pws_" + P + " * tanf(w_);");
+                line("        return ((pole_ < 0 ? -t_ : t_)" + minusA + ") * " + literal(1 / port.poleB) + ";",
+                     "g' with a + b g' = sign(pole) 2 fs' tan(w)");
+                line("    }");
+            }
+        }
+
         void Writer::step()
         {
             if (plan.regionFirst < 0)
                 return;
             const std::string& in = plan.inputName;
-            std::string call = in;
-            for (int i = plan.regionFirst; i <= plan.regionLast; ++i)
-                call = "b" + std::to_string(i + 1) + "(" + call + ")";
             const std::string region = plan.regionFirst == plan.regionLast
                                            ? "block " + std::to_string(plan.regionFirst + 1)
                                            : std::format("blocks {} to {}", plan.regionFirst + 1, plan.regionLast + 1);
             const std::string rate = plan.config.oversample == 1 ? std::string("the host rate")
                                                                  : std::to_string(plan.config.oversample) + " rate";
             at = inputLine();
-            line("    " + type + " step(" + type + " " + in + ") [[clang::nonblocking]]",
+            line("    " + type + " step(" + type + " " + in + lawParameters() + ") [[clang::nonblocking]]",
                  "one step of the oversampled region (" + region + "), at " + rate);
             line("    {");
-            line("        return " + call + ";");
+            lawLines();
+            line("        return " + regionCall(in) + ";");
             line("    }");
         }
 
@@ -1309,11 +1474,18 @@ namespace fminus::circuit
             const IoLine& input = *plan.netlist.input;
             const IoLine& output = *plan.netlist.output;
             at = inputLine();
-            line("    " + T + " tick(" + T + " " + in + ") [[clang::nonblocking]]",
+            line("    " + T + " tick(" + T + " " + in + lawParameters() + ") [[clang::nonblocking]]",
                  std::format("one host sample: .input {} (1.0 = {:g} V) to .output {}", input.name, input.scale,
                              output.name));
             line("    {");
             guard();
+            lawLines();
+            // with law inputs, the region's blocks are called here, the gains held over its steps (step would
+            // compute them again)
+            auto stepOf = [&](const std::string& x)
+            {
+                return hasLawGains() ? regionCall(x) : "step(" + x + ")";
+            };
             std::vector<std::string> body;
             std::string current = in;
             int z = 0;
@@ -1335,7 +1507,7 @@ namespace fminus::circuit
                 if (stages == 0)
                 {
                     const std::string name = fresh();
-                    body.push_back("const " + T + " " + name + " = step(" + current + ");");
+                    body.push_back("const " + T + " " + name + " = " + stepOf(current) + ";");
                     current = name;
                 }
                 else
@@ -1358,7 +1530,7 @@ namespace fminus::circuit
                     for (std::size_t k = 0; k < values.size(); ++k)
                     {
                         ys.push_back("y" + std::to_string(k));
-                        body.push_back("const " + T + " " + ys.back() + " = step(" + values[k] + ");");
+                        body.push_back("const " + T + " " + ys.back() + " = " + stepOf(values[k]) + ";");
                     }
                     for (int s = stages; s >= 1; --s)
                     {
@@ -1464,6 +1636,7 @@ namespace fminus::circuit
             w.blockSet(i);
         for (std::size_t i = 0; i < plan.blocks.size(); ++i)
             w.blockStep(i);
+        w.prewarpMethods();
         if (plan.regionFirst >= 0)
         {
             w.at = w.titleLine();

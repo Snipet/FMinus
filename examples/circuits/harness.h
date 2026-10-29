@@ -60,10 +60,10 @@ namespace circuits
         const fminus::Program::Module* module = nullptr;
         void (*init)(void*, float) = nullptr;
         void (*clear)(void*) = nullptr;
-        // fm_steps(c, u, law, y, n): y[i] = step(u[i]) (absent without a region, or with .channels 2)
+        // fm_steps(c, u, law, y, n): y[i] = step(u[i], law[i L ...]) (absent without a region, or with .channels 2)
         void (*steps)(void*, const float*, const float*, float*, int) = nullptr;
         // fm_ticks(c, u, law, pots, switches, y, n, start): set(pots[i P ...]) where (start + i) % 16 == 0, then
-        // y[i] = tick(u[i])
+        // y[i] = tick(u[i], law[i L ...])
         void (*ticks)(void*, const float*, const float*, const float*, const int*, float*, int, int) = nullptr;
         // fm_ticks2(c, a, b, law, pots, switches, ya, yb, n, start): the same on (a[i], b[i]) as a float2
         // (.channels 2)
@@ -76,6 +76,12 @@ namespace circuits
             return static_cast<int>(plan.pots.size());
         }
 
+        // tick's and step's floats after the signal
+        int laws() const
+        {
+            return static_cast<int>(plan.laws.size());
+        }
+
         // set(pots...), with 0 to 3 pots.
         void callSet(void* self, std::span<const double> pots) const;
     };
@@ -86,24 +92,30 @@ namespace circuits
                                    std::string& errors, fminus::Program::Math math = fminus::Program::Math::Vector,
                                    const std::string& extra = {});
 
-    // The region's step over u, at the region's rate, from init(48000) and set(pots).
-    std::vector<double> runSteps(const Circuit& c, std::span<const double> u, std::span<const double> pots);
+    // The region's step over u, at the region's rate, from init(48000) and set(pots); with law inputs, `law` holds
+    // laws() values a step (empty: each at its low end).
+    std::vector<double> runSteps(const Circuit& c, std::span<const double> u, std::span<const double> pots,
+                                 std::span<const float> law = {});
 
     // tick over u at 48 kHz from init(48000), the pots held (set on the grid), in calls of `call` samples (0: one
-    // call).
+    // call); `law` as runSteps', a host sample's values each.
     std::vector<double> runTicks(const Circuit& c, std::span<const double> u, std::span<const double> pots,
-                                 int call = 0);
+                                 int call = 0, std::span<const float> law = {});
 
     // The same with the pots a buffer, pots() values a sample.
     std::vector<double> runTicksWith(const Circuit& c, std::span<const double> u, std::span<const float> potBuffer,
-                                     int call = 0);
+                                     int call = 0, std::span<const float> law = {});
+
+    // A law buffer: each of `values` (one a law input) repeated for n samples.
+    std::vector<float> heldLaws(std::span<const double> values, std::size_t n);
 
     // A point of pots (plan.pots' order) with `key` at `value` and the others at their defaults.
     std::vector<double> potsWith(const fc::Plan& plan, const std::string& key, double value);
 
     // The plan's blocks in Holters' form at `rate` (every block there, as a reference chain does), ADAA's 2/3 for a
-    // port block when `adaa`.
-    std::vector<fc::Holters> chainAt(const fc::Plan& plan, std::span<const double> pots, double rate, bool adaa);
+    // port block when `adaa`; an OTA's gain at the law inputs `laws` (empty: each at its low end).
+    std::vector<fc::Holters> chainAt(const fc::Plan& plan, std::span<const double> pots, double rate, bool adaa,
+                                     std::span<const double> laws = {});
 
     // dB of an amplitude ratio.
     double dB(double ratio);

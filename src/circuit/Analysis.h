@@ -1,7 +1,8 @@
 // src/circuit/Analysis.h: the measurements of the report's targets (§2), as adaa.cpp made them: a radix-2 FFT, a long
 // windowed-sinc decimator (so the measuring filter never limits the measurement), the in-band error of one signal
 // against another, the inharmonic energy of a sine's response, its first and third harmonics, and the stress signals:
-// sines on odd FFT bins (report §9.7), a log sweep and band-limited noise. A host rate of 48 kHz throughout.
+// sines on odd FFT bins (report §9.7), a band-limited saw on one, a log sweep and band-limited noise. A host rate of 48
+// kHz throughout.
 #pragma once
 
 #include <complex>
@@ -48,6 +49,11 @@ namespace fminus::circuit
 
     // A log sweep from 20 Hz to 20 kHz over n samples at M x 48 kHz, of amplitude amp.
     std::vector<double> sweep(double amp, int m, std::size_t n);
+
+    // A band-limited saw on bin `bin` of an N-point window at 48 kHz, sampled at M times that, n samples: the series
+    // (2 amp / pi) sum (-1)^(k+1) sin(k w t) / k over the harmonics below 20 kHz (an ideal saw of peak amp, band-limited;
+    // its peak is about 1.09 amp), periodic in the window (N M a power of two).
+    std::vector<double> saw(double amp, int bin, std::size_t window, int m, std::size_t n);
 
     // Noise of peak amp, band-limited to 20 kHz, n samples at M x 48 kHz (n a power of two; periodic in n).
     std::vector<double> noise(double amp, int m, std::size_t n, unsigned seed = 7);

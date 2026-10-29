@@ -1,0 +1,15 @@
+* broken-omega.cir: omega3, the diode's closed form, asked of an OTA (lit errors.test)
+.title Broken
+.input  u    in
+.input  iabc -    kind=current range=10u:2m
+.output y    yb
+.solver omega(1)
+R1   in  a1  100k
+R2   a1  0   220
+R3   yb  a2  100k
+R4   a2  0   220
+G1   0   y   OTA a1 a2 {iabc}
+C1   y   0   1n
+R5   y   0   10meg
+X1   y   yb  yb  opamp
+.end

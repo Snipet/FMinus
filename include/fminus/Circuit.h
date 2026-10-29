@@ -1,6 +1,6 @@
 // include/fminus/Circuit.h: analog circuits as FMinus source. fminus::circuit::generate turns a SPICE-style netlist
-// (a .cir file: resistors, capacitors, antiparallel diode pairs with their .model, ideal op amps, pots, and the
-// directives docs/circuits.md lists) into the text of one FMinus module, which Program::compile compiles like any
+// (a .cir file: resistors, capacitors, antiparallel diode pairs with their .model, OTAs, ideal op amps, pots, law
+// inputs, and the directives docs/circuits.md lists) into the text of one FMinus module, which Program::compile compiles like any
 // other source. It is the circuit compiler of docs/research/analog-circuits/README.md (Phase 1 of its §11, in slices).
 // No LLVM, C++17, as FMinus.h; the host links FMinus::FMinus.
 //
@@ -17,7 +17,8 @@
 //                                a switch ramps
 //   float tick(float u, ...)     one host-rate sample: .input's volts (1.0 = scale volts) to .output's; the law inputs
 //                                (Result::inputs after the first: floats, in .input order, broadcast to float2 with
-//                                .channels 2) follow the signal
+//                                .channels 2) follow the signal, each clamped to its range (a NaN is its low end)
+//                                and held over the host sample's oversampled steps
 //   float step(float u, ...)     one step of the oversampled region, at .oversample times the rate (absent if none)
 //   void clear()                 back to the DC operating point
 // Fields are named after the parts (x_C1: C1's state; v_D1: the voltage across the pair D1|D2). .channels 2 makes
@@ -56,10 +57,12 @@ namespace fminus
         // gates, the candidates or the emitted arithmetic is never taken for this one's.
         inline constexpr int kSelfTestVersion = 1;
 
-        // How a nonlinear port's equation (v + 2 Is K sinh(v / N Vt) = p for a diode pair) is solved each step: a
-        // first guess, then a fixed number of Newton steps, each kept in the bracket [min(0, p), max(0, p)].
-        //   Omega     the closed form of the conducting diode alone (D'Angelo et al.'s omega3): .solver omega(K)
-        //   Previous  the previous step's solution: .solver newton(K) (the report compares it; it fails at hard drive)
+        // How a nonlinear port's equation (v + 2 Is K sinh(v / N Vt) = p for a diode pair, v + kd g tanh(v / 2 Vt) = p
+        // for an OTA) is solved each step: a first guess, then a fixed number of Newton steps, each kept in the
+        // bracket [min(0, p), max(0, p)].
+        //   Omega     the closed form of the conducting diode alone (D'Angelo et al.'s omega3): .solver omega(K); a
+        //             diode's only
+        //   Previous  the previous step's solution: .solver newton(K) (an OTA's; a diode's fails at hard drive)
         struct Solver
         {
             // Where Newton starts.
@@ -164,7 +167,7 @@ namespace fminus
             std::optional<bool> adaa;           // .adaa on|off
             std::optional<int> channels;        // .channels 1 or 2 (default 1)
             std::optional<Method> method;       // .method tr|bdf2 (default tr; bdf2 is not supported yet)
-            std::optional<bool> prewarp;        // .prewarp on|off, an OTA filter's cutoff law (off; on: not yet)
+            std::optional<bool> prewarp;        // .prewarp on|off: an OTA one-pole's cutoff law prewarped (off)
             std::optional<Choice> chosen;       // the self-test's answer: fills the open dimensions when its key is
                                                 // the netlist's (otherwise a note says why it is ignored)
         };

@@ -1,0 +1,36 @@
+* otalp.cir: a synth's two-pole low-pass, two buffered OTA one-poles (LM13700-style), the cutoff set by the OTAs'
+* bias current Iabc, a per-sample law input (the program computes it, through its expo converter)
+* Each stage: the OTA's + input at the signal through a 100k / 220 attenuator, its - input at the stage's own buffered
+* output through another, its current into 1 nF with the OTA's 10 MEG output resistance; an ideal follower buffers it.
+* The pole is a + b Iabc, a = -1 / (10 MEG 1 nF) = -100 rad/s and b = -att / (2 Vt 1 nF), att = 220 / 100220: 83 Hz
+* at 10 uA to 13.5 kHz at 2 mA. No resonance (a Phase 2 SVF's), no rails (the macro model has none).
+* The configuration is the self-test's answer, pinned (fminus otalp.cir --self-test without these three lines: 4x,
+* newton(1), candidate 10 of 18; T1 -89.0, T2 -73.2, T3 0.13 dB). 1x and 2x fail T3: the trapezoidal rule's warp of
+* H3 at 9 kHz, 2.3 and 0.53 dB through the two poles; newton(1) at 1x fails T1 at 2 mA.
+.title OtaLp
+.input  u    in   scale=1          ; 1.0 = 1 V
+.input  iabc -    kind=current range=10u:2m
+.output vout y2b
+.oversample 4 iir blocks=auto
+.adaa off
+.solver newton(1)
+.target solver=-60dB alias=-60dB level=5V freq=3k
+* stage 1
+R1   in   a1   100k
+R2   a1   0    220
+R3   y1b  m1   100k
+R4   m1   0    220
+G1   0    y1   OTA a1 m1 {iabc}    ; i = Iabc tanh((V(a1) - V(m1)) / 2 Vt), into y1
+C1   y1   0    1n
+R5   y1   0    10meg
+X1   y1   y1b  y1b  opamp          ; the buffer
+* stage 2
+R6   y1b  a2   100k
+R7   a2   0    220
+R8   y2b  m2   100k
+R9   m2   0    220
+G2   0    y2   OTA a2 m2 {iabc}
+C2   y2   0    1n
+R10  y2   0    10meg
+X2   y2   y2b  y2b  opamp
+.end

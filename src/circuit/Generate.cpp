@@ -41,8 +41,6 @@ namespace fminus::circuit
                 fail("Options::moduleName '" + o.moduleName + "' is not a letter followed by letters and digits");
             if (o.method && *o.method == Method::Bdf2)
                 fail("Options::method bdf2 is not supported yet (Phase 1)");
-            if (o.prewarp && *o.prewarp)
-                fail("Options::prewarp on is not supported yet (Phase 1)");
             if (o.chosen)
             {
                 const Choice& c = *o.chosen;
@@ -173,6 +171,8 @@ namespace fminus::circuit
                 signal.name = p->inputName;
                 signal.scale = p->inputScale;
                 result.inputs.push_back(signal);
+                for (const LawInfo& l : p->laws)
+                    result.inputs.push_back({l.name, l.kind, l.scale, l.low, l.high});
                 const Config& c = p->config;
                 result.configuration = configText(c);
                 result.provisional = c.provisional;

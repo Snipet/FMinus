@@ -1,8 +1,8 @@
 // src/circuit/Netlist.h: the circuit compiler's first stage. A .cir netlist (SPICE's lines: elements, .model cards,
 // comments, continuations and units, plus the directives docs/circuits.md lists) becomes a Netlist, its parts and
 // directives as written, each with its line and column. Also here: Messages, which every stage reports into (errors,
-// warnings and notes, formatted as clang's), the {expressions} over pots, and how a number is printed as an FMinus
-// float literal.
+// warnings and notes, formatted as clang's), the {expressions} over pots and law inputs, and how a number is printed as
+// an FMinus float literal.
 #pragma once
 
 #include "fminus/Circuit.h"
@@ -86,13 +86,14 @@ namespace fminus::circuit
     const char* taperName(Taper taper);
     double taperValue(Taper taper, double x);
 
-    // A {expression} over pots: numbers, pot names, + - * /, unary minus, ( ) and ^ with an integer exponent 0 to 8.
+    // A {expression} over pots and law inputs: numbers, names, + - * /, unary minus, ( ) and ^ with an integer exponent
+    // 0 to 8. A name is a pot's or (in an OTA's gain only) a law input's.
     struct Expr
     {
         enum class Op
         {
             Number,
-            Pot,
+            Name,   // a pot or a law input
             Neg,
             Add,
             Sub,
@@ -103,20 +104,20 @@ namespace fminus::circuit
 
         Op op = Op::Number;
         double value = 0;       // a Number's
-        std::string pot;        // a Pot's name, folded
-        std::string spelling;   // a Pot's name, as written
+        std::string pot;        // a Name's name, folded (a pot's or a law input's)
+        std::string spelling;   // a Name's name, as written
         int exponent = 0;       // a Pow's
         Loc loc;
         std::vector<Expr> args;   // the operands: one for Neg and Pow, two for the others
     };
 
-    // Its value, given each pot's (by folded name).
+    // Its value, given each name's (by folded name).
     double evaluate(const Expr& expr, const std::function<double(const std::string&)>& pot);
 
-    // The folded names of the pots it reads, each once, in the order it first reads them.
+    // The folded names it reads (pots and law inputs), each once, in the order it first reads them.
     std::vector<std::string> potsOf(const Expr& expr);
 
-    // As FMinus text: `pot` spells each pot (by folded name); subexpressions without a pot are folded in double.
+    // As FMinus text: `pot` spells each name (by folded name); subexpressions without a name are folded in double.
     std::string printExpr(const Expr& expr, const std::function<std::string(const std::string&)>& pot);
 
     // An element of the netlist.
@@ -129,16 +130,17 @@ namespace fminus::circuit
             Diode,       // D<name> anode cathode model
             Pot,         // P<name> e1 w e2 value {expr} [taper=...], or P<name> a b value {expr} [taper=...]
             OpAmp,       // X<name> inp inn out opamp
+            Ota,         // G<name> n+ n- OTA nc+ nc- gain|{expr}: i = gain tanh((V(nc+) - V(nc-)) / 2 Vt), n+ to n-
         };
 
         Kind kind = Kind::Resistor;
         std::string name;   // as written: "R1"
         Loc loc;
-        std::vector<std::string> nodes;   // as written
+        std::vector<std::string> nodes;   // as written (an OTA's: n+, n-, nc+, nc-)
         std::vector<Loc> nodeLocs;
-        double value = 0;   // ohms or farads (a pot's whole resistance)
+        double value = 0;   // ohms or farads (a pot's whole resistance), or an OTA's constant gain in amps
         Loc valueLoc;
-        std::optional<Expr> expr;     // a variable resistor's resistance, or a pot's position
+        std::optional<Expr> expr;     // a variable resistor's resistance, a pot's position, or an OTA's gain
         std::optional<Taper> taper;   // a pot's taper=
         Loc taperLoc;
         std::string model;   // a diode's, as written
@@ -164,14 +166,18 @@ namespace fminus::circuit
         std::optional<Taper> taper;
     };
 
-    // A .input or .output line.
+    // A .input or .output line. A law input (.input NAME - kind=cv|current) has no node: it enters an OTA's gain.
     struct IoLine
     {
         std::string name;
-        std::string node;
+        std::string node;   // "-" for a law input
         Loc loc;
         Loc nodeLoc;
         double scale = 1;
+        Input::Kind kind = Input::Kind::Voltage;   // .input's kind=
+        Loc kindLoc;
+        double low = 0;    // a law input's range=lo:hi (cv: 0:1 unless given)
+        double high = 0;
     };
 
     // .target: what examples/circuits checks (the generator only echoes it).
@@ -200,7 +206,8 @@ namespace fminus::circuit
         std::vector<Element> elements;
         std::vector<ModelCard> models;
         std::vector<PotLine> pots;
-        std::optional<IoLine> input;
+        std::optional<IoLine> input;   // the signal: the one voltage .input
+        std::vector<IoLine> laws;      // the law inputs (kind=cv|current), in .input order: tick's floats after it
         std::optional<IoLine> output;
         Setting<int> oversample;
         Setting<Halfband> halfband;
@@ -210,7 +217,7 @@ namespace fminus::circuit
         bool solverBare = false;
         Setting<int> channels;
         Setting<Method> method;   // .method tr|bdf2|auto
-        Setting<bool> prewarp;    // .prewarp on|off
+        Setting<bool> prewarp;    // .prewarp on|off: an OTA's cutoff law prewarped (off: the analog circuit's)
         TargetLine target;
         // The lines a self-test's key reads (Circuit.h's selfTestKey): each logical line up to .end, continuations
         // joined, comments dropped, its tokens lowercased and joined by one space (spaces inside {...} and around
