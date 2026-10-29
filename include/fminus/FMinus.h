@@ -164,6 +164,28 @@ namespace fminus
         using IncludeResolver =
             std::function<std::optional<IncludedFile>(std::string_view name, std::string_view from)>;
 
+        // Which of the program's LLVM IR it keeps as text, chosen when it compiles: for a host that shows what FMinus
+        // made of a program. The text is LLVM's, a module as LLVM prints it (a .ll file), and the same for the same
+        // source and options.
+        //   None       nothing is printed or held, and the program compiles as it would without the option. The
+        //              default.
+        //   Lowered    the IR as the code generator wrote it, set up for this machine (its triple and data layout),
+        //              before any pass, LLVM's or FMinus's, has run (loweredIr).
+        //   Optimised  the IR the JIT generates the machine code from: Lowered after the pipeline at
+        //              Options::optimisation, FMinus's own passes among them. It is what fminus --emit ll prints for
+        //              the same source and options, its file named as Options::fileName (optimisedIr).
+        //   Both       Lowered and Optimised.
+        // To print the optimised IR, compile() runs the optimiser itself, on its calling thread, and the first look-up
+        // of a function then runs only the code generator. A text does not change once compile() has returned, so any
+        // thread may read it while the Program lives.
+        enum class KeepIr
+        {
+            None,
+            Lowered,
+            Optimised,
+            Both,
+        };
+
         struct Options
         {
             int optimisation = 2;                  // -O0 to -O3: LLVM's pipeline at that level, as fminus -O<n>
@@ -196,6 +218,9 @@ namespace fminus
             // starts no pool. A region runs in its caller's floating-point mode on every thread (Denormals::Flush's
             // flush-to-zero too).
             unsigned threads = 0;
+            // Which of the program's LLVM IR to keep as text, for loweredIr() and optimisedIr() (KeepIr, above). None,
+            // the default, prints nothing and holds nothing.
+            KeepIr keepIr = KeepIr::None;
         };
 
         // Compiles `source`. Returns nullptr when it does not compile, with `errors` holding FMinus's messages, one a
@@ -224,6 +249,14 @@ namespace fminus
         // How many lanes a poly float has in this program: Options::polyLanes, or this machine's vector width in
         // floats (4 with NEON or SSE, 8 with AVX2).
         unsigned polyLanes() const;
+
+        // The program's LLVM IR as the code generator wrote it, as text, when Options::keepIr kept it (Lowered or
+        // Both); empty otherwise.
+        const std::string& loweredIr() const;
+
+        // The program's LLVM IR as the JIT generates its machine code from it, optimised, as text, when Options::keepIr
+        // kept it (Optimised or Both); empty otherwise.
+        const std::string& optimisedIr() const;
 
         // Whether a declaration of function `name` is marked [[clang::nonblocking]]. FMinus has then checked that it
         // cannot reach malloc, calloc, free or an external function not marked nonblocking itself, so it may run on

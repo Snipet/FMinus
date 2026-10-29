@@ -80,9 +80,9 @@ TEST_CASE("functions compute what they say", "[codegen]")
   `[pointer]`, `[heap]`, `[effects]`, `[math]` (the math modes and their kernels), `[versions]` (knob versioning and
   flat streams), `[tbaa]`, `[zeroinit]`, `[attributes]` and `[progress]` (the runtime's and libm's attributes, and loop
   progress), `[denormals]`, `[parallel]` (parallel regions, and `[runtime]` among them for the pool on its own),
-  `[circuit]` (the circuit compiler: `CircuitTest.cpp` its netlists, plans, equations, halfbands, reference and
-  analysis; `CircuitEmitTest.cpp` its emitted text, compiled through `fminus::Program`). Add
-  new ones freely.
+  `[ir]` (`Program::Options::keepIr`'s texts), `[circuit]` (the circuit compiler: `CircuitTest.cpp` its netlists,
+  plans, equations, halfbands, reference and analysis; `CircuitEmitTest.cpp` its emitted text, compiled through
+  `fminus::Program`). Add new ones freely.
 - **A hidden test** carries the tags `[.]` and a name: ctest never runs it, and `fminus-tests "[name]"` does.
   `[exhaustive]` runs every float through every math kernel, on every core, against its error bound, in every lane, and
   under flush-to-zero (extending.md, recipe 23): about ten minutes, for after a change to a kernel.
@@ -245,6 +245,7 @@ outputs to agree within 2e-5 of their peak.
 | Did it parse the way I think? | `fminus x.fm --emit ast` |
 | What did my lowering write? | `fminus x.fm -O0` |
 | What did LLVM make of it? | `fminus x.fm` (-O2), `-O3` |
+| What did a host's program become? | `Program::Options::keepIr`: `loweredIr()` and `optimisedIr()`, the second what `fminus x.fm --emit ll` prints with the host's options |
 | What does the CPU run? | `fminus x.fm --emit asm -o -` |
 | What does it return? | `fminus x.fm --run f 1 2` |
 | What did knob versioning do? | `fminus x.fm` against `fminus x.fm --knob-versions 0` |

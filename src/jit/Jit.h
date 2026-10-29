@@ -1,5 +1,6 @@
 // src/jit/Jit.h: ORC's LLJIT set up for FMinus modules. It targets this machine's CPU, optimises every module with
-// LLVM's default pipeline at a chosen level (support/HostTarget.h) and defines the FMinus runtime (runtime/Runtime.h).
+// LLVM's default pipeline at a chosen level (support/HostTarget.h), or takes them optimised already, and defines the
+// FMinus runtime (runtime/Runtime.h).
 //
 // LLJIT compiles lazily, on the thread that looks a symbol up: look up from a background thread, never the audio
 // thread, and hand the address over. Process symbols (libm's sinf for the sin builtin, ...) resolve too; a plugin may
@@ -28,13 +29,26 @@ namespace fminus::jit
     class Jit
     {
     public:
-        static llvm::Expected<std::unique_ptr<Jit>> create(llvm::OptimizationLevel level = llvm::OptimizationLevel::O3);
+        // How the modules add() takes arrive.
+        //   Unoptimised  as the code generator wrote them: the JIT optimises each (optimiseModule, at its level) when
+        //                one of its symbols is first looked up, in LLJIT's IR transform layer. The default.
+        //   Optimised    optimised already, at the JIT's level (prepareModule and optimiseModule, on a machine made as
+        //                the JIT's is), as fminus::Program optimises a module whose IR the host keeps as text
+        //                (Program::Options::keepIr): the JIT generates the code from each as it is.
+        enum class Modules
+        {
+            Unoptimised,
+            Optimised,
+        };
+
+        static llvm::Expected<std::unique_ptr<Jit>> create(llvm::OptimizationLevel level = llvm::OptimizationLevel::O3,
+                                                           Modules modules = Modules::Unoptimised);
         ~Jit();
         Jit(const Jit&) = delete;
         Jit& operator=(const Jit&) = delete;
 
-        // Adds `module` (and the context it lives in): set up for the JIT's target here, optimised and compiled when
-        // one of its symbols is first looked up.
+        // Adds `module` (and the context it lives in): set up for the JIT's target here, optimised (unless it came
+        // optimised: Modules) and compiled when one of its symbols is first looked up.
         llvm::Error add(std::unique_ptr<llvm::Module> module, std::unique_ptr<llvm::LLVMContext> context);
 
         // The address of `name` (an FMinus function's name), compiling what it needs on this thread.
