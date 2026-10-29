@@ -355,8 +355,9 @@ to `bool` and to the same pointer with `const` added (`convertPointer`).
 - **`optimiseModule(module, machine, level)`** runs `PassBuilder::buildPerModuleDefaultPipeline(level)`, which is
   clang's `-O<n>` pipeline, with loop and SLP vectorisation on. It passes the target machine, so the cost models know
   the host's vector width and instruction costs. SLP's cost threshold is 10 rather than LLVM's 0 (LLVM's
-  `-slp-threshold`, set once for the process unless the host set it), so that it no longer packs independent
-  recurrences, a stereo filter's channels, into one vector ([simd.md](simd.md), "The auto-vectorisers"). It is also
+  `-slp-threshold`, set once for the process unless the host set it), so that it packs independent recurrences, a
+  stereo filter's channels, into one vector only where that pays, a math builtin's two-lane kernel ([simd.md](simd.md),
+  "The auto-vectorisers"). It is also
   where FMinus's own passes (`src/opt/`) join the pipeline,
   through its extension points, each in a block of its own:
   - **Knob versioning** (`KnobVersioningPass`, extending.md recipe 16), at the early simplification point

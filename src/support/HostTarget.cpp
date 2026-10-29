@@ -31,9 +31,11 @@ namespace fminus
         // two channels, independent recurrences, into one vector, with shuffles on the path from each sample to the
         // next: one longer chain where the core ran two side by side. A frozen stereo state-variable filter's loop then
         // takes 31 cycles a sample instead of 20 (llvm-mca, apple-m5). From 10, on every example and the plugins'
-        // programs measured, SLP leaves such loops scalar, the code it would give with SLP off, and it still packs what
-        // pays: four calls of one math builtin into one four-lane call (up to a threshold of 40), and a float4 built
-        // from scalars (up to 15). docs/simd.md, "The auto-vectorisers", has the measurements.
+        // programs measured (before the math kernels' two-lane variant), SLP left such loops scalar, the code it would
+        // give with SLP off, and it still packed what pays: four calls of one math builtin into one four-lane call (up
+        // to a threshold of 40), and a float4 built from scalars (up to 15). With the two-lane variant (extending.md,
+        // recipe 24) it also pairs two channels' calls of one builtin, a stereo drive's tanhf, into one two-lane
+        // kernel. docs/simd.md, "The auto-vectorisers", has the measurements.
         constexpr const char* kSlpThreshold = "10";
 
         // LLVM's vectorisers take their thresholds from its command-line options, which are the process's: set
