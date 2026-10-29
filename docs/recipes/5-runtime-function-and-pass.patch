@@ -56,10 +56,10 @@ index 33cb1ca..1a15ca6 100644
          if (found == functions_.end())
          {
 diff --git a/src/ir/Functions.cpp b/src/ir/Functions.cpp
-index 7fc05f5..c602be7 100644
+index 188e96a..1fdf443 100644
 --- a/src/ir/Functions.cpp
 +++ b/src/ir/Functions.cpp
-@@ -29,7 +29,8 @@ namespace fminus::ir::detail
+@@ -35,7 +35,8 @@ namespace fminus::ir::detail
          Effect& effect = effects_[function.name];
          effect = std::max(effect, declaredEffect(function));
  
@@ -70,7 +70,7 @@ index 7fc05f5..c602be7 100644
              error(function.location, quoted(function.name) + " is a builtin and cannot be redefined");
              return;
 diff --git a/src/ir/Lowering.h b/src/ir/Lowering.h
-index be8c50a..8e84988 100644
+index 18ce931..844b5a5 100644
 --- a/src/ir/Lowering.h
 +++ b/src/ir/Lowering.h
 @@ -84,10 +84,20 @@ namespace fminus::ir::detail
@@ -236,7 +236,7 @@ index 4257e9f..095b2a5 100644
  FMINUS_RUNTIME_SYMBOL(fminus_rt_parallel_stop)
 +FMINUS_RUNTIME_SYMBOL(fminus_rt_db_to_gain)
 diff --git a/src/support/HostTarget.cpp b/src/support/HostTarget.cpp
-index 1f6422e..f09b122 100644
+index 38625be..7a08e5d 100644
 --- a/src/support/HostTarget.cpp
 +++ b/src/support/HostTarget.cpp
 @@ -3,6 +3,7 @@
@@ -247,9 +247,9 @@ index 1f6422e..f09b122 100644
  #include "opt/ZeroInitElision.h"
  #include "support/LLVMInit.h"
  
-@@ -60,6 +61,7 @@ namespace fminus
-         tuning.LoopVectorization = true;
+@@ -90,6 +91,7 @@ namespace fminus
          tuning.SLPVectorization = true;
+         raiseSlpThreshold();
          llvm::PassBuilder passes(&machine, tuning);
 +        opt::registerPasses(passes);
  

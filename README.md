@@ -299,7 +299,10 @@ Where FMinus differs from C, it is on purpose:
   `-1.5`. C allows `%` on integers only; HLSL allows it on floats. `%=` goes with it.
 - **A function may be called before its definition** without a prototype, because the compiler declares every
   function first. A prototype with no definition declares an external C function, as in C: the JIT resolves it in
-  the process (`float atanf(float x);` calls libm's), and the linker resolves it in an executable.
+  the process (`float atanf(float x);` calls libm's), and the linker resolves it in an executable. On Apple systems,
+  whose libm sets no `errno`, a prototype of libm's function says it writes no memory, as clang's `<math.h>` says
+  there, so a call on a loop's invariants is made once, before the loop ([docs/extending.md](docs/extending.md),
+  recipe 19).
 - **A declaration without an initialiser starts at 0**, and a pointer at null. C leaves the variable indeterminate.
   From `-O1`, the optimiser removes a local's zeroing where nothing reads the zeros: an array's that loops overwrite,
   and a module's that a copy of another overwrites. `-O0` keeps every one ([docs/extending.md](docs/extending.md),
@@ -573,8 +576,9 @@ These are constraints a plugin runs into. `examples/plugin/`, a JUCE plugin, mee
   `ScopedNoDenormals`), and it compiles with `Flush`, so its `process` finds the mode set and writes nothing.
 - **Parallel regions on the audio thread.** A `parallel for` or `parallel { }` runs on FMinus's pool and the audio
   thread together, in the audio thread's floating-point mode, and allocates and locks nothing. The audio thread starts
-  on its own share at once; pool threads that slept (no region for 50 µs) it wakes with a system call that does not
-  block; at the end it spins for the chunks other threads are still running. The pool's threads run at the
+  on its own share at once; of the pool threads that slept (no region for 50 µs), it wakes only as many as the region
+  has seats for (a region of two iterations, one), a system call each that does not block; at the end it spins for the
+  chunks other threads are still running. The pool's threads run at the
   user-interactive quality of service on macOS: they are not real-time threads, and join no audio workgroup, so the
   system may run them late, and the audio thread then takes their chunks itself. A region costs about 4 µs on an M5
   with every core (under 2 µs on two) against a plain call: worth it when its iterations take tens of microseconds

@@ -47,7 +47,9 @@ namespace fminus::ir
 
         // The modules are laid out first, in order, since a function's types may name them. Pass 1 declares every
         // function (a module's methods among them), so calls may come before definitions; pass 2 lowers each
-        // definition's body; then every function marked nonallocating or nonblocking is checked against its calls.
+        // definition's body, and a prototype that no definition followed and that names libm's function gets what
+        // libm's does (describeLibm); then every function marked nonallocating or nonblocking is checked against its
+        // calls.
         // Under Denormals::Flush, last, every definition is marked flushing and the entry points are wrapped, which
         // needs every call known (Denormals.cpp).
         void Lowering::lower(const ast::Program& program)
@@ -61,6 +63,7 @@ namespace fminus::ir
                 if (function.isDefinition && found != functions_.end() && found->second == &function)
                     define(function);   // the accepted definition, not a rejected duplicate
             }
+            describeLibm();
             checkEffects(program);
             if (denormals_ == Denormals::Flush && !diagnostics_.hasErrors())
                 flushDenormals(program);

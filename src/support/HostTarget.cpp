@@ -15,12 +15,41 @@
 #include <llvm/IR/Module.h>
 #include <llvm/IR/SystemLibraries.h>
 #include <llvm/Passes/PassBuilder.h>
+#include <llvm/Support/CommandLine.h>
 #include <llvm/Target/TargetMachine.h>
 
 #include <algorithm>
+#include <mutex>
 
 namespace fminus
 {
+    namespace
+    {
+        // The SLP vectoriser's cost threshold: how much cheaper, in its cost model's units, a tree of packed
+        // operations must be than the scalar code it replaces (LLVM's default is 0). The model counts instructions,
+        // not the latency of a chain that carries a value from one sample to the next. At 0 it packs a stereo filter's
+        // two channels, independent recurrences, into one vector, with shuffles on the path from each sample to the
+        // next: one longer chain where the core ran two side by side. A frozen stereo state-variable filter's loop then
+        // takes 31 cycles a sample instead of 20 (llvm-mca, apple-m5). From 10, on every example and the plugins'
+        // programs measured, SLP leaves such loops scalar, the code it would give with SLP off, and it still packs what
+        // pays: four calls of one math builtin into one four-lane call (up to a threshold of 40), and a float4 built
+        // from scalars (up to 15). docs/simd.md, "The auto-vectorisers", has the measurements.
+        constexpr const char* kSlpThreshold = "10";
+
+        // LLVM's vectorisers take their thresholds from its command-line options, which are the process's: set
+        // slp-threshold once, before the first pipeline runs, unless the host set it on LLVM's command line itself.
+        void raiseSlpThreshold()
+        {
+            static std::once_flag once;
+            std::call_once(once, [] {
+                auto& options = llvm::cl::getRegisteredOptions();
+                const auto found = options.find("slp-threshold");
+                if (found != options.end() && found->second->getNumOccurrences() == 0)
+                    found->second->addOccurrence(0, "slp-threshold", kSlpThreshold);
+            });
+        }
+    } // namespace
+
     llvm::Expected<std::unique_ptr<llvm::TargetMachine>> hostTargetMachine(llvm::CodeGenOptLevel level)
     {
         initializeLLVM();
@@ -59,6 +88,7 @@ namespace fminus
         llvm::PipelineTuningOptions tuning;
         tuning.LoopVectorization = true;
         tuning.SLPVectorization = true;
+        raiseSlpThreshold();
         llvm::PassBuilder passes(&machine, tuning);
 
         // A vector math library, in the fast math mode only (the module's kMathFlag; HostTarget.h). On Apple systems,

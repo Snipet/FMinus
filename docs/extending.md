@@ -2362,7 +2362,8 @@ same pipeline, and the module flag, but for the runtime's math names, which it r
 - **Vectors of other widths are faster**: a `float8` `sinf` was eight `sinf` calls, and is two four-lane ones.
 - **Scalar calls that can't vectorise are slower**: each computes four lanes of a vector function, whose latency is two
   to six times libm's (Measurements). (Recipe 23's kernels compute one lane, and recipe 24 puts them inline.)
-- **A prototype's libm function** (`atanf`, `powf`) gets the vector library only in the fast mode.
+- **A prototype's libm function** (`atanf`, `powf`) gets the vector library only in the fast mode, and only where its
+  calls write no memory: on Apple systems (recipe 19).
 - **Elsewhere than Apple systems** the vector mode's results were libm's, the four-lane functions a loop over libm,
   until recipe 23 made them FMinus's own everywhere.
 - **The runtime** has fifteen more functions, which a host that hides or strips symbols must keep
@@ -3134,21 +3135,23 @@ and summed by constant-bound loops went from about 14 ns a call to 10. Compile t
 
 ## Recipe 19: what the runtime's calls and loops promise
 
-*In the compiler. Code: `src/ir/Calls.cpp` (`kRuntimeFacts`, `describeRuntime`, `callRuntime`) and
-`src/ir/Statements.cpp` (`isConstant`, `mustProgress`). Tests: `tests/unit/AttributeTest.cpp` (`[attributes]`,
-`[progress]`), `tests/lit/fminus/runtime-attributes.fm`, `tests/lit/fminus/progress.fm`; `HeapTest.cpp` and `heap.fm`
-changed.*
+*In the compiler. Code: `src/ir/Calls.cpp` (`kRuntimeFacts`, `describeRuntime`, `callRuntime`),
+`src/ir/Functions.cpp` (`describeLibm`) and `src/ir/Statements.cpp` (`isConstant`, `mustProgress`). Tests:
+`tests/unit/AttributeTest.cpp` (`[attributes]`, `[progress]`), `tests/lit/fminus/runtime-attributes.fm`,
+`tests/lit/fminus/libm-prototypes.fm`, `tests/lit/fminus/progress.fm`; `HeapTest.cpp` and `heap.fm` changed.*
 
 LLVM optimises what it can prove, and it proves little about a call to a function it can't see, or about a loop it
-can't count. FMinus knows two things LLVM doesn't:
+can't count. FMinus knows three things LLVM doesn't:
 
 - **What the runtime's functions do.** It wrote them (`src/runtime/`). It declared them bare,
   `declare void @fminus_rt_fft_forward_real(ptr, ptr, ptr)`, so LLVM had to assume that an FFT may read and write every
   field of every module and all of the heap, and that `calloc` is just some function that returns a pointer.
+- **That Apple's libm sets no errno.** A prototype, `float asinf(float x);`, calls libm's function, which LLVM takes to
+  write `errno`, as C allows it to; so a call of it never left its loop, even on a still dial.
 - **That its loops end.** C11 says an implementation may assume it (6.8.5p6), and clang tells LLVM so. FMinus said
   nothing.
 
-Both are a fact on a declaration or a branch, and neither adds a pass: LLVM's own passes do the rest.
+Each is a fact on a declaration or a branch, and none adds a pass: LLVM's own passes do the rest.
 
 ### The runtime's declarations
 
@@ -3220,6 +3223,59 @@ bool refused() { float* p = calloc(-1, 4); float* none; const bool r = p == none
 `fminus file.fm --run refused` prints `true` at `-O0` and `false` at `-O2`. A block the program keeps, stores into a
 module or returns is made, and is null when the runtime refuses it, as `HeapTest.cpp` now checks from the host.
 
+### libm's prototypes, where libm sets no errno
+
+A prototype with no definition calls the process's C function of its name (README.md): `float asinf(float x);` calls
+libm's. LLVM knows libm's functions by name and type (`TargetLibraryInfo`), and InferFunctionAttrs, in the pipeline,
+gives their declarations what C promises of them: `nounwind willreturn nofree nosync`, and `memory(errnomem: write)`,
+since C lets a math function report a domain or range error in `errno`. A call that writes memory stays where it is:
+LICM leaves it in its loop, so does each of knob versioning's copies, and the loop vectoriser gives up on the loop. So
+in a method whose cutoff is a still dial, `tanf(pi * cutoff[i] / rate)`, while `tanf` was a prototype's libm call
+(recipe 23 made it a builtin), ran every sample, where the builtins' `sinf(w) / cosf(w)` ran once a call.
+
+Apple's libm writes no `errno`: its `math_errhandling` is `MATH_ERREXCEPT` (2), and none of thirty calls at their domain
+and range errors (`logf(0)`, `expf(1000)`, `powf(0, -1)`, `acosf(2)`, `sqrtf(-1)`, `fmodf(1, 0)`, ...) sets it, even
+compiled with `-fmath-errno`. That is why clang defaults to `-fno-math-errno` on Apple systems, and declares
+`<math.h>`'s functions `memory(none)` there. `describeLibm` (`Functions.cpp`) does the same for FMinus, after the
+definitions. For each prototype that no definition followed, whose name and type are a math function's that
+`TargetLibraryInfo` knows and the target has, it runs LLVM's own inference (`inferNonMandatoryLibFuncAttrs`) and takes
+`errno` out of what the function may write:
+
+| Prototype | LLVM's attributes | On Darwin |
+|---|---|---|
+| `asinf`, `powf`, `atan2f`, `exp2f`, `log10f`, `ldexpf`, ... | `memory(errnomem: write)` | `memory(none)` |
+| `remquof`, which writes its quotient | `memory(argmem: write, errnomem: write)` | `memory(argmem: write)` |
+| `roundf`, `ceilf`, `truncf`, ..., which set no `errno` anywhere | `memory(none)` | the same |
+| a name libm doesn't have, a type that isn't libm's (`float atanf(int x)`), a definition | none | none |
+
+Which libm is in the triple (`ir::Options::targetTriple`, the process's when empty). Linux's glibc and Windows' CRT do
+set `errno`: there the declarations stay as the program wrote them, and LLVM infers what C allows. Other C functions
+that write `errno`, the allocators, also reach memory of their own (`inaccessiblemem`), and keep it: only a function
+whose memory, without `errno`, is at most its arguments' loses `errno`.
+
+What LLVM then does, which is what clang does with `<math.h>` on Apple systems:
+
+- **Calls move.** A call on a loop's invariants is made once, before the loop, in every copy knob versioning makes.
+  A loop of calls on its samples vectorises: in the vector and libm math modes into `llvm.asin.v2f32` and its kin,
+  which the backend makes into one `asinf` call a lane, the same function, so every result is still libm's; in the
+  fast mode into libsystem_m's `_simd_asin_f4` (recipe 8), with that mode's caveat that a block's vectorised body and
+  its remainder may differ in their last bits (recipe 15: "a prototype's libm function gets the vector library only in
+  the fast mode").
+- **Two calls become arithmetic.** LLVM's library-call simplifier rewrites `powf(x, 2)` as `x * x`, and
+  `powf(x, 0.5)` as a square root (with `-0` and `-inf` handled), only for a call that touches no memory. Both are
+  correctly rounded, and libsystem_m's `powf` is not always: over every float, it differs from `x * x` for 13,758,450
+  inputs and from the square root for 13,621,093 (0.3% each). In [1, 2) it is the farther from the exact result in
+  53,514 of its 53,936 differences from `x * x`, and in all 44,211 from `sqrtf`. So those two calls move by an ulp, for
+  those inputs, toward the exact result. (The rewrites that need no such permission ran before too: `powf(x, -1)` to
+  `1 / x`, `powf(2, x)` to `exp2f(x)`, and constants folded with the host's double functions.)
+
+On an effect with a one-pole on `tanf(3.14159265f * cutoff[i] / 48000)` and a gain of `powf(10, level[i] / 20)`, its
+two parameters streams left flat (a still dial, as a plugin host compiles them), at `-O2` and flushing: 87.0
+instructions a sample before, 16.1 after, and 8.6 ns against 5.4 (an M5 under a load average of 47; the minimum of 14
+runs), the output the same. With the streams moving, the calls stay in the loop, as their arguments change every sample.
+(That was measured while `tanf` was a prototype's call of libm; since recipe 23 it is a builtin, whose call writes no
+memory on every system, and `powf` is the one of the two that this recipe moves.)
+
 ### Loops must make progress
 
 C11 6.8.5p6 lets an implementation assume that a loop ends when its controlling expression is not a constant
@@ -3284,6 +3340,11 @@ memory(errnomem: write)` (`std::pow` may set `errno`).
   read once across a transform, the transform's output read again, an unused `calloc` and `free` removed, a block's
   unwritten floats read as 0, a removed block's test against null folded to false, and `fft_create`'s call and test
   kept.
+- `tests/lit/fminus/libm-prototypes.fm`: on Darwin, libm's prototypes `memory(none)` (`remquof`'s `memory(argmem:
+  write)`) at `-O0`, a prototype of another type, an unknown name and a definition bare, and at `-O2` a loop's `asinf`
+  and `powf` of its invariants before the loop, which vectorises; elsewhere, the declarations bare and the calls in
+  the loop. (Its example was `tanf` until recipe 23 made `tanf` a builtin; `asinf` is one of libm's that LLVM takes to
+  write `errno`, as `tanf` was, where `cbrtf`, which LLVM already takes to touch no memory, would test nothing.)
 - `tests/lit/fminus/progress.fm`: the metadata on a `while`, on a `for`'s `for.inc`, on a `while`'s two branches back,
   and on a loop whose condition reads a `const` variable; none on `while (1)`, `for (;;)`, `while (true)`,
   `for (; 2 > 1 && !0;)` and `while (1.5f)`, and no function marked `mustprogress`; at `-O2`, two unused loops deleted
@@ -3292,7 +3353,8 @@ memory(errnomem: write)` (`std::pow` may set `errno`).
   spectrum as the transform's output, a store into the input just before a transform, a round trip through two
   transforms; `fft_create(7)` still null inside FMinus; a block reads 0 until written; loops with a `continue`, a `?:`,
   `while (1)` with a `break` and `for (;;)` with a `return`; a program's own prototype of `fminus_rt_free`, with other
-  types.
+  types; libm's prototypes lowered for Apple, Linux and Windows triples, each declaration's memory, and a loop of
+  `asinf` and `powf` against C++'s calls of libm, bit for bit.
 - Changed: `HeapTest.cpp`'s refused sizes return their blocks to the host, which tests them for null;
   `heap.fm`'s `declare` lines carry their attributes.
 
@@ -3827,10 +3889,17 @@ host's other audio thread). It allocates nothing and takes no lock.
 
 Each pool thread copies the caller's control register (FPCR on arm64, MXCSR on x86-64) while it runs chunks, so an
 iteration computes on any thread what it would on the caller's: flush-to-zero under `Denormals::Flush`, the rounding
-mode, everything. After a region it spins on `signal` for 50 µs, so the next region in the same block starts at once,
-then sleeps on it (`std::atomic::wait`); a caller that finds threads asleep wakes them, a system call that does not
-block, and starts on its chunks without waiting for them. On macOS the threads run at the user-interactive quality of
-service.
+mode, everything. A pool thread that took a seat in a region, or that a caller woke for one, spins on `signal` for
+50 µs, so the next region in the same block starts at once; then it sleeps (`std::atomic::wait`), on a word of its own,
+its bed, so that a caller can wake one thread and no other. A region has `seats` places for pool threads, its
+`threads` less the caller, and no more than its iterations less one. The caller counts the threads still awake, which
+will look at the region themselves, and wakes only as many sleepers as the seats left, the first beds first, so the
+same few threads take the small regions: a system call each, which does not block, and it starts on its chunks
+without waiting for them. A thread that finds no seat (more were awake than the region seats) spins only for what was
+left of its 50 µs, and sleeps. Sleeping and waking meet as joining and closing do: the thread marks its bed asleep and
+then looks at `signal` again; the caller bumps `signal` and then looks at the beds, and wakes a bed marked asleep with
+a compare-and-swap; both sequentially consistent, so either the caller wakes the thread or the thread sees the region.
+The stop wakes every bed the same way. On macOS the threads run at the user-interactive quality of service.
 
 ### What it changes for programs and hosts
 
@@ -3855,7 +3924,10 @@ service.
   region; `Denormals::Flush` flushing on every thread; every error's text and place, and the code that passes. And the
   pool from C++: every chunk once over many ranges, several threads at most `threads` of them, the caller's mode on
   every thread, a region in a region on its own thread, two callers at once, 20,000 small regions, and none of the
-  pool's threads left after the last stop.
+  pool's threads left after the last stop; and, paced as an audio callback runs them with every pool thread asleep
+  before each, that a region of two iterations costs the pool's threads under 150 µs of CPU time (one thread's spin,
+  where waking all of them cost each its 50 µs), and that a region with work for every thread still runs on several
+  (on five threads or more, and not on Windows, which has no POSIX clocks).
 - `tests/library/ParallelTest.cpp`: `Program::compile` of a synth whose nonblocking `process` has a `parallel for` and
   a `parallel { }`, with a knob and a stream, against `threads = 1`, bit for bit; two Programs run from two threads at
   once, three times over.
@@ -3878,6 +3950,21 @@ The voices scale with the performance cores, and less with the efficiency cores,
 regions are the cost of the synchronisation alone, which grows with the threads that take part: a chunk's
 compare-and-swap and the count of who is inside travel between the cores' caches. It depends on where the system puts
 the threads, too: a run whose two or four threads all landed on one cluster's cores took 0.09 s.
+
+Paced as an audio callback runs them, one region every 1,333 µs (64 samples at 48 kHz), so that every pool thread
+sleeps before each: a host of the runtime alone, 2,000 regions a run, three runs of each (two of the four-iteration
+one), on an M5 under a load average of about 130 from other builds. Before, a caller woke every sleeping thread for
+every region, and each spun its 50 µs after it, whether it found a seat or not; now it wakes only those the region
+seats:
+
+| Region | The pool's CPU a block, before | now | The caller's time in it (median), before | now |
+|---|---|---|---|---|
+| 2 iterations of 5 µs (one seat) | 519 to 534 µs | 60 µs | 18 to 19 µs | 8 to 10 µs |
+| 4 iterations of 10 µs (three seats) | 519 to 539 µs | 192 µs | 24 to 25 µs | 18 to 20 µs |
+| 16 iterations of 20 µs (nine seats, every thread) | 575 to 595 µs | 593 to 622 µs | 53 to 100 µs | 61 to 70 µs |
+
+A region that seats every thread wakes them as before, with a system call each where one woke them all; within this
+machine's noise, it costs the same.
 
 ## Recipe 23: math kernels of FMinus's own
 

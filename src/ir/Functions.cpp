@@ -1,13 +1,19 @@
 // src/ir/Functions.cpp: functions. Declarations follow C's rules for prototypes and definitions, with the C ABI's
 // attributes; a definition's parameters become stack slots, its body is lowered, and a non-void function that can
 // fall off its end is an error (a void one returns there). A method is a function too, whose first parameter is
-// `this` (Modules.cpp has the rest). Also the stack slots and the scopes variables live in.
+// `this` (Modules.cpp has the rest). A prototype of libm's, on a system whose libm sets no errno, says it writes no
+// memory (describeLibm). Also the stack slots and the scopes variables live in.
 #include "ir/Lowering.h"
 
 #include <llvm/ADT/DepthFirstIterator.h>
+#include <llvm/Analysis/TargetLibraryInfo.h>
 #include <llvm/IR/CFG.h>
 #include <llvm/IR/Verifier.h>
+#include <llvm/Support/ModRef.h>
 #include <llvm/Support/raw_ostream.h>
+#include <llvm/TargetParser/Host.h>
+#include <llvm/TargetParser/Triple.h>
+#include <llvm/Transforms/Utils/BuildLibCalls.h>
 
 namespace fminus::ir::detail
 {
@@ -179,6 +185,39 @@ namespace fminus::ir::detail
         if (llvm::verifyFunction(*llvmFunction, &os))
             error(function.location, "internal error: the IR of " + quoted(function.name) + " is invalid: "
                                          + problem);
+    }
+
+    // A prototype without a definition calls the process's C function of its name (README.md): libm's, when its name
+    // and its type are a math function's that TargetLibraryInfo knows (asinf, powf, atan2f, ldexpf, ...). LLVM's own
+    // attributes for those (InferFunctionAttrs, which the pipeline runs) say that each may write errno and nothing else
+    // but its pointers' memory; and a call that writes memory is never hoisted out of a loop, removed, or vectorised.
+    // Apple's libm writes no errno (math_errhandling is MATH_ERREXCEPT, which is why clang defaults to -fno-math-errno
+    // there), so on Darwin its functions get the same attributes without errno: asinf and powf then write no memory
+    // at all, as clang declares them, and powf(10, gain / 20) of a knob is computed once a call, not every sample.
+    // Elsewhere (glibc, the Windows CRT) libm sets errno, and the declarations stay as LLVM sees them. A definition is
+    // the program's own code, and keeps its own attributes.
+    void Lowering::describeLibm()
+    {
+        const llvm::Triple triple(targetTriple_.empty() ? llvm::sys::getProcessTriple() : targetTriple_);
+        if (!triple.isOSDarwin())
+            return;
+        llvm::TargetLibraryInfoImpl implementation(triple);
+        const llvm::TargetLibraryInfo library(implementation);
+        for (const auto& [name, function] : functions_)
+        {
+            llvm::Function* declaration = module_.getFunction(name);
+            llvm::LibFunc libFunc{};
+            if (function->isDefinition || declaration == nullptr || !library.getLibFunc(*declaration, libFunc)
+                || !library.has(libFunc))
+                continue;
+            llvm::inferNonMandatoryLibFuncAttrs(*declaration, library);
+            // libm's effects are errno's and, for sincosf and remquof, their pointers': without errno, only theirs.
+            // (Other C functions that write errno, the allocators, reach memory of their own, and keep it.)
+            const llvm::MemoryEffects effects = declaration->getMemoryEffects();
+            const llvm::MemoryEffects withoutErrno = effects.getWithoutLoc(llvm::IRMemLocation::ErrnoMem);
+            if (withoutErrno != effects && withoutErrno.onlyAccessesArgPointees())
+                declaration->setMemoryEffects(withoutErrno);
+        }
     }
 
     // A slot at the top of the entry block, whatever block the builder is in: mem2reg promotes only those.

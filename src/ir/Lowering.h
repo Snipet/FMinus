@@ -2,7 +2,7 @@
 // class, Lowering, lowers one program into one module, and its members are defined across src/ir/ by what they lower:
 //     CodeGen.cpp       ir::lower(), and the two passes: declare every function, then define each body
 //     Types.cpp         FMinus's types as LLVM's, the conversions between them, the errors' helpers
-//     Functions.cpp     declarations and prototypes, bodies and parameters, stack slots and scopes
+//     Functions.cpp     declarations and prototypes (libm's attributes), bodies and parameters, stack slots and scopes
 //     Statements.cpp    blocks, declarations, return, if, while, for, break and continue
 //     Expressions.cpp   constants, variables, operators, &&, ||, ?:, casts, assignment, ++ and --
 //     Calls.cpp         calls: the builtins (math functions, reductions, poly queries and memory, the heap, the FFT)
@@ -253,6 +253,7 @@ namespace fminus::ir::detail
         static bool sameSignature(const ast::Function& a, const ast::Function& b);
         void declare(const ast::Function& function);
         void define(const ast::Function& function);
+        void describeLibm();
         llvm::AllocaInst* allocate(llvm::Type* type, const std::string& name);
         static bool reachable(llvm::BasicBlock* block);
         bool bind(const std::string& name, Binding binding);
@@ -391,7 +392,7 @@ namespace fminus::ir::detail
         bool strictAliasing_;                                              // whether loads and stores carry !tbaa
         std::map<unsigned, StreamRead> flatStreams_;                       // what its streams' reads use
         Denormals denormals_;                                              // subnormals preserved or flushed
-        std::string targetTriple_;                                         // which mode register an entry point sets
+        std::string targetTriple_;                                         // the mode register, whether libm sets errno
         unsigned threads_;                                                 // the most threads a parallel region uses
         std::vector<Region> regions_;                                      // the parallel regions being lowered
         std::vector<llvm::Function*> outlined_;                            // every region's function

@@ -4,7 +4,7 @@
 // the same results on all the threads as on one; flushing subnormals on every thread under Denormals::Flush; the races
 // refused, and break, continue and return. From C++, the pool itself: every chunk taken once, by several threads, at
 // most `threads` of them, in the caller's floating-point mode, a region in a region on its own thread, two callers at
-// once, and many small regions in a row (run them under tsan too).
+// once, many small regions in a row (run them under tsan too), and a region that wakes only the threads it seats.
 #include "Compile.h"
 #include "fminus/FMinus.h"
 
@@ -24,6 +24,10 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#if !defined(_WIN32)
+#include <ctime>
+#endif
 
 #if defined(__x86_64__)
 #include <immintrin.h>
@@ -727,3 +731,59 @@ TEST_CASE("the pool runs many small regions in a row, and stops when its last us
         &threads, 0, 1000, 0);
     CHECK(threads.seen == std::set<std::thread::id>{std::this_thread::get_id()});
 }
+
+#if !defined(_WIN32)
+TEST_CASE("a region wakes the sleeping pool threads it can seat, and no others", "[parallel][runtime]")
+{
+    const Pool pool;
+    // Below five threads, waking all of them costs too little to tell from waking the one a region seats.
+    if (pool.threads < 5)
+        SKIP("fewer than five threads");
+    // The CPU time of the process's other threads, the pool's (POSIX's clocks: the scheduler's, to the microsecond).
+    const auto others = [] {
+        timespec process{}, caller{};
+        clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &process);
+        clock_gettime(CLOCK_THREAD_CPUTIME_ID, &caller);
+        return static_cast<double>(process.tv_sec - caller.tv_sec)
+               + 1e-9 * static_cast<double>(process.tv_nsec - caller.tv_nsec);
+    };
+
+    // Regions of two iterations, one seat each, as an audio callback runs them: every pool thread asleep before each
+    // (they spin for 50 us after one). The thread woken spins for 50 us after it; when every one woke, each did, and
+    // the region cost the pool about 50 us a thread.
+    const auto nothing = [](void*, std::int32_t, std::int32_t) {};
+    constexpr int kRegions = 50;
+    const double before = others();
+    for (int region = 0; region < kRegions; ++region)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        fminus_rt_parallel_for(nothing, nullptr, 0, 2, 0);
+    }
+    const double each = (others() - before) / kRegions;
+    INFO("the pool's CPU time a region: " << each * 1e6 << " us");
+    CHECK(each < 150e-6);   // fewer than three threads' spin
+
+    // A region with work for every thread, after they all slept, still runs on several: the caller woke them.
+    struct Threads
+    {
+        std::mutex lock;
+        std::set<std::thread::id> seen;
+    };
+    const auto note = [](void* context, std::int32_t, std::int32_t) {
+        auto& threads = *static_cast<Threads*>(context);
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        const std::lock_guard<std::mutex> held(threads.lock);
+        threads.seen.insert(std::this_thread::get_id());
+    };
+    std::size_t most = 0;
+    for (int attempt = 0; attempt < 20 && most < 2; ++attempt)   // a busy machine may run none of them in time
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        Threads all;
+        fminus_rt_parallel_for(note, &all, 0, 4 * pool.threads, 0);
+        CHECK(all.seen.size() <= static_cast<std::size_t>(pool.threads));
+        most = std::max(most, all.seen.size());
+    }
+    CHECK(most >= 2);
+}
+#endif

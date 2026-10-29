@@ -78,9 +78,9 @@ TEST_CASE("functions compute what they say", "[codegen]")
 - **Tags**: `[frontend]`, `[codegen]`, `[smoke]`, `[jit]`, `[aot]` (the AOT smoke test, and `AotTest.cpp`'s checks
   of an executable's entry), `[grammar]`, `[simd]` (vectors and the vector math library), `[poly]`, `[int]`,
   `[pointer]`, `[heap]`, `[effects]`, `[math]` (the math modes and their kernels), `[versions]` (knob versioning and
-  flat streams), `[tbaa]`, `[zeroinit]`, `[attributes]` and `[progress]` (the runtime's attributes and loop progress),
-  `[denormals]`, `[parallel]` (parallel regions, and `[runtime]` among them for the pool on its own). Add new ones
-  freely.
+  flat streams), `[tbaa]`, `[zeroinit]`, `[attributes]` and `[progress]` (the runtime's and libm's attributes, and loop
+  progress), `[denormals]`, `[parallel]` (parallel regions, and `[runtime]` among them for the pool on its own). Add
+  new ones freely.
 - **A hidden test** carries the tags `[.]` and a name: ctest never runs it, and `fminus-tests "[name]"` does.
   `[exhaustive]` runs every float through every math kernel, on every core, against its error bound, in every lane, and
   under flush-to-zero (extending.md, recipe 23): about ten minutes, for after a change to a kernel.
@@ -96,8 +96,10 @@ TEST_CASE("functions compute what they say", "[codegen]")
 - **Parallel regions** run alone, on the calling thread, unless the pool is started: `ParallelTest.cpp`'s `Pool`
   starts it for a test, as `Program::compile` does for a host. A region's result is checked against the same program
   compiled with `threads = 1`, bit for bit, and a test that a region used several threads tries a few times, since a
-  busy machine (ctest's `-j`) may not run a pool thread before the caller has done the work. Run them under `tsan`
-  too: the pool is what it checks.
+  busy machine (ctest's `-j`) may not run a pool thread before the caller has done the work. What the pool's threads
+  cost is their CPU time, which POSIX's clocks give whatever else the machine runs (the process's less the caller's:
+  `CLOCK_PROCESS_CPUTIME_ID`, `CLOCK_THREAD_CPUTIME_ID`), where wall time would not. Run them under `tsan` too: the
+  pool is what it checks.
 
 ## lit and FileCheck
 
@@ -146,7 +148,7 @@ float gain(float x, float g)
 
 | Feature | |
 |---|---|
-| `REQUIRES: arm64` (or `x86_64`) | the host architecture, for assembly checks (Windows names them `ARM64` and `AMD64`, so these skip there) |
+| `REQUIRES: arm64` (or `x86_64`) | the host architecture, for assembly checks, and IR checks that hang on its cost model (`slp.fm`) (Windows names them `ARM64` and `AMD64`, so these skip there) |
 | `REQUIRES: asserts` | LLVM built with assertions |
 | `REQUIRES: asan`, `ubsan`, `tsan` | the sanitizer build |
 | `REQUIRES: system-darwin` (or `system-linux`) | the host's system (`veclib.fm`, which runs `--math fast`, needs Apple's vector math library) |

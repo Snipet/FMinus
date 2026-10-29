@@ -72,8 +72,8 @@ maps them onto the target's registers.
 1. **The auto-vectorisers**, already running. `optimiseModule` enables LLVM's loop vectoriser and SLP vectoriser with
    the host's cost model. The loop vectoriser needs loops over memory, which FMinus has had since recipe 10's
    pointers: a loop over a buffer, such as `out[i] = in[i] * g`, runs on `<4 x float>`s with no vector type in the
-   source. The SLP vectoriser packs independent scalar operations, which small functions rarely have (see "The
-   auto-vectorisers").
+   source. The SLP vectoriser packs independent scalar operations, which small functions rarely have, above a cost
+   threshold that keeps it off independent recurrences (see "The auto-vectorisers").
 2. **Fixed-width vector types** (recipe 7): the programmer writes `float4`, and gets exactly four lanes on every
    target. Good for data that is four-wide by nature: four channels, a 4×4 matrix row, a filter's four states.
 3. **A vector math library** (recipe 8): `sinf` of a vector becomes one call to a vectorised `sinf`. In the default
@@ -1343,8 +1343,16 @@ servers (Graviton, Neoverse) and RISC-V, with its own tests on such a machine.
   loop) is versioned by the vectoriser itself: the vector loop when the stride is 1 (`ident.check`), and the scalar
   loop, a load and a select a sample, when the stream is flat.
 - **The SLP vectoriser** packs independent scalar operations of the same kind into vector operations. Four separate
-  `fmul`s on four separate values can become one `fmul <4 x float>`, if loading and storing them as a vector is
-  cheap. Without memory, that is rare.
+  `fmul`s on four separate values can become one `fmul <4 x float>`, if loading and storing them as a vector is cheap,
+  and four calls of one math builtin one call of its four-lane function (extending.md, recipe 15), in the default mode
+  the four-lane kernel, inline (recipe 24). Its cost model counts instructions, not the latency of a value carried from
+  one iteration to the next. At LLVM's threshold, 0, it packs independent recurrences: a stereo filter's two channels,
+  `[l.ic1, l.ic2, r.ic1, r.ic2]` in one `<4 x float>` with shuffles on the path from each sample to the next, one long
+  chain where the core ran two side by side. So `optimiseModule` raises the threshold to 10: a tree is packed only when
+  the model says it saves 10 of its units. The threshold is LLVM's option `-slp-threshold`, which is the process's;
+  `raiseSlpThreshold` (`support/HostTarget.cpp`) sets it once, before the first pipeline, unless the host set it on
+  LLVM's command line. `tests/lit/fminus/slp.fm` checks both sides: the filter's channels stay scalar, the four calls
+  stay one.
 - **Reductions need permission.** A loop that sums floats (`total += x[i]`) vectorises only with the `reassoc` flag,
   because a vectorised sum adds in another order. FMinus sets no fast-math flags, so it won't, and that is the same
   trade as `reduce_add`.
@@ -1352,6 +1360,28 @@ servers (Graviton, Neoverse) and RISC-V, with its own tests on such a machine.
 `opt -passes='default<O2>' -pass-remarks-missed=loop-vectorize` on `fminus -O0` IR says why a loop didn't vectorise.
 Explicit vectors (recipes 7 and 9) and the auto-vectorisers combine: the vectorisers leave already-vector code alone,
 and the backend legalises both the same way.
+
+**Why 10.** Measured on FMinus's fifteen example programs, as `fminus -O2` compiles them, and on fourteen programs of a
+JUCE host of FMinus (its five effects and four synth voices, and five built on its library: a chorus, a synth voice,
+an EQ, a reverb, and a filter that calls libm through prototypes), each as the host compiles it live (its float
+parameters streams, `Math::Vector`) and frozen (every parameter a constant, `Math::Fast`), at `-O2` and flushing
+subnormals. On all fourteen, 10 gives the code that SLP turned off gives; where that differs from 0, the loops that
+change, in cycles an iteration (`llvm-mca -mcpu=apple-m5`, which counts neither calls nor what they cost):
+
+| Loop | Threshold 0 | 10 (or SLP off) |
+|---|---|---|
+| a stereo state-variable filter, frozen: the two channels packed into a `<4 x float>` with 7 shuffles | 31.0 | 20.0 |
+| a stereo drive (two one-poles, `tanhf`), frozen | 40.0 | 33.0 |
+| the same drive live: four of its eight knob versions (the other four unchanged) | 44.0 | 37.0 |
+| an FM voice, frozen: its two phases packed into a `<2 x float>`, beside two `sinf` calls | 15.9 | 17.4 |
+
+The other changes (a synth voice, the EQ, the reverb) are outside loops of one block, and their instruction counts
+move by under 1%. Among the examples, 10 keeps what SLP does well and SLP off would lose: `chord.fm`'s float4 built
+from scalars and `convolver.fm`'s complex products stay packed (straight-line code, packed up to a threshold of 15),
+and four `sinf` calls on four phases stay one four-lane call (up to 40). The window is narrow at the bottom: at 8 and 9
+the stereo filter is still partly packed. These were measured before the math kernels' two-lane variant (extending.md,
+recipe 24); with it, SLP at 10 still pairs a stereo drive's two `tanhf` calls into one two-lane kernel, as
+`tests/lit/fminus/math.fm`'s `Drive` checks.
 
 ## Pitfalls
 
@@ -1368,6 +1398,7 @@ and the backend legalises both the same way.
 | A test of `sinf` on vectors fails by a few ulp after recipe 8 | it compared with `std::sin` exactly | compare with `fminus::math::sin` exactly (the default mode); in the fast mode, `Catch::Matchers::WithinULP(expected, 3)` |
 | The top-level syntax error loses its "expecting ..." list | `poly` is a fifth way to start a function; Bison lists at most four | update the test |
 | A local variable stops compiling after adding a member function | `std::vector<int> lanes` hides the member `lanes(type)` | rename the local |
+| A stereo filter's loop runs about 1.5x slower once its parameters are constants | the SLP vectoriser packed the two channels' independent recurrences into one vector, with shuffles from each sample to the next: its cost model counts instructions, not the chain's latency | SLP's threshold at 10 (`raiseSlpThreshold`), which leaves them scalar |
 | `llc` crashes on scalable vectors with `-mattr=+sme` | streaming mode lacks `fadda`, and LLVM 23 can't expand an ordered scalable reduction | SVE for scalable code; fixed widths on Apple silicon |
 | An FMinus function with `(float4)(1, 2, 3, 4)`, compiled as C with `ext_vector_type`, gives `4 4 4 4` | in C the parentheses are a cast of a comma expression; only OpenCL C reads them as a literal | C's `(float4){1, 2, 3, 4}`, which FMinus has too; or `clang -x cl` to compare with FMinus |
 | `(float4){x}` is `x, 0, 0, 0`, where `(float4)(x)` is `x` in every lane | C's braces fill the lanes left out with 0; OpenCL C's parentheses broadcast a single scalar | the form that means what you want: both are there |
