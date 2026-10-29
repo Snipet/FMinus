@@ -15,6 +15,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <system_error>
+#include <utility>
 
 namespace fminus::circuit
 {
@@ -487,12 +488,13 @@ namespace fminus::circuit
 
     bool Verdict::passes() const
     {
-        return finite && unconverged == 0 && t1.value <= kGateDb && t2.value <= kGateDb && t3.value <= kResponseDb;
+        return finite && unconverged == 0 && t1.measured > 0 && t2.measured > 0 && t3.measured > 0 &&
+               t1.value <= kGateDb && t2.value <= kGateDb && t3.value <= kResponseDb;
     }
 
     double Verdict::excess() const
     {
-        if (!finite)
+        if (!finite || t1.measured == 0 || t2.measured == 0 || t3.measured == 0)
             return std::numeric_limits<double>::infinity();
         return std::max({t1.value - kGateDb, t2.value - kGateDb, t3.value - kResponseDb});
     }
@@ -503,6 +505,11 @@ namespace fminus::circuit
             return "T4 not finite at " + notFinite;
         if (unconverged > 0)
             return std::format("T4: the references ran out of Newton steps on {} samples", unconverged);
+        for (const auto& [gate, name] : {std::pair{&t1, "T1"}, std::pair{&t2, "T2"}, std::pair{&t3, "T3"}})
+        {
+            if (gate->measured == 0)
+                return std::string(name) + " measured nowhere (every output silent)";
+        }
         const double e1 = t1.value - kGateDb;
         const double e2 = t2.value - kGateDb;
         const double e3 = t3.value - kResponseDb;
@@ -517,6 +524,15 @@ namespace fminus::circuit
     {
         return std::format("T1 {:.1f} dB, T2 {:.1f} dB, T3 {:.2f} dB", t1.value, t2.value, t3.value);
     }
+
+    namespace
+    {
+        // A unit's gate value: -inf, its signal is not on the gate; NaN, nothing to measure; +inf, a failure.
+        bool measured(double x)
+        {
+            return !std::isnan(x) && x > -std::numeric_limits<double>::infinity();
+        }
+    } // namespace
 
     Verdict reduce(const StressMatrix& matrix, std::span<const UnitVerdict> units, long unconverged)
     {
@@ -535,11 +551,11 @@ namespace fminus::circuit
                 v.finite = false;
                 continue;
             }
-            if (std::isfinite(r.t1))
+            if (measured(r.t1))
                 v.t1.max(r.t1, where);
-            if (std::isfinite(r.t2))
+            if (measured(r.t2))
                 v.t2.max(r.t2, where);
-            if (std::isfinite(r.t3))
+            if (measured(r.t3))
                 v.t3.max(r.t3, where + ", " + r.t3Which);
         }
         return v;

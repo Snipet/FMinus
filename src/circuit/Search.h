@@ -160,14 +160,16 @@ namespace fminus::circuit
     UnitVerdict measureUnit(const StressMatrix& matrix, int unit, int oversample, std::span<const double> steps,
                             std::span<const double> ticks, const ReferenceT1* t1, const Reference64* t3);
 
-    // A gate's worst value and where it fell.
+    // A gate's worst value and where it fell, over the units that measured it.
     struct GateWorst
     {
         double value = -std::numeric_limits<double>::infinity();
         std::string where;
+        int measured = 0;   // the units that gave it a value
 
         void max(double v, const std::string& at)
         {
+            ++measured;
             if (v > value)
             {
                 value = v;
@@ -176,7 +178,8 @@ namespace fminus::circuit
         }
     };
 
-    // A candidate's verdict over the matrix.
+    // A candidate's verdict over the matrix. A gate passes only when some unit measured it: a matrix that measures
+    // nothing (every output silent) passes nothing.
     struct Verdict
     {
         GateWorst t1;
@@ -187,7 +190,8 @@ namespace fminus::circuit
         long unconverged = 0;    // the references' samples that ran out of Newton steps
 
         bool passes() const;
-        // How far it misses: the largest of t1 + 60, t2 + 60 and t3 - 0.5 (negative when it passes those).
+        // How far it misses: the largest of t1 + 60, t2 + 60 and t3 - 0.5 (negative when it passes those; infinite
+        // when a gate was measured nowhere).
         double excess() const;
         // The worst gate and where: "T2 -55.1 dB at 2.2 V, 3012 Hz, drive 1"; "T4 not finite at ...".
         std::string worst() const;
@@ -195,7 +199,9 @@ namespace fminus::circuit
         std::string figures() const;
     };
 
-    // The units' verdicts reduced in index order (so the same for any thread count), with the references' counts.
+    // The units' verdicts reduced in index order (so the same for any thread count), with the references' counts. A
+    // gate's NaN (nothing to measure: the output and its reference both silent, a pot at a muting end) is no
+    // measurement; its +inf (one of them silent, the other not) is the worst.
     Verdict reduce(const StressMatrix& matrix, std::span<const UnitVerdict> units, long unconverged);
 
     // A candidate configuration of the open dimensions, with its model cost.

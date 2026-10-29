@@ -17,6 +17,7 @@
 #include <cmath>
 #include <format>
 #include <functional>
+#include <limits>
 #include <optional>
 #include <string>
 #include <thread>
@@ -140,13 +141,13 @@ namespace
         };
     }
 
-    // A verdict that passes (or not), for stub measures.
+    // A verdict that passes (or not), for stub measures: each gate measured on one unit.
     fc::Verdict verdict(bool passes, double excess = 1)
     {
         fc::Verdict v;
-        v.t1.value = passes ? -80 : -60 + excess;
-        v.t2.value = -80;
-        v.t3.value = 0.1;
+        v.t1.max(passes ? -80 : -60 + excess, "a");
+        v.t2.max(-80, "b");
+        v.t3.max(0.1, "c");
         return v;
     }
 } // namespace
@@ -450,6 +451,51 @@ TEST_CASE("the self-test runs the same on any number of threads", "[circuit]")
     // the answer generates a module that is not provisional
     options.chosen = a.choice;
     CHECK(!fc::generate(kPotClipper, "clip.cir", options).provisional);
+}
+
+TEST_CASE("a gate passes only where it was measured", "[circuit]")
+{
+    const fc::StressMatrix matrix = fc::stressMatrix(planned(kPotClipper), small());
+    const int units = matrix.units();
+    const double inf = std::numeric_limits<double>::infinity();
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    // every gate NaN (the output and its references silent): nothing measured, so nothing passes
+    std::vector<fc::UnitVerdict> silent(static_cast<std::size_t>(units));
+    for (fc::UnitVerdict& u : silent)
+    {
+        u.ran = true;
+        u.t1 = u.t2 = u.t3 = nan;
+    }
+    const fc::Verdict none = fc::reduce(matrix, silent, 0);
+    CHECK(none.t1.measured == 0);
+    CHECK(!none.passes());
+    CHECK(none.excess() == inf);
+    CHECK(none.worst() == "T1 measured nowhere (every output silent)");
+    // one unit's figures pass; a NaN elsewhere is no measurement, a +inf (silent against not) the worst
+    std::vector<fc::UnitVerdict> some = silent;
+    some[10].t1 = -80;
+    some[10].t2 = -80;
+    some[10].t3 = 0.1;
+    CHECK(fc::reduce(matrix, some, 0).passes());
+    some[11].t1 = inf;
+    const fc::Verdict worst = fc::reduce(matrix, some, 0);
+    CHECK(!worst.passes());
+    CHECK(worst.t1.value == inf);
+    CHECK(worst.t1.measured == 2);
+    CHECK(worst.worst() == "T1 inf dB at " + matrix.where(11));
+}
+
+TEST_CASE(".target level is a positive voltage", "[circuit]")
+{
+    for (const char* level : {"level=0V", "level=-4.5V", "level=1e300T"})
+    {
+        INFO(level);
+        fc::Messages messages;
+        const std::string text = replaced(kPotClipper, "level=4.5V", level);
+        fc::parse(text, messages);
+        CHECK(messages.format("t.cir", fc::Severity::Error) ==
+              std::format("t.cir:5:9: error: '{}': the level is a positive voltage\n", level));
+    }
 }
 
 TEST_CASE("T1 runs the region on what the blocks before it give it", "[circuit]")

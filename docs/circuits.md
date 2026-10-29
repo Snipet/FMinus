@@ -147,7 +147,7 @@ parameters, are refused: "the inductor L1 is not supported yet (Phase 1)".
 | `.channels 1\|2` | 2: tick and step take and return `float2`s |
 | `.method tr\|auto` | the integrator; `auto`, or none, is TR (BDF2, for a block that rings, is a later slice of Phase 1) |
 | `.prewarp off` | an OTA filter's cutoff law, as the circuit has it (`on` is a later slice of Phase 1) |
-| `.target [solver=xdB] [alias=xdB] [level=xV] [freq=xHz]` | echoed in the header; `level` is the self-test's stress level L (else `.input`'s scale); `examples/circuits` checks against it |
+| `.target [solver=xdB] [alias=xdB] [level=xV] [freq=xHz]` | echoed in the header; `level`, a positive voltage, is the self-test's stress level L (else `.input`'s scale); `examples/circuits` checks against it |
 
 `.op` warns that it is ignored (Phase 1: the DC operating point); SPICE's simulator directives (`.tran`, `.ac`,
 `.print`, ...) are ignored with a note; `.subckt`, `.param`, `.include`, `.lib`, `.options`, `.temp`, `.ic`, `.nodeset`
@@ -320,6 +320,9 @@ bumps `kSelfTestVersion` (1 until Phase 1's branch merges).
 - **T3**, the response: |dH1| and |dH3| at most 0.5 dB against the converged 64x chain (every block, TR, no ADAA), on
   bins 85 and 257; H3 counts within 100 dB of H1;
 - **T4**: finite on every signal, and every reference converged.
+
+A gate passes only where some unit measured it: a unit whose output and reference are both silent there (a pot at a
+muting end) gives that gate nothing, and one silent against the other fails it.
 
 The 64x chain runs once a unit (for the units T2 and T3 read), the converged region once a unit for each oversampling
 and ADAA a candidate needs (its Newton steps share it).

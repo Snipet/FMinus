@@ -1617,6 +1617,12 @@ namespace fminus::circuit
                         error(t[i].loc, "'" + t[i].text.substr(eq + 1) + "' is not a number (" + key + ")");
                         return true;
                     }
+                    // the self-test's stress level L: its sines run at fractions and multiples of it
+                    if (key == "level" && !(std::isfinite(v->value) && v->value > 0))
+                    {
+                        error(t[i].loc, "'" + t[i].text + "': the level is a positive voltage");
+                        return true;
+                    }
                     *slot = v->value;
                 }
                 return true;
