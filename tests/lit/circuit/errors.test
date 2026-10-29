@@ -33,6 +33,10 @@
 
 # NOOUTPUT: {{.*}}broken-nooutput.cir: error: the netlist has no .output
 
+# --emit fm is a netlist's: on an FMinus source it is an error.
+# RUN: not fminus %S/Inputs/play.fm --emit fm 2>&1 | FileCheck %s --check-prefix=NOTCIR --match-full-lines
+# NOTCIR: fminus: --emit fm: {{.*}}play.fm is not a circuit netlist (.cir)
+
 # A warning is not an error: 1M is a milliohm in SPICE, and the netlist still generates.
 # RUN: fminus %S/Inputs/milliohm.cir --emit fm -o %t.fm 2>&1 | FileCheck %s --check-prefix=MILLI --match-full-lines
 # MILLI: {{.*}}milliohm.cir:5:16: warning: '1M' is 1 milliohm in SPICE; write 1meg for a megohm

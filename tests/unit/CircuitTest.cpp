@@ -320,6 +320,41 @@ TEST_CASE("netlist errors, as clang words them", "[circuit]")
     }
 }
 
+TEST_CASE("netlist warnings and notes", "[circuit]")
+{
+    const std::string head = ".input u in\n.output y o\nR1 in o 1k\nC1 o 0 1n\n";
+    struct Case
+    {
+        std::string netlist;
+        std::string warnings;
+    };
+    const Case cases[] = {
+        {head + ".pot drive\n", "t.cir:5:6: warning: pot 'drive' is never used\n"},
+        {".input u in\n.output y o\n.pot tone 0.5 lin\nR1 in o 1k\nP1 o 0 10k {tone} taper=audio\n",
+         "t.cir:5:19: warning: P1's taper=audio differs from pot 'tone''s lin: taper=audio is used\n"},
+        {head + "R9 in 0 1k\n",
+         "t.cir:5:1: warning: R9 joins 'in' and ground, which are both driven: it changes nothing\n"},
+        {head + ".op\n", "t.cir:5:1: warning: '.op' is ignored (Phase 1: the DC operating point)\n"},
+    };
+    for (const Case& c : cases)
+    {
+        INFO(c.netlist);
+        const fc::Result r = fc::generate(c.netlist, "t.cir");
+        CHECK(r.errors.empty());
+        CHECK(r.warnings.find(c.warnings) != std::string::npos);
+    }
+    // auto is Phase 0's default, with a note; simulator directives are ignored with one
+    const fc::Result r = fc::generate(head + ".oversample auto\n.adaa auto\n.solver auto\n.tran 1u 1m\n", "t.cir");
+    CHECK(r.notes.find("t.cir:5:1: note: '.oversample auto' is 8x, Phase 0's default") != std::string::npos);
+    CHECK(r.notes.find("t.cir:6:1: note: '.adaa auto' is off") != std::string::npos);
+    CHECK(r.notes.find("t.cir:7:1: note: '.solver auto' is omega(2)") != std::string::npos);
+    CHECK(r.notes.find("t.cir:8:1: note: '.tran' is a simulator's directive: ignored") != std::string::npos);
+    CHECK(r.notes.find("t.cir: note: block 1 (R1, C1): 1 state, linear, at the host rate") != std::string::npos);
+    CHECK(errorsOf(head + ".model Q1 NPN(BF=100)\n") ==
+          "t.cir:5:11: error: model type 'NPN' is not supported yet (Phase 2): Phase 0 has diodes (D)\n");
+    CHECK(errorsOf(head + ".model D9 D(IS=1n XYZ=3)\n") == "t.cir:5:19: error: unknown diode parameter 'XYZ'\n");
+}
+
 TEST_CASE("the plan cuts at ideal op amps", "[circuit]")
 {
     const fc::Plan ts = planned(fc::test::kScreamer);
