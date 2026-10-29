@@ -1,0 +1,13 @@
+* clipper-pot.cir: Yeh's RC diode clipper with a drive pot in its series resistance, and no configuration directives:
+* the self-test chooses its oversampling, ADAA and solver (selftest.test)
+.title PotClipper
+.input  u    in
+.output y    a
+.pot    drive 0.5
+.target level=4.5V
+R1     in a  {1k + 4k * drive}
+C1     a  0  10n
+D1     a  0  1N914
+D2     0  a  1N914
+.model 1N914 D(IS=2.52n N=1.752)
+.end

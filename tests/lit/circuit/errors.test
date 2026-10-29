@@ -54,3 +54,10 @@
 # PLAY: {{.*}}broken-plan.cir:9:16: error: unknown model '1N4148X' (the models: 1N914)
 # PLAY: {{.*}}broken-plan.cir:10:16: error: unknown model '1N4148X' (the models: 1N914)
 # PLAY: {{.*}}broken-plan.cir:11:1: error: D3 has no antiparallel partner: Phase 0 solves antiparallel diode pairs only
+
+# FMinus's messages on a generated module are re-cited at the netlist's line the generated line comes from
+# (Result::lines): play-redefine.fm declares its own module Clipper before #include "clipper.cir", and the module
+# generated from clipper.cir redefines it at the netlist's .title line.
+# RUN: not fminus %S/Inputs/play-redefine.fm -I %S/../../../examples/circuits 2>&1 | FileCheck %s --check-prefix=RECITED --match-full-lines
+# RECITED:      In file included from {{.*}}play-redefine.fm:7:
+# RECITED-NEXT: {{.*}}clipper.cir:4:1: error: redefinition of 'Clipper' (in the module generated from clipper.cir, line 8)

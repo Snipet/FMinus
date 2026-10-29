@@ -1,0 +1,20 @@
+// clipper-pot.cir's module, as a program reads it (selftest.test): #include generates it, with the self-test's answer
+// under fminus --self-test.
+#include "clipper-pot.cir"
+
+// The output's peak for a 1 kHz sine of amplitude `amp`, drive at 1, over 0.25 s.
+float peak(float amp)
+{
+    PotClipper c;
+    c.init(48000);
+    c.set(1);
+    float pk = 0;
+    float ph = 0;
+    for (int i = 0; i < 12000; ++i)
+    {
+        pk = fmaxf(pk, fabsf(c.tick(amp * sinf(6.28318531f * ph))));
+        ph += 1000.0f / 48000.0f;
+        ph = ph >= 1 ? ph - 1 : ph;
+    }
+    return pk;
+}

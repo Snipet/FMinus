@@ -20,6 +20,9 @@
 //     fminus diodetone.cir --emit fm        the FMinus module a circuit netlist generates (fminus::circuit,
 //                                           docs/circuits.md); a .cir compiles and runs as that text would
 //     fminus play.fm --run dc 1             play.fm's #include "diodetone.cir" reads the module it generates
+//     fminus pedal.cir --self-test --emit fm   the self-test chooses the netlist's open configuration (on --threads
+//                                           threads), and the module is generated with its answer; --notes prints
+//                                           the plan
 #include "fminus/Circuit.h"
 #include "frontend/Frontend.h"
 #include "ir/CodeGen.h"
@@ -40,14 +43,19 @@
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Target/TargetMachine.h>
 
+#include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdlib>
+#include <exception>
 #include <format>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -128,13 +136,124 @@ namespace
         return tail == ".cir";
     }
 
-    // What the circuit compiler said of the .cir files #include read: its messages, and whether one failed. The
-    // include resolver cannot carry errors, so it writes them here, and main prints them after the parse.
+    // What the circuit compiler said of the .cir files the program reads (the input and its #includes): its messages,
+    // whether one failed, and each Result by the generated file's name, so that FMinus's messages on the generated
+    // text can be re-cited at the netlist's lines. The include resolver cannot carry errors, so it writes them here,
+    // and main prints them after the parse.
     struct CircuitLog
     {
         std::string messages;
         bool failed = false;
+        std::map<std::string, fminus::circuit::Result> results;   // "x.cir.fm" -> what generated it
     };
+
+    // --self-test's threads: SelfTestOptions::parallel on std::threads (0: one for each core), the calling thread one
+    // of them.
+    std::function<void(int, const std::function<void(int)>&)> threadPool(unsigned threads)
+    {
+        return [threads](int count, const std::function<void(int)>& job)
+        {
+            unsigned n = threads != 0 ? threads : std::max(1u, std::thread::hardware_concurrency());
+            n = std::min(n, static_cast<unsigned>(std::max(count, 1)));
+            std::atomic<int> next{0};
+            std::exception_ptr failure;
+            std::atomic<bool> failed{false};
+            auto work = [&]
+            {
+                for (int i = next++; i < count; i = next++)
+                {
+                    try
+                    {
+                        job(i);
+                    }
+                    catch (...)
+                    {
+                        if (!failed.exchange(true))
+                            failure = std::current_exception();
+                    }
+                }
+            };
+            std::vector<std::thread> pool;
+            for (unsigned k = 1; k < n; ++k)
+                pool.emplace_back(work);
+            work();
+            for (std::thread& t : pool)
+                t.join();
+            if (failure)
+                std::rethrow_exception(failure);
+        };
+    }
+
+    // How a .cir is generated: plainly, or after its self-test (whose messages and answer go to the log too).
+    struct CircuitSettings
+    {
+        bool selfTest = false;
+        unsigned threads = 0;
+        bool notes = false;
+    };
+
+    // `text` of the netlist `name`, generated as `settings` say; its messages go to `log`.
+    fminus::circuit::Result generateCircuit(std::string_view text, const std::string& name,
+                                            const CircuitSettings& settings, CircuitLog& log)
+    {
+        fminus::circuit::Options options;
+        if (settings.selfTest)
+        {
+            fminus::circuit::SelfTestOptions test;
+            test.parallel = threadPool(settings.threads);
+            const fminus::circuit::SelfTestResult tested = fminus::circuit::selfTest(text, name, options, test);
+            if (!tested.errors.empty())
+            {
+                log.messages += tested.errors + tested.warnings;
+                log.failed = true;
+                return {};
+            }
+            log.messages += tested.notes;
+            options.chosen = tested.choice;
+        }
+        fminus::circuit::Result result = fminus::circuit::generate(text, name, options);
+        log.messages += result.errors + result.warnings + (settings.notes ? result.notes : std::string());
+        log.failed = log.failed || !result.errors.empty();
+        log.results[name + ".fm"] = result;
+        return result;
+    }
+
+    // FMinus's messages, with each line that cites a module generated from a netlist ("x.cir.fm:12:8: error: ...")
+    // re-cited at the netlist's line it came from (Result::lines): "x.cir:4:1: error: ... (in the module generated
+    // from x.cir, line 12)".
+    std::string recited(const std::string& messages, const CircuitLog& log)
+    {
+        std::string out;
+        std::size_t at = 0;
+        while (at < messages.size())
+        {
+            const std::size_t end = std::min(messages.find('\n', at), messages.size());
+            std::string line = messages.substr(at, end - at);
+            at = end + 1;
+            for (const auto& [generated, result] : log.results)
+            {
+                if (line.rfind(generated + ":", 0) != 0)
+                    continue;
+                const std::size_t lineEnd = line.find(':', generated.size() + 1);
+                const std::size_t columnEnd =
+                    lineEnd == std::string::npos ? std::string::npos : line.find(':', lineEnd + 1);
+                if (columnEnd == std::string::npos)
+                    break;
+                const int number = std::atoi(line.substr(generated.size() + 1, lineEnd - generated.size() - 1).c_str());
+                const std::string netlist = generated.substr(0, generated.size() - 3);
+                const std::string base = std::string(llvm::sys::path::filename(netlist));
+                const int from = number >= 1 && static_cast<std::size_t>(number) <= result.lines.size()
+                                     ? result.lines[static_cast<std::size_t>(number) - 1]
+                                     : 0;
+                line = netlist + (from > 0 ? ":" + std::to_string(from) + ":1" : std::string()) +
+                       line.substr(columnEnd) + " (in the module generated from " + base + ", line " +
+                       std::to_string(number) + ")";
+                break;
+            }
+            out += line + "\n";
+        }
+        return out;
+    }
 
     // Where #include "name" finds its file, as C's quoted form looks: beside the including file, then in each of
     // `directories` in turn (an absolute name is itself). A file is named as found (the directory and the name, its
@@ -145,8 +264,9 @@ namespace
     class DiskIncludes
     {
     public:
-        DiskIncludes(std::vector<std::string> directories, const std::string& input, CircuitLog* log)
-            : directories_(std::move(directories)), log_(log)
+        DiskIncludes(std::vector<std::string> directories, const std::string& input, CircuitLog* log,
+                     CircuitSettings settings)
+            : directories_(std::move(directories)), log_(log), settings_(settings)
         {
             if (input != "<stdin>")
                 remember(input);
@@ -184,12 +304,7 @@ namespace
                 // generated once, so a second #include says nothing again (the scanner reads it once anyway)
                 auto [it, first] = generated_.try_emplace(found);
                 if (first)
-                {
-                    const fminus::circuit::Result circuit = fminus::circuit::generate((*file)->getBuffer(), found);
-                    log_->messages += circuit.errors + circuit.warnings;
-                    log_->failed = log_->failed || !circuit.errors.empty();
-                    it->second = circuit.source;
-                }
+                    it->second = generateCircuit((*file)->getBuffer(), found, settings_, *log_).source;
                 return fminus::frontend::IncludedFile{found + ".fm", it->second};
             }
             return std::nullopt;
@@ -209,6 +324,7 @@ namespace
         std::map<std::string, std::string> names_;       // a file's real path, and the name it goes by
         std::map<std::string, std::string> generated_;   // a .cir's name, and the module generated from it
         CircuitLog* log_;                                // main's: the resolver is copied into a std::function
+        CircuitSettings settings_;
     };
 
     int writeText(const std::string& path, const std::string& text)
@@ -245,6 +361,7 @@ int main(int argc, char** argv)
     std::string math = "vector";
     std::vector<std::string> includeDirectories;
     unsigned threads = 0;
+    CircuitSettings circuitSettings;
     app.add_option("input", input, "FMinus source file ('-' for stdin)")->required();
     app.add_option("args", runArgs, "The arguments of --run's function");
     app.add_option("-o,--output", output, "The output file ('-' is stdout)")->capture_default_str();
@@ -286,9 +403,14 @@ int main(int argc, char** argv)
         ->allow_extra_args(false);
     app.add_option("--threads", threads,
                    "The most threads a parallel for or parallel { } runs on, the calling thread's among them (0: one "
-                   "for each core; 1: each region on the calling thread alone)")
+                   "for each core; 1: each region on the calling thread alone); and --self-test's threads")
         ->capture_default_str();
+    app.add_flag("--self-test", circuitSettings.selfTest,
+                 "Run the self-test of each circuit netlist (.cir) the program reads and generate it with the answer: "
+                 "it chooses the configuration the netlist leaves open (seconds; docs/circuits.md)");
+    app.add_flag("--notes", circuitSettings.notes, "Print the circuit compiler's notes on each netlist (its plan)");
     CLI11_PARSE(app, argc, argv);
+    circuitSettings.threads = threads;
     if (emit == "exe" && run.empty() && output == "-")
         return fail("--emit exe: an executable needs a file name (-o)");
 
@@ -302,29 +424,30 @@ int main(int argc, char** argv)
         return fail("cannot read " + input + ": " + source.getError().message());
     std::string text = (*source)->getBuffer().str();
     std::string sourceName = input == "-" ? "<stdin>" : input;
+    CircuitLog circuits;
     if (isNetlist(input))
     {
-        const fminus::circuit::Result circuit = fminus::circuit::generate(text, input);
-        llvm::errs() << circuit.errors << circuit.warnings;
-        if (!circuit.errors.empty())
+        const fminus::circuit::Result circuit = generateCircuit(text, input, circuitSettings, circuits);
+        llvm::errs() << circuits.messages;
+        circuits.messages.clear();
+        if (circuits.failed)
             return 1;
         if (emit == "fm" && run.empty())
             return writeText(output, circuit.source);
         text = circuit.source;
-        sourceName = input + ".fm";   // FMinus's messages cite the lines --emit fm prints
+        sourceName = input + ".fm";   // FMinus's messages cite the lines --emit fm prints, re-cited at the netlist's
     }
     else if (emit == "fm")
         return fail("--emit fm: " + input + " is not a circuit netlist (.cir)");
-    CircuitLog circuits;
     fminus::Diagnostics diagnostics(sourceName);
-    std::optional<fminus::ast::Program> program =
-        fminus::frontend::parse(text, diagnostics, DiskIncludes(includeDirectories, diagnostics.fileName(), &circuits));
+    std::optional<fminus::ast::Program> program = fminus::frontend::parse(
+        text, diagnostics, DiskIncludes(includeDirectories, diagnostics.fileName(), &circuits, circuitSettings));
     llvm::errs() << circuits.messages;
     if (circuits.failed)
         return 1;
     if (!program)
     {
-        llvm::errs() << diagnostics.format();
+        llvm::errs() << recited(diagnostics.format(), circuits);
         return 1;
     }
     if (emit == "ast" && run.empty())
@@ -361,7 +484,7 @@ int main(int argc, char** argv)
     std::unique_ptr<llvm::Module> module = fminus::ir::lower(*program, *context, diagnostics, options);
     if (!module)
     {
-        llvm::errs() << diagnostics.format();
+        llvm::errs() << recited(diagnostics.format(), circuits);
         return 1;
     }
 
