@@ -568,7 +568,7 @@ Where the design left a choice, or the code (the self-test, measuring the JIT-co
 | search | `src/circuit/Search.*` | the self-test's arithmetic: the stress matrix, the 64x and T1 references, a unit's gates and their reduction, the candidates in the cost model's order, the ordered search, the no-configuration answer, the budget; `Choice`'s text |
 | runners | `src/circuit/Runners.*` | `fm_set`, `fm_steps` and `fm_ticks`: FMinus that drives a module over buffers, a call a run |
 | self-test | `src/api/CircuitSelfTest.cpp` (in `fminus_lib`) | `selfTest()`: each candidate generated, compiled through `fminus::Program` and run on the host's threads |
-| reference | `src/circuit/Reference.*` | a block in Holters' form in double, converged (a diode pair's from the closed-form guess, an OTA's by bracketed Newton) or with the emitted steps, plain or ADAA (an OTA's in its i-form, with the carry); a chain, with a stream of gains |
+| reference | `src/circuit/Reference.*` | a block in Holters' form in double, converged (a diode pair's from the closed-form guess, an OTA's by bracketed Newton) or with the emitted steps, plain or ADAA (an OTA's in its i-form, with the carry, which `RefOptions::carry` turns off for a check's control); a chain, with a stream of gains |
 | analysis | `src/circuit/Analysis.*` | the FFT, the windowed-sinc decimator, in-band error, inharmonic energy (and its excess over a reference's), H1 and H3, the stress signals (sines, the saw, the sweep, noise) |
 
 The invariant: every emitted coefficient is `derive<Val>` of the derivation the reference runs as `derive<double>`.
@@ -607,10 +607,13 @@ prints each check's worst value, where it fell, and the report's figure beside i
   through the JIT (T1 -89.0, T2 -73.2, T3 0.13 dB); without its directives, the self-test chooses what it ships (4x,
   newton(1), candidate 10 of 18) with the same figures, and so it does with iabc's argument in mA (`scale=1m`, the
   same range in amps); tick against step through its 4x IIR oversampler; the
-  prewarp's -3 dB points ([above](#prewarp)); the carry under ADAA: each step keeps the stored point's Newton residual
-  (to 6e-8 of `p_G1`, where a 37 Hz triangle moves the curve by up to 4e-4 of it), and over 512 ramps of a +-2-octave
-  37 Hz triangle the ADAA module stays within 1.1x of its departure from a plain newton(3) module with iabc held
-  (0.1502 V against 0.1501 V);
+  prewarp's -3 dB points ([above](#prewarp)); the carry under ADAA: one OTA stage driven into its law's bend (10k / 1k
+  attenuators, tanh 0.7 at the step), iabc stepping from 1 uA to 200 uA in one sample and back at 1x, newton(2): the
+  module follows the double reference with the same steps, ADAA, gain stream and carry to 1e-5 of the signal (2e-5
+  the gate), where the reference without the carry departs by 18 times the signal, and a module without it by 0.18 of
+  it (the mean pairs points on curves 200x apart); and over 512 ramps of a +-2-octave 37 Hz triangle on otalp.cir the
+  ADAA module stays within 1.1x of its departure from a plain newton(3) module with iabc held (0.1502 V against 0.1501
+  V), a bound on the output that the carry itself, a few uV there, barely moves;
 - **n.** law inputs: iabc NaN, 0 and 1 A for 200 samples of an 11 V sine give finite output; `.channels 2`'s lanes
   are the scalar module's, bit for bit, the law input broadcast to both; calls of 64 and 61 samples are one call's,
   bit for bit, with a per-sample iabc.

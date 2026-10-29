@@ -1236,7 +1236,8 @@ TEST_CASE("the bracket keeps every law's iterates finite, in double", "[circuit]
 TEST_CASE("the carry keeps the stored point's Newton residual, in double", "[circuit]")
 {
     // a step of the law input moves the curve, p = v + kg tanh(v / 2 Vt); the carry p_P += (kg - kg_P) t_P (t_P =
-    // tanh(v_P / 2 Vt)) moves the stored point onto the new one, its residual p_P - v_P - kg t_P unchanged
+    // tanh(v_P / 2 Vt)) moves the stored point onto the new one, its residual p_P - v_P - kg t_P unchanged: the
+    // carry's algebra, in double (example-circuits --check, m, measures the emitted carry: a module without it fails)
     const double s = 2 * fc::thermalVoltage(1);
     for (double p : {1e-4, 3e-3, 0.02, -0.05})
     {

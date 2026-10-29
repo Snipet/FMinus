@@ -21,6 +21,9 @@ namespace fminus::circuit
         int steps = -1;      // -1: solved to convergence; otherwise the emitted Newton steps
         Solver::Guess guess = Solver::Guess::Omega;
         double eps = 1e-5;   // ADAA's |dp| below which the mean is the midpoint (volts)
+        // ADAA, an OTA's: the stored point carried onto each step's curve when kd g moves, as the emitted step does.
+        // false leaves it on the last step's curve: a check's control, to measure what the carry does.
+        bool carry = true;
         // Polled every 4096 steps: true stops the run where it is (the rest of the output is 0, and stats->stopped
         // is set). Empty: never.
         std::function<bool()> stop;

@@ -132,7 +132,8 @@ namespace fminus::circuit
                     v1 = v;
                     return y;
                 }
-                p1 += (kg - kg1) * t1;
+                if (o.carry)
+                    p1 += (kg - kg1) * t1;
                 const double lc = logCosh(v / h.nvt);
                 const double dpv = p - p1;
                 const double vm = 0.5 * (v + v1);

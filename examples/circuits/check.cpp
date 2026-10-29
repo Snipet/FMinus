@@ -1273,16 +1273,86 @@ namespace circuits
                    "off is the default: the cutoff law is the circuit's");
         }
 
-        // The carry under ADAA: otalp.cir with ADAA (4x, newton(1)), a 5 V, 996 Hz sine, iabc a triangle +-2 octaves
-        // around its middle at 37 Hz. (1) a step of the law input keeps the stored point's Newton residual p_G1 - v_G1
-        // - kd g t_G1: the carry's float arithmetic on the module's fields, p_G1 + (kd g' - kgo_G1) t_G1, moves it by
-        // 1e-6 of |p_G1| at most, where the step moves the curve by more than 1e-4 of it (a 37 Hz triangle moves
-        // iabc by about 0.4 % a host sample); (2) end to end, against the plain newton(3) module, over 512 ramps:
-        // within 1.1x of the departure with iabc held at the triangle's ends.
+        // The carry under ADAA. (1) What it does: one OTA stage driven into its law's bend (10k / 1k attenuators, so a
+        // 0.5 V, 1 kHz sine puts tanh(v / 2 Vt) near 0.7), 10 nF, at 1x with ADAA and newton(2), iabc stepping from 1
+        // uA to 200 uA in one sample, at the sine's crest, and back. Its tick follows the double reference run with
+        // the same steps, ADAA and gain stream (Reference.cpp's carry the emitted one) to 2e-5 of the signal (float's
+        // rounding through the step, and in the slow pole after the step back); the same reference without the carry
+        // departs from it by more than 1e-3 of the signal (by 18 times it: the mean of the step pairs points on two
+        // curves 200x apart), so a module without the carry, or with a wrong one, fails (one without: 0.18). (2) otalp.cir with ADAA (4x, newton(1)), a 5 V, 996 Hz sine, iabc a triangle +-2 octaves
+        // around its middle at 37 Hz, against the plain newton(3) module over 512 ramps: within 1.1x of the departure
+        // with iabc held at the triangle's ends (a bound on the output, which the carry, a few uV here, barely moves).
         void carry(Report& r)
         {
-            std::printf("m. the carry under ADAA: otalp.cir (4x, ADAA, newton(1)), 5 V at 996 Hz, iabc a triangle +-2 "
-                        "octaves at 37 Hz\n");
+            std::printf("m. the carry under ADAA: an OTA stage in its law's bend, iabc stepping 1 uA to 200 uA and "
+                        "back, against the double reference; otalp.cir, iabc a triangle +-2 octaves at 37 Hz\n");
+            // (1) a gain step, through the JIT, against the reference with and without the carry
+            {
+                const std::string stage = ".title Bend\n.input u in\n.input iabc - kind=current range=1u:200u\n"
+                                          ".output y yb\n.oversample 1\n.adaa on\n.solver newton(2)\n"
+                                          "R1 in a1 10k\nR2 a1 0 1k\nR3 yb a2 10k\nR4 a2 0 1k\n"
+                                          "G1 0 y OTA a1 a2 {iabc}\nC1 y 0 10n\nR5 y 0 10meg\nX1 y yb yb opamp\n";
+                auto c = buildOrReport(r, stage, "bend.cir");
+                if (!c)
+                    return;
+                constexpr std::size_t n = 4800;
+                constexpr std::size_t up = 2412;     // 1 uA -> 200 uA, at the sine's crest
+                constexpr std::size_t down = 3612;   // and back
+                std::vector<double> u(n);
+                std::vector<float> law(n);
+                std::vector<double> gains(n);
+                for (std::size_t i = 0; i < n; ++i)
+                {
+                    const double w = 2 * std::numbers::pi * 1000 * static_cast<double>(i) / 48000;
+                    u[i] = static_cast<double>(static_cast<float>(0.5 * std::sin(w)));
+                    law[i] = i >= up && i < down ? 200e-6f : 1e-6f;
+                    gains[i] = static_cast<double>(law[i]);
+                }
+                // the module, and tanh(v / 2 Vt) at the step
+                Instance self(*c->module);
+                c->init(self.get(), 48000);
+                std::vector<double> y(n);
+                double bend = 0;
+                std::size_t tFieldOffset = 0;
+                for (const fminus::Program::Module::Field& f : c->module->fields)
+                {
+                    if (f.name == "t_G1")
+                        tFieldOffset = f.offset;
+                }
+                for (std::size_t i = 0; i < n; ++i)
+                {
+                    const auto x = static_cast<float>(u[i]);
+                    float out = 0;
+                    c->ticks(self.get(), &x, &law[i], nullptr, nullptr, &out, 1, static_cast<int>(i));
+                    y[i] = static_cast<double>(out);
+                    if (i + 1 == up || i + 1 == down)
+                    {
+                        float t = 0;
+                        std::memcpy(&t, static_cast<const char*>(self.get()) + tFieldOffset, sizeof t);
+                        bend = std::max(bend, std::fabs(static_cast<double>(t)));
+                    }
+                }
+                const std::vector<fc::Holters> h = chainAt(c->plan, {}, 48000, true, {});
+                fc::RefOptions ro;
+                ro.adaa = true;
+                ro.steps = 2;
+                ro.guess = fc::Solver::Guess::Previous;
+                const std::vector<double> carried = fc::simulate(h.front(), u, ro, nullptr, gains);
+                ro.carry = false;
+                const std::vector<double> held = fc::simulate(h.front(), u, ro, nullptr, gains);
+                double follows = 0;
+                double departs = 0;
+                for (std::size_t i = 0; i < n; ++i)
+                {
+                    follows = std::max(follows, std::fabs(y[i] - carried[i]) / 0.5);
+                    departs = std::max(departs, std::fabs(held[i] - carried[i]) / 0.5);
+                }
+                r.line(follows <= 2e-5 && departs >= 1e-3 && bend >= 0.5,
+                       std::format("a gain step (tanh at the step {:.2f}): the module follows the reference to {:.1e} "
+                                   "of the signal (gate 2e-5); without the carry the reference departs by {:.1e} "
+                                   "(gate: at least 1e-3)",
+                                   bend, follows, departs));
+            }
             fc::Options adaaOptions;
             adaaOptions.adaa = true;
             auto adaa = buildOrReport(r, netlist("otalp.cir"), "otalp.cir", adaaOptions);
@@ -1299,58 +1369,6 @@ namespace circuits
                 const double t = x < 0.5 ? 4 * x - 1 : 3 - 4 * x;   // -1 to 1 and back
                 return mid * std::exp2(2 * t);
             };
-            // (1) the residual, from the instance's fields after each tick, and the carry's float arithmetic
-            {
-                auto offsetOf = [&](const std::string& field)
-                {
-                    for (const fminus::Program::Module::Field& f : adaa->module->fields)
-                    {
-                        if (f.name == field)
-                            return f.offset;
-                    }
-                    throw std::runtime_error("no field " + field);
-                };
-                Instance self(*adaa->module);
-                adaa->init(self.get(), 48000);
-                auto read = [&](const std::string& field)
-                {
-                    float f = 0;
-                    std::memcpy(&f, static_cast<const char*>(self.get()) + offsetOf(field), sizeof f);
-                    return f;
-                };
-                const std::vector<double> u = fc::sine(5, 85, kWindow, 1, 4800);
-                double worst = 0;
-                double moved = 0;
-                for (std::size_t i = 0; i < u.size(); ++i)
-                {
-                    const float x = static_cast<float>(u[i]);
-                    const float g = static_cast<float>(triangle(i));
-                    float y = 0;
-                    adaa->ticks(self.get(), &x, &g, nullptr, nullptr, &y, 1, 1);
-                    // the next step's gain, and the carry its first line computes
-                    const volatile float kd = read("kd_G1");
-                    const volatile float g2 = static_cast<float>(triangle(i + 1));
-                    const volatile float kg = kd * g2;
-                    const volatile float kgo = read("kgo_G1");
-                    const volatile float t = read("t_G1");
-                    const volatile float dk = kg - kgo;
-                    const volatile float shift = dk * t;
-                    const volatile float p = read("p_G1");
-                    const volatile float carried = p + shift;
-                    const double v = static_cast<double>(read("v_G1"));
-                    const double before =
-                        static_cast<double>(p) - v - static_cast<double>(kgo) * static_cast<double>(t);
-                    const double after =
-                        static_cast<double>(carried) - v - static_cast<double>(kg) * static_cast<double>(t);
-                    const double scale = std::max(std::fabs(static_cast<double>(p)), 1e-6);
-                    worst = std::max(worst, std::fabs(after - before) / scale);
-                    moved = std::max(moved, std::fabs(static_cast<double>(shift)) / scale);
-                }
-                r.line(worst <= 1e-6 && moved > 1e-4,
-                       std::format("each step's carry keeps the stored point's Newton residual: it moves {:.1e} of "
-                                   "|p_G1| at worst (gate 1e-6), where the curve moves up to {:.1e} of it",
-                                   worst, moved));
-            }
             // (2) end to end
             constexpr std::size_t warm = 4800;
             const std::size_t ramp = static_cast<std::size_t>(period / 2);
