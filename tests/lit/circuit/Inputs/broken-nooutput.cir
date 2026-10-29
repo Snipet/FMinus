@@ -1,0 +1,6 @@
+* broken-nooutput.cir: no .output
+.title Broken
+.input  u    in
+R1     in  a   1k
+R2     a   0   1k
+.end

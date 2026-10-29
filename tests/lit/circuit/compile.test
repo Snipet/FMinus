@@ -1,0 +1,11 @@
+# A netlist is a program: fminus compiles a .cir as the text --emit fm prints, which compiles alone too, and the code
+# reaches no heap.
+# RUN: fminus %S/../../../examples/circuits/diodetone.cir | FileCheck %s
+# RUN: fminus %S/../../../examples/circuits/screamer.cir --emit asm -o %t.s
+# RUN: fminus %S/../../../examples/circuits/screamer-clip.cir -o %t.ll
+# RUN: fminus %S/../../../examples/circuits/diodetone.cir --emit fm -o %t.fm
+# RUN: fminus %t.fm | FileCheck %s
+
+# CHECK-NOT: malloc
+# CHECK:     define float @"DiodeTone::tick"(
+# CHECK-NOT: malloc

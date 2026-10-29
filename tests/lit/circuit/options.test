@@ -1,0 +1,65 @@
+# The configurations a netlist's directives choose (Inputs/*.cir are examples/circuits' with one directive changed),
+# each compiled too.
+# RUN: fminus %S/Inputs/diodetone-plain.cir --emit fm | FileCheck %s --check-prefix=PLAIN
+# RUN: fminus %S/Inputs/diodetone-plain.cir -o %t.plain.ll
+# RUN: fminus %S/Inputs/diodetone-newton.cir --emit fm | FileCheck %s --check-prefix=NEWTON
+# RUN: fminus %S/Inputs/diodetone-newton.cir -o %t.newton.ll
+# RUN: fminus %S/Inputs/diodetone-fir8.cir --emit fm | FileCheck %s --check-prefix=FIR8
+# RUN: fminus %S/Inputs/diodetone-fir8.cir -o %t.fir8.ll
+# RUN: fminus %S/Inputs/screamer-all.cir --emit fm | FileCheck %s --check-prefix=ALL
+# RUN: fminus %S/Inputs/screamer-all.cir -o %t.all.ll
+# RUN: fminus %S/Inputs/screamer-nonlinear.cir --emit fm 2>&1 | FileCheck %s --check-prefix=NONLINEAR
+# RUN: fminus %S/Inputs/screamer-nonlinear.cir -o %t.nonlinear.ll
+# RUN: fminus %S/Inputs/diodetone-stereo.cir --emit fm | FileCheck %s --check-prefix=STEREO
+# RUN: fminus %S/Inputs/diodetone-stereo.cir -o %t.stereo.ll
+
+# .adaa off .solver omega(2): two Newton steps, no ADAA mean, the states from v.
+# PLAIN:      configuration from the netlist: .oversample 4 iir blocks=auto, .adaa off, .solver omega(2)
+# PLAIN-LABEL: float b1(float u)
+# PLAIN:      // Newton step 1 of 2
+# PLAIN:      // Newton step 2 of 2
+# PLAIN-NOT:  vb
+# PLAIN:      x_C1 = g2_C1 * v - x_C1;
+# PLAIN-NEXT: x_C2 = g2_C2 * n_b - x_C2;
+
+# .solver newton(4): from the previous step's solution, kept in the bracket, then 4 steps.
+# NEWTON-LABEL: float b1(float u)
+# NEWTON:      const float lo = fminf(p, 0);
+# NEWTON-NEXT: const float hi = fmaxf(p, 0);
+# NEWTON-NEXT: float v = fminf(fmaxf(v_D1, lo), hi);
+# NEWTON:      // Newton step 4 of 4
+
+# .oversample 8 fir: three FIR stages each way.
+# FIR8:      int hb1u_pos;
+# FIR8:      float hb3u_d[20];
+# FIR8-LABEL: void hb3_up(float x, float* restrict o)
+# FIR8-LABEL: float tick(float u)
+# FIR8:      hb3_up(os2_1[1], os3_3);
+# FIR8:      const float y7 = step(os3_3[1]);
+# FIR8:      return hb1_down(z4, z5);
+
+# blocks=all: every block in the region.
+# ALL-LABEL: float step(float u)
+# ALL-NEXT:  {
+# ALL-NEXT:  return b4(b3(b2(b1(u))));
+# ALL-LABEL: float tick(float u)
+# ALL-NEXT:  {
+# ALL-NEXT:  hb1_up(u, os1);
+
+# blocks=nonlinear: the tone block back at the host rate, after the down chain, and a warning of its 1x error.
+# NONLINEAR: warning: block 3 (R7, C5, R8, XU2, R9, Ptone, R10, C6) errs by 13.40 dB at 1x (44.1 kHz), more than 0.5 dB: blocks=auto would oversample it
+# NONLINEAR-LABEL: float step(float u)
+# NONLINEAR-NEXT:  {
+# NONLINEAR-NEXT:  return b2(u);
+# NONLINEAR-LABEL: float tick(float u)
+# NONLINEAR:       const float z3 = hb1_down(z1, z2);
+# NONLINEAR-NEXT:  const float z4 = b3(z3);
+# NONLINEAR-NEXT:  return b4(z4);
+
+# .channels 2: both channels in one float2 recursion; the coefficients stay float.
+# STEREO:      float2 x_C1;
+# STEREO:      float p_D1_by_u;
+# STEREO:      float2 hb1u_x[6];
+# STEREO-LABEL: float2 b1(float2 u)
+# STEREO:      const float2 p = p_D1_by_u * u + p_D1_by_x_C1 * x_C1 + p_D1_by_x_C2 * x_C2;
+# STEREO-LABEL: float2 tick(float2 u)

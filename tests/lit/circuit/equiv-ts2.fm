@@ -1,0 +1,35 @@
+// The generator reproduces the hand-written module it was designed from: experiments/ts2.fm's ScreamerClip (fminus.md
+// §4's example 2, block 2, as printed) against Inputs/ts2-gen.cir's ScreamerClipGen, the same netlist in ts2.fm's
+// configuration (N Vt 45.3 mV, no ADAA, omega3 + 1 Newton step at 4x). Both run their step at 192 kHz on a 3 kHz sine
+// for 0.05 s.
+// RUN: fminus %s -I %S/../../../docs/research/analog-circuits/experiments -I %S/Inputs --run same 0.45 0 | FileCheck %s
+// RUN: fminus %s -I %S/../../../docs/research/analog-circuits/experiments -I %S/Inputs --run same 0.45 0.5 | FileCheck %s
+// RUN: fminus %s -I %S/../../../docs/research/analog-circuits/experiments -I %S/Inputs --run same 0.45 1 | FileCheck %s
+// CHECK: true
+#include "ts2.fm"
+#include "ts2-gen.cir"
+
+// max |a - b| <= 2e-5 max |a| (-94 dB) over 0.05 s at 192 kHz, with the drive pot at `pot`.
+bool same(float amp, float pot)
+{
+    ScreamerClip a;
+    a.init(192000);   // ts2.fm's init takes the oversampled rate
+    a.set(pot);
+    ScreamerClipGen b;
+    b.init(48000);    // the generated module's takes the host's; its step runs at 4 rate
+    b.set(pot);
+    float worst = 0;
+    float top = 0;
+    float phase = 0;
+    for (int i = 0; i < 9600; ++i)
+    {
+        const float u = amp * sinf(6.28318531f * phase);
+        phase += 3000.0f / 192000.0f;
+        phase = phase >= 1 ? phase - 1 : phase;
+        const float ya = a.step(u);
+        const float yb = b.step(u);
+        worst = fmaxf(worst, fabsf(ya - yb));
+        top = fmaxf(top, fabsf(ya));
+    }
+    return worst <= 2e-5f * top;
+}

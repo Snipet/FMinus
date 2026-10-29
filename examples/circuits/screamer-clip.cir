@@ -1,0 +1,19 @@
+* screamer-clip.cir: the TS808's clipping stage alone (screamer.cir's block 2), driven at the op amp's + input
+.title ScreamerClip
+.input  u    p1   scale=1
+.output vout v2
+.pot    drive 0.5 audio
+.oversample 4 iir blocks=auto
+.adaa on
+.solver omega(1)
+.target solver=-60dB alias=-60dB level=0.45V freq=3k
+XU1    p1  n1  v2  opamp
+R4     n1  z1  4.7k
+C3     z1  0   47n
+R6     n1  f1  51k
+Pdrive f1  v2  500k {drive} taper=audio
+C4     n1  v2  51p
+D1     n1  v2  1N914
+D2     v2  n1  1N914
+.model 1N914 D(IS=2.52n N=1.752)
+.end

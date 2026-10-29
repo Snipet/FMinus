@@ -1,0 +1,45 @@
+# The circuit compiler's messages, as clang words them (file:line:col), on broken netlists (Inputs/broken-*.cir):
+# fminus prints them and exits 1 without generating anything.
+# RUN: not fminus %S/Inputs/broken-parse.cir --emit fm 2>&1 | FileCheck %s --check-prefix=PARSE --match-full-lines
+# RUN: not fminus %S/Inputs/broken-plan.cir --emit fm 2>&1 | FileCheck %s --check-prefix=PLAN --match-full-lines
+# RUN: not fminus %S/Inputs/broken-feedback.cir --emit fm 2>&1 | FileCheck %s --check-prefix=FEEDBACK
+# RUN: not fminus %S/Inputs/broken-ports.cir --emit fm 2>&1 | FileCheck %s --check-prefix=PORTS --match-full-lines
+# RUN: not fminus %S/Inputs/broken-cycle.cir --emit fm 2>&1 | FileCheck %s --check-prefix=CYCLE --match-full-lines
+# RUN: not fminus %S/Inputs/broken-singular.cir --emit fm 2>&1 | FileCheck %s --check-prefix=SINGULAR --match-full-lines
+# RUN: not fminus %S/Inputs/broken-nooutput.cir --emit fm 2>&1 | FileCheck %s --check-prefix=NOOUTPUT --match-full-lines
+# RUN: not fminus %S/Inputs/play-broken.fm 2>&1 | FileCheck %s --check-prefix=PLAY --implicit-check-not=error: --implicit-check-not="not found"
+
+# PARSE:      {{.*}}broken-parse.cir:7:1: error: the inductor L1 is not supported yet (Phase 1)
+# PARSE-NEXT: {{.*}}broken-parse.cir:8:19: error: unknown pot 'tonee' (the pots: tone)
+# PARSE-NEXT: {{.*}}broken-parse.cir:9:20: error: the exponent of '^' is an integer from 0 to 8
+# PARSE-NEXT: {{.*}}broken-parse.cir:10:22: error: RS is not supported yet (Phase 1)
+# PARSE-NEXT: {{.*}}broken-parse.cir:11:9: error: '.method bdf2' is not supported yet (Phase 1)
+# PARSE-NEXT: {{.*}}broken-parse.cir:12:1: error: '.subckt' is not supported yet
+# PARSE-NEXT: {{.*}}broken-parse.cir:13:1: error: unknown directive '.foo'
+
+# PLAN:      {{.*}}broken-plan.cir:6:1: error: node 'f1' has one connection (R6); a node needs two
+# PLAN-NEXT: {{.*}}broken-plan.cir:7:1: error: node 'z2' reaches ground only through capacitors (C3, C9): its DC voltage is undefined (add 10meg to ground)
+# PLAN-NEXT: {{.*}}broken-plan.cir:9:16: error: unknown model '1N4148X' (the models: 1N914)
+# PLAN-NEXT: {{.*}}broken-plan.cir:10:16: error: unknown model '1N4148X' (the models: 1N914)
+# PLAN-NEXT: {{.*}}broken-plan.cir:11:1: error: D3 has no antiparallel partner: Phase 0 solves antiparallel diode pairs only
+
+# FEEDBACK: {{.*}}broken-feedback.cir:7:1: error: op amp XU1 has no negative feedback: an ideal op amp needs one
+
+# PORTS: {{.*}}broken-ports.cir:5:1: error: block 1 has 2 nonlinear ports (D1|D2, D3|D4): not supported yet (Phase 1)
+
+# CYCLE: {{.*}}broken-cycle.cir:7:1: error: a feedback loop around XU1 crosses blocks: not supported yet
+
+# SINGULAR: {{.*}}broken-singular.cir:5:1: error: block 1 (XU1, XU2, R1, R2, ...): its equations are singular (nothing determines V(o2)): an op amp without negative feedback, or a node cut off from the rest
+
+# NOOUTPUT: {{.*}}broken-nooutput.cir: error: the netlist has no .output
+
+# A warning is not an error: 1M is a milliohm in SPICE, and the netlist still generates.
+# RUN: fminus %S/Inputs/milliohm.cir --emit fm -o %t.fm 2>&1 | FileCheck %s --check-prefix=MILLI --match-full-lines
+# MILLI: {{.*}}milliohm.cir:5:16: warning: '1M' is 1 milliohm in SPICE; write 1meg for a megohm
+
+# Through #include: the circuit's errors, and no FMinus error after them.
+# PLAY: {{.*}}broken-plan.cir:6:1: error: node 'f1' has one connection (R6); a node needs two
+# PLAY: {{.*}}broken-plan.cir:7:1: error: node 'z2' reaches ground only through capacitors (C3, C9): its DC voltage is undefined (add 10meg to ground)
+# PLAY: {{.*}}broken-plan.cir:9:16: error: unknown model '1N4148X' (the models: 1N914)
+# PLAY: {{.*}}broken-plan.cir:10:16: error: unknown model '1N4148X' (the models: 1N914)
+# PLAY: {{.*}}broken-plan.cir:11:1: error: D3 has no antiparallel partner: Phase 0 solves antiparallel diode pairs only

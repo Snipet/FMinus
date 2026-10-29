@@ -1,0 +1,10 @@
+* broken-singular.cir: two op amps whose nullors say the same thing
+.title Broken
+.input  u    in
+.output vout o1
+XU1    in  n   o1  opamp
+XU2    in  n   o2  opamp
+R1     o1  n   1k
+R2     o2  n   1k
+R3     n   0   1k
+.end

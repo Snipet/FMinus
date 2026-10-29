@@ -1,0 +1,7 @@
+// A program that includes a broken netlist (errors.test): the circuit's errors, then nothing more.
+#include "broken-plan.cir"
+
+float f(float x)
+{
+    return x;
+}
