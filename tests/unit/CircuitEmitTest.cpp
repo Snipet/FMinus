@@ -2,6 +2,7 @@
 // coefficients against the double derivation they print, every configuration compiling with its methods
 // nonblocking, and generation deterministic with a layout that no pot value changes.
 #include "circuit/Emit.h"
+#include "circuit/Halfbands.h"
 #include "circuit/Mna.h"
 #include "circuit/Netlist.h"
 #include "circuit/Plan.h"
@@ -16,6 +17,7 @@
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
+#include <format>
 #include <locale>
 #include <map>
 #include <memory>
@@ -446,4 +448,68 @@ TEST_CASE("names keep their case, and a pot's sections have names of their own",
     CHECK(r.source.find("const float r_Ptone_a_2 = 25000.0f * (1 - t_Ptone);") != std::string::npos);
     CHECK(r.source.find("const float r_Ptone_a = 10000.0f * fminf(fmaxf(tone, 0), 1);") != std::string::npos);
     compiled(r);
+}
+
+TEST_CASE("Result's fields: the inputs, the latency, and each line's netlist line", "[circuit]")
+{
+    const fc::Result r = fc::generate(fc::test::kScreamer, "screamer.cir");
+    REQUIRE(r.errors.empty());
+    REQUIRE(r.inputs.size() == 1);
+    CHECK(r.inputs[0].name == "u");
+    CHECK(r.inputs[0].kind == fc::Input::Kind::Voltage);
+    CHECK(r.inputs[0].scale == 1);
+    CHECK(r.switches.empty());
+    CHECK(!r.provisional);
+    CHECK(r.selfTestKey.empty());   // the netlist names its whole configuration
+    // the IIR halfbands' round trip at 4x (3.5 host samples at 1 kHz), and ADAA's eighth of a sample
+    CHECK(r.latency == fc::roundTripDelay(4, fc::Halfband::Iir, 1000) + 0.125);
+    CHECK(r.notes.find(std::format("latency: about {:.1f} host samples", r.latency - 0.125)) != std::string::npos);
+    // a line of the netlist for each line of the module: the frame at .title, set at the first .pot, a block's
+    // methods at its first part, tick and step at .input, a part's fields at its line
+    std::vector<std::string> lines;
+    std::istringstream text(r.source);
+    for (std::string line; std::getline(text, line);)
+        lines.push_back(line);
+    REQUIRE(r.lines.size() == lines.size());
+    auto lineOf = [&](const std::string& start)
+    {
+        for (std::size_t i = 0; i < lines.size(); ++i)
+        {
+            if (lines[i].find(start) != std::string::npos)
+                return r.lines[i];
+        }
+        FAIL("no line " << start);
+        return -1;
+    };
+    auto netlistLine = [&](const std::string& start)
+    {
+        std::istringstream netlist(fc::test::kScreamer);
+        int n = 0;
+        for (std::string line; std::getline(netlist, line);)
+        {
+            ++n;
+            if (line.rfind(start, 0) == 0)
+                return n;
+        }
+        FAIL("no netlist line " << start);
+        return -1;
+    };
+    CHECK(lineOf("module Screamer") == netlistLine(".title"));
+    CHECK(r.lines.front() == netlistLine(".title"));   // the header
+    CHECK(lineOf("void init(float rate)") == netlistLine(".title"));
+    CHECK(lineOf("void set(float drive, float tone, float level)") == netlistLine(".pot    drive"));
+    CHECK(lineOf("void b2_set(float drive)") == netlistLine("XU1"));
+    CHECK(lineOf("float b2(float u)") == netlistLine("XU1"));
+    CHECK(lineOf("float b3(float u)") == netlistLine("R7"));
+    CHECK(lineOf("float tick(float u)") == netlistLine(".input"));
+    CHECK(lineOf("float step(float u)") == netlistLine(".input"));
+    CHECK(lineOf("    float x_C4;") == netlistLine("C4"));
+    CHECK(lineOf("    float v_D1;") == netlistLine("D1"));
+    CHECK(lineOf("    float gc_C6;") == netlistLine("C6"));
+    CHECK(lineOf("    int ck_;") == netlistLine(".title"));
+    // a netlist without .title: its frame is line 0
+    const fc::Result untitled = fc::generate(".input u in\n.output y o\nR1 in o 1k\nC1 o 0 1n\n", "t.cir");
+    REQUIRE(untitled.errors.empty());
+    CHECK(untitled.lines.front() == 0);
+    CHECK(*std::max_element(untitled.lines.begin(), untitled.lines.end()) == 4);
 }
