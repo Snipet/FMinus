@@ -209,7 +209,8 @@ namespace fminus
             // returned. Empty: in order, on the calling thread. The jobs write only their own results, so the answer
             // is the same, byte for byte, for any number of threads.
             std::function<void(int count, const std::function<void(int)>& job)> parallel;
-            // Polled between jobs and every 4096 steps of a reference: true stops the test (no answer).
+            // Polled between jobs and every 4096 steps of a reference, on the calling thread and on parallel's: true
+            // stops the test (no answer).
             std::function<bool()> cancelled;
             // The most steps (the references' and the candidates') the test may take; 0: the default (4e9, more than
             // any netlist needs yet). A test that would go over stops before it, with no answer and a note.
