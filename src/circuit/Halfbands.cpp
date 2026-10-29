@@ -220,7 +220,8 @@ namespace fminus::circuit
         const std::string sj = std::to_string(j);
         const std::string sw = std::to_string(w);
         out += "    void hb" + s + "_up(" + type + " x, " + type + "* restrict o) [[clang::nonblocking]]   // " +
-               rateText(stage) + ", up: Kaiser FIR, " + sj + " host samples of delay\n    {\n";
+               rateText(stage) + ", up: Kaiser FIR, " + sj + " samples of delay at " +
+               std::to_string(48 << (stage - 1)) + " kHz\n    {\n";
         out += "        " + up + "_pos = " + up + "_pos == 0 ? " + std::to_string(w - 1) + " : " + up + "_pos - 1;\n";
         out += "        " + up + "_d[" + up + "_pos] = x;\n        " + up + "_d[" + up + "_pos + " + sw + "] = x;\n";
         out += "        const int p = " + up + "_pos;\n";

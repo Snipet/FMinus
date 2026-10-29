@@ -293,9 +293,10 @@ N Vt 45.3 mV) and fminus.md's Tables 1-3 (on `clipper.cir` and `screamer-clip.ci
 columns from emitted code and the converged ones from the reference, each beside the source's numbers. It takes about
 a minute and a half on an M5. Acceptance, by eye: §5.2's entries within 1 dB, and solver columns below -80 dB within
 3 dB. As built: every alias, H1 and H3 entry is the report's to 0.1 dB; Tables 1-3 within 0.5 dB; the solver columns
-within 1 dB down to about -95 dB. Deeper entries are float's own floor (-100 to -150 dB), where the emitted code and
-the experiments' float emulation differ by up to 12 dB in either direction (§5.2 at 4x and 8x, prev K3-K6; Table 3's
-omega + 2 at 4x and 8x), all far below the -60 dB gate.
+within 1.1 dB down to about -95 dB, except example 1's ADAA omega K2 at 1x (-92.3 dB against the report's -83.5, which
+is the floor of the report's float emulation: its K2 there is worse than its K1, -89.1). Deeper entries are float's
+own floor (-100 to -150 dB), where the emitted code and the experiments' float emulation differ by up to 12 dB in
+either direction (§5.2 at 4x and 8x, prev K3-K6; Table 3's omega + 2 at 4x and 8x), all far below the -60 dB gate.
 
 `example-circuits` with no flags prints the cost table in `experiments/fmbench.cpp`'s method (subnormals flushed, one
 thread, the best of 7 x 10^6 host samples; cycles and instructions from `proc_pid_rusage` on macOS), each row named as

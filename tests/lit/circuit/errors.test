@@ -44,6 +44,10 @@
 # RUN: fminus %S/Inputs/milliohm.cir --emit fm -o %t.fm 2>&1 | FileCheck %s --check-prefix=MILLI --match-full-lines
 # MILLI: {{.*}}milliohm.cir:5:16: warning: '1M' is 1 milliohm in SPICE; write 1meg for a megohm
 
+# A netlist included twice is generated once: its warning shows once.
+# RUN: fminus %S/Inputs/play-twice.fm -o %t.ll 2>&1 | FileCheck %s --check-prefix=TWICE --implicit-check-not=warning:
+# TWICE: {{.*}}milliohm.cir:5:16: warning: '1M' is 1 milliohm in SPICE; write 1meg for a megohm
+
 # Through #include: the circuit's errors, and no FMinus error after them.
 # PLAY: {{.*}}broken-plan.cir:6:1: error: node 'f1' has one connection (R6); a node needs two
 # PLAY: {{.*}}broken-plan.cir:7:1: error: node 'z2' reaches ground only through capacitors (C3, C9): its DC voltage is undefined (add 10meg to ground)

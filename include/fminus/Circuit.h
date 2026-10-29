@@ -39,6 +39,8 @@ namespace fminus
         struct Solver
         {
             // Where Newton starts.
+            //   Omega     omega3's closed form: .solver omega(K)
+            //   Previous  the previous step's solution: .solver newton(K)
             enum class Guess
             {
                 Omega,
@@ -93,10 +95,9 @@ namespace fminus
             std::vector<std::string> pots;   // the pots in .pot order: set()'s arguments
         };
 
-        // The FMinus module of `netlist`, the text of the file the messages call `fileName`.
+        // The FMinus module of `netlist`, the text of the file the messages call `fileName`, with `options` (default
+        // Options when there are none).
         Result generate(std::string_view netlist, std::string_view fileName, const Options& options);
-
-        // The same with default Options.
         Result generate(std::string_view netlist, std::string_view fileName);
     } // namespace circuit
 } // namespace fminus

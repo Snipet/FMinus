@@ -181,10 +181,16 @@ namespace
                 std::string found = remember(std::string(candidate));
                 if (!isNetlist(found))
                     return fminus::frontend::IncludedFile{found, (*file)->getBuffer().str()};
-                const fminus::circuit::Result circuit = fminus::circuit::generate((*file)->getBuffer(), found);
-                log_->messages += circuit.errors + circuit.warnings;
-                log_->failed = log_->failed || !circuit.errors.empty();
-                return fminus::frontend::IncludedFile{found + ".fm", circuit.source};
+                // generated once, so a second #include says nothing again (the scanner reads it once anyway)
+                auto [it, first] = generated_.try_emplace(found);
+                if (first)
+                {
+                    const fminus::circuit::Result circuit = fminus::circuit::generate((*file)->getBuffer(), found);
+                    log_->messages += circuit.errors + circuit.warnings;
+                    log_->failed = log_->failed || !circuit.errors.empty();
+                    it->second = circuit.source;
+                }
+                return fminus::frontend::IncludedFile{found + ".fm", it->second};
             }
             return std::nullopt;
         }
@@ -200,8 +206,9 @@ namespace
         }
 
         std::vector<std::string> directories_;
-        std::map<std::string, std::string> names_;   // a file's real path, and the name it goes by
-        CircuitLog* log_;                            // main's: the resolver is copied into a std::function
+        std::map<std::string, std::string> names_;       // a file's real path, and the name it goes by
+        std::map<std::string, std::string> generated_;   // a .cir's name, and the module generated from it
+        CircuitLog* log_;                                // main's: the resolver is copied into a std::function
     };
 
     int writeText(const std::string& path, const std::string& text)
