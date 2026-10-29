@@ -162,14 +162,14 @@ namespace circuits
 
     namespace
     {
-        // The law buffer a run reads: `law`, or each law input at its low end.
+        // The law buffer a run reads: `law`, or each law input at its low end (as an argument: over its scale).
         std::vector<float> lawsOf(const Circuit& c, std::span<const float> law, std::size_t n)
         {
             if (!law.empty() || c.laws() == 0)
                 return {law.begin(), law.end()};
             std::vector<double> lows;
             for (const fc::LawInfo& l : c.plan.laws)
-                lows.push_back(l.low);
+                lows.push_back(l.low / l.scale);
             return heldLaws(lows, n);
         }
     } // namespace

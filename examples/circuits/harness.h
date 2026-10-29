@@ -93,7 +93,8 @@ namespace circuits
                                    const std::string& extra = {});
 
     // The region's step over u, at the region's rate, from init(48000) and set(pots); with law inputs, `law` holds
-    // laws() values a step (empty: each at its low end).
+    // laws() values a step, step's arguments (each over its input's scale, as fc::lawArguments gives them; empty:
+    // each at its low end).
     std::vector<double> runSteps(const Circuit& c, std::span<const double> u, std::span<const double> pots,
                                  std::span<const float> law = {});
 

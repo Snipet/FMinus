@@ -9,11 +9,14 @@
 #include "circuit/Search.h"
 #include "CircuitNetlists.h"
 #include "fminus/Circuit.h"
+#include "fminus/FMinus.h"
 
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
 #include <atomic>
+#include <cstddef>
+#include <cstring>
 #include <cmath>
 #include <format>
 #include <functional>
@@ -740,6 +743,11 @@ TEST_CASE("law inputs are stress axes, with a synth's signals", "[circuit]")
     const std::vector<double> sweep = fc::lawSamples(pc, mc, 19 + 18, 1, 4800);
     CHECK(*std::min_element(sweep.begin(), sweep.end()) < 1e-3);
     CHECK(*std::max_element(sweep.begin(), sweep.end()) > 0.999);
+    // as tick's arguments, over its scale (the module multiplies them back by 2m)
+    const std::vector<double> args = fc::lawArguments(pc, mc, 19 + 18, 1, 4800);
+    REQUIRE(args.size() == sweep.size());
+    for (std::size_t i = 0; i < args.size(); ++i)
+        CHECK(args[i] == sweep[i] / 2e-3);
     // a law input's range is part of the self-test's key
     const std::string other = replaced(openOta(fc::test::kOtaLp), "range=10u:2m", "range=10u:1m");
     CHECK(fc::selfTestKey(openOta(fc::test::kOtaLp), "t.cir", {}) != fc::selfTestKey(other, "t.cir", {}));
@@ -767,4 +775,55 @@ TEST_CASE("an OTA stage's self-test chooses from the SM row, the same on any num
     CHECK(r.errors.empty());
     CHECK(!r.provisional);
     CHECK(r.configuration.find("(the self-test " + one.key + ")") != std::string::npos);
+}
+
+TEST_CASE("a law input reaches the module over its scale: tick's gain is the references'", "[circuit]")
+{
+    // iabc's argument in mA (scale=1m), its range in amps: lawSamples gives amps (what gainAt and the references
+    // read), lawArguments those over 1m, and tick, fed them, computes the same gain in g_G1 (to float's rounding of
+    // the argument and of 1m). Fed the amps raw, tick computed a thousandth of them, clamped to 10 uA, and the
+    // self-test of such a netlist found no configuration that met its targets.
+    const std::string text = replaced(fc::test::otaStage(".oversample 1\n.adaa off\n.solver newton(2)\n"),
+                                      ".input iabc - kind=current range=10u:2m",
+                                      ".input iabc - kind=current scale=1m range=10u:2m");
+    const fc::Plan p = planned(text);
+    const fc::StressMatrix m = fc::stressMatrix(p, small());
+    const int unit = 19 + 18;   // iabc at its middle, moving +-2 octaves
+    REQUIRE(m.signal(unit).kind == fc::StressSignal::Kind::Modulated);
+    constexpr std::size_t n = 2400;
+    const std::vector<double> amps = fc::lawSamples(p, m, unit, 1, n);
+    const std::vector<double> args = fc::lawArguments(p, m, unit, 1, n);
+    const fc::Result r = fc::generate(text, "t.cir");
+    INFO(r.errors);
+    REQUIRE(r.errors.empty());
+    std::string errors;
+    auto program = fminus::Program::compile(r.source, errors);
+    INFO(errors);
+    REQUIRE(program);
+    const fminus::Program::Module& module = *program->module(r.module);
+    std::size_t offset = 0;
+    bool found = false;
+    for (const fminus::Program::Module::Field& f : module.fields)
+    {
+        if (f.name == "g_G1")
+        {
+            offset = f.offset;
+            found = true;
+        }
+    }
+    REQUIRE(found);
+    std::vector<std::max_align_t> memory((module.size + sizeof(std::max_align_t) - 1) / sizeof(std::max_align_t) + 1);
+    REQUIRE(module.alignment <= alignof(std::max_align_t));
+    void* self = memory.data();
+    program->function<void(void*, float)>(r.module + "::init", errors)(self, 48000);
+    auto tick = program->function<float(void*, float, float)>(r.module + "::tick", errors);
+    double worst = 0;
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        tick(self, 0.0f, static_cast<float>(args[i]));
+        float g = 0;
+        std::memcpy(&g, static_cast<const char*>(self) + offset, sizeof g);
+        worst = std::max(worst, std::fabs(static_cast<double>(g) / amps[i] - 1));
+    }
+    CHECK(worst <= 3e-7);
 }

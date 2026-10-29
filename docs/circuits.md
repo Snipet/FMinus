@@ -387,7 +387,8 @@ arithmetic, which bumps `kSelfTestVersion` (1 until Phase 1's branch merges).
   9 (its harmonics below 20 kHz; T1, T2 and T4), and for each law input a 996 Hz sine at L with that input moving +-2
   octaves around its middle at 37 Hz (linearly over its range when it starts at 0; T1 and T4), run at the points where
   that input is at its middle. A law input's value is held over a host sample's region steps, in the module and in the
-  references alike.
+  references alike. Its values are in its range's units (amps for `kind=current`), which the references read as the
+  gain; the candidate module takes each over the input's `scale` (`lawArguments`), which it multiplies back.
 
 **The gates** (T3 stays within 0.5 dB, the user's ruling):
 
@@ -603,7 +604,8 @@ prints each check's worst value, where it fell, and the report's figure beside i
 - **l.** the provisional configuration: 8x IIR, plain omega(2), its note, nonblocking; otalp.cir's, 2x newton(2);
 - **m.** the synth path, `otalp.cir`: T1-T4 at its configuration on the synth's stress matrix, the self-test's way
   through the JIT (T1 -89.0, T2 -73.2, T3 0.13 dB); without its directives, the self-test chooses what it ships (4x,
-  newton(1), candidate 10 of 18) with the same figures; tick against step through its 4x IIR oversampler; the
+  newton(1), candidate 10 of 18) with the same figures, and so it does with iabc's argument in mA (`scale=1m`, the
+  same range in amps); tick against step through its 4x IIR oversampler; the
   prewarp's -3 dB points ([above](#prewarp)); the carry under ADAA: each step keeps the stored point's Newton residual
   (to 6e-8 of `p_G1`, where a 37 Hz triangle moves the curve by up to 4e-4 of it), and over 512 ramps of a +-2-octave
   37 Hz triangle the ADAA module stays within 1.1x of its departure from a plain newton(3) module with iabc held

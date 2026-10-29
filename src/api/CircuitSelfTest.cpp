@@ -333,7 +333,7 @@ namespace fminus::circuit
                             const std::size_t n = static_cast<std::size_t>(c.oversample) * host;
                             const std::vector<float> in = floats(regionInput(p, matrix, u, c.oversample, stop));
                             const std::vector<float> law =
-                                laws ? floats(lawSamples(p, matrix, u, c.oversample, n)) : std::vector<float>{};
+                                laws ? floats(lawArguments(p, matrix, u, c.oversample, n)) : std::vector<float>{};
                             stepsOut.resize(n);
                             Instance self(*compiled.module);
                             compiled.init(self.get(), static_cast<float>(kHostRate));
@@ -349,7 +349,7 @@ namespace fminus::circuit
                                       potBuffer.begin() + static_cast<long>(i * pots));
                         std::vector<float> ticksOut(host);
                         const std::vector<float> law =
-                            laws ? floats(lawSamples(p, matrix, u, 1, host)) : std::vector<float>{};
+                            laws ? floats(lawArguments(p, matrix, u, 1, host)) : std::vector<float>{};
                         Instance self(*compiled.module);
                         compiled.init(self.get(), static_cast<float>(kHostRate));
                         compiled.ticks(self.get(), in.data(), laws ? law.data() : nullptr,

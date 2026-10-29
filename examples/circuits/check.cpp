@@ -766,6 +766,13 @@ namespace circuits
             return text;
         }
 
+        // A choice as the directives that pin it: ".oversample 4, .adaa off, .solver newton(1)".
+        std::string directivesOf(const fc::Choice& c)
+        {
+            return std::format(".oversample {}, .adaa {}, .solver {}({})", c.oversample, c.adaa ? "on" : "off",
+                               c.solver.guess == fc::Solver::Guess::Omega ? "omega" : "newton", c.solver.steps);
+        }
+
         // The self-test of `name` without its configuration directives, on 8 threads: it chooses `expected` (the
         // shipped directives, which the report and Phase 0's measurements chose by hand), its notes list each
         // candidate tried in the cost model's order with its verdict, and the answer's figures are section c's.
@@ -800,10 +807,7 @@ namespace circuits
             for (std::size_t k = 0; ordered && k < costs.size(); ++k)
                 ordered = std::fabs(costs[k] - order[k].cost) < 0.5;
             const std::string chose = fc::Choice::parse(t.choice->text()) ? t.choice->text() : std::string();
-            const std::string got = std::format(".oversample {}, .adaa {}, .solver {}({})", t.choice->oversample,
-                                                t.choice->adaa ? "on" : "off",
-                                                t.choice->solver.guess == fc::Solver::Guess::Omega ? "omega" : "newton",
-                                                t.choice->solver.steps);
+            const std::string got = directivesOf(*t.choice);
             const std::size_t all = order.size();
             r.line(got == expected && t.choice->met && !chose.empty(),
                    std::format("{} without its directives: the self-test chose {} (the shipped {}), candidate {} of "
@@ -1092,9 +1096,9 @@ namespace circuits
                     unconverged += t64->unconverged;
                 }
                 const std::vector<double> steps = runSteps(*c, fc::regionInput(p, mx, u, m, {}), {},
-                                                           floats(fc::lawSamples(p, mx, u, m, m * host)));
+                                                           floats(fc::lawArguments(p, mx, u, m, m * host)));
                 const std::vector<double> ticks = runTicks(*c, fc::signalSamples(mx, s, 1, host), {}, 0,
-                                                           floats(fc::lawSamples(p, mx, u, 1, host)));
+                                                           floats(fc::lawArguments(p, mx, u, 1, host)));
                 units[static_cast<std::size_t>(u)] =
                     fc::measureUnit(mx, u, m, steps, ticks, t1 ? &*t1 : nullptr, t64 ? &*t64 : nullptr);
             }
@@ -1174,7 +1178,33 @@ namespace circuits
             const Figures shipped = synthGates(r, "otalp.cir");
 
             // the self-test, without the netlist's configuration lines, chooses what it ships
-            search(r, "otalp.cir", ".oversample 4, .adaa off, .solver newton(1)", shipped);
+            const std::optional<fc::SelfTestResult> amps =
+                search(r, "otalp.cir", ".oversample 4, .adaa off, .solver newton(1)", shipped);
+
+            // and with iabc's argument in mA (scale=1m), the same range in amps: the self-test feeds the module its
+            // law samples over their scale, so it measures the same circuit and chooses as it does in amps (fed the
+            // amps raw, the module ran at a thousandth of its references' gains: no candidate met, T3 65.65 dB)
+            if (amps)
+            {
+                const std::string milliamps =
+                    opened(withDirective(netlist("otalp.cir"), ".input  iabc",
+                                         ".input  iabc -    kind=current scale=1m range=10u:2m"));
+                fc::SelfTestOptions test;
+                test.parallel = pool(8);
+                const fc::SelfTestResult t = fc::selfTest(milliamps, "otalp.cir", {}, test);
+                const fc::Choice& a = *amps->choice;
+                if (!t.choice)
+                    r.line(false, "iabc in mA (scale=1m): the self-test gave no answer:\n" + t.errors + t.notes);
+                else
+                    r.line(t.choice->met && directivesOf(*t.choice) == directivesOf(a) &&
+                               t.candidates == amps->candidates && std::fabs(t.choice->t1 - a.t1) <= 3 &&
+                               std::fabs(t.choice->t2 - a.t2) <= 3 && std::fabs(t.choice->t3 - a.t3) <= 0.01,
+                           std::format("iabc in mA (scale=1m): the self-test chose {}, candidate {} ({}); T1 {:.1f}, "
+                                       "T2 {:.1f}, T3 {:.3f} dB (in amps {:.1f}, {:.1f}, {:.3f}; T1 and T2 within 3 "
+                                       "dB, float's floor, T3 0.01)",
+                                       directivesOf(*t.choice), t.candidates, t.choice->met ? "met" : "not met",
+                                       t.choice->t1, t.choice->t2, t.choice->t3, a.t1, a.t2, a.t3));
+            }
 
             // tick against step through the 4x IIR oversampler, iabc held at its middle
             {

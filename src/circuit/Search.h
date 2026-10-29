@@ -133,6 +133,11 @@ namespace fminus::circuit
     // sample i at [i * laws + L] (the runners' law_ buffer). The point's values, or the modulated input's motion.
     std::vector<double> lawSamples(const Plan& plan, const StressMatrix& matrix, int unit, int m, std::size_t n);
 
+    // The same as tick's and step's arguments: each law input's samples over its .input scale, which the module
+    // multiplies back before its clamp. lawSamples' values are in the range's units (amps for kind=current), which
+    // gains and the references read; a module fed them raw would compute scale times them.
+    std::vector<double> lawArguments(const Plan& plan, const StressMatrix& matrix, int unit, int m, std::size_t n);
+
     // What stops a reference: polled every 4096 steps.
     using Stop = std::function<bool()>;
 

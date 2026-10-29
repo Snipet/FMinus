@@ -468,6 +468,15 @@ namespace fminus::circuit
         return out;
     }
 
+    std::vector<double> lawArguments(const Plan& plan, const StressMatrix& matrix, int unit, int m, std::size_t n)
+    {
+        std::vector<double> out = lawSamples(plan, matrix, unit, m, n);
+        const std::size_t laws = plan.laws.size();
+        for (std::size_t i = 0; i < out.size(); ++i)
+            out[i] /= plan.laws[i % laws].scale;
+        return out;
+    }
+
     namespace
     {
         // Blocks [first, last] in Holters' form at the unit's point, each designed at `rate` (times 2/3 for a port
