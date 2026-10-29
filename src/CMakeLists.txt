@@ -6,6 +6,13 @@
 # calls, with no LLVM in it. A process that JITs links it (through fminus), and executables from support/Aot.h link
 # libfminus_runtime.a itself.
 #
+# fminus_circuit: every .cpp under src/circuit/, the circuit compiler (include/fminus/Circuit.h: SPICE-style netlists to
+# FMinus source). It has no LLVM in it, as the runtime has none, and no grammar (src/circuit/ holds no *.y or *.l: a
+# grammar there would be generated into fminus_lib). fminus_lib links it, so FMinus::FMinus's hosts and FMinus::Internal's
+# users get it; a host that never calls its reference or analysis drops those objects at link time. It compiles with
+# -ffp-contract=off, as the runtime does, so the generator's double arithmetic, and with it the FMinus text it prints, is
+# the same on arm64 and x86-64.
+#
 # fminus_lib: every other .cpp under src/ (globbed: adding a file edits no CMake). Every directory holding a Bison
 # grammar (*.y) is a grammar: that .y, with every Flex scanner (*.l) beside it, is generated into the library through
 # fminus_add_grammar. A scanner in a directory without a grammar is generated alone. Generated files land under
@@ -21,9 +28,13 @@ file(GLOB_RECURSE _fminus_all_sources CONFIGURE_DEPENDS RELATIVE "${CMAKE_CURREN
      "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/*.h" "${CMAKE_CURRENT_SOURCE_DIR}/*.def")
 set(_fminus_runtime_sources ${_fminus_all_sources})
 list(FILTER _fminus_runtime_sources INCLUDE REGEX "^runtime/")
+set(_fminus_circuit_sources ${_fminus_all_sources})
+list(FILTER _fminus_circuit_sources INCLUDE REGEX "^circuit/")
 set(_fminus_sources ${_fminus_all_sources})
 list(FILTER _fminus_sources EXCLUDE REGEX "^runtime/")
+list(FILTER _fminus_sources EXCLUDE REGEX "^circuit/")
 list(TRANSFORM _fminus_runtime_sources PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
+list(TRANSFORM _fminus_circuit_sources PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
 list(TRANSFORM _fminus_sources PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
 file(GLOB_RECURSE _fminus_public_headers CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/include/*.h")
 
@@ -48,6 +59,18 @@ target_compile_definitions(fminus_runtime PRIVATE PFFFT_STATIC_DEFINE)
 find_package(Threads REQUIRED)
 target_link_libraries(fminus_runtime PUBLIC Threads::Threads)
 
+# ---- the circuit compiler -------------------------------------------------------------------------------------------
+add_library(fminus_circuit STATIC ${_fminus_circuit_sources})
+add_library(FMinus::Circuit ALIAS fminus_circuit)
+fminus_target_defaults(fminus_circuit)
+target_include_directories(fminus_circuit PUBLIC "${PROJECT_SOURCE_DIR}/include" PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_features(fminus_circuit INTERFACE cxx_std_17)   # what include/fminus/Circuit.h needs
+if(FMINUS_MSVC_FRONTEND)
+  target_compile_options(fminus_circuit PRIVATE /clang:-ffp-contract=off)
+else()
+  target_compile_options(fminus_circuit PRIVATE -ffp-contract=off)
+endif()
+
 # ---- the library ----------------------------------------------------------------------------------------------------
 add_library(fminus_lib STATIC ${_fminus_sources} ${_fminus_public_headers})
 add_library(FMinus::FMinus ALIAS fminus_lib)
@@ -63,7 +86,7 @@ target_include_directories(fminus_lib
   PUBLIC "${PROJECT_SOURCE_DIR}/include" "${PROJECT_BINARY_DIR}/include"
   PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_compile_features(fminus_lib INTERFACE cxx_std_17)   # what include/fminus/FMinus.h needs
-target_link_libraries(fminus_lib PUBLIC fminus_runtime PRIVATE FMinus::LLVM)   # linked by its users, not included
+target_link_libraries(fminus_lib PUBLIC fminus_runtime fminus_circuit PRIVATE FMinus::LLVM)   # LLVM: linked, not included
 # What support/Aot.cpp links executables with: this tree's C++ compiler driver, runtime library and sanitizers.
 target_compile_definitions(fminus_lib PRIVATE
   "FMINUS_AOT_DRIVER=\"${CMAKE_CXX_COMPILER}\""
