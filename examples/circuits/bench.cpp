@@ -1,12 +1,17 @@
-// examples/circuits/bench.cpp: example-circuits with no flags, the report's cost table (§3.2, §3.3, §4.1) from
-// emitted code, in fmbench.cpp's method: each row is a module generate() writes, with mkbench.py's bench function
-// appended (n host samples of a 1 kHz sine through tick, the squares summed), compiled with subnormals flushed, one
-// thread and the row's math mode, and the best of `reps` runs is kept: wall time, and on macOS this process's cycles
-// and instructions (proc_pid_rusage) at the user-interactive quality of service. A row is named as mkbench.py names its
-// bench, and the report's measurement of that bench (experiments/timing1.out) is printed beside it. Printed, never
-// asserted: run it on a quiet machine.
+// examples/circuits/bench.cpp: example-circuits with no flags. First what generate() takes on each shipped netlist,
+// and the self-test's wall time on diodetone.cir and screamer-clip.cir without their configuration directives, on 1,
+// 2, 4 and 8 threads. Then the report's cost table (§3.2, §3.3, §4.1) from emitted code, in fmbench.cpp's method: each
+// row is a module generate() writes, with mkbench.py's bench function appended (n host samples of a 1 kHz sine through
+// tick, the squares summed), compiled with subnormals flushed, one thread and the row's math mode, and the best of
+// `reps` runs is kept: wall time, and on macOS this process's cycles and instructions (proc_pid_rusage) at the
+// user-interactive quality of service. A row is named as mkbench.py names its bench; the self-test's cost model
+// (src/circuit/Search.h, report §3.2) and the report's measurement of that bench (experiments/timing1.out) are printed
+// beside it. Printed, never asserted: run it on a quiet machine. (--only skips the first two.)
 #include "harness.h"
 
+#include "circuit/Search.h"
+
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -16,6 +21,7 @@
 #include <regex>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #if defined(__APPLE__)
@@ -331,6 +337,80 @@ float fm_baseline(float n)
         }
     } // namespace
 
+    namespace
+    {
+        double millisecondsSince(std::chrono::steady_clock::time_point start)
+        {
+            return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+        }
+
+        // generate()'s time on each shipped netlist, and without its configuration directives: the best of 20.
+        void generateTimes()
+        {
+            std::printf("generate(): ms a netlist, the best of 20\n");
+            for (const char* name : {"diodetone.cir", "screamer.cir", "screamer-clip.cir", "clipper.cir"})
+            {
+                const std::string shipped = netlist(name);
+                std::string open = shipped;
+                for (const char* d : {".oversample", ".adaa", ".solver"})
+                    open = withDirective(open, d, "");
+                for (const std::string* text : {&shipped, static_cast<const std::string*>(&open)})
+                {
+                    double best = 1e30;
+                    for (int k = 0; k < 20; ++k)
+                    {
+                        const auto t0 = std::chrono::steady_clock::now();
+                        const fc::Result r = fc::generate(*text, name);
+                        best = std::min(best, millisecondsSince(t0));
+                        if (!r.errors.empty())
+                            std::printf("%s", r.errors.c_str());
+                    }
+                    std::printf("  %-18s %-24s %7.2f ms\n", name, text == &open ? "(directives removed)" : "", best);
+                }
+            }
+        }
+
+        // The self-test's wall time on `threads` std::threads (SelfTestOptions::parallel).
+        void selfTestTimes()
+        {
+            std::printf("selfTest(): wall seconds on 1, 2, 4 and 8 threads (the netlists without their configuration "
+                        "directives; %u cores)\n",
+                        std::thread::hardware_concurrency());
+            for (const char* name : {"diodetone.cir", "screamer-clip.cir"})
+            {
+                std::string text = netlist(name);
+                for (const char* d : {".oversample", ".adaa", ".solver"})
+                    text = withDirective(text, d, "");
+                std::printf("  %-18s", name);
+                for (int threads : {1, 2, 4, 8})
+                {
+                    fc::SelfTestOptions test;
+                    test.parallel = [threads](int count, const std::function<void(int)>& job)
+                    {
+                        std::atomic<int> next{0};
+                        auto work = [&]
+                        {
+                            for (int i = next++; i < count; i = next++)
+                                job(i);
+                        };
+                        std::vector<std::thread> pool;
+                        for (int k = 1; k < threads; ++k)
+                            pool.emplace_back(work);
+                        work();
+                        for (std::thread& t : pool)
+                            t.join();
+                    };
+                    const auto t0 = std::chrono::steady_clock::now();
+                    const fc::SelfTestResult r = fc::selfTest(text, name, {}, test);
+                    std::printf(" %d: %6.2f s%s", threads, millisecondsSince(t0) / 1000,
+                                r.choice ? "" : " (no answer)");
+                    std::fflush(stdout);
+                }
+                std::printf("\n");
+            }
+        }
+    } // namespace
+
     int bench(const BenchOptions& options)
     {
 #if defined(__APPLE__)
@@ -343,8 +423,13 @@ float fm_baseline(float n)
         if (getloadavg(load, 3) == 3)
             std::printf("load average: %.2f %.2f %.2f\n", load[0], load[1], load[2]);
 #endif
+        if (options.only.empty())
+        {
+            generateTimes();
+            selfTestTimes();
+        }
         std::printf("cycles a host sample at 48 kHz, best of %d x %d (wall ns; cycles and instructions from "
-                    "proc_pid_rusage on macOS); the report's (timing1.out) beside\n",
+                    "proc_pid_rusage on macOS); the self-test's cost model and the report's (timing1.out) beside\n",
                     options.reps, options.samples);
         const auto report = reported();
         std::vector<Row> rows = options.all ? allRows() : defaultRows();
@@ -401,11 +486,14 @@ float fm_baseline(float n)
             const Timing t = best(fn, options.samples, options.reps);
             const auto it = report.find({row.section(), name});
             const std::string theirs = it == report.end() ? std::string("      -") : std::format("{:7.1f}", it->second);
-            std::printf("%-30s %-11s %8.2f ns %8.1f cycles %8.1f instr | report %s | %s\n", name.c_str(),
+            fc::Messages messages;
+            const std::optional<fc::Plan> plan = fc::plan(fc::parse(netlist(file), messages), o, file, messages);
+            const double model = plan ? fc::modelCost(*plan, row.m, row.adaa, row.solver) * row.channels : 0;
+            std::printf("%-30s %-11s %8.2f ns %8.1f cycles %8.1f instr | model %6.0f | report %s | %s\n", name.c_str(),
                         row.math == fminus::Program::Math::Fast ? "Math::Fast"
                         : row.channels == 2                     ? "float2"
                                                                 : "",
-                        t.ns, t.cycles, t.instructions, theirs.c_str(), row.note.c_str());
+                        t.ns, t.cycles, t.instructions, model, theirs.c_str(), row.note.c_str());
             std::fflush(stdout);
         }
         for (const auto& [section, t] : baselines)

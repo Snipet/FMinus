@@ -2,19 +2,25 @@
 // against the double reference of the same configuration and against a converged 64x one, on the report's targets
 // (docs/research/analog-circuits/README.md §2): T1 solver <= -60 dB in band, T2 alias <= -60 dB, T3 H1 and H3 within
 // 0.5 dB, T4 finite; with the generation itself, the DC point, the TS chain, the report's decision, the halfbands'
-// indexing, float2, block-split invariance and a pot's glide under ADAA. Each line prints the worst value, where it
-// fell, and the report's figure beside it; a failure exits 1. Nothing is timed.
+// indexing, float2, block-split invariance and a pot's glide under ADAA (Phase 0's sections a to h); then Phase 1's:
+// the self-test's ordered search (i), the same answer on 1 and 8 threads (j), the run-time guard (k) and the
+// provisional configuration (l). Each line prints the worst value, where it fell, and the report's figure beside it;
+// a failure exits 1. Nothing is timed.
 #include "harness.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <format>
+#include <functional>
 #include <limits>
 #include <numeric>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace circuits
@@ -272,12 +278,13 @@ namespace circuits
         };
 
         // ---- c. the gates, on the two 1-port blocks ----
-        void gates(Report& r, const std::string& label, const std::string& text, const std::string& name,
-                   const std::string& pot, const Figures& report)
+        // Returns the worst T1, T2 and T3 it measured (section i compares the self-test's with them).
+        Figures gates(Report& r, const std::string& label, const std::string& text, const std::string& name,
+                      const std::string& pot, const Figures& report)
         {
             std::unique_ptr<Circuit> c = buildOrReport(r, text, name);
             if (!c)
-                return;
+                return {0, 0, 0};
             const fc::Plan& plan = c->plan;
             const int m = plan.config.oversample;
             const bool adaa = plan.config.adaa;
@@ -343,6 +350,7 @@ namespace circuits
             r.line(stats.unconverged == 0, std::format("the references: {} unconverged of {} samples, at most {} "
                                                        "Newton steps",
                                                        stats.unconverged, stats.samples, stats.maxIterations));
+            return {t1.value, t2.value, t3.value};
         }
 
         // ---- d. the Tube Screamer chain ----
@@ -711,6 +719,286 @@ namespace circuits
                                "drive held: within 1.1x",
                                moving, held));
         }
+
+        // ---- i, j. the self-test ----
+        // SelfTestOptions::parallel on `threads` std::threads.
+        std::function<void(int, const std::function<void(int)>&)> pool(int threads)
+        {
+            return [threads](int count, const std::function<void(int)>& job)
+            {
+                std::atomic<int> next{0};
+                auto work = [&]
+                {
+                    for (int i = next++; i < count; i = next++)
+                        job(i);
+                };
+                std::vector<std::thread> ts;
+                for (int k = 1; k < threads; ++k)
+                    ts.emplace_back(work);
+                work();
+                for (std::thread& t : ts)
+                    t.join();
+            };
+        }
+
+        // The netlist with its configuration directives removed: every searched dimension open.
+        std::string opened(std::string text)
+        {
+            for (const char* d : {".oversample", ".adaa", ".solver"})
+                text = withDirective(text, d, "");
+            return text;
+        }
+
+        // The self-test of `name` without its configuration directives, on 8 threads: it chooses `expected` (the
+        // shipped directives, which the report and Phase 0's measurements chose by hand), its notes list each
+        // candidate tried in the cost model's order with its verdict, and the answer's figures are section c's.
+        std::optional<fc::SelfTestResult> search(Report& r, const std::string& name, const std::string& expected,
+                                                 const Figures& c)
+        {
+            const std::string text = opened(netlist(name));
+            fc::SelfTestOptions test;
+            test.parallel = pool(8);
+            const fc::SelfTestResult t = fc::selfTest(text, name, {}, test);
+            if (!t.errors.empty() || !t.choice)
+            {
+                r.line(false, name + ": the self-test gave no answer:\n" + t.errors + t.notes);
+                return std::nullopt;
+            }
+            // the candidates tried, in order: "self-test candidate k: <configuration>, <cost> model cycles: ..."
+            std::vector<double> costs;
+            int verdicts = 0;
+            for (std::size_t at = t.notes.find("self-test candidate "); at != std::string::npos;
+                 at = t.notes.find("self-test candidate ", at + 1))
+            {
+                const std::size_t end = t.notes.find('\n', at);
+                const std::string line = t.notes.substr(at, end - at);
+                const std::size_t cycles = line.find(" model cycles");
+                const std::size_t comma = line.rfind(", ", cycles);
+                costs.push_back(std::stod(line.substr(comma + 2, cycles - comma - 2)));
+                verdicts += line.ends_with(": passes") || line.find(": fails (") != std::string::npos ? 1 : 0;
+            }
+            const bool ordered = std::is_sorted(costs.begin(), costs.end());
+            const std::string chose = fc::Choice::parse(t.choice->text()) ? t.choice->text() : std::string();
+            const std::string got = std::format(".oversample {}, .adaa {}, .solver omega({})", t.choice->oversample,
+                                                t.choice->adaa ? "on" : "off", t.choice->solver.steps);
+            r.line(got == expected && t.choice->met && !chose.empty(),
+                   std::format("{} without its directives: the self-test chose {} (the shipped {}), candidate {} of "
+                               "16",
+                               name, got, expected, t.candidates));
+            r.line(ordered && verdicts == t.candidates && static_cast<int>(costs.size()) == t.candidates,
+                   std::format("its notes list the {} candidates tried, each with its verdict, in the model's order "
+                               "({:g} to {:g} cycles)",
+                               t.candidates, costs.empty() ? 0.0 : costs.front(), costs.empty() ? 0.0 : costs.back()));
+            const double d1 = std::fabs(t.choice->t1 - c.solver);
+            const double d2 = std::fabs(t.choice->t2 - c.alias);
+            const double d3 = std::fabs(t.choice->t3 - c.h3);
+            r.line(d1 <= 1 && d2 <= 1 && d3 <= 1,
+                   std::format("the answer's T1 {:.1f}, T2 {:.1f}, T3 {:.2f} dB; section c measured {:.1f}, {:.1f}, "
+                               "{:.2f} (within 1 dB)",
+                               t.choice->t1, t.choice->t2, t.choice->t3, c.solver, c.alias, c.h3));
+            return t;
+        }
+
+        void selfTests(Report& r, const Figures& diodeTone, const Figures& screamerClip)
+        {
+            std::printf("i. the self-test's ordered search, on diodetone.cir and screamer-clip.cir without their "
+                        "configuration directives (the full stress matrix, 8 threads)\n");
+            const std::optional<fc::SelfTestResult> dt =
+                search(r, "diodetone.cir", ".oversample 4, .adaa off, .solver omega(2)", diodeTone);
+            search(r, "screamer-clip.cir", ".oversample 4, .adaa on, .solver omega(1)", screamerClip);
+            std::printf("j. diodetone.cir's self-test on the calling thread alone, against the 8 threads of i\n");
+            if (!dt)
+                return;
+            const fc::SelfTestResult serial = fc::selfTest(opened(netlist("diodetone.cir")), "diodetone.cir", {});
+            r.line(serial.choice && serial.choice->text() == dt->choice->text() && serial.notes == dt->notes,
+                   std::format("the answer ({}) and the notes ({} bytes) are the same, byte for byte",
+                               serial.choice ? serial.choice->text() : std::string("none"), serial.notes.size()));
+        }
+
+        // ---- k. the guard ----
+        // diodetone.cir as shipped, a 1 V, 996 Hz sine, tone 0.5: a NaN written into x_C1 between ticks 100 and 101
+        // (one channel), or into the second lane of x_C1 (.channels 2). From the next multiple of 16 ticks the output
+        // is finite, the fields are a fresh instance's after the same tick (clear()'s, a tick on), but fd_, the fade,
+        // which rises monotonically to exactly 1 within 960 samples (+-1); calls of 1, 61 and 64 samples agree, bit
+        // for bit.
+        void guard(Report& r)
+        {
+            std::printf("k. the run-time guard: diodetone.cir, a NaN written into x_C1 after tick 100\n");
+            auto c = buildOrReport(r, netlist("diodetone.cir"), "diodetone.cir");
+            fc::Options two;
+            two.channels = 2;
+            auto stereo = buildOrReport(r, netlist("diodetone.cir"), "diodetone.cir", two);
+            if (!c || !stereo)
+                return;
+            auto offsetOf = [](const Circuit& circuit, const std::string& name)
+            {
+                for (const fminus::Program::Module::Field& f : circuit.module->fields)
+                {
+                    if (f.name == name)
+                        return f.offset;
+                }
+                throw std::runtime_error("no field " + name);
+            };
+            constexpr std::size_t n = 2000;
+            constexpr std::size_t poisoned = 101;   // the NaN is written before this tick
+            const std::vector<double> u = fc::sine(1.0, 85, kWindow, 1, n);
+            const std::vector<float> in(u.begin(), u.end());
+            const float tone = 0.5f;
+            const std::vector<float> pots(n, tone);
+            const std::size_t x = offsetOf(*c, "x_C1");
+            const std::size_t fd = offsetOf(*c, "fd_");
+            auto readFloat = [](const void* base, std::size_t offset)
+            {
+                float f = 0;
+                std::memcpy(&f, static_cast<const char*>(base) + offset, sizeof f);
+                return f;
+            };
+            // the run, in calls of `call` samples, the NaN written between two calls; fd_ after each call
+            auto run = [&](int call, std::vector<float>* fade, Instance& self)
+            {
+                c->init(self.get(), 48000);
+                std::vector<float> out(n);
+                auto ticks = [&](std::size_t from, std::size_t until)
+                {
+                    for (std::size_t at = from; at < until;)
+                    {
+                        const std::size_t count = std::min(static_cast<std::size_t>(call), until - at);
+                        c->ticks(self.get(), in.data() + at, nullptr, pots.data() + at, nullptr, out.data() + at,
+                                 static_cast<int>(count), static_cast<int>(at));
+                        if (fade != nullptr)
+                            fade->push_back(readFloat(self.get(), fd));
+                        at += count;
+                    }
+                };
+                ticks(0, poisoned);
+                const float nan = std::numeric_limits<float>::quiet_NaN();
+                std::memcpy(static_cast<char*>(self.get()) + x, &nan, sizeof nan);
+                ticks(poisoned, n);
+                return out;
+            };
+            std::vector<float> fade;
+            Instance whole(*c->module);
+            const std::vector<float> one = run(1, &fade, whole);
+            const std::size_t reset = (poisoned + 15) / 16 * 16;   // 112: the next multiple of 16 ticks
+            bool finiteAfter = true;
+            for (std::size_t i = reset; i < n; ++i)
+                finiteAfter = finiteAfter && std::isfinite(one[i]);
+            r.line(finiteAfter && one[reset] == 0,
+                   std::format("the output is finite from tick {}, where the guard resets (0 there: the fade starts at "
+                               "0; before it, the bracket kept v_D1, and so the output, finite)",
+                               reset));
+            // the fields at the reset: a fresh instance's after one tick of the same input, but the fade's
+            {
+                Instance fresh(*c->module);
+                c->init(fresh.get(), 48000);
+                float y = 0;
+                c->ticks(fresh.get(), in.data() + reset, nullptr, pots.data() + reset, nullptr, &y, 1, 0);
+                Instance again(*c->module);
+                // the run again, stopped right after the reset's tick; x_C1 is NaN until it
+                c->init(again.get(), 48000);
+                std::vector<float> out(n);
+                bool poisonedUntil = true;
+                for (std::size_t i = 0; i <= reset; ++i)
+                {
+                    if (i == poisoned)
+                    {
+                        const float nan = std::numeric_limits<float>::quiet_NaN();
+                        std::memcpy(static_cast<char*>(again.get()) + x, &nan, sizeof nan);
+                    }
+                    if (i > poisoned && i <= reset)
+                        poisonedUntil = poisonedUntil && std::isnan(readFloat(again.get(), x));
+                    c->ticks(again.get(), in.data() + i, nullptr, pots.data() + i, nullptr, out.data() + i, 1,
+                             static_cast<int>(i));
+                }
+                r.line(poisonedUntil && std::isfinite(readFloat(again.get(), x)),
+                       std::format("x_C1 stays NaN from tick {} to the guard's check at tick {}, and is finite after it",
+                                   poisoned, reset));
+                std::string differ;
+                for (const fminus::Program::Module::Field& f : c->module->fields)
+                {
+                    if (f.name == "fd_")
+                        continue;
+                    if (std::memcmp(static_cast<const char*>(fresh.get()) + f.offset,
+                                    static_cast<const char*>(again.get()) + f.offset, f.size) != 0)
+                        differ += " " + f.name;
+                }
+                r.line(differ.empty(), "the fields after the reset's tick are a fresh instance's after the same tick, "
+                                       "but fd_" +
+                                           (differ.empty() ? std::string() : "; these differ:" + differ));
+            }
+            // the fade (fd_ after each tick, the reset's the first): monotonic, exactly 1 within 960 samples (+-1)
+            {
+                bool monotonic = true;
+                std::size_t settled = 0;
+                for (std::size_t i = reset; i < fade.size(); ++i)
+                {
+                    monotonic = monotonic && (i == reset || fade[i] >= fade[i - 1]);
+                    if (settled == 0 && fade[i] == 1.0f)
+                        settled = i - reset + 1;
+                }
+                r.line(monotonic && settled >= 959 && settled <= 961 && fade[reset] < 1.0f,
+                       std::format("fd_ rises monotonically from {:g} after the reset's tick to exactly 1 after {} "
+                                   "ticks (960 +- 1 at 48 kHz)",
+                                   fade[reset], settled));
+            }
+            for (int call : {61, 64})
+            {
+                Instance self(*c->module);
+                const std::vector<float> parts = run(call, nullptr, self);
+                std::size_t differ = 0;
+                for (std::size_t i = 0; i < n; ++i)
+                    differ += std::memcmp(&parts[i], &one[i], sizeof(float)) != 0 ? 1 : 0;
+                r.line(differ == 0, std::format("calls of {}: {} of {} samples differ from calls of 1", call, differ, n));
+            }
+            // .channels 2: a NaN in one lane resets both
+            {
+                Instance self(*stereo->module);
+                stereo->init(self.get(), 48000);
+                const std::vector<float> b(in.begin(), in.end());
+                std::vector<float> ya(n);
+                std::vector<float> yb(n);
+                const std::size_t x2 = offsetOf(*stereo, "x_C1");
+                stereo->ticks2(self.get(), in.data(), b.data(), nullptr, pots.data(), nullptr, ya.data(), yb.data(),
+                               static_cast<int>(poisoned), 0);
+                const float nan = std::numeric_limits<float>::quiet_NaN();
+                std::memcpy(static_cast<char*>(self.get()) + x2 + sizeof(float), &nan, sizeof nan);
+                stereo->ticks2(self.get(), in.data() + poisoned, b.data() + poisoned, nullptr, pots.data() + poisoned,
+                               nullptr, ya.data() + poisoned, yb.data() + poisoned, static_cast<int>(n - poisoned),
+                               static_cast<int>(poisoned));
+                bool same = true;
+                for (std::size_t i = reset; i < n; ++i)
+                    same = same && ya[i] == one[i] && yb[i] == one[i];
+                r.line(same, "float2: a NaN in x_C1's second lane resets both lanes at the same tick: from it, each lane "
+                             "is the scalar module's after its reset, bit for bit");
+            }
+        }
+
+        // ---- l. the provisional configuration ----
+        void provisional(Report& r)
+        {
+            std::printf("l. the provisional configuration: diodetone.cir without its configuration directives\n");
+            const fc::Result result = fc::generate(opened(netlist("diodetone.cir")), "diodetone.cir");
+            const bool note = result.notes.find("diodetone.cir: note: the self-test chooses this circuit's "
+                                                "configuration; provisional: 8x IIR, omega(2)\n") != std::string::npos;
+            r.line(result.errors.empty() && result.provisional && note && result.selfTestKey.size() == 16,
+                   "Result::provisional, its key, and the note 'the self-test chooses this circuit's configuration; "
+                   "provisional: 8x IIR, omega(2)'");
+            auto c = buildOrReport(r, opened(netlist("diodetone.cir")), "diodetone.cir");
+            if (!c)
+                return;
+            const fc::Config& cfg = c->plan.config;
+            std::string bad;
+            for (const char* method : {"init", "set", "tick", "step", "clear"})
+            {
+                const std::string full = c->result.module + "::" + method;
+                if (!c->program->nonBlocking(full))
+                    bad += " " + full;
+            }
+            r.line(cfg.oversample == 8 && cfg.halfband == fc::Halfband::Iir && !cfg.adaa &&
+                       cfg.solver.guess == fc::Solver::Guess::Omega && cfg.solver.steps == 2 && bad.empty(),
+                   "its module is 8x IIR, plain omega(2), and its methods are nonblocking" +
+                       (bad.empty() ? std::string() : "; not:" + bad));
+        }
     } // namespace
 
     int check()
@@ -718,9 +1006,10 @@ namespace circuits
         Report r;
         generation(r);
         dc(r);
-        gates(r, "as shipped", netlist("diodetone.cir"), "diodetone.cir", "tone", {-93.7, -79.8, -0.08});
-        gates(r, "as shipped", netlist("screamer-clip.cir"), "screamer-clip.cir", "drive", {-81.2, -75.1, -0.06});
-        // Phase 0's defaults: the netlists without their configuration lines
+        const Figures dt = gates(r, "as shipped", netlist("diodetone.cir"), "diodetone.cir", "tone", {-93.7, -79.8, -0.08});
+        const Figures ts =
+            gates(r, "as shipped", netlist("screamer-clip.cir"), "screamer-clip.cir", "drive", {-81.2, -75.1, -0.06});
+        // Phase 0's defaults, now the provisional configuration: the netlists without their configuration lines
         auto defaults = [](std::string text)
         {
             for (const char* d : {".oversample", ".adaa", ".solver"})
@@ -737,6 +1026,9 @@ namespace circuits
         stereo(r);
         blocks(r);
         glide(r);
+        selfTests(r, dt, ts);
+        guard(r);
+        provisional(r);
         std::printf("%s: %d check(s) failed\n", r.failures == 0 ? "passed" : "FAILED", r.failures);
         return r.failures == 0 ? 0 : 1;
     }
