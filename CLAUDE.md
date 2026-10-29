@@ -18,6 +18,10 @@ asks for that specific change, and ask before restructuring anything.
   the sanitizers. Dependencies keep their own flags.
 - `src/runtime/` is its own library (no LLVM): what generated code calls, JIT'd (`support/JitRuntime.h`) or linked
   into an executable (`support/Aot.h`, `tools/fminus-build`). Every runtime function goes in `RuntimeSymbols.def`.
+- `src/circuit/` is its own library too, `fminus_circuit` (no LLVM, no grammar): the circuit compiler the user asked
+  for (2026-10-29), SPICE-style netlists to FMinus source (`include/fminus/Circuit.h`, C++17; `docs/circuits.md`; the
+  research in `docs/research/analog-circuits/`). It compiles with `-ffp-contract=off`, so the text it prints is the
+  same on every machine; `fminus_lib` links it. A name its emitted module uses goes in `isModuleWord` (Plan.cpp).
 - The smoke tests (`tests/smoke/`, `tests/lit/smoke/`) prove the toolchain. Keep them passing until the user retires
   them.
 - `docs/` is the manual (architecture, extending, building, testing; `docs/recipes/` patches). Keep it in step with
