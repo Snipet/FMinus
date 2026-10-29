@@ -27,6 +27,8 @@ add_executable(fminus-tests ${_fminus_unit_tests} ${_fminus_smoke_tests})
 fminus_target_defaults(fminus-tests)
 target_link_libraries(fminus-tests PRIVATE FMinus::Internal fminus_smoke_calc Catch2::Catch2WithMain)
 catch_discover_tests(fminus-tests DISCOVERY_MODE PRE_TEST)
+# KeepIrTest.cpp runs the fminus driver beside this executable (bin/), so building the tests builds it too.
+add_dependencies(fminus-tests fminus)
 
 # ---- the public API, as a host uses it ------------------------------------------------------------------------------
 file(GLOB_RECURSE _fminus_library_tests CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/library/*.cpp")

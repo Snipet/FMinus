@@ -13,7 +13,7 @@
 
 namespace fminus::jit
 {
-    llvm::Expected<std::unique_ptr<Jit>> Jit::create(llvm::OptimizationLevel level)
+    llvm::Expected<std::unique_ptr<Jit>> Jit::create(llvm::OptimizationLevel level, Modules modules)
     {
         const llvm::CodeGenOptLevel codegen = codeGenLevel(level);
         auto machine = hostTargetMachine(codegen);
@@ -33,6 +33,8 @@ namespace fminus::jit
         jit->jit_ = std::move(*lljit);
         if (llvm::Error error = defineRuntimeSymbols(*jit->jit_))
             return error;
+        if (modules == Modules::Optimised)
+            return jit;   // LLJIT's transform layer, with no transform set, hands each module on as it is
 
         Jit* self = jit.get();
         jit->jit_->getIRTransformLayer().setTransform(

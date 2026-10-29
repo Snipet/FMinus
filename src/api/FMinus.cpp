@@ -1,7 +1,8 @@
 // src/api/FMinus.cpp: the public API (include/fminus/FMinus.h) on the pipeline, run as the fminus driver
 // (tools/fminus/main.cpp) runs it: parse, lower for this machine (a poly float's width, the data layout a module
 // follows), then hand the module to an LLJIT that optimises it at the chosen level and compiles it when one of its
-// functions is first looked up.
+// functions is first looked up. For a host that keeps the IR as text (Options::keepIr), print it, as lowered and as
+// optimised, the optimised IR as fminus --emit ll prints it: optimised here, and given to a JIT that takes it as it is.
 #include "fminus/FMinus.h"
 
 #include "frontend/Frontend.h"
@@ -15,6 +16,7 @@
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/Support/Error.h>
+#include <llvm/Support/raw_ostream.h>
 #include <llvm/Target/TargetMachine.h>
 
 #include <algorithm>
@@ -100,6 +102,15 @@ namespace fminus
             }
         }
 
+        // A module as LLVM's textual IR, as fminus --emit ll writes it.
+        std::string printed(const llvm::Module& module)
+        {
+            std::string text;
+            llvm::raw_string_ostream stream(text);
+            module.print(stream, nullptr);
+            return text;
+        }
+
         template <typename T>
         T& at(void* instance, std::size_t offset)
         {
@@ -114,6 +125,8 @@ namespace fminus
         std::map<std::string, Effect, std::less<>> effects;   // the functions a declaration marks
         std::vector<Module> modules;
         bool pool = false;   // a user of the runtime's pool, for its parallel regions (runtime/Parallel.cpp)
+        std::string loweredIr;     // Options::keepIr's texts, or empty
+        std::string optimisedIr;
 
         Impl() = default;
         Impl(const Impl&) = delete;
@@ -236,7 +249,26 @@ namespace fminus
 
         // A program with a parallel region runs it on the runtime's pool, from now until it is destroyed.
         const bool parallel = module->getFunction("fminus_rt_parallel_for") != nullptr && options.threads != 1;
-        auto created = jit::Jit::create(level);
+
+        // The IR as text, for a host that keeps it: set up for this machine, as the JIT sets a module up, and printed;
+        // then optimised as fminus --emit ll optimises it, by the same calls on a machine made as fminus's and the
+        // JIT's are, and printed, and the JIT takes it as it is.
+        const bool keepLowered = options.keepIr == KeepIr::Lowered || options.keepIr == KeepIr::Both;
+        const bool keepOptimised = options.keepIr == KeepIr::Optimised || options.keepIr == KeepIr::Both;
+        std::string loweredIr;
+        std::string optimisedIr;
+        if (keepLowered || keepOptimised)
+            prepareModule(*module, **machine);
+        if (keepLowered)
+            loweredIr = printed(*module);
+        if (keepOptimised)
+        {
+            optimiseModule(*module, **machine, level);
+            optimisedIr = printed(*module);
+        }
+
+        auto created =
+            jit::Jit::create(level, keepOptimised ? jit::Jit::Modules::Optimised : jit::Jit::Modules::Unoptimised);
         if (!created)
         {
             errors = llvm::toString(created.takeError()) + "\n";
@@ -257,6 +289,8 @@ namespace fminus
         }
         impl->polyLanes = lowering.polyLanes;
         impl->modules = std::move(modules);
+        impl->loweredIr = std::move(loweredIr);
+        impl->optimisedIr = std::move(optimisedIr);
         for (const ast::Function& function : program->functions)
         {
             const Effect effect = declaredEffect(function);
@@ -283,6 +317,16 @@ namespace fminus
     unsigned Program::polyLanes() const
     {
         return impl_->polyLanes;
+    }
+
+    const std::string& Program::loweredIr() const
+    {
+        return impl_->loweredIr;
+    }
+
+    const std::string& Program::optimisedIr() const
+    {
+        return impl_->optimisedIr;
     }
 
     bool Program::nonBlocking(std::string_view name) const
