@@ -520,8 +520,9 @@ library, with no LLVM in it, so a host's include resolver (or `tools/fminus`'s) 
 | Stage | Entry point | Input | Output |
 |---|---|---|---|
 | parse | `circuit::parse` (`Netlist.h`) | the netlist's text | `Netlist`: its elements, models, pots and directives, as written, with their lines and columns |
-| plan | `circuit::plan` (`Plan.h`) | `Netlist`, `Options` | `Plan`: diode pairs and OTAs as ports, pots as variable branches, law inputs, the checks, a chain of blocks cut at ideal op amps, the configuration, the oversampled region |
-| equations | `assemble`, `choosePivots` (`Mna.h`) | a block of the plan | `System` (its stamps, sources and readouts; a diode pair's port in the v-form, an OTA's in the i-form) and `Pivots` (the elimination order, checked over a grid of rates and pots) |
+| plan | `circuit::plan` (`Plan.h`) | `Netlist`, `Options` | `Plan`: diodes (one, strings, pairs, asymmetric pairs; RS written in as a resistor) and OTAs as ports, pots as variable branches, DC sources, E and G sources, law inputs, the checks, a chain of blocks cut at ideal op amps and grounded E sources, the DC operating point, the configuration, the oversampled region |
+| DC point | `dcPoint`, `solveDc` (`Dc.h`) | the plan's blocks | each node's DC voltage (the offsets' origin), the output's DC (tick's constant), `.op`'s notes; a biased port's error |
+| equations | `assemble`, `choosePivots` (`Mna.h`) | a block of the plan | `System` (its stamps, sources and readouts, in the offsets from the DC point, or with the DC sources' constants; a diode's port in the v-form, an OTA's in the i-form) and `Pivots` (the elimination order, checked over a grid of rates and pots) |
 | derivation | `solve<T>`, `derive<T>` (`Mna.h`) | `System`, `Pivots`, the symbols as `T` | each readout as a linear form in the sources, then the module's coefficients |
 | text | `deriveBlock`, `emit` (`Emit.h`) | the plan and each block's derivation on `Val`s | the module's FMinus text; each law's part of a step is `Laws.h`'s, beside its double twin |
 

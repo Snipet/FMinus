@@ -84,9 +84,9 @@ src/                    the fminus library: every .cpp is a source, every gramma
                         ZeroInitElision (a local's zeroing, removed where nothing reads it) and MathKernels (the
                         math builtins' kernels, inline)
   circuit/              the circuit compiler: its own library, libfminus_circuit.a, with no LLVM in it (Netlist,
-                        Plan, Mna, Laws, Emit, Halfbands, Generate; Reference and Analysis, the double reference and the
-                        measurements its checks use; Search, the self-test's arithmetic, and Runners, the FMinus
-                        that drives a module over buffers); docs/circuits.md
+                        Plan, Dc (the DC operating point), Mna, Laws, Emit, Halfbands, Generate; Reference and
+                        Analysis, the double reference and the measurements its checks use; Search, the self-test's
+                        arithmetic, and Runners, the FMinus that drives a module over buffers); docs/circuits.md
 tools/<name>/           one executable per directory, with CLI11 for its command line: fminus (the driver),
                         fminus-build and fminus-hostinfo
 examples/<name>/        one example per directory: an FMinus program, and a harness if it has .cpp files

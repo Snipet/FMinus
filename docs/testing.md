@@ -81,10 +81,14 @@ TEST_CASE("functions compute what they say", "[codegen]")
   flat streams), `[tbaa]`, `[zeroinit]`, `[attributes]` and `[progress]` (the runtime's and libm's attributes, and loop
   progress), `[denormals]`, `[parallel]` (parallel regions, and `[runtime]` among them for the pool on its own),
   `[ir]` (`Program::Options::keepIr`'s texts), `[circuit]` (the circuit compiler: `CircuitTest.cpp` its netlists,
-  plans, equations (an OTA's against report §7.2's hand derivation), laws (each one's antiderivative, bracket and
-  carry), prewarp, halfbands, reference and analysis; `CircuitEmitTest.cpp` its emitted text, compiled through
-  `fminus::Program`, an OTA's in 48 configurations, its ADAA mean against the double one over a saturating sweep, an
-  OTA driven hard against the reference; `CircuitSearchTest.cpp` its self-test: both rows' candidates' order, the
+  plans, equations (an OTA's against report §7.2's hand derivation; an inductor's, an E's and a G's stamps by hand, and
+  RL and RLC responses as the bilinear map), the DC operating point by hand and its errors, the offset form (a biased
+  netlist's module the unbiased one's), the diode forms (a string as one diode of n N, an asymmetric pair's K and law,
+  RS as its resistor, the built-in models), laws (each one's antiderivative, bracket and carry), prewarp, halfbands,
+  reference and analysis; `CircuitEmitTest.cpp` its emitted text, compiled through `fminus::Program`, an OTA's in 48
+  configurations and Phase 1's elements and diode laws in 40, the carry of a pot's move for one diode and an
+  asymmetric pair, its ADAA mean against the double one over a saturating sweep, an OTA driven hard against the
+  reference; `CircuitSearchTest.cpp` its self-test: both rows' candidates' order, the
   synth's stress matrix and a law input's arguments over its scale, the search, the gates' reduction
   and the no-configuration choice on stub measures, the key, a `Choice`'s text, and the self-test itself on a small
   stress shape, `selfTestWith` in `src/api/CircuitSelfTest.h`: T1 on the region's own input, its answer the same on
@@ -242,7 +246,9 @@ the research's (in-band error, inharmonic energy, H1 and H3; `src/circuit/Analys
 runs the self-test on the full stress matrix (it must choose the configurations the examples ship, the same on 1 and 8
 threads); `--tables` reprints the research's accuracy tables from emitted code (minutes), and with no flags it prints
 generate()'s and the self-test's times and the cost table, which nothing asserts. The unit tests run the self-test on
-a smaller stress shape only; `tests/lit/circuit/selftest.test` runs it through `fminus --self-test`.
+a smaller stress shape only; `tests/lit/circuit/selftest.test` runs it through `fminus --self-test`, and
+`tests/lit/circuit/op.test` prints DC points through `.op` (and compares a biased netlist's module with its unbiased
+twin's).
 `tests/lit/circuit/equiv-ex1c.fm` and `equiv-ts2.fm` compile the research's hand-written modules
 (`docs/research/analog-circuits/experiments/ex1c.fm`, `ts2.fm`) beside the generated ones and require their outputs to
 agree within 2e-5 of their peak.

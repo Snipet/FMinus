@@ -8,30 +8,40 @@ public API it needs, the self-test that chooses a netlist's configuration on the
 (asynchronously for a host, which keeps the answer), the run-time guard every module carries, and FMinus's messages
 re-cited at the netlist's lines; the second, the synth path (report §7): the OTA, law inputs that move a device's law
 every sample, the tanh law's solve and ADAA with their carry, the cutoff prewarp, and the self-test's smooth-monotone
-row. This page says what it does, how to use it, what it decided where the design left a choice or the code proved the
-design wrong, and what is not built yet.
+row; the third, the rest of the netlist's parts and the DC operating point: inductors, DC voltage and current sources,
+E and linear G sources, every diode form (one diode, a series string, an asymmetric pair, RS, the built-in 1N914 and
+1N4148), and the module running in offsets from the circuit's DC point (`.op` prints it). This page says what it does,
+how to use it, what it decided where the design left a choice or the code proved the design wrong, and what is not
+built yet.
 
 ## Status
 
-- **Built:** netlists of resistors, capacitors, pots, ideal op amps, antiparallel diode pairs and OTAs, cut into blocks
-  at the op amps; each block's equations (modified nodal analysis, trapezoidal companions, its one nonlinear port in
-  Holters' form: a diode pair's voltage, an OTA's current) eliminated with a pivot order fixed at generation and
-  printed as straight-line float code; the closed-form omega3 guess with fixed Newton steps (a diode's), the previous
-  step's v with fixed Newton steps (an OTA's); Holters' antiderivative antialiasing (ADAA) for both laws; IIR or FIR
-  halfband oversampling of the region that needs it; `.channels 2`. From Phase 1: the self-test (the stress matrix, the
-  converged references, T1-T4, the exp-affine and smooth-monotone candidates in the report's cost-model order, the
-  ordered search, the no-configuration answer), the provisional configuration a netlist plays until it answers, the
-  run-time guard, the map from each generated line to the netlist's (`fminus --self-test`, `--notes`); law inputs
-  (`.input NAME - kind=cv|current`) in an OTA's gain, each sample's, with ADAA's carry; `.prewarp on`.
+- **Built:** netlists of resistors, capacitors, inductors, pots, DC voltage and current sources, E and G (linear)
+  controlled sources, ideal op amps, diodes (one, a series string, an antiparallel pair, an asymmetric pair, with RS;
+  a `.model` card or the built-in 1N914 and 1N4148) and OTAs, cut into blocks at the op amps' and grounded E sources'
+  outputs; each block's equations (modified nodal analysis, trapezoidal companions, an inductor and a variable
+  resistor in the impedance form, its one nonlinear port in Holters' form: a diode's voltage, an OTA's current)
+  eliminated with a pivot order fixed at generation and printed as straight-line float code; the closed-form omega3
+  guess with fixed Newton steps (a diode's), the previous step's v with fixed Newton steps (an OTA's); Holters'
+  antiderivative antialiasing (ADAA) for every law; IIR or FIR halfband oversampling of the region that needs it;
+  `.channels 2`; the DC operating point, which the module runs in offsets from (`.op` prints it). From Phase 1's first
+  slices: the self-test (the stress matrix, the converged references, T1-T4, the exp-affine and smooth-monotone
+  candidates in the report's cost-model order, the ordered search, the no-configuration answer), the provisional
+  configuration a netlist plays until it answers, the run-time guard, the map from each generated line to the
+  netlist's (`fminus --self-test`, `--notes`); law inputs (`.input NAME - kind=cv|current`) in an OTA's gain, each
+  sample's, with ADAA's carry; `.prewarp on`.
 - **Checked:** the parser, the plan and the equations against hand derivations, Yeh's eq. 24, report §7.2's OTA stage
-  and textbook responses, each law's antiderivative and bracket, the carry's residual (`tests/unit/CircuitTest.cpp`);
-  the emitted coefficients against the double derivation, every configuration compiling nonblocking, the OTA's in 40
-  combinations, the bracket through the JIT (`tests/unit/CircuitEmitTest.cpp`); the self-test's order (both rows),
+  and textbook responses (an RL low-pass and an RLC band-pass among them), the stamps of an inductor, an E and a G,
+  DC points by hand, the offset form, the diode forms against their hand laws, each law's antiderivative and bracket,
+  the carry's residual (`tests/unit/CircuitTest.cpp`); the emitted coefficients against the double derivation, every
+  configuration compiling nonblocking, the OTA's in 40 combinations and Phase 1's elements and diode laws in 40, the
+  bracket through the JIT, the carry of a pot's move for every diode law (`tests/unit/CircuitEmitTest.cpp`); the self-test's order (both rows),
   search, gates, key and answers, the synth's stress, T1 on the region's own input, and its determinism, cancel,
   budget and errors (`tests/unit/CircuitSearchTest.cpp`); the text, the driver and the equivalence with the research's
   hand-written modules (`tests/lit/circuit/`); the report's targets on its full stress set, the self-test's choices,
-  the guard, and the synth path's gates, prewarp, carry, lanes and block splits, through the JIT (`example-circuits
-  --check`).
+  the guard, the synth path's gates, prewarp, carry, lanes and block splits, the offset form against the unbiased
+  module, the new diode forms' self-tests and an inductor's response, through the JIT (`example-circuits --check`);
+  the DC point's notes and errors (`tests/lit/circuit/op.test`, `errors.test`).
 - **Not built:** the rest of Phase 1, and later, at the end of this page.
 
 ## Use
@@ -76,8 +86,9 @@ options.include = [&](std::string_view name, std::string_view from) -> std::opti
 };
 ```
 
-`tests/library/CircuitTest.cpp` does this; `examples/circuits/` has the report's netlists, and `otalp.cir`, the synth
-path's.
+`tests/library/CircuitTest.cpp` does this; `examples/circuits/` has the report's netlists, `otalp.cir`, the synth
+path's, and Phase 1's elements': `screamer-biased.cir` (a DC reference), `halfwave.cir` (one diode), `asym.cir` (an
+asymmetric pair) and `wah.cir` (an inductor).
 
 A netlist with law inputs (`.input iabc - kind=current range=10u:2m`) makes `tick` and `step` take them after the
 signal, as floats (`Result::inputs` lists them, with their kinds and ranges): a voice computes its OTA filter's bias
@@ -130,8 +141,10 @@ case-folding and unit suffixes, which Flex and Bison fit poorly.
 - **Numbers.** `[+-]digits[.digits][e[+-]digits][suffix][letters]`: suffixes `t g meg k m u n p f` (`meg` before `m`),
   trailing letters ignored (`10nF`, `2.2kohm`, `-60dB`). `1M` is milli, as in SPICE: an R or P value under 1 ohm written
   with `m` or `M` warns `'1M' is 1 milliohm in SPICE; write 1meg for a megohm`. A part's value lies in 1e-30 to 1e30
-  (ohms or farads), which float coefficients hold; should the values still fold to a coefficient beyond float's range,
-  that is an error of the netlist ("the netlist's values give a coefficient of 1e+45, beyond float's range").
+  (ohms, farads or henries; an E's or a G's gain in size, not 0), which float coefficients hold; a source's (volts or
+  amps) is finite and at most 1e30 in size, and may be 0 or negative (the lead's ruling: the float range, no tighter
+  physical one). Should the values still fold to a coefficient beyond float's range, that is an error of the netlist
+  ("the netlist's values give a coefficient of 1e+45, beyond float's range").
 - **Expressions** `{...}` over the pots: numbers, pot names, `+ - * /`, unary minus, `( )`, and `^` with an integer
   exponent 0 to 8 (`-x^2` is `-(x^2)`; `^` prints as repeated products). They evaluate in double and print as FMinus
   over the clamped pots. One that names no pot is a constant. A part without a pot must be a finite float (`{1/0 +
@@ -142,7 +155,12 @@ case-folding and unit suffixes, which Flex and Bison fit poorly.
 |---|---|
 | `R<name> n+ n- value` | a resistor (positive); `R<name> n+ n- {expr}` one whose resistance is the expression of pots |
 | `C<name> n+ n- value` | a capacitor: a trapezoidal companion, `gc = 2 C fs'`, its history injected into n+ and drawn from n- |
-| `D<name> anode cathode model` | a diode: it must pair with an antiparallel twin of the same model, the pair one port, `i = 2 IS sinh(v / N Vt)` |
+| `L<name> n+ n- value` | an inductor, in the impedance form: its current an unknown, the row `V(n+) - V(n-) - rl i = -x`, `rl = 2 L fs'`, its state `x <- 2 rl i - x`; at DC (`rl = 0`) an exact short |
+| `V<name> n+ n- [DC] value` | a DC voltage source, `V(n+) - V(n-) = value`. With a terminal grounded, its other node is a constant (ground in the offsets the module runs in); otherwise a row of its block with its current an unknown (a short in the offsets). AC, SIN, PULSE and the other transient specs are errors ("'AC 1': a V source is DC: the signal is .input's") |
+| `I<name> n+ n- [DC] value` | a DC current source, `value` amps from n+ through it to n- (SPICE's direction): open in the offsets, seen by the DC point alone |
+| `E<name> n+ n- nc+ nc- gain\|{expr}` | a VCVS, `V(n+) - V(n-) = gain (V(nc+) - V(nc-))`. With an output terminal grounded, its other is driven: a cut, as an op amp's output, the E in its controls' block (a buffer block of its own when both are driven or ground); otherwise a row of its block, its current an unknown, its four nodes in one block. A gain of pots is the local `k_<E>` of `b<N>_set` |
+| `G<name> n+ n- nc+ nc- gain\|{expr}` | a linear VCCS, `gain (V(nc+) - V(nc-))` amps from n+ through it to n-: stamped in its block, which its four nodes join; a control on the block's input is a right-hand side |
+| `D<name> anode cathode model` | a diode. Antiparallel ones are a pair, `i = 2 IS sinh(v / N Vt)`; one alone, `i = IS (e^(v / N Vt) - 1)`; a pair of two laws (models, or strings of other lengths), the asymmetric law. Diodes in series through nodes nothing else touches (and not .input's or .output's), one model and one direction, are a string, `D1+D2`: one diode of n N. A model's RS is a resistor `RS_<D>` to a new node `rs_<D>` at the port's anode (one for a pair, whose RS must be equal). The model is a `.model` card's, else a built-in's: `1N914` and `1N4148`, IS 2.52 nA, N 1.752 (Yeh, DAFx-07) |
 | `P<name> e1 w e2 value {expr} [taper=...]` | a pot: `R(e1-w) = (1 - t) value`, `R(w-e2) = t value` |
 | `P<name> a b value {expr} [taper=...]` | a rheostat: `R = t value` |
 | `X<name> inp inn out opamp` | an ideal op amp (a nullor): `V(inp) = V(inn)`, any output current, no input current |
@@ -150,9 +168,10 @@ case-folding and unit suffixes, which Flex and Bison fit poorly.
 
 `t = taper(clamp01(expr))`: `lin` x; `audio` (81^x - 1) / 80, emitted as `(expf(4.394449f * x) - 1) * 0.0125f`; `rlog`
 1 - audio(1 - x). The taper is the P line's `taper=`, else the `.pot`'s word when `{expr}` is that pot alone, else lin
-(a warning when both are given and differ). L, V, I, E, F, H, Q, J, M, S, K, T and B elements, a G that is not an OTA,
-and `opamp(...)` parameters, are refused: "the inductor L1 is not supported yet (Phase 1)". A law input may appear only
-in an OTA's gain: "law input 'cv' in R1's value: a law input enters an OTA's gain only (pot-as-port is Phase 2)".
+(a warning when both are given and differ). F, H, Q, J, M, K, T and B elements and `opamp(...)` parameters are refused
+at their phase ("the current-controlled source F1 is not supported yet (Phase 2)"; S, the switch, is Phase 1's last
+slice). A law input may appear only in an OTA's gain: "law input 'cv' in R1's value: a law input enters an OTA's gain
+only (pot-as-port is Phase 2)", an E's or a G's too.
 
 | Directive | Meaning |
 |---|---|
@@ -161,7 +180,7 @@ in an OTA's gain: "law input 'cv' in R1's value: a law input enters an OTA's gai
 | `.input NAME - kind=cv\|current [scale=x] [range=lo:hi]` | a law input: no node (`-`); tick's and step's float after the signal, in `.input` order; its value is the sample times `scale`, clamped to `range` (`fmaxf` first, so a NaN is the low end) where it is used, and held over a host sample's oversampled steps; `current` (amps) needs `range=`, `cv` is 0:1 unless it says; an unused one warns |
 | `.output NAME node [scale=x]` | exactly one: tick returns V(node) / scale; the last block must compute it |
 | `.pot NAME [default] [lin\|audio\|rlog]` | `set()`'s arguments, in this order (default 0.5); an unused pot warns |
-| `.model NAME D(IS=x N=x ...)` | a diode model: IS (1e-14) and N (1); RS other than 0 is an error (Phase 1); CJO, TT, BV, IBV, M, VJ, EG, XTI, FC, KF and AF warn "ignored" |
+| `.model NAME D(IS=x N=x RS=x ...)` | a diode model: IS (1e-14), N (1) and RS (0: none); CJO, TT, BV, IBV, M, VJ, EG, XTI, FC, KF and AF warn "ignored". A card of a built-in's name replaces it |
 | `.oversample 1\|2\|4\|8\|auto [iir\|fir] [blocks=auto\|nonlinear\|all]` | the oversampling factor, the halfbands, and which blocks run oversampled; `auto`, or no `.oversample`, leaves the factor to the self-test |
 | `.adaa on\|off\|auto` | Holters' first-order ADAA on the port; `auto` or none: the self-test's |
 | `.solver omega\|omega(K)\|newton(K)\|auto` | the port's solver: the omega3 guess or the previous step's solution, then K Newton steps; `auto`, none, or bare `omega` (an exp-affine port's candidates are all omega's): the self-test's. An OTA's is `newton(K)`: omega3 is the diode's closed form, and is refused for it |
@@ -169,16 +188,25 @@ in an OTA's gain: "law input 'cv' in R1's value: a law input enters an OTA's gai
 | `.method tr\|auto` | the integrator; `auto`, or none, is TR (BDF2, for a block that rings, is a later slice of Phase 1) |
 | `.prewarp on\|off` | off (the default, the user's ruling): an OTA's cutoff law is the circuit's; on: prewarped ([below](#prewarp)) |
 | `.target [solver=xdB] [alias=xdB] [level=xV] [freq=xHz]` | echoed in the header; `level`, a positive voltage, is the self-test's stress level L (else `.input`'s scale); `examples/circuits` checks against it |
+| `.op` | the DC operating point as notes: each node's voltage, each V source's current (SPICE's `i(V1)`, from n+ through the source to n-), each port's voltage ([below](#dc-and-the-offset-form)) |
 
-`.op` warns that it is ignored (Phase 1: the DC operating point); SPICE's simulator directives (`.tran`, `.ac`,
+SPICE's simulator directives (`.tran`, `.ac`,
 `.print`, ...) are ignored with a note; `.subckt`, `.param`, `.include`, `.lib`, `.options`, `.temp`, `.ic`, `.nodeset`
 and `.func` are errors, as is any other directive.
 
 **Checks**, with the report's wording: a node with one connection; a node that reaches ground only through capacitors
-("its DC voltage is undefined (add 10meg to ground)"); an unknown model (with the list); a diode without an
-antiparallel partner, or a pair of different models; an op amp without negative feedback, or whose output is driven
-twice or is `.input`'s node; two nonlinear ports in a block ("multi-port Newton is Phase 2"); a feedback loop that
-crosses blocks (Phase 2); a block that
+and current sources (I, G and OTA outputs: "its DC voltage is undefined (add 10meg to ground)"); a loop of voltage
+sources, E outputs and inductors ("a loop of voltage sources, E outputs and inductors (V1, L1): its DC current is
+undefined"); an unknown model (with the list, and the built-ins: "unknown model '1N4148X' (the models: 1N914; built in:
+1N914, 1N4148)"); a series string of two models ("diodes D3 and D4 in series through node 'k' have different models
+(1N914, 1N4148): a series string is of one model"); a pair's unequal RS ("antiparallel D1|D2 have unequal RS (10 and 5
+ohm): a pair shares one series resistor"); a diode whose anode and cathode are one node; a V source on `.input`'s node
+("the V source V1 is across .input's node 'in': the signal is .input's"); a node driven twice (by op amps, grounded E
+and V sources); an E whose controls are in two blocks ("E1's controls, 'a' and 'b', are in two blocks: an E reads one
+block's nodes (or its input)"); an op amp without negative feedback, or whose output is driven twice or is
+`.input`'s node; two nonlinear ports in a block ("multi-port Newton is Phase 2"); a feedback loop that crosses blocks
+(Phase 2); at the DC point, a biased port, a block singular at DC that DC sources drive, a pot that moves the DC point
+([below](#dc-and-the-offset-form)); a block that
 reads two inputs or none, or that is off the chain from `.input` to `.output`; a singular block ("its equations are
 singular at drive=0, 44.1 kHz: an op amp without negative feedback, or a node cut off from the rest"); a port whose
 self-impedance K is not positive somewhere on that grid of rates and pots ("port D1|D2 sees a negative resistance
@@ -200,10 +228,15 @@ rates and pots (`checkPort`):
 | Law | Family | Port | phi | k | Solve | ADAA's antiderivative |
 |---|---|---|---|---|---|---|
 | a diode pair | exp-affine (EA) | the v-form: its voltage `v` the source, its current `j` an unknown | `sinh(v / N Vt)` | `2 Is K` | omega3, or the previous v, then K Newton steps | `F = p v - v^2 / 2 - k N Vt cosh(v / N Vt)` |
+| one diode | EA | the v-form | `e^(v / N Vt) - 1` | `Is K` | omega3 for p > 0 (exact there: `v + k e^(v / N Vt) = p + k`), `p + k` for p < 0 (the diode off), or the previous v; then K Newton steps | `F = p v - v^2 / 2 - k (N Vt e^(v / N Vt) - v)` |
+| an asymmetric pair | EA | the v-form | `Is (e^(v / N Vt) - 1) - Is2 (e^(-v / N2 Vt) - 1)`, over Is | `K` (its `ka = Is K`, `kr = Is2 K`) | omega3 for the side that conducts (p's sign's), or the previous v; then K Newton steps with both exponentials (110 model cycles a step) | the two diodes' terms, `ka (N Vt e^(v / N Vt) - v) + kr (N2 Vt e^(-v / N2 Vt) + v)` |
 | an OTA | smooth monotone (SM) | the i-form: its current `i` the source, its control voltage `v = p - kd i` a readout | `tanh(v / 2 Vt)` | `kd g`, `kd = -dv/di` | the previous v, then K Newton steps (their derivative is at least 1) | `F = p v - v^2 / 2 - k 2 Vt lc(v / 2 Vt)`, `lc = log cosh` |
 
 Every Newton step stays in the bracket `[min(0, p), max(0, p)]`, where the root is (`h(v) = v + k phi(v)` rises
-through 0), so every iterate is finite for any `p`. The single diode and the asymmetric pair (EA) are the next slice's.
+through 0), so every iterate is finite for any `p`. A series string is one diode of n N (`D1+D2`), so its law is one
+of these: a string of one model each way is a pair, of another length or model an asymmetric pair. With ADAA one
+diode's mean is `vm + ((v - v_P) (pm - vm + ka) - kc (c - c_P)) / dp`, `c = e^(v / N Vt)` stored as `c_P` (`1` at
+clear); an asymmetric pair's adds the other diode's `- kr` and `- kcr (cr - cr_P)`, `cr = e^(-v / N2 Vt)`.
 
 - **The i-form.** An OTA's port is its current: the block's readouts (its output, its capacitors' voltages) are linear
   in its states and `i`, which the law gives at the solved `v`, `g tanh(v / 2 Vt)`. In the v-form (`v` the source) an
@@ -229,22 +262,24 @@ through 0), so every iterate is finite for any `p`. The single diode and the asy
   (`CircuitEmitTest.cpp`). Below `|dp| = 1e-5 V` the mean is the midpoint's, as Phase 0's. Every ADAA block is designed
   at 2/3 of its rate.
 - **The carry.** ADAA's mean pairs the stored point (`v_P`, `p_P`) with this step's on one curve, `p = v + k phi(v)`.
-  When `k` moves (a pot moving a diode pair's K, an OTA's law input or a pot moving `kd g`), the point moves onto the
-  new curve with `v_P` held, keeping its Newton residual (the lead's ruling): a diode pair's in `b<N>_set` (Phase 0's
-  move), an OTA's at the start of each step, `p_P += (kg - kgo_P) t_P`, which covers a pot's move of `kd` and a law
-  input's of `g` alike (`kgo_P` is the last step's `kd g`, `t_P` its `tanh(v_P / 2 Vt)`).
+  When `k` moves (a pot moving a diode's K, an OTA's law input or a pot moving `kd g`), the point moves onto the
+  new curve with `v_P` held, keeping its Newton residual (the lead's ruling): a diode's in `b<N>_set`, `p_P += (K' -
+  K) f(v_P)` (a pair's Phase 0 move, `(ka - kprev) (e - 1 / e)` from `v_P`'s exponential computed again; one diode's
+  `(ka - kprev) (c_P - 1)` from the stored value; an asymmetric pair's that less `(kr - krprev) (cr_P - 1)`), an OTA's
+  at the start of each step, `p_P += (kg - kgo_P) t_P`, which covers a pot's move of `kd` and a law input's of `g`
+  alike (`kgo_P` is the last step's `kd g`, `t_P` its `tanh(v_P / 2 Vt)`).
 
 ## The module
 
 ```c
 module DiodeTone                     // .title
 {
-    void init(float rate)            // the host's rate; every state at 0 V (no bias in Phase 0); the pots' defaults
+    void init(float rate)            // the host's rate; every state at the DC point (0 in offsets); the pots' defaults
     void set(float tone)             // the pots, 0 to 1, in .pot order (clamped): on the absolute 16-sample grid
-    float tick(float u)              // one host sample: .input's volts to .output's (then the law inputs, if any:
-                                     // float tick(float u, float iabc))
+    float tick(float u)              // one host sample: .input's volts to .output's, its DC point added (then the
+                                     // law inputs, if any: float tick(float u, float iabc))
     float step(float u)              // one step of the oversampled region (absent if there is none)
-    void clear()                     // back to 0 V
+    void clear()                     // back to the DC point (0 in offsets)
     void b1_set(float tone)          // block 1's coefficients, from its pots
     float b1(float u)                // one step of block 1 at its rate
     void hb1_up(float x, float* restrict o)   float hb1_down(float v0, float v1)   // the halfbands
@@ -255,10 +290,13 @@ The header's comment says where each choice of the configuration came from (`con
 .solver omega(1) (the self-test 087ad67714f6249a); iir blocks=auto, .method tr (default)`), as `Result::configuration`
 does.
 
-- **Names.** States `x_<C>` (C's trapezoidal state); with ADAA `xo_<C>`, `uo_<input>`, `p_<D>` and `c_<D>`; the port's
-  last voltage `v_<D>` (always stored: the previous-solution guess, ADAA's v(n-1), what `trace` reads); rates `gc_<C>` =
-  2 C fs' and `g2_<C>` = 2 gc; coefficients `<readout>_by_<source>` (`p_D1_by_x_C1`, `n_b_by_v_D1`, `vc_C3_by_n_p1`) and
-  `ka_`, `kb_`, `lna_`, `kc_<D>` (literals instead when K is a constant: a port block with no capacitor and no pot); an
+- **Names.** States `x_<C>` (C's trapezoidal state) and `x_<L>` (L's); with ADAA `xo_<C>` and `xo_<L>`,
+  `uo_<input>`, `p_<D>` and `c_<D>` (an asymmetric pair's `cr_<D>` too); the port's last voltage `v_<D>` (always
+  stored: the previous-solution guess, ADAA's v(n-1), what `trace` reads); rates `gc_<C>` = 2 C fs', `g2_<C>` = 2 gc,
+  `rl_<L>` = 2 L fs' and `r2_<L>` = 2 rl; coefficients `<readout>_by_<source>` (`p_D1_by_x_C1`, `n_b_by_v_D1`,
+  `vc_C3_by_n_p1`, `il_L1_by_x_L1`: an inductor's current) and `ka_`, `kb_`, `lna_`, `kc_<D>` (an asymmetric pair's
+  other diode's `kr_`, `ks_`, `lnr_` and `kcr_<D>`; literals instead when K is a constant: a port block with no
+  capacitor and no pot); a gain of pots, `b<N>_set`'s local `k_<E>`; an
   OTA's `kd_<G>` (its loop), `g_<G>` (its gain, when it moves or is prewarped: each host sample's, set's or init's),
   `<readout>_by_i_<G>` (its current's), with ADAA `t_<G>`, `lc_<G>` and `kgo_<G>`, with `.prewarp on` `pws_<G>` and
   `pwk_<G>` (2 fs' and its inverse) and the method `pw<N>_`, and `pv_<pot>` for a pot a law input's gain reads (tick
@@ -267,12 +305,13 @@ does.
   halfband state `hb<s>u_*` and `hb<s>d_*`; the region's samples `os1`, `os2_0`, ...; the guard's `ck_`, `fd_` and
   `fdstep_`, and tick's locals `sum_` and `gain_` ([the guard](#the-guard)). Characters outside
   `[A-Za-z0-9_]` in part and node names become `_`, and a name taken already gets `_2` (a pot's sections `Ptone_a`
-  and `Ptone_b` included).
+  and `Ptone_b` included, and RS's resistor `RS_<D>` and node `rs_<D>`). Every field and local holds an offset from the
+  DC operating point, so `trace` reads offsets.
 - **Layout.** It depends on the netlist and the options only, never on a pot's value or `.pot` default, so a frozen copy
   of a program keeps its layout.
 - **Rates.** Region blocks run at oversample x the rate, the others at the host's; an ADAA port block is designed at
-  2/3 of its rate (Holters 2020). Rate factors (`gc_`, `g2_`) are init's; a block's coefficients are its
-  `b<N>_set`'s, or init's when it has no pots.
+  2/3 of its rate (Holters 2020). Rate factors (`gc_`, `g2_`, `rl_`, `r2_`) are init's; a block's coefficients are
+  its `b<N>_set`'s, or init's when it has no pots.
 - **The region** is one run of the block chain, through one up and one down halfband chain: `blocks=nonlinear` the
   first to last nonlinear block, `all` every block, `auto` (the default) those widened to every linear block that fails
   the 1x check: its trapezoidal response `H(j 2 fs tan(pi f / fs))` against the analog `H(j 2 pi f)`, at 44.1 kHz, over
@@ -292,10 +331,47 @@ does.
   curve's (on the TS's drive glides, about one glide in 60 to 200 clicks by 0.1 to 0.4 V, against an error of 0.07 V
   with the pot held). A held pot gives the same `ka`, and changes nothing.
 
-### DC
+### DC and the offset form
 
-A Phase 0 circuit has no bias: every state starts and clears to 0 V. The DC output is where the solver's fixed point
-lands, which is not exactly the circuit's DC point:
+The circuit's DC operating point (`src/circuit/Dc.*`, the pipeline's stage 4) is solved at generation: each block in
+chain order, in double, at rate 0 (a capacitor's `gc = 0` opens it, an inductor's `rl = 0` shorts it), its DC sources
+(Constant sources of `assemble(plan, block, true)`: the V and I sources' values) on its right-hand side and its input
+the block before's output (`.input`'s is 0 V), at the default pots, by a dense LU with partial pivoting. Without a DC
+source every value is 0 (Phase 0's circuits: nothing to solve).
+
+The module runs in **offsets** from that point: its states, ports, inputs and readouts are differences from it, so
+`init` and `clear` set 0, a V source is a 0 V source (a short: its row is kept, its value's column dropped), a grounded
+one's node is ground, and an I source is open. That is exact for a linear network, and for a port with 0 V across it
+at the DC point (`f(0) = 0`, so its law in the offsets is its law). The output adds its node's DC voltage back as a
+literal, after the guard's fade (a reset returns the circuit to its DC point), with a note: `return (gain_ < 1 ? z0 *
+gain_ : z0) + 4.5f;` (`divider.cir: note: the output's DC operating point, V(out) = 4.5 V, is tick's constant`). `step`
+and the fields are offsets, and so is what `trace` reads; the self-test measures tick less the constant. A port with a
+DC voltage across it (more than 1 nV of its open-circuit `p` at DC) is an error at its element, `port D1 is biased at DC
+(0.573 V): biased ports need the offset formulation (Phase 2)`, as is a pot that moves the DC point (each pot at 0, 0.5
+and 1, the others at their defaults: `pot 'x' moves the DC operating point (V(a) is 4.5 at x 0.5, 0 at 0): the module
+runs in offsets from one DC point (one a pot moves is Phase 2's)`) and a block singular at DC that DC sources drive (an
+op amp with only capacitors around it: an integrator with no DC source has no DC point to need, and starts at 0).
+
+`examples/circuits/screamer-biased.cir` is `screamer.cir` with its 4.5 V reference drawn (V1, and R1 and R8 to it): its
+DC point puts 4.5 V on the op amps' inputs and outputs and 0 V across the diodes and at the output (after C7), and it
+generates screamer.cir's module but for its comments, so its output is screamer.cir's, bit for bit
+(`example-circuits --check`, o; `tests/lit/circuit/op.test`). `.op` prints the point:
+
+```
+screamer-biased.cir: note: .op: V(vb) = 4.5 V
+screamer-biased.cir: note: .op: V(in) = 0 V
+screamer-biased.cir: note: .op: V(p1) = 4.5 V
+...
+screamer-biased.cir: note: .op: V(out) = 0 V
+screamer-biased.cir: note: .op: i(V1) = 0 A
+screamer-biased.cir: note: .op: port D1|D2: v = 0 V
+```
+
+A V source's current is SPICE's `i(V1)`, from n+ through the source to n-: a supply that delivers 450 uA reads
+`-450 uA`. A grounded source's is what its node's other elements draw; a floating one's is its unknown.
+
+**A DC input.** A circuit without bias starts and clears to 0 V, and its DC output, under a DC input, is where the
+solver's fixed point lands, which is not exactly the circuit's DC point:
 
 | Example 1, tone 1, DC in | plain omega3 + 2 steps at 4x (as shipped) | ADAA, omega3 + 1 step at 4x | exact |
 |---|---|---|---|
@@ -434,6 +510,8 @@ On the shipped netlists without their configuration directives:
 | `screamer.cir` (the chain) | 4x, ADAA, omega(1) (976) | 10 of 16 | -81.1, -66.6, 0.21 dB | the same |
 | `clipper.cir` | 4x, ADAA, omega(1) (908) | 10 of 16 | -80.6, -84.1, 0.44 dB | |
 | `otalp.cir` | 4x, newton(1) (728) | 10 of 18 | -89.0, -73.2, 0.13 dB | 1x newton(1) fails T1 at 2 mA (-61.0 dB); every 1x fails T3 (2.3 dB: the trapezoidal rule's warp of H3 at 9 kHz, through two poles), every 2x by 0.03-0.04 dB; ADAA adds its droop |
+| `halfwave.cir` (one diode) | 4x, omega(1) (680) | 9 of 16 | -70.3, -79.6, 0.04 dB | every 2x fails T2 (-58.6 dB) or T3 (1.28 dB with ADAA); omega3 is one diode's closed form where it conducts, so one step is enough |
+| `asym.cir` (an asymmetric pair) | 4x, ADAA, omega(1) (1068) | 10 of 16 | -82.7, -86.4, 0.44 dB | 4x omega(1) fails T1 (-57.3 dB at 4.5 V, 3 kHz: omega3's guess for the two diodes' side); every 2x fails T2 or T3 |
 
 These are the configurations the report and Phase 0 chose by hand, which the shipped netlists name (`example-circuits
 --check`, i):
@@ -444,6 +522,7 @@ These are the configurations the report and Phase 0 chose by hand, which the shi
 | `screamer.cir`, `screamer-clip.cir` | 4x, ADAA, omega3 + 1 | the report's choice for the TS (903 / 907 cycles); passes T1-T4; the self-test's answer |
 | `clipper.cir` | none: the self-test's | |
 | `otalp.cir` | 4x, the previous v + 1 | the self-test's answer, pinned (no hand choice: the report measured an SVF, §7.3) |
+| `halfwave.cir`, `asym.cir` | 4x, omega3 + 1; 4x, ADAA, omega3 + 1 | the self-test's answers, pinned (`example-circuits --check`, o) |
 
 **When nothing passes** (report §6.5), the answer is the candidate with the least excess over its worst gate (the
 largest of T1 + 60, T2 + 60 and T3 - 0.5) among those under 3,500 model cycles, ties to the higher oversampling, never
@@ -561,13 +640,46 @@ Where the design left a choice, or the code (the self-test, measuring the JIT-co
   lists its law inputs apart, `laws`; `Result::inputs` is the one vector, the signal first. An unused law input warns,
   as an unused pot does; a law input and a pot of one name (they meet in expressions, which fold case) are refused.
 
+## The elements and the DC point: what the code decided
+
+Where the design left a choice, or the code proved it wrong:
+
+- **RS is written into the netlist.** A model's RS becomes an element `RS_<D>` from the port's anode to a new node
+  `rs_<D>` before the nodes are numbered (one for a pair, whose two RS must be equal; a string's is n RS), so the module
+  is the one the explicit resistor gives, text for text (`tests/unit/CircuitTest.cpp`). A pair's shared resistor is
+  the usual approximation (each diode's RS where it conducts), said in a note.
+- **Strings and pairs on names.** The diodes are elaborated on the netlist's node names (a string's inner node is one
+  two diodes alone touch, one's cathode and the other's anode, and not `.input`'s or `.output`'s); a pair of one law each
+  way (the same Is and n N) is the sinh law, Phase 0's text unchanged, any other pair the asymmetric law.
+- **One diode's guess** is omega3 for p > 0, where it is exact (`v + ka e^(v / N Vt) = p + ka`), and `p + ka` for p < 0
+  (the diode off): halfwave.cir's self-test takes one Newton step at 4x. An asymmetric pair's omega3 is the conducting
+  side's, selected per lane (`p < 0 ? kr : ka`, ...); its Newton step costs 110 model cycles (two exponentials).
+- **The carry** of one diode and of an asymmetric pair reads ADAA's stored `c_P = e^(v_P / N Vt)` (and `cr_P`); the
+  pair's recomputes its exponential from `v_P`, as Phase 0's text does, so its modules are unchanged.
+- **A grounded V source's node is a constant**, not a row: in the offsets it is ground, so a biased netlist cuts and
+  stamps as its unbiased twin does (screamer-biased.cir's module is screamer.cir's). A floating V source is a row and a
+  current; on `.input`'s node, either kind is refused (the signal is `.input`'s).
+- **E and G sources.** A G, and an E whose output floats, join their four nodes into one block, as an OTA does; an E
+  with an output terminal grounded drives the other, a cut as an op amp's output, in its controls' block (whose regular
+  nodes must be one block's: "controls in two blocks" is that check). A gain is a float coefficient's (1e-30 to 1e30 in
+  size, negative for an inverting E, not 0) or an expression of pots, `b<N>_set`'s `k_<E>`.
+- **The DC point is checked over the pots.** The offsets are exact only from one DC point, so each pot at 0, 0.5 and 1
+  (the others at their defaults) must leave it where the defaults put it (to 1e-9 of each value); one that moves it is
+  an error (a biasing trim is Phase 2's, with the offset formulation). A block singular at DC is an error only when DC
+  sources drive it; with none, its point is 0 (an integrator starts at 0 V, as in Phase 0).
+- **The output's DC is added after the fade**, so a reset returns the module to its DC point, not to 0 V, and the
+  self-test measures tick less it (its references run in offsets).
+- **`clear()`'s comment** now says what it sets, "0 in the offsets the module runs in", on every module (Phase 0's said
+  "no bias, 0 V everywhere"): the one change to the shipped modules' text.
+
 ## How it computes
 
 | Stage | File | What |
 |---|---|---|
 | parse | `src/circuit/Netlist.*` | the line scanner, numbers, expressions; `Messages` (clang's format) |
-| plan | `src/circuit/Plan.*` | diode pairs and OTAs into ports, pots into variable branches, law inputs, the checks, the partition at op amps (a union-find over the nodes no source drives; each op amp in its inverting input's network; an OTA's four nodes in one block), the chain, the configuration, the region and the 1x check, the prewarp's fit |
-| equations | `src/circuit/Mna.*` | each block's stamps (KCL rows, nullor rows, variable-branch rows, a diode pair's port row; sources: the input, the states, a diode pair's v or an OTA's i), the pivots, `solve<T>`, `derive<T>`, `holters()` (the v-form, and an OTA block's i-form too), `analog()` |
+| plan | `src/circuit/Plan.*` | the diodes on the netlist's node names (each model, a card's or a built-in's; series strings; pairs, of one law or two; RS written in as a resistor to a new node), then diodes and OTAs into ports, pots into variable branches, V sources into driven nodes or branches, E and G sources, I sources, law inputs, the checks (loops of sources and inductors, cut-sets of capacitors and current sources among them), the partition at op amps and grounded E sources (a union-find over the nodes no source drives; each op amp in its inverting input's network; an OTA's, a G's and a floating E's four nodes in one block; a grounded E in its controls' block), the chain, the DC point, the configuration, the region and the 1x check, the prewarp's fit |
+| DC point | `src/circuit/Dc.*` | the DC operating point at the default pots, each block in chain order at rate 0 by a dense LU; the biased-port, pot and singular-at-DC errors; `.op`'s notes; the output's DC, tick's constant |
+| equations | `src/circuit/Mna.*` | each block's stamps (KCL rows, nullor rows, a grounded E's row, the impedance form's rows of variable resistors, inductors and floating V sources, a floating E's row, a diode's port row; a G's transconductances; sources: the input, the states, a diode's v or an OTA's i, and at DC the V and I sources' constants), the pivots, `solve<T>`, `derive<T>`, `holters()` (the v-form, and an OTA block's i-form too), `analog()` |
 | laws | `src/circuit/Laws.*` | each law's text (the guess, the Newton steps in the bracket, ADAA's mean, what a step stores) and its double twin (phi, phi', the antiderivative, the steps, the converged solve) |
 | text | `src/circuit/Emit.*` | `Val` and the code builder, then the module: fields, init, clear, set, `b<N>_set`, `b<N>`, the halfbands, step, tick (with the guard); the map from each line to the netlist's |
 | halfbands | `src/circuit/Halfbands.*` | the S1-S3 FIR and IIR coefficients of `experiments/hb-coefs.txt`, their responses, their FMinus |
@@ -623,7 +735,14 @@ prints each check's worst value, where it fell, and the report's figure beside i
   V), a bound on the output that the carry itself, a few uV there, barely moves;
 - **n.** law inputs: iabc NaN, 0 and 1 A for 200 samples of an 11 V sine give finite output; `.channels 2`'s lanes
   are the scalar module's, bit for bit, the law input broadcast to both; calls of 64 and 61 samples are one call's,
-  bit for bit, with a per-sample iabc.
+  bit for bit, with a per-sample iabc;
+- **o.** Phase 1's elements: `screamer-biased.cir`, `halfwave.cir`, `asym.cir` and `wah.cir` generate (wah.cir, linear,
+  with the 1x check's warning: its tank's response near 20 kHz warps by 13.4 dB at 1x) and are nonblocking;
+  screamer-biased.cir's module is screamer.cir's but for its comment lines, its output screamer.cir's bit for bit under
+  a drive glide, its DC point 4.5 V at the op amps' inputs and outputs (to 1e-9) and 0 V across the port; halfwave.cir
+  and asym.cir without their directives get the exp-affine answers they ship, which meet T1-T4 (the figures above);
+  wah.cir's tick follows its trapezoidal response `H(j 2 fs tan(pi f / fs))` within 0.0002 dB (gate 0.01 dB) at
+  105, 996 and 3012 Hz, `res` 0, 0.5 and 1.
 
 As built, the TS block at 4x with ADAA measures T1 -78.7, T2 -73.5 (converged -73.6; the report -75.1) and T3 0.14 dB;
 example 1 as shipped T1 -93.1, T2 -79.0 (the report -79.8), T3 0.10 dB; the decision's failures -53.3 and -52.7 dB (the
@@ -667,12 +786,14 @@ Refused with "not supported yet" wherever a netlist can ask for them:
 
 - multi-port blocks (an OTA SVF's two ports, ladders, resonance and self-oscillation's stress), BLT and tearing,
   decompositions, feedback across op-amp cuts (Phase 2);
-- BJTs, JFETs, triodes (Phase 2-3); biased circuits: V and I sources, the DC operating point and `.op`, the offset
-  formulation (Phase 1-2);
-- inductors, E/F/H sources and a linear G, switches (Phase 1); open-loop OTAs (VCAs), diode and OTA ports in one
-  region (per-family solvers), law inputs outside an OTA's gain (pot-as-port: in R, E or G), interpolated (up-chain)
-  law inputs (Phase 2);
-- single diodes, series strings, asymmetric or parallel pairs, RS, a model library;
+- BJTs, JFETs, triodes (Phase 2-3); biased ports (a port with a DC voltage across it: the offset formulation with
+  `expm1`) and a DC point that a pot moves (Phase 2); AC and transient specs on V and I sources (the signal is
+  `.input`'s);
+- switches (Phase 1's last slice); F and H sources, couplings (K) (Phase 2); open-loop OTAs (VCAs), diode and OTA ports
+  in one region (per-family solvers), law inputs outside an OTA's gain (pot-as-port: in R, E or G), interpolated
+  (up-chain) law inputs (Phase 2);
+- parallel diodes (two ports), a string of two models, a pair whose RS differ; junction capacitances (CJO and the rest,
+  which warn "ignored"); more built-in models than 1N914 and 1N4148;
 - soft and GBW op amps (an OTA filter's rails), `.subckt`, `.param`, `.include`, `.temp`, `.method bdf2` and the
   ringing check; prewarp for a block of more than one state, or with pots in its network, or that places the -3 dB
   point under ADAA;
