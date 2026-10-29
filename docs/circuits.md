@@ -21,10 +21,10 @@ choice or the code proved the design wrong, and what is not built yet.
   the map from each generated line to the netlist's (`fminus --self-test`, `--notes`).
 - **Checked:** the parser, the plan and the equations against hand derivations, Yeh's eq. 24 and textbook responses
   (`tests/unit/CircuitTest.cpp`); the emitted coefficients against the double derivation, every configuration compiling
-  nonblocking (`tests/unit/CircuitEmitTest.cpp`); the self-test's order, search, key and answers, and its determinism,
-  cancel and budget (`tests/unit/CircuitSearchTest.cpp`); the text, the driver and the equivalence with the research's
-  hand-written modules (`tests/lit/circuit/`); the report's targets on its full stress set, the self-test's choices and
-  the guard, through the JIT (`example-circuits --check`).
+  nonblocking (`tests/unit/CircuitEmitTest.cpp`); the self-test's order, search, gates, key and answers, T1 on the
+  region's own input, and its determinism, cancel, budget and errors (`tests/unit/CircuitSearchTest.cpp`); the text,
+  the driver and the equivalence with the research's hand-written modules (`tests/lit/circuit/`); the report's targets
+  on its full stress set, the self-test's choices and the guard, through the JIT (`example-circuits --check`).
 - **Not built:** the rest of Phase 1, and later, at the end of this page.
 
 ## Use
