@@ -7,11 +7,11 @@
 # RUN: diff %t.1 %t.2
 
 # The plan, in the header.
-# DT:      // DiodeTone: generated from diodetone.cir by fminus::circuit (Phase 0). Do not edit: edit diodetone.cir.
+# DT:      // DiodeTone: generated from diodetone.cir by fminus::circuit (Phase 1). Do not edit: edit diodetone.cir.
 # DT-NEXT: //   1 block, 2 states (C1, C2), 1 nonlinear port (D1|D2: 2 Is sinh(v / N Vt), Is 2.52 nA, N Vt 45.315 mV at 27 C), 1 pot (tone)
 # DT-NEXT: //   block 1 (R1, C1, D1, D2, R2, Ptone, C2): in -> b; port D1|D2 at V(a); at 4 rate
 # DT-NEXT: //   solver: omega3 + 2 Newton steps in [min(0, p), max(0, p)]
-# DT-NEXT: //   configuration from the netlist: .oversample 4 iir blocks=auto, .adaa off, .solver omega(2); no self-test (Phase 1)
+# DT-NEXT: //   configuration: .oversample 4 iir blocks=auto, .adaa off, .solver omega(2) (the netlist); .method tr (default)
 # DT-NEXT: //   .target: solver -60 dB, alias -60 dB at 4.5 V, 3 kHz (checked by examples/circuits --check, not here)
 # DT-NEXT: //   latency: about 3.5 host samples at 1 kHz (IIR halfbands, phase not linear)
 # DT-NEXT: module DiodeTone
@@ -23,15 +23,24 @@
 # DT-NEXT: float gc_C1;
 # DT:      float p_D1_by_u;
 # DT:      float ka_D1;
-# DT:      float hb1u_x[6];
+# DT:      int ck_;
+# DT-NEXT: float fd_;
+# DT-NEXT: float fdstep_;
+# DT-NEXT: float hb1u_x[6];
 
 # The rates, 2 C fs' with fs' = 4 rate, folded in double.
 # DT-LABEL: void init(float rate)
-# DT:       gc_C1 = 8e-08f * rate;
+# DT-NEXT:  {
+# DT-NEXT:  fdstep_ = 50 / rate;
+# DT-NEXT:  gc_C1 = 8e-08f * rate;
 # DT-NEXT:  gc_C2 = 1.76e-07f * rate;
 # DT-NEXT:  g2_C1 = 2 * gc_C1;
 # DT:       clear();
 # DT-NEXT:  set(0.5f);
+# DT-LABEL: void clear()
+# DT-NEXT:  {
+# DT-NEXT:  ck_ = 0;
+# DT-NEXT:  fd_ = 1;
 
 # The pot, clamped, then the block's coefficients.
 # DT-LABEL: void set(float tone)
@@ -63,9 +72,24 @@
 # DT-NEXT:  v_D1 = v;
 # DT-NEXT:  return n_b;
 
-# tick: up, four steps, down.
+# tick: the guard (every 16 ticks: every carried field, the halfbands' too, summed, and a reset when the sum is not
+# finite), up, four steps, down, and the output faded in after a reset.
 # DT-LABEL: float tick(float u)
 # DT-NEXT:  {
+# DT-NEXT:  if (ck_ == 0)
+# DT-NEXT:  {
+# DT-NEXT:  float sum_ = x_C1 + x_C2 + v_D1;
+# DT-NEXT:  for (int i = 0; i < 6; ++i)
+# DT-NEXT:  sum_ = sum_ + hb1u_x[i] + hb1u_y[i] + hb1d_x[i] + hb1d_y[i];
+# DT-NEXT:  for (int i = 0; i < 3; ++i)
+# DT-NEXT:  sum_ = sum_ + hb2u_x[i] + hb2u_y[i] + hb2d_x[i] + hb2d_y[i];
+# DT-NEXT:  if (!(sum_ - sum_ == 0))
+# DT-NEXT:  {
+# DT-NEXT:  clear();
+# DT-NEXT:  fd_ = 0;
+# DT-NEXT:  }
+# DT-NEXT:  }
+# DT-NEXT:  ck_ = ck_ == 15 ? 0 : ck_ + 1;
 # DT-NEXT:  hb1_up(u, os1);
 # DT-NEXT:  hb2_up(os1[0], os2_0);
 # DT-NEXT:  hb2_up(os1[1], os2_1);
@@ -75,12 +99,15 @@
 # DT-NEXT:  const float y3 = step(os2_1[1]);
 # DT-NEXT:  const float z0 = hb2_down(y0, y1);
 # DT-NEXT:  const float z1 = hb2_down(y2, y3);
-# DT-NEXT:  return hb1_down(z0, z1);
+# DT-NEXT:  const float z2 = hb1_down(z0, z1);
+# DT-NEXT:  const float gain_ = fd_;
+# DT-NEXT:  fd_ = fminf(fd_ + fdstep_, 1);
+# DT-NEXT:  return gain_ < 1 ? z2 * gain_ : z2;
 # DT-NEXT:  }
 # DT-NEXT:  };
 
 # The Tube Screamer: four blocks, cut at the op amps, each linear block's 1x verdict.
-# TS:      // Screamer: generated from screamer.cir by fminus::circuit (Phase 0). Do not edit: edit screamer.cir.
+# TS:      // Screamer: generated from screamer.cir by fminus::circuit (Phase 1). Do not edit: edit screamer.cir.
 # TS-NEXT: //   4 blocks, 6 states (C1, C3, C4, C5, C6, C7), 1 nonlinear port
 # TS-NEXT: //   block 1 (C1, R1): in -> p1; linear; at the host rate (1x check: 0.00 dB off at 44.1 kHz)
 # TS-NEXT: //   block 2 (XU1, R4, C3, R6, Pdrive, C4, D1, D2): p1 -> v2; cut at an op amp's + input (exact); port D1|D2 at V(n1) - V(v2); at 4 rate, designed at 4 rate 2/3 (ADAA)
@@ -127,8 +154,9 @@
 # TS-NEXT:  {
 # TS-NEXT:  return b3(b2(u));
 # TS-LABEL: float tick(float u)
-# TS-NEXT:  {
+# TS:       ck_ = ck_ == 15 ? 0 : ck_ + 1;
 # TS-NEXT:  const float z0 = b1(u);
 # TS-NEXT:  hb1_up(z0, os1);
 # TS:       const float z3 = hb1_down(z1, z2);
-# TS-NEXT:  return b4(z3);
+# TS-NEXT:  const float z4 = b4(z3);
+# TS-NEXT:  const float gain_ = fd_;

@@ -9,6 +9,8 @@
 #include <complex>
 #include <span>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace fminus::circuit
 {
@@ -32,4 +34,7 @@ namespace fminus::circuit
     void emitHalfbandFields(std::string& out, int stage, Halfband kind, const std::string& type);
     void emitHalfbandClear(std::string& out, int stage, Halfband kind);
     void emitHalfbandMethods(std::string& out, int stage, Halfband kind, const std::string& type);
+
+    // Stage s's float arrays that carry from sample to sample (the guard's sum reads them): each name and its length.
+    std::vector<std::pair<std::string, int>> halfbandStates(int stage, Halfband kind);
 } // namespace fminus::circuit

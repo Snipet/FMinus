@@ -1317,7 +1317,7 @@ namespace fminus::circuit
             if (name == ".input" || name == ".output")
             {
                 const bool input = name == ".input";
-                if (!arity(2, 3, input ? ".input NAME node [scale=x]" : ".output NAME node [scale=x]"))
+                if (!arity(2, 4, input ? ".input NAME node [kind=voltage] [scale=x]" : ".output NAME node [scale=x]"))
                     return true;
                 std::optional<IoLine>& slot = input ? n_.input : n_.output;
                 if (slot)
@@ -1332,21 +1332,44 @@ namespace fminus::circuit
                 io.loc = t[1].loc;
                 io.node = t[2].text;
                 io.nodeLoc = t[2].loc;
-                if (t.size() == 4)
+                for (std::size_t i = 3; i < t.size(); ++i)
                 {
                     std::string value;
-                    if (!isKeyValue(t[3], "scale", value))
+                    if (isKeyValue(t[i], "scale", value))
                     {
-                        error(t[3].loc, "'" + t[3].text + "': expected scale=x");
+                        const std::optional<Number> v = parseNumber(value);
+                        if (!v || !(v->value != 0))
+                        {
+                            error(t[i].loc, "'" + value + "' is not a nonzero number (scale)");
+                            return true;
+                        }
+                        io.scale = v->value;
+                    }
+                    else if (input && isKeyValue(t[i], "kind", value))
+                    {
+                        const std::string k = folded(value);
+                        if (k == "cv" || k == "current")
+                        {
+                            error(t[i].loc, "a law input (.input kind=" + value + ") is not supported yet (Phase 1)");
+                            return true;
+                        }
+                        if (k != "voltage")
+                        {
+                            error(t[i].loc, "'kind=" + value + "': voltage, cv or current");
+                            return true;
+                        }
+                    }
+                    else if (input && isKeyValue(t[i], "range", value))
+                    {
+                        error(t[i].loc, "'" + t[i].text + "': range= is a law input's (kind=cv|current)");
                         return true;
                     }
-                    const std::optional<Number> v = parseNumber(value);
-                    if (!v || !(v->value != 0))
+                    else
                     {
-                        error(t[3].loc, "'" + value + "' is not a nonzero number (scale)");
+                        error(t[i].loc, "'" + t[i].text + "': expected " +
+                                            (input ? std::string("kind=voltage or scale=x") : std::string("scale=x")));
                         return true;
                     }
-                    io.scale = v->value;
                 }
                 if (!isPlainName(io.name))
                 {
@@ -1486,7 +1509,8 @@ namespace fminus::circuit
                 }
                 if (w == "omega")
                 {
-                    n_.solver.value = Solver{Solver::Guess::Omega, 0};
+                    // the guess named, its steps left to the self-test (an EA port's candidates are all omega's)
+                    n_.solver.isAuto = true;
                     n_.solverBare = true;
                     return true;
                 }
@@ -1536,13 +1560,30 @@ namespace fminus::circuit
             }
             if (name == ".method")
             {
-                if (!arity(1, 1, ".method tr"))
+                if (!once(n_.method, head) || !arity(1, 1, ".method tr|bdf2|auto"))
                     return true;
                 const std::string w = folded(t[1].text);
-                if (w == "bdf2" || w == "be")
+                if (w == "tr")
+                    n_.method.value = Method::Tr;
+                else if (w == "auto")
+                    n_.method.isAuto = true;
+                else if (w == "bdf2")
                     error(t[1].loc, "'.method " + t[1].text + "' is not supported yet (Phase 1)");
-                else if (w != "tr")
-                    error(t[1].loc, "'.method " + t[1].text + "': tr (bdf2 and be are Phase 1)");
+                else
+                    error(t[1].loc, "'.method " + t[1].text + "': tr, bdf2 or auto");
+                return true;
+            }
+            if (name == ".prewarp")
+            {
+                if (!once(n_.prewarp, head) || !arity(1, 1, ".prewarp on|off"))
+                    return true;
+                const std::string w = folded(t[1].text);
+                if (w == "off")
+                    n_.prewarp.value = false;
+                else if (w == "on")
+                    error(t[1].loc, "'.prewarp on' is not supported yet (Phase 1)");
+                else
+                    error(t[1].loc, "'.prewarp " + t[1].text + "': on or off");
                 return true;
             }
             if (name == ".target")
@@ -1631,13 +1672,42 @@ namespace fminus::circuit
         }
     } // namespace
 
+    namespace
+    {
+        // A logical line as a self-test's key reads it (Netlist::canonical), or nothing for a line it leaves out.
+        std::optional<std::string> canonicalLine(const std::vector<Token>& tokens)
+        {
+            const std::string head = folded(tokens.front().text);
+            static constexpr std::array<std::string_view, 15> kLeftOut{
+                ".title", ".channels", ".op",     ".end",  ".tran",     ".ac",      ".dc",   ".print",
+                ".plot",  ".probe",    ".save",   ".meas", ".measure", ".control", ".endc"};
+            if (std::find(kLeftOut.begin(), kLeftOut.end(), head) != kLeftOut.end())
+                return std::nullopt;
+            std::string out;
+            for (const Token& t : joinAssignments(tokens))
+            {
+                std::string word;
+                for (char c : folded(t.text))
+                {
+                    if (c != ' ' && c != '\t')
+                        word += c;
+                }
+                out += (out.empty() ? "" : " ") + word;
+            }
+            return out;
+        }
+    } // namespace
+
     Netlist parse(std::string_view text, Messages& messages)
     {
         Netlist netlist;
         Parser parser(netlist, messages);
         for (Line& line : scan(text))
         {
-            if (!parser.line(std::move(line.tokens)))
+            const bool end = folded(line.tokens.front().text) == ".end";
+            if (std::optional<std::string> c = canonicalLine(line.tokens))
+                netlist.canonical.push_back(std::move(*c));
+            if (end || !parser.line(std::move(line.tokens)))
                 break;
         }
         parser.finish();

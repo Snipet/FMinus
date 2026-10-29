@@ -9,6 +9,7 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <format>
 #include <map>
 #include <numeric>
@@ -35,6 +36,63 @@ namespace fminus::circuit
         }
     } // namespace
 
+    namespace
+    {
+        // FNV-1a 64 over `text`.
+        std::uint64_t fnv1a(std::string_view text)
+        {
+            std::uint64_t h = 0xcbf29ce484222325ull;
+            for (const char c : text)
+            {
+                h ^= static_cast<unsigned char>(c);
+                h *= 0x100000001b3ull;
+            }
+            return h;
+        }
+
+        std::string solverText(const Solver& s)
+        {
+            return std::string(s.guess == Solver::Guess::Omega ? "omega(" : "newton(") + std::to_string(s.steps) + ")";
+        }
+    } // namespace
+
+    std::string keyOf(const Netlist& netlist, const Options& options)
+    {
+        std::string text = "fminus-circuit-selftest " + std::to_string(kSelfTestVersion) + "\n";
+        for (const std::string& line : netlist.canonical)
+            text += line + "\n";
+        // the Options that change the answer (moduleName, channels and chosen do not)
+        text += "options";
+        if (options.oversample)
+            text += " oversample=" + std::to_string(*options.oversample);
+        if (options.halfband)
+            text += std::string(" halfband=") + (*options.halfband == Halfband::Iir ? "iir" : "fir");
+        if (options.region)
+            text += std::string(" region=") + (*options.region == Region::Auto        ? "auto"
+                                               : *options.region == Region::Nonlinear ? "nonlinear"
+                                                                                      : "all");
+        if (options.solver)
+            text += " solver=" + solverText(*options.solver);
+        if (options.adaa)
+            text += std::string(" adaa=") + (*options.adaa ? "on" : "off");
+        if (options.method)
+            text += std::string(" method=") + (*options.method == Method::Tr ? "tr" : "bdf2");
+        if (options.prewarp)
+            text += std::string(" prewarp=") + (*options.prewarp ? "on" : "off");
+        text += "\n";
+        return std::format("{:016x}", fnv1a(text));
+    }
+
+    std::string configurationText(int oversample, Halfband halfband, bool adaa, const Solver& solver, bool withHalfband)
+    {
+        std::string text = std::to_string(oversample) + "x";
+        if (withHalfband)
+            text += halfband == Halfband::Iir ? " IIR" : " FIR";
+        if (adaa)
+            text += ", ADAA";
+        return text + ", " + solverText(solver);
+    }
+
     bool isReservedName(std::string_view name)
     {
         if (isFMinusKeyword(name))
@@ -55,8 +113,10 @@ namespace fminus::circuit
             return true;
         // init's parameter, the attribute's words, the halfband methods' parameters and locals, clear's loop
         // variable, and set's temporaries t<N>: FMinus reads a module's name as a type everywhere in the program
-        static constexpr std::array<std::string_view, 12> kOther{"rate", "clang", "nonblocking", "x",  "o",  "s0",
-                                                                 "s1",   "t",     "y",           "v0", "v1", "i"};
+        // and the guard's fields and locals (ck_, fd_, fdstep_, sum_, gain_)
+        static constexpr std::array<std::string_view, 17> kOther{
+            "rate", "clang", "nonblocking", "x",   "o",   "s0",     "s1",   "t",    "y",
+            "v0",   "v1",    "i",           "ck_", "fd_", "fdstep_", "sum_", "gain_"};
         return std::find(kOther.begin(), kOther.end(), name) != kOther.end() || numbered(name, 't');
     }
 
@@ -949,23 +1009,67 @@ namespace fminus::circuit
             }
         }
 
-        // ---- the configuration: Options over directives over defaults ----
+        // ---- the configuration: Options, then the netlist, then the self-test's answer, then the provisional ----
         Config& cfg = p.config;
-        if (options.oversample)
+        p.key = keyOf(p.netlist, options);
+        const bool hasPort =
+            std::any_of(p.blocks.begin(), p.blocks.end(), [](const Block& b) { return b.port.has_value(); });
+        // The Options' answer, when it is this netlist's (its key, which the version is part of).
+        std::optional<Choice> chosen;
+        if (options.chosen && options.chosen->key == p.key)
+            chosen = options.chosen;
+        else if (options.chosen)
+            messages.note({}, "Options::chosen is another netlist's or other Options' (key " + options.chosen->key +
+                                  "; this one's is " + p.key + "): it is ignored");
+        const std::string fromChoice = "the self-test " + p.key;
+        // A searched dimension: Options, then the netlist's directive; open when neither names it (nothing is open
+        // in a netlist without a port: there is nothing to choose).
+        auto resolve = [&](auto& value, std::string& from, bool& open, const auto& option, const auto& setting,
+                           const auto& byChoice, const auto& provisional)
         {
-            cfg.oversample = *options.oversample;
-            cfg.oversampleFrom = "Options";
+            if (option)
+            {
+                value = *option;
+                from = "Options";
+            }
+            else if (setting.value)
+            {
+                value = *setting.value;
+                from = "the netlist";
+            }
+            else if (!hasPort)
+                from = "default";
+            else
+            {
+                open = true;
+                if (chosen)
+                {
+                    value = byChoice;
+                    from = fromChoice;
+                }
+                else
+                {
+                    value = provisional;
+                    from = "provisional";
+                }
+            }
+        };
+        resolve(cfg.oversample, cfg.oversampleFrom, cfg.oversampleOpen, options.oversample, netlist.oversample,
+                chosen ? chosen->oversample : 8, 8);
+        resolve(cfg.adaa, cfg.adaaFrom, cfg.adaaOpen, options.adaa, netlist.adaa, chosen && chosen->adaa, false);
+        resolve(cfg.solver, cfg.solverFrom, cfg.solverOpen, options.solver, netlist.solver,
+                chosen ? chosen->solver : Solver{}, Solver{Solver::Guess::Omega, cfg.adaa ? 1 : 2});
+        // The integrator: only TR yet, so an open .method is TR, and not the self-test's to choose (a BDF2 twin is
+        // a candidate only for a block the ringing check flags: Phase 1's last slice).
+        if (options.method)
+        {
+            cfg.method = *options.method;
+            cfg.methodFrom = "Options";
         }
-        else if (netlist.oversample.value)
+        else if (netlist.method.value)
         {
-            cfg.oversample = *netlist.oversample.value;
-            cfg.oversampleFrom = "the netlist";
-        }
-        else if (netlist.oversample.isAuto)
-        {
-            cfg.oversampleFrom = "auto";
-            messages.note(netlist.oversample.loc, "'.oversample auto' is 8x, Phase 0's default (the self-test that "
-                                                  "would choose is Phase 1)");
+            cfg.method = *netlist.method.value;
+            cfg.methodFrom = "the netlist";
         }
         if (options.halfband)
         {
@@ -987,42 +1091,6 @@ namespace fminus::circuit
             cfg.region = *netlist.region.value;
             cfg.regionFrom = "the netlist";
         }
-        if (options.adaa)
-        {
-            cfg.adaa = *options.adaa;
-            cfg.adaaFrom = "Options";
-        }
-        else if (netlist.adaa.value)
-        {
-            cfg.adaa = *netlist.adaa.value;
-            cfg.adaaFrom = "the netlist";
-        }
-        else if (netlist.adaa.isAuto)
-        {
-            cfg.adaaFrom = "auto";
-            messages.note(netlist.adaa.loc, "'.adaa auto' is off, Phase 0's default (no self-test)");
-        }
-        const Solver byDefault{Solver::Guess::Omega, cfg.adaa ? 1 : 2};
-        cfg.solver = byDefault;
-        if (options.solver)
-        {
-            cfg.solver = *options.solver;
-            cfg.solverFrom = "Options";
-        }
-        else if (netlist.solver.value)
-        {
-            cfg.solver = *netlist.solver.value;
-            if (p.netlist.solverBare)
-                cfg.solver.steps = byDefault.steps;
-            cfg.solverFrom = "the netlist";
-        }
-        else if (netlist.solver.isAuto)
-        {
-            cfg.solverFrom = "auto";
-            messages.note(netlist.solver.loc, std::string("'.solver auto' is omega(") +
-                                                  std::to_string(byDefault.steps) + "), Phase 0's default " +
-                                                  (cfg.adaa ? "with" : "without") + " ADAA (no self-test)");
-        }
         if (options.channels)
         {
             cfg.channels = *options.channels;
@@ -1032,6 +1100,14 @@ namespace fminus::circuit
         {
             cfg.channels = *netlist.channels.value;
             cfg.channelsFrom = "the netlist";
+        }
+        if (cfg.anyOpen())
+        {
+            cfg.chosen = chosen;
+            cfg.provisional = !chosen;
+            if (cfg.provisional)
+                messages.note({}, "the self-test chooses this circuit's configuration; provisional: " +
+                                      configurationText(cfg.oversample, cfg.halfband, cfg.adaa, cfg.solver, true));
         }
 
         // ---- the region, and each linear block's 1x check ----

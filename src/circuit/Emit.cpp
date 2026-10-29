@@ -432,50 +432,166 @@ namespace fminus::circuit
             return oversample == 8 ? 3 : oversample == 4 ? 2 : oversample == 2 ? 1 : 0;
         }
 
-        std::string configText(const Config& c)
-        {
-            const std::string solver = std::string(c.solver.guess == Solver::Guess::Omega ? "omega(" : "newton(") +
-                                       std::to_string(c.solver.steps) + ")";
-            const std::string region = c.region == Region::Auto        ? "auto"
-                                       : c.region == Region::Nonlinear ? "nonlinear"
-                                                                       : "all";
-            std::vector<std::pair<std::string, std::string>> items{
-                {".oversample " + std::to_string(c.oversample), c.oversampleFrom},
-                {c.halfband == Halfband::Iir ? "iir" : "fir", c.halfbandFrom},
-                {"blocks=" + region, c.regionFrom},
-                {std::string(".adaa ") + (c.adaa ? "on" : "off"), c.adaaFrom},
-                {".solver " + solver, c.solverFrom},
-            };
-            if (c.channels != 1 || c.channelsFrom != "default")
-                items.emplace_back(".channels " + std::to_string(c.channels), c.channelsFrom);
-            const bool same = std::all_of(items.begin(), items.end(),
-                                          [&](const auto& i) { return i.second == items.front().second; });
-            auto fromName = [](const std::string& from)
-            {
-                return from == "default" ? std::string("the defaults")
-                       : from == "auto"  ? std::string("auto: Phase 0's default")
-                                         : from;
-            };
-            std::string text = same ? "configuration from " + fromName(items.front().second) + ": " : "configuration: ";
-            for (std::size_t i = 0; i < items.size(); ++i)
-            {
-                text += (i == 0 ? "" : i <= 2 ? " " : ", ") + items[i].first;
-                if (!same)
-                    text += " (" + fromName(items[i].second) + ")";
-            }
-            return text + "; no self-test (Phase 1)";
-        }
+    } // namespace
 
+    std::string configText(const Config& c)
+    {
+        const std::string region = c.region == Region::Auto        ? "auto"
+                                   : c.region == Region::Nonlinear ? "nonlinear"
+                                                                   : "all";
+        struct Item
+        {
+            std::string text;
+            std::string from;
+            bool joins = false;   // follows .oversample with a space (its halfbands and blocks=)
+        };
+        std::vector<Item> items{
+            {".oversample " + std::to_string(c.oversample), c.oversampleFrom},
+            {c.halfband == Halfband::Iir ? "iir" : "fir", c.halfbandFrom, true},
+            {"blocks=" + region, c.regionFrom, true},
+            {std::string(".adaa ") + (c.adaa ? "on" : "off"), c.adaaFrom},
+            {std::string(".solver ") + (c.solver.guess == Solver::Guess::Omega ? "omega(" : "newton(") +
+                 std::to_string(c.solver.steps) + ")",
+             c.solverFrom},
+            {std::string(".method ") + (c.method == Method::Tr ? "tr" : "bdf2"), c.methodFrom},
+        };
+        if (c.channels != 1 || c.channelsFrom != "default")
+            items.push_back({".channels " + std::to_string(c.channels), c.channelsFrom});
+        // grouped by where they came from, in the order of precedence
+        std::vector<std::string> sources;
+        for (const Item& i : items)
+        {
+            if (std::find(sources.begin(), sources.end(), i.from) == sources.end())
+                sources.push_back(i.from);
+        }
+        auto rank = [](const std::string& from)
+        {
+            return from == "Options" ? 0 : from == "the netlist" ? 1 : from.rfind("the self-test", 0) == 0 ? 2
+                                       : from == "provisional"   ? 3
+                                                                 : 4;
+        };
+        std::stable_sort(sources.begin(), sources.end(),
+                         [&](const std::string& a, const std::string& b) { return rank(a) < rank(b); });
+        std::string text = "configuration: ";
+        for (std::size_t g = 0; g < sources.size(); ++g)
+        {
+            std::string group;
+            bool afterOversample = false;
+            for (const Item& i : items)
+            {
+                if (i.from != sources[g])
+                {
+                    afterOversample = false;
+                    continue;
+                }
+                group += group.empty() ? "" : (i.joins && afterOversample ? " " : ", ");
+                group += i.text;
+                afterOversample = i.joins || i.text.rfind(".oversample", 0) == 0;
+            }
+            text += (g == 0 ? "" : "; ") + group + " (" + sources[g] + ")";
+        }
+        return text;
+    }
+
+    namespace
+    {
         struct Writer
         {
             const Plan& plan;
             const std::vector<BlockCode>& blocks;
             std::string type;   // float or float2: the signals and states
             std::string out;
+            std::vector<int> lines;   // each line of out: the netlist's line it comes from (Result::lines)
+            int at = 0;               // the netlist's line the lines written now come from
 
             void line(const std::string& text, const std::string& note = {}, std::size_t column = 60)
             {
                 out += withComment(text, note, column) + "\n";
+                lines.push_back(at);
+            }
+
+            // Text of whole lines (the halfbands' emitters write it), each from `at`.
+            void raw(const std::string& text)
+            {
+                out += text;
+                lines.insert(lines.end(), static_cast<std::size_t>(std::count(text.begin(), text.end(), '\n')), at);
+            }
+
+            // The netlist's lines: .title's (the module's frame), the first .pot's, .input's, an element's.
+            int titleLine() const
+            {
+                return plan.netlist.titleLoc.line;
+            }
+
+            int potLine() const
+            {
+                return plan.netlist.pots.empty() ? titleLine() : plan.netlist.pots.front().loc.line;
+            }
+
+            int inputLine() const
+            {
+                return plan.netlist.input ? plan.netlist.input->loc.line : titleLine();
+            }
+
+            int elementLine(int element) const
+            {
+                return plan.netlist.elements[static_cast<std::size_t>(element)].loc.line;
+            }
+
+            int blockLine(const Block& b) const
+            {
+                return b.elements.empty() ? titleLine() : elementLine(b.elements.front());
+            }
+
+            int portLine(const Block& b) const
+            {
+                return elementLine(b.port->elements.front());
+            }
+
+            // The fields the guard sums: every float that carries from one sample to the next (the parts' states,
+            // the ports' last voltages, ADAA's last points, the halfbands' delay lines), each with its length (0: not
+            // an array).
+            std::vector<std::pair<std::string, int>> carried() const
+            {
+                std::vector<std::pair<std::string, int>> fields;
+                for (const Block& b : plan.blocks)
+                {
+                    for (const Branch& br : b.branches)
+                    {
+                        if (br.kind == Branch::Kind::Capacitor)
+                            fields.emplace_back("x_" + br.ident, 0);
+                    }
+                }
+                for (std::size_t i = 0; i < plan.blocks.size(); ++i)
+                {
+                    const Block& b = plan.blocks[i];
+                    if (adaaBlock(b))
+                    {
+                        for (const Branch& br : b.branches)
+                        {
+                            if (br.kind == Branch::Kind::Capacitor)
+                                fields.emplace_back("xo_" + br.ident, 0);
+                        }
+                    }
+                    if (!b.port)
+                        continue;
+                    fields.emplace_back("v_" + b.port->name, 0);
+                    if (!adaaBlock(b))
+                        continue;
+                    fields.emplace_back("p_" + b.port->name, 0);
+                    fields.emplace_back("c_" + b.port->name, 0);
+                    if (usesInput(i))
+                        fields.emplace_back("uo_" + blocks[i].system.sources[0].name, 0);
+                }
+                if (plan.regionFirst >= 0)
+                {
+                    for (int s = 1; s <= stagesOf(plan.config.oversample); ++s)
+                    {
+                        for (const auto& state : halfbandStates(s, plan.config.halfband))
+                            fields.push_back(state);
+                    }
+                }
+                return fields;
             }
 
             bool adaaBlock(const Block& b) const
@@ -582,13 +698,15 @@ namespace fminus::circuit
             void blockStep(std::size_t i);
             void step();
             void tick();
+            void guard();
         };
 
         void Writer::header()
         {
             const Config& c = plan.config;
+            at = titleLine();
             line("// " + plan.module + ": generated from " + plan.baseName +
-                 " by fminus::circuit (Phase 0). Do not edit: edit " + plan.baseName + ".");
+                 " by fminus::circuit (Phase 1). Do not edit: edit " + plan.baseName + ".");
             std::string states;
             int stateCount = 0;
             int portCount = 0;
@@ -636,10 +754,10 @@ namespace fminus::circuit
                 {
                     const std::string an = plan.nodes[static_cast<std::size_t>(b.port->anode)].name;
                     const std::string ca = plan.nodes[static_cast<std::size_t>(b.port->cathode)].name;
-                    const std::string at = b.port->cathode == 0 ? "V(" + an + ")"
-                                           : b.port->anode == 0 ? "-V(" + ca + ")"
-                                                                : "V(" + an + ") - V(" + ca + ")";
-                    text += "port " + b.port->parts + " at " + at + "; at " + rateText(b);
+                    const std::string across = b.port->cathode == 0 ? "V(" + an + ")"
+                                               : b.port->anode == 0 ? "-V(" + ca + ")"
+                                                                    : "V(" + an + ") - V(" + ca + ")";
+                    text += "port " + b.port->parts + " at " + across + "; at " + rateText(b);
                     if (adaaBlock(b))
                         text += ", designed at " + rateText(b) + " 2/3 (ADAA)";
                 }
@@ -705,6 +823,7 @@ namespace fminus::circuit
                 {
                     if (br.kind != Branch::Kind::Capacitor)
                         continue;
+                    at = elementLine(br.element);
                     line("    " + type + " x_" + br.ident + ";",
                          first ? br.part + "'s companion state (trapezoidal): x <- 2 gc v - x" : "", 31);
                     first = false;
@@ -720,6 +839,7 @@ namespace fminus::circuit
                 {
                     if (br.kind != Branch::Kind::Capacitor)
                         continue;
+                    at = elementLine(br.element);
                     line("    " + type + " xo_" + br.ident + ";",
                          firstX ? "ADAA: x_" + br.ident + " a step earlier" : "", 31);
                     firstX = false;
@@ -731,6 +851,7 @@ namespace fminus::circuit
                 if (!b.port)
                     continue;
                 const std::string& p = b.port->name;
+                at = portLine(b);
                 line("    " + type + " v_" + p + ";", b.port->parts + ": the port's voltage at the last step", 31);
                 if (!adaaBlock(b))
                     continue;
@@ -747,6 +868,7 @@ namespace fminus::circuit
                 {
                     if (br.kind != Branch::Kind::Capacitor)
                         continue;
+                    at = elementLine(br.element);
                     line("    float gc_" + br.ident + ";", first ? "2 C fs', the companion's conductance" : "", 31);
                     first = false;
                 }
@@ -758,6 +880,7 @@ namespace fminus::circuit
                 {
                     if (br.kind != Branch::Kind::Capacitor)
                         continue;
+                    at = elementLine(br.element);
                     line("    float g2_" + br.ident + ";", first ? "2 gc" : "", 31);
                     first = false;
                 }
@@ -765,6 +888,7 @@ namespace fminus::circuit
             for (std::size_t i = 0; i < plan.blocks.size(); ++i)
             {
                 bool firstField = true;
+                at = blockLine(plan.blocks[i]);
                 for (const auto& [name, v] : blocks[i].coefficients)
                 {
                     if (v.kind != Val::Kind::Var)
@@ -774,11 +898,19 @@ namespace fminus::circuit
                     firstField = false;
                 }
             }
+            at = titleLine();
+            line("    int ck_;", "the guard: ticks since init or clear, mod 16 (it checks the states at 0)", 31);
+            line("    float fd_;", "the guard's fade-in after a reset, 0 to 1 over 20 ms", 31);
+            line("    float fdstep_;", "1 / (0.02 rate)", 31);
             if (plan.regionFirst < 0)
                 return;
             const int stages = stagesOf(plan.config.oversample);
             for (int s = 1; s <= stages; ++s)
-                emitHalfbandFields(out, s, plan.config.halfband, type);
+            {
+                std::string text;
+                emitHalfbandFields(text, s, plan.config.halfband, type);
+                raw(text);
+            }
             for (int s = 1; s <= stages; ++s)
             {
                 const int count = 1 << (s - 1);
@@ -796,8 +928,10 @@ namespace fminus::circuit
 
         void Writer::init()
         {
+            at = titleLine();
             line("    void init(float rate) [[clang::nonblocking]]", "the host's rate");
             line("    {");
+            line("        fdstep_ = 50 / rate;", "the guard's fade: 1 / (0.02 rate), 20 ms");
             for (const Block& b : plan.blocks)
             {
                 for (const Branch& br : b.branches)
@@ -852,8 +986,11 @@ namespace fminus::circuit
 
         void Writer::clear()
         {
+            at = titleLine();
             line("    void clear() [[clang::nonblocking]]", "the DC operating point: no bias, 0 V everywhere");
             line("    {");
+            line("        ck_ = 0;");
+            line("        fd_ = 1;");
             for (const Block& b : plan.blocks)
             {
                 for (const Branch& br : b.branches)
@@ -887,7 +1024,11 @@ namespace fminus::circuit
             if (plan.regionFirst >= 0)
             {
                 for (int s = 1; s <= stagesOf(plan.config.oversample); ++s)
-                    emitHalfbandClear(out, s, plan.config.halfband);
+                {
+                    std::string text;
+                    emitHalfbandClear(text, s, plan.config.halfband);
+                    raw(text);
+                }
             }
             line("    }");
         }
@@ -903,6 +1044,7 @@ namespace fminus::circuit
                 params += (params.empty() ? "" : ", ") + std::string("float ") + p.name;
                 names += (names.empty() ? "" : ", ") + p.name;
             }
+            at = potLine();
             line("    void set(" + params + ") [[clang::nonblocking]]",
                  ".pot " + names + ", 0 to 1: call it on the absolute 16-sample grid");
             line("    {");
@@ -938,6 +1080,7 @@ namespace fminus::circuit
                         params += (params.empty() ? "" : ", ") + std::string("float ") + p.name;
                 }
             }
+            at = blockLine(b);
             line("    void b" + std::to_string(b.index) + "_set(" + params + ") [[clang::nonblocking]]",
                  "block " + std::to_string(b.index) + "'s coefficients");
             line("    {");
@@ -970,6 +1113,7 @@ namespace fminus::circuit
             const bool adaa = adaaBlock(b);
             const std::string& in = plan.inputName;
             const std::string T = type;
+            at = blockLine(b);
             line("    " + T + " b" + std::to_string(b.index) + "(" + T + " " + in + ") [[clang::nonblocking]]",
                  "block " + std::to_string(b.index) + ", one step at " + rateText(b));
             line("    {");
@@ -1150,6 +1294,7 @@ namespace fminus::circuit
                                            : std::format("blocks {} to {}", plan.regionFirst + 1, plan.regionLast + 1);
             const std::string rate = plan.config.oversample == 1 ? std::string("the host rate")
                                                                  : std::to_string(plan.config.oversample) + " rate";
+            at = inputLine();
             line("    " + type + " step(" + type + " " + in + ") [[clang::nonblocking]]",
                  "one step of the oversampled region (" + region + "), at " + rate);
             line("    {");
@@ -1163,10 +1308,12 @@ namespace fminus::circuit
             const std::string T = type;
             const IoLine& input = *plan.netlist.input;
             const IoLine& output = *plan.netlist.output;
+            at = inputLine();
             line("    " + T + " tick(" + T + " " + in + ") [[clang::nonblocking]]",
                  std::format("one host sample: .input {} (1.0 = {:g} V) to .output {}", input.name, input.scale,
                              output.name));
             line("    {");
+            guard();
             std::vector<std::string> body;
             std::string current = in;
             int z = 0;
@@ -1234,26 +1381,79 @@ namespace fminus::circuit
                     current = name;
                 }
             }
-            // the last value straight into return
-            const std::string last = "const " + T + " " + current + " = ";
-            if (!body.empty() && body.back().rfind(last, 0) == 0)
-            {
-                std::string expr = body.back().substr(last.size());
-                expr.pop_back();
-                body.back() = "return " + expr + ";";
-            }
-            else
-                body.push_back("return " + current + ";");
+            // the output, faded in after a reset (gain_ is 1 when settled: the output is the circuit's, bit for bit)
             for (const std::string& l : body)
                 line("        " + l);
+            line("        const float gain_ = fd_;", "the guard's fade");
+            line("        fd_ = fminf(fd_ + fdstep_, 1);");
+            line("        return gain_ < 1 ? " + current + " * gain_ : " + current + ";");
             line("    }");
+        }
+
+        void Writer::guard()
+        {
+            // every 16 ticks, the sum of every carried field: not finite (a NaN or an infinity anywhere in it), and
+            // the module goes back to its DC point and fades its output in over 20 ms
+            const std::vector<std::pair<std::string, int>> fields = carried();
+            line("        if (ck_ == 0)", "the guard, every 16 ticks");
+            line("        {");
+            // the scalars in one sum, then each length of array in a loop
+            std::string sum;
+            bool first = true;
+            auto flush = [&]
+            {
+                if (sum.empty())
+                    return;
+                line(first ? "            " + type + " sum_ = " + sum + ";" : "            sum_ = sum_ + " + sum + ";");
+                first = false;
+                sum.clear();
+            };
+            for (const auto& [name, count] : fields)
+            {
+                if (count != 0)
+                    continue;
+                sum += (sum.empty() ? "" : " + ") + name;
+                if (sum.size() > 90)
+                    flush();
+            }
+            if (first && sum.empty())
+                sum = "0";
+            flush();
+            std::vector<int> lengths;
+            for (const auto& [name, count] : fields)
+            {
+                if (count != 0 && std::find(lengths.begin(), lengths.end(), count) == lengths.end())
+                    lengths.push_back(count);
+            }
+            for (int n : lengths)
+            {
+                std::string terms;
+                for (const auto& [name, count] : fields)
+                {
+                    if (count == n)
+                        terms += " + " + name + "[i]";
+                }
+                line("            for (int i = 0; i < " + std::to_string(n) + "; ++i)");
+                line("                sum_ = sum_" + terms + ";");
+            }
+            if (type == "float2")
+                line("            if (!(sum_.x - sum_.x == 0 && sum_.y - sum_.y == 0))", "either lane resets both");
+            else
+                line("            if (!(sum_ - sum_ == 0))", "a NaN or an infinity");
+            line("            {");
+            line("                clear();");
+            line("                fd_ = 0;");
+            line("            }");
+            line("        }");
+            line("        ck_ = ck_ == 15 ? 0 : ck_ + 1;");
         }
     } // namespace
 
-    std::string emit(const Plan& plan, const std::vector<BlockCode>& blocks)
+    std::string emit(const Plan& plan, const std::vector<BlockCode>& blocks, std::vector<int>* lines)
     {
-        Writer w{plan, blocks, plan.config.channels == 2 ? "float2" : "float", {}};
+        Writer w{plan, blocks, plan.config.channels == 2 ? "float2" : "float", {}, {}, 0};
         w.header();
+        w.at = w.titleLine();
         w.line("module " + plan.module);
         w.line("{");
         w.fields();
@@ -1266,12 +1466,22 @@ namespace fminus::circuit
             w.blockStep(i);
         if (plan.regionFirst >= 0)
         {
+            w.at = w.titleLine();
             for (int s = 1; s <= stagesOf(plan.config.oversample); ++s)
-                emitHalfbandMethods(w.out, s, plan.config.halfband, w.type);
+            {
+                std::string text;
+                emitHalfbandMethods(text, s, plan.config.halfband, w.type);
+                w.raw(text);
+            }
         }
         w.step();
         w.tick();
+        w.at = w.titleLine();
         w.line("};");
+        if (static_cast<std::size_t>(std::count(w.out.begin(), w.out.end(), '\n')) != w.lines.size())
+            throw std::logic_error("emit: the line map has " + std::to_string(w.lines.size()) + " lines");
+        if (lines != nullptr)
+            *lines = std::move(w.lines);
         return w.out;
     }
 } // namespace fminus::circuit

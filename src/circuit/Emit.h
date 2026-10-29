@@ -115,8 +115,13 @@ namespace fminus::circuit
     // Block `block`'s BlockCode, or nothing (an error in `messages`) when its equations are singular.
     std::optional<BlockCode> deriveBlock(const Plan& plan, int block, Messages& messages);
 
-    // The module's text.
-    std::string emit(const Plan& plan, const std::vector<BlockCode>& blocks);
+    // The module's text; `lines` gets, for each of its lines, the netlist's line it comes from (Result::lines).
+    std::string emit(const Plan& plan, const std::vector<BlockCode>& blocks, std::vector<int>* lines = nullptr);
+
+    // The configuration as one line (Result::configuration, and the header's): each choice, grouped by where it came
+    // from ("configuration: .oversample 4 iir blocks=auto, .adaa off, .solver omega(2) (the netlist); .method tr
+    // (default)").
+    std::string configText(const Config& config);
 
     // The delay ADAA adds, in host samples: half a step at the region's rate for each port block it runs in.
     double adaaLatency(const Plan& plan);

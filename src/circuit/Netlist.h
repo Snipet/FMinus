@@ -206,10 +206,16 @@ namespace fminus::circuit
         Setting<Halfband> halfband;
         Setting<Region> region;
         Setting<bool> adaa;
-        Setting<Solver> solver;   // bare `omega`: Guess::Omega with steps 0 and solverBare
+        Setting<Solver> solver;   // bare `omega`: isAuto (the self-test chooses its K) and solverBare
         bool solverBare = false;
         Setting<int> channels;
+        Setting<Method> method;   // .method tr|bdf2|auto
+        Setting<bool> prewarp;    // .prewarp on|off
         TargetLine target;
+        // The lines a self-test's key reads (Circuit.h's selfTestKey): each logical line up to .end, continuations
+        // joined, comments dropped, its tokens lowercased and joined by one space (spaces inside {...} and around
+        // '=' removed), without .title, .channels, .op, .end and simulator directives.
+        std::vector<std::string> canonical;
     };
 
     // The netlist in `text`, as far as it reads; its errors and warnings go to `messages`.

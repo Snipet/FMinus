@@ -6,6 +6,7 @@
 #include "circuit/Plan.h"
 #include "fminus/Circuit.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <exception>
 #include <format>
@@ -38,6 +39,26 @@ namespace fminus::circuit
             }
             if (!o.moduleName.empty() && !isPlainName(o.moduleName))
                 fail("Options::moduleName '" + o.moduleName + "' is not a letter followed by letters and digits");
+            if (o.method && *o.method == Method::Bdf2)
+                fail("Options::method bdf2 is not supported yet (Phase 1)");
+            if (o.prewarp && *o.prewarp)
+                fail("Options::prewarp on is not supported yet (Phase 1)");
+            if (o.chosen)
+            {
+                const Choice& c = *o.chosen;
+                const bool hex = c.key.size() == 16 && std::all_of(c.key.begin(), c.key.end(), [](char k)
+                                                                   { return (k >= '0' && k <= '9') || (k >= 'a' && k <= 'f'); });
+                if (!hex)
+                    fail("Options::chosen's key '" + c.key + "' is not 16 hex digits");
+                if (c.oversample != 1 && c.oversample != 2 && c.oversample != 4 && c.oversample != 8)
+                    fail("Options::chosen's oversample is " + std::to_string(c.oversample) + "; it is 1, 2, 4 or 8");
+                const int lo = c.solver.guess == Solver::Guess::Omega ? 0 : 1;
+                if (c.solver.steps < lo || c.solver.steps > 8)
+                    fail("Options::chosen's solver steps are " + std::to_string(c.solver.steps) + "; they are " +
+                         std::to_string(lo) + " to 8");
+                if (c.method == Method::Bdf2)
+                    fail("Options::chosen's method bdf2 is not supported yet (Phase 1)");
+            }
             return errors;
         }
 
@@ -47,6 +68,28 @@ namespace fminus::circuit
             for (int e : block.elements)
                 out += (out.empty() ? "" : ", ") + plan.netlist.elements[static_cast<std::size_t>(e)].name;
             return out;
+        }
+
+        // The answer the self-test gave when nothing met the targets (Choice::met false): a warning at the region's
+        // first port, naming the worst gate and the configuration used.
+        void noConfiguration(const Plan& plan, Messages& messages)
+        {
+            const Config& c = plan.config;
+            for (int i = plan.regionFirst; i <= plan.regionLast; ++i)
+            {
+                const Block& b = plan.blocks[static_cast<std::size_t>(i)];
+                if (!b.port)
+                    continue;
+                std::string parts;
+                for (int e : b.port->elements)
+                    parts += (parts.empty() ? "" : ", ") + plan.netlist.elements[static_cast<std::size_t>(e)].name;
+                messages.warning(plan.netlist.elements[static_cast<std::size_t>(b.port->elements.front())].loc,
+                                 "block " + std::to_string(b.index) + " (" + parts +
+                                     "): no configuration meets the targets (worst: " + c.chosen->worst +
+                                     "); using the most accurate under the cost cap: " +
+                                     configurationText(c.oversample, c.halfband, c.adaa, c.solver, false));
+                return;
+            }
         }
 
         // The plan as notes: each block, its rate and solver, and the latency.
@@ -121,10 +164,23 @@ namespace fminus::circuit
             }
             if (p && !messages.hasErrors())
             {
-                result.source = emit(*p, blocks);
+                result.source = emit(*p, blocks, &result.lines);
                 result.module = p->module;
                 for (const PotInfo& pot : p->pots)
                     result.pots.push_back(pot.name);
+                Input signal;
+                signal.name = p->inputName;
+                signal.scale = p->inputScale;
+                result.inputs.push_back(signal);
+                const Config& c = p->config;
+                result.configuration = configText(c);
+                result.provisional = c.provisional;
+                result.selfTestKey = c.anyOpen() ? p->key : std::string();
+                if (p->regionFirst >= 0)
+                    result.latency =
+                        (c.oversample > 1 ? roundTripDelay(c.oversample, c.halfband, 1000) : 0) + adaaLatency(*p);
+                if (c.chosen && !c.chosen->met)
+                    noConfiguration(*p, messages);
                 planNotes(*p, messages);
             }
             result.errors = messages.format(file, Severity::Error);
@@ -132,9 +188,13 @@ namespace fminus::circuit
             result.notes = messages.format(file, Severity::Note);
             if (!result.errors.empty())
             {
-                result.source.clear();
-                result.module.clear();
-                result.pots.clear();
+                const std::string errors = result.errors;
+                const std::string warnings = result.warnings;
+                const std::string notes = result.notes;
+                result = Result{};
+                result.errors = errors;
+                result.warnings = warnings;
+                result.notes = notes;
             }
         }
         catch (const NotAFloat& e)
@@ -153,5 +213,24 @@ namespace fminus::circuit
     Result generate(std::string_view netlist, std::string_view fileName)
     {
         return generate(netlist, fileName, Options{});
+    }
+
+    std::string selfTestKey(std::string_view netlist, std::string_view fileName, const Options& options)
+    {
+        try
+        {
+            Messages messages;
+            const Netlist parsed = parse(netlist, messages);
+            if (messages.hasErrors())
+                return {};
+            Options o = options;
+            o.chosen.reset();
+            const std::optional<Plan> p = plan(parsed, o, fileName, messages);
+            return p && !messages.hasErrors() ? p->key : std::string();
+        }
+        catch (const std::exception&)
+        {
+            return {};
+        }
     }
 } // namespace fminus::circuit

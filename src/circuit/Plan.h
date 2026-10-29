@@ -109,9 +109,12 @@ namespace fminus::circuit
         bool used = false;
     };
 
-    // The configuration, and where each choice came from: "the netlist", "Options", "default" or "auto". The defaults
-    // are Phase 0's for a 1-port exp-affine block, the configuration that meets the report's targets (T1-T4) on both
-    // of its examples' full stress sets: 8x, IIR halfbands, plain omega3 + 2 Newton steps (docs/circuits.md).
+    // The configuration, and where each choice came from: "the netlist", "Options", "the self-test <key>",
+    // "provisional" or "default". The searched dimensions (oversample, adaa, solver, method) are open when neither
+    // the Options nor the netlist name them (or the netlist writes auto): Options::chosen fills them when its key is
+    // the netlist's, and otherwise the provisional configuration does. The provisional configuration for a 1-port
+    // exp-affine block is Phase 0's measured default, the one that meets the report's targets (T1-T4) on both of its
+    // examples' full stress sets: 8x, IIR halfbands, plain omega3 + 2 Newton steps (docs/circuits.md).
     struct Config
     {
         int oversample = 8;
@@ -120,12 +123,25 @@ namespace fminus::circuit
         Solver solver{Solver::Guess::Omega, 2};
         bool adaa = false;
         int channels = 1;
+        Method method = Method::Tr;
         std::string oversampleFrom = "default";
         std::string halfbandFrom = "default";
         std::string regionFrom = "default";
         std::string solverFrom = "default";
         std::string adaaFrom = "default";
         std::string channelsFrom = "default";
+        std::string methodFrom = "default";
+        // Which searched dimensions are open (the self-test's to choose); none for a netlist without a port.
+        bool oversampleOpen = false;
+        bool adaaOpen = false;
+        bool solverOpen = false;
+        bool methodOpen = false;
+        bool provisional = false;          // a dimension is open and no matching Options::chosen filled it
+        std::optional<Choice> chosen;      // the Options::chosen that filled the open dimensions
+        bool anyOpen() const
+        {
+            return oversampleOpen || adaaOpen || solverOpen || methodOpen;
+        }
     };
 
     struct Plan
@@ -145,6 +161,7 @@ namespace fminus::circuit
         std::string inputName;   // .input's: tick's and step's parameter
         double inputScale = 1;
         double outputScale = 1;
+        std::string key;   // the self-test's key (Circuit.h's selfTestKey): the netlist's and the Options'
     };
 
     // The physical N Vt of a diode, N k 300.15 / q (CODATA's k and q, SPICE's TNOM of 27 C).
@@ -161,6 +178,12 @@ namespace fminus::circuit
     // The plan, or nothing when the netlist has errors (in `messages`).
     std::optional<Plan> plan(const Netlist& netlist, const Options& options, std::string_view fileName,
                              Messages& messages);
+
+    // The self-test's key of a parsed netlist with `options` (Circuit.h's selfTestKey): FNV-1a 64, as 16 hex digits.
+    std::string keyOf(const Netlist& netlist, const Options& options);
+
+    // A configuration as the notes give it: "8x IIR, ADAA, omega(1)" (`halfband`: with the halfbands' kind).
+    std::string configurationText(int oversample, Halfband halfband, bool adaa, const Solver& solver, bool withHalfband);
 
     // Names a pot or an input may not take: FMinus's keywords and builtins, and the names the module uses.
     bool isReservedName(std::string_view name);

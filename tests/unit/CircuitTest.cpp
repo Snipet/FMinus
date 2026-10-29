@@ -299,6 +299,13 @@ TEST_CASE("netlist errors, as clang words them", "[circuit]")
          "t.cir:5:18: error: RS is not supported yet (Phase 1)\n"},
         {head + "R1 in o 1k\nR2 o 0 1k\n.method bdf2\n",
          "t.cir:5:9: error: '.method bdf2' is not supported yet (Phase 1)\n"},
+        {head + "R1 in o 1k\nR2 o 0 1k\n.method be\n", "t.cir:5:9: error: '.method be': tr, bdf2 or auto\n"},
+        {head + "R1 in o 1k\nR2 o 0 1k\n.prewarp on\n",
+         "t.cir:5:10: error: '.prewarp on' is not supported yet (Phase 1)\n"},
+        {".input u in kind=cv\n.output y o\nR1 in o 1k\nR2 o 0 1k\n",
+         "t.cir:1:13: error: a law input (.input kind=cv) is not supported yet (Phase 1)\n"},
+        {".input u in range=0:1\n.output y o\nR1 in o 1k\nR2 o 0 1k\n",
+         "t.cir:1:13: error: 'range=0:1': range= is a law input's (kind=cv|current)\n"},
         {head + "R1 in o 1k\nR2 o 0 1k\n.subckt foo a b\n", "t.cir:5:1: error: '.subckt' is not supported yet\n"},
         {head + "R1 in o 1k\nR2 o 0 0\n", "t.cir:4:8: error: R2's value is 0: a resistor needs a positive value\n"},
         // a feedback loop that crosses blocks: X1 reads X2's output and X2 reads X1's
@@ -375,12 +382,26 @@ TEST_CASE("netlist warnings and notes", "[circuit]")
         CHECK(r.errors.empty());
         CHECK(r.warnings.find(c.warnings) != std::string::npos);
     }
-    // auto is Phase 0's default, with a note; simulator directives are ignored with one
+    // auto leaves a dimension to the self-test, but a linear netlist has nothing to choose; simulator directives are
+    // ignored with a note
     const fc::Result r = fc::generate(head + ".oversample auto\n.adaa auto\n.solver auto\n.tran 1u 1m\n", "t.cir");
-    CHECK(r.notes.find("t.cir:5:1: note: '.oversample auto' is 8x, Phase 0's default") != std::string::npos);
-    CHECK(r.notes.find("t.cir:6:1: note: '.adaa auto' is off") != std::string::npos);
-    CHECK(r.notes.find("t.cir:7:1: note: '.solver auto' is omega(2)") != std::string::npos);
+    CHECK(!r.provisional);
+    CHECK(r.selfTestKey.empty());
+    CHECK(r.notes.find("provisional") == std::string::npos);
     CHECK(r.notes.find("t.cir:8:1: note: '.tran' is a simulator's directive: ignored") != std::string::npos);
+    // with a port, they (or no directive) are open, and a provisional configuration plays until the self-test answers
+    const std::string port = ".input u in\n.output y o\nR1 in o 1k\nC1 o 0 1n\nD1 o 0 DD\nD2 0 o DD\n"
+                             ".model DD D(IS=2.52n N=1.752)\n";
+    for (const std::string& open : {std::string(), std::string(".oversample auto\n.adaa auto\n.solver auto\n"),
+                                     std::string(".solver omega\n")})
+    {
+        INFO(open);
+        const fc::Result p = fc::generate(port + open, "t.cir");
+        CHECK(p.provisional);
+        CHECK(p.selfTestKey.size() == 16);
+        CHECK(p.notes.find("t.cir: note: the self-test chooses this circuit's configuration; provisional: 8x IIR, "
+                           "omega(2)\n") != std::string::npos);
+    }
     CHECK(r.notes.find("t.cir: note: block 1 (R1, C1): 1 state, linear, at the host rate") != std::string::npos);
     CHECK(errorsOf(head + ".model Q1 NPN(BF=100)\n") ==
           "t.cir:5:11: error: model type 'NPN' is not supported yet (Phase 2): Phase 0 has diodes (D)\n");
