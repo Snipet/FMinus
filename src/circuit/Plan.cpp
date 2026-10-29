@@ -452,13 +452,15 @@ namespace fminus::circuit
                 port.prewarp = true;
                 port.poleA = aCoef;
                 port.poleB = bCoef;
-                messages.note({}, std::format("OTA {}: prewarp; its small-signal pole is a + b g, a = {:.7g} rad/s, b = "
-                                              "{:.7g} rad/s per A (g {:g} to {:g} A)",
-                                              port.parts, aCoef, bCoef, lo, hi));
+                messages.note({},
+                              std::format("OTA {}: prewarp; its small-signal pole is a + b g, a = {:.7g} rad/s, b = "
+                                          "{:.7g} rad/s per A (g {:g} to {:g} A)",
+                                          port.parts, aCoef, bCoef, lo, hi));
             }
             if (!any)
-                messages.warning(directive, "'.prewarp on' is ignored: it prewarps an OTA's cutoff, and the netlist has "
-                                            "none");
+                messages.warning(directive,
+                                 "'.prewarp on' is ignored: it prewarps an OTA's cutoff, and the netlist has "
+                                 "none");
         }
     } // namespace
 
@@ -1336,8 +1338,8 @@ namespace fminus::circuit
                     mixedAt = elements[static_cast<std::size_t>(b.port->elements.front())].loc;
             }
             if (!diodeList.empty() && !otas.empty())
-                messages.error(mixedAt, "the oversampled region mixes diode ports (" + diodeList + ") and OTA ports (" + otas +
-                                       "): one solver serves a region (per-family solvers are Phase 2)");
+                messages.error(mixedAt, "the oversampled region mixes diode ports (" + diodeList + ") and OTA ports (" +
+                                            otas + "): one solver serves a region (per-family solvers are Phase 2)");
             p.smooth = !otas.empty();
             p.config.otas = p.smooth;
         }

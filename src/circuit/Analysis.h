@@ -51,8 +51,8 @@ namespace fminus::circuit
     std::vector<double> sweep(double amp, int m, std::size_t n);
 
     // A band-limited saw on bin `bin` of an N-point window at 48 kHz, sampled at M times that, n samples: the series
-    // (2 amp / pi) sum (-1)^(k+1) sin(k w t) / k over the harmonics below 20 kHz (an ideal saw of peak amp, band-limited;
-    // its peak is about 1.09 amp), periodic in the window (N M a power of two).
+    // (2 amp / pi) sum (-1)^(k+1) sin(k w t) / k over the harmonics below 20 kHz (an ideal saw of peak amp,
+    // band-limited; its peak is about 1.09 amp), periodic in the window (N M a power of two).
     std::vector<double> saw(double amp, int bin, std::size_t window, int m, std::size_t n);
 
     // Noise of peak amp, band-limited to 20 kHz, n samples at M x 48 kHz (n a power of two; periodic in n).

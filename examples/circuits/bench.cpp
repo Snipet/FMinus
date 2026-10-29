@@ -320,7 +320,8 @@ float fm_baseline(float n)
         std::string otaBenchSource(const std::string& module, double amp, int channels)
         {
             const std::string a = fc::literal(amp);
-            const std::string x = channels == 2 ? "(float2)(" + a + " * sinf(ph), " + a + " * cosf(ph))" : a + " * sinf(ph)";
+            const std::string x =
+                channels == 2 ? "(float2)(" + a + " * sinf(ph), " + a + " * cosf(ph))" : a + " * sinf(ph)";
             const std::string type = channels == 2 ? "float2" : "float";
             const std::string sq = channels == 2 ? "y.x * y.x + y.y * y.y" : "y * y";
             return std::format(R"(

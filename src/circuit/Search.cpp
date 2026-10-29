@@ -573,8 +573,8 @@ namespace fminus::circuit
         const std::vector<double> u = regionInput(plan, matrix, unit, oversample, stop, &stopped);
         if (stopped)
             return r;
-        const ChainForm region = chainForm(plan, matrix, unit, plan.regionFirst, plan.regionLast, kHostRate * oversample,
-                                           oversample, u.size(), adaa, true);
+        const ChainForm region = chainForm(plan, matrix, unit, plan.regionFirst, plan.regionLast,
+                                           kHostRate * oversample, oversample, u.size(), adaa, true);
         RefOptions o;
         o.adaa = adaa;
         o.stop = stop;

@@ -1038,8 +1038,8 @@ namespace circuits
         }
 
         // The module's tick over u at `rate`, a law value a sample, in calls of `call` samples (0: one call).
-        std::vector<double> ticksAt(const Circuit& c, double rate, std::span<const double> u, std::span<const float> law,
-                                    int call = 0)
+        std::vector<double> ticksAt(const Circuit& c, double rate, std::span<const double> u,
+                                    std::span<const float> law, int call = 0)
         {
             Instance self(*c.module);
             c.init(self.get(), static_cast<float>(rate));
@@ -1190,10 +1190,11 @@ namespace circuits
                     runTicks(*c, fc::sine(1.11, 85, kWindow, 1, kHost), {}, 0, heldLaws({&mid, 1}, kHost));
                 const double gain = dB(fc::binMagnitude(windowOf(ticks), 85) / fc::binMagnitude(stepped, 85));
                 const double rest = fc::inharmonicDb(windowOf(ticks), 85);
-                r.line(std::fabs(gain) <= 0.01 && rest <= -85,
-                       std::format("tick against step at 4x IIR, 1.11 V, 996 Hz, iabc {:.3g}: the fundamental {:+.4f} dB "
-                                   "against the steps ideally decimated, the rest {:.1f} dB",
-                                   mid, gain, rest));
+                r.line(
+                    std::fabs(gain) <= 0.01 && rest <= -85,
+                    std::format("tick against step at 4x IIR, 1.11 V, 996 Hz, iabc {:.3g}: the fundamental {:+.4f} dB "
+                                "against the steps ideally decimated, the rest {:.1f} dB",
+                                mid, gain, rest));
             }
         }
 
@@ -1307,7 +1308,8 @@ namespace circuits
                     const volatile float p = read("p_G1");
                     const volatile float carried = p + shift;
                     const double v = static_cast<double>(read("v_G1"));
-                    const double before = static_cast<double>(p) - v - static_cast<double>(kgo) * static_cast<double>(t);
+                    const double before =
+                        static_cast<double>(p) - v - static_cast<double>(kgo) * static_cast<double>(t);
                     const double after =
                         static_cast<double>(carried) - v - static_cast<double>(kg) * static_cast<double>(t);
                     const double scale = std::max(std::fabs(static_cast<double>(p)), 1e-6);

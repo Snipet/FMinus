@@ -663,7 +663,8 @@ namespace fminus::circuit
                 o.kb = operandText(coefficient(i, "kb_" + P));
                 o.kc = operandText(coefficient(i, "kc_" + P));
                 const Val lna = coefficient(i, "lna_" + P);
-                o.plusLna = lna.kind == Val::Kind::Const && lna.c < 0 ? " - " + literal(-lna.c) : " + " + operandText(lna);
+                o.plusLna =
+                    lna.kind == Val::Kind::Const && lna.c < 0 ? " - " + literal(-lna.c) : " + " + operandText(lna);
                 o.kd = operandText(coefficient(i, "kd_" + P));
                 o.g = gainField(b) ? "g_" + P : literal(b.port->gainValue);
                 return o;
@@ -1074,8 +1075,9 @@ namespace fminus::circuit
                 if (!b.port || !b.port->prewarp)
                     continue;
                 const std::string& P = b.port->name;
-                const std::string fs = (b.rateFactor == 1 ? std::string("rate") : std::to_string(b.rateFactor) + " rate") +
-                                       (b.designFactor != 1 ? " 2/3" : "");
+                const std::string fs =
+                    (b.rateFactor == 1 ? std::string("rate") : std::to_string(b.rateFactor) + " rate") +
+                    (b.designFactor != 1 ? " 2/3" : "");
                 line("        pws_" + P + " = " + literal(2 * b.rateFactor * b.designFactor) + " * rate;",
                      "prewarp: 2 fs', fs' = " + fs);
                 line("        pwk_" + P + " = 1 / pws_" + P + ";");
@@ -1397,10 +1399,12 @@ namespace fminus::circuit
         {
             if (!hasLawGains())
                 return;
+            const int back = at;
             for (const LawInfo& l : plan.laws)
             {
                 if (!l.used)
                     continue;
+                at = l.loc.line;   // Result::lines: a law input's line, at its .input
                 const std::string x = l.scale == 1 ? l.name : l.name + " * " + literal(l.scale);
                 line("        const float l_" + l.name + " = fminf(fmaxf(" + x + ", " + literal(l.low) + "), " +
                          literal(l.high) + ");",
@@ -1409,11 +1413,14 @@ namespace fminus::circuit
             }
             for (const Block& b : plan.blocks)
             {
-                if (lawGain(b))
-                    line("        g_" + b.port->name + " = " +
-                             gainText(b, [&](const std::string& k) { return "pv_" + potName(k); }) + ";",
-                         b.port->parts + "'s gain, amps" + (b.port->prewarp ? ", prewarped" : ""));
+                if (!lawGain(b))
+                    continue;
+                at = portLine(b);   // and an OTA's gain, at the OTA
+                line("        g_" + b.port->name + " = " +
+                         gainText(b, [&](const std::string& k) { return "pv_" + potName(k); }) + ";",
+                     b.port->parts + "'s gain, amps" + (b.port->prewarp ? ", prewarped" : ""));
             }
+            at = back;
         }
 
         bool Writer::hasLawGains() const

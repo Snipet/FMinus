@@ -1120,7 +1120,8 @@ TEST_CASE("the OTA's and the law inputs' errors, as clang words them", "[circuit
         CHECK(errorsOf(c.netlist) == c.errors);
     }
     // an unused law input warns, as an unused pot does
-    const fc::Result r = fc::generate(".input u in\n.input cv - kind=cv\n.output y o\nR1 in o 1k\nR2 o 0 1k\n", "t.cir");
+    const fc::Result r =
+        fc::generate(".input u in\n.input cv - kind=cv\n.output y o\nR1 in o 1k\nR2 o 0 1k\n", "t.cir");
     CHECK(r.errors.empty());
     CHECK(r.warnings == "t.cir:2:8: warning: law input 'cv' is never used\n");
 }

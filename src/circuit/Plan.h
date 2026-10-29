@@ -63,10 +63,10 @@ namespace fminus::circuit
     //   Tanh  an OTA (G<name> n+ n- OTA nc+ nc- gain), f = g tanh(v / 2 Vt) with g its gain, which may move every
     //         sample with a law input (the smooth-monotone family, SM)
     // (Single and Asym, a single diode and an asymmetric pair, are the next slice's.) Form V is a two-terminal port,
-    // whose current flows between the terminals its voltage is across (a diode: from = anode, to = cathode); Form I is a
-    // controlled source, its voltage across its control nodes and its current between two others (an OTA: anode, cathode
-    // = nc+, nc-; from, to = n+, n-, SPICE's G direction). Both are stamped as Holters' v-form (Mna.h): v a source, j an
-    // unknown.
+    // whose current flows between the terminals its voltage is across (a diode: from = anode, to = cathode), stamped
+    // in Holters' v-form (Mna.h: v a source, j an unknown); Form I is a controlled source, its voltage across its
+    // control nodes and its current between two others (an OTA: anode, cathode = nc+, nc-; from, to = n+, n-, SPICE's
+    // G direction), stamped in the i-form (its current i a source, its control voltage a readout).
     struct PortDef
     {
         enum class Law

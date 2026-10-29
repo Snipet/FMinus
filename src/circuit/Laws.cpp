@@ -32,7 +32,8 @@ namespace fminus::circuit
             std::vector<LawLine> out;
             if (o.solver.guess == Solver::Guess::Omega)
             {
-                out.push_back({"const " + T + " q = fabsf(p);", "omega3 (D'Angelo et al. 2019): the conducting diode alone"});
+                out.push_back(
+                    {"const " + T + " q = fabsf(p);", "omega3 (D'Angelo et al. 2019): the conducting diode alone"});
                 out.push_back({"const " + T + " arg = (q + " + o.ka + ") * " + ivt + o.plusLna + ";", ""});
                 out.push_back({"const " + T + " w = arg <= " + literal(kOmegaLow) + " ? 0", ""});
                 out.push_back({"              : arg < 8 ? ((" + literal(kOmegaA) + " * arg + " + literal(kOmegaB) +
@@ -140,8 +141,8 @@ namespace fminus::circuit
             out.push_back({"const " + T + " dp = p - p_" + P + ";", ""});
             out.push_back({"const " + T + " wm = 0.5f * kg * (th + t_" + P + ");",
                            "p - v at the midpoint, from the law: kd times its current"});
-            out.push_back({"const " + T + " ib = (fabsf(dp) > " + literal(kAdaaEpsilon) + " ? wm + (kgv * dl - wm * (v - v_" +
-                               P + ")) / dp : wm) / " + o.kd + ";",
+            out.push_back({"const " + T + " ib = (fabsf(dp) > " + literal(kAdaaEpsilon) +
+                               " ? wm + (kgv * dl - wm * (v - v_" + P + ")) / dp : wm) / " + o.kd + ";",
                            "the mean current, (p - G(p)) / kd over [p_P, p]: the midpoint's and a correction"});
             return out;
         }

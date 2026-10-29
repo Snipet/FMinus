@@ -251,8 +251,8 @@ namespace fminus::circuit
 
     // The candidates of the plan's open dimensions (report §6.2: an exp-affine port's 1, 2, 4 and 8x, ADAA off and on,
     // omega3 + 1 or 2 Newton steps; a smooth-monotone port's (an OTA's) 1, 2 and 4x, ADAA off and on, the previous
-    // step's v + 1, 2 or 3), the pinned ones at the plan's values, cheapest first by modelCost; candidates within 5 % of
-    // the cheapest of their group go ADAA first, then fewer steps.
+    // step's v + 1, 2 or 3), the pinned ones at the plan's values, cheapest first by modelCost; candidates within 5 %
+    // of the cheapest of their group go ADAA first, then fewer steps.
     std::vector<Candidate> candidates(const Plan& plan);
 
     // candidates()'s order on any list: by cost, then within 5 % of the cheapest of a group, ADAA first, then fewer

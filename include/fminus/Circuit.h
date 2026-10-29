@@ -1,8 +1,8 @@
 // include/fminus/Circuit.h: analog circuits as FMinus source. fminus::circuit::generate turns a SPICE-style netlist
 // (a .cir file: resistors, capacitors, antiparallel diode pairs with their .model, OTAs, ideal op amps, pots, law
-// inputs, and the directives docs/circuits.md lists) into the text of one FMinus module, which Program::compile compiles like any
-// other source. It is the circuit compiler of docs/research/analog-circuits/README.md (Phase 1 of its §11, in slices).
-// No LLVM, C++17, as FMinus.h; the host links FMinus::FMinus.
+// inputs, and the directives docs/circuits.md lists) into the text of one FMinus module, which Program::compile
+// compiles like any other source. It is the circuit compiler of docs/research/analog-circuits/README.md (Phase 1 of
+// its §11, in slices). No LLVM, C++17, as FMinus.h; the host links FMinus::FMinus.
 //
 //   const fminus::circuit::Result result = fminus::circuit::generate(netlist, "pedal.cir");
 //   if (!result.errors.empty())
