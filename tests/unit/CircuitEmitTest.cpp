@@ -520,13 +520,18 @@ TEST_CASE("Result's fields: the inputs, the latency, and each line's netlist lin
 TEST_CASE("the OTA's laws compile nonblocking, with and without ADAA, in both channel counts", "[circuit]")
 {
     // one stage and the two-stage low-pass, a gain of a law input (each sample's), of a pot and a law input (tick's,
-    // with the pot stored by set), of a pot alone (set's) and a constant; ADAA, .channels 2 and .prewarp on and off
+    // with the pot stored by set), of a pot alone (set's) and a constant, and the low-pass with both OTAs' gains
+    // reading one pot and the law input (one pv_ field for the two); ADAA, .channels 2 and .prewarp on and off
     const std::string withPot = fc::test::otaStage(".pot res 0.5\n", "{iabc * (0.5 + res)}");
     const std::string potOnly = fc::test::otaStage(".pot res 0.5\n", "{1m * (0.1 + res)}");
     const std::string constant = fc::test::otaStage("", "1m");
+    std::string shared = fc::test::kOtaLp;
+    shared = withLine(shared, "G1   0    y1   OTA a1 m1 {iabc}", "G1 0 y1 OTA a1 m1 {iabc * amt}");
+    shared = withLine(shared, "G2   0    y2   OTA a2 m2 {iabc}", "G2 0 y2 OTA a2 m2 {iabc * amt}");
+    shared = withLine(shared, ".output vout y2b\n", ".output vout y2b\n.pot amt 0.5\n");
     int count = 0;
     int index = 0;
-    for (const std::string& text : {fc::test::otaStage(), fc::test::kOtaLp, withPot, potOnly, constant})
+    for (const std::string& text : {fc::test::otaStage(), fc::test::kOtaLp, withPot, potOnly, constant, shared})
     {
         for (bool adaa : {false, true})
         {
@@ -558,7 +563,19 @@ TEST_CASE("the OTA's laws compile nonblocking, with and without ADAA, in both ch
             }
         }
     }
-    CHECK(count == 40);
+    CHECK(count == 48);
+    // the shared pot's module: both gains are iabc amt, from the one pv_amt that set stores
+    const fc::Result r = fc::generate(shared, "t.cir");
+    CHECK(r.source.find("    float pv_amt;") == r.source.rfind("    float pv_amt;"));
+    auto program = compiled(r);
+    std::string errors;
+    const Program::Module& m = *program->module(r.module);
+    auto self = instance(m);
+    program->function<void(void*, float)>(r.module + "::init", errors)(self.get(), 48000);
+    callSet(*program, r.module, self.get(), {0.25f});
+    program->function<float(void*, float, float)>(r.module + "::tick", errors)(self.get(), 0.1f, 1e-3f);
+    CHECK(readFloat(self.get(), m, "g_G1") == 1e-3f * 0.25f);
+    CHECK(readFloat(self.get(), m, "g_G2") == 1e-3f * 0.25f);
 }
 
 TEST_CASE("the bracket keeps every law's iterates finite in float, through the JIT", "[circuit]")

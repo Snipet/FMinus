@@ -955,6 +955,7 @@ namespace fminus::circuit
                     line("    " + type + " uo_" + blocks[i].system.sources[0].name + ";",
                          "ADAA: block " + std::to_string(b.index) + "'s input a step earlier", 31);
             }
+            std::set<std::string> lawPots;   // pv_<pot>: one field for every OTA whose law-input gain reads the pot
             for (const Block& b : plan.blocks)
             {
                 if (!gainField(b))
@@ -974,7 +975,11 @@ namespace fminus::circuit
                 if (lawGain(b))
                 {
                     for (const std::string& key : b.port->gainPots)
-                        line("    float pv_" + potName(key) + ";", "pot " + potName(key) + ", clamped, for tick", 31);
+                    {
+                        if (lawPots.insert(key).second)
+                            line("    float pv_" + potName(key) + ";", "pot " + potName(key) + ", clamped, for tick",
+                                 31);
+                    }
                 }
             }
             first = true;

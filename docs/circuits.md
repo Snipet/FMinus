@@ -260,8 +260,9 @@ does.
   2 C fs' and `g2_<C>` = 2 gc; coefficients `<readout>_by_<source>` (`p_D1_by_x_C1`, `n_b_by_v_D1`, `vc_C3_by_n_p1`) and
   `ka_`, `kb_`, `lna_`, `kc_<D>` (literals instead when K is a constant: a port block with no capacitor and no pot); an
   OTA's `kd_<G>` (its loop), `g_<G>` (its gain, when it moves or is prewarped: each host sample's, set's or init's),
-  `<readout>_by_i_<G>` (its current's), with ADAA `t_<G>` and `kgo_<G>`, with `.prewarp on` `pws_<G>` and `pwk_<G>` (2
-  fs' and its inverse) and the method `pw<N>_`, and `pv_<pot>` for a pot a law input's gain reads (tick computes it);
+  `<readout>_by_i_<G>` (its current's), with ADAA `t_<G>`, `lc_<G>` and `kgo_<G>`, with `.prewarp on` `pws_<G>` and
+  `pwk_<G>` (2 fs' and its inverse) and the method `pw<N>_`, and `pv_<pot>` for a pot a law input's gain reads (tick
+  computes it; one field however many OTAs' gains read the pot);
   tick's and step's law inputs, clamped, `l_<name>`;
   halfband state `hb<s>u_*` and `hb<s>d_*`; the region's samples `os1`, `os2_0`, ...; the guard's `ck_`, `fd_` and
   `fdstep_`, and tick's locals `sum_` and `gain_` ([the guard](#the-guard)). Characters outside
