@@ -1,0 +1,56 @@
+DK cross-check (MNA vs hand form): K11 -3.42817/-3.42817 K12 -11.4272/-11.4272 K21 11.4272/11.4272 K22 0; Pu1 0.00219517/0.00219517
+== fc 1 kHz, Q 0.7, 1 V saw ==
+  64x reference: peak at 108.4 Hz
+  1x: alias -126.5 dB, vs 64x  -62.7 dB, peak 108.4 Hz | converged iterations: 2-D 2.42/4, torn 2.32/4
+      float, fixed K vs converged double (prev guess): torn K1 -105.0 torn K2 -124.4 torn K3 -124.4 2-D K1 -109.4 2-D K2 -124.4 2-D K3 -124.4 torn-lin K1  -84.8 torn-lin K2 -124.4
+      cutoff modulated per sample (+-2 oct, 37 Hz): torn K1  -97.1 torn K2 -119.3 2-D K1 -103.1 2-D K2 -119.3
+  2x: alias -259.8 dB, vs 64x  -74.7 dB, peak 108.4 Hz | converged iterations: 2-D 2.25/3, torn 2.21/3
+      float, fixed K vs converged double (prev guess): torn K1 -114.5 torn K2 -115.7 torn K3 -115.7 2-D K1 -116.1 2-D K2 -115.7 2-D K3 -115.7 torn-lin K1  -94.9 torn-lin K2 -115.7
+      cutoff modulated per sample (+-2 oct, 37 Hz): torn K1 -108.8 torn K2 -110.4 2-D K1 -110.1 2-D K2 -110.4
+  4x: alias -269.4 dB, vs 64x  -86.8 dB, peak 108.4 Hz | converged iterations: 2-D 2.16/3, torn 2.13/3
+      float, fixed K vs converged double (prev guess): torn K1 -103.8 torn K2 -103.8 torn K3 -103.8 2-D K1 -103.8 2-D K2 -103.8 2-D K3 -103.8 torn-lin K1 -102.1 torn-lin K2 -103.8
+      cutoff modulated per sample (+-2 oct, 37 Hz): torn K1  -98.2 torn K2  -98.2 2-D K1  -98.2 2-D K2  -98.2
+== fc 1 kHz, Q 10, 1 V saw ==
+  64x reference: peak at 108.4 Hz
+  1x: alias -119.1 dB, vs 64x  -39.7 dB, peak 108.4 Hz | converged iterations: 2-D 3.00/3, torn 2.95/3
+      float, fixed K vs converged double (prev guess): torn K1 -109.5 torn K2 -111.1 torn K3 -111.1 2-D K1  -97.0 2-D K2 -111.1 2-D K3 -111.0 torn-lin K1  -73.5 torn-lin K2 -111.0
+      cutoff modulated per sample (+-2 oct, 37 Hz): torn K1  -90.3 torn K2 -107.5 2-D K1  -78.7 2-D K2 -107.5
+  2x: alias -258.1 dB, vs 64x  -51.8 dB, peak 108.4 Hz | converged iterations: 2-D 2.99/3, torn 2.86/3
+      float, fixed K vs converged double (prev guess): torn K1 -102.1 torn K2 -102.0 torn K3 -101.9 2-D K1 -103.9 2-D K2 -101.9 2-D K3 -101.9 torn-lin K1  -83.6 torn-lin K2 -101.9
+      cutoff modulated per sample (+-2 oct, 37 Hz): torn K1  -98.0 torn K2  -98.2 2-D K1  -94.0 2-D K2  -98.3
+  4x: alias -267.2 dB, vs 64x  -63.9 dB, peak 108.4 Hz | converged iterations: 2-D 2.94/3, torn 2.63/3
+      float, fixed K vs converged double (prev guess): torn K1  -89.8 torn K2  -89.7 torn K3  -89.7 2-D K1  -89.8 2-D K2  -89.7 2-D K3  -89.7 torn-lin K1  -88.0 torn-lin K2  -89.7
+      cutoff modulated per sample (+-2 oct, 37 Hz): torn K1  -85.9 torn K2  -85.9 2-D K1  -85.9 2-D K2  -85.9
+== fc 1 kHz, Q 10, 10 V saw ==
+  64x reference: peak at 108.4 Hz
+  1x: alias  -76.7 dB, vs 64x  -40.8 dB, peak 108.4 Hz | converged iterations: 2-D 3.34/4, torn 3.06/4
+      float, fixed K vs converged double (prev guess): torn K1  -80.3 torn K2 -107.1 torn K3 -106.9 2-D K1  -54.4 2-D K2 -107.6 2-D K3 -107.3 torn-lin K1  -36.8 torn-lin K2 -106.9
+      cutoff modulated per sample (+-2 oct, 37 Hz): torn K1  -59.2 torn K2 -105.7 2-D K1  -38.3 2-D K2 -103.6
+  2x: alias -145.9 dB, vs 64x  -52.8 dB, peak 108.4 Hz | converged iterations: 2-D 3.15/4, torn 3.00/4
+      float, fixed K vs converged double (prev guess): torn K1  -93.6 torn K2  -98.9 torn K3  -98.9 2-D K1  -71.5 2-D K2  -98.9 2-D K3  -98.9 torn-lin K1  -46.9 torn-lin K2  -98.8
+      cutoff modulated per sample (+-2 oct, 37 Hz): torn K1  -80.7 torn K2  -96.6 2-D K1  -54.6 2-D K2  -96.6
+  4x: alias -250.4 dB, vs 64x  -64.9 dB, peak 108.4 Hz | converged iterations: 2-D 3.00/4, torn 2.99/4
+      float, fixed K vs converged double (prev guess): torn K1  -86.6 torn K2  -86.7 torn K3  -86.7 2-D K1  -92.9 2-D K2  -86.7 2-D K3  -86.7 torn-lin K1  -58.3 torn-lin K2  -86.7
+      cutoff modulated per sample (+-2 oct, 37 Hz): torn K1  -84.3 torn K2  -84.4 2-D K1  -72.3 2-D K2  -84.4
+== fc 4 kHz, Q 25, 5 V saw ==
+  64x reference: peak at 108.4 Hz
+  1x: alias  -74.4 dB, vs 64x   -9.5 dB, peak 108.4 Hz | converged iterations: 2-D 3.37/4, torn 3.22/4
+      float, fixed K vs converged double (prev guess): torn K1  -49.4 torn K2 -110.9 torn K3 -110.5 2-D K1  -31.8 2-D K2 -114.9 2-D K3 -110.9 torn-lin K1  -28.1 torn-lin K2 -110.4
+      cutoff modulated per sample (+-2 oct, 37 Hz): torn K1  -22.3 torn K2  -81.1 2-D K1  -20.0 2-D K2  -92.5
+  2x: alias -162.4 dB, vs 64x  -21.0 dB, peak 108.4 Hz | converged iterations: 2-D 3.23/4, torn 3.04/4
+      float, fixed K vs converged double (prev guess): torn K1  -73.9 torn K2 -105.2 torn K3 -105.4 2-D K1  -48.8 2-D K2 -105.0 2-D K3 -104.9 torn-lin K1  -39.8 torn-lin K2 -104.9
+      cutoff modulated per sample (+-2 oct, 37 Hz): torn K1  -38.4 torn K2 -100.5 2-D K1  -31.5 2-D K2  -99.2
+  4x: alias -238.6 dB, vs 64x  -33.0 dB, peak 108.4 Hz | converged iterations: 2-D 3.10/4, torn 2.95/3
+      float, fixed K vs converged double (prev guess): torn K1  -90.8 torn K2  -93.2 torn K3  -93.2 2-D K1  -66.9 2-D K2  -93.2 2-D K3  -93.2 torn-lin K1  -51.1 torn-lin K2  -93.3
+      cutoff modulated per sample (+-2 oct, 37 Hz): torn K1  -64.6 torn K2  -88.3 2-D K1  -45.4 2-D K2  -88.3
+== fc 4 kHz, self-osc (kq -0.02), 1 V saw ==
+  64x reference: peak at 1517.6 Hz
+  1x: alias  -81.0 dB, vs 64x  -31.0 dB, peak 1517.6 Hz | converged iterations: 2-D 4.17/5, torn 3.64/4
+      float, fixed K vs converged double (prev guess): torn K1  -22.4 torn K2  -62.0 torn K3  -61.9 2-D K1    0.4 2-D K2  -84.6 2-D K3  -61.9 torn-lin K1    3.3 torn-lin K2  -62.1 | self-osc: double 1517.6 Hz 52.610 V rms, float torn K2 1517.6 Hz 52.610 V rms
+      cutoff modulated per sample (+-2 oct, 37 Hz): torn K1    0.0 torn K2    2.4 2-D K1    0.1 2-D K2    2.5
+  2x: alias -207.2 dB, vs 64x  -43.4 dB, peak 1517.6 Hz | converged iterations: 2-D 3.99/4, torn 3.33/4
+      float, fixed K vs converged double (prev guess): torn K1  -44.5 torn K2  -53.8 torn K3  -53.8 2-D K1  -24.1 2-D K2  -53.8 2-D K3  -53.8 torn-lin K1  -18.4 torn-lin K2  -53.8 | self-osc: double 1517.6 Hz 52.751 V rms, float torn K2 1517.6 Hz 52.751 V rms
+      cutoff modulated per sample (+-2 oct, 37 Hz): torn K1    2.2 torn K2    1.7 2-D K1    0.1 2-D K2    2.1
+  4x: alias -219.6 dB, vs 64x  -55.5 dB, peak 1517.6 Hz | converged iterations: 2-D 3.98/4, torn 3.00/3
+      float, fixed K vs converged double (prev guess): torn K1  -41.4 torn K2  -41.6 torn K3  -41.6 2-D K1  -59.1 2-D K2  -41.6 2-D K3  -41.6 torn-lin K1  -32.4 torn-lin K2  -41.7 | self-osc: double 1517.6 Hz 52.786 V rms, float torn K2 1517.6 Hz 52.786 V rms
+      cutoff modulated per sample (+-2 oct, 37 Hz): torn K1    2.9 torn K2    1.4 2-D K1    1.8 2-D K2    0.6

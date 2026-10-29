@@ -1,0 +1,92 @@
+== Example 1 (DiodeTone), pot = tone ==
+ pot 0.0, 0.3 V 1 kHz
+  1x | plain: alias -249.5 null  -56.7 | ADAA: alias -248.8 null  -37.7 H1 -0.08 H3 -0.62 dB | float w+K1 vs same-rate double: plain -128.4 ADAA -133.2
+  2x | plain: alias -249.7 null  -68.8 | ADAA: alias -249.1 null  -44.6 H1 -0.03 H3 -0.20 dB | float w+K1 vs same-rate double: plain -126.6 ADAA -132.5
+  4x | plain: alias -249.9 null  -80.8 | ADAA: alias -249.5 null  -50.9 H1 -0.01 H3 -0.07 dB | float w+K1 vs same-rate double: plain -129.7 ADAA -126.2
+  8x | plain: alias -257.0 null  -93.0 | ADAA: alias -254.4 null  -57.0 H1 -0.01 H3 -0.03 dB | float w+K1 vs same-rate double: plain -121.6 ADAA -122.3
+ pot 0.0, 2 V 1 kHz
+  1x | plain: alias  -82.5 null  -51.6 | ADAA: alias  -96.5 null  -37.6 H1 -0.07 H3 -0.42 dB | float w+K1 vs same-rate double: plain  -54.9 ADAA  -99.3
+  2x | plain: alias -124.9 null  -63.5 | ADAA: alias -147.9 null  -44.5 H1 -0.02 H3 -0.12 dB | float w+K1 vs same-rate double: plain  -54.2 ADAA  -94.9
+  4x | plain: alias -199.1 null  -75.6 | ADAA: alias -220.0 null  -50.5 H1 -0.01 H3 -0.04 dB | float w+K1 vs same-rate double: plain  -63.0 ADAA  -84.2
+  8x | plain: alias -218.0 null  -87.7 | ADAA: alias -218.7 null  -56.5 H1 -0.00 H3 -0.01 dB | float w+K1 vs same-rate double: plain  -86.5 ADAA -103.5
+ pot 0.0, 4.5 V 3 kHz
+  1x | plain: alias  -42.4 null  -30.9 | ADAA: alias  -59.6 null  -20.6 H1 -0.38 H3 -3.69 dB | float w+K1 vs same-rate double: plain  -62.8 ADAA  -95.3
+  2x | plain: alias  -52.4 null  -44.0 | ADAA: alias  -81.9 null  -30.6 H1 -0.11 H3 -0.90 dB | float w+K1 vs same-rate double: plain  -58.4 ADAA  -99.5
+  4x | plain: alias  -79.8 null  -56.0 | ADAA: alias -107.6 null  -38.4 H1 -0.03 H3 -0.23 dB | float w+K1 vs same-rate double: plain  -54.7 ADAA  -94.9
+  8x | plain: alias -113.9 null  -68.0 | ADAA: alias -140.5 null  -44.9 H1 -0.01 H3 -0.06 dB | float w+K1 vs same-rate double: plain  -55.9 ADAA  -90.5
+ pot 0.5, 0.3 V 1 kHz
+  1x | plain: alias -252.0 null  -57.2 | ADAA: alias -251.9 null  -37.9 H1 -0.09 H3 -0.61 dB | float w+K1 vs same-rate double: plain -133.3 ADAA -137.8
+  2x | plain: alias -252.3 null  -69.2 | ADAA: alias -252.0 null  -44.9 H1 -0.03 H3 -0.19 dB | float w+K1 vs same-rate double: plain -128.2 ADAA -136.5
+  4x | plain: alias -252.5 null  -81.3 | ADAA: alias -252.1 null  -51.3 H1 -0.01 H3 -0.07 dB | float w+K1 vs same-rate double: plain -127.4 ADAA -131.1
+  8x | plain: alias -257.1 null  -93.4 | ADAA: alias -255.9 null  -57.4 H1 -0.01 H3 -0.03 dB | float w+K1 vs same-rate double: plain -118.1 ADAA -121.3
+ pot 0.5, 2 V 1 kHz
+  1x | plain: alias  -84.1 null  -51.7 | ADAA: alias  -97.6 null  -37.9 H1 -0.08 H3 -0.44 dB | float w+K1 vs same-rate double: plain  -54.8 ADAA  -99.9
+  2x | plain: alias -128.8 null  -63.7 | ADAA: alias -150.9 null  -44.9 H1 -0.03 H3 -0.13 dB | float w+K1 vs same-rate double: plain  -54.5 ADAA  -94.8
+  4x | plain: alias -206.9 null  -75.7 | ADAA: alias -222.0 null  -51.1 H1 -0.01 H3 -0.04 dB | float w+K1 vs same-rate double: plain  -63.8 ADAA  -84.6
+  8x | plain: alias -218.4 null  -87.9 | ADAA: alias -219.1 null  -57.1 H1 -0.01 H3 -0.02 dB | float w+K1 vs same-rate double: plain  -86.7 ADAA -106.5
+ pot 0.5, 4.5 V 3 kHz
+  1x | plain: alias  -44.0 null  -30.6 | ADAA: alias  -59.7 null  -20.9 H1 -0.40 H3 -3.74 dB | float w+K1 vs same-rate double: plain  -62.4 ADAA  -99.1
+  2x | plain: alias  -53.1 null  -44.1 | ADAA: alias  -82.3 null  -30.8 H1 -0.12 H3 -0.91 dB | float w+K1 vs same-rate double: plain  -58.2 ADAA  -98.7
+  4x | plain: alias  -80.8 null  -55.9 | ADAA: alias -108.6 null  -38.6 H1 -0.04 H3 -0.24 dB | float w+K1 vs same-rate double: plain  -54.7 ADAA  -97.1
+  8x | plain: alias -115.8 null  -67.9 | ADAA: alias -142.4 null  -45.1 H1 -0.01 H3 -0.07 dB | float w+K1 vs same-rate double: plain  -56.1 ADAA  -91.2
+ pot 1.0, 0.3 V 1 kHz
+  1x | plain: alias -252.2 null  -63.7 | ADAA: alias -252.3 null  -42.8 H1 -0.06 H3 -0.70 dB | float w+K1 vs same-rate double: plain -136.3 ADAA -140.1
+  2x | plain: alias -252.9 null  -75.8 | ADAA: alias -252.7 null  -50.5 H1 -0.03 H3 -0.26 dB | float w+K1 vs same-rate double: plain -136.3 ADAA -136.4
+  4x | plain: alias -253.1 null  -87.9 | ADAA: alias -252.5 null  -57.4 H1 -0.01 H3 -0.11 dB | float w+K1 vs same-rate double: plain -133.7 ADAA -134.5
+  8x | plain: alias -256.2 null -100.0 | ADAA: alias -255.1 null  -63.9 H1 -0.01 H3 -0.05 dB | float w+K1 vs same-rate double: plain -129.2 ADAA -120.4
+ pot 1.0, 2 V 1 kHz
+  1x | plain: alias  -74.1 null  -48.8 | ADAA: alias  -82.7 null  -38.7 H1 -0.02 H3 -0.23 dB | float w+K1 vs same-rate double: plain  -54.0 ADAA  -89.1
+  2x | plain: alias -122.1 null  -61.0 | ADAA: alias -138.7 null  -48.0 H1 -0.01 H3 -0.08 dB | float w+K1 vs same-rate double: plain  -58.6 ADAA  -83.2
+  4x | plain: alias -201.5 null  -73.1 | ADAA: alias -204.6 null  -55.7 H1 -0.00 H3 -0.03 dB | float w+K1 vs same-rate double: plain  -71.5 ADAA  -90.8
+  8x | plain: alias -201.0 null  -85.3 | ADAA: alias -201.7 null  -62.3 H1 -0.00 H3 -0.01 dB | float w+K1 vs same-rate double: plain  -83.4 ADAA -105.9
+ pot 1.0, 4.5 V 3 kHz
+  1x | plain: alias  -42.0 null  -30.2 | ADAA: alias  -58.0 null  -21.9 H1 -0.17 H3 -2.68 dB | float w+K1 vs same-rate double: plain  -57.6 ADAA -103.2
+  2x | plain: alias  -62.4 null  -43.9 | ADAA: alias  -83.0 null  -32.8 H1 -0.06 H3 -0.65 dB | float w+K1 vs same-rate double: plain  -55.8 ADAA  -95.7
+  4x | plain: alias  -91.7 null  -55.9 | ADAA: alias -118.4 null  -42.0 H1 -0.02 H3 -0.21 dB | float w+K1 vs same-rate double: plain  -54.5 ADAA  -92.4
+  8x | plain: alias -141.1 null  -68.0 | ADAA: alias -169.3 null  -49.3 H1 -0.01 H3 -0.08 dB | float w+K1 vs same-rate double: plain  -59.0 ADAA  -84.9
+== Example 2 block 2 (TS clip), pot = drive ==
+ pot 0.0, 30 mV 1 kHz
+  1x | plain: alias -222.7 null  -62.7 | ADAA: alias -229.4 null  -43.2 H1 -0.04 H3 -0.26 dB | float w+K1 vs same-rate double: plain  -84.1 ADAA -113.6
+  2x | plain: alias -243.3 null  -74.7 | ADAA: alias -239.1 null  -50.4 H1 -0.02 H3 -0.11 dB | float w+K1 vs same-rate double: plain  -86.6 ADAA -113.3
+  4x | plain: alias -243.5 null  -86.8 | ADAA: alias -237.9 null  -57.0 H1 -0.01 H3 -0.05 dB | float w+K1 vs same-rate double: plain  -92.9 ADAA -114.7
+  8x | plain: alias -249.2 null  -99.0 | ADAA: alias -237.9 null  -63.4 H1 -0.00 H3 -0.03 dB | float w+K1 vs same-rate double: plain  -98.6 ADAA -117.2
+ pot 0.0, 200 mV 1 kHz
+  1x | plain: alias  -59.9 null  -54.6 | ADAA: alias  -67.5 null  -40.9 H1 -0.01 H3 -0.09 dB | float w+K1 vs same-rate double: plain  -58.3 ADAA  -93.6
+  2x | plain: alias -109.0 null  -68.9 | ADAA: alias -123.4 null  -49.9 H1 -0.00 H3 -0.03 dB | float w+K1 vs same-rate double: plain  -57.4 ADAA  -91.3
+  4x | plain: alias -186.7 null  -81.0 | ADAA: alias -191.4 null  -57.6 H1 -0.00 H3 -0.01 dB | float w+K1 vs same-rate double: plain  -56.0 ADAA  -90.8
+  8x | plain: alias -189.9 null  -93.2 | ADAA: alias -190.1 null  -64.6 H1 -0.00 H3 -0.00 dB | float w+K1 vs same-rate double: plain  -54.4 ADAA  -89.1
+ pot 0.0, 450 mV 3 kHz
+  1x | plain: alias  -26.8 null  -26.8 | ADAA: alias  -39.0 null  -31.9 H1 -0.12 H3 -0.58 dB | float w+K1 vs same-rate double: plain  -67.9 ADAA -104.7
+  2x | plain: alias  -43.1 null  -42.9 | ADAA: alias  -65.5 null  -42.6 H1 -0.03 H3 -0.17 dB | float w+K1 vs same-rate double: plain  -67.0 ADAA  -96.4
+  4x | plain: alias  -66.6 null  -57.7 | ADAA: alias  -84.2 null  -53.4 H1 -0.01 H3 -0.06 dB | float w+K1 vs same-rate double: plain  -65.6 ADAA  -99.1
+  8x | plain: alias  -93.3 null  -69.5 | ADAA: alias -123.2 null  -63.2 H1 -0.00 H3 -0.02 dB | float w+K1 vs same-rate double: plain  -63.0 ADAA -100.7
+ pot 0.5, 30 mV 1 kHz
+  1x | plain: alias -121.9 null  -61.4 | ADAA: alias -125.2 null  -43.4 H1 -0.02 H3 -0.15 dB | float w+K1 vs same-rate double: plain  -59.0 ADAA  -83.4
+  2x | plain: alias -240.2 null  -73.5 | ADAA: alias -243.6 null  -51.0 H1 -0.01 H3 -0.06 dB | float w+K1 vs same-rate double: plain  -68.0 ADAA  -90.3
+  4x | plain: alias -238.7 null  -85.6 | ADAA: alias -239.4 null  -58.0 H1 -0.00 H3 -0.02 dB | float w+K1 vs same-rate double: plain  -81.1 ADAA -102.7
+  8x | plain: alias -238.9 null  -97.8 | ADAA: alias -238.2 null  -64.5 H1 -0.00 H3 -0.01 dB | float w+K1 vs same-rate double: plain  -76.6 ADAA -108.9
+ pot 0.5, 200 mV 1 kHz
+  1x | plain: alias  -47.7 null  -42.5 | ADAA: alias  -61.5 null  -37.1 H1 -0.01 H3 -0.09 dB | float w+K1 vs same-rate double: plain  -61.3 ADAA  -94.1
+  2x | plain: alias  -78.4 null  -57.5 | ADAA: alias  -95.3 null  -45.0 H1 -0.00 H3 -0.03 dB | float w+K1 vs same-rate double: plain  -59.6 ADAA  -90.7
+  4x | plain: alias -123.0 null  -69.6 | ADAA: alias -145.4 null  -54.0 H1 -0.00 H3 -0.01 dB | float w+K1 vs same-rate double: plain  -57.6 ADAA  -90.8
+  8x | plain: alias -178.3 null  -81.8 | ADAA: alias -178.7 null  -62.2 H1 -0.00 H3 -0.00 dB | float w+K1 vs same-rate double: plain  -55.3 ADAA  -90.2
+ pot 0.5, 450 mV 3 kHz
+  1x | plain: alias  -24.4 null  -24.2 | ADAA: alias  -37.1 null  -30.6 H1 -0.12 H3 -0.55 dB | float w+K1 vs same-rate double: plain  -70.2 ADAA  -97.7
+  2x | plain: alias  -35.4 null  -35.1 | ADAA: alias  -57.1 null  -37.9 H1 -0.03 H3 -0.14 dB | float w+K1 vs same-rate double: plain  -70.7 ADAA  -92.9
+  4x | plain: alias  -66.8 null  -56.9 | ADAA: alias  -76.7 null  -47.2 H1 -0.01 H3 -0.05 dB | float w+K1 vs same-rate double: plain  -68.6 ADAA  -93.8
+  8x | plain: alias  -79.7 null  -70.8 | ADAA: alias -105.3 null  -60.3 H1 -0.00 H3 -0.02 dB | float w+K1 vs same-rate double: plain  -64.5 ADAA  -97.8
+ pot 1.0, 30 mV 1 kHz
+  1x | plain: alias  -54.5 null  -43.5 | ADAA: alias  -65.3 null  -35.0 H1 -0.02 H3 -0.12 dB | float w+K1 vs same-rate double: plain  -51.7 ADAA  -89.3
+  2x | plain: alias  -93.5 null  -55.8 | ADAA: alias -109.0 null  -44.5 H1 -0.01 H3 -0.04 dB | float w+K1 vs same-rate double: plain  -49.8 ADAA  -84.8
+  4x | plain: alias -157.8 null  -67.8 | ADAA: alias -178.0 null  -54.2 H1 -0.00 H3 -0.01 dB | float w+K1 vs same-rate double: plain  -51.1 ADAA  -81.2
+  8x | plain: alias -180.9 null  -79.9 | ADAA: alias -181.4 null  -63.1 H1 -0.00 H3 -0.00 dB | float w+K1 vs same-rate double: plain  -66.2 ADAA  -82.6
+ pot 1.0, 200 mV 1 kHz
+  1x | plain: alias  -31.1 null  -30.9 | ADAA: alias  -42.9 null  -32.9 H1 -0.02 H3 -0.06 dB | float w+K1 vs same-rate double: plain  -63.3 ADAA  -91.4
+  2x | plain: alias  -57.7 null  -53.6 | ADAA: alias  -72.5 null  -43.5 H1 -0.01 H3 -0.02 dB | float w+K1 vs same-rate double: plain  -62.9 ADAA  -83.7
+  4x | plain: alias  -81.5 null  -67.1 | ADAA: alias -105.4 null  -55.7 H1 -0.00 H3 -0.01 dB | float w+K1 vs same-rate double: plain  -59.5 ADAA  -88.5
+  8x | plain: alias -117.7 null  -78.6 | ADAA: alias -144.0 null  -66.5 H1 -0.00 H3 -0.00 dB | float w+K1 vs same-rate double: plain  -56.3 ADAA  -90.9
+ pot 1.0, 450 mV 3 kHz
+  1x | plain: alias  -22.7 null  -22.2 | ADAA: alias  -35.9 null  -28.8 H1 -0.12 H3 -0.52 dB | float w+K1 vs same-rate double: plain  -73.4 ADAA  -90.2
+  2x | plain: alias  -31.1 null  -30.3 | ADAA: alias  -52.6 null  -33.3 H1 -0.04 H3 -0.12 dB | float w+K1 vs same-rate double: plain  -74.0 ADAA  -98.1
+  4x | plain: alias  -53.6 null  -53.4 | ADAA: alias  -75.1 null  -39.7 H1 -0.01 H3 -0.03 dB | float w+K1 vs same-rate double: plain  -70.9 ADAA  -99.7
+  8x | plain: alias  -72.9 null  -68.0 | ADAA: alias  -89.7 null  -50.9 H1 -0.00 H3 -0.01 dB | float w+K1 vs same-rate double: plain  -66.5 ADAA  -95.1

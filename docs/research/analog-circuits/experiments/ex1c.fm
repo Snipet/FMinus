@@ -1,0 +1,132 @@
+// Stand-in for library/6-circuits/oversample.fm's Oversample4 (its API; the real one is two halfband stages each way).
+module Oversample4
+{
+    float last;
+    void up(float x, float* restrict o4)
+    {
+        o4[0] = x;
+        o4[1] = x;
+        o4[2] = x;
+        o4[3] = x;
+        last = x;
+    }
+    float down(const float* restrict i4) { return 0.25f * (i4[0] + i4[1] + i4[2] + i4[3]); }
+    void clear() { last = 0; }
+};
+
+// diodetone.cir, compiled by fminus-circuit. Do not edit: edit diodetone.cir.
+//   method: DK, trapezoidal, 1 block, 4x; port D1|D2 by omega3 + 1 Newton step; states x_C1, x_C2
+//   self-test (float against double, 64x reference): solver -55 dB in band at 4.5 V, 3 kHz; alias -75 dB (4x)
+//   cost a host-rate sample: 4 x (1 logf when a diode conducts, 1 expf, 2 divides, ~31 flops) + Oversample4 (68 mult.)
+module DiodeTone
+{
+    float x_C1, x_C2;                 // the capacitors' companion histories
+    float g1, gc1, gc2;               // 1/R1, 2 C1 fs, 2 C2 fs
+    float cin, cx1, cx2, kk;          // p = cin u + cx1 x_C1 + cx2 x_C2;  v = p - kk i
+    float gk, k2, kvt, lna;           // 1 / kk, 2 Is kk, 2 Is kk / (N Vt), log(Is kk / (N Vt))
+    float din, dx1, dx2, di;          // v_b = din u + dx1 x_C1 + dx2 x_C2 - di i
+    Oversample4 os;                   // library: two halfband stages each way
+    float u4[4];
+    float y4[4];
+
+    void init(float rate)             // rate: the host's; the circuit runs at 4 rate
+    {
+        g1 = 1.0f / 2200.0f;
+        gc1 = 2.0f * 10e-9f * (4 * rate);
+        gc2 = 2.0f * 22e-9f * (4 * rate);
+        clear();
+        set(0.5f);
+    }
+
+    void clear()                      // the DC operating point: 0 V everywhere (no bias in this circuit)
+    {
+        x_C1 = 0;
+        x_C2 = 0;
+        os.clear();
+    }
+
+    void set(float tone)              // .pot tone: 0..1, lin; Ptone = 25k (1 - tone)
+    {
+        const float t = fminf(fmaxf(tone, 0), 1);
+        const float gs = 1.0f / (470.0f + 25000.0f * (1 - t));
+        const float s11 = g1 + gc1 + gs;
+        const float s22 = gs + gc2;
+        const float inv = 1.0f / (s11 * s22 - gs * gs);
+        cin = s22 * g1 * inv;
+        cx1 = s22 * inv;
+        cx2 = gs * inv;
+        kk = s22 * inv;
+        gk = (s11 * s22 - gs * gs) / s22;
+        din = gs * g1 * inv;
+        dx1 = gs * inv;
+        dx2 = s11 * inv;
+        di = gs * inv;
+        k2 = 5.04e-9f * kk;           // .model 1N914 D(IS=2.52n N=1.752): N Vt = 45.3 mV at 27 C
+        kvt = k2 * 22.0750552f;       // 1 / (N Vt) as a product: a constant's divide stays a divide in FMinus
+        lna = logf(0.5f * kvt);
+    }
+
+    float step(float u)               // one sample at 4 rate
+    {
+        const float p = cin * u + cx1 * x_C1 + cx2 * x_C2;
+        const float q = fabsf(p);
+        const float a = 0.5f * k2;
+        const float arg = (q + a) * 22.0750552f + lna;
+        const float w = arg <= -3.34145955f ? 0
+                      : arg < 8 ? ((-1.31429315e-3f * arg + 4.77593136e-2f) * arg + 3.63195266e-1f) * arg + 6.31318346e-1f
+                                : arg - logf(fmaxf(arg, 8));
+        float v = q + a - 0.0453f * w;                         // omega3: the conducting diode alone
+        v = p < 0 ? -v : v;
+        const float e = expf(v * 22.0750552f);
+        const float ei = 1 / e;
+        const float f = v - p + k2 * 0.5f * (e - ei);
+        const float d = 1 + kvt * 0.5f * (e + ei);
+        v = fminf(fmaxf(v - f / d, fminf(p, 0)), fmaxf(p, 0));  // one Newton step on both diodes, kept in bracket
+        const float i = (p - v) * gk;                          // the port's current, from the linear network
+        const float b = din * u + dx1 * x_C1 + dx2 * x_C2 - di * i;
+        x_C1 = 2 * gc1 * v - x_C1;
+        x_C2 = 2 * gc2 * b - x_C2;
+        return b;
+    }
+
+    float tick(float u)               // one sample at the host's rate
+    {
+        os.up(u, u4);
+        for (int k = 0; k < 4; ++k)
+            y4[k] = step(u4[k]);
+        return os.down(y4);
+    }
+};
+
+module Effect
+{
+    param float tone [[fminus::range(0, 1)]] [[fminus::default(0.5)]];
+    param float input [[fminus::range(-24, 24)]] [[fminus::default(0)]];   // dB; 0 dB: full scale is 1 V
+    param float level [[fminus::range(-36, 6)]] [[fminus::default(-6)]];   // dB
+    DiodeTone left_, right_;
+    int grid;                                                              // the absolute 16-sample grid
+
+    void init(float rate)
+    {
+        left_.init(rate);
+        right_.init(rate);
+        grid = 0;
+    }
+
+    void process(float* restrict left, float* restrict right, int n)
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            if (grid == 0)
+            {
+                left_.set(tone[i]);
+                right_.set(tone[i]);
+            }
+            grid = grid == 15 ? 0 : grid + 1;
+            const float gin = expf(0.115129255f * input[i]);
+            const float gout = expf(0.115129255f * level[i]);
+            left[i] = gout * left_.tick(gin * left[i]);
+            right[i] = gout * right_.tick(gin * right[i]);
+        }
+    }
+};

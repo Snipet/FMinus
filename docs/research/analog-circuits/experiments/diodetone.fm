@@ -1,0 +1,101 @@
+// diodetone.cir.fm: generated from diodetone.cir (hand-written here as the generator would emit it).
+// Circuit: in -R1 2.2k- a; C1 10n a-0; D1, D2 1N914 antiparallel a-0; a -R2 470- c -Ptone 25k- b; C2 22n b-0; out = b.
+// Method: nodal DK, trapezoidal, 1 nonlinear port (the diode pair, v = a), solved by the omega3 closed form and one
+// Newton step. States: x1, x2 (the capacitors' companion histories). Pots: tone (0..1) -> Rpot = 25k (1 - tone).
+module DiodeTone
+{
+    float x1, x2;          // C1, C2 histories
+    float g1, gc1, gc2;    // rate-dependent conductances
+    float cin, cx1, cx2;   // p = cin in + cx1 x1 + cx2 x2
+    float kk;              // the port's self-impedance K (ohms): a = p - K i
+    float k2, kvt, lna;    // 2 Is K, 2 Is K / Vt, log(Is K / Vt)
+    float din, dx1, dx2, di;   // b = din in + dx1 x1 + dx2 x2 - di i
+
+    void init(float rate)
+    {
+        g1 = 1.0f / 2200.0f;
+        gc1 = 2.0f * 10e-9f * rate;
+        gc2 = 2.0f * 22e-9f * rate;
+        x1 = 0;
+        x2 = 0;
+        set(0.5f);
+    }
+
+    // The pot: every 16 samples on the absolute grid, or once a call when its dial holds still.
+    void set(float tone)
+    {
+        const float t = fminf(fmaxf(tone, 0), 1);
+        const float gs = 1.0f / (470.0f + 25000.0f * (1 - t));
+        const float s11 = g1 + gc1 + gs;
+        const float s22 = gs + gc2;
+        const float inv = 1.0f / (s11 * s22 - gs * gs);
+        cin = s22 * g1 * inv;
+        cx1 = s22 * inv;
+        cx2 = gs * inv;
+        kk = s22 * inv;
+        din = gs * g1 * inv;
+        dx1 = gs * inv;
+        dx2 = s11 * inv;
+        di = gs * inv;
+        k2 = 2 * 2.52e-9f * kk;                     // 1N914: Is = 2.52 nA, N Vt = 45 mV
+        kvt = k2 / 0.045f;
+        lna = logf(0.5f * k2 / 0.045f);
+    }
+
+    float tick(float in)
+    {
+        const float p = cin * in + cx1 * x1 + cx2 * x2;
+        // omega3 (D'Angelo et al.): the diode that conducts, alone, in closed form
+        const float q = fabsf(p);
+        const float a = 0.5f * k2;
+        const float arg = (q + a) / 0.045f + lna;
+        const float w = arg <= -3.34145955f ? 0
+                      : arg < 8 ? ((-1.31429315e-3f * arg + 4.77593136e-2f) * arg + 3.63195266e-1f) * arg + 6.31318346e-1f
+                                : arg - logf(fmaxf(arg, 8));
+        float v = q + a - 0.045f * w;
+        v = p < 0 ? -v : v;
+        // one Newton step on both diodes: v - p + K 2 Is sinh(v / Vt) = 0
+        const float e = expf(v / 0.045f);
+        const float ei = 1 / e;
+        const float f = v - p + k2 * 0.5f * (e - ei);
+        const float d = 1 + kvt * 0.5f * (e + ei);
+        v = fminf(fmaxf(v - f / d, fminf(p, 0)), fmaxf(p, 0));
+        const float i = (p - v) / kk;               // the diodes' current, from the linear network
+        const float b = din * in + dx1 * x1 + dx2 * x2 - di * i;
+        x1 = 2 * gc1 * v - x1;
+        x2 = 2 * gc2 * b - x2;
+        return b;
+    }
+};
+
+// A timing harness: n samples of a 1 kHz, 2 V sine at 48 kHz; returns a checksum.
+float main(float n)
+{
+    DiodeTone c;
+    c.init(48000);
+    c.set(0.3f);
+    float sum = 0;
+    float ph = 0;
+    for (int i = 0; i < (int)n; ++i)
+    {
+        sum += c.tick(2 * sinf(6.28318531f * ph));
+        ph += 1000.0f / 48000.0f;
+        if (ph >= 1)
+            ph -= 1;
+    }
+    return sum;
+}
+
+float baseline(float n)
+{
+    float sum = 0;
+    float ph = 0;
+    for (int i = 0; i < (int)n; ++i)
+    {
+        sum += 2 * sinf(6.28318531f * ph);
+        ph += 1000.0f / 48000.0f;
+        if (ph >= 1)
+            ph -= 1;
+    }
+    return sum;
+}

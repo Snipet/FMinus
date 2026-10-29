@@ -1,0 +1,29 @@
+ 1:55  up 19 days, 14:54, 2 users, load averages: 7.86 5.22 4.83
+  1x      prev  K2: fail  worst alias (<= 0.45 V)  -21.5, solver   26.2, sweep/noise null  -10.9 dB  (0.36 s)
+  1x      omega K1: fail  worst alias (<= 0.45 V)  -21.5, solver  -49.0, sweep/noise null  -10.9 dB  (0.35 s)
+  1x ADAA omega K1: fail  worst alias (<= 0.45 V)  -35.0, solver  -69.5, sweep/noise null   -9.8 dB  (0.43 s)
+  1x      omega K2: fail  worst alias (<= 0.45 V)  -21.5, solver  -88.3, sweep/noise null  -10.9 dB  (0.39 s)
+  1x      prev  K4: fail  worst alias (<= 0.45 V)  -21.5, solver   28.0, sweep/noise null  -10.9 dB  (0.42 s)
+  2x      prev  K2: fail  worst alias (<= 0.45 V)  -31.3, solver   20.4, sweep/noise null  -17.5 dB  (1.18 s)
+  2x      omega K1: fail  worst alias (<= 0.45 V)  -31.3, solver  -49.8, sweep/noise null  -17.5 dB  (1.20 s)
+  1x      prev  K6: fail  worst alias (<= 0.45 V)  -21.5, solver   27.4, sweep/noise null  -10.9 dB  (0.50 s)
+  2x ADAA omega K1: fail  worst alias (<= 0.45 V)  -52.7, solver  -77.5, sweep/noise null  -19.6 dB  (1.33 s)
+  2x      omega K2: fail  worst alias (<= 0.45 V)  -31.3, solver  -89.4, sweep/noise null  -17.5 dB  (1.25 s)
+  2x      prev  K4: fail  worst alias (<= 0.45 V)  -31.3, solver   26.1, sweep/noise null  -17.5 dB  (1.40 s)
+  4x      prev  K2: fail  worst alias (<= 0.45 V)  -43.4, solver   -3.9, sweep/noise null  -26.4 dB  (2.45 s)
+  4x      omega K1: fail  worst alias (<= 0.45 V)  -43.4, solver  -49.8, sweep/noise null  -26.4 dB  (2.34 s)
+  2x      prev  K6: fail  worst alias (<= 0.45 V)  -31.3, solver   30.1, sweep/noise null  -17.5 dB  (1.46 s)
+  4x ADAA omega K1: PASS  worst alias (<= 0.45 V)  -71.9, solver  -79.5, sweep/noise null  -26.0 dB  (2.64 s)
+  4x      omega K2: fail  worst alias (<= 0.45 V)  -43.4, solver  -89.1, sweep/noise null  -26.4 dB  (2.53 s)
+  4x      prev  K4: fail  worst alias (<= 0.45 V)  -43.4, solver   -7.2, sweep/noise null  -26.4 dB  (2.94 s)
+  8x      prev  K2: fail  worst alias (<= 0.45 V)  -68.9, solver  -20.3, sweep/noise null  -37.7 dB  (5.12 s)
+  8x      omega K1: fail  worst alias (<= 0.45 V)  -68.9, solver  -51.9, sweep/noise null  -37.7 dB  (4.81 s)
+  4x      prev  K6: fail  worst alias (<= 0.45 V)  -43.4, solver  -10.2, sweep/noise null  -26.4 dB  (3.00 s)
+  8x ADAA omega K1: PASS  worst alias (<= 0.45 V)  -82.3, solver  -79.5, sweep/noise null  -34.7 dB  (5.61 s)
+  8x      omega K2: PASS  worst alias (<= 0.45 V)  -68.9, solver  -91.1, sweep/noise null  -37.7 dB  (4.13 s)
+  8x      prev  K4: fail  worst alias (<= 0.45 V)  -68.9, solver  -27.3, sweep/noise null  -37.7 dB  (4.25 s)
+  8x      prev  K6: fail  worst alias (<= 0.45 V)  -68.9, solver  -32.6, sweep/noise null  -37.7 dB  (4.92 s)
+reference (3 drives x 17 signals, 64x, converged double): 26.00 s
+exhaustive search over 24 candidates: 55.01 s; ordered search to the first pass (4x ADAA omega K1): 17.70 s
+./selftest  79.88s user 0.49s system 99% cpu 1:21.05 total
+ 1:56  up 19 days, 14:55, 2 users, load averages: 6.45 5.48 4.96

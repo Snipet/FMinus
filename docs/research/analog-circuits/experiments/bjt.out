@@ -1,0 +1,85 @@
+== Rangemaster topology, silicon (Is 1e-14) ==
+  DC: Vbe 0.6014 V, Vce 7.2302 V, Ic 0.127 mA, collector 7.729 V
+  1x,    10 mV: double offset vs absolute  -142.2 dB | float (8 Newton steps) absolute   -77.3 dB, offset  -133.0 dB
+  1x,   100 mV: double offset vs absolute  -140.3 dB | float (8 Newton steps) absolute   -76.3 dB, offset     nan dB
+  1x,  1000 mV: double offset vs absolute  -136.4 dB | float (8 Newton steps) absolute    -3.0 dB, offset     nan dB
+  4x,    10 mV: double offset vs absolute  -142.2 dB | float (8 Newton steps) absolute   -70.8 dB, offset  -132.1 dB
+  4x,   100 mV: double offset vs absolute  -140.3 dB | float (8 Newton steps) absolute   -64.0 dB, offset     nan dB
+  4x,  1000 mV: double offset vs absolute  -136.0 dB | float (8 Newton steps) absolute   -10.5 dB, offset     nan dB
+== Rangemaster topology, germanium-like (Is 5 uA) ==
+  DC: Vbe 0.0989 V, Vce 5.7962 V, Ic 0.230 mA, collector 6.701 V
+  1x,    10 mV: double offset vs absolute  -156.2 dB | float (8 Newton steps) absolute   -77.8 dB, offset  -129.3 dB
+  1x,   100 mV: double offset vs absolute  -151.4 dB | float (8 Newton steps) absolute   -85.4 dB, offset  -123.9 dB
+  1x,  1000 mV: double offset vs absolute  -139.4 dB | float (8 Newton steps) absolute     0.7 dB, offset     nan dB
+  4x,    10 mV: double offset vs absolute  -156.2 dB | float (8 Newton steps) absolute   -75.5 dB, offset  -126.1 dB
+  4x,   100 mV: double offset vs absolute  -151.4 dB | float (8 Newton steps) absolute   -74.8 dB, offset  -115.8 dB
+  4x,  1000 mV: double offset vs absolute  -139.1 dB | float (8 Newton steps) absolute   -10.1 dB, offset     nan dB
+== Fuzz Face (NPN silicon), fuzz 0.9 ==
+  K (V/A), ports Q1:BE, Q1:CE, Q2:BE, Q2:CE
+          -994.8            0       0.9989       0.9989
+               0     -3.3e+04     -3.3e+04            0
+          0.9989     -3.3e+04    -3.31e+04       -100.4
+          0.9989            0       -100.4        -8498
+  DC: Q1 Vbe 0.616 Vce 1.377, Q2 Vbe 0.647 Vce 2.063; Ic1 0.227 mA, Ic2 0.728 mA
+  1x,    10 mV: iterations to 1e-12 V: previous 118.25 mean / 200 max, extrapolated 1.00 / 34
+      output RMS 2.973 V
+      float offset, prev, plain   , fixed K vs converged double: K1    nan! K2    nan! K3    nan! K4    nan! K5    nan! K6    nan! K7    nan! K8    nan!
+      float offset, prev, capped  , fixed K vs converged double: K1   -2.4 K2   -2.0 K3   -2.3 K4   -2.4 K5   -2.3 K6   -5.0 K7   -4.6 K8   -3.1
+      float offset, extrap, plain , fixed K vs converged double: K1    nan! K2    nan! K3    nan! K4    nan! K5    nan! K6    nan! K7    nan! K8    nan!
+      float offset, extrap, capped, fixed K vs converged double: K1    6.7 K2    nan! K3    nan! K4    nan! K5    nan! K6    nan! K7    nan! K8    nan!
+
+  1x,   100 mV: iterations to 1e-12 V: previous 92.91 mean / 200 max, extrapolated 1.01 / 200
+      output RMS 3.296 V
+      float offset, prev, plain   , fixed K vs converged double: K1    nan! K2    nan! K3    nan! K4    nan! K5    nan! K6    nan! K7    nan! K8    nan!
+      float offset, prev, capped  , fixed K vs converged double: K1   -1.6 K2    1.7 K3    6.4 K4   14.6 K5   10.4 K6    7.4 K7    5.4 K8    5.5
+      float offset, extrap, plain , fixed K vs converged double: K1    nan! K2    nan! K3    nan! K4    nan! K5    nan! K6    nan! K7    nan! K8    nan!
+      float offset, extrap, capped, fixed K vs converged double: K1    nan! K2    nan! K3    nan! K4    nan! K5    nan! K6    nan! K7    nan! K8    nan!
+
+  1x,  1000 mV: iterations to 1e-12 V: previous 58.36 mean / 200 max, extrapolated 1.00 / 2
+      output RMS 2.955 V
+      float offset, prev, plain   , fixed K vs converged double: K1    nan! K2    nan! K3    nan! K4    nan! K5    nan! K6    nan! K7    nan! K8    nan!
+      float offset, prev, capped  , fixed K vs converged double: K1   -1.0 K2   -1.1 K3   23.3 K4   18.5 K5   23.7 K6   19.4 K7   10.4 K8   17.9
+      float offset, extrap, plain , fixed K vs converged double: K1    nan! K2    nan! K3    nan! K4    nan! K5    nan! K6    nan! K7    nan! K8    nan!
+      float offset, extrap, capped, fixed K vs converged double: K1    nan! K2    nan! K3    nan! K4    nan! K5    nan! K6    nan! K7    nan! K8    nan!
+
+  4x,    10 mV: iterations to 1e-12 V: previous 43.34 mean / 200 max, extrapolated 1.00 / 37
+      output RMS 3.404 V
+      float offset, prev, plain   , fixed K vs converged double: K1    nan! K2    nan! K3    nan! K4    nan! K5    nan! K6    nan! K7    nan! K8    nan!
+      float offset, prev, capped  , fixed K vs converged double: K1   -2.6 K2  -10.1 K3  -15.8 K4  -16.8 K5  -15.8 K6  -14.3 K7  -13.1 K8  -12.3
+      float offset, extrap, plain , fixed K vs converged double: K1    nan! K2    nan! K3    nan! K4    nan! K5    nan! K6    nan! K7    nan! K8    nan!
+      float offset, extrap, capped, fixed K vs converged double: K1    nan! K2    nan! K3    nan! K4    nan! K5    nan! K6    nan! K7    nan! K8    nan!
+
+  4x,   100 mV: iterations to 1e-12 V: previous 34.29 mean / 200 max, extrapolated 1.00 / 66
+      output RMS 3.265 V
+      float offset, prev, plain   , fixed K vs converged double: K1    nan! K2    nan! K3    nan! K4    nan! K5    nan! K6    nan! K7    nan! K8    nan!
+      float offset, prev, capped  , fixed K vs converged double: K1   14.0 K2   10.4 K3   -1.9 K4   -2.9 K5   -6.3 K6   -7.6 K7   -8.1 K8   -9.5
+      float offset, extrap, plain , fixed K vs converged double: K1    nan! K2    nan! K3    nan! K4    nan! K5    nan! K6    nan! K7    nan! K8    nan!
+      float offset, extrap, capped, fixed K vs converged double: K1    nan! K2    nan! K3    nan! K4    nan! K5    nan! K6    nan! K7    nan! K8    nan!
+
+  4x,  1000 mV: iterations to 1e-12 V: previous 22.26 mean / 200 max, extrapolated 1.00 / 200
+      output RMS 2.828 V
+      float offset, prev, plain   , fixed K vs converged double: K1    nan! K2    nan! K3    nan! K4    nan! K5    nan! K6    nan! K7    nan! K8    nan!
+      float offset, prev, capped  , fixed K vs converged double: K1   23.2 K2   19.9 K3   17.2 K4    7.4 K5   11.9 K6    3.3 K7   -6.5 K8   -1.6
+      float offset, extrap, plain , fixed K vs converged double: K1    nan! K2    nan! K3    nan! K4    nan! K5    nan! K6    nan! K7    nan! K8    nan!
+      float offset, extrap, capped, fixed K vs converged double: K1    nan! K2    nan! K3    nan! K4    nan! K5    nan! K6    nan! K7    nan! K8    nan!
+
+  8x,    10 mV: iterations to 1e-12 V: previous 25.13 mean / 200 max, extrapolated 2.65 / 23
+      output RMS 3.490 V
+      float offset, prev, plain   , fixed K vs converged double: K1    nan! K2    nan! K3    nan! K4    nan! K5    nan! K6    nan! K7    nan! K8    nan!
+      float offset, prev, capped  , fixed K vs converged double: K1   -7.2 K2  -14.8 K3  -21.6 K4  -27.2 K5  -27.1 K6  -26.8 K7  -26.8 K8  -26.8
+      float offset, extrap, plain , fixed K vs converged double: K1    nan! K2    nan! K3    nan! K4    nan! K5    nan! K6    nan! K7    nan! K8    nan!
+      float offset, extrap, capped, fixed K vs converged double: K1    nan! K2    nan! K3    nan! K4    nan! K5    nan! K6    nan! K7    nan! K8    nan!
+
+  8x,   100 mV: iterations to 1e-12 V: previous 21.88 mean / 200 max, extrapolated 1.00 / 43
+      output RMS 3.283 V
+      float offset, prev, plain   , fixed K vs converged double: K1    nan! K2    nan! K3    nan! K4    nan! K5    nan! K6    nan! K7    nan! K8    nan!
+      float offset, prev, capped  , fixed K vs converged double: K1    9.9 K2   -2.9 K3   -7.8 K4  -11.8 K5  -12.9 K6  -13.2 K7  -13.2 K8  -12.6
+      float offset, extrap, plain , fixed K vs converged double: K1    nan! K2    nan! K3    nan! K4    nan! K5    nan! K6    nan! K7    nan! K8    nan!
+      float offset, extrap, capped, fixed K vs converged double: K1    nan! K2    nan! K3    nan! K4    nan! K5    nan! K6    nan! K7    nan! K8    nan!
+
+  8x,  1000 mV: iterations to 1e-12 V: previous 14.44 mean / 200 max, extrapolated 1.00 / 200
+      output RMS 2.831 V
+      float offset, prev, plain   , fixed K vs converged double: K1    nan! K2    nan! K3    nan! K4    nan! K5    nan! K6    nan! K7    nan! K8    nan!
+      float offset, prev, capped  , fixed K vs converged double: K1   19.5 K2   11.1 K3    9.1 K4    2.2 K5   -0.2 K6    0.9 K7   -6.1 K8   -4.9
+      float offset, extrap, plain , fixed K vs converged double: K1    nan! K2    nan! K3    nan! K4    nan! K5    nan! K6    nan! K7    nan! K8    nan!
+      float offset, extrap, capped, fixed K vs converged double: K1    nan! K2    nan! K3    nan! K4    nan! K5    nan! K6    nan! K7    nan! K8    nan!

@@ -1,0 +1,22 @@
+ 1:50  up 19 days, 14:48, 2 users, load averages: 2.96 3.70 4.49
+compile 5.7 ms
+v_torn2_s_1x                    85.01 ns     375.7 cycles     496.9 instr  per call-unit   (lookup 196.2 ms, result -173.98)
+v_torn2_s_2x                   169.80 ns     751.0 cycles    1162.6 instr  per call-unit   (lookup 0.0 ms, result -162.492)
+v_torn2_p4_1x                   69.20 ns     305.8 cycles     600.6 instr  per call-unit   (lookup 0.0 ms, result 964.345)
+v_torn2_p4_2x                  138.55 ns     612.6 cycles    1230.9 instr  per call-unit   (lookup 0.0 ms, result 1086.06)
+v_tornlin2_s_1x                 70.86 ns     313.4 cycles     389.4 instr  per call-unit   (lookup 0.0 ms, result -171.551)
+v_tornlin2_s_2x                141.64 ns     626.7 cycles     947.9 instr  per call-unit   (lookup 0.0 ms, result -162.527)
+v_tornlin2_p4_1x                64.01 ns     283.4 cycles     364.5 instr  per call-unit   (lookup 0.0 ms, result 977.946)
+v_tornlin2_p4_2x               128.41 ns     566.0 cycles     808.1 instr  per call-unit   (lookup 0.0 ms, result 1085.85)
+v_2d2_s_1x                      56.07 ns     248.1 cycles     366.9 instr  per call-unit   (lookup 0.0 ms, result -173.456)
+v_2d2_s_2x                     111.94 ns     493.9 cycles     902.5 instr  per call-unit   (lookup 0.0 ms, result -162.47)
+v_2d2_p4_1x                     43.76 ns     188.5 cycles     495.4 instr  per call-unit   (lookup 0.0 ms, result 967.42)
+v_2d2_p4_2x                     85.61 ns     369.7 cycles     990.6 instr  per call-unit   (lookup 0.0 ms, result 1086.18)
+v_torn1_s_1x                    37.65 ns     165.2 cycles     307.2 instr  per call-unit   (lookup 0.0 ms, result 570.787)
+v_torn1_p4_1x                   37.66 ns     163.6 cycles     344.3 instr  per call-unit   (lookup 0.0 ms, result 5099.16)
+compile 3.7 ms
+v_tornlin2_s_1x                 40.05 ns     175.8 cycles     338.3 instr  per call-unit   (lookup 115.3 ms, result -171.55)
+v_tornlin2_p4_1x                80.28 ns     353.1 cycles     517.5 instr  per call-unit   (lookup 0.0 ms, result 977.971)
+v_tornlin2_s_2x                 80.42 ns     349.6 cycles     737.5 instr  per call-unit   (lookup 0.0 ms, result -162.529)
+v_tornlin2_p4_2x               160.55 ns     699.1 cycles    1114.7 instr  per call-unit   (lookup 0.0 ms, result 1085.88)
+ 1:50  up 19 days, 14:48, 2 users, load averages: 3.13 3.70 4.48
