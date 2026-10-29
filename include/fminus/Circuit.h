@@ -50,7 +50,7 @@ namespace fminus
         };
 
         // The oversampler's 2x halfband stages, designed for a 48 kHz host (passband to 20 kHz).
-        //   Iir  polyphase allpass (HIIR's design): about 4.3 host samples of delay at 1 kHz at 4x; the default
+        //   Iir  polyphase allpass (HIIR's design): about 3.5 host samples of delay at 1 kHz at 4x; the default
         //   Fir  Kaiser-windowed, linear phase: about 47 host samples of delay at 4x
         enum class Halfband
         {
@@ -74,11 +74,11 @@ namespace fminus
         struct Options
         {
             std::string moduleName;             // the module's name; empty: the netlist's .title
-            std::optional<int> oversample;      // 1, 2, 4 or 8 (.oversample; default 4)
+            std::optional<int> oversample;      // 1, 2, 4 or 8 (.oversample; default 8)
             std::optional<Halfband> halfband;   // .oversample's iir or fir (default iir)
             std::optional<Region> region;       // .oversample's blocks= (default auto)
-            std::optional<Solver> solver;       // .solver (default omega(1) with ADAA, omega(2) without)
-            std::optional<bool> adaa;           // .adaa on|off (default on)
+            std::optional<Solver> solver;       // .solver (default omega(2) without ADAA, omega(1) with)
+            std::optional<bool> adaa;           // .adaa on|off (default off)
             std::optional<int> channels;        // .channels 1 or 2 (default 1)
         };
 

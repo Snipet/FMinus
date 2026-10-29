@@ -9,30 +9,26 @@
 # The plan, in the header.
 # DT:      // DiodeTone: generated from diodetone.cir by fminus::circuit (Phase 0). Do not edit: edit diodetone.cir.
 # DT-NEXT: //   1 block, 2 states (C1, C2), 1 nonlinear port (D1|D2: 2 Is sinh(v / N Vt), Is 2.52 nA, N Vt 45.315 mV at 27 C), 1 pot (tone)
-# DT-NEXT: //   block 1 (R1, C1, D1, D2, R2, Ptone, C2): in -> b; port D1|D2 at V(a); at 4 rate, designed at 4 rate 2/3 (ADAA)
-# DT-NEXT: //   solver: omega3 + 1 Newton step in [min(0, p), max(0, p)]; ADAA (Holters 2020, closed-form F)
-# DT-NEXT: //   configuration from the netlist: .oversample 4 iir blocks=auto, .adaa on, .solver omega(1); no self-test (Phase 1)
+# DT-NEXT: //   block 1 (R1, C1, D1, D2, R2, Ptone, C2): in -> b; port D1|D2 at V(a); at 4 rate
+# DT-NEXT: //   solver: omega3 + 2 Newton steps in [min(0, p), max(0, p)]
+# DT-NEXT: //   configuration from the netlist: .oversample 4 iir blocks=auto, .adaa off, .solver omega(2); no self-test (Phase 1)
 # DT-NEXT: //   .target: solver -60 dB, alias -60 dB at 4.5 V, 3 kHz (checked by examples/circuits --check, not here)
-# DT-NEXT: //   latency: about 3.5 host samples at 1 kHz (IIR halfbands, phase not linear), plus 0.125 (ADAA)
+# DT-NEXT: //   latency: about 3.5 host samples at 1 kHz (IIR halfbands, phase not linear)
 # DT-NEXT: module DiodeTone
 
 # Fields named after the parts.
 # DT:      float x_C1;
 # DT-NEXT: float x_C2;
-# DT-NEXT: float xo_C1;
-# DT-NEXT: float xo_C2;
 # DT-NEXT: float v_D1;
-# DT-NEXT: float p_D1;
-# DT-NEXT: float c_D1;
 # DT-NEXT: float gc_C1;
 # DT:      float p_D1_by_u;
 # DT:      float ka_D1;
 # DT:      float hb1u_x[6];
 
-# The rates: 2 C fs', fs' = 4 rate 2/3 (ADAA's design rate), folded in double.
+# The rates, 2 C fs' with fs' = 4 rate, folded in double.
 # DT-LABEL: void init(float rate)
-# DT:       gc_C1 = 5.3333334e-08f * rate;
-# DT-NEXT:  gc_C2 = 1.17333336e-07f * rate;
+# DT:       gc_C1 = 8e-08f * rate;
+# DT-NEXT:  gc_C2 = 1.76e-07f * rate;
 # DT-NEXT:  g2_C1 = 2 * gc_C1;
 # DT:       clear();
 # DT-NEXT:  set(0.5f);
@@ -46,7 +42,7 @@
 # DT:       kb_D1 = 22.067577f * ka_D1;
 # DT-NEXT:  lna_D1 = logf(kb_D1);
 
-# The step: p, omega3, exactly one Newton step in the bracket, ADAA's mean, the states.
+# The step: p, omega3, exactly two Newton steps in the bracket, then the output and the states.
 # DT-LABEL: float b1(float u)
 # DT-NEXT:  {
 # DT-NEXT:  const float p = p_D1_by_u * u + p_D1_by_x_C1 * x_C1 + p_D1_by_x_C2 * x_C2;
@@ -59,20 +55,12 @@
 # DT-NEXT:  v = p < 0 ? -v : v;
 # DT-NEXT:  const float lo = fminf(p, 0);
 # DT-NEXT:  const float hi = fmaxf(p, 0);
-# DT:       const float f = v - p + ka_D1 * (e - ei);
+# DT-COUNT-2: const float f = v - p + ka_D1 * (e - ei);
 # DT-NOT:   const float f =
-# DT:       const float ec = expf(v * 22.067577f);
-# DT:       const float vb = fabsf(dp) > 1e-05f ? vm + ((v - v_D1) * (0.5f * (p + p_D1) - vm) - kc_D1 * (c - c_D1)) / dp : vm;
-# DT-NEXT:  const float xa_C1 = 0.5f * (x_C1 + xo_C1);
-# DT-NEXT:  const float xa_C2 = 0.5f * (x_C2 + xo_C2);
-# DT-NEXT:  const float n_b = n_b_by_x_C2 * xa_C2 + n_b_by_v_D1 * vb;
-# DT-NEXT:  xo_C1 = x_C1;
-# DT-NEXT:  xo_C2 = x_C2;
-# DT-NEXT:  x_C1 = g2_C1 * vb - xa_C1;
-# DT-NEXT:  x_C2 = g2_C2 * n_b - xa_C2;
+# DT:       const float n_b = n_b_by_x_C2 * x_C2 + n_b_by_v_D1 * v;
+# DT-NEXT:  x_C1 = g2_C1 * v - x_C1;
+# DT-NEXT:  x_C2 = g2_C2 * n_b - x_C2;
 # DT-NEXT:  v_D1 = v;
-# DT-NEXT:  p_D1 = p;
-# DT-NEXT:  c_D1 = c;
 # DT-NEXT:  return n_b;
 
 # tick: up, four steps, down.
@@ -108,10 +96,31 @@
 # TS:       const float r_Ptone_a = 20000.0f * (1 - t_Ptone);
 # TS-NEXT:  const float r_Ptone_b = 20000.0f * t_Ptone;
 # TS-LABEL: float b1(float u)
+# Block 2: omega3, one Newton step, ADAA's mean in closed form, the averaged states; V(n1) = u and V(v2) = u - v exactly.
 # TS-LABEL: float b2(float u)
-# TS:       const float ua = 0.5f * (u + uo_n_p1);
+# TS-NEXT:  {
+# TS-NEXT:  const float p = p_D1_by_n_p1 * u + p_D1_by_x_C3 * x_C3 + p_D1_by_x_C4 * x_C4;
+# TS-COUNT-1: const float f = v - p + ka_D1 * (e - ei);
+# TS-NOT:   const float f =
+# TS:       const float ec = expf(v * 22.067577f);
+# TS-NEXT:  const float c = ec + 1 / ec;
+# TS-NEXT:  const float dp = p - p_D1;
+# TS-NEXT:  const float vm = 0.5f * (v + v_D1);
+# TS-NEXT:  const float vb = fabsf(dp) > 1e-05f ? vm + ((v - v_D1) * (0.5f * (p + p_D1) - vm) - kc_D1 * (c - c_D1)) / dp : vm;
+# TS-NEXT:  const float xa_C3 = 0.5f * (x_C3 + xo_C3);
+# TS-NEXT:  const float xa_C4 = 0.5f * (x_C4 + xo_C4);
+# TS-NEXT:  const float ua = 0.5f * (u + uo_n_p1);
 # TS-NEXT:  const float n_v2 = ua - vb;
-# TS:       x_C4 = g2_C4 * vb - xa_C4;
+# TS-NEXT:  const float vc_C3 = vc_C3_by_n_p1 * ua + vc_C3_by_x_C3 * xa_C3;
+# TS-NEXT:  xo_C3 = x_C3;
+# TS-NEXT:  xo_C4 = x_C4;
+# TS-NEXT:  x_C3 = g2_C3 * vc_C3 - xa_C3;
+# TS-NEXT:  x_C4 = g2_C4 * vb - xa_C4;
+# TS-NEXT:  v_D1 = v;
+# TS-NEXT:  p_D1 = p;
+# TS-NEXT:  c_D1 = c;
+# TS-NEXT:  uo_n_p1 = u;
+# TS-NEXT:  return n_v2;
 # TS-LABEL: float b3(float u)
 # TS-LABEL: float b4(float u)
 # TS-LABEL: float step(float u)

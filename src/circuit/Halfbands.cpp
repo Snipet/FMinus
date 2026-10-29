@@ -117,31 +117,44 @@ namespace fminus::circuit
         return total;
     }
 
+    namespace
+    {
+        // A field's declaration, its comment at the column the module's other fields use.
+        std::string field(const std::string& declaration, const std::string& note = {})
+        {
+            std::string line = "    " + declaration;
+            if (!note.empty())
+            {
+                line.append(line.size() < 31 ? 31 - line.size() : 2, ' ');
+                line += "// " + note;
+            }
+            return line + "\n";
+        }
+    } // namespace
+
     void emitHalfbandFields(std::string& out, int stage, Halfband kind, const std::string& type)
     {
         const std::string up = pre(stage, 'u');
         const std::string down = pre(stage, 'd');
         if (kind == Halfband::Iir)
         {
-            const std::size_t n = iirCoefficients(stage).size();
-            const std::string count = std::to_string(n);
-            out += "    " + type + " " + up + "_x[" + count + "];   // " + rateText(stage) + ", up (IIR, " + count +
-                   " allpass coefficients)\n";
-            out += "    " + type + " " + up + "_y[" + count + "];\n";
-            out += "    " + type + " " + down + "_x[" + count + "];   // and down\n";
-            out += "    " + type + " " + down + "_y[" + count + "];\n";
+            const std::string count = std::to_string(iirCoefficients(stage).size());
+            out += field(type + " " + up + "_x[" + count + "];",
+                         rateText(stage) + ", up (IIR, " + count + " allpass coefficients)");
+            out += field(type + " " + up + "_y[" + count + "];");
+            out += field(type + " " + down + "_x[" + count + "];", "and down");
+            out += field(type + " " + down + "_y[" + count + "];");
             return;
         }
         const std::size_t j = firTaps(stage).size();
         const std::size_t w = 2 * j;
-        out += "    " + type + " " + up + "_d[" + std::to_string(2 * w) + "];   // " + rateText(stage) + ", up (FIR, " +
-               std::to_string(4 * j - 1) + " taps): a doubled ring\n";
-        out += "    int " + up + "_pos;\n";
-        out +=
-            "    " + type + " " + down + "_e[" + std::to_string(2 * (j + 1)) + "];   // and down: the even samples\n";
-        out += "    " + type + " " + down + "_od[" + std::to_string(2 * w) + "];   // the odd samples\n";
-        out += "    int " + down + "_pe;\n";
-        out += "    int " + down + "_po;\n";
+        out += field(type + " " + up + "_d[" + std::to_string(2 * w) + "];",
+                     rateText(stage) + ", up (FIR, " + std::to_string(4 * j - 1) + " taps): a doubled ring");
+        out += field("int " + up + "_pos;");
+        out += field(type + " " + down + "_e[" + std::to_string(2 * (j + 1)) + "];", "and down: the even samples");
+        out += field(type + " " + down + "_od[" + std::to_string(2 * w) + "];", "the odd samples");
+        out += field("int " + down + "_pe;");
+        out += field("int " + down + "_po;");
     }
 
     void emitHalfbandClear(std::string& out, int stage, Halfband kind)

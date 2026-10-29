@@ -1,7 +1,7 @@
 # The configurations a netlist's directives choose (Inputs/*.cir are examples/circuits' with one directive changed),
 # each compiled too.
-# RUN: fminus %S/Inputs/diodetone-plain.cir --emit fm | FileCheck %s --check-prefix=PLAIN
-# RUN: fminus %S/Inputs/diodetone-plain.cir -o %t.plain.ll
+# RUN: fminus %S/Inputs/diodetone-adaa.cir --emit fm | FileCheck %s --check-prefix=ADAA
+# RUN: fminus %S/Inputs/diodetone-adaa.cir -o %t.adaa.ll
 # RUN: fminus %S/Inputs/diodetone-newton.cir --emit fm | FileCheck %s --check-prefix=NEWTON
 # RUN: fminus %S/Inputs/diodetone-newton.cir -o %t.newton.ll
 # RUN: fminus %S/Inputs/diodetone-fir8.cir --emit fm | FileCheck %s --check-prefix=FIR8
@@ -13,14 +13,19 @@
 # RUN: fminus %S/Inputs/diodetone-stereo.cir --emit fm | FileCheck %s --check-prefix=STEREO
 # RUN: fminus %S/Inputs/diodetone-stereo.cir -o %t.stereo.ll
 
-# .adaa off .solver omega(2): two Newton steps, no ADAA mean, the states from v.
-# PLAIN:      configuration from the netlist: .oversample 4 iir blocks=auto, .adaa off, .solver omega(2)
-# PLAIN-LABEL: float b1(float u)
-# PLAIN:      // Newton step 1 of 2
-# PLAIN:      // Newton step 2 of 2
-# PLAIN-NOT:  vb
-# PLAIN:      x_C1 = g2_C1 * v - x_C1;
-# PLAIN-NEXT: x_C2 = g2_C2 * n_b - x_C2;
+# .adaa on .solver omega(1): one Newton step, ADAA's mean (Holters 2020), the states averaged, designed at 4 rate 2/3.
+# ADAA:      configuration from the netlist: .oversample 4 iir blocks=auto, .adaa on, .solver omega(1)
+# ADAA:      float xo_C1;
+# ADAA:      float c_D1;
+# ADAA:      gc_C1 = 5.3333334e-08f * rate;
+# ADAA:      c_D1 = 2;
+# ADAA-LABEL: float b1(float u)
+# ADAA:      // Newton step 1 of 1
+# ADAA-NOT:  // Newton step
+# ADAA:      const float vb = fabsf(dp) > 1e-05f ? vm + ((v - v_D1) * (0.5f * (p + p_D1) - vm) - kc_D1 * (c - c_D1)) / dp : vm;
+# ADAA:      const float n_b = n_b_by_x_C2 * xa_C2 + n_b_by_v_D1 * vb;
+# ADAA:      x_C1 = g2_C1 * vb - xa_C1;
+# ADAA-NEXT: x_C2 = g2_C2 * n_b - xa_C2;
 
 # .solver newton(4): from the previous step's solution, kept in the bracket, then 4 steps.
 # NEWTON-LABEL: float b1(float u)

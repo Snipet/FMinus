@@ -108,14 +108,16 @@ namespace fminus::circuit
         bool used = false;
     };
 
-    // The configuration, and where each choice came from: "the netlist", "Options", "default" or "auto".
+    // The configuration, and where each choice came from: "the netlist", "Options", "default" or "auto". The defaults
+    // are Phase 0's for a 1-port exp-affine block, the configuration that meets the report's targets (T1-T4) on both
+    // of its examples' full stress sets: 8x, IIR halfbands, plain omega3 + 2 Newton steps (docs/circuits.md).
     struct Config
     {
-        int oversample = 4;
+        int oversample = 8;
         Halfband halfband = Halfband::Iir;
         Region region = Region::Auto;
-        Solver solver{Solver::Guess::Omega, 1};
-        bool adaa = true;
+        Solver solver{Solver::Guess::Omega, 2};
+        bool adaa = false;
         int channels = 1;
         std::string oversampleFrom = "default";
         std::string halfbandFrom = "default";

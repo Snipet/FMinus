@@ -1,13 +1,16 @@
 // tests/unit/CircuitTest.cpp: the circuit compiler's front half (src/circuit/): SPICE numbers and {expressions}, the
 // netlist subset and its errors, the plan (blocks cut at ideal op amps, the oversampled region), each block's equations
-// against hand derivations, Yeh's eq. 24 and textbook responses, the 1x check, the pivots, and the halfband stages.
+// against hand derivations, Yeh's eq. 24 and textbook responses, the 1x check, the pivots, and the halfband stages;
+// and the double reference and the analysis that the checks of examples/circuits run on.
 #include "fminus/Circuit.h"
 
+#include "circuit/Analysis.h"
 #include "circuit/Emit.h"
 #include "circuit/Halfbands.h"
 #include "circuit/Mna.h"
 #include "circuit/Netlist.h"
 #include "circuit/Plan.h"
+#include "circuit/Reference.h"
 #include "CircuitNetlists.h"
 
 #include <catch2/catch_test_macros.hpp>
@@ -18,6 +21,7 @@
 #include <cstddef>
 #include <numbers>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -224,10 +228,10 @@ TEST_CASE("the netlist subset parses", "[circuit]")
     CHECK(n.output->node == "b");
     CHECK(n.oversample.value == 4);
     CHECK(n.halfband.value == fc::Halfband::Iir);
-    CHECK(n.adaa.value == true);
+    CHECK(n.adaa.value == false);
     REQUIRE(n.solver.value);
     CHECK(n.solver.value->guess == fc::Solver::Guess::Omega);
-    CHECK(n.solver.value->steps == 1);
+    CHECK(n.solver.value->steps == 2);
     CHECK(n.target.solver == -60);
     CHECK(n.target.alias == -60);
     CHECK(n.target.level == 4.5);
@@ -815,4 +819,83 @@ TEST_CASE("the halfband stages meet their design", "[circuit]")
         CHECK_THAT(fc::roundTripDelay(m, fc::Halfband::Iir, 1000), WithinAbs(measured(stages), 0.01));
     }
     CHECK_THAT(fc::roundTripDelay(4, fc::Halfband::Iir, 1000), WithinAbs(3.52, 0.01));
+}
+
+TEST_CASE("the analysis measures what it says", "[circuit]")
+{
+    const std::size_t n = 4096;
+    // an odd-bin sine has nothing off its harmonics
+    const std::vector<double> s = fc::sine(1.0, 85, n, 1, n);
+    CHECK(fc::inharmonicDb(s, 85) <= -250);
+    // a tone 60 dB down, off the harmonics, reads -60 dB (of the total)
+    std::vector<double> t = s;
+    const std::vector<double> off = fc::sine(1e-3, 101, n, 1, n);
+    for (std::size_t i = 0; i < n; ++i)
+        t[i] += off[i];
+    CHECK_THAT(fc::inharmonicDb(t, 85), WithinAbs(-60, 0.01));
+    // the same harmonics: 0 dB apart
+    double h1 = 1;
+    double h3 = 1;
+    std::vector<double> sq(n);
+    for (std::size_t i = 0; i < n; ++i)
+        sq[i] = std::tanh(3 * s[i]);
+    fc::harmonicDiffDb(sq, sq, 85, &h1, &h3);
+    CHECK(h1 == 0);
+    CHECK(h3 == 0);
+    // a known fractional delay, as a phase shift: the band error is rounding
+    const double delay = 0.37;
+    std::vector<double> late(n);
+    for (std::size_t i = 0; i < n; ++i)
+        late[i] = std::sin(2 * std::numbers::pi * 85 * (static_cast<double>(i) - delay) / static_cast<double>(n));
+    CHECK(fc::bandErrorDb(late, s, delay) <= -200);
+    CHECK(fc::bandErrorDb(late, s, 0) > -40);
+    // the decimator passes the band and keeps the sine where it was
+    const std::vector<double> fast = fc::sine(1.0, 85, n, 4, 4 * (n + 512));   // the filter reads 48 past the window
+    const std::vector<double> slow = fc::decimateWindow(fast, 4, 256, n);
+    const std::vector<double> want = fc::sine(1.0, 85, n, 1, n + 256);
+    CHECK(fc::bandErrorDb(slow, std::span<const double>(want).subspan(256, n), 0) <= -100);
+    CHECK_THAT(fc::binMagnitude(s, 85), WithinAbs(1, 1e-12));
+}
+
+TEST_CASE("the reference converges from the closed form", "[circuit]")
+{
+    // report §9.7: started from omega3, the converged solve never runs out of steps, even after a 13 V jump
+    const fc::Plan plan = planned(fc::test::kDiodeTone);
+    const fc::Holters h = fc::holters(plan, 0, 4 * 48000.0, potsAt(plan, "tone", 1));
+    fc::RefStats stats;
+    std::vector<double> step(48000, 13.0);
+    fc::simulate(h, step, {}, &stats);
+    fc::simulate(h, fc::sine(13.0, 257, 4096, 4, 48000), {}, &stats);
+    fc::RefOptions adaa;
+    adaa.adaa = true;
+    fc::simulate(fc::holters(plan, 0, 4 * 48000.0 * 2 / 3, potsAt(plan, "tone", 1)), step, adaa, &stats);
+    CHECK(stats.unconverged == 0);
+    CHECK(stats.samples == 3 * 48000);
+    CHECK(stats.maxIterations < 40);
+    // its DC point is the exact root of v + R1 2 Is sinh(v / N Vt) = u
+    const double nvt = fc::thermalVoltage(1.752);
+    auto root = [&](double u)
+    {
+        double lo = 0;
+        double hi = u;
+        for (int i = 0; i < 200; ++i)
+        {
+            const double m = 0.5 * (lo + hi);
+            (m + 2200 * 2 * 2.52e-9 * std::sinh(m / nvt) > u ? hi : lo) = m;
+        }
+        return lo;
+    };
+    const double expected[] = {0.0999503, 0.515596, 0.615423};
+    int k = 0;
+    for (double u : {0.1, 1.0, 5.0})
+    {
+        const std::vector<double> y = fc::simulate(h, std::vector<double>(48000, u), {});
+        INFO(u << " V");
+        CHECK_THAT(y.back(), WithinAbs(root(u), 1e-9));
+        CHECK_THAT(root(u), WithinAbs(expected[k++], 5e-7));
+        // the converged ADAA reference lands there too
+        const std::vector<double> ya = fc::simulate(fc::holters(plan, 0, 4 * 48000.0 * 2 / 3, potsAt(plan, "tone", 1)),
+                                                    std::vector<double>(48000, u), adaa);
+        CHECK_THAT(ya.back(), WithinAbs(root(u), 1e-9));
+    }
 }

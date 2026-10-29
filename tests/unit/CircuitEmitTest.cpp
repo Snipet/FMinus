@@ -107,7 +107,7 @@ namespace
 TEST_CASE("the emitted coefficients are the double derivation's, in float", "[circuit]")
 {
     const std::string netlists[] = {fc::test::kDiodeTone, fc::test::kScreamer,
-                                    withLine(fc::test::kDiodeTone, ".adaa on", ".adaa off"),
+                                    withLine(fc::test::kDiodeTone, ".adaa off", ".adaa on"),
                                     withLine(fc::test::kScreamer, ".adaa on", ".adaa off")};
     for (const std::string& text : netlists)
     {
@@ -300,7 +300,8 @@ TEST_CASE("generation is deterministic and the layout is fixed", "[circuit]")
     }
     CHECK(literals > 50);
     // the constants the generator folds, as the floats of their doubles
-    CHECK(dt.source.find("gc_C1 = " + fc::literal(2 * 10e-9 * 4 * (2.0 / 3.0)) + " * rate;") != std::string::npos);
+    CHECK(dt.source.find("gc_C1 = " + fc::literal(2 * 10e-9 * 4) + " * rate;") != std::string::npos);
+    CHECK(ts.source.find("gc_C3 = " + fc::literal(2 * 47e-9 * 4 * (2.0 / 3.0)) + " * rate;") != std::string::npos);
     const double nvt = 1.752 * 1.380649e-23 * 300.15 / 1.602176634e-19;
     CHECK(dt.source.find("expf(v * " + fc::literal(1 / nvt) + ")") != std::string::npos);
     CHECK(dt.source.find(" - " + fc::literal(nvt) + " * w;") != std::string::npos);

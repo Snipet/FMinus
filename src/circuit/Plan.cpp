@@ -941,7 +941,7 @@ namespace fminus::circuit
         else if (netlist.oversample.isAuto)
         {
             cfg.oversampleFrom = "auto";
-            messages.note(netlist.oversample.loc, "'.oversample auto' is 4x, Phase 0's default (the self-test that "
+            messages.note(netlist.oversample.loc, "'.oversample auto' is 8x, Phase 0's default (the self-test that "
                                                   "would choose is Phase 1)");
         }
         if (options.halfband)
@@ -977,7 +977,7 @@ namespace fminus::circuit
         else if (netlist.adaa.isAuto)
         {
             cfg.adaaFrom = "auto";
-            messages.note(netlist.adaa.loc, "'.adaa auto' is on, Phase 0's default (no self-test)");
+            messages.note(netlist.adaa.loc, "'.adaa auto' is off, Phase 0's default (no self-test)");
         }
         const Solver byDefault{Solver::Guess::Omega, cfg.adaa ? 1 : 2};
         cfg.solver = byDefault;
