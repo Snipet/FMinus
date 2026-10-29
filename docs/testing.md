@@ -81,8 +81,10 @@ TEST_CASE("functions compute what they say", "[codegen]")
   flat streams), `[tbaa]`, `[zeroinit]`, `[attributes]` and `[progress]` (the runtime's and libm's attributes, and loop
   progress), `[denormals]`, `[parallel]` (parallel regions, and `[runtime]` among them for the pool on its own),
   `[ir]` (`Program::Options::keepIr`'s texts), `[circuit]` (the circuit compiler: `CircuitTest.cpp` its netlists,
-  plans, equations, halfbands, reference and analysis; `CircuitEmitTest.cpp` its emitted text, compiled through
-  `fminus::Program`; `CircuitSearchTest.cpp` its self-test: the candidates' order, the search, the gates' reduction
+  plans, equations (an OTA's against report §7.2's hand derivation), laws (each one's antiderivative, bracket and
+  carry), prewarp, halfbands, reference and analysis; `CircuitEmitTest.cpp` its emitted text, compiled through
+  `fminus::Program`, an OTA's in 40 configurations; `CircuitSearchTest.cpp` its self-test: both rows' candidates'
+  order, the synth's stress matrix, the search, the gates' reduction
   and the no-configuration choice on stub measures, the key, a `Choice`'s text, and the self-test itself on a small
   stress shape, `selfTestWith` in `src/api/CircuitSelfTest.h`: T1 on the region's own input, its answer the same on
   any number of threads, a job's exception carried back to the caller). Add new ones freely.
