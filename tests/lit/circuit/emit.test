@@ -2,6 +2,7 @@
 # and that it writes the same text every time.
 # RUN: fminus %S/../../../examples/circuits/diodetone.cir --emit fm | FileCheck %s --check-prefix=DT
 # RUN: fminus %S/../../../examples/circuits/screamer.cir --emit fm | FileCheck %s --check-prefix=TS
+# RUN: fminus %S/../../../examples/circuits/otalp.cir --emit fm | FileCheck %s --check-prefix=OTA
 # RUN: fminus %S/../../../examples/circuits/screamer.cir --emit fm -o %t.1
 # RUN: fminus %S/../../../examples/circuits/screamer.cir --emit fm -o %t.2
 # RUN: diff %t.1 %t.2
@@ -160,3 +161,49 @@
 # TS:       const float z3 = hb1_down(z1, z2);
 # TS-NEXT:  const float z4 = b4(z3);
 # TS-NEXT:  const float gain_ = fd_;
+
+# The synth path's: otalp.cir, two buffered OTA one-poles whose gain is the law input iabc. tick and step take it after
+# the signal, clamp it to its range (fmaxf first: a NaN is its low end) and hold the gains over the region's steps; each
+# block is the i-form (its readouts the states and the OTA's current, which its law gives at the solved v).
+# OTA:      // OtaLp: generated from otalp.cir by fminus::circuit (Phase 1). Do not edit: edit otalp.cir.
+# OTA-NEXT: //   2 blocks, 2 states (C1, C2), 2 nonlinear ports (G1: an OTA, g tanh(v / 2 Vt), 2 Vt 51.73 mV at 27 C, g = iabc; G2: an OTA, g tanh(v / 2 Vt), 2 Vt 51.73 mV at 27 C, g = iabc), 0 pots
+# OTA-NEXT: //   block 1 (R1, R2, R3, R4, G1, C1, R5, X1): in -> y1b; port G1 at V(a1) - V(m1), its current from 0 to y1; at 4 rate
+# OTA-NEXT: //   block 2 (R6, R7, R8, R9, G2, C2, R10, X2): y1b -> y2b; cut at an op amp's output (exact); port G2 at V(a2) - V(m2), its current from 0 to y2; at 4 rate
+# OTA-NEXT: //   solver: the previous step's v + 1 Newton step in [min(0, p), max(0, p)]
+# OTA-NEXT: //   configuration: .oversample 4 iir blocks=auto, .adaa off, .solver newton(1) (the netlist); .method tr, .prewarp off (default)
+# OTA:      float v_G1;
+# OTA:      float g_G1;
+# OTA:      float kd_G1;
+# OTA-LABEL: float b1(float u)
+# OTA-NEXT:  {
+# OTA-NEXT:  const float p = 0.0021951706f * u + p_G1_by_x_C1 * x_C1;
+# OTA-NEXT:  const float kg = kd_G1 * g_G1;
+# OTA-NEXT:  const float kgs = kg * 19.331198f;
+# OTA-NEXT:  const float lo = fminf(p, 0);
+# OTA-NEXT:  const float hi = fmaxf(p, 0);
+# OTA-NEXT:  float v = fminf(fmaxf(v_G1, lo), hi);
+# OTA-NEXT:  {
+# OTA-NEXT:  const float tn = tanhf(v * 19.331198f);
+# OTA-NEXT:  const float f = v - p + kg * tn;
+# OTA-NEXT:  const float d = 1 + kgs * (1 - tn * tn);
+# OTA-NEXT:  v = fminf(fmaxf(v - f / d, lo), hi);
+# OTA-NEXT:  }
+# OTA-NEXT:  const float th = tanhf(v * 19.331198f);
+# OTA-NEXT:  const float ib = g_G1 * th;
+# OTA-NEXT:  const float n_y1b = n_y1b_by_x_C1 * x_C1 + n_y1b_by_i_G1 * ib;
+# OTA-LABEL: float step(float u, float iabc)
+# OTA-NEXT:  {
+# OTA-NEXT:  const float l_iabc = fminf(fmaxf(iabc, 1e-05f), 0.002f);
+# OTA-NEXT:  g_G1 = l_iabc;
+# OTA-NEXT:  g_G2 = l_iabc;
+# OTA-NEXT:  return b2(b1(u));
+# OTA-NEXT:  }
+# OTA-LABEL: float tick(float u, float iabc)
+# OTA:       ck_ = ck_ == 15 ? 0 : ck_ + 1;
+# OTA-NEXT:  const float l_iabc = fminf(fmaxf(iabc, 1e-05f), 0.002f);
+# OTA-NEXT:  g_G1 = l_iabc;
+# OTA-NEXT:  g_G2 = l_iabc;
+# OTA-NEXT:  hb1_up(u, os1);
+# OTA-NEXT:  hb2_up(os1[0], os2_0);
+# OTA-NEXT:  hb2_up(os1[1], os2_1);
+# OTA-NEXT:  const float y0 = b2(b1(os2_0[0]));

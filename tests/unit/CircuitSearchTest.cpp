@@ -648,3 +648,123 @@ TEST_CASE("the guard's names are the module's", "[circuit]")
         CHECK(fc::isModuleWord(name));
     }
 }
+
+namespace
+{
+    // otalp.cir without its configuration lines
+    std::string openOta(std::string text)
+    {
+        for (const char* line : {".oversample 4 iir blocks=auto\n", ".adaa off\n", ".solver newton(1)\n"})
+            text = replaced(text, line, "");
+        return text;
+    }
+} // namespace
+
+TEST_CASE("the smooth-monotone row, cheapest first", "[circuit]")
+{
+    // otalp.cir's two OTA port blocks, every dimension open: report §6.2's SM row, 1, 2 and 4x, ADAA off and on, the
+    // previous v + 1, 2 or 3 Newton steps; a block a step costs 10 + 2 (p), 5 (the guess), 60 a Newton step, 100 for
+    // ADAA's tail and 5 (the update), and the halfbands 12 a stage-sample
+    const fc::Plan p = planned(openOta(fc::test::kOtaLp));
+    REQUIRE(p.smooth);
+    REQUIRE(p.config.provisional);
+    CHECK(p.config.oversample == 2);
+    CHECK(p.config.solver.guess == fc::Solver::Guess::Previous);
+    CHECK(p.config.solver.steps == 2);
+    CHECK(!p.config.adaa);
+    std::vector<std::string> got;
+    for (const fc::Candidate& c : fc::candidates(p))
+        got.push_back(std::format("{} {:g}", c.text(), c.cost));
+    const std::vector<std::string> expected{
+        "1x, newton(1) 164",        "1x, newton(2) 284",        "1x, ADAA, newton(1) 364",  "2x, newton(1) 352",
+        "1x, newton(3) 404",        "1x, ADAA, newton(2) 484",  "1x, ADAA, newton(3) 604",  "2x, newton(2) 592",
+        "2x, ADAA, newton(1) 752",  "4x, newton(1) 728",        "2x, newton(3) 832",        "2x, ADAA, newton(2) 992",
+        "2x, ADAA, newton(3) 1232", "4x, newton(2) 1208",       "4x, ADAA, newton(1) 1528", "4x, newton(3) 1688",
+        "4x, ADAA, newton(2) 2008", "4x, ADAA, newton(3) 2488",
+    };
+    CHECK(got == expected);
+    // the provisional note names it
+    const fc::Result r = fc::generate(openOta(fc::test::kOtaLp), "otalp.cir");
+    CHECK(r.provisional);
+    CHECK(r.notes.find("otalp.cir: note: the self-test chooses this circuit's configuration; provisional: 2x IIR, "
+                       "newton(2)") != std::string::npos);
+}
+
+TEST_CASE("law inputs are stress axes, with a synth's signals", "[circuit]")
+{
+    const fc::Plan p = planned(fc::test::kOtaLp);
+    const fc::StressMatrix m = fc::stressMatrix(p);
+    // the law input's low end, geometric middle and high end
+    REQUIRE(m.points.size() == 3);
+    const double mid = std::sqrt(1e-5 * 2e-3);
+    CHECK(std::fabs(m.points[0].laws[0] - 1e-5) <= 1e-18);
+    CHECK(std::fabs(m.points[1].laws[0] - mid) <= 1e-15);
+    CHECK(std::fabs(m.points[2].laws[0] - 2e-3) <= 1e-15);
+    CHECK(m.points[1].label == "iabc 0.000141");
+    // 15 sines, the sweep, the noise, the saw (T1, T2, T4) and iabc's modulation (T1, T4)
+    REQUIRE(m.signals.size() == 19);
+    const fc::StressSignal& saw = m.signals[17];
+    CHECK(saw.kind == fc::StressSignal::Kind::Saw);
+    CHECK(saw.t1);
+    CHECK(saw.t2);
+    CHECK(!saw.t3);
+    const fc::StressSignal& mod = m.signals[18];
+    CHECK(mod.kind == fc::StressSignal::Kind::Modulated);
+    CHECK(mod.t1);
+    CHECK(!mod.t2);
+    CHECK(!mod.t3);
+    CHECK(mod.name == "996 Hz at 5 V, iabc +-2 octaves at 37 Hz");
+    // the modulation runs where iabc is at its middle, around which it moves +-2 octaves at 37 Hz, held over a host
+    // sample's steps
+    CHECK(!m.runs(18));
+    CHECK(m.runs(19 + 18));
+    CHECK(!m.runs(38 + 18));
+    const std::vector<double> held = fc::lawSamples(p, m, 19 + 18, 4, 4 * 4800);
+    double lo = 1;
+    double hi = 0;
+    for (std::size_t i = 0; i < held.size(); ++i)
+    {
+        lo = std::min(lo, held[i]);
+        hi = std::max(hi, held[i]);
+        if (i % 4 != 0)
+            CHECK(held[i] == held[i - 1]);
+    }
+    CHECK(std::fabs(hi / mid - 4) <= 1e-3);
+    CHECK(std::fabs(mid / lo - 4) <= 1e-3);
+    // a cv input from 0: its middle is the arithmetic one, and it moves over its whole range
+    const std::string cv =
+        replaced(fc::test::kOtaLp, ".input  iabc -    kind=current range=10u:2m", ".input iabc - kind=cv scale=2m");
+    const fc::Plan pc = planned(cv);
+    const fc::StressMatrix mc = fc::stressMatrix(pc);
+    CHECK(mc.points[1].laws[0] == 0.5);
+    const std::vector<double> sweep = fc::lawSamples(pc, mc, 19 + 18, 1, 4800);
+    CHECK(*std::min_element(sweep.begin(), sweep.end()) < 1e-3);
+    CHECK(*std::max_element(sweep.begin(), sweep.end()) > 0.999);
+    // a law input's range is part of the self-test's key
+    const std::string other = replaced(openOta(fc::test::kOtaLp), "range=10u:2m", "range=10u:1m");
+    CHECK(fc::selfTestKey(openOta(fc::test::kOtaLp), "t.cir", {}) != fc::selfTestKey(other, "t.cir", {}));
+}
+
+TEST_CASE("an OTA stage's self-test chooses from the SM row, the same on any number of threads", "[circuit]")
+{
+    const std::string text = fc::test::otaStage(".target level=5V\n");
+    const fc::SelfTestResult one = fc::selfTestWith(text, "t.cir", {}, {}, small());
+    INFO(one.errors << one.notes);
+    REQUIRE(one.choice);
+    CHECK(one.choice->solver.guess == fc::Solver::Guess::Previous);
+    CHECK(one.choice->oversample <= 4);
+    CHECK(one.notes.find("self-test candidate 1: 1x, newton(1), 82 model cycles") != std::string::npos);
+    fc::SelfTestOptions test;
+    test.parallel = pool(4);
+    const fc::SelfTestResult four = fc::selfTestWith(text, "t.cir", {}, test, small());
+    REQUIRE(four.choice);
+    CHECK(four.choice->text() == one.choice->text());
+    CHECK(four.notes == one.notes);
+    // and the module its answer makes is one generate() takes back, for the key it names
+    fc::Options o;
+    o.chosen = one.choice;
+    const fc::Result r = fc::generate(text, "t.cir", o);
+    CHECK(r.errors.empty());
+    CHECK(!r.provisional);
+    CHECK(r.configuration.find("(the self-test " + one.key + ")") != std::string::npos);
+}

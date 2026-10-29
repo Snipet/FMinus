@@ -513,3 +513,115 @@ TEST_CASE("Result's fields: the inputs, the latency, and each line's netlist lin
     CHECK(untitled.lines.front() == 0);
     CHECK(*std::max_element(untitled.lines.begin(), untitled.lines.end()) == 4);
 }
+
+TEST_CASE("the OTA's laws compile nonblocking, with and without ADAA, in both channel counts", "[circuit]")
+{
+    // one stage and the two-stage low-pass, a gain of a law input (each sample's), of a pot and a law input (tick's,
+    // with the pot stored by set), of a pot alone (set's) and a constant; ADAA, .channels 2 and .prewarp on and off
+    const std::string withPot = fc::test::otaStage(".pot res 0.5\n", "{iabc * (0.5 + res)}");
+    const std::string potOnly = fc::test::otaStage(".pot res 0.5\n", "{1m * (0.1 + res)}");
+    const std::string constant = fc::test::otaStage("", "1m");
+    int count = 0;
+    int index = 0;
+    for (const std::string& text : {fc::test::otaStage(), fc::test::kOtaLp, withPot, potOnly, constant})
+    {
+        for (bool adaa : {false, true})
+        {
+            for (int channels : {1, 2})
+            {
+                for (bool prewarp : {false, true})
+                {
+                    fc::Options o;
+                    o.adaa = adaa;
+                    o.channels = channels;
+                    o.prewarp = prewarp;
+                    o.oversample = index % 3 == 0 ? 1 : index % 3 == 1 ? 2 : 4;
+                    o.solver = fc::Solver{fc::Solver::Guess::Previous, 1 + index % 3};
+                    ++index;
+                    const fc::Result result = fc::generate(text, "t.cir", o);
+                    INFO("config " << index << ":\n" << result.errors << result.source);
+                    auto program = compiled(result);
+                    for (const char* method : {"init", "set", "tick", "step", "clear", "pw1_"})
+                    {
+                        const std::string name = result.module + "::" + method;
+                        const auto& methods = program->module(result.module)->methods;
+                        if (std::find(methods.begin(), methods.end(), name) == methods.end())
+                            continue;
+                        INFO(name);
+                        CHECK(program->nonBlocking(name));
+                    }
+                    ++count;
+                }
+            }
+        }
+    }
+    CHECK(count == 40);
+}
+
+TEST_CASE("the bracket keeps every law's iterates finite in float, through the JIT", "[circuit]")
+{
+    // one step from rest at 1x: p is the input's (the states are 0), and v, read from the instance, is finite and in
+    // [min(0, p), max(0, p)] for p from 1e-6 to 1e6 V either way, with 0 to 3 Newton steps (an OTA's from 1: its guess
+    // is the previous step's v, newton(K) with K at least 1). A pair: diodetone.cir at tone 1 (its p is the input's
+    // times p_D1_by_u); an OTA: one stage at 2 mA (p = att u).
+    struct Law
+    {
+        std::string text;
+        std::string port;
+        std::vector<fc::Solver> solvers;
+    };
+    const std::vector<Law> laws{
+        {fc::test::kDiodeTone,
+         "D1",
+         {{fc::Solver::Guess::Omega, 0},
+          {fc::Solver::Guess::Omega, 1},
+          {fc::Solver::Guess::Omega, 2},
+          {fc::Solver::Guess::Omega, 3}}},
+        {fc::test::otaStage("", "2m"),
+         "G1",
+         {{fc::Solver::Guess::Previous, 1}, {fc::Solver::Guess::Previous, 2}, {fc::Solver::Guess::Previous, 3}}}};
+    for (const Law& l : laws)
+    {
+        for (const fc::Solver& solver : l.solvers)
+        {
+            fc::Options o;
+            o.oversample = 1;
+            o.adaa = false;
+            o.solver = solver;
+            const fc::Result r = fc::generate(l.text, "t.cir", o);
+            auto program = compiled(r);
+            std::string errors;
+            const Program::Module& m = *program->module(r.module);
+            auto init = program->function<void(void*, float)>(r.module + "::init", errors);
+            const bool ota = l.port == "G1";
+            for (double mag = 1e-6; mag <= 1e6; mag *= 10)
+            {
+                for (double sign : {1.0, -1.0})
+                {
+                    auto self = instance(m);
+                    init(self.get(), 48000);
+                    float p = 0;
+                    if (ota)
+                    {
+                        const float u = static_cast<float>(sign * mag / (220.0 / 100220.0));
+                        program->function<float(void*, float)>(r.module + "::tick", errors)(self.get(), u);
+                        p = 0.0021951706f * u;   // p_G1_by_u, a literal: the stage's att
+                    }
+                    else
+                    {
+                        callSet(*program, r.module, self.get(), {1.0f});
+                        const float k = readFloat(self.get(), m, "p_D1_by_u");
+                        const float u = static_cast<float>(sign * mag) / k;
+                        program->function<float(void*, float)>(r.module + "::tick", errors)(self.get(), u);
+                        p = k * u;
+                    }
+                    const float v = readFloat(self.get(), m, "v_" + l.port);
+                    INFO(l.port << " steps " << solver.steps << " p " << p);
+                    CHECK(std::isfinite(v));
+                    CHECK(v >= std::fmin(0.0f, p));
+                    CHECK(v <= std::fmax(0.0f, p));
+                }
+            }
+        }
+    }
+}

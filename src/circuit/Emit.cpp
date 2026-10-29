@@ -1480,11 +1480,11 @@ namespace fminus::circuit
             line("    {");
             guard();
             lawLines();
-            // with law inputs, the region's blocks are called here, the gains held over its steps (step would
-            // compute them again)
+            // with law inputs, the region's blocks are called here, the gains held over its steps (step takes the law
+            // inputs, and would compute them again)
             auto stepOf = [&](const std::string& x)
             {
-                return hasLawGains() ? regionCall(x) : "step(" + x + ")";
+                return plan.laws.empty() ? "step(" + x + ")" : regionCall(x);
             };
             std::vector<std::string> body;
             std::string current = in;
