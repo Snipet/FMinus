@@ -1,0 +1,19 @@
+* biased.cir: op.test's TS-style stage biased at 4.5 V (V1, R1): the op amp's inputs and output sit at 4.5 V, the
+* diodes in its feedback at 0 V (an unbiased port), and the output's 4.5 V is tick's constant
+.title Biased
+.input  u    in
+.output vout out
+.op
+.oversample 4
+.adaa off
+.solver omega(2)
+V1     vb  0   4.5
+C1     in  p   1u
+R1     p   vb  100k
+X1     p   n   out  opamp
+R2     n   z   10k
+C2     z   0   1u
+R3     n   out 100k
+D1     n   out 1N914
+D2     out n   1N914
+.end

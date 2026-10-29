@@ -6,8 +6,9 @@
 // the self-test's ordered search (i), the same answer on 1 and 8 threads (j), the run-time guard (k), the provisional
 // configuration (l), and the synth path's otalp.cir (m: T1-T4 on the synth's stress matrix, the self-test's choice,
 // tick against step, the prewarp's -3 dB points, the carry under ADAA; n: a per-sample law input's lanes and block
-// splits). Each line prints the worst value, where it fell, and the report's figure beside it; a failure exits 1.
-// Nothing is timed.
+// splits); and Phase 1's elements (o: the new netlists, screamer-biased.cir's offset form against screamer.cir, the
+// self-test's answers for one diode and an asymmetric pair, an inductor's response). Each line prints the worst value,
+// where it fell, and the report's figure beside it; a failure exits 1. Nothing is timed.
 #include "harness.h"
 
 #include "circuit/Search.h"
@@ -15,6 +16,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <complex>
 #include <cstdio>
 #include <cstring>
 #include <format>
@@ -775,9 +777,10 @@ namespace circuits
 
         // The self-test of `name` without its configuration directives, on 8 threads: it chooses `expected` (the
         // shipped directives, which the report and Phase 0's measurements chose by hand), its notes list each
-        // candidate tried in the cost model's order with its verdict, and the answer's figures are section c's.
+        // candidate tried in the cost model's order with its verdict, and the answer's figures are section c's (when
+        // `c` is given; otherwise they are printed).
         std::optional<fc::SelfTestResult> search(Report& r, const std::string& name, const std::string& expected,
-                                                 const Figures& c)
+                                                 const Figures* c)
         {
             const std::string text = opened(netlist(name));
             fc::SelfTestOptions test;
@@ -817,13 +820,19 @@ namespace circuits
                    std::format("its notes list the {} candidates tried, each with its verdict, in the model's order "
                                "({:g} to {:g} cycles)",
                                t.candidates, costs.empty() ? 0.0 : costs.front(), costs.empty() ? 0.0 : costs.back()));
-            const double d1 = std::fabs(t.choice->t1 - c.solver);
-            const double d2 = std::fabs(t.choice->t2 - c.alias);
-            const double d3 = std::fabs(t.choice->t3 - c.h3);
+            if (c == nullptr)
+            {
+                Report::note(std::format("the answer's T1 {:.1f}, T2 {:.1f}, T3 {:.2f} dB", t.choice->t1,
+                                         t.choice->t2, t.choice->t3));
+                return t;
+            }
+            const double d1 = std::fabs(t.choice->t1 - c->solver);
+            const double d2 = std::fabs(t.choice->t2 - c->alias);
+            const double d3 = std::fabs(t.choice->t3 - c->h3);
             r.line(d1 <= 1 && d2 <= 1 && d3 <= 1,
                    std::format("the answer's T1 {:.1f}, T2 {:.1f}, T3 {:.2f} dB; section c measured {:.1f}, {:.1f}, "
                                "{:.2f} (within 1 dB)",
-                               t.choice->t1, t.choice->t2, t.choice->t3, c.solver, c.alias, c.h3));
+                               t.choice->t1, t.choice->t2, t.choice->t3, c->solver, c->alias, c->h3));
             return t;
         }
 
@@ -832,8 +841,8 @@ namespace circuits
             std::printf("i. the self-test's ordered search, on diodetone.cir and screamer-clip.cir without their "
                         "configuration directives (the full stress matrix, 8 threads)\n");
             const std::optional<fc::SelfTestResult> dt =
-                search(r, "diodetone.cir", ".oversample 4, .adaa off, .solver omega(2)", diodeTone);
-            search(r, "screamer-clip.cir", ".oversample 4, .adaa on, .solver omega(1)", screamerClip);
+                search(r, "diodetone.cir", ".oversample 4, .adaa off, .solver omega(2)", &diodeTone);
+            search(r, "screamer-clip.cir", ".oversample 4, .adaa on, .solver omega(1)", &screamerClip);
             std::printf("j. diodetone.cir's self-test on the calling thread alone, against the 8 threads of i\n");
             if (!dt)
                 return;
@@ -1179,7 +1188,7 @@ namespace circuits
 
             // the self-test, without the netlist's configuration lines, chooses what it ships
             const std::optional<fc::SelfTestResult> amps =
-                search(r, "otalp.cir", ".oversample 4, .adaa off, .solver newton(1)", shipped);
+                search(r, "otalp.cir", ".oversample 4, .adaa off, .solver newton(1)", &shipped);
 
             // and with iabc's argument in mA (scale=1m), the same range in amps: the self-test feeds the module its
             // law samples over their scale, so it measures the same circuit and chooses as it does in amps (fed the
@@ -1491,6 +1500,157 @@ namespace circuits
                 }
             }
         }
+        // ---- o. Phase 1's elements: the DC point's offsets, the diode forms, an inductor ----
+        // The new netlists generate (wah.cir with the 1x check's warning of a linear netlist) and are nonblocking;
+        // screamer-biased.cir's module is screamer.cir's but for its comments, and its output is screamer.cir's, bit
+        // for bit, under a drive glide, its DC point 4.5 V at the op amps and 0 V across the diodes; halfwave.cir's
+        // one diode and asym.cir's asymmetric pair, without their directives, get exp-affine answers that meet T1-T4
+        // (the shipped ones); wah.cir's module, an inductor's, follows its trapezoidal response, H(j 2 fs tan(pi f /
+        // fs)).
+        void elements(Report& r)
+        {
+            std::printf("o. Phase 1's elements: the new netlists; the offset form (screamer-biased.cir); one diode and "
+                        "an asymmetric pair (halfwave.cir, asym.cir); an inductor (wah.cir)\n");
+            for (const char* name : {"screamer-biased.cir", "halfwave.cir", "asym.cir", "wah.cir"})
+            {
+                const fc::Result result = fc::generate(netlist(name), name);
+                const std::string wanted = std::string(name) == "wah.cir"
+                                               ? "wah.cir: warning: the netlist is linear: it runs at 1x "
+                                                 "(oversampling a linear netlist, and matched designs, are Phase 1); "
+                                                 "block 1 (R1, L1, C1, R2, Pq, X1) errs by 13.4 dB at 1x (44.1 kHz)\n"
+                                               : "";
+                std::string errors;
+                std::unique_ptr<Circuit> c = build(netlist(name), name, {}, errors);
+                std::string bad;
+                for (const char* method : {"init", "set", "tick", "step", "clear"})
+                {
+                    if (!c)
+                        break;
+                    const std::string full = c->result.module + "::" + method;
+                    const bool exists = std::find(c->module->methods.begin(), c->module->methods.end(), full) !=
+                                        c->module->methods.end();
+                    if (exists && !c->program->nonBlocking(full))
+                        bad += " " + full;
+                }
+                r.line(result.errors.empty() && result.warnings == wanted && c && bad.empty(),
+                       std::format("{}: module {}, {} block(s){}{}", name, result.module,
+                                   c ? c->plan.blocks.size() : 0, bad.empty() ? "" : "; not nonblocking:" + bad,
+                                   result.warnings.empty() ? "" : "; " + result.warnings.substr(0, 60) + "..."));
+                if (result.warnings != wanted || !result.errors.empty())
+                    Report::note(result.errors + result.warnings);
+            }
+
+            // the offset form: screamer-biased.cir is screamer.cir with its 4.5 V reference drawn
+            {
+                auto lines = [](const std::string& text)
+                {
+                    std::vector<std::string> out;
+                    std::size_t at = 0;
+                    while (at < text.size())
+                    {
+                        const std::size_t end = std::min(text.find('\n', at), text.size());
+                        const std::string line = text.substr(at, end - at);
+                        if (line.rfind("//", 0) != 0)
+                            out.push_back(line);
+                        at = end + 1;
+                    }
+                    return out;
+                };
+                const fc::Result biased = fc::generate(netlist("screamer-biased.cir"), "screamer-biased.cir");
+                const fc::Result plain = fc::generate(netlist("screamer.cir"), "screamer.cir");
+                const std::vector<std::string> a = lines(biased.source);
+                const std::vector<std::string> b = lines(plain.source);
+                r.line(a == b && !a.empty(), std::format("screamer-biased.cir's module is screamer.cir's but for its "
+                                                         "comment lines ({} lines each)",
+                                                         a.size()));
+                std::string errors;
+                auto cb = build(netlist("screamer-biased.cir"), "screamer-biased.cir", {}, errors);
+                auto cs = build(netlist("screamer.cir"), "screamer.cir", {}, errors);
+                if (!cb || !cs)
+                {
+                    r.line(false, "screamer-biased.cir or screamer.cir does not build:\n" + errors);
+                    return;
+                }
+                // a 0.45 V, 996 Hz sine and noise, drive gliding 0 -> 1 -> 0 on the grid, tone and level held
+                constexpr std::size_t n = 9600;
+                std::vector<double> u = fc::sine(0.45, 85, kWindow, 1, n);
+                std::vector<double> noise = fc::noise(0.2, 1, 16384);
+                for (std::size_t i = 0; i < n; ++i)
+                    u[i] += noise[i];
+                std::vector<float> pots(3 * n);
+                for (std::size_t i = 0; i < n; ++i)
+                {
+                    const double x = static_cast<double>(i) / n;
+                    pots[3 * i] = static_cast<float>(x < 0.5 ? 2 * x : 2 - 2 * x);
+                    pots[3 * i + 1] = 0.5f;
+                    pots[3 * i + 2] = 0.7f;
+                }
+                const std::vector<double> yb = runTicksWith(*cb, u, pots);
+                const std::vector<double> ys = runTicksWith(*cs, u, pots);
+                std::size_t differ = 0;
+                for (std::size_t i = 0; i < n; ++i)
+                    differ += yb[i] != ys[i] ? 1 : 0;
+                r.line(differ == 0 && finite(yb),
+                       std::format("its output is screamer.cir's under a drive glide: {} of {} samples differ, bit for "
+                                   "bit",
+                                   differ, n));
+                const fc::Plan& p = cb->plan;
+                double worst = 0;
+                for (const char* node : {"p1", "n1", "v2", "t1", "v3"})
+                {
+                    for (std::size_t k = 0; k < p.nodes.size(); ++k)
+                    {
+                        if (p.nodes[k].name == node)
+                            worst = std::max(worst, std::fabs(p.dc[k] - 4.5));
+                    }
+                }
+                const bool op = biased.notes.find("note: .op: port D1|D2: v = 0 V\n") != std::string::npos &&
+                                biased.notes.find("note: .op: V(n1) = 4.5 V\n") != std::string::npos;
+                r.line(worst <= 1e-9 && op && p.outputDc == 0,
+                       std::format("its DC point: the op amps' inputs and outputs at 4.5 V (worst {:.1e} V off), the "
+                                   "port D1|D2 at 0 V, the output at 0 V (.op's notes)",
+                                   worst));
+            }
+
+            // one diode and an asymmetric pair: the self-test's exp-affine answers, which they ship
+            search(r, "halfwave.cir", ".oversample 4, .adaa off, .solver omega(1)", nullptr);
+            search(r, "asym.cir", ".oversample 4, .adaa on, .solver omega(1)", nullptr);
+
+            // an inductor: wah.cir's tick against its trapezoidal response, H(j 2 fs tan(pi f / fs)), at 1x
+            {
+                std::string errors;
+                auto c = build(netlist("wah.cir"), "wah.cir", {}, errors);
+                if (!c)
+                {
+                    r.line(false, "wah.cir does not build:\n" + errors);
+                    return;
+                }
+                double worst = 0;
+                std::string where;
+                for (double res : {0.0, 0.5, 1.0})
+                {
+                    const std::vector<double> pots{res};
+                    for (int bin : {9, 85, 257})
+                    {
+                        const std::vector<double> y = runTicks(*c, fc::sine(1, bin, kWindow, 1, kHost), pots);
+                        const double measured = fc::binMagnitude(windowOf(y), bin);
+                        const double f = bin * 48000.0 / kWindow;
+                        const std::complex<double> h = fc::analog(
+                            c->plan, 0, std::complex<double>(0, 2 * 48000 * std::tan(std::numbers::pi * f / 48000)),
+                            pots);
+                        const double off = std::fabs(dB(measured / std::abs(h)));
+                        if (off > worst)
+                        {
+                            worst = off;
+                            where = std::format("res {:g}, {}", res, hz(bin));
+                        }
+                    }
+                }
+                r.line(worst <= 0.01, std::format("wah.cir's tick follows the trapezoidal rule's response: {:.5f} dB "
+                                                  "off at worst, at {} (gate 0.01 dB)",
+                                                  worst, where));
+            }
+        }
     } // namespace
 
     int check()
@@ -1526,6 +1686,7 @@ namespace circuits
         prewarp(r);
         carry(r);
         synthLanes(r);
+        elements(r);
         std::printf("%s: %d check(s) failed\n", r.failures == 0 ? "passed" : "FAILED", r.failures);
         return r.failures == 0 ? 0 : 1;
     }
