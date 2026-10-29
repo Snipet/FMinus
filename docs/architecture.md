@@ -475,7 +475,7 @@ Because the JIT and executables share one runtime, the two compile the same prog
 
 | Target | Source | Uses |
 |---|---|---|
-| `fminus` | `tools/fminus/main.cpp` | parse, lower, then `--emit ast/ll/asm/obj/exe` or `--run` in the JIT; a `.cir` input, or an `#include` of one, is the text `fminus::circuit::generate` writes (`--emit fm` prints it) |
+| `fminus` | `tools/fminus/main.cpp` | parse, lower, then `--emit ast/ll/asm/obj/exe` or `--run` in the JIT; a `.cir` input, or an `#include` of one, is the text `fminus::circuit::generate` writes (`--emit fm` prints it; `--self-test` runs `fminus::circuit::selfTest` first, on `--threads` threads); FMinus's messages on that text are re-cited at the netlist's lines |
 | `fminus-build` | `tools/fminus-build/main.cpp` | LLVM IR to exe/obj/asm/ll (HostTarget + Aot) |
 | `fminus-hostinfo` | `tools/fminus-hostinfo/main.cpp` | the triple, CPU, features and data layout the JIT targets |
 | `example-biquad` | `examples/biquad/bench.cpp` | biquad.fm's module, its cutoff a stream, against C++, compared and timed, through `fminus::Program` |
@@ -486,7 +486,7 @@ Because the JIT and executables share one runtime, the two compile the same prog
 | `example-convolver` | `examples/convolver/bench.cpp` | convolver.fm's FIR by FFT, against C++ and a direct convolution, through `fminus::Program` |
 | `example-parameters` | `examples/parameters/bench.cpp` | parameters.fm's filter, its cutoff a knob, a stream or frozen, against C++, through `fminus::Program` |
 | `example-hello` | `examples/hello/main.cpp` | FMinus as a library at its smallest: a program compiled from a string, through `fminus::Program` |
-| `example-circuits` | `examples/circuits/*.cpp` | the circuit compiler's modules through `fminus::Program` against the double reference and a 64x one: the research's targets (`--check`), its accuracy tables (`--tables`) and its cost table |
+| `example-circuits` | `examples/circuits/*.cpp` | the circuit compiler's modules through `fminus::Program` against the double reference and a 64x one: the research's targets, the self-test and the guard (`--check`), its accuracy tables (`--tables`) and its cost table, with the self-test's times |
 | (not built here) | `examples/plugin/` | FMinus Filter, a JUCE plugin, and its check `fminus-plugin-check`: a CMake project of its own, which `examples/CMakeLists.txt` skips, built with `cmake -S examples/plugin -B build-plugin` ([building.md](building.md)) |
 | `fminus-tests` | `tests/unit/`, `tests/smoke/` | Catch2 |
 | `fminus-library-tests` | `tests/library/` | Catch2, in C++17, against `FMinus::FMinus` alone: the public API as a host uses it |
@@ -498,7 +498,7 @@ Because the JIT and executables share one runtime, the two compile the same prog
 |---|---|---|
 | `fminus_runtime` (`FMinus::Runtime`) | `src/runtime/**`, and PFFFT's objects (`fminus_pffft`) | none (generated code calls it by name) |
 | `fminus_circuit` (`FMinus::Circuit`, `libfminus_circuit.a`) | `src/circuit/**`: the circuit compiler | `include/` (`"fminus/Circuit.h"`); C++17; no LLVM; `-ffp-contract=off`, so its double folding prints the same text on every target; `fminus_lib` links it publicly |
-| `fminus_lib` (`FMinus::FMinus`, `libfminus.a`) | every other `.cpp` under `src/`, and the generated scanner and parser | `include/` (`"fminus/FMinus.h"`), `<build>/include` (`fminus/Config.h`); C++17; LLVM linked, not included |
+| `fminus_lib` (`FMinus::FMinus`, `libfminus.a`) | every other `.cpp` under `src/`, and the generated scanner and parser; among them `src/api/CircuitSelfTest.cpp`, the circuit compiler's self-test, which compiles its candidates through `fminus::Program` | `include/` (`"fminus/FMinus.h"`), `<build>/include` (`fminus/Config.h`); C++17; LLVM linked, not included |
 | `FMinus::Internal` | `fminus_lib` for this tree's tools, examples and tests | also `src/` (`"frontend/Ast.h"`, ...), `<build>/src/generated/` (`"frontend/Parser.tab.hpp"`), LLVM's headers; C++23 |
 | `FMinus::LLVM` | LLVM's headers (as system headers) and the libraries of `FMINUS_LLVM_COMPONENTS` | LLVM's |
 
@@ -527,7 +527,16 @@ library, with no LLVM in it, so a host's include resolver (or `tools/fminus`'s) 
 
 `generate()` (`Generate.cpp`) runs them; any error stops it before the text. `Messages` (`Netlist.h`) collects every
 stage's errors, warnings and notes and formats them as clang does. `Reference.h` and `Analysis.h` are the double
-reference and the measurements that `examples/circuits` and the tests check the emitted code with.
+reference and the measurements that the self-test, `examples/circuits` and the tests check the emitted code with.
+
+The plan leaves a dimension of the configuration (oversampling, ADAA, the solver, the integrator) open when neither the
+`Options` nor the netlist name it; `generate()` then emits a provisional configuration at once, and the self-test,
+`selfTest()`, chooses. It is the one part of the circuit compiler that needs the JIT, so it is split in two:
+`Search.h` (in `fminus_circuit`) holds its arithmetic, the stress matrix, the double references, the gates, the
+candidates in the cost model's order, the ordered search and the budget; `src/api/CircuitSelfTest.cpp` (in
+`fminus_lib`) generates each candidate with `Options::chosen`, compiles it through `fminus::Program` with
+`Runners.h`'s functions appended, and runs it on the host's threads (`SelfTestOptions::parallel`). FMinus owns no
+threads and no cache for it: the host stores the answer and generates again with it.
 
 The invariant: every emitted coefficient is `derive<Val>` of the same derivation the reference runs as
 `derive<double>` (and a linear block's analog response as `solve<std::complex<double>>`), over the same system and

@@ -1,11 +1,13 @@
-# Circuits: SPICE netlists to FMinus modules (Phase 0, as built)
+# Circuits: SPICE netlists to FMinus modules (Phase 0, and Phase 1 as built so far)
 
 `fminus::circuit` turns a SPICE-style netlist (a `.cir` file) into the text of one FMinus module, which compiles like
-any other source. It is Phase 0 of the analog circuit compiler that
-[research/analog-circuits/](research/analog-circuits/README.md) proposes (its §11): the 1-port generator, both of the
-report's examples through `fminus --emit fm`, and the report's accuracy and cost tables reprinted from emitted code.
-This page says what it does, how to use it, what it decided where the design left a choice or the code proved the design
-wrong, and what is not built yet.
+any other source. It is the analog circuit compiler that [research/analog-circuits/](research/analog-circuits/README.md)
+proposes (its §11). Phase 0 built the 1-port generator, both of the report's examples through `fminus --emit fm`, and
+the report's accuracy and cost tables reprinted from emitted code. Phase 1 is being built in slices; the first adds the
+public API it needs, the self-test that chooses a netlist's configuration on the report's stress matrix and targets
+(asynchronously for a host, which keeps the answer), the run-time guard every module carries, and FMinus's messages
+re-cited at the netlist's lines. This page says what it does, how to use it, what it decided where the design left a
+choice or the code proved the design wrong, and what is not built yet.
 
 ## Status
 
@@ -13,13 +15,17 @@ wrong, and what is not built yet.
   op amps; each block's equations (modified nodal analysis, trapezoidal companions, the diode pair as one nonlinear port
   in Holters' form) eliminated with a pivot order fixed at generation and printed as straight-line float code; the
   closed-form omega3 guess with fixed Newton steps; Holters' antiderivative antialiasing (ADAA); IIR or FIR halfband
-  oversampling of the region that needs it; `.channels 2`.
+  oversampling of the region that needs it; `.channels 2`. From Phase 1: the self-test (the stress matrix, the
+  converged references, T1-T4, the exp-affine candidates in the report's cost-model order, the ordered search, the
+  no-configuration answer), the provisional configuration a netlist plays until it answers, the run-time guard, and
+  the map from each generated line to the netlist's (`fminus --self-test`, `--notes`).
 - **Checked:** the parser, the plan and the equations against hand derivations, Yeh's eq. 24 and textbook responses
   (`tests/unit/CircuitTest.cpp`); the emitted coefficients against the double derivation, every configuration compiling
-  nonblocking (`tests/unit/CircuitEmitTest.cpp`); the text, the driver and the equivalence with the research's
-  hand-written modules (`tests/lit/circuit/`); the report's targets on its full stress set, through the JIT
-  (`example-circuits --check`).
-- **Not built:** Phase 1 and later, at the end of this page.
+  nonblocking (`tests/unit/CircuitEmitTest.cpp`); the self-test's order, search, key and answers, and its determinism,
+  cancel and budget (`tests/unit/CircuitSearchTest.cpp`); the text, the driver and the equivalence with the research's
+  hand-written modules (`tests/lit/circuit/`); the report's targets on its full stress set, the self-test's choices and
+  the guard, through the JIT (`example-circuits --check`).
+- **Not built:** the rest of Phase 1, and later, at the end of this page.
 
 ## Use
 
@@ -44,11 +50,11 @@ if (!result.errors.empty())
 auto program = fminus::Program::compile(result.source, errors);
 ```
 
-`Result` also holds `warnings`, `notes` (the plan: each block, its rate and solver, the latency), `module` (its name)
-and `pots` (`set()`'s arguments, in order). `Options` override the netlist's directives. `generate()` is pure and
-deterministic (the same text and options give the same `Result`, byte for byte, on any machine), safe on any thread,
-and allocates: call it off the audio thread. A host that serves `#include` itself generates in its resolver, as the
-playground would:
+`Result` also holds `warnings`, `notes` (the plan: each block, its rate and solver, the latency), `module` (its name),
+`pots` (`set()`'s arguments, in order) and the fields [below](#result). `Options` override the netlist's directives.
+`generate()` is pure and deterministic (the same text and options give the same `Result`, byte for byte, on any
+machine), safe on any thread, and allocates: call it off the audio thread. A host that serves `#include` itself
+generates in its resolver, as the playground would:
 
 ```cpp
 options.include = [&](std::string_view name, std::string_view from) -> std::optional<fminus::Program::IncludedFile> {
@@ -64,6 +70,35 @@ options.include = [&](std::string_view name, std::string_view from) -> std::opti
 ```
 
 `tests/library/CircuitTest.cpp` does this; `examples/circuits/` has the report's netlists.
+
+A netlist that leaves its configuration to the self-test (no `.oversample`, `.adaa` or `.solver`, or `auto`) generates
+at once with a provisional configuration, `Result::provisional` set and `Result::selfTestKey` naming it. The self-test
+takes seconds (a one-pot clipper's whole search, about 3 s on one core of an M5, 0.8 s on eight), so a host runs it
+apart, on its own threads, and keeps the answer:
+
+```cpp
+fminus::circuit::Result r = fminus::circuit::generate(netlist, "pedal.cir");      // provisional: play it meanwhile
+if (r.provisional && !store.count(r.selfTestKey))
+    worker.post([=] {                                                              // never the audio thread
+        fminus::circuit::SelfTestOptions test;
+        test.parallel = myPool;                // runs job(0..count-1) on the host's threads; empty: the calling one
+        test.cancelled = [&] { return stale; };
+        const auto answer = fminus::circuit::selfTest(netlist, "pedal.cir", {}, test);
+        if (answer.choice)
+            store[answer.key] = answer.choice->text();                             // in memory, in a saved session
+    });
+// later, or on the next compile:
+fminus::circuit::Options options;
+if (auto it = store.find(r.selfTestKey); it != store.end())
+    options.chosen = fminus::circuit::Choice::parse(it->second);                  // nothing (and why) if malformed
+r = fminus::circuit::generate(netlist, "pedal.cir", options);                      // the self-test's configuration
+```
+
+`fminus pedal.cir --self-test` does the same on the command line (on `--threads` threads, 0 for one a core), prints
+each candidate it tried and a line to paste into the netlist (`pedal.cir: note: the self-test chose .oversample 4,
+.adaa on, .solver omega(1)`), and generates with the answer; `--notes` prints `Result::notes`. FMinus's own messages on
+a generated module (`pedal.cir.fm:120:5: error: ...`, the lines `--emit fm` prints) are re-cited at the netlist's line
+the generated line comes from: `pedal.cir:9:1: error: ... (in the module generated from pedal.cir, line 120)`.
 
 ## The netlist
 
@@ -102,21 +137,21 @@ parameters, are refused: "the inductor L1 is not supported yet (Phase 1)".
 | Directive | Meaning |
 |---|---|
 | `.title NAME` | the module's name (default: the file's stem, its first letter capitalised) |
-| `.input NAME node [scale=x]` | exactly one: a voltage source from node to ground; sample 1.0 is `scale` volts; tick's argument |
+| `.input NAME node [kind=voltage] [scale=x]` | exactly one: a voltage source from node to ground; sample 1.0 is `scale` volts; tick's argument (law inputs, `kind=cv\|current`, come with Phase 1's next slice) |
 | `.output NAME node [scale=x]` | exactly one: tick returns V(node) / scale; the last block must compute it |
 | `.pot NAME [default] [lin\|audio\|rlog]` | `set()`'s arguments, in this order (default 0.5); an unused pot warns |
 | `.model NAME D(IS=x N=x ...)` | a diode model: IS (1e-14) and N (1); RS other than 0 is an error (Phase 1); CJO, TT, BV, IBV, M, VJ, EG, XTI, FC, KF and AF warn "ignored" |
-| `.oversample 1\|2\|4\|8\|auto [iir\|fir] [blocks=auto\|nonlinear\|all]` | the oversampling factor, the halfbands, and which blocks run oversampled |
-| `.adaa on\|off\|auto` | Holters' first-order ADAA on the port |
-| `.solver omega\|omega(K)\|newton(K)\|auto` | the port's solver: the omega3 guess or the previous step's solution, then K Newton steps |
+| `.oversample 1\|2\|4\|8\|auto [iir\|fir] [blocks=auto\|nonlinear\|all]` | the oversampling factor, the halfbands, and which blocks run oversampled; `auto`, or no `.oversample`, leaves the factor to the self-test |
+| `.adaa on\|off\|auto` | Holters' first-order ADAA on the port; `auto` or none: the self-test's |
+| `.solver omega\|omega(K)\|newton(K)\|auto` | the port's solver: the omega3 guess or the previous step's solution, then K Newton steps; `auto`, none, or bare `omega` (an exp-affine port's candidates are all omega's): the self-test's |
 | `.channels 1\|2` | 2: tick and step take and return `float2`s |
-| `.method tr` | the integrator; `bdf2` and `be` are Phase 1 |
-| `.target [solver=xdB] [alias=xdB] [level=xV] [freq=xHz]` | echoed in the header; `examples/circuits` checks against it |
+| `.method tr\|auto` | the integrator; `auto`, or none, is TR (BDF2, for a block that rings, is a later slice of Phase 1) |
+| `.prewarp off` | an OTA filter's cutoff law, as the circuit has it (`on` is a later slice of Phase 1) |
+| `.target [solver=xdB] [alias=xdB] [level=xV] [freq=xHz]` | echoed in the header; `level` is the self-test's stress level L (else `.input`'s scale); `examples/circuits` checks against it |
 
 `.op` warns that it is ignored (Phase 1: the DC operating point); SPICE's simulator directives (`.tran`, `.ac`,
 `.print`, ...) are ignored with a note; `.subckt`, `.param`, `.include`, `.lib`, `.options`, `.temp`, `.ic`, `.nodeset`
-and `.func` are errors, as is any other directive. `auto` in `.oversample`, `.adaa` and `.solver` resolves to Phase 0's
-default, with a note.
+and `.func` are errors, as is any other directive.
 
 **Checks**, with the report's wording: a node with one connection; a node that reaches ground only through capacitors
 ("its DC voltage is undefined (add 10meg to ground)"); an unknown model (with the list); a diode without an
@@ -146,11 +181,16 @@ module DiodeTone                     // .title
 };
 ```
 
+The header's comment says where each choice of the configuration came from (`configuration: .oversample 4, .adaa on,
+.solver omega(1) (the self-test 087ad67714f6249a); iir blocks=auto, .method tr (default)`), as `Result::configuration`
+does.
+
 - **Names.** States `x_<C>` (C's trapezoidal state); with ADAA `xo_<C>`, `uo_<input>`, `p_<D>` and `c_<D>`; the port's
   last voltage `v_<D>` (always stored: the previous-solution guess, ADAA's v(n-1), what `trace` reads); rates `gc_<C>` =
   2 C fs' and `g2_<C>` = 2 gc; coefficients `<readout>_by_<source>` (`p_D1_by_x_C1`, `n_b_by_v_D1`, `vc_C3_by_n_p1`) and
   `ka_`, `kb_`, `lna_`, `kc_<D>` (literals instead when K is a constant: a port block with no capacitor and no pot);
-  halfband state `hb<s>u_*` and `hb<s>d_*`; the region's samples `os1`, `os2_0`, ... Characters outside
+  halfband state `hb<s>u_*` and `hb<s>d_*`; the region's samples `os1`, `os2_0`, ...; the guard's `ck_`, `fd_` and
+  `fdstep_`, and tick's locals `sum_` and `gain_` ([the guard](#the-guard)). Characters outside
   `[A-Za-z0-9_]` in part and node names become `_`, and a name taken already gets `_2` (a pot's sections `Ptone_a`
   and `Ptone_b` included).
 - **Layout.** It depends on the netlist and the options only, never on a pot's value or `.pot` default, so a frozen copy
@@ -194,24 +234,145 @@ second order. At high DC levels the two disagree by more than the switch can set
 0.2 mV around a mean near the exact root; float and double wander apart. A Newton step more (or no ADAA) removes it.
 `example-circuits --check` (b) shows both, and `tests/lit/circuit/run.test` pins the shipped values.
 
-## Configuration, and why
+### The guard
 
-The defaults are Phase 0's for a 1-port exp-affine block (the only kind Phase 0 has): **8x, IIR halfbands, no ADAA,
-omega3 + 2 Newton steps**, `blocks=auto`, one channel. `.adaa on` without `.solver` takes omega3 + 1 step. `Options`
-override the netlist's directives, which override the defaults; the header records where each choice came from.
+Every module carries a run-time guard (report §6.4). `ck_` counts ticks from `init` and `clear`, mod 16; when it is 0,
+`tick` sums every field that carries from one sample to the next (the capacitors' states, the ports' last voltages,
+ADAA's last points and inputs, the halfbands' delay lines), and when the sum is not finite (`!(sum_ - sum_ == 0)`: a NaN
+or an infinity anywhere in it), it calls `clear()` and sets the fade `fd_` to 0. The output is `gain_ < 1 ? y * gain_ :
+y`, with `gain_` the fade before it rises by `fdstep_ = 1 / (0.02 rate)` a tick, to exactly 1 after 960 ticks at 48 kHz.
+Either lane of a `float2` resets both. Settled, the gain is 1 and the output is the circuit's, bit for bit (Phase 0's
+equivalence tests stay exact); the check is on the tick count, so how a host splits its blocks never changes it. It
+costs a sum every 16 ticks, the halfbands' arrays in loops: about 7 cycles a host sample on the shipped modules. The
+solver's bracket stays (it keeps `v` finite: a NaN written into `x_C1` leaves diodetone's output finite until the guard
+resets it), and the playground's ±4 output guard is the last line (`example-circuits --check`, k).
 
-The design set ADAA at 4x with omega3 + 1 step as the default (the report's §5.2 measured it best on the TS). On
-report §2's full stress set it fails T3 on example 1: H3 droops 0.57 dB at 0.3 V, 3 kHz, tone 0 (the converged double
-ADAA reference shows the same; the report measured three cases, -0.24 dB at worst). Plain omega3 + 2 at 4x passes
-example 1 but fails T2 on the TS (-53.3 dB, the report's -53.6). 8x plain omega3 + 2 meets T1-T4 on both blocks' stress
-sets (`example-circuits --check`, c and e), at about twice the 4x cost. Phase 1's self-test is what should choose per
-circuit; meanwhile the shipped netlists name their own:
+### Result
+
+| Field | What |
+|---|---|
+| `source` | the module's FMinus text; empty when there are errors |
+| `errors`, `warnings`, `notes` | `pedal.cir:7:1: error: ...` lines, as clang words them; the notes are the plan (each block, its rate and solver, the latency) and the provisional note |
+| `module`, `pots` | the module's name; `set()`'s float arguments, in `.pot` order |
+| `inputs` | tick's and step's arguments: the signal (`Input::Kind::Voltage`, its name and scale), then the law inputs (later in Phase 1) |
+| `switches` | `set()`'s int arguments after the pots (later in Phase 1) |
+| `configuration` | one line: each choice, grouped by where it came from (the netlist, Options, the self-test and its key, provisional, default) |
+| `provisional` | a dimension is open and no `Options::chosen` for this netlist answered it |
+| `selfTestKey` | the key the self-test's answer goes by, when a dimension is open; empty when the netlist names its whole configuration |
+| `latency` | host samples of delay at 1 kHz: the halfbands' round trip, and ADAA's half step for each port block it runs in |
+| `lines` | for each line of `source`, the netlist's line it comes from (0: none): the module's frame at `.title`, `set` at the first `.pot`, a block's `b<N>_set` and `b<N>` at its first part, `tick` and `step` at `.input`, a part's fields at its line. `fminus` re-cites FMinus's messages with it |
+
+## Configuration and the self-test
+
+The configuration has six dimensions: the oversampling factor, the halfbands (IIR or FIR), the region (`blocks=`), ADAA,
+the solver and the integrator (`.method`), with `.channels` beside them. Four are searched: oversampling, ADAA, the
+solver and the integrator. Each choice comes, in this order, from:
+
+1. `Options` (a member that is set);
+2. the netlist's directive;
+3. the self-test's answer, `Options::chosen`, for a searched dimension that neither names (or the netlist writes
+   `auto`): an **open** dimension. The answer counts only when its key is the netlist's; otherwise it is ignored with
+   the note `Options::chosen is another netlist's or other Options' (key ...; this one's is ...): it is ignored`;
+4. the provisional configuration, for an open dimension nothing answered: `Result::provisional` is then set, with one
+   note, `pedal.cir: note: the self-test chooses this circuit's configuration; provisional: 8x IIR, omega(2)`;
+5. the default, for the rest: IIR halfbands, `blocks=auto`, TR, one channel.
+
+A netlist without a port has nothing to choose: its dimensions are the defaults, never open. The integrator is never
+open yet either: its only candidate is TR until BDF2 comes (for a block that rings, a later slice of Phase 1). The
+header and `Result::configuration` say where each choice came from: the netlist, Options, the self-test and its key,
+provisional, or default.
+
+**The provisional configuration** is Phase 0's measured default for a 1-port exp-affine block: **8x, IIR halfbands, no
+ADAA, omega3 + 2 Newton steps** (omega3 + 1 when the netlist pins `.adaa on`). The design had set ADAA at 4x with
+omega3 + 1 step (the report's §5.2 measured it best on the TS). On report §2's full stress set that fails T3 on
+example 1: H3 droops 0.57 dB at 0.3 V, 3 kHz, tone 0 (the converged double ADAA reference shows the same; the report
+measured three cases, -0.24 dB at worst). Plain omega3 + 2 at 4x passes example 1 but fails T2 on the TS (-53.3 dB, the
+report's -53.6). 8x plain omega3 + 2 meets T1-T4 on both blocks' stress sets (`example-circuits --check`, c and e), at
+about twice the 4x cost: costly, but safe to play while the self-test runs.
+
+**The key** a self-test's answer goes by (`selfTestKey()`, `Result::selfTestKey`) is 16 hex digits of FNV-1a 64 over
+`kSelfTestVersion`, the netlist's lines as SPICE reads them (continuations joined, comments and blank lines dropped,
+tokens lowercased and single-spaced, the spaces inside `{...}` and around `=` removed; `.title`, `.channels`, `.op`,
+`.end` and simulator directives left out) and the `Options` that change the answer (all but `moduleName`, `channels`
+and `chosen`). A comment, spacing, case or a new title keeps it; a value, a directive, a model's parameter, a pot's
+default or `.target` changes it, and so does any change of the gates, the candidates or the emitted arithmetic, which
+bumps `kSelfTestVersion` (1 until Phase 1's branch merges).
+
+**The stress matrix** (report §2; `src/circuit/Search.h`) is a unit for each point and signal:
+
+- points: the pots the region and the blocks before it read, each at 0, 0.5 and 1: the full grid for three pots or
+  fewer, otherwise each pot alone (the others at their defaults), then all at 0 and all at 1;
+- signals: sines at L/15, L/4.5, L/2.25, L and 2.2 L on odd bins 9, 85 and 257 of a 4096-sample window at 48 kHz (105,
+  996 and 3012 Hz), after 1024 samples of warm-up; a 20 Hz-20 kHz log sweep and band-limited noise at L. L is `.target
+  level`, else `.input`'s scale (full scale).
+
+**The gates** (T3 stays within 0.5 dB, the user's ruling):
+
+- **T1**, the solver: the region's emitted step against the same configuration (rate, ADAA, integrator) in double,
+  solved to convergence, both decimated to the window, in band, at most -60 dB on every signal but 2.2 L;
+- **T2**, the alias: the tick's inharmonic energy below 20 kHz, in excess of the converged 64x chain's, bin by bin, at
+  most -60 dB of the tick's energy there, for sines up to L. The excess, not the energy itself: the TS chain's 1.6 Hz
+  output coupling (C7 into the level pot) has not settled in the window, its transient fills the inharmonic bins at
+  -48.5 dB on every configuration alike, and it is not an alias; the 64x reference has the same transient, and on a
+  block without one the excess is the energy (diodetone's -79.0 dB either way);
+- **T3**, the response: |dH1| and |dH3| at most 0.5 dB against the converged 64x chain (every block, TR, no ADAA), on
+  bins 85 and 257; H3 counts within 100 dB of H1;
+- **T4**: finite on every signal, and every reference converged.
+
+The 64x chain runs once a unit (for the units T2 and T3 read), the converged region once a unit for each oversampling
+and ADAA a candidate needs (its Newton steps share it).
+
+**The candidates** (report §6.2) of an exp-affine port, the only kind yet: 1, 2, 4 and 8x, ADAA off and on, omega3 + 1
+or 2 Newton steps; a dimension the netlist or the Options pin drops out, and one configuration serves every port block
+of the region. They run **cheapest first** by the report's §3.2 model, in cycles a host sample: each region block times
+its rate (a port block: 10 + 2 a state for p, 65 for omega3's guess or 5 for the previous step's, 70 a Newton step of a
+diode pair, 57 for ADAA's tail, 5 for the state update; a linear block: 5 + 3 a state), each block outside the region
+once, and 12 for each sample a halfband stage runs at its high rate, up and down together. Candidates within 5 % of the
+cheapest of their group go ADAA first, then fewer steps. The **first** to pass T1-T4 wins (the user's ruling: not an
+exhaustive search for the cheapest); its notes list every candidate tried, in order, with its model cost and verdict.
+On the shipped netlists without their configuration directives:
+
+| Netlist | The self-test's answer | Candidate | Its T1, T2, T3 | Before it |
+|---|---|---|---|---|
+| `diodetone.cir` | 4x, omega(2) (968 model cycles) | 11 of 16 | -93.1, -79.0, 0.10 dB | 4x omega(1) fails T1 (-54.2 dB); 4x ADAA omega(1) fails T3 (0.57 dB); every 2x fails T2 or T3 |
+| `screamer-clip.cir` | 4x, ADAA, omega(1) (916) | 10 of 16 | -78.7, -73.5, 0.14 dB | 4x omega(1) fails T1 (-49.8 dB); 2x ADAA fails T2 (-52.7 dB) |
+| `screamer.cir` (the chain) | 4x, ADAA, omega(1) (976) | 10 of 16 | -81.1, -66.6, 0.21 dB | the same |
+| `clipper.cir` | 4x, ADAA, omega(1) (908) | 10 of 16 | -80.6, -84.1, 0.44 dB | |
+
+These are the configurations the report and Phase 0 chose by hand, which the shipped netlists name (`example-circuits
+--check`, i):
 
 | Netlist | Configuration | Why |
 |---|---|---|
-| `diodetone.cir` | 4x, plain omega3 + 2 | the report's example-1 row (912 cycles); passes T1-T4 |
-| `screamer.cir`, `screamer-clip.cir` | 4x, ADAA, omega3 + 1 | the report's choice for the TS (903 / 907 cycles); passes T1-T4 |
-| `clipper.cir` | the defaults | |
+| `diodetone.cir` | 4x, plain omega3 + 2 | the report's example-1 row (912 cycles); passes T1-T4; the self-test's answer |
+| `screamer.cir`, `screamer-clip.cir` | 4x, ADAA, omega3 + 1 | the report's choice for the TS (903 / 907 cycles); passes T1-T4; the self-test's answer |
+| `clipper.cir` | none: the self-test's | |
+
+**When nothing passes** (report §6.5), the answer is the candidate with the least excess over its worst gate (the
+largest of T1 + 60, T2 + 60 and T3 - 0.5) among those under 3,500 model cycles, ties to the higher oversampling, never
+one that is not finite somewhere or whose references did not converge. `Choice::met` is then false, and `generate()`
+with it warns at the region's first port: `pedal.cir:9:1: warning: block 2 (D1, D2): no configuration meets the targets
+(worst: T2 -55.1 dB at 2.2 V, 3012 Hz, drive 1); using the most accurate under the cost cap: 8x, ADAA, omega(2)`.
+
+**How it runs.** `selfTest()` is the one part of the circuit compiler that needs the JIT, so it lives in `fminus_lib`
+(`src/api/CircuitSelfTest.cpp`); its arithmetic, the references and the verdicts, stays in `fminus_circuit`
+(`Search.cpp`). Each candidate is generated with `Options::chosen` and one channel, compiled on the calling thread
+through `fminus::Program` (`Math::Vector`, subnormals flushed, one thread, -O2) with `Runners.h`'s `fm_set`, `fm_steps`
+and `fm_ticks` appended, and run on every unit through `SelfTestOptions::parallel`, each in an aligned, zeroed instance
+(`init(48000)`, `set`, the run). It is blocking, pure and deterministic: each job writes its own unit's slot and the
+slots are reduced in index order, so the answer and the notes are the same, byte for byte, on any number of threads
+(`example-circuits --check`, j). `SelfTestOptions::cancelled` is polled between units and every 4096 reference steps;
+cancelled, the test returns `cancelled` and no answer. The budget is in steps (the references' and the candidates'),
+never wall time, and is checked before each stage: a test that would go over stops there, with no answer and a note
+(diodetone.cir's with a budget of 1000: `the self-test stops before the 64x references: it needs 11943936 steps more,
+and 0 of its budget of 1000 are spent; no answer`). FMinus owns no threads and no cache for it: a host runs it, stores `Choice::text()` under the key, and
+generates again with `Choice::parse()` of what it stored (above).
+
+`Choice::text()` is one line (diodetone.cir's, without its directives: `fminus-circuit-choice 1 key=d603a5e6059d602d
+oversample=4 adaa=off solver=omega(2) method=tr met=yes t1=-93.0903786120034 t2=-79.0209349673603
+t3=0.10430918903576991`), its figures each the shortest text that reads back as the same double, then ` worst=...`
+(the rest of the line) when not met. `Choice::parse()` reads it back, or gives nothing and why:
+another version's, a field missing or out of range, or not one at all.
 
 The rulings the implementation follows (the design's R1-R11):
 
@@ -224,7 +385,8 @@ The rulings the implementation follows (the design's R1-R11):
 - **R4 The port is a voltage source v** (Holters' v-form): structural values come out exact (example 1's C1 voltage
   is v; the TS block's V(n1) = u, V(v2) = u - v). `K = -1 / (dj/dv)` must be positive, and generation checks it at
   every point of the pivots' grid (`checkPort` in `src/circuit/Mna.h`).
-- **R5 Defaults:** above (changed from the design's, for the reason above).
+- **R5 Defaults:** above (changed from the design's, for the reason above); now the provisional configuration, which the
+  self-test replaces.
 - **R6 N Vt is physical:** N k 300.15 / q (SPICE's 27 C), 45.315 mV for the 1N914's N = 1.752. The research's 45.3 and
   45.0 mV are N = 1.75140653 and 1.73980781; the tables and the equivalence tests rewrite N so.
 - **R7** The shipped TS netlist has the report's §9.1 tone-pot line, `Ptone tn tw t1 20k {tone}`.
@@ -254,11 +416,14 @@ Two more choices the code made:
 | parse | `src/circuit/Netlist.*` | the line scanner, numbers, expressions; `Messages` (clang's format) |
 | plan | `src/circuit/Plan.*` | diode pairs into ports, pots into variable branches, the checks, the partition at op amps (a union-find over the nodes no source drives; each op amp in its inverting input's network), the chain, the configuration, the region and the 1x check |
 | equations | `src/circuit/Mna.*` | each block's stamps (KCL rows, nullor rows, variable-branch rows, the port row; sources: the input, the states, v), the pivots, `solve<T>`, `derive<T>`, `holters()`, `analog()` |
-| text | `src/circuit/Emit.*` | `Val` and the code builder, then the module: fields, init, clear, set, `b<N>_set`, `b<N>`, the halfbands, step, tick |
+| text | `src/circuit/Emit.*` | `Val` and the code builder, then the module: fields, init, clear, set, `b<N>_set`, `b<N>`, the halfbands, step, tick (with the guard); the map from each line to the netlist's |
 | halfbands | `src/circuit/Halfbands.*` | the S1-S3 FIR and IIR coefficients of `experiments/hb-coefs.txt`, their responses, their FMinus |
-| generate | `src/circuit/Generate.cpp` | `generate()`: parse, plan, each block's derivation, emit; errors stop it before emission |
+| generate | `src/circuit/Generate.cpp` | `generate()`: parse, plan, each block's derivation, emit; errors stop it before emission; `selfTestKey()` |
+| search | `src/circuit/Search.*` | the self-test's arithmetic: the stress matrix, the 64x and T1 references, a unit's gates and their reduction, the candidates in the cost model's order, the ordered search, the no-configuration answer, the budget; `Choice`'s text |
+| runners | `src/circuit/Runners.*` | `fm_set`, `fm_steps` and `fm_ticks`: FMinus that drives a module over buffers, a call a run |
+| self-test | `src/api/CircuitSelfTest.cpp` (in `fminus_lib`) | `selfTest()`: each candidate generated, compiled through `fminus::Program` and run on the host's threads |
 | reference | `src/circuit/Reference.*` | a block in Holters' form in double, converged from the closed-form guess or with the emitted steps, plain or ADAA; a chain |
-| analysis | `src/circuit/Analysis.*` | the FFT, the windowed-sinc decimator, in-band error, inharmonic energy, H1 and H3, the stress signals |
+| analysis | `src/circuit/Analysis.*` | the FFT, the windowed-sinc decimator, in-band error, inharmonic energy (and its excess over a reference's), H1 and H3, the stress signals |
 
 The invariant: every emitted coefficient is `derive<Val>` of the derivation the reference runs as `derive<double>`.
 
@@ -269,9 +434,9 @@ prints each check's worst value, where it fell, and the report's figure beside i
 
 - **a.** every shipped netlist generates with no error or warning, and its methods are nonblocking;
 - **b.** DC, as above;
-- **c.** report §2's targets on both 1-port blocks, as shipped and on the defaults, over the full stress set (sines at
-  L/15, L/4.5, L/2.25, L and 2.2 L on odd bins at 105, 996 and 3012 Hz, a sweep and noise at L, each pot at 0, 0.5 and
-  1): **T1** the emitted step against the converged double of the same configuration, in band, at most -60 dB;
+- **c.** report §2's targets on both 1-port blocks, as shipped and on the provisional configuration (Phase 0's
+  defaults), over the full stress set (sines at L/15, L/4.5, L/2.25, L and 2.2 L on odd bins at 105, 996 and 3012 Hz, a
+  sweep and noise at L, each pot at 0, 0.5 and 1): **T1** the emitted step against the converged double of the same configuration, in band, at most -60 dB;
   **T2** the emitted tick's inharmonic energy at most -60 dB for sines up to L; **T3** H1 and H3 within 0.5 dB of a
   converged 64x reference; **T4** finite on every signal; the references converge on every sample;
 - **d.** the TS chain: T3 against a converged 64x chain at drive x tone {0, 0.5, 1}, and tone 1 is 16.4 dB brighter at
@@ -282,7 +447,15 @@ prints each check's worst value, where it fell, and the report's figure beside i
   bit for bit; **h.** calls of 64 and 61 samples against one, a pot gliding on the 16-sample grid, bit for bit; and a
   glide under ADAA (the TS block's drive, a triangle): each `set()` keeps the last point's Newton residual (to 1e-5 of
   `p_D1`, where the curve moves up to 1.6e-2), and over 512 ramps the output stays within 1.1x of the held error against
-  a plain omega3 + 3 module.
+  a plain omega3 + 3 module;
+- **i.** the self-test's ordered search on `diodetone.cir` and `screamer-clip.cir` without their configuration
+  directives, on the full stress matrix: it chooses their shipped configurations, its notes list each candidate tried in
+  the model's order with its verdict, and the answer's T1, T2 and T3 are section c's;
+- **j.** the same answer and notes, byte for byte, on the calling thread alone and on 8 threads;
+- **k.** the guard: a NaN written into `x_C1` is reset at the next multiple of 16 ticks, the fields then a fresh
+  instance's, the fade monotonic to exactly 1 after 960 ticks, calls of 1, 61 and 64 samples alike, and a NaN in one
+  lane of a `float2` resetting both;
+- **l.** the provisional configuration: 8x IIR, plain omega(2), its note, nonblocking.
 
 As built, the TS block at 4x with ADAA measures T1 -78.7, T2 -73.5 (converged -73.6; the report -75.1) and T3 0.14 dB;
 example 1 as shipped T1 -93.1, T2 -79.0 (the report -79.8), T3 0.10 dB; the decision's failures -53.3 and -52.7 dB (the
@@ -298,9 +471,13 @@ is the floor of the report's float emulation: its K2 there is worse than its K1,
 own floor (-100 to -150 dB), where the emitted code and the experiments' float emulation differ by up to 12 dB in
 either direction (§5.2 at 4x and 8x, prev K3-K6; Table 3's omega + 2 at 4x and 8x), all far below the -60 dB gate.
 
-`example-circuits` with no flags prints the cost table in `experiments/fmbench.cpp`'s method (subnormals flushed, one
+`example-circuits` with no flags first prints `generate()`'s time on each shipped netlist (0.05 to 14 ms: the TS's three
+linear blocks' 1x checks are most of it) and the self-test's wall time on 1, 2, 4 and 8 threads (diodetone.cir and
+screamer-clip.cir without their directives: 3.3, 1.8, 1.1 and 0.8 s on an M5 at load 3), then the cost table in
+`experiments/fmbench.cpp`'s method (subnormals flushed, one
 thread, the best of 7 x 10^6 host samples; cycles and instructions from `proc_pid_rusage` on macOS), each row named as
-`experiments/mkbench.py` names its bench and printed beside `experiments/timing1.out`'s measurement; `--all` runs
+`experiments/mkbench.py` names its bench and printed beside the self-test's cost model and `experiments/timing1.out`'s
+measurement; `--all` runs
 mkbench's whole matrix, `--only <regex>` some rows, `--math fast` the frozen copy's mode. Acceptance, by eye: within
 10 % of timing1.out on an idle M-series Mac. The emitted shapes are mkbench's (the omega3, Newton and ADAA text, field
 arrays in tick), in one module with methods, with fewer coefficients. As built (an M5 at load 2): every row within 7 %
@@ -317,13 +494,13 @@ Refused with "not supported yet" wherever a netlist can ask for them:
   formulation (Phase 1-2);
 - inductors, E/F/G/H sources, the OTA macro, `.input kind=cv|current`, switches (Phase 1);
 - single diodes, series strings, asymmetric or parallel pairs, RS, a model library;
-- soft and GBW op amps, `.subckt`, `.param`, `.include`, `.temp`, `.method bdf2|be`;
-- the self-test (the stress matrix at compile time, run asynchronously and cached, the ordered search, the run-time
-  guard beyond the bracket, the no-configuration warning), and `auto` as a real choice;
+- soft and GBW op amps, `.subckt`, `.param`, `.include`, `.temp`, `.method bdf2` and the ringing check, `.prewarp on`;
+- the self-test's rows beyond the exp-affine port (the OTA's smooth-monotone row, BDF2 twins);
 - Woodbury pot updates, and pots as ports for audio-rate resistances;
 - magnitude-matched linear blocks at 1x, oversampled linear-only netlists, several regions, several inputs or outputs;
 - designing halfbands (the coefficients are gen.cpp's, embedded);
 - `.channels 4` voice banks; FMinus additions (`#line`, `fmaf`, `expm1f`, `omegaf`, file-scope `const` arrays); a
   `latency()` in the host's contract;
 - the playground (`.cir` in its Sources, its include resolver, `Lang.h`, `lint.layers`, a `fminus.circuit` probe, the
-  circuits guide part); `.cir` highlighting in `editors/vscode`; `Circuit.h` on the site's API page; ngspice goldens.
+  circuits guide part, the self-test run asynchronously with its answers kept); `.cir` highlighting in `editors/vscode`;
+  `Circuit.h` on the site's API page; ngspice goldens.

@@ -1,6 +1,7 @@
 * clipper.cir: Yeh's RC diode clipper (DAFx-07): R1 into C1, an antiparallel 1N914 pair across it; the circuit of
-* fminus.md's Tables 1 to 3 (example-circuits --tables runs it with their 45.0 mV). No configuration directives:
-* Phase 0's defaults (8x, plain omega3 + 2 Newton steps; docs/circuits.md)
+* fminus.md's Tables 1 to 3 (example-circuits --tables runs it with their 45.0 mV). No configuration directives: the
+* self-test chooses (4x, ADAA, omega3 + 1 step); until it answers, the provisional configuration plays (8x, plain
+* omega3 + 2 Newton steps; docs/circuits.md)
 .title Clipper
 .input  u    in   scale=1
 .output vout a

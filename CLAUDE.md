@@ -21,7 +21,9 @@ asks for that specific change, and ask before restructuring anything.
 - `src/circuit/` is its own library too, `fminus_circuit` (no LLVM, no grammar): the circuit compiler the user asked
   for (2026-10-29), SPICE-style netlists to FMinus source (`include/fminus/Circuit.h`, C++17; `docs/circuits.md`; the
   research in `docs/research/analog-circuits/`). It compiles with `-ffp-contract=off`, so the text it prints is the
-  same on every machine; `fminus_lib` links it. A name its emitted module uses goes in `isModuleWord` (Plan.cpp).
+  same on every machine; `fminus_lib` links it. A name its emitted module uses goes in `isModuleWord` (Plan.cpp). Its
+  self-test, `selfTest()`, needs the JIT, so it lives in `fminus_lib` (`src/api/CircuitSelfTest.cpp`, which compiles
+  candidates through `fminus::Program`); its arithmetic stays in `src/circuit/Search.*`, which stays LLVM-free.
 - The smoke tests (`tests/smoke/`, `tests/lit/smoke/`) prove the toolchain. Keep them passing until the user retires
   them.
 - `docs/` is the manual (architecture, extending, building, testing; `docs/recipes/` patches). Keep it in step with
