@@ -1,0 +1,31 @@
+// The DiodeTone module of examples/circuits/diodetone.cir, as a program reads it: #include of a .cir (run.test).
+#include "diodetone.cir"
+
+// The output after 12000 host samples (0.25 s at 48 kHz) of `level` volts in, tone at 1 (bright).
+float dc(float level)
+{
+    DiodeTone c;
+    c.init(48000);
+    c.set(1);
+    float y = 0;
+    for (int i = 0; i < 12000; ++i)
+        y = c.tick(level);
+    return y;
+}
+
+// The output's peak for a 1 kHz sine of amplitude `amp`, tone at 1, over 0.25 s.
+float peak(float amp)
+{
+    DiodeTone c;
+    c.init(48000);
+    c.set(1);
+    float pk = 0;
+    float ph = 0;
+    for (int i = 0; i < 12000; ++i)
+    {
+        pk = fmaxf(pk, fabsf(c.tick(amp * sinf(6.28318531f * ph))));
+        ph += 1000.0f / 48000.0f;
+        ph = ph >= 1 ? ph - 1 : ph;
+    }
+    return pk;
+}

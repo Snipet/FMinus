@@ -1,0 +1,14 @@
+// The module of diodetone-45mv.cir, the configuration fminus.md printed its DC values from (run.test).
+#include "diodetone-45mv.cir"
+
+// The output after 12000 host samples (0.25 s at 48 kHz) of `level` volts in, tone at 1 (bright).
+float dc(float level)
+{
+    DiodeTone c;
+    c.init(48000);
+    c.set(1);
+    float y = 0;
+    for (int i = 0; i < 12000; ++i)
+        y = c.tick(level);
+    return y;
+}

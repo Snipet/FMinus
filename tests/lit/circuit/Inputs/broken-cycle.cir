@@ -1,0 +1,13 @@
+* broken-cycle.cir: XU1 reads XU2's output, and XU2 reads XU1's
+.title Broken
+.input  u    in
+.output vout m
+R1     in  m   1k
+R2     m   0   1k
+XU1    o2  n1  o1  opamp
+R3     o1  n1  1k
+R4     n1  0   1k
+XU2    o1  n2  o2  opamp
+R5     o2  n2  1k
+R6     n2  0   1k
+.end

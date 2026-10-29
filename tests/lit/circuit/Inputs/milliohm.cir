@@ -1,0 +1,7 @@
+* milliohm.cir: 1M is a milliohm in SPICE (a warning: the netlist still generates)
+.title Milliohm
+.input  u    in
+.output vout a
+R1     in  a   1M
+C1     a   0   10n
+.end

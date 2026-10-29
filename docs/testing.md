@@ -80,7 +80,9 @@ TEST_CASE("functions compute what they say", "[codegen]")
   `[pointer]`, `[heap]`, `[effects]`, `[math]` (the math modes and their kernels), `[versions]` (knob versioning and
   flat streams), `[tbaa]`, `[zeroinit]`, `[attributes]` and `[progress]` (the runtime's and libm's attributes, and loop
   progress), `[denormals]`, `[parallel]` (parallel regions, and `[runtime]` among them for the pool on its own),
-  `[ir]` (`Program::Options::keepIr`'s texts). Add new ones freely.
+  `[ir]` (`Program::Options::keepIr`'s texts), `[circuit]` (the circuit compiler: `CircuitTest.cpp` its netlists,
+  plans, equations, halfbands, reference and analysis; `CircuitEmitTest.cpp` its emitted text, compiled through
+  `fminus::Program`). Add new ones freely.
 - **A hidden test** carries the tags `[.]` and a name: ctest never runs it, and `fminus-tests "[name]"` does.
   `[exhaustive]` runs every float through every math kernel, on every core, against its error bound, in every lane, and
   under flush-to-zero (extending.md, recipe 23): about ten minutes, for after a change to a kernel.
@@ -226,6 +228,15 @@ it can't allocate (`examples/delay/`).
 Write the C++ reference as the kernel is written, on raw pointers. The examples compile with LLVM's definitions,
 which turn on libc++'s hardening, so a `std::vector`'s `operator[]` in the reference's loop checks every index: the
 delay's first reference was 35 % slower than FMinus for that alone.
+
+`example-circuits` (`examples/circuits/`) checks generated code another way: its references are the double simulation
+of the same circuit (`src/circuit/Reference.h`), solved to convergence, and a converged one at 64x, and its measures are
+the research's (in-band error, inharmonic energy, H1 and H3; `src/circuit/Analysis.h`). `--check` (ctest's
+`example.circuits`) gates on the research's targets and prints each worst value beside the research's figure;
+`--tables` reprints the research's accuracy tables from emitted code (minutes), and with no flags it prints the cost
+table, which nothing asserts. `tests/lit/circuit/equiv-ex1c.fm` and `equiv-ts2.fm` compile the research's hand-written
+modules (`docs/research/analog-circuits/experiments/ex1c.fm`, `ts2.fm`) beside the generated ones and require their
+outputs to agree within 2e-5 of their peak.
 
 ## Looking at what the compiler did
 

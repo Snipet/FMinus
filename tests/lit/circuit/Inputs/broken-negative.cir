@@ -1,0 +1,17 @@
+* broken-negative.cir: a negative impedance converter (XU1, Rf, R3, R4) across the diode pair: the port sees a
+* negative resistance, K < 0, which the solver's bracket and log(Is K / N Vt) cannot take (errors.test)
+.title Negative
+.input  u    in
+.output y    a
+.oversample 2
+R1     in  a   1k
+C1     a   0   10n
+D1     a   0   DX
+D2     0   a   DX
+XU1    a   n   o   opamp
+Rf     o   a   100
+R3     o   n   1k
+R4     n   0   1k
+R5     a   n   1meg
+.model DX D(IS=2.52n N=1.752)
+.end

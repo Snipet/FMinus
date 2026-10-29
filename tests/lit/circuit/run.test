@@ -1,0 +1,25 @@
+# The generated module runs: #include "diodetone.cir" in an FMinus program (Inputs/play.fm), tone at 1, a level of DC
+# held for 0.25 s at 48 kHz. The values are the JIT's, deterministic on every machine (FMinus's math kernels, no
+# contraction); examples/circuits --check compares them with the double reference of the same configuration.
+# As shipped (plain omega3 + 2 Newton steps at 4x) the DC point is within 2e-5 V of the exact one, the root of
+# v + R1 2 Is sinh(v / N Vt) = u: 0.0999503, 0.515596 and 0.615423 V. (With ADAA and one step it would sit up to 1 mV
+# above it, and at 5 V wander around it: docs/circuits.md, "DC".)
+# RUN: fminus %S/Inputs/play.fm -I %S/../../../examples/circuits --run dc 0.1 | FileCheck %s --check-prefix=DC01
+# RUN: fminus %S/Inputs/play.fm -I %S/../../../examples/circuits --run dc 1 | FileCheck %s --check-prefix=DC1
+# RUN: fminus %S/Inputs/play.fm -I %S/../../../examples/circuits --run dc 5 | FileCheck %s --check-prefix=DC5
+# DC01: 0.099950{{[0-9]*}}
+# DC1: 0.515595{{[0-9]*}}
+# DC5: 0.615435{{[0-9]*}}
+
+# fminus.md's own configuration (N Vt 45.0 mV, no ADAA, omega3 + 1 step at 4x) prints its sanity values: 0.09995, 0.512
+# and 0.612 V (0.0999495, 0.512374, 0.612392).
+# RUN: fminus %S/Inputs/play-45mv.fm -I %S/Inputs --run dc 0.1 | FileCheck %s --check-prefix=OLD01
+# RUN: fminus %S/Inputs/play-45mv.fm -I %S/Inputs --run dc 1 | FileCheck %s --check-prefix=OLD1
+# RUN: fminus %S/Inputs/play-45mv.fm -I %S/Inputs --run dc 5 | FileCheck %s --check-prefix=OLD5
+# OLD01: 0.099949{{[0-9]*}}
+# OLD1: 0.51237{{[0-9]*}}
+# OLD5: 0.61239{{[0-9]*}}
+
+# A 4.5 V, 1 kHz sine: finite, and clipped below 0.7 V.
+# RUN: fminus %S/Inputs/play.fm -I %S/../../../examples/circuits --run peak 4.5 | FileCheck %s --check-prefix=PEAK
+# PEAK: {{^}}0.6{{[0-9]+$}}

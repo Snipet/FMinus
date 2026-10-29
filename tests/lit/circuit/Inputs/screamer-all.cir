@@ -1,0 +1,39 @@
+* screamer-all.cir: screamer.cir with every block oversampled (options.test)
+* Values from Yeh, Abel & Smith, DAFx-07, figs. 14 and 15 and eq. 24. The 4.5 V reference is AC ground, valid while the
+* op amps stay inside their rails; the input and output emitter followers are left out.
+.title Screamer
+.input  u    in   scale=1
+.output vout out
+.pot    drive 0.5 audio
+.pot    tone  0.5 lin
+.pot    level 0.7 audio
+.oversample 4 iir blocks=all
+.adaa on
+.solver omega(1)
+.target solver=-60dB alias=-60dB level=0.45V freq=3k
+* clipping stage (fig. 14)
+C1     in  p1  1u
+R1     p1  0   10k
+XU1    p1  n1  v2  opamp            ; ideal: V(n1) = V(p1), no input current
+R4     n1  z1  4.7k
+C3     z1  0   47n
+R6     n1  f1  51k
+Pdrive f1  v2  500k {drive} taper=audio
+C4     n1  v2  51p
+D1     n1  v2  1N914
+D2     v2  n1  1N914
+* tone control (fig. 15, eq. 24): an active treble control
+R7     v2  t1  1k
+C5     t1  0   0.22u
+R8     t1  0   10k
+XU2    t1  tn  v3  opamp
+R9     v3  tn  1k
+Ptone  tn  tw  t1  20k {tone}       ; R(tw-t1) = tone 20k on the + input side, as Yeh's R_l = T 20k (report 9.1)
+R10    tw  tz  220
+C6     tz  0   0.22u
+* level
+C7     v3  o1  1u
+R11    o1  o2  1k
+Plevel o2  out 0   100k {level} taper=audio
+.model 1N914 D(IS=2.52n N=1.752)
+.end

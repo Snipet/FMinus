@@ -17,6 +17,10 @@
 //     fminus synth.fm -I lib                #include "name" looks beside the including file, then in lib/
 //     fminus voices.fm --threads 4          a parallel for or parallel { } on 4 threads at most (0, the default:
 //                                           one for each core; 1: each region on the calling thread alone)
+//     fminus diodetone.cir --emit fm        the FMinus module a circuit netlist generates (fminus::circuit,
+//                                           docs/circuits.md); a .cir compiles and runs as that text would
+//     fminus play.fm --run dc 1             play.fm's #include "diodetone.cir" reads the module it generates
+#include "fminus/Circuit.h"
 #include "frontend/Frontend.h"
 #include "ir/CodeGen.h"
 #include "jit/Jit.h"
@@ -113,15 +117,36 @@ namespace
         return !number.empty() && end == number.c_str() + number.size();
     }
 
+    // Whether a file's name ends in .cir, in any case: a circuit netlist (fminus::circuit).
+    bool isNetlist(std::string_view name)
+    {
+        if (name.size() < 4)
+            return false;
+        std::string tail(name.substr(name.size() - 4));
+        for (char& c : tail)
+            c = static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+        return tail == ".cir";
+    }
+
+    // What the circuit compiler said of the .cir files #include read: its messages, and whether one failed. The
+    // include resolver cannot carry errors, so it writes them here, and main prints them after the parse.
+    struct CircuitLog
+    {
+        std::string messages;
+        bool failed = false;
+    };
+
     // Where #include "name" finds its file, as C's quoted form looks: beside the including file, then in each of
     // `directories` in turn (an absolute name is itself). A file is named as found (the directory and the name, its
     // ./ and ../ removed), except one read already by another name: the first name it was found by, so that the
-    // scanner reads it once (the program's own file, `input`, is read already).
+    // scanner reads it once (the program's own file, `input`, is read already). A .cir file is a circuit netlist: its
+    // text is the module fminus::circuit generates, named <file>.fm (so a second #include of it reads nothing), and
+    // what the generator says goes to `log`.
     class DiskIncludes
     {
     public:
-        DiskIncludes(std::vector<std::string> directories, const std::string& input)
-            : directories_(std::move(directories))
+        DiskIncludes(std::vector<std::string> directories, const std::string& input, CircuitLog* log)
+            : directories_(std::move(directories)), log_(log)
         {
             if (input != "<stdin>")
                 remember(input);
@@ -151,8 +176,21 @@ namespace
                 if (llvm::sys::fs::is_directory(candidate))
                     continue;
                 llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> file = llvm::MemoryBuffer::getFile(candidate, true);
-                if (file)
-                    return fminus::frontend::IncludedFile{remember(std::string(candidate)), (*file)->getBuffer().str()};
+                if (!file)
+                    continue;
+                std::string found = remember(std::string(candidate));
+                if (!isNetlist(found))
+                    return fminus::frontend::IncludedFile{found, (*file)->getBuffer().str()};
+                // generated once, so a second #include says nothing again (the scanner reads it once anyway)
+                auto [it, first] = generated_.try_emplace(found);
+                if (first)
+                {
+                    const fminus::circuit::Result circuit = fminus::circuit::generate((*file)->getBuffer(), found);
+                    log_->messages += circuit.errors + circuit.warnings;
+                    log_->failed = log_->failed || !circuit.errors.empty();
+                    it->second = circuit.source;
+                }
+                return fminus::frontend::IncludedFile{found + ".fm", it->second};
             }
             return std::nullopt;
         }
@@ -168,7 +206,9 @@ namespace
         }
 
         std::vector<std::string> directories_;
-        std::map<std::string, std::string> names_;   // a file's real path, and the name it goes by
+        std::map<std::string, std::string> names_;       // a file's real path, and the name it goes by
+        std::map<std::string, std::string> generated_;   // a .cir's name, and the module generated from it
+        CircuitLog* log_;                                // main's: the resolver is copied into a std::function
     };
 
     int writeText(const std::string& path, const std::string& text)
@@ -208,8 +248,10 @@ int main(int argc, char** argv)
     app.add_option("input", input, "FMinus source file ('-' for stdin)")->required();
     app.add_option("args", runArgs, "The arguments of --run's function");
     app.add_option("-o,--output", output, "The output file ('-' is stdout)")->capture_default_str();
-    app.add_option("--emit", emit, "What to write: ast, ll, asm, obj, or exe (an executable that runs main)")
-        ->check(CLI::IsMember({"ast", "ll", "asm", "obj", "exe"}))
+    app.add_option("--emit", emit,
+                   "What to write: ast, ll, asm, obj, exe (an executable that runs main), or fm (the FMinus module a "
+                   "circuit netlist, .cir, generates)")
+        ->check(CLI::IsMember({"ast", "ll", "asm", "obj", "exe", "fm"}))
         ->capture_default_str();
     app.add_option("-O", level, "Optimisation level, 0 to 3")->check(CLI::Range(0, 3))->capture_default_str();
     app.add_option("--run", run, "JIT-compile, call this function with the arguments and print its result");
@@ -254,13 +296,32 @@ int main(int argc, char** argv)
                                                         llvm::OptimizationLevel::O2, llvm::OptimizationLevel::O3};
     const llvm::OptimizationLevel optimisation = levels[static_cast<std::size_t>(level)];
 
-    // Source -> syntax tree.
+    // Source -> syntax tree. A circuit netlist (.cir) is first the FMinus text fminus::circuit generates from it.
     llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> source = llvm::MemoryBuffer::getFileOrSTDIN(input);
     if (!source)
         return fail("cannot read " + input + ": " + source.getError().message());
-    fminus::Diagnostics diagnostics(input == "-" ? "<stdin>" : input);
-    std::optional<fminus::ast::Program> program = fminus::frontend::parse(
-        (*source)->getBuffer(), diagnostics, DiskIncludes(includeDirectories, diagnostics.fileName()));
+    std::string text = (*source)->getBuffer().str();
+    std::string sourceName = input == "-" ? "<stdin>" : input;
+    if (isNetlist(input))
+    {
+        const fminus::circuit::Result circuit = fminus::circuit::generate(text, input);
+        llvm::errs() << circuit.errors << circuit.warnings;
+        if (!circuit.errors.empty())
+            return 1;
+        if (emit == "fm" && run.empty())
+            return writeText(output, circuit.source);
+        text = circuit.source;
+        sourceName = input + ".fm";   // FMinus's messages cite the lines --emit fm prints
+    }
+    else if (emit == "fm")
+        return fail("--emit fm: " + input + " is not a circuit netlist (.cir)");
+    CircuitLog circuits;
+    fminus::Diagnostics diagnostics(sourceName);
+    std::optional<fminus::ast::Program> program =
+        fminus::frontend::parse(text, diagnostics, DiskIncludes(includeDirectories, diagnostics.fileName(), &circuits));
+    llvm::errs() << circuits.messages;
+    if (circuits.failed)
+        return 1;
     if (!program)
     {
         llvm::errs() << diagnostics.format();
@@ -385,10 +446,10 @@ int main(int argc, char** argv)
     }
     if (emit == "ll")
     {
-        std::string text;
-        llvm::raw_string_ostream os(text);
+        std::string ir;
+        llvm::raw_string_ostream os(ir);
         module->print(os, nullptr);
-        return writeText(output, text);
+        return writeText(output, ir);
     }
     const auto kind = emit == "asm" ? fminus::aot::FileKind::Assembly : fminus::aot::FileKind::Object;
     if (llvm::Error error = fminus::aot::emitFile(*module, **machine, output, kind))

@@ -475,7 +475,7 @@ Because the JIT and executables share one runtime, the two compile the same prog
 
 | Target | Source | Uses |
 |---|---|---|
-| `fminus` | `tools/fminus/main.cpp` | parse, lower, then `--emit ast/ll/asm/obj/exe` or `--run` in the JIT |
+| `fminus` | `tools/fminus/main.cpp` | parse, lower, then `--emit ast/ll/asm/obj/exe` or `--run` in the JIT; a `.cir` input, or an `#include` of one, is the text `fminus::circuit::generate` writes (`--emit fm` prints it) |
 | `fminus-build` | `tools/fminus-build/main.cpp` | LLVM IR to exe/obj/asm/ll (HostTarget + Aot) |
 | `fminus-hostinfo` | `tools/fminus-hostinfo/main.cpp` | the triple, CPU, features and data layout the JIT targets |
 | `example-biquad` | `examples/biquad/bench.cpp` | biquad.fm's module, its cutoff a stream, against C++, compared and timed, through `fminus::Program` |
@@ -486,6 +486,7 @@ Because the JIT and executables share one runtime, the two compile the same prog
 | `example-convolver` | `examples/convolver/bench.cpp` | convolver.fm's FIR by FFT, against C++ and a direct convolution, through `fminus::Program` |
 | `example-parameters` | `examples/parameters/bench.cpp` | parameters.fm's filter, its cutoff a knob, a stream or frozen, against C++, through `fminus::Program` |
 | `example-hello` | `examples/hello/main.cpp` | FMinus as a library at its smallest: a program compiled from a string, through `fminus::Program` |
+| `example-circuits` | `examples/circuits/*.cpp` | the circuit compiler's modules through `fminus::Program` against the double reference and a 64x one: the research's targets (`--check`), its accuracy tables (`--tables`) and its cost table |
 | (not built here) | `examples/plugin/` | FMinus Filter, a JUCE plugin, and its check `fminus-plugin-check`: a CMake project of its own, which `examples/CMakeLists.txt` skips, built with `cmake -S examples/plugin -B build-plugin` ([building.md](building.md)) |
 | `fminus-tests` | `tests/unit/`, `tests/smoke/` | Catch2 |
 | `fminus-library-tests` | `tests/library/` | Catch2, in C++17, against `FMinus::FMinus` alone: the public API as a host uses it |
@@ -496,6 +497,7 @@ Because the JIT and executables share one runtime, the two compile the same prog
 | Target | What | Include roots it gives |
 |---|---|---|
 | `fminus_runtime` (`FMinus::Runtime`) | `src/runtime/**`, and PFFFT's objects (`fminus_pffft`) | none (generated code calls it by name) |
+| `fminus_circuit` (`FMinus::Circuit`, `libfminus_circuit.a`) | `src/circuit/**`: the circuit compiler | `include/` (`"fminus/Circuit.h"`); C++17; no LLVM; `-ffp-contract=off`, so its double folding prints the same text on every target; `fminus_lib` links it publicly |
 | `fminus_lib` (`FMinus::FMinus`, `libfminus.a`) | every other `.cpp` under `src/`, and the generated scanner and parser | `include/` (`"fminus/FMinus.h"`), `<build>/include` (`fminus/Config.h`); C++17; LLVM linked, not included |
 | `FMinus::Internal` | `fminus_lib` for this tree's tools, examples and tests | also `src/` (`"frontend/Ast.h"`, ...), `<build>/src/generated/` (`"frontend/Parser.tab.hpp"`), LLVM's headers; C++23 |
 | `FMinus::LLVM` | LLVM's headers (as system headers) and the libraries of `FMINUS_LLVM_COMPONENTS` | LLVM's |
@@ -508,6 +510,28 @@ gives C++ the math builtins as the default math mode computes them. It has no LL
 `FMinus::FMinus` gives its users neither LLVM's include directories and definitions nor FMinus's C++23
 (`fminus_target_defaults` makes a target's standard its own), only the libraries to link. The tree's tools, examples
 and tests use the stages directly, through `FMinus::Internal`.
+
+## Circuits: `src/circuit/`
+
+The circuit compiler ([circuits.md](circuits.md)) is a front end to FMinus, not a part of its pipeline: it turns a
+SPICE-style netlist into FMinus source, which then goes through the stages above like any other text. It is its own
+library, with no LLVM in it, so a host's include resolver (or `tools/fminus`'s) can call it.
+
+| Stage | Entry point | Input | Output |
+|---|---|---|---|
+| parse | `circuit::parse` (`Netlist.h`) | the netlist's text | `Netlist`: its elements, models, pots and directives, as written, with their lines and columns |
+| plan | `circuit::plan` (`Plan.h`) | `Netlist`, `Options` | `Plan`: diode pairs as ports, pots as variable branches, the checks, a chain of blocks cut at ideal op amps, the configuration, the oversampled region |
+| equations | `assemble`, `choosePivots` (`Mna.h`) | a block of the plan | `System` (its stamps, sources and readouts) and `Pivots` (the elimination order, checked over a grid of rates and pots) |
+| derivation | `solve<T>`, `derive<T>` (`Mna.h`) | `System`, `Pivots`, the symbols as `T` | each readout as a linear form in the sources, then the module's coefficients |
+| text | `deriveBlock`, `emit` (`Emit.h`) | the plan and each block's derivation on `Val`s | the module's FMinus text |
+
+`generate()` (`Generate.cpp`) runs them; any error stops it before the text. `Messages` (`Netlist.h`) collects every
+stage's errors, warnings and notes and formats them as clang does. `Reference.h` and `Analysis.h` are the double
+reference and the measurements that `examples/circuits` and the tests check the emitted code with.
+
+The invariant: every emitted coefficient is `derive<Val>` of the same derivation the reference runs as
+`derive<double>` (and a linear block's analog response as `solve<std::complex<double>>`), over the same system and
+pivots, so the float code computes what the reference computes, operation for operation.
 
 ## Invariants worth keeping
 

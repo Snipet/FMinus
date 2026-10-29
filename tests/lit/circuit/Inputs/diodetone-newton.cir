@@ -1,0 +1,18 @@
+* diodetone-newton.cir: diodetone.cir from the previous solution, 4 Newton steps (options.test)
+.title DiodeTone
+.input  u    in   scale=1          ; 1.0 = 1 V into R1
+.output vout b
+.pot    tone 0.5 lin               ; 1: bright (0 ohm), 0: dark (25k)
+.oversample 4 iir blocks=auto
+.adaa off
+.solver newton(4)
+.target solver=-60dB alias=-60dB level=4.5V freq=3k
+R1     in a  2.2k
+C1     a  0  10n
+D1     a  0  1N914
+D2     0  a  1N914
+R2     a  c  470
+Ptone  c  b  25k {1 - tone}        ; a rheostat
+C2     b  0  22n
+.model 1N914 D(IS=2.52n N=1.752)
+.end

@@ -1,0 +1,10 @@
+// A program that includes a netlist twice (errors.test): it is generated once, so its warning shows once.
+#include "milliohm.cir"
+#include "milliohm.cir"
+
+float f(float x)
+{
+    Milliohm c;
+    c.init(48000);
+    return c.tick(x);
+}

@@ -131,6 +131,7 @@ Every source list is a glob, so adding a file never edits CMake. Configure picks
 | an example | `examples/<name>/*.cpp`, and its FMinus sources | `bin/example-<name>`, told its directory as `FMINUS_EXAMPLE_DIR`, with a ctest `example.<name>` running `--check`; a directory with a `CMakeLists.txt` of its own is a separate project, which `examples/CMakeLists.txt` skips (`examples/plugin/`, [below](#the-plugin-example)) |
 | a unit test | `tests/unit/*.cpp` | part of `fminus-tests`; each `TEST_CASE` is a ctest test |
 | a lit test | `tests/lit/**/*.{fm,ll,test}` | part of the lit suite |
+| a circuit-compiler source | `src/circuit/` | part of `libfminus_circuit.a` (no LLVM, no grammar: a `*.y` or `*.l` there would be generated into `libfminus.a`) |
 | a public header | `include/fminus/` | `"fminus/..."`, for code embedding FMinus (FMinus.h: C++17, no LLVM) |
 | a test of the public API | `tests/library/*.cpp` | part of `fminus-library-tests` (C++17, `FMinus::FMinus` alone) |
 

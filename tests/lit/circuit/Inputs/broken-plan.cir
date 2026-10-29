@@ -1,0 +1,14 @@
+* broken-plan.cir: errors.test's errors about the circuit's shape (fminus.md §5's messages)
+.title Broken
+.input  u    in
+.output vout b
+R1     in  a   2.2k
+R6     a   f1  51k
+C3     a   z2  1n
+C9     z2  0   1n
+D1     a   0   1N4148X
+D2     0   a   1N4148X
+D3     a   b   1N914
+R2     b   0   1k
+.model 1N914 D(IS=2.52n N=1.752)
+.end

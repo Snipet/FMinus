@@ -1,0 +1,9 @@
+* broken-feedback.cir: an op amp whose output never reaches its - input
+.title Broken
+.input  u    in
+.output vout o
+R1     in  n   10k
+R2     n   0   10k
+XU1    n   0   o   opamp
+R3     o   0   1k
+.end

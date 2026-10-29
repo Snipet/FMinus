@@ -1,0 +1,12 @@
+* broken-ports.cir: two diode pairs in one block
+.title Broken
+.input  u    in
+.output vout a
+R1     in  a   2.2k
+D1     a   0   DM
+D2     0   a   DM
+R2     a   b   1k
+D3     b   0   DM
+D4     0   b   DM
+.model DM D(IS=2.52n N=1.752)
+.end

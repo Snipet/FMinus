@@ -6,6 +6,10 @@ cost on FMinus at commit `c75caab`. This folder holds the report, the four resea
 ([notes/](notes/)), and the sources and results of the experiments it cites ([experiments/](experiments/), whose
 [README](experiments/README.md) says how to build and run each).
 
+**As built:** Phase 0 (§11) is now in FMinus, as [docs/circuits.md](../../circuits.md) describes: `src/circuit/`,
+`fminus x.cir --emit fm`, and `examples/circuits`, which reprints this report's tables from emitted code. Where it found
+this report off (the default configuration, ADAA's DC behaviour, the IIR halfbands' latency), that page says so.
+
 The report draws together the four notes ([landscape.md](notes/landscape.md), [methods.md](notes/methods.md),
 [optimization.md](notes/optimization.md), [fminus.md](notes/fminus.md)) and settles the points where they disagree. It
 adds a second round of experiments:
@@ -799,7 +803,7 @@ fields named after the parts.
 
 | Phase | Deliverables | Agent-days | Changes from [fminus.md §10](notes/fminus.md#10-phased-plan) |
 |---|---|---|---|
-| 0. Spike | 1-port generator; both examples through `fminus --emit fm`; this report's tables reproduced from emitted code | 2 | – |
+| 0. Spike | 1-port generator; both examples through `fminus --emit fm`; this report's tables reproduced from emitted code (built: [circuits.md](../../circuits.md)) | 2 | – |
 | 1. First slice | [fminus.md](notes/fminus.md#10-phased-plan)'s Phase 1, plus: the ADAA candidate with closed-form F (+1); stress matrix, asynchronous self-test with cache, run-time guard and no-config warning (+2); matched design for linear blocks at 1x (+1); `OTA`, `E` and `G` elements, law inputs and the prewarp option (+2) | **16** (was 10) | ADAA moved in from Phase 4; the self-test grows from "tens of ms" to an asynchronous job |
 | 2. Transistors and op-amp models | [fminus.md](notes/fminus.md#10-phased-plan)'s Phase 2, plus: junction capacitances by default; the offset formulation, mandatory; BLT, decomposition and tearing, emitting both solvers; the soft-rail op-amp; the ladder as a 4-port tanh chain | **13** (was 9) | the Fuzz Face may end in the no-config outcome; budget about 7,000 cycles at 8x |
 | 3. Tubes, tables and FMinus additions | [fminus.md](notes/fminus.md#10-phased-plan)'s Phase 3, plus `expm1f` (0.5); `omegaf` stays | 10.5 | – |

@@ -58,7 +58,8 @@ cmake/
   FMinusCLI11.cmake       CLI11 -> CLI11::CLI11, linked into every tool
   FMinusTesting.cmake     Catch2 and lit
   templates/Config.h.in   -> <build>/include/fminus/Config.h
-include/fminus/         the library's public API ("fminus/..."): FMinus.h, fminus::Program (below)
+include/fminus/         the library's public API ("fminus/..."): FMinus.h, fminus::Program (below); Circuit.h,
+                        fminus::circuit::generate (SPICE-style netlists to FMinus source, docs/circuits.md)
 src/                    the fminus library: every .cpp is a source, every grammar is generated in
   api/                  the public API (include/fminus/FMinus.h) on the pipeline
   support/              integration helpers that came with the skeleton: LLVMInit, HostTarget (the host's
@@ -80,6 +81,9 @@ src/                    the fminus library: every .cpp is a source, every gramma
   opt/                  FMinus's own LLVM passes: KnobVersioning (a method's copies for its knobs' values),
                         ZeroInitElision (a local's zeroing, removed where nothing reads it) and MathKernels (the
                         math builtins' kernels, inline)
+  circuit/              the circuit compiler: its own library, libfminus_circuit.a, with no LLVM in it (Netlist,
+                        Plan, Mna, Emit, Halfbands, Generate; Reference and Analysis, the double reference and the
+                        measurements its checks use); docs/circuits.md
 tools/<name>/           one executable per directory, with CLI11 for its command line: fminus (the driver),
                         fminus-build and fminus-hostinfo
 examples/<name>/        one example per directory: an FMinus program, and a harness if it has .cpp files
@@ -104,11 +108,13 @@ examples/<name>/        one example per directory: an FMinus program, and a harn
   hello/                FMinus as a library at its smallest: a main that JIT-compiles a program from a string
   plugin/               FMinus Filter, a JUCE plugin (AU, VST3, Standalone) whose DSP is an FMinus program: its
                         own CMake project, built apart from FMinus's (cmake -S examples/plugin -B build-plugin)
+  circuits/             the circuit compiler's netlists (.cir): the research's examples, checked against its targets,
+                        its accuracy tables and its costs reprinted from emitted code (--check, --tables)
 tests/
   unit/                 your Catch2 tests
   library/              the public API as a host uses it: in C++17, against FMinus::FMinus alone
   smoke/                the toolchain's checks: LLJIT + O3 on the host, Bison + Flex (smoke/calc/)
-  lit/                  lit + FileCheck tests (*.test, *.fm, *.ll)
+  lit/                  lit + FileCheck tests (*.test, *.fm, *.ll); lit/circuit/ the circuit compiler's
 editors/vscode/         a VSCode extension: syntax highlighting for .fm files (its README installs it)
 Scripts/pin-llvm.sh     the pin lines for another LLVM release
 docs/                   the manual: architecture, programs, extending, SIMD, building, testing; recipes/ as patches
@@ -358,6 +364,7 @@ build-dev/bin/fminus lp.fm --denormals=flush       # subnormals flushed to zero:
 build-dev/bin/fminus lp.fm --no-strict-aliasing    # no TBAA: for a program that reads memory as another type
 build-dev/bin/fminus synth.fm -I lib               # #include "name": beside the including file, then in lib/
 build-dev/bin/fminus voices.fm --threads 4         # a parallel region on 4 threads at most (0: every core; 1: alone)
+build-dev/bin/fminus pedal.cir --emit fm           # the FMinus module a circuit netlist generates (docs/circuits.md)
 ```
 
 How it fits together: `frontend::parse` (Lexer.l, then Parser.y) gives an `ast::Program`, and `ir::lower` (in
@@ -465,6 +472,12 @@ gain(in, out, n, 0.5f);                                       // one call a bloc
   `compile()` runs the optimiser itself, and the first look-up then only the code generator.
 - **Lifetime.** A function pointer is valid while its `Program` lives.
 
+`include/fminus/Circuit.h` is the circuit compiler's: `fminus::circuit::generate(netlist, "pedal.cir")` turns a
+SPICE-style netlist into the text of one FMinus module, which `Program::compile` compiles like any other source, its
+errors in clang's words as FMinus's are. A host that serves `#include` generates in its resolver for a `.cir` name
+([docs/circuits.md](docs/circuits.md) has the lambda). It is C++17 with no LLVM too, and comes with `FMinus::FMinus`
+(its library, `libfminus_circuit.a`, links into `libfminus.a`'s users).
+
 The header has no LLVM in it and needs C++17. In CMake, a host links `FMinus::FMinus`, and gets FMinus's include
 directories and libraries (LLVM's too, linked statically, and the FFT inside the runtime's), but neither LLVM's headers
 nor FMinus's C++23. As a
@@ -560,6 +573,9 @@ preset has a workflow (`cmake --workflow --preset <name>`) except `xcode`, which
   ([editors/vscode/README.md](editors/vscode/README.md)).
 - `build-dev/bin/fminus`: FMinus source to its tree, IR, assembly or an object, or run in the JIT (above).
 - `build-dev/bin/fminus-build`: LLVM IR to an executable, object, assembly or optimised IR (above).
+- `build-dev/bin/fminus examples/circuits/diodetone.cir --emit fm`: an analog circuit's netlist as the FMinus module the
+  circuit compiler generates ([docs/circuits.md](docs/circuits.md)); `build-dev/bin/example-circuits --check` checks
+  the research's examples against its targets.
 - The LLVM tools of the flavor in use are in `.deps/install/llvm-…/bin`: `opt -passes='default<O3>' -S`,
   `llc -mcpu=native`, `llvm-mca` (throughput of a kernel's machine code), `llvm-objdump -d`.
 - LLVM is built with `LLVM_ENABLE_DUMP=ON`: `value->dump()` and `module->dump()` work without assertions too.
