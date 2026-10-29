@@ -7,6 +7,7 @@
 # RUN: not fminus %S/Inputs/broken-cycle.cir --emit fm 2>&1 | FileCheck %s --check-prefix=CYCLE --match-full-lines
 # RUN: not fminus %S/Inputs/broken-singular.cir --emit fm 2>&1 | FileCheck %s --check-prefix=SINGULAR --match-full-lines
 # RUN: not fminus %S/Inputs/broken-nooutput.cir --emit fm 2>&1 | FileCheck %s --check-prefix=NOOUTPUT --match-full-lines
+# RUN: not fminus %S/Inputs/broken-negative.cir --emit fm 2>&1 | FileCheck %s --check-prefix=NEGATIVE --match-full-lines
 # RUN: not fminus %S/Inputs/play-broken.fm 2>&1 | FileCheck %s --check-prefix=PLAY --implicit-check-not=error: --implicit-check-not="not found"
 
 # PARSE:      {{.*}}broken-parse.cir:7:1: error: the inductor L1 is not supported yet (Phase 1)
@@ -32,6 +33,8 @@
 # SINGULAR: {{.*}}broken-singular.cir:5:1: error: block 1 (XU1, XU2, R1, R2, ...): its equations are singular (nothing determines V(o2)): an op amp without negative feedback, or a node cut off from the rest
 
 # NOOUTPUT: {{.*}}broken-nooutput.cir: error: the netlist has no .output
+
+# NEGATIVE: {{.*}}broken-negative.cir:7:1: error: port D1|D2 sees a negative resistance (K = -123.2 ohm at 22.05 kHz): positive feedback around XU1 is not supported yet
 
 # --emit fm is a netlist's: on an FMinus source it is an error.
 # RUN: not fminus %S/Inputs/play.fm --emit fm 2>&1 | FileCheck %s --check-prefix=NOTCIR --match-full-lines

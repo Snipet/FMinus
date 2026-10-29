@@ -46,8 +46,9 @@ namespace fminus::circuit
         double g = 0;        // Conductance
         double c = 0;        // Capacitor, farads
         std::string part;    // the part's name, as written
-        std::string ident;   // its FMinus form: "C1", "Ptone_a"
-        int element = -1;    // in the netlist
+        std::string ident;       // its FMinus form, unique among the parts': "C1", "Ptone_a"
+        std::string partIdent;   // its element's FMinus form: "Ptone" for both of a pot's sections
+        int element = -1;        // in the netlist
         // Variable: r = value * (1 - t) (section 1, e1-w), value * t (section 2, w-e2, or a rheostat), or the
         // resistor's {expr} (section 0); t = taper(clamp01(expr)).
         int section = 0;
@@ -163,4 +164,8 @@ namespace fminus::circuit
 
     // Names a pot or an input may not take: FMinus's keywords and builtins, and the names the module uses.
     bool isReservedName(std::string_view name);
+
+    // Names the module may not take: those, and every other name its text uses (FMinus reads a module's name as a
+    // type wherever it appears).
+    bool isModuleWord(std::string_view name);
 } // namespace fminus::circuit

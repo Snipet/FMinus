@@ -7,6 +7,8 @@
 #include <charconv>
 #include <cmath>
 #include <cstddef>
+#include <format>
+#include <limits>
 #include <locale>
 #include <map>
 #include <set>
@@ -104,7 +106,9 @@ namespace fminus::circuit
     {
         const float f = static_cast<float>(value);
         if (!std::isfinite(f))
-            throw std::runtime_error("a constant is not a finite float (" + std::to_string(value) + ")");
+            throw NotAFloat(std::format("the netlist's values give a coefficient of {:g}, beyond float's range: check "
+                                        "them",
+                                        value));
         if (smallInt && f == std::floor(f) && std::fabs(f) <= 16.0f)
             return std::to_string(static_cast<int>(f));
         std::array<char, 64> buffer{};
@@ -596,6 +600,28 @@ namespace fminus::circuit
                     ++pos_;
             }
 
+            // One level deeper ('(' or a unary '-' at p), within kMaxDepth: the parser and every walk of the tree
+            // (evaluate, print, the destructor) recurse, and generate() may run on a thread with a small stack.
+            bool nested(std::size_t p)
+            {
+                if (++depth_ <= kMaxDepth)
+                    return true;
+                fail(p, "the expression is nested too deeply (at most " + std::to_string(kMaxDepth) + " levels)");
+                return false;
+            }
+
+            // One operator more, within kMaxOperators: a long chain is a deep tree too.
+            bool counted(Loc loc)
+            {
+                if (++operators_ <= kMaxOperators)
+                    return true;
+                if (!failed_)
+                    messages_.error(loc, "the expression has too many operators (at most " +
+                                             std::to_string(kMaxOperators) + ")");
+                failed_ = true;
+                return false;
+            }
+
             bool accept(char c)
             {
                 skip();
@@ -609,7 +635,7 @@ namespace fminus::circuit
 
             std::optional<Expr> binary(std::optional<Expr> left, Expr::Op op, std::optional<Expr> right, Loc loc)
             {
-                if (!left || !right)
+                if (!left || !right || !counted(loc))
                     return std::nullopt;
                 Expr e;
                 e.op = op;
@@ -661,8 +687,11 @@ namespace fminus::circuit
                 const std::size_t p = pos_;
                 if (accept('-'))
                 {
+                    if (!nested(p))
+                        return std::nullopt;
                     std::optional<Expr> operand = unary();
-                    if (!operand)
+                    --depth_;
+                    if (!operand || !counted(locAt(p)))
                         return std::nullopt;
                     Expr e;
                     e.op = Expr::Op::Neg;
@@ -696,6 +725,8 @@ namespace fminus::circuit
                     return std::nullopt;
                 }
                 pos_ = end;
+                if (!counted(locAt(p)))
+                    return std::nullopt;
                 Expr e;
                 e.op = Expr::Op::Pow;
                 e.loc = locAt(p);
@@ -716,8 +747,11 @@ namespace fminus::circuit
                 const char c = text_[pos_];
                 if (c == '(')
                 {
+                    if (!nested(p))
+                        return std::nullopt;
                     ++pos_;
                     std::optional<Expr> e = expression();
+                    --depth_;
                     if (!e)
                         return std::nullopt;
                     if (!accept(')'))
@@ -776,11 +810,16 @@ namespace fminus::circuit
                 return std::nullopt;
             }
 
+            static constexpr int kMaxDepth = 64;
+            static constexpr int kMaxOperators = 256;
+
             std::string_view text_;
             Loc at_;   // the '{' (the text starts after it)
             Messages& messages_;
             std::size_t pos_ = 0;
             bool failed_ = false;
+            int depth_ = 0;
+            int operators_ = 0;
         };
 
         // ---- the line parser ----------------------------------------------------------------------------------------
@@ -831,7 +870,35 @@ namespace fminus::circuit
                     return std::nullopt;
                 }
                 ExprParser p(std::string_view(t.text).substr(1, t.text.size() - 2), t.loc, messages_);
-                return p.parse();
+                std::optional<Expr> e = p.parse();
+                if (e && !finiteConstants(*e))
+                    return std::nullopt;
+                return e;
+            }
+
+            // Whether each part of `e` without a pot (which the module prints folded, as a float literal) is a finite
+            // float; an error at the first that is not.
+            bool finiteConstants(const Expr& e)
+            {
+                if (potsOf(e).empty())
+                {
+                    const double v = evaluate(e, [](const std::string&) { return 0.0; });
+                    if (std::isfinite(v) && std::fabs(v) <= static_cast<double>(std::numeric_limits<float>::max()))
+                        return true;
+                    error(e.loc, std::format("a constant in the expression is {:g}, not a finite float", v));
+                    return false;
+                }
+                return std::all_of(e.args.begin(), e.args.end(), [&](const Expr& a) { return finiteConstants(a); });
+            }
+
+            // Whether a part's value is one Phase 0's float coefficients hold (1/R, R and 2 C fs' are float literals,
+            // with headroom for their products): 1e-30 to 1e30, ohms or farads. An error otherwise.
+            bool inRange(double value, const Token& t, const std::string& part)
+            {
+                if (value >= 1e-30 && value <= 1e30)
+                    return true;
+                error(t.loc, part + "'s value " + t.text + " is out of range for float coefficients (1e-30 to 1e30)");
+                return false;
             }
 
             bool defined(const std::string& name, Loc loc)
@@ -1000,6 +1067,8 @@ namespace fminus::circuit
                                         (resistor ? "resistor" : "capacitor") + " needs a positive value");
                     return;
                 }
+                if (!e.expr && !inRange(e.value, t[3], head.text))
+                    return;
                 break;
             }
             case 'd':
@@ -1054,6 +1123,8 @@ namespace fminus::circuit
                           head.text + "'s value is " + t[brace - 1].text + ": a pot needs a positive value");
                     return;
                 }
+                if (!inRange(e.value, t[brace - 1], head.text))
+                    return;
                 e.expr = expression(t[brace]);
                 if (!e.expr)
                     return;

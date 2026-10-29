@@ -687,6 +687,37 @@ namespace fminus::circuit
         return std::nullopt;
     }
 
+    bool checkPort(const System& system, const Pivots& pivots, const Plan& plan, int blockIndex, Messages& messages)
+    {
+        const Block& block = plan.blocks.at(static_cast<std::size_t>(blockIndex));
+        if (!block.port)
+            return true;
+        const auto j = static_cast<std::size_t>(system.portCurrent);
+        const auto v = static_cast<std::size_t>(system.port);
+        for (const GridPoint& g : pivotGrid(plan, block))
+        {
+            const Linear<double> l =
+                solve(system, pivots, symbolValues(system, plan, blockIndex, g.designRate, g.pots));
+            const double k = 1 / -l.coef[j][v];
+            if (k > 0 && std::isfinite(k))
+                continue;
+            Loc loc;
+            if (!block.elements.empty())
+                loc = plan.netlist.elements[static_cast<std::size_t>(block.elements.front())].loc;
+            const std::string around = block.opamps.empty() ? std::string() : " around " + block.opamps.front().name;
+            if (k < 0)
+                messages.error(loc, std::format("port {} sees a negative resistance (K = {:.4g} ohm at {}): positive "
+                                                "feedback{} is not supported yet",
+                                                block.port->parts, k, pointText(plan, block, g), around));
+            else
+                messages.error(loc, std::format("port {}'s self-impedance is not a positive number (K = {:.4g} ohm at "
+                                                "{})",
+                                                block.port->parts, k, pointText(plan, block, g)));
+            return false;
+        }
+        return true;
+    }
+
     double pivotMargin(const System& system, const Pivots& pivots, const Plan& plan, int blockIndex)
     {
         const Block& block = plan.blocks.at(static_cast<std::size_t>(blockIndex));

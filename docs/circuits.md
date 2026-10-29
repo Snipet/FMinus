@@ -76,10 +76,14 @@ case-folding and unit suffixes, which Flex and Bison fit poorly.
   first written. `0` and `gnd` are ground.
 - **Numbers.** `[+-]digits[.digits][e[+-]digits][suffix][letters]`: suffixes `t g meg k m u n p f` (`meg` before `m`),
   trailing letters ignored (`10nF`, `2.2kohm`, `-60dB`). `1M` is milli, as in SPICE: an R or P value under 1 ohm written
-  with `m` or `M` warns `'1M' is 1 milliohm in SPICE; write 1meg for a megohm`.
+  with `m` or `M` warns `'1M' is 1 milliohm in SPICE; write 1meg for a megohm`. A part's value lies in 1e-30 to 1e30
+  (ohms or farads), which float coefficients hold; should the values still fold to a coefficient beyond float's range,
+  that is an error of the netlist ("the netlist's values give a coefficient of 1e+45, beyond float's range").
 - **Expressions** `{...}` over the pots: numbers, pot names, `+ - * /`, unary minus, `( )`, and `^` with an integer
   exponent 0 to 8 (`-x^2` is `-(x^2)`; `^` prints as repeated products). They evaluate in double and print as FMinus
-  over the clamped pots. One that names no pot is a constant.
+  over the clamped pots. One that names no pot is a constant. A part without a pot must be a finite float (`{1/0 +
+  tone}` is an error), and an expression has at most 64 levels of nesting and 256 operators: every walk of its tree
+  recurses, and `generate()` may run on a thread with a small stack.
 
 | Element | Meaning |
 |---|---|
@@ -119,8 +123,12 @@ default, with a note.
 antiparallel partner, or a pair of different models; an op amp without negative feedback, or whose output is driven
 twice or is `.input`'s node; two nonlinear ports in a block (Phase 1); a feedback loop that crosses blocks; a block that
 reads two inputs or none, or that is off the chain from `.input` to `.output`; a singular block ("its equations are
-singular at drive=0, 44.1 kHz: an op amp without negative feedback, or a node cut off from the rest"); pot and input
-names that are FMinus keywords, builtins or names the module uses (`set`, `tick`, `b2`, `p`, `v`, `ua`, ...).
+singular at drive=0, 44.1 kHz: an op amp without negative feedback, or a node cut off from the rest"); a port whose
+self-impedance K is not positive somewhere on that grid of rates and pots ("port D1|D2 sees a negative resistance
+(K = -123.2 ohm at 22.05 kHz): positive feedback around X1 is not supported yet"); pot and input names that are FMinus
+keywords, builtins or names the module uses (`set`, `tick`, `b2`, `p`, `v`, `ua`, `os1`, ...), and a module named by any
+word its text uses (`step`, `rate`, `t3`, `x`, ...: FMinus reads a module's name as a type wherever it appears). Names
+compare with their case, as FMinus's do: `.title Tone` with `.pot tone` is fine.
 
 ## The module
 
@@ -141,8 +149,10 @@ module DiodeTone                     // .title
 - **Names.** States `x_<C>` (C's trapezoidal state); with ADAA `xo_<C>`, `uo_<input>`, `p_<D>` and `c_<D>`; the port's
   last voltage `v_<D>` (always stored: the previous-solution guess, ADAA's v(n-1), what `trace` reads); rates `gc_<C>` =
   2 C fs' and `g2_<C>` = 2 gc; coefficients `<readout>_by_<source>` (`p_D1_by_x_C1`, `n_b_by_v_D1`, `vc_C3_by_n_p1`) and
-  `ka_`, `kb_`, `lna_`, `kc_<D>`; halfband state `hb<s>u_*` and `hb<s>d_*`; the region's samples `os1`, `os2_0`, ...
-  Characters outside `[A-Za-z0-9_]` in part and node names become `_`.
+  `ka_`, `kb_`, `lna_`, `kc_<D>` (literals instead when K is a constant: a port block with no capacitor and no pot);
+  halfband state `hb<s>u_*` and `hb<s>d_*`; the region's samples `os1`, `os2_0`, ... Characters outside
+  `[A-Za-z0-9_]` in part and node names become `_`, and a name taken already gets `_2` (a pot's sections `Ptone_a`
+  and `Ptone_b` included).
 - **Layout.** It depends on the netlist and the options only, never on a pot's value or `.pot` default, so a frozen copy
   of a program keeps its layout.
 - **Rates.** Region blocks run at oversample x the rate, the others at the host's; an ADAA port block is designed at
@@ -206,7 +216,8 @@ The rulings the implementation follows (the design's R1-R11):
 - **R3 Variable resistors in the impedance form**: a pot section's current is an unknown, with the row
   `V(a) - V(b) - r i = 0`, so its 0-ohm end is exact. No clamp or floor.
 - **R4 The port is a voltage source v** (Holters' v-form): structural values come out exact (example 1's C1 voltage
-  is v; the TS block's V(n1) = u, V(v2) = u - v). `K = -1 / (dj/dv)` must be positive.
+  is v; the TS block's V(n1) = u, V(v2) = u - v). `K = -1 / (dj/dv)` must be positive, and generation checks it at
+  every point of the pivots' grid (`checkPort` in `src/circuit/Mna.h`).
 - **R5 Defaults:** above (changed from the design's, for the reason above).
 - **R6 N Vt is physical:** N k 300.15 / q (SPICE's 27 C), 45.315 mV for the 1N914's N = 1.752. The research's 45.3 and
   45.0 mV are N = 1.75140653 and 1.73980781; the tables and the equivalence tests rewrite N so.
@@ -216,7 +227,8 @@ The rulings the implementation follows (the design's R1-R11):
   small integers print as ints (`2 * gc_C1`). Each re-reads to the float it names. ln 81 is a literal.
 - **R10** `src/circuit/` is its own library, `fminus_circuit` (`FMinus::Circuit`), with no LLVM and no grammar.
 - **R11 Names:** pots and inputs are `[A-Za-z][A-Za-z0-9]*`, not an FMinus keyword or builtin, not each other's or the
-  module's, and not a name the module uses; generated names carry `_` or are `t<N>` temporaries, which skip pot names.
+  module's, and not a name the module uses; generated names carry `_` (but for `os1`, which is reserved) or are `t<N>`
+  temporaries, which skip pot names. The module's name is none of the words the module's text uses.
 
 Two more choices the code made:
 

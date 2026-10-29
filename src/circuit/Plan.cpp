@@ -25,20 +25,39 @@ namespace fminus::circuit
         return n * kBoltzmann * kTnom / kCharge;
     }
 
+    namespace
+    {
+        // Whether `name` is `prefix` followed by one digit or more.
+        bool numbered(std::string_view name, char prefix)
+        {
+            return name.size() >= 2 && name[0] == prefix &&
+                   std::all_of(name.begin() + 1, name.end(), [](char c) { return c >= '0' && c <= '9'; });
+        }
+    } // namespace
+
     bool isReservedName(std::string_view name)
     {
         if (isFMinusKeyword(name))
             return true;
-        static constexpr std::array<std::string_view, 22> kModule{
-            "init", "clear", "set", "tick", "step", "p",  "q", "arg", "w",  "v",  "lo",
-            "hi",   "e",     "ei",  "f",    "d",    "ec", "c", "dp",  "vm", "vb", "ua"};
+        // the methods, the step's locals, and os1, the one field without a '_' (tick's region sample)
+        static constexpr std::array<std::string_view, 23> kModule{
+            "init", "clear", "set", "tick", "step", "p",  "q", "arg", "w",  "v",  "lo", "hi",
+            "e",    "ei",    "f",   "d",    "ec",   "c",  "dp", "vm", "vb", "ua", "os1"};
         if (std::find(kModule.begin(), kModule.end(), name) != kModule.end())
             return true;
         // b<N> (a block's step), y<k> and z<k> (tick's locals)
-        if (name.size() >= 2 && (name[0] == 'b' || name[0] == 'y' || name[0] == 'z') &&
-            std::all_of(name.begin() + 1, name.end(), [](char c) { return c >= '0' && c <= '9'; }))
+        return numbered(name, 'b') || numbered(name, 'y') || numbered(name, 'z');
+    }
+
+    bool isModuleWord(std::string_view name)
+    {
+        if (isReservedName(name))
             return true;
-        return false;
+        // init's parameter, the attribute's words, the halfband methods' parameters and locals, clear's loop
+        // variable, and set's temporaries t<N>: FMinus reads a module's name as a type everywhere in the program
+        static constexpr std::array<std::string_view, 12> kOther{"rate", "clang", "nonblocking", "x",  "o",  "s0",
+                                                                 "s1",   "t",     "y",           "v0", "v1", "i"};
+        return std::find(kOther.begin(), kOther.end(), name) != kOther.end() || numbered(name, 't');
     }
 
     namespace
@@ -221,6 +240,9 @@ namespace fminus::circuit
                                         ", is not a letter followed by letters and digits");
             else if (isFMinusKeyword(name))
                 messages.error(loc, "the module's name '" + name + "' is an FMinus keyword or builtin");
+            else if (isModuleWord(name))
+                messages.error(loc, "the module's name '" + name + "', from " + from +
+                                        ", is a name the module uses: rename it");
             p.module = name;
         }
 
@@ -279,7 +301,7 @@ namespace fminus::circuit
                 messages.error(netlist.input->loc, ".input '" + netlist.input->name +
                                                        "' is an FMinus keyword or builtin, or a name the module uses: "
                                                        "rename it");
-            else if (folded(netlist.input->name) == folded(p.module))
+            else if (netlist.input->name == p.module)   // FMinus's names keep their case
                 messages.error(netlist.input->loc, ".input '" + netlist.input->name + "' is the module's name");
         }
         if (netlist.output)
@@ -300,9 +322,9 @@ namespace fminus::circuit
             if (isReservedName(line.name))
                 messages.error(line.loc, "pot '" + line.name +
                                              "' is an FMinus keyword or builtin, or a name the module uses: rename it");
-            else if (netlist.input && folded(line.name) == folded(netlist.input->name))
+            else if (netlist.input && line.name == netlist.input->name)   // exact: FMinus's names keep their case
                 messages.error(line.loc, "pot '" + line.name + "' has .input's name");
-            else if (folded(line.name) == folded(p.module))
+            else if (line.name == p.module)
                 messages.error(line.loc, "pot '" + line.name + "' is the module's name");
             p.pots.push_back(info);
         }
@@ -343,6 +365,7 @@ namespace fminus::circuit
             Branch b;
             b.part = el.name;
             b.ident = elementIdent[e];
+            b.partIdent = elementIdent[e];
             b.element = static_cast<int>(e);
             switch (el.kind)
             {
@@ -401,12 +424,12 @@ namespace fminus::circuit
                     first.a = nn[0];
                     first.b = nn[1];
                     first.section = 1;
-                    first.ident = b.ident + "_a";
+                    first.ident = unique(b.ident + "_a", partIdents);   // r_Ptone_a: unique, as every part's
                     Branch second = b;
                     second.a = nn[1];
                     second.b = nn[2];
                     second.section = 2;
-                    second.ident = b.ident + "_b";
+                    second.ident = unique(b.ident + "_b", partIdents);
                     pieces.push_back({first});
                     pieces.push_back({second});
                 }

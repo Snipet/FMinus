@@ -310,3 +310,88 @@ TEST_CASE("generation is deterministic and the layout is fixed", "[circuit]")
     CHECK(fc::literal(0.5) == "0.5f");
     CHECK(fc::literal(2, true) == "2");
 }
+
+TEST_CASE("a port block whose K is a constant compiles and runs", "[circuit]")
+{
+    // No capacitor and no pot: K is a number, so the port's constants are literals, not fields (ka_D1 and the rest).
+    // y is the port's v, from v + 2 Is K sinh(v / N Vt) = p.
+    struct Case
+    {
+        std::string netlist;
+        double k;      // the port's K
+        double gain;   // p per volt of u
+        double sign;   // y = u * offset + sign * v
+        double offset;
+    };
+    const std::string model = ".model DD D(IS=2.52n N=1.752)\n";
+    const Case cases[] = {
+        // a resistor and the pair: y = v, p = u
+        {".title Hard\n.input u in\n.output y a\nR1 in a 2.2k\nD1 a 0 DD\nD2 0 a DD\n" + model, 2200, 1, 1, 0},
+        // an op amp with resistive feedback: V(n1) = u, v = V(n1) - V(v2) = u - y, p = -u R6 / R4
+        {".title OpClip\n.input u p1\n.output y v2\nXU1 p1 n1 v2 opamp\nR4 n1 0 4.7k\nR6 n1 v2 51k\nD1 n1 v2 DD\n"
+         "D2 v2 n1 DD\n" +
+             model,
+         51000, -51.0 / 4.7, -1, 1},
+    };
+    const double nvt = fc::thermalVoltage(1.752);
+    for (const Case& c : cases)
+    {
+        for (bool adaa : {false, true})
+        {
+            fc::Options o;
+            o.adaa = adaa;
+            const fc::Result r = fc::generate(c.netlist, "t.cir", o);
+            INFO(r.source);
+            CHECK(r.source.find("ka_D1") == std::string::npos);
+            auto program = compiled(r);
+            for (const char* method : {"init", "tick", "step", "clear"})
+                CHECK(program->nonBlocking(r.module + "::" + method));
+            const Program::Module* m = program->module(r.module);
+            REQUIRE(m);
+            std::string errors;
+            auto* init = program->function<void(void*, float)>(r.module + "::init", errors);
+            auto* tick = program->function<float(void*, float)>(r.module + "::tick", errors);
+            REQUIRE(init);
+            REQUIRE(tick);
+            for (double u : {0.1, 1.0})
+            {
+                // the exact root, by bisection
+                const double p = c.gain * u;
+                double lo = -std::fabs(p);
+                double hi = std::fabs(p);
+                for (int i = 0; i < 200; ++i)
+                {
+                    const double mid = 0.5 * (lo + hi);
+                    (mid + 2 * 2.52e-9 * c.k * std::sinh(mid / nvt) < p ? lo : hi) = mid;
+                }
+                const double exact = c.offset * u + c.sign * 0.5 * (lo + hi);
+                auto self = instance(*m);
+                init(self.get(), 48000);
+                float y = 0;
+                for (int i = 0; i < 4800; ++i)
+                    y = tick(self.get(), static_cast<float>(u));
+                // omega + 2 lands on the root; ADAA's omega + 1 within F1's first-order DC error
+                INFO("adaa " << adaa << ", u " << u << ": " << y << " against " << exact);
+                CHECK(std::fabs(static_cast<double>(y) - exact) <= (adaa ? 1.5e-3 : 2e-5));
+            }
+        }
+    }
+}
+
+TEST_CASE("names keep their case, and a pot's sections have names of their own", "[circuit]")
+{
+    // FMinus's names keep their case: a pot tone in module Tone, a pot u beside .input U
+    for (const std::string& text : {".title Tone\n.input u in\n.output y a\n.pot tone\nR1 in a 1k\nP1 a 0 10k {tone}\n",
+                                    ".title Up\n.input U in\n.output y a\n.pot u\nR1 in a 1k\nP1 a 0 10k {u}\n"})
+    {
+        INFO(text);
+        compiled(fc::generate(text, "t.cir"));
+    }
+    // a part named as another's section: Ptone's sections are Ptone_a_2 and Ptone_b, beside the rheostat Ptone_a
+    const fc::Result r = fc::generate(".title Sections\n.input u in\n.output y b\n.pot tone\nR1 in a 1k\n"
+                                      "Ptone a w b 25k {tone}\nPtone_a w 0 10k {tone}\nC1 b 0 10n\nR2 b 0 10k\n",
+                                      "t.cir");
+    CHECK(r.source.find("const float r_Ptone_a_2 = 25000.0f * (1 - t_Ptone);") != std::string::npos);
+    CHECK(r.source.find("const float r_Ptone_a = 10000.0f * fminf(fmaxf(tone, 0), 1);") != std::string::npos);
+    compiled(r);
+}

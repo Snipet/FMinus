@@ -137,6 +137,11 @@ namespace fminus::circuit
                 result.pots.clear();
             }
         }
+        catch (const NotAFloat& e)
+        {
+            result = Result{};
+            result.errors = file + ": error: " + e.what() + "\n";
+        }
         catch (const std::exception& e)
         {
             result = Result{};

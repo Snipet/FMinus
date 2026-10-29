@@ -127,6 +127,11 @@ namespace fminus::circuit
     // equations are singular somewhere on it.
     std::optional<Pivots> choosePivots(const System& system, const Plan& plan, int block, Messages& messages);
 
+    // Whether a port block's self-impedance K is positive (and finite) at every point of that grid, as the solver's
+    // bracket [min(0, p), max(0, p)] and log(Is K / N Vt) need; otherwise an error (positive feedback makes K
+    // negative). A block without a port passes.
+    bool checkPort(const System& system, const Pivots& pivots, const Plan& plan, int block, Messages& messages);
+
     // The smallest |pivot| / max |its column| of the elimination in `pivots`, over the block's grid of rates and pots.
     double pivotMargin(const System& system, const Pivots& pivots, const Plan& plan, int block);
 

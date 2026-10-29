@@ -9,6 +9,7 @@
 
 #include <functional>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -51,6 +52,13 @@ namespace fminus::circuit
 
     private:
         std::vector<Message> messages_;
+    };
+
+    // What literal() throws for a value beyond float's range (the netlist's values, folded, can give one); generate()
+    // reports it as an error of the netlist.
+    struct NotAFloat : std::runtime_error
+    {
+        using std::runtime_error::runtime_error;
     };
 
     // A float literal in FMinus text: std::to_chars's shortest round trip of the float `value` rounds to (locale-free),

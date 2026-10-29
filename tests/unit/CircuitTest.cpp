@@ -312,6 +312,38 @@ TEST_CASE("netlist errors, as clang words them", "[circuit]")
         {head + "R1 in o 1k\nR2 o 0 1k\n.pot set\n",
          "t.cir:5:6: error: pot 'set' is an FMinus keyword or builtin, or a "
          "name the module uses: rename it\n"},
+        // the names the module uses: os1 (tick's field), and any name its text has, for the module (R11)
+        {".input os1 in\n.output y o\nR1 in o 1k\nR2 o 0 1k\n",
+         "t.cir:1:8: error: .input 'os1' is an FMinus keyword or builtin, or a name the module uses: rename it\n"},
+        {".title step\n" + head + "R1 in o 1k\nR2 o 0 1k\n",
+         "t.cir:1:8: error: the module's name 'step', from .title, is a name the module uses: rename it\n"},
+        {".title t3\n" + head + "R1 in o 1k\nR2 o 0 1k\n",
+         "t.cir:1:8: error: the module's name 't3', from .title, is a name the module uses: rename it\n"},
+        {".title rate\n" + head + "R1 in o 1k\nR2 o 0 1k\n",
+         "t.cir:1:8: error: the module's name 'rate', from .title, is a name the module uses: rename it\n"},
+        // a negative impedance converter around the port: K < 0, which the bracket and log(Is K / N Vt) cannot take
+        {".input u in\n.output y a\n.oversample 2\nR1 in a 1k\nC1 a 0 10n\nD1 a 0 DX\nD2 0 a DX\nX1 a n o opamp\n"
+         "Rf o a 100\nR3 o n 1k\nR4 n 0 1k\nR5 a n 1meg\n.model DX D(IS=2.52n N=1.752)\n",
+         "t.cir:4:1: error: port D1|D2 sees a negative resistance (K = -123.2 ohm at 22.05 kHz): positive feedback "
+         "around X1 is not supported yet\n"},
+        // values float coefficients cannot hold, and expressions too deep for a walk of their tree
+        {head + "R1 in o 1e-45\nR2 o 0 1k\n",
+         "t.cir:3:9: error: R1's value 1e-45 is out of range for float coefficients (1e-30 to 1e30)\n"},
+        {head + "R1 in o 1k\nC1 o 0 2e30\n",
+         "t.cir:4:8: error: C1's value 2e30 is out of range for float coefficients (1e-30 to 1e30)\n"},
+        {head + ".pot tone\nR1 in o {1/0 + tone}\nR2 o 0 1k\n",
+         "t.cir:4:11: error: a constant in the expression is inf, not a finite float\n"},
+        {head + ".pot tone\nR1 in o 1k\nR2 o 0 {" + std::string(65, '(') + "tone" + std::string(65, ')') + "}\n",
+         "t.cir:5:73: error: the expression is nested too deeply (at most 64 levels)\n"},
+        {head + ".pot tone\nR1 in o 1k\nR2 o 0 {" + std::string(65, '-') + "tone}\n",
+         "t.cir:5:73: error: the expression is nested too deeply (at most 64 levels)\n"},
+        {head + ".pot tone\nR1 in o 1k\nR2 o 0 {1k + tone" + [] {
+             std::string s;
+             for (int i = 0; i < 300; ++i)
+                 s += "+1";
+             return s;
+         }() + "}\n",
+         "t.cir:5:528: error: the expression has too many operators (at most 256)\n"},
     };
     for (const Case& c : cases)
     {

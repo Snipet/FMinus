@@ -319,7 +319,7 @@ namespace fminus::circuit
         BlockCode bc;
         bc.system = assemble(plan, blockIndex);
         std::optional<Pivots> pivots = choosePivots(bc.system, plan, blockIndex, messages);
-        if (!pivots)
+        if (!pivots || !checkPort(bc.system, *pivots, plan, blockIndex, messages))
             return std::nullopt;
         bc.pivots = *pivots;
         const Block& block = plan.blocks[static_cast<std::size_t>(blockIndex)];
@@ -363,7 +363,7 @@ namespace fminus::circuit
                     withComment("const float r_" + br.ident + " = " + literal(br.value) + " * " + clamped + ";", note));
                 continue;
             }
-            const std::string t = "t_" + (rheostat ? br.ident : br.ident.substr(0, br.ident.size() - 2));
+            const std::string t = "t_" + br.partIdent;
             if (taperDone.insert(br.element).second)
                 bc.rLines.push_back(withComment("const float " + t + " = " + tapered + ";", note));
             if (br.section == 1)
@@ -962,6 +962,15 @@ namespace fminus::circuit
                 const std::string& P = b.port->name;
                 const std::string ivt = literal(1 / b.port->nvt);
                 const std::string nvt = literal(b.port->nvt);
+                // The port's constants, each a field, or a literal when K is a constant (a block with no capacitor
+                // and no pot): " + lna" with its sign
+                const std::string ka = operandText(coefficient(i, "ka_" + P));
+                const std::string kb = operandText(coefficient(i, "kb_" + P));
+                const std::string kc = operandText(coefficient(i, "kc_" + P));
+                const Val lnaVal = coefficient(i, "lna_" + P);
+                const std::string plusLna = lnaVal.kind == Val::Kind::Const && lnaVal.c < 0
+                                                ? " - " + literal(-lnaVal.c)
+                                                : " + " + operandText(lnaVal);
                 std::vector<std::pair<Val, std::string>> pTerms;
                 for (std::size_t k = 0; k < s.sources.size(); ++k)
                 {
@@ -974,12 +983,12 @@ namespace fminus::circuit
                 {
                     line("        const " + T + " q = fabsf(p);",
                          "omega3 (D'Angelo et al. 2019): the conducting diode alone");
-                    line("        const " + T + " arg = (q + ka_" + P + ") * " + ivt + " + lna_" + P + ";");
+                    line("        const " + T + " arg = (q + " + ka + ") * " + ivt + plusLna + ";");
                     line("        const " + T + " w = arg <= " + literal(kOmegaLow) + " ? 0");
                     line("                      : arg < 8 ? ((" + literal(kOmegaA) + " * arg + " + literal(kOmegaB) +
                          ") * arg + " + literal(kOmegaC) + ") * arg + " + literal(kOmegaD));
                     line("                                : arg - logf(fmaxf(arg, 8));");
-                    line("        " + T + " v = q + ka_" + P + " - " + nvt + " * w;");
+                    line("        " + T + " v = q + " + ka + " - " + nvt + " * w;");
                     line("        v = p < 0 ? -v : v;");
                     line("        const " + T + " lo = fminf(p, 0);");
                     line("        const " + T + " hi = fmaxf(p, 0);");
@@ -998,8 +1007,8 @@ namespace fminus::circuit
                     line("        {", std::format("Newton step {} of {}, kept in the bracket", k, solver.steps));
                     line("            const " + T + " e = expf(v * " + ivt + ");");
                     line("            const " + T + " ei = 1 / e;");
-                    line("            const " + T + " f = v - p + ka_" + P + " * (e - ei);");
-                    line("            const " + T + " d = 1 + kb_" + P + " * (e + ei);");
+                    line("            const " + T + " f = v - p + " + ka + " * (e - ei);");
+                    line("            const " + T + " d = 1 + " + kb + " * (e + ei);");
                     line("            v = fminf(fmaxf(v - f / d, lo), hi);");
                     line("        }");
                 }
@@ -1011,7 +1020,7 @@ namespace fminus::circuit
                     line("        const " + T + " dp = p - p_" + P + ";");
                     line("        const " + T + " vm = 0.5f * (v + v_" + P + ");");
                     line("        const " + T + " vb = fabsf(dp) > " + literal(kAdaaEpsilon) + " ? vm + ((v - v_" + P +
-                         ") * (0.5f * (p + p_" + P + ") - vm) - kc_" + P + " * (c - c_" + P + ")) / dp : vm;");
+                         ") * (0.5f * (p + p_" + P + ") - vm) - " + kc + " * (c - c_" + P + ")) / dp : vm;");
                 }
             }
             const bool input = adaa && usesInput(i);
