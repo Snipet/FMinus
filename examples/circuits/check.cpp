@@ -1271,6 +1271,33 @@ namespace circuits
             Report::note(".prewarp off (the default), the trapezoidal rule's warp: " + off);
             r.line(plain->plan.config.prewarpFrom == "default" && !plain->plan.config.prewarp,
                    "off is the default: the cutoff law is the circuit's");
+            // with ADAA (designed at 2/3 of the rate), printed: its mean's own droop, which the tan warp at fs' does
+            // not place, moves the -3 dB point too
+            {
+                fc::Options adaaOn;
+                adaaOn.prewarp = true;
+                adaaOn.adaa = true;
+                fc::Options adaaOff;
+                adaaOff.adaa = true;
+                auto warpedAdaa = buildOrReport(r, stage, "stage.cir", adaaOn);
+                auto plainAdaa = buildOrReport(r, stage, "stage.cir", adaaOff);
+                if (!warpedAdaa || !plainAdaa)
+                    return;
+                std::string rows;
+                for (double rate : {44100.0, 48000.0})
+                {
+                    for (double fc0 : {1000.0, 4000.0, 10000.0})
+                    {
+                        const double g = (-2 * std::numbers::pi * fc0 - port.poleA) / port.poleB;
+                        const double warpedF = minus3dB(*warpedAdaa, rate, g, fc0);
+                        const double plainF = minus3dB(*plainAdaa, rate, g, fc0);
+                        rows += std::format("{}{:g} kHz at {:g}: on {:+.2f} %, off {:+.2f} %", rows.empty() ? "" : "; ",
+                                            fc0 / 1000, rate / 1000, 100 * (warpedF / fc0 - 1),
+                                            100 * (plainF / fc0 - 1));
+                    }
+                }
+                Report::note("with ADAA (1x): the -3 dB point's error, .prewarp on and off: " + rows);
+            }
         }
 
         // The carry under ADAA. (1) What it does: one OTA stage driven into its law's bend (10k / 1k attenuators, so a
@@ -1279,9 +1306,10 @@ namespace circuits
         // the same steps, ADAA and gain stream (Reference.cpp's carry the emitted one) to 2e-5 of the signal (float's
         // rounding through the step, and in the slow pole after the step back); the same reference without the carry
         // departs from it by more than 1e-3 of the signal (by 18 times it: the mean of the step pairs points on two
-        // curves 200x apart), so a module without the carry, or with a wrong one, fails (one without: 0.18). (2) otalp.cir with ADAA (4x, newton(1)), a 5 V, 996 Hz sine, iabc a triangle +-2 octaves
-        // around its middle at 37 Hz, against the plain newton(3) module over 512 ramps: within 1.1x of the departure
-        // with iabc held at the triangle's ends (a bound on the output, which the carry, a few uV here, barely moves).
+        // curves 200x apart), so a module without the carry, or with a wrong one, fails (one without: 0.18).
+        // (2) otalp.cir with ADAA (4x, newton(1)), a 5 V, 996 Hz sine, iabc a triangle +-2 octaves around its middle
+        // at 37 Hz, against the plain newton(3) module over 512 ramps: within 1.1x of the departure with iabc held at
+        // the triangle's ends (a bound on the output, which the carry, a few uV here, barely moves).
         void carry(Report& r)
         {
             std::printf("m. the carry under ADAA: an OTA stage in its law's bend, iabc stepping 1 uA to 200 uA and "

@@ -511,7 +511,8 @@ Two more choices the code made:
 ## Prewarp
 
 `.prewarp on` (or `Options::prewarp`; off by default, the user's ruling) moves an OTA one-pole's cutoff law from the
-circuit's to the trapezoidal rule's prewarped one, so its -3 dB point is the analog circuit's at every gain. At
+circuit's to the trapezoidal rule's prewarped one, so its -3 dB point is the analog circuit's at every gain, without
+ADAA (with it, below, only nearer). At
 generation the block's small-signal pole is fitted as affine in the gain, `pole = a + b g` (rad/s), from the ends of
 the gain's range on its grid, and checked at the middle (a residual of 1e-6 at most, else a warning that prewarp is
 ignored); a law input's range makes a gain's, and the fit covers the OTA's own 10 MEG leak (otalp.cir's stage: `a =
@@ -526,6 +527,12 @@ self-test's T1 reference prewarps as the module does; the 64x reference, the cir
 At 1x, 44.1 and 48 kHz, cutoffs of 1, 4 and 10 kHz, a 10 mV signal (`example-circuits --check`, m): with `.prewarp on`
 the -3 dB point is the analog's within 0.0001 %; off, the trapezoidal rule's warp, -0.14 to -0.17 % at 1 kHz, -2.2 to
 -2.6 % at 4 kHz and -11.5 to -13.1 % at 10 kHz.
+
+**Only without ADAA.** ADAA's mean adds its own droop (a first-order average over each step, at 2/3 of the rate), which
+the tan warp at `fs'` does not place: at 1x with ADAA the -3 dB point misses the analog's by -1.5 to -1.7 % at 1 kHz,
+-9.2 to -10.2 % at 4 kHz and -23.9 to -25.3 % at 10 kHz with `.prewarp on` (off: -1.8 to -2.0, -12.9 to -14.5 and
+-36.5 to -39.3 %), so prewarp narrows the error there but does not remove it (check m prints both); oversampling
+shrinks both terms. Placing the -3 dB point under ADAA (a prewarp for the averaged recursion) is not built.
 
 ## The synth path: what the code decided
 
@@ -667,7 +674,8 @@ Refused with "not supported yet" wherever a netlist can ask for them:
   law inputs (Phase 2);
 - single diodes, series strings, asymmetric or parallel pairs, RS, a model library;
 - soft and GBW op amps (an OTA filter's rails), `.subckt`, `.param`, `.include`, `.temp`, `.method bdf2` and the
-  ringing check; prewarp for a block of more than one state, or with pots in its network;
+  ringing check; prewarp for a block of more than one state, or with pots in its network, or that places the -3 dB
+  point under ADAA;
 - the self-test's BDF2 twins;
 - Woodbury pot updates, and pots as ports for audio-rate resistances;
 - magnitude-matched linear blocks at 1x, oversampled linear-only netlists, several regions, several inputs or outputs;

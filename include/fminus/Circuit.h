@@ -167,7 +167,8 @@ namespace fminus
             std::optional<bool> adaa;           // .adaa on|off
             std::optional<int> channels;        // .channels 1 or 2 (default 1)
             std::optional<Method> method;       // .method tr|bdf2 (default tr; bdf2 is not supported yet)
-            std::optional<bool> prewarp;        // .prewarp on|off: an OTA one-pole's cutoff law prewarped (off)
+            std::optional<bool> prewarp;        // .prewarp on|off: an OTA one-pole's cutoff law prewarped (off);
+                                                // its -3 dB point the analog's without ADAA (with it, nearer only)
             std::optional<Choice> chosen;       // the self-test's answer: fills the open dimensions when its key is
                                                 // the netlist's (otherwise a note says why it is ignored)
         };
