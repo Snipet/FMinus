@@ -63,7 +63,7 @@ namespace
         }
         ~TemporaryFile()
         {
-            llvm::sys::fs::remove(path);
+            (void)llvm::sys::fs::remove(path);   // a temporary file: nothing to do if it is gone already
         }
         TemporaryFile(const TemporaryFile&) = delete;
         TemporaryFile& operator=(const TemporaryFile&) = delete;
