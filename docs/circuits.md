@@ -309,7 +309,9 @@ bumps `kSelfTestVersion` (1 until Phase 1's branch merges).
 **The gates** (T3 stays within 0.5 dB, the user's ruling):
 
 - **T1**, the solver: the region's emitted step against the same configuration (rate, ADAA, integrator) in double,
-  solved to convergence, both decimated to the window, in band, at most -60 dB on every signal but 2.2 L;
+  solved to convergence, both decimated to the window, in band, at most -60 dB on every signal but 2.2 L. Both run on
+  what the region sees: the signal through the blocks before it (in double at the region's rate), so a booster ahead
+  of a clipper drives the clipper at its own level, and the pots before the region reach T1;
 - **T2**, the alias: the tick's inharmonic energy below 20 kHz, in excess of the converged 64x chain's, bin by bin, at
   most -60 dB of the tick's energy there, for sines up to L. The excess, not the energy itself: the TS chain's 1.6 Hz
   output coupling (C7 into the level pot) has not settled in the window, its transient fills the inharmonic bins at

@@ -1,12 +1,12 @@
 // src/api/CircuitSelfTest.cpp: fminus::circuit::selfTest (include/fminus/Circuit.h), the part of the circuit
 // compiler's self-test that needs the JIT, so it lives in fminus_lib rather than fminus_circuit. It plans the netlist,
-// then runs the search of src/circuit/Search.h: the shared references first (the 64x chain for each unit T3 reads; the converged
-// region at each rate, ADAA and integrator a candidate needs, for T1), then each candidate in order, generated with
-// Options::chosen, compiled here through fminus::Program (on the calling thread, as the report's bench compiled them:
-// Math::Vector, subnormals flushed, one thread, -O2) with the runners appended (src/circuit/Runners.h), and run on
-// every unit through SelfTestOptions::parallel. Every number it judges by is computed in fminus_circuit; each job
-// writes only its own unit's slot, and the slots are reduced in index order, so the answer and the notes are the
-// same, byte for byte, for any number of threads.
+// then runs the search of src/circuit/Search.h: the shared references first (the 64x chain for each unit T3 reads; for
+// T1, the converged region at each rate, ADAA and integrator a candidate needs, on what the blocks before the region
+// give it), then each candidate in order, generated with Options::chosen, compiled here through fminus::Program (on
+// the calling thread, as the report's bench compiled them: Math::Vector, subnormals flushed, one thread, -O2) with the
+// runners appended (src/circuit/Runners.h), and run on every unit through SelfTestOptions::parallel. Every number it
+// judges by is computed in fminus_circuit; each job writes only its own unit's slot, and the slots are reduced in
+// index order, so the answer and the notes are the same, byte for byte, for any number of threads.
 #include "api/CircuitSelfTest.h"
 
 #include "circuit/Analysis.h"
@@ -302,12 +302,12 @@ namespace fminus::circuit
                         const StressPoint& point = matrix.point(u);
                         const StressSignal& signal = matrix.signal(u);
                         const std::vector<float> potValues = floats(point.pots);
-                        // the region's step at its rate
+                        // the region's step at its rate, on what the region sees (T1's reference's input)
                         std::vector<float> stepsOut;
                         if (compiled.steps != nullptr)
                         {
                             const std::size_t n = static_cast<std::size_t>(c.oversample) * host;
-                            const std::vector<float> in = floats(signalSamples(matrix, signal, c.oversample, n));
+                            const std::vector<float> in = floats(regionInput(p, matrix, u, c.oversample, stop));
                             stepsOut.resize(n);
                             Instance self(*compiled.module);
                             compiled.init(self.get(), static_cast<float>(kHostRate));

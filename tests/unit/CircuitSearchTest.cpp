@@ -1,7 +1,8 @@
 // tests/unit/CircuitSearchTest.cpp: the circuit compiler's self-test (src/circuit/Search.h,
-// src/api/CircuitSelfTest.cpp): the candidates' cost-model order, the ordered search and the no-configuration choice on stub measures, the key, a
-// Choice's text and what generate makes of one, and the self-test itself, run through the JIT on a small stress shape:
-// its answer the same for any number of threads, its cancel and its budget.
+// src/api/CircuitSelfTest.cpp): the candidates' cost-model order, the ordered search and the no-configuration choice on
+// stub measures, the key, a Choice's text and what generate makes of one, and the self-test itself, run through the JIT
+// on a small stress shape: T1 on the region's own input, its answer the same for any number of threads, its cancel and
+// its budget.
 #include "api/CircuitSelfTest.h"
 #include "circuit/Netlist.h"
 #include "circuit/Plan.h"
@@ -66,6 +67,46 @@ namespace
                                     "D1 a 0 DM\n"
                                     "D2 0 a DM\n"
                                     ".model DM D(IS=2.52n N=1.752)\n";
+
+    // Yeh's RC clipper alone at L = 4.5 V, and behind an ideal x10 non-inverting stage at L = 0.45 V: the clipper sees
+    // the same 4.5 V.
+    const std::string kClipper45 = ".title Clip\n"
+                                   ".input u in\n"
+                                   ".output y a\n"
+                                   ".oversample 4\n"
+                                   ".target level=4.5V\n"
+                                   "R1 in a 2.2k\n"
+                                   "C1 a 0 10n\n"
+                                   "D1 a 0 DM\n"
+                                   "D2 0 a DM\n"
+                                   ".model DM D(IS=2.52n N=1.752)\n";
+    const std::string kBoosted = ".title Boosted\n"
+                                 ".input u n\n"
+                                 ".output y a\n"
+                                 ".oversample 4\n"
+                                 ".target level=0.45V\n"
+                                 "X1 n m o opamp\n"
+                                 "Rf o m 9k\n"
+                                 "Rg m 0 1k\n"
+                                 "R1 o a 2.2k\n"
+                                 "C1 a 0 10n\n"
+                                 "D1 a 0 DM\n"
+                                 "D2 0 a DM\n"
+                                 ".model DM D(IS=2.52n N=1.752)\n";
+
+    // Each "self-test candidate k: ..." note's T1, in dB.
+    std::vector<double> t1Figures(const std::string& notes)
+    {
+        std::vector<double> out;
+        for (std::size_t at = notes.find("self-test candidate "); at != std::string::npos;
+             at = notes.find("self-test candidate ", at + 1))
+        {
+            const std::size_t t1 = notes.find(": T1 ", at);
+            REQUIRE(t1 != std::string::npos);
+            out.push_back(std::stod(notes.substr(t1 + 5)));
+        }
+        return out;
+    }
 
     // A shape that measures in a fraction of the time: a 1024-sample window (odd bins 3, 21 and 65: 141, 984 and 3047
     // Hz) and a 16x reference. The code is the same; the figures are not the report's.
@@ -409,6 +450,53 @@ TEST_CASE("the self-test runs the same on any number of threads", "[circuit]")
     // the answer generates a module that is not provisional
     options.chosen = a.choice;
     CHECK(!fc::generate(kPotClipper, "clip.cir", options).provisional);
+}
+
+TEST_CASE("T1 runs the region on what the blocks before it give it", "[circuit]")
+{
+    // the x10 stage is block 1, before the region: the region's input is ten times the signal
+    const fc::Plan boosted = planned(kBoosted);
+    REQUIRE(boosted.regionFirst == 1);
+    const fc::StressMatrix matrix = fc::stressMatrix(boosted, small());
+    CHECK(matrix.upstream == 1);
+    CHECK(matrix.level == 0.45);
+    const int unit = 10;   // L, on bin 21
+    REQUIRE(matrix.signal(unit).amp == 0.45);
+    const std::vector<double> u = fc::signalSamples(matrix, matrix.signal(unit), 4, 4 * matrix.shape.host());
+    const std::vector<double> in = fc::regionInput(boosted, matrix, unit, 4, {});
+    REQUIRE(in.size() == u.size());
+    double worst = 0;
+    for (std::size_t i = 0; i < u.size(); ++i)
+        worst = std::max(worst, std::fabs(in[i] - 10 * u[i]));
+    CHECK(worst < 1e-12);
+    // with the region first, it is the signal itself
+    const fc::Plan alone = planned(kClipper45);
+    const fc::StressMatrix single = fc::stressMatrix(alone, small());
+    CHECK(single.upstream == 0);
+    CHECK(fc::regionInput(alone, single, unit, 4, {}) ==
+          fc::signalSamples(single, single.signal(unit), 4, 4 * single.shape.host()));
+    // a candidate's step budget counts the upstream run
+    CHECK(fc::stepsCandidate(matrix, 4) == static_cast<std::int64_t>(matrix.units()) * 3 * 4 *
+                                               static_cast<std::int64_t>(matrix.shape.host()));
+    CHECK(fc::stepsCandidate(single, 4) == static_cast<std::int64_t>(single.units()) * 2 * 4 *
+                                               static_cast<std::int64_t>(single.shape.host()));
+
+    // so the boosted clipper's candidates measure the clipper's T1 at 4.5 V, not at the 0.45 V of its input
+    fc::SelfTestOptions every;
+    every.everyCandidate = true;
+    const fc::SelfTestResult a = fc::selfTestWith(kBoosted, "boosted.cir", {}, every, small());
+    const fc::SelfTestResult b = fc::selfTestWith(kClipper45, "clip.cir", {}, every, small());
+    INFO(a.errors << a.notes << b.errors << b.notes);
+    const std::vector<double> ta = t1Figures(a.notes);
+    const std::vector<double> tb = t1Figures(b.notes);
+    REQUIRE(ta.size() == 4);
+    REQUIRE(tb.size() == 4);
+    for (std::size_t i = 0; i < ta.size(); ++i)
+        CHECK(std::fabs(ta[i] - tb[i]) <= 0.15);
+    REQUIRE(a.choice);
+    REQUIRE(b.choice);
+    CHECK(a.choice->adaa == b.choice->adaa);
+    CHECK(a.choice->solver.steps == b.choice->solver.steps);
 }
 
 TEST_CASE("the self-test stops when cancelled, and within its budget", "[circuit]")

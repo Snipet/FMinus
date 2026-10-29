@@ -258,6 +258,7 @@ namespace fminus::circuit
             m.level = std::fabs(plan.inputScale);
             m.levelFrom = ".input's scale (full scale)";
         }
+        m.upstream = std::max(plan.regionFirst, 0);
         // the pots the region and the blocks before it read, in .pot order
         std::vector<std::size_t> axes;
         const int last = plan.regionFirst >= 0 ? plan.regionLast : static_cast<int>(plan.blocks.size()) - 1;
@@ -395,12 +396,35 @@ namespace fminus::circuit
         return r;
     }
 
+    std::vector<double> regionInput(const Plan& plan, const StressMatrix& matrix, int unit, int oversample,
+                                    const Stop& stop, bool* stopped)
+    {
+        const std::size_t n = static_cast<std::size_t>(oversample) * matrix.shape.host();
+        std::vector<double> u = signalSamples(matrix, matrix.signal(unit), oversample, n);
+        if (plan.regionFirst <= 0)
+            return u;
+        std::vector<Holters> before;
+        for (int b = 0; b < plan.regionFirst; ++b)
+            before.push_back(holters(plan, b, kHostRate * oversample, matrix.point(unit).pots));
+        RefOptions o;
+        o.stop = stop;
+        RefStats stats;
+        std::vector<double> y = simulateChain(before, u, o, &stats);
+        if (stopped != nullptr)
+            *stopped = stats.stopped;
+        return y;
+    }
+
     ReferenceT1 referenceT1(const Plan& plan, const StressMatrix& matrix, int unit, int oversample, bool adaa,
                             Method method, const Stop& stop)
     {
         if (method != Method::Tr)
             throw std::logic_error("referenceT1: only the trapezoidal rule");
         ReferenceT1 r;
+        bool stopped = false;
+        const std::vector<double> u = regionInput(plan, matrix, unit, oversample, stop, &stopped);
+        if (stopped)
+            return r;
         std::vector<Holters> region;
         for (int b = plan.regionFirst; b <= plan.regionLast; ++b)
         {
@@ -408,13 +432,11 @@ namespace fminus::circuit
                                   (adaa && plan.blocks[static_cast<std::size_t>(b)].port ? 2.0 / 3.0 : 1.0);
             region.push_back(holters(plan, b, design, matrix.point(unit).pots));
         }
-        const std::size_t n = static_cast<std::size_t>(oversample) * matrix.shape.host();
         RefOptions o;
         o.adaa = adaa;
         o.stop = stop;
         RefStats stats;
-        const std::vector<double> y =
-            simulateChain(region, signalSamples(matrix, matrix.signal(unit), oversample, n), o, &stats);
+        const std::vector<double> y = simulateChain(region, u, o, &stats);
         if (stats.stopped)
             return r;
         r.window = decimateWindow(y, oversample, matrix.shape.warm, matrix.shape.window);
@@ -740,7 +762,7 @@ namespace fminus::circuit
 
     std::int64_t stepsCandidate(const StressMatrix& matrix, int oversample)
     {
-        return static_cast<std::int64_t>(matrix.units()) * 2 * oversample *
+        return static_cast<std::int64_t>(matrix.units()) * (matrix.upstream > 0 ? 3 : 2) * oversample *
                static_cast<std::int64_t>(matrix.shape.host());
     }
 } // namespace fminus::circuit

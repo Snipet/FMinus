@@ -76,6 +76,7 @@ namespace fminus::circuit
         StressShape shape;
         double level = 1;          // L, volts
         std::string levelFrom;     // ".target level" or ".input's scale"
+        int upstream = 0;          // the blocks before the region, which T1's input runs through (regionInput)
         std::vector<StressPoint> points;
         std::vector<StressSignal> signals;
 
@@ -110,6 +111,13 @@ namespace fminus::circuit
     // What stops a reference: polled every 4096 steps.
     using Stop = std::function<bool()>;
 
+    // What the region sees of a unit's signal, at `oversample` times the host's rate (oversample x the shape's host
+    // samples): the signal through the blocks before the region (linear: trapezoidal, in double, designed at that
+    // rate), so at the level and with the pots the region meets; the signal itself when the region is the chain's
+    // first block. T1's reference and the candidate's step both run on it. *stopped is set when `stop` stopped it.
+    std::vector<double> regionInput(const Plan& plan, const StressMatrix& matrix, int unit, int oversample,
+                                    const Stop& stop, bool* stopped = nullptr);
+
     // A unit's T2 and T3 reference: the converged 64x chain (every block, trapezoidal, no ADAA): its fundamental's and
     // third harmonic's amplitudes over the window (T3), and the energy of its bins below 20 kHz, decimated to the
     // host's rate (T2 counts the tick's inharmonic energy in excess of it: what the linear blocks' transients put
@@ -126,7 +134,7 @@ namespace fminus::circuit
     Reference64 reference64(const Plan& plan, const StressMatrix& matrix, int unit, const Stop& stop);
 
     // A unit's T1 reference: the region's blocks in double at the candidate's rate, ADAA and integrator, solved to
-    // convergence, decimated to the host's window.
+    // convergence, on the unit's regionInput, decimated to the host's window.
     struct ReferenceT1
     {
         bool done = false;
@@ -251,7 +259,8 @@ namespace fminus::circuit
     std::string directivesOf(const Config& open, const Choice& choice);
 
     // The steps a stage takes: the 64x references (a unit T2 reads); one configuration's T1 references; one
-    // candidate's runs (its steps and its ticks, each oversample x the host's samples).
+    // candidate's runs (its steps and its ticks, each oversample x the host's samples, and with blocks before the
+    // region, the steps' regionInput).
     std::int64_t steps64(const StressMatrix& matrix);
     std::int64_t stepsT1(const StressMatrix& matrix, int oversample);
     std::int64_t stepsCandidate(const StressMatrix& matrix, int oversample);
