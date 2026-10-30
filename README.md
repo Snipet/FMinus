@@ -84,9 +84,10 @@ src/                    the fminus library: every .cpp is a source, every gramma
                         ZeroInitElision (a local's zeroing, removed where nothing reads it) and MathKernels (the
                         math builtins' kernels, inline)
   circuit/              the circuit compiler: its own library, libfminus_circuit.a, with no LLVM in it (Netlist,
-                        Plan, Dc (the DC operating point), Mna, Laws, Emit, Halfbands, Generate; Reference and
-                        Analysis, the double reference and the measurements its checks use; Search, the self-test's
-                        arithmetic, and Runners, the FMinus that drives a module over buffers); docs/circuits.md
+                        Plan, Dc (the DC operating point), Mna, Laws, Linear (matched designs, the method check),
+                        Emit, Halfbands, Generate; Reference and Analysis, the double reference and the measurements
+                        its checks use; Search, the self-test's arithmetic, and Runners, the FMinus that drives a
+                        module over buffers); docs/circuits.md
 tools/<name>/           one executable per directory, with CLI11 for its command line: fminus (the driver),
                         fminus-build and fminus-hostinfo
 examples/<name>/        one example per directory: an FMinus program, and a harness if it has .cpp files
@@ -111,8 +112,9 @@ examples/<name>/        one example per directory: an FMinus program, and a harn
   hello/                FMinus as a library at its smallest: a main that JIT-compiles a program from a string
   plugin/               FMinus Filter, a JUCE plugin (AU, VST3, Standalone) whose DSP is an FMinus program: its
                         own CMake project, built apart from FMinus's (cmake -S examples/plugin -B build-plugin)
-  circuits/             the circuit compiler's netlists (.cir): the research's examples, checked against its targets,
-                        its accuracy tables and its costs reprinted from emitted code (--check, --tables)
+  circuits/             the circuit compiler's netlists (.cir): the research's examples and Phase 1's (switches,
+                        matched linear blocks, a linear-only region, a block that rings), checked against their
+                        targets, the accuracy tables and the costs reprinted from emitted code (--check, --tables)
 tests/
   unit/                 your Catch2 tests
   library/              the public API as a host uses it: in C++17, against FMinus::FMinus alone
@@ -370,7 +372,9 @@ build-dev/bin/fminus voices.fm --threads 4         # a parallel region on 4 thre
 build-dev/bin/fminus pedal.cir --emit fm           # the FMinus module a circuit netlist generates (docs/circuits.md)
 build-dev/bin/fminus pedal.cir --self-test --emit fm   # the self-test chooses the netlist's open configuration first
                                                    # (--threads its threads), and prints a line of directives to paste
-build-dev/bin/fminus pedal.cir --notes -o /dev/null    # the circuit compiler's plan: blocks, rates, solvers, latency
+                                                   # and its warnings (a block that rings at Nyquist)
+build-dev/bin/fminus pedal.cir --notes -o /dev/null    # the circuit compiler's plan: blocks, rates, solvers or linear
+                                                   # forms (matched, Woodbury), the method check, latency
 ```
 
 How it fits together: `frontend::parse` (Lexer.l, then Parser.y) gives an `ast::Program`, and `ir::lower` (in
@@ -480,7 +484,8 @@ gain(in, out, n, 0.5f);                                       // one call a bloc
 
 `include/fminus/Circuit.h` is the circuit compiler's: `fminus::circuit::generate(netlist, "pedal.cir")` turns a
 SPICE-style netlist into the text of one FMinus module, which `Program::compile` compiles like any other source, its
-errors in clang's words as FMinus's are. A host that serves `#include` generates in its resolver for a `.cir` name
+errors in clang's words as FMinus's are; `set()` takes the pots, then the ramped switches' positions
+(`Result::switches`). A host that serves `#include` generates in its resolver for a `.cir` name
 ([docs/circuits.md](docs/circuits.md) has the lambda). A netlist that leaves its configuration open plays a
 provisional one until `fminus::circuit::selfTest`, which takes seconds and runs on the host's threads, answers; the
 host stores the answer (`Choice::text()`) under the netlist's key and generates again with it. It is C++17 with no

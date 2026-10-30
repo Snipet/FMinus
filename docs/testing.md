@@ -84,15 +84,19 @@ TEST_CASE("functions compute what they say", "[codegen]")
   plans, equations (an OTA's against report §7.2's hand derivation; an inductor's, an E's and a G's stamps by hand, and
   RL and RLC responses as the bilinear map), the DC operating point by hand and its errors, the offset form (a biased
   netlist's module the unbiased one's), the diode forms (a string as one diode of n N, an asymmetric pair's K and law,
-  RS as its resistor, the built-in models), laws (each one's antiderivative, bracket and carry), prewarp, halfbands,
-  reference and analysis; `CircuitEmitTest.cpp` its emitted text, compiled through `fminus::Program`, an OTA's in 48
-  configurations and Phase 1's elements and diode laws in 40, the carry of a pot's move for one diode and an
-  asymmetric pair, its ADAA mean against the double one over a saturating sweep, an OTA driven hard against the
-  reference; `CircuitSearchTest.cpp` its self-test: both rows' candidates' order, the
-  synth's stress matrix and a law input's arguments over its scale, the search, the gates' reduction
-  and the no-configuration choice on stub measures, the key, a `Choice`'s text, and the self-test itself on a small
-  stress shape, `selfTestWith` in `src/api/CircuitSelfTest.h`: T1 on the region's own input, its answer the same on
-  any number of threads, a job's exception carried back to the caller). Add new ones freely.
+  RS as its resistor, the built-in models), laws (each one's antiderivative, bracket and carry), switches (parsing,
+  planning, their errors), BDF2's blocks as the BDF2 map, the matched design (`src/circuit/Linear.h`: its poles and
+  magnitudes, the region a block it cannot serve joins, the eigenvalues), prewarp, halfbands, reference and analysis;
+  `CircuitEmitTest.cpp` its emitted text, compiled through `fminus::Program`, the coefficients (the Woodbury form's
+  against the double derivation all in set), an OTA's in 48 configurations and Phase 1's elements and diode laws in
+  40, the carry of a pot's move for one diode and an asymmetric pair, its ADAA mean against the double one over a
+  saturating sweep, an OTA driven hard against the reference, BDF2 against its double reference, a switch's ramp, its
+  block splits and its ADAA point, a matched block's float coefficients and response; `CircuitSearchTest.cpp` its
+  self-test: both rows' candidates' order, the synth's stress matrix and a law input's arguments over its scale,
+  switch positions as axes, the method check (its flag, its measure, its warning and the BDF2 twins), the search, the
+  gates' reduction and the no-configuration choice on stub measures, the key, a `Choice`'s text, and the self-test
+  itself on a small stress shape, `selfTestWith` in `src/api/CircuitSelfTest.h`: T1 on the region's own input, its
+  answer the same on any number of threads, a job's exception carried back to the caller). Add new ones freely.
 - **A hidden test** carries the tags `[.]` and a name: ctest never runs it, and `fminus-tests "[name]"` does.
   `[exhaustive]` runs every float through every math kernel, on every core, against its error bound, in every lane, and
   under flush-to-zero (extending.md, recipe 23): about ten minutes, for after a change to a kernel.
@@ -244,8 +248,10 @@ of the same circuit (`src/circuit/Reference.h`), solved to convergence, and a co
 the research's (in-band error, inharmonic energy, H1 and H3; `src/circuit/Analysis.h`). `--check` (ctest's
 `example.circuits`) gates on the research's targets and prints each worst value beside the research's figure, and
 runs the self-test on the full stress matrix (it must choose the configurations the examples ship, the same on 1 and 8
-threads); `--tables` reprints the research's accuracy tables from emitted code (minutes), and with no flags it prints
-generate()'s and the self-test's times and the cost table, which nothing asserts. The unit tests run the self-test on
+threads), and checks Phase 1's coefficients, switches, matched designs, linear-only region, BDF2 and method check
+(section p); `--tables` reprints the research's accuracy tables from emitted code (minutes), and with no flags it
+prints generate()'s and the self-test's times, `set()`'s cycles in both forms and the cost table, which nothing
+asserts. The unit tests run the self-test on
 a smaller stress shape only; `tests/lit/circuit/selftest.test` runs it through `fminus --self-test`, and
 `tests/lit/circuit/op.test` prints DC points through `.op` (and compares a biased netlist's module with its unbiased
 twin's).

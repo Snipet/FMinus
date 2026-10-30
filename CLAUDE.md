@@ -19,8 +19,10 @@ asks for that specific change, and ask before restructuring anything.
 - `src/runtime/` is its own library (no LLVM): what generated code calls, JIT'd (`support/JitRuntime.h`) or linked
   into an executable (`support/Aot.h`, `tools/fminus-build`). Every runtime function goes in `RuntimeSymbols.def`.
 - `src/circuit/` is its own library too, `fminus_circuit` (no LLVM, no grammar): the circuit compiler the user asked
-  for (2026-10-29), SPICE-style netlists to FMinus source (`include/fminus/Circuit.h`, C++17; `docs/circuits.md`; the
-  research in `docs/research/analog-circuits/`). It compiles with `-ffp-contract=off`, so the text it prints is the
+  for (2026-10-29), SPICE-style netlists to FMinus source (`include/fminus/Circuit.h`, C++17; `docs/circuits.md`, Phase
+  1 as built, with what is not built yet at its end; the research in `docs/research/analog-circuits/`). Its linear
+  blocks' designs and the method check are `Linear.*`, on doubles at generation and on `Val`s for the text, as
+  `Mna.h`'s derivation is. It compiles with `-ffp-contract=off`, so the text it prints is the
   same on every machine; `fminus_lib` links it. A name its emitted module uses goes in `isModuleWord` (Plan.cpp). Its
   self-test, `selfTest()`, needs the JIT, so it lives in `fminus_lib` (`src/api/CircuitSelfTest.cpp`, which compiles
   candidates through `fminus::Program`); its arithmetic stays in `src/circuit/Search.*`, which stays LLVM-free.

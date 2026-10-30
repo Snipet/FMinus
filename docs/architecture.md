@@ -519,12 +519,13 @@ library, with no LLVM in it, so a host's include resolver (or `tools/fminus`'s) 
 
 | Stage | Entry point | Input | Output |
 |---|---|---|---|
-| parse | `circuit::parse` (`Netlist.h`) | the netlist's text | `Netlist`: its elements, models, pots and directives, as written, with their lines and columns |
-| plan | `circuit::plan` (`Plan.h`) | `Netlist`, `Options` | `Plan`: diodes (one, strings, pairs, asymmetric pairs; RS written in as a resistor) and OTAs as ports, pots as variable branches, DC sources, E and G sources, law inputs, the checks, a chain of blocks cut at ideal op amps and grounded E sources, the DC operating point, the configuration, the oversampled region |
+| parse | `circuit::parse` (`Netlist.h`) | the netlist's text | `Netlist`: its elements, models, pots, switches and directives, as written, with their lines and columns |
+| plan | `circuit::plan` (`Plan.h`) | `Netlist`, `Options` | `Plan`: diodes (one, strings, pairs, asymmetric pairs; RS written in as a resistor) and OTAs as ports, pots and switches as variable branches, DC sources, E and G sources, law inputs, the checks, a chain of blocks cut at ideal op amps and grounded E sources, the DC operating point, the configuration (the integrator: TR or BDF2), each linear block's form (trapezoidal, or a matched design at 1x), the oversampled region, the method check's notes |
 | DC point | `dcPoint`, `solveDc` (`Dc.h`) | the plan's blocks | each node's DC voltage (the offsets' origin), the output's DC (tick's constant), `.op`'s notes; a biased port's error |
-| equations | `assemble`, `choosePivots` (`Mna.h`) | a block of the plan | `System` (its stamps, sources and readouts, in the offsets from the DC point, or with the DC sources' constants; a diode's port in the v-form, an OTA's in the i-form) and `Pivots` (the elimination order, checked over a grid of rates and pots) |
+| equations | `assemble`, `choosePivots` (`Mna.h`) | a block of the plan | `System` (its stamps, sources and readouts, in the offsets from the DC point, or with the DC sources' constants; trapezoidal or BDF2 companions; a diode's port in the v-form, an OTA's in the i-form) and `Pivots` (the elimination order, checked over a grid of rates, pots and switch positions; the variable branches last first, for the Woodbury form) |
 | derivation | `solve<T>`, `derive<T>` (`Mna.h`) | `System`, `Pivots`, the symbols as `T` | each readout as a linear form in the sources, then the module's coefficients |
-| text | `deriveBlock`, `emit` (`Emit.h`) | the plan and each block's derivation on `Val`s | the module's FMinus text; each law's part of a step is `Laws.h`'s, beside its double twin |
+| linear | `matchedDesign<T>`, `matchedCheck`, `ringingCheck` (`Linear.h`) | a linear block's trapezoidal form; a port block's linearised A | the matched design (a one-pole or a biquad at 1x) and its gate; the eigenvalues near -1 the method check flags |
+| text | `deriveBlock`, `emit` (`Emit.h`) | the plan and each block's derivation on `Val`s | the module's FMinus text, in the Woodbury form where it shortens `b<N>_set` (what the rate alone moves in init); each law's part of a step is `Laws.h`'s, beside its double twin |
 
 `generate()` (`Generate.cpp`) runs them; any error stops it before the text. `Messages` (`Netlist.h`) collects every
 stage's errors, warnings and notes and formats them as clang does. `Reference.h` and `Analysis.h` are the double
@@ -534,7 +535,8 @@ The plan leaves a dimension of the configuration (oversampling, ADAA, the solver
 `Options` nor the netlist name it; `generate()` then emits a provisional configuration at once, and the self-test,
 `selfTest()`, chooses. It is the one part of the circuit compiler that needs the JIT, so it is split in two:
 `Search.h` (in `fminus_circuit`) holds its arithmetic, the stress matrix, the double references, the gates, the
-candidates in the cost model's order, the ordered search and the budget; `src/api/CircuitSelfTest.cpp` (in
+candidates in the cost model's order, the method check's measure and its BDF2 twins, the ordered search and the
+budget; `src/api/CircuitSelfTest.cpp` (in
 `fminus_lib`) generates each candidate with `Options::chosen`, compiles it through `fminus::Program` with
 `Runners.h`'s functions appended, and runs it on the host's threads (`SelfTestOptions::parallel`). FMinus owns no
 threads and no cache for it: the host stores the answer and generates again with it.

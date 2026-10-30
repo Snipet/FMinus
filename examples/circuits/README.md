@@ -35,14 +35,14 @@ failure: the report's targets (a-h), then the self-test's search without the net
 must choose what they ship (i, j), the run-time guard (k), the provisional configuration (l), and the synth path on
 `otalp.cir` (m: T1-T4 on the synth's stress matrix, the self-test's choice, tick against step, the prewarp's -3 dB
 points, the carry under ADAA; n: a per-sample law input's lanes and block splits), Phase 1's elements (o: the new
-netlists, screamer-biased.cir's offset form against screamer.cir, the self-test's answers on halfwave.cir and
-asym.cir, wah.cir's matched design), and Phase 1's last slice (p: the Woodbury form's coefficients on every shipped
-netlist against the double derivation all in set, switch.cir's ramp, its block splits and its ADAA residual, the
-matched designs of rc8k.cir and sallen-key.cir, the tone stack's linear-only region, BDF2 against its reference, and
-the method check: ringing.cir ringing at 1x, the TS stage flagged without ringing; with d, a tone glide through the
-TS tone block matched at 1x). It times nothing. With no flags it prints generate()'s and the self-test's times, set()'s
-cycles on the TS tone block in the Woodbury form and all in set, then the cost table: each row's wall time, and on
-macOS its cycles and instructions, beside the self-test's cost model and the report's measurement of the same bench
+netlists, screamer-biased.cir's offset form against screamer.cir, the self-test's answers on halfwave.cir and asym.cir,
+wah.cir's matched design), and Phase 1's coefficients and linear blocks (p: the Woodbury form's coefficients on every
+shipped netlist against the double derivation all in set, switch.cir's ramp, its block splits and its ADAA residual, the
+matched designs of rc8k.cir and sallen-key.cir, the tone stack's linear-only region, BDF2 against its reference, and the
+method check: ringing.cir ringing at 1x, the TS stage flagged without ringing; with d, a tone glide through the TS tone
+block matched at 1x). It times nothing. With no flags it prints generate()'s and the self-test's times, set()'s cycles
+on the TS tone block in the Woodbury form and all in set, then the cost table: each row's wall time, and on macOS its
+cycles and instructions, beside the self-test's cost model and the report's measurement of the same bench
 (`experiments/timing1.out`); it asserts nothing.
 
 The files: `main.cpp` (the command line), `harness.h`/`harness.cpp` (building a module with its runners appended,
