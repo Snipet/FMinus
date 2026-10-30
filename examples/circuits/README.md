@@ -29,6 +29,7 @@ build-dev/bin/example-circuits --check                            # the targets 
 build-dev/bin/example-circuits --tables                           # report §5.2's table, fminus.md's Tables 1-3
 build-dev/bin/example-circuits                                    # the cost table (on a quiet machine)
 build-dev/bin/example-circuits --all --only adaa --reps 7 --samples 1000000 --math fast
+build-dev/bin/example-circuits --only probes                      # the probes' cost in a host's process loop
 ```
 
 `--check` prints, for each check, the worst value, where it fell, and the report's figure beside it, and exits 1 on a
@@ -41,10 +42,14 @@ wah.cir's matched design), and Phase 1's coefficients and linear blocks (p: the 
 shipped netlist against the double derivation all in set, switch.cir's ramp, its block splits and its ADAA residual, the
 matched designs of rc8k.cir and sallen-key.cir, lowpass-sweep.cir's through the JIT wherever its pot puts its poles, the
 tone stack's linear-only region, BDF2 against its reference, and the method check: ringing.cir ringing at 1x, the TS
-stage flagged without ringing; with d, a tone glide through the TS tone block matched at 1x). It times nothing. With no
-flags it prints generate()'s and the self-test's times, set()'s cycles on the TS tone block in the Woodbury form and all
-in set, then the cost table: each row's wall time, and on macOS its cycles and instructions, beside the self-test's cost
-model and the report's measurement of the same bench (`experiments/timing1.out`); it asserts nothing.
+stage flagged without ringing; with d, a tone glide through the TS tone block matched at 1x), and the probes (q: on
+every netlist here, the same output bits with probes off, disarmed and armed on each node, each node's ring against the
+double reference of its voltage, the stats and the DC volts). It times nothing. With no flags it prints generate()'s
+and the self-test's times, set()'s cycles on the TS tone block in the Woodbury form and all in set, the probes' cost on
+screamer.cir and otalp.cir in a host module's process loop (off, disarmed, armed on one slot and on four; `--only
+probes` prints it alone), then the cost table: each row's wall time, and on macOS its cycles and instructions, beside
+the self-test's cost model and the report's measurement of the same bench (`experiments/timing1.out`); it asserts
+nothing.
 
 The files: `main.cpp` (the command line), `harness.h`/`harness.cpp` (building a module with its runners appended,
 running it, the double reference), `check.cpp`, `tables.cpp` and `bench.cpp` (the three modes).

@@ -14,9 +14,12 @@
 // failure exits 1. Nothing is timed.
 #include "harness.h"
 
+#include "circuit/Emit.h"
+#include "circuit/Halfbands.h"
 #include "circuit/Search.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <complex>
@@ -2358,6 +2361,620 @@ namespace circuits
                                              "trapezoidal at 4x (within 1.1x)",
                                              a, b));
         }
+
+        // ---- q. the probes: the same output bits, the rings' accuracy, the stats, the DC volts ----
+
+        // Every netlist of this example's directory (the playground's library's three, diodetone.cir, otalp.cir and
+        // screamer.cir, are these but for their comments).
+        const std::vector<std::string> kAllNetlists{
+            "asym.cir",           "clipper.cir",  "diodetone.cir",     "halfwave.cir",   "lowpass-sweep.cir",
+            "otalp.cir",          "rc8k.cir",     "ringing.cir",       "sallen-key.cir", "screamer-biased.cir",
+            "screamer-clip.cir",  "screamer.cir", "switch.cir",        "tonestack.cir",  "wah.cir"};
+
+        // A field's offset in a circuit's module.
+        std::size_t offsetOf(const Circuit& c, const std::string& name)
+        {
+            for (const fminus::Program::Module::Field& f : c.module->fields)
+            {
+                if (f.name == name)
+                    return f.offset;
+            }
+            throw std::runtime_error(c.fileName + ": the module has no field " + name);
+        }
+
+        template <typename T>
+        T fieldAt(const void* self, std::size_t offset, std::size_t index = 0)
+        {
+            T v{};
+            std::memcpy(&v, static_cast<const char*>(self) + offset + index * sizeof(T), sizeof v);
+            return v;
+        }
+
+        template <typename T>
+        void setFieldAt(void* self, std::size_t offset, T v, std::size_t index = 0)
+        {
+            std::memcpy(static_cast<char*>(self) + offset + index * sizeof(T), &v, sizeof v);
+        }
+
+        // What a run of tick reads: a lane or two of signal, and a buffer of pots, switch positions and law arguments
+        // (each a sample's).
+        struct ProbeInputs
+        {
+            std::vector<float> a;
+            std::vector<float> b;   // .channels 2's second lane
+            std::vector<float> pots;
+            std::vector<int> switches;
+            std::vector<float> law;
+        };
+
+        // A run's outputs, and while armed each slot's samples (read from its ring after each call) and its stats.
+        struct ProbeRun
+        {
+            std::vector<float> a;
+            std::vector<float> b;
+            std::array<std::vector<float>, 4> rings;
+            std::array<float, 4> peak{};
+            std::array<float, 4> sum{};
+            std::array<float, 4> squares{};
+            bool ringsZero = true;   // the rings of slots on no readable node: nothing written
+        };
+
+        // tick over `in` from init(48000) in calls of `call` samples; with `slots`, armed on them (prb_ 1, prs_) once
+        // init has run.
+        ProbeRun runProbed(const Circuit& c, const ProbeInputs& in, int call, const std::array<int, 4>* slots,
+                           const std::vector<bool>* readable = nullptr)
+        {
+            Instance self(*c.module);
+            c.init(self.get(), 48000);
+            std::size_t ring = 0;
+            if (slots != nullptr)
+            {
+                setFieldAt<int>(self.get(), offsetOf(c, "prb_"), 1);
+                for (std::size_t k = 0; k < 4; ++k)
+                    setFieldAt<int>(self.get(), offsetOf(c, "prs_"), (*slots)[k], k);
+                ring = offsetOf(c, "pr_");
+            }
+            const auto n = static_cast<int>(in.a.size());
+            const auto p = static_cast<std::size_t>(c.pots());
+            const auto w = static_cast<std::size_t>(c.switches());
+            const auto l = static_cast<std::size_t>(c.laws());
+            ProbeRun out;
+            out.a.resize(in.a.size());
+            out.b.resize(in.b.size());
+            for (int start = 0; start < n; start += call)
+            {
+                const int count = std::min(call, n - start);
+                const auto s = static_cast<std::size_t>(start);
+                const float* law = in.law.empty() ? nullptr : in.law.data() + s * l;
+                const float* pots = in.pots.empty() ? nullptr : in.pots.data() + s * p;
+                const int* switches = in.switches.empty() ? nullptr : in.switches.data() + s * w;
+                if (c.ticks2 != nullptr)
+                    c.ticks2(self.get(), in.a.data() + s, in.b.data() + s, law, pots, switches, out.a.data() + s,
+                             out.b.data() + s, count, start);
+                else
+                    c.ticks(self.get(), in.a.data() + s, law, pots, switches, out.a.data() + s, count, start);
+                if (slots == nullptr)
+                    continue;
+                for (std::size_t k = 0; k < 4; ++k)
+                {
+                    for (int j = 0; j < count; ++j)
+                        out.rings[k].push_back(
+                            fieldAt<float>(self.get(), ring, 1024 * k + static_cast<std::size_t>(start + j) % 1024));
+                }
+            }
+            if (slots != nullptr)
+            {
+                for (std::size_t k = 0; k < 4; ++k)
+                {
+                    out.peak[k] = fieldAt<float>(self.get(), offsetOf(c, "prp_"), k);
+                    out.sum[k] = fieldAt<float>(self.get(), offsetOf(c, "pra_"), k);
+                    out.squares[k] = fieldAt<float>(self.get(), offsetOf(c, "prq_"), k);
+                    const int node = (*slots)[k];
+                    const bool reads = readable != nullptr && node >= 0 &&
+                                       static_cast<std::size_t>(node) < readable->size() &&
+                                       (*readable)[static_cast<std::size_t>(node)];
+                    if (reads)
+                        continue;
+                    for (std::size_t j = 0; j < 1024; ++j)
+                        out.ringsZero = out.ringsZero && fieldAt<float>(self.get(), ring, 1024 * k + j) == 0;
+                    out.ringsZero = out.ringsZero && out.peak[k] == 0 && out.sum[k] == 0 && out.squares[k] == 0;
+                }
+            }
+            return out;
+        }
+
+        // The samples of every signal of report §2's stress set at level L, 512 each, one after another (the second
+        // lane: the same in the other order, at 0.8 of it); the pots gliding as triangles on the grid, the switches
+        // stepping through their positions, the law inputs moving across their ranges every sample.
+        ProbeInputs stressInputs(const fc::Plan& plan, int channels)
+        {
+            const double level = plan.netlist.target.level ? *plan.netlist.target.level : std::fabs(plan.inputScale);
+            const std::vector<Signal> set = stressSet(level);
+            constexpr std::size_t each = 512;
+            ProbeInputs in;
+            for (const Signal& s : set)
+            {
+                const std::vector<double> v = make(s, 1, each);
+                in.a.insert(in.a.end(), v.begin(), v.end());
+            }
+            if (channels == 2)
+            {
+                for (auto it = set.rbegin(); it != set.rend(); ++it)
+                {
+                    for (double v : make(*it, 1, each))
+                        in.b.push_back(static_cast<float>(0.8 * v));
+                }
+            }
+            const std::size_t n = in.a.size();
+            for (std::size_t i = 0; i < n; ++i)
+            {
+                for (std::size_t j = 0; j < plan.pots.size(); ++j)
+                {
+                    const double x = std::fmod(static_cast<double>(i + 997 * j) / 3000.0, 2.0);
+                    in.pots.push_back(static_cast<float>(x <= 1 ? x : 2 - x));
+                }
+                for (const fc::SwitchInfo& sw : plan.switches)
+                    in.switches.push_back(static_cast<int>((i / 2500 + static_cast<std::size_t>(sw.defaultPosition)) %
+                                                           static_cast<std::size_t>(sw.positions)));
+                for (std::size_t j = 0; j < plan.laws.size(); ++j)
+                {
+                    const fc::LawInfo& law = plan.laws[j];
+                    const double t = 0.5 + 0.5 * std::sin(2 * std::numbers::pi * static_cast<double>(i) / 2000 +
+                                                          static_cast<double>(j));
+                    const double value = law.low > 0 ? law.low * std::pow(law.high / law.low, t)
+                                                     : law.low + (law.high - law.low) * t;
+                    in.law.push_back(static_cast<float>(value / law.scale));
+                }
+            }
+            return in;
+        }
+
+        // A halfband stage in double, as the module's hb<s>_up and hb<s>_down compute it in float (Halfbands.cpp's
+        // emitters), on the designs' double coefficients.
+        struct HalfbandStage
+        {
+            fc::Halfband kind = fc::Halfband::Iir;
+            std::vector<double> a;    // IIR: the allpass coefficients, even ones on the first branch
+            std::vector<double> h2;   // FIR: the odd taps, 2h
+            std::vector<double> ux, uy, dx, dy;
+            std::vector<double> d, e, od;
+            std::size_t pos = 0, pe = 0, po = 0;
+
+            HalfbandStage(int stage, fc::Halfband k)
+                : kind(k)
+            {
+                if (kind == fc::Halfband::Iir)
+                {
+                    const std::span<const double> c = fc::iirCoefficients(stage);
+                    a.assign(c.begin(), c.end());
+                    ux.assign(a.size(), 0);
+                    uy = ux;
+                    dx = ux;
+                    dy = ux;
+                    return;
+                }
+                const std::span<const double> t = fc::firTaps(stage);
+                h2.assign(t.begin(), t.end());
+                const std::size_t j = h2.size();
+                d.assign(4 * j, 0);
+                od.assign(4 * j, 0);
+                e.assign(2 * (j + 1), 0);
+            }
+
+            void allpasses(double& s0, double& s1, std::vector<double>& x, std::vector<double>& y) const
+            {
+                for (std::size_t i = 0; i < a.size(); ++i)
+                {
+                    double& sv = i % 2 == 0 ? s0 : s1;
+                    const double t = sv;
+                    sv = (sv - y[i]) * a[i] + x[i];
+                    x[i] = t;
+                    y[i] = sv;
+                }
+            }
+
+            std::pair<double, double> up(double x)
+            {
+                if (kind == fc::Halfband::Iir)
+                {
+                    double s0 = x;
+                    double s1 = x;
+                    allpasses(s0, s1, ux, uy);
+                    return {s0, s1};
+                }
+                const std::size_t j = h2.size();
+                const std::size_t w = 2 * j;
+                pos = pos == 0 ? w - 1 : pos - 1;
+                d[pos] = x;
+                d[pos + w] = x;
+                double o1 = 0;
+                for (std::size_t i = 0; i < j; ++i)
+                    o1 += h2[i] * (d[pos + j + i] + d[pos + j - i - 1]);
+                return {d[pos + j], o1};
+            }
+
+            double down(double v0, double v1)
+            {
+                if (kind == fc::Halfband::Iir)
+                {
+                    double s0 = v1;
+                    double s1 = v0;
+                    allpasses(s0, s1, dx, dy);
+                    return 0.5 * (s0 + s1);
+                }
+                const std::size_t j = h2.size();
+                const std::size_t w = 2 * j;
+                pe = pe == 0 ? j : pe - 1;
+                e[pe] = v0;
+                e[pe + j + 1] = v0;
+                double y = 0.5 * e[pe + j];
+                for (std::size_t i = 0; i < j; ++i)
+                    y += 0.5 * h2[i] * (od[po + j + i] + od[po + j - i - 1]);
+                po = po == 0 ? w - 1 : po - 1;
+                od[po] = v1;
+                od[po + w] = v1;
+                return y;
+            }
+        };
+
+        // The double reference of a node's voltage (in offsets), host sample by host sample, in the module's
+        // configuration: the chain's blocks in Holters' form with the emitted solver's steps (the node's block reading
+        // that node), the matched designs as their double TDF2, the halfbands in double, the region's nodes at its last
+        // step of each host sample; `u` tick's arguments, the pots and switches at `point`, the law inputs held at
+        // `laws`.
+        std::vector<double> nodeReference(const fc::Plan& plan, const fc::ProbeNode& node, std::span<const double> u,
+                                          const std::vector<double>& point, const std::vector<double>& laws)
+        {
+            const fc::Config& cfg = plan.config;
+            const int m = plan.regionFirst >= 0 ? cfg.oversample : 1;
+            const auto nb = static_cast<int>(plan.blocks.size());
+            // .output's node is tick's output in volts: the whole chain's, through the halfbands
+            const int stop = node.index == plan.outputNode ? -1 : node.block;
+            auto run = [&](int b, const std::vector<double>& in, double rate, bool readNode)
+            {
+                const fc::Block& block = plan.blocks[static_cast<std::size_t>(b)];
+                if (block.design == fc::Block::Design::Matched)
+                {
+                    const std::optional<fc::TrForm<double>> tr = fc::trForm(plan, b, rate, point);
+                    if (!tr)
+                        throw std::runtime_error("no trapezoidal form for a matched block");
+                    const fc::Matched<double> md = fc::matchedDesign(*tr, block.matchedPolarity);
+                    std::vector<double> y;
+                    double s1 = 0;
+                    double s2 = 0;
+                    for (double x : in)
+                    {
+                        const double ym = md.b0 * x + s1;
+                        s1 = md.b1 * x - md.a1 * ym + s2;
+                        s2 = md.b2 * x - md.a2 * ym;
+                        y.push_back(ym);
+                    }
+                    return y;
+                }
+                const double design = block.port && cfg.adaa ? rate * 2 / 3 : rate;
+                fc::Holters h = fc::holters(plan, b, design, point, laws, std::nullopt, readNode ? node.index : 0);
+                if (block.port && block.port->prewarp && block.method == fc::Method::Tr)
+                    h.g = fc::prewarped(*block.port, h.g, design);
+                fc::RefOptions o;
+                o.adaa = block.port.has_value() && cfg.adaa;
+                o.steps = cfg.solver.steps;
+                o.guess = cfg.solver.guess;
+                return fc::simulate(h, in, o);
+            };
+            std::vector<double> x(u.begin(), u.end());
+            const int preEnd = plan.regionFirst >= 0 ? plan.regionFirst : nb;
+            for (int b = 0; b < preEnd; ++b)
+            {
+                x = run(b, x, 48000, b == stop);
+                if (b == stop)
+                    return x;
+            }
+            auto output = [&](std::vector<double> y)
+            {
+                if (stop >= 0)
+                    throw std::runtime_error("no block computes node " + node.node.name);
+                for (double& v : y)
+                    v *= plan.outputScale;
+                return y;
+            };
+            if (plan.regionFirst < 0)
+                return output(x);
+            int stages = 0;
+            while ((1 << stages) < m)
+                ++stages;
+            std::vector<HalfbandStage> st;
+            for (int s = 1; s <= stages; ++s)
+                st.emplace_back(s, cfg.halfband);
+            std::vector<double> hi;
+            for (double v : x)
+            {
+                std::vector<double> values{v};
+                for (HalfbandStage& stage : st)
+                {
+                    std::vector<double> next;
+                    for (double y : values)
+                    {
+                        const auto [y0, y1] = stage.up(y);
+                        next.push_back(y0);
+                        next.push_back(y1);
+                    }
+                    values = next;
+                }
+                hi.insert(hi.end(), values.begin(), values.end());
+            }
+            for (int b = plan.regionFirst; b <= plan.regionLast; ++b)
+            {
+                hi = run(b, hi, 48000.0 * m, b == stop);
+                if (b == stop)
+                {
+                    std::vector<double> y;
+                    for (std::size_t i = 0; i < x.size(); ++i)
+                        y.push_back(hi[static_cast<std::size_t>(m) * i + static_cast<std::size_t>(m) - 1]);
+                    return y;
+                }
+            }
+            x.clear();
+            for (std::size_t i = 0; i < hi.size() / static_cast<std::size_t>(m); ++i)
+            {
+                std::vector<double> ys(hi.begin() + static_cast<std::ptrdiff_t>(i) * m,
+                                       hi.begin() + static_cast<std::ptrdiff_t>(i + 1) * m);
+                for (int s = stages; s >= 1; --s)
+                {
+                    std::vector<double> next;
+                    for (std::size_t j = 0; j + 1 < ys.size(); j += 2)
+                        next.push_back(st[static_cast<std::size_t>(s - 1)].down(ys[j], ys[j + 1]));
+                    ys = next;
+                }
+                x.push_back(ys.front());
+            }
+            for (int b = plan.regionLast + 1; b < nb; ++b)
+            {
+                x = run(b, x, 48000, b == stop);
+                if (b == stop)
+                    return x;
+            }
+            return output(x);
+        }
+
+        // The .op notes' node voltages, by folded name ("V(vb) = 4.5 V", "V(x) = 12.5 mV").
+        std::map<std::string, double> opVoltages(const std::string& notes)
+        {
+            std::map<std::string, double> out;
+            const std::regex line(R"(\.op: V\(([^)]+)\) = (\S+) ([fpnum]?)V)");
+            for (auto it = std::sregex_iterator(notes.begin(), notes.end(), line); it != std::sregex_iterator(); ++it)
+            {
+                const std::string prefix = (*it)[3].str();
+                const double scale = prefix == "f"   ? 1e-15
+                                     : prefix == "p" ? 1e-12
+                                     : prefix == "n" ? 1e-9
+                                     : prefix == "u" ? 1e-6
+                                     : prefix == "m" ? 1e-3
+                                                     : 1;
+                out[fc::folded((*it)[1].str())] = std::stod((*it)[2].str()) * scale;
+            }
+            return out;
+        }
+
+        void probes(Report& r)
+        {
+            std::printf("q. the probes (Options::probes): every netlist here (the playground library's three among "
+                        "them but for comments), in one and two channels, its stress signals one after another with "
+                        "the pots gliding, in calls of 64 and 61 samples: the same output bits with probes off, on and "
+                        "disarmed, and armed on each readable node in turn (and on each unreadable one)\n");
+            for (const std::string& name : kAllNetlists)
+            {
+                const std::string text = netlist(name);
+                std::size_t runs = 0;
+                std::size_t differ = 0;
+                std::size_t samples = 0;
+                bool unwritten = true;
+                std::string failed;
+                for (int channels : {1, 2})
+                {
+                    fc::Options o;
+                    o.channels = channels;
+                    fc::Options p = o;
+                    p.probes = true;
+                    auto off = buildOrReport(r, text, name, o);
+                    auto on = buildOrReport(r, text, name, p);
+                    if (!off || !on)
+                    {
+                        failed = "does not build";
+                        break;
+                    }
+                    const ProbeInputs in = stressInputs(off->plan, channels);
+                    const ProbeRun reference = runProbed(*off, in, 64, nullptr);
+                    std::vector<int> readable;
+                    std::vector<int> unreadable;
+                    std::vector<bool> reads;
+                    for (std::size_t k = 0; k < on->result.nodes.size(); ++k)
+                    {
+                        (on->result.nodes[k].readable ? readable : unreadable).push_back(static_cast<int>(k));
+                        reads.push_back(on->result.nodes[k].readable);
+                    }
+                    auto compare = [&](const ProbeRun& run)
+                    {
+                        ++runs;
+                        samples += run.a.size() + run.b.size();
+                        for (std::size_t i = 0; i < run.a.size(); ++i)
+                            differ += std::memcmp(&run.a[i], &reference.a[i], sizeof(float)) != 0 ? 1 : 0;
+                        for (std::size_t i = 0; i < run.b.size(); ++i)
+                            differ += std::memcmp(&run.b[i], &reference.b[i], sizeof(float)) != 0 ? 1 : 0;
+                        unwritten = unwritten && run.ringsZero;
+                    };
+                    for (int call : {64, 61})
+                    {
+                        compare(runProbed(*off, in, call, nullptr));
+                        compare(runProbed(*on, in, call, nullptr));
+                        for (std::size_t k = 0; k < readable.size(); ++k)
+                        {
+                            const std::array<int, 4> slots{readable[k], readable[(k + 1) % readable.size()],
+                                                           readable[(k + 2) % readable.size()],
+                                                           readable[(k + 3) % readable.size()]};
+                            compare(runProbed(*on, in, call, &slots, &reads));
+                        }
+                        for (int k : unreadable)
+                        {
+                            const std::array<int, 4> slots{k, 99, -3, static_cast<int>(reads.size())};
+                            compare(runProbed(*on, in, call, &slots, &reads));
+                        }
+                    }
+                }
+                r.line(failed.empty() && differ == 0 && unwritten,
+                       failed.empty() ? std::format("{}: {} runs, {} of {} samples differ from the module's without "
+                                                    "probes{}",
+                                                    name, runs, differ, samples,
+                                                    unwritten ? "" : "; a slot on no readable node was written")
+                                      : name + ": " + failed);
+            }
+
+            std::printf("q. the rings: each readable node against the double reference of its voltage in the "
+                        "module's configuration (the halfbands and matched designs in double), a sine at L / 2.25, "
+                        "996 Hz, the pots at their defaults, in calls of 64 (gate -60 dB of the node's RMS, or 1e-4 "
+                        "V); the output node's ring tick's output times .output's scale; prp_, pra_ and prq_ the "
+                        "samples' peak, sum and sum of squares in float; each node's dc the .op note's\n");
+            for (const std::string& name : kAllNetlists)
+            {
+                const std::string text = netlist(name);
+                fc::Options p;
+                p.probes = true;
+                auto c = buildOrReport(r, text, name, p);
+                if (!c)
+                    continue;
+                const fc::Plan& plan = c->plan;
+                fc::Messages messages;
+                const std::vector<fc::ProbeNode> nodes = fc::probeNodes(plan, fc::parse(text, messages));
+                const double level =
+                    plan.netlist.target.level ? *plan.netlist.target.level : std::fabs(plan.inputScale);
+                constexpr std::size_t n = 3072;
+                const std::vector<double> u = fc::sine(level / 2.25 / std::fabs(plan.inputScale), 85, kWindow, 1, n);
+                ProbeInputs in;
+                in.a.assign(u.begin(), u.end());
+                const std::vector<double> point = fc::defaultPoint(plan);
+                std::vector<double> laws;
+                for (const fc::LawInfo& law : plan.laws)
+                    laws.push_back(law.middle());
+                for (std::size_t i = 0; i < n; ++i)
+                {
+                    for (const fc::PotInfo& pot : plan.pots)
+                        in.pots.push_back(static_cast<float>(pot.defaultValue));
+                    for (const fc::SwitchInfo& sw : plan.switches)
+                        in.switches.push_back(sw.defaultPosition);
+                    for (std::size_t j = 0; j < plan.laws.size(); ++j)
+                        in.law.push_back(static_cast<float>(laws[j] / plan.laws[j].scale));
+                }
+                std::vector<int> readable;
+                std::vector<bool> reads;
+                for (std::size_t k = 0; k < nodes.size(); ++k)
+                {
+                    if (nodes[k].node.readable)
+                        readable.push_back(static_cast<int>(k));
+                    reads.push_back(nodes[k].node.readable);
+                }
+                Worst worst;
+                int over = 0;   // nodes whose ring errs by more than their bound
+                double outputError = 0;
+                std::size_t statsDiffer = 0;
+                std::string failure;
+                for (std::size_t g = 0; g < readable.size(); g += 4)
+                {
+                    std::array<int, 4> slots{-1, -1, -1, -1};
+                    for (std::size_t k = 0; k < 4 && g + k < readable.size(); ++k)
+                        slots[k] = readable[g + k];
+                    const ProbeRun run = runProbed(*c, in, 64, &slots, &reads);
+                    for (std::size_t k = 0; k < 4; ++k)
+                    {
+                        if (slots[k] < 0)
+                            continue;
+                        const fc::ProbeNode& node = nodes[static_cast<std::size_t>(slots[k])];
+                        const std::vector<float>& ring = run.rings[k];
+                        // the stats, as tick accumulates them, in float
+                        float peak = 0;
+                        float sum = 0;
+                        float squares = 0;
+                        for (float v : ring)
+                        {
+                            peak = std::fmax(peak, std::fabs(v));
+                            sum = sum + v;
+                            squares = squares + v * v;
+                        }
+                        statsDiffer += (peak != run.peak[k]) + (sum != run.sum[k]) + (squares != run.squares[k]);
+                        std::vector<double> reference;
+                        if (node.index == plan.inputNode)
+                        {
+                            for (double x : u)
+                                reference.push_back(x * plan.inputScale);
+                        }
+                        else if (node.block < 0)
+                            reference.assign(n, 0.0);   // a DC node's offset
+                        else
+                        {
+                            try
+                            {
+                                reference = nodeReference(plan, node, u, point, laws);
+                            }
+                            catch (const std::exception& e)
+                            {
+                                failure = node.node.name + ": " + e.what();
+                                continue;
+                            }
+                        }
+                        double error = 0;
+                        double power = 0;
+                        for (std::size_t i = kWarm; i < n; ++i)
+                        {
+                            const double ref = reference[i];
+                            const double dv = static_cast<double>(ring[i]) - (ref + node.node.dc);
+                            error += dv * dv;
+                            power += ref * ref;
+                        }
+                        const double count = static_cast<double>(n - kWarm);
+                        const double rmsError = std::sqrt(error / count);
+                        const double rms = std::sqrt(power / count);
+                        // within -60 dB of the node's RMS, or 1e-4 V
+                        over += rmsError <= std::max(1e-3 * rms, 1e-4) ? 0 : 1;
+                        if (rms > 0)
+                            worst.max(dB(std::max(rmsError, 1e-30) / rms),
+                                      std::format("{} ({:.3g} V RMS, {:.2g} V off)", node.node.name, rms, rmsError));
+                        if (node.index == plan.outputNode)
+                        {
+                            for (std::size_t i = 0; i < n; ++i)
+                            {
+                                const double y = static_cast<double>(run.a[i]) * plan.outputScale;
+                                outputError = std::max(outputError, std::fabs(static_cast<double>(ring[i]) - y) /
+                                                                        std::max(1.0, std::fabs(y)));
+                            }
+                        }
+                    }
+                }
+                // the DC volts against the .op note's
+                const std::map<std::string, double> op =
+                    opVoltages(fc::generate(withDirective(text, ".op", ".op"), name).notes);
+                // (every node .op prints: a series string's inner node it leaves out)
+                double dcError = 0;
+                bool dcListed = true;
+                for (const fc::ProbeNode& node : nodes)
+                {
+                    const auto it = op.find(fc::folded(node.node.name));
+                    if (it == op.end())
+                    {
+                        dcListed = dcListed && plan.nodes[static_cast<std::size_t>(node.index)].absorbed;
+                        continue;
+                    }
+                    dcError = std::max(dcError,
+                                       std::fabs(node.node.dc - it->second) / std::max(1.0, std::fabs(node.node.dc)));
+                }
+                r.line(failure.empty() && over == 0 && outputError <= 1e-6 && statsDiffer == 0 && dcError <= 1e-9 &&
+                           dcListed,
+                       failure.empty()
+                           ? std::format("{}: {} readable of {} nodes, {} over the gate; the worst ring {:.1f} dB of "
+                                         "its node's RMS, at {}; the output's {:.1e} off; {} stats differ; dc {:.1e} "
+                                         "off the .op notes",
+                                         name, readable.size(), nodes.size(), over, worst.value, worst.where,
+                                         outputError, statsDiffer, dcError)
+                           : name + ": " + failure);
+            }
+        }
     } // namespace
 
     int check()
@@ -2401,6 +3018,7 @@ namespace circuits
         linearRegion(r);
         bdf2(r);
         ringingCheck(r);
+        probes(r);
         std::printf("%s: %d check(s) failed\n", r.failures == 0 ? "passed" : "FAILED", r.failures);
         return r.failures == 0 ? 0 : 1;
     }
