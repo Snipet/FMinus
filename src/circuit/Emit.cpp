@@ -5,6 +5,7 @@
 
 #include "circuit/Halfbands.h"
 #include "circuit/Laws.h"
+#include "circuit/Linear.h"
 
 #include <algorithm>
 #include <array>
@@ -182,6 +183,46 @@ namespace fminus::circuit
         return temp(v.code, "logf(" + v.name + ")", {v.name}, false, v.deps);
     }
 
+    namespace
+    {
+        // A call of a float builtin on a Val: folded for a constant, else a temporary.
+        Val callOf(const char* name, const Val& v, double (*fold)(double))
+        {
+            if (v.kind != Val::Kind::Var)
+                return Val(fold(v.kind == Val::Kind::Zero ? 0.0 : v.c));
+            return temp(v.code, std::string(name) + "(" + operandText(v) + ")", {v.name}, false, v.deps);
+        }
+    } // namespace
+
+    Val expOf(const Val& v)
+    {
+        return callOf("expf", v, [](double x) { return std::exp(x); });
+    }
+
+    Val sqrtOf(const Val& v)
+    {
+        return callOf("sqrtf", v, [](double x) { return std::sqrt(x); });
+    }
+
+    Val cosOf(const Val& v)
+    {
+        return callOf("cosf", v, [](double x) { return std::cos(x); });
+    }
+
+    Val whereNegative(const Val& c, const Val& a, const Val& b)
+    {
+        if (c.kind != Val::Kind::Var)
+            return (c.kind == Val::Kind::Const && c.c < 0) ? a : b;
+        std::vector<std::string> uses{c.name};
+        for (const Val* x : {&a, &b})
+        {
+            if (x->kind == Val::Kind::Var)
+                uses.push_back(x->name);
+        }
+        return temp(c.code, operandText(c) + " < 0 ? " + operandText(a) + " : " + operandText(b), uses, false,
+                    c.deps | a.deps | b.deps);
+    }
+
     void annotate(Val& v, const std::string& comment)
     {
         if (v.kind == Val::Kind::Var && v.code != nullptr)
@@ -190,7 +231,7 @@ namespace fminus::circuit
 
     Val bindField(const std::string& field, Val value)
     {
-        if (value.kind != Val::Kind::Var)
+        if (value.kind != Val::Kind::Var || !value.code->fieldsOn_)
             return value;
         Code* code = value.code;
         code->assign(field, value);
@@ -508,8 +549,13 @@ namespace fminus::circuit
                 const bool rate = s.kind == System::Symbol::Kind::Gc || s.kind == System::Symbol::Kind::Rl;
                 symbols.push_back(Val::var(s.name, &into, rate ? Val::kRate : Val::kPots));
             }
+            // a matched block's trapezoidal coefficients are its design's inputs, not fields
+            const bool matched = block.design == Block::Design::Matched;
+            into.bindFields(!matched);
             const Linear<Val> linear = solve(bc.system, order, symbols);
-            Coefficients<Val> out = derive(bc.system, linear, block, plan.config.adaa && block.port.has_value());
+            Coefficients<Val> out = matched ? matchedCoefficients(plan, blockIndex, bc.system, linear, into)
+                                            : derive(bc.system, linear, block,
+                                                     plan.config.adaa && block.port.has_value());
             for (auto& [name, v] : out)
                 v.code = nullptr;
             return out;
@@ -758,6 +804,13 @@ namespace fminus::circuit
                 std::vector<std::pair<std::string, int>> fields;
                 for (const Block& b : plan.blocks)
                 {
+                    if (matchedBlock(b))
+                    {
+                        fields.emplace_back("s1_b" + std::to_string(b.index), 0);
+                        if (orderOf(b) == 2)
+                            fields.emplace_back("s2_b" + std::to_string(b.index), 0);
+                        continue;
+                    }
                     for (const Branch& br : b.branches)
                     {
                         if (br.state())
@@ -808,23 +861,38 @@ namespace fminus::circuit
                 return adaaBlock(b) || b.method == Method::Bdf2;
             }
 
+            // Whether a block runs a matched design (its states s1_b<N> and s2_b<N>, not its parts' x_<C>).
+            static bool matchedBlock(const Block& b)
+            {
+                return b.design == Block::Design::Matched;
+            }
+
+            // A matched block's order: 1 or 2.
+            static int orderOf(const Block& b)
+            {
+                return static_cast<int>(
+                    std::count_if(b.branches.begin(), b.branches.end(), [](const Branch& br) { return br.state(); }));
+            }
+
             // Whether block i's set() moves its ADAA port's curve: ka (an asymmetric pair's kr too) is a field its
             // b<N>_set computes.
             bool movesPortCurve(std::size_t i) const
             {
                 const Block& b = plan.blocks[i];
+                if (!adaaBlock(b) || b.port->smooth() || !b.hasControls())
+                    return false;
                 const Val ka = coefficient(i, "ka_" + b.port->name);
-                return adaaBlock(b) && !b.port->smooth() && b.hasControls() && ka.kind == Val::Kind::Var &&
-                       (ka.deps & Val::kPots) != 0;
+                return ka.kind == Val::Kind::Var && (ka.deps & Val::kPots) != 0;
             }
 
             // Whether its other diode's kr moves too (an asymmetric pair).
             bool movesReverse(std::size_t i) const
             {
                 const Block& b = plan.blocks[i];
+                if (!movesPortCurve(i) || b.port->law != PortDef::Law::Asym)
+                    return false;
                 const Val kr = coefficient(i, "kr_" + b.port->name);
-                return movesPortCurve(i) && b.port->law == PortDef::Law::Asym && kr.kind == Val::Kind::Var &&
-                       (kr.deps & Val::kPots) != 0;
+                return kr.kind == Val::Kind::Var && (kr.deps & Val::kPots) != 0;
             }
 
             Val coefficient(std::size_t b, const std::string& name) const
@@ -1108,6 +1176,10 @@ namespace fminus::circuit
                     if (b.method == Method::Bdf2)
                         text += ", BDF2";
                 }
+                else if (matchedBlock(b))
+                    text += std::format("linear; matched at 1x ({:.2f} dB off at 44.1 and 48 kHz; the trapezoidal "
+                                        "rule's {:.2f} at 44.1)",
+                                        b.matchedError, b.oneX);
                 else
                 {
                     text += "linear; at " + rateText(b);
@@ -1122,7 +1194,11 @@ namespace fminus::circuit
                 }
                 line(text);
             }
-            if (plan.regionFirst >= 0)
+            const bool regionPorts = plan.regionFirst >= 0 &&
+                                     std::any_of(plan.blocks.begin() + plan.regionFirst,
+                                                 plan.blocks.begin() + plan.regionLast + 1,
+                                                 [](const Block& b) { return b.port.has_value(); });
+            if (regionPorts)
             {
                 std::string text = "//   solver: ";
                 text += c.solver.guess == Solver::Guess::Omega ? "omega3 + " : "the previous step's v + ";
@@ -1173,6 +1249,16 @@ namespace fminus::circuit
             };
             for (const Block& b : plan.blocks)
             {
+                if (matchedBlock(b))
+                {
+                    at = blockLine(b);
+                    const std::string n = std::to_string(b.index);
+                    line("    " + type + " s1_b" + n + ";",
+                         "block " + n + "'s matched design: its transposed direct form II's states", 31);
+                    if (orderOf(b) == 2)
+                        line("    " + type + " s2_b" + n + ";", "", 31);
+                    continue;
+                }
                 for (const Branch& br : b.branches)
                 {
                     if (!br.state())
@@ -1495,6 +1581,13 @@ namespace fminus::circuit
                      br->part + " at its switch's default position");
             for (const Block& b : plan.blocks)
             {
+                if (matchedBlock(b))
+                {
+                    line("        s1_b" + std::to_string(b.index) + " = 0;");
+                    if (orderOf(b) == 2)
+                        line("        s2_b" + std::to_string(b.index) + " = 0;");
+                    continue;
+                }
                 for (const Branch& br : b.branches)
                 {
                     if (br.state())
@@ -1664,8 +1757,23 @@ namespace fminus::circuit
             const std::string T = type;
             at = blockLine(b);
             line("    " + T + " b" + std::to_string(b.index) + "(" + T + " " + in + ") [[clang::nonblocking]]",
-                 "block " + std::to_string(b.index) + ", one step at " + rateText(b));
+                 "block " + std::to_string(b.index) + ", one step at " + rateText(b) +
+                     (matchedBlock(b) ? std::string(": its matched design") : ""));
             line("    {");
+            if (matchedBlock(b))
+            {
+                // transposed direct form II: y = b0 u + s1, s1 <- b1 u - a1 y + s2, s2 <- b2 u - a2 y
+                const std::string n = "_b" + std::to_string(b.index);
+                const bool two = orderOf(b) == 2;
+                line("        const " + T + " y = mb0" + n + " * " + in + " + s1" + n + ";");
+                line("        s1" + n + " = mb1" + n + " * " + in + " - ma1" + n + " * y" + (two ? " + s2" + n : "") +
+                     ";");
+                if (two)
+                    line("        s2" + n + " = mb2" + n + " * " + in + " - ma2" + n + " * y;");
+                line("        return y;");
+                line("    }");
+                return;
+            }
             std::vector<std::string> pText;
             std::vector<std::string> rText;
             for (const System::Source& src : s.sources)

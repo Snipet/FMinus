@@ -6,6 +6,7 @@
 #pragma once
 
 #include "circuit/Analysis.h"
+#include "circuit/Linear.h"
 #include "circuit/Mna.h"
 #include "circuit/Plan.h"
 #include "circuit/Reference.h"

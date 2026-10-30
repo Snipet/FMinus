@@ -162,7 +162,7 @@ namespace circuits
             return h;
         }
 
-        std::string configText(const fc::Config& c)
+        std::string configName(const fc::Config& c)
         {
             return std::format("{}x {}, {}, {}({})", c.oversample, c.halfband == fc::Halfband::Iir ? "IIR" : "FIR",
                                c.adaa ? "ADAA" : "no ADAA",
@@ -299,7 +299,7 @@ namespace circuits
             const bool adaa = plan.config.adaa;
             const double level = *plan.netlist.target.level;
             std::printf("c. %s %s (%s), L = %g V; %s 0, 0.5 and 1; report §2's stress set\n", name.c_str(),
-                        label.c_str(), configText(plan.config).c_str(), level, pot.c_str());
+                        label.c_str(), configName(plan.config).c_str(), level, pot.c_str());
             Worst t1;
             Worst t2;
             Worst converged;
@@ -372,7 +372,7 @@ namespace circuits
             const fc::Plan& plan = c->plan;
             std::printf("d. %s as shipped (%s; blocks %d to %d in the region): T3 against the 64x chain, drive x tone "
                         "{0, 0.5, 1}, 0.45 V\n",
-                        name.c_str(), configText(plan.config).c_str(), plan.regionFirst + 1, plan.regionLast + 1);
+                        name.c_str(), configName(plan.config).c_str(), plan.regionFirst + 1, plan.regionLast + 1);
             constexpr std::size_t warm = 4096;   // block 1's 15.9 Hz high-pass settles
             const std::size_t host = warm + kWindow + 64;
             Worst t3;
@@ -1082,7 +1082,7 @@ namespace circuits
             const int m = p.config.oversample;
             const fc::StressMatrix mx = fc::stressMatrix(p);
             std::printf("m. %s as shipped (%s), L = %g V; %s at %zu points; the synth's stress matrix (%d units)\n",
-                        name.c_str(), configText(p.config).c_str(), mx.level, p.laws.front().name.c_str(),
+                        name.c_str(), configName(p.config).c_str(), mx.level, p.laws.front().name.c_str(),
                         mx.points.size(), mx.units());
             std::vector<fc::UnitVerdict> units(static_cast<std::size_t>(mx.units()));
             long unconverged = 0;
@@ -1514,11 +1514,7 @@ namespace circuits
             for (const char* name : {"screamer-biased.cir", "halfwave.cir", "asym.cir", "wah.cir"})
             {
                 const fc::Result result = fc::generate(netlist(name), name);
-                const std::string wanted = std::string(name) == "wah.cir"
-                                               ? "wah.cir: warning: the netlist is linear: it runs at 1x "
-                                                 "(oversampling a linear netlist, and matched designs, are Phase 1); "
-                                                 "block 1 (R1, L1, C1, R2, Pq, X1) errs by 13.4 dB at 1x (44.1 kHz)\n"
-                                               : "";
+                const std::string wanted;
                 std::string errors;
                 std::unique_ptr<Circuit> c = build(netlist(name), name, {}, errors);
                 std::string bad;
@@ -1616,7 +1612,8 @@ namespace circuits
             search(r, "halfwave.cir", ".oversample 4, .adaa off, .solver omega(1)", nullptr);
             search(r, "asym.cir", ".oversample 4, .adaa on, .solver omega(1)", nullptr);
 
-            // an inductor: wah.cir's tick against its trapezoidal response, H(j 2 fs tan(pi f / fs)), at 1x
+            // an inductor: wah.cir's tick against its matched design's response at 1x (its trapezoidal one errs by
+            // 13.4 dB near 20 kHz; the matched design passes the 1x check, docs/circuits.md)
             {
                 std::string errors;
                 auto c = build(netlist("wah.cir"), "wah.cir", {}, errors);
@@ -1635,9 +1632,9 @@ namespace circuits
                         const std::vector<double> y = runTicks(*c, fc::sine(1, bin, kWindow, 1, kHost), pots);
                         const double measured = fc::binMagnitude(windowOf(y), bin);
                         const double f = bin * 48000.0 / kWindow;
-                        const std::complex<double> h = fc::analog(
-                            c->plan, 0, std::complex<double>(0, 2 * 48000 * std::tan(std::numbers::pi * f / 48000)),
-                            pots);
+                        const fc::Matched<double> design = fc::matchedDesign(
+                            *fc::trForm(c->plan, 0, 48000, pots), c->plan.blocks[0].matchedPolarity);
+                        const std::complex<double> h = fc::matchedResponse(design, f, 48000);
                         const double off = std::fabs(dB(measured / std::abs(h)));
                         if (off > worst)
                         {
@@ -1646,9 +1643,10 @@ namespace circuits
                         }
                     }
                 }
-                r.line(worst <= 0.01, std::format("wah.cir's tick follows the trapezoidal rule's response: {:.5f} dB "
-                                                  "off at worst, at {} (gate 0.01 dB)",
-                                                  worst, where));
+                r.line(worst <= 0.01 && c->plan.blocks[0].design == fc::Block::Design::Matched,
+                       std::format("wah.cir's tick follows its matched design's response at 1x: {:.5f} dB off at "
+                                   "worst, at {} (gate 0.01 dB)",
+                                   worst, where));
             }
         }
     } // namespace

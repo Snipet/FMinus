@@ -217,6 +217,16 @@ namespace fminus::circuit
         double designFactor = 1;   // designed at designFactor x that (2/3 with ADAA)
         double oneX = 0;           // a linear block's 1x check: worst dB at 44.1 kHz
         double oneXRegion = 0;     // and at oversample x 44.1 kHz
+        // How a linear block outside the region runs: the trapezoidal rule, or a matched design at 1x (Linear.h),
+        // when the trapezoidal rule's response fails the 1x check and the matched one's passes it
+        enum class Design
+        {
+            Tr,
+            Matched,
+        };
+        Design design = Design::Tr;
+        double matchedError = 0;      // the matched design's 1x check: worst dB at 44.1 and 48 kHz
+        double matchedPolarity = 1;   // the sign its numerator takes (an inverting block's -1)
 
         // Whether set() moves it: it reads pots or switches (its coefficients are b<N>_set's, else init's).
         bool hasControls() const

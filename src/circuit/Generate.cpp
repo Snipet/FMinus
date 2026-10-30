@@ -114,6 +114,8 @@ namespace fminus::circuit
                     text += "linear, at " + rate + std::format(" (1x check: {:.2f} dB off at 44.1 kHz", b.oneX);
                     if (b.inRegion)
                         text += std::format(", {:.2f} dB at {}x", b.oneXRegion, b.rateFactor);
+                    if (b.design == Block::Design::Matched)
+                        text += std::format("; a matched design, {:.2f} dB at 44.1 and 48 kHz", b.matchedError);
                     text += ")";
                 }
                 messages.note({}, text);

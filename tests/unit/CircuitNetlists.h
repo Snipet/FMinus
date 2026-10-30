@@ -172,6 +172,42 @@ C2 b 0 10n
 X1 b out out opamp
 )";
 
+    // examples/circuits/rc8k.cir: an RC low-pass at 8 kHz, a matched one-pole at 1x.
+    inline const std::string kRc8k = R"(.title Rc8k
+.input u in
+.output vout a
+R1 in a 1k
+C1 a 0 19.89n
+)";
+
+    // examples/circuits/sallen-key.cir: a unity-gain Sallen-Key low-pass at 2.1 kHz, Q 0.74, a matched biquad at 1x.
+    inline const std::string kSallenKey2k = R"(.title SallenKey
+.input u in
+.output vout out
+R1 in a 5.1k
+R2 a b 5.1k
+C1 a out 22n
+C2 b 0 10n
+X1 b out out opamp
+)";
+
+    // examples/circuits/tonestack.cir: the Bassman's tone stack, of order 3 (a matched design is of 1 or 2).
+    inline const std::string kToneStack = R"(.title ToneStack
+.input u in
+.output vout out
+.pot treble 0.5
+.pot bass 0.5 audio
+.pot mid 0.5
+C1 in t 250p
+R1 in n 56k
+C2 n b 20n
+C3 n m 20n
+Ptreb t out b 250k {treble}
+Pbass b m 1meg {bass}
+Pmid m 0 25k {mid}
+RL out 0 1meg
+)";
+
     // Phase 1's elements. An RL low-pass, R / (R + s L).
     inline const std::string kRlLowpass = R"(.title RlLowpass
 .input u in

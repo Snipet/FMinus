@@ -1,0 +1,9 @@
+* rc8k.cir: an RC low-pass at 8 kHz (1k into 19.9 nF), a linear block of one state. At 44.1 kHz the trapezoidal
+* rule's response errs by more than 0.5 dB near 20 kHz (its warp), so it runs a matched design at 1x: its pole by
+* impulse invariance, its zero matching the analog magnitude at DC and at 0.83 of Nyquist (docs/circuits.md).
+.title Rc8k
+.input  u    in   scale=1
+.output vout a
+R1     in a  1k
+C1     a  0  19.89n
+.end

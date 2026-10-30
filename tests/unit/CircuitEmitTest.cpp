@@ -4,6 +4,7 @@
 #include "circuit/Emit.h"
 #include "circuit/Halfbands.h"
 #include "circuit/Laws.h"
+#include "circuit/Linear.h"
 #include "circuit/Mna.h"
 #include "circuit/Netlist.h"
 #include "circuit/Plan.h"
@@ -30,6 +31,7 @@
 #include <regex>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace
@@ -241,6 +243,48 @@ TEST_CASE("the emitted coefficients are the double derivation's, in float", "[ci
                         positions.push_back(static_cast<int>(pots[k]));
                     for (int call = 0; call < (positions.empty() ? 1 : 512); ++call)
                         callSet(*program, result.module, self.get(), args, positions);
+                    if (block.design == fc::Block::Design::Matched)
+                    {
+                        // a matched design: the float one's response against the double one's (from the block's
+                        // trapezoidal form, Linear.h) over the 1x check's band, within 0.02 dB to 96 kHz and 0.1 dB
+                        // above. Its coefficients are only as well conditioned as the trapezoidal form they come
+                        // from: a pole near z = -1 (a stiff branch, the switch's 1 ohm into C2) or near z = 1 (a low
+                        // pole at 384 kHz) costs float two to four digits of them (the matched designs' own test holds
+                        // well-conditioned ones to 1e-5)
+                        const std::optional<fc::TrForm<double>> tr =
+                            fc::trForm(plan, static_cast<int>(b), designRate, pots);
+                        REQUIRE(tr);
+                        const fc::Matched<double> d = fc::matchedDesign(*tr, block.matchedPolarity);
+                        const std::string n = "_b" + std::to_string(block.index);
+                        auto field = [&](const char* name)
+                        {
+                            return static_cast<double>(readFloat(self.get(), *m, name + n));
+                        };
+                        fc::Matched<double> f;
+                        f.b0 = field("mb0");
+                        f.b1 = field("mb1");
+                        f.a1 = field("ma1");
+                        if (tr->order == 2)
+                        {
+                            f.b2 = field("mb2");
+                            f.a2 = field("ma2");
+                        }
+                        // within 40 dB of the response's peak, as the 1x check counts
+                        double peak = 0;
+                        for (double hz = 20; hz <= 20000; hz *= 1.05)
+                            peak = std::fmax(peak, std::abs(fc::matchedResponse(d, hz, designRate)));
+                        double worst = 0;
+                        for (double hz = 20; hz <= 20000; hz *= 1.05)
+                        {
+                            const double hd = std::abs(fc::matchedResponse(d, hz, designRate));
+                            const double hf = std::abs(fc::matchedResponse(f, hz, designRate));
+                            if (hd >= 0.01 * peak)
+                                worst = std::fmax(worst, std::fabs(20 * std::log10(hf / hd)));
+                        }
+                        INFO(result.module << " block " << b + 1 << " at " << rate << ": " << worst << " dB");
+                        CHECK(worst <= (rate <= 96000 ? 0.02 : 0.1));
+                        continue;
+                    }
                     const std::vector<double> symbols =
                         fc::symbolValues(code->system, plan, static_cast<int>(b), designRate, pots);
                     const fc::Linear<double> linear = fc::solve(code->system, *phase0, symbols);
@@ -802,6 +846,76 @@ TEST_CASE("a switch's ramp: block splits give the same bits, and ADAA's point st
         CHECK(std::fabs(now - first) <= 1e-5 * std::fmax(size, p));
     }
     CHECK(moved > 0);
+}
+
+TEST_CASE("a matched block's float coefficients are the double design's, and its tick its response", "[circuit]")
+{
+    // rc8k.cir's one-pole and sallen-key.cir's biquad, through the JIT at 44.1, 48 and 96 kHz: init computes the design
+    // from the block's trapezoidal form in float, within 1e-5 of the double design at 44.1 and 48 kHz (of the largest
+    // numerator coefficient for b0, b1 and b2; 1e-4 at 96 kHz, where its poles sit nearer z = 1), and tick, a sine at
+    // 105, 996 and 3012 Hz, is the design's response there within 0.001 dB; both channel counts compile nonblocking
+    for (const std::string& text : {fc::test::kRc8k, fc::test::kSallenKey2k})
+    {
+        const fc::Result r = fc::generate(text, "t.cir");
+        INFO(r.errors << r.warnings);
+        REQUIRE(r.errors.empty());
+        CHECK(r.warnings.empty());
+        auto program = compiled(r);
+        for (const char* method : {"init", "tick", "clear"})
+            CHECK(program->nonBlocking(r.module + "::" + method));
+        fc::Options stereo;
+        stereo.channels = 2;
+        auto program2 = compiled(fc::generate(text, "t.cir", stereo));
+        CHECK(program2->nonBlocking(r.module + "::tick"));
+        const Program::Module* m = program->module(r.module);
+        REQUIRE(m);
+        std::string errors;
+        auto* init = program->function<void(void*, float)>(r.module + "::init", errors);
+        auto* tick = program->function<float(void*, float)>(r.module + "::tick", errors);
+        REQUIRE(init);
+        REQUIRE(tick);
+        const fc::Plan plan = planned(text);
+        const fc::Block& block = plan.blocks[0];
+        REQUIRE(block.design == fc::Block::Design::Matched);
+        for (double rate : {44100.0, 48000.0, 96000.0})
+        {
+            const fc::Matched<double> d = fc::matchedDesign(*fc::trForm(plan, 0, rate, {}), block.matchedPolarity);
+            auto self = instance(*m);
+            init(self.get(), static_cast<float>(rate));
+            const double top = std::fmax(std::fabs(d.b0), std::fmax(std::fabs(d.b1), std::fabs(d.b2)));
+            const bool two = std::any_of(m->fields.begin(), m->fields.end(),
+                                         [](const Program::Module::Field& f) { return f.name == "mb2_b1"; });
+            std::vector<std::tuple<std::string, double, double>> fields{
+                {"mb0_b1", d.b0, top}, {"mb1_b1", d.b1, top}, {"ma1_b1", d.a1, 1.0}};
+            if (two)
+            {
+                fields.emplace_back("mb2_b1", d.b2, top);
+                fields.emplace_back("ma2_b1", d.a2, 1.0);
+            }
+            for (const auto& [name, value, scale] : fields)
+            {
+                const double f = static_cast<double>(readFloat(self.get(), *m, name));
+                INFO(r.module << " at " << rate << ": " << name << " " << f << " against " << value);
+                CHECK(std::fabs(f - value) <= (rate <= 48000 ? 1e-5 : 1e-4) * scale);
+            }
+            for (int bin : {9, 85, 257})
+            {
+                const double hz = bin * rate / 4096;
+                auto run = instance(*m);
+                init(run.get(), static_cast<float>(rate));
+                std::vector<double> y(8192);
+                for (std::size_t i = 0; i < y.size(); ++i)
+                {
+                    const double phase = 2 * std::numbers::pi * bin * static_cast<double>(i) / 4096;
+                    y[i] = static_cast<double>(tick(run.get(), static_cast<float>(std::sin(phase))));
+                }
+                const double measured = fc::binMagnitude(std::span<const double>(y).subspan(4096, 4096), bin);
+                const double expected = std::abs(fc::matchedResponse(d, hz, rate));
+                INFO(r.module << " at " << rate << ", " << hz << " Hz: " << measured << " against " << expected);
+                CHECK(std::fabs(20 * std::log10(measured / expected)) <= 1e-3);
+            }
+        }
+    }
 }
 
 TEST_CASE("names keep their case, and a pot's sections have names of their own", "[circuit]")

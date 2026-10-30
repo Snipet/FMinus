@@ -4,6 +4,7 @@
 
 #include "circuit/Dc.h"
 #include "circuit/Emit.h"
+#include "circuit/Linear.h"
 #include "circuit/Mna.h"
 
 #include <algorithm>
@@ -2228,39 +2229,78 @@ namespace fminus::circuit
         {
             return elements[static_cast<std::size_t>(b.elements.front())].loc;
         };
-        if (portBlocks.empty())
+        const bool linearOnly = portBlocks.empty();
+        const int count = static_cast<int>(p.blocks.size());
+        // Under blocks=auto, a linear block whose trapezoidal response fails the 1x check runs a matched design at
+        // 1x when that passes it (Linear.h), and joins the oversampled region otherwise
+        std::vector<MatchedCheck> matched(p.blocks.size());
+        std::vector<bool> joins(p.blocks.size(), false);
+        for (std::size_t i = 0; i < p.blocks.size(); ++i)
         {
-            std::string worst;
-            for (const Block& b : p.blocks)
-            {
-                if (b.oneX > kTolerance)
-                    worst += std::format("; {} errs by {:.1f} dB at 1x (44.1 kHz)", blockLabel(b), b.oneX);
-            }
-            if (cfg.oversampleFrom != "default" || !worst.empty())
-                messages.warning({}, "the netlist is linear: it runs at 1x (oversampling a linear netlist, and matched "
-                                     "designs, are Phase 1)" +
-                                         worst);
+            const Block& b = p.blocks[i];
+            if (b.port || !pivotsOf[i] || b.oneX <= kTolerance || cfg.region != Region::Auto)
+                continue;
+            matched[i] = matchedCheck(p, static_cast<int>(i));
+            joins[i] = !matched[i].usable || matched[i].worst > kTolerance;
         }
-        else
+        int first = linearOnly ? -1 : portBlocks.front();
+        int last = linearOnly ? -1 : portBlocks.back();
+        if (cfg.region == Region::All)
         {
-            int first = portBlocks.front();
-            int last = portBlocks.back();
-            if (cfg.region == Region::All)
+            first = 0;
+            last = count - 1;
+        }
+        else if (cfg.region == Region::Auto)
+        {
+            for (int i = 0; i < count; ++i)
             {
-                first = 0;
-                last = static_cast<int>(p.blocks.size()) - 1;
+                if (!joins[static_cast<std::size_t>(i)])
+                    continue;
+                first = first < 0 ? i : std::min(first, i);
+                last = std::max(last, i);
             }
-            else if (cfg.region == Region::Auto)
+        }
+        if (linearOnly && cfg.method == Method::Bdf2)
+            messages.warning(cfg.methodFrom == "the netlist" ? netlist.method.loc : Loc{},
+                             "'.method bdf2' is ignored: the netlist is linear (its blocks run the trapezoidal rule, "
+                             "or matched designs)");
+        if (linearOnly)
+        {
+            // nothing to choose; the oversampled region, if any, at .oversample's factor, else at the smallest of 2,
+            // 4 and 8 at which its blocks' trapezoidal responses pass the 1x check
+            cfg.method = Method::Tr;
+            if (first < 0)
             {
-                for (std::size_t i = 0; i < p.blocks.size(); ++i)
+                if (cfg.oversampleFrom != "default")
+                    messages.note({}, std::format("the netlist is linear and its blocks run at 1x: .oversample {} is "
+                                                  "unused",
+                                                  cfg.oversample));
+                else
+                    cfg.oversample = 1;
+            }
+            else if (cfg.oversampleFrom == "default")
+            {
+                cfg.oversample = 8;
+                for (int os : {2, 4, 8})
                 {
-                    if (!p.blocks[i].port && p.blocks[i].oneX > kTolerance)
+                    bool passes = true;
+                    for (int i = first; i <= last; ++i)
                     {
-                        first = std::min(first, static_cast<int>(i));
-                        last = std::max(last, static_cast<int>(i));
+                        const auto k = static_cast<std::size_t>(i);
+                        if (pivotsOf[k] && oneXError(systems[k], *pivotsOf[k], p, i, kCheckRate * os) > kTolerance)
+                            passes = false;
+                    }
+                    if (passes)
+                    {
+                        cfg.oversample = os;
+                        break;
                     }
                 }
+                cfg.oversampleFrom = "the 1x check";
             }
+        }
+        if (first >= 0)
+        {
             p.regionFirst = first;
             p.regionLast = last;
             for (int i = first; i <= last; ++i)
@@ -2272,27 +2312,50 @@ namespace fminus::circuit
                 if (b.port && cfg.adaa)
                     b.designFactor = 2.0 / 3.0;
             }
-            for (std::size_t i = 0; i < p.blocks.size(); ++i)
+        }
+        for (std::size_t i = 0; i < p.blocks.size(); ++i)
+        {
+            Block& b = p.blocks[i];
+            if (b.port || !pivotsOf[i])
+                continue;
+            if (b.inRegion)
             {
-                Block& b = p.blocks[i];
-                if (b.port || !pivotsOf[i])
-                    continue;
-                if (b.inRegion)
-                {
-                    b.oneXRegion =
-                        oneXError(systems[i], *pivotsOf[i], p, static_cast<int>(i), kCheckRate * b.rateFactor,
-                                  b.method);
-                    if (b.oneXRegion > kTolerance)
-                        messages.warning(blockLoc(b),
-                                         std::format("{} errs by {:.2f} dB at {}x 44.1 kHz, more than {} dB even "
-                                                     "oversampled (matched designs are Phase 1)",
-                                                     blockLabel(b), b.oneXRegion, b.rateFactor, kTolerance));
-                }
-                else if (b.oneX > kTolerance)
-                    messages.warning(blockLoc(b), std::format("{} errs by {:.2f} dB at 1x (44.1 kHz), more than {} dB: "
-                                                              "blocks=auto would oversample it",
-                                                              blockLabel(b), b.oneX, kTolerance));
+                b.oneXRegion = oneXError(systems[i], *pivotsOf[i], p, static_cast<int>(i), kCheckRate * b.rateFactor,
+                                         b.method);
+                if (b.oneXRegion > kTolerance)
+                    messages.warning(blockLoc(b), std::format("{} errs by {:.2f} dB at {}x 44.1 kHz, more than {} dB "
+                                                              "even oversampled",
+                                                              blockLabel(b), b.oneXRegion, b.rateFactor, kTolerance));
             }
+            else if (b.oneX > kTolerance && matched[i].usable && matched[i].worst <= kTolerance)
+            {
+                b.design = Block::Design::Matched;
+                b.matchedError = matched[i].worst;
+                b.matchedPolarity = matched[i].polarity;
+            }
+            else if (b.oneX > kTolerance)
+                messages.warning(blockLoc(b), std::format("{} errs by {:.2f} dB at 1x (44.1 kHz), more than {} dB: "
+                                                          "blocks=auto would oversample it",
+                                                          blockLabel(b), b.oneX, kTolerance));
+            // why a block that fails the 1x check runs as it does
+            if (b.oneX <= kTolerance || cfg.region != Region::Auto)
+                continue;
+            if (b.design == Block::Design::Matched)
+                messages.note({}, std::format("{}: a matched design at 1x: its trapezoidal response errs by {:.2f} dB "
+                                              "at 44.1 kHz, the matched one's by {:.2f} dB at 44.1 and 48 kHz",
+                                              blockLabel(b), b.oneX, b.matchedError));
+            else if (b.inRegion && !joins[i])
+                messages.note({}, std::format("{}: in the oversampled region, between its other blocks (its "
+                                              "trapezoidal response errs by {:.2f} dB at 44.1 kHz)",
+                                              blockLabel(b), b.oneX));
+            else if (!matched[i].usable)
+                messages.note({}, std::format("{}: in the oversampled region: its trapezoidal response errs by {:.2f} "
+                                              "dB at 44.1 kHz, and a matched design cannot serve ({})",
+                                              blockLabel(b), b.oneX, matched[i].why));
+            else
+                messages.note({}, std::format("{}: in the oversampled region: its trapezoidal response errs by {:.2f} "
+                                              "dB at 44.1 kHz, a matched design's by {:.2f} dB, more than {}",
+                                              blockLabel(b), b.oneX, matched[i].worst, kTolerance));
         }
 
         // ---- prewarp: each OTA's small-signal pole, fitted as a + b g ----

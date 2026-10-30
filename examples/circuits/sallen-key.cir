@@ -1,0 +1,13 @@
+* sallen-key.cir: a unity-gain Sallen-Key low-pass at 2.1 kHz, Q 0.74: a linear block of two states, buffered by its
+* follower. At 44.1 kHz the trapezoidal rule's response errs by more than 0.5 dB near 20 kHz, so it runs a matched
+* design at 1x: its poles by impulse invariance, its numerator matching the analog magnitude at DC, at its poles'
+* frequency and at 0.83 of Nyquist (docs/circuits.md).
+.title SallenKey
+.input  u    in   scale=1
+.output vout out
+R1     in  a    5.1k
+R2     a   b    5.1k
+C1     a   out  22n
+C2     b   0    10n
+X1     b   out  out  opamp         ; the follower
+.end

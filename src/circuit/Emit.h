@@ -53,6 +53,12 @@ namespace fminus::circuit
     Val operator-(const Val& a);
     bool isZero(const Val& v);
     Val logOf(const Val& v);
+    // expf, sqrtf and cosf of a Val (folded in double for a constant); `whereNegative(c, a, b)` is `c < 0 ? a : b`
+    // (chosen at generation for a constant c). The matched designs' arithmetic (Linear.h).
+    Val expOf(const Val& v);
+    Val sqrtOf(const Val& v);
+    Val cosOf(const Val& v);
+    Val whereNegative(const Val& c, const Val& a, const Val& b);
     void annotate(Val& v, const std::string& comment);
     Val bindField(const std::string& field, Val value);
 
@@ -73,6 +79,13 @@ namespace fminus::circuit
 
         // Prints `field = <v>;` (a negated Var as -t).
         void assign(const std::string& field, const Val& v);
+
+        // Whether bindField assigns fields (true), or returns its value as it is (a matched block's trapezoidal
+        // coefficients are its design's inputs, not fields).
+        void bindFields(bool on)
+        {
+            fieldsOn_ = on;
+        }
 
         // A line of its own (a local's declaration, a call), reading `uses`.
         void raw(const std::string& text, const std::vector<std::string>& uses = {}, const std::string& comment = {});
@@ -122,6 +135,7 @@ namespace fminus::circuit
         std::set<std::string> reserved_;
         std::map<std::string, std::string> seen_;   // an expression's text, and its temporary
         std::map<std::string, int> depsOf_;         // a temporary's deps
+        bool fieldsOn_ = true;
         int next_ = 0;
         std::vector<Stmt> stmts_;
         std::vector<std::string> fields_;

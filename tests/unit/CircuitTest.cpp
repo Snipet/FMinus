@@ -9,6 +9,7 @@
 #include "circuit/Emit.h"
 #include "circuit/Halfbands.h"
 #include "circuit/Laws.h"
+#include "circuit/Linear.h"
 #include "circuit/Mna.h"
 #include "circuit/Netlist.h"
 #include "circuit/Plan.h"
@@ -491,14 +492,19 @@ TEST_CASE("the plan cuts at ideal op amps", "[circuit]")
     CHECK(ts.nodes[static_cast<std::size_t>(ts.blocks[1].input)].name == "p1");   // XU1's + input: an exact cut
     CHECK(ts.nodes[static_cast<std::size_t>(ts.blocks[2].input)].name == "v2");   // XU1's output
     CHECK(ts.nodes[static_cast<std::size_t>(ts.blocks[3].input)].name == "v3");   // XU2's output
-    CHECK(ts.regionFirst == 1);   // blocks=auto: block 2, and block 3, which fails the 1x check
-    CHECK(ts.regionLast == 2);
+    // blocks=auto: block 2; block 3 fails the 1x check, and its matched design passes it, so it runs at 1x
+    CHECK(ts.regionFirst == 1);
+    CHECK(ts.regionLast == 1);
     CHECK(ts.blocks[1].rateFactor == 4);
     CHECK(ts.blocks[1].designFactor == 2.0 / 3.0);
-    CHECK(ts.blocks[2].rateFactor == 4);
-    CHECK(ts.blocks[2].designFactor == 1);
+    CHECK(ts.blocks[2].rateFactor == 1);
+    CHECK(ts.blocks[2].design == fc::Block::Design::Matched);
+    CHECK(ts.blocks[2].matchedError <= 0.5);
+    CHECK(ts.blocks[2].oneX > 13);
     CHECK(ts.blocks[0].rateFactor == 1);
     CHECK(ts.blocks[3].rateFactor == 1);
+    CHECK(ts.blocks[0].design == fc::Block::Design::Tr);
+    CHECK(ts.blocks[3].design == fc::Block::Design::Tr);
 
     fc::Options nonlinear;
     nonlinear.region = fc::Region::Nonlinear;
@@ -1663,6 +1669,126 @@ TEST_CASE("BDF2's blocks are the BDF2 map of their analog response", "[circuit]"
     CHECK(fc::symbolValues(s, rl, 0, 48000.0, {}, fc::Method::Bdf2) == std::vector<double>{1.5 * 0.01 * 48000});
     const Complex low = fc::discreteS(fc::Method::Bdf2, 100, 48000);
     CHECK(std::abs(low - Complex(0, 2 * std::numbers::pi * 100)) <= 1e-4 * 2 * std::numbers::pi * 100);
+}
+
+TEST_CASE("the matched design: impulse-invariant poles, the analog magnitude at its three points", "[circuit]")
+{
+    // An RC low-pass at 8 kHz (one state), a Sallen-Key low-pass at 2.1 kHz (two), the TS tone block and the wah's
+    // tank (two, pots moving them), in double: the poles are e^(p T) of the analog poles (the inverse bilinear
+    // transform of the trapezoidal form's), and |H| at DC, at 0.83 of Nyquist and at the poles' frequency (or a
+    // quarter of the rate above it) is the analog response's
+    struct Case
+    {
+        std::string text;
+        int block;
+    };
+    const Case cases[] = {
+        {fc::test::kRc8k, 0}, {fc::test::kSallenKey2k, 0}, {fc::test::kScreamer, 2}, {fc::test::kWah, 0}};
+    for (const Case& c : cases)
+    {
+        const fc::Plan plan = planned(c.text);
+        const fc::Block& block = plan.blocks[static_cast<std::size_t>(c.block)];
+        CHECK(block.design == fc::Block::Design::Matched);
+        CHECK(block.matchedError <= 0.5);
+        for (double fs : {44100.0, 48000.0, 96000.0})
+        {
+            for (const std::vector<double>& pots : fc::potGrid(plan, block))
+            {
+                const std::optional<fc::TrForm<double>> tr = fc::trForm(plan, c.block, fs, pots);
+                REQUIRE(tr);
+                const fc::Matched<double> m = fc::matchedDesign(*tr, block.matchedPolarity);
+                INFO(plan.module << " at " << fs);
+                // the analog poles: the eigenvalues of Ac = 2 fs (A - I)(A + I)^-1
+                std::vector<Complex> poles;
+                if (tr->order == 1)
+                    poles.push_back(2 * fs * (tr->a11 - 1) / (tr->a11 + 1));
+                else
+                {
+                    const double p11 = tr->a11 + 1, p12 = tr->a12, p21 = tr->a21, p22 = tr->a22 + 1;
+                    const double det = p11 * p22 - p12 * p21;
+                    // (A - I) adj(A + I) / det
+                    const double m11 = ((tr->a11 - 1) * p22 - tr->a12 * p21) / det;
+                    const double m12 = (-(tr->a11 - 1) * p12 + tr->a12 * p11) / det;
+                    const double m21 = (tr->a21 * p22 - (tr->a22 - 1) * p21) / det;
+                    const double m22 = (-tr->a21 * p12 + (tr->a22 - 1) * p11) / det;
+                    const double trace = 2 * fs * (m11 + m22);
+                    const double d = 4 * fs * fs * (m11 * m22 - m12 * m21);
+                    const Complex root = std::sqrt(Complex(trace * trace / 4 - d));
+                    poles.push_back(trace / 2 + root);
+                    poles.push_back(trace / 2 - root);
+                }
+                if (tr->order == 1)
+                    CHECK(std::fabs(m.a1 + std::exp(poles[0].real() / fs)) <= 1e-12);
+                else
+                {
+                    const Complex z1 = std::exp(poles[0] / fs);
+                    const Complex z2 = std::exp(poles[1] / fs);
+                    CHECK(std::abs(m.a1 + (z1 + z2)) <= 1e-12);
+                    CHECK(std::abs(m.a2 - z1 * z2) <= 1e-12);
+                }
+                // the three points
+                auto analogAt = [&](double f)
+                {
+                    return std::abs(fc::analog(plan, c.block, Complex(0, 2 * std::numbers::pi * f), pots));
+                };
+                std::vector<double> points{0.0, fc::kMatchTop * fs / 2};
+                if (tr->order == 2)
+                {
+                    const double w0 = std::sqrt(std::abs(poles[0] * poles[1]));   // rad/s
+                    points.push_back(std::fmin(w0 / (2 * std::numbers::pi), fs / 4));
+                }
+                for (double f : points)
+                {
+                    const double a = analogAt(f);
+                    const double h = std::abs(fc::matchedResponse(m, f, fs));
+                    INFO("at " << f << " Hz: " << h << " against " << a);
+                    CHECK(std::fabs(h - a) <= 1e-9 * a + 1e-13);   // a band-pass's DC: 0 to rounding
+                }
+            }
+        }
+    }
+    // a matched block's polarity is the analog one's: an inverting RC stage, -10 at DC, its pole at 8 kHz
+    const fc::Plan inverting =
+        planned(".input u in\n.output y o\nR1 in n 1k\nX1 0 n o opamp\nR2 o n 10k\nC1 o n 1.989n\n");
+    REQUIRE(inverting.blocks[0].design == fc::Block::Design::Matched);
+    CHECK(inverting.blocks[0].matchedPolarity == -1);
+    const fc::Matched<double> m =
+        fc::matchedDesign(*fc::trForm(inverting, 0, 48000, {}), inverting.blocks[0].matchedPolarity);
+    CHECK_THAT(fc::matchedResponse(m, 1e-6, 48000).real(), WithinRel(-10.0, 1e-6));
+}
+
+TEST_CASE("a linear block a matched design cannot serve joins the region, with a note saying why", "[circuit]")
+{
+    // the tone stack: three states; a linear-only netlist's region is its failing blocks, at the smallest of 2, 4 and
+    // 8 at which the trapezoidal rule passes the 1x check (nothing left open: not provisional)
+    const fc::Result r = fc::generate(fc::test::kToneStack, "t.cir");
+    INFO(r.errors << r.warnings);
+    REQUIRE(r.errors.empty());
+    CHECK(r.warnings.empty());
+    CHECK(!r.provisional);
+    CHECK(r.selfTestKey.empty());
+    CHECK(r.notes.find("t.cir: note: block 1 (C1, R1, C2, C3, Ptreb, Pbass, Pmid, RL): in the oversampled region: its "
+                       "trapezoidal response errs by 13.37 dB at 44.1 kHz, and a matched design cannot serve (3 "
+                       "states: a matched design is of order 1 or 2)\n") != std::string::npos);
+    const fc::Plan plan = planned(fc::test::kToneStack);
+    CHECK(plan.regionFirst == 0);
+    CHECK(plan.regionLast == 0);
+    CHECK(plan.blocks[0].oneXRegion <= 0.5);
+    CHECK(plan.config.oversample == 4);
+    CHECK(plan.config.oversampleFrom == "the 1x check");
+    // an all-pass, a low-pass less a high-pass (1 - s R C) / (1 + s R C), nearly (R3 couples them): its zero is not
+    // minimum-phase, so no magnitude match serves (its magnitude passes the 1x check anyway; the check is asked)
+    const std::string allpass = ".input u in\n.output y o\nR1 in x 1k\nC1 x 0 10n\nC2 in z 10n\nR2 z 0 1k\n"
+                                "R3 x z 1meg\nE1 o 0 x z 1\nRL o 0 10k\n";
+    const fc::MatchedCheck ap = fc::matchedCheck(planned(allpass), 0);
+    CHECK(!ap.usable);
+    CHECK(ap.why == "its zeros are not minimum-phase (a magnitude match would change its phase)");
+    // a linear netlist whose blocks pass at 1x runs there: no region, and .oversample's factor is unused (a note)
+    const fc::Result low = fc::generate(fc::test::kRcLowpass + ".oversample 4\n", "t.cir");
+    CHECK(low.warnings.empty());
+    CHECK(low.notes.find("t.cir: note: the netlist is linear and its blocks run at 1x: .oversample 4 is unused\n") !=
+          std::string::npos);
+    CHECK(low.source.find("float step(") == std::string::npos);
 }
 
 TEST_CASE("the DC operating point, by hand", "[circuit]")
