@@ -375,6 +375,8 @@ build-dev/bin/fminus pedal.cir --self-test --emit fm   # the self-test chooses t
                                                    # and its warnings (a block that rings at Nyquist)
 build-dev/bin/fminus pedal.cir --notes -o /dev/null    # the circuit compiler's plan: blocks, rates, solvers or linear
                                                    # forms (matched, Woodbury), the method check, latency
+build-dev/bin/fminus pedal.cir --probes --nodes --emit fm   # the module with its probe fields, and its nodes as a
+                                                   # probe sees them (rate, DC volts, readable or why not)
 ```
 
 How it fits together: `frontend::parse` (Lexer.l, then Parser.y) gives an `ast::Program`, and `ir::lower` (in
@@ -589,8 +591,9 @@ preset has a workflow (`cmake --workflow --preset <name>`) except `xcode`, which
 - `build-dev/bin/fminus-build`: LLVM IR to an executable, object, assembly or optimised IR (above).
 - `build-dev/bin/fminus examples/circuits/diodetone.cir --emit fm`: an analog circuit's netlist as the FMinus module the
   circuit compiler generates ([docs/circuits.md](docs/circuits.md)); `--self-test` lets the self-test choose what the
-  netlist leaves open, `--notes` prints the plan; `build-dev/bin/example-circuits --check` checks the research's
-  examples against its targets, and the self-test against the configurations they ship.
+  netlist leaves open, `--notes` prints the plan, `--probes` adds the probe fields and `--nodes` lists the nodes a
+  probe reads; `build-dev/bin/example-circuits --check` checks the research's examples against its targets, and the
+  self-test against the configurations they ship.
 - The LLVM tools of the flavor in use are in `.deps/install/llvm-…/bin`: `opt -passes='default<O3>' -S`,
   `llc -mcpu=native`, `llvm-mca` (throughput of a kernel's machine code), `llvm-objdump -d`.
 - LLVM is built with `LLVM_ENABLE_DUMP=ON`: `value->dump()` and `module->dump()` work without assertions too.
