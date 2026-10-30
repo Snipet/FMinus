@@ -876,13 +876,13 @@ the shifted QR algorithm in complex double) and flags the block when one lies wi
 
 A flag is a suspicion: the self-test measures it. At each oversampling a candidate needs, it runs the flagged block's
 region trapezoidal and converged (no ADAA) on the sines up to L, and compares the energy it puts between 20 and 24 kHz
-with the 64x reference's there, summed over those units. More than 6 dB above it rings: the self-test warns once
-every factor is measured, naming the smallest higher factor that does not ring (`ringing.cir:12:1: warning: at 1x
-block 1 rings at Nyquist (13 dB more above 20 kHz than the 64x reference): .oversample 2 or .method bdf2`; with `.adaa
-on` named, in the netlist or Options, `.oversample 2, or .adaa off and .method bdf2`, since BDF2 has no ADAA), and puts
-each candidate at that oversampling's BDF2 twin (no ADAA, its solver) right after it in the order, when the integrator
-is open and ADAA is not named on. A flag without the excess is a note and no warning. The band is the host's top, 20 to 24 kHz at every
-factor: up to the region's Nyquist it grew with the oversampling and measured the halfbands' own stopband.
+with the 64x reference's there, summed over those units. More than 6 dB above it rings: the self-test warns once every
+factor is measured, naming the smallest higher factor that does not ring (`ringing.cir:12:1: warning: at 1x block 1
+rings at Nyquist (13 dB more above 20 kHz than the 64x reference): .oversample 2 or .method bdf2`; with `.adaa on`
+named, in the netlist or Options, `.oversample 2, or .adaa off and .method bdf2`, since BDF2 has no ADAA), and puts each
+candidate at that oversampling's BDF2 twin (no ADAA, its solver) right after it in the order, when the integrator is
+open and ADAA is not named on. A flag without the excess is a note and no warning. The band is the host's top, 20 to 24
+kHz at every factor: up to the region's Nyquist it grew with the oversampling and measured the halfbands' own stopband.
 
 As built: `ringing.cir` (an inductor's kick ringing with a capacitor at 159 kHz) is flagged at every factor and rings
 at 1x (12.8 dB; 1.7, 0.2 and 0.1 at 2, 4 and 8x); its 1x BDF2 twins fail too (T2 -34.5 dB, T3 1.62 dB: BDF2's droop),

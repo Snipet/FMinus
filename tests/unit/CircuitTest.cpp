@@ -1810,8 +1810,8 @@ TEST_CASE("a linear block a matched design cannot serve joins the region, with a
           "t.cir:4:1: warning: block 1 (R1, C1) errs by 12.79 dB at 1x (44.1 kHz), more than 0.5 dB: blocks=auto would "
           "run a matched design at 1x (0.32 dB)\n");
     CHECK(fc::generate(fc::test::kToneStack, "t.cir", nonlinear).warnings ==
-          "t.cir:7:1: warning: block 1 (C1, R1, C2, C3, Ptreb, Pbass, Pmid, RL) errs by 13.37 dB at 1x (44.1 kHz), more "
-          "than 0.5 dB: blocks=auto would oversample it\n");
+          "t.cir:7:1: warning: block 1 (C1, R1, C2, C3, Ptreb, Pbass, Pmid, RL) errs by 13.37 dB at 1x (44.1 kHz), "
+          "more than 0.5 dB: blocks=auto would oversample it\n");
 }
 
 TEST_CASE("the DC operating point, by hand", "[circuit]")
