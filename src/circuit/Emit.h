@@ -164,8 +164,9 @@ namespace fminus::circuit
         std::string form;   // "b3_set: the Woodbury form, 24 operations (init 70); all in set, 92"
     };
 
-    // Block `block`'s BlockCode, or nothing (an error in `messages`) when its equations are singular.
-    std::optional<BlockCode> deriveBlock(const Plan& plan, int block, Messages& messages);
+    // Block `block`'s BlockCode, or nothing (an error in `messages`) when its equations are singular. Without
+    // `woodbury`, all in b<N>_set whatever it costs (the bench's comparison).
+    std::optional<BlockCode> deriveBlock(const Plan& plan, int block, Messages& messages, bool woodbury = true);
 
     // The module's text; `lines` gets, for each of its lines, the netlist's line it comes from (Result::lines).
     std::string emit(const Plan& plan, const std::vector<BlockCode>& blocks, std::vector<int>* lines = nullptr);

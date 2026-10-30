@@ -195,7 +195,7 @@ namespace fminus::circuit
 
     MatchedCheck matchedCheck(const Plan& plan, int block);
 
-    // ---- the method check (the pipeline's stage 7) -------------------------------------------------------------------
+    // ---- the method check (the pipeline's stage 7) ------------------------------------------------------------------
 
     // The eigenvalues of a real square matrix: Householder reduction to Hessenberg form, then the shifted QR algorithm
     // (Wilkinson's shift, deflating from the bottom), in complex double; in no particular order. Nothing when it does

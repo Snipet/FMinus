@@ -462,7 +462,7 @@ namespace fminus::circuit
 
     // ---- a block's coefficients -------------------------------------------------------------------------------------
 
-    std::optional<BlockCode> deriveBlock(const Plan& plan, int blockIndex, Messages& messages)
+    std::optional<BlockCode> deriveBlock(const Plan& plan, int blockIndex, Messages& messages, bool woodbury)
     {
         BlockCode bc;
         bc.system = assemble(plan, blockIndex);
@@ -562,7 +562,7 @@ namespace fminus::circuit
         };
         bc.coefficients = derived(bc.pivots, code);
         bc.lines = code.lines();
-        if (!block.hasControls())
+        if (!block.hasControls() || !woodbury)
             return bc;
         // The Woodbury form: the variable branches' currents pivoted last, so that everything before them depends on
         // the rate alone (init's) and b<N>_set is left with the k x k (R + Q) elimination and what it reaches; kept
@@ -1072,7 +1072,7 @@ namespace fminus::circuit
             const Config& c = plan.config;
             at = titleLine();
             line("// " + plan.module + ": generated from " + plan.baseName +
-                 " by fminus::circuit (Phase 1). Do not edit: edit " + plan.baseName + ".");
+                 " by fminus::circuit. Do not edit: edit " + plan.baseName + ".");
             std::string states;
             int stateCount = 0;
             int portCount = 0;

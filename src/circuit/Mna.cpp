@@ -1217,9 +1217,14 @@ namespace fminus::circuit
     std::complex<double> analogPortCurrent(const Plan& plan, int blockIndex, std::complex<double> s,
                                            const std::vector<double>& pots)
     {
-        const Block& block = plan.blocks.at(static_cast<std::size_t>(blockIndex));
         const System system = assemble(plan, blockIndex);
-        const Pivots pivots = pivotsOrThrow(system, plan, blockIndex);
+        return analogPortCurrent(system, pivotsOrThrow(system, plan, blockIndex), plan, blockIndex, s, pots);
+    }
+
+    std::complex<double> analogPortCurrent(const System& system, const Pivots& pivots, const Plan& plan,
+                                           int blockIndex, std::complex<double> s, const std::vector<double>& pots)
+    {
+        const Block& block = plan.blocks.at(static_cast<std::size_t>(blockIndex));
         const std::vector<double> numbers = symbolValues(system, plan, blockIndex, 1.0, pots);
         std::vector<std::complex<double>> symbols;
         for (std::size_t k = 0; k < system.symbols.size(); ++k)

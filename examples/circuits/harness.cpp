@@ -133,6 +133,7 @@ namespace circuits
         fc::RunnerShape shape;
         shape.module = c->result.module;
         shape.pots = c->pots();
+        shape.switches = c->switches();
         shape.laws = c->laws();
         shape.channels = channels;
         shape.step = region;
@@ -148,6 +149,7 @@ namespace circuits
         c->clear = c->program->function<void(void*)>(m + "::clear", fmErrors);
         if (c->pots() > 0)
             c->set = c->program->address(m + "::set", fmErrors);
+        c->setAll = c->program->function<void(void*, const float*, const int*)>("fm_set", fmErrors);
         if (region && channels == 1)
             c->steps = c->program->function<void(void*, const float*, const float*, float*, int)>("fm_steps", fmErrors);
         if (channels == 1)
@@ -200,7 +202,7 @@ namespace circuits
     }
 
     std::vector<double> runTicksWith(const Circuit& c, std::span<const double> u, std::span<const float> potBuffer,
-                                     int call, std::span<const float> law)
+                                     int call, std::span<const float> law, std::span<const int> switchBuffer)
     {
         Instance self(*c.module);
         c.init(self.get(), 48000);
@@ -215,8 +217,10 @@ namespace circuits
         {
             const int count = std::min(size, n - start);
             const auto s = static_cast<std::size_t>(start);
+            const auto w = static_cast<std::size_t>(c.switches());
             c.ticks(self.get(), in.data() + s, laws.empty() ? nullptr : laws.data() + s * l,
-                    potBuffer.data() + s * p, nullptr, out.data() + s, count, start);
+                    potBuffer.empty() ? nullptr : potBuffer.data() + s * p,
+                    switchBuffer.empty() ? nullptr : switchBuffer.data() + s * w, out.data() + s, count, start);
         }
         return {out.begin(), out.end()};
     }

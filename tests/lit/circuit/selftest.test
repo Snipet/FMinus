@@ -23,7 +23,7 @@
 # NOTES-NEXT: clipper-pot.cir: note: the self-test chose .oversample 4, .adaa on, .solver omega(1)
 # NOTES-NOT:  {{.}}
 
-# MODULE:      // PotClipper: generated from clipper-pot.cir by fminus::circuit (Phase 1). Do not edit: edit clipper-pot.cir.
+# MODULE:      // PotClipper: generated from clipper-pot.cir by fminus::circuit. Do not edit: edit clipper-pot.cir.
 # MODULE:      //   configuration: .oversample 4, .adaa on, .solver omega(1), .method tr (the self-test 087ad67714f6249a); iir blocks=auto (default)
 # MODULE:      void b1_set(float drive)
 

@@ -71,10 +71,18 @@ namespace circuits
         void (*ticks2)(void*, const float*, const float*, const float*, const float*, const int*, float*, float*, int,
                        int) = nullptr;
         std::uintptr_t set = 0;
+        // fm_set(c, pots, switches): set(pots[0 ..], switches[0 ..]), whatever their counts
+        void (*setAll)(void*, const float*, const int*) = nullptr;
 
         int pots() const
         {
             return static_cast<int>(plan.pots.size());
+        }
+
+        // set()'s ints after the pots
+        int switches() const
+        {
+            return static_cast<int>(plan.switches.size());
         }
 
         // tick's and step's floats after the signal
@@ -104,9 +112,11 @@ namespace circuits
     std::vector<double> runTicks(const Circuit& c, std::span<const double> u, std::span<const double> pots,
                                  int call = 0, std::span<const float> law = {});
 
-    // The same with the pots a buffer, pots() values a sample.
+    // The same with the pots a buffer, pots() values a sample, and the switches' positions another, switches() a
+    // sample (empty: none).
     std::vector<double> runTicksWith(const Circuit& c, std::span<const double> u, std::span<const float> potBuffer,
-                                     int call = 0, std::span<const float> law = {});
+                                     int call = 0, std::span<const float> law = {},
+                                     std::span<const int> switchBuffer = {});
 
     // A law buffer: each of `values` (one a law input) repeated for n samples.
     std::vector<float> heldLaws(std::span<const double> values, std::size_t n);

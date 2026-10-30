@@ -487,6 +487,10 @@ namespace fminus::circuit
                                            const std::vector<double>& pots);
 
     // The same with the system and pivots at hand.
+    std::complex<double> analogPortCurrent(const System& system, const Pivots& pivots, const Plan& plan, int block,
+                                           std::complex<double> s, const std::vector<double>& pots);
+
+    // The same with the system and pivots at hand.
     std::complex<double> analog(const System& system, const Pivots& pivots, const Plan& plan, int block,
                                 std::complex<double> s, const std::vector<double>& pots);
 

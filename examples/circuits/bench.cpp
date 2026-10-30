@@ -9,6 +9,7 @@
 // beside it. Printed, never asserted: run it on a quiet machine. (--only skips the first two.)
 #include "harness.h"
 
+#include "circuit/Emit.h"
 #include "circuit/Search.h"
 
 #include <atomic>
@@ -146,7 +147,7 @@ namespace circuits
                  1,
                  fc::Region::Auto,
                  {},
-                 "Phase 0's blocks=auto, as shipped"});
+                 "blocks=auto as shipped: the tone block matched at 1x"});
             // §4.1
             add({"TS", {G::Omega, 2}, false, 8, fc::Halfband::Fir, 1, fc::Region::Auto, {}, "§4.1 row 1: 1,861"});
             add({"TS", {G::Omega, 1}, true, 4, fc::Halfband::Fir, 1, fc::Region::Auto, {}, "§4.1 row 1: 903"});
@@ -478,6 +479,58 @@ float fm_baseline(float n)
         }
     } // namespace
 
+    namespace
+    {
+        // b3_set's cycles a call on screamer.cir's tone block, its pot moving every call: in the Woodbury form (the
+        // rate-only part in init) and all in set, both derived by deriveBlock and emitted whole.
+        void setCycles(const BenchOptions& options)
+        {
+            std::printf("set() cycles: screamer.cir's b3_set (the tone block, its pot moving each call), best of %d "
+                        "x %d\n",
+                        options.reps, options.samples);
+            fc::Messages messages;
+            const std::optional<fc::Plan> plan =
+                fc::plan(fc::parse(netlist("screamer.cir"), messages), {}, "screamer.cir", messages);
+            if (!plan)
+                return;
+            for (bool woodbury : {true, false})
+            {
+                std::vector<fc::BlockCode> codes;
+                for (std::size_t b = 0; b < plan->blocks.size(); ++b)
+                    codes.push_back(*fc::deriveBlock(*plan, static_cast<int>(b), messages, woodbury));
+                const std::string source = fc::emit(*plan, codes) + R"(
+float fm_bench(float n)
+{
+    Screamer w;
+    w.init(48000);
+    float sum = 0;
+    for (int i = 0; i < (int)n; ++i)
+    {
+        w.b3_set((float)(i % 256) * 0.00390625f);
+        sum += w.mb0_b3;
+    }
+    return sum;
+}
+)";
+                fminus::Program::Options po;
+                po.denormals = fminus::Program::Denormals::Flush;
+                po.threads = 1;
+                std::string errors;
+                auto program = fminus::Program::compile(source, errors, po);
+                if (!program)
+                {
+                    std::printf("  does not compile:\n%s", errors.c_str());
+                    continue;
+                }
+                const Timing t = best(program->function<float(float)>("fm_bench", errors), options.samples / 10,
+                                      options.reps);
+                std::printf("  %-26s %8.2f ns %8.1f cycles %8.1f instr a call | %s\n",
+                            woodbury ? "the Woodbury form" : "all in set (Phase 0's)", t.ns, t.cycles,
+                            t.instructions, codes[2].form.empty() ? "(no note)" : codes[2].form.c_str());
+            }
+        }
+    } // namespace
+
     int bench(const BenchOptions& options)
     {
 #if defined(__APPLE__)
@@ -494,6 +547,7 @@ float fm_baseline(float n)
         {
             generateTimes();
             selfTestTimes();
+            setCycles(options);
         }
         std::printf("cycles a host sample at 48 kHz, best of %d x %d (wall ns; cycles and instructions from "
                     "proc_pid_rusage on macOS); the self-test's cost model and the report's (timing1.out) beside\n",

@@ -1811,7 +1811,7 @@ namespace fminus::circuit
                 for (int n : found)
                     names += (names.empty() ? "" : ", ") + p.nodes[static_cast<std::size_t>(n)].name;
                 messages.error(loc, label + " reads " + std::to_string(found.size()) + " inputs (" + names +
-                                        "): not supported yet (Phase 1)");
+                                        "): not supported yet (Phase 2)");
             }
             else
                 reads[c] = found.front();
@@ -1836,7 +1836,8 @@ namespace fminus::circuit
                 messages.error(firsts.empty() ? Loc{} : netlist.input->loc,
                                firsts.empty() ? "no block reads .input"
                                               : std::to_string(firsts.size()) +
-                                                    " blocks read .input: Phase 0's blocks form one chain (Phase 1)");
+                                                    " blocks read .input: the blocks form one chain (branching ones "
+                                                    "are Phase 2)");
                 return std::nullopt;
             }
             std::vector<bool> visited(blocks.size(), false);
@@ -1857,7 +1858,7 @@ namespace fminus::circuit
                         elements[static_cast<std::size_t>(blocks[static_cast<std::size_t>(next[1])].elements.front())]
                             .loc,
                         "two blocks read block (" + partsText(p, blocks[static_cast<std::size_t>(at)]) +
-                            "): Phase 0's blocks form one chain (Phase 1)");
+                            "): the blocks form one chain (branching ones are Phase 2)");
                     return std::nullopt;
                 }
                 at = next.empty() ? -1 : next.front();
@@ -1885,7 +1886,7 @@ namespace fminus::circuit
                                             " crosses blocks: not supported yet (Phase 2)");
                 else
                     messages.error(loc, "block (" + partsText(p, blocks[c]) +
-                                            ") is off the chain from .input to .output: not supported yet (Phase 1)");
+                                            ") is off the chain from .input to .output: not supported yet (Phase 2)");
                 return std::nullopt;
             }
         }
@@ -2260,6 +2261,7 @@ namespace fminus::circuit
                 last = std::max(last, i);
             }
         }
+        bool regionChecked = false;   // the linear-only region's 1x check, already made at its factor
         if (linearOnly && cfg.method == Method::Bdf2)
             messages.warning(cfg.methodFrom == "the netlist" ? netlist.method.loc : Loc{},
                              "'.method bdf2' is ignored: the netlist is linear (its blocks run the trapezoidal rule, "
@@ -2284,15 +2286,19 @@ namespace fminus::circuit
                 for (int os : {2, 4, 8})
                 {
                     bool passes = true;
-                    for (int i = first; i <= last; ++i)
+                    for (int i = first; i <= last && passes; ++i)
                     {
                         const auto k = static_cast<std::size_t>(i);
-                        if (pivotsOf[k] && oneXError(systems[k], *pivotsOf[k], p, i, kCheckRate * os) > kTolerance)
-                            passes = false;
+                        if (!pivotsOf[k])
+                            continue;
+                        // kept: the region's check below is this one at the factor chosen
+                        p.blocks[k].oneXRegion = oneXError(systems[k], *pivotsOf[k], p, i, kCheckRate * os);
+                        passes = p.blocks[k].oneXRegion <= kTolerance;
                     }
                     if (passes)
                     {
                         cfg.oversample = os;
+                        regionChecked = true;
                         break;
                     }
                 }
@@ -2320,8 +2326,9 @@ namespace fminus::circuit
                 continue;
             if (b.inRegion)
             {
-                b.oneXRegion = oneXError(systems[i], *pivotsOf[i], p, static_cast<int>(i), kCheckRate * b.rateFactor,
-                                         b.method);
+                if (!regionChecked)
+                    b.oneXRegion = oneXError(systems[i], *pivotsOf[i], p, static_cast<int>(i),
+                                             kCheckRate * b.rateFactor, b.method);
                 if (b.oneXRegion > kTolerance)
                     messages.warning(blockLoc(b), std::format("{} errs by {:.2f} dB at {}x 44.1 kHz, more than {} dB "
                                                               "even oversampled",

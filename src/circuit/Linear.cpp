@@ -386,6 +386,18 @@ namespace fminus::circuit
         const PortDef& port = *block.port;
         const double level =
             plan.netlist.target.level ? *plan.netlist.target.level : std::fabs(plan.inputScale);
+        // the blocks' systems and pivots, through this one, solved once
+        std::vector<System> systems;
+        std::vector<Pivots> pivots;
+        for (int k = 0; k <= blockIndex; ++k)
+        {
+            systems.push_back(assemble(plan, k));
+            Messages scratch;
+            const std::optional<Pivots> order = choosePivots(systems.back(), plan, k, scratch);
+            if (!order)
+                return out;
+            pivots.push_back(*order);
+        }
         // the conductances: (G, pots)
         std::vector<std::pair<double, std::vector<double>>> points;
         for (const std::vector<double>& pots : potGrid(plan, block))
@@ -415,8 +427,13 @@ namespace fminus::circuit
                 const std::complex<double> s(0, 2 * std::numbers::pi * f);
                 double gain = level / std::fabs(plan.inputScale);   // samples, through the blocks before
                 for (int b = 0; b < blockIndex; ++b)
-                    gain *= std::abs(analog(plan, b, s, pots));
-                current = std::max(current, gain * std::abs(analogPortCurrent(plan, blockIndex, s, pots)));
+                {
+                    const auto k = static_cast<std::size_t>(b);
+                    gain *= std::abs(analog(systems[k], pivots[k], plan, b, s, pots));
+                }
+                const auto self = static_cast<std::size_t>(blockIndex);
+                current = std::max(current, gain * std::abs(analogPortCurrent(systems[self], pivots[self], plan,
+                                                                               blockIndex, s, pots)));
             }
             const double high = port.law == PortDef::Law::Pair
                                     ? std::sqrt(current * current + 4 * port.is * port.is) / port.nvt

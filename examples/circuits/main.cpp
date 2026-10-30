@@ -1,6 +1,7 @@
 // examples/circuits/main.cpp: example-circuits, the circuit compiler's example (docs/circuits.md). Its netlists are
 // the report's (docs/research/analog-circuits/README.md): diodetone.cir (example 1), screamer.cir (example 2, with
-// §9.1's tone-pot line), screamer-clip.cir (its clipping stage alone) and clipper.cir (Yeh's RC clipper).
+// §9.1's tone-pot line), screamer-clip.cir (its clipping stage alone) and clipper.cir (Yeh's RC clipper); and Phase
+// 1's (README.md lists them all).
 //
 //     build-dev/bin/example-circuits --check          the targets, T1-T4, and the rest (what ctest runs; nothing timed)
 //     build-dev/bin/example-circuits --tables         the report's accuracy tables from emitted code (minutes)

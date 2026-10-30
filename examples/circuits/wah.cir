@@ -1,7 +1,6 @@
 * wah.cir: an RLC band-pass, as a wah's tank: R1 into a 500 mH inductor and a 47 nF capacitor (their resonance at
-* 1.04 kHz), damped by R2 and the pot Pq (Q from 0.3 to 7), and buffered. Linear: it runs at the host rate, where the
-* trapezoidal rule's warp near 20 kHz errs by more than 0.5 dB (a warning names it; the matched design at 1x is the
-* next slice's).
+* 1.04 kHz), damped by R2 and the pot Pq (Q from 0.3 to 7), and buffered. Linear: the trapezoidal rule's warp near
+* 20 kHz errs by 13.4 dB at 1x, so it runs a matched design at 1x (0.35 dB; docs/circuits.md).
 .title Wah
 .input  u    in   scale=1
 .output vout out

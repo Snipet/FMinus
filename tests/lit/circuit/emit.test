@@ -11,7 +11,7 @@
 # RUN: diff %t.1 %t.2
 
 # The plan, in the header.
-# DT:      // DiodeTone: generated from diodetone.cir by fminus::circuit (Phase 1). Do not edit: edit diodetone.cir.
+# DT:      // DiodeTone: generated from diodetone.cir by fminus::circuit. Do not edit: edit diodetone.cir.
 # DT-NEXT: //   1 block, 2 states (C1, C2), 1 nonlinear port (D1|D2: 2 Is sinh(v / N Vt), Is 2.52 nA, N Vt 45.315 mV at 27 C), 1 pot (tone)
 # DT-NEXT: //   block 1 (R1, C1, D1, D2, R2, Ptone, C2): in -> b; port D1|D2 at V(a); at 4 rate
 # DT-NEXT: //   solver: omega3 + 2 Newton steps in [min(0, p), max(0, p)]
@@ -112,7 +112,7 @@
 
 # The Tube Screamer: four blocks, cut at the op amps, each linear block's 1x verdict: the tone block's trapezoidal
 # response fails it, and its matched design passes it, so it runs at 1x (the region is the clipping stage alone).
-# TS:      // Screamer: generated from screamer.cir by fminus::circuit (Phase 1). Do not edit: edit screamer.cir.
+# TS:      // Screamer: generated from screamer.cir by fminus::circuit. Do not edit: edit screamer.cir.
 # TS-NEXT: //   4 blocks, 6 states (C1, C3, C4, C5, C6, C7), 1 nonlinear port
 # TS-NEXT: //   block 1 (C1, R1): in -> p1; linear; at the host rate (1x check: 0.00 dB off at 44.1 kHz)
 # TS-NEXT: //   block 2 (XU1, R4, C3, R6, Pdrive, C4, D1, D2): p1 -> v2; cut at an op amp's + input (exact); port D1|D2 at V(n1) - V(v2); at 4 rate, designed at 4 rate 2/3 (ADAA)
@@ -184,7 +184,7 @@
 # The synth path's: otalp.cir, two buffered OTA one-poles whose gain is the law input iabc. tick and step take it after
 # the signal, clamp it to its range (fmaxf first: a NaN is its low end) and hold the gains over the region's steps; each
 # block is the i-form (its readouts the states and the OTA's current, which its law gives at the solved v).
-# OTA:      // OtaLp: generated from otalp.cir by fminus::circuit (Phase 1). Do not edit: edit otalp.cir.
+# OTA:      // OtaLp: generated from otalp.cir by fminus::circuit. Do not edit: edit otalp.cir.
 # OTA-NEXT: //   2 blocks, 2 states (C1, C2), 2 nonlinear ports (G1: an OTA, g tanh(v / 2 Vt), 2 Vt 51.73 mV at 27 C, g = iabc; G2: an OTA, g tanh(v / 2 Vt), 2 Vt 51.73 mV at 27 C, g = iabc), 0 pots
 # OTA-NEXT: //   block 1 (R1, R2, R3, R4, G1, C1, R5, X1): in -> y1b; port G1 at V(a1) - V(m1), its current from 0 to y1; at 4 rate
 # OTA-NEXT: //   block 2 (R6, R7, R8, R9, G2, C2, R10, X2): y1b -> y2b; cut at an op amp's output (exact); port G2 at V(a2) - V(m2), its current from 0 to y2; at 4 rate
