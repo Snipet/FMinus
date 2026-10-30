@@ -1535,6 +1535,43 @@ TEST_CASE("the DC operating point, by hand", "[circuit]")
     const fc::Plan iv = planned(".input u in\n.output y c\nC0 in b 1u\nI1 0 b 1m\nR1 b 0 1k\nV1 c b 2\nR2 c 0 1meg\n");
     CHECK(std::fabs(nodeDc(iv, "b") - (1e-3 - 2e-6) / 1.001e-3) <= 1e-12);
     CHECK(std::fabs(nodeDc(iv, "c") - nodeDc(iv, "b") - 2) <= 1e-12);
+    // branches in parallel at DC share a current the equations leave free, and the point is still defined: an
+    // inductor across a diode pair (the port, solved open, sees 0 V; L1 carries R2's 900 uA), and a rheostat's 0-ohm
+    // end across an inductor (the pot's section carries none, as at every other position)
+    const std::string tank = ".input u in\n.output y a\nR1 in a 1k\nV1 vb 0 9\nR2 vb a 10k\nL1 a 0 100m\n";
+    const std::string pinned = "\n.oversample 4\n.adaa off\n.solver omega(1)\n";
+    const fc::Plan shunted = planned(tank + "C1 a 0 10n\nD1 a 0 1N914\nD2 0 a 1N914" + pinned);
+    const fc::DcPoint sp = dcOf(shunted);
+    CHECK(nodeDc(shunted, "a") == 0);
+    REQUIRE(sp.ports.size() == 1);
+    CHECK(sp.ports[0].second == 0);
+    const fc::System ss = fc::assemble(shunted, 0, true);
+    auto unknown = [](const fc::System& s, const std::string& name)
+    {
+        const auto at = static_cast<std::size_t>(std::find(s.unknownNames.begin(), s.unknownNames.end(), name) -
+                                                 s.unknownNames.begin());
+        REQUIRE(at < s.unknownNames.size());
+        return at;
+    };
+    CHECK(std::fabs(sp.unknowns[0][unknown(ss, "i(L1)")] - 9e-4) <= 1e-12 * 9e-4);
+    CHECK(sp.unknowns[0][unknown(ss, "j(D1|D2)")] == 0);
+    const fc::Result shuntedModule = fc::generate(tank + "C1 a 0 10n\nD1 a 0 1N914\nD2 0 a 1N914" + pinned, "t.cir");
+    CHECK(shuntedModule.errors.empty());
+    CHECK(!shuntedModule.source.empty());
+    for (const std::string& rheostat :
+         {std::string(".pot x\n") + tank + "P1 a 0 10k {x}\n",
+          std::string(".pot x 0\n.input u in\n.output y a\nR1 in a 1k\nP1 a 0 10k {x}\nV1 vb 0 9\nR2 vb a 10k\n"
+                      "L1 a 0 100m\n")})
+    {
+        INFO(rheostat);
+        const fc::Result module = fc::generate(rheostat, "t.cir");
+        CHECK(module.errors.empty());
+        const fc::Plan rp = planned(rheostat);
+        const fc::DcPoint pp = dcOf(rp);
+        const fc::System ps = fc::assemble(rp, 0, true);
+        CHECK(std::fabs(pp.unknowns[0][unknown(ps, "i(L1)")] - 9e-4) <= 1e-12 * 9e-4);
+        CHECK(std::fabs(pp.unknowns[0][unknown(ps, "i(P1)")]) <= 1e-18);
+    }
     // no DC source: every value 0, the module as Phase 0's
     const fc::Plan none = planned(fc::test::kDiodeTone);
     CHECK(std::all_of(none.dc.begin(), none.dc.end(), [](double v) { return v == 0; }));
@@ -1580,6 +1617,10 @@ TEST_CASE("the DC operating point's errors", "[circuit]")
         // a diode biased through a resistor from a supply
         {head + "R1 in a 10k\nV1 vb 0 9\nR2 vb a 10k\nD1 a 0 1N914\n",
          "t.cir:6:1: error: port D1 is biased at DC (0.573 V): biased ports need the offset formulation (Phase 2)\n"},
+        // a DC current that only the diode can take: biased, by that current
+        {head + "C1 in a 1u\nI1 0 a 1m\nD1 a 0 1N914\n",
+         "t.cir:5:1: error: port D1 is biased at DC (0.001 A through it): biased ports need the offset formulation "
+         "(Phase 2)\n"},
         // an integrator with a DC source at its input: its output has no DC point
         {head + "R1 in a 10k\nC1 a o 1n\nX1 0 a o opamp\nV1 b 0 1\nR3 b a 1k\n",
          "t.cir:3:1: error: block 1 (R1, C1, X1, R3): its DC operating point is undefined: its equations are singular "
