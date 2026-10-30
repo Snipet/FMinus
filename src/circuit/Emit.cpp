@@ -1762,15 +1762,16 @@ namespace fminus::circuit
             line("    {");
             if (matchedBlock(b))
             {
-                // transposed direct form II: y = b0 u + s1, s1 <- b1 u - a1 y + s2, s2 <- b2 u - a2 y
+                // transposed direct form II: y = b0 u + s1, s1 <- b1 u - a1 y + s2, s2 <- b2 u - a2 y; its output is
+                // ym_, a name no input can take (an input's name is letters and digits)
                 const std::string n = "_b" + std::to_string(b.index);
                 const bool two = orderOf(b) == 2;
-                line("        const " + T + " y = mb0" + n + " * " + in + " + s1" + n + ";");
-                line("        s1" + n + " = mb1" + n + " * " + in + " - ma1" + n + " * y" + (two ? " + s2" + n : "") +
+                line("        const " + T + " ym_ = mb0" + n + " * " + in + " + s1" + n + ";");
+                line("        s1" + n + " = mb1" + n + " * " + in + " - ma1" + n + " * ym_" + (two ? " + s2" + n : "") +
                      ";");
                 if (two)
-                    line("        s2" + n + " = mb2" + n + " * " + in + " - ma2" + n + " * y;");
-                line("        return y;");
+                    line("        s2" + n + " = mb2" + n + " * " + in + " - ma2" + n + " * ym_;");
+                line("        return ym_;");
                 line("    }");
                 return;
             }

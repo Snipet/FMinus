@@ -765,9 +765,9 @@ analog magnitude at DC, at the poles' frequency (clamped to a quarter of the rat
 "Matched Second Order Digital Filters", 2016; a one-pole's at DC and 0.83 of Nyquist), as transposed direct form II:
 
 ```c
-const float y = mb0_b3 * u + s1_b3;
-s1_b3 = mb1_b3 * u - ma1_b3 * y + s2_b3;
-s2_b3 = mb2_b3 * u - ma2_b3 * y;
+const float ym_ = mb0_b3 * u + s1_b3;                  // ym_: a name no input can take
+s1_b3 = mb1_b3 * u - ma1_b3 * ym_ + s2_b3;
+s2_b3 = mb2_b3 * u - ma2_b3 * ym_;
 ```
 
 - **From the trapezoidal form.** The design takes the block's own trapezoidal state-space (the coefficients its

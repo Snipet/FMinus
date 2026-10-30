@@ -164,10 +164,10 @@
 # TS-NEXT:  return n_v2;
 # TS-LABEL: float b3(float u)
 # TS-NEXT:  {
-# TS-NEXT:  const float y = mb0_b3 * u + s1_b3;
-# TS-NEXT:  s1_b3 = mb1_b3 * u - ma1_b3 * y + s2_b3;
-# TS-NEXT:  s2_b3 = mb2_b3 * u - ma2_b3 * y;
-# TS-NEXT:  return y;
+# TS-NEXT:  const float ym_ = mb0_b3 * u + s1_b3;
+# TS-NEXT:  s1_b3 = mb1_b3 * u - ma1_b3 * ym_ + s2_b3;
+# TS-NEXT:  s2_b3 = mb2_b3 * u - ma2_b3 * ym_;
+# TS-NEXT:  return ym_;
 # TS-LABEL: float b4(float u)
 # TS-LABEL: float step(float u)
 # TS-NEXT:  {
@@ -236,17 +236,17 @@
 # RC:      ma1_b1 = -t15;
 # RC-LABEL: float b1(float u)
 # RC-NEXT:  {
-# RC-NEXT:  const float y = mb0_b1 * u + s1_b1;
-# RC-NEXT:  s1_b1 = mb1_b1 * u - ma1_b1 * y;
-# RC-NEXT:  return y;
+# RC-NEXT:  const float ym_ = mb0_b1 * u + s1_b1;
+# RC-NEXT:  s1_b1 = mb1_b1 * u - ma1_b1 * ym_;
+# RC-NEXT:  return ym_;
 # SK:      //   block 1 (R1, R2, C1, C2, X1): in -> out; linear; matched at 1x (0.45 dB off at 44.1 and 48 kHz; the trapezoidal rule's 26.82 at 44.1)
 # SK:      float s1_b1;
 # SK-NEXT: float s2_b1;
 # SK-LABEL: float b1(float u)
 # SK-NEXT:  {
-# SK-NEXT:  const float y = mb0_b1 * u + s1_b1;
-# SK-NEXT:  s1_b1 = mb1_b1 * u - ma1_b1 * y + s2_b1;
-# SK-NEXT:  s2_b1 = mb2_b1 * u - ma2_b1 * y;
+# SK-NEXT:  const float ym_ = mb0_b1 * u + s1_b1;
+# SK-NEXT:  s1_b1 = mb1_b1 * u - ma1_b1 * ym_ + s2_b1;
+# SK-NEXT:  s2_b1 = mb2_b1 * u - ma2_b1 * ym_;
 
 # A switch: set() takes its position after the pots; each S element's ramp moves 16 / (0.02 rate) a call toward its
 # target, landing on it, and its resistance is exp(ln roff + s (ln ron - ln roff)).

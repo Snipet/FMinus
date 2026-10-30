@@ -127,11 +127,12 @@ namespace fminus::circuit
             return true;
         // init's parameter, the attribute's words, the halfband methods' parameters and locals, clear's loop
         // variable, and set's temporaries t<N>: FMinus reads a module's name as a type everywhere in the program
-        // and the guard's fields and locals (ck_, fd_, fdstep_, sum_, gain_), and a switch's ramp step (swstep_; its
-        // other names, sw_<S>, to_<S> and BDF2's h_<C>, carry the part's name, as the coefficients do)
-        static constexpr std::array<std::string_view, 18> kOther{
-            "rate", "clang", "nonblocking", "x",   "o",   "s0",      "s1",   "t",     "y",
-            "v0",   "v1",    "i",           "ck_", "fd_", "fdstep_", "sum_", "gain_", "swstep_"};
+        // and the guard's fields and locals (ck_, fd_, fdstep_, sum_, gain_), a switch's ramp step (swstep_; its
+        // other names, sw_<S>, to_<S> and BDF2's h_<C>, carry the part's name, as the coefficients do) and a matched
+        // block's output (ym_)
+        static constexpr std::array<std::string_view, 19> kOther{
+            "rate", "clang", "nonblocking", "x",   "o",   "s0",      "s1",   "t",     "y",       "v0",
+            "v1",   "i",     "ck_",         "fd_", "ym_", "fdstep_", "sum_", "gain_", "swstep_"};
         return std::find(kOther.begin(), kOther.end(), name) != kOther.end() || numbered(name, 't');
     }
 

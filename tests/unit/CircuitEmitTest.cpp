@@ -916,6 +916,41 @@ TEST_CASE("a matched block's float coefficients are the double design's, and its
             }
         }
     }
+
+    // the matched step's output is ym_, a name no input can take: an input named y compiles, and runs as u does
+    CHECK(fc::isModuleWord("ym_"));
+    for (const std::string& text : {fc::test::kRc8k, fc::test::kSallenKey2k})
+    {
+        const fc::Result u = fc::generate(text, "t.cir");
+        const fc::Result y = fc::generate(withLine(text, ".input u in", ".input y in"), "t.cir");
+        CHECK(y.source.find("const float ym_ = mb0_b1 * y + s1_b1;") != std::string::npos);
+        auto pu = compiled(u);
+        auto py = compiled(y);
+        std::string errors;
+        auto* initU = pu->function<void(void*, float)>(u.module + "::init", errors);
+        auto* tickU = pu->function<float(void*, float)>(u.module + "::tick", errors);
+        auto* initY = py->function<void(void*, float)>(y.module + "::init", errors);
+        auto* tickY = py->function<float(void*, float)>(y.module + "::tick", errors);
+        REQUIRE(initU);
+        REQUIRE(tickU);
+        REQUIRE(initY);
+        REQUIRE(tickY);
+        const Program::Module* mu = pu->module(u.module);
+        const Program::Module* my = py->module(y.module);
+        REQUIRE(mu);
+        REQUIRE(my);
+        auto su = instance(*mu);
+        auto sy = instance(*my);
+        initU(su.get(), 48000.0f);
+        initY(sy.get(), 48000.0f);
+        for (int i = 0; i < 256; ++i)
+        {
+            const auto x = static_cast<float>(std::sin(0.13 * i));
+            const float a = tickU(su.get(), x);
+            const float b = tickY(sy.get(), x);
+            REQUIRE(std::memcmp(&a, &b, sizeof a) == 0);
+        }
+    }
 }
 
 TEST_CASE("names keep their case, and a pot's sections have names of their own", "[circuit]")
