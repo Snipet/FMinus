@@ -33,7 +33,8 @@ the design wrong, and what is not built yet.
   rings, the ordered search, the no-configuration answer), the provisional configuration a netlist plays until it
   answers, the method check (stage 7), the run-time guard, the map from each generated line to the netlist's (`fminus
   --self-test`, `--notes`); law inputs (`.input NAME - kind=cv|current`) in an OTA's gain, each sample's, with ADAA's
-  carry; `.prewarp on`.
+  carry; `.prewarp on`. Probes: `Options::probes`, the fields through which a host watches up to four node voltages
+  as the module plays, with the same output bits, and `Result::nodes` ([below](#probes); `fminus --probes --nodes`).
 - **Checked:** the parser, the plan and the equations against hand derivations, Yeh's eq. 24, report §7.2's OTA stage
   and textbook responses (an RL low-pass and an RLC band-pass among them), the stamps of an inductor, an E and a G, DC
   points by hand, the offset form, the diode forms against their hand laws, each law's antiderivative and bracket, the
@@ -52,7 +53,12 @@ the design wrong, and what is not built yet.
   ADAA residual, BDF2 against its reference, the matched designs' float coefficients and response
   (`CircuitEmitTest.cpp`); switch positions as stress axes, the method check's flag, measurement, warning and twins
   (`CircuitSearchTest.cpp`); every shipped netlist's coefficients, `switch.cir`, `rc8k.cir`, `sallen-key.cir`,
-  `lowpass-sweep.cir`, `tonestack.cir`, BDF2 and `ringing.cir` through the JIT (`example-circuits --check`, p).
+  `lowpass-sweep.cir`, `tonestack.cir`, BDF2 and `ringing.cir` through the JIT (`example-circuits --check`, p); the
+  probes' nodes, their order, DC volts and readability (`CircuitTest.cpp`), their fields' layout, init, clear, the
+  rings and the slots, every method nonblocking in one and two channels, an ADAA input only a probe reads
+  (`CircuitEmitTest.cpp`), the self-test unchanged by them (`CircuitSearchTest.cpp`), the node list and the text
+  (`tests/lit/circuit/probes.test`), and on every shipped netlist the same output bits probed or not, each ring against
+  the double reference of its node, the stats and the DC volts (`example-circuits --check`, q).
 - **Not built:** Phase 2 and later, at the end of this page.
 
 ## Use
@@ -61,6 +67,7 @@ the design wrong, and what is not built yet.
 build-dev/bin/fminus examples/circuits/diodetone.cir --emit fm        # the generated module
 build-dev/bin/fminus examples/circuits/diodetone.cir                  # compiled, as that text would be (--emit ll)
 build-dev/bin/fminus play.fm -I examples/circuits --run dc 1          # a program that does #include "diodetone.cir"
+build-dev/bin/fminus examples/circuits/diodetone.cir --probes --nodes --emit fm   # with its probe fields, and its nodes
 ```
 
 `fminus` reads a `.cir` input (any case) as the text the circuit compiler generates from it: `--emit fm` prints that
@@ -343,7 +350,10 @@ does.
   computes it; one field however many OTAs' gains read the pot);
   tick's and step's law inputs, clamped, `l_<name>`;
   halfband state `hb<s>u_*` and `hb<s>d_*`; the region's samples `os1`, `os2_0`, ...; the guard's `ck_`, `fd_` and
-  `fdstep_`, and tick's locals `sum_` and `gain_` ([the guard](#the-guard)). Characters outside
+  `fdstep_`, and tick's locals `sum_` and `gain_` ([the guard](#the-guard)); with probes, `kProbeFields`' (`prb_`,
+  `prs_`, `prn_`, `pr_`, `prp_`, `pra_`, `prq_`, `prv_`), a node's coefficients `pn_<node>_by_<source>`, ADAA's input
+  history `pru_b<N>` where only a probe reads it, and the methods `b<N>_pr`, `step_pr` and `tick_pr`
+  ([probes](#probes)). Characters outside
   `[A-Za-z0-9_]` in part and node names become `_`, and a name taken already gets `_2` (a pot's sections `Ptone_a`
   and `Ptone_b` included, and RS's resistor `RS_<D>` and node `rs_<D>`). Every field and local holds an offset from the
   DC operating point, so `trace` reads offsets.
@@ -475,6 +485,88 @@ diodetone's output finite until the guard resets it), and the playground's ±4 o
 | `selfTestKey` | the key the self-test's answer goes by, when a dimension is open; empty when the netlist names its whole configuration |
 | `latency` | host samples of delay at 1 kHz: the halfbands' round trip, and ADAA's half step for each port block it runs in |
 | `lines` | for each line of `source`, the netlist's line it comes from (0: none): the module's frame at `.title`, `set` at the first `.pot`, a block's `b<N>_set` and `b<N>` at its first part, `tick` and `step` at `.input`, a part's fields at its line. `fminus` re-cites FMinus's messages with it |
+| `nodes` | every node of the netlist but ground, in first-mention order, with its rate, DC volts and whether a probe can read it ([below](#probes)); `prs_` takes the index |
+
+## Probes
+
+A host that draws the circuit (the playground's schematic) watches its node voltages as it plays: `Options::probes`
+gives the module the fields `kProbeFields` names (`include/fminus/Circuit.h`), through which a host arms up to
+`kProbeSlots` (4) slots, each on a node of `Result::nodes`, and reads each one's last `kProbeRing` (1024) samples and
+its peak, sum and sum of squares. The output's bits are the same with probes off, on and disarmed, and armed on any
+node (`example-circuits --check`, q); so are the messages, the self-test's key and its answer.
+
+```cpp
+fminus::circuit::Options options;
+options.probes = true;
+const fminus::circuit::Result r = fminus::circuit::generate(netlist, "pedal.cir", options);
+for (std::size_t k = 0; k < r.nodes.size(); ++k)     // prs_ takes k: "n1", line 14, 4x, 0 V, readable
+    show(r.nodes[k].name, r.nodes[k].readable ? "" : r.nodes[k].why);
+// between two calls (the fields' offsets from Program::Module::fields): prs_[0] = k, then prb_ = 1, slot 0 armed
+// after each call: prn_'s advance since the last call is how many of slot 0's ring samples are new, the newest at
+// pr_[(prn_ - 1) % 1024]; prp_[0], pra_[0] and prq_[0] read, then zeroed
+```
+
+`fminus pedal.cir --probes --nodes --emit fm` prints the module with its probe fields and, on stderr, the nodes
+(`pedal.cir:14:12: node 3 'n1': rate 4, dc 4.5 V, readable`; `tests/lit/circuit/probes.test` pins diodetone.cir's).
+
+**The nodes.** `Result::nodes` lists every node of the netlist but ground, in the order the netlist first mentions
+them (an element's node token, or `.input`'s and `.output`'s node, whichever comes first: `.input u in` on line 3 makes
+`in` node 0), with that mention's line and column, its spelling there, the DC point's volts (`.op`'s, the pots and
+switches at their defaults), the rate of the block that computes it (steps a host sample) and whether a probe can read
+it. It is filled with or without `Options::probes`. A probe reads:
+
+- a node a block solves for or drives (an op amp's output), from that block's step: one value a host sample, the
+  region's at its last step of the host sample (`rate` is the region's factor), a `.channels 2` module's lane 0;
+- `.output`'s node: tick's output in volts, `.output`'s scale times it, through the halfbands when the region computes
+  it (the oversampled node itself is not what plays), before the guard's fade;
+- `.input`'s node: tick's sample times `.input`'s scale; a DC source's node: its volts.
+
+It cannot read the inside of a matched design at 1x, whose node voltages the module never computes, only its input and
+its output (`why`: "inside a filter computed as a whole at 1x (block 3)": the TS tone block's t1, tn, tw and tz;
+`rc8k.cir`'s one block has no inside, its nodes its input and its output), nor a series string's inner node ("inside
+the series string D1|D2+D3, computed as one diode (block 1)"), nor a node no block computes.
+
+**The fields** come after every other field of the module, so the module's own keep their names, types and offsets:
+
+| Field | Type | Who writes it | What |
+|---|---|---|---|
+| `prb_` | `int` | the host; init sets 0 | 0: off; else armed |
+| `prs_` | `int[4]` | the host; init sets -1 | each slot's node, an index into `Result::nodes`; a slot on a node out of range or not readable writes nothing |
+| `prn_` | `int` | tick; init sets 0 | the samples written while armed, modulo 2^30: the sample written at `prn_ = i` is at `pr_[1024 k + i % 1024]` |
+| `pr_` | `float[4096]` | tick | slot k's ring at `[1024 k, 1024 k + 1024)`: absolute volts (the DC point added back) |
+| `prp_`, `pra_`, `prq_` | `float[4]` each | tick; the host zeroes them when it has read them; init sets 0 | each slot's peak \|v\|, sum of v and sum of v², since zeroed |
+| `prv_` | `float[nodes]` | tick | its scratch: each readable node's volts at the last armed sample |
+
+`clear()` leaves them all (they are the host's, and the guard's reset is the circuit's), the guard sums none of them,
+and `init` leaves the rings: a host allocates them zeroed, nothing reads a ring beyond what `prn_` says is written,
+and a ring is memory (16 KB an instance) that stays untouched until a probe is armed. Every name ends in `_`, which no
+pot, input or module name has; `isModuleWord` refuses them anyway, with the methods' (`tick_pr`, `step_pr`) and the
+locals'.
+
+**The code.** tick's first statement is `if (prb_ != 0) return tick_pr(u);` (with its law inputs): disarmed, a probe
+costs tick a load, a compare and a branch, and the rest of tick is the module's without probes. `tick_pr` is tick
+again (its guard, its law inputs, the same calls in the same order, so the same output bit for bit) with each block's
+step replaced by `b<N>_pr`, which is `b<N>` with, before its states move on, a store of each of its nodes' volts into
+`prv_`; in the region, only the host sample's last step calls the probing step (`step_pr`). Then it writes
+`.input`'s, the DC nodes' and `.output`'s volts, each armed slot's sample, peak, sum and sum of squares, and advances
+`prn_`. A node's volts are a readout the block already computes (its output, a grounded capacitor's voltage, the
+port's v), or its own: `pn_<node>_by_<source>` on the step's sources (with ADAA, their means, as every readout's),
+derived after the block's own coefficients in the same code with the same pivots. The elimination's statements are
+the same text, so each is the temporary it was, the module's own coefficients are computed by the same operations as
+without probes, and the Woodbury form and its counts are chosen without the probes' readouts; the probes'
+coefficients are computed where the block's are (its `b<N>_set`, or init, with the Woodbury form's rate-only terms in
+init), so a pot's move costs `set()` what they take. An ADAA block whose readouts never read its input but a node does
+keeps that input a step earlier in `pru_b<N>`, which both steps store and the guard does not sum.
+
+As built, in a host module's process loop as the playground's template calls a circuit (two instances, blocks of 64,
+the signal from a table; `example-circuits --only probes`, an M5 at load 4): screamer.cir 1196 cycles a host sample
+without probes, 1200 disarmed (+0.3 %), 1222 armed on one slot (+2 %), 1244 on four; otalp.cir 1232, 1229, 1303 and
+1371; screamer.cir's `set()` with its three pots moving each call, 193 cycles without probes and 192 with them. The
+disarmed figures are within the bench's noise of each other (+-1 % from run to run); a first build, with the branch
+after the guard and `tick_pr` a call that was not a tail call, cost otalp.cir 2 %.
+
+**The self-test** runs without probes (`selfTest()` generates its candidates with `Options::probes` off), and its key
+leaves `probes` out (`tests/unit/CircuitSearchTest.cpp`).
 
 ## Configuration and the self-test
 
@@ -956,7 +1048,7 @@ shipped netlists' answers are unchanged.
 | equations | `src/circuit/Mna.*` | each block's stamps (KCL rows, nullor rows, a grounded E's row, the impedance form's rows of variable resistors, switches, inductors and floating V sources, a floating E's row, a diode's port row; a G's transconductances; sources: the input, the states, a diode's v or an OTA's i, and at DC the V and I sources' constants; trapezoidal or BDF2 companions), the pivots (the variable branches last first, for the Woodbury form), `solve<T>`, `derive<T>`, `holters()` (the v-form, and an OTA block's i-form too; BDF2's `[x; xo]`), `analog()`, the 1x check |
 | laws | `src/circuit/Laws.*` | each law's text (the guess, the Newton steps in the bracket, ADAA's mean, what a step stores) and its double twin (phi, phi', the antiderivative, the steps, the converged solve) |
 | linear | `src/circuit/Linear.*` | a linear block's trapezoidal form (order 1 or 2), the matched design on doubles and `Val`s, its gate; the eigenvalues (Hessenberg, shifted QR) and the method check's linearised A |
-| text | `src/circuit/Emit.*` | `Val` (with its rate and pots tag) and the code builder (its operation count, the init/set split), then the module: fields, init (the Woodbury form's `w<N>_<k>`), clear, set (the switches' ramps), `b<N>_set`, `b<N>` (a matched block's TDF2), the halfbands, step, tick (with the guard); the map from each line to the netlist's |
+| text | `src/circuit/Emit.*` | `Val` (with its rate and pots tag) and the code builder (its operation count, the init/set split), then the module: fields, init (the Woodbury form's `w<N>_<k>`), clear, set (the switches' ramps), `b<N>_set`, `b<N>` (a matched block's TDF2), the halfbands, step, tick (with the guard); the map from each line to the netlist's; the probes' nodes (`probeNodes`), readouts, fields and probing methods |
 | halfbands | `src/circuit/Halfbands.*` | the S1-S3 FIR and IIR coefficients of `experiments/hb-coefs.txt`, their responses, their FMinus |
 | generate | `src/circuit/Generate.cpp` | `generate()`: parse, plan, each block's derivation, emit; errors stop it before emission; `selfTestKey()` |
 | search | `src/circuit/Search.*` | the self-test's arithmetic: the stress matrix (switch positions among its axes), the 64x and T1 references (TR or BDF2), a unit's gates and their reduction, the candidates in the cost model's order, the method check's measure, warning and BDF2 twins, the ordered search, the no-configuration answer, the budget; `Choice`'s text |
@@ -1037,7 +1129,17 @@ prints each check's worst value, where it fell, and the report's figure beside i
   against step through its halfbands, H1 against the analog response 0.006 dB off); BDF2 on diodetone.cir (the step
   against the double BDF2 reference, -102.6 dB in band, gate -100; nonblocking in one and two channels); the method
   check (`ringing.cir` at 1x flagged, 12.8 dB of excess, the warning's text and its BDF2 twins; diodetone.cir at 4x not
-  flagged; screamer-clip.cir flagged without excess, no warning, no twin).
+  flagged; screamer-clip.cir flagged without excess, no warning, no twin);
+- **q.** the probes, on every netlist here (the playground library's three, diodetone.cir, otalp.cir and screamer.cir,
+  among them but for their comments): in one and two channels, the stress set's signals one after another with the
+  pots gliding (the switches stepping, the law inputs moving), in calls of 64 and 61 samples, the output bits the
+  module's without probes, with probes on and disarmed, and armed on each readable node in turn (four slots, each on
+  another) and on each unreadable one (with nodes out of range: those slots write nothing); then each readable node's
+  ring, a sine at L / 2.25 with the pots at their defaults, against the double reference of its voltage in the same
+  configuration (the chain's Holters forms with the emitted solver's steps, the node's block reading that node, the
+  matched designs as their double TDF2, the halfbands in double), within -60 dB of the node's RMS or 1e-4 V (the worst
+  -79.9 dB, switch.cir's d), `.output`'s ring tick's output times its scale, `prp_`, `pra_` and `prq_` the ring's
+  samples' peak, sum and sum of squares in float, bit for bit, and each node's `dc` the `.op` note's to 1e-9.
 
 As built, the TS block at 4x with ADAA measures T1 -78.7, T2 -73.5 (converged -73.6; the report -75.1) and T3 0.14 dB;
 example 1 as shipped T1 -93.1, T2 -79.0 (the report -79.8), T3 0.10 dB; the decision's failures -53.3 and -52.7 dB (the
@@ -1092,6 +1194,8 @@ Phase 2 and later (the design's §17); a netlist that asks for one is refused wi
   matched design of more than two states); interpolated (up-chain) law inputs.
 - **Netlists:** F, H, K, T and B elements; `.subckt`, `.param`, `.include` and `.lib`; several inputs, outputs or
   regions; per-block configurations; more built-in models than 1N914 and 1N4148.
+- **Probes:** a `.channels 2` module's second lane, differential and current probes, the inside of a matched design or
+  of a series string of diodes; a ring that init clears.
 - **FMinus and tooling:** `#line`, `fmaf`, `expm1f`, `omegaf`; ngspice goldens; `.cir` in `editors/vscode`;
   `Circuit.h` on the site's API page.
 - **The playground:** voice banks (`.channels 4`, VoiceBank); the circuit block sugar; `latency()` in the contract;
