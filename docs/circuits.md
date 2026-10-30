@@ -196,28 +196,29 @@ and `.func` are errors, as is any other directive.
 
 **Checks**, with the report's wording: a node with one connection; a node that reaches ground only through capacitors
 and current sources (I, G and OTA outputs: "its DC voltage is undefined (add 10meg to ground)"); a loop of voltage
-sources, E outputs and inductors ("a loop of voltage sources, E outputs and inductors (V1, L1): its DC current is
-undefined"); an unknown model (with the list, and the built-ins: "unknown model '1N4148X' (the models: 1N914; built in:
-1N914, 1N4148)"); a series string of two models ("diodes D3 and D4 in series through node 'k' have different models
-(1N914, 1N4148): a series string is of one model"); a pair's unequal RS ("antiparallel D1|D2 have unequal RS (10 and 5
-ohm): a pair shares one series resistor"); a diode whose anode and cathode are one node; a V source on `.input`'s node
-("the V source V1 is across .input's node 'in': the signal is .input's"); a node driven twice (by op amps, grounded E
-and V sources); an E whose controls are in two blocks ("E1's controls, 'a' and 'b', are in two blocks: an E reads one
-block's nodes (or its input)"); an op amp without negative feedback, or whose output is driven twice or is
-`.input`'s node; two nonlinear ports in a block ("multi-port Newton is Phase 2"); a feedback loop that crosses blocks
-(Phase 2); at the DC point, a biased port, a block singular at DC that DC sources drive, a pot that moves the DC point
-([below](#dc-and-the-offset-form)); a block that
+sources, E outputs and inductors, `.input`'s node and op amps' outputs counting as sources to ground ("a loop of voltage
+sources, E outputs and inductors (V1, L1): its DC current is undefined"; an inductor from `.input`'s node to a V
+source's, "(.input, V1, L1)"; from an op amp's output to ground, "(X1, L1)"); an unknown model (with the list, and the
+built-ins: "unknown model '1N4148X' (the models: 1N914; built in: 1N914, 1N4148)"); a series string of two models
+("diodes D3 and D4 in series through node 'k' have different models (1N914, 1N4148): a series string is of one model");
+a pair's unequal RS ("antiparallel D1|D2 have unequal RS (10 and 5 ohm): a pair shares one series resistor"); a diode
+whose anode and cathode are one node; a V source on `.input`'s node ("the V source V1 is across .input's node 'in': the
+signal is .input's"); a node driven twice (by op amps, grounded E and V sources); an E whose controls are in two blocks
+("E1's controls, 'a' and 'b', are in two blocks: an E reads one block's nodes (or its input)"); an op amp without
+negative feedback, or whose output is driven twice or is `.input`'s node; two nonlinear ports in a block ("multi-port
+Newton is Phase 2"); a feedback loop that crosses blocks (Phase 2); at the DC point, a biased port, a block whose DC
+equations DC sources make inconsistent, a pot that moves the DC point ([below](#dc-and-the-offset-form)); a block that
 reads two inputs or none, or that is off the chain from `.input` to `.output`; a singular block ("its equations are
 singular at drive=0, 44.1 kHz: an op amp without negative feedback, or a node cut off from the rest"); a port whose
-self-impedance K is not positive somewhere on that grid of rates and pots ("port D1|D2 sees a negative resistance
-(K = -123.2 ohm at 22.05 kHz): positive feedback around X1 is not supported yet"); an OTA with no feedback around it
-("OTA G1 has no feedback around it (an open-loop OTA, a VCA): Phase 2") or with positive feedback ("OTA G1 sees
-positive feedback (kd = -24.86 ohm at 22.05 kHz): its output drives its + input; not supported yet"); diode and OTA
-ports in one region ("one solver serves a region (per-family solvers are Phase 2)"); an OTA's gain negative somewhere
-on its grid; pot, input and law input names that are FMinus
-keywords, builtins or names the module uses (`set`, `tick`, `b2`, `p`, `v`, `ua`, `os1`, ...), and a module named by any
-word its text uses (`step`, `rate`, `t3`, `x`, ...: FMinus reads a module's name as a type wherever it appears). Names
-compare with their case, as FMinus's do: `.title Tone` with `.pot tone` is fine.
+self-impedance K is not positive somewhere on that grid of rates and pots ("port D1|D2 sees a negative resistance (K =
+-123.2 ohm at 22.05 kHz): positive feedback around X1 is not supported yet"); an OTA with no feedback around it ("OTA G1
+has no feedback around it (an open-loop OTA, a VCA): Phase 2") or with positive feedback ("OTA G1 sees positive feedback
+(kd = -24.86 ohm at 22.05 kHz): its output drives its + input; not supported yet"); diode and OTA ports in one region
+("one solver serves a region (per-family solvers are Phase 2)"); an OTA's gain negative somewhere on its grid; pot,
+input and law input names that are FMinus keywords, builtins or names the module uses (`set`, `tick`, `b2`, `p`, `v`,
+`ua`, `os1`, ...), and a module named by any word its text uses (`step`, `rate`, `t3`, `x`, ...: FMinus reads a module's
+name as a type wherever it appears). Names compare with their case, as FMinus's do: `.title Tone` with `.pot tone` is
+fine.
 
 ## Ports and laws
 
@@ -336,8 +337,14 @@ does.
 The circuit's DC operating point (`src/circuit/Dc.*`, the pipeline's stage 4) is solved at generation: each block in
 chain order, in double, at rate 0 (a capacitor's `gc = 0` opens it, an inductor's `rl = 0` shorts it), its DC sources
 (Constant sources of `assemble(plan, block, true)`: the V and I sources' values) on its right-hand side and its input
-the block before's output (`.input`'s is 0 V), at the default pots, by a dense LU with partial pivoting. Without a DC
-source every value is 0 (Phase 0's circuits: nothing to solve).
+the block before's output (`.input`'s is 0 V), at the default pots, by a dense LU with partial pivoting. A diode's port
+is solved open (its current 0, its row and current dropped): its `p` at DC is the voltage the network puts across it,
+so an inductor across it, which shorts it at DC, leaves nothing undefined; only where the open network leaves that
+voltage free (the diode a node's only DC path) is the port shorted instead (Holters' v-form, `v = 0`). Branches in
+parallel at DC can share a current the equations leave free (a pot's 0-ohm end across an inductor): the elimination
+then takes the pots' sections' currents last, so such a section carries none, as at every other position of its pot,
+and checks the residual; only an inconsistent block (a DC current with nowhere to go), or one that leaves its port's
+value free, is an error. Without a DC source every value is 0 (Phase 0's circuits: nothing to solve).
 
 The module runs in **offsets** from that point: its states, ports, inputs and readouts are differences from it, so
 `init` and `clear` set 0, a V source is a 0 V source (a short: its row is kept, its value's column dropped), a grounded
@@ -347,10 +354,12 @@ literal, after the guard's fade (a reset returns the circuit to its DC point), w
 gain_ : z0) + 4.5f;` (`divider.cir: note: the output's DC operating point, V(out) = 4.5 V, is tick's constant`). `step`
 and the fields are offsets, and so is what `trace` reads; the self-test measures tick less the constant. A port with a
 DC voltage across it (more than 1 nV of its open-circuit `p` at DC) is an error at its element, `port D1 is biased at DC
-(0.573 V): biased ports need the offset formulation (Phase 2)`, as is a pot that moves the DC point (each pot at 0, 0.5
-and 1, the others at their defaults: `pot 'x' moves the DC operating point (V(a) is 4.5 at x 0.5, 0 at 0): the module
-runs in offsets from one DC point (one a pot moves is Phase 2's)`) and a block singular at DC that DC sources drive (an
-op amp with only capacitors around it: an integrator with no DC source has no DC point to need, and starts at 0).
+(0.573 V): biased ports need the offset formulation (Phase 2)` (or, a current only the diode can take, `(0.001 A
+through it)`), as is a pot that moves the DC point (each pot at 0, 0.5 and 1, the others at their defaults, the
+defaults' point must still solve every block's equations: `pot 'x' moves the DC operating point (V(a) is 4.5 at x 0.5,
+0 at 0): the module runs in offsets from one DC point (one a pot moves is Phase 2's)`) and a block whose DC equations
+are inconsistent while DC sources drive it (an op amp with only capacitors around it and a DC current into it: an
+integrator with no DC source has no DC point to need, and starts at 0).
 
 `examples/circuits/screamer-biased.cir` is `screamer.cir` with its 4.5 V reference drawn (V1, and R1 and R8 to it): its
 DC point puts 4.5 V on the op amps' inputs and outputs and 0 V across the diodes and at the output (after C7), and it
@@ -591,17 +600,18 @@ Two more choices the code made:
 
 `.prewarp on` (or `Options::prewarp`; off by default, the user's ruling) moves an OTA one-pole's cutoff law from the
 circuit's to the trapezoidal rule's prewarped one, so its -3 dB point is the analog circuit's at every gain, without
-ADAA (with it, below, only nearer). At
-generation the block's small-signal pole is fitted as affine in the gain, `pole = a + b g` (rad/s), from the ends of
-the gain's range on its grid, and checked at the middle (a residual of 1e-6 at most, else a warning that prewarp is
-ignored); a law input's range makes a gain's, and the fit covers the OTA's own 10 MEG leak (otalp.cir's stage: `a =
--1 / (10 MEG 1 nF) = -100`, `b = -att / (2 Vt 1 nF) = -4.2435e7`; at 10 uA the leak is a fifth of the pole, which a
-fit proportional to `g` alone would miss). Where `g` is computed (each host sample for a law input, `b<N>_set` for
-pots, `init` for a constant), it becomes `g' = (sign(a + b g) 2 fs' tan(w) - a) / b`, `w = |a + b g| / 2 fs'` below
-1.5, with `fs'` the block's design rate (2/3 of its rate with ADAA): the method `pw<N>_`, one `tanf` a host sample, off
-the recursion's chain. The notes print `a` and `b`. It applies to an OTA in a one-state block whose network has no pot
-(the fit is made at generation); elsewhere it warns that it is ignored, as it does in a netlist without an OTA. The
-self-test's T1 reference prewarps as the module does; the 64x reference, the circuit's truth, does not.
+ADAA (with it, below, only nearer). At generation the block's small-signal pole is fitted as affine in the gain, `pole =
+a + b g` (rad/s), from the ends of the gain's range on its grid, and checked at the middle (a residual of 1e-6 at most,
+else a warning that prewarp is ignored). It applies to a block with one state (a capacitor or an inductor) whose network
+no pot moves (no pot, no `{expr}` resistor, no E or G gain of pots); any other OTA warns that prewarp is ignored for it.
+A law input's range makes a gain's, and the fit covers the OTA's own 10 MEG leak (otalp.cir's stage: `a = -1 / (10 MEG 1
+nF) = -100`, `b = -att / (2 Vt 1 nF) = -4.2435e7`; at 10 uA the leak is a fifth of the pole, which a fit proportional to
+`g` alone would miss). Where `g` is computed (each host sample for a law input, `b<N>_set` for pots, `init` for a
+constant), it becomes `g' = (sign(a + b g) 2 fs' tan(w) - a) / b`, `w = |a + b g| / 2 fs'` below 1.5, with `fs'` the
+block's design rate (2/3 of its rate with ADAA): the method `pw<N>_`, one `tanf` a host sample, off the recursion's
+chain. The notes print `a` and `b`. It applies to an OTA in a one-state block whose network has no pot (the fit is made
+at generation); elsewhere it warns that it is ignored, as it does in a netlist without an OTA. The self-test's T1
+reference prewarps as the module does; the 64x reference, the circuit's truth, does not.
 
 At 1x, 44.1 and 48 kHz, cutoffs of 1, 4 and 10 kHz, a 10 mV signal (`example-circuits --check`, m): with `.prewarp on`
 the -3 dB point is the analog's within 0.0001 %; off, the trapezoidal rule's warp, -0.14 to -0.17 % at 1 kHz, -2.2 to
@@ -663,10 +673,16 @@ Where the design left a choice, or the code proved it wrong:
   with an output terminal grounded drives the other, a cut as an op amp's output, in its controls' block (whose regular
   nodes must be one block's: "controls in two blocks" is that check). A gain is a float coefficient's (1e-30 to 1e30 in
   size, negative for an inverting E, not 0) or an expression of pots, `b<N>_set`'s `k_<E>`.
-- **The DC point is checked over the pots.** The offsets are exact only from one DC point, so each pot at 0, 0.5 and 1
-  (the others at their defaults) must leave it where the defaults put it (to 1e-9 of each value); one that moves it is
-  an error (a biasing trim is Phase 2's, with the offset formulation). A block singular at DC is an error only when DC
-  sources drive it; with none, its point is 0 (an integrator starts at 0 V, as in Phase 0).
+- **The DC point is checked over the pots.** The offsets are exact only from one DC point, so at each pot at 0, 0.5
+  and 1 (the others at their defaults) the defaults' point must still be a DC point: every block's equations there hold
+  at it, each row to 1e-9 of its terms (and 1e-12 of the block's largest row). A residual, not a comparison of
+  solutions, so a position that leaves a current's share free (a pot's 0-ohm end across an inductor) passes; one that
+  moves the point is an error (a biasing trim is Phase 2's, with the offset formulation). A block singular at DC is an
+  error only when its DC equations are inconsistent, or leave its port's value free, while DC sources drive it; with
+  none, its point is 0 (an integrator starts at 0 V, as in Phase 0).
+- **A diode's port is solved open at DC**, its `p` the voltage across it with its current 0, and shorted (Holters'
+  v-form) only when the open network leaves that voltage free; a DC current only the diode can take is a bias too,
+  given in amps.
 - **The output's DC is added after the fade**, so a reset returns the module to its DC point, not to 0 V, and the
   self-test measures tick less it (its references run in offsets).
 - **`clear()`'s comment** now says what it sets, "0 in the offsets the module runs in", on every module (Phase 0's said
