@@ -3,6 +3,7 @@
 #include "circuit/Search.h"
 
 #include "circuit/Analysis.h"
+#include "circuit/Linear.h"
 #include "circuit/Mna.h"
 #include "circuit/Reference.h"
 
@@ -553,21 +554,60 @@ namespace fminus::circuit
 
     // ---- the references ---------------------------------------------------------------------------------------------
 
-    Reference64 reference64(const Plan& plan, const StressMatrix& matrix, int unit, const Stop& stop)
+    double highEnergy(std::span<const double> y, int m, const StressShape& shape, double top)
+    {
+        const std::size_t first = static_cast<std::size_t>(m) * shape.warm;
+        const std::size_t count = static_cast<std::size_t>(m) * shape.window;
+        std::vector<std::complex<double>> spectrum(count);
+        for (std::size_t i = 0; i < count && first + i < y.size(); ++i)
+            spectrum[i] = y[first + i];
+        fft(spectrum);
+        const double binHz = kHostRate / static_cast<double>(shape.window);   // the same at any m
+        double energy = 0;
+        for (std::size_t k = 0; k <= count / 2; ++k)
+        {
+            const double f = static_cast<double>(k) * binHz;
+            if (f >= 20000 && f <= top + 1e-9)
+                energy += std::norm(spectrum[k]);
+        }
+        // as power: a sinusoid's |Y(k)|^2 grows with the window's length squared, which differs with m
+        return energy / (static_cast<double>(count) * static_cast<double>(count));
+    }
+
+    Reference64 reference64(const Plan& plan, const StressMatrix& matrix, int unit, const Stop& stop, bool high)
     {
         Reference64 r;
         const StressSignal& signal = matrix.signal(unit);
         const int factor = matrix.shape.referenceFactor;
         const std::size_t n = static_cast<std::size_t>(factor) * matrix.shape.host();
-        const ChainForm chain = chainForm(plan, matrix, unit, 0, static_cast<int>(plan.blocks.size()) - 1,
-                                          kHostRate * factor, factor, n, false, false, Method::Tr);
         RefOptions o;
         o.stop = stop;
         RefStats stats;
-        const std::vector<double> y =
-            simulateChain(chain.blocks, signalSamples(matrix, signal, factor, n), o, &stats, chain.gains);
+        const std::vector<double> u = signalSamples(matrix, signal, factor, n);
+        const int count = static_cast<int>(plan.blocks.size());
+        // with `high`, the chain in two runs, through the region's last block and after it: the same numbers (each
+        // block's output is the next one's input), the region's output kept between
+        const int split = high && plan.regionFirst >= 0 ? plan.regionLast : count - 1;
+        const ChainForm upTo =
+            chainForm(plan, matrix, unit, 0, split, kHostRate * factor, factor, n, false, false, Method::Tr);
+        std::vector<double> y = simulateChain(upTo.blocks, u, o, &stats, upTo.gains);
         if (stats.stopped)
             return r;
+        if (split < count - 1)
+        {
+            for (int k = 0; k < 4; ++k)
+                r.high[static_cast<std::size_t>(k)] = highEnergy(y, factor, matrix.shape, kHostRate / 2);
+            const ChainForm after = chainForm(plan, matrix, unit, split + 1, count - 1, kHostRate * factor, factor, n,
+                                              false, false, Method::Tr);
+            y = simulateChain(after.blocks, y, o, &stats, after.gains);
+            if (stats.stopped)
+                return r;
+        }
+        else if (high)
+        {
+            for (int k = 0; k < 4; ++k)
+                r.high[static_cast<std::size_t>(k)] = highEnergy(y, factor, matrix.shape, kHostRate / 2);
+        }
         const auto rate = static_cast<std::size_t>(factor);
         const std::span<const double> window =
             std::span<const double>(y).subspan(rate * matrix.shape.warm, rate * matrix.shape.window);
@@ -599,7 +639,7 @@ namespace fminus::circuit
     }
 
     ReferenceT1 referenceT1(const Plan& plan, const StressMatrix& matrix, int unit, int oversample, bool adaa,
-                            Method method, const Stop& stop)
+                            Method method, const Stop& stop, bool high)
     {
         if (adaa && method == Method::Bdf2)
             throw std::logic_error("referenceT1: ADAA is the trapezoidal rule's");
@@ -619,8 +659,89 @@ namespace fminus::circuit
             return r;
         r.window = decimateWindow(y, oversample, matrix.shape.warm, matrix.shape.window);
         r.unconverged = stats.unconverged;
+        if (high)
+            r.high = highEnergy(y, oversample, matrix.shape, kHostRate / 2);
         r.done = true;
         return r;
+    }
+
+    std::vector<Ringing> ringingFlags(const Plan& plan, const std::vector<int>& oversamples)
+    {
+        std::vector<Ringing> out;
+        for (int os : oversamples)
+        {
+            Ringing r;
+            r.oversample = os;
+            for (int b = std::max(plan.regionFirst, 0); plan.regionFirst >= 0 && b <= plan.regionLast; ++b)
+            {
+                const Block& block = plan.blocks[static_cast<std::size_t>(b)];
+                if (!block.port)
+                    continue;
+                const RingingCheck check = ringingCheck(plan, b, kHostRate * os);
+                if (!check.flagged)
+                    continue;
+                r.block = b;
+                r.eigenvalue = check.eigenvalue;
+                break;
+            }
+            out.push_back(r);
+        }
+        return out;
+    }
+
+    std::string ringingWarning(const Plan& plan, const Ringing& r, const std::vector<Ringing>& all)
+    {
+        // the smallest oversampling above that is not flagged, or measured without excess
+        int next = 0;
+        for (int os : {2, 4, 8})
+        {
+            if (os <= r.oversample || next != 0)
+                continue;
+            bool known = false;
+            bool clean = false;
+            for (const Ringing& other : all)
+            {
+                if (other.oversample != os)
+                    continue;
+                known = true;
+                clean = other.block < 0 || (other.measured && !other.rings());
+            }
+            if (!known)
+                clean = ringingFlags(plan, {os}).front().block < 0;
+            if (clean)
+                next = os;
+        }
+        return std::format("at {}x block {} rings at Nyquist ({:.0f} dB more above 20 kHz than the 64x reference): {}",
+                           r.oversample, plan.blocks[static_cast<std::size_t>(r.block)].index, r.excess,
+                           next != 0 ? std::format(".oversample {} or .method bdf2", next) : std::string(".method bdf2"));
+    }
+
+    std::vector<Candidate> withTwins(const Plan& plan, const std::vector<Candidate>& ordered,
+                                     const std::vector<Ringing>& ringing)
+    {
+        std::vector<Candidate> out;
+        auto rings = [&](int os)
+        {
+            return std::any_of(ringing.begin(), ringing.end(),
+                               [&](const Ringing& r) { return r.oversample == os && r.rings(); });
+        };
+        for (const Candidate& c : ordered)
+        {
+            out.push_back(c);
+            if (c.method != Method::Tr || !rings(c.oversample))
+                continue;
+            Candidate twin = c;
+            twin.adaa = false;
+            twin.method = Method::Bdf2;
+            twin.cost = modelCost(plan, twin.oversample, false, twin.solver, Method::Bdf2);
+            const bool seen = std::any_of(out.begin(), out.end(), [&](const Candidate& x)
+                                          { return x.method == Method::Bdf2 && x.oversample == twin.oversample &&
+                                                   x.solver.guess == twin.solver.guess &&
+                                                   x.solver.steps == twin.solver.steps; });
+            if (!seen)
+                out.push_back(twin);
+        }
+        return out;
     }
 
     // ---- a unit's gates, and the verdict ----------------------------------------------------------------------------

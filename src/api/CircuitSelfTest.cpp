@@ -17,6 +17,7 @@
 #include "fminus/FMinus.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
@@ -183,8 +184,20 @@ namespace fminus::circuit
                 return finish();
             }
             const StressMatrix matrix = stressMatrix(p, shape);
-            const std::vector<Candidate> order = candidates(p);
+            std::vector<Candidate> order = candidates(p);
             const int units = matrix.units();
+            // the method check (stage 7): the oversampling factors at which a region block's linearised trapezoidal
+            // A has an eigenvalue near -1, which the references below measure
+            std::vector<int> factors;
+            for (const Candidate& c : order)
+            {
+                if (c.method == Method::Tr && std::find(factors.begin(), factors.end(), c.oversample) == factors.end())
+                    factors.push_back(c.oversample);
+            }
+            std::sort(factors.begin(), factors.end());
+            std::vector<Ringing> ringing = ringingFlags(p, factors);
+            const bool flagged =
+                std::any_of(ringing.begin(), ringing.end(), [](const Ringing& r) { return r.block >= 0; });
             notes.note({}, std::format("self-test {}: {} open; {} point{} x {} signals = {} units, L = {:g} V ({}); {} "
                                        "candidates, cheapest first",
                                        p.key, openText(cfg), matrix.points.size(), matrix.points.size() == 1 ? "" : "s",
@@ -258,7 +271,7 @@ namespace fminus::circuit
                         return;
                     if (!matrix.runs(u))
                         return;
-                    ref64[static_cast<std::size_t>(u)] = reference64(p, matrix, u, stop);
+                    ref64[static_cast<std::size_t>(u)] = reference64(p, matrix, u, stop, flagged);
                 });
             if (cancelled())
                 return stopped();
@@ -269,6 +282,76 @@ namespace fminus::circuit
             // the candidates, each with its configuration's T1 references (shared by its Newton steps)
             std::map<std::tuple<int, bool, Method>, std::vector<ReferenceT1>> t1;
             bool overBudget = false;
+            // a flagged factor's trapezoidal reference (no ADAA), with its energy above 20 kHz: against the 64x
+            // reference's in the same band, summed over the units both run
+            for (Ringing& r : ringing)
+            {
+                if (r.block < 0)
+                    continue;
+                const Block& block = p.blocks[static_cast<std::size_t>(r.block)];
+                notes.note({}, std::format("self-test: at {}x block {}'s linearised trapezoidal A has an eigenvalue at "
+                                           "{:.4f} (within 0.1 of -1): it may ring at Nyquist",
+                                           r.oversample, block.index, r.eigenvalue.real()));
+                if (cancelled())
+                    return stopped();
+                if (!afford(stepsT1(matrix, r.oversample), std::format("the T1 references at {}x", r.oversample)))
+                    return finish();
+                std::vector<ReferenceT1> refs(static_cast<std::size_t>(units));
+                run(units,
+                    [&](int u)
+                    {
+                        if (!matrix.signal(u).t1 || !matrix.runs(u) || cancelled())
+                            return;
+                        refs[static_cast<std::size_t>(u)] =
+                            referenceT1(p, matrix, u, r.oversample, false, Method::Tr, stop, true);
+                    });
+                if (cancelled())
+                    return stopped();
+                double here = 0;
+                double truth = 0;
+                std::size_t band = 0;
+                while ((1 << band) < r.oversample)
+                    ++band;
+                for (int u = 0; u < units; ++u)
+                {
+                    const ReferenceT1& a = refs[static_cast<std::size_t>(u)];
+                    const Reference64& b = ref64[static_cast<std::size_t>(u)];
+                    if (!a.done || !b.done || a.high < 0)
+                        continue;
+                    here += a.high;
+                    truth += b.high[band];
+                }
+                r.measured = true;
+                r.excess = 10 * std::log10(std::max(here, 1e-300) / std::max(truth, 1e-300));
+                notes.note({}, std::format("self-test: at {}x block {} puts {:.1f} dB more above 20 kHz than the 64x "
+                                           "reference{}",
+                                           r.oversample, block.index, r.excess,
+                                           r.rings() ? ": it rings" : ": no ringing (6 dB is the gate)"));
+                t1.emplace(std::make_tuple(r.oversample, false, Method::Tr), std::move(refs));
+            }
+            // each factor that rings, a warning (once every flagged factor is measured: it suggests the next that
+            // does not)
+            for (const Ringing& r : ringing)
+            {
+                if (!r.rings())
+                    continue;
+                const Block& block = p.blocks[static_cast<std::size_t>(r.block)];
+                const Loc loc = p.netlist.elements[static_cast<std::size_t>(block.elements.front())].loc;
+                out.warnings +=
+                    std::format("{}:{}:{}: warning: {}\n", file, loc.line, loc.column, ringingWarning(p, r, ringing));
+            }
+            // a ringing factor's candidates each get a BDF2 twin right after them (no ADAA: it is the trapezoidal
+            // rule's), where the integrator is open and ADAA not named on
+            if (cfg.methodOpen && !(cfg.adaa && !cfg.adaaOpen))
+            {
+                const std::size_t before = order.size();
+                order = withTwins(p, order, ringing);
+                if (order.size() > before)
+                    notes.note({}, std::format("self-test: {} BDF2 twin{} join the candidates, each right after its "
+                                               "trapezoidal candidate ({} candidates)",
+                                               order.size() - before, order.size() - before == 1 ? "" : "s",
+                                               order.size()));
+            }
             int index = 0;
             const auto measure = [&](const Candidate& c) -> std::optional<Verdict>
             {

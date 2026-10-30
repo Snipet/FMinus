@@ -2361,6 +2361,22 @@ namespace fminus::circuit
         // ---- prewarp: each OTA's small-signal pole, fitted as a + b g ----
         if (cfg.prewarp)
             fitPrewarp(p, systems, messages);
+
+        // ---- the method check (stage 7): a region port block whose linearised trapezoidal A has an eigenvalue near
+        // -1 may ring at Nyquist; the self-test measures whether it does ----
+        for (int i = std::max(p.regionFirst, 0); p.regionFirst >= 0 && i <= p.regionLast; ++i)
+        {
+            const Block& b = p.blocks[static_cast<std::size_t>(i)];
+            if (!b.port || b.method != Method::Tr)
+                continue;
+            const RingingCheck check = ringingCheck(p, i, 48000.0 * b.rateFactor);
+            if (check.flagged)
+                messages.note({}, std::format("{}: an eigenvalue of its linearised trapezoidal A at {}x, {:.4f}, is "
+                                              "within 0.1 of -1 (the port at {:.3g} S): it may ring at Nyquist (the "
+                                              "self-test measures it)",
+                                              blockLabel(b), b.rateFactor, check.eigenvalue.real(),
+                                              check.conductance));
+        }
         return p;
     }
 } // namespace fminus::circuit

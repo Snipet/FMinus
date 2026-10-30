@@ -239,7 +239,8 @@ namespace fminus
                                             // or when the netlist has errors
             bool cancelled = false;         // SelfTestOptions::cancelled stopped it
             std::string errors;             // the netlist's errors, as generate() gives them
-            std::string warnings;           // and its warnings
+            std::string warnings;           // and its warnings, then the self-test's own: a block that rings
+                                            // at Nyquist ("at 1x block 2 rings at Nyquist (...): .method bdf2")
             std::string notes;              // "pedal.cir: note: ..." lines: the stress matrix, each candidate tried
                                             // in order with its model cost and verdict, and the answer
             int candidates = 0;             // how many candidates it measured

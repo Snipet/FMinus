@@ -9,6 +9,8 @@
 #include "circuit/Plan.h"
 #include "fminus/Circuit.h"
 
+#include <array>
+#include <complex>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -160,9 +162,13 @@ namespace fminus::circuit
         double h3 = 0;
         std::vector<double> power;
         long unconverged = 0;
+        // with `high`: the region's output's energy (its last block's, at 64x, over the window) from 20 kHz to the
+        // Nyquist of 1, 2, 4 and 8 times the host rate, the bands the ringing check compares
+        std::array<double, 4> high{};
     };
 
-    Reference64 reference64(const Plan& plan, const StressMatrix& matrix, int unit, const Stop& stop);
+    Reference64 reference64(const Plan& plan, const StressMatrix& matrix, int unit, const Stop& stop,
+                            bool high = false);
 
     // A unit's T1 reference: the region's blocks in double at the candidate's rate, ADAA and integrator, solved to
     // convergence, on the unit's regionInput, decimated to the host's window.
@@ -171,10 +177,41 @@ namespace fminus::circuit
         bool done = false;
         std::vector<double> window;
         long unconverged = 0;
+        double high = -1;   // with `high`: its output's energy from 20 kHz to the region's Nyquist, over the window
     };
 
     ReferenceT1 referenceT1(const Plan& plan, const StressMatrix& matrix, int unit, int oversample, bool adaa,
-                            Method method, const Stop& stop);
+                            Method method, const Stop& stop, bool high = false);
+
+    // A signal's energy over the window (at m times the host rate, the shape's window of host samples from its warm
+    // up) between 20 kHz and `top` Hz: the sum of |Y(k)|^2 over those bins of its FFT.
+    double highEnergy(std::span<const double> y, int m, const StressShape& shape, double top);
+
+    // The method check, at the self-test (report §6.2; fminus.md §5, stage 7): at an oversampling, the region's first
+    // port block whose linearised trapezoidal A has an eigenvalue within 0.1 of -1 (Linear.h's ringingCheck, at the
+    // plain design rate), and what was measured of it: the energy the region's trapezoidal output (the converged
+    // reference, no ADAA) puts between 20 kHz and its Nyquist against the 64x reference's, summed over the units
+    // both measure (the sines up to L). Above +6 dB it rings: the self-test warns, and puts each candidate's BDF2 twin
+    // (no ADAA) right after it.
+    struct Ringing
+    {
+        int oversample = 1;
+        int block = -1;            // chain index; -1: nothing flagged
+        std::complex<double> eigenvalue;
+        bool measured = false;
+        double excess = 0;         // dB
+        bool rings() const
+        {
+            return measured && excess > 6;
+        }
+    };
+
+    std::vector<Ringing> ringingFlags(const Plan& plan, const std::vector<int>& oversamples);
+
+    // "at 1x block 2 rings at Nyquist (12 dB more above 20 kHz than the 64x reference): .oversample 4 or .method bdf2"
+    // (the oversampling suggested is the smallest above that is not flagged, or flagged without excess).
+    std::string ringingWarning(const Plan& plan, const Ringing& r, const std::vector<Ringing>& all);
+
 
     // A unit's gates for one candidate, from what its module computed: `steps`, the region's step over the signal at
     // the region's rate; `ticks`, tick over it at the host's.
@@ -265,6 +302,11 @@ namespace fminus::circuit
     // candidates()'s order on any list: by cost, then within 5 % of the cheapest of a group, ADAA first, then fewer
     // Newton steps (stable: an equal pair keeps its order).
     void orderCandidates(std::vector<Candidate>& candidates);
+
+    // `ordered` with each candidate whose oversampling rings followed by its BDF2 twin (no ADAA, its solver), each twin
+    // once, costed by the model.
+    std::vector<Candidate> withTwins(const Plan& plan, const std::vector<Candidate>& ordered,
+                                     const std::vector<Ringing>& ringing);
 
     // The search's record: each candidate measured, in order, and the answer.
     struct Tried

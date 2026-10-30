@@ -453,6 +453,7 @@ namespace fminus::circuit
         double is = 0;
         double nvt = 0;
         double k = 0;   // 2 Is K (a pair), Is K (one diode, an asymmetric pair's forward one), K (an OTA: kd)
+        double kd = 0;  // the port's self-impedance K (a diode's) or loop kd (an OTA's), ohms
         double k2 = 0;    // an asymmetric pair's other diode: Is2 K
         double nvt2 = 0;  // and its N2 Vt
         double g = 1;   // an OTA's gain, amps, when no stream of gains is given (Reference.h)
@@ -478,6 +479,12 @@ namespace fminus::circuit
 
     // A linear block's analog response at s: its output per volt of its input, with each capacitor an admittance s C.
     std::complex<double> analog(const Plan& plan, int block, std::complex<double> s, const std::vector<double>& pots);
+
+    // A port block's analog short-circuit current at s: its port's current per volt of its input with the port shorted
+    // (v = 0; an OTA's control voltage per volt of its input with its current 0), the port's largest current at a
+    // level being about this times the level where it conducts hard.
+    std::complex<double> analogPortCurrent(const Plan& plan, int block, std::complex<double> s,
+                                           const std::vector<double>& pots);
 
     // The same with the system and pivots at hand.
     std::complex<double> analog(const System& system, const Pivots& pivots, const Plan& plan, int block,

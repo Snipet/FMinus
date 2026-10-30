@@ -10,6 +10,11 @@
 # RUN: diff %t.1.fm %t.4.fm
 
 # NOTES:      clipper-pot.cir: note: self-test 087ad67714f6249a: .oversample, .adaa, .solver, .method open; 3 points x 17 signals = 51 units, L = 4.5 V (.target level); 16 candidates, cheapest first
+# The method check: at 1x, 2x and 4x the block's linearised A has an eigenvalue near -1, and the references measure no
+# ringing there (no BDF2 twins).
+# NOTES-NEXT: clipper-pot.cir: note: self-test: at 1x block 1's linearised trapezoidal A has an eigenvalue at {{.*}} (within 0.1 of -1): it may ring at Nyquist
+# NOTES-NEXT: clipper-pot.cir: note: self-test: at 1x block 1 puts {{.*}} dB more above 20 kHz than the 64x reference: no ringing (6 dB is the gate)
+# NOTES:      clipper-pot.cir: note: self-test: at 4x block 1 puts {{.*}}: no ringing (6 dB is the gate)
 # NOTES-NEXT: clipper-pot.cir: note: self-test candidate 1: 1x, omega(1), 152 model cycles: {{.*}}: fails (T2 {{.*}})
 # NOTES-NEXT: clipper-pot.cir: note: self-test candidate 2: 1x, ADAA, omega(1), 209 model cycles: {{.*}}: fails
 # NOTES:      clipper-pot.cir: note: self-test candidate 9: 4x, omega(1), 680 model cycles: {{.*}}: fails (T1 {{.*}})

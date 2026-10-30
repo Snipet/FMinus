@@ -197,6 +197,7 @@ namespace
                                             const CircuitSettings& settings, CircuitLog& log)
     {
         fminus::circuit::Options options;
+        std::string selfTestWarnings;
         if (settings.selfTest)
         {
             fminus::circuit::SelfTestOptions test;
@@ -209,10 +210,27 @@ namespace
                 return {};
             }
             log.messages += tested.notes;
+            selfTestWarnings = tested.warnings;
             options.chosen = tested.choice;
         }
         fminus::circuit::Result result = fminus::circuit::generate(text, name, options);
-        log.messages += result.errors + result.warnings + (settings.notes ? result.notes : std::string());
+        log.messages += result.errors + result.warnings;
+        if (settings.selfTest)
+        {
+            // the self-test's own warnings (a block that rings), which generate does not repeat
+            std::size_t at = 0;
+            const std::string& warnings = selfTestWarnings;
+            while (at < warnings.size())
+            {
+                const std::size_t end = std::min(warnings.find('\n', at), warnings.size());
+                const std::string line = warnings.substr(at, end - at + 1);
+                if (result.warnings.find(line) == std::string::npos)
+                    log.messages += line;
+                at = end + 1;
+            }
+        }
+        if (settings.notes)
+            log.messages += result.notes;
         log.failed = log.failed || !result.errors.empty();
         log.results[name + ".fm"] = result;
         return result;

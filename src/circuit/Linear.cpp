@@ -2,6 +2,8 @@
 // (Linear.h).
 #include "circuit/Linear.h"
 
+#include "circuit/Laws.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -237,5 +239,218 @@ namespace fminus::circuit
         if (tr.order == 2)
             bind("ma2", m.a2);
         return coefficients;
+    }
+
+    // ---- the method check -------------------------------------------------------------------------------------------
+
+    std::optional<std::vector<std::complex<double>>> eigenvalues(std::vector<std::vector<double>> a)
+    {
+        using C = std::complex<double>;
+        const std::size_t n = a.size();
+        std::vector<C> out;
+        if (n == 0)
+            return out;
+        // Hessenberg: Householder reflections H = I - 2 v v^T on rows and columns k + 1 .. n - 1
+        for (std::size_t k = 0; k + 2 < n; ++k)
+        {
+            double norm = 0;
+            for (std::size_t i = k + 1; i < n; ++i)
+                norm += a[i][k] * a[i][k];
+            norm = std::sqrt(norm);
+            if (norm == 0)
+                continue;
+            const double alpha = a[k + 1][k] > 0 ? -norm : norm;
+            std::vector<double> v(n, 0.0);
+            for (std::size_t i = k + 1; i < n; ++i)
+                v[i] = a[i][k];
+            v[k + 1] -= alpha;
+            double vn = 0;
+            for (std::size_t i = k + 1; i < n; ++i)
+                vn += v[i] * v[i];
+            vn = std::sqrt(vn);
+            if (vn == 0)
+                continue;
+            for (std::size_t i = k + 1; i < n; ++i)
+                v[i] /= vn;
+            for (std::size_t j = 0; j < n; ++j)
+            {
+                double dot = 0;
+                for (std::size_t i = k + 1; i < n; ++i)
+                    dot += v[i] * a[i][j];
+                for (std::size_t i = k + 1; i < n; ++i)
+                    a[i][j] -= 2 * v[i] * dot;
+            }
+            for (std::size_t i = 0; i < n; ++i)
+            {
+                double dot = 0;
+                for (std::size_t j = k + 1; j < n; ++j)
+                    dot += a[i][j] * v[j];
+                for (std::size_t j = k + 1; j < n; ++j)
+                    a[i][j] -= 2 * dot * v[j];
+            }
+        }
+        std::vector<std::vector<C>> h(n, std::vector<C>(n));
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            for (std::size_t j = 0; j < n; ++j)
+                h[i][j] = a[i][j];
+        }
+        // the shifted QR algorithm on the active window [lo, hi], by Givens rotations
+        std::size_t hi = n - 1;
+        int iterations = 0;
+        int total = 0;
+        while (true)
+        {
+            if (hi == 0)
+            {
+                out.push_back(h[0][0]);
+                break;
+            }
+            std::size_t lo = hi;
+            while (lo > 0 && std::abs(h[lo][lo - 1]) > 1e-15 * (std::abs(h[lo][lo]) + std::abs(h[lo - 1][lo - 1])))
+                --lo;
+            if (lo == hi)
+            {
+                out.push_back(h[hi][hi]);
+                --hi;
+                iterations = 0;
+                continue;
+            }
+            if (++total > 100 * static_cast<int>(n))
+                return std::nullopt;
+            // Wilkinson's shift: the trailing 2 x 2's eigenvalue nearer its corner (an exceptional one now and then)
+            const C p = h[hi - 1][hi - 1];
+            const C q = h[hi - 1][hi];
+            const C r = h[hi][hi - 1];
+            const C d = h[hi][hi];
+            const C mean = 0.5 * (p + d);
+            const C root = std::sqrt(mean * mean - (p * d - q * r));
+            C mu = std::abs(mean + root - d) < std::abs(mean - root - d) ? mean + root : mean - root;
+            if (++iterations % 11 == 0)
+                mu = d + std::abs(r);
+            for (std::size_t k = lo; k <= hi; ++k)
+                h[k][k] -= mu;
+            std::vector<std::pair<double, C>> rotations;
+            for (std::size_t k = lo; k < hi; ++k)
+            {
+                const C x = h[k][k];
+                const C y = h[k + 1][k];
+                const double norm = std::sqrt(std::norm(x) + std::norm(y));
+                double c = 1;
+                C sn = 0;
+                if (norm > 0)
+                {
+                    if (std::abs(x) == 0)
+                    {
+                        c = 0;
+                        sn = std::conj(y) / std::abs(y);
+                    }
+                    else
+                    {
+                        c = std::abs(x) / norm;
+                        sn = (x / std::abs(x)) * std::conj(y) / norm;
+                    }
+                }
+                rotations.emplace_back(c, sn);
+                for (std::size_t j = k; j <= hi; ++j)
+                {
+                    const C top = h[k][j];
+                    const C bottom = h[k + 1][j];
+                    h[k][j] = c * top + sn * bottom;
+                    h[k + 1][j] = -std::conj(sn) * top + c * bottom;
+                }
+            }
+            for (std::size_t k = lo; k < hi; ++k)
+            {
+                const auto [c, sn] = rotations[k - lo];
+                for (std::size_t i = lo; i <= std::min(k + 2, hi); ++i)
+                {
+                    const C left = h[i][k];
+                    const C right = h[i][k + 1];
+                    h[i][k] = c * left + std::conj(sn) * right;
+                    h[i][k + 1] = -sn * left + c * right;
+                }
+            }
+            for (std::size_t k = lo; k <= hi; ++k)
+                h[k][k] += mu;
+        }
+        return out;
+    }
+
+    RingingCheck ringingCheck(const Plan& plan, int blockIndex, double designRate)
+    {
+        const Block& block = plan.blocks.at(static_cast<std::size_t>(blockIndex));
+        RingingCheck out;
+        if (!block.port)
+            return out;
+        const PortDef& port = *block.port;
+        const double level =
+            plan.netlist.target.level ? *plan.netlist.target.level : std::fabs(plan.inputScale);
+        // the conductances: (G, pots)
+        std::vector<std::pair<double, std::vector<double>>> points;
+        for (const std::vector<double>& pots : potGrid(plan, block))
+        {
+            if (port.smooth())
+            {
+                // tanh's slope is largest at v = 0: g / 2 Vt, at the gains the law inputs' ends give
+                std::vector<double> lows;
+                std::vector<double> highs;
+                for (const LawInfo& l : plan.laws)
+                {
+                    lows.push_back(l.low);
+                    highs.push_back(l.high);
+                }
+                for (const std::vector<double>& laws : {lows, highs})
+                    points.emplace_back(gainAt(plan, port, pots, laws) / port.nvt, pots);
+                continue;
+            }
+            // a diode's: at v = 0, and at the largest short-circuit current at L on 20 Hz to 20 kHz
+            const double at0 = port.law == PortDef::Law::Pair   ? 2 * port.is / port.nvt
+                               : port.law == PortDef::Law::Asym ? port.is / port.nvt + port.is2 / port.nvt2
+                                                                : port.is / port.nvt;
+            points.emplace_back(at0, pots);
+            double current = 0;
+            for (double f = 20; f <= 20000; f *= 1.05)
+            {
+                const std::complex<double> s(0, 2 * std::numbers::pi * f);
+                double gain = level / std::fabs(plan.inputScale);   // samples, through the blocks before
+                for (int b = 0; b < blockIndex; ++b)
+                    gain *= std::abs(analog(plan, b, s, pots));
+                current = std::max(current, gain * std::abs(analogPortCurrent(plan, blockIndex, s, pots)));
+            }
+            const double high = port.law == PortDef::Law::Pair
+                                    ? std::sqrt(current * current + 4 * port.is * port.is) / port.nvt
+                                : port.law == PortDef::Law::Asym
+                                    ? std::max((current + port.is) / port.nvt, (current + port.is2) / port.nvt2)
+                                    : (current + port.is) / port.nvt;
+            points.emplace_back(high, pots);
+        }
+        double nearest = std::numeric_limits<double>::infinity();
+        for (const auto& [g, pots] : points)
+        {
+            const Holters h = holters(plan, blockIndex, designRate, pots, {}, Method::Tr);
+            const double s = 1 / (1 + h.kd * g);
+            std::vector<std::vector<double>> a = h.a;
+            for (std::size_t i = 0; i < a.size(); ++i)
+            {
+                for (std::size_t j = 0; j < a.size(); ++j)
+                    a[i][j] += s * h.w[i] * h.cp[j];
+            }
+            const std::optional<std::vector<std::complex<double>>> eig = eigenvalues(a);
+            if (!eig)
+                continue;
+            for (const std::complex<double>& z : *eig)
+            {
+                const double distance = std::abs(z + 1.0);
+                if (distance < nearest)
+                {
+                    nearest = distance;
+                    out.eigenvalue = z;
+                    out.conductance = g;
+                }
+            }
+        }
+        out.flagged = nearest < 0.1;
+        return out;
     }
 } // namespace fminus::circuit

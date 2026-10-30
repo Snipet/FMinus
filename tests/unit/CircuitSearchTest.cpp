@@ -4,6 +4,7 @@
 // on a small stress shape: T1 on the region's own input, its answer the same for any number of threads, its cancel and
 // its budget.
 #include "api/CircuitSelfTest.h"
+#include "circuit/Linear.h"
 #include "circuit/Netlist.h"
 #include "circuit/Plan.h"
 #include "circuit/Search.h"
@@ -15,6 +16,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <complex>
 #include <cstddef>
 #include <cstring>
 #include <cmath>
@@ -856,4 +858,95 @@ TEST_CASE("switch positions are stress axes, and the self-test runs a switch set
     REQUIRE(r.choice);
     CHECK(r.choice->t1 <= -60);
     CHECK(r.notes.find("9 points x 17 signals") != std::string::npos);
+}
+
+namespace
+{
+    // examples/circuits/ringing.cir without its configuration lines: an inductor's current that a diode interrupts,
+    // ringing with C1 at 159 kHz; at 1x the trapezoidal rule puts the resonance at Nyquist
+    const std::string kRinging = ".title Ringing\n.input u in\n.output vout b\n.target level=4.5V\nR1 in a 100\n"
+                                 "L1 a b 1m\nD1 b 0 1N914\nC1 b 0 1n\nR2 b 0 100k\n";
+} // namespace
+
+TEST_CASE("the method check: eigenvalues near -1 flag a block; the self-test measures it, warns and tries BDF2",
+          "[circuit]")
+{
+    // the eigenvalues, by Hessenberg QR: a rotation's +-i, a companion matrix's 1, 2 and 3
+    const auto rotation = fc::eigenvalues({{0, -1}, {1, 0}});
+    REQUIRE(rotation);
+    REQUIRE(rotation->size() == 2);
+    for (const std::complex<double>& z : *rotation)
+        CHECK(std::abs(std::abs(z.imag()) - 1) + std::abs(z.real()) <= 1e-12);
+    const auto companion = fc::eigenvalues({{6, -11, 6}, {1, 0, 0}, {0, 1, 0}});
+    REQUIRE(companion);
+    std::vector<double> roots;
+    for (const std::complex<double>& z : *companion)
+    {
+        CHECK(std::abs(z.imag()) <= 1e-9);
+        roots.push_back(z.real());
+    }
+    std::sort(roots.begin(), roots.end());
+    REQUIRE(roots.size() == 3);
+    for (int k = 0; k < 3; ++k)
+        CHECK(std::fabs(roots[static_cast<std::size_t>(k)] - (k + 1)) <= 1e-9);
+
+    // example 1 at 4x is not flagged (-0.85 at the diodes' largest conductance at 4.5 V); at 1x it is (-0.96)
+    const fc::Plan dt = planned(fc::test::kDiodeTone);
+    CHECK(!fc::ringingCheck(dt, 0, 4 * 48000.0).flagged);
+    const fc::RingingCheck one = fc::ringingCheck(dt, 0, 48000.0);
+    CHECK(one.flagged);
+    CHECK(one.eigenvalue.real() < -0.9);
+
+    // the twins: right after each 1x candidate, one a solver, never with ADAA
+    const fc::Plan ring = planned(kRinging);
+    std::vector<fc::Ringing> ringing = fc::ringingFlags(ring, {1, 2});
+    REQUIRE(ringing.size() == 2);
+    CHECK(ringing[0].block == 0);
+    ringing[0].measured = true;
+    ringing[0].excess = 12.8;
+    ringing[1].measured = true;
+    ringing[1].excess = 1.7;
+    const std::vector<fc::Candidate> base = fc::candidates(ring);
+    const std::vector<fc::Candidate> twinned = fc::withTwins(ring, base, ringing);
+    CHECK(twinned.size() == base.size() + 2);
+    for (std::size_t i = 0; i < twinned.size(); ++i)
+    {
+        if (twinned[i].method != fc::Method::Bdf2)
+            continue;
+        CHECK(twinned[i].oversample == 1);
+        CHECK(!twinned[i].adaa);
+        REQUIRE(i > 0);
+        CHECK(twinned[i - 1].oversample == 1);   // right after its trapezoidal candidate
+        CHECK(twinned[i - 1].solver.steps == twinned[i].solver.steps);
+        CHECK(twinned[i].cost > fc::modelCost(ring, 1, false, twinned[i].solver));   // the second history
+    }
+    CHECK(fc::ringingWarning(ring, ringing[0], ringing) ==
+          "at 1x block 1 rings at Nyquist (13 dB more above 20 kHz than the 64x reference): .oversample 2 or .method "
+          "bdf2");
+
+    // the self-test at 1x: flagged, measured in excess, warned at the block, and its BDF2 twins tried
+    fc::Options at1;
+    at1.oversample = 1;
+    const fc::SelfTestResult r = fc::selfTestWith(kRinging, "ring.cir", at1, {}, small());
+    INFO(r.errors << r.warnings << r.notes);
+    REQUIRE(r.errors.empty());
+    CHECK(r.notes.find("ring.cir: note: self-test: at 1x block 1's linearised trapezoidal A has an eigenvalue at") !=
+          std::string::npos);
+    CHECK(r.notes.find(": it rings\n") != std::string::npos);
+    CHECK(r.notes.find("ring.cir: note: self-test: 2 BDF2 twins join the candidates, each right after its trapezoidal "
+                       "candidate (6 candidates)\n") != std::string::npos);
+    CHECK(r.notes.find(", BDF2, ") != std::string::npos);
+    CHECK(r.warnings.find("ring.cir:5:1: warning: at 1x block 1 rings at Nyquist (") == 0);
+    CHECK(r.warnings.find("dB more above 20 kHz than the 64x reference): .method bdf2\n") != std::string::npos);
+
+    // a flagged block that does not ring (the TS clipping stage, an eigenvalue at -0.995 at 1x): measured, no warning
+    fc::Options ts1 = at1;
+    ts1.adaa = true;   // no twins either way: ADAA named on
+    const fc::SelfTestResult t = fc::selfTestWith(open(fc::test::kScreamerClip), "ts.cir", ts1, {}, small());
+    INFO(t.errors << t.notes);
+    REQUIRE(t.errors.empty());
+    CHECK(t.notes.find("ts.cir: note: self-test: at 1x block 1's linearised trapezoidal A has an eigenvalue at") !=
+          std::string::npos);
+    CHECK(t.notes.find(": no ringing (6 dB is the gate)\n") != std::string::npos);
+    CHECK(t.warnings.find("rings at Nyquist") == std::string::npos);
 }

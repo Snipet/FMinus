@@ -1113,6 +1113,7 @@ namespace fminus::circuit
             const auto j = pr;
             const auto v = port;
             kSelf = system.iForm ? -l.coef[j][v] : 1 / -l.coef[j][v];
+            h.kd = kSelf;
             for (std::size_t s : states)
                 h.cp.push_back(system.iForm ? l.coef[j][s] : l.coef[j][s] * kSelf);
             h.cp.resize(size, 0.0);
@@ -1211,6 +1212,28 @@ namespace fminus::circuit
     {
         const System system = assemble(plan, block);
         return analog(system, pivotsOrThrow(system, plan, block), plan, block, s, pots);
+    }
+
+    std::complex<double> analogPortCurrent(const Plan& plan, int blockIndex, std::complex<double> s,
+                                           const std::vector<double>& pots)
+    {
+        const Block& block = plan.blocks.at(static_cast<std::size_t>(blockIndex));
+        const System system = assemble(plan, blockIndex);
+        const Pivots pivots = pivotsOrThrow(system, plan, blockIndex);
+        const std::vector<double> numbers = symbolValues(system, plan, blockIndex, 1.0, pots);
+        std::vector<std::complex<double>> symbols;
+        for (std::size_t k = 0; k < system.symbols.size(); ++k)
+        {
+            const System::Symbol& sym = system.symbols[k];
+            if (sym.kind == System::Symbol::Kind::Gc)
+                symbols.push_back(s * block.branches[static_cast<std::size_t>(sym.branch)].c);
+            else if (sym.kind == System::Symbol::Kind::Rl)
+                symbols.push_back(s * block.branches[static_cast<std::size_t>(sym.branch)].l);
+            else
+                symbols.emplace_back(numbers[k], 0.0);
+        }
+        const Linear<std::complex<double>> l = solve(system, pivots, symbols);
+        return l.coef[static_cast<std::size_t>(system.portCurrent)][static_cast<std::size_t>(system.input)];
     }
 
     std::complex<double> discreteS(Method method, double f, double rate)

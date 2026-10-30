@@ -195,6 +195,28 @@ namespace fminus::circuit
 
     MatchedCheck matchedCheck(const Plan& plan, int block);
 
+    // ---- the method check (the pipeline's stage 7) -------------------------------------------------------------------
+
+    // The eigenvalues of a real square matrix: Householder reduction to Hessenberg form, then the shifted QR algorithm
+    // (Wilkinson's shift, deflating from the bottom), in complex double; in no particular order. Nothing when it does
+    // not converge (it does, in a few iterations an eigenvalue, for the small matrices here).
+    std::optional<std::vector<std::complex<double>>> eigenvalues(std::vector<std::vector<double>> a);
+
+    // A port block's linearised trapezoidal state matrix at a design rate and pots: its Holters form with the port
+    // replaced by its small-signal conductance G, v = p / (1 + kd G), so A + W Cp^T / (1 + kd G); and its eigenvalue
+    // nearest -1, where the trapezoidal rule rings (a stiff pole, z = (1 - a T / 2) / (1 + a T / 2) near -1 for a
+    // large a), at the port's smallest conductance (v = 0) and its largest on the stress range: a diode's at its
+    // short-circuit current at the stress level L, over 20 Hz to 20 kHz (the blocks before it at their analog gain),
+    // an OTA's at v = 0 and its largest gain.
+    struct RingingCheck
+    {
+        bool flagged = false;                // an eigenvalue within 0.1 of -1
+        std::complex<double> eigenvalue;     // the one nearest -1
+        double conductance = 0;              // where it is: the port's conductance, siemens
+    };
+
+    RingingCheck ringingCheck(const Plan& plan, int block, double designRate);
+
     // The emitted design: the block's trapezoidal form from its derivation in Vals (`linear`, its readouts on its
     // sources), the design, and its coefficients bound to fields mb0_b<N>, mb1_b<N>, mb2_b<N>, ma1_b<N> and ma2_b<N>
     // (order 1: mb0, mb1 and ma1), in `code`.
