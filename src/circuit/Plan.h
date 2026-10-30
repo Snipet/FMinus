@@ -63,11 +63,22 @@ namespace fminus::circuit
         std::string partIdent;   // its element's FMinus form: "Ptone" for both of a pot's sections
         int element = -1;        // in the netlist
         // Variable: r = value * (1 - t) (section 1, e1-w), value * t (section 2, w-e2, or a rheostat), or the
-        // resistor's {expr} (section 0); t = taper(clamp01(expr)).
+        // resistor's {expr} (section 0); t = taper(clamp01(expr)). Section 3 is a switch's (an S element): r =
+        // exp(ln roff + s (ln ron - ln roff)), s its ramp from 0 (open) to 1 (closed at `closed`'s positions).
         int section = 0;
         double value = 0;
         Expr expr;
         Taper taper = Taper::Lin;
+        std::string switchKey;     // a switch's .switch, folded
+        std::vector<int> closed;   // the positions it is closed at
+        double ron = 1;
+        double roff = 10e6;
+
+        // Whether it is a switch's resistance.
+        bool isSwitch() const
+        {
+            return kind == Kind::Variable && section == 3;
+        }
 
         // Whether it carries a state from step to step: a capacitor or an inductor.
         bool state() const
@@ -199,12 +210,19 @@ namespace fminus::circuit
         int input = -1;                  // the node it reads (.input's, or the block before's output)
         int output = -1;                 // the node the next block reads, or .output's
         std::vector<std::string> pots;   // the pots it reads (its network's and its OTA's gain), folded, in .pot order
+        std::vector<std::string> switches;   // the switches its S elements read, folded, in .switch order
         bool inRegion = false;
         Method method = Method::Tr;   // its integrator: the configuration's in the region, the trapezoidal rule outside
         int rateFactor = 1;        // runs at rateFactor x the host's rate
         double designFactor = 1;   // designed at designFactor x that (2/3 with ADAA)
         double oneX = 0;           // a linear block's 1x check: worst dB at 44.1 kHz
         double oneXRegion = 0;     // and at oversample x 44.1 kHz
+
+        // Whether set() moves it: it reads pots or switches (its coefficients are b<N>_set's, else init's).
+        bool hasControls() const
+        {
+            return !pots.empty() || !switches.empty();
+        }
     };
 
     struct PotInfo
@@ -213,6 +231,18 @@ namespace fminus::circuit
         std::string key;    // folded
         double defaultValue = 0.5;
         std::optional<Taper> taper;
+        bool used = false;
+    };
+
+    // A switch (.switch NAME positions [default]): set()'s int argument after the pots, a position from 0 to
+    // positions - 1. Each S element that names it ramps its resistance toward ron or roff over 20 ms of set() calls.
+    struct SwitchInfo
+    {
+        std::string name;   // as written
+        std::string key;    // folded
+        int positions = 2;
+        int defaultPosition = 0;
+        Loc loc;
         bool used = false;
     };
 
@@ -282,6 +312,7 @@ namespace fminus::circuit
         std::vector<Node> nodes;   // [0] is ground
         Config config;
         std::vector<PotInfo> pots;   // in .pot order
+        std::vector<SwitchInfo> switches;   // in .switch order
         std::vector<LawInfo> laws;   // in .input order
         std::vector<Block> blocks;   // in chain order
         bool smooth = false;         // its ports are OTAs (the SM family); otherwise diodes (EA), or none
@@ -303,13 +334,26 @@ namespace fminus::circuit
     // The physical N Vt of a diode, N k 300.15 / q (CODATA's k and q, SPICE's TNOM of 27 C).
     double thermalVoltage(double n);
 
-    // The pot positions a check runs a block at: its pots at {0, 0.5, 1}, the full grid for 3 pots or fewer, otherwise
-    // each pot alone (the others at their defaults) and all at 0 and all at 1. Each point gives every pot's value, by
-    // folded name, in plan.pots' order.
+    // The control positions a check runs a block at: its pots at {0, 0.5, 1} and its switches at each position, the
+    // full grid for 3 axes or fewer, otherwise each axis alone (the others at their defaults) and all at their low ends
+    // (0, position 0) and all at their high ends (1, the last position). Each point gives every pot's value in
+    // plan.pots' order, then every switch's position in plan.switches' order (a point without them: the defaults).
     std::vector<std::vector<double>> potGrid(const Plan& plan, const Block& block);
 
     // A pot's value by folded name, from a point of potGrid (or the defaults).
     double potValue(const Plan& plan, const std::vector<double>& point, const std::string& key);
+
+    // A switch's position by folded name, from a point of potGrid (its default when the point has none).
+    int switchPosition(const Plan& plan, const std::vector<double>& point, const std::string& key);
+
+    // The defaults as a point: each pot's default, then each switch's.
+    std::vector<double> defaultPoint(const Plan& plan);
+
+    // A switch section's ramp at a position: 1 where it is closed, 0 where open.
+    double switchRamp(const Branch& branch, int position);
+
+    // A switch section's resistance at its ramp s: exp(ln roff + s (ln ron - ln roff)), the emitted arithmetic.
+    double switchResistance(const Branch& branch, double s);
 
     // An OTA port's gain, amps, at `pots` (a point as potGrid's) and `laws` (each law input's value, in plan.laws'
     // order, clamped to its range as tick clamps it; empty: each at its low end). A constant gain is its value.

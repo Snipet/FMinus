@@ -702,6 +702,27 @@ namespace fminus::circuit
                     return false;
                 }
             }
+            // nor a switch: each of its positions, the rest at their defaults
+            for (std::size_t i = 0; i < plan.switches.size(); ++i)
+            {
+                const SwitchInfo& w = plan.switches[i];
+                if (!w.used)
+                    continue;
+                for (int position = 0; position < w.positions; ++position)
+                {
+                    if (position == w.defaultPosition)
+                        continue;
+                    std::vector<double> at = defaultPoint(plan);
+                    at[plan.pots.size() + i] = position;
+                    if (holds(plan, *point, at))
+                        continue;
+                    messages.error(w.loc, std::format("switch '{}' at position {} moves the DC operating point: the "
+                                                      "module runs in offsets from one DC point (one a switch moves "
+                                                      "is Phase 2's)",
+                                                      w.name, position));
+                    return false;
+                }
+            }
             plan.dc = point->nodes;
         }
         else

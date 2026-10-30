@@ -136,6 +136,8 @@ namespace fminus::circuit
             Current,     // I<name> n+ n- [DC] value: value amps from n+ through it to n- (SPICE's direction)
             Vcvs,        // E<name> n+ n- nc+ nc- gain|{expr}: V(n+) - V(n-) = gain (V(nc+) - V(nc-))
             Vccs,        // G<name> n+ n- nc+ nc- gain|{expr}: gain (V(nc+) - V(nc-)) amps from n+ through it to n-
+            Switch,      // S<name> a b SWITCH pos[,pos...] [ron=1] [roff=10meg]: closed (ron) at the listed positions of
+                         // `.switch SWITCH`, open (roff) at the others, ramped between them over 20 ms
         };
 
         Kind kind = Kind::Resistor;
@@ -151,8 +153,12 @@ namespace fminus::circuit
         std::optional<Expr> expr;
         std::optional<Taper> taper;   // a pot's taper=
         Loc taperLoc;
-        std::string model;   // a diode's, as written
+        std::string model;   // a diode's, as written; a switch's .switch, as written
         Loc modelLoc;
+        std::vector<int> closed;   // a switch's: the positions it is closed at, as written
+        Loc closedLoc;
+        double ron = 1;       // a switch's resistance closed, ohms
+        double roff = 10e6;   // and open
         std::string text;   // the line, its tokens joined by spaces (for the generated comments)
     };
 
@@ -169,6 +175,15 @@ namespace fminus::circuit
     // The diode models built in, used where no .model card names them: 1N914 and 1N4148 (IS 2.52 nA, N 1.752: Yeh,
     // DAFx-07), in this order. A card of one's name replaces it.
     std::vector<ModelCard> builtinModels();
+
+    // A .switch line: set()'s int argument (after the pots), a position from 0 to positions - 1.
+    struct SwitchLine
+    {
+        std::string name;
+        Loc loc;
+        int positions = 2;
+        int defaultPosition = 0;
+    };
 
     // A .pot line.
     struct PotLine
@@ -219,6 +234,7 @@ namespace fminus::circuit
         std::vector<Element> elements;
         std::vector<ModelCard> models;
         std::vector<PotLine> pots;
+        std::vector<SwitchLine> switches;   // in .switch order: set()'s ints after the pots
         std::optional<IoLine> input;   // the signal: the one voltage .input
         std::vector<IoLine> laws;      // the law inputs (kind=cv|current), in .input order: tick's floats after it
         std::optional<IoLine> output;

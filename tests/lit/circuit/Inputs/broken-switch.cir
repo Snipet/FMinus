@@ -1,0 +1,14 @@
+* broken-switch.cir: errors.test's switch errors, each found while the netlist is read
+.title Broken
+.input  u    in
+.output vout a
+.switch mode 3
+R1     in a  10k
+C1     a  0  10n
+S1     a  b  sel 1
+S2     a  c  mode 1,3
+S3     a  d  mode 2 ron=0
+R2     b  0  1k
+R3     c  0  1k
+R4     d  0  1k
+.end

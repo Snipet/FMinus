@@ -1,8 +1,8 @@
 // include/fminus/Circuit.h: analog circuits as FMinus source. fminus::circuit::generate turns a SPICE-style netlist
 // (a .cir file: resistors, capacitors, inductors, DC voltage and current sources, E and G controlled sources, diodes
 // (one, a series string, a pair, an asymmetric pair, with RS) with their .model or a built-in one (1N914, 1N4148),
-// OTAs, ideal op amps, pots, law inputs, and the directives docs/circuits.md lists) into the text of one FMinus
-// module, which Program::compile compiles like any other source. It is the circuit compiler of
+// OTAs, ideal op amps, pots, ramped switches, law inputs, and the directives docs/circuits.md lists) into the text of
+// one FMinus module, which Program::compile compiles like any other source. It is the circuit compiler of
 // docs/research/analog-circuits/README.md (Phase 1 of its §11, in slices). No LLVM, C++17, as FMinus.h; the host links
 // FMinus::FMinus.
 //

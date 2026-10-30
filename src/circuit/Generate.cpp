@@ -163,6 +163,8 @@ namespace fminus::circuit
                 result.module = p->module;
                 for (const PotInfo& pot : p->pots)
                     result.pots.push_back(pot.name);
+                for (const SwitchInfo& w : p->switches)
+                    result.switches.push_back(w.name);
                 Input signal;
                 signal.name = p->inputName;
                 signal.scale = p->inputScale;

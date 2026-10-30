@@ -126,10 +126,11 @@ namespace fminus::circuit
             return true;
         // init's parameter, the attribute's words, the halfband methods' parameters and locals, clear's loop
         // variable, and set's temporaries t<N>: FMinus reads a module's name as a type everywhere in the program
-        // and the guard's fields and locals (ck_, fd_, fdstep_, sum_, gain_)
-        static constexpr std::array<std::string_view, 17> kOther{
-            "rate", "clang", "nonblocking", "x",   "o",   "s0",     "s1",   "t",    "y",
-            "v0",   "v1",    "i",           "ck_", "fd_", "fdstep_", "sum_", "gain_"};
+        // and the guard's fields and locals (ck_, fd_, fdstep_, sum_, gain_), and a switch's ramp step (swstep_; its
+        // other names, sw_<S>, to_<S> and BDF2's h_<C>, carry the part's name, as the coefficients do)
+        static constexpr std::array<std::string_view, 18> kOther{
+            "rate", "clang", "nonblocking", "x",   "o",   "s0",      "s1",   "t",     "y",
+            "v0",   "v1",    "i",           "ck_", "fd_", "fdstep_", "sum_", "gain_", "swstep_"};
         return std::find(kOther.begin(), kOther.end(), name) != kOther.end() || numbered(name, 't');
     }
 
@@ -504,41 +505,61 @@ namespace fminus::circuit
         return ((pole < 0 ? -t : t) - port.poleA) * (1 / port.poleB);
     }
 
+    std::vector<double> defaultPoint(const Plan& plan)
+    {
+        std::vector<double> point;
+        for (const PotInfo& p : plan.pots)
+            point.push_back(p.defaultValue);
+        for (const SwitchInfo& w : plan.switches)
+            point.push_back(w.defaultPosition);
+        return point;
+    }
+
     std::vector<std::vector<double>> potGrid(const Plan& plan, const Block& block)
     {
-        std::vector<double> defaults;
-        for (const PotInfo& p : plan.pots)
-            defaults.push_back(p.defaultValue);
-        std::vector<std::size_t> mine;
+        const std::vector<double> defaults = defaultPoint(plan);
+        // the axes: (index into the point, its values)
+        std::vector<std::pair<std::size_t, std::vector<double>>> axes;
         for (const std::string& key : block.pots)
         {
             for (std::size_t i = 0; i < plan.pots.size(); ++i)
             {
                 if (plan.pots[i].key == key)
-                    mine.push_back(i);
+                    axes.push_back({i, {0.0, 0.5, 1.0}});
+            }
+        }
+        for (const std::string& key : block.switches)
+        {
+            for (std::size_t i = 0; i < plan.switches.size(); ++i)
+            {
+                if (plan.switches[i].key != key)
+                    continue;
+                std::vector<double> positions;
+                for (int k = 0; k < plan.switches[i].positions; ++k)
+                    positions.push_back(k);
+                axes.push_back({plan.pots.size() + i, positions});
             }
         }
         std::vector<std::vector<double>> grid;
-        const double values[] = {0.0, 0.5, 1.0};
-        if (mine.size() <= 3)
+        if (axes.size() <= 3)
         {
             std::size_t count = 1;
-            for (std::size_t i = 0; i < mine.size(); ++i)
-                count *= 3;
+            for (const auto& axis : axes)
+                count *= axis.second.size();
             for (std::size_t k = 0; k < count; ++k)
             {
                 std::vector<double> point = defaults;
                 std::size_t rest = k;
-                for (std::size_t i : mine)
+                for (const auto& [i, values] : axes)
                 {
-                    point[i] = values[rest % 3];
-                    rest /= 3;
+                    point[i] = values[rest % values.size()];
+                    rest /= values.size();
                 }
                 grid.push_back(point);
             }
             return grid;
         }
-        for (std::size_t i : mine)
+        for (const auto& [i, values] : axes)
         {
             for (double v : values)
             {
@@ -547,11 +568,11 @@ namespace fminus::circuit
                 grid.push_back(point);
             }
         }
-        for (double v : {0.0, 1.0})
+        for (bool high : {false, true})
         {
             std::vector<double> point = defaults;
-            for (std::size_t i : mine)
-                point[i] = v;
+            for (const auto& [i, values] : axes)
+                point[i] = high ? values.back() : values.front();
             grid.push_back(point);
         }
         return grid;
@@ -565,6 +586,29 @@ namespace fminus::circuit
                 return i < point.size() ? point[i] : plan.pots[i].defaultValue;
         }
         return 0;
+    }
+
+    int switchPosition(const Plan& plan, const std::vector<double>& point, const std::string& key)
+    {
+        for (std::size_t i = 0; i < plan.switches.size(); ++i)
+        {
+            if (plan.switches[i].key != key)
+                continue;
+            const std::size_t at = plan.pots.size() + i;
+            return at < point.size() ? static_cast<int>(point[at]) : plan.switches[i].defaultPosition;
+        }
+        return 0;
+    }
+
+    double switchRamp(const Branch& branch, int position)
+    {
+        return std::find(branch.closed.begin(), branch.closed.end(), position) != branch.closed.end() ? 1.0 : 0.0;
+    }
+
+    double switchResistance(const Branch& branch, double s)
+    {
+        const double lnOff = std::log(branch.roff);
+        return std::exp(lnOff + s * (std::log(branch.ron) - lnOff));
     }
 
     namespace
@@ -850,6 +894,17 @@ namespace fminus::circuit
                 messages.error(line.loc, "pot '" + line.name + "' is the module's name");
             p.pots.push_back(info);
         }
+        // ---- switches: set()'s ints after the pots ----
+        for (const SwitchLine& line : netlist.switches)
+        {
+            SwitchInfo info{line.name, folded(line.name), line.positions, line.defaultPosition, line.loc, false};
+            if (isReservedName(line.name))
+                messages.error(line.loc, "switch '" + line.name +
+                                             "' is an FMinus keyword or builtin, or a name the module uses: rename it");
+            else if (line.name == p.module)
+                messages.error(line.loc, "switch '" + line.name + "' is the module's name");
+            p.switches.push_back(info);
+        }
         // ---- law inputs: tick's and step's floats after the signal ----
         for (const IoLine& line : netlist.laws)
         {
@@ -995,6 +1050,25 @@ namespace fminus::circuit
                 }
                 break;
             }
+            case Element::Kind::Switch:
+            {
+                // a resistance that ramps between roff and ron: a variable branch (its current an unknown)
+                b.kind = Branch::Kind::Variable;
+                b.a = nn[0];
+                b.b = nn[1];
+                b.section = 3;
+                b.switchKey = folded(el.model);
+                b.closed = el.closed;
+                b.ron = el.ron;
+                b.roff = el.roff;
+                for (SwitchInfo& w : p.switches)
+                {
+                    if (w.key == b.switchKey)
+                        w.used = true;
+                }
+                pieces.push_back({b});
+                break;
+            }
             case Element::Kind::Diode:
                 break;   // the diode groups', below
             case Element::Kind::Inductor:
@@ -1090,6 +1164,11 @@ namespace fminus::circuit
                         messages.warning(line.loc, "pot '" + pot.name + "' is never used");
                 }
             }
+        }
+        for (const SwitchInfo& w : p.switches)
+        {
+            if (!w.used)
+                messages.warning(w.loc, "switch '" + w.name + "' is never used");
         }
 
         // ---- diode ports: a single diode, a series string, a pair (or an asymmetric one) ----
@@ -1402,6 +1481,7 @@ namespace fminus::circuit
                 switch (elements[e].kind)
                 {
                 case Element::Kind::Resistor:
+                case Element::Kind::Switch:
                 case Element::Kind::Diode:
                 case Element::Kind::Inductor:
                 case Element::Kind::Voltage:
@@ -1850,13 +1930,21 @@ namespace fminus::circuit
         for (Block& block : p.blocks)
         {
             std::set<std::string> keys;
+            std::set<std::string> switchKeys;
             for (const Branch& b : block.branches)
             {
-                if (b.kind == Branch::Kind::Variable)
+                if (b.isSwitch())
+                    switchKeys.insert(b.switchKey);
+                else if (b.kind == Branch::Kind::Variable)
                 {
                     for (const std::string& k : potsOf(b.expr))
                         keys.insert(k);
                 }
+            }
+            for (const SwitchInfo& w : p.switches)
+            {
+                if (switchKeys.count(w.key))
+                    block.switches.push_back(w.key);
             }
             if (block.port)
                 keys.insert(block.port->gainPots.begin(), block.port->gainPots.end());

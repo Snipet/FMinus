@@ -340,6 +340,17 @@ namespace fminus::circuit
             const Element& el = plan.netlist.elements[static_cast<std::size_t>(br.element)];
             const std::string note =
                 el.text + (el.kind == Element::Kind::Pot ? std::string(", ") + taperName(br.taper) : "");
+            if (br.isSwitch())
+            {
+                // r = exp(ln roff + s (ln ron - ln roff)): a ramp of sw_ moves r by a constant ratio a step
+                const double a = std::log(br.roff);
+                const double b = std::log(br.ron) - a;
+                const std::string ramp = literal(std::fabs(b)) + " * sw_" + br.ident;
+                const std::string arg = a == 0 ? (b < 0 ? "-" : "") + ramp
+                                                : literal(a) + (b < 0 ? " - " : " + ") + ramp;
+                bc.rLines.push_back(withComment("const float r_" + br.ident + " = expf(" + arg + ");", note));
+                continue;
+            }
             const std::string expr = printExpr(br.expr, potName);
             if (br.section == 0)
             {
@@ -531,7 +542,37 @@ namespace fminus::circuit
 
             int potLine() const
             {
-                return plan.netlist.pots.empty() ? titleLine() : plan.netlist.pots.front().loc.line;
+                return !plan.netlist.pots.empty()       ? plan.netlist.pots.front().loc.line
+                       : !plan.netlist.switches.empty() ? plan.netlist.switches.front().loc.line
+                                                        : titleLine();
+            }
+
+            // The S elements, in netlist order: each one's ramp sw_<S>.
+            std::vector<const Branch*> switchBranches() const
+            {
+                std::vector<const Branch*> list;
+                for (const Block& b : plan.blocks)
+                {
+                    for (const Branch& br : b.branches)
+                    {
+                        if (br.isSwitch())
+                            list.push_back(&br);
+                    }
+                }
+                std::stable_sort(list.begin(), list.end(),
+                                 [](const Branch* x, const Branch* y) { return x->element < y->element; });
+                return list;
+            }
+
+            // A switch section's ramp at its .switch's default position: 0 or 1.
+            double defaultRamp(const Branch& br) const
+            {
+                for (const SwitchInfo& w : plan.switches)
+                {
+                    if (w.key == br.switchKey)
+                        return switchRamp(br, w.defaultPosition);
+                }
+                return 0;
             }
 
             int inputLine() const
@@ -617,7 +658,7 @@ namespace fminus::circuit
             bool movesPortCurve(std::size_t i) const
             {
                 const Block& b = plan.blocks[i];
-                return adaaBlock(b) && !b.port->smooth() && !b.pots.empty() &&
+                return adaaBlock(b) && !b.port->smooth() && b.hasControls() &&
                        coefficient(i, "ka_" + b.port->name).kind == Val::Kind::Var;
             }
 
@@ -863,12 +904,19 @@ namespace fminus::circuit
             std::string pots;
             for (const PotInfo& p : plan.pots)
                 pots += (pots.empty() ? "" : ", ") + p.name;
+            std::string switches;
+            for (const SwitchInfo& w : plan.switches)
+                switches += (switches.empty() ? "" : ", ") + w.name + std::format(": {} positions", w.positions);
             line("//   " + std::to_string(plan.blocks.size()) + (plan.blocks.size() == 1 ? " block, " : " blocks, ") +
                  std::to_string(stateCount) + (stateCount == 1 ? " state" : " states") +
                  (states.empty() ? "" : " (" + states + ")") + ", " + std::to_string(portCount) +
                  (portCount == 1 ? " nonlinear port" : " nonlinear ports") + (ports.empty() ? "" : " (" + ports + ")") +
                  ", " + std::to_string(plan.pots.size()) + (plan.pots.size() == 1 ? " pot" : " pots") +
-                 (pots.empty() ? "" : " (" + pots + ")"));
+                 (pots.empty() ? "" : " (" + pots + ")") +
+                 (plan.switches.empty() ? std::string()
+                                        : ", " + std::to_string(plan.switches.size()) +
+                                              (plan.switches.size() == 1 ? " switch (" : " switches (") + switches +
+                                              ")"));
             for (std::size_t i = 0; i < plan.blocks.size(); ++i)
             {
                 const Block& b = plan.blocks[i];
@@ -1046,6 +1094,22 @@ namespace fminus::circuit
                     }
                 }
             }
+            {
+                bool firstS = true;
+                for (const Branch* br : switchBranches())
+                {
+                    at = elementLine(br->element);
+                    line("    float sw_" + br->ident + ";",
+                         firstS ? br->part + "'s ramp: 0 open (roff) to 1 closed (ron), set's, 20 ms end to end" : "",
+                         31);
+                    firstS = false;
+                }
+                if (!firstS)
+                {
+                    at = potLine();
+                    line("    float swstep_;", "a ramp's most a set() call: 16 / (0.02 rate)", 31);
+                }
+            }
             noted.clear();
             for (const Block& b : plan.blocks)
             {
@@ -1137,6 +1201,8 @@ namespace fminus::circuit
             line("    void init(float rate) [[clang::nonblocking]]", "the host's rate");
             line("    {");
             line("        fdstep_ = 50 / rate;", "the guard's fade: 1 / (0.02 rate), 20 ms");
+            if (!plan.switches.empty())
+                line("        swstep_ = 800 / rate;", "a switch's ramp a set() call: 16 / (0.02 rate), 20 ms");
             for (const Block& b : plan.blocks)
             {
                 for (const Branch& br : b.branches)
@@ -1204,7 +1270,7 @@ namespace fminus::circuit
             }
             for (std::size_t i = 0; i < plan.blocks.size(); ++i)
             {
-                if (!plan.blocks[i].pots.empty() || blocks[i].lines.empty())
+                if (plan.blocks[i].hasControls() || blocks[i].lines.empty())
                     continue;
                 line("        {", "block " + std::to_string(i + 1) + "'s coefficients (it has no pots)");
                 for (const std::string& l : blocks[i].lines)
@@ -1220,7 +1286,7 @@ namespace fminus::circuit
                     line("        kr_" + plan.blocks[i].port->name + " = 0;");
             }
             line("        clear();");
-            if (!plan.pots.empty())
+            if (!plan.pots.empty() || !plan.switches.empty())
             {
                 std::string args;
                 std::string note;
@@ -1228,6 +1294,14 @@ namespace fminus::circuit
                 {
                     args += (args.empty() ? "" : ", ") + literal(p.defaultValue);
                     note += (note.empty() ? ".pot " : ", ") + p.name + std::format(" {:g}", p.defaultValue);
+                }
+                bool firstSwitch = true;
+                for (const SwitchInfo& w : plan.switches)
+                {
+                    args += (args.empty() ? "" : ", ") + std::to_string(w.defaultPosition);
+                    note += (note.empty() ? "" : "; ") + std::string(firstSwitch ? ".switch " : ", ") + w.name +
+                            std::format(" {}", w.defaultPosition);
+                    firstSwitch = false;
                 }
                 line("        set(" + args + ");", note);
             }
@@ -1242,6 +1316,9 @@ namespace fminus::circuit
             line("    {");
             line("        ck_ = 0;");
             line("        fd_ = 1;");
+            for (const Branch* br : switchBranches())
+                line("        sw_" + br->ident + " = " + (defaultRamp(*br) == 1 ? "1" : "0") + ";",
+                     br->part + " at its switch's default position");
             for (const Block& b : plan.blocks)
             {
                 for (const Branch& br : b.branches)
@@ -1287,22 +1364,57 @@ namespace fminus::circuit
 
         void Writer::set()
         {
-            if (plan.pots.empty())
+            if (plan.pots.empty() && plan.switches.empty())
                 return;
             std::string params;
             std::string names;
             for (const PotInfo& p : plan.pots)
             {
                 params += (params.empty() ? "" : ", ") + std::string("float ") + p.name;
-                names += (names.empty() ? "" : ", ") + p.name;
+                names += (names.empty() ? ".pot " : ", ") + p.name;
             }
+            if (!names.empty())
+                names += ", 0 to 1";
+            std::string switchNames;
+            for (const SwitchInfo& w : plan.switches)
+            {
+                params += (params.empty() ? "" : ", ") + std::string("int ") + w.name;
+                switchNames += (switchNames.empty() ? ".switch " : ", ") + w.name;
+            }
+            if (!switchNames.empty())
+                names += (names.empty() ? "" : "; ") + switchNames;
             at = potLine();
             line("    void set(" + params + ") [[clang::nonblocking]]",
-                 ".pot " + names + ", 0 to 1: call it on the absolute 16-sample grid");
+                 names + ": call it on the absolute 16-sample grid" +
+                     (plan.switches.empty() ? "" : ", every grid tick while a switch ramps"));
             line("    {");
+            // each switch section's ramp toward its target, swstep_ a call, landing on it exactly
+            for (const Branch* br : switchBranches())
+            {
+                const SwitchInfo* w = nullptr;
+                for (const SwitchInfo& x : plan.switches)
+                {
+                    if (x.key == br->switchKey)
+                        w = &x;
+                }
+                std::string test;
+                std::string positions;
+                for (int position : br->closed)
+                {
+                    test += (test.empty() ? "" : " || ") + w->name + " == " + std::to_string(position);
+                    positions += (positions.empty() ? "" : ", ") + std::to_string(position);
+                }
+                const std::string& S = br->ident;
+                at = elementLine(br->element);
+                line("        const float to_" + S + " = " + test + " ? 1.0f : 0.0f;",
+                     br->part + " closed at " + w->name + " " + positions);
+                line("        sw_" + S + " = fabsf(to_" + S + " - sw_" + S + ") <= 1.001f * swstep_ ? to_" + S +
+                     " : sw_" + S + " + (to_" + S + " > sw_" + S + " ? swstep_ : -swstep_);");
+            }
+            at = potLine();
             for (const Block& b : plan.blocks)
             {
-                if (b.pots.empty())
+                if (!b.hasControls())
                     continue;
                 std::string args;
                 for (const std::string& key : b.pots)
@@ -1321,7 +1433,7 @@ namespace fminus::circuit
         void Writer::blockSet(std::size_t i)
         {
             const Block& b = plan.blocks[i];
-            if (b.pots.empty())
+            if (!b.hasControls())
                 return;
             std::string params;
             for (const std::string& key : b.pots)

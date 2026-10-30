@@ -8,6 +8,7 @@
 #include "circuit/Netlist.h"
 #include "circuit/Plan.h"
 #include "circuit/Reference.h"
+#include "circuit/Runners.h"
 #include "circuit/Analysis.h"
 #include "CircuitNetlists.h"
 #include "fminus/Circuit.h"
@@ -584,6 +585,192 @@ TEST_CASE("a BDF2 module is the double BDF2 reference's, nonblocking in both cha
         INFO(r.module << ": " << error << " dB");
         CHECK(error <= -100);
     }
+}
+
+TEST_CASE("a switch ramps over 20 ms of set() calls, as a pot gliding there does", "[circuit]")
+{
+    // S1, open (10meg) at mode 0 and closed (1 ohm) at mode 1: sw_S1 moves 16 / (0.02 rate) a call, so at 48 kHz it
+    // reaches 1 on the 60th call exactly, r falling by (roff / ron)^(1/60) a call; at 44.1 kHz on the 56th
+    const std::string text = ".title Sw\n.input u in\n.output y a\n.switch mode 2\nR1 in a 10k\nC1 a 0 10n\n"
+                             "S1 a b mode 1\nC2 b 0 47n\n";
+    const fc::Result r = fc::generate(text, "t.cir");
+    auto program = compiled(r);
+    const Program::Module* m = program->module(r.module);
+    REQUIRE(m);
+    std::string errors;
+    auto* init = program->function<void(void*, float)>(r.module + "::init", errors);
+    auto* set = program->function<void(void*, int)>(r.module + "::set", errors);
+    auto* tick = program->function<float(void*, float)>(r.module + "::tick", errors);
+    REQUIRE(init);
+    REQUIRE(set);
+    REQUIRE(tick);
+    CHECK(program->nonBlocking(r.module + "::set"));
+    const double a = std::log(10e6);
+    const double b = std::log(1.0) - a;
+    for (double rate : {48000.0, 44100.0})
+    {
+        const double perCall = std::pow(10e6, 800 / rate);   // (roff / ron)^(1/60) at 48 kHz
+        auto self = instance(*m);
+        init(self.get(), static_cast<float>(rate));
+        CHECK(readFloat(self.get(), *m, "sw_S1") == 0);
+        double before = std::exp(a);
+        int landed = 0;
+        double worst = 0;
+        for (int call = 1; call <= 80; ++call)
+        {
+            set(self.get(), 1);
+            const auto sw = static_cast<double>(readFloat(self.get(), *m, "sw_S1"));
+            const double now = std::exp(a + b * sw);
+            worst = std::fmax(worst, before / now);
+            before = now;
+            if (sw == 1 && landed == 0)
+                landed = call;
+        }
+        INFO("at " << rate);
+        CHECK(landed == (rate == 48000 ? 60 : 56));
+        CHECK(worst <= perCall * 1.001);
+        // and back, as fast
+        for (int call = 1; call <= 60; ++call)
+            set(self.get(), 0);
+        CHECK(readFloat(self.get(), *m, "sw_S1") == 0);
+    }
+
+    // under a 1 kHz sine the switch closing makes no larger a step than a pot that moves the same resistance the same
+    // way on the same grid ticks: R2 {10meg * glide}, glide 10^(-7 s) at each set()
+    const std::string glide = ".title Glide\n.input u in\n.output y a\n.pot glide 1\nR1 in a 10k\nC1 a 0 10n\n"
+                              "R2 a b {10meg * glide}\nC2 b 0 47n\n";
+    const fc::Result g = fc::generate(glide, "t.cir");
+    auto gp = compiled(g);
+    const Program::Module* gm = gp->module(g.module);
+    auto* ginit = gp->function<void(void*, float)>(g.module + "::init", errors);
+    auto* gset = gp->function<void(void*, float)>(g.module + "::set", errors);
+    auto* gtick = gp->function<float(void*, float)>(g.module + "::tick", errors);
+    REQUIRE(ginit);
+    REQUIRE(gset);
+    REQUIRE(gtick);
+    auto self = instance(*m);
+    auto other = instance(*gm);
+    init(self.get(), 48000);
+    ginit(other.get(), 48000);
+    set(self.get(), 0);
+    gset(other.get(), 1);
+    double stepSwitch = 0;
+    double stepGlide = 0;
+    float lastS = 0;
+    float lastG = 0;
+    int calls = 0;
+    for (int i = 0; i < 9600; ++i)
+    {
+        if (i % 16 == 0)
+        {
+            const bool on = i >= 2400;
+            set(self.get(), on ? 1 : 0);
+            calls += on ? 1 : 0;
+            gset(other.get(), static_cast<float>(std::pow(10.0, -7.0 * std::fmin(calls / 60.0, 1.0))));
+        }
+        const auto u = static_cast<float>(std::sin(2 * std::numbers::pi * 1000 * i / 48000));
+        const float ys = tick(self.get(), u);
+        const float yg = gtick(other.get(), u);
+        if (i > 0)
+        {
+            stepSwitch = std::fmax(stepSwitch, std::fabs(static_cast<double>(ys - lastS)));
+            stepGlide = std::fmax(stepGlide, std::fabs(static_cast<double>(yg - lastG)));
+        }
+        lastS = ys;
+        lastG = yg;
+    }
+    INFO("largest step: the switch's " << stepSwitch << ", the glide's " << stepGlide);
+    CHECK(stepSwitch <= 1.1 * stepGlide);
+}
+
+TEST_CASE("a switch's ramp: block splits give the same bits, and ADAA's point stays on its curve", "[circuit]")
+{
+    // S1 in parallel with R1 moves the pair's K from 10k to 99 ohm; with ADAA, b1_set carries the stored point onto
+    // each new curve (its Newton residual kept), call by call through the ramp
+    const std::string text = ".title SwClip\n.input u in\n.output y a\n.switch hard 2\n.oversample 4\n.adaa on\n"
+                             ".solver omega(1)\nR1 in a 10k\nS1 in a hard 1 ron=100\nC1 a 0 10n\nD1 a 0 1N914\n"
+                             "D2 0 a 1N914\n";
+    const fc::Result r = fc::generate(text, "t.cir");
+    INFO(r.errors);
+    REQUIRE(r.errors.empty());
+    fc::RunnerShape shape;
+    shape.module = r.module;
+    shape.switches = 1;
+    std::string errors;
+    auto program = Program::compile(r.source + fc::runnerSource(shape), errors);
+    INFO(errors);
+    REQUIRE(program);
+    const Program::Module* m = program->module(r.module);
+    REQUIRE(m);
+    auto* init = program->function<void(void*, float)>(r.module + "::init", errors);
+    auto* set = program->function<void(void*, int)>(r.module + "::set", errors);
+    auto* tick = program->function<float(void*, float)>(r.module + "::tick", errors);
+    using Ticks = void(void*, const float*, const float*, const float*, const int*, float*, int, int);
+    auto* ticks = program->function<Ticks>("fm_ticks", errors);
+    REQUIRE(init);
+    REQUIRE(set);
+    REQUIRE(tick);
+    REQUIRE(ticks);
+    // calls of 1, 61 and 64 samples against one call, the switch closing at 1000 and opening at 3000
+    constexpr int n = 4800;
+    std::vector<float> u(n);
+    std::vector<int> positions(n);
+    for (int i = 0; i < n; ++i)
+    {
+        u[static_cast<std::size_t>(i)] = static_cast<float>(4.5 * std::sin(2 * std::numbers::pi * 996 * i / 48000));
+        positions[static_cast<std::size_t>(i)] = i >= 1000 && i < 3000 ? 1 : 0;
+    }
+    auto run = [&](int call)
+    {
+        auto self = instance(*m);
+        init(self.get(), 48000);
+        std::vector<float> y(n);
+        for (int at = 0; at < n; at += call)
+        {
+            const int count = std::min(call, n - at);
+            ticks(self.get(), u.data() + at, nullptr, nullptr, positions.data() + at, y.data() + at, count, at);
+        }
+        return y;
+    };
+    const std::vector<float> one = run(n);
+    for (int call : {1, 61, 64})
+    {
+        const std::vector<float> split = run(call);
+        INFO("calls of " << call);
+        CHECK(std::memcmp(one.data(), split.data(), sizeof(float) * n) == 0);
+    }
+
+    // the carry: drive to conduction, then close the switch call by call
+    auto self = instance(*m);
+    init(self.get(), 48000);
+    set(self.get(), 0);
+    const double nvt = fc::thermalVoltage(1.752);
+    bool conducting = false;
+    for (int i = 0; i < 9600 && !conducting; ++i)
+    {
+        tick(self.get(), static_cast<float>(4.5 * std::sin(2 * std::numbers::pi * 996 * i / 48000)));
+        conducting = i >= 2400 && std::fabs(readFloat(self.get(), *m, "v_D1")) > 0.5f;
+    }
+    REQUIRE(conducting);
+    auto residual = [&]
+    {
+        const auto v = static_cast<double>(readFloat(self.get(), *m, "v_D1"));
+        const auto p = static_cast<double>(readFloat(self.get(), *m, "p_D1"));
+        const auto ka = static_cast<double>(readFloat(self.get(), *m, "ka_D1"));
+        return std::pair{p - v - ka * 2 * std::sinh(v / nvt), std::fabs(p)};
+    };
+    const auto [first, size] = residual();
+    double moved = 0;
+    for (int call = 0; call < 60; ++call)
+    {
+        const double kaBefore = static_cast<double>(readFloat(self.get(), *m, "ka_D1"));
+        set(self.get(), 1);
+        moved = std::fmax(moved, std::fabs(static_cast<double>(readFloat(self.get(), *m, "ka_D1")) - kaBefore));
+        const auto [now, p] = residual();
+        INFO("call " << call + 1 << ": residual " << first << " -> " << now);
+        CHECK(std::fabs(now - first) <= 1e-5 * std::fmax(size, p));
+    }
+    CHECK(moved > 0);
 }
 
 TEST_CASE("names keep their case, and a pot's sections have names of their own", "[circuit]")

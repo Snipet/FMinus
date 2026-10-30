@@ -1015,6 +1015,12 @@ namespace fminus::circuit
                 out.push_back(companion * br.l * designRate);
                 continue;
             }
+            if (br.isSwitch())
+            {
+                // settled at the point's position: the emitted ramp's end
+                out.push_back(switchResistance(br, switchRamp(br, switchPosition(plan, pots, br.switchKey))));
+                continue;
+            }
             const double x = evaluate(br.expr, pot);
             if (br.section == 0)
             {

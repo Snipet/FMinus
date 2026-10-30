@@ -647,7 +647,7 @@ TEST_CASE("a job's exception comes back to the self-test's caller", "[circuit]")
 
 TEST_CASE("the guard's names are the module's", "[circuit]")
 {
-    for (const char* name : {"ck_", "fd_", "fdstep_", "sum_", "gain_"})
+    for (const char* name : {"ck_", "fd_", "fdstep_", "sum_", "gain_", "swstep_"})
     {
         INFO(name);
         CHECK(fc::isModuleWord(name));
@@ -828,4 +828,32 @@ TEST_CASE("a law input reaches the module over its scale: tick's gain is the ref
         worst = std::max(worst, std::fabs(static_cast<double>(g) / amps[i] - 1));
     }
     CHECK(worst <= 3e-7);
+}
+
+TEST_CASE("switch positions are stress axes, and the self-test runs a switch settled", "[circuit]")
+{
+    // a switch the region reads: each of its positions a point, beside the pot's 0, 0.5 and 1 (the full grid)
+    const std::string text = kPotClipper + ".switch hard 3\nS1 in a hard 1,2 ron=100\n";
+    const fc::Plan p = planned(text);
+    const fc::StressMatrix m = fc::stressMatrix(p);
+    REQUIRE(m.points.size() == 9);
+    CHECK(m.points.front().label == "drive 0, hard 0");
+    CHECK(m.points[4].label == "drive 0.5, hard 1");
+    CHECK(m.points.back().label == "drive 1, hard 2");
+    for (const fc::StressPoint& point : m.points)
+        CHECK(point.pots.size() == 2);   // the pot, then the switch's position
+    // the candidates run with the switch at each point's position, its ramp settled before the run: the references,
+    // which hold it there, agree (T1 far under its gate at every point)
+    fc::Options options;
+    options.oversample = 4;
+    options.solver = fc::Solver{fc::Solver::Guess::Omega, 2};
+    options.adaa = false;
+    // the rest pinned, the integrator open alone (.method auto): one candidate, the trapezoidal rule's
+    const fc::SelfTestResult r = fc::selfTestWith(text + ".method auto\n", "sw.cir", options, {}, small());
+    INFO(r.errors << r.notes);
+    REQUIRE(r.errors.empty());
+    CHECK(r.candidates == 1);
+    REQUIRE(r.choice);
+    CHECK(r.choice->t1 <= -60);
+    CHECK(r.notes.find("9 points x 17 signals") != std::string::npos);
 }

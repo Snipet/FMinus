@@ -271,45 +271,66 @@ namespace fminus::circuit
         m.upstream = std::max(plan.regionFirst, 0);
         m.inputScale = std::fabs(plan.inputScale);
         m.outputScale = std::fabs(plan.outputScale);
-        // the axes: the pots the region and the blocks before it read, in .pot order, then the law inputs the OTAs'
-        // gains read, in .input order
+        // the axes: the pots the region and the blocks before it read, in .pot order, then the switches they read, in
+        // .switch order, then the law inputs the OTAs' gains read, in .input order
         struct Axis
         {
-            bool law = false;
+            enum class Kind
+            {
+                Pot,
+                Switch,
+                Law,
+            };
+            Kind kind = Kind::Pot;
             std::size_t index = 0;
+            int levels = 3;   // a pot's 0, 0.5 and 1, a law input's low end, middle and high end; a switch's positions
         };
         std::vector<Axis> axes;
         const int last = plan.regionFirst >= 0 ? plan.regionLast : static_cast<int>(plan.blocks.size()) - 1;
-        for (std::size_t i = 0; i < plan.pots.size(); ++i)
+        auto readUpTo = [&](const std::string& key, bool isSwitch)
         {
             bool read = false;
             for (int b = 0; b <= last; ++b)
             {
-                const std::vector<std::string>& keys = plan.blocks[static_cast<std::size_t>(b)].pots;
-                read = read || std::find(keys.begin(), keys.end(), plan.pots[i].key) != keys.end();
+                const Block& block = plan.blocks[static_cast<std::size_t>(b)];
+                const std::vector<std::string>& keys = isSwitch ? block.switches : block.pots;
+                read = read || std::find(keys.begin(), keys.end(), key) != keys.end();
             }
-            if (read)
-                axes.push_back({false, i});
+            return read;
+        };
+        for (std::size_t i = 0; i < plan.pots.size(); ++i)
+        {
+            if (readUpTo(plan.pots[i].key, false))
+                axes.push_back({Axis::Kind::Pot, i, 3});
+        }
+        for (std::size_t i = 0; i < plan.switches.size(); ++i)
+        {
+            if (readUpTo(plan.switches[i].key, true))
+                axes.push_back({Axis::Kind::Switch, i, plan.switches[i].positions});
         }
         for (std::size_t i = 0; i < plan.laws.size(); ++i)
         {
             if (plan.laws[i].used)
-                axes.push_back({true, i});
+                axes.push_back({Axis::Kind::Law, i, 3});
         }
         StressPoint defaults;
-        for (const PotInfo& p : plan.pots)
-            defaults.pots.push_back(p.defaultValue);
+        defaults.pots = defaultPoint(plan);
         for (const LawInfo& l : plan.laws)
         {
             defaults.laws.push_back(l.middle());
             defaults.lawLevels.push_back(1);
         }
-        // an axis at level 0, 1 or 2: a pot's 0, 0.5 and 1, a law input's low end, middle and high end
+        // an axis at a level: a pot's 0, 0.5 and 1, a switch's position, a law input's low end, middle and high end
         auto setAxis = [&](StressPoint& point, const Axis& a, int level)
         {
-            if (!a.law)
+            if (a.kind == Axis::Kind::Pot)
             {
                 point.pots[a.index] = 0.5 * level;
+                return;
+            }
+            if (a.kind == Axis::Kind::Switch)
+            {
+                point.pots[plan.pots.size() + a.index] = level;
                 return;
             }
             const LawInfo& l = plan.laws[a.index];
@@ -322,8 +343,12 @@ namespace fminus::circuit
             for (const Axis& a : axes)
             {
                 text += text.empty() ? "" : ", ";
-                text += a.law ? std::format("{} {:.3g}", plan.laws[a.index].name, point.laws[a.index])
-                              : std::format("{} {:g}", plan.pots[a.index].name, point.pots[a.index]);
+                text += a.kind == Axis::Kind::Law
+                            ? std::format("{} {:.3g}", plan.laws[a.index].name, point.laws[a.index])
+                        : a.kind == Axis::Kind::Switch
+                            ? std::format("{} {:g}", plan.switches[a.index].name,
+                                          point.pots[plan.pots.size() + a.index])
+                            : std::format("{} {:g}", plan.pots[a.index].name, point.pots[a.index]);
             }
             point.label = text;
             return point;
@@ -331,16 +356,16 @@ namespace fminus::circuit
         if (axes.size() <= 3)
         {
             std::size_t count = 1;
-            for (std::size_t i = 0; i < axes.size(); ++i)
-                count *= 3;
+            for (const Axis& a : axes)
+                count *= static_cast<std::size_t>(a.levels);
             for (std::size_t k = 0; k < count; ++k)
             {
                 StressPoint point = defaults;
                 std::size_t rest = k;
                 for (const Axis& a : axes)
                 {
-                    setAxis(point, a, static_cast<int>(rest % 3));
-                    rest /= 3;
+                    setAxis(point, a, static_cast<int>(rest % static_cast<std::size_t>(a.levels)));
+                    rest /= static_cast<std::size_t>(a.levels);
                 }
                 m.points.push_back(label(point));
             }
@@ -349,18 +374,18 @@ namespace fminus::circuit
         {
             for (const Axis& a : axes)
             {
-                for (int level : {0, 1, 2})
+                for (int level = 0; level < a.levels; ++level)
                 {
                     StressPoint point = defaults;
                     setAxis(point, a, level);
                     m.points.push_back(label(point));
                 }
             }
-            for (int level : {0, 2})
+            for (bool high : {false, true})
             {
                 StressPoint point = defaults;
                 for (const Axis& a : axes)
-                    setAxis(point, a, level);
+                    setAxis(point, a, high ? a.levels - 1 : 0);
                 m.points.push_back(label(point));
             }
         }

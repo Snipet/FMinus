@@ -315,6 +315,7 @@ namespace fminus::circuit
                 const Compiled compiled = compile(generated, file, p.regionFirst >= 0);
                 const std::size_t host = matrix.shape.host();
                 const auto pots = static_cast<std::size_t>(p.pots.size());
+                const auto switches = static_cast<std::size_t>(p.switches.size());
                 std::vector<UnitVerdict> results(static_cast<std::size_t>(units));
                 run(units,
                     [&](int u)
@@ -323,7 +324,19 @@ namespace fminus::circuit
                             return;
                         const StressPoint& point = matrix.point(u);
                         const StressSignal& signal = matrix.signal(u);
-                        const std::vector<float> potValues = floats(point.pots);
+                        // the point's pots, then its switches' positions (set()'s ints)
+                        const std::vector<float> potValues(point.pots.begin(),
+                                                           point.pots.begin() + static_cast<long>(pots));
+                        std::vector<int> switchValues;
+                        for (std::size_t k = 0; k < switches; ++k)
+                            switchValues.push_back(static_cast<int>(point.pots[pots + k]));
+                        // set(), until a switch's ramp has settled (60 calls at 48 kHz; once without switches)
+                        auto settle = [&](void* self)
+                        {
+                            for (int k = 0; k < (switches > 0 ? 64 : 1); ++k)
+                                compiled.set(self, pots > 0 ? potValues.data() : nullptr,
+                                             switches > 0 ? switchValues.data() : nullptr);
+                        };
                         const bool laws = !p.laws.empty();
                         // the region's step at its rate, on what the region sees (T1's reference's input), the law
                         // inputs held over each host sample's steps
@@ -337,23 +350,31 @@ namespace fminus::circuit
                             stepsOut.resize(n);
                             Instance self(*compiled.module);
                             compiled.init(self.get(), static_cast<float>(kHostRate));
-                            compiled.set(self.get(), pots > 0 ? potValues.data() : nullptr, nullptr);
+                            settle(self.get());
                             compiled.steps(self.get(), in.data(), laws ? law.data() : nullptr, stepsOut.data(),
                                            static_cast<int>(n));
                         }
                         // tick at the host's, set() on the grid
                         const std::vector<float> in = floats(signalSamples(matrix, signal, 1, host));
                         std::vector<float> potBuffer(host * pots);
+                        std::vector<int> switchBuffer(host * switches);
                         for (std::size_t i = 0; i < host; ++i)
+                        {
                             std::copy(potValues.begin(), potValues.end(),
                                       potBuffer.begin() + static_cast<long>(i * pots));
+                            std::copy(switchValues.begin(), switchValues.end(),
+                                      switchBuffer.begin() + static_cast<long>(i * switches));
+                        }
                         std::vector<float> ticksOut(host);
                         const std::vector<float> law =
                             laws ? floats(lawArguments(p, matrix, u, 1, host)) : std::vector<float>{};
                         Instance self(*compiled.module);
                         compiled.init(self.get(), static_cast<float>(kHostRate));
+                        if (switches > 0)
+                            settle(self.get());
                         compiled.ticks(self.get(), in.data(), laws ? law.data() : nullptr,
-                                       pots > 0 ? potBuffer.data() : nullptr, nullptr, ticksOut.data(),
+                                       pots > 0 ? potBuffer.data() : nullptr,
+                                       switches > 0 ? switchBuffer.data() : nullptr, ticksOut.data(),
                                        static_cast<int>(host), 0);
                         const auto unit = static_cast<std::size_t>(u);
                         // tick adds the output's DC operating point back; the references run in the offsets

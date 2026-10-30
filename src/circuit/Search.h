@@ -49,8 +49,9 @@ namespace fminus::circuit
         }
     };
 
-    // A point of the matrix: every pot's value (plan.pots' order), every law input's (plan.laws' order; each at its
-    // low end, middle or high end, lawLevels' 0, 1 or 2), and how the notes name it ("drive 1", "iabc 0.000141").
+    // A point of the matrix: every pot's value (plan.pots' order) then every switch's position (plan.switches'), as
+    // potGrid's points are; every law input's (plan.laws' order; each at its low end, middle or high end, lawLevels'
+    // 0, 1 or 2), and how the notes name it ("drive 1", "mode 2", "iabc 0.000141").
     struct StressPoint
     {
         std::vector<double> pots;
@@ -118,9 +119,9 @@ namespace fminus::circuit
     };
 
     // The plan's matrix (report §2): the axes are the pots the region and the blocks before it read, at 0, 0.5 and 1,
-    // and the law inputs, at their low end, middle (geometric; arithmetic when the range starts at 0) and high end
-    // (with three axes or fewer the full grid; otherwise each alone, the others at their defaults (a law input at its
-    // middle), then all low and all high); sines at L/15, L/4.5, L/2.25, L and 2.2 L on the shape's bins, a 20 Hz-20
+    // the switches they read, at each position, and the law inputs, at their low end, middle (geometric; arithmetic
+    // when the range starts at 0) and high end (with three axes or fewer the full grid; otherwise each alone, the
+    // others at their defaults (a law input at its middle), then all low and all high); sines at L/15, L/4.5, L/2.25, L and 2.2 L on the shape's bins, a 20 Hz-20
     // kHz log sweep and band-limited noise at L; with law inputs, a synth's too: a band-limited saw at L on the first
     // bin (105 Hz), and for each law input a 996 Hz sine at L with that input moving +-2 octaves at 37 Hz around its
     // middle (linearly over its range when it starts at 0). L is .target level, else .input's scale (full scale).

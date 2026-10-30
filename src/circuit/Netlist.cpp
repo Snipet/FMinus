@@ -995,6 +995,7 @@ namespace fminus::circuit
             Netlist& n_;
             Messages& messages_;
             std::map<std::string, Loc> names_;   // element names, folded
+            std::set<std::string> named_;        // the names .switch lines give, folded (with an error or not)
         };
 
         // The element kinds refused, with what to say.
@@ -1011,8 +1012,6 @@ namespace fminus::circuit
                 return "the JFET %s is not supported yet (Phase 2)";
             case 'm':
                 return "the MOSFET %s is not supported yet (Phase 2)";
-            case 's':
-                return "the switch %s is not supported yet (Phase 1)";
             case 'k':
                 return "the coupling %s is not supported yet (Phase 2)";
             case 't':
@@ -1350,6 +1349,73 @@ namespace fminus::circuit
                 }
                 if (!e.expr && !inRange(e.value, t[6], head.text))
                     return;
+                break;
+            }
+            case 's':
+            {
+                // S<name> a b SWITCH pos[,pos...] [ron=1] [roff=10meg]: a resistor that ramps between roff and ron
+                const std::string usage = ": expected 'S<name> a b SWITCH pos[,pos...] [ron=1] [roff=10meg]'";
+                if (t.size() < 5 || !nodeTokensOk(1, 2) || t[3].text.find_first_of("{}=(),") != std::string::npos)
+                {
+                    error(head.loc, head.text + usage);
+                    return;
+                }
+                e.kind = Element::Kind::Switch;
+                nodesFrom(1, 2);
+                e.model = t[3].text;
+                e.modelLoc = t[3].loc;
+                // the positions, to the first key=value (a space after a comma splits them: joined again)
+                std::size_t k = 4;
+                std::string list;
+                e.closedLoc = t[4].loc;
+                while (k < t.size() && t[k].text.find('=') == std::string::npos)
+                    list += t[k++].text;
+                std::size_t at = 0;
+                while (true)
+                {
+                    const std::size_t comma = std::min(list.find(',', at), list.size());
+                    const std::string item = list.substr(at, comma - at);
+                    const bool digits = !item.empty() && item.size() <= 2 &&
+                                        std::all_of(item.begin(), item.end(), [](char c) { return isDigit(c); });
+                    if (!digits)
+                    {
+                        error(e.closedLoc, "'" + (list.empty() ? t[4].text : list) + "': " + head.text +
+                                               "'s positions are the switch's positions it is closed at, as 0,2");
+                        return;
+                    }
+                    e.closed.push_back(std::stoi(item));
+                    if (comma == list.size())
+                        break;
+                    at = comma + 1;
+                }
+                for (; k < t.size(); ++k)
+                {
+                    std::string value;
+                    const bool on = isKeyValue(t[k], "ron", value);
+                    if (!on && !isKeyValue(t[k], "roff", value))
+                    {
+                        error(t[k].loc, "'" + t[k].text + "': a switch takes ron= and roff= after its positions");
+                        return;
+                    }
+                    const std::optional<Number> v = parseNumber(value);
+                    if (!v)
+                    {
+                        error(t[k].loc, "'" + value + "' is not a number (" + head.text + "'s " +
+                                            (on ? "ron" : "roff") + ")");
+                        return;
+                    }
+                    if (!(v->value >= 1e-30 && v->value <= 1e30))
+                    {
+                        error(t[k].loc, "'" + t[k].text + "': " + head.text + "'s " + (on ? "ron" : "roff") +
+                                            " is out of range for float coefficients (1e-30 to 1e30 ohms)");
+                        return;
+                    }
+                    if (v->milli && v->value < 1)
+                        messages_.warning(t[k].loc, "'" + value + "' is " + v->mantissa +
+                                                        " milliohm in SPICE; write " + v->mantissa +
+                                                        "meg for a megohm");
+                    (on ? e.ron : e.roff) = v->value;
+                }
                 break;
             }
             case 'x':
@@ -1694,6 +1760,54 @@ namespace fminus::circuit
                 n_.pots.push_back(p);
                 return true;
             }
+            if (name == ".switch")
+            {
+                // .switch NAME positions [default]: set()'s int argument after the pots
+                if (!arity(2, 3, ".switch NAME positions [default]"))
+                    return true;
+                SwitchLine w;
+                w.name = t[1].text;
+                w.loc = t[1].loc;
+                named_.insert(folded(w.name));   // an S naming it is not an unknown switch, even if this line errs
+                auto integer = [](const std::string& text)
+                {
+                    const bool digits = !text.empty() && text.size() <= 2 &&
+                                        std::all_of(text.begin(), text.end(), [](char c) { return isDigit(c); });
+                    return digits ? std::stoi(text) : -1;
+                };
+                w.positions = integer(t[2].text);
+                if (w.positions < 2 || w.positions > 8)
+                {
+                    error(t[2].loc, "'" + t[2].text + "': a switch has 2 to 8 positions");
+                    return true;
+                }
+                if (t.size() == 4)
+                {
+                    w.defaultPosition = integer(t[3].text);
+                    if (w.defaultPosition < 0 || w.defaultPosition >= w.positions)
+                    {
+                        error(t[3].loc, "switch '" + w.name + "' defaults to " + t[3].text +
+                                            "; its positions are 0 to " + std::to_string(w.positions - 1));
+                        return true;
+                    }
+                }
+                if (!isPlainName(w.name))
+                {
+                    error(w.loc, "switch '" + w.name + "': a name is a letter, then letters and digits");
+                    return true;
+                }
+                for (const SwitchLine& q : n_.switches)
+                {
+                    if (folded(q.name) == folded(w.name))
+                    {
+                        error(w.loc, "switch '" + w.name + "' is defined twice (first at line " +
+                                         std::to_string(q.loc.line) + ")");
+                        return true;
+                    }
+                }
+                n_.switches.push_back(w);
+                return true;
+            }
             if (name == ".model")
             {
                 model(t);
@@ -1969,6 +2083,58 @@ namespace fminus::circuit
                     if (folded(p.name) == folded(l.name))
                         error(l.loc, "law input '" + l.name + "' has pot '" + p.name + "''s name (line " +
                                          std::to_string(p.loc.line) + ")");
+                }
+            }
+            // a switch and a pot or an input of one name (they are set()'s, tick's and step's parameters)
+            for (const SwitchLine& w : n_.switches)
+            {
+                for (const PotLine& p : n_.pots)
+                {
+                    if (folded(p.name) == folded(w.name))
+                        error(w.loc, "switch '" + w.name + "' has pot '" + p.name + "''s name (line " +
+                                         std::to_string(p.loc.line) + ")");
+                }
+                std::vector<const IoLine*> inputs;
+                if (n_.input)
+                    inputs.push_back(&*n_.input);
+                for (const IoLine& l : n_.laws)
+                    inputs.push_back(&l);
+                for (const IoLine* l : inputs)
+                {
+                    if (folded(l->name) == folded(w.name))
+                        error(w.loc, "switch '" + w.name + "' has input '" + l->name + "''s name (line " +
+                                         std::to_string(l->loc.line) + ")");
+                }
+            }
+            // each S names a .switch, closed at its positions
+            for (const Element& e : n_.elements)
+            {
+                if (e.kind != Element::Kind::Switch)
+                    continue;
+                const auto w = std::find_if(n_.switches.begin(), n_.switches.end(),
+                                            [&](const SwitchLine& x) { return folded(x.name) == folded(e.model); });
+                if (w == n_.switches.end() && named_.count(folded(e.model)))
+                    continue;   // its .switch line has an error of its own
+                if (w == n_.switches.end())
+                {
+                    std::string names;
+                    for (const SwitchLine& x : n_.switches)
+                        names += (names.empty() ? "" : ", ") + x.name;
+                    error(e.modelLoc, "unknown switch '" + e.model + "' (" +
+                                          (names.empty() ? std::string("there are no .switch lines")
+                                                         : "the switches: " + names) +
+                                          ")");
+                    continue;
+                }
+                for (int position : e.closed)
+                {
+                    if (position >= w->positions)
+                    {
+                        error(e.closedLoc, e.name + " is closed at position " + std::to_string(position) +
+                                               " of switch '" + w->name + "', whose positions are 0 to " +
+                                               std::to_string(w->positions - 1));
+                        break;
+                    }
                 }
             }
         }

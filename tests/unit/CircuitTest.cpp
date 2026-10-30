@@ -1517,6 +1517,106 @@ TEST_CASE("with inductors, the trapezoidal blocks are the bilinear map of their 
     }
 }
 
+TEST_CASE("a switch parses and plans as a ramped variable branch", "[circuit]")
+{
+    const std::string text = ".title Sw\n.input u in\n.output y a\n.switch mode 3 1\nR1 in a 10k\nC1 a 0 10n\n"
+                             "S1 a b mode 1,2 ron=10 roff=1meg\nC2 b 0 47n\n";
+    const Parsed p = parsed(text);
+    INFO(p.errors);
+    REQUIRE(p.errors.empty());
+    REQUIRE(p.netlist.switches.size() == 1);
+    CHECK(p.netlist.switches[0].name == "mode");
+    CHECK(p.netlist.switches[0].positions == 3);
+    CHECK(p.netlist.switches[0].defaultPosition == 1);
+    const fc::Element& s1 = p.netlist.elements[2];
+    CHECK(s1.kind == fc::Element::Kind::Switch);
+    CHECK(s1.closed == std::vector<int>{1, 2});
+    CHECK(s1.ron == 10);
+    CHECK(s1.roff == 1e6);
+    // its positions are a space apart too ("1, 2"), and ron and roff default to 1 and 10meg
+    const Parsed spaced = parsed(".input u in\n.output y a\n.switch mode 3\nR1 in a 10k\nS1 a 0 mode 1, 2\n");
+    REQUIRE(spaced.errors.empty());
+    CHECK(spaced.netlist.elements[1].closed == std::vector<int>{1, 2});
+    CHECK(spaced.netlist.elements[1].ron == 1);
+    CHECK(spaced.netlist.elements[1].roff == 10e6);
+
+    const fc::Plan plan = planned(text);
+    REQUIRE(plan.switches.size() == 1);
+    REQUIRE(plan.blocks.size() == 1);
+    const fc::Block& block = plan.blocks[0];
+    CHECK(block.switches == std::vector<std::string>{"mode"});
+    CHECK(block.hasControls());
+    const auto sw = std::find_if(block.branches.begin(), block.branches.end(),
+                                 [](const fc::Branch& b) { return b.isSwitch(); });
+    REQUIRE(sw != block.branches.end());
+    // its grid is its positions; its resistance is ron where it is closed, roff where open, settled
+    const std::vector<std::vector<double>> grid = fc::potGrid(plan, block);
+    CHECK(grid == std::vector<std::vector<double>>{{0}, {1}, {2}});
+    const fc::System system = fc::assemble(plan, 0);
+    const auto r = std::find_if(system.symbols.begin(), system.symbols.end(),
+                                [](const fc::System::Symbol& y) { return y.name == "r_S1"; });
+    REQUIRE(r != system.symbols.end());
+    const auto at = static_cast<std::size_t>(r - system.symbols.begin());
+    CHECK_THAT(fc::symbolValues(system, plan, 0, 48000, {0})[at], WithinRel(1e6, 1e-12));
+    CHECK_THAT(fc::symbolValues(system, plan, 0, 48000, {1})[at], WithinRel(10.0, 1e-12));
+    CHECK_THAT(fc::symbolValues(system, plan, 0, 48000, {})[at], WithinRel(10.0, 1e-12));   // the default, 1
+    const fc::Result result = fc::generate(text, "t.cir");
+    CHECK(result.switches == std::vector<std::string>{"mode"});
+    CHECK(result.source.find("void set(int mode)") != std::string::npos);
+}
+
+TEST_CASE("a switch's errors, as clang words them", "[circuit]")
+{
+    const std::string head = ".input u in\n.output y a\nR1 in a 10k\nC1 a 0 10n\n";
+    struct Case
+    {
+        std::string netlist;
+        std::string errors;
+    };
+    const Case cases[] = {
+        {head + ".switch mode 3\nS1 a 0 sel 1\n", "t.cir:6:8: error: unknown switch 'sel' (the switches: mode)\n"},
+        {head + "S1 a 0 sel 1\n", "t.cir:5:8: error: unknown switch 'sel' (there are no .switch lines)\n"},
+        {head + ".switch mode 3\nS1 a 0 mode 1,3\n",
+         "t.cir:6:13: error: S1 is closed at position 3 of switch 'mode', whose positions are 0 to 2\n"},
+        {head + ".switch mode 2\nS1 a 0 mode 1 ron=0\n",
+         "t.cir:6:15: error: 'ron=0': S1's ron is out of range for float coefficients (1e-30 to 1e30 ohms)\n"},
+        {head + ".switch mode 2\nS1 a 0 mode 1 roff=2e30\n",
+         "t.cir:6:15: error: 'roff=2e30': S1's roff is out of range for float coefficients (1e-30 to 1e30 "
+         "ohms)\n"},
+        {head + ".switch mode 2\nS1 a 0 mode 1 on=3\n",
+         "t.cir:6:15: error: 'on=3': a switch takes ron= and roff= after its positions\n"},
+        {head + ".switch mode 2\nS1 a 0 mode one\n",
+         "t.cir:6:13: error: 'one': S1's positions are the switch's positions it is closed at, as 0,2\n"},
+        {head + ".switch mode 1\nS1 a 0 mode 0\n", "t.cir:5:14: error: '1': a switch has 2 to 8 positions\n"},
+        {head + ".switch mode 3 5\nS1 a 0 mode 0\n",
+         "t.cir:5:16: error: switch 'mode' defaults to 5; its positions are 0 to 2\n"},
+        {head + ".switch mode 2\n.switch MODE 3\nS1 a 0 mode 0\n",
+         "t.cir:6:9: error: switch 'MODE' is defined twice (first at line 5)\n"},
+        {head + ".pot mode\n.switch Mode 2\nS1 a 0 mode 0\nR2 a 0 {10k * mode}\n",
+         "t.cir:6:9: error: switch 'Mode' has pot 'mode''s name (line 5)\n"},
+        {head + ".switch u 2\nS1 a 0 u 0\n", "t.cir:5:9: error: switch 'u' has input 'u''s name (line 1)\n"},
+        {head + ".switch set 2\nS1 a 0 set 0\n",
+         "t.cir:5:9: error: switch 'set' is an FMinus keyword or builtin, or a name the module uses: rename it\n"},
+        {head + "S1 a\n", "t.cir:5:1: error: S1: expected 'S<name> a b SWITCH pos[,pos...] [ron=1] [roff=10meg]'\n"},
+        // a switch that moves the DC point: the module runs in offsets from one
+        {".input u in\n.output y a\n.switch mode 2\nV1 vb 0 4.5\nR1 vb a 10k\nR2 in a 10k\nS1 a 0 mode 1\n"
+         "C1 a 0 10n\n",
+         "t.cir:3:9: error: switch 'mode' at position 1 moves the DC operating point: the module runs in offsets from "
+         "one DC point (one a switch moves is Phase 2's)\n"},
+    };
+    for (const Case& c : cases)
+    {
+        INFO(c.netlist);
+        CHECK(errorsOf(c.netlist) == c.errors);
+    }
+    // an unused switch warns, as an unused pot does; '10M' is 10 milliohm
+    const fc::Result unused = fc::generate(head + ".switch mode 2\n", "t.cir");
+    CHECK(unused.warnings.find("t.cir:5:9: warning: switch 'mode' is never used\n") != std::string::npos);
+    const fc::Result milli = fc::generate(head + ".switch mode 2\nS1 a 0 mode 1 roff=10M\n", "t.cir");
+    CHECK(milli.warnings.find("t.cir:6:15: warning: '10M' is 10 milliohm in SPICE; write 10meg for a megohm\n") !=
+          std::string::npos);
+}
+
 TEST_CASE("BDF2's blocks are the BDF2 map of their analog response", "[circuit]")
 {
     // BDF2's companions (gc = 3 C fs' / 2, rl = 3 L fs' / 2, and each state's second history) make a linear block's
