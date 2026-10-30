@@ -174,7 +174,10 @@ namespace fminus
             std::optional<int> channels;        // .channels 1 or 2 (default 1)
             std::optional<Method> method;       // .method tr|bdf2 (default tr; bdf2 not with ADAA)
             std::optional<bool> prewarp;        // .prewarp on|off: an OTA one-pole's cutoff law prewarped (off);
-                                                // its -3 dB point the analog's without ADAA (with it, nearer only)
+                                                // its -3 dB point the analog's without ADAA (with it, nearer only),
+                                                // by warping the OTA's gain, which moves its distortion away from
+                                                // the circuit's (T3 0.39 against 0.13 dB on otalp.cir at 4x): a
+                                                // cutoff law, not an accuracy gain
             std::optional<Choice> chosen;       // the self-test's answer: fills the open dimensions when its key is
                                                 // the netlist's (otherwise a note says why it is ignored)
         };

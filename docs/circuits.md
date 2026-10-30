@@ -685,6 +685,15 @@ the tan warp at `fs'` does not place: at 1x with ADAA the -3 dB point misses the
 -36.5 to -39.3 %), so prewarp narrows the error there but does not remove it (check m prints both); oversampling
 shrinks both terms. Placing the -3 dB point under ADAA (a prewarp for the averaged recursion) is not built.
 
+**A cutoff law, not an accuracy gain.** Prewarp places the small-signal -3 dB point by warping the OTA's gain `g`, and
+`g` is also how hard the tanh is driven: near the cutoff the warped `g'` (38 % above `g` for a 13.5 kHz cutoff at 1x, 48
+kHz) shrinks the OTA's differential input for the same output, so its distortion moves away from the circuit's (H3 goes
+roughly with the cube of that input). On otalp.cir with its three configuration directives removed (`fminus
+--self-test`), T3 against the 64x reference (which does not prewarp), without and with `.prewarp on`: 1x 2.27 to 2.99 dB
+against 6.95 to 11.18 dB, 2x 0.53 to 0.54 against 1.43 to 1.85, 4x (the answer both times) 0.13 against 0.39, with
+prewarp the worst case H3 at iabc 2 mA. So turning it on "for accuracy" gives a less accurate circuit at the same cost;
+it is for a synth that wants the digital cutoff where the analog -3 dB point is, and the self-test's T3 still gates it.
+
 ## The synth path: what the code decided
 
 Where the design left a choice, or the code (the self-test, measuring the JIT-compiled module) proved it wrong:
