@@ -377,16 +377,17 @@ TEST_CASE("a Choice's text, and what generate makes of one", "[circuit]")
     REQUIRE(r.errors.empty());
     CHECK(!r.provisional);
     CHECK(r.selfTestKey == p.key);
-    CHECK(r.configuration == "configuration: .oversample 4, .adaa on, .solver omega(1) (the self-test " + p.key +
-                                 "); iir blocks=auto, .method tr (default)");
+    // the integrator is open too (another dimension is): the answer's
+    CHECK(r.configuration == "configuration: .oversample 4, .adaa on, .solver omega(1), .method tr (the self-test " +
+                                 p.key + "); iir blocks=auto (default)");
     CHECK(r.notes.find("provisional") == std::string::npos);
     CHECK(r.warnings.empty());
     // without one: provisional
     const fc::Result provisional = fc::generate(base, "diodetone.cir");
     CHECK(provisional.provisional);
     CHECK(provisional.selfTestKey == p.key);
-    CHECK(provisional.configuration == "configuration: .oversample 8, .adaa off, .solver omega(2) (provisional); iir "
-                                       "blocks=auto, .method tr (default)");
+    CHECK(provisional.configuration == "configuration: .oversample 8, .adaa off, .solver omega(2), .method tr "
+                                       "(provisional); iir blocks=auto (default)");
     // another netlist's answer is ignored, with a note
     fc::Choice stale = four;
     stale.key = "0123456789abcdef";
@@ -405,7 +406,8 @@ TEST_CASE("a Choice's text, and what generate makes of one", "[circuit]")
     const fc::Result kept = fc::generate(two, "diodetone.cir", options);
     REQUIRE(kept.errors.empty());
     CHECK(kept.configuration.rfind(
-              "configuration: .oversample 2 (the netlist); .adaa on, .solver omega(1) (the self-test", 0) == 0);
+              "configuration: .oversample 2 (the netlist); .adaa on, .solver omega(1), .method tr (the self-test",
+              0) == 0);
     CHECK(kept.source.find("at 2 rate") != std::string::npos);
     // a malformed answer is an error of the Options
     fc::Choice bad = four;
@@ -453,8 +455,8 @@ TEST_CASE("the self-test runs the same on any number of threads", "[circuit]")
     CHECK(a.notes == b.notes);
     CHECK(a.candidates == b.candidates);
     CHECK(a.key == fc::selfTestKey(kPotClipper, "clip.cir", options));
-    CHECK(a.notes.find("clip.cir: note: self-test " + a.key + ": .adaa, .solver open; 3 points x 17 signals = 51 "
-                       "units, L = 4.5 V (.target level); 4 candidates, cheapest first\n") == 0);
+    CHECK(a.notes.find("clip.cir: note: self-test " + a.key + ": .adaa, .solver, .method open; 3 points x 17 "
+                       "signals = 51 units, L = 4.5 V (.target level); 4 candidates, cheapest first\n") == 0);
     CHECK(a.notes.find("clip.cir: note: the self-test chose .adaa ") != std::string::npos);
     // the answer generates a module that is not provisional
     options.chosen = a.choice;

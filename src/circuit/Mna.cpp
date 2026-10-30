@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstddef>
 #include <format>
+#include <functional>
 #include <limits>
 #include <map>
 #include <numbers>
@@ -986,9 +987,11 @@ namespace fminus::circuit
     }
 
     std::vector<double> symbolValues(const System& system, const Plan& plan, int blockIndex, double designRate,
-                                     const std::vector<double>& pots)
+                                     const std::vector<double>& pots, std::optional<Method> method)
     {
         const Block& block = plan.blocks.at(static_cast<std::size_t>(blockIndex));
+        // a companion's factor of C fs' (or L fs'): 2 for the trapezoidal rule, 3 / 2 for BDF2
+        const double companion = method.value_or(block.method) == Method::Bdf2 ? 1.5 : 2.0;
         std::vector<double> out;
         auto pot = [&](const std::string& key)
         {
@@ -1004,12 +1007,12 @@ namespace fminus::circuit
             const Branch& br = block.branches[static_cast<std::size_t>(s.branch)];
             if (s.kind == System::Symbol::Kind::Gc)
             {
-                out.push_back(2 * br.c * designRate);
+                out.push_back(companion * br.c * designRate);
                 continue;
             }
             if (s.kind == System::Symbol::Kind::Rl)
             {
-                out.push_back(2 * br.l * designRate);
+                out.push_back(companion * br.l * designRate);
                 continue;
             }
             const double x = evaluate(br.expr, pot);
@@ -1037,12 +1040,14 @@ namespace fminus::circuit
     } // namespace
 
     Holters holters(const Plan& plan, int blockIndex, double designRate, const std::vector<double>& pots,
-                    const std::vector<double>& laws)
+                    const std::vector<double>& laws, std::optional<Method> method)
     {
         const Block& block = plan.blocks.at(static_cast<std::size_t>(blockIndex));
+        const bool bdf2 = method.value_or(block.method) == Method::Bdf2;
         const System system = assemble(plan, blockIndex);
         const Pivots pivots = pivotsOrThrow(system, plan, blockIndex);
-        const Linear<double> l = solve(system, pivots, symbolValues(system, plan, blockIndex, designRate, pots));
+        const Linear<double> l =
+            solve(system, pivots, symbolValues(system, plan, blockIndex, designRate, pots, method));
         Holters h;
         std::vector<std::size_t> states;
         for (std::size_t s = 0; s < system.sources.size(); ++s)
@@ -1050,7 +1055,10 @@ namespace fminus::circuit
             if (system.sources[s].kind == System::Source::Kind::State)
                 states.push_back(s);
         }
-        h.states = static_cast<int>(states.size());
+        // BDF2's state is [x; xo]: each companion's history, then its second part
+        const std::size_t count = states.size();
+        const std::size_t size = bdf2 ? 2 * count : count;
+        h.states = static_cast<int>(size);
         h.port = block.port.has_value();
         const auto in = static_cast<std::size_t>(system.input);
         const auto out = static_cast<std::size_t>(system.output);
@@ -1076,6 +1084,7 @@ namespace fminus::circuit
             kSelf = system.iForm ? -l.coef[j][v] : 1 / -l.coef[j][v];
             for (std::size_t s : states)
                 h.cp.push_back(system.iForm ? l.coef[j][s] : l.coef[j][s] * kSelf);
+            h.cp.resize(size, 0.0);
             h.dp = system.iForm ? l.coef[j][in] : l.coef[j][in] * kSelf;
             h.law = block.port->law;
             h.is = block.port->is;
@@ -1093,45 +1102,53 @@ namespace fminus::circuit
         }
         for (std::size_t s : states)
             h.cy.push_back(on(out, s));
+        h.cy.resize(size, 0.0);
         h.dy = on(out, in);
-        h.a.assign(states.size(), std::vector<double>(states.size(), 0.0));
-        h.b.assign(states.size(), 0.0);
-        h.w.assign(states.size(), 0.0);
-        // a state's update, x <- 2 gc v - x (a capacitor) or 2 rl i - x (an inductor): its factor, 2 gc or 2 rl
+        // a state's update, x <- 2 gc v - x (a capacitor) or 2 rl i - x (an inductor) with the trapezoidal rule: its
+        // factor, 2 gc or 2 rl, 4 C fs' or 4 L fs'; BDF2's x <- h - xo, xo <- h / 4, h = 4/3 g v: its factor 4/3 g,
+        // 2 C fs' or 2 L fs' (g = 3 C fs' / 2)
         auto twice = [&](std::size_t i)
         {
             const Branch& br = block.branches[static_cast<std::size_t>(system.sources[states[i]].branch)];
-            return 4 * (br.kind == Branch::Kind::Inductor ? br.l : br.c) * designRate;
+            return (bdf2 ? 2 : 4) * (br.kind == Branch::Kind::Inductor ? br.l : br.c) * designRate;
         };
-        for (std::size_t i = 0; i < states.size(); ++i)
+        // the update's rows over [x; xo], from each state's readout's coefficients
+        auto rows = [&](std::vector<std::vector<double>>& a, std::vector<double>& b, std::vector<double>& w,
+                        const std::function<double(std::size_t, std::size_t)>& coef,
+                        const std::function<double(std::size_t)>& onPort)
         {
-            const double g2 = twice(i);
-            const auto [readout, sign] = system.capacitor[i];
-            const auto ro = static_cast<std::size_t>(readout);
-            for (std::size_t j = 0; j < states.size(); ++j)
-                h.a[i][j] = g2 * sign * on(ro, states[j]) - (i == j ? 1 : 0);
-            h.b[i] = g2 * sign * on(ro, in);
-            if (h.port)
-                h.w[i] = g2 * sign * onV(ro);
-        }
-        if (h.port && system.iForm)
-        {
-            h.iForm = true;
-            h.ai.assign(states.size(), std::vector<double>(states.size(), 0.0));
-            h.bi.assign(states.size(), 0.0);
-            h.wi.assign(states.size(), 0.0);
-            for (std::size_t i = 0; i < states.size(); ++i)
+            a.assign(size, std::vector<double>(size, 0.0));
+            b.assign(size, 0.0);
+            w.assign(size, 0.0);
+            for (std::size_t i = 0; i < count; ++i)
             {
                 const double g2 = twice(i);
                 const auto [readout, sign] = system.capacitor[i];
                 const auto ro = static_cast<std::size_t>(readout);
-                for (std::size_t j = 0; j < states.size(); ++j)
-                    h.ai[i][j] = g2 * sign * l.coef[ro][states[j]] - (i == j ? 1 : 0);
-                h.bi[i] = g2 * sign * l.coef[ro][in];
-                h.wi[i] = g2 * sign * l.coef[ro][port];
+                for (std::size_t j = 0; j < count; ++j)
+                    a[i][j] = g2 * sign * coef(ro, states[j]) - (!bdf2 && i == j ? 1 : 0);
+                b[i] = g2 * sign * coef(ro, in);
+                if (h.port)
+                    w[i] = g2 * sign * onPort(ro);
+                if (!bdf2)
+                    continue;
+                a[i][count + i] = -1;
+                for (std::size_t j = 0; j < count; ++j)
+                    a[count + i][j] = 0.25 * a[i][j];
+                b[count + i] = 0.25 * b[i];
+                w[count + i] = 0.25 * w[i];
             }
+        };
+        rows(h.a, h.b, h.w, on, onV);
+        if (h.port && system.iForm)
+        {
+            h.iForm = true;
+            rows(
+                h.ai, h.bi, h.wi, [&](std::size_t ro, std::size_t src) { return l.coef[ro][src]; },
+                [&](std::size_t ro) { return l.coef[ro][port]; });
             for (std::size_t s : states)
                 h.cyi.push_back(l.coef[out][s]);
+            h.cyi.resize(size, 0.0);
             h.dyi = l.coef[out][in];
             h.wyi = l.coef[out][port];
         }
@@ -1165,7 +1182,16 @@ namespace fminus::circuit
         return analog(system, pivotsOrThrow(system, plan, block), plan, block, s, pots);
     }
 
-    double oneXError(const System& system, const Pivots& pivots, const Plan& plan, int blockIndex, double rate)
+    std::complex<double> discreteS(Method method, double f, double rate)
+    {
+        if (method == Method::Tr)
+            return {0, 2 * rate * std::tan(std::numbers::pi * f / rate)};
+        const std::complex<double> zi = std::polar(1.0, -2 * std::numbers::pi * f / rate);   // z^-1
+        return rate * (3.0 - 4.0 * zi + zi * zi) / 2.0;
+    }
+
+    double oneXError(const System& system, const Pivots& pivots, const Plan& plan, int blockIndex, double rate,
+                     Method method)
     {
         const Block& block = plan.blocks.at(static_cast<std::size_t>(blockIndex));
         double worst = 0;
@@ -1189,8 +1215,8 @@ namespace fminus::circuit
             {
                 if (analogDb[i] < top - 40)
                     continue;
-                const double warped = 2 * rate * std::tan(std::numbers::pi * freqs[i] / rate);
-                const double h = std::abs(analog(system, pivots, plan, blockIndex, {0, warped}, pots));
+                const double h =
+                    std::abs(analog(system, pivots, plan, blockIndex, discreteS(method, freqs[i], rate), pots));
                 worst = std::max(worst, std::fabs(20 * std::log10(h + 1e-300) - analogDb[i]));
             }
         }

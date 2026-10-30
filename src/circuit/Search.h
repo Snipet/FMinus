@@ -250,9 +250,10 @@ namespace fminus::circuit
     // The report's §3.2 model, in cycles a host sample: each region block times its rate (a port block: p, 10 + 2 a
     // state (a capacitor's or an inductor's); the guess, omega 65 or the previous 5; each Newton step, 70 for a diode
     // pair or one diode, 110 for an asymmetric pair (two exponentials), 60 for an OTA's tanh; ADAA's tail, 57 for an
-    // exp-affine law, 100 for tanh's log cosh; the state update, 5. A linear block: 5 + 3 a state), each block outside
-    // the region at 1x, and 12 for each sample a halfband stage runs at its high rate, up and down together.
-    double modelCost(const Plan& plan, int oversample, bool adaa, const Solver& solver);
+    // exp-affine law, 100 for tanh's log cosh; the state update, 5. A linear block: 5 + 3 a state; with BDF2, a region
+    // block's 2 a state more, its second history), each block outside the region at 1x, and 12 for each sample a
+    // halfband stage runs at its high rate, up and down together.
+    double modelCost(const Plan& plan, int oversample, bool adaa, const Solver& solver, Method method = Method::Tr);
 
     // The candidates of the plan's open dimensions (report §6.2: an exp-affine port's 1, 2, 4 and 8x, ADAA off and on,
     // omega3 + 1 or 2 Newton steps; a smooth-monotone port's (an OTA's) 1, 2 and 4x, ADAA off and on, the previous
@@ -293,7 +294,8 @@ namespace fminus::circuit
     // The answer as a Choice.
     Choice choiceOf(const std::string& key, const Candidate& candidate, const Verdict& verdict, bool met);
 
-    // The directives that pin a choice's open dimensions: ".oversample 4, .adaa on, .solver omega(1)".
+    // The directives that pin a choice's open dimensions: ".oversample 4, .adaa on, .solver omega(1)" (the integrator
+    // only when the answer is BDF2 or the netlist wrote .method auto: left out, it is the trapezoidal rule).
     std::string directivesOf(const Config& open, const Choice& choice);
 
     // The steps a stage takes: the 64x references (a unit T2 reads); one configuration's T1 references; one

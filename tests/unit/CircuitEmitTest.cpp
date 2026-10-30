@@ -8,6 +8,7 @@
 #include "circuit/Netlist.h"
 #include "circuit/Plan.h"
 #include "circuit/Reference.h"
+#include "circuit/Analysis.h"
 #include "CircuitNetlists.h"
 #include "fminus/Circuit.h"
 #include "fminus/FMinus.h"
@@ -86,6 +87,18 @@ X2 o2 o3 o3 opamp
 .adaa on
 .solver omega(1)
 R1 in a {100 + 20k * drive}
+C1 a 0 10n
+D1 a 0 1N4148
+)";
+
+    // kSinglePot with no pot (K a number but for the capacitor): a port block BDF2 runs
+    const std::string kSinglePot0 = R"(.title SinglePot
+.input u in
+.output y a
+.oversample 4
+.adaa on
+.solver omega(1)
+R1 in a 2.2k
 C1 a 0 10n
 D1 a 0 1N4148
 )";
@@ -492,6 +505,85 @@ TEST_CASE("a pot's move keeps ADAA's last point on the port's curve", "[circuit]
     const float p = readFloat(self.get(), *m, "p_D1");
     set(self.get(), 1);
     CHECK(readFloat(self.get(), *m, "p_D1") == p);
+}
+
+TEST_CASE("a BDF2 module is the double BDF2 reference's, nonblocking in both channel counts", "[circuit]")
+{
+    // .method bdf2: the emitted step (its companions, its second histories) against the double reference running
+    // the block's BDF2 Holters form with the module's guess and Newton steps, in band: a diode pair across C1 (and a
+    // pot into C2), an OTA stage in its i-form, one diode
+    struct Case
+    {
+        std::string text;
+        std::vector<double> laws;   // the law inputs, held
+    };
+    const Case cases[] = {{withLine(fc::test::kDiodeTone, ".adaa off", ".method bdf2"), {}},
+                          {fc::test::otaStage(".oversample 2\n.adaa off\n.solver newton(2)\n.method bdf2\n"), {1e-4}},
+                          {withLine(kSinglePot0, ".adaa on", ".method bdf2"), {}}};
+    for (const Case& c : cases)
+    {
+        const fc::Result r = fc::generate(c.text, "t.cir");
+        INFO(r.errors << r.warnings);
+        REQUIRE(r.errors.empty());
+        CHECK(r.source.find("xo_") != std::string::npos);
+        auto program = compiled(r);
+        for (const char* method : {"init", "set", "tick", "step", "clear"})
+        {
+            const std::string name = r.module + "::" + method;
+            if (std::find(program->module(r.module)->methods.begin(), program->module(r.module)->methods.end(),
+                          name) != program->module(r.module)->methods.end())
+                CHECK(program->nonBlocking(name));
+        }
+        fc::Options stereo;
+        stereo.channels = 2;
+        const fc::Result r2 = fc::generate(c.text, "t.cir", stereo);
+        auto program2 = compiled(r2);
+        CHECK(program2->nonBlocking(r2.module + "::tick"));
+        CHECK(program2->nonBlocking(r2.module + "::step"));
+
+        const fc::Plan plan = planned(c.text);
+        REQUIRE(plan.regionFirst == 0);
+        REQUIRE(plan.regionFirst == plan.regionLast);
+        const Program::Module* m = program->module(r.module);
+        REQUIRE(m);
+        std::string errors;
+        auto* init = program->function<void(void*, float)>(r.module + "::init", errors);
+        REQUIRE(init);
+        const int os = plan.config.oversample;
+        const double rate = 48000.0 * os;
+        std::vector<double> pots;
+        for (const fc::PotInfo& pot : plan.pots)
+            pots.push_back(pot.defaultValue);
+        const fc::Holters h = fc::holters(plan, 0, rate, pots, c.laws);
+        fc::RefOptions o;
+        o.steps = plan.config.solver.steps;
+        o.guess = plan.config.solver.guess;
+        const std::size_t n = static_cast<std::size_t>(os) * (1024 + 4096 + 64);
+        const std::vector<double> u = fc::sine(plan.netlist.target.level.value_or(1), 85, 4096, os, n);
+        const std::vector<double> ref = fc::simulate(h, u, o);
+        auto self = instance(*m);
+        init(self.get(), 48000);
+        std::vector<double> y(n);
+        if (c.laws.empty())
+        {
+            auto* step = program->function<float(void*, float)>(r.module + "::step", errors);
+            REQUIRE(step);
+            for (std::size_t i = 0; i < n; ++i)
+                y[i] = static_cast<double>(step(self.get(), static_cast<float>(u[i])));
+        }
+        else
+        {
+            auto* step = program->function<float(void*, float, float)>(r.module + "::step", errors);
+            REQUIRE(step);
+            for (std::size_t i = 0; i < n; ++i)
+                y[i] = static_cast<double>(step(self.get(), static_cast<float>(u[i]), static_cast<float>(c.laws[0])));
+        }
+        const std::vector<double> yd = fc::decimateWindow(y, os, 1024, 4096);
+        const std::vector<double> rd = fc::decimateWindow(ref, os, 1024, 4096);
+        const double error = fc::bandErrorDb(yd, rd);
+        INFO(r.module << ": " << error << " dB");
+        CHECK(error <= -100);
+    }
 }
 
 TEST_CASE("names keep their case, and a pot's sections have names of their own", "[circuit]")

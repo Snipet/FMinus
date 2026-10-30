@@ -39,8 +39,6 @@ namespace fminus::circuit
             }
             if (!o.moduleName.empty() && !isPlainName(o.moduleName))
                 fail("Options::moduleName '" + o.moduleName + "' is not a letter followed by letters and digits");
-            if (o.method && *o.method == Method::Bdf2)
-                fail("Options::method bdf2 is not supported yet (Phase 1)");
             if (o.chosen)
             {
                 const Choice& c = *o.chosen;
@@ -55,8 +53,6 @@ namespace fminus::circuit
                 if (c.solver.steps < lo || c.solver.steps > 8)
                     fail("Options::chosen's solver steps are " + std::to_string(c.solver.steps) + "; they are " +
                          std::to_string(lo) + " to 8");
-                if (c.method == Method::Bdf2)
-                    fail("Options::chosen's method bdf2 is not supported yet (Phase 1)");
             }
             return errors;
         }

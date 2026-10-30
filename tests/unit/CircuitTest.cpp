@@ -339,8 +339,9 @@ TEST_CASE("netlist errors, as clang words them", "[circuit]")
          "t.cir:4:1: error: the transistor Q1 is not supported yet (Phase 2)\n"},
         {head + "R1 in o 1k\nR2 o 0 1k\n.model M D(IS=1n RS=-10)\n",
          "t.cir:5:18: error: 'RS=-10': RS is 0 or a resistance from 1e-30 to 1e30 ohms\n"},
-        {head + "R1 in o 1k\nR2 o 0 1k\n.method bdf2\n",
-         "t.cir:5:9: error: '.method bdf2' is not supported yet (Phase 1)\n"},
+        // BDF2 is an integrator ADAA's mean does not hold for (Holters' is the trapezoidal rule's)
+        {head + "R1 in o 1k\nC1 o 0 10n\nD1 o 0 1N914\nD2 0 o 1N914\n.adaa on\n.method bdf2\n",
+         "t.cir:8:1: error: '.method bdf2' with '.adaa on': ADAA is Holters' trapezoidal form\n"},
         {head + "R1 in o 1k\nR2 o 0 1k\n.method be\n", "t.cir:5:9: error: '.method be': tr, bdf2 or auto\n"},
         {".input u in kind=cv\n.output y o\nR1 in o 1k\nR2 o 0 1k\n",
          "t.cir:1:10: error: 'in': a law input (kind=cv) has no node; write '-' (it enters an OTA's gain, not the "
@@ -1514,6 +1515,54 @@ TEST_CASE("with inductors, the trapezoidal blocks are the bilinear map of their 
         const Complex h = fc::analog(wah, 0, Complex(0, 2 * std::numbers::pi * f0), {res});
         CHECK(std::abs(h - rd / (10000 + rd)) <= 1e-9);
     }
+}
+
+TEST_CASE("BDF2's blocks are the BDF2 map of their analog response", "[circuit]")
+{
+    // BDF2's companions (gc = 3 C fs' / 2, rl = 3 L fs' / 2, and each state's second history) make a linear block's
+    // discrete response H(fs (3 - 4 z^-1 + z^-2) / 2), within 1e-9 relative from 20 Hz to 20 kHz: the TS chain's
+    // linear blocks, an RL low-pass and the wah's tank, at each point of their pot grids
+    struct Case
+    {
+        std::string text;
+        std::vector<int> blocks;
+    };
+    const Case cases[] = {{fc::test::kScreamer, {0, 2, 3}}, {fc::test::kRlLowpass, {0}}, {fc::test::kWah, {0}}};
+    for (const Case& c : cases)
+    {
+        const fc::Plan plan = planned(c.text);
+        for (int b : c.blocks)
+        {
+            const fc::Block& block = plan.blocks[static_cast<std::size_t>(b)];
+            for (double fs : {44100.0, 48000.0, 96000.0})
+            {
+                for (const std::vector<double>& pots : fc::potGrid(plan, block))
+                {
+                    const fc::Holters tr = fc::holters(plan, b, fs, pots);
+                    const fc::Holters h = fc::holters(plan, b, fs, pots, {}, fc::Method::Bdf2);
+                    CHECK(h.states == 2 * tr.states);   // [x; xo]
+                    double worst = 0;
+                    for (double f = 20; f <= 20000; f *= 1.05)
+                    {
+                        const Complex digital = stateSpace(h, std::polar(1.0, 2 * std::numbers::pi * f / fs));
+                        const Complex analog =
+                            fc::analog(plan, b, fc::discreteS(fc::Method::Bdf2, f, fs), pots);
+                        if (std::abs(analog) < 1e-9)
+                            continue;   // the level pot at 0: silence
+                        worst = std::fmax(worst, std::abs(digital - analog) / std::abs(analog));
+                    }
+                    INFO(plan.module << " block " << b + 1 << " at " << fs);
+                    CHECK(worst < 1e-9);
+                }
+            }
+        }
+    }
+    // the companions' values, and BDF2's map at a low frequency: s within 1e-6 of j 2 pi f (second order)
+    const fc::Plan rl = planned(fc::test::kRlLowpass);
+    const fc::System s = fc::assemble(rl, 0);
+    CHECK(fc::symbolValues(s, rl, 0, 48000.0, {}, fc::Method::Bdf2) == std::vector<double>{1.5 * 0.01 * 48000});
+    const Complex low = fc::discreteS(fc::Method::Bdf2, 100, 48000);
+    CHECK(std::abs(low - Complex(0, 2 * std::numbers::pi * 100)) <= 1e-4 * 2 * std::numbers::pi * 100);
 }
 
 TEST_CASE("the DC operating point, by hand", "[circuit]")

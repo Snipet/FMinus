@@ -14,7 +14,7 @@
 # PARSE-NEXT: {{.*}}broken-parse.cir:8:19: error: unknown pot 'tonee' (the pots: tone)
 # PARSE-NEXT: {{.*}}broken-parse.cir:9:20: error: the exponent of '^' is an integer from 0 to 8
 # PARSE-NEXT: {{.*}}broken-parse.cir:10:22: error: 'RS=-10': RS is 0 or a resistance from 1e-30 to 1e30 ohms
-# PARSE-NEXT: {{.*}}broken-parse.cir:11:9: error: '.method bdf2' is not supported yet (Phase 1)
+# PARSE-NEXT: {{.*}}broken-parse.cir:11:9: error: '.method be': tr, bdf2 or auto
 # PARSE-NEXT: {{.*}}broken-parse.cir:12:1: error: '.subckt' is not supported yet
 # PARSE-NEXT: {{.*}}broken-parse.cir:13:1: error: unknown directive '.foo'
 
@@ -76,6 +76,10 @@
 # CONTROLS: {{.*}}broken-controls.cir:12:1: error: E1's controls, 'a' and 'b', are in two blocks: an E reads one block's nodes (or its input)
 
 # BIASED: {{.*}}broken-biased.cir:8:1: error: port D1 is biased at DC (0.573 V): biased ports need the offset formulation (Phase 2)
+
+# The integrator: BDF2 with ADAA, whose closed-form mean is Holters' for the trapezoidal rule.
+# RUN: not fminus %S/Inputs/broken-bdf2.cir --emit fm 2>&1 | FileCheck %s --check-prefix=BDF2 --match-full-lines
+# BDF2: {{.*}}broken-bdf2.cir:10:1: error: '.method bdf2' with '.adaa on': ADAA is Holters' trapezoidal form
 
 # --emit fm is a netlist's: on an FMinus source it is an error.
 # RUN: not fminus %S/Inputs/play.fm --emit fm 2>&1 | FileCheck %s --check-prefix=NOTCIR --match-full-lines

@@ -1828,10 +1828,10 @@ namespace fminus::circuit
                 const std::string w = folded(t[1].text);
                 if (w == "tr")
                     n_.method.value = Method::Tr;
+                else if (w == "bdf2")
+                    n_.method.value = Method::Bdf2;
                 else if (w == "auto")
                     n_.method.isAuto = true;
-                else if (w == "bdf2")
-                    error(t[1].loc, "'.method " + t[1].text + "' is not supported yet (Phase 1)");
                 else
                     error(t[1].loc, "'.method " + t[1].text + "': tr, bdf2 or auto");
                 return true;

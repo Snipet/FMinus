@@ -664,6 +664,13 @@ namespace fminus::circuit
                                               ": pots move its block's pole, and the fit is made at generation");
                     continue;
                 }
+                if (b.method == Method::Bdf2)
+                {
+                    messages.warning(loc, "prewarp is ignored for OTA " + port.parts +
+                                              ": it places the trapezoidal rule's pole, and its block is BDF2 "
+                                              "(.method bdf2)");
+                    continue;
+                }
                 (void)systems;
                 auto [lo, hi] = gainRange(p, b);
                 if (!(hi > lo))
@@ -2015,8 +2022,10 @@ namespace fminus::circuit
         else if (p.smooth && netlist.solverBare && !options.solver)
             messages.error(netlist.solver.loc,
                            "'.solver omega': an OTA's port is solved from the previous step's v: .solver newton(K)");
-        // The integrator: only TR yet, so an open .method is TR, and not the self-test's to choose (a BDF2 twin is
-        // a candidate only for a block the ringing check flags: Phase 1's last slice).
+        // The integrator: Options, then the netlist. It is open (the self-test's: the trapezoidal rule, and a BDF2
+        // twin of a candidate whose block rings) when the netlist writes `.method auto`, or leaves it out while
+        // another searched dimension is open: a netlist that names the rest of its configuration plays the
+        // trapezoidal rule, with nothing left to choose (were a .method left out open, every netlist would be).
         if (options.method)
         {
             cfg.method = *options.method;
@@ -2026,6 +2035,29 @@ namespace fminus::circuit
         {
             cfg.method = *netlist.method.value;
             cfg.methodFrom = "the netlist";
+        }
+        else if (hasPort && (netlist.method.isAuto || cfg.oversampleOpen || cfg.adaaOpen || cfg.solverOpen))
+        {
+            cfg.methodOpen = true;
+            cfg.methodAuto = netlist.method.isAuto;
+            cfg.method = chosen ? chosen->method : Method::Tr;
+            cfg.methodFrom = chosen ? fromChoice : "provisional";
+        }
+        if (cfg.adaa && cfg.method == Method::Bdf2)
+        {
+            // where each came from, as the error names it
+            auto said = [&](const std::string& from, const std::string& directive, const std::string& member)
+            {
+                return from == "the netlist" ? "'" + directive + "'"
+                       : from == "Options"   ? "Options::" + member
+                                             : "Options::chosen's " + member;
+            };
+            const Loc loc = cfg.methodFrom == "the netlist" ? netlist.method.loc
+                            : cfg.adaaFrom == "the netlist" ? netlist.adaa.loc
+                                                            : Loc{};
+            messages.error(loc, said(cfg.methodFrom, ".method bdf2", "method bdf2") + " with " +
+                                    said(cfg.adaaFrom, ".adaa on", "adaa on") +
+                                    ": ADAA is Holters' trapezoidal form");
         }
         if (options.prewarp)
         {
@@ -2148,6 +2180,7 @@ namespace fminus::circuit
                 Block& b = p.blocks[static_cast<std::size_t>(i)];
                 b.inRegion = true;
                 b.rateFactor = cfg.oversample;
+                b.method = cfg.method;
                 if (b.port && cfg.adaa)
                     b.designFactor = 2.0 / 3.0;
             }
@@ -2159,7 +2192,8 @@ namespace fminus::circuit
                 if (b.inRegion)
                 {
                     b.oneXRegion =
-                        oneXError(systems[i], *pivotsOf[i], p, static_cast<int>(i), kCheckRate * b.rateFactor);
+                        oneXError(systems[i], *pivotsOf[i], p, static_cast<int>(i), kCheckRate * b.rateFactor,
+                                  b.method);
                     if (b.oneXRegion > kTolerance)
                         messages.warning(blockLoc(b),
                                          std::format("{} errs by {:.2f} dB at {}x 44.1 kHz, more than {} dB even "

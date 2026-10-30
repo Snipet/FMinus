@@ -9,7 +9,7 @@
 # RUN: diff %t.1.notes %t.4.notes
 # RUN: diff %t.1.fm %t.4.fm
 
-# NOTES:      clipper-pot.cir: note: self-test 087ad67714f6249a: .oversample, .adaa, .solver open; 3 points x 17 signals = 51 units, L = 4.5 V (.target level); 16 candidates, cheapest first
+# NOTES:      clipper-pot.cir: note: self-test 087ad67714f6249a: .oversample, .adaa, .solver, .method open; 3 points x 17 signals = 51 units, L = 4.5 V (.target level); 16 candidates, cheapest first
 # NOTES-NEXT: clipper-pot.cir: note: self-test candidate 1: 1x, omega(1), 152 model cycles: {{.*}}: fails (T2 {{.*}})
 # NOTES-NEXT: clipper-pot.cir: note: self-test candidate 2: 1x, ADAA, omega(1), 209 model cycles: {{.*}}: fails
 # NOTES:      clipper-pot.cir: note: self-test candidate 9: 4x, omega(1), 680 model cycles: {{.*}}: fails (T1 {{.*}})
@@ -19,7 +19,7 @@
 # NOTES-NOT:  {{.}}
 
 # MODULE:      // PotClipper: generated from clipper-pot.cir by fminus::circuit (Phase 1). Do not edit: edit clipper-pot.cir.
-# MODULE:      //   configuration: .oversample 4, .adaa on, .solver omega(1) (the self-test 087ad67714f6249a); iir blocks=auto, .method tr (default)
+# MODULE:      //   configuration: .oversample 4, .adaa on, .solver omega(1), .method tr (the self-test 087ad67714f6249a); iir blocks=auto (default)
 # MODULE:      void b1_set(float drive)
 
 # Without --self-test the same netlist plays its provisional configuration; --notes prints the plan, the provisional

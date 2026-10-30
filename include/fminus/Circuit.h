@@ -102,9 +102,11 @@ namespace fminus
             All,
         };
 
-        // The integrator (.method).
+        // The integrator of the oversampled region's blocks (.method); the blocks outside it are trapezoidal (or a
+        // matched design, docs/circuits.md).
         //   Tr    the trapezoidal rule: the default
-        //   Bdf2  the second-order backward difference, for a block that rings at Nyquist (not supported yet)
+        //   Bdf2  the second-order backward difference (L-stable: it does not ring at Nyquist where a stiff block
+        //         makes the trapezoidal rule ring); never with ADAA, which is Holters' trapezoidal form
         enum class Method
         {
             Tr,
@@ -170,7 +172,7 @@ namespace fminus
             std::optional<Solver> solver;       // .solver
             std::optional<bool> adaa;           // .adaa on|off
             std::optional<int> channels;        // .channels 1 or 2 (default 1)
-            std::optional<Method> method;       // .method tr|bdf2 (default tr; bdf2 is not supported yet)
+            std::optional<Method> method;       // .method tr|bdf2 (default tr; bdf2 not with ADAA)
             std::optional<bool> prewarp;        // .prewarp on|off: an OTA one-pole's cutoff law prewarped (off);
                                                 // its -3 dB point the analog's without ADAA (with it, nearer only)
             std::optional<Choice> chosen;       // the self-test's answer: fills the open dimensions when its key is

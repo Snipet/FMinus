@@ -200,6 +200,7 @@ namespace fminus::circuit
         int output = -1;                 // the node the next block reads, or .output's
         std::vector<std::string> pots;   // the pots it reads (its network's and its OTA's gain), folded, in .pot order
         bool inRegion = false;
+        Method method = Method::Tr;   // its integrator: the configuration's in the region, the trapezoidal rule outside
         int rateFactor = 1;        // runs at rateFactor x the host's rate
         double designFactor = 1;   // designed at designFactor x that (2/3 with ADAA)
         double oneX = 0;           // a linear block's 1x check: worst dB at 44.1 kHz
@@ -263,6 +264,7 @@ namespace fminus::circuit
         bool adaaOpen = false;
         bool solverOpen = false;
         bool methodOpen = false;
+        bool methodAuto = false;           // the netlist wrote .method auto (the self-test's paste line then names it)
         bool provisional = false;          // a dimension is open and no matching Options::chosen filled it
         std::optional<Choice> chosen;      // the Options::chosen that filled the open dimensions
         bool anyOpen() const

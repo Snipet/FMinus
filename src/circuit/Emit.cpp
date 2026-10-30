@@ -571,7 +571,7 @@ namespace fminus::circuit
                 for (std::size_t i = 0; i < plan.blocks.size(); ++i)
                 {
                     const Block& b = plan.blocks[i];
-                    if (adaaBlock(b))
+                    if (secondHistory(b))
                     {
                         for (const Branch& br : b.branches)
                         {
@@ -604,6 +604,12 @@ namespace fminus::circuit
             bool adaaBlock(const Block& b) const
             {
                 return b.port.has_value() && plan.config.adaa;
+            }
+
+            // Whether a block keeps xo_<C> for its states: ADAA's last states, or BDF2's second history.
+            bool secondHistory(const Block& b) const
+            {
+                return adaaBlock(b) || b.method == Method::Bdf2;
             }
 
             // Whether block i's set() moves its ADAA port's curve: ka (an asymmetric pair's kr too) is a field its
@@ -894,10 +900,14 @@ namespace fminus::circuit
                     text += "; at " + rateText(b);
                     if (adaaBlock(b))
                         text += ", designed at " + rateText(b) + " 2/3 (ADAA)";
+                    if (b.method == Method::Bdf2)
+                        text += ", BDF2";
                 }
                 else
                 {
                     text += "linear; at " + rateText(b);
+                    if (b.method == Method::Bdf2)
+                        text += ", BDF2";
                     if (b.inRegion)
                         text += std::format(" (1x check: {:.2f} dB off at 44.1 kHz, {:.2f} dB at {}x)", b.oneX,
                                             b.oneXRegion, b.rateFactor);
@@ -950,8 +960,12 @@ namespace fminus::circuit
 
         void Writer::fields()
         {
-            bool first = true;
-            bool firstL = true;
+            // each note on the first field of its kind and integrator: (inductor, BDF2)
+            std::set<std::pair<bool, bool>> noted;
+            auto firstOf = [&](bool inductor, const Block& b)
+            {
+                return noted.insert({inductor, b.method == Method::Bdf2}).second;
+            };
             for (const Block& b : plan.blocks)
             {
                 for (const Branch& br : b.branches)
@@ -960,19 +974,19 @@ namespace fminus::circuit
                         continue;
                     at = elementLine(br.element);
                     const bool inductor = br.kind == Branch::Kind::Inductor;
+                    const bool bdf2 = b.method == Method::Bdf2;
                     std::string note;
-                    if (inductor && firstL)
-                        note = br.part + "'s companion state (trapezoidal): x <- 2 rl i - x";
-                    else if (!inductor && first)
-                        note = br.part + "'s companion state (trapezoidal): x <- 2 gc v - x";
+                    if (firstOf(inductor, b))
+                        note = br.part + "'s companion state (" + (bdf2 ? "BDF2" : "trapezoidal") +
+                               (bdf2 ? std::string("): x <- h - xo, h = 4/3 ") + (inductor ? "rl i" : "gc v")
+                                     : std::string("): x <- 2 ") + (inductor ? "rl i - x" : "gc v - x"));
                     line("    " + type + " x_" + br.ident + ";", note, 31);
-                    (inductor ? firstL : first) = false;
                 }
             }
             for (std::size_t i = 0; i < plan.blocks.size(); ++i)
             {
                 const Block& b = plan.blocks[i];
-                if (!adaaBlock(b))
+                if (!secondHistory(b))
                     continue;
                 bool firstX = true;
                 for (const Branch& br : b.branches)
@@ -980,8 +994,11 @@ namespace fminus::circuit
                     if (!br.state())
                         continue;
                     at = elementLine(br.element);
-                    line("    " + type + " xo_" + br.ident + ";",
-                         firstX ? "ADAA: x_" + br.ident + " a step earlier" : "", 31);
+                    std::string note;
+                    if (firstX)
+                        note = adaaBlock(b) ? "ADAA: x_" + br.ident + " a step earlier"
+                                            : "BDF2: x_" + br.ident + "'s second part, h / 4 a step earlier";
+                    line("    " + type + " xo_" + br.ident + ";", note, 31);
                     firstX = false;
                 }
             }
@@ -1029,7 +1046,7 @@ namespace fminus::circuit
                     }
                 }
             }
-            first = true;
+            noted.clear();
             for (const Block& b : plan.blocks)
             {
                 for (const Branch& br : b.branches)
@@ -1037,11 +1054,14 @@ namespace fminus::circuit
                     if (br.kind != Branch::Kind::Capacitor)
                         continue;
                     at = elementLine(br.element);
-                    line("    float gc_" + br.ident + ";", first ? "2 C fs', the companion's conductance" : "", 31);
-                    first = false;
+                    line("    float gc_" + br.ident + ";",
+                         firstOf(false, b) ? (b.method == Method::Bdf2 ? "3 C fs' / 2 (BDF2)" : "2 C fs'") +
+                                                 std::string(", the companion's conductance")
+                                           : "",
+                         31);
                 }
             }
-            first = true;
+            noted.clear();
             for (const Block& b : plan.blocks)
             {
                 for (const Branch& br : b.branches)
@@ -1049,11 +1069,11 @@ namespace fminus::circuit
                     if (br.kind != Branch::Kind::Capacitor)
                         continue;
                     at = elementLine(br.element);
-                    line("    float g2_" + br.ident + ";", first ? "2 gc" : "", 31);
-                    first = false;
+                    line("    float g2_" + br.ident + ";",
+                         firstOf(false, b) ? (b.method == Method::Bdf2 ? "4/3 gc" : "2 gc") : "", 31);
                 }
             }
-            first = true;
+            noted.clear();
             for (const Block& b : plan.blocks)
             {
                 for (const Branch& br : b.branches)
@@ -1061,9 +1081,13 @@ namespace fminus::circuit
                     if (br.kind != Branch::Kind::Inductor)
                         continue;
                     at = elementLine(br.element);
-                    line("    float rl_" + br.ident + ";", first ? "2 L fs', the companion's resistance" : "", 31);
-                    line("    float r2_" + br.ident + ";", first ? "2 rl" : "", 31);
-                    first = false;
+                    const bool note = firstOf(true, b);
+                    const bool bdf2 = b.method == Method::Bdf2;
+                    line("    float rl_" + br.ident + ";",
+                         note ? (bdf2 ? "3 L fs' / 2 (BDF2)" : "2 L fs'") + std::string(", the companion's resistance")
+                              : "",
+                         31);
+                    line("    float r2_" + br.ident + ";", note ? (bdf2 ? "4/3 rl" : "2 rl") : "", 31);
                 }
             }
             for (std::size_t i = 0; i < plan.blocks.size(); ++i)
@@ -1119,19 +1143,26 @@ namespace fminus::circuit
                 {
                     if (br.kind != Branch::Kind::Capacitor)
                         continue;
-                    const double factor = 2 * br.c * b.rateFactor * b.designFactor;
+                    const bool bdf2 = b.method == Method::Bdf2;
+                    const double factor = (bdf2 ? 1.5 : 2) * br.c * b.rateFactor * b.designFactor;
                     const std::string fs =
                         (b.rateFactor == 1 ? std::string("rate") : std::to_string(b.rateFactor) + " rate") +
                         (b.designFactor != 1 ? " 2/3" : "");
                     line("        gc_" + br.ident + " = " + literal(factor) + " * rate;",
-                         "2 " + br.part + " fs', fs' = " + fs);
+                         (bdf2 ? "3 " + br.part + " fs' / 2 (BDF2)" : "2 " + br.part + " fs'") + ", fs' = " + fs);
                 }
             }
             for (const Block& b : plan.blocks)
             {
                 for (const Branch& br : b.branches)
                 {
-                    if (br.kind == Branch::Kind::Capacitor)
+                    if (br.kind != Branch::Kind::Capacitor)
+                        continue;
+                    if (b.method == Method::Bdf2)
+                        line("        g2_" + br.ident + " = " + literal(2 * br.c * b.rateFactor * b.designFactor) +
+                                 " * rate;",
+                             "4/3 gc: BDF2's history, 2 " + br.part + " fs'");
+                    else
                         line("        g2_" + br.ident + " = 2 * gc_" + br.ident + ";");
                 }
             }
@@ -1141,13 +1172,19 @@ namespace fminus::circuit
                 {
                     if (br.kind != Branch::Kind::Inductor)
                         continue;
-                    const double factor = 2 * br.l * b.rateFactor * b.designFactor;
+                    const bool bdf2 = b.method == Method::Bdf2;
+                    const double factor = (bdf2 ? 1.5 : 2) * br.l * b.rateFactor * b.designFactor;
                     const std::string fs =
                         (b.rateFactor == 1 ? std::string("rate") : std::to_string(b.rateFactor) + " rate") +
                         (b.designFactor != 1 ? " 2/3" : "");
                     line("        rl_" + br.ident + " = " + literal(factor) + " * rate;",
-                         "2 " + br.part + " fs', fs' = " + fs);
-                    line("        r2_" + br.ident + " = 2 * rl_" + br.ident + ";");
+                         (bdf2 ? "3 " + br.part + " fs' / 2 (BDF2)" : "2 " + br.part + " fs'") + ", fs' = " + fs);
+                    if (bdf2)
+                        line("        r2_" + br.ident + " = " + literal(2 * br.l * b.rateFactor * b.designFactor) +
+                                 " * rate;",
+                             "4/3 rl: BDF2's history, 2 " + br.part + " fs'");
+                    else
+                        line("        r2_" + br.ident + " = 2 * rl_" + br.ident + ";");
                 }
             }
             for (const Block& b : plan.blocks)
@@ -1216,7 +1253,7 @@ namespace fminus::circuit
             for (std::size_t i = 0; i < plan.blocks.size(); ++i)
             {
                 const Block& b = plan.blocks[i];
-                if (adaaBlock(b))
+                if (secondHistory(b))
                 {
                     for (const Branch& br : b.branches)
                     {
@@ -1448,8 +1485,18 @@ namespace fminus::circuit
                     note = br.part + " across the port: its voltage is v";
                 else
                     note = br.part + "'s voltage is " + s.readouts[static_cast<std::size_t>(readout)].label;
-                line("        " + src.name + " = " + (negative ? "-" : "") + (inductor ? "r2_" : "g2_") + ident +
-                         " * " + vc + " - " + (adaa ? "xa_" + ident : src.name) + ";",
+                const std::string g2 = (negative ? "-" : "") + std::string(inductor ? "r2_" : "g2_") + ident;
+                if (b.method == Method::Bdf2)
+                {
+                    // BDF2's history in two parts: x = 4/3 g v - g v_prev / 3, xo = g v / 3, so x <- h - xo and xo <- h
+                    // / 4, h = 4/3 g v (an inductor's 4/3 r i)
+                    line("        const " + T + " h_" + ident + " = " + g2 + " * " + vc + ";", note + " (BDF2)");
+                    line("        " + src.name + " = h_" + ident + " - xo_" + ident + ";");
+                    line("        xo_" + ident + " = 0.25f * h_" + ident + ";");
+                    continue;
+                }
+                line("        " + src.name + " = " + g2 + " * " + vc + " - " + (adaa ? "xa_" + ident : src.name) +
+                         ";",
                      note);
             }
             if (b.port)

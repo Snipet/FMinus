@@ -490,7 +490,7 @@ namespace fminus::circuit
         };
 
         ChainForm chainForm(const Plan& plan, const StressMatrix& matrix, int unit, int first, int last, double rate,
-                            int m, std::size_t n, bool adaa, bool prewarp)
+                            int m, std::size_t n, bool adaa, bool prewarp, Method method)
         {
             ChainForm c;
             const StressPoint& point = matrix.point(unit);
@@ -501,8 +501,9 @@ namespace fminus::circuit
             {
                 const Block& block = plan.blocks[static_cast<std::size_t>(b)];
                 const double design = rate * (adaa && block.port ? 2.0 / 3.0 : 1.0);
-                Holters h = holters(plan, b, design, point.pots, point.laws);
-                const bool warp = prewarp && block.port && block.port->prewarp;
+                Holters h = holters(plan, b, design, point.pots, point.laws, method);
+                // a BDF2 block is not prewarped (fitPrewarp's rule)
+                const bool warp = prewarp && method == Method::Tr && block.port && block.port->prewarp;
                 if (warp)
                     h.g = prewarped(*block.port, h.g, design);
                 std::vector<double> stream;
@@ -534,7 +535,7 @@ namespace fminus::circuit
         const int factor = matrix.shape.referenceFactor;
         const std::size_t n = static_cast<std::size_t>(factor) * matrix.shape.host();
         const ChainForm chain = chainForm(plan, matrix, unit, 0, static_cast<int>(plan.blocks.size()) - 1,
-                                          kHostRate * factor, factor, n, false, false);
+                                          kHostRate * factor, factor, n, false, false, Method::Tr);
         RefOptions o;
         o.stop = stop;
         RefStats stats;
@@ -562,7 +563,7 @@ namespace fminus::circuit
             return u;
         std::vector<Holters> before;
         for (int b = 0; b < plan.regionFirst; ++b)
-            before.push_back(holters(plan, b, kHostRate * oversample, matrix.point(unit).pots));
+            before.push_back(holters(plan, b, kHostRate * oversample, matrix.point(unit).pots, {}, Method::Tr));
         RefOptions o;
         o.stop = stop;
         RefStats stats;
@@ -575,15 +576,15 @@ namespace fminus::circuit
     ReferenceT1 referenceT1(const Plan& plan, const StressMatrix& matrix, int unit, int oversample, bool adaa,
                             Method method, const Stop& stop)
     {
-        if (method != Method::Tr)
-            throw std::logic_error("referenceT1: only the trapezoidal rule");
+        if (adaa && method == Method::Bdf2)
+            throw std::logic_error("referenceT1: ADAA is the trapezoidal rule's");
         ReferenceT1 r;
         bool stopped = false;
         const std::vector<double> u = regionInput(plan, matrix, unit, oversample, stop, &stopped);
         if (stopped)
             return r;
         const ChainForm region = chainForm(plan, matrix, unit, plan.regionFirst, plan.regionLast,
-                                           kHostRate * oversample, oversample, u.size(), adaa, true);
+                                           kHostRate * oversample, oversample, u.size(), adaa, true, method);
         RefOptions o;
         o.adaa = adaa;
         o.stop = stop;
@@ -720,7 +721,8 @@ namespace fminus::circuit
 
     std::string Candidate::text() const
     {
-        return configurationText(oversample, Halfband::Iir, adaa, solver, false);
+        return configurationText(oversample, Halfband::Iir, adaa, solver, false) +
+               (method == Method::Bdf2 ? ", BDF2" : "");
     }
 
     namespace
@@ -738,6 +740,7 @@ namespace fminus::circuit
             double adaaEa = 57;       // ADAA's tail on an exp-affine law
             double adaaSm = 100;      // and on tanh's (log cosh: an expf and a logf)
             double update = 5;        // the state update
+            double bdf2PerState = 2;  // BDF2's second history, a state
             double linear = 5;        // a linear block's step
             double linearPerState = 3;
             double halfband = 12;     // a halfband stage's sample at its high rate, up and down
@@ -752,26 +755,26 @@ namespace fminus::circuit
         }
     } // namespace
 
-    double modelCost(const Plan& plan, int oversample, bool adaa, const Solver& solver)
+    double modelCost(const Plan& plan, int oversample, bool adaa, const Solver& solver, Method method)
     {
         double total = 0;
         for (const Block& b : plan.blocks)
         {
             const double rate = b.inRegion ? oversample : 1;
             const int states = statesOf(b);
-            double step = 0;
+            double step = b.inRegion && method == Method::Bdf2 ? kCost.bdf2PerState * states : 0;
             if (b.port)
             {
                 const bool smooth = b.port->smooth();
                 const double newton = smooth                                  ? kCost.newtonTanh
                                       : b.port->law == PortDef::Law::Asym ? kCost.newtonAsym
                                                                           : kCost.newtonPair;
-                step = kCost.p + kCost.perState * states +
-                       (solver.guess == Solver::Guess::Omega ? kCost.omega : kCost.previous) + newton * solver.steps +
-                       (adaa ? (smooth ? kCost.adaaSm : kCost.adaaEa) : 0) + kCost.update;
+                step += kCost.p + kCost.perState * states +
+                        (solver.guess == Solver::Guess::Omega ? kCost.omega : kCost.previous) + newton * solver.steps +
+                        (adaa ? (smooth ? kCost.adaaSm : kCost.adaaEa) : 0) + kCost.update;
             }
             else
-                step = kCost.linear + kCost.linearPerState * states;
+                step += kCost.linear + kCost.linearPerState * states;
             total += rate * step;
         }
         if (plan.regionFirst >= 0 && oversample > 1)
@@ -793,14 +796,19 @@ namespace fminus::circuit
                                               {Solver::Guess::Previous, 3}}
                         : std::vector<Solver>{{Solver::Guess::Omega, 1}, {Solver::Guess::Omega, 2}};
         const std::vector<int> factors = c.oversampleOpen ? row : std::vector<int>{c.oversample};
-        const std::vector<bool> adaas = c.adaaOpen ? std::vector<bool>{false, true} : std::vector<bool>{c.adaa};
+        // ADAA is the trapezoidal rule's: a netlist that names BDF2 tries it off only. An open integrator's
+        // candidates are the trapezoidal rule's, with BDF2 twins added where a block rings (ringingTwins)
+        const Method method = c.methodOpen ? Method::Tr : c.method;
+        const std::vector<bool> adaas = !c.adaaOpen            ? std::vector<bool>{c.adaa}
+                                        : method == Method::Bdf2 ? std::vector<bool>{false}
+                                                                 : std::vector<bool>{false, true};
         const std::vector<Solver> solvers = c.solverOpen ? rowSolvers : std::vector<Solver>{c.solver};
         for (int os : factors)
         {
             for (bool adaa : adaas)
             {
                 for (const Solver& s : solvers)
-                    out.push_back({os, adaa, s, c.method, modelCost(plan, os, adaa, s)});
+                    out.push_back({os, adaa, s, method, modelCost(plan, os, adaa, s, method)});
             }
         }
         orderCandidates(out);
@@ -914,7 +922,9 @@ namespace fminus::circuit
             add(std::string(".adaa ") + (choice.adaa ? "on" : "off"));
         if (open.solverOpen)
             add(".solver " + solverText(choice.solver));
-        if (open.methodOpen)
+        // an open integrator left out of the netlist is the trapezoidal rule once the rest is pinned: named only
+        // when the answer is BDF2, or the netlist wrote .method auto
+        if (open.methodOpen && (open.methodAuto || choice.method == Method::Bdf2))
             add(std::string(".method ") + (choice.method == Method::Tr ? "tr" : "bdf2"));
         return text;
     }

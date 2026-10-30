@@ -150,9 +150,12 @@ namespace fminus::circuit
     // The smallest |pivot| / max |its column| of the elimination in `pivots`, over the block's grid of rates and pots.
     double pivotMargin(const System& system, const Pivots& pivots, const Plan& plan, int block);
 
-    // The values of the system's symbols at a design rate (fs', the rate the block's capacitors see) and pots.
+    // The values of the system's symbols at a design rate (fs', the rate the block's capacitors see) and pots (a point
+    // as potGrid's: the pots, then the switches' positions; a switch left out is at its default): a capacitor's gc =
+    // 2 C fs' and an inductor's rl = 2 L fs' (the trapezoidal rule), 3 C fs' / 2 and 3 L fs' / 2 (BDF2), with the
+    // block's integrator, or `method` when given.
     std::vector<double> symbolValues(const System& system, const Plan& plan, int block, double designRate,
-                                     const std::vector<double>& pots);
+                                     const std::vector<double>& pots, std::optional<Method> method = std::nullopt);
 
     // ---- the derivation, for any T --------------------------------------------------------------------------------
 
@@ -420,6 +423,8 @@ namespace fminus::circuit
     }
 
     // A block in Holters' form (adaa.cpp's Block, generalised): N states, one input, one output, at most one port.
+    // With BDF2 its state is [x; xo], 2N: each capacitor's and inductor's history and its second part (the emitted
+    // step's xo_<C>), x <- h - xo and xo <- h / 4 with h = 4/3 g v (a capacitor's; an inductor's 4/3 r i).
     //   p = Cp x(n-1) + dp u(n);  v solves v + k sinh(v / nvt) = p, k = 2 Is K (a diode pair),
     //                             v + k (e^(v / nvt) - 1) = p, k = Is K (one diode),
     //                             v + k (e^(v / nvt) - 1) - k2 (e^(-v / nvt2) - 1) = p (an asymmetric pair), or
@@ -457,9 +462,10 @@ namespace fminus::circuit
     };
 
     // Block `block`'s Holters form at the design rate fs' (the rate its capacitors see), pots (a point as potGrid's)
-    // and law inputs (an OTA's gain's, in plan.laws' order; empty: each at its low end).
+    // and law inputs (an OTA's gain's, in plan.laws' order; empty: each at its low end), with the block's integrator,
+    // or `method` when given.
     Holters holters(const Plan& plan, int block, double designRate, const std::vector<double>& pots,
-                    const std::vector<double>& laws = {});
+                    const std::vector<double>& laws = {}, std::optional<Method> method = std::nullopt);
 
 
 
@@ -470,8 +476,14 @@ namespace fminus::circuit
     std::complex<double> analog(const System& system, const Pivots& pivots, const Plan& plan, int block,
                                 std::complex<double> s, const std::vector<double>& pots);
 
-    // A linear block's 1x check at a host rate: the worst |dB H_TR(f) - dB H(j 2 pi f)| over 20 Hz to 20 kHz in steps
+    // A linear block's 1x check at a host rate: the worst |dB H_d(f) - dB H(j 2 pi f)| over 20 Hz to 20 kHz in steps
     // of 1.01x, at each point of its pot grid, counting only where dB H is within 40 dB of its maximum, and skipping a
-    // pot point where |H| is below -120 dB everywhere. H_TR(f) = H(j 2 fs tan(pi f / fs)), the trapezoidal rule's.
-    double oneXError(const System& system, const Pivots& pivots, const Plan& plan, int block, double rate);
+    // pot point where |H| is below -120 dB everywhere. H_d(f) is the integrator's map of the analog response: the
+    // trapezoidal rule's H(j 2 fs tan(pi f / fs)), BDF2's H(fs (3 - 4 z^-1 + z^-2) / 2) at z = e^(j 2 pi f / fs).
+    double oneXError(const System& system, const Pivots& pivots, const Plan& plan, int block, double rate,
+                     Method method = Method::Tr);
+
+    // The discrete s an integrator puts in place of the analog one at f Hz and `rate`: the trapezoidal rule's j 2 fs
+    // tan(pi f / fs), BDF2's fs (3 - 4 z^-1 + z^-2) / 2 at z = e^(j 2 pi f / fs).
+    std::complex<double> discreteS(Method method, double f, double rate);
 } // namespace fminus::circuit
