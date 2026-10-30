@@ -1158,9 +1158,9 @@ namespace fminus::circuit
                     const Block& before = plan.blocks[i - 1];
                     const bool driven =
                         std::find(before.driven.begin(), before.driven.end(), b.input) != before.driven.end();
-                    const Node& in = plan.nodes[static_cast<std::size_t>(b.input)];
+                    const NodeInfo& in = plan.nodes[static_cast<std::size_t>(b.input)];
                     std::string driver = "an op amp's";
-                    if (in.source == Node::Source::Vcvs)
+                    if (in.source == NodeInfo::Source::Vcvs)
                         driver = plan.netlist.elements[static_cast<std::size_t>(in.element)].name + "'s";
                     text += driven ? "cut at " + driver + " output (exact); " : "cut at an op amp's + input (exact); ";
                 }

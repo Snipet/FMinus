@@ -190,8 +190,8 @@ namespace fminus::circuit
             }
             auto touch = [&](int node)
             {
-                const Node& n = plan.nodes[static_cast<std::size_t>(node)];
-                if (n.source != Node::Source::Dc || constantAt.count(node))
+                const NodeInfo& n = plan.nodes[static_cast<std::size_t>(node)];
+                if (n.source != NodeInfo::Source::Dc || constantAt.count(node))
                     return;
                 constantAt[node] = static_cast<int>(s.sources.size());
                 s.sources.push_back({plan.netlist.elements[static_cast<std::size_t>(n.element)].name,
@@ -280,7 +280,7 @@ namespace fminus::circuit
                 t.scale = fromInput ? plan.inputScale : 1.0;
                 return t;
             }
-            if (plan.nodes[static_cast<std::size_t>(node)].source == Node::Source::Dc)
+            if (plan.nodes[static_cast<std::size_t>(node)].source == NodeInfo::Source::Dc)
             {
                 // a constant: ground in the offsets
                 if (dc)

@@ -872,7 +872,7 @@ namespace fminus::circuit
         const std::vector<DiodeGroup> diodeGroups = elaborateDiodes(p.netlist, messages, absorbedKeys);
 
         // ---- nodes ----
-        p.nodes.push_back({"0", "0", Node::Source::None, -1, 0});
+        p.nodes.push_back({"0", "0", NodeInfo::Source::None, -1, 0});
         std::map<std::string, int> nodeOf;
         std::set<std::string> nodeIdents{"0"};
         auto node = [&](const std::string& name)
@@ -883,7 +883,7 @@ namespace fminus::circuit
             if (const auto it = nodeOf.find(key); it != nodeOf.end())
                 return it->second;
             const int index = static_cast<int>(p.nodes.size());
-            p.nodes.push_back({name, unique(identOf(name), nodeIdents), Node::Source::None, -1, 0});
+            p.nodes.push_back({name, unique(identOf(name), nodeIdents), NodeInfo::Source::None, -1, 0});
             nodeOf.emplace(key, index);
             return index;
         };
@@ -919,7 +919,7 @@ namespace fminus::circuit
                 messages.error(netlist.input->nodeLoc, ".input's node is ground");
             else
             {
-                p.nodes[static_cast<std::size_t>(p.inputNode)].source = Node::Source::Input;
+                p.nodes[static_cast<std::size_t>(p.inputNode)].source = NodeInfo::Source::Input;
                 ++p.nodes[static_cast<std::size_t>(p.inputNode)].connections;
             }
             if (isReservedName(netlist.input->name))
@@ -1438,7 +1438,7 @@ namespace fminus::circuit
             {
                 driverOf.emplace(op.out, k);
                 drivenBy.emplace(op.out, "op amp " + op.name);
-                p.nodes[static_cast<std::size_t>(op.out)].source = Node::Source::OpAmp;
+                p.nodes[static_cast<std::size_t>(op.out)].source = NodeInfo::Source::OpAmp;
             }
         }
         for (Controlled& c : controlled)
@@ -1457,7 +1457,7 @@ namespace fminus::circuit
             if (!drive(c.out, c.name, loc))
                 continue;
             c.driven = true;
-            p.nodes[static_cast<std::size_t>(c.out)].source = Node::Source::Vcvs;
+            p.nodes[static_cast<std::size_t>(c.out)].source = NodeInfo::Source::Vcvs;
             p.nodes[static_cast<std::size_t>(c.out)].element = c.element;
         }
         std::vector<Branch> voltageBranches;
@@ -1478,8 +1478,8 @@ namespace fminus::circuit
                 const int at = a == 0 ? b : a;
                 if (at == 0 || !drive(at, el.name, el.loc))
                     continue;
-                Node& n = p.nodes[static_cast<std::size_t>(at)];
-                n.source = Node::Source::Dc;
+                NodeInfo& n = p.nodes[static_cast<std::size_t>(at)];
+                n.source = NodeInfo::Source::Dc;
                 n.value = a == 0 ? -el.value : el.value;
                 n.element = static_cast<int>(e);
                 continue;
@@ -1833,7 +1833,7 @@ namespace fminus::circuit
             {
                 // a DC source's node is a constant, not an input
                 if (n == 0 || holder[static_cast<std::size_t>(n)] == static_cast<int>(c) ||
-                    p.nodes[static_cast<std::size_t>(n)].source == Node::Source::Dc)
+                    p.nodes[static_cast<std::size_t>(n)].source == NodeInfo::Source::Dc)
                     return;
                 if (std::find(found.begin(), found.end(), n) == found.end())
                     found.push_back(n);

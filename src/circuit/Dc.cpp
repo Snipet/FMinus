@@ -279,9 +279,9 @@ namespace fminus::circuit
         {
             if (!plan.currents.empty())
                 return true;
-            for (const Node& n : plan.nodes)
+            for (const NodeInfo& n : plan.nodes)
             {
-                if (n.source == Node::Source::Dc)
+                if (n.source == NodeInfo::Source::Dc)
                     return true;
             }
             for (const Block& b : plan.blocks)
@@ -339,7 +339,7 @@ namespace fminus::circuit
         point.nodes.assign(plan.nodes.size(), 0.0);
         for (std::size_t n = 0; n < plan.nodes.size(); ++n)
         {
-            if (plan.nodes[n].source == Node::Source::Dc)
+            if (plan.nodes[n].source == NodeInfo::Source::Dc)
                 point.nodes[n] = plan.nodes[n].value;
         }
         // each element's current from its first node to its second, where a block's unknowns hold it (a variable
