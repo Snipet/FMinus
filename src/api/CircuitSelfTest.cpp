@@ -160,10 +160,13 @@ namespace fminus::circuit
         };
         try
         {
-            // the netlist's own messages, as generate gives them; the configuration without any answer
+            // the netlist's own messages, as generate gives them; the configuration without any answer, and the
+            // candidates measured as a host plays them without probes (Options::probes changes no output bit, and is
+            // not part of the key)
             Options base = options;
             base.chosen.reset();
             base.channels.reset();
+            base.probes = false;
             const Result first = generate(netlist, fileName, base);
             out.errors = first.errors;
             out.warnings = first.warnings;

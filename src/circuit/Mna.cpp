@@ -578,6 +578,26 @@ namespace fminus::circuit
         return s;
     }
 
+    std::optional<System::Readout> nodeReadout(const Plan& plan, int blockIndex, int node)
+    {
+        const Block& block = plan.blocks.at(static_cast<std::size_t>(blockIndex));
+        // assemble's unknowns: the block's nodes, then the nodes it drives
+        int unknown = -1;
+        if (const auto it = std::find(block.nodes.begin(), block.nodes.end(), node); it != block.nodes.end())
+            unknown = static_cast<int>(it - block.nodes.begin());
+        else if (const auto at = std::find(block.driven.begin(), block.driven.end(), node); at != block.driven.end())
+            unknown = static_cast<int>(block.nodes.size()) + static_cast<int>(at - block.driven.begin());
+        if (unknown < 0)
+            return std::nullopt;
+        const NodeInfo& n = plan.nodes[static_cast<std::size_t>(node)];
+        System::Readout r;
+        r.name = "pn_" + n.ident;
+        r.kind = System::Readout::Kind::Node;
+        r.label = "V(" + n.name + ")";
+        r.unknowns.emplace_back(unknown, 1);
+        return r;
+    }
+
     // ---- the elimination order ----------------------------------------------------------------------------------
 
     namespace
@@ -1071,12 +1091,22 @@ namespace fminus::circuit
     } // namespace
 
     Holters holters(const Plan& plan, int blockIndex, double designRate, const std::vector<double>& pots,
-                    const std::vector<double>& laws, std::optional<Method> method)
+                    const std::vector<double>& laws, std::optional<Method> method, int node)
     {
         const Block& block = plan.blocks.at(static_cast<std::size_t>(blockIndex));
         const bool bdf2 = method.value_or(block.method) == Method::Bdf2;
-        const System system = assemble(plan, blockIndex);
+        System system = assemble(plan, blockIndex);
         const Pivots pivots = pivotsOrThrow(system, plan, blockIndex);
+        if (node > 0)
+        {
+            // a probe's reference: y reads V(node) (a readout leaves the elimination as it is)
+            std::optional<System::Readout> r = nodeReadout(plan, blockIndex, node);
+            if (!r)
+                throw std::logic_error("holters: block " + std::to_string(block.index) + " does not compute node '" +
+                                       plan.nodes[static_cast<std::size_t>(node)].name + "'");
+            system.output = static_cast<int>(system.readouts.size());
+            system.readouts.push_back(std::move(*r));
+        }
         const Linear<double> l =
             solve(system, pivots, symbolValues(system, plan, blockIndex, designRate, pots, method));
         Holters h;

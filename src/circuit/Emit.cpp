@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <format>
@@ -380,7 +381,7 @@ namespace fminus::circuit
         }
     } // namespace
 
-    Code::Split Code::split(const std::string& prefix) const
+    Code::Split Code::split(const std::string& prefix, const std::map<std::string, std::string>& fixed) const
     {
         std::vector<Stmt> init;
         std::vector<Stmt> set;
@@ -408,14 +409,17 @@ namespace fminus::circuit
         }
         Split out;
         std::map<std::string, std::string> renames;
+        std::size_t next = fixed.size();
         for (const Stmt& s : init)
         {
             if (s.declares && read.count(s.lhs))
             {
-                renames[s.lhs] = prefix + std::to_string(out.fields.size());
+                const auto it = fixed.find(s.lhs);
+                renames[s.lhs] = it != fixed.end() ? it->second : prefix + std::to_string(next++);
                 out.fields.push_back(renames[s.lhs]);
             }
         }
+        out.renames = renames;
         auto apply = [&](std::vector<Stmt>& list)
         {
             for (Stmt& s : list)
@@ -467,7 +471,17 @@ namespace fminus::circuit
 
     // ---- a block's coefficients -------------------------------------------------------------------------------------
 
-    std::optional<BlockCode> deriveBlock(const Plan& plan, int blockIndex, Messages& messages, bool woodbury)
+    namespace
+    {
+        // Whether `r` reads exactly what `node` (a nodeReadout) does: its one unknown, with coefficient 1.
+        bool readsNode(const System::Readout& r, const System::Readout& node)
+        {
+            return r.sources.empty() && r.unknowns == node.unknowns;
+        }
+    } // namespace
+
+    std::optional<BlockCode> deriveBlock(const Plan& plan, int blockIndex, Messages& messages, bool woodbury,
+                                         const std::vector<int>& probes)
     {
         BlockCode bc;
         bc.system = assemble(plan, blockIndex);
@@ -567,39 +581,112 @@ namespace fminus::circuit
         };
         bc.coefficients = derived(bc.pivots, code);
         bc.lines = code.lines();
-        if (!block.hasControls() || !woodbury)
-            return bc;
-        // The Woodbury form: the variable branches' currents pivoted last, so that everything before them depends on
-        // the rate alone (init's) and b<N>_set is left with the k x k (R + Q) elimination and what it reaches; kept
-        // when its b<N>_set does fewer operations than the all-in-set form's
-        const std::string setName = "b" + std::to_string(block.index) + "_set";
-        const int all = code.operations();
-        Messages scratch;
-        const std::optional<Pivots> last = choosePivots(bc.system, plan, blockIndex, scratch, true);
-        if (!last)
-        {
-            bc.form = std::format("{}: all in set, {} operations (no order pivots its variable branches last)",
-                                  setName, all);
-            return bc;
-        }
         Code wood(reserved);
-        Coefficients<Val> coefficients = derived(*last, wood);
-        Code::Split split = wood.split("w" + std::to_string(block.index) + "_");
-        if (split.setOperations >= all)
+        Code* kept = &code;   // the derivation the module prints
+        const std::string prefix = "w" + std::to_string(block.index) + "_";
+        std::map<std::string, std::string> wNames;   // the Woodbury form's temporaries, and their fields
+        if (block.hasControls() && woodbury)
         {
-            bc.form = std::format("{}: all in set, {} operations (the Woodbury form's would be {}, and {} in init)",
-                                  setName, all, split.setOperations, split.initOperations);
+            // The Woodbury form: the variable branches' currents pivoted last, so that everything before them depends
+            // on the rate alone (init's) and b<N>_set is left with the k x k (R + Q) elimination and what it reaches;
+            // kept when its b<N>_set does fewer operations than the all-in-set form's
+            const std::string setName = "b" + std::to_string(block.index) + "_set";
+            const int all = code.operations();
+            Messages scratch;
+            const std::optional<Pivots> last = choosePivots(bc.system, plan, blockIndex, scratch, true);
+            if (!last)
+                bc.form = std::format("{}: all in set, {} operations (no order pivots its variable branches last)",
+                                      setName, all);
+            else
+            {
+                Coefficients<Val> coefficients = derived(*last, wood);
+                Code::Split split = wood.split(prefix);
+                if (split.setOperations >= all)
+                    bc.form = std::format(
+                        "{}: all in set, {} operations (the Woodbury form's would be {}, and {} in init)", setName,
+                        all, split.setOperations, split.initOperations);
+                else
+                {
+                    bc.form = std::format("{}: the Woodbury form (its variable branches pivoted last), {} operations, "
+                                          "and {} in init; all in set, {}",
+                                          setName, split.setOperations, split.initOperations, all);
+                    bc.pivots = *last;
+                    bc.coefficients = std::move(coefficients);
+                    bc.lines = std::move(split.set);
+                    bc.initLines = std::move(split.init);
+                    bc.wFields = std::move(split.fields);
+                    bc.woodbury = true;
+                    wNames = std::move(split.renames);
+                    kept = &wood;
+                }
+            }
+        }
+        if (probes.empty() || block.design == Block::Design::Matched)
+            return bc;
+        // The probes: each node's voltage, a readout the derivation already has (the output, a grounded capacitor's
+        // voltage) or one of its own, pn_<node>, derived after everything else in the same code, with the same pivots:
+        // the elimination's statements are the same text, so each is the temporary it was, and the coefficients the
+        // module computed before are computed as before, by the same operations; the form chosen above stands
+        System extended = bc.system;
+        const bool last = blockIndex + 1 == static_cast<int>(plan.blocks.size());
+        for (int node : probes)
+        {
+            std::optional<System::Readout> own = nodeReadout(plan, blockIndex, node);
+            if (!own)
+                throw std::logic_error("deriveBlock: block " + std::to_string(block.index) +
+                                       " does not compute a probe's node");
+            BlockCode::Probe probe;
+            probe.node = node;
+            if (last && node == plan.outputNode)
+                probe.readout = bc.system.output;   // tick's output, its volts over .output's scale
+            for (std::size_t r = 0; r < bc.system.readouts.size() && probe.readout < 0; ++r)
+            {
+                if (static_cast<int>(r) != bc.system.portCurrent && readsNode(bc.system.readouts[r], *own))
+                    probe.readout = static_cast<int>(r);
+            }
+            if (probe.readout < 0)
+            {
+                probe.own = *own;
+                extended.readouts.push_back(*own);
+            }
+            bc.probes.push_back(probe);
+        }
+        if (extended.readouts.size() == bc.system.readouts.size())
+            return bc;
+        std::vector<Val> symbols;
+        for (const System::Symbol& sym : bc.system.symbols)
+        {
+            const bool rate = sym.kind == System::Symbol::Kind::Gc || sym.kind == System::Symbol::Kind::Rl;
+            symbols.push_back(Val::var(sym.name, kept, rate ? Val::kRate : Val::kPots));
+        }
+        kept->bindFields(true);
+        const Linear<Val> linear = solve(extended, bc.pivots, symbols);
+        for (std::size_t o = bc.system.readouts.size(); o < extended.readouts.size(); ++o)
+        {
+            for (std::size_t src = 0; src < extended.sources.size(); ++src)
+            {
+                if (isZero(linear.coef[o][src]))
+                    continue;
+                const std::string name = extended.readouts[o].name + "_by_" + extended.sources[src].name;
+                bc.probeCoefficients.emplace_back(name, bindField(name, linear.coef[o][src]));
+            }
+        }
+        for (auto& [name, v] : bc.probeCoefficients)
+            v.code = nullptr;
+        if (!bc.woodbury)
+        {
+            bc.lines = code.lines();
             return bc;
         }
-        bc.form = std::format("{}: the Woodbury form (its variable branches pivoted last), {} operations, and {} in "
-                              "init; all in set, {}",
-                              setName, split.setOperations, split.initOperations, all);
-        bc.pivots = *last;
-        bc.coefficients = std::move(coefficients);
+        // the Woodbury form's split again, over its statements and the probes': the fields it had keep their names
+        Code::Split split = wood.split(prefix, wNames);
         bc.lines = std::move(split.set);
         bc.initLines = std::move(split.init);
-        bc.wFields = std::move(split.fields);
-        bc.woodbury = true;
+        for (const std::string& f : split.fields)
+        {
+            if (std::find(bc.wFields.begin(), bc.wFields.end(), f) == bc.wFields.end())
+                bc.probeWFields.push_back(f);
+        }
         return bc;
     }
 
@@ -726,6 +813,7 @@ namespace fminus::circuit
             std::string out;
             std::vector<int> lines;   // each line of out: the netlist's line it comes from (Result::lines)
             int at = 0;               // the netlist's line the lines written now come from
+            const std::vector<ProbeNode>* probes = nullptr;   // with Options::probes: Result::nodes, and where each is
 
             void line(const std::string& text, const std::string& note = {}, std::size_t column = 60)
             {
@@ -1061,11 +1149,81 @@ namespace fminus::circuit
             void clear();
             void set();
             void blockSet(std::size_t i);
-            void blockStep(std::size_t i);
-            void step();
+            void blockStep(std::size_t i, bool probing = false);
+            void step(bool probing = false);
             void tick();
+            void tickProbing();
+            std::vector<std::string> tickBody(bool probing, std::string& current) const;
+            void probeFields();
+            void probeInit();
+
+            bool probing() const
+            {
+                return probes != nullptr;
+            }
+
+            // A plan node's index in Result::nodes (prv_'s and prs_'s), or -1.
+            int probeIndex(int node) const
+            {
+                if (probes == nullptr)
+                    return -1;
+                for (std::size_t k = 0; k < probes->size(); ++k)
+                {
+                    if ((*probes)[k].index == node)
+                        return static_cast<int>(k);
+                }
+                return -1;
+            }
+
+            // A value's lane 0: itself, or its .x in a .channels 2 module (a probe reads one lane).
+            std::string lane0(const std::string& text) const
+            {
+                if (type != "float2")
+                    return text;
+                const bool name = !text.empty() && std::all_of(text.begin(), text.end(), [](char c)
+                                                               { return std::isalnum(static_cast<unsigned char>(c)) ||
+                                                                        c == '_'; });
+                return name ? text + ".x" : "(" + text + ").x";
+            }
+
+            // `value` with a node's DC volts added: the absolute voltage a probe writes.
+            static std::string plusDc(const std::string& value, double dc)
+            {
+                if (dc == 0)
+                    return value;
+                return value + (dc < 0 ? " - " : " + ") + literal(std::fabs(dc));
+            }
+
+            // A probe's own coefficient of block i (pn_<node>_by_<source>), or zero.
+            Val probeCoefficient(std::size_t i, const std::string& name) const
+            {
+                for (const auto& [n, v] : blocks[i].probeCoefficients)
+                {
+                    if (n == name)
+                        return v;
+                }
+                return Val();
+            }
+
+            // Whether a probe of ADAA block i reads its input when none of its readouts does: its input a step earlier
+            // is then the probes' own field, pru_b<N> (not the guard's: it reaches no output).
+            bool probeInput(std::size_t i) const
+            {
+                if (!probing() || !adaaBlock(plan.blocks[i]) || usesInput(i))
+                    return false;
+                const System& s = blocks[i].system;
+                const std::string suffix = "_by_" + s.sources[static_cast<std::size_t>(s.input)].name;
+                for (const auto& [name, v] : blocks[i].probeCoefficients)
+                {
+                    if (!isZero(v) && name.size() > suffix.size() &&
+                        name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0)
+                        return true;
+                }
+                return false;
+            }
             void guard();
-            std::string regionCall(const std::string& x) const;
+            std::string regionCall(const std::string& x, bool probing = false) const;
+            void fade(const std::string& current);
             std::string lawParameters() const;
             void lawLines();
             bool hasLawGains() const;
@@ -1555,6 +1713,7 @@ namespace fminus::circuit
             for (const Branch* br : switchBranches())
                 line("        sw_" + br->ident + " = " + (defaultRamp(*br) == 1 ? "1" : "0") + ";",
                      br->part + " at its switch's default position");
+            probeInit();
             line("        clear();");
             if (!plan.pots.empty() || !plan.switches.empty())
             {
@@ -1623,6 +1782,8 @@ namespace fminus::circuit
                     line("        " + f.name + " = " + f.clear + ";");
                 if (usesInput(i))
                     line("        uo_" + blocks[i].system.sources[0].name + " = 0;");
+                else if (probeInput(i))
+                    line("        pru_b" + std::to_string(b.index) + " = 0;");
             }
             if (plan.regionFirst >= 0)
             {
@@ -1634,6 +1795,67 @@ namespace fminus::circuit
                 }
             }
             line("    }");
+        }
+
+        // The probes' fields, after every other (so that the others keep their offsets): each block's probe
+        // coefficients and the Woodbury terms only they read, ADAA's input history where only a probe reads it, then
+        // kProbeFields' (Circuit.h).
+        void Writer::probeFields()
+        {
+            if (!probing())
+                return;
+            for (std::size_t i = 0; i < plan.blocks.size(); ++i)
+            {
+                at = blockLine(plan.blocks[i]);
+                bool first = true;
+                for (const auto& [name, v] : blocks[i].probeCoefficients)
+                {
+                    if (v.kind != Val::Kind::Var)
+                        continue;
+                    line("    float " + name + ";",
+                         first ? "block " + std::to_string(i + 1) + "'s probe coefficients: its nodes' volts" : "", 31);
+                    first = false;
+                }
+                for (const std::string& f : blocks[i].probeWFields)
+                    line("    float " + f + ";", "", 31);
+                if (probeInput(i))
+                    line("    " + type + " pru_b" + std::to_string(i + 1) + ";",
+                         "ADAA: block " + std::to_string(i + 1) + "'s input a step earlier (the probes')", 31);
+            }
+            at = titleLine();
+            const std::string slots = std::to_string(kProbeSlots);
+            line("    int prb_;", "the probes (Circuit.h): 0 off, else armed; the host's", 31);
+            line("    int prs_[" + slots + "];", "each slot's node, Result::nodes' index, or -1; the host's", 31);
+            line("    int prn_;", "the samples written while armed, modulo 2^30", 31);
+            line("    float pr_[" + std::to_string(kProbeSlots * kProbeRing) + "];",
+                 "slot k's ring at [" + std::to_string(kProbeRing) + " k, " + std::to_string(kProbeRing) +
+                     " k + " + std::to_string(kProbeRing) + "): absolute volts",
+                 31);
+            line("    float prp_[" + slots + "];", "each slot's peak |v| since the host zeroed it", 31);
+            line("    float pra_[" + slots + "];", "its sum", 31);
+            line("    float prq_[" + slots + "];", "and its sum of squares", 31);
+            line("    float prv_[" + std::to_string(probes->size()) + "];",
+                 "each readable node's volts at the last armed sample (tick_pr's)", 31);
+        }
+
+        // init's part of the probes: off, each slot on no node, nothing counted (the rings are the host's memory, which
+        // nothing reads before prn_ says it is written: init leaves them, untouched until a probe is armed).
+        void Writer::probeInit()
+        {
+            if (!probing())
+                return;
+            at = titleLine();
+            line("        prb_ = 0;", "the probes: off, each slot on no node, nothing counted");
+            line("        prn_ = 0;");
+            line("        for (int i = 0; i < " + std::to_string(kProbeSlots) + "; ++i)");
+            line("        {");
+            line("            prs_[i] = -1;");
+            line("            prp_[i] = 0;");
+            line("            pra_[i] = 0;");
+            line("            prq_[i] = 0;");
+            line("        }");
+            line("        for (int i = 0; i < " + std::to_string(probes->size()) + "; ++i)");
+            line("            prv_[i] = 0;");
         }
 
         void Writer::set()
@@ -1755,17 +1977,22 @@ namespace fminus::circuit
             line("    }");
         }
 
-        void Writer::blockStep(std::size_t i)
+        void Writer::blockStep(std::size_t i, bool probing)
         {
             const Block& b = plan.blocks[i];
             const System& s = blocks[i].system;
             const bool adaa = adaaBlock(b);
             const std::string& in = plan.inputName;
             const std::string T = type;
+            const bool lastBlock = i + 1 == plan.blocks.size();
             at = blockLine(b);
-            line("    " + T + " b" + std::to_string(b.index) + "(" + T + " " + in + ") [[clang::nonblocking]]",
-                 "block " + std::to_string(b.index) + ", one step at " + rateText(b) +
-                     (matchedBlock(b) ? std::string(": its matched design") : ""));
+            if (probing)
+                line("    " + T + " b" + std::to_string(b.index) + "_pr(" + T + " " + in + ") [[clang::nonblocking]]",
+                     "block " + std::to_string(b.index) + "'s step, and its nodes' volts into prv_ (the probes)");
+            else
+                line("    " + T + " b" + std::to_string(b.index) + "(" + T + " " + in + ") [[clang::nonblocking]]",
+                     "block " + std::to_string(b.index) + ", one step at " + rateText(b) +
+                         (matchedBlock(b) ? std::string(": its matched design") : ""));
             line("    {");
             if (matchedBlock(b))
             {
@@ -1778,6 +2005,14 @@ namespace fminus::circuit
                      ";");
                 if (two)
                     line("        s2" + n + " = mb2" + n + " * " + in + " - ma2" + n + " * ym_;");
+                // its output, the one node a matched design holds (.output's, tick_pr writes)
+                if (const int k = probing && !lastBlock ? probeIndex(b.output) : -1;
+                    k >= 0 && (*probes)[static_cast<std::size_t>(k)].node.readable)
+                {
+                    const Node& node = (*probes)[static_cast<std::size_t>(k)].node;
+                    line("        prv_[" + std::to_string(k) + "] = " + plusDc(lane0("ym_"), node.dc) + ";",
+                         "V(" + node.name + ")");
+                }
                 line("        return ym_;");
                 line("    }");
                 return;
@@ -1838,6 +2073,9 @@ namespace fminus::circuit
                 }
                 if (input)
                     line("        const " + T + " ua = 0.5f * (" + in + " + uo_" + s.sources[0].name + ");");
+                else if (probing && probeInput(i))
+                    line("        const " + T + " ua = 0.5f * (" + in + " + pru_b" + std::to_string(b.index) + ");",
+                         "ADAA: the input's mean, for the probes");
             }
             // The readouts: a local each, or the source itself when one is +-1 times it.
             std::vector<std::string> readoutText(s.readouts.size());
@@ -1856,6 +2094,34 @@ namespace fminus::circuit
                 if (static_cast<int>(r) == s.output && i + 1 == plan.blocks.size())
                     note += ": .output " + plan.netlist.output->name;
                 line("        const " + T + " " + s.readouts[r].name + " = " + linear(t) + ";", note);
+            }
+            // The probes: each node's voltage, from the readouts above or from its own coefficients, on the same
+            // sources (ADAA's means too), before the states move on
+            if (probing)
+            {
+                std::vector<std::string> laneText;
+                for (const std::string& r : rText)
+                    laneText.push_back(lane0(r));
+                for (const BlockCode::Probe& probe : blocks[i].probes)
+                {
+                    const int k = probeIndex(probe.node);
+                    if (k < 0 || !(*probes)[static_cast<std::size_t>(k)].node.readable || probe.node == plan.outputNode)
+                        continue;   // .output's node is tick's output: tick_pr writes it
+                    std::string v;
+                    if (probe.readout >= 0)
+                        v = lane0(readoutText[static_cast<std::size_t>(probe.readout)]);
+                    else
+                    {
+                        std::vector<std::pair<Val, std::string>> t;
+                        for (std::size_t src = 0; src < s.sources.size(); ++src)
+                            t.emplace_back(probeCoefficient(i, probe.own.name + "_by_" + s.sources[src].name),
+                                           laneText[src]);
+                        v = linear(t);
+                    }
+                    const Node& node = (*probes)[static_cast<std::size_t>(k)].node;
+                    line("        prv_[" + std::to_string(k) + "] = " + plusDc(v, node.dc) + ";",
+                         "V(" + node.name + ")");
+                }
             }
             if (adaa)
             {
@@ -1910,17 +2176,19 @@ namespace fminus::circuit
                     line("        " + l.text, l.note);
                 if (input)
                     line("        uo_" + s.sources[0].name + " = " + in + ";");
+                else if (probeInput(i))
+                    line("        pru_b" + std::to_string(b.index) + " = " + in + ";");
             }
             line("        return " + readoutText[static_cast<std::size_t>(s.output)] + ";");
             line("    }");
         }
 
-        // The region's blocks on `x`: b3(b2(x)).
-        std::string Writer::regionCall(const std::string& x) const
+        // The region's blocks on `x`: b3(b2(x)) (with `probing`, b3_pr(b2_pr(x))).
+        std::string Writer::regionCall(const std::string& x, bool probing) const
         {
             std::string call = x;
             for (int i = plan.regionFirst; i <= plan.regionLast; ++i)
-                call = "b" + std::to_string(i + 1) + "(" + call + ")";
+                call = "b" + std::to_string(i + 1) + (probing ? "_pr" : "") + "(" + call + ")";
             return call;
         }
 
@@ -1997,10 +2265,10 @@ namespace fminus::circuit
             }
         }
 
-        void Writer::step()
+        void Writer::step(bool probing)
         {
-            if (plan.regionFirst < 0)
-                return;
+            if (plan.regionFirst < 0 || (probing && !plan.laws.empty()))
+                return;   // with law inputs tick calls the region's blocks itself
             const std::string& in = plan.inputName;
             const std::string region = plan.regionFirst == plan.regionLast
                                            ? "block " + std::to_string(plan.regionFirst + 1)
@@ -2008,35 +2276,36 @@ namespace fminus::circuit
             const std::string rate = plan.config.oversample == 1 ? std::string("the host rate")
                                                                  : std::to_string(plan.config.oversample) + " rate";
             at = inputLine();
-            line("    " + type + " step(" + type + " " + in + lawParameters() + ") [[clang::nonblocking]]",
-                 "one step of the oversampled region (" + region + "), at " + rate);
+            if (probing)
+                line("    " + type + " step_pr(" + type + " " + in + ") [[clang::nonblocking]]",
+                     "the region's step, and its nodes' volts into prv_ (tick_pr's last step)");
+            else
+                line("    " + type + " step(" + type + " " + in + lawParameters() + ") [[clang::nonblocking]]",
+                     "one step of the oversampled region (" + region + "), at " + rate);
             line("    {");
-            lawLines();
-            line("        return " + regionCall(in) + ";");
+            if (!probing)
+                lawLines();
+            line("        return " + regionCall(in, probing) + ";");
             line("    }");
         }
 
-        void Writer::tick()
+        // tick's blocks, from its input to `current`, the last of the locals: with `probing`, each block outside the
+        // region and the region's last step write their nodes' volts (b<N>_pr, step_pr), the other steps as they are.
+        std::vector<std::string> Writer::tickBody(bool probing, std::string& current) const
         {
             const std::string& in = plan.inputName;
             const std::string T = type;
-            const IoLine& input = *plan.netlist.input;
-            const IoLine& output = *plan.netlist.output;
-            at = inputLine();
-            line("    " + T + " tick(" + T + " " + in + lawParameters() + ") [[clang::nonblocking]]",
-                 std::format("one host sample: .input {} (1.0 = {:g} V) to .output {}", input.name, input.scale,
-                             output.name));
-            line("    {");
-            guard();
-            lawLines();
+            const std::string pr = probing ? "_pr" : "";
             // with law inputs, the region's blocks are called here, the gains held over its steps (step takes the law
             // inputs, and would compute them again)
-            auto stepOf = [&](const std::string& x)
+            auto stepOf = [&](const std::string& x, bool last)
             {
-                return plan.laws.empty() ? "step(" + x + ")" : regionCall(x);
+                if (!plan.laws.empty())
+                    return regionCall(x, probing && last);
+                return (probing && last ? "step_pr(" : "step(") + x + ")";
             };
             std::vector<std::string> body;
-            std::string current = in;
+            current = in;
             int z = 0;
             auto fresh = [&]
             {
@@ -2047,7 +2316,7 @@ namespace fminus::circuit
             for (int i = 0; i < preEnd; ++i)
             {
                 const std::string name = fresh();
-                body.push_back("const " + T + " " + name + " = b" + std::to_string(i + 1) + "(" + current + ");");
+                body.push_back("const " + T + " " + name + " = b" + std::to_string(i + 1) + pr + "(" + current + ");");
                 current = name;
             }
             if (plan.regionFirst >= 0)
@@ -2056,7 +2325,7 @@ namespace fminus::circuit
                 if (stages == 0)
                 {
                     const std::string name = fresh();
-                    body.push_back("const " + T + " " + name + " = " + stepOf(current) + ";");
+                    body.push_back("const " + T + " " + name + " = " + stepOf(current, true) + ";");
                     current = name;
                 }
                 else
@@ -2079,7 +2348,8 @@ namespace fminus::circuit
                     for (std::size_t k = 0; k < values.size(); ++k)
                     {
                         ys.push_back("y" + std::to_string(k));
-                        body.push_back("const " + T + " " + ys.back() + " = " + stepOf(values[k]) + ";");
+                        body.push_back("const " + T + " " + ys.back() + " = " +
+                                       stepOf(values[k], k + 1 == values.size()) + ";");
                     }
                     for (int s = stages; s >= 1; --s)
                     {
@@ -2098,13 +2368,46 @@ namespace fminus::circuit
                 for (int i = plan.regionLast + 1; i < n; ++i)
                 {
                     const std::string name = fresh();
-                    body.push_back("const " + T + " " + name + " = b" + std::to_string(i + 1) + "(" + current + ");");
+                    body.push_back("const " + T + " " + name + " = b" + std::to_string(i + 1) + pr + "(" + current +
+                                   ");");
                     current = name;
                 }
             }
-            // the output, faded in after a reset (gain_ is 1 when settled: the output is the circuit's, bit for bit)
-            for (const std::string& l : body)
+            return body;
+        }
+
+        void Writer::tick()
+        {
+            const std::string& in = plan.inputName;
+            const std::string T = type;
+            const IoLine& input = *plan.netlist.input;
+            const IoLine& output = *plan.netlist.output;
+            at = inputLine();
+            line("    " + T + " tick(" + T + " " + in + lawParameters() + ") [[clang::nonblocking]]",
+                 std::format("one host sample: .input {} (1.0 = {:g} V) to .output {}", input.name, input.scale,
+                             output.name));
+            line("    {");
+            if (probing())
+            {
+                // first, so that the rest is tick as it is without probes, and the armed path a tail call
+                std::string args = in;
+                for (const LawInfo& l : plan.laws)
+                    args += ", " + l.name;
+                line("        if (prb_ != 0)", "the probes are armed: the same sample, and the slots' volts");
+                line("            return tick_pr(" + args + ");");
+            }
+            guard();
+            lawLines();
+            std::string current;
+            for (const std::string& l : tickBody(false, current))
                 line("        " + l);
+            fade(current);
+            line("    }");
+        }
+
+        // The output, faded in after a reset (gain_ is 1 when settled: the output is the circuit's, bit for bit).
+        void Writer::fade(const std::string& current)
+        {
             line("        const float gain_ = fd_;", "the guard's fade");
             line("        fd_ = fminf(fd_ + fdstep_, 1);");
             if (plan.outputDc != 0)
@@ -2117,6 +2420,82 @@ namespace fminus::circuit
                                  plan.outputDc * plan.outputScale));
             else
                 line("        return gain_ < 1 ? " + current + " * gain_ : " + current + ";");
+        }
+
+        // tick with the probes armed (prb_ != 0): its guard, its law inputs and the same blocks, so the same output
+        // bit for bit, with each readable node's volts in prv_ (the region's at its last step), then each slot's
+        // sample, peak, sum and sum of squares; a slot whose node is out of range or not readable writes nothing.
+        void Writer::tickProbing()
+        {
+            const std::string& in = plan.inputName;
+            const std::string T = type;
+            at = inputLine();
+            line("    " + T + " tick_pr(" + T + " " + in + lawParameters() + ") [[clang::nonblocking]]",
+                 "tick with the probes armed: the same output, and each slot's volts");
+            line("    {");
+            guard();
+            lawLines();
+            std::vector<std::pair<int, int>> readable;   // runs of readable nodes, first to last
+            for (std::size_t k = 0; k < probes->size(); ++k)
+            {
+                const ProbeNode& p = (*probes)[k];
+                if (p.node.readable)
+                {
+                    if (!readable.empty() && readable.back().second + 1 == static_cast<int>(k))
+                        readable.back().second = static_cast<int>(k);
+                    else
+                        readable.emplace_back(static_cast<int>(k), static_cast<int>(k));
+                }
+                if (!p.node.readable || p.block >= 0)
+                    continue;
+                // .input's node, and a DC node: what no block computes
+                std::string v;
+                if (p.index == plan.inputNode)
+                    v = plan.inputScale == 1 ? lane0(in) : lane0(in) + " * " + literal(plan.inputScale);
+                else
+                    v = literal(0.0);
+                line("        prv_[" + std::to_string(k) + "] = " +
+                         (p.index == plan.inputNode ? plusDc(v, p.node.dc) : literal(p.node.dc)) + ";",
+                     "V(" + p.node.name + ")" + (p.index == plan.inputNode ? ": .input's" : ": a DC node's"));
+            }
+            std::string current;
+            for (const std::string& l : tickBody(true, current))
+                line("        " + l);
+            // .output's node: tick's output in volts (through the halfbands when the region computes it), before the
+            // guard's fade
+            if (const int k = probeIndex(plan.outputNode); k >= 0)
+            {
+                const Node& node = (*probes)[static_cast<std::size_t>(k)].node;
+                std::string v = lane0(current);
+                if (plan.outputScale != 1)
+                    v += " * " + literal(plan.outputScale);
+                line("        prv_[" + std::to_string(k) + "] = " + plusDc(v, node.dc) + ";",
+                     "V(" + node.name + "): .output's, tick's output in volts");
+            }
+            std::string test;
+            for (const auto& [first, last] : readable)
+            {
+                const std::string run = first == last ? "n_ == " + std::to_string(first)
+                                                      : "(n_ >= " + std::to_string(first) + " && n_ <= " +
+                                                            std::to_string(last) + ")";
+                test += (test.empty() ? "" : " || ") + run;
+            }
+            line("        for (int i = 0; i < " + std::to_string(kProbeSlots) + "; ++i)", "each slot");
+            line("        {");
+            line("            const int n_ = prs_[i];");
+            line("            if (" + (test.empty() ? std::string("false") : test) + ")", "a readable node's");
+            line("            {");
+            line("                const float e_ = prv_[n_];");
+            line("                pr_[" + std::to_string(kProbeRing) + " * i + prn_ % " + std::to_string(kProbeRing) +
+                     "] = e_;",
+                 "its ring");
+            line("                prp_[i] = fmaxf(prp_[i], fabsf(e_));", "its peak, sum and sum of squares");
+            line("                pra_[i] = pra_[i] + e_;");
+            line("                prq_[i] = prq_[i] + e_ * e_;");
+            line("            }");
+            line("        }");
+            line("        prn_ = prn_ == 1073741823 ? 0 : prn_ + 1;", "modulo 2^30");
+            fade(current);
             line("    }");
         }
 
@@ -2179,14 +2558,109 @@ namespace fminus::circuit
         }
     } // namespace
 
-    std::string emit(const Plan& plan, const std::vector<BlockCode>& blocks, std::vector<int>* lines)
+    std::vector<ProbeNode> probeNodes(const Plan& plan, const Netlist& parsed)
     {
-        Writer w{plan, blocks, plan.config.channels == 2 ? "float2" : "float", {}, {}, 0};
+        // every mention of a node, as written: the elements' node tokens, .input's and .output's
+        struct Mention
+        {
+            Loc loc;
+            std::string name;
+        };
+        std::vector<Mention> mentions;
+        for (const Element& e : parsed.elements)
+        {
+            for (std::size_t k = 0; k < e.nodes.size(); ++k)
+                mentions.push_back({k < e.nodeLocs.size() ? e.nodeLocs[k] : e.loc, e.nodes[k]});
+        }
+        if (parsed.input)
+            mentions.push_back({parsed.input->nodeLoc, parsed.input->node});
+        if (parsed.output)
+            mentions.push_back({parsed.output->nodeLoc, parsed.output->node});
+        std::stable_sort(mentions.begin(), mentions.end(), [](const Mention& a, const Mention& b)
+                         { return a.loc.line != b.loc.line ? a.loc.line < b.loc.line : a.loc.column < b.loc.column; });
+        std::map<std::string, int> indexOf;   // folded name -> plan node
+        for (std::size_t n = 1; n < plan.nodes.size(); ++n)
+            indexOf.emplace(folded(plan.nodes[n].name), static_cast<int>(n));
+        // the block whose port's diodes touch a node (a series string's inner node), by folded name
+        auto portBlock = [&](const std::string& key) -> int
+        {
+            for (std::size_t b = 0; b < plan.blocks.size(); ++b)
+            {
+                const std::optional<PortDef>& port = plan.blocks[b].port;
+                if (!port)
+                    continue;
+                for (int e : port->elements)
+                {
+                    for (const std::string& n : plan.netlist.elements[static_cast<std::size_t>(e)].nodes)
+                    {
+                        if (folded(n) == key)
+                            return static_cast<int>(b);
+                    }
+                }
+            }
+            return -1;
+        };
+        std::vector<ProbeNode> out;
+        std::set<std::string> seen;
+        for (const Mention& m : mentions)
+        {
+            const std::string key = folded(m.name);
+            if (key == "0" || key == "gnd" || !seen.insert(key).second)
+                continue;
+            const auto it = indexOf.find(key);
+            if (it == indexOf.end())
+                continue;
+            const NodeInfo& n = plan.nodes[static_cast<std::size_t>(it->second)];
+            ProbeNode p;
+            p.index = it->second;
+            p.node.name = m.name;
+            p.node.line = m.loc.line;
+            p.node.column = m.loc.column;
+            p.node.dc = static_cast<std::size_t>(p.index) < plan.dc.size() ? plan.dc[static_cast<std::size_t>(p.index)]
+                                                                            : 0.0;
+            if (n.absorbed)
+            {
+                const int b = portBlock(key);
+                const Block* block = b >= 0 ? &plan.blocks[static_cast<std::size_t>(b)] : nullptr;
+                p.node.readable = false;
+                p.node.rate = block != nullptr ? block->rateFactor : 1;
+                p.node.why = "inside the series string " + (block != nullptr ? block->port->parts : "of diodes") +
+                             ", computed as one diode" +
+                             (block != nullptr ? " (block " + std::to_string(block->index) + ")" : std::string());
+            }
+            else if (p.index == plan.inputNode || n.source == NodeInfo::Source::Dc)
+                p.node.rate = 1;   // the host's sample, or a constant: no block computes it
+            else if (n.owner >= 0)
+            {
+                const Block& b = plan.blocks[static_cast<std::size_t>(n.owner)];
+                p.block = n.owner;
+                p.node.rate = b.rateFactor;
+                if (b.design == Block::Design::Matched && p.index != b.output)
+                {
+                    p.node.readable = false;
+                    p.node.why = "inside a filter computed as a whole at 1x (block " + std::to_string(b.index) + ")";
+                }
+            }
+            else
+            {
+                p.node.readable = false;
+                p.node.why = "no block of the module computes it";
+            }
+            out.push_back(std::move(p));
+        }
+        return out;
+    }
+
+    std::string emit(const Plan& plan, const std::vector<BlockCode>& blocks, std::vector<int>* lines,
+                     const std::vector<ProbeNode>* probes)
+    {
+        Writer w{plan, blocks, plan.config.channels == 2 ? "float2" : "float", {}, {}, 0, probes};
         w.header();
         w.at = w.titleLine();
         w.line("module " + plan.module);
         w.line("{");
         w.fields();
+        w.probeFields();
         w.init();
         w.clear();
         w.set();
@@ -2194,6 +2668,11 @@ namespace fminus::circuit
             w.blockSet(i);
         for (std::size_t i = 0; i < plan.blocks.size(); ++i)
             w.blockStep(i);
+        if (w.probing())
+        {
+            for (std::size_t i = 0; i < plan.blocks.size(); ++i)
+                w.blockStep(i, true);
+        }
         w.prewarpMethods();
         if (plan.regionFirst >= 0)
         {
@@ -2206,7 +2685,11 @@ namespace fminus::circuit
             }
         }
         w.step();
+        if (w.probing())
+            w.step(true);
         w.tick();
+        if (w.probing())
+            w.tickProbing();
         w.at = w.titleLine();
         w.line("};");
         if (static_cast<std::size_t>(std::count(w.out.begin(), w.out.end(), '\n')) != w.lines.size())

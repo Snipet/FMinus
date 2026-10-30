@@ -128,12 +128,20 @@ namespace fminus::circuit
         // init's parameter, the attribute's words, the halfband methods' parameters and locals, clear's loop
         // variable, and set's temporaries t<N>: FMinus reads a module's name as a type everywhere in the program
         // and the guard's fields and locals (ck_, fd_, fdstep_, sum_, gain_), a switch's ramp step (swstep_; its
-        // other names, sw_<S>, to_<S> and BDF2's h_<C>, carry the part's name, as the coefficients do) and a matched
-        // block's output (ym_)
-        static constexpr std::array<std::string_view, 19> kOther{
-            "rate", "clang", "nonblocking", "x",   "o",   "s0",      "s1",   "t",     "y",       "v0",
-            "v1",   "i",     "ck_",         "fd_", "ym_", "fdstep_", "sum_", "gain_", "swstep_"};
-        return std::find(kOther.begin(), kOther.end(), name) != kOther.end() || numbered(name, 't');
+        // other names, sw_<S>, to_<S> and BDF2's h_<C>, carry the part's name, as the coefficients do), a matched
+        // block's output (ym_), and the probes' fields (Circuit.h's kProbeFields), methods (tick_pr, step_pr; b<N>_pr
+        // and pru_b<N> carry a block's number, as b<N>_set does) and tick_pr's locals (n_, e_)
+        static constexpr std::array<std::string_view, 21> kOther{
+            "rate",    "clang", "nonblocking", "x",   "o",       "s0",      "s1",      "t",  "y",  "v0",   "v1",
+            "i",       "ck_",   "fd_",         "ym_", "fdstep_", "sum_",    "gain_",   "swstep_", "tick_pr", "step_pr"};
+        static constexpr std::array<std::string_view, 2> kProbeLocals{"n_", "e_"};
+        for (const char* field : kProbeFields)
+        {
+            if (name == field)
+                return true;
+        }
+        return std::find(kOther.begin(), kOther.end(), name) != kOther.end() ||
+               std::find(kProbeLocals.begin(), kProbeLocals.end(), name) != kProbeLocals.end() || numbered(name, 't');
     }
 
     namespace

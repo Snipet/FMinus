@@ -136,6 +136,11 @@ namespace fminus::circuit
     // operating point (Dc.h).
     System assemble(const Plan& plan, int block, bool dc = false);
 
+    // A readout of V(node), in volts (no .output scale), on block `block`'s system: the node's unknown, for a node the
+    // block solves for or drives (assemble numbers them first, the block's nodes, then its driven ones); nothing for
+    // any other node. Named pn_<its ident>, labelled V(<name>).
+    std::optional<System::Readout> nodeReadout(const Plan& plan, int block, int node);
+
     // The elimination order: (row, unknown) for each step.
     struct Pivots
     {
@@ -471,9 +476,11 @@ namespace fminus::circuit
 
     // Block `block`'s Holters form at the design rate fs' (the rate its capacitors see), pots (a point as potGrid's)
     // and law inputs (an OTA's gain's, in plan.laws' order; empty: each at its low end), with the block's integrator,
-    // or `method` when given.
+    // or `method` when given. With `node` (a plan node the block solves for or drives), its output y reads that node's
+    // voltage, V(node) in volts (nodeReadout), instead of the block's output: a probe's reference.
     Holters holters(const Plan& plan, int block, double designRate, const std::vector<double>& pots,
-                    const std::vector<double>& laws = {}, std::optional<Method> method = std::nullopt);
+                    const std::vector<double>& laws = {}, std::optional<Method> method = std::nullopt,
+                    int node = 0);
 
 
 

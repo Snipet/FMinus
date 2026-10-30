@@ -152,11 +152,20 @@ namespace fminus::circuit
             if (!messages.hasErrors())
                 p = plan(parsed, options, fileName, messages);
             std::vector<BlockCode> blocks;
+            std::vector<ProbeNode> nodes;
             if (p && !messages.hasErrors())
             {
+                nodes = probeNodes(*p, parsed);
                 for (std::size_t b = 0; b < p->blocks.size(); ++b)
                 {
-                    std::optional<BlockCode> code = deriveBlock(*p, static_cast<int>(b), messages);
+                    // with probes, the readable nodes the block computes are readouts of its derivation too
+                    std::vector<int> probes;
+                    for (const ProbeNode& n : nodes)
+                    {
+                        if (options.probes && n.node.readable && n.block == static_cast<int>(b))
+                            probes.push_back(n.index);
+                    }
+                    std::optional<BlockCode> code = deriveBlock(*p, static_cast<int>(b), messages, true, probes);
                     if (!code)
                         break;
                     blocks.push_back(std::move(*code));
@@ -164,7 +173,9 @@ namespace fminus::circuit
             }
             if (p && !messages.hasErrors())
             {
-                result.source = emit(*p, blocks, &result.lines);
+                result.source = emit(*p, blocks, &result.lines, options.probes ? &nodes : nullptr);
+                for (const ProbeNode& n : nodes)
+                    result.nodes.push_back(n.node);
                 result.module = p->module;
                 for (const PotInfo& pot : p->pots)
                     result.pots.push_back(pot.name);
