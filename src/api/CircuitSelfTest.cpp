@@ -527,4 +527,9 @@ namespace fminus::circuit
     {
         return selfTestWith(netlist, fileName, options, test, StressShape{});
     }
+
+    SelfTestResult selfTest(std::string_view netlist, std::string_view fileName, const Options& options)
+    {
+        return selfTestWith(netlist, fileName, options, SelfTestOptions{}, StressShape{});
+    }
 } // namespace fminus::circuit

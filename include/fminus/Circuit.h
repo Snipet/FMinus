@@ -253,8 +253,10 @@ namespace fminus
         // cost model (§3.2), each generated, compiled (fminus::Program, on the calling thread) and run on the stress
         // matrix (on SelfTestOptions::parallel's threads) against the converged double references, until one meets
         // the targets T1-T4 (report §2); when none does, the most accurate under 3,500 model cycles a host sample,
-        // with met = false. Blocking, pure and deterministic; seconds to minutes: never on the audio thread.
+        // with met = false. Blocking, pure and deterministic; seconds to minutes: never on the audio thread. Without
+        // `test`, default SelfTestOptions: in order, on the calling thread.
         SelfTestResult selfTest(std::string_view netlist, std::string_view fileName, const Options& options,
-                                const SelfTestOptions& test = {});
+                                const SelfTestOptions& test);
+        SelfTestResult selfTest(std::string_view netlist, std::string_view fileName, const Options& options);
     } // namespace circuit
 } // namespace fminus
