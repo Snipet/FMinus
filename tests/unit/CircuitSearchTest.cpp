@@ -417,6 +417,51 @@ TEST_CASE("a Choice's text, and what generate makes of one", "[circuit]")
     options.chosen = bad;
     CHECK(fc::generate(base, "diodetone.cir", options).errors ==
           "diodetone.cir:1:1: error: Options::chosen's key 'xyz' is not 16 hex digits\n");
+
+    // an answer with the netlist's key that the netlist cannot take (a damaged or hand-edited one) is ignored as
+    // another netlist's is, the provisional configuration playing: ADAA with BDF2, from the answer alone or with the
+    // netlist's .adaa on; an omega solver for an OTA's port. The netlist's and the Options' own say stays an error
+    fc::Choice both = four;
+    both.method = fc::Method::Bdf2;
+    options.chosen = both;
+    const fc::Result bdf2 = fc::generate(base, "diodetone.cir", options);
+    INFO(bdf2.errors);
+    CHECK(bdf2.errors.empty());
+    CHECK(bdf2.provisional);
+    CHECK(bdf2.configuration == provisional.configuration);
+    CHECK(bdf2.notes.find("diodetone.cir: note: Options::chosen (key " + p.key +
+                          ") does not fit this netlist: it has adaa on with method bdf2 (ADAA is Holters' trapezoidal "
+                          "form): it is ignored\n") != std::string::npos);
+    CHECK(bdf2.notes.find("the self-test chooses this circuit's configuration; provisional") != std::string::npos);
+    const std::string adaaOn = replaced(base, ".target", ".adaa on\n.target");
+    fc::Choice methodOnly = four;
+    methodOnly.key = fc::selfTestKey(adaaOn, "diodetone.cir", {});
+    methodOnly.adaa = false;
+    methodOnly.method = fc::Method::Bdf2;
+    options.chosen = methodOnly;
+    const fc::Result pinned = fc::generate(adaaOn, "diodetone.cir", options);
+    CHECK(pinned.errors.empty());
+    CHECK(pinned.provisional);
+    CHECK(pinned.notes.find("does not fit this netlist: it has method bdf2, and ADAA is on (the netlist) (ADAA is "
+                            "Holters' trapezoidal form): it is ignored\n") != std::string::npos);
+    const std::string ota = fc::test::otaStage();
+    fc::Choice omega;
+    omega.key = fc::selfTestKey(ota, "t.cir", {});
+    omega.oversample = 4;
+    omega.solver = {fc::Solver::Guess::Omega, 1};
+    fc::Options otaOptions;
+    otaOptions.chosen = omega;
+    const fc::Result smooth = fc::generate(ota, "t.cir", otaOptions);
+    INFO(smooth.errors);
+    CHECK(smooth.errors.empty());
+    CHECK(smooth.provisional);
+    CHECK(smooth.notes.find("t.cir: note: Options::chosen (key " + omega.key +
+                            ") does not fit this netlist: its solver omega(1) is a diode's (an OTA's port is solved "
+                            "from the previous step's v): it is ignored\n") != std::string::npos);
+    fc::Options pinnedBdf2;
+    pinnedBdf2.method = fc::Method::Bdf2;
+    CHECK(fc::generate(adaaOn, "diodetone.cir", pinnedBdf2).errors.find("ADAA is Holters' trapezoidal form") !=
+          std::string::npos);
 }
 
 TEST_CASE("an answer that meets nothing warns at the region's first port", "[circuit]")

@@ -486,7 +486,11 @@ solver and the integrator. Each choice comes, in this order, from:
 2. the netlist's directive;
 3. the self-test's answer, `Options::chosen`, for a searched dimension that neither names (or the netlist writes
    `auto`): an **open** dimension. The answer counts only when its key is the netlist's; otherwise it is ignored with
-   the note `Options::chosen is another netlist's or other Options' (key ...; this one's is ...): it is ignored`;
+   the note `Options::chosen is another netlist's or other Options' (key ...; this one's is ...): it is ignored`. An
+   answer with the netlist's key that the netlist cannot take (a damaged or hand-edited one: the self-test gives
+   neither) is ignored the same way, all of it, with the note `Options::chosen (key ...) does not fit this netlist:
+   ...: it is ignored`: an omega solver for an OTA's port, or ADAA with BDF2 where the answer gave either (the
+   netlist's and the Options' own say stays an error);
 4. the provisional configuration, for an open dimension nothing answered: `Result::provisional` is then set, with one
    note, `pedal.cir: note: the self-test chooses this circuit's configuration; provisional: 8x IIR, omega(2)`;
 5. the default, for the rest: IIR halfbands, `blocks=auto`, TR, one channel.

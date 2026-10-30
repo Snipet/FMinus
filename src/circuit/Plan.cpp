@@ -2133,14 +2133,68 @@ namespace fminus::circuit
                 }
             }
         };
-        // The provisional configuration: an exp-affine port's is Phase 0's 8x, omega3 + 2 (+ 1 with ADAA pinned); a
-        // smooth-monotone port's (an OTA's) 2x, the previous step's v + 2 Newton steps.
-        resolve(cfg.oversample, cfg.oversampleFrom, cfg.oversampleOpen, options.oversample, netlist.oversample,
-                chosen ? chosen->oversample : 8, p.smooth ? 2 : 8);
-        resolve(cfg.adaa, cfg.adaaFrom, cfg.adaaOpen, options.adaa, netlist.adaa, chosen && chosen->adaa, false);
-        resolve(cfg.solver, cfg.solverFrom, cfg.solverOpen, options.solver, netlist.solver,
-                chosen ? chosen->solver : Solver{},
-                p.smooth ? Solver{Solver::Guess::Previous, 2} : Solver{Solver::Guess::Omega, cfg.adaa ? 1 : 2});
+        // The searched dimensions, from an answer or without one. The provisional configuration: an exp-affine
+        // port's is Phase 0's 8x, omega3 + 2 (+ 1 with ADAA pinned); a smooth-monotone port's (an OTA's) 2x, the
+        // previous step's v + 2 Newton steps. The integrator: Options, then the netlist. It is open (the self-test's:
+        // the trapezoidal rule, and a BDF2 twin of a candidate whose block rings) when the netlist writes `.method
+        // auto`, or leaves it out while another searched dimension is open: a netlist that names the rest of its
+        // configuration plays the trapezoidal rule, with nothing left to choose (were a .method left out open, every
+        // netlist would be).
+        auto configure = [&]()
+        {
+            resolve(cfg.oversample, cfg.oversampleFrom, cfg.oversampleOpen, options.oversample, netlist.oversample,
+                    chosen ? chosen->oversample : 8, p.smooth ? 2 : 8);
+            resolve(cfg.adaa, cfg.adaaFrom, cfg.adaaOpen, options.adaa, netlist.adaa, chosen && chosen->adaa, false);
+            resolve(cfg.solver, cfg.solverFrom, cfg.solverOpen, options.solver, netlist.solver,
+                    chosen ? chosen->solver : Solver{},
+                    p.smooth ? Solver{Solver::Guess::Previous, 2} : Solver{Solver::Guess::Omega, cfg.adaa ? 1 : 2});
+            if (options.method)
+            {
+                cfg.method = *options.method;
+                cfg.methodFrom = "Options";
+            }
+            else if (netlist.method.value)
+            {
+                cfg.method = *netlist.method.value;
+                cfg.methodFrom = "the netlist";
+            }
+            else if (hasPort && (netlist.method.isAuto || cfg.oversampleOpen || cfg.adaaOpen || cfg.solverOpen))
+            {
+                cfg.methodOpen = true;
+                cfg.methodAuto = netlist.method.isAuto;
+                cfg.method = chosen ? chosen->method : Method::Tr;
+                cfg.methodFrom = chosen ? fromChoice : "provisional";
+            }
+        };
+        configure();
+        // An answer with this netlist's key that the netlist cannot take (a damaged or hand-edited one: the self-test
+        // gives neither) is ignored, as another netlist's is, and the provisional configuration plays (the netlist's
+        // and the Options' own errors stay errors): an omega solver for an OTA's port, or ADAA with BDF2 where the
+        // answer gave either.
+        if (chosen)
+        {
+            std::string misfit;
+            if (p.smooth && cfg.solverFrom == fromChoice && cfg.solver.guess == Solver::Guess::Omega)
+                misfit = "its solver omega(" + std::to_string(cfg.solver.steps) +
+                         ") is a diode's (an OTA's port is solved from the previous step's v)";
+            else if (cfg.adaa && cfg.method == Method::Bdf2 &&
+                     (cfg.adaaFrom == fromChoice || cfg.methodFrom == fromChoice))
+            {
+                const bool adaaChosen = cfg.adaaFrom == fromChoice;
+                const bool methodChosen = cfg.methodFrom == fromChoice;
+                misfit = adaaChosen && methodChosen ? "it has adaa on with method bdf2"
+                         : adaaChosen ? "it has adaa on, and the integrator is BDF2 (" + cfg.methodFrom + ")"
+                                      : "it has method bdf2, and ADAA is on (" + cfg.adaaFrom + ")";
+                misfit += " (ADAA is Holters' trapezoidal form)";
+            }
+            if (!misfit.empty())
+            {
+                messages.note({}, "Options::chosen (key " + chosen->key + ") does not fit this netlist: " + misfit +
+                                      ": it is ignored");
+                chosen.reset();
+                configure();
+            }
+        }
         // omega3 is the diode's closed form: an OTA's port starts from the previous step's v
         if (p.smooth && cfg.solver.guess == Solver::Guess::Omega)
         {
@@ -2154,27 +2208,6 @@ namespace fminus::circuit
         else if (p.smooth && netlist.solverBare && !options.solver)
             messages.error(netlist.solver.loc,
                            "'.solver omega': an OTA's port is solved from the previous step's v: .solver newton(K)");
-        // The integrator: Options, then the netlist. It is open (the self-test's: the trapezoidal rule, and a BDF2
-        // twin of a candidate whose block rings) when the netlist writes `.method auto`, or leaves it out while
-        // another searched dimension is open: a netlist that names the rest of its configuration plays the
-        // trapezoidal rule, with nothing left to choose (were a .method left out open, every netlist would be).
-        if (options.method)
-        {
-            cfg.method = *options.method;
-            cfg.methodFrom = "Options";
-        }
-        else if (netlist.method.value)
-        {
-            cfg.method = *netlist.method.value;
-            cfg.methodFrom = "the netlist";
-        }
-        else if (hasPort && (netlist.method.isAuto || cfg.oversampleOpen || cfg.adaaOpen || cfg.solverOpen))
-        {
-            cfg.methodOpen = true;
-            cfg.methodAuto = netlist.method.isAuto;
-            cfg.method = chosen ? chosen->method : Method::Tr;
-            cfg.methodFrom = chosen ? fromChoice : "provisional";
-        }
         if (cfg.adaa && cfg.method == Method::Bdf2)
         {
             // where each came from, as the error names it
