@@ -28,12 +28,13 @@ namespace fminus::circuit
         }
     }
 
-    Val Val::var(std::string name, Code* code)
+    Val Val::var(std::string name, Code* code, int deps)
     {
         Val v;
         v.kind = Kind::Var;
         v.name = std::move(name);
         v.code = code;
+        v.deps = deps;
         return v;
     }
 
@@ -72,11 +73,16 @@ namespace fminus::circuit
             return {v.negated, v.name, {v.name}};
         }
 
-        Val temp(Code* code, const std::string& text, std::vector<std::string> uses, bool negative)
+        Val temp(Code* code, const std::string& text, std::vector<std::string> uses, bool negative, int deps)
         {
-            Val t = code->temp(text, uses);
+            Val t = code->temp(text, uses, deps);
             t.negated = negative;
             return t;
+        }
+
+        int depsOf(const Val& a, const Val& b)
+        {
+            return a.deps | b.deps;
         }
 
         std::vector<std::string> joined(std::vector<std::string> a, const std::vector<std::string>& b)
@@ -110,13 +116,14 @@ namespace fminus::circuit
         const Signed x = signedOf(a);
         const Signed y = signedOf(b);
         const std::vector<std::string> uses = joined(x.uses, y.uses);
+        const int deps = depsOf(a, b);
         if (!x.negative && !y.negative)
-            return temp(code, x.text + " + " + y.text, uses, false);
+            return temp(code, x.text + " + " + y.text, uses, false, deps);
         if (!x.negative && y.negative)
-            return temp(code, x.text + " - " + y.text, uses, false);
+            return temp(code, x.text + " - " + y.text, uses, false, deps);
         if (x.negative && !y.negative)
-            return temp(code, y.text + " - " + x.text, uses, false);
-        return temp(code, x.text + " + " + y.text, uses, true);
+            return temp(code, y.text + " - " + x.text, uses, false, deps);
+        return temp(code, x.text + " + " + y.text, uses, true, deps);
     }
 
     Val operator-(const Val& a, const Val& b)
@@ -140,8 +147,8 @@ namespace fminus::circuit
         const bool negative = x.negative != y.negative;
         // a constant first: 0.5f * x
         if (b.kind == Val::Kind::Const)
-            return temp(code, y.text + " * " + x.text, joined(x.uses, y.uses), negative);
-        return temp(code, x.text + " * " + y.text, joined(x.uses, y.uses), negative);
+            return temp(code, y.text + " * " + x.text, joined(x.uses, y.uses), negative, depsOf(a, b));
+        return temp(code, x.text + " * " + y.text, joined(x.uses, y.uses), negative, depsOf(a, b));
     }
 
     Val operator/(const Val& a, const Val& b)
@@ -160,10 +167,10 @@ namespace fminus::circuit
         {
             // a constant's sign stays on it: -1 / t10 is K, positive
             const double numerator = y.negative ? -a.c : a.c;
-            return temp(code, literal(numerator, true) + " / " + y.text, y.uses, false);
+            return temp(code, literal(numerator, true) + " / " + y.text, y.uses, false, b.deps);
         }
         const Signed x = signedOf(a);
-        return temp(code, x.text + " / " + y.text, joined(x.uses, y.uses), x.negative != y.negative);
+        return temp(code, x.text + " / " + y.text, joined(x.uses, y.uses), x.negative != y.negative, depsOf(a, b));
     }
 
     Val logOf(const Val& v)
@@ -172,7 +179,7 @@ namespace fminus::circuit
             return Val(std::log(v.c));
         if (v.kind != Val::Kind::Var || v.negated)
             throw std::logic_error("Val: the log of a value that is not positive");
-        return temp(v.code, "logf(" + v.name + ")", {v.name}, false);
+        return temp(v.code, "logf(" + v.name + ")", {v.name}, false, v.deps);
     }
 
     void annotate(Val& v, const std::string& comment)
@@ -188,7 +195,7 @@ namespace fminus::circuit
         Code* code = value.code;
         code->assign(field, value);
         code->fields_.push_back(field);
-        return Val::var(field, code);
+        return Val::var(field, code, value.deps);
     }
 
     std::string operandText(const Val& v)
@@ -207,18 +214,19 @@ namespace fminus::circuit
     {
     }
 
-    Val Code::temp(const std::string& text, const std::vector<std::string>& uses)
+    Val Code::temp(const std::string& text, const std::vector<std::string>& uses, int deps)
     {
         // the same expression again (the elimination meets a product twice) is the same temporary
         if (const auto it = seen_.find(text); it != seen_.end())
-            return Val::var(it->second, this);
+            return Val::var(it->second, this, depsOf_[it->second]);
         std::string name;
         do
             name = "t" + std::to_string(next_++);
         while (reserved_.count(name));
         seen_.emplace(text, name);
-        stmts_.push_back({name, true, text, {}, uses});
-        return Val::var(name, this);
+        depsOf_[name] = deps;
+        stmts_.push_back({name, true, text, {}, uses, deps});
+        return Val::var(name, this, deps);
     }
 
     void Code::assign(const std::string& field, const Val& v)
@@ -226,7 +234,7 @@ namespace fminus::circuit
         std::vector<std::string> uses;
         if (v.kind == Val::Kind::Var)
             uses.push_back(v.name);
-        stmts_.push_back({field, false, operandText(v), {}, uses});
+        stmts_.push_back({field, false, operandText(v), {}, uses, v.kind == Val::Kind::Var ? v.deps : 0});
     }
 
     void Code::raw(const std::string& text, const std::vector<std::string>& uses, const std::string& comment)
@@ -254,26 +262,26 @@ namespace fminus::circuit
         }
     } // namespace
 
-    std::vector<std::string> Code::lines() const
+    std::vector<std::string> Code::merged(const std::vector<Stmt>& stmts)
     {
         std::map<std::string, int> uses;
-        for (const Stmt& s : stmts_)
+        for (const Stmt& s : stmts)
         {
             for (const std::string& u : s.uses)
                 ++uses[u];
         }
         std::vector<std::string> out;
-        for (std::size_t i = 0; i < stmts_.size(); ++i)
+        for (std::size_t i = 0; i < stmts.size(); ++i)
         {
-            const Stmt& s = stmts_[i];
+            const Stmt& s = stmts[i];
             if (s.lhs.empty())
             {
                 out.push_back(withComment(s.rhs, s.note));
                 continue;
             }
-            if (s.declares && i + 1 < stmts_.size())
+            if (s.declares && i + 1 < stmts.size())
             {
-                const Stmt& next = stmts_[i + 1];
+                const Stmt& next = stmts[i + 1];
                 if (!next.declares && !next.lhs.empty() && next.rhs == s.lhs && uses[s.lhs] == 1)
                 {
                     out.push_back(withComment(next.lhs + " = " + s.rhs + ";", s.note));
@@ -283,6 +291,110 @@ namespace fminus::circuit
             }
             out.push_back(withComment((s.declares ? "const float " : "") + s.lhs + " = " + s.rhs + ";", s.note));
         }
+        return out;
+    }
+
+    std::vector<std::string> Code::lines() const
+    {
+        return merged(stmts_);
+    }
+
+    int Code::operations() const
+    {
+        return static_cast<int>(std::count_if(stmts_.begin(), stmts_.end(), [](const Stmt& s) { return s.declares; }));
+    }
+
+    namespace
+    {
+        // `text` with each whole name in `renames` replaced.
+        std::string renamed(const std::string& text, const std::map<std::string, std::string>& renames)
+        {
+            std::string out;
+            std::size_t i = 0;
+            auto word = [](char c)
+            {
+                return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+            };
+            while (i < text.size())
+            {
+                if (!word(text[i]))
+                {
+                    out += text[i++];
+                    continue;
+                }
+                std::size_t end = i;
+                while (end < text.size() && word(text[end]))
+                    ++end;
+                const std::string name = text.substr(i, end - i);
+                const auto it = renames.find(name);
+                out += it == renames.end() ? name : it->second;
+                i = end;
+            }
+            return out;
+        }
+    } // namespace
+
+    Code::Split Code::split(const std::string& prefix) const
+    {
+        std::vector<Stmt> init;
+        std::vector<Stmt> set;
+        std::set<std::string> initTemps;
+        for (const Stmt& s : stmts_)
+        {
+            if (s.lhs.empty() || (s.deps & Val::kPots) != 0)
+                set.push_back(s);
+            else
+            {
+                init.push_back(s);
+                if (s.declares)
+                    initTemps.insert(s.lhs);
+            }
+        }
+        // init's temporaries that a pot's statement reads: fields, numbered in init's order
+        std::set<std::string> read;
+        for (const Stmt& s : set)
+        {
+            for (const std::string& u : s.uses)
+            {
+                if (initTemps.count(u))
+                    read.insert(u);
+            }
+        }
+        Split out;
+        std::map<std::string, std::string> renames;
+        for (const Stmt& s : init)
+        {
+            if (s.declares && read.count(s.lhs))
+            {
+                renames[s.lhs] = prefix + std::to_string(out.fields.size());
+                out.fields.push_back(renames[s.lhs]);
+            }
+        }
+        auto apply = [&](std::vector<Stmt>& list)
+        {
+            for (Stmt& s : list)
+            {
+                if (const auto it = renames.find(s.lhs); it != renames.end())
+                {
+                    s.lhs = it->second;
+                    s.declares = false;
+                }
+                s.rhs = renamed(s.rhs, renames);
+                for (std::string& u : s.uses)
+                {
+                    if (const auto it = renames.find(u); it != renames.end())
+                        u = it->second;
+                }
+            }
+        };
+        out.initOperations = static_cast<int>(
+            std::count_if(init.begin(), init.end(), [](const Stmt& s) { return s.declares; }));
+        out.setOperations =
+            static_cast<int>(std::count_if(set.begin(), set.end(), [](const Stmt& s) { return s.declares; }));
+        apply(init);
+        apply(set);
+        out.init = merged(init);
+        out.set = merged(set);
         return out;
     }
 
@@ -386,14 +498,57 @@ namespace fminus::circuit
             bc.rLines.push_back(withComment("const float k_" + c.ident + " = " + printExpr(*c.expr, potName) + ";",
                                             el.text));
         }
-        std::vector<Val> symbols;
-        for (const System::Symbol& s : bc.system.symbols)
-            symbols.push_back(Val::var(s.name, &code));
-        const Linear<Val> linear = solve(bc.system, bc.pivots, symbols);
-        bc.coefficients = derive(bc.system, linear, block, plan.config.adaa && block.port.has_value());
-        for (auto& [name, v] : bc.coefficients)
-            v.code = nullptr;
+        // The derivation in an order, into a Code: a capacitor's gc and an inductor's rl depend on the rate, a
+        // variable resistance and a gain of pots on the pots
+        auto derived = [&](const Pivots& order, Code& into)
+        {
+            std::vector<Val> symbols;
+            for (const System::Symbol& s : bc.system.symbols)
+            {
+                const bool rate = s.kind == System::Symbol::Kind::Gc || s.kind == System::Symbol::Kind::Rl;
+                symbols.push_back(Val::var(s.name, &into, rate ? Val::kRate : Val::kPots));
+            }
+            const Linear<Val> linear = solve(bc.system, order, symbols);
+            Coefficients<Val> out = derive(bc.system, linear, block, plan.config.adaa && block.port.has_value());
+            for (auto& [name, v] : out)
+                v.code = nullptr;
+            return out;
+        };
+        bc.coefficients = derived(bc.pivots, code);
         bc.lines = code.lines();
+        if (!block.hasControls())
+            return bc;
+        // The Woodbury form: the variable branches' currents pivoted last, so that everything before them depends on
+        // the rate alone (init's) and b<N>_set is left with the k x k (R + Q) elimination and what it reaches; kept
+        // when its b<N>_set does fewer operations than the all-in-set form's
+        const std::string setName = "b" + std::to_string(block.index) + "_set";
+        const int all = code.operations();
+        Messages scratch;
+        const std::optional<Pivots> last = choosePivots(bc.system, plan, blockIndex, scratch, true);
+        if (!last)
+        {
+            bc.form = std::format("{}: all in set, {} operations (no order pivots its variable branches last)",
+                                  setName, all);
+            return bc;
+        }
+        Code wood(reserved);
+        Coefficients<Val> coefficients = derived(*last, wood);
+        Code::Split split = wood.split("w" + std::to_string(block.index) + "_");
+        if (split.setOperations >= all)
+        {
+            bc.form = std::format("{}: all in set, {} operations (the Woodbury form's would be {}, and {} in init)",
+                                  setName, all, split.setOperations, split.initOperations);
+            return bc;
+        }
+        bc.form = std::format("{}: the Woodbury form (its variable branches pivoted last), {} operations, and {} in "
+                              "init; all in set, {}",
+                              setName, split.setOperations, split.initOperations, all);
+        bc.pivots = *last;
+        bc.coefficients = std::move(coefficients);
+        bc.lines = std::move(split.set);
+        bc.initLines = std::move(split.init);
+        bc.wFields = std::move(split.fields);
+        bc.woodbury = true;
         return bc;
     }
 
@@ -658,16 +813,18 @@ namespace fminus::circuit
             bool movesPortCurve(std::size_t i) const
             {
                 const Block& b = plan.blocks[i];
-                return adaaBlock(b) && !b.port->smooth() && b.hasControls() &&
-                       coefficient(i, "ka_" + b.port->name).kind == Val::Kind::Var;
+                const Val ka = coefficient(i, "ka_" + b.port->name);
+                return adaaBlock(b) && !b.port->smooth() && b.hasControls() && ka.kind == Val::Kind::Var &&
+                       (ka.deps & Val::kPots) != 0;
             }
 
             // Whether its other diode's kr moves too (an asymmetric pair).
             bool movesReverse(std::size_t i) const
             {
                 const Block& b = plan.blocks[i];
-                return movesPortCurve(i) && b.port->law == PortDef::Law::Asym &&
-                       coefficient(i, "kr_" + b.port->name).kind == Val::Kind::Var;
+                const Val kr = coefficient(i, "kr_" + b.port->name);
+                return movesPortCurve(i) && b.port->law == PortDef::Law::Asym && kr.kind == Val::Kind::Var &&
+                       (kr.deps & Val::kPots) != 0;
             }
 
             Val coefficient(std::size_t b, const std::string& name) const
@@ -1166,6 +1323,12 @@ namespace fminus::circuit
                          firstField ? "block " + std::to_string(i + 1) + "'s coefficients" : "", 31);
                     firstField = false;
                 }
+                for (std::size_t k = 0; k < blocks[i].wFields.size(); ++k)
+                    line("    float " + blocks[i].wFields[k] + ";",
+                         k == 0 ? "block " + std::to_string(i + 1) + "'s rate-only terms (init's; b" +
+                                      std::to_string(i + 1) + "_set reads them: Woodbury)"
+                                : "",
+                         31);
             }
             at = titleLine();
             line("    int ck_;", "the guard: ticks since init or clear, mod 16 (it checks the states at 0)", 31);
@@ -1270,6 +1433,16 @@ namespace fminus::circuit
             }
             for (std::size_t i = 0; i < plan.blocks.size(); ++i)
             {
+                at = blockLine(plan.blocks[i]);
+                if (blocks[i].woodbury && !blocks[i].initLines.empty())
+                {
+                    line("        {", "block " + std::to_string(i + 1) + "'s rate-only part (the Woodbury form): b" +
+                                          std::to_string(i + 1) + "_set does the rest");
+                    for (const std::string& l : blocks[i].initLines)
+                        line("            " + l);
+                    line("        }");
+                    continue;
+                }
                 if (plan.blocks[i].hasControls() || blocks[i].lines.empty())
                     continue;
                 line("        {", "block " + std::to_string(i + 1) + "'s coefficients (it has no pots)");
@@ -1277,6 +1450,7 @@ namespace fminus::circuit
                     line("            " + l);
                 line("        }");
             }
+            at = titleLine();
             for (std::size_t i = 0; i < plan.blocks.size(); ++i)
             {
                 if (movesPortCurve(i))
@@ -1446,7 +1620,8 @@ namespace fminus::circuit
             }
             at = blockLine(b);
             line("    void b" + std::to_string(b.index) + "_set(" + params + ") [[clang::nonblocking]]",
-                 "block " + std::to_string(b.index) + "'s coefficients");
+                 "block " + std::to_string(b.index) + "'s coefficients" +
+                     (blocks[i].woodbury ? std::string(": what its pots move (Woodbury)") : ""));
             line("    {");
             const bool shift = movesPortCurve(i);
             const std::string P = b.port ? b.port->name : std::string();

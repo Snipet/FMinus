@@ -150,13 +150,27 @@ D3 m a 1N914
         return 0;
     }
 
-    // Calls set() with the pots, whatever their count (0 to 3 in these netlists: none, no call).
-    void callSet(Program& program, const std::string& module, void* self, const std::vector<float>& pots)
+    // Calls set() with the pots, whatever their count (0 to 3 in these netlists: none, no call), then the switches
+    // (none, or one).
+    void callSet(Program& program, const std::string& module, void* self, const std::vector<float>& pots,
+                 const std::vector<int>& switches = {})
     {
         std::string errors;
         const std::string name = module + "::set";
-        if (pots.empty())
+        if (pots.empty() && switches.empty())
             return;
+        if (switches.size() == 1)
+        {
+            if (pots.empty())
+                program.function<void(void*, int)>(name, errors)(self, switches[0]);
+            else if (pots.size() == 1)
+                program.function<void(void*, float, int)>(name, errors)(self, pots[0], switches[0]);
+            else
+                FAIL("set() takes " << pots.size() << " pots and a switch");
+            return;
+        }
+        if (!switches.empty())
+            FAIL("set() takes " << switches.size() << " switches");
         if (pots.size() == 1)
             program.function<void(void*, float)>(name, errors)(self, pots[0]);
         else if (pots.size() == 2)
@@ -171,8 +185,16 @@ D3 m a 1N914
 TEST_CASE("the emitted coefficients are the double derivation's, in float", "[circuit]")
 {
     // Phase 0's, and Phase 1's elements: an inductor (the wah's tank, a pot damping it), a DC source and an E, a
-    // pot's gain in an E and a G, one diode and an asymmetric pair whose K a pot moves, with and without ADAA
+    // pot's gain in an E and a G, one diode and an asymmetric pair whose K a pot moves, with and without ADAA, and
+    // switches (one in a linear block, one moving a diode pair's K). Where b<N>_set is the Woodbury form (its rate-only
+    // part init's), init and b<N>_set together give the all-in-set derivation's coefficients (Phase 0's pivot order,
+    // in double), pots at exactly 0 and 1 included, at host rates from 44.1 to 384 kHz.
     const std::string netlists[] = {fc::test::kDiodeTone,
+                                    ".title Sw\n.input u in\n.output y a\n.switch mode 3 1\nR1 in a 10k\nC1 a 0 10n\n"
+                                    "S1 a b mode 1,2\nC2 b 0 47n\n",
+                                    ".title SwClip\n.input u in\n.output y a\n.switch hard 2\n.oversample 4\n"
+                                    ".adaa on\n.solver omega(1)\n.pot drive\nR1 in a {1k + 9k * drive}\n"
+                                    "S1 in a hard 1 ron=100\nC1 a 0 10n\nD1 a 0 1N914\nD2 0 a 1N914\n",
                                     fc::test::kScreamer,
                                     withLine(fc::test::kDiodeTone, ".adaa off", ".adaa on"),
                                     withLine(fc::test::kScreamer, ".adaa on", ".adaa off"),
@@ -186,6 +208,7 @@ TEST_CASE("the emitted coefficients are the double derivation's, in float", "[ci
                                     withLine(kAsymPot, ".adaa on", ".adaa off")};
     for (const std::string& text : netlists)
     {
+        INFO(text);
         const fc::Result result = fc::generate(text, "t.cir");
         auto program = compiled(result);
         const Program::Module* m = program->module(result.module);
@@ -194,7 +217,7 @@ TEST_CASE("the emitted coefficients are the double derivation's, in float", "[ci
         std::string errors;
         auto* init = program->function<void(void*, float)>(result.module + "::init", errors);
         REQUIRE(init);
-        for (double rate : {44100.0, 48000.0, 96000.0})
+        for (double rate : {44100.0, 48000.0, 96000.0, 192000.0, 384000.0})
         {
             for (std::size_t b = 0; b < plan.blocks.size(); ++b)
             {
@@ -202,18 +225,25 @@ TEST_CASE("the emitted coefficients are the double derivation's, in float", "[ci
                 fc::Messages messages;
                 const std::optional<fc::BlockCode> code = fc::deriveBlock(plan, static_cast<int>(b), messages);
                 REQUIRE(code);
+                const std::optional<fc::Pivots> phase0 =
+                    fc::choosePivots(code->system, plan, static_cast<int>(b), messages);
+                REQUIRE(phase0);
                 const double designRate = rate * block.rateFactor * block.designFactor;
                 for (const std::vector<double>& pots : fc::potGrid(plan, block))
                 {
                     auto self = instance(*m);
                     init(self.get(), static_cast<float>(rate));
-                    std::vector<float> args;
-                    for (double v : pots)
-                        args.push_back(static_cast<float>(v));
-                    callSet(*program, result.module, self.get(), args);
+                    // the pots as floats, the switches as ints, set until a switch's ramp settles (16 / (0.02 rate)
+                    // a call: 60 calls at 48 kHz, 480 at 384 kHz)
+                    std::vector<float> args(pots.begin(), pots.begin() + static_cast<long>(plan.pots.size()));
+                    std::vector<int> positions;
+                    for (std::size_t k = plan.pots.size(); k < pots.size(); ++k)
+                        positions.push_back(static_cast<int>(pots[k]));
+                    for (int call = 0; call < (positions.empty() ? 1 : 512); ++call)
+                        callSet(*program, result.module, self.get(), args, positions);
                     const std::vector<double> symbols =
                         fc::symbolValues(code->system, plan, static_cast<int>(b), designRate, pots);
-                    const fc::Linear<double> linear = fc::solve(code->system, code->pivots, symbols);
+                    const fc::Linear<double> linear = fc::solve(code->system, *phase0, symbols);
                     const fc::Coefficients<double> doubles =
                         fc::derive(code->system, linear, block, plan.config.adaa && block.port.has_value());
                     std::map<std::string, double> expected(doubles.begin(), doubles.end());
@@ -243,6 +273,7 @@ TEST_CASE("the emitted coefficients are the double derivation's, in float", "[ci
                         if (field->second.kind != fc::Val::Kind::Var)
                             continue;   // a literal: exact
                         const double f = static_cast<double>(readFloat(self.get(), *m, name));
+                        CHECK(std::isfinite(f));
                         row.first = std::fmax(row.first, std::fabs(f - d) * scale);
                     }
                     for (const auto& [readout, row] : rows)

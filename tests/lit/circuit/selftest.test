@@ -23,10 +23,11 @@
 # MODULE:      void b1_set(float drive)
 
 # Without --self-test the same netlist plays its provisional configuration; --notes prints the plan, the provisional
-# note first.
+# note first, and with each block that has pots, the form of its b<N>_set (the Woodbury form only where it does less).
 # RUN: fminus %S/Inputs/clipper-pot.cir --notes --emit fm -o %t.p.fm 2>&1 | FileCheck %s --check-prefix=PLAN --match-full-lines
 # PLAN:      {{.*}}clipper-pot.cir: note: the self-test chooses this circuit's configuration; provisional: 8x IIR, omega(2)
 # PLAN-NEXT: {{.*}}clipper-pot.cir: note: block 1 (R1, C1, D1, D2): 1 state, port D1|D2, at 8 rate, omega3 + 2 Newton steps
+# PLAN-NEXT: {{.*}}clipper-pot.cir: note: block 1's b1_set: all in set, 8 operations (the Woodbury form's would be 8, and 0 in init)
 # PLAN-NEXT: {{.*}}clipper-pot.cir: note: latency: about 3.8 host samples at 1 kHz (IIR halfbands)
 
 # A netlist that names its whole configuration has nothing to choose; its key (pinned here: it moves only with the

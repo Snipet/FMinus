@@ -87,8 +87,8 @@ namespace fminus::circuit
             }
         }
 
-        // The plan as notes: each block, its rate and solver, and the latency.
-        void planNotes(const Plan& plan, Messages& messages)
+        // The plan as notes: each block, its rate and solver (and the form of its b<N>_set), and the latency.
+        void planNotes(const Plan& plan, const std::vector<BlockCode>& codes, Messages& messages)
         {
             const Config& c = plan.config;
             for (const Block& b : plan.blocks)
@@ -117,6 +117,9 @@ namespace fminus::circuit
                     text += ")";
                 }
                 messages.note({}, text);
+                const std::string& form = codes[static_cast<std::size_t>(b.index - 1)].form;
+                if (!form.empty())
+                    messages.note({}, "block " + std::to_string(b.index) + "'s " + form);
             }
             if (plan.regionFirst >= 0 && c.oversample > 1)
             {
@@ -180,7 +183,7 @@ namespace fminus::circuit
                         (c.oversample > 1 ? roundTripDelay(c.oversample, c.halfband, 1000) : 0) + adaaLatency(*p);
                 if (c.chosen && !c.chosen->met)
                     noConfiguration(*p, messages);
-                planNotes(*p, messages);
+                planNotes(*p, blocks, messages);
             }
             result.errors = messages.format(file, Severity::Error);
             result.warnings = messages.format(file, Severity::Warning);

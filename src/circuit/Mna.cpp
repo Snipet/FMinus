@@ -142,6 +142,15 @@ namespace fminus::circuit
         }
         if (row != s.n)
             throw std::logic_error("assemble: rows and unknowns differ");
+        s.variableUnknown.assign(un, false);
+        s.variableRow.assign(un, false);
+        for (std::size_t b = 0; b < block.branches.size(); ++b)
+        {
+            if (block.branches[b].kind != Branch::Kind::Variable)
+                continue;
+            s.variableUnknown[static_cast<std::size_t>(branchCurrent[b])] = true;
+            s.variableRow[static_cast<std::size_t>(branchRow[b])] = true;
+        }
 
         // Sources: the input, each capacitor's and inductor's state, the port's v; with `dc`, the DC sources.
         const bool fromInput = block.input == plan.inputNode;
@@ -721,7 +730,8 @@ namespace fminus::circuit
         // The order, by exact +-1 entries first (least Markowitz cost, then the lowest row and column), then by the
         // best worst-over-the-grid magnitude in its column; or by that magnitude alone. `failure` says where it fails.
         std::optional<Pivots> tryOrder(const System& system, const Plan& plan, const Block& block,
-                                       const std::vector<GridPoint>& grid, bool preferOnes, std::string& failure)
+                                       const std::vector<GridPoint>& grid, bool preferOnes, bool variableLast,
+                                       std::string& failure)
         {
             const auto n = static_cast<std::size_t>(system.n);
             Code scratch;
@@ -747,8 +757,18 @@ namespace fminus::circuit
             std::vector<bool> rowDone(n, false);
             std::vector<bool> colDone(n, false);
             Pivots pivots;
+            std::size_t fixedLeft = 0;   // the unknowns that are not variable branches' currents
+            for (std::size_t c = 0; c < n; ++c)
+                fixedLeft += system.variableUnknown[c] ? 0 : 1;
             for (std::size_t step = 0; step < n; ++step)
             {
+                // with variableLast, until the other unknowns are eliminated, neither a variable row nor column
+                auto allowed = [&](std::size_t r, std::size_t c)
+                {
+                    if (!variableLast || fixedLeft == 0)
+                        return true;
+                    return !system.variableRow[r] && !system.variableUnknown[c];
+                };
                 // Column maxima over the remaining rows, at each grid point.
                 auto relative = [&](std::size_t r, std::size_t c)
                 {
@@ -779,7 +799,8 @@ namespace fminus::circuit
                         {
                             // an exact +-1, and (threshold pivoting) at least 0.1 of its column everywhere on the
                             // grid: float runs the elimination, so the growth a smaller pivot allows is lost digits
-                            if (colDone[c] || !isUnit(structure[r][c]) || relative(r, c) < kThreshold)
+                            if (colDone[c] || !allowed(r, c) || !isUnit(structure[r][c]) ||
+                                relative(r, c) < kThreshold)
                                 continue;
                             long rowCount = 0;
                             long colCount = 0;
@@ -809,7 +830,7 @@ namespace fminus::circuit
                             continue;
                         for (std::size_t c = 0; c < n; ++c)
                         {
-                            if (colDone[c] || isZero(structure[r][c]))
+                            if (colDone[c] || !allowed(r, c) || isZero(structure[r][c]))
                                 continue;
                             const double score = relative(r, c);
                             if (score > bestScore)
@@ -849,6 +870,7 @@ namespace fminus::circuit
                     eliminate(a, bestR, bestC, rowDone, colDone);
                 rowDone[bestR] = true;
                 colDone[bestC] = true;
+                fixedLeft -= system.variableUnknown[bestC] ? 0 : 1;
                 pivots.order.emplace_back(static_cast<int>(bestR), static_cast<int>(bestC));
             }
             // The double solve's relative residual, at every grid point and for every source.
@@ -896,16 +918,19 @@ namespace fminus::circuit
         }
     } // namespace
 
-    std::optional<Pivots> choosePivots(const System& system, const Plan& plan, int blockIndex, Messages& messages)
+    std::optional<Pivots> choosePivots(const System& system, const Plan& plan, int blockIndex, Messages& messages,
+                                       bool variableLast)
     {
         const Block& block = plan.blocks.at(static_cast<std::size_t>(blockIndex));
         const std::vector<GridPoint> grid = pivotGrid(plan, block);
         std::string failure;
-        if (std::optional<Pivots> p = tryOrder(system, plan, block, grid, true, failure))
+        if (std::optional<Pivots> p = tryOrder(system, plan, block, grid, true, variableLast, failure))
             return p;
         std::string second;
-        if (std::optional<Pivots> p = tryOrder(system, plan, block, grid, false, second))
+        if (std::optional<Pivots> p = tryOrder(system, plan, block, grid, false, variableLast, second))
             return p;
+        if (variableLast)
+            return std::nullopt;
         Loc loc;
         if (!block.elements.empty())
             loc = plan.netlist.elements[static_cast<std::size_t>(block.elements.front())].loc;

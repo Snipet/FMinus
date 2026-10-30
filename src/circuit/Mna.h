@@ -124,6 +124,10 @@ namespace fminus::circuit
         int output = -1;                                 // the output's readout
         // per state source: the readout its update reads (a capacitor's voltage, an inductor's current), and a sign
         std::vector<std::pair<int, double>> capacitor;
+        // the unknowns and rows of the variable branches (pots' sections, {expr} resistors, switches): their currents
+        // and their rows V(a) - V(b) - r i = 0, the only place an r appears (the Woodbury form pivots them last)
+        std::vector<bool> variableUnknown;
+        std::vector<bool> variableRow;
     };
 
     // The block's equations (Plan.h's Block, by chain index), in the offsets from the DC operating point the module
@@ -139,8 +143,11 @@ namespace fminus::circuit
     };
 
     // The order, chosen and checked over the block's grid of rates and pots; nothing (with an error) when the
-    // equations are singular somewhere on it.
-    std::optional<Pivots> choosePivots(const System& system, const Plan& plan, int block, Messages& messages);
+    // equations are singular somewhere on it. With `variableLast`, an order that pivots the variable branches'
+    // currents last, on their own rows (the Woodbury form: until then nothing a pot moves enters the elimination),
+    // under the same threshold and residual rules; nothing (and no error) when there is none.
+    std::optional<Pivots> choosePivots(const System& system, const Plan& plan, int block, Messages& messages,
+                                       bool variableLast = false);
 
     // Whether a port block's self-impedance K is positive (and finite) at every point of that grid, as the solver's
     // bracket [min(0, p), max(0, p)] and log(Is K / N Vt) need; otherwise an error (positive feedback makes K
