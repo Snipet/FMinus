@@ -2264,9 +2264,14 @@ namespace fminus::circuit
         }
         bool regionChecked = false;   // the linear-only region's 1x check, already made at its factor
         if (linearOnly && cfg.method == Method::Bdf2)
+        {
             messages.warning(cfg.methodFrom == "the netlist" ? netlist.method.loc : Loc{},
                              "'.method bdf2' is ignored: the netlist is linear (its blocks run the trapezoidal rule, "
                              "or matched designs)");
+            // the configuration line says where tr came from: not from the netlist's (or Options') bdf2
+            cfg.methodFrom = cfg.methodFrom == "the netlist" ? "the netlist's bdf2 ignored: linear"
+                                                             : "Options' bdf2 ignored: linear";
+        }
         if (linearOnly)
         {
             // nothing to choose; the oversampled region, if any, at .oversample's factor, else at the smallest of 2,
@@ -2342,9 +2347,16 @@ namespace fminus::circuit
                 b.matchedPolarity = matched[i].polarity;
             }
             else if (b.oneX > kTolerance)
+            {
+                // blocks=nonlinear: what blocks=auto would do with it, a matched design at 1x or the region
+                const MatchedCheck m = matchedCheck(p, static_cast<int>(i));
+                const std::string instead = m.usable && m.worst <= kTolerance
+                                                ? std::format("run a matched design at 1x ({:.2f} dB)", m.worst)
+                                                : std::string("oversample it");
                 messages.warning(blockLoc(b), std::format("{} errs by {:.2f} dB at 1x (44.1 kHz), more than {} dB: "
-                                                          "blocks=auto would oversample it",
-                                                          blockLabel(b), b.oneX, kTolerance));
+                                                          "blocks=auto would {}",
+                                                          blockLabel(b), b.oneX, kTolerance, instead));
+            }
             // why a block that fails the 1x check runs as it does
             if (b.oneX <= kTolerance || cfg.region != Region::Auto)
                 continue;

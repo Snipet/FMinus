@@ -1789,6 +1789,29 @@ TEST_CASE("a linear block a matched design cannot serve joins the region, with a
     CHECK(low.notes.find("t.cir: note: the netlist is linear and its blocks run at 1x: .oversample 4 is unused\n") !=
           std::string::npos);
     CHECK(low.source.find("float step(") == std::string::npos);
+
+    // a linear netlist ignores .method bdf2 (a warning), and the configuration line says where its tr came from
+    const auto lines = std::count(fc::test::kToneStack.begin(), fc::test::kToneStack.end(), '\n');
+    const fc::Result bdf2 = fc::generate(fc::test::kToneStack + ".method bdf2\n", "t.cir");
+    CHECK(bdf2.warnings == "t.cir:" + std::to_string(lines + 1) +
+                               ":1: warning: '.method bdf2' is ignored: the netlist is linear (its blocks run the "
+                               "trapezoidal rule, or matched designs)\n");
+    CHECK(bdf2.configuration.find(".method tr (the netlist's bdf2 ignored: linear)") != std::string::npos);
+    fc::Options bdf2Options;
+    bdf2Options.method = fc::Method::Bdf2;
+    CHECK(fc::generate(fc::test::kToneStack, "t.cir", bdf2Options)
+              .configuration.find(".method tr (Options' bdf2 ignored: linear)") != std::string::npos);
+
+    // blocks=nonlinear leaves a failing linear block at 1x on the trapezoidal rule; its warning says what blocks=auto
+    // would do instead: a matched design at 1x where one passes, the oversampled region where none can
+    fc::Options nonlinear;
+    nonlinear.region = fc::Region::Nonlinear;
+    CHECK(fc::generate(fc::test::kRc8k, "t.cir", nonlinear).warnings ==
+          "t.cir:4:1: warning: block 1 (R1, C1) errs by 12.79 dB at 1x (44.1 kHz), more than 0.5 dB: blocks=auto would "
+          "run a matched design at 1x (0.32 dB)\n");
+    CHECK(fc::generate(fc::test::kToneStack, "t.cir", nonlinear).warnings ==
+          "t.cir:7:1: warning: block 1 (C1, R1, C2, C3, Ptreb, Pbass, Pmid, RL) errs by 13.37 dB at 1x (44.1 kHz), more "
+          "than 0.5 dB: blocks=auto would oversample it\n");
 }
 
 TEST_CASE("the DC operating point, by hand", "[circuit]")

@@ -52,7 +52,7 @@
 # ALL-NEXT:  hb1_up(u, os1);
 
 # blocks=nonlinear: the tone block back at the host rate, after the down chain, and a warning of its 1x error.
-# NONLINEAR: warning: block 3 (R7, C5, R8, XU2, R9, Ptone, R10, C6) errs by 13.40 dB at 1x (44.1 kHz), more than 0.5 dB: blocks=auto would oversample it
+# NONLINEAR: warning: block 3 (R7, C5, R8, XU2, R9, Ptone, R10, C6) errs by 13.40 dB at 1x (44.1 kHz), more than 0.5 dB: blocks=auto would run a matched design at 1x (0.35 dB)
 # NONLINEAR-LABEL: float step(float u)
 # NONLINEAR-NEXT:  {
 # NONLINEAR-NEXT:  return b2(u);

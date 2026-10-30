@@ -786,7 +786,8 @@ s2_b3 = mb2_b3 * u - ma2_b3 * ym_;
   magnitude match loses the sign; it is fixed at generation, -1 for an inverting block). A block that fails either
   way joins the oversampled region, with a note.
 - **Under `blocks=auto` only**, and only at 1x: `blocks=all` puts every block in the region in its trapezoidal form,
-  and `blocks=nonlinear` leaves a failing block at 1x with a warning, as before.
+  and `blocks=nonlinear` leaves a failing block at 1x with a warning that says what `blocks=auto` would do with it
+  ("blocks=auto would run a matched design at 1x (0.35 dB)", or "would oversample it").
 - **Float.** The coefficients come out of float arithmetic on the block's own float coefficients, and a stiff block's
   are ill-conditioned (its poles near `z = 1`): the emitted responses are within 0.0025 dB of the double design's up
   to 96 kHz and within 0.1 dB at 192 and 384 kHz (`example-circuits --check`, p); rc8k.cir's and sallen-key.cir's
@@ -857,8 +858,8 @@ response that droops near Nyquist (no `tan` map makes it exact), so it is for a 
 blocks are checked against their own map, `s = fs' (3 - 4 z^-1 + z^-2) / 2`, to 1e-9 (`CircuitTest.cpp`), and
 diodetone.cir with `.method bdf2` follows the double BDF2 reference at -102.6 dB in band (check p). ADAA is Holters'
 trapezoidal form, so `.method bdf2` with `.adaa on` is an error; `.prewarp on` places the trapezoidal rule's pole, so
-it is ignored with a warning on a BDF2 block; a linear netlist ignores BDF2. The model costs BDF2 2 cycles more a
-state.
+it is ignored with a warning on a BDF2 block; a linear netlist ignores BDF2, with a warning, and its configuration
+line says so (`.method tr (the netlist's bdf2 ignored: linear)`). The model costs BDF2 2 cycles more a state.
 
 ### The method check
 
