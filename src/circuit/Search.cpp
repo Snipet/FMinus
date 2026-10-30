@@ -595,8 +595,7 @@ namespace fminus::circuit
             return r;
         if (split < count - 1)
         {
-            for (int k = 0; k < 4; ++k)
-                r.high[static_cast<std::size_t>(k)] = highEnergy(y, factor, matrix.shape, kHostRate / 2);
+            r.high = highEnergy(y, factor, matrix.shape, kHostRate / 2);
             const ChainForm after = chainForm(plan, matrix, unit, split + 1, count - 1, kHostRate * factor, factor, n,
                                               false, false, Method::Tr);
             y = simulateChain(after.blocks, y, o, &stats, after.gains);
@@ -604,10 +603,7 @@ namespace fminus::circuit
                 return r;
         }
         else if (high)
-        {
-            for (int k = 0; k < 4; ++k)
-                r.high[static_cast<std::size_t>(k)] = highEnergy(y, factor, matrix.shape, kHostRate / 2);
-        }
+            r.high = highEnergy(y, factor, matrix.shape, kHostRate / 2);
         const auto rate = static_cast<std::size_t>(factor);
         const std::span<const double> window =
             std::span<const double>(y).subspan(rate * matrix.shape.warm, rate * matrix.shape.window);

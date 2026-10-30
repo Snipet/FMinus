@@ -309,9 +309,6 @@ namespace fminus::circuit
                     return stopped();
                 double here = 0;
                 double truth = 0;
-                std::size_t band = 0;
-                while ((1 << band) < r.oversample)
-                    ++band;
                 for (int u = 0; u < units; ++u)
                 {
                     const ReferenceT1& a = refs[static_cast<std::size_t>(u)];
@@ -319,7 +316,7 @@ namespace fminus::circuit
                     if (!a.done || !b.done || a.high < 0)
                         continue;
                     here += a.high;
-                    truth += b.high[band];
+                    truth += b.high;
                 }
                 r.measured = true;
                 r.excess = 10 * std::log10(std::max(here, 1e-300) / std::max(truth, 1e-300));

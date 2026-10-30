@@ -9,7 +9,6 @@
 #include "circuit/Plan.h"
 #include "fminus/Circuit.h"
 
-#include <array>
 #include <complex>
 #include <cstddef>
 #include <cstdint>
@@ -162,9 +161,9 @@ namespace fminus::circuit
         double h3 = 0;
         std::vector<double> power;
         long unconverged = 0;
-        // with `high`: the region's output's energy (its last block's, at 64x, over the window) from 20 kHz to the
-        // Nyquist of 1, 2, 4 and 8 times the host rate, the bands the ringing check compares
-        std::array<double, 4> high{};
+        // with `high`: the region's output's energy (its last block's, at 64x, over the window) from 20 to 24 kHz,
+        // the host's top, the band the ringing check compares at every oversampling
+        double high = 0;
     };
 
     Reference64 reference64(const Plan& plan, const StressMatrix& matrix, int unit, const Stop& stop,
@@ -177,7 +176,7 @@ namespace fminus::circuit
         bool done = false;
         std::vector<double> window;
         long unconverged = 0;
-        double high = -1;   // with `high`: its output's energy from 20 kHz to the region's Nyquist, over the window
+        double high = -1;   // with `high`: its output's energy from 20 to 24 kHz (the host's top), over the window
     };
 
     ReferenceT1 referenceT1(const Plan& plan, const StressMatrix& matrix, int unit, int oversample, bool adaa,
@@ -190,9 +189,10 @@ namespace fminus::circuit
     // The method check, at the self-test (report §6.2; fminus.md §5, stage 7): at an oversampling, the region's first
     // port block whose linearised trapezoidal A has an eigenvalue within 0.1 of -1 (Linear.h's ringingCheck, at the
     // plain design rate), and what was measured of it: the energy the region's trapezoidal output (the converged
-    // reference, no ADAA) puts between 20 kHz and its Nyquist against the 64x reference's, summed over the units
-    // both measure (the sines up to L). Above +6 dB it rings: the self-test warns, and puts each candidate's BDF2 twin
-    // (no ADAA) right after it.
+    // reference, no ADAA) puts between 20 and 24 kHz (the host's top, at every oversampling: up to the region's
+    // Nyquist the band would grow with the factor and measure the halfbands' own stopband) against the 64x
+    // reference's, summed over the units both measure (the sines up to L). Above +6 dB it rings: the self-test warns,
+    // and puts each candidate's BDF2 twin (no ADAA) right after it.
     struct Ringing
     {
         int oversample = 1;
