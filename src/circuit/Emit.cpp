@@ -2448,15 +2448,13 @@ namespace fminus::circuit
                 }
                 if (!p.node.readable || p.block >= 0)
                     continue;
-                // .input's node, and a DC node: what no block computes
-                std::string v;
-                if (p.index == plan.inputNode)
-                    v = plan.inputScale == 1 ? lane0(in) : lane0(in) + " * " + literal(plan.inputScale);
-                else
-                    v = literal(0.0);
+                // .input's node (tick's sample in volts), and a DC node (its volts): what no block computes
+                const bool input = p.index == plan.inputNode;
+                const std::string sample =
+                    plan.inputScale == 1 ? lane0(in) : lane0(in) + " * " + literal(plan.inputScale);
                 line("        prv_[" + std::to_string(k) + "] = " +
-                         (p.index == plan.inputNode ? plusDc(v, p.node.dc) : literal(p.node.dc)) + ";",
-                     "V(" + p.node.name + ")" + (p.index == plan.inputNode ? ": .input's" : ": a DC node's"));
+                         (input ? plusDc(sample, p.node.dc) : literal(p.node.dc)) + ";",
+                     "V(" + p.node.name + ")" + (input ? ": .input's" : ": a DC node's"));
             }
             std::string current;
             for (const std::string& l : tickBody(true, current))
