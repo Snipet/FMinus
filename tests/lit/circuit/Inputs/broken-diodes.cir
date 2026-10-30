@@ -1,0 +1,14 @@
+* broken-diodes.cir: errors.test's diode forms that are not one port's: a pair whose RS differ, and a series string
+* of two models
+.title Broken
+.input  u    in
+.output vout a
+R1     in  a   10k
+D1     a   0   DA
+D2     0   a   DB
+R2     a   b   1k
+D3     b   m   1N914
+D4     m   0   1N4148
+.model DA D(IS=2.52n N=1.752 RS=10)
+.model DB D(IS=2.52n N=1.752 RS=5)
+.end

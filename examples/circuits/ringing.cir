@@ -1,0 +1,20 @@
+* ringing.cir: an inductive kick: R1 100 into L1 1 mH, one 1N914 from its far end to ground with C1 1 nF across it (a
+* junction's capacitance, drawn), R2 100k its load. Each time the diode turns off it interrupts L1's current, which
+* rings with C1 at 159 kHz. At 1x the trapezoidal rule puts that resonance at Nyquist (an eigenvalue of the block's
+* linearised A at -0.9998), where the kicks excite it: the self-test measures 13 dB more between 20 and 24 kHz than the
+* 64x reference has, warns (at 1x block 1 rings at Nyquist ...: .oversample 2 or .method bdf2), and tries each 1x
+* candidate's BDF2 twin; at 2x and above the halfbands take what rings away. The configuration is the self-test's
+* answer, pinned (fminus ringing.cir --self-test without these three lines: 2x, ADAA, omega(1)).
+.title Ringing
+.input  u    in   scale=1
+.output vout b
+.oversample 2 iir blocks=auto
+.adaa on
+.solver omega(1)
+.target solver=-60dB alias=-60dB level=4.5V freq=3k
+R1     in a  100
+L1     a  b  1m
+D1     b  0  1N914
+C1     b  0  1n
+R2     b  0  100k
+.end

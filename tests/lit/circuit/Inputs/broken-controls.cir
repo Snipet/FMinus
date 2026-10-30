@@ -1,0 +1,14 @@
+* broken-controls.cir: errors.test's E source whose controls are in two blocks (a, and b past X1's output)
+.title Broken
+.input  u    in
+.output vout c
+R1     in  a   10k
+R2     a   0   1k
+X1     a   n   o1  opamp
+R3     o1  n   1k
+R4     n   0   1k
+R5     o1  b   1k
+R6     b   0   1k
+E1     c   0   a   b   2
+R7     c   0   1k
+.end

@@ -2,9 +2,15 @@
 // coefficients against the double derivation they print, every configuration compiling with its methods
 // nonblocking, and generation deterministic with a layout that no pot value changes.
 #include "circuit/Emit.h"
+#include "circuit/Halfbands.h"
+#include "circuit/Laws.h"
+#include "circuit/Linear.h"
 #include "circuit/Mna.h"
 #include "circuit/Netlist.h"
 #include "circuit/Plan.h"
+#include "circuit/Reference.h"
+#include "circuit/Runners.h"
+#include "circuit/Analysis.h"
 #include "CircuitNetlists.h"
 #include "fminus/Circuit.h"
 #include "fminus/FMinus.h"
@@ -16,13 +22,16 @@
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
+#include <format>
 #include <locale>
 #include <map>
 #include <memory>
+#include <numbers>
 #include <optional>
 #include <regex>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace
@@ -58,6 +67,59 @@ namespace
         return program;
     }
 
+    // E and G with gains pots move, an E's output driving the next block, a G stamped in its block.
+    const std::string kGains = R"(.title Gains
+.input u in
+.output y o3
+.pot g 0.5
+.pot h 0.2
+E1 m 0 in 0 {1 + 10 * g}
+R1 m out 1k
+C1 out 0 10n
+G1 o2 0 out 0 {1m + 2m * h}
+R3 o2 0 1k
+X2 o2 o3 o3 opamp
+)";
+
+    // One diode whose K a pot moves (R1 from 100 ohm to 20k), and an asymmetric pair's (ADAA on: b1_set's carry).
+    const std::string kSinglePot = R"(.title SinglePot
+.input u in
+.output y a
+.pot drive 0.5
+.oversample 4
+.adaa on
+.solver omega(1)
+R1 in a {100 + 20k * drive}
+C1 a 0 10n
+D1 a 0 1N4148
+)";
+
+    // kSinglePot with no pot (K a number but for the capacitor): a port block BDF2 runs
+    const std::string kSinglePot0 = R"(.title SinglePot
+.input u in
+.output y a
+.oversample 4
+.adaa on
+.solver omega(1)
+R1 in a 2.2k
+C1 a 0 10n
+D1 a 0 1N4148
+)";
+
+    const std::string kAsymPot = R"(.title AsymPot
+.input u in
+.output y a
+.pot drive 0.5
+.oversample 4
+.adaa on
+.solver omega(1)
+R1 in a {100 + 20k * drive}
+C1 a 0 10n
+D1 a 0 1N914
+D2 0 m 1N914
+D3 m a 1N914
+)";
+
     fc::Plan planned(const std::string& text, const fc::Options& options = {})
     {
         fc::Messages messages;
@@ -90,13 +152,31 @@ namespace
         return 0;
     }
 
-    // Calls set() with the pots, whatever their count (1 to 3 in these netlists).
-    void callSet(Program& program, const std::string& module, void* self, const std::vector<float>& pots)
+    // Calls set() with the pots, whatever their count (0 to 3 in these netlists: none, no call), then the switches
+    // (none, or one).
+    void callSet(Program& program, const std::string& module, void* self, const std::vector<float>& pots,
+                 const std::vector<int>& switches = {})
     {
         std::string errors;
         const std::string name = module + "::set";
+        if (pots.empty() && switches.empty())
+            return;
+        if (switches.size() == 1)
+        {
+            if (pots.empty())
+                program.function<void(void*, int)>(name, errors)(self, switches[0]);
+            else if (pots.size() == 1)
+                program.function<void(void*, float, int)>(name, errors)(self, pots[0], switches[0]);
+            else
+                FAIL("set() takes " << pots.size() << " pots and a switch");
+            return;
+        }
+        if (!switches.empty())
+            FAIL("set() takes " << switches.size() << " switches");
         if (pots.size() == 1)
             program.function<void(void*, float)>(name, errors)(self, pots[0]);
+        else if (pots.size() == 2)
+            program.function<void(void*, float, float)>(name, errors)(self, pots[0], pots[1]);
         else if (pots.size() == 3)
             program.function<void(void*, float, float, float)>(name, errors)(self, pots[0], pots[1], pots[2]);
         else
@@ -106,11 +186,31 @@ namespace
 
 TEST_CASE("the emitted coefficients are the double derivation's, in float", "[circuit]")
 {
-    const std::string netlists[] = {fc::test::kDiodeTone, fc::test::kScreamer,
+    // Phase 0's, and Phase 1's elements: an inductor (the wah's tank, a pot damping it), a DC source and an E, a
+    // pot's gain in an E and a G, one diode and an asymmetric pair whose K a pot moves, with and without ADAA, and
+    // switches (one in a linear block, one moving a diode pair's K). Where b<N>_set is the Woodbury form (its rate-only
+    // part init's), init and b<N>_set together give the all-in-set derivation's coefficients (Phase 0's pivot order,
+    // in double), pots at exactly 0 and 1 included, at host rates from 44.1 to 384 kHz.
+    const std::string netlists[] = {fc::test::kDiodeTone,
+                                    ".title Sw\n.input u in\n.output y a\n.switch mode 3 1\nR1 in a 10k\nC1 a 0 10n\n"
+                                    "S1 a b mode 1,2\nC2 b 0 47n\n",
+                                    ".title SwClip\n.input u in\n.output y a\n.switch hard 2\n.oversample 4\n"
+                                    ".adaa on\n.solver omega(1)\n.pot drive\nR1 in a {1k + 9k * drive}\n"
+                                    "S1 in a hard 1 ron=100\nC1 a 0 10n\nD1 a 0 1N914\nD2 0 a 1N914\n",
+                                    fc::test::kScreamer,
                                     withLine(fc::test::kDiodeTone, ".adaa off", ".adaa on"),
-                                    withLine(fc::test::kScreamer, ".adaa on", ".adaa off")};
+                                    withLine(fc::test::kScreamer, ".adaa on", ".adaa off"),
+                                    fc::test::kWah,
+                                    fc::test::kRlLowpass,
+                                    fc::test::kDivider,
+                                    kGains,
+                                    kSinglePot,
+                                    withLine(kSinglePot, ".adaa on", ".adaa off"),
+                                    kAsymPot,
+                                    withLine(kAsymPot, ".adaa on", ".adaa off")};
     for (const std::string& text : netlists)
     {
+        INFO(text);
         const fc::Result result = fc::generate(text, "t.cir");
         auto program = compiled(result);
         const Program::Module* m = program->module(result.module);
@@ -119,7 +219,7 @@ TEST_CASE("the emitted coefficients are the double derivation's, in float", "[ci
         std::string errors;
         auto* init = program->function<void(void*, float)>(result.module + "::init", errors);
         REQUIRE(init);
-        for (double rate : {44100.0, 48000.0, 96000.0})
+        for (double rate : {44100.0, 48000.0, 96000.0, 192000.0, 384000.0})
         {
             for (std::size_t b = 0; b < plan.blocks.size(); ++b)
             {
@@ -127,18 +227,67 @@ TEST_CASE("the emitted coefficients are the double derivation's, in float", "[ci
                 fc::Messages messages;
                 const std::optional<fc::BlockCode> code = fc::deriveBlock(plan, static_cast<int>(b), messages);
                 REQUIRE(code);
+                const std::optional<fc::Pivots> phase0 =
+                    fc::choosePivots(code->system, plan, static_cast<int>(b), messages);
+                REQUIRE(phase0);
                 const double designRate = rate * block.rateFactor * block.designFactor;
                 for (const std::vector<double>& pots : fc::potGrid(plan, block))
                 {
                     auto self = instance(*m);
                     init(self.get(), static_cast<float>(rate));
-                    std::vector<float> args;
-                    for (double v : pots)
-                        args.push_back(static_cast<float>(v));
-                    callSet(*program, result.module, self.get(), args);
+                    // the pots as floats, the switches as ints, set until a switch's ramp settles (16 / (0.02 rate)
+                    // a call: 60 calls at 48 kHz, 480 at 384 kHz)
+                    std::vector<float> args(pots.begin(), pots.begin() + static_cast<long>(plan.pots.size()));
+                    std::vector<int> positions;
+                    for (std::size_t k = plan.pots.size(); k < pots.size(); ++k)
+                        positions.push_back(static_cast<int>(pots[k]));
+                    for (int call = 0; call < (positions.empty() ? 1 : 512); ++call)
+                        callSet(*program, result.module, self.get(), args, positions);
+                    if (block.design == fc::Block::Design::Matched)
+                    {
+                        // a matched design: the float one's response against the double one's (from the block's
+                        // trapezoidal form, Linear.h) over the 1x check's band, within 0.02 dB to 96 kHz and 0.1 dB
+                        // above. Its coefficients are only as well conditioned as the trapezoidal form they come
+                        // from: a pole near z = -1 (a stiff branch, the switch's 1 ohm into C2) or near z = 1 (a low
+                        // pole at 384 kHz) costs float two to four digits of them (the matched designs' own test holds
+                        // well-conditioned ones to 1e-5)
+                        const std::optional<fc::TrForm<double>> tr =
+                            fc::trForm(plan, static_cast<int>(b), designRate, pots);
+                        REQUIRE(tr);
+                        const fc::Matched<double> d = fc::matchedDesign(*tr, block.matchedPolarity);
+                        const std::string n = "_b" + std::to_string(block.index);
+                        auto field = [&](const char* name)
+                        {
+                            return static_cast<double>(readFloat(self.get(), *m, name + n));
+                        };
+                        fc::Matched<double> f;
+                        f.b0 = field("mb0");
+                        f.b1 = field("mb1");
+                        f.a1 = field("ma1");
+                        if (tr->order == 2)
+                        {
+                            f.b2 = field("mb2");
+                            f.a2 = field("ma2");
+                        }
+                        // within 40 dB of the response's peak, as the 1x check counts
+                        double peak = 0;
+                        for (double hz = 20; hz <= 20000; hz *= 1.05)
+                            peak = std::fmax(peak, std::abs(fc::matchedResponse(d, hz, designRate)));
+                        double worst = 0;
+                        for (double hz = 20; hz <= 20000; hz *= 1.05)
+                        {
+                            const double hd = std::abs(fc::matchedResponse(d, hz, designRate));
+                            const double hf = std::abs(fc::matchedResponse(f, hz, designRate));
+                            if (hd >= 0.01 * peak)
+                                worst = std::fmax(worst, std::fabs(20 * std::log10(hf / hd)));
+                        }
+                        INFO(result.module << " block " << b + 1 << " at " << rate << ": " << worst << " dB");
+                        CHECK(worst <= (rate <= 96000 ? 0.02 : 0.1));
+                        continue;
+                    }
                     const std::vector<double> symbols =
                         fc::symbolValues(code->system, plan, static_cast<int>(b), designRate, pots);
-                    const fc::Linear<double> linear = fc::solve(code->system, code->pivots, symbols);
+                    const fc::Linear<double> linear = fc::solve(code->system, *phase0, symbols);
                     const fc::Coefficients<double> doubles =
                         fc::derive(code->system, linear, block, plan.config.adaa && block.port.has_value());
                     std::map<std::string, double> expected(doubles.begin(), doubles.end());
@@ -150,13 +299,16 @@ TEST_CASE("the emitted coefficients are the double derivation's, in float", "[ci
                         if (by == std::string::npos)
                             continue;
                         const std::string source = name.substr(by + 4);
+                        // a capacitor's state is a current (gc volts); an inductor's a voltage (rl i + v)
                         double scale = 1;
                         if (source.rfind("x_", 0) == 0)
-                            scale = symbols[static_cast<std::size_t>(
-                                std::find_if(code->system.symbols.begin(), code->system.symbols.end(),
-                                             [&](const fc::System::Symbol& s)
-                                             { return s.name == "gc_" + source.substr(2); }) -
-                                code->system.symbols.begin())];
+                        {
+                            const auto gc = std::find_if(code->system.symbols.begin(), code->system.symbols.end(),
+                                                         [&](const fc::System::Symbol& s)
+                                                         { return s.name == "gc_" + source.substr(2); });
+                            if (gc != code->system.symbols.end())
+                                scale = symbols[static_cast<std::size_t>(gc - code->system.symbols.begin())];
+                        }
                         auto& row = rows[name.substr(0, by)];
                         row.second += std::fabs(d) * scale;
                         const auto field = std::find_if(code->coefficients.begin(), code->coefficients.end(),
@@ -165,6 +317,7 @@ TEST_CASE("the emitted coefficients are the double derivation's, in float", "[ci
                         if (field->second.kind != fc::Val::Kind::Var)
                             continue;   // a literal: exact
                         const double f = static_cast<double>(readFloat(self.get(), *m, name));
+                        CHECK(std::isfinite(f));
                         row.first = std::fmax(row.first, std::fabs(f - d) * scale);
                     }
                     for (const auto& [readout, row] : rows)
@@ -174,7 +327,7 @@ TEST_CASE("the emitted coefficients are the double derivation's, in float", "[ci
                     }
                     if (block.port)
                     {
-                        for (const char* k : {"ka_", "kb_", "lna_", "kc_"})
+                        for (const char* k : {"ka_", "kb_", "lna_", "kc_", "kr_", "ks_", "lnr_", "kcr_"})
                         {
                             const std::string name = k + block.port->name;
                             if (!expected.count(name))
@@ -430,6 +583,413 @@ TEST_CASE("a pot's move keeps ADAA's last point on the port's curve", "[circuit]
     CHECK(readFloat(self.get(), *m, "p_D1") == p);
 }
 
+TEST_CASE("a BDF2 module is the double BDF2 reference's, nonblocking in both channel counts", "[circuit]")
+{
+    // .method bdf2: the emitted step (its companions, its second histories) against the double reference running
+    // the block's BDF2 Holters form with the module's guess and Newton steps, in band: a diode pair across C1 (and a
+    // pot into C2), an OTA stage in its i-form, one diode
+    struct Case
+    {
+        std::string text;
+        std::vector<double> laws;   // the law inputs, held
+    };
+    const Case cases[] = {{withLine(fc::test::kDiodeTone, ".adaa off", ".method bdf2"), {}},
+                          {fc::test::otaStage(".oversample 2\n.adaa off\n.solver newton(2)\n.method bdf2\n"), {1e-4}},
+                          {withLine(kSinglePot0, ".adaa on", ".method bdf2"), {}}};
+    for (const Case& c : cases)
+    {
+        const fc::Result r = fc::generate(c.text, "t.cir");
+        INFO(r.errors << r.warnings);
+        REQUIRE(r.errors.empty());
+        CHECK(r.source.find("xo_") != std::string::npos);
+        auto program = compiled(r);
+        for (const char* method : {"init", "set", "tick", "step", "clear"})
+        {
+            const std::string name = r.module + "::" + method;
+            if (std::find(program->module(r.module)->methods.begin(), program->module(r.module)->methods.end(),
+                          name) != program->module(r.module)->methods.end())
+                CHECK(program->nonBlocking(name));
+        }
+        fc::Options stereo;
+        stereo.channels = 2;
+        const fc::Result r2 = fc::generate(c.text, "t.cir", stereo);
+        auto program2 = compiled(r2);
+        CHECK(program2->nonBlocking(r2.module + "::tick"));
+        CHECK(program2->nonBlocking(r2.module + "::step"));
+
+        const fc::Plan plan = planned(c.text);
+        REQUIRE(plan.regionFirst == 0);
+        REQUIRE(plan.regionFirst == plan.regionLast);
+        const Program::Module* m = program->module(r.module);
+        REQUIRE(m);
+        std::string errors;
+        auto* init = program->function<void(void*, float)>(r.module + "::init", errors);
+        REQUIRE(init);
+        const int os = plan.config.oversample;
+        const double rate = 48000.0 * os;
+        std::vector<double> pots;
+        for (const fc::PotInfo& pot : plan.pots)
+            pots.push_back(pot.defaultValue);
+        const fc::Holters h = fc::holters(plan, 0, rate, pots, c.laws);
+        fc::RefOptions o;
+        o.steps = plan.config.solver.steps;
+        o.guess = plan.config.solver.guess;
+        const std::size_t n = static_cast<std::size_t>(os) * (1024 + 4096 + 64);
+        const std::vector<double> u = fc::sine(plan.netlist.target.level.value_or(1), 85, 4096, os, n);
+        const std::vector<double> ref = fc::simulate(h, u, o);
+        auto self = instance(*m);
+        init(self.get(), 48000);
+        std::vector<double> y(n);
+        if (c.laws.empty())
+        {
+            auto* step = program->function<float(void*, float)>(r.module + "::step", errors);
+            REQUIRE(step);
+            for (std::size_t i = 0; i < n; ++i)
+                y[i] = static_cast<double>(step(self.get(), static_cast<float>(u[i])));
+        }
+        else
+        {
+            auto* step = program->function<float(void*, float, float)>(r.module + "::step", errors);
+            REQUIRE(step);
+            for (std::size_t i = 0; i < n; ++i)
+                y[i] = static_cast<double>(step(self.get(), static_cast<float>(u[i]), static_cast<float>(c.laws[0])));
+        }
+        const std::vector<double> yd = fc::decimateWindow(y, os, 1024, 4096);
+        const std::vector<double> rd = fc::decimateWindow(ref, os, 1024, 4096);
+        const double error = fc::bandErrorDb(yd, rd);
+        INFO(r.module << ": " << error << " dB");
+        CHECK(error <= -100);
+    }
+}
+
+TEST_CASE("a switch ramps over 20 ms of set() calls, as a pot gliding there does", "[circuit]")
+{
+    // S1, open (10meg) at mode 0 and closed (1 ohm) at mode 1: sw_S1 moves 16 / (0.02 rate) a call, so at 48 kHz it
+    // reaches 1 on the 60th call exactly, r falling by (roff / ron)^(1/60) a call; at 44.1 kHz on the 56th
+    const std::string text = ".title Sw\n.input u in\n.output y a\n.switch mode 2\nR1 in a 10k\nC1 a 0 10n\n"
+                             "S1 a b mode 1\nC2 b 0 47n\n";
+    const fc::Result r = fc::generate(text, "t.cir");
+    auto program = compiled(r);
+    const Program::Module* m = program->module(r.module);
+    REQUIRE(m);
+    std::string errors;
+    auto* init = program->function<void(void*, float)>(r.module + "::init", errors);
+    auto* set = program->function<void(void*, int)>(r.module + "::set", errors);
+    auto* tick = program->function<float(void*, float)>(r.module + "::tick", errors);
+    REQUIRE(init);
+    REQUIRE(set);
+    REQUIRE(tick);
+    CHECK(program->nonBlocking(r.module + "::set"));
+    const double a = std::log(10e6);
+    const double b = std::log(1.0) - a;
+    for (double rate : {48000.0, 44100.0})
+    {
+        const double perCall = std::pow(10e6, 800 / rate);   // (roff / ron)^(1/60) at 48 kHz
+        auto self = instance(*m);
+        init(self.get(), static_cast<float>(rate));
+        CHECK(readFloat(self.get(), *m, "sw_S1") == 0);
+        double before = std::exp(a);
+        int landed = 0;
+        double worst = 0;
+        for (int call = 1; call <= 80; ++call)
+        {
+            set(self.get(), 1);
+            const auto sw = static_cast<double>(readFloat(self.get(), *m, "sw_S1"));
+            const double now = std::exp(a + b * sw);
+            worst = std::fmax(worst, before / now);
+            before = now;
+            if (sw == 1 && landed == 0)
+                landed = call;
+        }
+        INFO("at " << rate);
+        CHECK(landed == (rate == 48000 ? 60 : 56));
+        CHECK(worst <= perCall * 1.001);
+        // and back, as fast
+        for (int call = 1; call <= 60; ++call)
+            set(self.get(), 0);
+        CHECK(readFloat(self.get(), *m, "sw_S1") == 0);
+    }
+
+    // under a 1 kHz sine the switch closing makes no larger a step than a pot that moves the same resistance the same
+    // way on the same grid ticks: R2 {10meg * glide}, glide 10^(-7 s) at each set()
+    const std::string glide = ".title Glide\n.input u in\n.output y a\n.pot glide 1\nR1 in a 10k\nC1 a 0 10n\n"
+                              "R2 a b {10meg * glide}\nC2 b 0 47n\n";
+    const fc::Result g = fc::generate(glide, "t.cir");
+    auto gp = compiled(g);
+    const Program::Module* gm = gp->module(g.module);
+    auto* ginit = gp->function<void(void*, float)>(g.module + "::init", errors);
+    auto* gset = gp->function<void(void*, float)>(g.module + "::set", errors);
+    auto* gtick = gp->function<float(void*, float)>(g.module + "::tick", errors);
+    REQUIRE(ginit);
+    REQUIRE(gset);
+    REQUIRE(gtick);
+    auto self = instance(*m);
+    auto other = instance(*gm);
+    init(self.get(), 48000);
+    ginit(other.get(), 48000);
+    set(self.get(), 0);
+    gset(other.get(), 1);
+    double stepSwitch = 0;
+    double stepGlide = 0;
+    float lastS = 0;
+    float lastG = 0;
+    int calls = 0;
+    for (int i = 0; i < 9600; ++i)
+    {
+        if (i % 16 == 0)
+        {
+            const bool on = i >= 2400;
+            set(self.get(), on ? 1 : 0);
+            calls += on ? 1 : 0;
+            gset(other.get(), static_cast<float>(std::pow(10.0, -7.0 * std::fmin(calls / 60.0, 1.0))));
+        }
+        const auto u = static_cast<float>(std::sin(2 * std::numbers::pi * 1000 * i / 48000));
+        const float ys = tick(self.get(), u);
+        const float yg = gtick(other.get(), u);
+        if (i > 0)
+        {
+            stepSwitch = std::fmax(stepSwitch, std::fabs(static_cast<double>(ys - lastS)));
+            stepGlide = std::fmax(stepGlide, std::fabs(static_cast<double>(yg - lastG)));
+        }
+        lastS = ys;
+        lastG = yg;
+    }
+    INFO("largest step: the switch's " << stepSwitch << ", the glide's " << stepGlide);
+    CHECK(stepSwitch <= 1.1 * stepGlide);
+
+    // clear() keeps each ramp where set() left it, as the coefficients are: two instances at rest with S1 closed away
+    // from its default (open), one cleared, then the same sine and the same set() calls: the same bits (a clear that
+    // put the ramp back at its default would open S1 and ramp it shut again over 20 ms, the coefficients stale until
+    // the next set()); init alone starts the ramp at its default
+    auto kept = instance(*m);
+    auto cleared = instance(*m);
+    auto* clear = program->function<void(void*)>(r.module + "::clear", errors);
+    REQUIRE(clear);
+    for (void* p : {kept.get(), cleared.get()})
+    {
+        init(p, 48000);
+        for (int i = 0; i < 4800; ++i)
+        {
+            if (i % 16 == 0)
+                set(p, 1);
+            tick(p, 0);
+        }
+    }
+    clear(cleared.get());
+    CHECK(readFloat(cleared.get(), *m, "sw_S1") == 1);
+    int differ = 0;
+    for (int i = 4800; i < 9600; ++i)
+    {
+        if (i % 16 == 0)
+        {
+            set(kept.get(), 1);
+            set(cleared.get(), 1);
+        }
+        const auto u = static_cast<float>(4.5 * std::sin(2 * std::numbers::pi * 1000 * i / 48000));
+        const float yk = tick(kept.get(), u);
+        const float yc = tick(cleared.get(), u);
+        differ += std::memcmp(&yk, &yc, sizeof yk) != 0 ? 1 : 0;
+    }
+    CHECK(differ == 0);
+    init(cleared.get(), 48000);
+    CHECK(readFloat(cleared.get(), *m, "sw_S1") == 0);
+}
+
+TEST_CASE("a switch's ramp: block splits give the same bits, and ADAA's point stays on its curve", "[circuit]")
+{
+    // S1 in parallel with R1 moves the pair's K from 10k to 99 ohm; with ADAA, b1_set carries the stored point onto
+    // each new curve (its Newton residual kept), call by call through the ramp
+    const std::string text = ".title SwClip\n.input u in\n.output y a\n.switch hard 2\n.oversample 4\n.adaa on\n"
+                             ".solver omega(1)\nR1 in a 10k\nS1 in a hard 1 ron=100\nC1 a 0 10n\nD1 a 0 1N914\n"
+                             "D2 0 a 1N914\n";
+    const fc::Result r = fc::generate(text, "t.cir");
+    INFO(r.errors);
+    REQUIRE(r.errors.empty());
+    fc::RunnerShape shape;
+    shape.module = r.module;
+    shape.switches = 1;
+    std::string errors;
+    auto program = Program::compile(r.source + fc::runnerSource(shape), errors);
+    INFO(errors);
+    REQUIRE(program);
+    const Program::Module* m = program->module(r.module);
+    REQUIRE(m);
+    auto* init = program->function<void(void*, float)>(r.module + "::init", errors);
+    auto* set = program->function<void(void*, int)>(r.module + "::set", errors);
+    auto* tick = program->function<float(void*, float)>(r.module + "::tick", errors);
+    using Ticks = void(void*, const float*, const float*, const float*, const int*, float*, int, int);
+    auto* ticks = program->function<Ticks>("fm_ticks", errors);
+    REQUIRE(init);
+    REQUIRE(set);
+    REQUIRE(tick);
+    REQUIRE(ticks);
+    // calls of 1, 61 and 64 samples against one call, the switch closing at 1000 and opening at 3000
+    constexpr int n = 4800;
+    std::vector<float> u(n);
+    std::vector<int> positions(n);
+    for (int i = 0; i < n; ++i)
+    {
+        u[static_cast<std::size_t>(i)] = static_cast<float>(4.5 * std::sin(2 * std::numbers::pi * 996 * i / 48000));
+        positions[static_cast<std::size_t>(i)] = i >= 1000 && i < 3000 ? 1 : 0;
+    }
+    auto run = [&](int call)
+    {
+        auto self = instance(*m);
+        init(self.get(), 48000);
+        std::vector<float> y(n);
+        for (int at = 0; at < n; at += call)
+        {
+            const int count = std::min(call, n - at);
+            ticks(self.get(), u.data() + at, nullptr, nullptr, positions.data() + at, y.data() + at, count, at);
+        }
+        return y;
+    };
+    const std::vector<float> one = run(n);
+    for (int call : {1, 61, 64})
+    {
+        const std::vector<float> split = run(call);
+        INFO("calls of " << call);
+        CHECK(std::memcmp(one.data(), split.data(), sizeof(float) * n) == 0);
+    }
+
+    // the carry: drive to conduction, then close the switch call by call
+    auto self = instance(*m);
+    init(self.get(), 48000);
+    set(self.get(), 0);
+    const double nvt = fc::thermalVoltage(1.752);
+    bool conducting = false;
+    for (int i = 0; i < 9600 && !conducting; ++i)
+    {
+        tick(self.get(), static_cast<float>(4.5 * std::sin(2 * std::numbers::pi * 996 * i / 48000)));
+        conducting = i >= 2400 && std::fabs(readFloat(self.get(), *m, "v_D1")) > 0.5f;
+    }
+    REQUIRE(conducting);
+    auto residual = [&]
+    {
+        const auto v = static_cast<double>(readFloat(self.get(), *m, "v_D1"));
+        const auto p = static_cast<double>(readFloat(self.get(), *m, "p_D1"));
+        const auto ka = static_cast<double>(readFloat(self.get(), *m, "ka_D1"));
+        return std::pair{p - v - ka * 2 * std::sinh(v / nvt), std::fabs(p)};
+    };
+    const auto [first, size] = residual();
+    double moved = 0;
+    for (int call = 0; call < 60; ++call)
+    {
+        const double kaBefore = static_cast<double>(readFloat(self.get(), *m, "ka_D1"));
+        set(self.get(), 1);
+        moved = std::fmax(moved, std::fabs(static_cast<double>(readFloat(self.get(), *m, "ka_D1")) - kaBefore));
+        const auto [now, p] = residual();
+        INFO("call " << call + 1 << ": residual " << first << " -> " << now);
+        CHECK(std::fabs(now - first) <= 1e-5 * std::fmax(size, p));
+    }
+    CHECK(moved > 0);
+}
+
+TEST_CASE("a matched block's float coefficients are the double design's, and its tick its response", "[circuit]")
+{
+    // rc8k.cir's one-pole and sallen-key.cir's biquad, through the JIT at 44.1, 48 and 96 kHz: init computes the design
+    // from the block's trapezoidal form in float, within 1e-5 of the double design at 44.1 and 48 kHz (of the largest
+    // numerator coefficient for b0, b1 and b2; 1e-4 at 96 kHz, where its poles sit nearer z = 1), and tick, a sine at
+    // 105, 996 and 3012 Hz, is the design's response there within 0.001 dB; both channel counts compile nonblocking
+    for (const std::string& text : {fc::test::kRc8k, fc::test::kSallenKey2k})
+    {
+        const fc::Result r = fc::generate(text, "t.cir");
+        INFO(r.errors << r.warnings);
+        REQUIRE(r.errors.empty());
+        CHECK(r.warnings.empty());
+        auto program = compiled(r);
+        for (const char* method : {"init", "tick", "clear"})
+            CHECK(program->nonBlocking(r.module + "::" + method));
+        fc::Options stereo;
+        stereo.channels = 2;
+        auto program2 = compiled(fc::generate(text, "t.cir", stereo));
+        CHECK(program2->nonBlocking(r.module + "::tick"));
+        const Program::Module* m = program->module(r.module);
+        REQUIRE(m);
+        std::string errors;
+        auto* init = program->function<void(void*, float)>(r.module + "::init", errors);
+        auto* tick = program->function<float(void*, float)>(r.module + "::tick", errors);
+        REQUIRE(init);
+        REQUIRE(tick);
+        const fc::Plan plan = planned(text);
+        const fc::Block& block = plan.blocks[0];
+        REQUIRE(block.design == fc::Block::Design::Matched);
+        for (double rate : {44100.0, 48000.0, 96000.0})
+        {
+            const fc::Matched<double> d = fc::matchedDesign(*fc::trForm(plan, 0, rate, {}), block.matchedPolarity);
+            auto self = instance(*m);
+            init(self.get(), static_cast<float>(rate));
+            const double top = std::fmax(std::fabs(d.b0), std::fmax(std::fabs(d.b1), std::fabs(d.b2)));
+            const bool two = std::any_of(m->fields.begin(), m->fields.end(),
+                                         [](const Program::Module::Field& f) { return f.name == "mb2_b1"; });
+            std::vector<std::tuple<std::string, double, double>> fields{
+                {"mb0_b1", d.b0, top}, {"mb1_b1", d.b1, top}, {"ma1_b1", d.a1, 1.0}};
+            if (two)
+            {
+                fields.emplace_back("mb2_b1", d.b2, top);
+                fields.emplace_back("ma2_b1", d.a2, 1.0);
+            }
+            for (const auto& [name, value, scale] : fields)
+            {
+                const double f = static_cast<double>(readFloat(self.get(), *m, name));
+                INFO(r.module << " at " << rate << ": " << name << " " << f << " against " << value);
+                CHECK(std::fabs(f - value) <= (rate <= 48000 ? 1e-5 : 1e-4) * scale);
+            }
+            for (int bin : {9, 85, 257})
+            {
+                const double hz = bin * rate / 4096;
+                auto run = instance(*m);
+                init(run.get(), static_cast<float>(rate));
+                std::vector<double> y(8192);
+                for (std::size_t i = 0; i < y.size(); ++i)
+                {
+                    const double phase = 2 * std::numbers::pi * bin * static_cast<double>(i) / 4096;
+                    y[i] = static_cast<double>(tick(run.get(), static_cast<float>(std::sin(phase))));
+                }
+                const double measured = fc::binMagnitude(std::span<const double>(y).subspan(4096, 4096), bin);
+                const double expected = std::abs(fc::matchedResponse(d, hz, rate));
+                INFO(r.module << " at " << rate << ", " << hz << " Hz: " << measured << " against " << expected);
+                CHECK(std::fabs(20 * std::log10(measured / expected)) <= 1e-3);
+            }
+        }
+    }
+
+    // the matched step's output is ym_, a name no input can take: an input named y compiles, and runs as u does
+    CHECK(fc::isModuleWord("ym_"));
+    for (const std::string& text : {fc::test::kRc8k, fc::test::kSallenKey2k})
+    {
+        const fc::Result u = fc::generate(text, "t.cir");
+        const fc::Result y = fc::generate(withLine(text, ".input u in", ".input y in"), "t.cir");
+        CHECK(y.source.find("const float ym_ = mb0_b1 * y + s1_b1;") != std::string::npos);
+        auto pu = compiled(u);
+        auto py = compiled(y);
+        std::string errors;
+        auto* initU = pu->function<void(void*, float)>(u.module + "::init", errors);
+        auto* tickU = pu->function<float(void*, float)>(u.module + "::tick", errors);
+        auto* initY = py->function<void(void*, float)>(y.module + "::init", errors);
+        auto* tickY = py->function<float(void*, float)>(y.module + "::tick", errors);
+        REQUIRE(initU);
+        REQUIRE(tickU);
+        REQUIRE(initY);
+        REQUIRE(tickY);
+        const Program::Module* mu = pu->module(u.module);
+        const Program::Module* my = py->module(y.module);
+        REQUIRE(mu);
+        REQUIRE(my);
+        auto su = instance(*mu);
+        auto sy = instance(*my);
+        initU(su.get(), 48000.0f);
+        initY(sy.get(), 48000.0f);
+        for (int i = 0; i < 256; ++i)
+        {
+            const auto x = static_cast<float>(std::sin(0.13 * i));
+            const float a = tickU(su.get(), x);
+            const float b = tickY(sy.get(), x);
+            REQUIRE(std::memcmp(&a, &b, sizeof a) == 0);
+        }
+    }
+}
+
 TEST_CASE("names keep their case, and a pot's sections have names of their own", "[circuit]")
 {
     // FMinus's names keep their case: a pot tone in module Tone, a pot u beside .input U
@@ -446,4 +1006,472 @@ TEST_CASE("names keep their case, and a pot's sections have names of their own",
     CHECK(r.source.find("const float r_Ptone_a_2 = 25000.0f * (1 - t_Ptone);") != std::string::npos);
     CHECK(r.source.find("const float r_Ptone_a = 10000.0f * fminf(fmaxf(tone, 0), 1);") != std::string::npos);
     compiled(r);
+}
+
+TEST_CASE("Result's fields: the inputs, the latency, and each line's netlist line", "[circuit]")
+{
+    const fc::Result r = fc::generate(fc::test::kScreamer, "screamer.cir");
+    REQUIRE(r.errors.empty());
+    REQUIRE(r.inputs.size() == 1);
+    CHECK(r.inputs[0].name == "u");
+    CHECK(r.inputs[0].kind == fc::Input::Kind::Voltage);
+    CHECK(r.inputs[0].scale == 1);
+    CHECK(r.switches.empty());
+    CHECK(!r.provisional);
+    CHECK(r.selfTestKey.empty());   // the netlist names its whole configuration
+    // the IIR halfbands' round trip at 4x (3.5 host samples at 1 kHz), and ADAA's eighth of a sample
+    CHECK(r.latency == fc::roundTripDelay(4, fc::Halfband::Iir, 1000) + 0.125);
+    CHECK(r.notes.find(std::format("latency: about {:.1f} host samples", r.latency - 0.125)) != std::string::npos);
+    // a line of the netlist for each line of the module: the frame at .title, set at the first .pot, a block's
+    // methods at its first part, tick and step at .input, a part's fields at its line
+    std::vector<std::string> lines;
+    std::istringstream text(r.source);
+    for (std::string line; std::getline(text, line);)
+        lines.push_back(line);
+    REQUIRE(r.lines.size() == lines.size());
+    auto lineOf = [&](const std::string& start)
+    {
+        for (std::size_t i = 0; i < lines.size(); ++i)
+        {
+            if (lines[i].find(start) != std::string::npos)
+                return r.lines[i];
+        }
+        FAIL("no line " << start);
+        return -1;
+    };
+    auto netlistLine = [&](const std::string& start)
+    {
+        std::istringstream netlist(fc::test::kScreamer);
+        int n = 0;
+        for (std::string line; std::getline(netlist, line);)
+        {
+            ++n;
+            if (line.rfind(start, 0) == 0)
+                return n;
+        }
+        FAIL("no netlist line " << start);
+        return -1;
+    };
+    CHECK(lineOf("module Screamer") == netlistLine(".title"));
+    CHECK(r.lines.front() == netlistLine(".title"));   // the header
+    CHECK(lineOf("void init(float rate)") == netlistLine(".title"));
+    CHECK(lineOf("void set(float drive, float tone, float level)") == netlistLine(".pot    drive"));
+    CHECK(lineOf("void b2_set(float drive)") == netlistLine("XU1"));
+    CHECK(lineOf("float b2(float u)") == netlistLine("XU1"));
+    CHECK(lineOf("float b3(float u)") == netlistLine("R7"));
+    CHECK(lineOf("float tick(float u)") == netlistLine(".input"));
+    CHECK(lineOf("float step(float u)") == netlistLine(".input"));
+    CHECK(lineOf("    float x_C4;") == netlistLine("C4"));
+    CHECK(lineOf("    float v_D1;") == netlistLine("D1"));
+    CHECK(lineOf("    float gc_C6;") == netlistLine("C6"));
+    CHECK(lineOf("    int ck_;") == netlistLine(".title"));
+    // a netlist without .title: its frame is line 0
+    const fc::Result untitled = fc::generate(".input u in\n.output y o\nR1 in o 1k\nC1 o 0 1n\n", "t.cir");
+    REQUIRE(untitled.errors.empty());
+    CHECK(untitled.lines.front() == 0);
+    CHECK(*std::max_element(untitled.lines.begin(), untitled.lines.end()) == 4);
+}
+
+TEST_CASE("the OTA's laws compile nonblocking, with and without ADAA, in both channel counts", "[circuit]")
+{
+    // one stage and the two-stage low-pass, a gain of a law input (each sample's), of a pot and a law input (tick's,
+    // with the pot stored by set), of a pot alone (set's) and a constant, and the low-pass with both OTAs' gains
+    // reading one pot and the law input (one pv_ field for the two); ADAA, .channels 2 and .prewarp on and off
+    const std::string withPot = fc::test::otaStage(".pot res 0.5\n", "{iabc * (0.5 + res)}");
+    const std::string potOnly = fc::test::otaStage(".pot res 0.5\n", "{1m * (0.1 + res)}");
+    const std::string constant = fc::test::otaStage("", "1m");
+    std::string shared = fc::test::kOtaLp;
+    shared = withLine(shared, "G1   0    y1   OTA a1 m1 {iabc}", "G1 0 y1 OTA a1 m1 {iabc * amt}");
+    shared = withLine(shared, "G2   0    y2   OTA a2 m2 {iabc}", "G2 0 y2 OTA a2 m2 {iabc * amt}");
+    shared = withLine(shared, ".output vout y2b\n", ".output vout y2b\n.pot amt 0.5\n");
+    int count = 0;
+    int index = 0;
+    for (const std::string& text : {fc::test::otaStage(), fc::test::kOtaLp, withPot, potOnly, constant, shared})
+    {
+        for (bool adaa : {false, true})
+        {
+            for (int channels : {1, 2})
+            {
+                for (bool prewarp : {false, true})
+                {
+                    fc::Options o;
+                    o.adaa = adaa;
+                    o.channels = channels;
+                    o.prewarp = prewarp;
+                    o.oversample = index % 3 == 0 ? 1 : index % 3 == 1 ? 2 : 4;
+                    o.solver = fc::Solver{fc::Solver::Guess::Previous, 1 + index % 3};
+                    ++index;
+                    const fc::Result result = fc::generate(text, "t.cir", o);
+                    INFO("config " << index << ":\n" << result.errors << result.source);
+                    auto program = compiled(result);
+                    for (const char* method : {"init", "set", "tick", "step", "clear", "pw1_"})
+                    {
+                        const std::string name = result.module + "::" + method;
+                        const auto& methods = program->module(result.module)->methods;
+                        if (std::find(methods.begin(), methods.end(), name) == methods.end())
+                            continue;
+                        INFO(name);
+                        CHECK(program->nonBlocking(name));
+                    }
+                    ++count;
+                }
+            }
+        }
+    }
+    CHECK(count == 48);
+    // the shared pot's module: both gains are iabc amt, from the one pv_amt that set stores
+    const fc::Result r = fc::generate(shared, "t.cir");
+    CHECK(r.source.find("    float pv_amt;") == r.source.rfind("    float pv_amt;"));
+    auto program = compiled(r);
+    std::string errors;
+    const Program::Module& m = *program->module(r.module);
+    auto self = instance(m);
+    program->function<void(void*, float)>(r.module + "::init", errors)(self.get(), 48000);
+    callSet(*program, r.module, self.get(), {0.25f});
+    program->function<float(void*, float, float)>(r.module + "::tick", errors)(self.get(), 0.1f, 1e-3f);
+    CHECK(readFloat(self.get(), m, "g_G1") == 1e-3f * 0.25f);
+    CHECK(readFloat(self.get(), m, "g_G2") == 1e-3f * 0.25f);
+}
+
+TEST_CASE("the bracket keeps every law's iterates finite in float, through the JIT", "[circuit]")
+{
+    // one step from rest at 1x: p is the input's (the states are 0), and v, read from the instance, is finite and in
+    // [min(0, p), max(0, p)] for p from 1e-6 to 1e6 V either way, with 0 to 3 Newton steps (an OTA's from 1: its guess
+    // is the previous step's v, newton(K) with K at least 1). A pair: diodetone.cir at tone 1 (its p is the input's
+    // times p_D1_by_u); an OTA: one stage at 2 mA (p = att u).
+    struct Law
+    {
+        std::string text;
+        std::string port;
+        std::vector<fc::Solver> solvers;
+    };
+    const std::vector<Law> laws{
+        {fc::test::kDiodeTone,
+         "D1",
+         {{fc::Solver::Guess::Omega, 0},
+          {fc::Solver::Guess::Omega, 1},
+          {fc::Solver::Guess::Omega, 2},
+          {fc::Solver::Guess::Omega, 3}}},
+        {fc::test::otaStage("", "2m"),
+         "G1",
+         {{fc::Solver::Guess::Previous, 1}, {fc::Solver::Guess::Previous, 2}, {fc::Solver::Guess::Previous, 3}}},
+        // one diode and an asymmetric pair (halfwave.cir, asym.cir: p is the input's times p_D1_by_u)
+        {fc::test::kHalfWave,
+         "D1",
+         {{fc::Solver::Guess::Omega, 0},
+          {fc::Solver::Guess::Omega, 1},
+          {fc::Solver::Guess::Omega, 3},
+          {fc::Solver::Guess::Previous, 2}}},
+        {fc::test::kAsym,
+         "D1",
+         {{fc::Solver::Guess::Omega, 0},
+          {fc::Solver::Guess::Omega, 1},
+          {fc::Solver::Guess::Omega, 3},
+          {fc::Solver::Guess::Previous, 2}}}};
+    for (const Law& l : laws)
+    {
+        for (const fc::Solver& solver : l.solvers)
+        {
+            fc::Options o;
+            o.oversample = 1;
+            o.adaa = false;
+            o.solver = solver;
+            const fc::Result r = fc::generate(l.text, "t.cir", o);
+            auto program = compiled(r);
+            std::string errors;
+            const Program::Module& m = *program->module(r.module);
+            auto init = program->function<void(void*, float)>(r.module + "::init", errors);
+            const bool ota = l.port == "G1";
+            for (double mag = 1e-6; mag <= 1e6; mag *= 10)
+            {
+                for (double sign : {1.0, -1.0})
+                {
+                    auto self = instance(m);
+                    init(self.get(), 48000);
+                    float p = 0;
+                    if (ota)
+                    {
+                        const float u = static_cast<float>(sign * mag / (220.0 / 100220.0));
+                        program->function<float(void*, float)>(r.module + "::tick", errors)(self.get(), u);
+                        p = 0.0021951706f * u;   // p_G1_by_u, a literal: the stage's att
+                    }
+                    else
+                    {
+                        if (!r.pots.empty())
+                            callSet(*program, r.module, self.get(), {1.0f});
+                        const float k = readFloat(self.get(), m, "p_D1_by_u");
+                        const float u = static_cast<float>(sign * mag) / k;
+                        program->function<float(void*, float)>(r.module + "::tick", errors)(self.get(), u);
+                        p = k * u;
+                    }
+                    const float v = readFloat(self.get(), m, "v_" + l.port);
+                    INFO(l.port << " steps " << solver.steps << " p " << p);
+                    CHECK(std::isfinite(v));
+                    CHECK(v >= std::fmin(0.0f, p));
+                    CHECK(v <= std::fmax(0.0f, p));
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("an OTA's ADAA mean is the double one wherever its control voltage goes, through the JIT", "[circuit]")
+{
+    // The emitted tail (Laws.cpp's text: the carry, the mean, what the step stores) in a module of its own, kd = 1 (the
+    // mean of the current is then kg tanh's): a step from a point (p_P, v_P) to (p, v) on the curve p = v + kg tanh(x),
+    // x = v / 2 Vt, with x_P and x over [-40, 40] (a 5 V control voltage is x = 97; tanhf is +-1 from |x| = 9), on a
+    // grid and from 1e-4 to 5 either way from each x_P. The mean is finite and within 1e-5 kg of the double one
+    // (Reference.cpp's, log cosh differenced in double; measured 2.9e-6 kg, float's rounding of x near 33). The log1p
+    // form alone gave NaN, or 0 for -39 in log cosh's difference, on a long step back from saturation.
+    const fc::Plan plan = planned(fc::test::otaStage("", "1m"));
+    const fc::PortDef& port = *plan.blocks.front().port;
+    fc::LawOperands o;
+    o.type = "float";
+    o.port = port.name;
+    o.kd = "1";
+    o.g = "1";
+    o.solver = fc::Solver{fc::Solver::Guess::Previous, 1};
+    o.adaa = true;
+    const std::string& P = port.name;
+    std::string text = "module Tail\n{\n    float v_" + P + ";\n    float p_" + P + ";\n";
+    for (const fc::LawField& f : fc::adaaFields(port))
+        text += "    float " + f.name + ";\n";
+    text += "    float mean(float p, float v, float kg) [[clang::nonblocking]]\n    {\n";
+    text += "        const float kgv = kg * " + fc::literal(port.nvt) + ";\n";
+    for (const fc::LawLine& l : fc::adaaText(port, o))
+        text += "        " + l.text + "\n";
+    text += "        v_" + P + " = v;\n";
+    for (const fc::LawLine& l : fc::storeText(port, o))
+        text += "        " + l.text + "\n";
+    text += "        return ib;\n    }\n};\n";
+    INFO(text);
+    std::string errors;
+    auto program = Program::compile(text, errors);
+    INFO(errors);
+    REQUIRE(program);
+    const Program::Module& m = *program->module("Tail");
+    auto mean = program->function<float(void*, float, float, float)>("Tail::mean", errors);
+    const double s = port.nvt;
+    for (const double kg : {0.05, 0.5, 5.0})
+    {
+        double worst = 0;
+        std::string where;
+        std::size_t pairs = 0;
+        auto pair = [&](double xp, double x)
+        {
+            if (std::fabs(x) > 40)
+                return;
+            const auto vpf = static_cast<float>(xp * s);
+            const auto vf = static_cast<float>(x * s);
+            const auto ppf =
+                static_cast<float>(static_cast<double>(vpf) + kg * std::tanh(static_cast<double>(vpf) / s));
+            const auto pf = static_cast<float>(static_cast<double>(vf) + kg * std::tanh(static_cast<double>(vf) / s));
+            auto self = instance(m);
+            mean(self.get(), ppf, vpf, static_cast<float>(kg));
+            const auto got = static_cast<double>(mean(self.get(), pf, vf, static_cast<float>(kg)));
+            // the reference's mean (Reference.cpp's stepTanh), kd = 1, on the same floats
+            const auto vp = static_cast<double>(vpf);
+            const auto v = static_cast<double>(vf);
+            const auto pp = static_cast<double>(ppf);
+            const auto p = static_cast<double>(pf);
+            const double vm = 0.5 * (v + vp);
+            const double pm = 0.5 * (p + pp);
+            const double dlc = fc::logCosh(v / s) - fc::logCosh(vp / s);
+            const double vbar = std::fabs(p - pp) > 1e-5 ? vm + ((v - vp) * (pm - vm) - kg * s * dlc) / (p - pp) : vm;
+            const double error = std::isfinite(got) ? std::fabs(got - (pm - vbar)) / kg : 1e30;
+            ++pairs;
+            if (error > worst)
+            {
+                worst = error;
+                where = std::format("x_P {:g}, x {:g}: {:g}, not {:g}", xp, x, got, pm - vbar);
+            }
+        };
+        for (int i = -80; i <= 80; ++i)
+        {
+            for (int j = -80; j <= 80; ++j)
+                pair(0.5 * i, 0.5 * j);
+            for (const double d : {1e-4, 1e-3, 0.01, 0.1, 0.49, 0.999, 1.0, 1.001, 2.0, 5.0})
+            {
+                pair(0.5 * i, 0.5 * i + d);
+                pair(0.5 * i, 0.5 * i - d);
+            }
+        }
+        INFO("kg " << kg << ", " << pairs << " steps; worst " << worst << " kg at " << where);
+        CHECK(worst <= 1e-5);
+    }
+}
+
+TEST_CASE("an OTA driven far past its linear range runs finite with ADAA, and as the double reference does",
+          "[circuit]")
+{
+    // otaStage with 10k / 10k attenuators (att = 1/2): a 5 V sine drives the control voltage to 2.5 V (x = 48), and a
+    // step of its ADAA mean from saturation back toward 0 crosses tanhf's +-1. At 1x, newton(3), 10 uA and 2 mA, a 3
+    // kHz sine: every output finite, and within 2e-5 V of the double reference run with the same steps and ADAA
+    // (Reference.cpp's simulate, the block's Holters form at its design rate, 2/3 of 48 kHz; measured 3.9e-6 V). At 4x
+    // (a region, its halfbands) a 10 kHz sine: finite. The log1p form alone gave 7500 outputs of 12000 non-finite.
+    std::string hot = fc::test::otaStage();
+    for (const char* from : {"R1 in a1 100k\nR2 a1 0 220\nR3 yb a2 100k\nR4 a2 0 220\n"})
+        hot = withLine(hot, from, "R1 in a1 10k\nR2 a1 0 10k\nR3 yb a2 10k\nR4 a2 0 10k\n");
+    for (const int oversample : {1, 4})
+    {
+        fc::Options o;
+        o.oversample = oversample;
+        o.adaa = true;
+        o.solver = fc::Solver{fc::Solver::Guess::Previous, 3};
+        const fc::Result r = fc::generate(hot, "t.cir", o);
+        auto program = compiled(r);
+        std::string errors;
+        const Program::Module& m = *program->module(r.module);
+        auto init = program->function<void(void*, float)>(r.module + "::init", errors);
+        auto tick = program->function<float(void*, float, float)>(r.module + "::tick", errors);
+        const fc::Plan plan = planned(hot, o);
+        for (const double iabc : {1e-5, 2e-3})
+        {
+            const double f = oversample == 1 ? 3000 : 10000;
+            std::vector<double> u(4800);
+            for (std::size_t i = 0; i < u.size(); ++i)
+                u[i] = 5 * std::sin(2 * std::numbers::pi * f * static_cast<double>(i) / 48000);
+            auto self = instance(m);
+            init(self.get(), 48000);
+            std::vector<double> y(u.size());
+            std::size_t notFinite = 0;
+            for (std::size_t i = 0; i < u.size(); ++i)
+            {
+                y[i] = static_cast<double>(tick(self.get(), static_cast<float>(u[i]), static_cast<float>(iabc)));
+                notFinite += std::isfinite(y[i]) ? 0 : 1;
+            }
+            INFO(oversample << "x, iabc " << iabc);
+            CHECK(notFinite == 0);
+            if (oversample != 1)
+                continue;
+            const std::vector<double> laws{iabc};
+            const fc::Holters h = fc::holters(plan, 0, 48000.0 * 2 / 3, {}, laws);
+            fc::RefOptions ro;
+            ro.adaa = true;
+            ro.steps = 3;
+            ro.guess = fc::Solver::Guess::Previous;
+            std::vector<double> uf(u.size());
+            for (std::size_t i = 0; i < u.size(); ++i)
+                uf[i] = static_cast<double>(static_cast<float>(u[i]));
+            const std::vector<double> ref = fc::simulate(h, uf, ro);
+            double worst = 0;
+            for (std::size_t i = 0; i < u.size(); ++i)
+                worst = std::max(worst, std::fabs(y[i] - ref[i]));
+            INFO("worst " << worst << " V");
+            CHECK(worst <= 2e-5);
+        }
+    }
+}
+
+TEST_CASE("Phase 1's elements and diode laws compile nonblocking, in both channel counts", "[circuit]")
+{
+    // an inductor, DC sources (V, I, a floating V), E and G sources with constant and pot gains, one diode, a string,
+    // an asymmetric pair, RS: each with ADAA off and on, each solver's guess, .channels 1 and 2
+    const std::string sources = ".title Sources\n.input u in\n.output y out\n.pot x 0.3\nC0 in b 1u\nV1 vcc 0 9\n"
+                                "R1 vcc b 10k\nR2 b 0 10k\nI1 0 b 10u\nV2 c b 0\nR3 c 0 1meg\nL1 c d 10m\nR4 d 0 1k\n"
+                                "C4 d e0 1u\nR7 e0 0 10k\nE1 e 0 e0 0 {2 + x}\nR5 e f 1k\nC5 f 0 10n\nD1 f 0 1N4148\n"
+                                "X1 f out out opamp\n";
+    const std::string rs = ".title Rs\n.input u in\n.output y c\nR1 in a 2.2k\nC1 a 0 10n\nD1 a m DR\nD2 m 0 DR\n"
+                           "X1 a b b opamp\nR2 b c 1k\nC2 c 0 10n\nD3 c 0 DR\nD4 0 c DR\n"
+                           ".model DR D(IS=2.52n N=1.752 RS=5)\n";
+    int count = 0;
+    int index = 0;
+    for (const std::string& text : {fc::test::kWah, fc::test::kRlLowpass, fc::test::kDivider, kGains,
+                                    fc::test::kHalfWave, fc::test::kAsym, kSinglePot, kAsymPot, sources, rs})
+    {
+        for (bool adaa : {false, true})
+        {
+            for (int channels : {1, 2})
+            {
+                fc::Options o;
+                o.adaa = adaa;
+                o.channels = channels;
+                o.oversample = index % 3 == 0 ? 1 : index % 3 == 1 ? 2 : 4;
+                o.solver = index % 2 == 0 ? fc::Solver{fc::Solver::Guess::Omega, 1 + index % 3}
+                                          : fc::Solver{fc::Solver::Guess::Previous, 1 + index % 3};
+                ++index;
+                const fc::Result result = fc::generate(text, "t.cir", o);
+                INFO("config " << index << ":\n" << result.errors << result.source);
+                auto program = compiled(result);
+                for (const char* method : {"init", "set", "tick", "step", "clear"})
+                {
+                    const std::string name = result.module + "::" + method;
+                    const auto& methods = program->module(result.module)->methods;
+                    if (std::find(methods.begin(), methods.end(), name) == methods.end())
+                        continue;
+                    INFO(name);
+                    CHECK(program->nonBlocking(name));
+                }
+                ++count;
+            }
+        }
+    }
+    CHECK(count == 40);
+}
+
+TEST_CASE("a pot's move keeps one diode's and an asymmetric pair's ADAA point on the curve", "[circuit]")
+{
+    // b<N>_set's carry, p_D1 += (ka' - ka) (c_D1 - 1) (and the other diode's - (kr' - kr) (cr_D1 - 1)): the last
+    // step's Newton residual, p_D1 - v_D1 - K f(v_D1), is kept to 1e-5 of p_D1 as the pot glides 0 -> 1 (R1 100 ohm
+    // to 20.1k: K moves by 4.8 times), as check h's for the pair
+    for (const std::string& text : {kSinglePot, kAsymPot})
+    {
+        const fc::Result r = fc::generate(text, "t.cir");
+        auto program = compiled(r);
+        const Program::Module* m = program->module(r.module);
+        REQUIRE(m);
+        std::string errors;
+        auto* init = program->function<void(void*, float)>(r.module + "::init", errors);
+        auto* set = program->function<void(void*, float)>(r.module + "::set", errors);
+        auto* tick = program->function<float(void*, float)>(r.module + "::tick", errors);
+        REQUIRE(init);
+        auto self = instance(*m);
+        init(self.get(), 48000);
+        set(self.get(), 0);
+        const bool asym = r.module == "AsymPot";
+        const double s = fc::thermalVoltage(1.752);
+        const double s2 = fc::thermalVoltage(2 * 1.752);
+        struct Point
+        {
+            double residual;
+            double p;
+            double curve;
+        };
+        auto point = [&]
+        {
+            const auto v = static_cast<double>(readFloat(self.get(), *m, "v_D1"));
+            const auto p = static_cast<double>(readFloat(self.get(), *m, "p_D1"));
+            double curve = static_cast<double>(readFloat(self.get(), *m, "ka_D1")) * (std::exp(v / s) - 1);
+            if (asym)
+                curve -= static_cast<double>(readFloat(self.get(), *m, "kr_D1")) * (std::exp(-v / s2) - 1);
+            return Point{p - v - curve, p, curve};
+        };
+        // a 2 V, 996 Hz sine, to where the diode conducts (its forward side, and the asymmetric pair's other side)
+        for (double side : {1.0, -1.0})
+        {
+            set(self.get(), 0);
+            bool conducting = false;
+            for (int i = 0; i < 9600 && !conducting; ++i)
+            {
+                tick(self.get(), static_cast<float>(2 * std::sin(2 * std::numbers::pi * 996 * i / 48000)));
+                const float v = readFloat(self.get(), *m, "v_D1");
+                conducting = i >= 2400 && side * static_cast<double>(v) > (side > 0 ? 0.5 : 0.95);
+            }
+            if (!asym && side < 0)
+                continue;   // one diode: no reverse conduction
+            INFO(r.module << " side " << side);
+            REQUIRE(conducting);
+            const Point before = point();
+            set(self.get(), 1);
+            const Point after = point();
+            INFO("residual " << before.residual << " -> " << after.residual << ", p " << before.p << " -> " << after.p);
+            CHECK(std::fabs(after.curve - before.curve) > 0.1 * std::fabs(before.p));   // the move is large
+            CHECK(std::fabs(after.residual - before.residual) <=
+                  1e-5 * std::fmax(std::fabs(before.p), std::fabs(after.p)));
+            // a pot held changes nothing, bit for bit
+            const float p = readFloat(self.get(), *m, "p_D1");
+            set(self.get(), 1);
+            CHECK(readFloat(self.get(), *m, "p_D1") == p);
+        }
+    }
 }

@@ -104,41 +104,6 @@ namespace circuits
         }
     }
 
-    namespace
-    {
-        // The runners, in FMinus, for a module with `pots` pots and `channels` channels.
-        std::string runners(const std::string& module, int pots, int channels, bool step)
-        {
-            std::string call;
-            for (int k = 0; k < pots; ++k)
-                call += (k == 0 ? "" : ", ") + std::string("pots[i * ") + std::to_string(pots) + " + " +
-                        std::to_string(k) + "]";
-            const std::string set =
-                pots == 0 ? "" : "        if ((start + i) % 16 == 0)\n            c->set(" + call + ");\n";
-            std::string out = "\n// example-circuits' runners: a buffer a call.\n";
-            if (step && channels == 1)
-                out += "void fm_steps(" + module +
-                       "* c, const float* restrict u, float* restrict y, int n) "
-                       "[[clang::nonblocking]]\n{\n    for (int i = 0; i < n; ++i)\n        y[i] = c->step(u[i]);\n}\n";
-            if (channels == 1)
-                out +=
-                    "void fm_ticks(" + module +
-                    "* c, const float* restrict u, const float* restrict pots, "
-                    "float* restrict y, int n, int start) [[clang::nonblocking]]\n{\n    for (int i = 0; i < n; ++i)\n"
-                    "    {\n" +
-                    set + "        y[i] = c->tick(u[i]);\n    }\n}\n";
-            else
-                out += "void fm_ticks2(" + module +
-                       "* c, const float* restrict a, const float* restrict b, "
-                       "const float* restrict pots, float* restrict ya, float* restrict yb, int n, int start) "
-                       "[[clang::nonblocking]]\n{\n    for (int i = 0; i < n; ++i)\n    {\n" +
-                       set +
-                       "        const float2 y = c->tick((float2)(a[i], b[i]));\n        ya[i] = y.x;\n"
-                       "        yb[i] = y.y;\n    }\n}\n";
-            return out;
-        }
-    } // namespace
-
     std::unique_ptr<Circuit> build(const std::string& text, const std::string& fileName, const fc::Options& options,
                                    std::string& errors, fminus::Program::Math math, const std::string& extra)
     {
@@ -165,8 +130,14 @@ namespace circuits
         o.denormals = fminus::Program::Denormals::Flush;
         o.threads = 1;
         std::string fmErrors;
-        c->program = fminus::Program::compile(
-            c->result.source + runners(c->result.module, c->pots(), channels, region) + extra, fmErrors, o);
+        fc::RunnerShape shape;
+        shape.module = c->result.module;
+        shape.pots = c->pots();
+        shape.switches = c->switches();
+        shape.laws = c->laws();
+        shape.channels = channels;
+        shape.step = region;
+        c->program = fminus::Program::compile(c->result.source + fc::runnerSource(shape) + extra, fmErrors, o);
         if (!c->program)
         {
             errors += fmErrors;
@@ -178,32 +149,60 @@ namespace circuits
         c->clear = c->program->function<void(void*)>(m + "::clear", fmErrors);
         if (c->pots() > 0)
             c->set = c->program->address(m + "::set", fmErrors);
+        c->setAll = c->program->function<void(void*, const float*, const int*)>("fm_set", fmErrors);
         if (region && channels == 1)
-            c->steps = c->program->function<void(void*, const float*, float*, int)>("fm_steps", fmErrors);
+            c->steps = c->program->function<void(void*, const float*, const float*, float*, int)>("fm_steps", fmErrors);
         if (channels == 1)
-            c->ticks =
-                c->program->function<void(void*, const float*, const float*, float*, int, int)>("fm_ticks", fmErrors);
+            c->ticks = c->program->function<void(void*, const float*, const float*, const float*, const int*, float*,
+                                                 int, int)>("fm_ticks", fmErrors);
         else
-            c->ticks2 =
-                c->program->function<void(void*, const float*, const float*, const float*, float*, float*, int, int)>(
-                    "fm_ticks2", fmErrors);
+            c->ticks2 = c->program->function<void(void*, const float*, const float*, const float*, const float*,
+                                                  const int*, float*, float*, int, int)>("fm_ticks2", fmErrors);
         errors += fmErrors;
         return c;
     }
 
-    std::vector<double> runSteps(const Circuit& c, std::span<const double> u, std::span<const double> pots)
+    namespace
+    {
+        // The law buffer a run reads: `law`, or each law input at its low end (as an argument: over its scale).
+        std::vector<float> lawsOf(const Circuit& c, std::span<const float> law, std::size_t n)
+        {
+            if (!law.empty() || c.laws() == 0)
+                return {law.begin(), law.end()};
+            std::vector<double> lows;
+            for (const fc::LawInfo& l : c.plan.laws)
+                lows.push_back(l.low / l.scale);
+            return heldLaws(lows, n);
+        }
+    } // namespace
+
+    std::vector<float> heldLaws(std::span<const double> values, std::size_t n)
+    {
+        std::vector<float> out;
+        out.reserve(n * values.size());
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            for (double v : values)
+                out.push_back(static_cast<float>(v));
+        }
+        return out;
+    }
+
+    std::vector<double> runSteps(const Circuit& c, std::span<const double> u, std::span<const double> pots,
+                                 std::span<const float> law)
     {
         Instance self(*c.module);
         c.init(self.get(), 48000);
         c.callSet(self.get(), pots);
         std::vector<float> in(u.begin(), u.end());
         std::vector<float> out(u.size());
-        c.steps(self.get(), in.data(), out.data(), static_cast<int>(in.size()));
+        const std::vector<float> laws = lawsOf(c, law, u.size());
+        c.steps(self.get(), in.data(), laws.empty() ? nullptr : laws.data(), out.data(), static_cast<int>(in.size()));
         return {out.begin(), out.end()};
     }
 
     std::vector<double> runTicksWith(const Circuit& c, std::span<const double> u, std::span<const float> potBuffer,
-                                     int call)
+                                     int call, std::span<const float> law, std::span<const int> switchBuffer)
     {
         Instance self(*c.module);
         c.init(self.get(), 48000);
@@ -212,16 +211,22 @@ namespace circuits
         std::vector<float> out(u.size());
         const int size = call <= 0 ? n : call;
         const auto p = static_cast<std::size_t>(c.pots());
+        const auto l = static_cast<std::size_t>(c.laws());
+        const std::vector<float> laws = lawsOf(c, law, u.size());
         for (int start = 0; start < n; start += size)
         {
             const int count = std::min(size, n - start);
             const auto s = static_cast<std::size_t>(start);
-            c.ticks(self.get(), in.data() + s, potBuffer.data() + s * p, out.data() + s, count, start);
+            const auto w = static_cast<std::size_t>(c.switches());
+            c.ticks(self.get(), in.data() + s, laws.empty() ? nullptr : laws.data() + s * l,
+                    potBuffer.empty() ? nullptr : potBuffer.data() + s * p,
+                    switchBuffer.empty() ? nullptr : switchBuffer.data() + s * w, out.data() + s, count, start);
         }
         return {out.begin(), out.end()};
     }
 
-    std::vector<double> runTicks(const Circuit& c, std::span<const double> u, std::span<const double> pots, int call)
+    std::vector<double> runTicks(const Circuit& c, std::span<const double> u, std::span<const double> pots, int call,
+                                 std::span<const float> law)
     {
         std::vector<float> buffer;
         buffer.reserve(u.size() * pots.size());
@@ -230,7 +235,7 @@ namespace circuits
             for (double v : pots)
                 buffer.push_back(static_cast<float>(v));
         }
-        return runTicksWith(c, u, buffer, call);
+        return runTicksWith(c, u, buffer, call, law);
     }
 
     std::vector<double> potsWith(const fc::Plan& plan, const std::string& key, double value)
@@ -241,14 +246,16 @@ namespace circuits
         return point;
     }
 
-    std::vector<fc::Holters> chainAt(const fc::Plan& plan, std::span<const double> pots, double rate, bool adaa)
+    std::vector<fc::Holters> chainAt(const fc::Plan& plan, std::span<const double> pots, double rate, bool adaa,
+                                     std::span<const double> laws)
     {
         std::vector<fc::Holters> blocks;
         const std::vector<double> point(pots.begin(), pots.end());
+        const std::vector<double> lawPoint(laws.begin(), laws.end());
         for (std::size_t b = 0; b < plan.blocks.size(); ++b)
         {
             const double design = plan.blocks[b].port && adaa ? rate * 2 / 3 : rate;
-            blocks.push_back(fc::holters(plan, static_cast<int>(b), design, point));
+            blocks.push_back(fc::holters(plan, static_cast<int>(b), design, point, lawPoint));
         }
         return blocks;
     }

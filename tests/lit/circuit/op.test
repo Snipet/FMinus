@@ -1,0 +1,60 @@
+# The DC operating point (src/circuit/Dc.h): .op prints it as notes (each node's voltage, each V source's current,
+# SPICE's i(V), into its n+ terminal; each port's voltage), and the module runs in offsets from it: its V sources are
+# shorts, its states start at 0, and tick adds the output's DC back as a constant.
+# RUN: fminus %S/Inputs/divider.cir --emit fm --notes -o %t.divider.fm 2>&1 | FileCheck %s --check-prefix=DIVIDER --match-full-lines
+# RUN: FileCheck %s --check-prefix=DIVIDER-FM < %t.divider.fm
+# RUN: fminus %S/Inputs/divider.cir -o %t.divider.ll
+# RUN: fminus %S/Inputs/rlc.cir --emit fm --notes -o %t.rlc.fm 2>&1 | FileCheck %s --check-prefix=RLC --match-full-lines
+# RUN: FileCheck %s --check-prefix=RLC-FM < %t.rlc.fm
+# RUN: fminus %S/Inputs/rlc.cir -o %t.rlc.ll
+# RUN: fminus %S/Inputs/biased.cir --emit fm --notes -o %t.biased.fm 2>&1 | FileCheck %s --check-prefix=BIASED --match-full-lines
+# RUN: FileCheck %s --check-prefix=BIASED-FM < %t.biased.fm
+# RUN: fminus %S/Inputs/biased.cir -o %t.biased.ll
+# RUN: fminus %S/../../../examples/circuits/screamer-biased.cir --emit fm --notes -o %t.sb.fm 2>&1 | FileCheck %s --check-prefix=TS --match-full-lines
+# RUN: fminus %S/../../../examples/circuits/screamer.cir --emit fm -o %t.s.fm
+# RUN: diff -I '^//' %t.sb.fm %t.s.fm
+
+# A 9 V divider into a follower: 4.5 V on the follower, V1 supplying 450 uA.
+# DIVIDER:      {{.*}}divider.cir: note: the output's DC operating point, V(out) = 4.5 V, is tick's constant: the module runs in offsets from the DC point
+# DIVIDER-NEXT: {{.*}}divider.cir: note: .op: V(vcc) = 9 V
+# DIVIDER-NEXT: {{.*}}divider.cir: note: .op: V(b) = 4.5 V
+# DIVIDER-NEXT: {{.*}}divider.cir: note: .op: V(in) = 0 V
+# DIVIDER-NEXT: {{.*}}divider.cir: note: .op: V(out) = 4.5 V
+# DIVIDER-NEXT: {{.*}}divider.cir: note: .op: i(V1) = -450 uA
+# DIVIDER-FM-NOT: V1
+# DIVIDER-FM:     return (gain_ < 1 ? z0 * gain_ : z0) + 4.5f;        // V(out)'s DC operating point, 4.5 V
+
+# A supply through an inductor (a short at DC) into an RC: L1 carries 9 mA.
+# RLC:      {{.*}}rlc.cir: note: the output's DC operating point, V(b) = 9 V, is tick's constant: the module runs in offsets from the DC point
+# RLC-NEXT: {{.*}}rlc.cir: note: .op: V(in) = 0 V
+# RLC-NEXT: {{.*}}rlc.cir: note: .op: V(b) = 9 V
+# RLC-NEXT: {{.*}}rlc.cir: note: .op: V(vcc) = 9 V
+# RLC-NEXT: {{.*}}rlc.cir: note: .op: i(V1) = -9 mA
+# RLC-FM:   float x_L1;                // L1's companion state (trapezoidal): x <- 2 rl i - x
+# RLC-FM:   rl_L1 = 0.2f * rate;                                // 2 L1 fs', fs' = rate
+# RLC-FM:   x_L1 = r2_L1 * il_L1 - x_L1;                        // L1's current is i(L1)
+# RLC-FM:   return (gain_ < 1 ? z0 * gain_ : z0) + 9.0f;        // V(b)'s DC operating point, 9 V
+
+# A TS-style stage biased at 4.5 V: its diodes at 0 V (an unbiased port), its output's 4.5 V tick's constant.
+# BIASED:      {{.*}}biased.cir: note: .op: V(vb) = 4.5 V
+# BIASED-NEXT: {{.*}}biased.cir: note: .op: V(in) = 0 V
+# BIASED-NEXT: {{.*}}biased.cir: note: .op: V(p) = 4.5 V
+# BIASED-NEXT: {{.*}}biased.cir: note: .op: V(n) = 4.5 V
+# BIASED-NEXT: {{.*}}biased.cir: note: .op: V(out) = 4.5 V
+# BIASED-NEXT: {{.*}}biased.cir: note: .op: V(z) = 4.5 V
+# BIASED-NEXT: {{.*}}biased.cir: note: .op: i(V1) = 0 A
+# BIASED-NEXT: {{.*}}biased.cir: note: .op: port D1|D2: v = 0 V
+# BIASED-FM:   void clear(){{.*}}// the DC operating point: 0 in the offsets the module runs in
+# BIASED-FM:   v_D1 = 0;
+# BIASED-FM:   return (gain_ < 1 ? z3 * gain_ : z3) + 4.5f;        // V(out)'s DC operating point, 4.5 V
+
+# The Tube Screamer with its 4.5 V reference drawn: 4.5 V at the op amps, 0 V across the diodes and at the output (after
+# C7), and the module screamer.cir's but for its comments (the diff above).
+# TS:      {{.*}}screamer-biased.cir: note: .op: V(vb) = 4.5 V
+# TS-NEXT: {{.*}}screamer-biased.cir: note: .op: V(in) = 0 V
+# TS-NEXT: {{.*}}screamer-biased.cir: note: .op: V(p1) = 4.5 V
+# TS-NEXT: {{.*}}screamer-biased.cir: note: .op: V(n1) = 4.5 V
+# TS-NEXT: {{.*}}screamer-biased.cir: note: .op: V(v2) = 4.5 V
+# TS:      {{.*}}screamer-biased.cir: note: .op: V(out) = 0 V
+# TS-NEXT: {{.*}}screamer-biased.cir: note: .op: i(V1) = 0 A
+# TS-NEXT: {{.*}}screamer-biased.cir: note: .op: port D1|D2: v = 0 V

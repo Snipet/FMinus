@@ -157,6 +157,20 @@ namespace fminus::circuit
         out += field("int " + down + "_po;");
     }
 
+    std::vector<std::pair<std::string, int>> halfbandStates(int stage, Halfband kind)
+    {
+        const std::string up = pre(stage, 'u');
+        const std::string down = pre(stage, 'd');
+        if (kind == Halfband::Iir)
+        {
+            const int n = static_cast<int>(iirCoefficients(stage).size());
+            return {{up + "_x", n}, {up + "_y", n}, {down + "_x", n}, {down + "_y", n}};
+        }
+        const int j = static_cast<int>(firTaps(stage).size());
+        const int w = 2 * j;
+        return {{up + "_d", 2 * w}, {down + "_e", 2 * (j + 1)}, {down + "_od", 2 * w}};
+    }
+
     void emitHalfbandClear(std::string& out, int stage, Halfband kind)
     {
         const std::string up = pre(stage, 'u');

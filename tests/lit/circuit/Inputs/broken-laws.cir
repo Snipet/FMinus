@@ -1,0 +1,8 @@
+* broken-laws.cir: a current input without its range, and a law input in a resistor's value (lit errors.test)
+.input  u    in
+.input  iabc -    kind=current
+.input  cv   -    kind=cv
+.output y    o
+R1   in  o   {1k + 1meg * cv}
+R2   o   0   1k
+.end

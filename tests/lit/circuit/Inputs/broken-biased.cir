@@ -1,0 +1,9 @@
+* broken-biased.cir: errors.test's biased port: a diode a 9 V supply biases through R2 (Phase 2's offset formulation)
+.title Broken
+.input  u    in
+.output vout a
+R1     in  a   10k
+V1     vb  0   9
+R2     vb  a   10k
+D1     a   0   1N914
+.end

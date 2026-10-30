@@ -1,14 +1,16 @@
 // examples/circuits/harness.h: what example-circuits' three modes (--check, --tables, the cost table) share: the
-// example's netlists, a generated module compiled through fminus::Program with runners appended (fm_steps, the
-// oversampled region's step over a buffer; fm_ticks, tick over a buffer with set() on the absolute 16-sample grid from
-// a pot buffer: one call a run, testing.md's rule), and the double reference of a plan's blocks
-// (src/circuit/Reference.h).
+// example's netlists, a generated module compiled through fminus::Program with the self-test's runners appended
+// (src/circuit/Runners.h: fm_steps, the oversampled region's step over a buffer; fm_ticks, tick over a buffer with
+// set() on the absolute 16-sample grid from a pot buffer: one call a run, testing.md's rule), and the double reference
+// of a plan's blocks (src/circuit/Reference.h).
 #pragma once
 
 #include "circuit/Analysis.h"
+#include "circuit/Linear.h"
 #include "circuit/Mna.h"
 #include "circuit/Plan.h"
 #include "circuit/Reference.h"
+#include "circuit/Runners.h"
 #include "fminus/Circuit.h"
 #include "fminus/FMinus.h"
 
@@ -59,17 +61,34 @@ namespace circuits
         const fminus::Program::Module* module = nullptr;
         void (*init)(void*, float) = nullptr;
         void (*clear)(void*) = nullptr;
-        // fm_steps(c, u, y, n): y[i] = step(u[i]) (absent without a region, or with .channels 2)
-        void (*steps)(void*, const float*, float*, int) = nullptr;
-        // fm_ticks(c, u, pots, y, n, start): set(pots[i P ...]) where (start + i) % 16 == 0, then y[i] = tick(u[i])
-        void (*ticks)(void*, const float*, const float*, float*, int, int) = nullptr;
-        // fm_ticks2(c, a, b, pots, ya, yb, n, start): the same on (a[i], b[i]) as a float2 (.channels 2)
-        void (*ticks2)(void*, const float*, const float*, const float*, float*, float*, int, int) = nullptr;
+        // fm_steps(c, u, law, y, n): y[i] = step(u[i], law[i L ...]) (absent without a region, or with .channels 2)
+        void (*steps)(void*, const float*, const float*, float*, int) = nullptr;
+        // fm_ticks(c, u, law, pots, switches, y, n, start): set(pots[i P ...]) where (start + i) % 16 == 0, then
+        // y[i] = tick(u[i], law[i L ...])
+        void (*ticks)(void*, const float*, const float*, const float*, const int*, float*, int, int) = nullptr;
+        // fm_ticks2(c, a, b, law, pots, switches, ya, yb, n, start): the same on (a[i], b[i]) as a float2
+        // (.channels 2)
+        void (*ticks2)(void*, const float*, const float*, const float*, const float*, const int*, float*, float*, int,
+                       int) = nullptr;
         std::uintptr_t set = 0;
+        // fm_set(c, pots, switches): set(pots[0 ..], switches[0 ..]), whatever their counts
+        void (*setAll)(void*, const float*, const int*) = nullptr;
 
         int pots() const
         {
             return static_cast<int>(plan.pots.size());
+        }
+
+        // set()'s ints after the pots
+        int switches() const
+        {
+            return static_cast<int>(plan.switches.size());
+        }
+
+        // tick's and step's floats after the signal
+        int laws() const
+        {
+            return static_cast<int>(plan.laws.size());
         }
 
         // set(pots...), with 0 to 3 pots.
@@ -82,24 +101,33 @@ namespace circuits
                                    std::string& errors, fminus::Program::Math math = fminus::Program::Math::Vector,
                                    const std::string& extra = {});
 
-    // The region's step over u, at the region's rate, from init(48000) and set(pots).
-    std::vector<double> runSteps(const Circuit& c, std::span<const double> u, std::span<const double> pots);
+    // The region's step over u, at the region's rate, from init(48000) and set(pots); with law inputs, `law` holds
+    // laws() values a step, step's arguments (each over its input's scale, as fc::lawArguments gives them; empty:
+    // each at its low end).
+    std::vector<double> runSteps(const Circuit& c, std::span<const double> u, std::span<const double> pots,
+                                 std::span<const float> law = {});
 
     // tick over u at 48 kHz from init(48000), the pots held (set on the grid), in calls of `call` samples (0: one
-    // call).
+    // call); `law` as runSteps', a host sample's values each.
     std::vector<double> runTicks(const Circuit& c, std::span<const double> u, std::span<const double> pots,
-                                 int call = 0);
+                                 int call = 0, std::span<const float> law = {});
 
-    // The same with the pots a buffer, pots() values a sample.
+    // The same with the pots a buffer, pots() values a sample, and the switches' positions another, switches() a
+    // sample (empty: none).
     std::vector<double> runTicksWith(const Circuit& c, std::span<const double> u, std::span<const float> potBuffer,
-                                     int call = 0);
+                                     int call = 0, std::span<const float> law = {},
+                                     std::span<const int> switchBuffer = {});
+
+    // A law buffer: each of `values` (one a law input) repeated for n samples.
+    std::vector<float> heldLaws(std::span<const double> values, std::size_t n);
 
     // A point of pots (plan.pots' order) with `key` at `value` and the others at their defaults.
     std::vector<double> potsWith(const fc::Plan& plan, const std::string& key, double value);
 
     // The plan's blocks in Holters' form at `rate` (every block there, as a reference chain does), ADAA's 2/3 for a
-    // port block when `adaa`.
-    std::vector<fc::Holters> chainAt(const fc::Plan& plan, std::span<const double> pots, double rate, bool adaa);
+    // port block when `adaa`; an OTA's gain at the law inputs `laws` (empty: each at its low end).
+    std::vector<fc::Holters> chainAt(const fc::Plan& plan, std::span<const double> pots, double rate, bool adaa,
+                                     std::span<const double> laws = {});
 
     // dB of an amplitude ratio.
     double dB(double ratio);

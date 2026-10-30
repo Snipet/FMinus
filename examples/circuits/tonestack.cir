@@ -1,0 +1,21 @@
+* tonestack.cir: the Fender Bassman's tone stack (5F6-A; Yeh and Smith, DAFx-06), a linear block of three states:
+* C1 250p from the input to the treble pot's top, R1 56k to N, C2 20n from N to the treble pot's bottom, C3 20n from N
+* to the mid pot's top, the bass pot (1M, audio) between the treble pot's bottom and the mid pot's top, the mid pot
+* (25k) to ground; the output at the treble pot's wiper, into 1 MEG. A matched design is of order 1 or 2, so where
+* its trapezoidal response errs at 1x it runs in an oversampled region of its own, at the smallest of 2, 4 and 8 at
+* which the trapezoidal rule passes the 1x check (docs/circuits.md).
+.title ToneStack
+.input  u    in   scale=1
+.output vout out
+.pot    treble 0.5
+.pot    bass   0.5 audio
+.pot    mid    0.5
+C1     in  t    250p
+R1     in  n    56k
+C2     n   b    20n
+C3     n   m    20n
+Ptreb  t   out  b   250k {treble}
+Pbass  b   m    1meg {bass}         ; a rheostat
+Pmid   m   0    25k {mid}           ; a rheostat
+RL     out 0    1meg
+.end

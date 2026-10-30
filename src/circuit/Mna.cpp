@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstddef>
 #include <format>
+#include <functional>
 #include <limits>
 #include <map>
 #include <numbers>
@@ -33,7 +34,7 @@ namespace fminus::circuit
         };
     } // namespace
 
-    System assemble(const Plan& plan, int blockIndex)
+    System assemble(const Plan& plan, int blockIndex, bool dc)
     {
         const Block& block = plan.blocks.at(static_cast<std::size_t>(blockIndex));
         System s;
@@ -53,17 +54,39 @@ namespace fminus::circuit
             unknownOf[node] = s.n++;
             s.unknownNames.push_back("V(" + nodeName(node) + ")");
         }
+        // The impedance form's currents: a variable resistor's, an inductor's, a V source's (one between two nodes
+        // neither of which is ground), in branch order; then a floating E's.
+        auto hasCurrent = [](const Branch& b)
+        {
+            return b.kind == Branch::Kind::Variable || b.kind == Branch::Kind::Inductor ||
+                   b.kind == Branch::Kind::Voltage;
+        };
         std::vector<int> branchCurrent(block.branches.size(), -1);
         for (std::size_t b = 0; b < block.branches.size(); ++b)
         {
-            if (block.branches[b].kind == Branch::Kind::Variable)
+            if (hasCurrent(block.branches[b]))
             {
                 branchCurrent[b] = s.n++;
                 s.unknownNames.push_back("i(" + block.branches[b].ident + ")");
             }
         }
+        std::vector<int> controlledCurrent(block.controlled.size(), -1);
+        for (std::size_t k = 0; k < block.controlled.size(); ++k)
+        {
+            const Controlled& c = block.controlled[k];
+            if (c.kind == Controlled::Kind::Vcvs && !c.driven)
+            {
+                controlledCurrent[k] = s.n++;
+                s.unknownNames.push_back("i(" + c.ident + ")");
+            }
+        }
+        // A two-terminal port (a diode, a pair) is Holters' v-form: its voltage the source v, its current an unknown
+        // j. A controlled source (an OTA) is the i-form: its current the source i, its control voltage a readout, so
+        // the block's readouts are sums of its states and i, never small differences of the input and v.
+        const bool iForm = block.port && block.port->form == PortDef::Form::I;
+        s.iForm = iForm;
         int portCurrent = -1;
-        if (block.port)
+        if (block.port && !iForm)
         {
             portCurrent = s.n++;
             s.unknownNames.push_back("j(" + block.port->parts + ")");
@@ -71,7 +94,8 @@ namespace fminus::circuit
         const auto un = static_cast<std::size_t>(s.n);
         s.a.assign(un, std::vector<Affine>(un));
 
-        // Rows: KCL of the solved nodes, the nullors, the variable branches, the port.
+        // Rows: KCL of the solved nodes, the nullors, the driven E sources, the branches with a current, the
+        // floating E sources, the port.
         int row = 0;
         for (int node : block.nodes)
         {
@@ -84,47 +108,127 @@ namespace fminus::circuit
             nullorRow.push_back(row++);
             s.rowNames.push_back(op.name);
         }
-        std::vector<int> variableRow(block.branches.size(), -1);
+        std::vector<int> controlledRow(block.controlled.size(), -1);
+        for (std::size_t k = 0; k < block.controlled.size(); ++k)
+        {
+            if (block.controlled[k].driven)
+            {
+                controlledRow[k] = row++;
+                s.rowNames.push_back(block.controlled[k].name);
+            }
+        }
+        std::vector<int> branchRow(block.branches.size(), -1);
         for (std::size_t b = 0; b < block.branches.size(); ++b)
         {
-            if (block.branches[b].kind == Branch::Kind::Variable)
+            if (hasCurrent(block.branches[b]))
             {
-                variableRow[b] = row++;
+                branchRow[b] = row++;
                 s.rowNames.push_back(block.branches[b].ident);
             }
         }
+        for (std::size_t k = 0; k < block.controlled.size(); ++k)
+        {
+            if (controlledCurrent[k] >= 0)
+            {
+                controlledRow[k] = row++;
+                s.rowNames.push_back(block.controlled[k].name);
+            }
+        }
         int portRow = -1;
-        if (block.port)
+        if (block.port && !iForm)
         {
             portRow = row++;
             s.rowNames.push_back(block.port->parts);
         }
         if (row != s.n)
             throw std::logic_error("assemble: rows and unknowns differ");
+        s.variableUnknown.assign(un, false);
+        s.variableRow.assign(un, false);
+        for (std::size_t b = 0; b < block.branches.size(); ++b)
+        {
+            if (block.branches[b].kind != Branch::Kind::Variable)
+                continue;
+            s.variableUnknown[static_cast<std::size_t>(branchCurrent[b])] = true;
+            s.variableRow[static_cast<std::size_t>(branchRow[b])] = true;
+        }
 
-        // Sources: the input, each capacitor's state, the port's v.
+        // Sources: the input, each capacitor's and inductor's state, the port's v; with `dc`, the DC sources.
         const bool fromInput = block.input == plan.inputNode;
         s.sources.push_back(
             {fromInput ? plan.inputName : "n_" + plan.nodes[static_cast<std::size_t>(block.input)].ident,
-             System::Source::Kind::Input, -1});
+             System::Source::Kind::Input, -1, 0});
         s.input = 0;
         std::vector<int> stateOf(block.branches.size(), -1);
         for (std::size_t b = 0; b < block.branches.size(); ++b)
         {
-            if (block.branches[b].kind == Branch::Kind::Capacitor)
+            if (block.branches[b].state())
             {
                 stateOf[b] = static_cast<int>(s.sources.size());
-                s.sources.push_back({"x_" + block.branches[b].ident, System::Source::Kind::State, static_cast<int>(b)});
+                s.sources.push_back(
+                    {"x_" + block.branches[b].ident, System::Source::Kind::State, static_cast<int>(b), 0});
             }
         }
         if (block.port)
         {
             s.port = static_cast<int>(s.sources.size());
-            s.sources.push_back({"v_" + block.port->name, System::Source::Kind::Port, -1});
+            s.sources.push_back({(iForm ? "i_" : "v_") + block.port->name, System::Source::Kind::Port, -1, 0});
+        }
+        // the DC sources a block sees: its V branches, the grounded V sources' nodes it touches, the I sources at its
+        // nodes (each once)
+        std::vector<int> constantOf(block.branches.size(), -1);   // a V branch's
+        std::map<int, int> constantAt;                            // a DC node's
+        std::vector<std::pair<std::size_t, int>> currents;        // (plan.currents index, its source)
+        if (dc)
+        {
+            for (std::size_t b = 0; b < block.branches.size(); ++b)
+            {
+                const Branch& br = block.branches[b];
+                if (br.kind != Branch::Kind::Voltage)
+                    continue;
+                constantOf[b] = static_cast<int>(s.sources.size());
+                s.sources.push_back({br.part, System::Source::Kind::Constant, static_cast<int>(b), br.dc});
+            }
+            auto touch = [&](int node)
+            {
+                const Node& n = plan.nodes[static_cast<std::size_t>(node)];
+                if (n.source != Node::Source::Dc || constantAt.count(node))
+                    return;
+                constantAt[node] = static_cast<int>(s.sources.size());
+                s.sources.push_back({plan.netlist.elements[static_cast<std::size_t>(n.element)].name,
+                                     System::Source::Kind::Constant, -1, n.value});
+            };
+            for (const Branch& br : block.branches)
+            {
+                touch(br.a);
+                touch(br.b);
+            }
+            if (block.port)
+            {
+                for (int node : {block.port->anode, block.port->cathode, block.port->from, block.port->to})
+                    touch(node);
+            }
+            for (const OpAmp& op : block.opamps)
+            {
+                touch(op.inp);
+                touch(op.inn);
+            }
+            for (const Controlled& c : block.controlled)
+            {
+                for (int node : {c.p, c.n, c.cp, c.cn})
+                    touch(node);
+            }
+            for (std::size_t k = 0; k < plan.currents.size(); ++k)
+            {
+                const CurrentSource& c = plan.currents[k];
+                if (!kclRow.count(c.a) && !kclRow.count(c.b))
+                    continue;
+                currents.emplace_back(k, static_cast<int>(s.sources.size()));
+                s.sources.push_back({c.name, System::Source::Kind::Constant, -1, c.value});
+            }
         }
         s.rhs.assign(s.sources.size(), std::vector<Affine>(un));
 
-        // Symbols: each capacitor's gc, each variable branch's r.
+        // Symbols: each capacitor's gc, each variable branch's r, each inductor's rl; each gain pots move.
         std::vector<int> symbolOf(block.branches.size(), -1);
         for (std::size_t b = 0; b < block.branches.size(); ++b)
         {
@@ -132,13 +236,30 @@ namespace fminus::circuit
             if (br.kind == Branch::Kind::Capacitor)
             {
                 symbolOf[b] = static_cast<int>(s.symbols.size());
-                s.symbols.push_back({"gc_" + br.ident, System::Symbol::Kind::Gc, static_cast<int>(b)});
+                s.symbols.push_back({"gc_" + br.ident, System::Symbol::Kind::Gc, static_cast<int>(b), -1});
             }
             else if (br.kind == Branch::Kind::Variable)
             {
                 symbolOf[b] = static_cast<int>(s.symbols.size());
-                s.symbols.push_back({"r_" + br.ident, System::Symbol::Kind::R, static_cast<int>(b)});
+                s.symbols.push_back({"r_" + br.ident, System::Symbol::Kind::R, static_cast<int>(b), -1});
             }
+            else if (br.kind == Branch::Kind::Inductor)
+            {
+                symbolOf[b] = static_cast<int>(s.symbols.size());
+                s.symbols.push_back({"rl_" + br.ident, System::Symbol::Kind::Rl, static_cast<int>(b), -1});
+            }
+        }
+        std::vector<Affine> gainOf(block.controlled.size());
+        for (std::size_t k = 0; k < block.controlled.size(); ++k)
+        {
+            const Controlled& c = block.controlled[k];
+            if (c.expr)
+            {
+                gainOf[k].add(static_cast<int>(s.symbols.size()), 1);
+                s.symbols.push_back({"k_" + c.ident, System::Symbol::Kind::Gain, -1, static_cast<int>(k)});
+            }
+            else
+                gainOf[k].add(c.gain);
         }
 
         auto term = [&](int node)
@@ -157,6 +278,16 @@ namespace fminus::circuit
                 t.kind = Term::Kind::Source;
                 t.index = s.input;
                 t.scale = fromInput ? plan.inputScale : 1.0;
+                return t;
+            }
+            if (plan.nodes[static_cast<std::size_t>(node)].source == Node::Source::Dc)
+            {
+                // a constant: ground in the offsets
+                if (dc)
+                {
+                    t.kind = Term::Kind::Source;
+                    t.index = constantAt.at(node);
+                }
                 return t;
             }
             throw std::logic_error("assemble: block " + std::to_string(block.index) + " reads node '" + nodeName(node) +
@@ -186,6 +317,15 @@ namespace fminus::circuit
                 else if (t.kind == Term::Kind::Source)
                     addTo(s.rhs[static_cast<std::size_t>(t.index)][r], y, t.scale);
             }
+        };
+        // y times a node's voltage in row r's left-hand side (moved to the right-hand side for a source).
+        auto voltageTimes = [&](int r, int node, const Affine& y, double factor)
+        {
+            const Term t = term(node);
+            if (t.kind == Term::Kind::Unknown)
+                addTo(s.a[static_cast<std::size_t>(r)][static_cast<std::size_t>(t.index)], y, factor);
+            else if (t.kind == Term::Kind::Source)
+                addTo(s.rhs[static_cast<std::size_t>(t.index)][static_cast<std::size_t>(r)], y, -factor * t.scale);
         };
         // +-1 times a node's voltage in row r's left-hand side (moved to the right-hand side for a source).
         auto voltage = [&](int r, int node, double sign)
@@ -233,10 +373,32 @@ namespace fminus::circuit
             case Branch::Kind::Variable:
             {
                 current(br.a, br.b, branchCurrent[b]);
-                const int r = variableRow[b];
+                const int r = branchRow[b];
                 voltage(r, br.a, 1);
                 voltage(r, br.b, -1);
                 s.a[static_cast<std::size_t>(r)][static_cast<std::size_t>(branchCurrent[b])].add(symbolOf[b], -1);
+                break;
+            }
+            case Branch::Kind::Inductor:
+            {
+                // V(a) - V(b) - rl i = -x: the trapezoidal rule's v = rl i - x (x = rl i + v a step earlier)
+                current(br.a, br.b, branchCurrent[b]);
+                const int r = branchRow[b];
+                voltage(r, br.a, 1);
+                voltage(r, br.b, -1);
+                s.a[static_cast<std::size_t>(r)][static_cast<std::size_t>(branchCurrent[b])].add(symbolOf[b], -1);
+                s.rhs[static_cast<std::size_t>(stateOf[b])][static_cast<std::size_t>(r)].add(-1);
+                break;
+            }
+            case Branch::Kind::Voltage:
+            {
+                // V(a) - V(b) = dc: 0 in the offsets, a short with its current an unknown
+                current(br.a, br.b, branchCurrent[b]);
+                const int r = branchRow[b];
+                voltage(r, br.a, 1);
+                voltage(r, br.b, -1);
+                if (dc)
+                    s.rhs[static_cast<std::size_t>(constantOf[b])][static_cast<std::size_t>(r)].add(1);
                 break;
             }
             }
@@ -246,15 +408,69 @@ namespace fminus::circuit
             voltage(nullorRow[k], block.opamps[k].inp, 1);
             voltage(nullorRow[k], block.opamps[k].inn, -1);
         }
-        if (block.port)
+        for (std::size_t k = 0; k < block.controlled.size(); ++k)
         {
-            current(block.port->anode, block.port->cathode, portCurrent);
+            const Controlled& c = block.controlled[k];
+            const Affine& g = gainOf[k];
+            if (c.kind == Controlled::Kind::Vccs)
+            {
+                // g (V(cp) - V(cn)) leaves p and enters n
+                for (const auto& [node, sign] : {std::pair{c.p, 1.0}, std::pair{c.n, -1.0}})
+                {
+                    const auto it = kclRow.find(node);
+                    if (it == kclRow.end())
+                        continue;
+                    voltageTimes(it->second, c.cp, g, sign);
+                    voltageTimes(it->second, c.cn, g, -sign);
+                }
+                continue;
+            }
+            const int r = controlledRow[k];
+            if (c.driven)
+            {
+                // V(out) - sign g (V(cp) - V(cn)) = 0
+                voltage(r, c.out, 1);
+                voltageTimes(r, c.cp, g, -c.sign);
+                voltageTimes(r, c.cn, g, c.sign);
+                continue;
+            }
+            // V(p) - V(n) - g (V(cp) - V(cn)) = 0, its current from p through it to n
+            current(c.p, c.n, controlledCurrent[k]);
+            voltage(r, c.p, 1);
+            voltage(r, c.n, -1);
+            voltageTimes(r, c.cp, g, -1);
+            voltageTimes(r, c.cn, g, 1);
+        }
+        for (const auto& [k, source] : currents)
+        {
+            // value amps from a through the source to b: drawn from a, injected into b
+            const CurrentSource& c = plan.currents[k];
+            if (const auto it = kclRow.find(c.a); it != kclRow.end())
+                s.rhs[static_cast<std::size_t>(source)][static_cast<std::size_t>(it->second)].add(-1);
+            if (const auto it = kclRow.find(c.b); it != kclRow.end())
+                s.rhs[static_cast<std::size_t>(source)][static_cast<std::size_t>(it->second)].add(1);
+        }
+        if (block.port && !iForm)
+        {
+            // the v-form: j, the port's current (an unknown), flows from anode to cathode through it, and its row
+            // V(anode) - V(cathode) = v makes its voltage the source v
+            current(block.port->from, block.port->to, portCurrent);
             voltage(portRow, block.port->anode, 1);
             voltage(portRow, block.port->cathode, -1);
             s.rhs[static_cast<std::size_t>(s.port)][static_cast<std::size_t>(portRow)].add(1);
         }
+        else if (block.port)
+        {
+            // the i-form: the source i leaves `from` (n+) and enters `to` (n-), SPICE's G direction
+            const auto i = static_cast<std::size_t>(s.port);
+            if (const auto it = kclRow.find(block.port->from); it != kclRow.end())
+                s.rhs[i][static_cast<std::size_t>(it->second)].add(-1);
+            if (const auto it = kclRow.find(block.port->to); it != kclRow.end())
+                s.rhs[i][static_cast<std::size_t>(it->second)].add(1);
+        }
 
-        // Readouts: the port's current, the output, each capacitor's voltage (one readout a node pair).
+        // Readouts: the port's current, the output, each capacitor's voltage (one readout a node pair), each
+        // inductor's current.
         auto formOf = [&](int p, int q, double scale)
         {
             System::Readout r;
@@ -278,13 +494,23 @@ namespace fminus::circuit
                 return "-V(" + nodeName(q) + ")";
             return "V(" + nodeName(p) + ") - V(" + nodeName(q) + ")";
         };
-        if (block.port)
+        if (block.port && !iForm)
         {
             System::Readout r;
             r.name = "j_" + block.port->name;
             r.kind = System::Readout::Kind::PortCurrent;
             r.label = "j(" + block.port->parts + ")";
             r.unknowns.emplace_back(portCurrent, 1);
+            s.portCurrent = static_cast<int>(s.readouts.size());
+            s.readouts.push_back(r);
+        }
+        else if (block.port)
+        {
+            // the OTA's control voltage, V(nc+) - V(nc-): v = p - kd i
+            System::Readout r = formOf(block.port->anode, block.port->cathode, 1);
+            r.name = "vp_" + block.port->name;
+            r.kind = System::Readout::Kind::PortCurrent;
+            r.label = label(block.port->anode, block.port->cathode);
             s.portCurrent = static_cast<int>(s.readouts.size());
             s.readouts.push_back(r);
         }
@@ -310,6 +536,17 @@ namespace fminus::circuit
         for (std::size_t b = 0; b < block.branches.size(); ++b)
         {
             const Branch& br = block.branches[b];
+            if (br.kind == Branch::Kind::Inductor)
+            {
+                System::Readout r;
+                r.name = "il_" + br.ident;
+                r.kind = System::Readout::Kind::Current;
+                r.label = "i(" + br.part + ")";
+                r.unknowns.emplace_back(branchCurrent[b], 1);
+                s.capacitor.emplace_back(static_cast<int>(s.readouts.size()), 1);
+                s.readouts.push_back(r);
+                continue;
+            }
             if (br.kind != Branch::Kind::Capacitor)
                 continue;
             int found = -1;
@@ -493,7 +730,8 @@ namespace fminus::circuit
         // The order, by exact +-1 entries first (least Markowitz cost, then the lowest row and column), then by the
         // best worst-over-the-grid magnitude in its column; or by that magnitude alone. `failure` says where it fails.
         std::optional<Pivots> tryOrder(const System& system, const Plan& plan, const Block& block,
-                                       const std::vector<GridPoint>& grid, bool preferOnes, std::string& failure)
+                                       const std::vector<GridPoint>& grid, bool preferOnes, bool variableLast,
+                                       std::string& failure)
         {
             const auto n = static_cast<std::size_t>(system.n);
             Code scratch;
@@ -519,8 +757,18 @@ namespace fminus::circuit
             std::vector<bool> rowDone(n, false);
             std::vector<bool> colDone(n, false);
             Pivots pivots;
+            std::size_t fixedLeft = 0;   // the unknowns that are not variable branches' currents
+            for (std::size_t c = 0; c < n; ++c)
+                fixedLeft += system.variableUnknown[c] ? 0 : 1;
             for (std::size_t step = 0; step < n; ++step)
             {
+                // with variableLast, until the other unknowns are eliminated, neither a variable row nor column
+                auto allowed = [&](std::size_t r, std::size_t c)
+                {
+                    if (!variableLast || fixedLeft == 0)
+                        return true;
+                    return !system.variableRow[r] && !system.variableUnknown[c];
+                };
                 // Column maxima over the remaining rows, at each grid point.
                 auto relative = [&](std::size_t r, std::size_t c)
                 {
@@ -551,7 +799,8 @@ namespace fminus::circuit
                         {
                             // an exact +-1, and (threshold pivoting) at least 0.1 of its column everywhere on the
                             // grid: float runs the elimination, so the growth a smaller pivot allows is lost digits
-                            if (colDone[c] || !isUnit(structure[r][c]) || relative(r, c) < kThreshold)
+                            if (colDone[c] || !allowed(r, c) || !isUnit(structure[r][c]) ||
+                                relative(r, c) < kThreshold)
                                 continue;
                             long rowCount = 0;
                             long colCount = 0;
@@ -581,7 +830,7 @@ namespace fminus::circuit
                             continue;
                         for (std::size_t c = 0; c < n; ++c)
                         {
-                            if (colDone[c] || isZero(structure[r][c]))
+                            if (colDone[c] || !allowed(r, c) || isZero(structure[r][c]))
                                 continue;
                             const double score = relative(r, c);
                             if (score > bestScore)
@@ -621,6 +870,7 @@ namespace fminus::circuit
                     eliminate(a, bestR, bestC, rowDone, colDone);
                 rowDone[bestR] = true;
                 colDone[bestC] = true;
+                fixedLeft -= system.variableUnknown[bestC] ? 0 : 1;
                 pivots.order.emplace_back(static_cast<int>(bestR), static_cast<int>(bestC));
             }
             // The double solve's relative residual, at every grid point and for every source.
@@ -668,16 +918,19 @@ namespace fminus::circuit
         }
     } // namespace
 
-    std::optional<Pivots> choosePivots(const System& system, const Plan& plan, int blockIndex, Messages& messages)
+    std::optional<Pivots> choosePivots(const System& system, const Plan& plan, int blockIndex, Messages& messages,
+                                       bool variableLast)
     {
         const Block& block = plan.blocks.at(static_cast<std::size_t>(blockIndex));
         const std::vector<GridPoint> grid = pivotGrid(plan, block);
         std::string failure;
-        if (std::optional<Pivots> p = tryOrder(system, plan, block, grid, true, failure))
+        if (std::optional<Pivots> p = tryOrder(system, plan, block, grid, true, variableLast, failure))
             return p;
         std::string second;
-        if (std::optional<Pivots> p = tryOrder(system, plan, block, grid, false, second))
+        if (std::optional<Pivots> p = tryOrder(system, plan, block, grid, false, variableLast, second))
             return p;
+        if (variableLast)
+            return std::nullopt;
         Loc loc;
         if (!block.elements.empty())
             loc = plan.netlist.elements[static_cast<std::size_t>(block.elements.front())].loc;
@@ -698,14 +951,24 @@ namespace fminus::circuit
         {
             const Linear<double> l =
                 solve(system, pivots, symbolValues(system, plan, blockIndex, g.designRate, g.pots));
-            const double k = 1 / -l.coef[j][v];
+            // kd: the v-form's 1 / -(dj/dv); the i-form's -(dv/di)
+            const double k = system.iForm ? -l.coef[j][v] : 1 / -l.coef[j][v];
             if (k > 0 && std::isfinite(k))
                 continue;
             Loc loc;
             if (!block.elements.empty())
                 loc = plan.netlist.elements[static_cast<std::size_t>(block.elements.front())].loc;
             const std::string around = block.opamps.empty() ? std::string() : " around " + block.opamps.front().name;
-            if (k < 0)
+            if (k == 0 && system.iForm)
+                messages.error(plan.netlist.elements[static_cast<std::size_t>(block.port->elements.front())].loc,
+                               "OTA " + block.port->parts +
+                                   " has no feedback around it (an open-loop OTA, a VCA): Phase 2");
+            else if (k < 0 && block.port->form == PortDef::Form::I)
+                messages.error(plan.netlist.elements[static_cast<std::size_t>(block.port->elements.front())].loc,
+                               std::format("OTA {} sees positive feedback (kd = {:.4g} ohm at {}): its output drives "
+                                           "its + input; not supported yet",
+                                           block.port->parts, k, pointText(plan, block, g)));
+            else if (k < 0)
                 messages.error(loc, std::format("port {} sees a negative resistance (K = {:.4g} ohm at {}): positive "
                                                 "feedback{} is not supported yet",
                                                 block.port->parts, k, pointText(plan, block, g), around));
@@ -749,19 +1012,41 @@ namespace fminus::circuit
     }
 
     std::vector<double> symbolValues(const System& system, const Plan& plan, int blockIndex, double designRate,
-                                     const std::vector<double>& pots)
+                                     const std::vector<double>& pots, std::optional<Method> method)
     {
         const Block& block = plan.blocks.at(static_cast<std::size_t>(blockIndex));
+        // a companion's factor of C fs' (or L fs'): 2 for the trapezoidal rule, 3 / 2 for BDF2
+        const double companion = method.value_or(block.method) == Method::Bdf2 ? 1.5 : 2.0;
         std::vector<double> out;
+        auto pot = [&](const std::string& key)
+        {
+            return potValue(plan, pots, key);
+        };
         for (const System::Symbol& s : system.symbols)
         {
+            if (s.kind == System::Symbol::Kind::Gain)
+            {
+                out.push_back(evaluate(*block.controlled[static_cast<std::size_t>(s.controlled)].expr, pot));
+                continue;
+            }
             const Branch& br = block.branches[static_cast<std::size_t>(s.branch)];
             if (s.kind == System::Symbol::Kind::Gc)
             {
-                out.push_back(2 * br.c * designRate);
+                out.push_back(companion * br.c * designRate);
                 continue;
             }
-            const double x = evaluate(br.expr, [&](const std::string& key) { return potValue(plan, pots, key); });
+            if (s.kind == System::Symbol::Kind::Rl)
+            {
+                out.push_back(companion * br.l * designRate);
+                continue;
+            }
+            if (br.isSwitch())
+            {
+                // settled at the point's position: the emitted ramp's end
+                out.push_back(switchResistance(br, switchRamp(br, switchPosition(plan, pots, br.switchKey))));
+                continue;
+            }
+            const double x = evaluate(br.expr, pot);
             if (br.section == 0)
             {
                 out.push_back(x);
@@ -785,12 +1070,15 @@ namespace fminus::circuit
         }
     } // namespace
 
-    Holters holters(const Plan& plan, int blockIndex, double designRate, const std::vector<double>& pots)
+    Holters holters(const Plan& plan, int blockIndex, double designRate, const std::vector<double>& pots,
+                    const std::vector<double>& laws, std::optional<Method> method)
     {
         const Block& block = plan.blocks.at(static_cast<std::size_t>(blockIndex));
+        const bool bdf2 = method.value_or(block.method) == Method::Bdf2;
         const System system = assemble(plan, blockIndex);
         const Pivots pivots = pivotsOrThrow(system, plan, blockIndex);
-        const Linear<double> l = solve(system, pivots, symbolValues(system, plan, blockIndex, designRate, pots));
+        const Linear<double> l =
+            solve(system, pivots, symbolValues(system, plan, blockIndex, designRate, pots, method));
         Holters h;
         std::vector<std::size_t> states;
         for (std::size_t s = 0; s < system.sources.size(); ++s)
@@ -798,41 +1086,103 @@ namespace fminus::circuit
             if (system.sources[s].kind == System::Source::Kind::State)
                 states.push_back(s);
         }
-        h.states = static_cast<int>(states.size());
+        // BDF2's state is [x; xo]: each companion's history, then its second part
+        const std::size_t count = states.size();
+        const std::size_t size = bdf2 ? 2 * count : count;
+        h.states = static_cast<int>(size);
         h.port = block.port.has_value();
         const auto in = static_cast<std::size_t>(system.input);
         const auto out = static_cast<std::size_t>(system.output);
         double kSelf = 0;
+        // each readout's coefficient on a source as the v-form has it: the i-form's i = (v - p) / Ki substituted (in
+        // double, where its differences cost nothing), so the reference runs both forms as one
+        const auto port = static_cast<std::size_t>(system.port);
+        const auto pr = static_cast<std::size_t>(system.portCurrent);
+        auto onV = [&](std::size_t ro)
+        {
+            return system.iForm ? l.coef[ro][port] / l.coef[pr][port] : l.coef[ro][port];
+        };
+        auto on = [&](std::size_t ro, std::size_t src)
+        {
+            if (!h.port || !system.iForm)
+                return l.coef[ro][src];
+            return l.coef[ro][src] - l.coef[ro][port] * l.coef[pr][src] / l.coef[pr][port];
+        };
         if (h.port)
         {
-            const auto j = static_cast<std::size_t>(system.portCurrent);
-            const auto v = static_cast<std::size_t>(system.port);
-            kSelf = 1 / -l.coef[j][v];
+            const auto j = pr;
+            const auto v = port;
+            kSelf = system.iForm ? -l.coef[j][v] : 1 / -l.coef[j][v];
+            h.kd = kSelf;
             for (std::size_t s : states)
-                h.cp.push_back(l.coef[j][s] * kSelf);
-            h.dp = l.coef[j][in] * kSelf;
+                h.cp.push_back(system.iForm ? l.coef[j][s] : l.coef[j][s] * kSelf);
+            h.cp.resize(size, 0.0);
+            h.dp = system.iForm ? l.coef[j][in] : l.coef[j][in] * kSelf;
+            h.law = block.port->law;
             h.is = block.port->is;
             h.nvt = block.port->nvt;
-            h.k = 2 * block.port->is * kSelf;
-            h.wy = l.coef[out][v];
+            // the pair's v + 2 Is K sinh(v / N Vt); an OTA's v + K g tanh(v / 2 Vt), g its gain (at the point's pots
+            // and the law inputs `laws`)
+            h.k = block.port->smooth()                       ? kSelf
+                  : block.port->law == PortDef::Law::Pair ? 2 * block.port->is * kSelf
+                                                          : block.port->is * kSelf;
+            h.k2 = block.port->is2 * kSelf;
+            h.nvt2 = block.port->nvt2;
+            if (block.port->smooth())
+                h.g = gainAt(plan, *block.port, pots, laws);
+            h.wy = onV(out);
         }
         for (std::size_t s : states)
-            h.cy.push_back(l.coef[out][s]);
-        h.dy = l.coef[out][in];
-        h.a.assign(states.size(), std::vector<double>(states.size(), 0.0));
-        h.b.assign(states.size(), 0.0);
-        h.w.assign(states.size(), 0.0);
-        for (std::size_t i = 0; i < states.size(); ++i)
+            h.cy.push_back(on(out, s));
+        h.cy.resize(size, 0.0);
+        h.dy = on(out, in);
+        // a state's update, x <- 2 gc v - x (a capacitor) or 2 rl i - x (an inductor) with the trapezoidal rule: its
+        // factor, 2 gc or 2 rl, 4 C fs' or 4 L fs'; BDF2's x <- h - xo, xo <- h / 4, h = 4/3 g v: its factor 4/3 g,
+        // 2 C fs' or 2 L fs' (g = 3 C fs' / 2)
+        auto twice = [&](std::size_t i)
         {
             const Branch& br = block.branches[static_cast<std::size_t>(system.sources[states[i]].branch)];
-            const double g2 = 4 * br.c * designRate;
-            const auto [readout, sign] = system.capacitor[i];
-            const auto ro = static_cast<std::size_t>(readout);
-            for (std::size_t j = 0; j < states.size(); ++j)
-                h.a[i][j] = g2 * sign * l.coef[ro][states[j]] - (i == j ? 1 : 0);
-            h.b[i] = g2 * sign * l.coef[ro][in];
-            if (h.port)
-                h.w[i] = g2 * sign * l.coef[ro][static_cast<std::size_t>(system.port)];
+            return (bdf2 ? 2 : 4) * (br.kind == Branch::Kind::Inductor ? br.l : br.c) * designRate;
+        };
+        // the update's rows over [x; xo], from each state's readout's coefficients
+        auto rows = [&](std::vector<std::vector<double>>& a, std::vector<double>& b, std::vector<double>& w,
+                        const std::function<double(std::size_t, std::size_t)>& coef,
+                        const std::function<double(std::size_t)>& onPort)
+        {
+            a.assign(size, std::vector<double>(size, 0.0));
+            b.assign(size, 0.0);
+            w.assign(size, 0.0);
+            for (std::size_t i = 0; i < count; ++i)
+            {
+                const double g2 = twice(i);
+                const auto [readout, sign] = system.capacitor[i];
+                const auto ro = static_cast<std::size_t>(readout);
+                for (std::size_t j = 0; j < count; ++j)
+                    a[i][j] = g2 * sign * coef(ro, states[j]) - (!bdf2 && i == j ? 1 : 0);
+                b[i] = g2 * sign * coef(ro, in);
+                if (h.port)
+                    w[i] = g2 * sign * onPort(ro);
+                if (!bdf2)
+                    continue;
+                a[i][count + i] = -1;
+                for (std::size_t j = 0; j < count; ++j)
+                    a[count + i][j] = 0.25 * a[i][j];
+                b[count + i] = 0.25 * b[i];
+                w[count + i] = 0.25 * w[i];
+            }
+        };
+        rows(h.a, h.b, h.w, on, onV);
+        if (h.port && system.iForm)
+        {
+            h.iForm = true;
+            rows(
+                h.ai, h.bi, h.wi, [&](std::size_t ro, std::size_t src) { return l.coef[ro][src]; },
+                [&](std::size_t ro) { return l.coef[ro][port]; });
+            for (std::size_t s : states)
+                h.cyi.push_back(l.coef[out][s]);
+            h.cyi.resize(size, 0.0);
+            h.dyi = l.coef[out][in];
+            h.wyi = l.coef[out][port];
         }
         return h;
     }
@@ -841,7 +1191,7 @@ namespace fminus::circuit
                                 std::complex<double> s, const std::vector<double>& pots)
     {
         const Block& block = plan.blocks.at(static_cast<std::size_t>(blockIndex));
-        // r from the pots (as numbers), gc := s C
+        // r and the gains from the pots (as numbers), gc := s C, rl := s L
         const std::vector<double> numbers = symbolValues(system, plan, blockIndex, 1.0, pots);
         std::vector<std::complex<double>> symbols;
         for (std::size_t k = 0; k < system.symbols.size(); ++k)
@@ -849,6 +1199,8 @@ namespace fminus::circuit
             const System::Symbol& sym = system.symbols[k];
             if (sym.kind == System::Symbol::Kind::Gc)
                 symbols.push_back(s * block.branches[static_cast<std::size_t>(sym.branch)].c);
+            else if (sym.kind == System::Symbol::Kind::Rl)
+                symbols.push_back(s * block.branches[static_cast<std::size_t>(sym.branch)].l);
             else
                 symbols.emplace_back(numbers[k], 0.0);
         }
@@ -862,7 +1214,43 @@ namespace fminus::circuit
         return analog(system, pivotsOrThrow(system, plan, block), plan, block, s, pots);
     }
 
-    double oneXError(const System& system, const Pivots& pivots, const Plan& plan, int blockIndex, double rate)
+    std::complex<double> analogPortCurrent(const Plan& plan, int blockIndex, std::complex<double> s,
+                                           const std::vector<double>& pots)
+    {
+        const System system = assemble(plan, blockIndex);
+        return analogPortCurrent(system, pivotsOrThrow(system, plan, blockIndex), plan, blockIndex, s, pots);
+    }
+
+    std::complex<double> analogPortCurrent(const System& system, const Pivots& pivots, const Plan& plan,
+                                           int blockIndex, std::complex<double> s, const std::vector<double>& pots)
+    {
+        const Block& block = plan.blocks.at(static_cast<std::size_t>(blockIndex));
+        const std::vector<double> numbers = symbolValues(system, plan, blockIndex, 1.0, pots);
+        std::vector<std::complex<double>> symbols;
+        for (std::size_t k = 0; k < system.symbols.size(); ++k)
+        {
+            const System::Symbol& sym = system.symbols[k];
+            if (sym.kind == System::Symbol::Kind::Gc)
+                symbols.push_back(s * block.branches[static_cast<std::size_t>(sym.branch)].c);
+            else if (sym.kind == System::Symbol::Kind::Rl)
+                symbols.push_back(s * block.branches[static_cast<std::size_t>(sym.branch)].l);
+            else
+                symbols.emplace_back(numbers[k], 0.0);
+        }
+        const Linear<std::complex<double>> l = solve(system, pivots, symbols);
+        return l.coef[static_cast<std::size_t>(system.portCurrent)][static_cast<std::size_t>(system.input)];
+    }
+
+    std::complex<double> discreteS(Method method, double f, double rate)
+    {
+        if (method == Method::Tr)
+            return {0, 2 * rate * std::tan(std::numbers::pi * f / rate)};
+        const std::complex<double> zi = std::polar(1.0, -2 * std::numbers::pi * f / rate);   // z^-1
+        return rate * (3.0 - 4.0 * zi + zi * zi) / 2.0;
+    }
+
+    double oneXError(const System& system, const Pivots& pivots, const Plan& plan, int blockIndex, double rate,
+                     Method method)
     {
         const Block& block = plan.blocks.at(static_cast<std::size_t>(blockIndex));
         double worst = 0;
@@ -886,8 +1274,8 @@ namespace fminus::circuit
             {
                 if (analogDb[i] < top - 40)
                     continue;
-                const double warped = 2 * rate * std::tan(std::numbers::pi * freqs[i] / rate);
-                const double h = std::abs(analog(system, pivots, plan, blockIndex, {0, warped}, pots));
+                const double h =
+                    std::abs(analog(system, pivots, plan, blockIndex, discreteS(method, freqs[i], rate), pots));
                 worst = std::max(worst, std::fabs(20 * std::log10(h + 1e-300) - analogDb[i]));
             }
         }

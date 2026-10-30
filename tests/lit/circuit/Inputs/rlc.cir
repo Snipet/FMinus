@@ -1,0 +1,11 @@
+* rlc.cir: op.test's supply through an inductor into an RC: L1 shorts at DC, so V(b) is 9 V and L1 carries 9 mA
+.title Rlc
+.input  u    in
+.output vout b
+.op
+C0     in  b   1u
+V1     vcc 0   9
+L1     vcc b   100m
+R1     b   0   1k
+C1     b   0   100n
+.end

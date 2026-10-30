@@ -1,6 +1,8 @@
 // src/circuit/Reference.cpp: the double reference (Reference.h), a port of adaa.cpp's run<double>.
 #include "circuit/Reference.h"
 
+#include "circuit/Laws.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -52,7 +54,11 @@ namespace fminus::circuit
             double u1 = 0;
             double p1 = 0;
             double v1 = 0;
-            double c1 = 1;   // cosh(v(n-1) / nvt)
+            double c1 = 1;    // cosh(v(n-1) / nvt)
+            double t1 = 0;    // an OTA's tanh(v(n-1) / 2 Vt)
+            double lc1 = 0;   // and log cosh
+            double kg1 = 0;   // its k g at n-1
+            double g1 = 0;    // one diode's or an asymmetric pair's G(v(n-1)), the law's antiderivative
 
             Runner(const Holters& block, const RefOptions& options, RefStats* s)
                 : h(block)
@@ -64,14 +70,116 @@ namespace fminus::circuit
             {
                 if (!h.port)
                     o.adaa = false;
+                if (h.port && (h.law == PortDef::Law::Single || h.law == PortDef::Law::Asym))
+                    g1 = lawAntiderivative(lawShape(h, 1), 0);
             }
 
-            double solve(double p)
+            double solve(double p, double kg)
             {
+                if (h.law == PortDef::Law::Single || h.law == PortDef::Law::Asym)
+                {
+                    const LawShape shape = lawShape(h, 1);
+                    if (o.steps >= 0)
+                        return lawStepsOf(shape, p, o.guess, v1, o.steps);
+                    long unconverged = 0;
+                    int iterations = 0;
+                    const double v = lawConvergedOf(shape, p, v1, &unconverged, &iterations);
+                    if (stats != nullptr)
+                    {
+                        stats->unconverged += unconverged;
+                        stats->maxIterations = std::max(stats->maxIterations, iterations);
+                    }
+                    return v;
+                }
+                if (h.law == PortDef::Law::Tanh)
+                {
+                    if (o.steps >= 0)
+                        return lawSteps(h.law, p, kg, h.nvt, Solver::Guess::Previous, v1, o.steps);
+                    long unconverged = 0;
+                    int iterations = 0;
+                    const double v = lawConverged(h.law, p, kg, h.nvt, v1, &unconverged, &iterations);
+                    if (stats != nullptr)
+                    {
+                        stats->unconverged += unconverged;
+                        stats->maxIterations = std::max(stats->maxIterations, iterations);
+                    }
+                    return v;
+                }
                 if (o.steps < 0)
                     return converged(p, h.k, h.nvt, stats);
                 const double g = o.guess == Solver::Guess::Omega ? omegaGuess(p, h.k, h.nvt) : v1;
                 return newtonSteps(p, h.k, h.nvt, g, o.steps);
+            }
+
+            // An OTA's step: its law's scale this step, kd g (g the stream's, or the block's).
+            double step(double u, double g)
+            {
+                if (h.law == PortDef::Law::Tanh)
+                    return stepTanh(u, g);
+                return step(u);
+            }
+
+            // An OTA's step, as the emitted code: v + kg tanh(v / 2 Vt) = p, kg = kd g, in the block's i-form (its
+            // current i = g tanh(v / 2 Vt) the source); with ADAA, the carry of the last point onto this step's curve
+            // (p1 += (kg - kg1) t1), then the mean of i over [p1, p], (pm - G) / kd with G the mean of v (report
+            // §5.1's closed form, with log cosh).
+            double stepTanh(double u, double g)
+            {
+                const double kg = h.k * g;
+                const std::size_t n = x1.size();
+                if (stats != nullptr)
+                    ++stats->samples;
+                double p = h.dp * u;
+                for (std::size_t i = 0; i < n; ++i)
+                    p += h.cp[i] * x1[i];
+                const double v = solve(p, kg);
+                if (!o.adaa)
+                {
+                    const double i0 = g * std::tanh(v / h.nvt);
+                    double y = h.dyi * u + h.wyi * i0;
+                    for (std::size_t i = 0; i < n; ++i)
+                        y += h.cyi[i] * x1[i];
+                    for (std::size_t i = 0; i < n; ++i)
+                    {
+                        double s = h.bi[i] * u + h.wi[i] * i0;
+                        for (std::size_t j = 0; j < n; ++j)
+                            s += h.ai[i][j] * x1[j];
+                        next[i] = s;
+                    }
+                    x1.swap(next);
+                    v1 = v;
+                    return y;
+                }
+                if (o.carry)
+                    p1 += (kg - kg1) * t1;
+                const double lc = logCosh(v / h.nvt);
+                const double dpv = p - p1;
+                const double vm = 0.5 * (v + v1);
+                const double pm = 0.5 * (p + p1);
+                double vbar = vm;
+                if (std::fabs(dpv) > o.eps)
+                    vbar = vm + ((v - v1) * (pm - vm) - kg * h.nvt * (lc - lc1)) / dpv;
+                const double ibar = (pm - vbar) / h.k;
+                const double ua = 0.5 * (u + u1);
+                double y = h.dyi * ua + h.wyi * ibar;
+                for (std::size_t i = 0; i < n; ++i)
+                    y += h.cyi[i] * 0.5 * (x1[i] + x2[i]);
+                for (std::size_t i = 0; i < n; ++i)
+                {
+                    double s = h.bi[i] * ua + h.wi[i] * ibar;
+                    for (std::size_t j = 0; j < n; ++j)
+                        s += h.ai[i][j] * 0.5 * (x1[j] + x2[j]);
+                    next[i] = s;
+                }
+                x2 = x1;
+                x1.swap(next);
+                u1 = u;
+                p1 = p;
+                v1 = v;
+                t1 = std::tanh(v / h.nvt);
+                lc1 = lc;
+                kg1 = kg;
+                return y;
             }
 
             double step(double u)
@@ -86,7 +194,7 @@ namespace fminus::circuit
                     p = h.dp * u;
                     for (std::size_t i = 0; i < n; ++i)
                         p += h.cp[i] * x1[i];
-                    v = solve(p);
+                    v = solve(p, h.k);
                 }
                 if (!o.adaa)
                 {
@@ -105,16 +213,18 @@ namespace fminus::circuit
                     return y;
                 }
                 // first-order ADAA of the solved map, in the cancellation-free form:
-                //   vbar = vm + [dv (pm - vm) - k nvt (c - c1)] / dp
+                //   vbar = vm + [dv (pm - vm) - (G(v) - G(v1))] / dp, G the law's antiderivative (a pair's k nvt cosh)
+                const bool pair = h.law == PortDef::Law::Pair;
                 const double e = std::exp(v / h.nvt);
                 const double c = 0.5 * (e + 1 / e);
+                const double g = pair ? 0 : lawAntiderivative(lawShape(h, 1), v);
                 const double dpv = p - p1;
                 const double dv = v - v1;
                 const double vm = 0.5 * (v + v1);
                 const double pm = 0.5 * (p + p1);
                 double vbar = vm;
                 if (std::fabs(dpv) > o.eps)
-                    vbar = vm + (dv * (pm - vm) - h.k * h.nvt * (c - c1)) / dpv;
+                    vbar = vm + (dv * (pm - vm) - (pair ? h.k * h.nvt * (c - c1) : g - g1)) / dpv;
                 const double ua = 0.5 * (u + u1);
                 double y = h.dy * ua + h.wy * vbar;
                 for (std::size_t i = 0; i < n; ++i)
@@ -132,6 +242,7 @@ namespace fminus::circuit
                 p1 = p;
                 v1 = v;
                 c1 = c;
+                g1 = g;
                 return y;
             }
         };
@@ -171,17 +282,26 @@ namespace fminus::circuit
     }
 
     std::vector<double> simulate(const Holters& block, std::span<const double> u, const RefOptions& options,
-                                 RefStats* stats)
+                                 RefStats* stats, std::span<const double> gains)
     {
         Runner r(block, options, stats);
         std::vector<double> out(u.size());
         for (std::size_t n = 0; n < u.size(); ++n)
-            out[n] = r.step(u[n]);
+        {
+            if ((n & 4095) == 0 && options.stop && options.stop())
+            {
+                if (stats != nullptr)
+                    stats->stopped = true;
+                break;
+            }
+            out[n] = r.step(u[n], gains.empty() ? block.g : gains[n]);
+        }
         return out;
     }
 
     std::vector<double> simulateChain(std::span<const Holters> blocks, std::span<const double> u,
-                                      const RefOptions& options, RefStats* stats)
+                                      const RefOptions& options, RefStats* stats,
+                                      std::span<const std::vector<double>> gains)
     {
         std::vector<Runner> runners;
         runners.reserve(blocks.size());
@@ -190,9 +310,18 @@ namespace fminus::circuit
         std::vector<double> out(u.size());
         for (std::size_t n = 0; n < u.size(); ++n)
         {
+            if ((n & 4095) == 0 && options.stop && options.stop())
+            {
+                if (stats != nullptr)
+                    stats->stopped = true;
+                break;
+            }
             double s = u[n];
-            for (Runner& r : runners)
-                s = r.step(s);
+            for (std::size_t b = 0; b < runners.size(); ++b)
+            {
+                const bool streamed = b < gains.size() && !gains[b].empty();
+                s = runners[b].step(s, streamed ? gains[b][n] : blocks[b].g);
+            }
             out[n] = s;
         }
         return out;

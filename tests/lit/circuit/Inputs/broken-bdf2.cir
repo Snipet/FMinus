@@ -1,0 +1,11 @@
+* broken-bdf2.cir: errors.test's integrator error: ADAA's closed-form mean is the trapezoidal rule's
+.title Bdf2Adaa
+.input  u    in
+.output vout a
+R1     in a  2.2k
+C1     a  0  10n
+D1     a  0  1N914
+D2     0  a  1N914
+.adaa on
+.method bdf2
+.end

@@ -2,19 +2,38 @@
 // against the double reference of the same configuration and against a converged 64x one, on the report's targets
 // (docs/research/analog-circuits/README.md §2): T1 solver <= -60 dB in band, T2 alias <= -60 dB, T3 H1 and H3 within
 // 0.5 dB, T4 finite; with the generation itself, the DC point, the TS chain, the report's decision, the halfbands'
-// indexing, float2, block-split invariance and a pot's glide under ADAA. Each line prints the worst value, where it
-// fell, and the report's figure beside it; a failure exits 1. Nothing is timed.
+// indexing, float2, block-split invariance and a pot's glide under ADAA (Phase 0's sections a to h); then Phase 1's:
+// the self-test's ordered search (i), the same answer on 1 and 8 threads (j), the run-time guard (k), the provisional
+// configuration (l), and the synth path's otalp.cir (m: T1-T4 on the synth's stress matrix, the self-test's choice,
+// tick against step, the prewarp's -3 dB points, the carry under ADAA; n: a per-sample law input's lanes and block
+// splits); and Phase 1's elements (o: the new netlists, screamer-biased.cir's offset form against screamer.cir, the
+// self-test's answers for one diode and an asymmetric pair, an inductor's response); and Phase 1's last slice (p: the
+// Woodbury form's coefficients on every shipped netlist, switch.cir's ramp, matched designs at 1x, the tone stack's
+// linear-only region, BDF2, the method check on ringing.cir and the TS stage; with d, a tone glide through the TS
+// tone block matched at 1x). Each line prints the worst value, where it fell, and the report's figure beside it; a
+// failure exits 1. Nothing is timed.
 #include "harness.h"
 
+#include "circuit/Search.h"
+
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <complex>
 #include <cstdio>
 #include <cstring>
 #include <format>
+#include <functional>
 #include <limits>
+#include <map>
+#include <span>
+#include <numbers>
 #include <numeric>
+#include <optional>
+#include <regex>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace circuits
@@ -147,7 +166,7 @@ namespace circuits
             return h;
         }
 
-        std::string configText(const fc::Config& c)
+        std::string configName(const fc::Config& c)
         {
             return std::format("{}x {}, {}, {}({})", c.oversample, c.halfband == fc::Halfband::Iir ? "IIR" : "FIR",
                                c.adaa ? "ADAA" : "no ADAA",
@@ -170,7 +189,8 @@ namespace circuits
             std::printf(
                 "a. the shipped netlists generate with no error or warning; init, set, tick, step and clear are "
                 "nonblocking\n");
-            for (const char* name : {"diodetone.cir", "screamer.cir", "screamer-clip.cir", "clipper.cir"})
+            for (const char* name : {"diodetone.cir", "screamer.cir", "screamer-clip.cir", "clipper.cir", "otalp.cir",
+                                     "rc8k.cir", "sallen-key.cir", "tonestack.cir", "switch.cir", "ringing.cir"})
             {
                 const fc::Result result = fc::generate(netlist(name), name);
                 if (!result.errors.empty() || !result.warnings.empty())
@@ -272,18 +292,19 @@ namespace circuits
         };
 
         // ---- c. the gates, on the two 1-port blocks ----
-        void gates(Report& r, const std::string& label, const std::string& text, const std::string& name,
-                   const std::string& pot, const Figures& report)
+        // Returns the worst T1, T2 and T3 it measured (section i compares the self-test's with them).
+        Figures gates(Report& r, const std::string& label, const std::string& text, const std::string& name,
+                      const std::string& pot, const Figures& report)
         {
             std::unique_ptr<Circuit> c = buildOrReport(r, text, name);
             if (!c)
-                return;
+                return {0, 0, 0};
             const fc::Plan& plan = c->plan;
             const int m = plan.config.oversample;
             const bool adaa = plan.config.adaa;
             const double level = *plan.netlist.target.level;
             std::printf("c. %s %s (%s), L = %g V; %s 0, 0.5 and 1; report §2's stress set\n", name.c_str(),
-                        label.c_str(), configText(plan.config).c_str(), level, pot.c_str());
+                        label.c_str(), configName(plan.config).c_str(), level, pot.c_str());
             Worst t1;
             Worst t2;
             Worst converged;
@@ -343,6 +364,7 @@ namespace circuits
             r.line(stats.unconverged == 0, std::format("the references: {} unconverged of {} samples, at most {} "
                                                        "Newton steps",
                                                        stats.unconverged, stats.samples, stats.maxIterations));
+            return {t1.value, t2.value, t3.value};
         }
 
         // ---- d. the Tube Screamer chain ----
@@ -355,7 +377,7 @@ namespace circuits
             const fc::Plan& plan = c->plan;
             std::printf("d. %s as shipped (%s; blocks %d to %d in the region): T3 against the 64x chain, drive x tone "
                         "{0, 0.5, 1}, 0.45 V\n",
-                        name.c_str(), configText(plan.config).c_str(), plan.regionFirst + 1, plan.regionLast + 1);
+                        name.c_str(), configName(plan.config).c_str(), plan.regionFirst + 1, plan.regionLast + 1);
             constexpr std::size_t warm = 4096;   // block 1's 15.9 Hz high-pass settles
             const std::size_t host = warm + kWindow + 64;
             Worst t3;
@@ -383,8 +405,11 @@ namespace circuits
                 }
             }
             r.line(t3.value <= kResponse,
-                   std::format("T3 H1, H3 {:.3f} dB at {} (gate {}: the tone block in the region, report §9.2)",
-                               t3.value, t3.where, kResponse));
+                   std::format("T3 H1, H3 {:.3f} dB at {} (gate {}: the tone block as the plan has it, {}; report "
+                               "§9.2)",
+                               t3.value, t3.where, kResponse,
+                               plan.blocks[2].design == fc::Block::Design::Matched ? "matched at 1x"
+                                                                                   : "in the region"));
             r.line(stats.unconverged == 0,
                    std::format("the chain reference: {} unconverged of {} samples", stats.unconverged, stats.samples));
             const std::vector<double> defaults = potsWith(plan, "", 0);
@@ -567,7 +592,7 @@ namespace circuits
             std::vector<float> pa(kHost);
             std::vector<float> pb(kHost);
             const std::vector<float> potBuffer(kHost, 0.3f);
-            pair->ticks2(self.get(), fa.data(), fb.data(), potBuffer.data(), pa.data(), pb.data(),
+            pair->ticks2(self.get(), fa.data(), fb.data(), nullptr, potBuffer.data(), nullptr, pa.data(), pb.data(),
                          static_cast<int>(kHost), 0);
             std::size_t differ = 0;
             for (std::size_t i = 0; i < kHost; ++i)
@@ -681,7 +706,7 @@ namespace circuits
                     const float x = static_cast<float>(u[i]);
                     const float pot = 0;
                     float y = 0;
-                    adaa->ticks(self.get(), &x, &pot, &y, 1, 1);   // start 1: no set() inside
+                    adaa->ticks(self.get(), &x, nullptr, &pot, nullptr, &y, 1, 1);   // start 1: no set() inside
                 }
                 r.line(worst <= 1e-5 && moved > 1e-3,
                        std::format("each set() of 4 ramps keeps the last point's Newton residual: it moves {:.1e} of "
@@ -711,6 +736,1628 @@ namespace circuits
                                "drive held: within 1.1x",
                                moving, held));
         }
+
+        // ---- i, j. the self-test ----
+        // SelfTestOptions::parallel on `threads` std::threads.
+        std::function<void(int, const std::function<void(int)>&)> pool(int threads)
+        {
+            return [threads](int count, const std::function<void(int)>& job)
+            {
+                std::atomic<int> next{0};
+                auto work = [&]
+                {
+                    for (int i = next++; i < count; i = next++)
+                        job(i);
+                };
+                std::vector<std::thread> ts;
+                for (int k = 1; k < threads; ++k)
+                    ts.emplace_back(work);
+                work();
+                for (std::thread& t : ts)
+                    t.join();
+            };
+        }
+
+        // The netlist's plan (it must have one).
+        fc::Plan planned(const std::string& text, const std::string& name)
+        {
+            fc::Messages messages;
+            const std::optional<fc::Plan> p = fc::plan(fc::parse(text, messages), {}, name, messages);
+            if (!p)
+                throw std::runtime_error(name + " does not plan:\n" + messages.format(name, fc::Severity::Error));
+            return *p;
+        }
+
+        // The netlist with its configuration directives removed: every searched dimension open.
+        std::string opened(std::string text)
+        {
+            for (const char* d : {".oversample", ".adaa", ".solver"})
+                text = withDirective(text, d, "");
+            return text;
+        }
+
+        // A choice as the directives that pin it: ".oversample 4, .adaa off, .solver newton(1)".
+        std::string directivesOf(const fc::Choice& c)
+        {
+            return std::format(".oversample {}, .adaa {}, .solver {}({})", c.oversample, c.adaa ? "on" : "off",
+                               c.solver.guess == fc::Solver::Guess::Omega ? "omega" : "newton", c.solver.steps);
+        }
+
+        // The self-test of `name` without its configuration directives, on 8 threads: it chooses `expected` (the
+        // shipped directives, which the report and Phase 0's measurements chose by hand), its notes list each
+        // candidate tried in the cost model's order with its verdict, and the answer's figures are section c's (when
+        // `c` is given; otherwise they are printed).
+        std::optional<fc::SelfTestResult> search(Report& r, const std::string& name, const std::string& expected,
+                                                 const Figures* c)
+        {
+            const std::string text = opened(netlist(name));
+            fc::SelfTestOptions test;
+            test.parallel = pool(8);
+            const fc::SelfTestResult t = fc::selfTest(text, name, {}, test);
+            if (!t.errors.empty() || !t.choice)
+            {
+                r.line(false, name + ": the self-test gave no answer:\n" + t.errors + t.notes);
+                return std::nullopt;
+            }
+            // the candidates tried, in order: "self-test candidate k: <configuration>, <cost> model cycles: ..."
+            std::vector<double> costs;
+            int verdicts = 0;
+            for (std::size_t at = t.notes.find("self-test candidate "); at != std::string::npos;
+                 at = t.notes.find("self-test candidate ", at + 1))
+            {
+                const std::size_t end = t.notes.find('\n', at);
+                const std::string line = t.notes.substr(at, end - at);
+                const std::size_t cycles = line.find(" model cycles");
+                const std::size_t comma = line.rfind(", ", cycles);
+                costs.push_back(std::stod(line.substr(comma + 2, cycles - comma - 2)));
+                verdicts += line.ends_with(": passes") || line.find(": fails (") != std::string::npos ? 1 : 0;
+            }
+            // the model's order: candidates()'s (by cost, ADAA first within 5 % of a group's cheapest)
+            const std::vector<fc::Candidate> order = fc::candidates(planned(text, name));
+            bool ordered = costs.size() <= order.size();
+            for (std::size_t k = 0; ordered && k < costs.size(); ++k)
+                ordered = std::fabs(costs[k] - order[k].cost) < 0.5;
+            const std::string chose = fc::Choice::parse(t.choice->text()) ? t.choice->text() : std::string();
+            const std::string got = directivesOf(*t.choice);
+            const std::size_t all = order.size();
+            r.line(got == expected && t.choice->met && !chose.empty(),
+                   std::format("{} without its directives: the self-test chose {} (the shipped {}), candidate {} of "
+                               "{}",
+                               name, got, expected, t.candidates, all));
+            r.line(ordered && verdicts == t.candidates && static_cast<int>(costs.size()) == t.candidates,
+                   std::format("its notes list the {} candidates tried, each with its verdict, in the model's order "
+                               "({:g} to {:g} cycles)",
+                               t.candidates, costs.empty() ? 0.0 : costs.front(), costs.empty() ? 0.0 : costs.back()));
+            if (c == nullptr)
+            {
+                Report::note(std::format("the answer's T1 {:.1f}, T2 {:.1f}, T3 {:.2f} dB", t.choice->t1,
+                                         t.choice->t2, t.choice->t3));
+                return t;
+            }
+            const double d1 = std::fabs(t.choice->t1 - c->solver);
+            const double d2 = std::fabs(t.choice->t2 - c->alias);
+            const double d3 = std::fabs(t.choice->t3 - c->h3);
+            r.line(d1 <= 1 && d2 <= 1 && d3 <= 1,
+                   std::format("the answer's T1 {:.1f}, T2 {:.1f}, T3 {:.2f} dB; section c measured {:.1f}, {:.1f}, "
+                               "{:.2f} (within 1 dB)",
+                               t.choice->t1, t.choice->t2, t.choice->t3, c->solver, c->alias, c->h3));
+            return t;
+        }
+
+        void selfTests(Report& r, const Figures& diodeTone, const Figures& screamerClip)
+        {
+            std::printf("i. the self-test's ordered search, on diodetone.cir and screamer-clip.cir without their "
+                        "configuration directives (the full stress matrix, 8 threads)\n");
+            const std::optional<fc::SelfTestResult> dt =
+                search(r, "diodetone.cir", ".oversample 4, .adaa off, .solver omega(2)", &diodeTone);
+            search(r, "screamer-clip.cir", ".oversample 4, .adaa on, .solver omega(1)", &screamerClip);
+            std::printf("j. diodetone.cir's self-test on the calling thread alone, against the 8 threads of i\n");
+            if (!dt)
+                return;
+            const fc::SelfTestResult serial = fc::selfTest(opened(netlist("diodetone.cir")), "diodetone.cir", {});
+            r.line(serial.choice && serial.choice->text() == dt->choice->text() && serial.notes == dt->notes,
+                   std::format("the answer ({}) and the notes ({} bytes) are the same, byte for byte",
+                               serial.choice ? serial.choice->text() : std::string("none"), serial.notes.size()));
+        }
+
+        // ---- k. the guard ----
+        // diodetone.cir as shipped, a 1 V, 996 Hz sine, tone 0.5: a NaN written into x_C1 between ticks 100 and 101
+        // (one channel), or into the second lane of x_C1 (.channels 2). From the next multiple of 16 ticks the output
+        // is finite, the fields are a fresh instance's after the same tick (clear()'s, a tick on), but fd_, the fade,
+        // which rises monotonically to exactly 1 within 960 samples (+-1); calls of 1, 61 and 64 samples agree, bit
+        // for bit.
+        void guard(Report& r)
+        {
+            std::printf("k. the run-time guard: diodetone.cir, a NaN written into x_C1 after tick 100\n");
+            auto c = buildOrReport(r, netlist("diodetone.cir"), "diodetone.cir");
+            fc::Options two;
+            two.channels = 2;
+            auto stereo = buildOrReport(r, netlist("diodetone.cir"), "diodetone.cir", two);
+            if (!c || !stereo)
+                return;
+            auto offsetOf = [](const Circuit& circuit, const std::string& name)
+            {
+                for (const fminus::Program::Module::Field& f : circuit.module->fields)
+                {
+                    if (f.name == name)
+                        return f.offset;
+                }
+                throw std::runtime_error("no field " + name);
+            };
+            constexpr std::size_t n = 2000;
+            constexpr std::size_t poisoned = 101;   // the NaN is written before this tick
+            const std::vector<double> u = fc::sine(1.0, 85, kWindow, 1, n);
+            const std::vector<float> in(u.begin(), u.end());
+            const float tone = 0.5f;
+            const std::vector<float> pots(n, tone);
+            const std::size_t x = offsetOf(*c, "x_C1");
+            const std::size_t fd = offsetOf(*c, "fd_");
+            auto readFloat = [](const void* base, std::size_t offset)
+            {
+                float f = 0;
+                std::memcpy(&f, static_cast<const char*>(base) + offset, sizeof f);
+                return f;
+            };
+            // the run, in calls of `call` samples, the NaN written between two calls; fd_ after each call
+            auto run = [&](int call, std::vector<float>* fade, Instance& self)
+            {
+                c->init(self.get(), 48000);
+                std::vector<float> out(n);
+                auto ticks = [&](std::size_t from, std::size_t until)
+                {
+                    for (std::size_t at = from; at < until;)
+                    {
+                        const std::size_t count = std::min(static_cast<std::size_t>(call), until - at);
+                        c->ticks(self.get(), in.data() + at, nullptr, pots.data() + at, nullptr, out.data() + at,
+                                 static_cast<int>(count), static_cast<int>(at));
+                        if (fade != nullptr)
+                            fade->push_back(readFloat(self.get(), fd));
+                        at += count;
+                    }
+                };
+                ticks(0, poisoned);
+                const float nan = std::numeric_limits<float>::quiet_NaN();
+                std::memcpy(static_cast<char*>(self.get()) + x, &nan, sizeof nan);
+                ticks(poisoned, n);
+                return out;
+            };
+            std::vector<float> fade;
+            Instance whole(*c->module);
+            const std::vector<float> one = run(1, &fade, whole);
+            const std::size_t reset = (poisoned + 15) / 16 * 16;   // 112: the next multiple of 16 ticks
+            bool finiteAfter = true;
+            for (std::size_t i = reset; i < n; ++i)
+                finiteAfter = finiteAfter && std::isfinite(one[i]);
+            r.line(finiteAfter && one[reset] == 0,
+                   std::format("the output is finite from tick {}, where the guard resets (0 there: the fade starts at "
+                               "0; before it, the bracket kept v_D1, and so the output, finite)",
+                               reset));
+            // the fields at the reset: a fresh instance's after one tick of the same input, but the fade's
+            {
+                Instance fresh(*c->module);
+                c->init(fresh.get(), 48000);
+                float y = 0;
+                c->ticks(fresh.get(), in.data() + reset, nullptr, pots.data() + reset, nullptr, &y, 1, 0);
+                Instance again(*c->module);
+                // the run again, stopped right after the reset's tick; x_C1 is NaN until it
+                c->init(again.get(), 48000);
+                std::vector<float> out(n);
+                bool poisonedUntil = true;
+                for (std::size_t i = 0; i <= reset; ++i)
+                {
+                    if (i == poisoned)
+                    {
+                        const float nan = std::numeric_limits<float>::quiet_NaN();
+                        std::memcpy(static_cast<char*>(again.get()) + x, &nan, sizeof nan);
+                    }
+                    if (i > poisoned && i <= reset)
+                        poisonedUntil = poisonedUntil && std::isnan(readFloat(again.get(), x));
+                    c->ticks(again.get(), in.data() + i, nullptr, pots.data() + i, nullptr, out.data() + i, 1,
+                             static_cast<int>(i));
+                }
+                r.line(poisonedUntil && std::isfinite(readFloat(again.get(), x)),
+                       std::format("x_C1 stays NaN from tick {} to the guard's check at tick {}, and is finite "
+                                   "after it",
+                                   poisoned, reset));
+                std::string differ;
+                for (const fminus::Program::Module::Field& f : c->module->fields)
+                {
+                    if (f.name == "fd_")
+                        continue;
+                    if (std::memcmp(static_cast<const char*>(fresh.get()) + f.offset,
+                                    static_cast<const char*>(again.get()) + f.offset, f.size) != 0)
+                        differ += " " + f.name;
+                }
+                r.line(differ.empty(), "the fields after the reset's tick are a fresh instance's after the same tick, "
+                                       "but fd_" +
+                                           (differ.empty() ? std::string() : "; these differ:" + differ));
+            }
+            // the fade (fd_ after each tick, the reset's the first): monotonic, exactly 1 within 960 samples (+-1)
+            {
+                bool monotonic = true;
+                std::size_t settled = 0;
+                for (std::size_t i = reset; i < fade.size(); ++i)
+                {
+                    monotonic = monotonic && (i == reset || fade[i] >= fade[i - 1]);
+                    if (settled == 0 && fade[i] == 1.0f)
+                        settled = i - reset + 1;
+                }
+                r.line(monotonic && settled >= 959 && settled <= 961 && fade[reset] < 1.0f,
+                       std::format("fd_ rises monotonically from {:g} after the reset's tick to exactly 1 after {} "
+                                   "ticks (960 +- 1 at 48 kHz)",
+                                   fade[reset], settled));
+            }
+            for (int call : {61, 64})
+            {
+                Instance self(*c->module);
+                const std::vector<float> parts = run(call, nullptr, self);
+                std::size_t differ = 0;
+                for (std::size_t i = 0; i < n; ++i)
+                    differ += std::memcmp(&parts[i], &one[i], sizeof(float)) != 0 ? 1 : 0;
+                r.line(differ == 0,
+                       std::format("calls of {}: {} of {} samples differ from calls of 1", call, differ, n));
+            }
+            // .channels 2: a NaN in one lane resets both
+            {
+                Instance self(*stereo->module);
+                stereo->init(self.get(), 48000);
+                const std::vector<float> b(in.begin(), in.end());
+                std::vector<float> ya(n);
+                std::vector<float> yb(n);
+                const std::size_t x2 = offsetOf(*stereo, "x_C1");
+                stereo->ticks2(self.get(), in.data(), b.data(), nullptr, pots.data(), nullptr, ya.data(), yb.data(),
+                               static_cast<int>(poisoned), 0);
+                const float nan = std::numeric_limits<float>::quiet_NaN();
+                std::memcpy(static_cast<char*>(self.get()) + x2 + sizeof(float), &nan, sizeof nan);
+                stereo->ticks2(self.get(), in.data() + poisoned, b.data() + poisoned, nullptr, pots.data() + poisoned,
+                               nullptr, ya.data() + poisoned, yb.data() + poisoned, static_cast<int>(n - poisoned),
+                               static_cast<int>(poisoned));
+                bool same = true;
+                for (std::size_t i = reset; i < n; ++i)
+                    same = same && ya[i] == one[i] && yb[i] == one[i];
+                r.line(same, "float2: a NaN in x_C1's second lane resets both lanes at the same tick: from it, each "
+                             "lane is the scalar module's after its reset, bit for bit");
+            }
+        }
+
+        // ---- l. the provisional configuration ----
+        void provisional(Report& r)
+        {
+            std::printf("l. the provisional configuration: diodetone.cir without its configuration directives\n");
+            const fc::Result result = fc::generate(opened(netlist("diodetone.cir")), "diodetone.cir");
+            const bool note = result.notes.find("diodetone.cir: note: the self-test chooses this circuit's "
+                                                "configuration; provisional: 8x IIR, omega(2)\n") != std::string::npos;
+            r.line(result.errors.empty() && result.provisional && note && result.selfTestKey.size() == 16,
+                   "Result::provisional, its key, and the note 'the self-test chooses this circuit's configuration; "
+                   "provisional: 8x IIR, omega(2)'");
+            auto c = buildOrReport(r, opened(netlist("diodetone.cir")), "diodetone.cir");
+            if (!c)
+                return;
+            const fc::Config& cfg = c->plan.config;
+            std::string bad;
+            for (const char* method : {"init", "set", "tick", "step", "clear"})
+            {
+                const std::string full = c->result.module + "::" + method;
+                if (!c->program->nonBlocking(full))
+                    bad += " " + full;
+            }
+            r.line(cfg.oversample == 8 && cfg.halfband == fc::Halfband::Iir && !cfg.adaa &&
+                       cfg.solver.guess == fc::Solver::Guess::Omega && cfg.solver.steps == 2 && bad.empty(),
+                   "its module is 8x IIR, plain omega(2), and its methods are nonblocking" +
+                       (bad.empty() ? std::string() : "; not:" + bad));
+            // an OTA's (the SM row's): 2x, the previous v + 2 Newton steps
+            const fc::Result ota = fc::generate(opened(netlist("otalp.cir")), "otalp.cir");
+            r.line(ota.errors.empty() && ota.provisional &&
+                       ota.notes.find("otalp.cir: note: the self-test chooses this circuit's configuration; "
+                                      "provisional: 2x IIR, newton(2)\n") != std::string::npos,
+                   "otalp.cir without its directives: provisional, 2x IIR, newton(2) (the SM row's)");
+        }
+        // ---- m. the synth path: otalp.cir ----
+        std::vector<float> floats(const std::vector<double>& v)
+        {
+            return {v.begin(), v.end()};
+        }
+
+        // The module's tick over u at `rate`, a law value a sample, in calls of `call` samples (0: one call).
+        std::vector<double> ticksAt(const Circuit& c, double rate, std::span<const double> u,
+                                    std::span<const float> law, int call = 0)
+        {
+            Instance self(*c.module);
+            c.init(self.get(), static_cast<float>(rate));
+            const auto n = static_cast<int>(u.size());
+            const std::vector<float> in(u.begin(), u.end());
+            std::vector<float> out(u.size());
+            const auto l = static_cast<std::size_t>(c.laws());
+            const int size = call <= 0 ? n : call;
+            for (int start = 0; start < n; start += size)
+            {
+                const auto s = static_cast<std::size_t>(start);
+                c.ticks(self.get(), in.data() + s, law.data() + s * l, nullptr, nullptr, out.data() + s,
+                        std::min(size, n - start), start);
+            }
+            return {out.begin(), out.end()};
+        }
+
+        // T1-T4 at the netlist's configuration, the self-test's way (its stress matrix, a synth's: the law input at
+        // its three points, the saw and the modulation; its converged references; measureUnit and reduce), through
+        // the JIT here.
+        Figures synthGates(Report& r, const std::string& name)
+        {
+            auto c = buildOrReport(r, netlist(name), name);
+            if (!c)
+                return {0, 0, 0};
+            const fc::Plan& p = c->plan;
+            const int m = p.config.oversample;
+            const fc::StressMatrix mx = fc::stressMatrix(p);
+            std::printf("m. %s as shipped (%s), L = %g V; %s at %zu points; the synth's stress matrix (%d units)\n",
+                        name.c_str(), configName(p.config).c_str(), mx.level, p.laws.front().name.c_str(),
+                        mx.points.size(), mx.units());
+            std::vector<fc::UnitVerdict> units(static_cast<std::size_t>(mx.units()));
+            long unconverged = 0;
+            const std::size_t host = mx.shape.host();
+            for (int u = 0; u < mx.units(); ++u)
+            {
+                if (!mx.runs(u))
+                    continue;
+                const fc::StressSignal& s = mx.signal(u);
+                std::optional<fc::ReferenceT1> t1;
+                std::optional<fc::Reference64> t64;
+                if (s.t1)
+                {
+                    t1 = fc::referenceT1(p, mx, u, m, p.config.adaa, fc::Method::Tr, {});
+                    unconverged += t1->unconverged;
+                }
+                if (s.t2)
+                {
+                    t64 = fc::reference64(p, mx, u, {});
+                    unconverged += t64->unconverged;
+                }
+                const std::vector<double> steps = runSteps(*c, fc::regionInput(p, mx, u, m, {}), {},
+                                                           floats(fc::lawArguments(p, mx, u, m, m * host)));
+                const std::vector<double> ticks = runTicks(*c, fc::signalSamples(mx, s, 1, host), {}, 0,
+                                                           floats(fc::lawArguments(p, mx, u, 1, host)));
+                units[static_cast<std::size_t>(u)] =
+                    fc::measureUnit(mx, u, m, steps, ticks, t1 ? &*t1 : nullptr, t64 ? &*t64 : nullptr);
+            }
+            const fc::Verdict v = fc::reduce(mx, units, unconverged);
+            r.line(v.t1.value <= kGate, std::format("T1 solver  {:6.1f} dB at {} (gate {})", v.t1.value, v.t1.where,
+                                                     kGate));
+            r.line(v.t2.value <= kGate, std::format("T2 alias   {:6.1f} dB at {}, in excess of the 64x reference's "
+                                                     "(gate {})",
+                                                     v.t2.value, v.t2.where, kGate));
+            r.line(v.t3.value <= kResponse, std::format("T3 H1, H3 {:.3f} dB at {}, against 64x (gate {})", v.t3.value,
+                                                        v.t3.where, kResponse));
+            r.line(v.finite, v.finite ? std::string("T4 finite on every signal, 2.2 L, the saw and the modulation too")
+                                      : "T4 not finite at " + v.notFinite);
+            r.line(unconverged == 0, std::format("the references: {} unconverged samples", unconverged));
+            return {v.t1.value, v.t2.value, v.t3.value};
+        }
+
+        // An amplitude at f: the least-squares fit of a sin + b cos + c over y (exact for a sinusoid at f whatever
+        // the window's length).
+        double amplitudeAt(std::span<const double> y, double f, double rate, std::size_t first)
+        {
+            double s[3][4] = {};
+            for (std::size_t i = first; i < y.size(); ++i)
+            {
+                const double w = 2 * std::numbers::pi * f * static_cast<double>(i) / rate;
+                const double b[3] = {std::sin(w), std::cos(w), 1};
+                for (int j = 0; j < 3; ++j)
+                {
+                    for (int k = 0; k < 3; ++k)
+                        s[j][k] += b[j] * b[k];
+                    s[j][3] += b[j] * y[i];
+                }
+            }
+            for (int k = 0; k < 3; ++k)
+            {
+                for (int j = 0; j < 3; ++j)
+                {
+                    if (j == k)
+                        continue;
+                    const double f2 = s[j][k] / s[k][k];
+                    for (int c = k; c < 4; ++c)
+                        s[j][c] -= f2 * s[k][c];
+                }
+            }
+            const double a = s[0][3] / s[0][0];
+            const double b = s[1][3] / s[1][1];
+            return std::hypot(a, b);
+        }
+
+        // The -3 dB frequency of a one-pole OTA module at `rate` with its gain held at g, at a small signal (10 mV):
+        // its DC gain from a step, then a bisection on f.
+        double minus3dB(const Circuit& c, double rate, double g, double guess)
+        {
+            const std::size_t n = 24000;
+            const std::vector<float> law(n, static_cast<float>(g));
+            const std::vector<double> dcIn(n, 0.01);
+            const double dc = ticksAt(c, rate, dcIn, law).back() / 0.01;
+            auto gain = [&](double f)
+            {
+                std::vector<double> u(n);
+                for (std::size_t i = 0; i < n; ++i)
+                    u[i] = 0.01 * std::sin(2 * std::numbers::pi * f * static_cast<double>(i) / rate);
+                return amplitudeAt(ticksAt(c, rate, u, law), f, rate, 4000) / 0.01 / dc;
+            };
+            double lo = guess / 3;
+            double hi = std::min(guess * 3, 0.45 * rate);
+            for (int k = 0; k < 40; ++k)
+            {
+                const double mid = std::sqrt(lo * hi);
+                (gain(mid) > std::sqrt(0.5) ? lo : hi) = mid;
+            }
+            return std::sqrt(lo * hi);
+        }
+
+        void synth(Report& r)
+        {
+            const Figures shipped = synthGates(r, "otalp.cir");
+
+            // the self-test, without the netlist's configuration lines, chooses what it ships
+            const std::optional<fc::SelfTestResult> amps =
+                search(r, "otalp.cir", ".oversample 4, .adaa off, .solver newton(1)", &shipped);
+
+            // and with iabc's argument in mA (scale=1m), the same range in amps: the self-test feeds the module its
+            // law samples over their scale, so it measures the same circuit and chooses as it does in amps (fed the
+            // amps raw, the module ran at a thousandth of its references' gains: no candidate met, T3 65.65 dB)
+            if (amps)
+            {
+                const std::string milliamps =
+                    opened(withDirective(netlist("otalp.cir"), ".input  iabc",
+                                         ".input  iabc -    kind=current scale=1m range=10u:2m"));
+                fc::SelfTestOptions test;
+                test.parallel = pool(8);
+                const fc::SelfTestResult t = fc::selfTest(milliamps, "otalp.cir", {}, test);
+                const fc::Choice& a = *amps->choice;
+                if (!t.choice)
+                    r.line(false, "iabc in mA (scale=1m): the self-test gave no answer:\n" + t.errors + t.notes);
+                else
+                    r.line(t.choice->met && directivesOf(*t.choice) == directivesOf(a) &&
+                               t.candidates == amps->candidates && std::fabs(t.choice->t1 - a.t1) <= 3 &&
+                               std::fabs(t.choice->t2 - a.t2) <= 3 && std::fabs(t.choice->t3 - a.t3) <= 0.01,
+                           std::format("iabc in mA (scale=1m): the self-test chose {}, candidate {} ({}); T1 {:.1f}, "
+                                       "T2 {:.1f}, T3 {:.3f} dB (in amps {:.1f}, {:.1f}, {:.3f}; T1 and T2 within 3 "
+                                       "dB, float's floor, T3 0.01)",
+                                       directivesOf(*t.choice), t.candidates, t.choice->met ? "met" : "not met",
+                                       t.choice->t1, t.choice->t2, t.choice->t3, a.t1, a.t2, a.t3));
+            }
+
+            // tick against step through the 4x IIR oversampler, iabc held at its middle
+            {
+                auto c = buildOrReport(r, netlist("otalp.cir"), "otalp.cir");
+                if (!c)
+                    return;
+                const int m = c->plan.config.oversample;
+                const double mid = c->plan.laws.front().middle();
+                const std::vector<double> stepped = fc::decimateWindow(
+                    runSteps(*c, fc::sine(1.11, 85, kWindow, m, m * kHost), {}, heldLaws({&mid, 1}, m * kHost)), m,
+                    kWarm, kWindow);
+                const std::vector<double> ticks =
+                    runTicks(*c, fc::sine(1.11, 85, kWindow, 1, kHost), {}, 0, heldLaws({&mid, 1}, kHost));
+                const double gain = dB(fc::binMagnitude(windowOf(ticks), 85) / fc::binMagnitude(stepped, 85));
+                const double rest = fc::inharmonicDb(windowOf(ticks), 85);
+                r.line(
+                    std::fabs(gain) <= 0.01 && rest <= -85,
+                    std::format("tick against step at 4x IIR, 1.11 V, 996 Hz, iabc {:.3g}: the fundamental {:+.4f} dB "
+                                "against the steps ideally decimated, the rest {:.1f} dB",
+                                mid, gain, rest));
+            }
+        }
+
+        // The prewarp: one OTA stage at 1x, its -3 dB point at 1, 4 and 10 kHz cutoffs (the gain g with a + b g = -2
+        // pi fc), at 44.1 and 48 kHz, at a small signal: with .prewarp on within 0.5 % of the analog's; off (the
+        // default), the trapezoidal rule's warp, printed.
+        void prewarp(Report& r)
+        {
+            std::printf("m. the prewarp: one OTA stage (otalp.cir's first) at 1x, its -3 dB point at a 10 mV signal\n");
+            const std::string stage = ".title Stage\n.input u in\n.input iabc - kind=current range=10u:2m\n"
+                                      ".output y yb\n.oversample 1\n.adaa off\n.solver newton(2)\n"
+                                      "R1 in a1 100k\nR2 a1 0 220\nR3 yb a2 100k\nR4 a2 0 220\n"
+                                      "G1 0 y OTA a1 a2 {iabc}\nC1 y 0 1n\nR5 y 0 10meg\nX1 y yb yb opamp\n";
+            fc::Options on;
+            on.prewarp = true;
+            auto warped = buildOrReport(r, stage, "stage.cir", on);
+            auto plain = buildOrReport(r, stage, "stage.cir");
+            if (!warped || !plain)
+                return;
+            const fc::PortDef& port = *warped->plan.blocks.front().port;
+            double worst = 0;
+            std::string where;
+            std::string off;
+            for (double rate : {44100.0, 48000.0})
+            {
+                for (double fc0 : {1000.0, 4000.0, 10000.0})
+                {
+                    const double g = (-2 * std::numbers::pi * fc0 - port.poleA) / port.poleB;
+                    const double f = minus3dB(*warped, rate, g, fc0);
+                    const double error = std::fabs(f / fc0 - 1);
+                    if (error > worst)
+                    {
+                        worst = error;
+                        where = std::format("{:g} kHz at {:g} kHz", fc0 / 1000, rate / 1000);
+                    }
+                    off += std::format("{}{:g} kHz at {:g}: {:.1f} Hz ({:+.2f} %)", off.empty() ? "" : "; ", fc0 / 1000,
+                                       rate / 1000, minus3dB(*plain, rate, g, fc0),
+                                       100 * (minus3dB(*plain, rate, g, fc0) / fc0 - 1));
+                }
+            }
+            r.line(worst <= 0.005, std::format(".prewarp on: the -3 dB point within {:.4f} % of the analog's at worst "
+                                               "({}; gate 0.5 %)",
+                                               100 * worst, where));
+            Report::note(".prewarp off (the default), the trapezoidal rule's warp: " + off);
+            r.line(plain->plan.config.prewarpFrom == "default" && !plain->plan.config.prewarp,
+                   "off is the default: the cutoff law is the circuit's");
+            // with ADAA (designed at 2/3 of the rate), printed: its mean's own droop, which the tan warp at fs' does
+            // not place, moves the -3 dB point too
+            {
+                fc::Options adaaOn;
+                adaaOn.prewarp = true;
+                adaaOn.adaa = true;
+                fc::Options adaaOff;
+                adaaOff.adaa = true;
+                auto warpedAdaa = buildOrReport(r, stage, "stage.cir", adaaOn);
+                auto plainAdaa = buildOrReport(r, stage, "stage.cir", adaaOff);
+                if (!warpedAdaa || !plainAdaa)
+                    return;
+                std::string rows;
+                for (double rate : {44100.0, 48000.0})
+                {
+                    for (double fc0 : {1000.0, 4000.0, 10000.0})
+                    {
+                        const double g = (-2 * std::numbers::pi * fc0 - port.poleA) / port.poleB;
+                        const double warpedF = minus3dB(*warpedAdaa, rate, g, fc0);
+                        const double plainF = minus3dB(*plainAdaa, rate, g, fc0);
+                        rows += std::format("{}{:g} kHz at {:g}: on {:+.2f} %, off {:+.2f} %", rows.empty() ? "" : "; ",
+                                            fc0 / 1000, rate / 1000, 100 * (warpedF / fc0 - 1),
+                                            100 * (plainF / fc0 - 1));
+                    }
+                }
+                Report::note("with ADAA (1x): the -3 dB point's error, .prewarp on and off: " + rows);
+            }
+        }
+
+        // The carry under ADAA. (1) What it does: one OTA stage driven into its law's bend (10k / 1k attenuators, so a
+        // 0.5 V, 1 kHz sine puts tanh(v / 2 Vt) near 0.7), 10 nF, at 1x with ADAA and newton(2), iabc stepping from 1
+        // uA to 200 uA in one sample, at the sine's crest, and back. Its tick follows the double reference run with
+        // the same steps, ADAA and gain stream (Reference.cpp's carry the emitted one) to 2e-5 of the signal (float's
+        // rounding through the step, and in the slow pole after the step back); the same reference without the carry
+        // departs from it by more than 1e-3 of the signal (by 18 times it: the mean of the step pairs points on two
+        // curves 200x apart), so a module without the carry, or with a wrong one, fails (one without: 0.18).
+        // (2) otalp.cir with ADAA (4x, newton(1)), a 5 V, 996 Hz sine, iabc a triangle +-2 octaves around its middle
+        // at 37 Hz, against the plain newton(3) module over 512 ramps: within 1.1x of the departure with iabc held at
+        // the triangle's ends (a bound on the output, which the carry, a few uV here, barely moves).
+        void carry(Report& r)
+        {
+            std::printf("m. the carry under ADAA: an OTA stage in its law's bend, iabc stepping 1 uA to 200 uA and "
+                        "back, against the double reference; otalp.cir, iabc a triangle +-2 octaves at 37 Hz\n");
+            // (1) a gain step, through the JIT, against the reference with and without the carry
+            {
+                const std::string stage = ".title Bend\n.input u in\n.input iabc - kind=current range=1u:200u\n"
+                                          ".output y yb\n.oversample 1\n.adaa on\n.solver newton(2)\n"
+                                          "R1 in a1 10k\nR2 a1 0 1k\nR3 yb a2 10k\nR4 a2 0 1k\n"
+                                          "G1 0 y OTA a1 a2 {iabc}\nC1 y 0 10n\nR5 y 0 10meg\nX1 y yb yb opamp\n";
+                auto c = buildOrReport(r, stage, "bend.cir");
+                if (!c)
+                    return;
+                constexpr std::size_t n = 4800;
+                constexpr std::size_t up = 2412;     // 1 uA -> 200 uA, at the sine's crest
+                constexpr std::size_t down = 3612;   // and back
+                std::vector<double> u(n);
+                std::vector<float> law(n);
+                std::vector<double> gains(n);
+                for (std::size_t i = 0; i < n; ++i)
+                {
+                    const double w = 2 * std::numbers::pi * 1000 * static_cast<double>(i) / 48000;
+                    u[i] = static_cast<double>(static_cast<float>(0.5 * std::sin(w)));
+                    law[i] = i >= up && i < down ? 200e-6f : 1e-6f;
+                    gains[i] = static_cast<double>(law[i]);
+                }
+                // the module, and tanh(v / 2 Vt) at the step
+                Instance self(*c->module);
+                c->init(self.get(), 48000);
+                std::vector<double> y(n);
+                double bend = 0;
+                std::size_t tFieldOffset = 0;
+                for (const fminus::Program::Module::Field& f : c->module->fields)
+                {
+                    if (f.name == "t_G1")
+                        tFieldOffset = f.offset;
+                }
+                for (std::size_t i = 0; i < n; ++i)
+                {
+                    const auto x = static_cast<float>(u[i]);
+                    float out = 0;
+                    c->ticks(self.get(), &x, &law[i], nullptr, nullptr, &out, 1, static_cast<int>(i));
+                    y[i] = static_cast<double>(out);
+                    if (i + 1 == up || i + 1 == down)
+                    {
+                        float t = 0;
+                        std::memcpy(&t, static_cast<const char*>(self.get()) + tFieldOffset, sizeof t);
+                        bend = std::max(bend, std::fabs(static_cast<double>(t)));
+                    }
+                }
+                const std::vector<fc::Holters> h = chainAt(c->plan, {}, 48000, true, {});
+                fc::RefOptions ro;
+                ro.adaa = true;
+                ro.steps = 2;
+                ro.guess = fc::Solver::Guess::Previous;
+                const std::vector<double> carried = fc::simulate(h.front(), u, ro, nullptr, gains);
+                ro.carry = false;
+                const std::vector<double> held = fc::simulate(h.front(), u, ro, nullptr, gains);
+                double follows = 0;
+                double departs = 0;
+                for (std::size_t i = 0; i < n; ++i)
+                {
+                    follows = std::max(follows, std::fabs(y[i] - carried[i]) / 0.5);
+                    departs = std::max(departs, std::fabs(held[i] - carried[i]) / 0.5);
+                }
+                r.line(follows <= 2e-5 && departs >= 1e-3 && bend >= 0.5,
+                       std::format("a gain step (tanh at the step {:.2f}): the module follows the reference to {:.1e} "
+                                   "of the signal (gate 2e-5); without the carry the reference departs by {:.1e} "
+                                   "(gate: at least 1e-3)",
+                                   bend, follows, departs));
+            }
+            fc::Options adaaOptions;
+            adaaOptions.adaa = true;
+            auto adaa = buildOrReport(r, netlist("otalp.cir"), "otalp.cir", adaaOptions);
+            fc::Options plainOptions;
+            plainOptions.solver = fc::Solver{fc::Solver::Guess::Previous, 3};
+            auto plain = buildOrReport(r, netlist("otalp.cir"), "otalp.cir", plainOptions);
+            if (!adaa || !plain)
+                return;
+            const double mid = adaa->plan.laws.front().middle();
+            const double period = 48000.0 / 37;
+            auto triangle = [&](std::size_t i)
+            {
+                const double x = std::fmod(static_cast<double>(i) / period, 1.0);
+                const double t = x < 0.5 ? 4 * x - 1 : 3 - 4 * x;   // -1 to 1 and back
+                return mid * std::exp2(2 * t);
+            };
+            // (2) end to end
+            constexpr std::size_t warm = 4800;
+            const std::size_t ramp = static_cast<std::size_t>(period / 2);
+            auto departure = [&](std::size_t ramps, auto law)
+            {
+                const std::size_t n = warm + ramps * ramp;
+                const std::vector<double> u = fc::sine(5, 85, kWindow, 1, n);
+                std::vector<float> laws(n);
+                for (std::size_t i = 0; i < n; ++i)
+                    laws[i] = static_cast<float>(law(i));
+                const std::vector<double> a = runTicks(*adaa, u, {}, 0, laws);
+                const std::vector<double> b = runTicks(*plain, u, {}, 0, laws);
+                double worst = 0;
+                for (std::size_t i = warm; i < n; ++i)
+                    worst = std::max(worst, std::fabs(a[i] - b[i]));
+                return worst;
+            };
+            const double held = std::max(departure(64, [&](std::size_t) { return mid / 4; }),
+                                         departure(64, [&](std::size_t) { return mid * 4; }));
+            const double moving = departure(512, triangle);
+            r.line(moving <= 1.1 * held,
+                   std::format("against the plain newton(3) module over 512 ramps: {:.4f} V at worst, {:.4f} V with "
+                               "iabc held: within 1.1x",
+                               moving, held));
+        }
+
+        // ---- n. law inputs: lanes and block splits ----
+        // otalp.cir with a per-sample iabc (its triangle, and NaN, 0 and 1 A, which the clamp takes to its range):
+        // finite; .channels 2's lanes are the scalar module's, bit for bit (iabc broadcast to both); calls of 64 and 61
+        // samples are one call's, bit for bit.
+        void synthLanes(Report& r)
+        {
+            std::printf("n. law inputs: otalp.cir with a per-sample iabc, its lanes and its block splits\n");
+            auto c = buildOrReport(r, netlist("otalp.cir"), "otalp.cir");
+            fc::Options two;
+            two.channels = 2;
+            auto pair = buildOrReport(r, netlist("otalp.cir"), "otalp.cir", two);
+            if (!c || !pair)
+                return;
+            const double mid = c->plan.laws.front().middle();
+            constexpr std::size_t n = 4800;
+            std::vector<float> law(n);
+            for (std::size_t i = 0; i < n; ++i)
+                law[i] = static_cast<float>(mid * std::exp2(2 * std::sin(2 * std::numbers::pi * 37 * i / 48000.0)));
+            // NaN, 0 and 1 A
+            {
+                bool finiteAll = true;
+                for (float x : {std::numeric_limits<float>::quiet_NaN(), 0.0f, 1.0f})
+                {
+                    std::vector<float> bad = law;
+                    for (std::size_t i = 1000; i < 1200; ++i)
+                        bad[i] = x;
+                    finiteAll = finiteAll && finite(runTicks(*c, fc::sine(11, 85, kWindow, 1, n), {}, 0, bad));
+                }
+                r.line(finiteAll, "iabc NaN, 0 and 1 A for 200 samples of an 11 V sine: the output is finite");
+            }
+            // the lanes
+            {
+                const std::vector<double> a = fc::sine(5, 85, kWindow, 1, n);
+                std::vector<double> b = fc::noise(5, 1, 8192);
+                b.resize(n);
+                const std::vector<double> ya = runTicks(*c, a, {}, 0, law);
+                const std::vector<double> yb = runTicks(*c, b, {}, 0, law);
+                Instance self(*pair->module);
+                pair->init(self.get(), 48000);
+                const std::vector<float> fa = floats(a);
+                const std::vector<float> fb = floats(b);
+                std::vector<float> pa(n);
+                std::vector<float> pb(n);
+                pair->ticks2(self.get(), fa.data(), fb.data(), law.data(), nullptr, nullptr, pa.data(), pb.data(),
+                             static_cast<int>(n), 0);
+                std::size_t differ = 0;
+                for (std::size_t i = 0; i < n; ++i)
+                    differ += (static_cast<double>(pa[i]) != ya[i] ? 1 : 0) +
+                              (static_cast<double>(pb[i]) != yb[i] ? 1 : 0);
+                r.line(differ == 0, std::format(".channels 2: {} of {} samples differ from the scalar module's (a 5 V "
+                                                "sine on one lane, 5 V noise on the other)",
+                                                differ, 2 * n));
+            }
+            // the block splits
+            {
+                const std::vector<double> u = fc::sine(5, 85, kWindow, 1, n);
+                const std::vector<double> whole = runTicks(*c, u, {}, 0, law);
+                for (int call : {64, 61})
+                {
+                    const std::vector<double> parts = runTicks(*c, u, {}, call, law);
+                    std::size_t differ = 0;
+                    for (std::size_t i = 0; i < n; ++i)
+                        differ += parts[i] != whole[i] ? 1 : 0;
+                    r.line(differ == 0, std::format("calls of {}: {} of {} samples differ from one call", call, differ,
+                                                    n));
+                }
+            }
+        }
+        // ---- o. Phase 1's elements: the DC point's offsets, the diode forms, an inductor ----
+        // The new netlists generate (wah.cir with the 1x check's warning of a linear netlist) and are nonblocking;
+        // screamer-biased.cir's module is screamer.cir's but for its comments, and its output is screamer.cir's, bit
+        // for bit, under a drive glide, its DC point 4.5 V at the op amps and 0 V across the diodes; halfwave.cir's
+        // one diode and asym.cir's asymmetric pair, without their directives, get exp-affine answers that meet T1-T4
+        // (the shipped ones); wah.cir's module, an inductor's, follows its trapezoidal response, H(j 2 fs tan(pi f /
+        // fs)).
+        void elements(Report& r)
+        {
+            std::printf("o. Phase 1's elements: the new netlists; the offset form (screamer-biased.cir); one diode and "
+                        "an asymmetric pair (halfwave.cir, asym.cir); an inductor (wah.cir)\n");
+            for (const char* name : {"screamer-biased.cir", "halfwave.cir", "asym.cir", "wah.cir"})
+            {
+                const fc::Result result = fc::generate(netlist(name), name);
+                const std::string wanted;
+                std::string errors;
+                std::unique_ptr<Circuit> c = build(netlist(name), name, {}, errors);
+                std::string bad;
+                for (const char* method : {"init", "set", "tick", "step", "clear"})
+                {
+                    if (!c)
+                        break;
+                    const std::string full = c->result.module + "::" + method;
+                    const bool exists = std::find(c->module->methods.begin(), c->module->methods.end(), full) !=
+                                        c->module->methods.end();
+                    if (exists && !c->program->nonBlocking(full))
+                        bad += " " + full;
+                }
+                r.line(result.errors.empty() && result.warnings == wanted && c && bad.empty(),
+                       std::format("{}: module {}, {} block(s){}{}", name, result.module,
+                                   c ? c->plan.blocks.size() : 0, bad.empty() ? "" : "; not nonblocking:" + bad,
+                                   result.warnings.empty() ? "" : "; " + result.warnings.substr(0, 60) + "..."));
+                if (result.warnings != wanted || !result.errors.empty())
+                    Report::note(result.errors + result.warnings);
+            }
+
+            // the offset form: screamer-biased.cir is screamer.cir with its 4.5 V reference drawn
+            {
+                auto lines = [](const std::string& text)
+                {
+                    std::vector<std::string> out;
+                    std::size_t at = 0;
+                    while (at < text.size())
+                    {
+                        const std::size_t end = std::min(text.find('\n', at), text.size());
+                        const std::string line = text.substr(at, end - at);
+                        if (line.rfind("//", 0) != 0)
+                            out.push_back(line);
+                        at = end + 1;
+                    }
+                    return out;
+                };
+                const fc::Result biased = fc::generate(netlist("screamer-biased.cir"), "screamer-biased.cir");
+                const fc::Result plain = fc::generate(netlist("screamer.cir"), "screamer.cir");
+                const std::vector<std::string> a = lines(biased.source);
+                const std::vector<std::string> b = lines(plain.source);
+                r.line(a == b && !a.empty(), std::format("screamer-biased.cir's module is screamer.cir's but for its "
+                                                         "comment lines ({} lines each)",
+                                                         a.size()));
+                std::string errors;
+                auto cb = build(netlist("screamer-biased.cir"), "screamer-biased.cir", {}, errors);
+                auto cs = build(netlist("screamer.cir"), "screamer.cir", {}, errors);
+                if (!cb || !cs)
+                {
+                    r.line(false, "screamer-biased.cir or screamer.cir does not build:\n" + errors);
+                    return;
+                }
+                // a 0.45 V, 996 Hz sine and noise, drive gliding 0 -> 1 -> 0 on the grid, tone and level held
+                constexpr std::size_t n = 9600;
+                std::vector<double> u = fc::sine(0.45, 85, kWindow, 1, n);
+                std::vector<double> noise = fc::noise(0.2, 1, 16384);
+                for (std::size_t i = 0; i < n; ++i)
+                    u[i] += noise[i];
+                std::vector<float> pots(3 * n);
+                for (std::size_t i = 0; i < n; ++i)
+                {
+                    const double x = static_cast<double>(i) / n;
+                    pots[3 * i] = static_cast<float>(x < 0.5 ? 2 * x : 2 - 2 * x);
+                    pots[3 * i + 1] = 0.5f;
+                    pots[3 * i + 2] = 0.7f;
+                }
+                const std::vector<double> yb = runTicksWith(*cb, u, pots);
+                const std::vector<double> ys = runTicksWith(*cs, u, pots);
+                std::size_t differ = 0;
+                for (std::size_t i = 0; i < n; ++i)
+                    differ += yb[i] != ys[i] ? 1 : 0;
+                r.line(differ == 0 && finite(yb),
+                       std::format("its output is screamer.cir's under a drive glide: {} of {} samples differ, bit for "
+                                   "bit",
+                                   differ, n));
+                const fc::Plan& p = cb->plan;
+                double worst = 0;
+                for (const char* node : {"p1", "n1", "v2", "t1", "v3"})
+                {
+                    for (std::size_t k = 0; k < p.nodes.size(); ++k)
+                    {
+                        if (p.nodes[k].name == node)
+                            worst = std::max(worst, std::fabs(p.dc[k] - 4.5));
+                    }
+                }
+                const bool op = biased.notes.find("note: .op: port D1|D2: v = 0 V\n") != std::string::npos &&
+                                biased.notes.find("note: .op: V(n1) = 4.5 V\n") != std::string::npos;
+                r.line(worst <= 1e-9 && op && p.outputDc == 0,
+                       std::format("its DC point: the op amps' inputs and outputs at 4.5 V (worst {:.1e} V off), the "
+                                   "port D1|D2 at 0 V, the output at 0 V (.op's notes)",
+                                   worst));
+            }
+
+            // one diode and an asymmetric pair: the self-test's exp-affine answers, which they ship
+            search(r, "halfwave.cir", ".oversample 4, .adaa off, .solver omega(1)", nullptr);
+            search(r, "asym.cir", ".oversample 4, .adaa on, .solver omega(1)", nullptr);
+
+            // an inductor: wah.cir's tick against its matched design's response at 1x (its trapezoidal one errs by
+            // 13.4 dB near 20 kHz; the matched design passes the 1x check, docs/circuits.md)
+            {
+                std::string errors;
+                auto c = build(netlist("wah.cir"), "wah.cir", {}, errors);
+                if (!c)
+                {
+                    r.line(false, "wah.cir does not build:\n" + errors);
+                    return;
+                }
+                double worst = 0;
+                std::string where;
+                for (double res : {0.0, 0.5, 1.0})
+                {
+                    const std::vector<double> pots{res};
+                    for (int bin : {9, 85, 257})
+                    {
+                        const std::vector<double> y = runTicks(*c, fc::sine(1, bin, kWindow, 1, kHost), pots);
+                        const double measured = fc::binMagnitude(windowOf(y), bin);
+                        const double f = bin * 48000.0 / kWindow;
+                        const fc::Matched<double> design = fc::matchedDesign(
+                            *fc::trForm(c->plan, 0, 48000, pots), c->plan.blocks[0].matchedPolarity);
+                        const std::complex<double> h = fc::matchedResponse(design, f, 48000);
+                        const double off = std::fabs(dB(measured / std::abs(h)));
+                        if (off > worst)
+                        {
+                            worst = off;
+                            where = std::format("res {:g}, {}", res, hz(bin));
+                        }
+                    }
+                }
+                r.line(worst <= 0.01 && c->plan.blocks[0].design == fc::Block::Design::Matched,
+                       std::format("wah.cir's tick follows its matched design's response at 1x: {:.5f} dB off at "
+                                   "worst, at {} (gate 0.01 dB)",
+                                   worst, where));
+            }
+        }
+
+        // ---- p. Phase 1's last slice: Woodbury, switches, matched designs, the linear-only region, BDF2, ringing ----
+
+        // Every netlist this example ships.
+        const std::vector<std::string> kShipped{"diodetone.cir",  "screamer.cir",   "screamer-clip.cir",
+                                                "clipper.cir",    "otalp.cir",      "screamer-biased.cir",
+                                                "halfwave.cir",   "asym.cir",       "wah.cir",
+                                                "rc8k.cir",       "sallen-key.cir", "tonestack.cir",
+                                                "switch.cir",     "ringing.cir",    "lowpass-sweep.cir"};
+
+        // A float field of an instance, by name, as a double (NaN when the module has none).
+        double fieldOf(const Circuit& c, const void* self, const std::string& name)
+        {
+            for (const fminus::Program::Module::Field& f : c.module->fields)
+            {
+                if (f.name != name)
+                    continue;
+                float v = 0;
+                std::memcpy(&v, static_cast<const char*>(self) + f.offset, sizeof v);
+                return static_cast<double>(v);
+            }
+            return std::numeric_limits<double>::quiet_NaN();
+        }
+
+        // set() from a point of the control grid (the pots, then the switches' positions), until a switch's ramp
+        // settles (16 / (0.02 rate) a call: 480 calls at 384 kHz).
+        void settle(const Circuit& c, void* self, const std::vector<double>& point)
+        {
+            const auto pots = static_cast<std::size_t>(c.pots());
+            std::vector<float> p(point.begin(), point.begin() + static_cast<long>(std::min(pots, point.size())));
+            std::vector<int> w;
+            for (std::size_t k = pots; k < point.size(); ++k)
+                w.push_back(static_cast<int>(point[k]));
+            for (int call = 0; call < (w.empty() ? 1 : 512); ++call)
+                c.setAll(self, p.empty() ? nullptr : p.data(), w.empty() ? nullptr : w.data());
+        }
+
+        // p, Woodbury: on every shipped netlist, at host rates from 44.1 to 384 kHz and over each block's control grid
+        // (its pots at 0, 0.5 and 1, its switches at each position), init's and b<N>_set's coefficients through the
+        // JIT against the double derivation all in set (Phase 0's pivot order), row-normalised: within 1e-5, every
+        // block in either form but one. The exception is tonestack.cir's block, all in set (its b1_set is as long in
+        // the Woodbury form): float cannot hold Phase 0's form of it to 1e-5 above 44.1 kHz (three states, a 1 MEG
+        // pot against 250 pF, designed at 4x, its 8 Hz pole a hair from z = 1), so it is printed rate by rate and held
+        // to 1e-4. A matched design's float coefficients are only as well conditioned as the trapezoidal form they
+        // come from, so its response is compared, against the double design's: within 0.02 dB to 96 kHz, 0.1 dB
+        // above (but lowpass-sweep.cir's, which matched() holds to the analog response). And the TS tone block's
+        // b<N>_set does fewer operations in the Woodbury form than all in set (both in its note).
+        void woodbury(Report& r)
+        {
+            std::printf("p. Woodbury: every shipped netlist's coefficients (init's and b<N>_set's, through the JIT) "
+                        "against the double derivation all in set, 44.1 to 384 kHz, each block's control grid\n");
+            double worst = 0;   // the Woodbury form's blocks
+            std::string where;
+            double worstAll = 0;   // the all-in-set form's, but the tone stack's
+            std::string whereAll;
+            const std::string toneStack = "tonestack.cir";
+            std::map<double, double> toneStackAt;   // its block's worst at each host rate
+            double matched = 0;
+            double matchedHigh = 0;
+            std::string matchedWhere;
+            bool finiteAll = true;
+            int points = 0;
+            int woodburyBlocks = 0;
+            for (const std::string& name : kShipped)
+            {
+                auto c = buildOrReport(r, netlist(name), name);
+                if (!c)
+                    continue;
+                const fc::Plan& plan = c->plan;
+                for (std::size_t b = 0; b < plan.blocks.size(); ++b)
+                {
+                    const fc::Block& block = plan.blocks[b];
+                    fc::Messages messages;
+                    const std::optional<fc::BlockCode> code = fc::deriveBlock(plan, static_cast<int>(b), messages);
+                    const std::optional<fc::Pivots> phase0 =
+                        code ? fc::choosePivots(code->system, plan, static_cast<int>(b), messages) : std::nullopt;
+                    if (!code || !phase0)
+                    {
+                        r.line(false, name + ": a block does not derive");
+                        continue;
+                    }
+                    woodburyBlocks += code->woodbury ? 1 : 0;
+                    for (double rate : {44100.0, 48000.0, 96000.0, 192000.0, 384000.0})
+                    {
+                        const double design = rate * block.rateFactor * block.designFactor;
+                        for (const std::vector<double>& point : fc::potGrid(plan, block))
+                        {
+                            Instance self(*c->module);
+                            c->init(self.get(), static_cast<float>(rate));
+                            settle(*c, self.get(), point);
+                            ++points;
+                            const std::string at = std::format("{} block {} at {:g} kHz", name, b + 1, rate / 1000);
+                            if (block.design == fc::Block::Design::Matched)
+                            {
+                                // lowpass-sweep.cir's poles sit near z = 1 on purpose, where float's coefficients
+                                // are further from double's (0.13 dB at 192 kHz): matched() holds it to the analog
+                                // response instead, the gate that decides
+                                if (name == "lowpass-sweep.cir")
+                                    continue;
+                                const fc::Matched<double> d =
+                                    fc::matchedDesign(*fc::trForm(plan, static_cast<int>(b), design, point),
+                                                      block.matchedPolarity);
+                                const std::string n = "_b" + std::to_string(block.index);
+                                fc::Matched<double> f;
+                                f.b0 = fieldOf(*c, self.get(), "mb0" + n);
+                                f.b1 = fieldOf(*c, self.get(), "mb1" + n);
+                                f.a1 = fieldOf(*c, self.get(), "ma1" + n);
+                                if (!std::isnan(fieldOf(*c, self.get(), "mb2" + n)))
+                                {
+                                    f.b2 = fieldOf(*c, self.get(), "mb2" + n);
+                                    f.a2 = fieldOf(*c, self.get(), "ma2" + n);
+                                }
+                                double peak = 0;
+                                for (double hz = 20; hz <= 20000; hz *= 1.05)
+                                    peak = std::fmax(peak, std::abs(fc::matchedResponse(d, hz, design)));
+                                double off = 0;
+                                for (double hz = 20; hz <= 20000; hz *= 1.05)
+                                {
+                                    const double hd = std::abs(fc::matchedResponse(d, hz, design));
+                                    const double hf = std::abs(fc::matchedResponse(f, hz, design));
+                                    if (hd >= 0.01 * peak)
+                                        off = std::fmax(off, std::isfinite(hf) ? std::fabs(dB(hf / hd)) : 1e9);
+                                }
+                                double& slot = rate <= 96000 ? matched : matchedHigh;
+                                if (off > slot)
+                                {
+                                    slot = off;
+                                    if (rate <= 96000)
+                                        matchedWhere = at;
+                                }
+                                continue;
+                            }
+                            const std::vector<double> symbols =
+                                fc::symbolValues(code->system, plan, static_cast<int>(b), design, point);
+                            const fc::Linear<double> linear = fc::solve(code->system, *phase0, symbols);
+                            const fc::Coefficients<double> doubles =
+                                fc::derive(code->system, linear, block, plan.config.adaa && block.port.has_value());
+                            // per readout: max_s |f - d| S_s against sum_s |d| S_s, S_s a source's scale (a capacitor's
+                            // state is a current: gc volts)
+                            std::map<std::string, std::pair<double, double>> rows;
+                            for (const auto& [field, d] : doubles)
+                            {
+                                const std::size_t by = field.find("_by_");
+                                if (by == std::string::npos)
+                                    continue;
+                                const std::string source = field.substr(by + 4);
+                                double scale = 1;
+                                if (source.rfind("x_", 0) == 0)
+                                {
+                                    for (std::size_t k = 0; k < code->system.symbols.size(); ++k)
+                                    {
+                                        if (code->system.symbols[k].name == "gc_" + source.substr(2))
+                                            scale = symbols[k];
+                                    }
+                                }
+                                auto& row = rows[field.substr(0, by)];
+                                row.second += std::fabs(d) * scale;
+                                const auto emitted =
+                                    std::find_if(code->coefficients.begin(), code->coefficients.end(),
+                                                 [&](const auto& x) { return x.first == field; });
+                                if (emitted == code->coefficients.end() || emitted->second.kind != fc::Val::Kind::Var)
+                                    continue;   // a literal: exact
+                                const double f = fieldOf(*c, self.get(), field);
+                                finiteAll = finiteAll && std::isfinite(f);
+                                row.first = std::fmax(row.first, std::fabs(f - d) * scale);
+                            }
+                            for (const auto& [readout, row] : rows)
+                            {
+                                const double rel = row.second > 0 ? row.first / row.second : 0;
+                                if (!code->woodbury && name == toneStack)
+                                {
+                                    toneStackAt[rate] = std::fmax(toneStackAt[rate], rel);
+                                    continue;
+                                }
+                                double& slot = code->woodbury ? worst : worstAll;
+                                if (rel > slot)
+                                {
+                                    slot = rel;
+                                    (code->woodbury ? where : whereAll) = at + ", " + readout;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            r.line(worst <= 1e-5 && finiteAll,
+                   std::format("{} points of {} netlists' blocks: the {} in the Woodbury form within {:.1e} of the "
+                               "double derivation all in set, row-normalised, at {} (gate 1e-5); every coefficient "
+                               "finite, pots at 0 and 1 too",
+                               points, kShipped.size(), woodburyBlocks, worst, where));
+            r.line(worstAll <= 1e-5,
+                   std::format("the other blocks all in set (Phase 0's form, kept where the Woodbury form saves "
+                               "nothing): within {:.1e}, at {} (gate 1e-5)",
+                               worstAll, whereAll));
+            double toneStackWorst = 0;
+            std::string toneStackText;
+            for (const auto& [rate, value] : toneStackAt)
+            {
+                toneStackWorst = std::fmax(toneStackWorst, value);
+                toneStackText += std::format("{}{:.1e} at {:g}", toneStackText.empty() ? "" : ", ", value, rate / 1000);
+            }
+            r.line(toneStackAt.size() == 5 && toneStackWorst <= 1e-4,
+                   std::format("{}'s block, all in set: {} kHz (gate 1e-4, not 1e-5: float cannot hold Phase 0's form "
+                               "of it, designed at 4x the rate with its 8 Hz pole a hair from z = 1)",
+                               toneStack, toneStackText));
+            r.line(matched <= 0.02 && matchedHigh <= 0.1,
+                   std::format("the matched designs' float responses: within {:.4f} dB of the double design's to 96 "
+                               "kHz (at {}; gate 0.02), {:.4f} dB at 192 and 384 kHz (gate 0.1)",
+                               matched, matchedWhere, matchedHigh));
+            const fc::Result ts = fc::generate(netlist("screamer.cir"), "screamer.cir");
+            const std::regex form(R"(block 3's b3_set: the Woodbury form \(its variable branches pivoted last\), )"
+                                  R"((\d+) operations, and (\d+) in init; all in set, (\d+))");
+            std::smatch m;
+            const bool found = std::regex_search(ts.notes, m, form);
+            const int set = found ? std::stoi(m[1].str()) : 0;
+            const int all = found ? std::stoi(m[3].str()) : 0;
+            r.line(found && set < all,
+                   std::format("screamer.cir's tone block: b3_set does {} operations in the Woodbury form ({} in "
+                               "init), against {} all in set (its note)",
+                               set, found ? m[2].str() : "?", all));
+        }
+
+        // p, switches: switch.cir's S1, closed at clip 1. At 48 kHz its ramp moves 1/60 a set() call: r from roff to
+        // ron in exactly 60 calls, each call's ratio (roff/ron)^(1/60), within 0.1 %; under a sine its flip makes no
+        // larger a step than a pot moving the same resistance on the same grid ticks does; calls of 1, 61 and 64
+        // samples give one call's bits with the switch flipping; under ADAA each call keeps the stored point's Newton
+        // residual; the self-test's stress matrix takes each position as a point.
+        void switches(Report& r)
+        {
+            std::printf("p. switches: switch.cir, S1 closed at clip 1 (ron 1 ohm, roff 10 MEG), ramped by set() on the "
+                        "16-sample grid\n");
+            const std::string text = netlist("switch.cir");
+            auto c = buildOrReport(r, text, "switch.cir");
+            if (!c)
+                return;
+            const float tone = 0.5f;
+            auto setTo = [&](void* self, int position)
+            {
+                c->setAll(self, &tone, &position);
+            };
+            {
+                Instance self(*c->module);
+                c->init(self.get(), 48000);
+                for (int k = 0; k < 64; ++k)
+                    setTo(self.get(), 0);   // open
+                const double a = std::log(10e6);
+                const double b = std::log(1.0) - a;
+                double before = std::exp(a + b * fieldOf(*c, self.get(), "sw_S1"));
+                double ratio = 0;
+                int landed = 0;
+                for (int call = 1; call <= 80; ++call)
+                {
+                    setTo(self.get(), 1);
+                    const double sw = fieldOf(*c, self.get(), "sw_S1");
+                    const double now = std::exp(a + b * sw);
+                    ratio = std::fmax(ratio, before / now);
+                    before = now;
+                    if (sw == 1 && landed == 0)
+                        landed = call;
+                }
+                const double per = std::pow(10e6, 1.0 / 60);
+                r.line(landed == 60 && ratio <= per * 1.001,
+                       std::format("at 48 kHz r goes from roff to ron in {} set() calls (gate 60), {:.6f} a call at "
+                                   "most (the (roff / ron)^(1/60) {:.6f}, within 0.1 %)",
+                                   landed, ratio, per));
+            }
+            // the flip's step against a pot gliding the same resistance: S1 replaced by R {10meg * glide}
+            std::string glideText = text;
+            glideText.replace(glideText.find("S1     a  d  clip 1"), std::string("S1     a  d  clip 1").size(),
+                              "RS1    a  d  {10meg * glide}");
+            glideText.replace(glideText.find(".switch clip 2 1"), std::string(".switch clip 2 1").size(),
+                              ".pot    glide 1");
+            auto g = buildOrReport(r, glideText, "switch-glide.cir");
+            if (!g)
+                return;
+            constexpr std::size_t n = 9600;
+            const std::vector<double> u = fc::sine(4.5, 85, kWindow, 1, n);
+            std::vector<float> tonePots(n, tone);
+            std::vector<int> flips(n);
+            std::vector<float> glidePots(2 * n);
+            int calls = 0;
+            for (std::size_t i = 0; i < n; ++i)
+            {
+                flips[i] = i >= 2400 ? 1 : 0;
+                if (i % 16 == 0 && i >= 2400)
+                    ++calls;
+                // the switch's ramp: s = calls / 60, r = 10^(7 (1 - s)) = 10meg * glide
+                glidePots[2 * i] = static_cast<float>(i >= 2400 ? std::pow(10.0, -7.0 * std::fmin(calls / 60.0, 1.0))
+                                                                : 1.0);
+                glidePots[2 * i + 1] = tone;
+            }
+            // the glide netlist's pots: glide (.pot order: tone, then glide)
+            for (std::size_t i = 0; i < n; ++i)
+                std::swap(glidePots[2 * i], glidePots[2 * i + 1]);
+            std::vector<float> openFirst(n, tone);
+            const std::vector<double> ys = runTicksWith(*c, u, openFirst, 0, {}, flips);
+            const std::vector<double> yg = runTicksWith(*g, u, glidePots);
+            auto largestStep = [](const std::vector<double>& y)
+            {
+                double step = 0;
+                for (std::size_t i = 2400; i < y.size(); ++i)
+                    step = std::fmax(step, std::fabs(y[i] - y[i - 1]));
+                return step;
+            };
+            r.line(largestStep(ys) <= 1.1 * largestStep(yg),
+                   std::format("closing under a 4.5 V, 996 Hz sine, the largest step {:.4f} V, against {:.4f} V with "
+                               "a pot moving R the same way (within 1.1x)",
+                               largestStep(ys), largestStep(yg)));
+            // block splits, the switch flipping open at 1000 and closed again at 3000
+            {
+                std::vector<int> position(4800);
+                for (std::size_t i = 0; i < position.size(); ++i)
+                    position[i] = i >= 1000 && i < 3000 ? 0 : 1;
+                const std::vector<double> in = fc::sine(4.5, 85, kWindow, 1, position.size());
+                const std::vector<float> pots(position.size(), tone);
+                const std::vector<double> whole = runTicksWith(*c, in, pots, 0, {}, position);
+                for (int call : {1, 61, 64})
+                {
+                    const std::vector<double> parts = runTicksWith(*c, in, pots, call, {}, position);
+                    std::size_t differ = 0;
+                    for (std::size_t i = 0; i < whole.size(); ++i)
+                        differ += parts[i] != whole[i] ? 1 : 0;
+                    r.line(differ == 0 && finite(parts), std::format("calls of {} with S1 flipping: {} of {} samples "
+                                                                     "differ from one call",
+                                                                     call, differ, whole.size()));
+                }
+            }
+            // ADAA: each set() of a ramp keeps the stored point's Newton residual
+            {
+                Instance self(*c->module);
+                c->init(self.get(), 48000);
+                setTo(self.get(), 1);
+                const fc::PortDef& port = *c->plan.blocks.front().port;
+                bool conducting = false;
+                std::vector<float> one(1);
+                for (int i = 0; i < 9600 && !conducting; ++i)
+                {
+                    one[0] = static_cast<float>(4.5 * std::sin(2 * std::numbers::pi * 996 * i / 48000));
+                    float y = 0;
+                    const int closed = 1;
+                    c->ticks(self.get(), one.data(), nullptr, &tone, &closed, &y, 1, i);
+                    conducting = i >= 2400 && std::fabs(fieldOf(*c, self.get(), "v_D1")) > 0.5;
+                }
+                auto residual = [&]
+                {
+                    const double v = fieldOf(*c, self.get(), "v_D1");
+                    const double pp = fieldOf(*c, self.get(), "p_D1");
+                    const double ka = fieldOf(*c, self.get(), "ka_D1");
+                    return std::pair{pp - v - 2 * ka * std::sinh(v / port.nvt), std::fabs(pp)};
+                };
+                const auto [first, size] = residual();
+                double worstMove = 0;
+                for (int call = 0; call < 60; ++call)
+                {
+                    setTo(self.get(), 0);
+                    const auto [now, pnow] = residual();
+                    worstMove = std::fmax(worstMove, std::fabs(now - first) / std::fmax(size, pnow));
+                }
+                r.line(conducting && worstMove <= 1e-5,
+                       std::format("under ADAA, opening it call by call keeps the stored point's Newton residual: it "
+                                   "moves {:.1e} of |p_D1| at worst (gate 1e-5)",
+                                   worstMove));
+            }
+            const fc::StressMatrix matrix = fc::stressMatrix(c->plan);
+            auto among = [&](const std::string& label)
+            {
+                return std::any_of(matrix.points.begin(), matrix.points.end(), [&](const fc::StressPoint& p)
+                                   { return p.label.find(label) != std::string::npos; });
+            };
+            const bool axes = among("clip 0") && among("clip 1");
+            r.line(axes, std::format("the self-test's stress matrix: {} points, each switch position among them "
+                                     "(\"{}\" ...)",
+                                     matrix.points.size(), matrix.points.front().label));
+        }
+
+        // p, matched designs: rc8k.cir's one-pole and sallen-key.cir's biquad fail the 1x check trapezoidal and pass
+        // it matched, their headers saying so, and tick follows the design's response; the TS tone block's matched
+        // error; the tone stack (order 3) falls back, with a note saying why; lowpass-sweep.cir's design, its poles
+        // near z = 1, finite and within the gate through the JIT.
+        void matched(Report& r)
+        {
+            std::printf("p. matched designs at 1x: rc8k.cir, sallen-key.cir, the TS tone block, the tone stack, "
+                        "lowpass-sweep.cir\n");
+            for (const char* name : {"rc8k.cir", "sallen-key.cir"})
+            {
+                auto c = buildOrReport(r, netlist(name), name);
+                if (!c)
+                    continue;
+                const fc::Block& b = c->plan.blocks.front();
+                const std::regex header(R"(matched at 1x \(([0-9.]+) dB off at 44\.1 and 48 kHz)");
+                std::smatch m;
+                const bool says = std::regex_search(c->result.source, m, header);
+                double off = 0;
+                for (int bin : {9, 85, 257})
+                {
+                    const std::vector<double> y = runTicks(*c, fc::sine(0.5, bin, kWindow, 1, kHost), {});
+                    const fc::Matched<double> d =
+                        fc::matchedDesign(*fc::trForm(c->plan, 0, 48000, {}), b.matchedPolarity);
+                    const double h = std::abs(fc::matchedResponse(d, bin * 48000.0 / kWindow, 48000)) * 0.5;
+                    off = std::fmax(off, std::fabs(dB(fc::binMagnitude(windowOf(y), bin) / h)));
+                }
+                r.line(says && b.design == fc::Block::Design::Matched && b.oneX > 0.5 && b.matchedError <= 0.5 &&
+                           off <= 0.01,
+                       std::format("{}: matched at 1x ({:.2f} dB at 44.1 and 48 kHz; the trapezoidal rule's {:.2f}), "
+                                   "its header says so ({} dB); tick follows the design {:.5f} dB off at worst (gate "
+                                   "0.01)",
+                                   name, b.matchedError, b.oneX, says ? m[1].str() : "?", off));
+            }
+            {
+                std::string errors;
+                auto ts = build(netlist("screamer.cir"), "screamer.cir", {}, errors);
+                if (ts)
+                {
+                    const fc::Block& tone = ts->plan.blocks[2];
+                    r.line(tone.design == fc::Block::Design::Matched && tone.matchedError <= 0.5 && !tone.inRegion,
+                           std::format("screamer.cir's tone block: matched at 1x, {:.2f} dB at 44.1 and 48 kHz (its "
+                                       "trapezoidal response {:.2f} dB); the region is block 2 alone",
+                                       tone.matchedError, tone.oneX));
+                }
+            }
+            const fc::Result stack = fc::generate(netlist("tonestack.cir"), "tonestack.cir");
+            r.line(stack.notes.find("a matched design cannot serve (3 states: a matched design is of order 1 or 2)") !=
+                       std::string::npos && stack.warnings.empty(),
+                   "tonestack.cir (order 3) falls back to the region, its note saying why");
+            {
+                // lowpass-sweep.cir, its poles from 10 kHz down to 99 Hz (near z = 1, where the design's float
+                // arithmetic once gave NaN): through the JIT at every host rate from 44.1 to 384 kHz and 33 positions
+                // of its pot, init and set give finite coefficients and poles inside the unit circle; up to 192 kHz
+                // (the float run's rates) their response is within 0.5 dB of the analog one, by the 1x check's rule
+                const std::string name = "lowpass-sweep.cir";
+                auto c = buildOrReport(r, netlist(name), name);
+                if (c)
+                {
+                    const fc::Plan& plan = c->plan;
+                    const fc::System system = fc::assemble(plan, 0);
+                    fc::Messages scratch;
+                    const std::optional<fc::Pivots> pivots = fc::choosePivots(system, plan, 0, scratch);
+                    bool sound = pivots.has_value();
+                    double worst = 0;
+                    std::string where;
+                    double high = 0;
+                    int points = 0;
+                    for (double rate : {44100.0, 48000.0, 88200.0, 96000.0, 176400.0, 192000.0, 384000.0})
+                    {
+                        for (int k = 0; k <= 32 && pivots; ++k)
+                        {
+                            const std::vector<double> point{k / 32.0};
+                            Instance self(*c->module);
+                            c->init(self.get(), static_cast<float>(rate));
+                            settle(*c, self.get(), point);
+                            ++points;
+                            fc::Matched<double> f;
+                            f.b0 = fieldOf(*c, self.get(), "mb0_b1");
+                            f.b1 = fieldOf(*c, self.get(), "mb1_b1");
+                            f.b2 = fieldOf(*c, self.get(), "mb2_b1");
+                            f.a1 = fieldOf(*c, self.get(), "ma1_b1");
+                            f.a2 = fieldOf(*c, self.get(), "ma2_b1");
+                            for (double x : {f.b0, f.b1, f.b2, f.a1, f.a2})
+                                sound = sound && std::isfinite(x);
+                            sound = sound && f.a2 < 1 && std::fabs(f.a1) < 1 + f.a2;
+                            std::vector<double> analogDb;
+                            std::vector<double> hz;
+                            double peak = -1e300;
+                            for (double fr = 20; fr <= 20000; fr *= 1.02)
+                            {
+                                hz.push_back(fr);
+                                analogDb.push_back(dB(std::abs(fc::analog(
+                                    system, *pivots, plan, 0, std::complex<double>(0, 2 * std::numbers::pi * fr),
+                                    point))));
+                                peak = std::fmax(peak, analogDb.back());
+                            }
+                            for (std::size_t i = 0; i < hz.size(); ++i)
+                            {
+                                if (analogDb[i] < peak - 40)
+                                    continue;
+                                const double h = std::abs(fc::matchedResponse(f, hz[i], rate));
+                                const double off = std::isfinite(h) ? std::fabs(dB(h) - analogDb[i]) : 1e9;
+                                double& slot = rate <= 192000 ? worst : high;
+                                if (off > slot)
+                                {
+                                    slot = off;
+                                    if (rate <= 192000)
+                                        where = std::format("cut {:g} at {:g} kHz, {:.0f} Hz", point[0], rate / 1000,
+                                                            hz[i]);
+                                }
+                            }
+                        }
+                    }
+                    const fc::Block& b = plan.blocks.front();
+                    r.line(b.design == fc::Block::Design::Matched && sound && worst <= 0.5,
+                           std::format("{}: matched at 1x ({:.2f} dB at 44.1 and 48 kHz; the trapezoidal rule's "
+                                       "{:.2f}); {} points through the JIT, 44.1 to 384 kHz: every coefficient "
+                                       "finite, the poles inside the unit circle; the response within {:.3f} dB of "
+                                       "the analog one to 192 kHz (at {}; gate 0.5), {:.3f} dB at 384 kHz",
+                                       name, b.matchedError, b.oneX, points, worst, where, high));
+                }
+            }
+        }
+
+        // p, the linear-only region: the tone stack runs in a region at the smallest of 2, 4 and 8 at which its
+        // trapezoidal response passes the 1x check, tick agrees with step through the halfbands, and its H1 is the
+        // analog response's within 0.5 dB.
+        void linearRegion(Report& r)
+        {
+            std::printf("p. a linear-only region: tonestack.cir\n");
+            auto c = buildOrReport(r, netlist("tonestack.cir"), "tonestack.cir");
+            if (!c)
+                return;
+            const fc::Plan& plan = c->plan;
+            const int m = plan.config.oversample;
+            r.line(plan.regionFirst == 0 && plan.regionLast == 0 && plan.blocks[0].oneXRegion <= 0.5,
+                   std::format("its block in a {}x region ({}; the 1x check: {:.2f} dB at 1x, {:.2f} at {}x); not "
+                               "provisional ({})",
+                               m, plan.config.oversampleFrom, plan.blocks[0].oneX, plan.blocks[0].oneXRegion, m,
+                               c->result.provisional ? "provisional!" : "nothing open"));
+            std::vector<double> defaults;
+            for (const fc::PotInfo& p : plan.pots)
+                defaults.push_back(p.defaultValue);
+            const std::vector<double> stepped = fc::decimateWindow(
+                runSteps(*c, fc::sine(0.1, 85, kWindow, m, m * kHost), defaults), m, kWarm, kWindow);
+            const std::vector<double> ticks = runTicks(*c, fc::sine(0.1, 85, kWindow, 1, kHost), defaults);
+            const double gain = dB(fc::binMagnitude(windowOf(ticks), 85) / fc::binMagnitude(stepped, 85));
+            // the rest in excess of the steps' own: its 8 Hz bass pole's transient, still in the window, is in both
+            const double rest = fc::inharmonicExcessDb(windowOf(ticks), fc::bandPower(stepped), 85);
+            r.line(std::fabs(gain) <= 0.01 && rest <= -85,
+                   std::format("tick against step through the {}x IIR halfbands: the fundamental {:+.4f} dB, the rest "
+                               "{:.1f} dB in excess of the steps' (section f's gates)",
+                               m, gain, rest));
+            double worst = 0;
+            std::string where;
+            for (const std::vector<double>& pots : fc::potGrid(plan, plan.blocks[0]))
+            {
+                for (int bin : {85, 257})
+                {
+                    const std::vector<double> y = runTicks(*c, fc::sine(0.1, bin, kWindow, 1, kHost), pots);
+                    const double f = bin * 48000.0 / kWindow;
+                    const double a = 0.1 * std::abs(fc::analog(plan, 0, {0, 2 * std::numbers::pi * f}, pots));
+                    const double off = std::fabs(dB(fc::binMagnitude(windowOf(y), bin) / a));
+                    if (off > worst)
+                    {
+                        worst = off;
+                        where = std::format("treble {:g}, bass {:g}, mid {:g}, {}", pots[0], pots[1], pots[2], hz(bin));
+                    }
+                }
+            }
+            r.line(worst <= kResponse, std::format("T3: H1 against the analog response {:.3f} dB off at worst, at {} "
+                                                   "(gate 0.5)",
+                                                   worst, where));
+        }
+
+        // p, BDF2: diodetone.cir with .method bdf2: its step against the double reference running the block's BDF2
+        // form with the module's guess and steps, in band, at most -100 dB; nonblocking in both channel counts.
+        void bdf2(Report& r)
+        {
+            std::printf("p. BDF2: diodetone.cir with .method bdf2 (no ADAA)\n");
+            fc::Options o;
+            o.method = fc::Method::Bdf2;
+            auto c = buildOrReport(r, netlist("diodetone.cir"), "diodetone.cir", o);
+            fc::Options stereo = o;
+            stereo.channels = 2;
+            auto c2 = buildOrReport(r, netlist("diodetone.cir"), "diodetone.cir", stereo);
+            if (!c || !c2)
+                return;
+            const fc::Plan& plan = c->plan;
+            const int m = plan.config.oversample;
+            double worst = -1e300;
+            std::string where;
+            for (double tone : {0.0, 0.5, 1.0})
+            {
+                const std::vector<double> pots = potsWith(plan, "tone", tone);
+                const fc::Holters h = fc::holters(plan, 0, 48000.0 * m, pots);
+                for (const Signal& s : stressSet(4.5))
+                {
+                    if (s.overload)
+                        continue;
+                    const std::vector<double> u = make(s, m, m * kHost);
+                    fc::RefOptions ro;
+                    ro.steps = plan.config.solver.steps;
+                    const std::vector<double> ref = fc::simulate(h, u, ro);
+                    const double e = fc::bandErrorDb(fc::decimateWindow(runSteps(*c, u, pots), m, kWarm, kWindow),
+                                                     fc::decimateWindow(ref, m, kWarm, kWindow), 0,
+                                                     s.kind != Signal::Kind::Sine);
+                    if (e > worst)
+                    {
+                        worst = e;
+                        where = std::format("tone {:g}, {}", tone, s.name);
+                    }
+                }
+            }
+            bool nonblocking = true;
+            for (const auto* x : {c.get(), c2.get()})
+            {
+                for (const char* method : {"init", "set", "tick", "step", "clear"})
+                    nonblocking = nonblocking && x->program->nonBlocking(x->result.module + "::" + method);
+            }
+            r.line(worst <= -100 && nonblocking,
+                   std::format("the step against the double BDF2 reference: {:.1f} dB in band at worst, at {} (gate "
+                               "-100); nonblocking with one channel and two",
+                               worst, where));
+        }
+
+        // p, the method check: ringing.cir at 1x is flagged, measured in excess, warned, and its BDF2 twins tried;
+        // example 1 at 4x is not flagged; the TS stage, flagged, measures no excess, and warns nothing.
+        void ringingCheck(Report& r)
+        {
+            std::printf("p. the method check: ringing.cir at 1x; diodetone.cir at 4x; the TS stage\n");
+            std::string text = netlist("ringing.cir");
+            for (const char* d : {".oversample", ".adaa", ".solver"})
+                text = withDirective(text, d, "");
+            fc::Options at1;
+            at1.oversample = 1;
+            fc::SelfTestOptions test;
+            test.parallel = [](int count, const std::function<void(int)>& job)
+            {
+                std::atomic<int> next{0};
+                auto work = [&]
+                {
+                    for (int i = next++; i < count; i = next++)
+                        job(i);
+                };
+                std::vector<std::thread> pool;
+                for (int k = 1; k < 8; ++k)
+                    pool.emplace_back(work);
+                work();
+                for (std::thread& t : pool)
+                    t.join();
+            };
+            const fc::SelfTestResult rt = fc::selfTest(text, "ringing.cir", at1, test);
+            const std::regex measured(R"(at 1x block 1 puts ([0-9.]+) dB more above 20 kHz than the 64x reference: it )"
+                                      R"(rings)");
+            std::smatch m;
+            const bool rings = std::regex_search(rt.notes, m, measured);
+            const double excess = rings ? std::stod(m[1].str()) : 0;
+            const std::string warning =
+                std::format("ringing.cir:15:1: warning: at 1x block 1 rings at Nyquist ({:.0f} dB more above 20 kHz "
+                            "than the 64x reference): .method bdf2\n",
+                            excess);
+            const bool flagged = rt.notes.find("at 1x block 1's linearised trapezoidal A has an eigenvalue at") !=
+                                 std::string::npos;
+            const bool twins = rt.notes.find("BDF2 twins join the candidates") != std::string::npos &&
+                               rt.notes.find(", BDF2, ") != std::string::npos;
+            r.line(flagged && rings && excess > 6 && rt.warnings == warning && twins,
+                   std::format("ringing.cir at 1x: flagged, {:.1f} dB more between 20 and 24 kHz than the 64x "
+                               "reference (gate 6), warned (\"{}\"), its BDF2 twins tried",
+                               excess,
+                               rt.warnings.empty() ? std::string() : rt.warnings.substr(0, rt.warnings.size() - 1)));
+            if (rt.warnings != warning)
+                Report::note(rt.warnings + rt.errors);
+            const fc::Plan dt = [&]
+            {
+                fc::Messages messages;
+                return *fc::plan(fc::parse(netlist("diodetone.cir"), messages), {}, "diodetone.cir", messages);
+            }();
+            const fc::RingingCheck four = fc::ringingCheck(dt, 0, 4 * 48000.0);
+            r.line(!four.flagged, std::format("diodetone.cir at 4x is not flagged (its eigenvalue nearest -1, {:.4f})",
+                                              four.eigenvalue.real()));
+            std::string ts = netlist("screamer-clip.cir");
+            ts = withDirective(ts, ".method", ".method auto");
+            const fc::SelfTestResult rs = fc::selfTest(ts, "screamer-clip.cir", {}, test);
+            const bool tsFlagged = rs.notes.find("at 4x block 1's linearised trapezoidal A has an eigenvalue") !=
+                                   std::string::npos;
+            r.line(tsFlagged && rs.notes.find("no ringing (6 dB is the gate)") != std::string::npos &&
+                       rs.warnings.find("rings at Nyquist") == std::string::npos && rs.choice,
+                   "screamer-clip.cir (as shipped, .method auto): flagged at 4x, measured without excess, no warning, "
+                   "no twin");
+        }
+
+        // d, the TS chain under the plan's design for the tone block (matched at 1x): a 20 ms tone glide's largest step
+        // against the blocks=all build's (the tone block trapezoidal at 4x).
+        void toneGlide(Report& r)
+        {
+            std::printf("d. screamer.cir's tone block matched at 1x: a 20 ms tone glide against blocks=all\n");
+            auto shipped = buildOrReport(r, netlist("screamer.cir"), "screamer.cir");
+            fc::Options all;
+            all.region = fc::Region::All;
+            auto oversampled = buildOrReport(r, netlist("screamer.cir"), "screamer.cir", all);
+            if (!shipped || !oversampled)
+                return;
+            constexpr std::size_t n = 9600;
+            const std::vector<double> u = fc::sine(0.2, 85, kWindow, 1, n);
+            std::vector<float> pots;
+            for (std::size_t i = 0; i < n; ++i)
+            {
+                const double tone = std::clamp((static_cast<double>(i) - 4800) / 960, 0.0, 1.0);
+                pots.push_back(0.5f);
+                pots.push_back(static_cast<float>(tone));
+                pots.push_back(0.7f);
+            }
+            auto largestStep = [](const std::vector<double>& y)
+            {
+                double step = 0;
+                for (std::size_t i = 4800; i < y.size(); ++i)
+                    step = std::fmax(step, std::fabs(y[i] - y[i - 1]));
+                return step;
+            };
+            const double a = largestStep(runTicksWith(*shipped, u, pots));
+            const double b = largestStep(runTicksWith(*oversampled, u, pots));
+            r.line(a <= 1.1 * b, std::format("its largest step {:.5f} V, against {:.5f} V with the tone block "
+                                             "trapezoidal at 4x (within 1.1x)",
+                                             a, b));
+        }
     } // namespace
 
     int check()
@@ -718,25 +2365,42 @@ namespace circuits
         Report r;
         generation(r);
         dc(r);
-        gates(r, "as shipped", netlist("diodetone.cir"), "diodetone.cir", "tone", {-93.7, -79.8, -0.08});
-        gates(r, "as shipped", netlist("screamer-clip.cir"), "screamer-clip.cir", "drive", {-81.2, -75.1, -0.06});
-        // Phase 0's defaults: the netlists without their configuration lines
+        const Figures dt =
+            gates(r, "as shipped", netlist("diodetone.cir"), "diodetone.cir", "tone", {-93.7, -79.8, -0.08});
+        const Figures ts =
+            gates(r, "as shipped", netlist("screamer-clip.cir"), "screamer-clip.cir", "drive", {-81.2, -75.1, -0.06});
+        // Phase 0's defaults, now the provisional configuration: the netlists without their configuration lines
         auto defaults = [](std::string text)
         {
             for (const char* d : {".oversample", ".adaa", ".solver"})
                 text = withDirective(text, d, "");
             return text;
         };
-        gates(r, "on Phase 0's defaults", defaults(netlist("diodetone.cir")), "diodetone.cir", "tone",
+        gates(r, "provisional (Phase 0's defaults)", defaults(netlist("diodetone.cir")), "diodetone.cir", "tone",
               {-97.0, -113.9, -0.02});
-        gates(r, "on Phase 0's defaults", defaults(netlist("screamer-clip.cir")), "screamer-clip.cir", "drive",
-              {-94.4, -72.9, -0.00});
+        gates(r, "provisional (Phase 0's defaults)", defaults(netlist("screamer-clip.cir")), "screamer-clip.cir",
+              "drive", {-94.4, -72.9, -0.00});
         chain(r);
         decision(r);
         halfbands(r);
         stereo(r);
         blocks(r);
         glide(r);
+        selfTests(r, dt, ts);
+        guard(r);
+        provisional(r);
+        synth(r);
+        prewarp(r);
+        carry(r);
+        synthLanes(r);
+        elements(r);
+        toneGlide(r);
+        woodbury(r);
+        switches(r);
+        matched(r);
+        linearRegion(r);
+        bdf2(r);
+        ringingCheck(r);
         std::printf("%s: %d check(s) failed\n", r.failures == 0 ? "passed" : "FAILED", r.failures);
         return r.failures == 0 ? 0 : 1;
     }

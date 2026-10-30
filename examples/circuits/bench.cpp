@@ -1,12 +1,18 @@
-// examples/circuits/bench.cpp: example-circuits with no flags, the report's cost table (§3.2, §3.3, §4.1) from
-// emitted code, in fmbench.cpp's method: each row is a module generate() writes, with mkbench.py's bench function
-// appended (n host samples of a 1 kHz sine through tick, the squares summed), compiled with subnormals flushed, one
-// thread and the row's math mode, and the best of `reps` runs is kept: wall time, and on macOS this process's cycles
-// and instructions (proc_pid_rusage) at the user-interactive quality of service. A row is named as mkbench.py names its
-// bench, and the report's measurement of that bench (experiments/timing1.out) is printed beside it. Printed, never
-// asserted: run it on a quiet machine.
+// examples/circuits/bench.cpp: example-circuits with no flags. First what generate() takes on each shipped netlist,
+// and the self-test's wall time on diodetone.cir and screamer-clip.cir without their configuration directives, on 1,
+// 2, 4 and 8 threads. Then the report's cost table (§3.2, §3.3, §4.1) from emitted code, in fmbench.cpp's method: each
+// row is a module generate() writes, with mkbench.py's bench function appended (n host samples of a 1 kHz sine through
+// tick, the squares summed), compiled with subnormals flushed, one thread and the row's math mode, and the best of
+// `reps` runs is kept: wall time, and on macOS this process's cycles and instructions (proc_pid_rusage) at the
+// user-interactive quality of service. A row is named as mkbench.py names its bench; the self-test's cost model
+// (src/circuit/Search.h, report §3.2) and the report's measurement of that bench (experiments/timing1.out) are printed
+// beside it. Printed, never asserted: run it on a quiet machine. (--only skips the first two.)
 #include "harness.h"
 
+#include "circuit/Emit.h"
+#include "circuit/Search.h"
+
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -16,6 +22,7 @@
 #include <regex>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #if defined(__APPLE__)
@@ -35,7 +42,8 @@ namespace circuits
     {
         struct Row
         {
-            std::string circuit;   // "DT" (diodetone.cir), "TS" (screamer-clip.cir), "TSF" (screamer.cir, the chain)
+            std::string circuit;   // "DT" (diodetone.cir), "TS" (screamer-clip.cir), "TSF" (screamer.cir, the chain),
+                                   // "OTA" (otalp.cir, iabc moving each sample)
             fc::Solver solver;
             bool adaa = false;
             int m = 4;
@@ -51,6 +59,8 @@ namespace circuits
                 const std::string g = std::format("{}{}{}", solver.guess == fc::Solver::Guess::Omega ? "w" : "p",
                                                   solver.steps, adaa ? "_adaa" : "");
                 const std::string k = kind == fc::Halfband::Iir ? "iir" : "fir";
+                if (circuit == "OTA")
+                    return std::format("b_OTA_{}_{}x_{}{}", g, m, k, prewarp ? "_prewarp" : "");
                 if (circuit == "TSF")
                     return std::format("f_TS_{}_{}x_{}_{}", g, m, k,
                                        region == fc::Region::All         ? "all"
@@ -59,9 +69,13 @@ namespace circuits
                 return std::format("b_{}_{}_{}x_{}", circuit, g, m, k);
             }
 
+            bool prewarp = false;   // OTA: .prewarp on
+
             std::string section() const
             {
                 const std::string mode = math == fminus::Program::Math::Fast ? "fast" : "vector";
+                if (circuit == "OTA")
+                    return "ota " + mode;
                 if (circuit == "TSF")
                     return "tsfull " + mode;
                 if (circuit == "TS")
@@ -133,7 +147,7 @@ namespace circuits
                  1,
                  fc::Region::Auto,
                  {},
-                 "Phase 0's blocks=auto, as shipped"});
+                 "blocks=auto as shipped: the tone block matched at 1x"});
             // §4.1
             add({"TS", {G::Omega, 2}, false, 8, fc::Halfband::Fir, 1, fc::Region::Auto, {}, "§4.1 row 1: 1,861"});
             add({"TS", {G::Omega, 1}, true, 4, fc::Halfband::Fir, 1, fc::Region::Auto, {}, "§4.1 row 1: 903"});
@@ -155,6 +169,19 @@ namespace circuits
             add({"TSF", {G::Omega, 2}, false, 8, fc::Halfband::Fir, 1, fc::Region::All, {}, "§4.1 row 6: 1,865"});
             add({"DT", {G::Omega, 1}, false, 4, fc::Halfband::Iir, 1, fc::Region::Auto, {}, "§4.1 row 7: omega + 1"});
             add({"DT", {G::Omega, 2}, false, 4, fc::Halfband::Iir, 1, fc::Region::Auto, {}, "§4.1 row 7: omega + 2"});
+            // the synth path: otalp.cir's two OTA one-poles, iabc moving each sample (an expf, the expo converter);
+            // report §7.4 measured its 2-port SVF, 248 cycles a voice at 1x with 2 steps, not comparable
+            add({"OTA", {G::Previous, 2}, false, 1, fc::Halfband::Iir, 1, fc::Region::Auto, {}, "1x, newton(2)"});
+            add({"OTA", {G::Previous, 2}, false, 2, fc::Halfband::Iir, 1, fc::Region::Auto, {}, "the provisional"});
+            add({"OTA", {G::Previous, 1}, false, 4, fc::Halfband::Iir, 1, fc::Region::Auto, {}, "as shipped"});
+            add({"OTA", {G::Previous, 1}, true, 4, fc::Halfband::Iir, 1, fc::Region::Auto, {}, "ADAA"});
+            add({"OTA", {G::Previous, 2}, false, 1, fc::Halfband::Iir, 2, fc::Region::Auto, {}, "float2"});
+            {
+                Row warped{"OTA", {G::Previous, 2}, false, 1, fc::Halfband::Iir, 1, fc::Region::Auto, {},
+                           "prewarp (one tanf a sample)"};
+                warped.prewarp = true;
+                add(warped);
+            }
             return rows;
         }
 
@@ -289,6 +316,53 @@ float fm_baseline(float n)
                                module, a, setCall);
         }
 
+        // The OTA's bench: tick with a 1 kHz sine at amp and iabc from an expo converter, 2^(2 sin) around 141 uA at
+        // 37 Hz (one expf a sample, as a synth's voice computes it).
+        std::string otaBenchSource(const std::string& module, double amp, int channels)
+        {
+            const std::string a = fc::literal(amp);
+            const std::string x =
+                channels == 2 ? "(float2)(" + a + " * sinf(ph), " + a + " * cosf(ph))" : a + " * sinf(ph)";
+            const std::string type = channels == 2 ? "float2" : "float";
+            const std::string sq = channels == 2 ? "y.x * y.x + y.y * y.y" : "y * y";
+            return std::format(R"(
+float fm_bench(float n)
+{{
+    {0} w;
+    w.init(48000);
+    float sum = 0;
+    float ph = 0;
+    float lph = 0;
+    for (int i = 0; i < (int)n; ++i)
+    {{
+        const {2} x = {1};
+        ph += 0.130899694f;
+        ph = ph > 6.28318531f ? ph - 6.28318531f : ph;
+        lph += 0.00484346f;
+        lph = lph > 6.28318531f ? lph - 6.28318531f : lph;
+        const float iabc = 0.000141421f * expf(1.38629436f * sinf(lph));
+        const {2} y = w.tick(x, iabc);
+        sum += {3};
+    }}
+    return sum;
+}}
+float fm_baseline(float n)
+{{
+    float sum = 0;
+    float ph = 0;
+    for (int i = 0; i < (int)n; ++i)
+    {{
+        const float x = 4.5f * sinf(ph);
+        ph += 0.130899694f;
+        ph = ph > 6.28318531f ? ph - 6.28318531f : ph;
+        sum += x * x;
+    }}
+    return sum;
+}}
+)",
+                               module, x, type, sq);
+        }
+
         struct Timing
         {
             double ns = 0;
@@ -331,6 +405,132 @@ float fm_baseline(float n)
         }
     } // namespace
 
+    namespace
+    {
+        double millisecondsSince(std::chrono::steady_clock::time_point start)
+        {
+            return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+        }
+
+        // generate()'s time on each shipped netlist, and without its configuration directives: the best of 20.
+        void generateTimes()
+        {
+            std::printf("generate(): ms a netlist, the best of 20\n");
+            for (const char* name : {"diodetone.cir", "screamer.cir", "screamer-clip.cir", "clipper.cir", "otalp.cir"})
+            {
+                const std::string shipped = netlist(name);
+                std::string open = shipped;
+                for (const char* d : {".oversample", ".adaa", ".solver"})
+                    open = withDirective(open, d, "");
+                for (const std::string* text : {&shipped, static_cast<const std::string*>(&open)})
+                {
+                    double best = 1e30;
+                    for (int k = 0; k < 20; ++k)
+                    {
+                        const auto t0 = std::chrono::steady_clock::now();
+                        const fc::Result r = fc::generate(*text, name);
+                        best = std::min(best, millisecondsSince(t0));
+                        if (!r.errors.empty())
+                            std::printf("%s", r.errors.c_str());
+                    }
+                    std::printf("  %-18s %-24s %7.2f ms\n", name, text == &open ? "(directives removed)" : "", best);
+                }
+            }
+        }
+
+        // The self-test's wall time on `threads` std::threads (SelfTestOptions::parallel).
+        void selfTestTimes()
+        {
+            std::printf("selfTest(): wall seconds on 1, 2, 4 and 8 threads (the netlists without their configuration "
+                        "directives; %u cores)\n",
+                        std::thread::hardware_concurrency());
+            for (const char* name : {"diodetone.cir", "screamer-clip.cir", "otalp.cir"})
+            {
+                std::string text = netlist(name);
+                for (const char* d : {".oversample", ".adaa", ".solver"})
+                    text = withDirective(text, d, "");
+                std::printf("  %-18s", name);
+                for (int threads : {1, 2, 4, 8})
+                {
+                    fc::SelfTestOptions test;
+                    test.parallel = [threads](int count, const std::function<void(int)>& job)
+                    {
+                        std::atomic<int> next{0};
+                        auto work = [&]
+                        {
+                            for (int i = next++; i < count; i = next++)
+                                job(i);
+                        };
+                        std::vector<std::thread> pool;
+                        for (int k = 1; k < threads; ++k)
+                            pool.emplace_back(work);
+                        work();
+                        for (std::thread& t : pool)
+                            t.join();
+                    };
+                    const auto t0 = std::chrono::steady_clock::now();
+                    const fc::SelfTestResult r = fc::selfTest(text, name, {}, test);
+                    std::printf(" %d: %6.2f s%s", threads, millisecondsSince(t0) / 1000,
+                                r.choice ? "" : " (no answer)");
+                    std::fflush(stdout);
+                }
+                std::printf("\n");
+            }
+        }
+    } // namespace
+
+    namespace
+    {
+        // b3_set's cycles a call on screamer.cir's tone block, its pot moving every call: in the Woodbury form (the
+        // rate-only part in init) and all in set, both derived by deriveBlock and emitted whole.
+        void setCycles(const BenchOptions& options)
+        {
+            std::printf("set() cycles: screamer.cir's b3_set (the tone block, its pot moving each call), best of %d "
+                        "x %d\n",
+                        options.reps, options.samples);
+            fc::Messages messages;
+            const std::optional<fc::Plan> plan =
+                fc::plan(fc::parse(netlist("screamer.cir"), messages), {}, "screamer.cir", messages);
+            if (!plan)
+                return;
+            for (bool woodbury : {true, false})
+            {
+                std::vector<fc::BlockCode> codes;
+                for (std::size_t b = 0; b < plan->blocks.size(); ++b)
+                    codes.push_back(*fc::deriveBlock(*plan, static_cast<int>(b), messages, woodbury));
+                const std::string source = fc::emit(*plan, codes) + R"(
+float fm_bench(float n)
+{
+    Screamer w;
+    w.init(48000);
+    float sum = 0;
+    for (int i = 0; i < (int)n; ++i)
+    {
+        w.b3_set((float)(i % 256) * 0.00390625f);
+        sum += w.mb0_b3;
+    }
+    return sum;
+}
+)";
+                fminus::Program::Options po;
+                po.denormals = fminus::Program::Denormals::Flush;
+                po.threads = 1;
+                std::string errors;
+                auto program = fminus::Program::compile(source, errors, po);
+                if (!program)
+                {
+                    std::printf("  does not compile:\n%s", errors.c_str());
+                    continue;
+                }
+                const Timing t = best(program->function<float(float)>("fm_bench", errors), options.samples / 10,
+                                      options.reps);
+                std::printf("  %-26s %8.2f ns %8.1f cycles %8.1f instr a call | %s\n",
+                            woodbury ? "the Woodbury form" : "all in set (Phase 0's)", t.ns, t.cycles,
+                            t.instructions, codes[2].form.empty() ? "(no note)" : codes[2].form.c_str());
+            }
+        }
+    } // namespace
+
     int bench(const BenchOptions& options)
     {
 #if defined(__APPLE__)
@@ -343,8 +543,14 @@ float fm_baseline(float n)
         if (getloadavg(load, 3) == 3)
             std::printf("load average: %.2f %.2f %.2f\n", load[0], load[1], load[2]);
 #endif
+        if (options.only.empty())
+        {
+            generateTimes();
+            selfTestTimes();
+            setCycles(options);
+        }
         std::printf("cycles a host sample at 48 kHz, best of %d x %d (wall ns; cycles and instructions from "
-                    "proc_pid_rusage on macOS); the report's (timing1.out) beside\n",
+                    "proc_pid_rusage on macOS); the self-test's cost model and the report's (timing1.out) beside\n",
                     options.reps, options.samples);
         const auto report = reported();
         std::vector<Row> rows = options.all ? allRows() : defaultRows();
@@ -360,9 +566,10 @@ float fm_baseline(float n)
                                                                          : "";
             if (!std::regex_search(name + mode + (row.channels == 2 ? " float2 " : " ") + row.note, only))
                 continue;
-            const std::string file = row.circuit == "DT"   ? "diodetone.cir"
-                                     : row.circuit == "TS" ? "screamer-clip.cir"
-                                                           : "screamer.cir";
+            const std::string file = row.circuit == "DT"    ? "diodetone.cir"
+                                     : row.circuit == "TS"  ? "screamer-clip.cir"
+                                     : row.circuit == "OTA" ? "otalp.cir"
+                                                            : "screamer.cir";
             fc::Options o;
             o.oversample = row.m;
             o.halfband = row.kind;
@@ -370,7 +577,9 @@ float fm_baseline(float n)
             o.solver = row.solver;
             o.channels = row.channels;
             o.region = row.region;
-            const double amp = row.circuit == "DT" ? 4.5 : 0.45;
+            if (row.prewarp)
+                o.prewarp = true;
+            const double amp = row.circuit == "DT" ? 4.5 : row.circuit == "OTA" ? 5 : 0.45;
             // mkbench.py's settings: tone 0.5 (DiodeTone), drive 1 (the TS)
             const std::string setCall = row.circuit == "DT"   ? "w.set(0.5f);"
                                         : row.circuit == "TS" ? "w.set(1);"
@@ -386,8 +595,9 @@ float fm_baseline(float n)
             po.denormals = fminus::Program::Denormals::Flush;
             po.threads = 1;
             std::string errors;
-            auto program =
-                fminus::Program::compile(r.source + benchSource(r.module, amp, row.channels, setCall), errors, po);
+            const std::string bench = row.circuit == "OTA" ? otaBenchSource(r.module, amp, row.channels)
+                                                           : benchSource(r.module, amp, row.channels, setCall);
+            auto program = fminus::Program::compile(r.source + bench, errors, po);
             if (!program)
             {
                 std::printf("%-30s does not compile:\n%s", name.c_str(), errors.c_str());
@@ -401,11 +611,14 @@ float fm_baseline(float n)
             const Timing t = best(fn, options.samples, options.reps);
             const auto it = report.find({row.section(), name});
             const std::string theirs = it == report.end() ? std::string("      -") : std::format("{:7.1f}", it->second);
-            std::printf("%-30s %-11s %8.2f ns %8.1f cycles %8.1f instr | report %s | %s\n", name.c_str(),
+            fc::Messages messages;
+            const std::optional<fc::Plan> plan = fc::plan(fc::parse(netlist(file), messages), o, file, messages);
+            const double model = plan ? fc::modelCost(*plan, row.m, row.adaa, row.solver) * row.channels : 0;
+            std::printf("%-30s %-11s %8.2f ns %8.1f cycles %8.1f instr | model %6.0f | report %s | %s\n", name.c_str(),
                         row.math == fminus::Program::Math::Fast ? "Math::Fast"
                         : row.channels == 2                     ? "float2"
                                                                 : "",
-                        t.ns, t.cycles, t.instructions, theirs.c_str(), row.note.c_str());
+                        t.ns, t.cycles, t.instructions, model, theirs.c_str(), row.note.c_str());
             std::fflush(stdout);
         }
         for (const auto& [section, t] : baselines)

@@ -1,6 +1,7 @@
-// tests/unit/CircuitNetlists.h: the netlists the circuit compiler's tests share (CircuitTest.cpp, CircuitEmitTest.cpp),
-// as strings: the report's two examples (docs/research/analog-circuits/notes/fminus.md §4, with the report's §9.1
-// tone-pot line), TS's clipping stage alone, and synthetic circuits with textbook responses. makeDT and makeTS are
+// tests/unit/CircuitNetlists.h: the netlists the circuit compiler's tests share (CircuitTest.cpp, CircuitEmitTest.cpp,
+// CircuitSearchTest.cpp), as strings: the report's two examples (docs/research/analog-circuits/notes/fminus.md §4, with
+// the report's §9.1 tone-pot line), TS's clipping stage alone, the synth path's OTA low-pass and one of its stages, and
+// synthetic circuits with textbook responses. makeDT and makeTS are
 // docs/research/analog-circuits/experiments/adaa.cpp's hand-derived Holters forms of the two 1-port blocks, copied
 // from there, so that the generator's derivation is checked against an independent one.
 #pragma once
@@ -89,6 +90,45 @@ D2     v2  n1  1N914
 .end
 )";
 
+    // The synth path's example, as examples/circuits/otalp.cir ships it: two buffered OTA one-poles, the cutoff set by
+    // the law input iabc (report §7).
+    inline const std::string kOtaLp = R"(* otalp.cir: two buffered OTA one-poles
+.title OtaLp
+.input  u    in   scale=1
+.input  iabc -    kind=current range=10u:2m
+.output vout y2b
+.oversample 4 iir blocks=auto
+.adaa off
+.solver newton(1)
+.target solver=-60dB alias=-60dB level=5V freq=3k
+R1   in   a1   100k
+R2   a1   0    220
+R3   y1b  m1   100k
+R4   m1   0    220
+G1   0    y1   OTA a1 m1 {iabc}
+C1   y1   0    1n
+R5   y1   0    10meg
+X1   y1   y1b  y1b  opamp
+R6   y1b  a2   100k
+R7   a2   0    220
+R8   y2b  m2   100k
+R9   m2   0    220
+G2   0    y2   OTA a2 m2 {iabc}
+C2   y2   0    1n
+R10  y2   0    10meg
+X2   y2   y2b  y2b  opamp
+.end
+)";
+
+    // One of its stages: an OTA one-pole, its output buffered, 100k / 220 attenuators at both inputs (att = 220 /
+    // 100220), 1 nF and the OTA's 10 MEG. `lines` adds directives; `gain` is G1's.
+    inline std::string otaStage(const std::string& lines = "", const std::string& gain = "{iabc}")
+    {
+        return ".title OtaStage\n.input u in\n.input iabc - kind=current range=10u:2m\n.output y yb\n" + lines +
+               "R1 in a1 100k\nR2 a1 0 220\nR3 yb a2 100k\nR4 a2 0 220\nG1 0 y OTA a1 a2 " + gain +
+               "\nC1 y 0 1n\nR5 y 0 10meg\nX1 y yb yb opamp\n";
+    }
+
     // A netlist with its .model's N replaced (1.75140653 gives adaa.cpp's 45.3 mV).
     inline std::string withN(std::string netlist, const std::string& n)
     {
@@ -131,6 +171,144 @@ C1 a out 22n
 C2 b 0 10n
 X1 b out out opamp
 )";
+
+    // examples/circuits/rc8k.cir: an RC low-pass at 8 kHz, a matched one-pole at 1x.
+    inline const std::string kRc8k = R"(.title Rc8k
+.input u in
+.output vout a
+R1 in a 1k
+C1 a 0 19.89n
+)";
+
+    // examples/circuits/sallen-key.cir: a unity-gain Sallen-Key low-pass at 2.1 kHz, Q 0.74, a matched biquad at 1x.
+    inline const std::string kSallenKey2k = R"(.title SallenKey
+.input u in
+.output vout out
+R1 in a 5.1k
+R2 a b 5.1k
+C1 a out 22n
+C2 b 0 10n
+X1 b out out opamp
+)";
+
+    // examples/circuits/lowpass-sweep.cir: a Sallen-Key low-pass, Q 1.6, its cutoff swept by a pot from 10 kHz
+    // down to 99 Hz, where its poles sit near z = 1.
+    inline const std::string kLowpassSweep = R"(.title LowpassSweep
+.input u in
+.output vout out
+.pot cut 0.5
+R0 in m 500
+P1 m a 50k {1 - cut}
+R2 a n 500
+P2 n b 50k {1 - cut}
+C1 a out 100n
+C2 b 0 10n
+X1 b out out opamp
+)";
+
+    // The same at Q 5 (1 uF over 10 nF), its cutoff from 3.2 kHz down to 31 Hz: at 176.4 and 192 kHz, float's
+    // coefficients for a biquad that low and that sharp (its poles 1e-4 from z = 1) cannot hold its response.
+    inline const std::string kLowpassSweepQ5 = R"(.title LowpassSweepQ5
+.input u in
+.output vout out
+.pot cut 0.5
+R0 in m 500
+P1 m a 50k {1 - cut}
+R2 a n 500
+P2 n b 50k {1 - cut}
+C1 a out 1u
+C2 b 0 10n
+X1 b out out opamp
+)";
+
+    // examples/circuits/tonestack.cir: the Bassman's tone stack, of order 3 (a matched design is of 1 or 2).
+    inline const std::string kToneStack = R"(.title ToneStack
+.input u in
+.output vout out
+.pot treble 0.5
+.pot bass 0.5 audio
+.pot mid 0.5
+C1 in t 250p
+R1 in n 56k
+C2 n b 20n
+C3 n m 20n
+Ptreb t out b 250k {treble}
+Pbass b m 1meg {bass}
+Pmid m 0 25k {mid}
+RL out 0 1meg
+)";
+
+    // Phase 1's elements. An RL low-pass, R / (R + s L).
+    inline const std::string kRlLowpass = R"(.title RlLowpass
+.input u in
+.output y o
+L1 in o 10m
+R1 o 0 1k
+)";
+
+    // examples/circuits/wah.cir: an RLC band-pass, its tank damped by a pot, buffered.
+    inline const std::string kWah = R"(.title Wah
+.input u in
+.output y out
+.pot res 0.5 audio
+R1 in a 10k
+L1 a 0 500m
+C1 a 0 47n
+R2 a d 1k
+Pq d 0 22k {res}
+X1 a out out opamp
+)";
+
+    // A 9 V divider into a follower, the signal coupled in through C1: V(b) = V(out) = 4.5 V at DC.
+    inline const std::string kDivider = R"(.title Divider
+.input u in
+.output y out
+V1 vcc 0 9
+R2 vcc b 10k
+R3 b 0 10k
+C1 in b 1u
+X1 b out out opamp
+)";
+
+    // examples/circuits/halfwave.cir: one diode (a built-in model, no card) across C1.
+    inline const std::string kHalfWave = R"(.title HalfWave
+.input u in
+.output y a
+.oversample 4 iir blocks=auto
+.adaa off
+.solver omega(1)
+R1 in a 2.2k
+C1 a 0 10n
+D1 a 0 1N4148
+)";
+
+    // examples/circuits/asym.cir: one diode against two in series, an asymmetric pair.
+    inline const std::string kAsym = R"(.title Asym
+.input u in
+.output y a
+.oversample 4 iir blocks=auto
+.adaa on
+.solver omega(1)
+R1 in a 2.2k
+C1 a 0 10n
+D1 a 0 1N914
+D2 0 m 1N914
+D3 m a 1N914
+.model 1N914 D(IS=2.52n N=1.752)
+)";
+
+    // kScreamer with its 4.5 V reference drawn (examples/circuits/screamer-biased.cir): V1, and R1 and R8 to it.
+    inline std::string screamerBiased()
+    {
+        std::string text = kScreamer;
+        auto replace = [&](const std::string& from, const std::string& to)
+        {
+            text.replace(text.find(from), from.size(), to);
+        };
+        replace("C1     in  p1  1u\nR1     p1  0   10k", "V1     vb  0   4.5\nC1     in  p1  1u\nR1     p1  vb  10k");
+        replace("R8     t1  0   10k", "R8     t1  vb  10k");
+        return text;
+    }
 
     // ---- adaa.cpp's hand-derived blocks (Holters' form) ----
 

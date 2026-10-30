@@ -1,7 +1,7 @@
 // src/circuit/Halfbands.h: the oversampler's 2x halfband stages, S1 (48 <-> 96 kHz), S2 (96 <-> 192) and S3
 // (192 <-> 384), as docs/research/analog-circuits/experiments/gen.cpp designed them (hb-coefs.txt): Kaiser-windowed
 // FIRs and polyphase-allpass IIRs (HIIR's design), their responses, and the FMinus that runs them (mkbench.py's
-// fir() and iir(), as methods on prefixed fields). The coefficients are embedded; designing them is Phase 1.
+// fir() and iir(), as methods on prefixed fields). The coefficients are embedded; designing them is later's.
 #pragma once
 
 #include "fminus/Circuit.h"
@@ -9,6 +9,8 @@
 #include <complex>
 #include <span>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace fminus::circuit
 {
@@ -32,4 +34,7 @@ namespace fminus::circuit
     void emitHalfbandFields(std::string& out, int stage, Halfband kind, const std::string& type);
     void emitHalfbandClear(std::string& out, int stage, Halfband kind);
     void emitHalfbandMethods(std::string& out, int stage, Halfband kind, const std::string& type);
+
+    // Stage s's float arrays that carry from sample to sample (the guard's sum reads them): each name and its length.
+    std::vector<std::pair<std::string, int>> halfbandStates(int stage, Halfband kind);
 } // namespace fminus::circuit

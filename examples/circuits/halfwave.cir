@@ -1,0 +1,16 @@
+* halfwave.cir: a half-wave diode clipper: R1 into C1, one 1N4148 across it (the built-in model, no .model card).
+* The positive half clips at the diode's forward voltage; the negative half passes, low-passed. The configuration is the
+* self-test's answer, pinned (fminus halfwave.cir --self-test without these three lines: 4x, omega(1), candidate 9 of
+* 16; T1 -70.3, T2 -79.6, T3 0.04 dB). Every 2x fails T2 or T3; omega3 is one diode's closed form where it conducts,
+* so one Newton step is enough.
+.title HalfWave
+.input  u    in   scale=1
+.output vout a
+.oversample 4 iir blocks=auto
+.adaa off
+.solver omega(1)
+.target solver=-60dB alias=-60dB level=4.5V freq=3k
+R1     in a  2.2k
+C1     a  0  10n
+D1     a  0  1N4148
+.end

@@ -4,11 +4,11 @@
 .output vout b
 .pot    tone 0.5
 R1     in a  2.2k
-L1     a  0  10m
+V1     a  0  DC 0 AC 1
 R2     a  b  {1 - tonee}
 R3     b  0  {tone^2.5}
-.model DM D(IS=2.52n RS=10)
-.method bdf2
+.model DM D(IS=2.52n RS=-10)
+.method be
 .subckt amp a b
 .foo
 .end

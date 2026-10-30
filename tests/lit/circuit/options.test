@@ -14,7 +14,7 @@
 # RUN: fminus %S/Inputs/diodetone-stereo.cir -o %t.stereo.ll
 
 # .adaa on .solver omega(1): one Newton step, ADAA's mean (Holters 2020), the states averaged, designed at 4 rate 2/3.
-# ADAA:      configuration from the netlist: .oversample 4 iir blocks=auto, .adaa on, .solver omega(1)
+# ADAA:      configuration: .oversample 4 iir blocks=auto, .adaa on, .solver omega(1) (the netlist); .method tr (default)
 # ADAA:      float xo_C1;
 # ADAA:      float c_D1;
 # ADAA:      gc_C1 = 5.3333334e-08f * rate;
@@ -41,25 +41,25 @@
 # FIR8-LABEL: float tick(float u)
 # FIR8:      hb3_up(os2_1[1], os3_3);
 # FIR8:      const float y7 = step(os3_3[1]);
-# FIR8:      return hb1_down(z4, z5);
+# FIR8:      const float z6 = hb1_down(z4, z5);
 
 # blocks=all: every block in the region.
 # ALL-LABEL: float step(float u)
 # ALL-NEXT:  {
 # ALL-NEXT:  return b4(b3(b2(b1(u))));
 # ALL-LABEL: float tick(float u)
-# ALL-NEXT:  {
+# ALL:       ck_ = ck_ == 15 ? 0 : ck_ + 1;
 # ALL-NEXT:  hb1_up(u, os1);
 
 # blocks=nonlinear: the tone block back at the host rate, after the down chain, and a warning of its 1x error.
-# NONLINEAR: warning: block 3 (R7, C5, R8, XU2, R9, Ptone, R10, C6) errs by 13.40 dB at 1x (44.1 kHz), more than 0.5 dB: blocks=auto would oversample it
+# NONLINEAR: warning: block 3 (R7, C5, R8, XU2, R9, Ptone, R10, C6) errs by 13.40 dB at 1x (44.1 kHz), more than 0.5 dB: blocks=auto would run a matched design at 1x (0.35 dB)
 # NONLINEAR-LABEL: float step(float u)
 # NONLINEAR-NEXT:  {
 # NONLINEAR-NEXT:  return b2(u);
 # NONLINEAR-LABEL: float tick(float u)
 # NONLINEAR:       const float z3 = hb1_down(z1, z2);
 # NONLINEAR-NEXT:  const float z4 = b3(z3);
-# NONLINEAR-NEXT:  return b4(z4);
+# NONLINEAR-NEXT:  const float z5 = b4(z4);
 
 # .channels 2: both channels in one float2 recursion; the coefficients stay float.
 # STEREO:      float2 x_C1;
@@ -68,3 +68,6 @@
 # STEREO-LABEL: float2 b1(float2 u)
 # STEREO:      const float2 p = p_D1_by_u * u + p_D1_by_x_C1 * x_C1 + p_D1_by_x_C2 * x_C2;
 # STEREO-LABEL: float2 tick(float2 u)
+# STEREO:      float2 sum_ = x_C1 + x_C2 + v_D1;
+# STEREO:      if (!(sum_.x - sum_.x == 0 && sum_.y - sum_.y == 0))
+# STEREO:      return gain_ < 1 ? z2 * gain_ : z2;

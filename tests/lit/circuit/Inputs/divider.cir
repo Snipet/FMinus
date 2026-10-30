@@ -1,0 +1,11 @@
+* divider.cir: op.test's 9 V divider into a follower, the signal coupled in through C1
+.title Divider
+.input  u    in
+.output vout out
+.op
+V1     vcc 0   9
+R2     vcc b   10k
+R3     b   0   10k
+C1     in  b   1u
+X1     b   out out  opamp
+.end

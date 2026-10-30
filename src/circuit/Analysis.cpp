@@ -1,6 +1,7 @@
 // src/circuit/Analysis.cpp: the measurements (Analysis.h), as adaa.cpp computes them.
 #include "circuit/Analysis.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <numbers>
@@ -139,6 +140,33 @@ namespace fminus::circuit
         return 10 * std::log10(other / (harmonic + other) + 1e-40);
     }
 
+    std::vector<double> bandPower(std::span<const double> y)
+    {
+        const std::vector<Complex> a = spectrum(y, false);
+        std::vector<double> out(topBin(y.size()) + 1);
+        for (std::size_t b = 0; b < out.size(); ++b)
+            out[b] = std::norm(a[b]);
+        return out;
+    }
+
+    double inharmonicExcessDb(std::span<const double> y, std::span<const double> ref, int bin)
+    {
+        const std::vector<Complex> a = spectrum(y, false);
+        const std::size_t top = topBin(y.size());
+        if (ref.size() != top + 1)
+            throw std::invalid_argument("inharmonicExcessDb: the reference's bins differ");
+        double all = 0;
+        double other = 0;
+        for (std::size_t b = 1; b <= top; ++b)
+        {
+            const double e = std::norm(a[b]);
+            all += e;
+            if (b % static_cast<std::size_t>(bin) != 0)
+                other += std::max(0.0, e - ref[b]);
+        }
+        return 10 * std::log10(other / all + 1e-40);
+    }
+
     void harmonicDiffDb(std::span<const double> y, std::span<const double> ref, int bin, double* h1, double* h3)
     {
         const std::vector<Complex> a = spectrum(y, false);
@@ -180,6 +208,29 @@ namespace fminus::circuit
             const double phase = 2 * std::numbers::pi * f0 * t / k * (std::exp(time / t * k) - 1);
             s[i] = amp * std::sin(phase);
         }
+        return s;
+    }
+
+    std::vector<double> saw(double amp, int bin, std::size_t window, int m, std::size_t n)
+    {
+        // one period of the window, by an inverse FFT of its harmonics (sin(k w t) is a / 2j on bin k b, its mirror
+        // the conjugate), then repeated
+        const std::size_t period = window * static_cast<std::size_t>(m);
+        std::vector<Complex> bins(period, Complex(0));
+        const double f0 = static_cast<double>(bin) * kHostRate / static_cast<double>(window);
+        for (int k = 1; k * f0 < 20000 && static_cast<std::size_t>(k * bin) < period / 2; ++k)
+        {
+            const double a = 2 * amp / std::numbers::pi * (k % 2 == 1 ? 1.0 : -1.0) / k;
+            const Complex c(0, -0.5 * a);   // a / 2j
+            bins[static_cast<std::size_t>(k * bin)] = c;
+            bins[period - static_cast<std::size_t>(k * bin)] = std::conj(c);
+        }
+        for (Complex& c : bins)
+            c = std::conj(c);
+        fft(bins);
+        std::vector<double> s(n);
+        for (std::size_t i = 0; i < n; ++i)
+            s[i] = bins[i % period].real();
         return s;
     }
 

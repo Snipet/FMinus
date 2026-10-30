@@ -185,6 +185,12 @@ namespace fminus::circuit
         return x;
     }
 
+    std::vector<ModelCard> builtinModels()
+    {
+        // Yeh, DAFx-07 (as examples/circuits' netlists write them): both are the same small-signal silicon diode
+        return {{"1N914", {}, 2.52e-9, 1.752, 0}, {"1N4148", {}, 2.52e-9, 1.752, 0}};
+    }
+
     // ---- expressions ------------------------------------------------------------------------------------------------
 
     double evaluate(const Expr& expr, const std::function<double(const std::string&)>& pot)
@@ -193,7 +199,7 @@ namespace fminus::circuit
         {
         case Expr::Op::Number:
             return expr.value;
-        case Expr::Op::Pot:
+        case Expr::Op::Name:
             return pot(expr.pot);
         case Expr::Op::Neg:
             return -evaluate(expr.args[0], pot);
@@ -222,7 +228,7 @@ namespace fminus::circuit
     {
         void collectPots(const Expr& expr, std::vector<std::string>& out)
         {
-            if (expr.op == Expr::Op::Pot)
+            if (expr.op == Expr::Op::Name)
             {
                 if (std::find(out.begin(), out.end(), expr.pot) == out.end())
                     out.push_back(expr.pot);
@@ -248,7 +254,7 @@ namespace fminus::circuit
             case Expr::Op::Pow:   // printed as a product
                 return e.exponent == 0 ? 4 : e.exponent == 1 ? precedence(e.args[0]) : 2;
             case Expr::Op::Number:
-            case Expr::Op::Pot:
+            case Expr::Op::Name:
                 return 4;
             }
             return 4;
@@ -274,7 +280,7 @@ namespace fminus::circuit
             {
             case Expr::Op::Number:
                 return literal(e.value);
-            case Expr::Op::Pot:
+            case Expr::Op::Name:
                 return pot(e.pot);
             case Expr::Op::Neg:
                 return "-" + printOperand(e.args[0], 3, pot);
@@ -431,6 +437,30 @@ namespace fminus::circuit
                 out.push_back(std::move(t));
             }
             return out;
+        }
+
+        // A .model line's card after the name, split at ( ) and , as SPICE allows (each piece keeping its column),
+        // its key = value pieces joined: D(IS=2.52n N=1.752), D (IS=2.52n, N=1.752 ) and D IS=2.52n N=1.752 give the
+        // same pieces.
+        std::vector<Token> modelCard(const std::vector<Token>& t)
+        {
+            std::vector<Token> pieces;
+            for (std::size_t i = 2; i < t.size(); ++i)
+            {
+                const std::string& s = t[i].text;
+                std::size_t k = 0;
+                while (k < s.size())
+                {
+                    while (k < s.size() && (s[k] == '(' || s[k] == ')' || s[k] == ','))
+                        ++k;
+                    const std::size_t first = k;
+                    while (k < s.size() && s[k] != '(' && s[k] != ')' && s[k] != ',')
+                        ++k;
+                    if (k > first)
+                        pieces.push_back({s.substr(first, k - first), {t[i].loc.line, t[i].loc.column + int(first)}});
+                }
+            }
+            return joinAssignments(std::move(pieces));
         }
 
         // ---- numbers ------------------------------------------------------------------------------------------------
@@ -799,7 +829,7 @@ namespace fminus::circuit
                     while (end < text_.size() && (isLetter(text_[end]) || isDigit(text_[end]) || text_[end] == '_'))
                         ++end;
                     Expr e;
-                    e.op = Expr::Op::Pot;
+                    e.op = Expr::Op::Name;
                     e.pot = folded(text_.substr(pos_, end - pos_));
                     e.spelling = std::string(text_.substr(pos_, end - pos_));
                     e.loc = locAt(p);
@@ -901,6 +931,38 @@ namespace fminus::circuit
                 return false;
             }
 
+            // An E's or a linear G's gain: a number (not 0, at most 1e30 and at least 1e-30 in size: a float
+            // coefficient) or an {expression} of pots.
+            bool gain(Element& e, const Token& t, const std::string& part)
+            {
+                e.valueLoc = t.loc;
+                if (t.text.front() == '{')
+                {
+                    e.expr = expression(t);
+                    if (!e.expr)
+                        return false;
+                    if (!potsOf(*e.expr).empty())
+                        return true;
+                    e.value = evaluate(*e.expr, [](const std::string&) { return 0.0; });
+                    e.expr.reset();
+                }
+                else
+                {
+                    const std::optional<Number> v = parseNumber(t.text);
+                    if (!v)
+                    {
+                        error(t.loc, "'" + t.text + "' is not a number (" + part + "'s gain)");
+                        return false;
+                    }
+                    e.value = v->value;
+                }
+                if (std::fabs(e.value) >= 1e-30 && std::fabs(e.value) <= 1e30)
+                    return true;
+                error(t.loc, part + "'s gain " + t.text +
+                                 " is out of range for float coefficients (1e-30 to 1e30 in size; not 0)");
+                return false;
+            }
+
             bool defined(const std::string& name, Loc loc)
             {
                 const std::string key = folded(name);
@@ -933,34 +995,25 @@ namespace fminus::circuit
             Netlist& n_;
             Messages& messages_;
             std::map<std::string, Loc> names_;   // element names, folded
+            std::set<std::string> named_;        // the names .switch lines give, folded (with an error or not)
         };
 
-        // The element kinds Phase 0 refuses, with what to say.
+        // The element kinds refused, with what to say.
         const char* unsupported(char kind)
         {
             switch (kind)
             {
-            case 'l':
-                return "the inductor %s is not supported yet (Phase 1)";
-            case 'v':
-                return "the voltage source %s is not supported yet (Phase 1; the input is .input's)";
-            case 'i':
-                return "the current source %s is not supported yet (Phase 1)";
-            case 'e':
             case 'f':
-            case 'g':
             case 'h':
-                return "the controlled source %s is not supported yet (Phase 1)";
+                return "the current-controlled source %s is not supported yet (Phase 2)";
             case 'q':
                 return "the transistor %s is not supported yet (Phase 2)";
             case 'j':
                 return "the JFET %s is not supported yet (Phase 2)";
             case 'm':
                 return "the MOSFET %s is not supported yet (Phase 2)";
-            case 's':
-                return "the switch %s is not supported yet (Phase 1)";
             case 'k':
-                return "the coupling %s is not supported yet (Phase 1)";
+                return "the coupling %s is not supported yet (Phase 2)";
             case 't':
                 return "the transmission line %s is not supported yet";
             case 'b':
@@ -996,7 +1049,7 @@ namespace fminus::circuit
             e.loc = head.loc;
             for (const Token& token : t)
                 e.text += (e.text.empty() ? "" : " ") + token.text;
-            if (const char* what = unsupported(kind))
+            if (const char* what = unsupported(kind); what != nullptr)
             {
                 error(head.loc, replaced(what, head.text));
                 return;
@@ -1068,6 +1121,94 @@ namespace fminus::circuit
                     return;
                 }
                 if (!e.expr && !inRange(e.value, t[3], head.text))
+                    return;
+                break;
+            }
+            case 'l':
+            {
+                if (t.size() != 4 || !nodeTokensOk(1, 2))
+                {
+                    error(head.loc, head.text + ": expected 'L<name> n+ n- value'");
+                    return;
+                }
+                e.kind = Element::Kind::Inductor;
+                nodesFrom(1, 2);
+                e.valueLoc = t[3].loc;
+                const std::optional<Number> v = parseNumber(t[3].text);
+                if (!v)
+                {
+                    error(t[3].loc, "'" + t[3].text + "' is not a number (" + head.text + "'s value)");
+                    return;
+                }
+                e.value = v->value;
+                if (!(e.value > 0))
+                {
+                    error(t[3].loc, head.text + "'s value is " + t[3].text + ": an inductor needs a positive value");
+                    return;
+                }
+                if (!inRange(e.value, t[3], head.text))
+                    return;
+                break;
+            }
+            case 'v':
+            case 'i':
+            {
+                // V<name> n+ n- [DC] value, I<name> n+ n- [DC] value: DC only (the signal is .input's)
+                const bool voltage = kind == 'v';
+                for (std::size_t i = 3; i < t.size(); ++i)
+                {
+                    const std::string w = folded(t[i].text);
+                    static constexpr std::array<std::string_view, 7> kSpecs{"ac",  "sin", "pulse", "pwl",
+                                                                            "exp(", "sffm", "am("};
+                    if (std::any_of(kSpecs.begin(), kSpecs.end(), [&](std::string_view k)
+                                    { return w == k || (k != "ac" && w.rfind(k, 0) == 0); }))
+                    {
+                        std::string spec;   // the rest of the line
+                        for (std::size_t j = i; j < t.size(); ++j)
+                            spec += (spec.empty() ? "" : " ") + t[j].text;
+                        error(t[i].loc, "'" + spec + "': a" + std::string(voltage ? " V" : "n I") +
+                                            " source is DC: the signal is .input's");
+                        return;
+                    }
+                }
+                const std::size_t at = t.size() == 5 && folded(t[3].text) == "dc" ? 4 : 3;
+                if (t.size() != at + 1 || !nodeTokensOk(1, 2))
+                {
+                    error(head.loc, head.text + (voltage ? ": expected 'V<name> n+ n- [DC] value'"
+                                                         : ": expected 'I<name> n+ n- [DC] value'"));
+                    return;
+                }
+                e.kind = voltage ? Element::Kind::Voltage : Element::Kind::Current;
+                nodesFrom(1, 2);
+                e.valueLoc = t[at].loc;
+                const std::optional<Number> v = parseNumber(t[at].text);
+                if (!v)
+                {
+                    error(t[at].loc, "'" + t[at].text + "' is not a number (" + head.text + "'s value)");
+                    return;
+                }
+                e.value = v->value;
+                // a DC volt or amp value: 0 or negative too, finite, and within float's reach
+                if (!std::isfinite(e.value) || std::fabs(e.value) > 1e30)
+                {
+                    error(t[at].loc, head.text + "'s value " + t[at].text +
+                                         " is out of range for float coefficients (at most 1e30 in size)");
+                    return;
+                }
+                break;
+            }
+            case 'e':
+            {
+                // E<name> n+ n- nc+ nc- gain|{expr}: a VCVS
+                if (t.size() != 6 || !nodeTokensOk(1, 4))
+                {
+                    error(head.loc, head.text + ": expected 'E<name> n+ n- nc+ nc- gain' (gain in V/V, or {expr} of "
+                                                "pots)");
+                    return;
+                }
+                e.kind = Element::Kind::Vcvs;
+                nodesFrom(1, 4);
+                if (!gain(e, t[5], head.text))
                     return;
                 break;
             }
@@ -1152,6 +1293,131 @@ namespace fminus::circuit
                 }
                 break;
             }
+            case 'g':
+            {
+                // G<name> n+ n- nc+ nc- gain|{expr}: a linear VCCS, its current leaving n+ and entering n- (SPICE's G
+                // direction)
+                if (t.size() == 6 && folded(t[3].text) != "ota")
+                {
+                    if (!nodeTokensOk(1, 4))
+                        return;
+                    e.kind = Element::Kind::Vccs;
+                    nodesFrom(1, 4);
+                    if (!gain(e, t[5], head.text))
+                        return;
+                    break;
+                }
+                // G<name> n+ n- OTA nc+ nc- gain|{expr}: the OTA macro (report §7.1), SPICE's G direction (its current
+                // leaves n+ and enters n-)
+                if (t.size() != 7 || folded(t[3].text) != "ota" || !nodeTokensOk(1, 2) || !nodeTokensOk(4, 2))
+                {
+                    error(head.loc, head.text + ": expected 'G<name> n+ n- nc+ nc- gain' (a VCCS, gain in A/V, or "
+                                                "{expr} of pots) or 'G<name> n+ n- OTA nc+ nc- gain' (gain in amps, "
+                                                "or {expr} of pots and law inputs)");
+                    return;
+                }
+                e.kind = Element::Kind::Ota;
+                nodesFrom(1, 2);
+                nodesFrom(4, 2);
+                e.valueLoc = t[6].loc;
+                if (t[6].text.front() == '{')
+                {
+                    e.expr = expression(t[6]);
+                    if (!e.expr)
+                        return;
+                    if (potsOf(*e.expr).empty())
+                    {
+                        e.value = evaluate(*e.expr, [](const std::string&) { return 0.0; });
+                        e.expr.reset();
+                    }
+                }
+                else
+                {
+                    const std::optional<Number> v = parseNumber(t[6].text);
+                    if (!v)
+                    {
+                        error(t[6].loc, "'" + t[6].text + "' is not a number (" + head.text + "'s gain)");
+                        return;
+                    }
+                    e.value = v->value;
+                }
+                if (!e.expr && !(e.value > 0))
+                {
+                    error(t[6].loc, head.text + "'s gain is " + t[6].text + ": an OTA's gain (its bias current) is "
+                                                                             "positive");
+                    return;
+                }
+                if (!e.expr && !inRange(e.value, t[6], head.text))
+                    return;
+                break;
+            }
+            case 's':
+            {
+                // S<name> a b SWITCH pos[,pos...] [ron=1] [roff=10meg]: a resistor that ramps between roff and ron
+                const std::string usage = ": expected 'S<name> a b SWITCH pos[,pos...] [ron=1] [roff=10meg]'";
+                if (t.size() < 5 || !nodeTokensOk(1, 2) || t[3].text.find_first_of("{}=(),") != std::string::npos)
+                {
+                    error(head.loc, head.text + usage);
+                    return;
+                }
+                e.kind = Element::Kind::Switch;
+                nodesFrom(1, 2);
+                e.model = t[3].text;
+                e.modelLoc = t[3].loc;
+                // the positions, to the first key=value (a space after a comma splits them: joined again)
+                std::size_t k = 4;
+                std::string list;
+                e.closedLoc = t[4].loc;
+                while (k < t.size() && t[k].text.find('=') == std::string::npos)
+                    list += t[k++].text;
+                std::size_t at = 0;
+                while (true)
+                {
+                    const std::size_t comma = std::min(list.find(',', at), list.size());
+                    const std::string item = list.substr(at, comma - at);
+                    const bool digits = !item.empty() && item.size() <= 2 &&
+                                        std::all_of(item.begin(), item.end(), [](char c) { return isDigit(c); });
+                    if (!digits)
+                    {
+                        error(e.closedLoc, "'" + (list.empty() ? t[4].text : list) + "': " + head.text +
+                                               "'s positions are the switch's positions it is closed at, as 0,2");
+                        return;
+                    }
+                    e.closed.push_back(std::stoi(item));
+                    if (comma == list.size())
+                        break;
+                    at = comma + 1;
+                }
+                for (; k < t.size(); ++k)
+                {
+                    std::string value;
+                    const bool on = isKeyValue(t[k], "ron", value);
+                    if (!on && !isKeyValue(t[k], "roff", value))
+                    {
+                        error(t[k].loc, "'" + t[k].text + "': a switch takes ron= and roff= after its positions");
+                        return;
+                    }
+                    const std::optional<Number> v = parseNumber(value);
+                    if (!v)
+                    {
+                        error(t[k].loc, "'" + value + "' is not a number (" + head.text + "'s " +
+                                            (on ? "ron" : "roff") + ")");
+                        return;
+                    }
+                    if (!(v->value >= 1e-30 && v->value <= 1e30))
+                    {
+                        error(t[k].loc, "'" + t[k].text + "': " + head.text + "'s " + (on ? "ron" : "roff") +
+                                            " is out of range for float coefficients (1e-30 to 1e30 ohms)");
+                        return;
+                    }
+                    if (v->milli && v->value < 1)
+                        messages_.warning(t[k].loc, "'" + value + "' is " + v->mantissa +
+                                                        " milliohm in SPICE; write " + v->mantissa +
+                                                        "meg for a megohm");
+                    (on ? e.ron : e.roff) = v->value;
+                }
+                break;
+            }
             case 'x':
             {
                 if (t.size() != 5 || !nodeTokensOk(1, 3))
@@ -1194,24 +1460,7 @@ namespace fminus::circuit
                 error(head.loc, "expected '.model NAME D(IS=... N=...)'");
                 return;
             }
-            // The card after the name, split at ( ) and , as SPICE allows, each piece keeping its column.
-            std::vector<Token> pieces;
-            for (std::size_t i = 2; i < t.size(); ++i)
-            {
-                const std::string& s = t[i].text;
-                std::size_t k = 0;
-                while (k < s.size())
-                {
-                    while (k < s.size() && (s[k] == '(' || s[k] == ')' || s[k] == ','))
-                        ++k;
-                    const std::size_t first = k;
-                    while (k < s.size() && s[k] != '(' && s[k] != ')' && s[k] != ',')
-                        ++k;
-                    if (k > first)
-                        pieces.push_back({s.substr(first, k - first), {t[i].loc.line, t[i].loc.column + int(first)}});
-                }
-            }
-            pieces = joinAssignments(std::move(pieces));
+            std::vector<Token> pieces = modelCard(t);
             if (pieces.empty())
             {
                 error(head.loc, "expected '.model NAME D(IS=... N=...)'");
@@ -1223,7 +1472,8 @@ namespace fminus::circuit
                 const bool transistor = type == "npn" || type == "pnp" || type == "njf" || type == "pjf" ||
                                         type == "nmos" || type == "pmos";
                 error(pieces.front().loc, "model type '" + pieces.front().text + "' is not supported yet" +
-                                              std::string(transistor ? " (Phase 2)" : "") + ": Phase 0 has diodes (D)");
+                                              std::string(transistor ? " (Phase 2)" : "") +
+                                              ": a .model card is a diode's (D)");
                 return;
             }
             ModelCard card;
@@ -1263,15 +1513,17 @@ namespace fminus::circuit
                     card.n = v->value;
                 else if (key == "rs")
                 {
-                    if (v->value != 0)
+                    // a series resistance: an internal node and a resistor (0: none)
+                    if (!(v->value == 0 || (v->value >= 1e-30 && v->value <= 1e30)))
                     {
-                        error(p.loc, "RS is not supported yet (Phase 1)");
+                        error(p.loc, "'" + p.text + "': RS is 0 or a resistance from 1e-30 to 1e30 ohms");
                         return;
                     }
+                    card.rs = v->value;
                 }
                 else if (std::find(kIgnored.begin(), kIgnored.end(), key) != kIgnored.end())
-                    messages_.warning(p.loc, p.text.substr(0, eq) + " is ignored (Phase 0's diode is Shockley's: IS "
-                                                                    "and N)");
+                    messages_.warning(p.loc, p.text.substr(0, eq) + " is ignored (the diode model is Shockley's: IS, "
+                                                                    "N and RS)");
                 else
                 {
                     error(p.loc, "unknown diode parameter '" + p.text.substr(0, eq) + "'");
@@ -1317,14 +1569,13 @@ namespace fminus::circuit
             if (name == ".input" || name == ".output")
             {
                 const bool input = name == ".input";
-                if (!arity(2, 3, input ? ".input NAME node [scale=x]" : ".output NAME node [scale=x]"))
+                if (!arity(2, 5, input ? ".input NAME node [kind=voltage] [scale=x]' or '.input NAME - kind=cv|current "
+                                         "[scale=x] [range=lo:hi]"
+                                       : ".output NAME node [scale=x]"))
                     return true;
-                std::optional<IoLine>& slot = input ? n_.input : n_.output;
-                if (slot)
+                if (!input && t.size() > 4)
                 {
-                    error(head.loc, std::string(input ? "a second .input" : "a second .output") +
-                                        " (the first at line " + std::to_string(slot->loc.line) +
-                                        "): Phase 0 has one of each");
+                    error(head.loc, "expected '.output NAME node [scale=x]'");
                     return true;
                 }
                 IoLine io;
@@ -1332,26 +1583,128 @@ namespace fminus::circuit
                 io.loc = t[1].loc;
                 io.node = t[2].text;
                 io.nodeLoc = t[2].loc;
-                if (t.size() == 4)
+                bool ranged = false;
+                Loc rangeLoc;
+                std::string rangeText;
+                for (std::size_t i = 3; i < t.size(); ++i)
                 {
                     std::string value;
-                    if (!isKeyValue(t[3], "scale", value))
+                    if (isKeyValue(t[i], "scale", value))
                     {
-                        error(t[3].loc, "'" + t[3].text + "': expected scale=x");
+                        const std::optional<Number> v = parseNumber(value);
+                        if (!v || !(v->value != 0) || !std::isfinite(v->value))
+                        {
+                            error(t[i].loc, "'" + value + "' is not a nonzero number (scale)");
+                            return true;
+                        }
+                        io.scale = v->value;
+                    }
+                    else if (input && isKeyValue(t[i], "kind", value))
+                    {
+                        const std::string k = folded(value);
+                        io.kindLoc = t[i].loc;
+                        if (k == "cv")
+                            io.kind = Input::Kind::Cv;
+                        else if (k == "current")
+                            io.kind = Input::Kind::Current;
+                        else if (k != "voltage")
+                        {
+                            error(t[i].loc, "'kind=" + value + "': voltage, cv or current");
+                            return true;
+                        }
+                    }
+                    else if (input && isKeyValue(t[i], "range", value))
+                    {
+                        // lo:hi, two numbers with SPICE's suffixes, lo below hi, each a float
+                        const std::size_t colon = value.find(':');
+                        const std::optional<Number> lo =
+                            colon == std::string::npos ? std::nullopt : parseNumber(value.substr(0, colon));
+                        const std::optional<Number> hi =
+                            colon == std::string::npos ? std::nullopt : parseNumber(value.substr(colon + 1));
+                        auto isFloat = [](double x)
+                        {
+                            return std::isfinite(x) && std::fabs(x) <= 1e30;
+                        };
+                        if (!lo || !hi || !isFloat(lo->value) || !isFloat(hi->value) || !(lo->value < hi->value))
+                        {
+                            error(t[i].loc, "'" + t[i].text + "': range=lo:hi, two numbers with lo below hi");
+                            return true;
+                        }
+                        io.low = lo->value;
+                        io.high = hi->value;
+                        ranged = true;
+                        rangeLoc = t[i].loc;
+                        rangeText = t[i].text;
+                    }
+                    else
+                    {
+                        error(t[i].loc, "'" + t[i].text + "': expected " +
+                                            (input ? std::string("kind=voltage|cv|current, scale=x or range=lo:hi")
+                                                   : std::string("scale=x")));
                         return true;
                     }
-                    const std::optional<Number> v = parseNumber(value);
-                    if (!v || !(v->value != 0))
-                    {
-                        error(t[3].loc, "'" + value + "' is not a nonzero number (scale)");
-                        return true;
-                    }
-                    io.scale = v->value;
                 }
                 if (!isPlainName(io.name))
                 {
                     error(io.loc, std::string(input ? ".input" : ".output") + " '" + io.name +
                                       "': a name is a letter, then letters and digits");
+                    return true;
+                }
+                const bool law = io.kind != Input::Kind::Voltage;
+                if (law && io.node != "-")
+                {
+                    error(io.nodeLoc, "'" + io.node + "': a law input (kind=" +
+                                          (io.kind == Input::Kind::Cv ? "cv" : "current") +
+                                          ") has no node; write '-' (it enters an OTA's gain, not the netlist)");
+                    return true;
+                }
+                if (!law && io.node == "-")
+                {
+                    error(io.nodeLoc, "'-' is a law input's node: a law input says kind=cv or kind=current");
+                    return true;
+                }
+                if (!law && ranged)
+                {
+                    error(rangeLoc, "'" + rangeText + "': range= is a law input's (kind=cv|current)");
+                    return true;
+                }
+                if (io.kind == Input::Kind::Current && !ranged)
+                {
+                    error(io.kindLoc, "law input '" + io.name + "' is a current: it needs its range in amps, "
+                                                                "range=lo:hi (as range=10u:2m)");
+                    return true;
+                }
+                if (io.kind == Input::Kind::Cv && !ranged)
+                {
+                    io.low = 0;
+                    io.high = 1;
+                }
+                if (input)
+                {
+                    auto taken = [&](const IoLine& other)
+                    {
+                        if (folded(other.name) != folded(io.name))
+                            return false;
+                        error(io.loc, "input '" + io.name + "' is defined twice (first at line " +
+                                          std::to_string(other.loc.line) + ")");
+                        return true;
+                    };
+                    if ((n_.input && taken(*n_.input)) ||
+                        std::any_of(n_.laws.begin(), n_.laws.end(), [&](const IoLine& l) { return taken(l); }))
+                        return true;
+                }
+                if (law)
+                {
+                    n_.laws.push_back(io);
+                    return true;
+                }
+                std::optional<IoLine>& slot = input ? n_.input : n_.output;
+                if (slot)
+                {
+                    error(head.loc, std::string(input ? "a second voltage .input" : "a second .output") +
+                                        " (the first at line " + std::to_string(slot->loc.line) + "): " +
+                                        (input ? "a netlist has one signal (law inputs are kind=cv|current)"
+                                               : "a netlist has one output"));
                     return true;
                 }
                 slot = io;
@@ -1406,6 +1759,54 @@ namespace fminus::circuit
                     }
                 }
                 n_.pots.push_back(p);
+                return true;
+            }
+            if (name == ".switch")
+            {
+                // .switch NAME positions [default]: set()'s int argument after the pots
+                if (!arity(2, 3, ".switch NAME positions [default]"))
+                    return true;
+                SwitchLine w;
+                w.name = t[1].text;
+                w.loc = t[1].loc;
+                named_.insert(folded(w.name));   // an S naming it is not an unknown switch, even if this line errs
+                auto integer = [](const std::string& text)
+                {
+                    const bool digits = !text.empty() && text.size() <= 2 &&
+                                        std::all_of(text.begin(), text.end(), [](char c) { return isDigit(c); });
+                    return digits ? std::stoi(text) : -1;
+                };
+                w.positions = integer(t[2].text);
+                if (w.positions < 2 || w.positions > 8)
+                {
+                    error(t[2].loc, "'" + t[2].text + "': a switch has 2 to 8 positions");
+                    return true;
+                }
+                if (t.size() == 4)
+                {
+                    w.defaultPosition = integer(t[3].text);
+                    if (w.defaultPosition < 0 || w.defaultPosition >= w.positions)
+                    {
+                        error(t[3].loc, "switch '" + w.name + "' defaults to " + t[3].text +
+                                            "; its positions are 0 to " + std::to_string(w.positions - 1));
+                        return true;
+                    }
+                }
+                if (!isPlainName(w.name))
+                {
+                    error(w.loc, "switch '" + w.name + "': a name is a letter, then letters and digits");
+                    return true;
+                }
+                for (const SwitchLine& q : n_.switches)
+                {
+                    if (folded(q.name) == folded(w.name))
+                    {
+                        error(w.loc, "switch '" + w.name + "' is defined twice (first at line " +
+                                         std::to_string(q.loc.line) + ")");
+                        return true;
+                    }
+                }
+                n_.switches.push_back(w);
                 return true;
             }
             if (name == ".model")
@@ -1486,7 +1887,8 @@ namespace fminus::circuit
                 }
                 if (w == "omega")
                 {
-                    n_.solver.value = Solver{Solver::Guess::Omega, 0};
+                    // the guess named, its steps left to the self-test (an EA port's candidates are all omega's)
+                    n_.solver.isAuto = true;
                     n_.solverBare = true;
                     return true;
                 }
@@ -1536,13 +1938,28 @@ namespace fminus::circuit
             }
             if (name == ".method")
             {
-                if (!arity(1, 1, ".method tr"))
+                if (!once(n_.method, head) || !arity(1, 1, ".method tr|bdf2|auto"))
                     return true;
                 const std::string w = folded(t[1].text);
-                if (w == "bdf2" || w == "be")
-                    error(t[1].loc, "'.method " + t[1].text + "' is not supported yet (Phase 1)");
-                else if (w != "tr")
-                    error(t[1].loc, "'.method " + t[1].text + "': tr (bdf2 and be are Phase 1)");
+                if (w == "tr")
+                    n_.method.value = Method::Tr;
+                else if (w == "bdf2")
+                    n_.method.value = Method::Bdf2;
+                else if (w == "auto")
+                    n_.method.isAuto = true;
+                else
+                    error(t[1].loc, "'.method " + t[1].text + "': tr, bdf2 or auto");
+                return true;
+            }
+            if (name == ".prewarp")
+            {
+                if (!once(n_.prewarp, head) || !arity(1, 1, ".prewarp on|off"))
+                    return true;
+                const std::string w = folded(t[1].text);
+                if (w == "off" || w == "on")
+                    n_.prewarp.value = w == "on";
+                else
+                    error(t[1].loc, "'.prewarp " + t[1].text + "': on or off");
                 return true;
             }
             if (name == ".target")
@@ -1576,13 +1993,22 @@ namespace fminus::circuit
                         error(t[i].loc, "'" + t[i].text.substr(eq + 1) + "' is not a number (" + key + ")");
                         return true;
                     }
+                    // the self-test's stress level L: its sines run at fractions and multiples of it
+                    if (key == "level" && !(std::isfinite(v->value) && v->value > 0))
+                    {
+                        error(t[i].loc, "'" + t[i].text + "': the level is a positive voltage");
+                        return true;
+                    }
                     *slot = v->value;
                 }
                 return true;
             }
             if (name == ".op")
             {
-                messages_.warning(head.loc, "'.op' is ignored (Phase 1: the DC operating point)");
+                // the DC operating point, as notes (Dc.h)
+                if (!arity(0, 0, ".op"))
+                    return true;
+                n_.op = head.loc;
                 return true;
             }
             static constexpr std::array<std::string_view, 11> kSimulator{
@@ -1605,29 +2031,151 @@ namespace fminus::circuit
 
         void Parser::finish()
         {
-            // Every pot an {expression} names must be a .pot (they may come in any order).
+            // Every name an {expression} reads must be a .pot, or (in an OTA's gain only) a law input; they may come
+            // in any order.
             std::string list;
             for (const PotLine& p : n_.pots)
                 list += (list.empty() ? "" : ", ") + p.name;
+            std::string laws;
+            for (const IoLine& l : n_.laws)
+                laws += (laws.empty() ? "" : ", ") + l.name;
             std::set<std::string> known;
             for (const PotLine& p : n_.pots)
                 known.insert(folded(p.name));
+            std::set<std::string> lawNames;
+            for (const IoLine& l : n_.laws)
+                lawNames.insert(folded(l.name));
+            const Element* in = nullptr;
             std::function<void(const Expr&)> check = [&](const Expr& e)
             {
-                if (e.op == Expr::Op::Pot && !known.count(e.pot))
+                if (e.op == Expr::Op::Name && !known.count(e.pot))
                 {
                     // the name as written: the loc's column points at it in the line
-                    error(e.loc, "unknown pot '" + e.spelling + "' (" +
-                                     (list.empty() ? std::string("there are no pots") : "the pots: " + list) + ")");
+                    if (lawNames.count(e.pot))
+                    {
+                        if (in->kind != Element::Kind::Ota)
+                            error(e.loc, "law input '" + e.spelling + "' in " + in->name +
+                                             "'s value: a law input enters an OTA's gain only (pot-as-port is Phase "
+                                             "2)");
+                    }
+                    else if (laws.empty())
+                        error(e.loc, "unknown pot '" + e.spelling + "' (" +
+                                         (list.empty() ? std::string("there are no pots") : "the pots: " + list) +
+                                         ")");
+                    else
+                        error(e.loc, "unknown pot or law input '" + e.spelling + "' (" +
+                                         (list.empty() ? std::string("there are no pots") : "the pots: " + list) +
+                                         "; the law inputs: " + laws + ")");
                 }
                 for (const Expr& a : e.args)
                     check(a);
             };
             for (const Element& e : n_.elements)
             {
+                in = &e;
                 if (e.expr)
                     check(*e.expr);
             }
+            // a pot and a law input of one name
+            for (const PotLine& p : n_.pots)
+            {
+                for (const IoLine& l : n_.laws)
+                {
+                    if (folded(p.name) == folded(l.name))
+                        error(l.loc, "law input '" + l.name + "' has pot '" + p.name + "''s name (line " +
+                                         std::to_string(p.loc.line) + ")");
+                }
+            }
+            // a switch and a pot or an input of one name (they are set()'s, tick's and step's parameters)
+            for (const SwitchLine& w : n_.switches)
+            {
+                for (const PotLine& p : n_.pots)
+                {
+                    if (folded(p.name) == folded(w.name))
+                        error(w.loc, "switch '" + w.name + "' has pot '" + p.name + "''s name (line " +
+                                         std::to_string(p.loc.line) + ")");
+                }
+                std::vector<const IoLine*> inputs;
+                if (n_.input)
+                    inputs.push_back(&*n_.input);
+                for (const IoLine& l : n_.laws)
+                    inputs.push_back(&l);
+                for (const IoLine* l : inputs)
+                {
+                    if (folded(l->name) == folded(w.name))
+                        error(w.loc, "switch '" + w.name + "' has input '" + l->name + "''s name (line " +
+                                         std::to_string(l->loc.line) + ")");
+                }
+            }
+            // each S names a .switch, closed at its positions
+            for (const Element& e : n_.elements)
+            {
+                if (e.kind != Element::Kind::Switch)
+                    continue;
+                const auto w = std::find_if(n_.switches.begin(), n_.switches.end(),
+                                            [&](const SwitchLine& x) { return folded(x.name) == folded(e.model); });
+                if (w == n_.switches.end() && named_.count(folded(e.model)))
+                    continue;   // its .switch line has an error of its own
+                if (w == n_.switches.end())
+                {
+                    std::string names;
+                    for (const SwitchLine& x : n_.switches)
+                        names += (names.empty() ? "" : ", ") + x.name;
+                    error(e.modelLoc, "unknown switch '" + e.model + "' (" +
+                                          (names.empty() ? std::string("there are no .switch lines")
+                                                         : "the switches: " + names) +
+                                          ")");
+                    continue;
+                }
+                for (int position : e.closed)
+                {
+                    if (position >= w->positions)
+                    {
+                        error(e.closedLoc, e.name + " is closed at position " + std::to_string(position) +
+                                               " of switch '" + w->name + "', whose positions are 0 to " +
+                                               std::to_string(w->positions - 1));
+                        break;
+                    }
+                }
+            }
+        }
+    } // namespace
+
+    namespace
+    {
+        // A logical line as a self-test's key reads it (Netlist::canonical), or nothing for a line it leaves out.
+        std::optional<std::string> canonicalLine(const std::vector<Token>& tokens)
+        {
+            const std::string head = folded(tokens.front().text);
+            static constexpr std::array<std::string_view, 15> kLeftOut{
+                ".title", ".channels", ".op",     ".end",  ".tran",     ".ac",      ".dc",   ".print",
+                ".plot",  ".probe",    ".save",   ".meas", ".measure", ".control", ".endc"};
+            if (std::find(kLeftOut.begin(), kLeftOut.end(), head) != kLeftOut.end())
+                return std::nullopt;
+            auto word = [](const Token& t)
+            {
+                std::string w;
+                for (char c : folded(t.text))
+                {
+                    if (c != ' ' && c != '\t')
+                        w += c;
+                }
+                return w;
+            };
+            std::string out;
+            // a .model card as the parser reads it (its parentheses and commas are separators, so the spacing next
+            // to them is spacing), written in one form: ".model 1n914 d(is=2.52n n=1.752)"
+            if (head == ".model" && tokens.size() > 2)
+            {
+                const std::vector<Token> card = modelCard(tokens);
+                out = word(tokens[0]) + " " + word(tokens[1]);
+                for (std::size_t i = 0; i < card.size(); ++i)
+                    out += (i == 0 ? " " : i == 1 ? "(" : " ") + word(card[i]);
+                return card.size() > 1 ? out + ")" : out;
+            }
+            for (const Token& t : joinAssignments(tokens))
+                out += (out.empty() ? "" : " ") + word(t);
+            return out;
         }
     } // namespace
 
@@ -1637,7 +2185,10 @@ namespace fminus::circuit
         Parser parser(netlist, messages);
         for (Line& line : scan(text))
         {
-            if (!parser.line(std::move(line.tokens)))
+            const bool end = folded(line.tokens.front().text) == ".end";
+            if (std::optional<std::string> c = canonicalLine(line.tokens))
+                netlist.canonical.push_back(std::move(*c));
+            if (end || !parser.line(std::move(line.tokens)))
                 break;
         }
         parser.finish();

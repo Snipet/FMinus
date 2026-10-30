@@ -1,0 +1,7 @@
+// A module of the program named as clipper-pot.cir's, declared before its #include: FMinus's error falls in the
+// module generated from the netlist, and fminus re-cites it at the netlist's line (errors.test).
+module PotClipper
+{
+    float x;
+};
+#include "clipper-pot.cir"

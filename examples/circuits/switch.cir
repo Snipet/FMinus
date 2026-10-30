@@ -1,0 +1,22 @@
+* switch.cir: a diode clipper with a clipping switch: R1 2.2k into C1 10n, the 1N914 pair across it through S1, which
+* is closed at the switch's position 1 (the default: clipping) and open at 0 (10 MEG in series: the RC alone). set()
+* takes the switch's int position after the pots and ramps S1's resistance between 1 ohm and 10 MEG over 20 ms of
+* calls on the 16-sample grid, so a flip never steps; with ADAA each call keeps the stored point on the moving curve.
+.title ClipSwitch
+.input  u    in   scale=1
+.output vout a
+.switch clip 2 1
+.pot    tone 0.5
+.oversample 4 iir blocks=auto
+.adaa on
+.solver omega(1)
+.target solver=-60dB alias=-60dB level=4.5V freq=3k
+R1     in a  2.2k
+C1     a  0  10n
+S1     a  d  clip 1
+D1     d  0  1N914
+D2     0  d  1N914
+R2     a  c  470
+Ptone  c  b  25k {1 - tone}        ; a rheostat
+C2     b  0  22n
+.end
