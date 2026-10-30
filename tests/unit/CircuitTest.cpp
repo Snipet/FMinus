@@ -1312,6 +1312,20 @@ TEST_CASE("prewarp applies to a one-state OTA block, and warns elsewhere", "[cir
     CHECK(two.warnings ==
           "t.cir:10:1: warning: prewarp is ignored for OTA G1: its block has 2 states (it prewarps a one-pole's "
           "cutoff)\n");
+    // an inductor is a state as a capacitor is: a block with C1 and an inductor has 2 states
+    const fc::Result withL =
+        fc::generate(withLineAdded(fc::test::otaStage(".prewarp on\n"), "L1 y z 10\nR6 z 0 10meg\n"), "t.cir");
+    INFO(withL.errors);
+    CHECK(withL.warnings ==
+          "t.cir:10:1: warning: prewarp is ignored for OTA G1: its block has 2 states (it prewarps a one-pole's "
+          "cutoff)\n");
+    // a G whose gain pots move (a leak the pot sets) moves the pole the fit is made for: ignored
+    const fc::Result potLeak =
+        fc::generate(withLineAdded(fc::test::otaStage(".prewarp on\n.pot x\n"), "G2 y 0 y 0 {1u + 100u * x}\n"),
+                     "t.cir");
+    INFO(potLeak.errors);
+    CHECK(potLeak.warnings == "t.cir:11:1: warning: prewarp is ignored for OTA G1: pots move its block's pole, and the "
+                              "fit is made at generation\n");
     // and a netlist without an OTA
     CHECK(fc::generate(".input u in\n.output y o\n.prewarp on\nR1 in o 1k\nR2 o 0 1k\n", "t.cir").warnings ==
           "t.cir:3:1: warning: '.prewarp on' is ignored: it prewarps an OTA's cutoff, and the netlist has none\n");
@@ -1639,6 +1653,16 @@ TEST_CASE("the DC operating point's errors", "[circuit]")
          "voltage is undefined (add 10meg to ground)\n"},
         {head + "R1 in a 10k\nR2 a 0 1k\nV1 in 0 1\n",
          "t.cir:5:1: error: the V source V1 is across .input's node 'in': the signal is .input's\n"},
+        // .input's node and an op amp's output are sources to ground: an inductor from one to another source
+        {head + "R1 in a 10k\nR2 a 0 1k\nV1 vb 0 4.5\nL1 in vb 1m\n",
+         "t.cir:6:1: error: a loop of voltage sources, E outputs and inductors (.input, V1, L1): its DC current is "
+         "undefined\n"},
+        {head + "R1 in b 1k\nR2 b 0 1k\nX1 b a a opamp\nL1 a 0 1m\n",
+         "t.cir:6:1: error: a loop of voltage sources, E outputs and inductors (X1, L1): its DC current is "
+         "undefined\n"},
+        // without .input, only that
+        {".output y a\nR1 b a 1k\nR4 b 0 1k\nV1 vb 0 4.5\nR2 vb a 1k\nR3 a 0 1k\n",
+         "t.cir: error: the netlist has no .input\n"},
         {head + "R1 in a 10k\nX1 0 a b opamp\nR2 b a 1k\nV1 b 0 1\n",
          "t.cir:6:1: error: node 'b' is driven by op amp X1 and by V1\n"},
         {head + "R1 in a 10k\nR2 a 0 1k\nV1 b 0 DC 0 AC 1\nR3 b a 1k\n",

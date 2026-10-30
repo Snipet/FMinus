@@ -623,9 +623,10 @@ namespace fminus::circuit
             return 2 * kRate * (z - 1) / (z + 1);
         }
 
-        // .prewarp on: each OTA in a one-state block without pots in its network gets its pole's affine fit, a + b g
-        // from the ends of its gain's range, checked at the middle (a residual of 1e-6 at most, else a warning that
-        // prewarp is ignored for it); any other OTA, or a netlist without one, warns that prewarp is ignored.
+        // .prewarp on: each OTA in a one-state block (one capacitor or inductor) without pots in its network (no pot,
+        // no {expr} resistor, no E or G gain of pots) gets its pole's affine fit, a + b g from the ends of its gain's
+        // range, checked at the middle (a residual of 1e-6 at most, else a warning that prewarp is ignored for it);
+        // any other OTA, or a netlist without one, warns that prewarp is ignored.
         void fitPrewarp(Plan& p, const std::vector<System>& systems, Messages& messages)
         {
             const std::vector<Element>& elements = p.netlist.elements;
@@ -639,13 +640,17 @@ namespace fminus::circuit
                 any = true;
                 PortDef& port = *b.port;
                 const Loc loc = elements[static_cast<std::size_t>(port.elements.front())].loc;
+                // its states (capacitors and inductors), and whether pots move its network (a pot, a resistor's
+                // {expr}, an E's or a G's gain)
                 int states = 0;
                 bool variable = false;
                 for (const Branch& br : b.branches)
                 {
-                    states += br.kind == Branch::Kind::Capacitor ? 1 : 0;
+                    states += br.state() ? 1 : 0;
                     variable = variable || br.kind == Branch::Kind::Variable;
                 }
+                for (const Controlled& c : b.controlled)
+                    variable = variable || c.expr.has_value();
                 if (states != 1)
                 {
                     messages.warning(loc, std::format("prewarp is ignored for OTA {}: its block has {} states (it "
@@ -1150,12 +1155,70 @@ namespace fminus::circuit
 
         // ---- loops of voltage sources, E outputs and inductors (their DC current is undefined) ----
         {
+            // .input's node and the op amps' outputs are sources to ground too: a V source, an E or an inductor
+            // between two of them (or one and ground) closes a loop through them
+            constexpr std::size_t kInput = std::numeric_limits<std::size_t>::max();   // .input's edge
             UnionFind loops(p.nodes.size());
             std::vector<std::vector<std::pair<int, std::size_t>>> tree(p.nodes.size());   // node -> (node, element)
+            auto source = [&](int node, std::size_t edge)
+            {
+                if (node <= 0 || loops.find(static_cast<std::size_t>(node)) == loops.find(0))
+                    return;
+                loops.join(static_cast<std::size_t>(node), 0);
+                tree[static_cast<std::size_t>(node)].emplace_back(0, edge);
+                tree[0].emplace_back(node, edge);
+            };
+            source(p.inputNode, kInput);
+            for (const OpAmp& op : opamps)
+                source(op.out, static_cast<std::size_t>(op.element));
+            // a V source or an E that the driven nodes' checks below refuse for where it sits on .input's node or an
+            // op amp's output is left out, so it is not refused twice: a V source on .input's node, or grounded on an
+            // op amp's output, or between that output and another driven node; an E driving either
+            std::vector<int> opOuts;
+            for (const OpAmp& op : opamps)
+                opOuts.push_back(op.out);
+            auto isOpOut = [&](int n)
+            {
+                return n > 0 && std::find(opOuts.begin(), opOuts.end(), n) != opOuts.end();
+            };
+            std::vector<int> drivenNodes = opOuts;   // and the grounded V sources' and E sources' outputs
+            for (std::size_t e = 0; e < elements.size(); ++e)
+            {
+                const Element::Kind kind = elements[e].kind;
+                if ((kind == Element::Kind::Voltage || kind == Element::Kind::Vcvs) &&
+                    (elementNodes[e][0] == 0) != (elementNodes[e][1] == 0))
+                    drivenNodes.push_back(elementNodes[e][0] == 0 ? elementNodes[e][1] : elementNodes[e][0]);
+            }
+            auto isDriven = [&](int n)
+            {
+                return n > 0 && (n == p.inputNode || std::find(drivenNodes.begin(), drivenNodes.end(), n) !=
+                                                         drivenNodes.end());
+            };
+            auto refusedLater = [&](std::size_t e)
+            {
+                const int a = elementNodes[e][0];
+                const int b = elementNodes[e][1];
+                if (elements[e].kind == Element::Kind::Voltage)
+                {
+                    if (p.inputNode > 0 && (a == p.inputNode || b == p.inputNode))
+                        return true;
+                    if (a == 0 || b == 0)
+                        return isOpOut(a == 0 ? b : a);
+                    return (isOpOut(a) && isDriven(b)) || (isOpOut(b) && isDriven(a));
+                }
+                if (elements[e].kind == Element::Kind::Vcvs && (a == 0) != (b == 0))
+                {
+                    const int out = a == 0 ? b : a;
+                    return (p.inputNode > 0 && out == p.inputNode) || isOpOut(out);
+                }
+                return false;
+            };
             for (std::size_t e = 0; e < elements.size(); ++e)
             {
                 const Element::Kind kind = elements[e].kind;
                 if (kind != Element::Kind::Voltage && kind != Element::Kind::Inductor && kind != Element::Kind::Vcvs)
+                    continue;
+                if (refusedLater(e))
                     continue;
                 const int a = elementNodes[e][0];
                 const int b = elementNodes[e][1];
@@ -1186,11 +1249,12 @@ namespace fminus::circuit
                 for (int at = b; at != a && at >= 0 && from[static_cast<std::size_t>(at)] != -2;
                      at = from[static_cast<std::size_t>(at)])
                     loop.push_back(via[static_cast<std::size_t>(at)]);
-                std::sort(loop.begin(), loop.end());
+                std::sort(loop.begin(), loop.end(), [](std::size_t x, std::size_t y)
+                          { return x == kInput ? y != kInput : y != kInput && x < y; });
                 loop.push_back(e);
                 std::string names;
                 for (std::size_t k : loop)
-                    names += (names.empty() ? "" : ", ") + elements[k].name;
+                    names += (names.empty() ? "" : ", ") + (k == kInput ? std::string(".input") : elements[k].name);
                 messages.error(elements[e].loc, "a loop of voltage sources, E outputs and inductors (" + names +
                                                     "): its DC current is undefined");
             }
@@ -1257,7 +1321,7 @@ namespace fminus::circuit
             const Element& el = elements[e];
             const int a = elementNodes[e][0];
             const int b = elementNodes[e][1];
-            if (a == p.inputNode || b == p.inputNode)
+            if (p.inputNode > 0 && (a == p.inputNode || b == p.inputNode))
             {
                 messages.error(el.loc, "the V source " + el.name + " is across .input's node '" +
                                            nodeName(p.inputNode) + "': the signal is .input's");

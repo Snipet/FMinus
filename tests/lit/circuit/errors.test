@@ -65,8 +65,10 @@
 # RUN: not fminus %S/Inputs/broken-controls.cir --emit fm 2>&1 | FileCheck %s --check-prefix=CONTROLS --match-full-lines
 # RUN: not fminus %S/Inputs/broken-biased.cir --emit fm 2>&1 | FileCheck %s --check-prefix=BIASED --match-full-lines
 
-# TOPOLOGY:      {{.*}}broken-dc.cir:9:1: error: a loop of voltage sources, E outputs and inductors (V1, L1): its DC current is undefined
-# TOPOLOGY-NEXT: {{.*}}broken-dc.cir:11:1: error: node 'x' reaches ground only through capacitors and current sources (I1, C1): its DC voltage is undefined (add 10meg to ground)
+# TOPOLOGY:      {{.*}}broken-dc.cir:11:1: error: a loop of voltage sources, E outputs and inductors (V1, L1): its DC current is undefined
+# TOPOLOGY-NEXT: {{.*}}broken-dc.cir:13:1: error: node 'x' reaches ground only through capacitors and current sources (I1, C1): its DC voltage is undefined (add 10meg to ground)
+# TOPOLOGY-NEXT: {{.*}}broken-dc.cir:16:1: error: a loop of voltage sources, E outputs and inductors (.input, V2, L2): its DC current is undefined
+# TOPOLOGY-NEXT: {{.*}}broken-dc.cir:19:1: error: a loop of voltage sources, E outputs and inductors (X1, L3): its DC current is undefined
 
 # DIODES:      {{.*}}broken-diodes.cir:8:1: error: antiparallel D1|D2 have unequal RS (10 and 5 ohm): a pair shares one series resistor
 # DIODES-NEXT: {{.*}}broken-diodes.cir:11:1: error: diodes D3 and D4 in series through node 'm' have different models (1N914, 1N4148): a series string is of one model
