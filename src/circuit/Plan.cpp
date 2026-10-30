@@ -622,38 +622,88 @@ namespace fminus::circuit
 
     namespace
     {
-        // The smallest and largest gain of an OTA port over its pots' and law inputs' grid (gainAt's, at each pot's
-        // 0, 0.5 and 1 and each law input's low end, middle and high end).
-        std::pair<double, double> gainRange(const Plan& p, const Block& b)
+        // The law inputs an OTA port's gain reads: indices into p.laws.
+        std::vector<std::size_t> gainLawAxes(const Plan& p, const PortDef& port)
         {
-            const PortDef& port = *b.port;
             std::vector<std::size_t> axes;
             for (std::size_t i = 0; i < p.laws.size(); ++i)
             {
                 if (std::find(port.gainLaws.begin(), port.gainLaws.end(), p.laws[i].key) != port.gainLaws.end())
                     axes.push_back(i);
             }
+            return axes;
+        }
+
+        // The law inputs' values a check of an OTA's gain runs at, by potGrid's rule: each of `axes` (indices into
+        // p.laws) at its low end, middle and high end, the full grid for 3 axes or fewer, otherwise each axis alone
+        // (the others at their middles) and all at their low ends and all at their high ends; a law input off `axes`
+        // at its low end. Each point gives every law input's value in p.laws' order (3k + 2 points past 3 axes, not
+        // 3^k: a gain of 13 law inputs took 2.5 s on the full grid).
+        std::vector<std::vector<double>> lawGrid(const Plan& p, const std::vector<std::size_t>& axes)
+        {
+            std::vector<double> lows;
+            for (const LawInfo& l : p.laws)
+                lows.push_back(l.low);
+            auto level = [&](std::size_t i, int at)
+            {
+                const LawInfo& l = p.laws[i];
+                return at == 0 ? l.low : at == 1 ? l.middle() : l.high;
+            };
+            std::vector<std::vector<double>> grid;
+            if (axes.size() <= 3)
+            {
+                std::size_t count = 1;
+                for (std::size_t k = 0; k < axes.size(); ++k)
+                    count *= 3;
+                for (std::size_t k = 0; k < count; ++k)
+                {
+                    std::vector<double> point = lows;
+                    std::size_t rest = k;
+                    for (std::size_t i : axes)
+                    {
+                        point[i] = level(i, static_cast<int>(rest % 3));
+                        rest /= 3;
+                    }
+                    grid.push_back(point);
+                }
+                return grid;
+            }
+            std::vector<double> middles = lows;
+            for (std::size_t i : axes)
+                middles[i] = level(i, 1);
+            for (std::size_t i : axes)
+            {
+                for (int at : {0, 1, 2})
+                {
+                    std::vector<double> point = middles;
+                    point[i] = level(i, at);
+                    grid.push_back(point);
+                }
+            }
+            for (int at : {0, 2})
+            {
+                std::vector<double> point = lows;
+                for (std::size_t i : axes)
+                    point[i] = level(i, at);
+                grid.push_back(point);
+            }
+            return grid;
+        }
+
+        // The smallest and largest gain of an OTA port over its pots' and law inputs' grid (gainAt's, at potGrid's
+        // points of its pots and lawGrid's of its law inputs).
+        std::pair<double, double> gainRange(const Plan& p, const Block& b)
+        {
+            const PortDef& port = *b.port;
             Block gainBlock = b;
             gainBlock.pots = port.gainPots;
-            std::size_t points = 1;
-            for (std::size_t i = 0; i < axes.size(); ++i)
-                points *= 3;
+            const std::vector<std::vector<double>> lawPoints = lawGrid(p, gainLawAxes(p, port));
             double lo = std::numeric_limits<double>::infinity();
             double hi = -lo;
             for (const std::vector<double>& pots : potGrid(p, gainBlock))
             {
-                for (std::size_t k = 0; k < points; ++k)
+                for (const std::vector<double>& laws : lawPoints)
                 {
-                    std::vector<double> laws;
-                    for (const LawInfo& l : p.laws)
-                        laws.push_back(l.low);
-                    std::size_t rest = k;
-                    for (std::size_t i : axes)
-                    {
-                        const double values[] = {p.laws[i].low, p.laws[i].middle(), p.laws[i].high};
-                        laws[i] = values[rest % 3];
-                        rest /= 3;
-                    }
                     const double g = gainAt(p, port, pots, laws);
                     lo = std::min(lo, g);
                     hi = std::max(hi, g);
@@ -1999,35 +2049,19 @@ namespace fminus::circuit
             if (!b.port || !b.port->smooth() || !b.port->gain)
                 continue;
             const PortDef& port = *b.port;
-            std::vector<std::size_t> lawAxes;
-            for (std::size_t i = 0; i < p.laws.size(); ++i)
-            {
-                if (std::find(port.gainLaws.begin(), port.gainLaws.end(), p.laws[i].key) != port.gainLaws.end())
-                    lawAxes.push_back(i);
-            }
+            const std::vector<std::size_t> lawAxes = gainLawAxes(p, port);
             Block gainBlock = b;
             gainBlock.pots = port.gainPots;
-            std::size_t lawPoints = 1;
-            for (std::size_t i = 0; i < lawAxes.size(); ++i)
-                lawPoints *= 3;
+            const std::vector<std::vector<double>> lawPoints = lawGrid(p, lawAxes);
             bool reported = false;
             for (const std::vector<double>& pots : potGrid(p, gainBlock))
             {
-                for (std::size_t k = 0; k < lawPoints && !reported; ++k)
+                for (std::size_t k = 0; k < lawPoints.size() && !reported; ++k)
                 {
-                    std::vector<double> laws;
-                    for (const LawInfo& l : p.laws)
-                        laws.push_back(l.low);
-                    std::size_t rest = k;
+                    const std::vector<double>& laws = lawPoints[k];
                     std::string where;
                     for (std::size_t i : lawAxes)
-                    {
-                        const LawInfo& l = p.laws[i];
-                        const double values[] = {l.low, l.middle(), l.high};
-                        laws[i] = values[rest % 3];
-                        rest /= 3;
-                        where += std::format("{}{} {:g}", where.empty() ? "" : ", ", l.name, laws[i]);
-                    }
+                        where += std::format("{}{} {:g}", where.empty() ? "" : ", ", p.laws[i].name, laws[i]);
                     for (const std::string& key : port.gainPots)
                     {
                         if (const int i = potIndex(key); i >= 0)

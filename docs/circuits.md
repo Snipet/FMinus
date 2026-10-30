@@ -189,7 +189,7 @@ case-folding and unit suffixes, which Flex and Bison fit poorly.
 | `P<name> a b value {expr} [taper=...]` | a rheostat: `R = t value` |
 | `S<name> a b SWITCH pos[,pos...] [ron=1] [roff=10meg]` | a switch: a resistance that ramps between `roff` (open) and `ron` (closed), closed at the positions listed of the `.switch` SWITCH (and open at the others); in the impedance form, as a pot's section is, `r = e^(ln roff + s (ln ron - ln roff))` with the ramp `s` from 0 to 1 ([below](#the-module)). `ron` and `roff` lie in 1e-30 to 1e30 ohms |
 | `X<name> inp inn out opamp` | an ideal op amp (a nullor): `V(inp) = V(inn)`, any output current, no input current |
-| `G<name> n+ n- OTA nc+ nc- gain` | an OTA (report §7.1's macro): `i = g tanh((V(nc+) - V(nc-)) / 2 Vt)`, leaving n+ and entering n- (SPICE's G direction), 2 Vt = 2 k 300.15 / q = 51.73 mV; `g`, amps, a positive number or a `{expr}` of pots and law inputs, not negative anywhere on their grid |
+| `G<name> n+ n- OTA nc+ nc- gain` | an OTA (report §7.1's macro): `i = g tanh((V(nc+) - V(nc-)) / 2 Vt)`, leaving n+ and entering n- (SPICE's G direction), 2 Vt = 2 k 300.15 / q = 51.73 mV; `g`, amps, a positive number or a `{expr}` of pots and law inputs, not negative anywhere on their grid (each at its low end, middle and high end: the full grid for three law inputs or fewer, otherwise each alone and all at either end, as the pots' grid) |
 
 `t = taper(clamp01(expr))`: `lin` x; `audio` (81^x - 1) / 80, emitted as `(expf(4.394449f * x) - 1) * 0.0125f`; `rlog` 1
 - audio(1 - x). The taper is the P line's `taper=`, else the `.pot`'s word when `{expr}` is that pot alone, else lin (a

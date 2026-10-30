@@ -1167,6 +1167,30 @@ TEST_CASE("the OTA's and the law inputs' errors, as clang words them", "[circuit
         fc::generate(".input u in\n.input cv - kind=cv\n.output y o\nR1 in o 1k\nR2 o 0 1k\n", "t.cir");
     CHECK(r.errors.empty());
     CHECK(r.warnings == "t.cir:2:8: warning: law input 'cv' is never used\n");
+
+    // an OTA's gain of many law inputs is checked at potGrid's points of them, each alone and all at either end past
+    // three (3k + 2 points, not 3^k: 13 took 2.5 s, 30 never finished): 30 generate, and a gain negative where five
+    // are low is still refused
+    auto many = [](int count, bool average)
+    {
+        std::string text = ".title Many\n.input u in\n";
+        std::string sum;
+        for (int i = 0; i < count; ++i)
+        {
+            text += ".input c" + std::to_string(i) + " - kind=current range=10u:2m\n";
+            sum += (i == 0 ? "" : " + ") + std::string("c") + std::to_string(i);
+        }
+        const std::string gain = average ? "{(" + sum + ") / " + std::to_string(count) + "}" : "{" + sum + " - 1m}";
+        return text + ".output y yb\nR1 in a1 100k\nR2 a1 0 220\nR3 yb a2 100k\nR4 a2 0 220\nG1 0 y OTA a1 a2 " +
+               gain + "\nC1 y 0 1n\nR5 y 0 10meg\nX1 y yb yb opamp\n.oversample 2\n.adaa off\n.solver newton(2)\n";
+    };
+    const fc::Result thirty = fc::generate(many(30, true), "t.cir");
+    INFO(thirty.errors);
+    CHECK(thirty.errors.empty());
+    CHECK(!thirty.source.empty());
+    const std::string negative = fc::generate(many(5, false), "t.cir").errors;
+    CHECK(negative.find("error: OTA G1's gain is -") != std::string::npos);
+    CHECK(negative.find("an OTA's gain (its bias current) is not negative") != std::string::npos);
 }
 
 TEST_CASE("the OTA port is §7.2's", "[circuit]")
