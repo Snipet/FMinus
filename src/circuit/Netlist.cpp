@@ -1472,7 +1472,8 @@ namespace fminus::circuit
                 const bool transistor = type == "npn" || type == "pnp" || type == "njf" || type == "pjf" ||
                                         type == "nmos" || type == "pmos";
                 error(pieces.front().loc, "model type '" + pieces.front().text + "' is not supported yet" +
-                                              std::string(transistor ? " (Phase 2)" : "") + ": Phase 0 has diodes (D)");
+                                              std::string(transistor ? " (Phase 2)" : "") +
+                                              ": a .model card is a diode's (D)");
                 return;
             }
             ModelCard card;

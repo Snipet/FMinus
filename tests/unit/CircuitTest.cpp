@@ -447,7 +447,7 @@ TEST_CASE("netlist warnings and notes", "[circuit]")
     }
     CHECK(r.notes.find("t.cir: note: block 1 (R1, C1): 1 state, linear, at the host rate") != std::string::npos);
     CHECK(errorsOf(head + ".model Q1 NPN(BF=100)\n") ==
-          "t.cir:5:11: error: model type 'NPN' is not supported yet (Phase 2): Phase 0 has diodes (D)\n");
+          "t.cir:5:11: error: model type 'NPN' is not supported yet (Phase 2): a .model card is a diode's (D)\n");
     CHECK(errorsOf(head + ".model D9 D(IS=1n XYZ=3)\n") == "t.cir:5:19: error: unknown diode parameter 'XYZ'\n");
     // ADAA delays each port block it runs in by half a step: two clipping stages at 4x, a quarter of a host sample
     const fc::Result two = fc::generate(".input u in\n.output y b\n.oversample 4\n.adaa on\nR1 in a 1k\nC1 a 0 10n\n"
