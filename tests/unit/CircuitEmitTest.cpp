@@ -1881,3 +1881,63 @@ TEST_CASE("probes armed on every node leave the output's bits in every configura
         }
     }
 }
+
+TEST_CASE("probes armed leave the output's bits in every math mode", "[circuit]")
+{
+    // a frozen copy runs Math::Fast (LLVM's intrinsics), a capture's replay Math::Libm: tick and tick_pr are the same
+    // code on the same values in each
+    for (const std::string& text : {fc::test::kScreamer, fc::test::kOtaLp, fc::test::kDiodeTone})
+    {
+        for (Program::Math math : {Program::Math::Fast, Program::Math::Libm})
+        {
+            const fc::Result off = fc::generate(text, "t.cir");
+            const fc::Result on = fc::generate(text, "t.cir", withProbes());
+            Program::Options po;
+            po.math = math;
+            std::string errors;
+            auto p0 = Program::compile(off.source, errors, po);
+            auto p1 = Program::compile(on.source, errors, po);
+            REQUIRE(p0);
+            REQUIRE(p1);
+            const Program::Module* m0 = p0->module(off.module);
+            const Program::Module* m = p1->module(on.module);
+            REQUIRE(m0);
+            REQUIRE(m);
+            auto* init0 = p0->function<void(void*, float)>(off.module + "::init", errors);
+            auto* init = p1->function<void(void*, float)>(on.module + "::init", errors);
+            REQUIRE(init0);
+            REQUIRE(init);
+            const bool law = on.inputs.size() > 1;
+            auto* tick0 = p0->function<float(void*, float)>(off.module + "::tick", errors);
+            auto* tick = p1->function<float(void*, float)>(on.module + "::tick", errors);
+            auto* tickLaw0 = p0->function<float(void*, float, float)>(off.module + "::tick", errors);
+            auto* tickLaw = p1->function<float(void*, float, float)>(on.module + "::tick", errors);
+            std::vector<int> readable;
+            for (std::size_t k = 0; k < on.nodes.size(); ++k)
+            {
+                if (on.nodes[k].readable)
+                    readable.push_back(static_cast<int>(k));
+            }
+            auto plain = instance(*m0);
+            auto self = instance(*m);
+            init0(plain.get(), 48000);
+            init(self.get(), 48000);
+            int differ = 0;
+            for (int i = 0; i < 4000; ++i)
+            {
+                // armed in turns of 250 samples on each readable node, disarmed between
+                const int turn = i / 250;
+                writeAt<int>(self.get(), *m, "prb_", turn % 2);
+                writeAt<int>(self.get(), *m, "prs_", readable[static_cast<std::size_t>(turn) % readable.size()], 0);
+                const auto x = static_cast<float>(2 * std::sin(2 * std::numbers::pi * 1003 * i / 48000));
+                const auto iabc =
+                    static_cast<float>(1.41421e-4 * std::exp(1.386 * std::sin(2 * std::numbers::pi * i / 2000)));
+                const float y0 = law ? tickLaw0(plain.get(), x, iabc) : tick0(plain.get(), x);
+                const float y = law ? tickLaw(self.get(), x, iabc) : tick(self.get(), x);
+                differ += std::memcmp(&y0, &y, sizeof y) != 0 ? 1 : 0;
+            }
+            INFO(on.module << (math == Program::Math::Fast ? " Math::Fast" : " Math::Libm"));
+            CHECK(differ == 0);
+        }
+    }
+}

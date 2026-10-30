@@ -493,7 +493,8 @@ A host that draws the circuit (the playground's schematic) watches its node volt
 gives the module the fields `kProbeFields` names (`include/fminus/Circuit.h`), through which a host arms up to
 `kProbeSlots` (4) slots, each on a node of `Result::nodes`, and reads each one's last `kProbeRing` (1024) samples and
 its peak, sum and sum of squares. The output's bits are the same with probes off, on and disarmed, and armed on any
-node (`example-circuits --check`, q); so are the messages, the self-test's key and its answer.
+node (`example-circuits --check`, q), in each math mode (`CircuitEmitTest.cpp`: Math::Fast, a playground's frozen
+copy's, and Math::Libm too); so are the messages, the self-test's key and its answer.
 
 ```cpp
 fminus::circuit::Options options;

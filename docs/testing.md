@@ -95,7 +95,8 @@ TEST_CASE("functions compute what they say", "[codegen]")
   saturating sweep, an OTA driven hard against the reference, BDF2 against its double reference, a switch's ramp, its
   block splits and its ADAA point, a matched block's float coefficients and response, the probes (their fields after
   the module's own, every method nonblocking in one and two channels, init, clear, the rings, the slots, prn_'s wrap,
-  an ADAA input only a probe reads); `CircuitSearchTest.cpp` its
+  an ADAA input only a probe reads, the output's bits probed or not in other configurations and in every math mode);
+  `CircuitSearchTest.cpp` its
   self-test: both rows' candidates' order, the synth's stress matrix and a law input's arguments over its scale,
   switch positions as axes, the method check (its flag, its measure, its warning and the BDF2 twins), the search, the
   gates' reduction and the no-configuration choice on stub measures, the key, a `Choice`'s text, and the self-test
