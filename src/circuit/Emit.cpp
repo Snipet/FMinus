@@ -209,6 +209,11 @@ namespace fminus::circuit
         return callOf("cosf", v, [](double x) { return std::cos(x); });
     }
 
+    Val sinOf(const Val& v)
+    {
+        return callOf("sinf", v, [](double x) { return std::sin(x); });
+    }
+
     Val whereNegative(const Val& c, const Val& a, const Val& b)
     {
         if (c.kind != Val::Kind::Var)

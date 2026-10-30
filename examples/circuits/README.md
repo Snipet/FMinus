@@ -18,6 +18,7 @@ accuracy and cost tables from emitted code.
 | `wah.cir` | an RLC band-pass, a wah's tank (500 mH, 47 nF), its Q set by a pot, buffered | linear: a matched design at 1x (0.35 dB; its trapezoidal response errs by 13.4 dB) |
 | `rc8k.cir` | an RC low-pass at 8 kHz, a linear block of one state | linear: a matched one-pole at 1x (0.32 dB; trapezoidal, 12.8 dB) |
 | `sallen-key.cir` | a unity-gain Sallen-Key low-pass at 2.1 kHz, Q 0.74, a linear block of two states | linear: a matched biquad at 1x (0.45 dB; trapezoidal, 26.8 dB) |
+| `lowpass-sweep.cir` | a unity-gain Sallen-Key low-pass, Q 1.6, its cutoff swept by a pot from 10 kHz down to 99 Hz, where its poles sit near z = 1 | linear: a matched biquad at 1x (0.44 dB; trapezoidal, 28.6 dB), its float design held to the gate at every host rate to 192 kHz |
 | `tonestack.cir` | the Fender Bassman's tone stack (treble, bass and mid pots), a linear block of three states | linear: a matched design is of order 1 or 2, so a 4x region of its own, the smallest at which its trapezoidal response passes the 1x check |
 | `switch.cir` | example 1 with a clipping switch: S1 in series with the diodes, closed at `.switch clip` position 1 | 4x IIR, ADAA, omega3 + 1 step; S1 ramped over 20 ms of set() calls |
 | `ringing.cir` | an inductive kick: R1 100 into 1 mH, a diode to ground at its far end with 1 nF across it, which rings at 159 kHz when the diode turns off | 2x IIR, ADAA, omega3 + 1 step: the self-test's answer, pinned; at 1x the self-test measures it ringing at Nyquist, warns, and tries BDF2 twins |
@@ -38,12 +39,12 @@ points, the carry under ADAA; n: a per-sample law input's lanes and block splits
 netlists, screamer-biased.cir's offset form against screamer.cir, the self-test's answers on halfwave.cir and asym.cir,
 wah.cir's matched design), and Phase 1's coefficients and linear blocks (p: the Woodbury form's coefficients on every
 shipped netlist against the double derivation all in set, switch.cir's ramp, its block splits and its ADAA residual, the
-matched designs of rc8k.cir and sallen-key.cir, the tone stack's linear-only region, BDF2 against its reference, and the
-method check: ringing.cir ringing at 1x, the TS stage flagged without ringing; with d, a tone glide through the TS tone
-block matched at 1x). It times nothing. With no flags it prints generate()'s and the self-test's times, set()'s cycles
-on the TS tone block in the Woodbury form and all in set, then the cost table: each row's wall time, and on macOS its
-cycles and instructions, beside the self-test's cost model and the report's measurement of the same bench
-(`experiments/timing1.out`); it asserts nothing.
+matched designs of rc8k.cir and sallen-key.cir, lowpass-sweep.cir's through the JIT wherever its pot puts its poles, the
+tone stack's linear-only region, BDF2 against its reference, and the method check: ringing.cir ringing at 1x, the TS
+stage flagged without ringing; with d, a tone glide through the TS tone block matched at 1x). It times nothing. With no
+flags it prints generate()'s and the self-test's times, set()'s cycles on the TS tone block in the Woodbury form and all
+in set, then the cost table: each row's wall time, and on macOS its cycles and instructions, beside the self-test's cost
+model and the report's measurement of the same bench (`experiments/timing1.out`); it asserts nothing.
 
 The files: `main.cpp` (the command line), `harness.h`/`harness.cpp` (building a module with its runners appended,
 running it, the double reference), `check.cpp`, `tables.cpp` and `bench.cpp` (the three modes).

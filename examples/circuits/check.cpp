@@ -1665,7 +1665,7 @@ namespace circuits
                                                 "clipper.cir",    "otalp.cir",      "screamer-biased.cir",
                                                 "halfwave.cir",   "asym.cir",       "wah.cir",
                                                 "rc8k.cir",       "sallen-key.cir", "tonestack.cir",
-                                                "switch.cir",     "ringing.cir"};
+                                                "switch.cir",     "ringing.cir",    "lowpass-sweep.cir"};
 
         // A float field of an instance, by name, as a double (NaN when the module has none).
         double fieldOf(const Circuit& c, const void* self, const std::string& name)
@@ -1702,8 +1702,8 @@ namespace circuits
         // pot against 250 pF, designed at 4x, its 8 Hz pole a hair from z = 1), so it is printed rate by rate and held
         // to 1e-4. A matched design's float coefficients are only as well conditioned as the trapezoidal form they
         // come from, so its response is compared, against the double design's: within 0.02 dB to 96 kHz, 0.1 dB
-        // above. And the TS tone block's b<N>_set does fewer operations in the Woodbury form than all in set (both in
-        // its note).
+        // above (but lowpass-sweep.cir's, which matched() holds to the analog response). And the TS tone block's
+        // b<N>_set does fewer operations in the Woodbury form than all in set (both in its note).
         void woodbury(Report& r)
         {
             std::printf("p. Woodbury: every shipped netlist's coefficients (init's and b<N>_set's, through the JIT) "
@@ -1751,6 +1751,11 @@ namespace circuits
                             const std::string at = std::format("{} block {} at {:g} kHz", name, b + 1, rate / 1000);
                             if (block.design == fc::Block::Design::Matched)
                             {
+                                // lowpass-sweep.cir's poles sit near z = 1 on purpose, where float's coefficients
+                                // are further from double's (0.13 dB at 192 kHz): matched() holds it to the analog
+                                // response instead, the gate that decides
+                                if (name == "lowpass-sweep.cir")
+                                    continue;
                                 const fc::Matched<double> d =
                                     fc::matchedDesign(*fc::trForm(plan, static_cast<int>(b), design, point),
                                                       block.matchedPolarity);
@@ -2029,10 +2034,12 @@ namespace circuits
 
         // p, matched designs: rc8k.cir's one-pole and sallen-key.cir's biquad fail the 1x check trapezoidal and pass
         // it matched, their headers saying so, and tick follows the design's response; the TS tone block's matched
-        // error; the tone stack (order 3) falls back, with a note saying why.
+        // error; the tone stack (order 3) falls back, with a note saying why; lowpass-sweep.cir's design, its poles
+        // near z = 1, finite and within the gate through the JIT.
         void matched(Report& r)
         {
-            std::printf("p. matched designs at 1x: rc8k.cir, sallen-key.cir, the TS tone block, the tone stack\n");
+            std::printf("p. matched designs at 1x: rc8k.cir, sallen-key.cir, the TS tone block, the tone stack, "
+                        "lowpass-sweep.cir\n");
             for (const char* name : {"rc8k.cir", "sallen-key.cir"})
             {
                 auto c = buildOrReport(r, netlist(name), name);
@@ -2074,6 +2081,79 @@ namespace circuits
             r.line(stack.notes.find("a matched design cannot serve (3 states: a matched design is of order 1 or 2)") !=
                        std::string::npos && stack.warnings.empty(),
                    "tonestack.cir (order 3) falls back to the region, its note saying why");
+            {
+                // lowpass-sweep.cir, its poles from 10 kHz down to 99 Hz (near z = 1, where the design's float
+                // arithmetic once gave NaN): through the JIT at every host rate from 44.1 to 384 kHz and 33 positions
+                // of its pot, init and set give finite coefficients and poles inside the unit circle; up to 192 kHz
+                // (the float run's rates) their response is within 0.5 dB of the analog one, by the 1x check's rule
+                const std::string name = "lowpass-sweep.cir";
+                auto c = buildOrReport(r, netlist(name), name);
+                if (c)
+                {
+                    const fc::Plan& plan = c->plan;
+                    const fc::System system = fc::assemble(plan, 0);
+                    fc::Messages scratch;
+                    const std::optional<fc::Pivots> pivots = fc::choosePivots(system, plan, 0, scratch);
+                    bool sound = pivots.has_value();
+                    double worst = 0;
+                    std::string where;
+                    double high = 0;
+                    int points = 0;
+                    for (double rate : {44100.0, 48000.0, 88200.0, 96000.0, 176400.0, 192000.0, 384000.0})
+                    {
+                        for (int k = 0; k <= 32 && pivots; ++k)
+                        {
+                            const std::vector<double> point{k / 32.0};
+                            Instance self(*c->module);
+                            c->init(self.get(), static_cast<float>(rate));
+                            settle(*c, self.get(), point);
+                            ++points;
+                            fc::Matched<double> f;
+                            f.b0 = fieldOf(*c, self.get(), "mb0_b1");
+                            f.b1 = fieldOf(*c, self.get(), "mb1_b1");
+                            f.b2 = fieldOf(*c, self.get(), "mb2_b1");
+                            f.a1 = fieldOf(*c, self.get(), "ma1_b1");
+                            f.a2 = fieldOf(*c, self.get(), "ma2_b1");
+                            for (double x : {f.b0, f.b1, f.b2, f.a1, f.a2})
+                                sound = sound && std::isfinite(x);
+                            sound = sound && f.a2 < 1 && std::fabs(f.a1) < 1 + f.a2;
+                            std::vector<double> analogDb;
+                            std::vector<double> hz;
+                            double peak = -1e300;
+                            for (double fr = 20; fr <= 20000; fr *= 1.02)
+                            {
+                                hz.push_back(fr);
+                                analogDb.push_back(dB(std::abs(fc::analog(
+                                    system, *pivots, plan, 0, std::complex<double>(0, 2 * std::numbers::pi * fr),
+                                    point))));
+                                peak = std::fmax(peak, analogDb.back());
+                            }
+                            for (std::size_t i = 0; i < hz.size(); ++i)
+                            {
+                                if (analogDb[i] < peak - 40)
+                                    continue;
+                                const double h = std::abs(fc::matchedResponse(f, hz[i], rate));
+                                const double off = std::isfinite(h) ? std::fabs(dB(h) - analogDb[i]) : 1e9;
+                                double& slot = rate <= 192000 ? worst : high;
+                                if (off > slot)
+                                {
+                                    slot = off;
+                                    if (rate <= 192000)
+                                        where = std::format("cut {:g} at {:g} kHz, {:.0f} Hz", point[0], rate / 1000,
+                                                            hz[i]);
+                                }
+                            }
+                        }
+                    }
+                    const fc::Block& b = plan.blocks.front();
+                    r.line(b.design == fc::Block::Design::Matched && sound && worst <= 0.5,
+                           std::format("{}: matched at 1x ({:.2f} dB at 44.1 and 48 kHz; the trapezoidal rule's "
+                                       "{:.2f}); {} points through the JIT, 44.1 to 384 kHz: every coefficient "
+                                       "finite, the poles inside the unit circle; the response within {:.3f} dB of "
+                                       "the analog one to 192 kHz (at {}; gate 0.5), {:.3f} dB at 384 kHz",
+                                       name, b.matchedError, b.oneX, points, worst, where, high));
+                }
+            }
         }
 
         // p, the linear-only region: the tone stack runs in a region at the smallest of 2, 4 and 8 at which its

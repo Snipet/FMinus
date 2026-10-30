@@ -47,12 +47,12 @@ the design wrong, and what is not built yet.
   form against the unbiased module, the new diode forms' self-tests and an inductor's response, through the JIT
   (`example-circuits --check`); the DC point's notes and errors (`tests/lit/circuit/op.test`, `errors.test`); BDF2's
   blocks against the BDF2 map of their analog response, switches' parsing, planning and errors, the matched designs'
-  poles and magnitudes, the linear-only region, the eigenvalues (`CircuitTest.cpp`); the Woodbury form's coefficients
-  against the double derivation all in set at 44.1 to 384 kHz, a switch's ramp, block splits and ADAA residual, BDF2
-  against its reference, the matched designs' float coefficients and response (`CircuitEmitTest.cpp`); switch positions
-  as stress axes, the method check's flag, measurement, warning and twins (`CircuitSearchTest.cpp`); every shipped
-  netlist's coefficients, `switch.cir`, `rc8k.cir`, `sallen-key.cir`, `tonestack.cir`, BDF2 and `ringing.cir` through
-  the JIT (`example-circuits --check`, p).
+  poles and magnitudes and their float run, the linear-only region, the eigenvalues (`CircuitTest.cpp`); the Woodbury
+  form's coefficients against the double derivation all in set at 44.1 to 384 kHz, a switch's ramp, block splits and
+  ADAA residual, BDF2 against its reference, the matched designs' float coefficients and response
+  (`CircuitEmitTest.cpp`); switch positions as stress axes, the method check's flag, measurement, warning and twins
+  (`CircuitSearchTest.cpp`); every shipped netlist's coefficients, `switch.cir`, `rc8k.cir`, `sallen-key.cir`,
+  `lowpass-sweep.cir`, `tonestack.cir`, BDF2 and `ringing.cir` through the JIT (`example-circuits --check`, p).
 - **Not built:** Phase 2 and later, at the end of this page.
 
 ## Use
@@ -761,8 +761,9 @@ The trapezoidal rule maps the analog frequency axis onto the digital one by `tan
 block's response is far from the circuit's: the TS tone block 13.4 dB off, an 8 kHz RC low-pass 12.8 dB, a 2 kHz
 Sallen-Key 26.8 dB. A linear block of one or two states (`src/circuit/Linear.*`) can instead run a one-pole or a
 biquad whose poles are the analog ones mapped by impulse invariance (`z = e^(s T)`) and whose numerator matches the
-analog magnitude at DC, at the poles' frequency (clamped to a quarter of the rate) and at 0.83 of Nyquist (Vicanek,
-"Matched Second Order Digital Filters", 2016; a one-pole's at DC and 0.83 of Nyquist), as transposed direct form II:
+analog magnitude at DC, at the poles' frequency (clamped to 0.1 radians a sample below, 764 Hz at 48 kHz, and to a
+quarter of the rate above) and at 0.83 of Nyquist (Vicanek, "Matched Second Order Digital Filters", 2016; a one-pole's
+at DC and 0.83 of Nyquist), as transposed direct form II:
 
 ```c
 const float ym_ = mb0_b3 * u + s1_b3;                  // ym_: a name no input can take
@@ -774,24 +775,44 @@ s2_b3 = mb2_b3 * u - ma2_b3 * ym_;
   derivation gives, in float, wherever they are computed: `b<N>_set` for a block with pots or switches, init
   otherwise), whose inverse bilinear transform, in `s / 2 fs`, is the block's analog response exactly: so the design
   needs no rate of its own, and a pot's move reaches it through the same code. `matchedDesign<T>` runs on doubles (the
-  gate, the tests) and on `Val`s (the emitted text), as `derive<T>` does; the text uses `expf`, `sqrtf` and `cosf`, and
-  a select (`q < 0 ? a : b`) where the poles turn from real to complex.
+  gate, the tests), on floats (the gate's float run) and on `Val`s (the emitted text), as `derive<T>` does; the text
+  uses `expf`, `sqrtf` and `sinf`, and selects (`q < 0 ? a : b`) where the poles turn from real to complex and where a
+  square root's argument is held at 0 or above.
+- **Poles near z = 1.** A low pole at a high rate puts the poles near `z = 1`, where float keeps few of the design's
+  digits. Two places lost them all: Vicanek's `|A|^2 = A0 phi0 + A1 phi1 + A2 phi2` from `a1` near -2 and `a2` near 1
+  (so `1 + a1 + a2`, a pole pair's distance from DC, came from their last digits), and the numerator's `B1` and `B2`
+  from `|H|^2 |A|^2 - B0 phi0` at a match point so low that the response has barely moved from its DC value there. A
+  Sallen-Key swept down to 99 Hz (`lowpass-sweep.cir`) came out with NaN coefficients at 48 kHz from a cutoff of about
+  200 Hz down, and played NaN with no warning. Now `|A|^2`'s terms come from the poles in factors free of that
+  cancellation (`1 + a1 + a2 = e^2 - rs`, `A1 - 16 a2 = (e^2 + rs)((1 + r)^2 + 4 r + rs)`, with `e = 1 - r` and `rs`
+  from `sinh^2` or `sin^2` of the poles' spread), the middle match point has a floor (`kMatchFloor`: the numerator's
+  magnitude is smooth, so a higher point serves as well, and in double no shipped figure moves), and every square
+  root's argument is held at 0 or above and `b2`'s divisor away from 0, so the coefficients are finite wherever the
+  poles sit.
 - **The top match point is 0.83 of Nyquist**, the audio band's top at 48 kHz, not Vicanek's Nyquist: matched there, a
   block whose response falls as a one-pole's does (an RC low-pass above 300 Hz, the wah's tank, the TS tone block)
   errs by 0.96 dB near 0.37 of the rate; at 0.83, by 0.32 to 0.45 dB on the shipped blocks.
 - **The gate.** At generation, at 44.1 and 48 kHz over the block's pot and switch grid, the matched response must pass
-  the 1x check's rule (0.5 dB, within 40 dB of the maximum, 20 Hz-20 kHz). A design that cannot serve says why in a
-  note: more than two states ("3 states: a matched design is of order 1 or 2"), zeros that are not minimum-phase (a
-  magnitude match would change the phase), a factorisation that fails, or a polarity that changes with the pots (a
-  magnitude match loses the sign; it is fixed at generation, -1 for an inverting block). A block that fails either
-  way joins the oversampled region, with a note.
+  the 1x check's rule (0.5 dB, within 40 dB of the maximum, 20 Hz-20 kHz): that is the note's figure. Then the float
+  run: the design as the module computes it, `matchedDesign<float>` on the trapezoidal form rounded to float, at
+  every host rate from 44.1 to 192 kHz (44.1, 48, 88.2, 96, 176.4 and 192) over a finer grid (17 positions a pot,
+  every switch position), must give finite coefficients, poles inside the unit circle and a response that passes the
+  same rule against the analog one. A design that cannot serve says why in a note: more than two states ("3 states: a
+  matched design is of order 1 or 2"), zeros that are not minimum-phase (a magnitude match would change the phase),
+  coefficients that are not finite, a polarity that changes with the pots (a magnitude match loses the sign; it is
+  fixed at generation, -1 for an inverting block), or the float run's figure ("in float, as the module computes it,
+  its response errs by 2.76 dB at 192 kHz, cut 0.0625": the same Sallen-Key at Q 5, its poles 1e-4 from `z = 1` there,
+  where a direct form's float coefficients cannot place them). A block that fails either way joins the oversampled
+  region, with a note. Above 192 kHz the module runs the same design, finite, unchecked.
 - **Under `blocks=auto` only**, and only at 1x: `blocks=all` puts every block in the region in its trapezoidal form,
   and `blocks=nonlinear` leaves a failing block at 1x with a warning that says what `blocks=auto` would do with it
   ("blocks=auto would run a matched design at 1x (0.35 dB)", or "would oversample it").
 - **Float.** The coefficients come out of float arithmetic on the block's own float coefficients, and a stiff block's
-  are ill-conditioned (its poles near `z = 1`): the emitted responses are within 0.0025 dB of the double design's up
-  to 96 kHz and within 0.1 dB at 192 and 384 kHz (`example-circuits --check`, p); rc8k.cir's and sallen-key.cir's
-  coefficients themselves within 1e-5 at 44.1 and 48 kHz (`CircuitEmitTest.cpp`).
+  are ill-conditioned (its poles near `z = 1`): the emitted responses are within 0.0010 dB of the double design's up
+  to 96 kHz and within 0.016 dB at 192 and 384 kHz on the shipped netlists (`example-circuits --check`, p);
+  lowpass-sweep.cir's, through the JIT at 33 positions of its pot from 44.1 to 384 kHz, finite with their poles inside
+  the unit circle, and within 0.34 dB of the analog response to 192 kHz (0.22 at 384); rc8k.cir's and
+  sallen-key.cir's coefficients themselves within 1e-5 at 44.1 and 48 kHz (`CircuitEmitTest.cpp`).
 
 As built: `rc8k.cir` 0.32 dB (the trapezoidal rule's 12.79), `sallen-key.cir` 0.45 dB (26.82), `wah.cir` 0.35 dB
 (13.42), the TS tone block 0.35 dB (13.40), each at 44.1 and 48 kHz; the header says it (`block 3 (...): ...; linear;
@@ -935,7 +956,8 @@ The invariant: every emitted coefficient is `derive<Val>` of the derivation the 
 prints each check's worst value, where it fell, and the report's figure beside it:
 
 - **a.** every shipped netlist generates with no error or warning, and its methods are nonblocking (the report's
-  four, `otalp.cir`, `rc8k.cir`, `sallen-key.cir`, `tonestack.cir`, `switch.cir` and `ringing.cir`; o has the rest);
+  four, `otalp.cir`, `rc8k.cir`, `sallen-key.cir`, `tonestack.cir`, `switch.cir` and `ringing.cir`; o has the rest,
+  and p `lowpass-sweep.cir`);
 - **b.** DC, as above;
 - **c.** report §2's targets on both 1-port blocks, as shipped and on the provisional configuration (Phase 0's
   defaults), over the full stress set (sines at L/15, L/4.5, L/2.25, L and 2.2 L on odd bins at 105, 996 and 3012 Hz, a
@@ -986,18 +1008,19 @@ prints each check's worst value, where it fell, and the report's figure beside i
 - **p.** the coefficients and the linear blocks: every shipped netlist's coefficients, init's and `b<N>_set`'s through
   the JIT, against the double derivation all in set, 44.1 to 384 kHz, on each block's control grid with the pots at 0
   and 1 (the Woodbury blocks within 1e-7, gate 1e-5; those all in set within 1.9e-7, gate 1e-5, but the tone stack's,
-  within 9.8e-5 at 384 kHz, gate 1e-4), the matched designs' float responses against the double design's (0.0025 dB to
-  96 kHz, gate 0.02; 0.09 above, gate 0.1), the TS tone block's operation counts (200 against 236); `switch.cir`: the
+  within 9.8e-5 at 384 kHz, gate 1e-4), the matched designs' float responses against the double design's (0.0010 dB to
+  96 kHz, gate 0.02; 0.016 above, gate 0.1), the TS tone block's operation counts (200 against 236); `switch.cir`: the
   ramp from roff to ron in 60 `set()` calls at 48 kHz, each call's ratio within 0.1 % of (roff / ron)^(1/60), closing
   the diodes under a 4.5 V sine within 1.1x of a pot moving R the same way (0.51 V against 0.59), calls of 1, 61 and 64
   samples with S1 flipping bit for bit one call's, the ADAA point's Newton residual kept call by call (4.5e-7 of `p_D1`,
   gate 1e-5), each position among the stress matrix's points; `rc8k.cir` and `sallen-key.cir` matched at 1x with the
   header's figure, their ticks their designs' responses (gate 0.01 dB), the TS tone block matched and the region block 2
-  alone, `tonestack.cir` falling back with its note; the tone stack's linear-only 4x region (tick against step through
-  its halfbands, H1 against the analog response 0.006 dB off); BDF2 on diodetone.cir (the step against the double BDF2
-  reference, -102.6 dB in band, gate -100; nonblocking in one and two channels); the method check (`ringing.cir` at 1x
-  flagged, 12.8 dB of excess, the warning's text and its BDF2 twins; diodetone.cir at 4x not flagged; screamer-clip.cir
-  flagged without excess, no warning, no twin).
+  alone, `tonestack.cir` falling back with its note, `lowpass-sweep.cir`'s design through the JIT (finite, stable and
+  within 0.5 dB of the analog response at 33 positions, 44.1 to 192 kHz); the tone stack's linear-only 4x region (tick
+  against step through its halfbands, H1 against the analog response 0.006 dB off); BDF2 on diodetone.cir (the step
+  against the double BDF2 reference, -102.6 dB in band, gate -100; nonblocking in one and two channels); the method
+  check (`ringing.cir` at 1x flagged, 12.8 dB of excess, the warning's text and its BDF2 twins; diodetone.cir at 4x not
+  flagged; screamer-clip.cir flagged without excess, no warning, no twin).
 
 As built, the TS block at 4x with ADAA measures T1 -78.7, T2 -73.5 (converged -73.6; the report -75.1) and T3 0.14 dB;
 example 1 as shipped T1 -93.1, T2 -79.0 (the report -79.8), T3 0.10 dB; the decision's failures -53.3 and -52.7 dB (the

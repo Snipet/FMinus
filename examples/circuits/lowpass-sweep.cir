@@ -1,0 +1,17 @@
+* lowpass-sweep.cir: a unity-gain Sallen-Key low-pass, Q 1.6, whose cutoff a pot sweeps from 10 kHz down to 99 Hz
+* (500 ohms and a 50k pot in each arm, 100 nF over 10 nF): a linear block of two states, a matched design at 1x. At its
+* low end its poles sit near z = 1, where float keeps few of the design's digits: the design matches there at its
+* floor, not at its poles' frequency, and the float run at generation holds it to the gate at every host rate up to
+* 192 kHz (docs/circuits.md, "Matched designs at 1x").
+.title LowpassSweep
+.input  u    in   scale=1
+.output vout out
+.pot    cut  0.5                   ; 0: 99 Hz, 1: 10 kHz
+R0     in  m    500
+P1     m   a    50k {1 - cut}      ; a rheostat
+R2     a   n    500
+P2     n   b    50k {1 - cut}
+C1     a   out  100n
+C2     b   0    10n
+X1     b   out  out  opamp         ; the follower
+.end

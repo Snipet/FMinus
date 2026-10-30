@@ -501,6 +501,9 @@ namespace fminus::circuit
     double oneXError(const System& system, const Pivots& pivots, const Plan& plan, int block, double rate,
                      Method method = Method::Tr);
 
+    // The 1x check's gate, dB: a response within it passes (a matched design's too, in double and in float).
+    inline constexpr double kOneXTolerance = 0.5;
+
     // The discrete s an integrator puts in place of the analog one at f Hz and `rate`: the trapezoidal rule's j 2 fs
     // tan(pi f / fs), BDF2's fs (3 - 4 z^-1 + z^-2) / 2 at z = e^(j 2 pi f / fs).
     std::complex<double> discreteS(Method method, double f, double rate);

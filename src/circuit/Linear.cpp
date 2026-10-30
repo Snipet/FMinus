@@ -60,16 +60,83 @@ namespace fminus::circuit
             return {tr.d + beta1 + beta2, 2 * (tr.d - beta2), tr.d - beta1 + beta2};
         }
 
-        // The match frequency's analog s^ = j x: x, from w0 (or pi / 4 above it).
+        // The analog denominator in s / 2 fs, A0 + A1 s^ + A2 s^2 (matchedDesign's).
+        std::vector<double> denominator(const TrForm<double>& tr)
+        {
+            if (tr.order == 1)
+                return {1 - tr.a11, 1 + tr.a11};
+            const double trace = tr.a11 + tr.a22;
+            const double det = tr.a11 * tr.a22 - tr.a12 * tr.a21;
+            return {1 - trace + det, 2 * (1 - det), 1 + trace + det};
+        }
+
+        // The block's analog response at f Hz from its trapezoidal form at `rate` (its inverse bilinear transform: the
+        // circuit's own response, exactly).
+        std::complex<double> trAnalog(const TrForm<double>& tr, double f, double rate)
+        {
+            const std::complex<double> s(0, std::numbers::pi * f / rate);   // s / 2 fs
+            const std::vector<double> n = numerator(tr);
+            const std::vector<double> d = denominator(tr);
+            std::complex<double> num = 0;
+            std::complex<double> den = 0;
+            for (std::size_t k = n.size(); k-- > 0;)
+                num = num * s + n[k];
+            for (std::size_t k = d.size(); k-- > 0;)
+                den = den * s + d[k];
+            return num / den;
+        }
+
+        // The match frequency's analog s^ = j x: x, from w0, clamped to [kMatchFloor, pi / 4].
         double matchX(const TrForm<double>& tr)
         {
             if (tr.order == 1)
                 return 0;
-            const double trace = tr.a11 + tr.a22;
-            const double det = tr.a11 * tr.a22 - tr.a12 * tr.a21;
-            const double w2 = (1 - trace + det) / (1 + trace + det);
+            const std::vector<double> d = denominator(tr);
+            const double w2 = d[0] / d[2];
             const double quarter = std::numbers::pi * std::numbers::pi / 16;
-            return std::sqrt(w2 - quarter < 0 ? w2 : quarter);
+            const double upTo = w2 - quarter < 0 ? w2 : quarter;
+            return std::sqrt(upTo < kMatchFloor * kMatchFloor ? kMatchFloor * kMatchFloor : upTo);
+        }
+
+        TrForm<float> rounded(const TrForm<double>& tr)
+        {
+            TrForm<float> f;
+            f.order = tr.order;
+            f.a11 = static_cast<float>(tr.a11);
+            f.a12 = static_cast<float>(tr.a12);
+            f.a21 = static_cast<float>(tr.a21);
+            f.a22 = static_cast<float>(tr.a22);
+            f.b1 = static_cast<float>(tr.b1);
+            f.b2 = static_cast<float>(tr.b2);
+            f.c1 = static_cast<float>(tr.c1);
+            f.c2 = static_cast<float>(tr.c2);
+            f.d = static_cast<float>(tr.d);
+            return f;
+        }
+
+        // A point of the control grid as the notes give it: "cut 0.0625, mode 1" (the block's pots and switches).
+        std::string pointText(const Plan& plan, const Block& block, const std::vector<double>& point)
+        {
+            std::string text;
+            for (const std::string& key : block.pots)
+            {
+                for (const PotInfo& pot : plan.pots)
+                {
+                    if (pot.key == key)
+                        text += std::format("{}{} {:g}", text.empty() ? "" : ", ", pot.name,
+                                            potValue(plan, point, key));
+                }
+            }
+            for (const std::string& key : block.switches)
+            {
+                for (const SwitchInfo& sw : plan.switches)
+                {
+                    if (sw.key == key)
+                        text += std::format("{}{} {}", text.empty() ? "" : ", ", sw.name,
+                                            switchPosition(plan, point, key));
+                }
+            }
+            return text;
         }
     } // namespace
 
@@ -132,7 +199,7 @@ namespace fminus::circuit
                 {
                     if (!std::isfinite(c))
                     {
-                        out.why = std::format("its factorisation fails at {:g} kHz", rate / 1000);
+                        out.why = std::format("its coefficients are not finite at {:g} kHz", rate / 1000);
                         return out;
                     }
                 }
@@ -176,6 +243,80 @@ namespace fminus::circuit
             }
         }
         out.worst = worst;
+        // The float run: the module computes the design in float, and near z = 1 (a low pole, a high rate) float
+        // keeps fewer of its digits than double; so the design is run as the module runs it, on the trapezoidal form
+        // rounded to float, at every host rate up to 192 kHz over a finer grid (17 positions a pot, every switch
+        // position), and its float coefficients must be finite, its poles inside the unit circle, and its response
+        // within the gate of the analog one by the same rule. (The analog response is the trapezoidal form's inverse
+        // bilinear transform, exact.)
+        std::vector<double> coarse;
+        for (double f = 20; f <= 20000; f *= 1.02)
+            coarse.push_back(f);
+        double floatWorst = 0;
+        std::string floatWhere;
+        for (double rate : kMatchedRates)
+        {
+            for (const std::vector<double>& pots : potGrid(plan, block, 17))
+            {
+                const std::optional<TrForm<double>> tr = trForm(plan, blockIndex, rate, pots);
+                if (!tr)
+                {
+                    out.why = "its form is not of order 1 or 2";
+                    return out;
+                }
+                const Matched<float> f = matchedDesign(rounded(*tr), out.polarity);
+                Matched<double> m;
+                m.b0 = static_cast<double>(f.b0);
+                m.b1 = static_cast<double>(f.b1);
+                m.b2 = static_cast<double>(f.b2);
+                m.a1 = static_cast<double>(f.a1);
+                m.a2 = static_cast<double>(f.a2);
+                const std::string where = pointText(plan, block, pots);
+                const std::string at =
+                    std::format("at {:g} kHz{}", rate / 1000, where.empty() ? std::string() : ", " + where);
+                for (double c : {m.b0, m.b1, m.b2, m.a1, m.a2})
+                {
+                    if (!std::isfinite(c))
+                    {
+                        out.why = "its float coefficients are not finite " + at;
+                        return out;
+                    }
+                }
+                if (!(m.a2 < 1 && std::fabs(m.a1) < 1 + m.a2))
+                {
+                    out.why = "its float poles are not inside the unit circle " + at;
+                    return out;
+                }
+                std::vector<double> analogDb;
+                double peak = -1e300;
+                for (double fr : coarse)
+                {
+                    analogDb.push_back(20 * std::log10(std::abs(trAnalog(*tr, fr, rate)) + 1e-300));
+                    peak = std::max(peak, analogDb.back());
+                }
+                if (peak < -120)
+                    continue;
+                for (std::size_t i = 0; i < coarse.size(); ++i)
+                {
+                    if (analogDb[i] < peak - 40)
+                        continue;
+                    const double h = std::abs(matchedResponse(m, coarse[i], rate));
+                    const double off = std::fabs(20 * std::log10(h + 1e-300) - analogDb[i]);
+                    if (off > floatWorst)
+                    {
+                        floatWorst = off;
+                        floatWhere = at;
+                    }
+                }
+            }
+        }
+        out.floatWorst = floatWorst;
+        if (floatWorst > kOneXTolerance)
+        {
+            out.why = std::format("in float, as the module computes it, its response errs by {:.2f} dB {}",
+                                  floatWorst, floatWhere);
+            return out;
+        }
         out.usable = true;
         return out;
     }

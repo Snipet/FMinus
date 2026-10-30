@@ -1675,8 +1675,9 @@ TEST_CASE("the matched design: impulse-invariant poles, the analog magnitude at 
 {
     // An RC low-pass at 8 kHz (one state), a Sallen-Key low-pass at 2.1 kHz (two), the TS tone block and the wah's
     // tank (two, pots moving them), in double: the poles are e^(p T) of the analog poles (the inverse bilinear
-    // transform of the trapezoidal form's), and |H| at DC, at 0.83 of Nyquist and at the poles' frequency (or a
-    // quarter of the rate above it) is the analog response's
+    // transform of the trapezoidal form's), and |H| at DC, at 0.83 of Nyquist and at the poles' frequency (clamped to
+    // [kMatchFloor fs / pi, fs / 4]: the TS tone block's 332 Hz is matched at 764 Hz at 48 kHz) is the analog
+    // response's
     struct Case
     {
         std::string text;
@@ -1735,7 +1736,8 @@ TEST_CASE("the matched design: impulse-invariant poles, the analog magnitude at 
                 if (tr->order == 2)
                 {
                     const double w0 = std::sqrt(std::abs(poles[0] * poles[1]));   // rad/s
-                    points.push_back(std::fmin(w0 / (2 * std::numbers::pi), fs / 4));
+                    points.push_back(
+                        std::clamp(w0 / (2 * std::numbers::pi), fc::kMatchFloor * fs / std::numbers::pi, fs / 4));
                 }
                 for (double f : points)
                 {
@@ -1812,6 +1814,64 @@ TEST_CASE("a linear block a matched design cannot serve joins the region, with a
     CHECK(fc::generate(fc::test::kToneStack, "t.cir", nonlinear).warnings ==
           "t.cir:7:1: warning: block 1 (C1, R1, C2, C3, Ptreb, Pbass, Pmid, RL) errs by 13.37 dB at 1x (44.1 kHz), "
           "more than 0.5 dB: blocks=auto would oversample it\n");
+}
+
+TEST_CASE("a matched design's float run: poles near z = 1 run at 1x where float holds them, else in the region",
+          "[circuit]")
+{
+    // lowpass-sweep.cir: Q 1.6, 10 kHz down to 99 Hz. Matched at its poles' frequency, the low end's design came out
+    // NaN in float (its numerator from |H|^2 |A|^2 - B0 phi0, a difference of nearly equal numbers); matched at
+    // kMatchFloor, with |A|^2 from the poles, float holds it at every host rate to 192 kHz: at 1x, no warning
+    const fc::Result sweep = fc::generate(fc::test::kLowpassSweep, "t.cir");
+    INFO(sweep.errors << sweep.warnings);
+    REQUIRE(sweep.errors.empty());
+    CHECK(sweep.warnings.empty());
+    const fc::Plan plan = planned(fc::test::kLowpassSweep);
+    CHECK(plan.blocks[0].design == fc::Block::Design::Matched);
+    CHECK(plan.regionFirst < 0);
+    const fc::MatchedCheck check = fc::matchedCheck(plan, 0);
+    CHECK(check.usable);
+    CHECK(check.floatWorst <= 0.5);
+    CHECK(check.worst == plan.blocks[0].matchedError);
+    // the design on floats is finite everywhere, a hair below the floor and far above it too (b0 > 0, b2's divisor)
+    for (double rate : {44100.0, 192000.0, 384000.0, 768000.0})
+    {
+        for (double cut : {0.0, 0.03125, 0.5, 1.0})
+        {
+            const std::optional<fc::TrForm<double>> tr = fc::trForm(plan, 0, rate, {cut});
+            REQUIRE(tr);
+            fc::TrForm<float> f;
+            f.order = tr->order;
+            f.a11 = static_cast<float>(tr->a11);
+            f.a12 = static_cast<float>(tr->a12);
+            f.a21 = static_cast<float>(tr->a21);
+            f.a22 = static_cast<float>(tr->a22);
+            f.b1 = static_cast<float>(tr->b1);
+            f.b2 = static_cast<float>(tr->b2);
+            f.c1 = static_cast<float>(tr->c1);
+            f.c2 = static_cast<float>(tr->c2);
+            f.d = static_cast<float>(tr->d);
+            const fc::Matched<float> m = fc::matchedDesign(f, 1.0);
+            INFO(rate << " Hz, cut " << cut);
+            for (float x : {m.b0, m.b1, m.b2, m.a1, m.a2})
+                CHECK(std::isfinite(x));
+        }
+    }
+    // at Q 5 its poles sit 1e-4 from z = 1 at 192 kHz, nearer than float's coefficients can place them: the float
+    // run refuses the design, and the block joins the region, its note saying where the float response failed
+    const fc::Result q5 = fc::generate(fc::test::kLowpassSweepQ5, "t.cir");
+    INFO(q5.notes);
+    REQUIRE(q5.errors.empty());
+    const fc::Plan sharp = planned(fc::test::kLowpassSweepQ5);
+    CHECK(sharp.blocks[0].design != fc::Block::Design::Matched);
+    CHECK(sharp.blocks[0].inRegion);
+    const fc::MatchedCheck refused = fc::matchedCheck(sharp, 0);
+    CHECK(!refused.usable);
+    CHECK(refused.worst <= 0.5);   // in double it passes at 44.1 and 48 kHz
+    CHECK(refused.floatWorst > 0.5);
+    CHECK(refused.why.starts_with("in float, as the module computes it, its response errs by "));
+    CHECK(q5.notes.find("and a matched design cannot serve (in float, as the module computes it, its response errs "
+                        "by") != std::string::npos);
 }
 
 TEST_CASE("the DC operating point, by hand", "[circuit]")

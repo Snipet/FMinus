@@ -344,11 +344,12 @@ namespace fminus::circuit
     // The physical N Vt of a diode, N k 300.15 / q (CODATA's k and q, SPICE's TNOM of 27 C).
     double thermalVoltage(double n);
 
-    // The control positions a check runs a block at: its pots at {0, 0.5, 1} and its switches at each position, the
-    // full grid for 3 axes or fewer, otherwise each axis alone (the others at their defaults) and all at their low ends
-    // (0, position 0) and all at their high ends (1, the last position). Each point gives every pot's value in
-    // plan.pots' order, then every switch's position in plan.switches' order (a point without them: the defaults).
-    std::vector<std::vector<double>> potGrid(const Plan& plan, const Block& block);
+    // The control positions a check runs a block at: its pots at {0, 0.5, 1} (at `resolution` positions evenly spaced
+    // from 0 to 1) and its switches at each position, the full grid for 3 axes or fewer, otherwise each axis alone (the
+    // others at their defaults) and all at their low ends (0, position 0) and all at their high ends (1, the last
+    // position). Each point gives every pot's value in plan.pots' order, then every switch's position in
+    // plan.switches' order (a point without them: the defaults).
+    std::vector<std::vector<double>> potGrid(const Plan& plan, const Block& block, int resolution = 3);
 
     // A pot's value by folded name, from a point of potGrid (or the defaults).
     double potValue(const Plan& plan, const std::vector<double>& point, const std::string& key);

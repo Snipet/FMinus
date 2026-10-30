@@ -53,11 +53,12 @@ namespace fminus::circuit
     Val operator-(const Val& a);
     bool isZero(const Val& v);
     Val logOf(const Val& v);
-    // expf, sqrtf and cosf of a Val (folded in double for a constant); `whereNegative(c, a, b)` is `c < 0 ? a : b`
-    // (chosen at generation for a constant c). The matched designs' arithmetic (Linear.h).
+    // expf, sqrtf, cosf and sinf of a Val (folded in double for a constant); `whereNegative(c, a, b)` is `c < 0 ? a :
+    // b` (chosen at generation for a constant c). The matched designs' arithmetic (Linear.h).
     Val expOf(const Val& v);
     Val sqrtOf(const Val& v);
     Val cosOf(const Val& v);
+    Val sinOf(const Val& v);
     Val whereNegative(const Val& c, const Val& a, const Val& b);
     void annotate(Val& v, const std::string& comment);
     Val bindField(const std::string& field, Val value);

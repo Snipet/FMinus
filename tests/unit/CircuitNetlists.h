@@ -191,6 +191,36 @@ C2 b 0 10n
 X1 b out out opamp
 )";
 
+    // examples/circuits/lowpass-sweep.cir: a Sallen-Key low-pass, Q 1.6, its cutoff swept by a pot from 10 kHz
+    // down to 99 Hz, where its poles sit near z = 1.
+    inline const std::string kLowpassSweep = R"(.title LowpassSweep
+.input u in
+.output vout out
+.pot cut 0.5
+R0 in m 500
+P1 m a 50k {1 - cut}
+R2 a n 500
+P2 n b 50k {1 - cut}
+C1 a out 100n
+C2 b 0 10n
+X1 b out out opamp
+)";
+
+    // The same at Q 5 (1 uF over 10 nF), its cutoff from 3.2 kHz down to 31 Hz: at 176.4 and 192 kHz, float's
+    // coefficients for a biquad that low and that sharp (its poles 1e-4 from z = 1) cannot hold its response.
+    inline const std::string kLowpassSweepQ5 = R"(.title LowpassSweepQ5
+.input u in
+.output vout out
+.pot cut 0.5
+R0 in m 500
+P1 m a 50k {1 - cut}
+R2 a n 500
+P2 n b 50k {1 - cut}
+C1 a out 1u
+C2 b 0 10n
+X1 b out out opamp
+)";
+
     // examples/circuits/tonestack.cir: the Bassman's tone stack, of order 3 (a matched design is of 1 or 2).
     inline const std::string kToneStack = R"(.title ToneStack
 .input u in

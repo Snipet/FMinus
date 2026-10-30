@@ -517,9 +517,16 @@ namespace fminus::circuit
         return point;
     }
 
-    std::vector<std::vector<double>> potGrid(const Plan& plan, const Block& block)
+    std::vector<std::vector<double>> potGrid(const Plan& plan, const Block& block, int resolution)
     {
         const std::vector<double> defaults = defaultPoint(plan);
+        std::vector<double> steps{0.0, 0.5, 1.0};
+        if (resolution != 3)
+        {
+            steps.clear();
+            for (int k = 0; k < resolution; ++k)
+                steps.push_back(resolution > 1 ? static_cast<double>(k) / (resolution - 1) : 0.5);
+        }
         // the axes: (index into the point, its values)
         std::vector<std::pair<std::size_t, std::vector<double>>> axes;
         for (const std::string& key : block.pots)
@@ -527,7 +534,7 @@ namespace fminus::circuit
             for (std::size_t i = 0; i < plan.pots.size(); ++i)
             {
                 if (plan.pots[i].key == key)
-                    axes.push_back({i, {0.0, 0.5, 1.0}});
+                    axes.push_back({i, steps});
             }
         }
         for (const std::string& key : block.switches)
@@ -2207,7 +2214,7 @@ namespace fminus::circuit
                 portBlocks.push_back(static_cast<int>(i));
         }
         constexpr double kCheckRate = 44100;
-        constexpr double kTolerance = 0.5;
+        constexpr double kTolerance = kOneXTolerance;
         std::vector<System> systems;
         std::vector<std::optional<Pivots>> pivotsOf;
         for (std::size_t i = 0; i < p.blocks.size(); ++i)
