@@ -839,11 +839,12 @@ block took (`block 3's b3_set: the Woodbury form (its variable branches pivoted 
 all in set, 236`). ADAA's carry stays in `b<N>_set`. As built: the TS clipping stage 12 operations against 23, its tone
 block 200 against 236 (the matched design is most of them), diodetone.cir 19 against 26, wah.cir 23 against 29; the tone
 stack 182 either way (all in set), and the TS's level block finds no order that pivots its pot last (37). Every shipped
-block's coefficients, through the JIT, are within 1e-7 of the double derivation all in set, row-normalised, from 44.1
-to 384 kHz with the pots at 0 and 1 (the gate 1e-5); those all in set within 9.8e-5 (the tone stack's region designs at
-176 kHz to 1.5 MHz, where its 8 Hz pole is a hair from `z = 1`; the gate 1e-4). The TS tone block's `b3_set`, its pot
-moving every call, costs 126 cycles a call in the Woodbury form against 134 all in set (the bench prints both; an M5 at
-load 3): a pot's update is off the per-sample path either way.
+block's coefficients, through the JIT, are within 1e-7 of the double derivation all in set, row-normalised, from 44.1 to
+384 kHz with the pots at 0 and 1 (the gate 1e-5), and those all in set within 1.9e-7 (the gate 1e-5) but one: the tone
+stack's, whose region designs at 176 kHz to 1.5 MHz put its 8 Hz pole a hair from `z = 1`, where float holds its
+coefficients to 8.0e-6 at 44.1 kHz, 1.4e-5 at 48 and 9.8e-5 at 384 (the gate 1e-4). The TS tone block's `b3_set`, its
+pot moving every call, costs 126 cycles a call in the Woodbury form against 134 all in set (the bench prints both; an M5
+at load 3): a pot's update is off the per-sample path either way.
 
 ## BDF2 and the method check
 
@@ -984,19 +985,19 @@ prints each check's worst value, where it fell, and the report's figure beside i
   `res` 0, 0.5 and 1;
 - **p.** the coefficients and the linear blocks: every shipped netlist's coefficients, init's and `b<N>_set`'s through
   the JIT, against the double derivation all in set, 44.1 to 384 kHz, on each block's control grid with the pots at 0
-  and 1 (the Woodbury blocks within 1e-7, gate 1e-5; those all in set within 9.8e-5, gate 1e-4), the matched designs'
-  float responses against the double design's (0.0025 dB to 96 kHz, gate 0.02; 0.09 above, gate 0.1), the TS tone
-  block's operation counts (200 against 236); `switch.cir`: the ramp from roff to ron in 60 `set()` calls at 48 kHz,
-  each call's ratio within 0.1 % of (roff / ron)^(1/60), closing the diodes under a 4.5 V sine within 1.1x of a pot
-  moving R the same way (0.51 V against 0.59), calls of 1, 61 and 64 samples with S1 flipping bit for bit one call's,
-  the ADAA point's Newton residual kept call by call (4.5e-7 of `p_D1`, gate 1e-5), each position among the stress
-  matrix's points; `rc8k.cir` and `sallen-key.cir` matched at 1x with the header's figure, their ticks their designs'
-  responses (gate 0.01 dB), the TS tone block matched and the region block 2 alone, `tonestack.cir` falling back with
-  its note; the tone stack's linear-only 4x region (tick against step through its halfbands, H1 against the analog
-  response 0.006 dB off); BDF2 on diodetone.cir (the step against the double BDF2 reference, -102.6 dB in band, gate
-  -100; nonblocking in one and two channels); the method check (`ringing.cir` at 1x flagged, 12.8 dB of excess, the
-  warning's text and its BDF2 twins; diodetone.cir at 4x not flagged; screamer-clip.cir flagged without excess, no
-  warning, no twin).
+  and 1 (the Woodbury blocks within 1e-7, gate 1e-5; those all in set within 1.9e-7, gate 1e-5, but the tone stack's,
+  within 9.8e-5 at 384 kHz, gate 1e-4), the matched designs' float responses against the double design's (0.0025 dB to
+  96 kHz, gate 0.02; 0.09 above, gate 0.1), the TS tone block's operation counts (200 against 236); `switch.cir`: the
+  ramp from roff to ron in 60 `set()` calls at 48 kHz, each call's ratio within 0.1 % of (roff / ron)^(1/60), closing
+  the diodes under a 4.5 V sine within 1.1x of a pot moving R the same way (0.51 V against 0.59), calls of 1, 61 and 64
+  samples with S1 flipping bit for bit one call's, the ADAA point's Newton residual kept call by call (4.5e-7 of `p_D1`,
+  gate 1e-5), each position among the stress matrix's points; `rc8k.cir` and `sallen-key.cir` matched at 1x with the
+  header's figure, their ticks their designs' responses (gate 0.01 dB), the TS tone block matched and the region block 2
+  alone, `tonestack.cir` falling back with its note; the tone stack's linear-only 4x region (tick against step through
+  its halfbands, H1 against the analog response 0.006 dB off); BDF2 on diodetone.cir (the step against the double BDF2
+  reference, -102.6 dB in band, gate -100; nonblocking in one and two channels); the method check (`ringing.cir` at 1x
+  flagged, 12.8 dB of excess, the warning's text and its BDF2 twins; diodetone.cir at 4x not flagged; screamer-clip.cir
+  flagged without excess, no warning, no twin).
 
 As built, the TS block at 4x with ADAA measures T1 -78.7, T2 -73.5 (converged -73.6; the report -75.1) and T3 0.14 dB;
 example 1 as shipped T1 -93.1, T2 -79.0 (the report -79.8), T3 0.10 dB; the decision's failures -53.3 and -52.7 dB (the

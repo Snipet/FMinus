@@ -1696,18 +1696,24 @@ namespace circuits
 
         // p, Woodbury: on every shipped netlist, at host rates from 44.1 to 384 kHz and over each block's control grid
         // (its pots at 0, 0.5 and 1, its switches at each position), init's and b<N>_set's coefficients through the
-        // JIT against the double derivation all in set (Phase 0's pivot order), row-normalised: within 1e-5. A matched
-        // design's float coefficients are only as well conditioned as the trapezoidal form they come from, so its
-        // response is compared, against the double design's: within 0.02 dB to 96 kHz, 0.1 dB above. And the TS tone
-        // block's b<N>_set does fewer operations in the Woodbury form than all in set (both in its note).
+        // JIT against the double derivation all in set (Phase 0's pivot order), row-normalised: within 1e-5, every
+        // block in either form but one. The exception is tonestack.cir's block, all in set (its b1_set is as long in
+        // the Woodbury form): float cannot hold Phase 0's form of it to 1e-5 above 44.1 kHz (three states, a 1 MEG
+        // pot against 250 pF, designed at 4x, its 8 Hz pole a hair from z = 1), so it is printed rate by rate and held
+        // to 1e-4. A matched design's float coefficients are only as well conditioned as the trapezoidal form they
+        // come from, so its response is compared, against the double design's: within 0.02 dB to 96 kHz, 0.1 dB
+        // above. And the TS tone block's b<N>_set does fewer operations in the Woodbury form than all in set (both in
+        // its note).
         void woodbury(Report& r)
         {
             std::printf("p. Woodbury: every shipped netlist's coefficients (init's and b<N>_set's, through the JIT) "
                         "against the double derivation all in set, 44.1 to 384 kHz, each block's control grid\n");
             double worst = 0;   // the Woodbury form's blocks
             std::string where;
-            double worstAll = 0;   // the all-in-set form's
+            double worstAll = 0;   // the all-in-set form's, but the tone stack's
             std::string whereAll;
+            const std::string toneStack = "tonestack.cir";
+            std::map<double, double> toneStackAt;   // its block's worst at each host rate
             double matched = 0;
             double matchedHigh = 0;
             std::string matchedWhere;
@@ -1815,6 +1821,11 @@ namespace circuits
                             for (const auto& [readout, row] : rows)
                             {
                                 const double rel = row.second > 0 ? row.first / row.second : 0;
+                                if (!code->woodbury && name == toneStack)
+                                {
+                                    toneStackAt[rate] = std::fmax(toneStackAt[rate], rel);
+                                    continue;
+                                }
                                 double& slot = code->woodbury ? worst : worstAll;
                                 if (rel > slot)
                                 {
@@ -1831,11 +1842,21 @@ namespace circuits
                                "double derivation all in set, row-normalised, at {} (gate 1e-5); every coefficient "
                                "finite, pots at 0 and 1 too",
                                points, kShipped.size(), woodburyBlocks, worst, where));
-            r.line(worstAll <= 1e-4,
-                   std::format("the blocks all in set (Phase 0's form, kept where the Woodbury form saves nothing): "
-                               "within {:.1e}, at {} (gate 1e-4: the tone stack's 4x region designs at 176 kHz to 1.5 "
-                               "MHz, where its 8 Hz pole is a hair from z = 1)",
+            r.line(worstAll <= 1e-5,
+                   std::format("the other blocks all in set (Phase 0's form, kept where the Woodbury form saves "
+                               "nothing): within {:.1e}, at {} (gate 1e-5)",
                                worstAll, whereAll));
+            double toneStackWorst = 0;
+            std::string toneStackText;
+            for (const auto& [rate, value] : toneStackAt)
+            {
+                toneStackWorst = std::fmax(toneStackWorst, value);
+                toneStackText += std::format("{}{:.1e} at {:g}", toneStackText.empty() ? "" : ", ", value, rate / 1000);
+            }
+            r.line(toneStackAt.size() == 5 && toneStackWorst <= 1e-4,
+                   std::format("{}'s block, all in set: {} kHz (gate 1e-4, not 1e-5: float cannot hold Phase 0's form "
+                               "of it, designed at 4x the rate with its 8 Hz pole a hair from z = 1)",
+                               toneStack, toneStackText));
             r.line(matched <= 0.02 && matchedHigh <= 0.1,
                    std::format("the matched designs' float responses: within {:.4f} dB of the double design's to 96 "
                                "kHz (at {}; gate 0.02), {:.4f} dB at 192 and 384 kHz (gate 0.1)",
