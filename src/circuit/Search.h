@@ -209,7 +209,8 @@ namespace fminus::circuit
     std::vector<Ringing> ringingFlags(const Plan& plan, const std::vector<int>& oversamples);
 
     // "at 1x block 2 rings at Nyquist (12 dB more above 20 kHz than the 64x reference): .oversample 4 or .method bdf2"
-    // (the oversampling suggested is the smallest above that is not flagged, or flagged without excess).
+    // (the oversampling suggested is the smallest above that is not flagged, or flagged without excess; with .adaa
+    // named on, in the netlist or Options, BDF2 needs it off: ".oversample 4, or .adaa off and .method bdf2").
     std::string ringingWarning(const Plan& plan, const Ringing& r, const std::vector<Ringing>& all);
 
 

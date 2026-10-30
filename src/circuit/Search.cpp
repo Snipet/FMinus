@@ -711,10 +711,12 @@ namespace fminus::circuit
             if (clean)
                 next = os;
         }
+        // BDF2 has no ADAA (Holters' form is the trapezoidal rule's): with .adaa named on, BDF2 needs it off
+        const bool adaaOn = plan.config.adaa && !plan.config.adaaOpen;
+        const std::string bdf2 = adaaOn ? ".adaa off and .method bdf2" : ".method bdf2";
         return std::format("at {}x block {} rings at Nyquist ({:.0f} dB more above 20 kHz than the 64x reference): {}",
                            r.oversample, plan.blocks[static_cast<std::size_t>(r.block)].index, r.excess,
-                           next != 0 ? std::format(".oversample {} or .method bdf2", next)
-                                     : std::string(".method bdf2"));
+                           next != 0 ? std::format(".oversample {}{} or {}", next, adaaOn ? "," : "", bdf2) : bdf2);
     }
 
     std::vector<Candidate> withTwins(const Plan& plan, const std::vector<Candidate>& ordered,

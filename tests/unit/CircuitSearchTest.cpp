@@ -923,6 +923,22 @@ TEST_CASE("the method check: eigenvalues near -1 flag a block; the self-test mea
     CHECK(fc::ringingWarning(ring, ringing[0], ringing) ==
           "at 1x block 1 rings at Nyquist (13 dB more above 20 kHz than the 64x reference): .oversample 2 or .method "
           "bdf2");
+    // with .adaa named on (in the netlist or Options), BDF2 needs it off ('.method bdf2' with '.adaa on' is an error)
+    fc::Options adaaOn;
+    adaaOn.adaa = true;
+    for (const fc::Plan& pinned : {planned(kRinging + ".adaa on\n"), planned(kRinging, adaaOn)})
+    {
+        CHECK(fc::ringingWarning(pinned, ringing[0], ringing) ==
+              "at 1x block 1 rings at Nyquist (13 dB more above 20 kHz than the 64x reference): .oversample 2, or "
+              ".adaa off and .method bdf2");
+        std::vector<fc::Ringing> all = ringing;
+        all[1].excess = 7;   // 2x rings too, and 4x and 8x are flagged (ringingFlags): nothing to suggest but BDF2
+        CHECK(fc::ringingWarning(pinned, all[0], all) ==
+              "at 1x block 1 rings at Nyquist (13 dB more above 20 kHz than the 64x reference): .adaa off and .method "
+              "bdf2");
+    }
+    CHECK(fc::ringingWarning(planned(kRinging + ".adaa off\n"), ringing[0], ringing) ==
+          fc::ringingWarning(ring, ringing[0], ringing));
 
     // the self-test at 1x: flagged, measured in excess, warned at the block, and its BDF2 twins tried
     fc::Options at1;
