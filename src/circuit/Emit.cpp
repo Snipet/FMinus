@@ -1550,6 +1550,11 @@ namespace fminus::circuit
                 if (movesReverse(i))
                     line("        kr_" + plan.blocks[i].port->name + " = 0;");
             }
+            // the switches' ramps start at their defaults, which set(defaults) below then holds; clear() leaves them
+            // where set() put them, as the coefficients are (a reset keeps the host's position, and nothing steps)
+            for (const Branch* br : switchBranches())
+                line("        sw_" + br->ident + " = " + (defaultRamp(*br) == 1 ? "1" : "0") + ";",
+                     br->part + " at its switch's default position");
             line("        clear();");
             if (!plan.pots.empty() || !plan.switches.empty())
             {
@@ -1581,9 +1586,6 @@ namespace fminus::circuit
             line("    {");
             line("        ck_ = 0;");
             line("        fd_ = 1;");
-            for (const Branch* br : switchBranches())
-                line("        sw_" + br->ident + " = " + (defaultRamp(*br) == 1 ? "1" : "0") + ";",
-                     br->part + " at its switch's default position");
             for (const Block& b : plan.blocks)
             {
                 if (matchedBlock(b))

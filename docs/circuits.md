@@ -372,9 +372,10 @@ does.
 - **Switches ramp.** `set()` moves each switch's `sw_<S>` toward its position's target, 1 where the S is closed and 0
   where it is open, by `swstep_` a call (snapping onto it within 1.001 steps), and `b<N>_set` computes its resistance
   `r_<S> = expf(ln roff + sw (ln ron - ln roff))`: geometric, so each call moves it by the same ratio, (roff / ron)^(1 /
-  60) at 48 kHz, and the block sees a pot's glide, never a step. `init` sets the switches' defaults and `clear` puts
-  each `sw_<S>` at its switch's default, so a reset settles where `init` does; the ramp is a field, kept across calls
-  (`example-circuits --check`, p).
+  60) at 48 kHz, and the block sees a pot's glide, never a step. `init` starts each `sw_<S>` at its switch's default
+  (then `set(defaults)` holds it there); `clear` leaves it where `set()` put it, as it leaves the coefficients, so a
+  reset (the host's, or the guard's) keeps the host's position and nothing ramps; the ramp is a field, kept across
+  calls (`example-circuits --check`, p).
 - **Pots under ADAA.** ADAA's closed-form mean pairs the last step's point (`v_D1`, `p_D1`) with this step's on one
   curve, `p = v + 2 ka sinh(v / N Vt)`. A pot (or a switch's ramp) that moves K moves the curve, so `b<N>_set` moves
   `p_D1` onto the new one with `v_D1` held (its Newton residual kept); without it the mean spikes when the signal's move
@@ -921,8 +922,11 @@ shipped netlists' answers are unchanged.
   calls, and close it in one.
 - **The ramp is `set()`'s**, a field moved a step a call on the 16-sample grid, so the output never depends on how a
   host splits its blocks (calls of 1, 61 and 64 samples alike with a switch flipping) and a switch costs nothing a
-  sample. It snaps onto its target within 1.001 steps, so 60 calls at 48 kHz land exactly. `clear` puts each ramp at
-  its switch's default, as `init` does.
+  sample. It snaps onto its target within 1.001 steps, so 60 calls at 48 kHz land exactly. `init` puts each ramp at
+  its switch's default; `clear` leaves it, as it leaves the coefficients `set()` computed from it. (As first built,
+  `clear` put it back at the default too, with the coefficients still the host's position's: after a reset away from
+  the default, the next `set()` stepped the switch to about its default and ramped it back over 20 ms, 4 V off for a
+  clipping switch: the plan's "init and clear take the default position", which a final review found audible.)
 - **Positions are the stress matrix's axes** (each of them), and the DC point is checked at each, as a pot's are.
 - **The Woodbury form only where it saves**, by the code builder's own operation count (strictly fewer): the tone
   stack's is as long either way, and keeps Phase 0's text.

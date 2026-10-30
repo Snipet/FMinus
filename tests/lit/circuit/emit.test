@@ -254,8 +254,11 @@
 # SW:      float sw_S1;               // S1's ramp: 0 open (roff) to 1 closed (ron), set's, 20 ms end to end
 # SW-NEXT: float swstep_;             // a ramp's most a set() call: 16 / (0.02 rate)
 # SW:      swstep_ = 800 / rate;
-# SW:      set(0.5f, 1);                                       // .pot tone 0.5; .switch clip 1
 # SW:      sw_S1 = 1;                                          // S1 at its switch's default position
+# SW-NEXT: clear();
+# SW-NEXT: set(0.5f, 1);                                       // .pot tone 0.5; .switch clip 1
+# SW-LABEL: void clear()
+# SW-NOT:  sw_S1
 # SW-LABEL: void set(float tone, int clip)
 # SW-NEXT:  {
 # SW-NEXT:  const float to_S1 = clip == 1 ? 1.0f : 0.0f;

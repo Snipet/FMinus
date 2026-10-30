@@ -13,7 +13,7 @@
 //
 // The module (named by .title):
 //   void init(float rate)        the host's rate; every state at the DC operating point (0: the module runs in
-//                                offsets from it), the pots at their .pot defaults
+//                                offsets from it), the pots and switches at their defaults
 //   void set(float drive, ...)   the pots, 0 to 1, in .pot order (clamped), then the switches' int positions
 //                                (Result::switches): call it on the absolute 16-sample grid, and every grid tick while
 //                                a switch ramps
@@ -23,7 +23,7 @@
 //                                with .channels 2) follow the signal, each clamped to its range (a NaN is its low
 //                                end) and held over the host sample's oversampled steps
 //   float step(float u, ...)     one step of the oversampled region, at .oversample times the rate (absent if none)
-//   void clear()                 back to the DC operating point
+//   void clear()                 back to the DC operating point (the pots and switches where set() left them)
 // Fields are named after the parts (x_C1: C1's state; v_D1: the voltage across the pair D1|D2) and hold offsets from
 // the DC operating point. .channels 2 makes tick and step take and return float2s. The code is straight-line float
 // code with fixed step counts: its output never depends on how a host splits blocks. generate() is pure and

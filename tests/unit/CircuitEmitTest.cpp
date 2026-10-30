@@ -756,6 +756,43 @@ TEST_CASE("a switch ramps over 20 ms of set() calls, as a pot gliding there does
     }
     INFO("largest step: the switch's " << stepSwitch << ", the glide's " << stepGlide);
     CHECK(stepSwitch <= 1.1 * stepGlide);
+
+    // clear() keeps each ramp where set() left it, as the coefficients are: two instances at rest with S1 closed away
+    // from its default (open), one cleared, then the same sine and the same set() calls: the same bits (a clear that
+    // put the ramp back at its default would open S1 and ramp it shut again over 20 ms, the coefficients stale until
+    // the next set()); init alone starts the ramp at its default
+    auto kept = instance(*m);
+    auto cleared = instance(*m);
+    auto* clear = program->function<void(void*)>(r.module + "::clear", errors);
+    REQUIRE(clear);
+    for (void* p : {kept.get(), cleared.get()})
+    {
+        init(p, 48000);
+        for (int i = 0; i < 4800; ++i)
+        {
+            if (i % 16 == 0)
+                set(p, 1);
+            tick(p, 0);
+        }
+    }
+    clear(cleared.get());
+    CHECK(readFloat(cleared.get(), *m, "sw_S1") == 1);
+    int differ = 0;
+    for (int i = 4800; i < 9600; ++i)
+    {
+        if (i % 16 == 0)
+        {
+            set(kept.get(), 1);
+            set(cleared.get(), 1);
+        }
+        const auto u = static_cast<float>(4.5 * std::sin(2 * std::numbers::pi * 1000 * i / 48000));
+        const float yk = tick(kept.get(), u);
+        const float yc = tick(cleared.get(), u);
+        differ += std::memcmp(&yk, &yc, sizeof yk) != 0 ? 1 : 0;
+    }
+    CHECK(differ == 0);
+    init(cleared.get(), 48000);
+    CHECK(readFloat(cleared.get(), *m, "sw_S1") == 0);
 }
 
 TEST_CASE("a switch's ramp: block splits give the same bits, and ADAA's point stays on its curve", "[circuit]")
