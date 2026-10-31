@@ -71,7 +71,7 @@ namespace fminus
         inline constexpr int kProbeSlots = 4;
 
         // The samples a slot's ring keeps (a power of two): slot k's are pr_[kProbeRing k] to pr_[kProbeRing k +
-        // kProbeRing - 1], the one written last at (prn_ - 1) % kProbeRing.
+        // kProbeRing - 1], the one written last at (prn_ + kProbeRing - 1) % kProbeRing (prn_ wraps to 0).
         inline constexpr int kProbeRing = 1024;
 
         // The probe fields' names, as Program::Module::fields lists them (docs/circuits.md, "Probes"):

@@ -504,7 +504,7 @@ for (std::size_t k = 0; k < r.nodes.size(); ++k)     // prs_ takes k: "n1", line
     show(r.nodes[k].name, r.nodes[k].readable ? "" : r.nodes[k].why);
 // between two calls (the fields' offsets from Program::Module::fields): prs_[0] = k, then prb_ = 1, slot 0 armed
 // after each call: prn_'s advance since the last call is how many of slot 0's ring samples are new, the newest at
-// pr_[(prn_ - 1) % 1024]; prp_[0], pra_[0] and prq_[0] read, then zeroed
+// pr_[(prn_ + 1023) % 1024] (prn_ wraps to 0); prp_[0], pra_[0] and prq_[0] read, then zeroed
 ```
 
 `fminus pedal.cir --probes --nodes --emit fm` prints the module with its probe fields and, on stderr, the nodes
