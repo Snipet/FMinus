@@ -86,17 +86,23 @@ TEST_CASE("functions compute what they say", "[codegen]")
   netlist's module the unbiased one's), the diode forms (a string as one diode of n N, an asymmetric pair's K and law,
   RS as its resistor, the built-in models), laws (each one's antiderivative, bracket and carry), switches (parsing,
   planning, their errors), BDF2's blocks as the BDF2 map, the matched design (`src/circuit/Linear.h`: its poles and
-  magnitudes, the region a block it cannot serve joins, the eigenvalues), prewarp, halfbands, reference and analysis;
+  magnitudes, the region a block it cannot serve joins, the eigenvalues), prewarp, halfbands, reference and analysis,
+  and the probes' nodes (their first-mention order, DC volts and which a probe can read, `Options::probes` changing
+  nothing but the text, the probe fields' names refused);
   `CircuitEmitTest.cpp` its emitted text, compiled through `fminus::Program`, the coefficients (the Woodbury form's
   against the double derivation all in set), an OTA's in 48 configurations and Phase 1's elements and diode laws in
   40, the carry of a pot's move for one diode and an asymmetric pair, its ADAA mean against the double one over a
   saturating sweep, an OTA driven hard against the reference, BDF2 against its double reference, a switch's ramp, its
-  block splits and its ADAA point, a matched block's float coefficients and response; `CircuitSearchTest.cpp` its
+  block splits and its ADAA point, a matched block's float coefficients and response, the probes (their fields after
+  the module's own, every method nonblocking in one and two channels, init, clear, the rings, the slots, prn_'s wrap,
+  an ADAA input only a probe reads, the output's bits probed or not in other configurations and in every math mode);
+  `CircuitSearchTest.cpp` its
   self-test: both rows' candidates' order, the synth's stress matrix and a law input's arguments over its scale,
   switch positions as axes, the method check (its flag, its measure, its warning and the BDF2 twins), the search, the
   gates' reduction and the no-configuration choice on stub measures, the key, a `Choice`'s text, and the self-test
   itself on a small stress shape, `selfTestWith` in `src/api/CircuitSelfTest.h`: T1 on the region's own input, its
-  answer the same on any number of threads, a job's exception carried back to the caller). Add new ones freely.
+  answer the same on any number of threads, a job's exception carried back to the caller, and unchanged by
+  `Options::probes`). Add new ones freely.
 - **A hidden test** carries the tags `[.]` and a name: ctest never runs it, and `fminus-tests "[name]"` does.
   `[exhaustive]` runs every float through every math kernel, on every core, against its error bound, in every lane, and
   under flush-to-zero (extending.md, recipe 23): about ten minutes, for after a change to a kernel.
@@ -249,12 +255,15 @@ the research's (in-band error, inharmonic energy, H1 and H3; `src/circuit/Analys
 `example.circuits`) gates on the research's targets and prints each worst value beside the research's figure, and
 runs the self-test on the full stress matrix (it must choose the configurations the examples ship, the same on 1 and 8
 threads), and checks Phase 1's coefficients, switches, matched designs, linear-only region, BDF2 and method check
-(section p); `--tables` reprints the research's accuracy tables from emitted code (minutes), and with no flags it
-prints generate()'s and the self-test's times, `set()`'s cycles in both forms and the cost table, which nothing
-asserts. The unit tests run the self-test on
+(section p), and the probes (section q: the same output bits probed or not on every netlist, each ring against a double
+reference of its node in the module's configuration, the stats, the DC volts); `--tables` reprints the research's
+accuracy tables from emitted code (minutes), and with no flags it prints generate()'s and the self-test's times,
+`set()`'s cycles in both forms, the probes' cost in a host's process loop (`--only probes` alone) and the cost table,
+which nothing asserts. The unit tests run the self-test on
 a smaller stress shape only; `tests/lit/circuit/selftest.test` runs it through `fminus --self-test`, and
 `tests/lit/circuit/op.test` prints DC points through `.op` (and compares a biased netlist's module with its unbiased
-twin's).
+twin's), and `tests/lit/circuit/probes.test` the nodes a probe sees (`fminus --nodes`, diodetone.cir's pinned) and
+the text `--probes` adds.
 `tests/lit/circuit/equiv-ex1c.fm` and `equiv-ts2.fm` compile the research's hand-written modules
 (`docs/research/analog-circuits/experiments/ex1c.fm`, `ts2.fm`) beside the generated ones and require their outputs to
 agree within 2e-5 of their peak.

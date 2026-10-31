@@ -34,6 +34,12 @@
 // sample to sample are finite. If one is not (a NaN or an infinity from a host's input, say), tick calls clear() and
 // fades its output back in over 20 ms. Settled, the output is the circuit's, bit for bit.
 //
+// The probes (Options::probes; docs/circuits.md, "Probes"): the module also carries the fields kProbeFields names,
+// through which a host watches up to kProbeSlots of the circuit's node voltages (Result::nodes) as it plays, with the
+// same output bits as without them. The host writes prb_ (1: armed) and prs_ (each slot's node), off the audio path
+// or between calls; tick, while armed, writes each slot's absolute volts into its ring once a host sample, and its
+// peak, sum and sum of squares, which the host reads and zeroes. Disarmed, a probe costs tick one branch.
+//
 // The configuration (the oversampling factor, ADAA, the solver, the integrator) is the netlist's when its directives
 // name it. A dimension the netlist leaves out, or writes `auto`, is open: the self-test chooses it, on the report's
 // targets and stress matrix. The self-test takes seconds, so it never runs inside generate(). A host:
@@ -60,6 +66,41 @@ namespace fminus
         // The self-test's version: part of every key (selfTestKey), so an answer stored by another version of the
         // gates, the candidates or the emitted arithmetic is never taken for this one's.
         inline constexpr int kSelfTestVersion = 1;
+
+        // The node voltages a module with probes (Options::probes) watches at once: its slots, 0 to 3.
+        inline constexpr int kProbeSlots = 4;
+
+        // The samples a slot's ring keeps (a power of two): slot k's are pr_[kProbeRing k] to pr_[kProbeRing k +
+        // kProbeRing - 1], the one written last at (prn_ + kProbeRing - 1) % kProbeRing (prn_ wraps to 0).
+        inline constexpr int kProbeRing = 1024;
+
+        // The probe fields' names, as Program::Module::fields lists them (docs/circuits.md, "Probes"):
+        //   prb_  int: 0 off (tick writes nothing), else armed; init sets 0
+        //   prs_  int[kProbeSlots]: each slot's node, an index into Result::nodes, or -1 (init's): a slot whose node
+        //         is out of range or not readable writes nothing
+        //   prn_  int: the samples written while armed, modulo 2^30 (the ring's position); init sets 0
+        //   pr_   float[kProbeSlots kProbeRing]: the rings, absolute volts, one a host sample
+        //   prp_  float[kProbeSlots]: each slot's peak |v| since the host last zeroed it (init sets 0)
+        //   pra_  float[kProbeSlots]: and the sum of its samples
+        //   prq_  float[kProbeSlots]: and the sum of their squares
+        //   prv_  float[the nodes' count]: tick's scratch, each readable node's volts at its last armed sample
+        // The host writes prb_ and prs_ and zeroes prp_, pra_ and prq_ when it has read them; tick writes the rest.
+        // Every name ends in '_', which no pot, input or module name has, and none of them is a field the guard sums
+        // or that clear() sets.
+        inline constexpr const char* kProbeFields[] = {"prb_", "prs_", "prn_", "pr_", "prp_", "pra_", "prq_", "prv_"};
+
+        // A node of the netlist, as a probe sees it (Result::nodes).
+        struct Node
+        {
+            std::string name;        // as first written
+            int line = 0;            // its first mention (an element's token, .input's or .output's): its line, from 1
+            int column = 0;          // and its column, from 1 (bytes)
+            int rate = 1;            // the steps a host sample of the block that computes it (.oversample's in the
+                                     // region; a node in it gives a probe its last step's voltage)
+            double dc = 0;           // its volts at the DC operating point (the pots and switches at their defaults)
+            bool readable = true;    // the module holds its voltage each host sample: prs_ takes it
+            std::string why;         // when not, why ("inside a filter computed as a whole at 1x (block 3)")
+        };
 
         // How a nonlinear port's equation (v + 2 Is K sinh(v / N Vt) = p for a diode pair, v + kd g tanh(v / 2 Vt) = p
         // for an OTA) is solved each step: a first guess, then a fixed number of Newton steps, each kept in the
@@ -180,6 +221,9 @@ namespace fminus
                                                 // cutoff law, not an accuracy gain
             std::optional<Choice> chosen;       // the self-test's answer: fills the open dimensions when its key is
                                                 // the netlist's (otherwise a note says why it is ignored)
+            bool probes = false;                // the probe fields (kProbeFields) and tick's probing path: the same
+                                                // output bits, the same messages and Result but for source and lines;
+                                                // not part of the self-test's key, and the self-test runs without them
         };
 
         // What generate() returns.
@@ -201,6 +245,8 @@ namespace fminus
             double latency = 0;                  // host samples of delay at 1 kHz: the halfbands' and ADAA's
             std::vector<int> lines;              // for each line of source, the netlist's line it comes from:
                                                  // lines[k] is line k + 1's (0: none, as the module's frame)
+            std::vector<Node> nodes;             // every node of the netlist but ground, in first-mention order:
+                                                 // prs_ takes the index (with or without Options::probes)
         };
 
         // The FMinus module of `netlist`, the text of the file the messages call `fileName`, with `options` (default

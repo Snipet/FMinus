@@ -15,8 +15,8 @@
 
 namespace fminus::circuit
 {
-    // A node of the netlist. Node 0 is ground.
-    struct Node
+    // A node of the netlist, as the plan holds it (Circuit.h's Node is what a probe sees of it). Node 0 is ground.
+    struct NodeInfo
     {
         enum class Source
         {
@@ -319,7 +319,7 @@ namespace fminus::circuit
         std::string baseName;   // its last component, for the generated header
         std::string module;     // the module's name
         Netlist netlist;
-        std::vector<Node> nodes;   // [0] is ground
+        std::vector<NodeInfo> nodes;   // [0] is ground
         Config config;
         std::vector<PotInfo> pots;   // in .pot order
         std::vector<SwitchInfo> switches;   // in .switch order

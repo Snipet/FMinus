@@ -1475,3 +1475,469 @@ TEST_CASE("a pot's move keeps one diode's and an asymmetric pair's ADAA point on
         }
     }
 }
+
+namespace
+{
+    const Program::Module::Field* fieldNamed(const Program::Module& m, const std::string& name)
+    {
+        for (const Program::Module::Field& f : m.fields)
+        {
+            if (f.name == name)
+                return &f;
+        }
+        return nullptr;
+    }
+
+    template <typename T>
+    T readAt(const void* base, const Program::Module& m, const std::string& name, std::size_t index = 0)
+    {
+        const Program::Module::Field* f = fieldNamed(m, name);
+        REQUIRE(f);
+        REQUIRE((index + 1) * sizeof(T) <= f->size);
+        T v{};
+        std::memcpy(&v, static_cast<const char*>(base) + f->offset + index * sizeof(T), sizeof v);
+        return v;
+    }
+
+    template <typename T>
+    void writeAt(void* base, const Program::Module& m, const std::string& name, T v, std::size_t index = 0)
+    {
+        const Program::Module::Field* f = fieldNamed(m, name);
+        REQUIRE(f);
+        REQUIRE((index + 1) * sizeof(T) <= f->size);
+        std::memcpy(static_cast<char*>(base) + f->offset + index * sizeof(T), &v, sizeof v);
+    }
+
+    fc::Options withProbes(fc::Options o = {})
+    {
+        o.probes = true;
+        return o;
+    }
+} // namespace
+
+TEST_CASE("a module's probe fields follow its others, and its methods are nonblocking in both channel counts",
+          "[circuit]")
+{
+    int modules = 0;
+    for (const std::string& text : {fc::test::kDiodeTone, fc::test::kScreamer, fc::test::kOtaLp, fc::test::kAsym,
+                                    fc::test::kWah, fc::test::kToneStack, fc::test::screamerBiased()})
+    {
+        for (int channels : {1, 2})
+        {
+            fc::Options o;
+            o.channels = channels;
+            const fc::Result off = fc::generate(text, "t.cir", o);
+            const fc::Result on = fc::generate(text, "t.cir", withProbes(o));
+            INFO(on.source);
+            auto p0 = compiled(off);
+            auto p1 = compiled(on);
+            const Program::Module* m0 = p0->module(off.module);
+            const Program::Module* m1 = p1->module(on.module);
+            REQUIRE(m0);
+            REQUIRE(m1);
+            // the module's own fields keep their names, types and offsets; the probes' come after them
+            REQUIRE(m1->fields.size() > m0->fields.size());
+            for (std::size_t i = 0; i < m0->fields.size(); ++i)
+            {
+                CHECK(m1->fields[i].name == m0->fields[i].name);
+                CHECK(m1->fields[i].type == m0->fields[i].type);
+                CHECK(m1->fields[i].offset == m0->fields[i].offset);
+            }
+            const std::map<std::string, std::string> types{
+                {"prb_", "int"},      {"prs_", "int[4]"},   {"prn_", "int"},      {"pr_", "float[4096]"},
+                {"prp_", "float[4]"}, {"pra_", "float[4]"}, {"prq_", "float[4]"},
+                {"prv_", std::format("float[{}]", on.nodes.size())}};
+            for (const char* name : fc::kProbeFields)
+            {
+                INFO(name);
+                CHECK(!fieldNamed(*m0, name));
+                const Program::Module::Field* f = fieldNamed(*m1, name);
+                REQUIRE(f);
+                CHECK(f->type == types.at(name));
+                CHECK(f->offset >= m0->fields.back().offset + m0->fields.back().size);
+            }
+            CHECK(static_cast<int>(std::size(fc::kProbeFields)) == 8);
+            CHECK(fc::kProbeSlots * fc::kProbeRing == 4096);
+            // every method nonblocking: the module's, and the probing tick's, step's and blocks'
+            std::vector<std::string> methods{"init", "set", "tick", "step", "clear", "tick_pr", "step_pr"};
+            for (std::size_t b = 1; b <= 4; ++b)
+                methods.push_back(std::format("b{}_pr", b));
+            CHECK(std::find(m1->methods.begin(), m1->methods.end(), on.module + "::tick_pr") != m1->methods.end());
+            for (const std::string& method : methods)
+            {
+                const std::string name = on.module + "::" + method;
+                if (std::find(m1->methods.begin(), m1->methods.end(), name) == m1->methods.end())
+                    continue;
+                INFO(name);
+                CHECK(p1->nonBlocking(name));
+            }
+            ++modules;
+        }
+    }
+    CHECK(modules == 14);
+}
+
+TEST_CASE("init, clear, the ring and the slots of a module's probes", "[circuit]")
+{
+    const fc::Result off = fc::generate(fc::test::kScreamer, "screamer.cir");
+    const fc::Result on = fc::generate(fc::test::kScreamer, "screamer.cir", withProbes());
+    auto p0 = compiled(off);
+    auto p1 = compiled(on);
+    const Program::Module* m0 = p0->module("Screamer");
+    const Program::Module* m = p1->module("Screamer");
+    REQUIRE(m0);
+    REQUIRE(m);
+    std::string errors;
+    auto* init0 = p0->function<void(void*, float)>("Screamer::init", errors);
+    auto* tick0 = p0->function<float(void*, float)>("Screamer::tick", errors);
+    auto* init = p1->function<void(void*, float)>("Screamer::init", errors);
+    auto* tick = p1->function<float(void*, float)>("Screamer::tick", errors);
+    auto* clear = p1->function<void(void*)>("Screamer::clear", errors);
+    REQUIRE(init0);
+    REQUIRE(tick0);
+    REQUIRE(init);
+    REQUIRE(tick);
+    REQUIRE(clear);
+    const std::size_t nodes = on.nodes.size();
+    REQUIRE(nodes == 14);
+    REQUIRE(on.nodes[1].name == "out");
+    REQUIRE(on.nodes[3].name == "n1");
+    REQUIRE(!on.nodes[7].readable);   // t1, inside the matched tone block
+
+    // init: off, each slot on no node, nothing counted; it leaves the rings, the host's memory (here not zeroed)
+    auto self = instance(*m);
+    std::memset(self.get(), 0x5a, m->size);
+    init(self.get(), 48000);
+    CHECK(readAt<int>(self.get(), *m, "prb_") == 0);
+    CHECK(readAt<int>(self.get(), *m, "prn_") == 0);
+    for (std::size_t k = 0; k < 4; ++k)
+    {
+        CHECK(readAt<int>(self.get(), *m, "prs_", k) == -1);
+        CHECK(readAt<float>(self.get(), *m, "prp_", k) == 0);
+        CHECK(readAt<float>(self.get(), *m, "pra_", k) == 0);
+        CHECK(readAt<float>(self.get(), *m, "prq_", k) == 0);
+    }
+    for (std::size_t k = 0; k < nodes; ++k)
+        CHECK(readAt<float>(self.get(), *m, "prv_", k) == 0);
+    {
+        const Program::Module::Field* ring = fieldNamed(*m, "pr_");
+        REQUIRE(ring);
+        const auto* bytes = static_cast<const unsigned char*>(self.get()) + ring->offset;
+        CHECK(std::all_of(bytes, bytes + ring->size, [](unsigned char b) { return b == 0x5a; }));
+        std::memset(static_cast<char*>(self.get()) + ring->offset, 0, ring->size);
+    }
+
+    // armed: slot 0 on n1 (the clipping stage's, at its last step of four), slot 1 on t1 (not readable), slot 2 on
+    // a node out of range, slot 3 on .output's node: the output bits are the module's without probes
+    writeAt<int>(self.get(), *m, "prb_", 1);
+    for (const auto& [slot, node] : {std::pair{0, 3}, std::pair{1, 7}, std::pair{2, 99}, std::pair{3, 1}})
+        writeAt<int>(self.get(), *m, "prs_", node, static_cast<std::size_t>(slot));
+    auto plain = instance(*m0);
+    init0(plain.get(), 48000);
+    constexpr int n = 3000;
+    int differ = 0;
+    float peak = 0;
+    float sum = 0;
+    float squares = 0;
+    std::vector<float> ys;
+    for (int i = 0; i < n; ++i)
+    {
+        const auto u = static_cast<float>(0.45 * std::sin(2 * std::numbers::pi * 996 * i / 48000));
+        const float y0 = tick0(plain.get(), u);
+        const float y = tick(self.get(), u);
+        differ += std::memcmp(&y0, &y, sizeof y) != 0 ? 1 : 0;
+        ys.push_back(y);
+        // .output's node: tick's output times its scale (1), its DC point 0
+        peak = std::fmax(peak, std::fabs(y));
+        sum = sum + y;
+        squares = squares + y * y;
+    }
+    CHECK(differ == 0);
+    CHECK(readAt<int>(self.get(), *m, "prn_") == n);
+    int written = 0;
+    int unwritten = 0;
+    int outputRing = 0;
+    for (std::size_t j = 0; j < 1024; ++j)
+    {
+        written += readAt<float>(self.get(), *m, "pr_", j) != 0 ? 1 : 0;
+        unwritten += readAt<float>(self.get(), *m, "pr_", 1024 + j) != 0 ? 1 : 0;
+        unwritten += readAt<float>(self.get(), *m, "pr_", 2048 + j) != 0 ? 1 : 0;
+    }
+    // the sample written at prn_ = i is at i % 1024: slot 3's ring holds the last 1024 outputs
+    for (int i = n - 1024; i < n; ++i)
+    {
+        const float r = readAt<float>(self.get(), *m, "pr_", static_cast<std::size_t>(3 * 1024 + i % 1024));
+        outputRing += std::memcmp(&r, &ys[static_cast<std::size_t>(i)], sizeof r) == 0 ? 1 : 0;
+    }
+    CHECK(written > 1000);
+    CHECK(unwritten == 0);
+    CHECK(outputRing == 1024);
+    for (std::size_t k : {1u, 2u})
+    {
+        CHECK(readAt<float>(self.get(), *m, "prp_", k) == 0);
+        CHECK(readAt<float>(self.get(), *m, "pra_", k) == 0);
+        CHECK(readAt<float>(self.get(), *m, "prq_", k) == 0);
+    }
+    // the stats: the peak, the sum and the sum of squares of every sample written since init, in float
+    CHECK(readAt<float>(self.get(), *m, "prp_", 3) == peak);
+    CHECK(readAt<float>(self.get(), *m, "pra_", 3) == sum);
+    CHECK(readAt<float>(self.get(), *m, "prq_", 3) == squares);
+    CHECK(readAt<float>(self.get(), *m, "prp_", 0) > 0);
+
+    // clear leaves every probe field (they are the host's), whatever it resets
+    std::vector<unsigned char> before(m->size);
+    std::memcpy(before.data(), self.get(), m->size);
+    clear(self.get());
+    for (const char* name : fc::kProbeFields)
+    {
+        INFO(name);
+        const Program::Module::Field* f = fieldNamed(*m, name);
+        REQUIRE(f);
+        CHECK(std::memcmp(before.data() + f->offset, static_cast<const char*>(self.get()) + f->offset, f->size) == 0);
+    }
+
+    // prn_ wraps at 2^30: the sample written at 2^30 - 1 is the ring's last
+    writeAt<int>(self.get(), *m, "prn_", (1 << 30) - 1);
+    const float y = tick(self.get(), 0.1f);
+    CHECK(readAt<int>(self.get(), *m, "prn_") == 0);
+    CHECK(readAt<float>(self.get(), *m, "pr_", 3 * 1024 + 1023) == y);
+
+    // disarmed, nothing is written, and prn_ stays where it is
+    writeAt<int>(self.get(), *m, "prb_", 0);
+    writeAt<float>(self.get(), *m, "pra_", 0.0f, 3);
+    for (int i = 0; i < 100; ++i)
+        tick(self.get(), 0.2f);
+    CHECK(readAt<int>(self.get(), *m, "prn_") == 0);
+    CHECK(readAt<float>(self.get(), *m, "pra_", 3) == 0);
+}
+
+TEST_CASE("a probe's node that reads an ADAA block's input, which no readout of it reads, keeps that input's history",
+          "[circuit]")
+{
+    // R0 and R1 halve the way from the input to the port: V(m) = (u + v) / 2, ADAA's means (ua and vb) in the step;
+    // the block's readouts read v alone, so only the probe needs u a step earlier, pru_b1 (not a field the guard sums)
+    const std::string text = ".title Halves\n.input u in\n.output y a\n.oversample 1\n.adaa on\n.solver omega(1)\n"
+                             "R0 in m 1k\nR1 m a 1k\nC1 a 0 10n\nD1 a 0 1N914\nD2 0 a 1N914\n";
+    const fc::Result off = fc::generate(text, "t.cir");
+    const fc::Result on = fc::generate(text, "t.cir", withProbes());
+    INFO(on.source);
+    CHECK(off.source.find("pru_") == std::string::npos);
+    CHECK(off.source.find("uo_") == std::string::npos);
+    CHECK(on.source.find("    float pru_b1;") != std::string::npos);
+    CHECK(on.source.find("        pru_b1 = 0;") != std::string::npos);   // clear's: the DC point
+    CHECK(on.source.find("const float ua = 0.5f * (u + pru_b1);") != std::string::npos);
+    {
+        const std::size_t sum = on.source.find("float sum_ = ");
+        REQUIRE(sum != std::string::npos);
+        CHECK(on.source.substr(sum, on.source.find('\n', sum) - sum).find("pru_") == std::string::npos);
+    }
+    REQUIRE(on.nodes.size() == 3);
+    REQUIRE(on.nodes[2].name == "m");
+    auto p0 = compiled(off);
+    auto p1 = compiled(on);
+    const Program::Module* m0 = p0->module("Halves");
+    const Program::Module* m = p1->module("Halves");
+    REQUIRE(m0);
+    REQUIRE(m);
+    std::string errors;
+    auto* init0 = p0->function<void(void*, float)>("Halves::init", errors);
+    auto* tick0 = p0->function<float(void*, float)>("Halves::tick", errors);
+    auto* init = p1->function<void(void*, float)>("Halves::init", errors);
+    auto* tick = p1->function<float(void*, float)>("Halves::tick", errors);
+    REQUIRE(init0);
+    REQUIRE(tick0);
+    REQUIRE(init);
+    REQUIRE(tick);
+    CHECK(p1->nonBlocking("Halves::tick_pr"));
+    CHECK(p1->nonBlocking("Halves::b1_pr"));
+    auto plain = instance(*m0);
+    auto self = instance(*m);
+    init0(plain.get(), 48000);
+    init(self.get(), 48000);
+    // armed after 500 samples: the history is kept while disarmed too, so the first armed sample is right
+    int differ = 0;
+    double worst = 0;
+    float before = 0;
+    for (int i = 0; i < 2000; ++i)
+    {
+        if (i == 500)
+        {
+            writeAt<int>(self.get(), *m, "prb_", 1);
+            writeAt<int>(self.get(), *m, "prs_", 2, 0);
+        }
+        const auto u = static_cast<float>(2 * std::sin(2 * std::numbers::pi * 1000 * i / 48000));
+        const float y0 = tick0(plain.get(), u);
+        const float y = tick(self.get(), u);
+        differ += std::memcmp(&y0, &y, sizeof y) != 0 ? 1 : 0;
+        if (i >= 500)
+        {
+            const float ring = readAt<float>(self.get(), *m, "pr_", static_cast<std::size_t>(i - 500) % 1024);
+            const double ua = 0.5 * (static_cast<double>(u) + static_cast<double>(before));
+            const double expected = 0.5 * ua + 0.5 * static_cast<double>(y);
+            worst = std::fmax(worst, std::fabs(static_cast<double>(ring) - expected));
+        }
+        before = u;
+    }
+    CHECK(differ == 0);
+    INFO("V(m) against (ua + vb) / 2: " << worst);
+    CHECK(worst <= 1e-6);
+}
+
+TEST_CASE("probes armed on every node leave the output's bits in every configuration", "[circuit]")
+{
+    // the configurations example-circuits' check q does not ship: BDF2, the FIR halfbands, 2x and 8x, every block in
+    // the region, one channel and two; each readable node in turn on slot 0, the others on the next ones
+    struct Config
+    {
+        const std::string* text;
+        int oversample;
+        fc::Halfband halfband;
+        fc::Region region;
+        bool adaa;
+        std::optional<fc::Method> method;
+        int channels;
+    };
+    const std::vector<Config> configs{
+        {&fc::test::kDiodeTone, 4, fc::Halfband::Iir, fc::Region::Auto, false, fc::Method::Bdf2, 1},
+        {&fc::test::kDiodeTone, 2, fc::Halfband::Fir, fc::Region::Auto, true, std::nullopt, 2},
+        {&fc::test::kScreamer, 8, fc::Halfband::Fir, fc::Region::All, true, std::nullopt, 1},
+        {&fc::test::kScreamer, 2, fc::Halfband::Iir, fc::Region::Nonlinear, false, fc::Method::Bdf2, 2},
+        {&kSinglePot, 1, fc::Halfband::Iir, fc::Region::Auto, true, std::nullopt, 1},
+    };
+    for (const Config& c : configs)
+    {
+        fc::Options o;
+        o.oversample = c.oversample;
+        o.halfband = c.halfband;
+        o.region = c.region;
+        o.adaa = c.adaa;
+        o.method = c.method;
+        o.channels = c.channels;
+        const fc::Result off = fc::generate(*c.text, "t.cir", o);
+        const fc::Result on = fc::generate(*c.text, "t.cir", withProbes(o));
+        INFO(on.configuration << ", " << c.channels << " channel(s)");
+        auto p0 = compiled(off);
+        auto p1 = compiled(on);
+        const Program::Module* m0 = p0->module(off.module);
+        const Program::Module* m = p1->module(on.module);
+        REQUIRE(m0);
+        REQUIRE(m);
+        std::string errors;
+        auto* init0 = p0->function<void(void*, float)>(off.module + "::init", errors);
+        auto* init = p1->function<void(void*, float)>(on.module + "::init", errors);
+        REQUIRE(init0);
+        REQUIRE(init);
+        std::vector<int> readable;
+        for (std::size_t k = 0; k < on.nodes.size(); ++k)
+        {
+            if (on.nodes[k].readable)
+                readable.push_back(static_cast<int>(k));
+        }
+        REQUIRE(!readable.empty());
+        for (std::size_t first = 0; first < readable.size(); ++first)
+        {
+            auto plain = instance(*m0);
+            auto self = instance(*m);
+            init0(plain.get(), 48000);
+            init(self.get(), 48000);
+            writeAt<int>(self.get(), *m, "prb_", 1);
+            for (std::size_t k = 0; k < 4; ++k)
+                writeAt<int>(self.get(), *m, "prs_", readable[(first + k) % readable.size()], k);
+            int differ = 0;
+            for (int i = 0; i < 1500; ++i)
+            {
+                const auto x = static_cast<float>(1.5 * std::sin(2 * std::numbers::pi * 997 * i / 48000));
+                if (i % 16 == 0)
+                {
+                    const float pot = static_cast<float>(i % 960) / 960;
+                    std::vector<float> pots(off.pots.size(), pot);
+                    callSet(*p0, off.module, plain.get(), pots);
+                    callSet(*p1, on.module, self.get(), pots);
+                }
+                if (c.channels == 2)
+                {
+                    using float2 = float __attribute__((ext_vector_type(2)));
+                    auto* tick0 = p0->function<float2(void*, float2)>(off.module + "::tick", errors);
+                    auto* tick = p1->function<float2(void*, float2)>(on.module + "::tick", errors);
+                    REQUIRE(tick0);
+                    REQUIRE(tick);
+                    const float2 u{x, -0.5f * x};
+                    const float2 y0 = tick0(plain.get(), u);
+                    const float2 y = tick(self.get(), u);
+                    differ += std::memcmp(&y0, &y, sizeof y) != 0 ? 1 : 0;
+                    continue;
+                }
+                auto* tick0 = p0->function<float(void*, float)>(off.module + "::tick", errors);
+                auto* tick = p1->function<float(void*, float)>(on.module + "::tick", errors);
+                REQUIRE(tick0);
+                REQUIRE(tick);
+                const float y0 = tick0(plain.get(), x);
+                const float y = tick(self.get(), x);
+                differ += std::memcmp(&y0, &y, sizeof y) != 0 ? 1 : 0;
+            }
+            INFO("slot 0 on " << on.nodes[static_cast<std::size_t>(readable[first])].name);
+            CHECK(differ == 0);
+            CHECK(readAt<int>(self.get(), *m, "prn_") == 1500);
+        }
+    }
+}
+
+TEST_CASE("probes armed leave the output's bits in every math mode", "[circuit]")
+{
+    // a frozen copy runs Math::Fast (LLVM's intrinsics), a capture's replay Math::Libm: tick and tick_pr are the same
+    // code on the same values in each
+    for (const std::string& text : {fc::test::kScreamer, fc::test::kOtaLp, fc::test::kDiodeTone})
+    {
+        for (Program::Math math : {Program::Math::Fast, Program::Math::Libm})
+        {
+            const fc::Result off = fc::generate(text, "t.cir");
+            const fc::Result on = fc::generate(text, "t.cir", withProbes());
+            Program::Options po;
+            po.math = math;
+            std::string errors;
+            auto p0 = Program::compile(off.source, errors, po);
+            auto p1 = Program::compile(on.source, errors, po);
+            REQUIRE(p0);
+            REQUIRE(p1);
+            const Program::Module* m0 = p0->module(off.module);
+            const Program::Module* m = p1->module(on.module);
+            REQUIRE(m0);
+            REQUIRE(m);
+            auto* init0 = p0->function<void(void*, float)>(off.module + "::init", errors);
+            auto* init = p1->function<void(void*, float)>(on.module + "::init", errors);
+            REQUIRE(init0);
+            REQUIRE(init);
+            const bool law = on.inputs.size() > 1;
+            auto* tick0 = p0->function<float(void*, float)>(off.module + "::tick", errors);
+            auto* tick = p1->function<float(void*, float)>(on.module + "::tick", errors);
+            auto* tickLaw0 = p0->function<float(void*, float, float)>(off.module + "::tick", errors);
+            auto* tickLaw = p1->function<float(void*, float, float)>(on.module + "::tick", errors);
+            std::vector<int> readable;
+            for (std::size_t k = 0; k < on.nodes.size(); ++k)
+            {
+                if (on.nodes[k].readable)
+                    readable.push_back(static_cast<int>(k));
+            }
+            auto plain = instance(*m0);
+            auto self = instance(*m);
+            init0(plain.get(), 48000);
+            init(self.get(), 48000);
+            int differ = 0;
+            for (int i = 0; i < 4000; ++i)
+            {
+                // armed in turns of 250 samples on each readable node, disarmed between
+                const int turn = i / 250;
+                writeAt<int>(self.get(), *m, "prb_", turn % 2);
+                writeAt<int>(self.get(), *m, "prs_", readable[static_cast<std::size_t>(turn) % readable.size()], 0);
+                const auto x = static_cast<float>(2 * std::sin(2 * std::numbers::pi * 1003 * i / 48000));
+                const auto iabc =
+                    static_cast<float>(1.41421e-4 * std::exp(1.386 * std::sin(2 * std::numbers::pi * i / 2000)));
+                const float y0 = law ? tickLaw0(plain.get(), x, iabc) : tick0(plain.get(), x);
+                const float y = law ? tickLaw(self.get(), x, iabc) : tick(self.get(), x);
+                differ += std::memcmp(&y0, &y, sizeof y) != 0 ? 1 : 0;
+            }
+            INFO(on.module << (math == Program::Math::Fast ? " Math::Fast" : " Math::Libm"));
+            CHECK(differ == 0);
+        }
+    }
+}

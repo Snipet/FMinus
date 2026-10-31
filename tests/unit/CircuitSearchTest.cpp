@@ -1011,3 +1011,30 @@ TEST_CASE("the method check: eigenvalues near -1 flag a block; the self-test mea
     CHECK(t.notes.find(": no ringing (6 dB is the gate)\n") != std::string::npos);
     CHECK(t.warnings.find("rings at Nyquist") == std::string::npos);
 }
+
+TEST_CASE("Options::probes changes neither the self-test's key nor its answer nor its notes", "[circuit]")
+{
+    fc::Options options;
+    options.oversample = 4;   // four candidates
+    const fc::SelfTestResult a = fc::selfTestWith(kPotClipper, "clip.cir", options, {}, small());
+    fc::Options probed = options;
+    probed.probes = true;
+    const fc::SelfTestResult b = fc::selfTestWith(kPotClipper, "clip.cir", probed, {}, small());
+    INFO(a.errors);
+    REQUIRE(a.errors.empty());
+    REQUIRE(a.choice);
+    REQUIRE(b.choice);
+    CHECK(a.key == b.key);
+    CHECK(a.key == fc::selfTestKey(kPotClipper, "clip.cir", probed));
+    CHECK(a.choice->text() == b.choice->text());
+    CHECK(a.notes == b.notes);
+    CHECK(a.warnings == b.warnings);
+    CHECK(a.candidates == b.candidates);
+    // and the answer fills a probed netlist's open dimensions as it fills the plain one's
+    probed.chosen = b.choice;
+    options.chosen = a.choice;
+    const fc::Result plain = fc::generate(kPotClipper, "clip.cir", options);
+    const fc::Result probes = fc::generate(kPotClipper, "clip.cir", probed);
+    CHECK(!probes.provisional);
+    CHECK(plain.configuration == probes.configuration);
+}

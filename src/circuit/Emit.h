@@ -110,9 +110,12 @@ namespace fminus::circuit
             std::vector<std::string> fields;
             int initOperations = 0;
             int setOperations = 0;
+            std::map<std::string, std::string> renames;   // each such temporary's field
         };
 
-        Split split(const std::string& prefix) const;
+        // `fixed`: temporaries whose fields are already named (an earlier split's renames, which a split of more
+        // statements keeps); the others are numbered after them.
+        Split split(const std::string& prefix, const std::map<std::string, std::string>& fixed = {}) const;
 
         // The fields assigned (bind's), in order.
         const std::vector<std::string>& fields() const
@@ -163,14 +166,47 @@ namespace fminus::circuit
         std::vector<std::string> wFields;     // and the fields b<N>_set reads it from: w<N>_<k>
         bool woodbury = false;
         std::string form;   // "b3_set: the Woodbury form, 24 operations (init 70); all in set, 92"
+        // With probes, a node the block computes (deriveBlock's `probes`), and how the module reads its voltage.
+        struct Probe
+        {
+            int node = 0;          // the plan node
+            int readout = -1;      // the readout of `system` that is its voltage (at the chain's end, the output's:
+                                   // V over .output's scale), or -1:
+            System::Readout own;   // its own, pn_<node>, whose coefficients are probeCoefficients'
+        };
+        std::vector<Probe> probes;
+        // The own readouts' coefficients, pn_<node>_by_<source> (each a field, a literal or left out). `lines` and
+        // `initLines` compute them too, after what they computed before; probeWFields are the Woodbury form's
+        // rate-only terms only they read (w<N>_<k>, numbered after wFields).
+        Coefficients<Val> probeCoefficients;
+        std::vector<std::string> probeWFields;
     };
 
     // Block `block`'s BlockCode, or nothing (an error in `messages`) when its equations are singular. Without
-    // `woodbury`, all in b<N>_set whatever it costs (the bench's comparison).
-    std::optional<BlockCode> deriveBlock(const Plan& plan, int block, Messages& messages, bool woodbury = true);
+    // `woodbury`, all in b<N>_set whatever it costs (the bench's comparison). With `probes` (plan node indices: the
+    // readable nodes the block solves for or drives), each one's voltage as a readout too, the derivation's own
+    // statements and its form (the Woodbury choice and its counts) as without them.
+    std::optional<BlockCode> deriveBlock(const Plan& plan, int block, Messages& messages, bool woodbury = true,
+                                         const std::vector<int>& probes = {});
 
-    // The module's text; `lines` gets, for each of its lines, the netlist's line it comes from (Result::lines).
-    std::string emit(const Plan& plan, const std::vector<BlockCode>& blocks, std::vector<int>* lines = nullptr);
+    // A node as a probe sees it (Circuit.h's Node), and where the module computes it.
+    struct ProbeNode
+    {
+        Node node;        // Result::nodes' entry
+        int index = 0;    // its plan.nodes index
+        int block = -1;   // the chain index of the block that computes it; -1 for .input's node and a DC node
+    };
+
+    // The netlist's nodes but ground, in first-mention order (`parsed`: the netlist as written, before the plan's
+    // elaboration), each with its rate, its DC volts and whether a probe can read it: a node a block solves for or
+    // drives, a matched block's output, .input's node and a DC node can be read; the inside of a matched block, of a
+    // series string of diodes, and a node no block holds cannot.
+    std::vector<ProbeNode> probeNodes(const Plan& plan, const Netlist& parsed);
+
+    // The module's text; `lines` gets, for each of its lines, the netlist's line it comes from (Result::lines). With
+    // `probes` (probeNodes', and the blocks derived with theirs), the probe fields and tick's probing path too.
+    std::string emit(const Plan& plan, const std::vector<BlockCode>& blocks, std::vector<int>* lines = nullptr,
+                     const std::vector<ProbeNode>* probes = nullptr);
 
     // The configuration as one line (Result::configuration, and the header's): each choice, grouped by where it came
     // from ("configuration: .oversample 4 iir blocks=auto, .adaa off, .solver omega(2) (the netlist); .method tr

@@ -1,0 +1,85 @@
+# The probes (docs/circuits.md, "Probes"): Result::nodes as fminus --nodes prints them (each node's first mention, its
+# rate, its DC volts, whether a probe can read it), and the fields and methods Options::probes adds (fminus --probes),
+# after the module's own, whose text it leaves as it was.
+# RUN: fminus %S/../../../examples/circuits/diodetone.cir --nodes --emit fm -o %t.dt.fm 2>&1 | FileCheck %s --check-prefix=DT-NODES --match-full-lines
+# RUN: fminus %S/../../../examples/circuits/diodetone.cir --probes --emit fm -o %t.dt.probes.fm
+# RUN: FileCheck %s --check-prefix=DT < %t.dt.probes.fm
+# RUN: FileCheck %s --check-prefix=PLAIN < %t.dt.fm
+# RUN: fminus %S/../../../examples/circuits/diodetone.cir --emit fm -o %t.dt.again.fm
+# RUN: diff %t.dt.fm %t.dt.again.fm
+# RUN: fminus %S/../../../examples/circuits/sallen-key.cir --nodes --emit fm -o %t.sk.fm 2>&1 | FileCheck %s --check-prefix=SK --match-full-lines
+# RUN: fminus %S/../../../examples/circuits/screamer-biased.cir --nodes --emit fm -o %t.sb.fm 2>&1 | FileCheck %s --check-prefix=SB
+# RUN: fminus %S/../../../examples/circuits/asym.cir --nodes --emit fm -o %t.asym.fm 2>&1 | FileCheck %s --check-prefix=ASYM --match-full-lines
+# RUN: fminus %S/../../../examples/circuits/screamer.cir --probes -o %t.ts.ll
+# RUN: fminus %S/../../../examples/circuits/otalp.cir --probes -o %t.ota.ll
+
+# diodetone.cir's nodes: .input's and .output's mentioned first; the clipper's at its 4x steps; no DC source, so 0 V.
+# DT-NODES:      {{.*}}diodetone.cir:3:14: node 0 'in': rate 1, dc 0 V, readable
+# DT-NODES-NEXT: {{.*}}diodetone.cir:4:14: node 1 'b': rate 4, dc 0 V, readable
+# DT-NODES-NEXT: {{.*}}diodetone.cir:10:11: node 2 'a': rate 4, dc 0 V, readable
+# DT-NODES-NEXT: {{.*}}diodetone.cir:14:11: node 3 'c': rate 4, dc 0 V, readable
+# DT-NODES-NOT:  node
+
+# The probe fields after the module's own, init's part, and tick's one branch, first: armed, tick_pr is its sample.
+# DT:      int ck_;
+# DT:      float pn_c_by_x_C2;
+# DT-NEXT: float pn_c_by_v_D1;
+# DT-NEXT: int prb_;
+# DT-NEXT: int prs_[4];
+# DT-NEXT: int prn_;
+# DT-NEXT: float pr_[4096];
+# DT-NEXT: float prp_[4];
+# DT-NEXT: float pra_[4];
+# DT-NEXT: float prq_[4];
+# DT-NEXT: float prv_[4];
+# DT:      void init(float rate)
+# DT:      prb_ = 0;
+# DT:      prs_[i] = -1;
+# DT:      clear();
+# DT:      void clear()
+# DT-NOT:  pr{{[bsnpaqv]?}}_
+# DT:      void set(float tone)
+# The block's step again, writing its nodes' volts (the region's, at tick's last step): the port's voltage, and c's
+# own coefficients; .output's node is tick's output, through the halfbands.
+# DT:      float b1_pr(float u)
+# DT:      const float n_b = n_b_by_x_C2 * x_C2 + n_b_by_v_D1 * v;
+# DT-NEXT: prv_[2] = v;
+# DT-NEXT: prv_[3] = pn_c_by_x_C2 * x_C2 + pn_c_by_v_D1 * v;
+# DT-NEXT: x_C1 = g2_C1 * v - x_C1;
+# DT:      float step_pr(float u)
+# DT-NEXT: {
+# DT-NEXT: return b1_pr(u);
+# DT:      float tick(float u)
+# DT-NEXT: {
+# DT-NEXT: if (prb_ != 0)
+# DT-NEXT: return tick_pr(u);
+# DT-NEXT: if (ck_ == 0)
+# DT:      ck_ = ck_ == 15 ? 0 : ck_ + 1;
+# DT-NEXT: hb1_up(u, os1);
+# DT:      float tick_pr(float u)
+# DT-NEXT: {
+# DT-NEXT: if (ck_ == 0)
+# DT:      ck_ = ck_ == 15 ? 0 : ck_ + 1;
+# DT-NEXT: prv_[0] = u;
+# DT:      const float y3 = step_pr(os2_1[1]);
+# DT:      const float z2 = hb1_down(z0, z1);
+# DT-NEXT: prv_[1] = z2;
+# DT:      if ((n_ >= 0 && n_ <= 3))
+# DT:      pr_[1024 * i + prn_ % 1024] = e_;
+# DT:      prn_ = prn_ == 1073741823 ? 0 : prn_ + 1;
+# PLAIN-NOT: pr{{[bsnpaqv]?}}_
+
+# A matched design's inside is not computed: its input and output are.
+# SK:      {{.*}}sallen-key.cir:6:14: node 0 'in': rate 1, dc 0 V, readable
+# SK-NEXT: {{.*}}sallen-key.cir:7:14: node 1 'out': rate 1, dc 0 V, readable
+# SK-NEXT: {{.*}}sallen-key.cir:8:12: node 2 'a': rate 1, dc 0 V, not readable: inside a filter computed as a whole at 1x (block 1)
+# SK-NEXT: {{.*}}sallen-key.cir:9:12: node 3 'b': rate 1, dc 0 V, not readable: inside a filter computed as a whole at 1x (block 1)
+
+# A DC source's node, and DC volts.
+# SB: screamer-biased.cir:{{[0-9]+}}:{{[0-9]+}}: node 2 'vb': rate 1, dc 4.5 V, readable
+# SB: node 4 'n1': rate 4, dc 4.5 V, readable
+
+# A series string's inner node is inside the one diode its law computes.
+# ASYM:      {{.*}}asym.cir:7:14: node 0 'in': rate 1, dc 0 V, readable
+# ASYM-NEXT: {{.*}}asym.cir:8:14: node 1 'a': rate 4, dc 0 V, readable
+# ASYM-NEXT: {{.*}}asym.cir:16:11: node 2 'm': rate 4, dc 0 V, not readable: inside the series string D1|D2+D3, computed as one diode (block 1)

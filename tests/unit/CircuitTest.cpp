@@ -2247,3 +2247,113 @@ TEST_CASE("the diode forms' and the new elements' emitted names are refused as n
         CHECK(r.errors.empty());
     }
 }
+
+TEST_CASE("the probes' nodes: first-mention order, rates, DC volts, and which a probe can read", "[circuit]")
+{
+    struct Expected
+    {
+        const char* name;
+        int line;
+        int column;
+        int rate;
+        bool readable;
+    };
+    auto check = [](const fc::Result& r, const std::vector<Expected>& expected)
+    {
+        INFO(r.errors);
+        REQUIRE(r.nodes.size() == expected.size());
+        for (std::size_t k = 0; k < expected.size(); ++k)
+        {
+            const fc::Node& n = r.nodes[k];
+            INFO("node " << k << " " << n.name);
+            CHECK(n.name == expected[k].name);
+            CHECK(n.line == expected[k].line);
+            CHECK(n.column == expected[k].column);
+            CHECK(n.rate == expected[k].rate);
+            CHECK(n.readable == expected[k].readable);
+            CHECK(n.why.empty() == n.readable);
+        }
+    };
+    // the TS chain: .input's and .output's nodes are mentioned first; the clipping stage runs at 4x; the tone block is
+    // a matched design at 1x, whose inside the module never computes (its output, v3, it does)
+    const fc::Result ts = fc::generate(fc::test::kScreamer, "screamer.cir");
+    check(ts, {{"in", 3, 14, 1, true},   {"out", 4, 14, 1, true},  {"p1", 12, 12, 1, true}, {"n1", 14, 12, 4, true},
+               {"v2", 14, 16, 4, true},  {"z1", 15, 12, 4, true},  {"f1", 17, 12, 4, true}, {"t1", 22, 12, 1, false},
+               {"tn", 25, 12, 1, false}, {"v3", 25, 16, 1, true},  {"tw", 27, 12, 1, false},
+               {"tz", 28, 12, 1, false}, {"o1", 30, 12, 1, true},  {"o2", 31, 12, 1, true}});
+    for (const fc::Node& n : ts.nodes)
+    {
+        if (!n.readable)
+            CHECK(n.why == "inside a filter computed as a whole at 1x (block 3)");
+        CHECK(n.dc == 0);
+    }
+    // DC volts are the DC point's; a DC source's node and .input's are read without a block
+    const fc::Result divider = fc::generate(fc::test::kDivider, "t.cir");
+    check(divider, {{"in", 2, 10, 1, true}, {"out", 3, 11, 1, true}, {"vcc", 4, 4, 1, true}, {"b", 5, 8, 1, true}});
+    const fc::Plan dp = planned(fc::test::kDivider);
+    for (const fc::Node& n : divider.nodes)
+        CHECK(n.dc == nodeDc(dp, n.name));
+    CHECK(std::fabs(divider.nodes[2].dc - 9) <= 1e-12);
+    CHECK(std::fabs(divider.nodes[3].dc - 4.5) <= 1e-12);
+    // a series string's inner node is inside the one diode its law computes
+    const fc::Result asym = fc::generate(fc::test::kAsym, "asym.cir");
+    check(asym, {{"in", 2, 10, 1, true}, {"a", 3, 11, 4, true}, {"m", 10, 6, 4, false}});
+    CHECK(asym.nodes[2].why == "inside the series string D1|D2+D3, computed as one diode (block 1)");
+    // a name keeps its first spelling; ground is not a node
+    const fc::Result spelled = fc::generate(".input u IN\n.output y Out\nR1 in out 1k\nC1 OUT gnd 10n\n", "t.cir");
+    REQUIRE(spelled.nodes.size() == 2);
+    CHECK(spelled.nodes[0].name == "IN");
+    CHECK(spelled.nodes[1].name == "Out");
+    // Options::probes changes the module's text alone: the nodes, the messages and the rest are the same, and so is
+    // the self-test's key
+    for (const std::string& text : {fc::test::kScreamer, fc::test::kOtaLp, fc::test::kAsym, fc::test::kDivider})
+    {
+        fc::Options probes;
+        probes.probes = true;
+        const fc::Result a = fc::generate(text, "t.cir");
+        const fc::Result b = fc::generate(text, "t.cir", probes);
+        INFO(text);
+        CHECK(a.errors == b.errors);
+        CHECK(a.warnings == b.warnings);
+        CHECK(a.notes == b.notes);
+        CHECK(a.module == b.module);
+        CHECK(a.pots == b.pots);
+        CHECK(a.switches == b.switches);
+        CHECK(a.inputs.size() == b.inputs.size());
+        CHECK(a.configuration == b.configuration);
+        CHECK(a.provisional == b.provisional);
+        CHECK(a.selfTestKey == b.selfTestKey);
+        CHECK(a.latency == b.latency);
+        REQUIRE(a.nodes.size() == b.nodes.size());
+        for (std::size_t k = 0; k < a.nodes.size(); ++k)
+        {
+            CHECK(a.nodes[k].name == b.nodes[k].name);
+            CHECK(a.nodes[k].readable == b.nodes[k].readable);
+            CHECK(a.nodes[k].dc == b.nodes[k].dc);
+        }
+        CHECK(fc::selfTestKey(text, "t.cir", {}) == fc::selfTestKey(text, "t.cir", probes));
+        CHECK(a.source.find("prb_") == std::string::npos);
+        CHECK(b.source.find("    int prb_;") != std::string::npos);
+        CHECK(b.lines.size() == static_cast<std::size_t>(std::count(b.source.begin(), b.source.end(), '\n')));
+    }
+}
+
+TEST_CASE("the probe fields' names are refused as names", "[circuit]")
+{
+    const std::string head = ".input u in\n.output y o\n";
+    const std::string body = "R1 in o 1k\nR2 o 0 1k\n";
+    for (const char* name : fc::kProbeFields)
+    {
+        INFO(name);
+        CHECK(fc::isModuleWord(name));
+        CHECK(!fc::isPlainName(name));
+        CHECK(!errorsOf(head + ".pot " + name + "\nR3 in o {1k + " + name + "}\n" + body).empty());
+        CHECK(!errorsOf(".input " + std::string(name) + " in\n.output y o\n" + body).empty());
+        CHECK(!errorsOf(".title " + std::string(name) + "\n" + head + body).empty());
+        fc::Options named;
+        named.moduleName = name;
+        CHECK(!fc::generate(head + body, "t.cir", named).errors.empty());
+    }
+    for (const char* name : {"tick_pr", "step_pr", "n_", "e_"})
+        CHECK(fc::isModuleWord(name));
+}

@@ -23,6 +23,8 @@
 //     fminus pedal.cir --self-test --emit fm   the self-test chooses the netlist's open configuration (on --threads
 //                                           threads), and the module is generated with its answer; --notes prints
 //                                           the plan
+//     fminus pedal.cir --probes --nodes --emit fm   the module with its probe fields (Options::probes), and the
+//                                           netlist's nodes as a probe sees them (Result::nodes) on stderr
 #include "fminus/Circuit.h"
 #include "frontend/Frontend.h"
 #include "ir/CodeGen.h"
@@ -190,13 +192,30 @@ namespace
         bool selfTest = false;
         unsigned threads = 0;
         bool notes = false;
+        bool probes = false;   // Options::probes
+        bool nodes = false;    // print Result::nodes
     };
+
+    // Result::nodes, a line each, cited at each node's first mention: "pedal.cir:12:8: node 3 'n1': rate 4, dc 4.5 V,
+    // readable" (or "not readable: <why>").
+    std::string nodeLines(const fminus::circuit::Result& result, const std::string& name)
+    {
+        std::string out;
+        for (std::size_t k = 0; k < result.nodes.size(); ++k)
+        {
+            const fminus::circuit::Node& n = result.nodes[k];
+            out += std::format("{}:{}:{}: node {} '{}': rate {}, dc {:.9g} V, {}\n", name, n.line, n.column, k, n.name,
+                               n.rate, n.dc, n.readable ? std::string("readable") : "not readable: " + n.why);
+        }
+        return out;
+    }
 
     // `text` of the netlist `name`, generated as `settings` say; its messages go to `log`.
     fminus::circuit::Result generateCircuit(std::string_view text, const std::string& name,
                                             const CircuitSettings& settings, CircuitLog& log)
     {
         fminus::circuit::Options options;
+        options.probes = settings.probes;
         std::string selfTestWarnings;
         if (settings.selfTest)
         {
@@ -231,6 +250,8 @@ namespace
         }
         if (settings.notes)
             log.messages += result.notes;
+        if (settings.nodes)
+            log.messages += nodeLines(result, name);
         log.failed = log.failed || !result.errors.empty();
         log.results[name + ".fm"] = result;
         return result;
@@ -427,6 +448,11 @@ int main(int argc, char** argv)
                  "Run the self-test of each circuit netlist (.cir) the program reads and generate it with the answer: "
                  "it chooses the configuration the netlist leaves open (seconds; docs/circuits.md)");
     app.add_flag("--notes", circuitSettings.notes, "Print the circuit compiler's notes on each netlist (its plan)");
+    app.add_flag("--probes", circuitSettings.probes,
+                 "Generate each circuit netlist's module with its probe fields (docs/circuits.md, \"Probes\"): the "
+                 "same output");
+    app.add_flag("--nodes", circuitSettings.nodes,
+                 "Print each circuit netlist's nodes as a probe sees them: rate, DC volts, whether it can be read");
     CLI11_PARSE(app, argc, argv);
     circuitSettings.threads = threads;
     if (emit == "exe" && run.empty() && output == "-")

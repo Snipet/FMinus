@@ -6,7 +6,8 @@
 // `reps` runs is kept: wall time, and on macOS this process's cycles and instructions (proc_pid_rusage) at the
 // user-interactive quality of service. A row is named as mkbench.py names its bench; the self-test's cost model
 // (src/circuit/Search.h, report §3.2) and the report's measurement of that bench (experiments/timing1.out) are printed
-// beside it. Printed, never asserted: run it on a quiet machine. (--only skips the first two.)
+// beside it. Before it, set()'s cycles and the probes' cost in a host's process loop (--only probes: that alone).
+// Printed, never asserted: run it on a quiet machine. (--only skips the first two.)
 #include "harness.h"
 
 #include "circuit/Emit.h"
@@ -529,6 +530,179 @@ float fm_bench(float n)
                             t.instructions, codes[2].form.empty() ? "(no note)" : codes[2].form.c_str());
             }
         }
+
+        // The probes' cost (docs/circuits.md, "Probes"): screamer.cir and otalp.cir as the playground's template calls
+        // a circuit, two instances (left and right) ticked in a host module's process loop over blocks of 64 samples,
+        // the signal (and otalp.cir's iabc) read from tables the host fills in init, so that the loop costs little but
+        // the circuit's work; generated without probes, with them disarmed (tick's one branch), and armed on one slot
+        // and on four (the left instance's, as the playground arms one). Printed, never asserted.
+        void probeCosts(const BenchOptions& options)
+        {
+            const int samples = std::max(options.samples / 4, 4096);
+            std::printf("the probes: ns a host sample of two instances in a host module's process loop (blocks of 64), "
+                        "best of %d x %d; the left instance armed\n",
+                        options.reps, samples);
+            struct Case
+            {
+                const char* file;
+                double amp;
+                const char* node;   // the node one slot arms
+            };
+            for (const Case& k : {Case{"screamer.cir", 0.45, "v2"}, Case{"otalp.cir", 5, "y1"}})
+            {
+                std::vector<Timing> times;
+                std::vector<std::string> names;
+                std::string setLine;
+                for (int variant = 0; variant < 4; ++variant)
+                {
+                    fc::Options o;
+                    o.probes = variant > 0;
+                    const fc::Result r = fc::generate(netlist(k.file), k.file, o);
+                    if (!r.errors.empty())
+                    {
+                        std::printf("  %s: %s", k.file, r.errors.c_str());
+                        break;
+                    }
+                    int index = 0;
+                    std::vector<int> readable;
+                    for (std::size_t n = 0; n < r.nodes.size(); ++n)
+                    {
+                        if (r.nodes[n].name == k.node)
+                            index = static_cast<int>(n);
+                        if (r.nodes[n].readable)
+                            readable.push_back(static_cast<int>(n));
+                    }
+                    std::string arm;
+                    if (variant >= 2)
+                    {
+                        arm = "        amp[0].prb_ = 1;\n";
+                        for (int slot = 0; slot < (variant == 2 ? 1 : 4); ++slot)
+                            arm += std::format("        amp[0].prs_[{}] = {};\n", slot,
+                                               slot == 0 ? index
+                                                         : readable[static_cast<std::size_t>(slot) % readable.size()]);
+                    }
+                    const bool ota = !r.inputs.empty() && r.inputs.size() > 1;
+                    const std::string source = r.source + std::format(R"(
+module Host
+{{
+    {0} amp[2];
+    float sig[1024];
+    float law[1024];
+    void init(float rate)
+    {{
+        amp[0].init(rate);
+        amp[1].init(rate);
+        for (int i = 0; i < 1024; ++i)
+        {{
+            sig[i] = {1} * sinf(0.130899694f * (float)i);
+            law[i] = 0.000141421f * expf(1.38629436f * sinf(0.00613592f * (float)i));
+        }}
+{2}    }}
+    void process(float* restrict left, float* restrict right, int n) [[clang::nonblocking]]
+    {{
+        for (int i = 0; i < n; ++i)
+        {{
+            left[i] = amp[0].tick(left[i]{3});
+            right[i] = amp[1].tick(right[i]{4});
+        }}
+    }}
+}};
+float fm_bench(float n)
+{{
+    Host h;
+    h.init(48000);
+    float left[64];
+    float right[64];
+    float sum = 0;
+    int at = 0;
+    for (int b = 0; b < (int)n; b += 64)
+    {{
+        for (int i = 0; i < 64; ++i)
+        {{
+            left[i] = h.sig[(at + i) % 1024];
+            right[i] = h.sig[(at + i + 256) % 1024];
+        }}
+        h.process(left, right, 64);
+        at = (at + 64) % 1024;
+        sum += left[0] + right[63];
+    }}
+    return sum;
+}}
+)",
+                                                                      r.module, fc::literal(k.amp), arm,
+                                                                      ota ? ", law[i % 1024]" : "",
+                                                                      ota ? ", law[(i + 512) % 1024]" : "");
+                    fminus::Program::Options po;
+                    po.math = options.math;
+                    po.denormals = fminus::Program::Denormals::Flush;
+                    po.threads = 1;
+                    std::string errors;
+                    auto program = fminus::Program::compile(source, errors, po);
+                    if (!program)
+                    {
+                        std::printf("  %s does not compile:\n%s", k.file, errors.c_str());
+                        break;
+                    }
+                    times.push_back(best(program->function<float(float)>("fm_bench", errors), samples, options.reps));
+                    names.push_back(variant == 0   ? "no probes"
+                                    : variant == 1 ? "disarmed"
+                                    : variant == 2 ? std::format("armed, 1 slot ({})", k.node)
+                                                   : std::string("armed, 4 slots"));
+                }
+                if (times.size() != 4)
+                    continue;
+                std::printf("  %-14s", k.file);
+                for (std::size_t v = 0; v < times.size(); ++v)
+                {
+                    std::printf(" | %s %.1f ns", names[v].c_str(), times[v].ns);
+                    if (v > 0)
+                        std::printf(" (%+.2f %%)", 100 * (times[v].ns / times[0].ns - 1));
+                }
+                std::printf("\n  %-14s", "");
+                for (std::size_t v = 0; v < times.size(); ++v)
+                    std::printf(" | %.0f cycles, %.0f instr", times[v].cycles, times[v].instructions);
+                std::printf("  (idle overhead %+.2f %% of the cycles)\n",
+                            100 * (times[1].cycles / times[0].cycles - 1));
+                std::fflush(stdout);
+            }
+            // set(): the probes' coefficients are computed where the module's are, so a pot's move costs more
+            std::printf("  set() on screamer.cir, its three pots moving each call: ");
+            for (bool probes : {false, true})
+            {
+                fc::Options o;
+                o.probes = probes;
+                const fc::Result r = fc::generate(netlist("screamer.cir"), "screamer.cir", o);
+                const std::string source = r.source + R"(
+float fm_bench(float n)
+{
+    Screamer w;
+    w.init(48000);
+    float sum = 0;
+    for (int i = 0; i < (int)n; ++i)
+    {
+        const float x = (float)(i % 256) * 0.00390625f;
+        w.set(x, 1 - x, x);
+        sum += w.mb0_b3;
+    }
+    return sum;
+}
+)";
+                fminus::Program::Options po;
+                po.denormals = fminus::Program::Denormals::Flush;
+                po.threads = 1;
+                std::string errors;
+                auto program = fminus::Program::compile(source, errors, po);
+                if (!program)
+                {
+                    std::printf("does not compile:\n%s", errors.c_str());
+                    return;
+                }
+                const Timing t =
+                    best(program->function<float(float)>("fm_bench", errors), options.samples / 10, options.reps);
+                std::printf("%s %.1f ns, %.0f cycles a call%s", probes ? "with probes" : "without", t.ns, t.cycles,
+                            probes ? "\n" : "; ");
+            }
+        }
     } // namespace
 
     int bench(const BenchOptions& options)
@@ -543,11 +717,17 @@ float fm_bench(float n)
         if (getloadavg(load, 3) == 3)
             std::printf("load average: %.2f %.2f %.2f\n", load[0], load[1], load[2]);
 #endif
+        if (options.only == "probes")
+        {
+            probeCosts(options);
+            return 0;
+        }
         if (options.only.empty())
         {
             generateTimes();
             selfTestTimes();
             setCycles(options);
+            probeCosts(options);
         }
         std::printf("cycles a host sample at 48 kHz, best of %d x %d (wall ns; cycles and instructions from "
                     "proc_pid_rusage on macOS); the self-test's cost model and the report's (timing1.out) beside\n",
