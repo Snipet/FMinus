@@ -9,6 +9,7 @@
 //                       and the program's
 //     Math.cpp          sinf, cosf, tanf, expf, tanhf and logf in the vector and libm math modes: the runtime's
 //                       functions
+//     Hash.cpp          hash and randf: an int's bits mixed, and a float uniform in [-1, 1) from them, inline
 //     Vectors.cpp       vector literals, swizzles, and ?: lane by lane
 //     Memory.cpp        lvalues (variables, p[i], *p, components) read and written, arrays, &x, pointer arithmetic
 //     Modules.cpp       modules: their layout, fields, methods and calls of them, `this`, copies
@@ -91,6 +92,7 @@ namespace fminus::ir::detail
     bool isReduction(std::string_view name);             // reduce_add, reduce_min, reduce_max
     bool isPolyQuery(std::string_view name);             // poly_lanes, poly_index
     bool isPolyMemory(std::string_view name);            // poly_load, poly_store
+    bool isHash(std::string_view name);                  // hash, randf
 
     // A loop's branches back to `header`, but not `entry`, marked llvm.loop.mustprogress (Statements.cpp).
     void mustProgress(llvm::BasicBlock* header, const llvm::Instruction* entry);
@@ -327,6 +329,10 @@ namespace fminus::ir::detail
         static std::string mathName(const Builtin& builtin, MathFunction which);
         bool checkMathNames(SourceLocation location, const Builtin& builtin);
         llvm::FunctionCallee mathFunction(const Builtin& builtin, MathFunction which);
+
+        // ---- Hash.cpp -----------------------------------------------------------------------------------------------
+        llvm::Value* mixBits(llvm::Value* x);
+        Value lowerHash(SourceLocation location, const ast::CallExpr& call, const std::vector<Value>& args);
 
         // ---- Modules.cpp --------------------------------------------------------------------------------------------
         void layOut(const ast::Program& program);

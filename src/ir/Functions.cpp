@@ -35,7 +35,8 @@ namespace fminus::ir::detail
         Effect& effect = effects_[function.name];
         effect = std::max(effect, declaredEffect(function));
 
-        if (isReduction(function.name) || isPolyQuery(function.name) || isPolyMemory(function.name))
+        if (isReduction(function.name) || isPolyQuery(function.name) || isPolyMemory(function.name)
+            || isHash(function.name))
         {
             error(function.location, quoted(function.name) + " is a builtin and cannot be redefined");
             return;

@@ -11,6 +11,9 @@
 # RUN: fminus %S/../../../examples/unison/unison.fm --run main 0.01 7 | FileCheck %s --check-prefix=MIX
 # RUN: fminus %S/../../../examples/unison/unison.fm --poly-lanes 16 --run main 0.01 7 | FileCheck %s --check-prefix=MIX
 # RUN: fminus %S/../../../examples/unison/unison.fm --poly-lanes 16 --run lanes | FileCheck %s --check-prefix=LANES16
+# RUN: fminus %S/../../../examples/noise/noise.fm --run main 48000 | FileCheck %s --check-prefix=NOISE
+# RUN: fminus %S/../../../examples/noise/noise.fm --run main 48000 -O0 --math libm | FileCheck %s --check-prefix=NOISE
+# RUN: fminus %S/../../../examples/noise/noise.fm --run apart 48000 | FileCheck %s --check-prefix=APART
 
 # 23 harmonics below 24 kHz approach the ideal 0.5; at 10 kHz only two fit, and the sum is exactly 2/pi. The last
 # digits are the math functions': 0.4867599 with FMinus's kernels (the default math mode) and with libm's, 0.48676 with
@@ -33,3 +36,8 @@
 # The mean of 7 detuned saws; the last digits depend on the width.
 # MIX: -0.799592{{[0-9]*}}
 # LANES16: 16
+
+# A second of white noise at 48 kHz: its RMS, near 1/sqrt(3) = 0.57735, the same bits at -O0 and in libm's math mode
+# (randf computes on integers, exactly). Two voices' sources, from two seeds, barely correlate.
+# NOISE: 0.5765617
+# APART: -0.0015290721

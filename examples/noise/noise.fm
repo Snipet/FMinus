@@ -1,0 +1,70 @@
+// examples/noise/noise.fm: white noise from a count of samples, with hash and randf (docs/extending.md, recipe 25).
+//
+// randf(n) is a float uniform in [-1, 1), the same for the same n wherever it is computed. A sample's noise is then a
+// function of its index: a block of it needs no state but where it starts, it is the same whatever the block size,
+// and a loop of it vectorises (about three instructions a sample on arm64). hash(n) mixes an int: a seed through it
+// keeps two sources apart.
+//
+//   fminus examples/noise/noise.fm --run main 48000       a second of noise at 48 kHz: its RMS, near 1/sqrt(3)
+//   fminus examples/noise/noise.fm --run apart 48000      two voices' sources: their correlation, near 0
+
+// A block of white noise: sample i of the stream is randf(start + i).
+void white(float* restrict out, int n, int start) [[clang::nonblocking]]
+{
+    for (int i = 0; i < n; ++i)
+        out[i] = randf(start + i);
+}
+
+// A source a voice holds: a stream of its own, from its seed, and how far along it is. An int counts 2^31 samples,
+// 12.4 hours at 48 kHz; past that ++ would overflow, so the count starts again at 0.
+module Noise
+{
+    int seed;
+    int count;
+
+    void init(int voice)
+    {
+        seed = hash(voice);
+        count = 0;
+    }
+
+    float next()
+    {
+        const float x = randf(seed ^ count);
+        count = count < 0x7FFFFFFF ? count + 1 : 0;
+        return x;
+    }
+};
+
+float main(float samples)
+{
+    const int n = (int)samples;
+    float squares = 0;
+    for (int i = 0; i < n; ++i)
+    {
+        const float x = randf(i);
+        squares += x * x;
+    }
+    return sqrtf(squares / n);
+}
+
+// The correlation of two voices' noise over `samples`: near 0, about 1 / sqrt(samples) either side.
+float apart(float samples)
+{
+    Noise a;
+    Noise b;
+    a.init(1);
+    b.init(2);
+    float ab = 0;
+    float aa = 0;
+    float bb = 0;
+    for (int i = 0; i < (int)samples; ++i)
+    {
+        const float x = a.next();
+        const float y = b.next();
+        ab += x * y;
+        aa += x * x;
+        bb += y * y;
+    }
+    return ab / sqrtf(aa * bb);
+}

@@ -2,9 +2,9 @@
 // where the class's names hide the others); then the builtins, in the order a call tries them: the reductions,
 // poly_lanes and poly_index, poly_load and poly_store, <math.h>'s float functions (LLVM intrinsics, overloaded on
 // vectors; the transcendental ones the runtime's functions, by the math mode: Math.cpp), <stdlib.h>'s heap (malloc,
-// calloc and free) and the FFT (fft_create, fft_forward, ...), both on the runtime's functions; then the program's
-// own functions. The runtime's functions are declared with what they do (describeRuntime), so LLVM does not take one
-// for an unknown function that may read and write all memory.
+// calloc and free) and the FFT (fft_create, fft_forward, ...), both on the runtime's functions, and hash and randf
+// (inline: Hash.cpp); then the program's own functions. The runtime's functions are declared with what they do
+// (describeRuntime), so LLVM does not take one for an unknown function that may read and write all memory.
 #include "ir/Lowering.h"
 
 #include <llvm/IR/Attributes.h>
@@ -274,6 +274,8 @@ namespace fminus::ir::detail
                 calls_[function_->name].push_back({location, call.callee});
             return lowerFft(location, *fft, args);
         }
+        if (isHash(call.callee))
+            return lowerHash(location, call, args);   // Hash.cpp
         std::vector<llvm::Value*> irArgs;
         if (const Builtin* builtin = findBuiltin(call.callee))
         {
