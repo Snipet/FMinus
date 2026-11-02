@@ -1,16 +1,16 @@
 # Extending the compiler
 
 How to add to FMinus. First, how a change moves through the compiler, and the few rules that keep that easy. Then
-twenty-four worked recipes. Eleven grow the C subset from a one-line builtin to C's control flow, a custom LLVM pass,
+twenty-five worked recipes. Eleven grow the C subset from a one-line builtin to C's control flow, a custom LLVM pass,
 `int`, `void` and pointers, the heap with the attributes that keep it off the audio thread, arrays and modules, FMinus's
 classes, an FFT from a C library built into the runtime, and parameters, the values a plugin's host sets. Six more are
 about the compiler rather than the language: math that gives a float one result wherever it is computed, knob versioning
 and flat streams, C's strict aliasing told to LLVM, zero-init elision, what the runtime's calls and loops promise, and
 subnormals flushed for the audio thread. Two more grow the language again: `#include`, which splits a program into
 files, and `parallel for` and `parallel { }`, a program's own threads. Two return to the math: kernels of FMinus's
-own, the same in every lane and on every target, and those kernels inline. The last three are for DSP's everyday code:
-C's bitwise operators with a hash and white noise from a counter, constant tables stored once, and `switch` and
-enumerations. Then the pitfalls
+own, the same in every lane and on every target, and those kernels inline. The last four are for DSP's everyday code:
+C's bitwise operators with a hash and white noise from a counter, constant tables stored once, `switch` and
+enumerations, and constants at the top level with arrays sized by constant expressions. Then the pitfalls
 those recipes ran into, and design notes for what comes next. [simd.md](simd.md) has recipes 7 to 9, for vectors.
 
 Recipes 1 to 4 are in the compiler now (`tanhf` and `%`; `bool` and its operators; `if`, `while` and `for`), and so are
@@ -18,8 +18,9 @@ simd.md's 7 to 9, recipe 10 (`int`, `void` and pointers), recipe 11 (the heap), 
 13 (the FFT), recipe 14 (parameters), recipes 15 to 20 (the math modes, knob versioning, TBAA, zero-init elision, the
 runtime's attributes and loop progress, denormal control), recipe 21 (`#include`), recipe 22 (`parallel for` and
 `parallel { }`), recipes 23 and 24 (math kernels of FMinus's own, and inline), recipe 25 (the bitwise operators,
-`hash` and `randf`), recipe 26 (constant tables) and recipe 27 (`switch` and `enum`), so their sections describe how
-the code you have got there: read a section beside the files it names.
+`hash` and `randf`), recipe 26 (constant tables), recipe 27 (`switch` and `enum`) and recipe 28 (constants at the top
+level, and sizes of constant expressions), so their sections describe how the code you have got there: read a section
+beside the files it names.
 Recipes 5 and 6, a runtime function and a pass, are not part of the language; they live in [recipes/](recipes/) as a
 patch, so you can apply them to see them work. None of these are sketches: each was applied to this repository, built
 with `-Werror`, and tested in the dev and asan presets, every test passing. [architecture.md](architecture.md) describes
@@ -42,7 +43,7 @@ Most language features touch the same places, in this order:
 | 5 | `src/ir/` | its conversions and checks, and its lowering to LLVM IR, in the file its kind belongs to (`Lowering.h` lists them: types, functions, statements, expressions, calls, the math modes, vectors, memory, modules, effects, parallel regions, TBAA, denormals); a load or store of memory gets its type's tag (`tag`, recipe 17); a statement that holds code walks it in `Parallel.cpp`'s `Walker` too |
 | 6 | `src/runtime/` | if it needs C++ at run time, a runtime function (recipe 5); if a builtin calls it, its facts: in `kRuntimeFacts`, through `callRuntime` (recipe 19), or for a math builtin's, in `mathFunction` (`Math.cpp`, recipe 15) |
 | 7 | `tools/fminus/main.cpp`, `src/support/Aot.cpp` | for a new type: whether `--run` can pass and print it (its `switch` over the result type), and whether an executable's `main` may take or return it (`addEntryPoint`) |
-| 8 | `tests/` | a dump in `FrontendTest.cpp`; results in `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `SwitchTest.cpp`, `EnumTest.cpp`, `IntTest.cpp`, `BitwiseTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `TableTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `HashTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp` or `ParallelTest.cpp` (their helpers are in `Compile.h`); IR or errors in `tests/lit/fminus/` |
+| 8 | `tests/` | a dump in `FrontendTest.cpp`; results in `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `SwitchTest.cpp`, `EnumTest.cpp`, `IntTest.cpp`, `BitwiseTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `TableTest.cpp`, `TopLevelTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `HashTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp` or `ParallelTest.cpp` (their helpers are in `Compile.h`); IR or errors in `tests/lit/fminus/` |
 | 9 | `examples/` | a program that uses it, and a line in `tests/lit/fminus/examples.test` that runs it |
 | 10 | `editors/vscode/syntaxes/fminus.tmLanguage.json` | a new keyword, type or builtin, so VSCode highlights it (its README says where) |
 | 11 | `README.md` | the language table, and the deviations from C if any |
@@ -56,12 +57,12 @@ when recipe 10 added `Kind::Pointer`, it stopped in `typeOf`, `typeName` and the
 nothing reminds you of.
 
 Each feature has an example to read beside its recipe: `examples/comparison/` for `bool` (recipe 3),
-`examples/waveforms/` for every statement (recipes 4 and 27), `examples/chord/` for `float4` and the vector math library
-(recipes 7 and 8), `examples/unison/` for `poly float` (recipe 9), `examples/biquad/` for a block of samples a
-call, through pointers (recipe 10), `examples/delay/` for state on the heap and a kernel that can't allocate
-(recipe 11), `examples/saturator/` and `examples/meter/` for `poly float` through a buffer, against plain loops
-(recipes 9 and 10), `examples/convolver/` and `examples/delay/echo.fm` for loops over a module's fields
-(recipe 17), and `examples/ensemble/` for `parallel for` and `parallel { }` (recipe 22).
+`examples/waveforms/` for every statement (recipes 4 and 27) and a constant of the top level (recipe 28),
+`examples/chord/` for `float4` and the vector math library (recipes 7 and 8), `examples/unison/` for `poly float`
+(recipe 9), `examples/biquad/` for a block of samples a call, through pointers (recipe 10), `examples/delay/` for state
+on the heap and a kernel that can't allocate (recipe 11), `examples/saturator/` and `examples/meter/` for `poly float`
+through a buffer, against plain loops (recipes 9 and 10), `examples/convolver/` and `examples/delay/echo.fm` for loops
+over a module's fields (recipe 17), and `examples/ensemble/` for `parallel for` and `parallel { }` (recipe 22).
 
 ## Ground rules
 
@@ -1721,8 +1722,8 @@ A swizzle and a field are written alike, `v.x` and `m.y`, and the parser can't t
 type. So `SwizzleExpr` became `MemberExpr`, with an `arrow` flag for `p->y`, and the code generator decides by the
 base's type. `m.tick(x)` and `p->tick(x)` are `MethodCallExpr`s, and `this` a `ThisExpr`. An array is a declarator
 with a size after its name, `"[" NUMBER "]"`, and an initialiser list; a parameter declared as one is a pointer, as in
-C. The size is the parser's to check (a positive integer constant: `arraySize` in `Parser.y`), since the `Type` holds
-it.
+C. The size was the parser's to check (a positive integer constant), since the `Type` holds it; recipe 28 makes it any
+integer constant expression, which the code generator works out.
 
 ### A struct type per module
 
@@ -1839,7 +1840,7 @@ mirror of the modules has the same layout, and plays a score through both, bit f
 
 - `tests/unit/ArrayTest.cpp`: arrays zeroed, indexed, initialised from lists, decayed to pointers and compared as
   them, of ints and vectors, declared afresh in a loop, a C++ host's buffer as an array parameter; the errors, the
-  parser's for sizes included.
+  sizes' included.
 - `tests/unit/ModuleTest.cpp`: a module's methods run on a C++ host's struct, against C++; modules holding modules and
   arrays of them, methods calling methods with and without `this`, `this` passed on; sizes with padding, copies,
   modules on the heap, pointers to a module's own kind; the effects through methods; the errors, clang's where clang
@@ -4568,7 +4569,8 @@ deviations.
 
 ### What it changes for programs and hosts
 
-- **Results do not change**, bit for bit; a const array of constants costs no time where it is declared.
+- **Results do not change**, bit for bit; a const array of constants costs no time where it is declared. Recipe 28's
+  tables at the top level take the same shapes (`tableContents`).
 - **A large table takes its size in the JIT's memory**, once, where it took it on the stack, on every call: a table of
   100,000 floats with a short list is 400 KB of `__const` in the object, zeros included. One over 1 MiB stays on the
   stack, as before.
@@ -4720,11 +4722,12 @@ generator's scopes: a `Binding` is a variable (its slot) or a constant (its valu
 each knows where it was declared, for the notes. In a block, a constant is the block's, a variable of an inner block
 hides it, and one of the same scope is clang's "redefinition of 'A' as different kind of symbol" (two constants:
 "redefinition of enumerator 'A'"), with "previous definition is here". At the top level and in a module it is the
-file's, `fileScope_`, as a C struct's enumeration constants are: `CodeGen.cpp` declares each enumeration before the
-first function after it, so a function sees the constants declared before it, and a module's methods, which follow
+file's, `fileScope_`, as a C struct's enumeration constants are: `CodeGen.cpp` declares each enumeration in its place
+among the file's declarations (since recipe 28, as it lays out each module and defines each constant), so a function
+sees the constants declared before it, and a module's methods, which follow
 the module, see its own. A constant named as a function or a module of the file is a redefinition too, reported at
-whichever comes second. A name in a method is looked up as C++ looks one up in a member function (`enumerator`): the
-blocks' scopes, then the module's fields and methods, then the file's.
+whichever comes second. A name in a method is looked up as C++ looks one up in a member function (`enumerator`, on
+`named` since recipe 28): the blocks' scopes, then the module's fields and methods, then the file's.
 
 The scanner learns none of this, unlike a module's name (recipe 12). A module's name is a type, which the grammar must
 know to tell `T * p` from `a * b`; an enumeration constant is an expression wherever it stands, so the grammar never
@@ -4775,6 +4778,167 @@ say `'int'`.
 - `tests/lit/fminus/enum.fm`: constants folded (no load), the table a constant global, the cases, a constant loop
   without `llvm.loop.mustprogress`, the dump, `--run`; `enum-errors.fm`, each error once. `CircuitTest.cpp` checks
   the keywords are refused as names, and `examples.test` runs `examples/waveforms/`'s `wave`.
+
+## Recipe 28: constants at the top level, and sizes of constant expressions
+
+*In the compiler. Code: in `src/frontend/Parser.y`, a declaration among the `items` (`Program::constants`) and an
+array's size an expression (`array_size`); `Constant`, `DeclStmt::size`, `Field::size` and `Field::enums`, and
+`Param::size` in `Ast.h`, their dumps in `Ast.cpp`. In `src/ir/`: `CodeGen.cpp` (the file in source order),
+`Constants.cpp` (`sized`, `checkSizes`, `defineConstant`, `atTopLevel`, `fileNameClash`), `Modules.cpp`
+(`prepareModules`, `layOut` where the module is, `fieldType`), `Functions.cpp` (`describeThis`, `named`),
+`Memory.cpp` (a top-level constant as an lvalue, `tableContents`, a const array's element assigned), `Expressions.cpp`
+(a constant scalar read as its value, `?:`, `&&` and `||` on a constant at the top level, `sizeof` of a module not yet
+laid out) and `Statements.cpp` (a local's size); `module()`'s field types in `src/api/FMinus.cpp`. Tests:
+`tests/unit/TopLevelTest.cpp` (`[toplevel]`), `FrontendTest.cpp`, `tests/lit/fminus/toplevel.fm` and
+`toplevel-errors.fm`. Example: `examples/waveforms/`'s `PI`.*
+
+An instrument's tables are the program's, not a function's: a 17-by-12 table of partials that two functions and a
+module's method read, the sizes of a bank of filters, a window. Recipe 26 stores a function's const table once, but it
+is that function's: a second function needs a copy of its list, and a module's method a field filled by `init`. And a
+size was a number: `float table[204]`, with the stride, 12, written again in every index. This recipe adds C's two
+answers. A declaration at the top level declares constants, C's file-scope const objects, which every function and
+method after them reads; and an array's size is any integer constant expression, so `ROWS * COLS` names it, with
+enumeration constants (recipe 27):
+
+```c
+enum { ROWS = 17, COLS = 12 };
+const float PARTIALS[ROWS * COLS] = {1, 0.5f, 0.25f};   // the rest are 0
+const float GAIN = 0.5f;
+
+float partial(int row, int k) { return PARTIALS[row * COLS + k] * GAIN; }
+```
+
+### The grammar
+
+`items` takes a `declaration`, as a block and a module's body do. A declaration and a function share their start,
+`qualifier type pointer IDENTIFIER`, and the next token decides, `(` or not, as between a module's field and its
+method, so Bison finds no conflict. Each declarator becomes a `Constant`, its `DeclStmt` and how many functions,
+modules and enumerations come before it, which `dump` prints where it is: `(decl const float[(* ROWS COLS)] PARTIALS
+{1 0.5f 0.25f})`.
+
+An array's size was `"[" NUMBER "]"`, which the parser checked and put in the `Type`. It is an expression now,
+`array_size: "[" expr "]" | "[" "]"`, kept as written (`DeclStmt::size`, `Field::size`, `Param::size`), and the
+array's `Type` has a count of 0 in the tree: an enumeration constant's value is the code generator's (recipe 27), so
+every size is. `[]` takes its size from the list, `float t[] = {1, 2, 3}`, as C's does. A module's body is parsed into
+its fields, methods and enumerations apart, so a field records how many of its module's enumerations come before it
+(`Field::enums`): its size sees those, and not one declared after it, as in C. The dump shows a size as written,
+`int[0x10]`.
+
+### Sizes
+
+`sized` (`Constants.cpp`) works one out with recipe 27's `fold`: enumeration constants, `sizeof`, operators (the
+bitwise ones too), casts and `?:`, an `int` or a `bool`, from 1 to 2^30. Its errors are clang's, where clang has them:
+
+- a `float`: "size of array has non-integer type 'float'";
+- no constant: "expression is not an integer constant expression", at the operand that is none. C would make a local
+  array sized by a variable a variable length array, and refuse one at the top level or in a struct; FMinus has none.
+  A `const int` is no constant expression, in C17 as here (C23's `constexpr` object would be): a size is named by an
+  enumeration constant, C's idiom, `enum { TAPS = 64 };`;
+- negative: "'buf' declared as an array with a negative size"; an overflow, recipe 27's "overflow in expression";
+- 0, a GNU extension in C: "zero size arrays are not allowed"; over 2^30: "array is too large: FMinus's arrays have at
+  most 2^30 elements" (both FMinus's, as before);
+- `[]` without a list: "definition of variable with array type needs an explicit size or an initializer", and in a
+  module "field has incomplete type 'float[]'" (C's flexible array member is not FMinus's).
+
+After an error the array has one element, so its uses report nothing more. A local's size is worked out in
+`declareVariable`, with its block's enumerations in scope; a field's in `layOut`; a parameter's, `float x[N]`, a
+pointer whose size C still checks, in `checkSizes`, where the function is among the file's declarations, with the
+parameters before it in scope as variables (C99's `float x[n]` is a variable length parameter, which FMinus refuses as
+any size that is no constant). The tree stays as the parser made it: `layOut` keeps each field's type, its count
+worked out, in `fieldTypes_` (`fieldType`), and `module()` (the public API) names a field's array from the LLVM
+struct's.
+
+### The file in order
+
+The code generator laid out every module, declared every function and then lowered each body, declaring the
+enumerations before each. Now a field's size may name an enumeration constant, so a module's layout waits for the
+enumerations before it, and a constant is seen by what follows it. Pass 1 still declares every function, so calls may
+come before definitions; pass 2 (`CodeGen.cpp`) goes through the file in source order, as C's file scope does:
+
+```cpp
+                    if (constant != nullptr && constant->position <= position && constant->enums <= enums
+                        && constant->modules <= modules)
+                        defineConstant(*constant);              // before the enumerations and modules after it
+                    else if (enumeration != nullptr && enumeration->module == nullptr
+                             && enumeration->position <= position && enumeration->modules <= modules)
+                        declareEnum(*enumeration);              // before the modules after it
+                    else if (module != nullptr && module->position <= position)
+                        layOut(*module, enums);                 // its own enumerations among its fields
+```
+
+each before function `position`, which comes next: its parameters' sizes are checked, and its body lowered. A
+module's own enumerations are declared among its fields (`Field::enums`), and the rest after them, for its methods. A
+method's `this` was `nonnull align dereferenceable(size)` from pass 1, which needs the module's size; `describeThis`
+gives it when `layOut` has it. A module's `sizeof` before its layout is done, in its own fields' sizes or its own
+enumerations' values, is C's "invalid application of 'sizeof' to an incomplete type 'M'" (`prepareModules` makes the
+struct types opaque before pass 1, and `isOpaque` says which are not laid out yet); its methods see it whole.
+
+### Constants
+
+`defineConstant` makes a constant an LLVM global of its name, `constant`, with C's external linkage, as clang makes a
+C file's const object: `@PARTIALS = constant ...`, aligned as its type. A table's contents are recipe 26's
+(`tableContents`): the list's values, then zeros, eight or more of them one `zeroinitializer`; a scalar without an
+initialiser is 0, and a table without a list all zeros.
+
+The initialiser is lowered as a function's would be, into a function of no use (private, `fminus.top-level`, deleted
+after, with any declaration only it used), with `function_` a function of no name and no module (`topLevel_`): the same
+`lower`, `convert` and `DenormalFolder`, so a constant holds what a function's array of the same list holds, bit for
+bit, its subnormals flushed when the host flushes them. Every value must then be an `llvm::Constant`, or it is clang's
+"initializer element is not a compile-time constant", at the first that is not. What folds is a constant: numbers,
+enumeration constants, `sizeof`, operators and casts of them, `hash` and `randf` of them, a constant scalar of the top
+level (below), the address of a table's element (`&PARTIALS[COLS]`, a constant expression). What the program would
+compute as it runs is not: a call (`sinf(1)` too, which every math mode lowers to a call), a table's element (a load),
+a heap block. `?:`, `&&` and `||` branch even on constants (recipe 3); at the top level (`atTopLevel`), where nothing
+runs, a constant condition is the value it picks, so `N > 2 ? 0.25f : 4` is a constant there, as in C. In a function
+they branch as before, so a local table holding one stays on the stack (recipe 26).
+
+FMinus's own errors: a declaration at the top level that is not `const` ("FMinus has no variables at the top level:
+declare 'state' const, a constant of the program, or keep it in a module"), since a program's state lives in modules,
+each instance's own; and a module ("a module is no constant of the top level: its fields start at 0, and only its
+methods set them"). The constant's name goes into `fileScope_`, beside the enumeration constants: a second of the name
+is "redefinition of 'A'", an enumeration constant "redefinition of 'A' as different kind of symbol" with its note,
+and so is a function or a module of the name (`fileNameClash`, which `declareEnum` shares), reported at the later.
+
+### Reading one
+
+`lvalue` finds a constant after the blocks' scopes and, in a method, the module's fields and methods (`named`, C++'s
+lookup in a member function), so a local or a field of the name hides it. A table decays to a pointer as any array:
+`getelementptr inbounds float, ptr @PARTIALS, i64 %idxprom` and a load, one object for every function, method and
+call, with no copy. A parallel region reads it where it is: it is in no function's scope, so nothing captures it. A
+scalar reads as its value, with no load, as clang reads a const object whose initialiser is a constant even at `-O0`
+(`fmul float %0, 5.000000e-01`); `&GAIN` is the global's address. So a constant scalar is a constant in another's
+initialiser (`const int M = N * 2;`, which C17 leaves to the compiler, 6.6p10, and clang takes), but in a constant
+expression it is a variable, as in C: a size, a case's value or an enumerator's.
+
+Assigning to one is clang's error: "cannot assign to variable 'GAIN' with const-qualified type 'const float'", and,
+for an element of a const array its variable names, a local's too, "cannot assign to variable 'PARTIALS' with
+const-qualified type 'const float[204]'" (it was "read-only variable is not assignable", which stays for an element
+through a `const float*`).
+
+### What it changes for programs and hosts
+
+- **Programs gain** top-level constants, sizes of constant expressions and `[]` sized by a list. Every program that
+  compiled compiles to the same IR, with four differences a test may see: a module's dump lists its enumerations among
+  its fields, in source order; a size's dump is as written; an element of a const array assigned is clang's message;
+  and a module's enumeration can no longer take the module's own `sizeof` (C's incomplete type).
+- **Hosts**: a top-level constant is a symbol of its name, data, in the JIT's and in an object's (`--emit obj`), as a C
+  file's const object is; nothing calls it. `module()` reports an array field's size as it was worked out.
+
+### Tests
+
+- `tests/unit/TopLevelTest.cpp`: the reporting program's case, a 17-by-12 table read by two functions, a module's
+  method, a `parallel for` and a pointer into it, through an enumeration's stride, against C++, with one constant
+  global and no stack slot or store for it; tables of floats (subnormals, -0, a NaN, `?:`, a constant scalar's value),
+  ints (`hash(3)`, `&&`, `||`), `float4`s, zeros and `[]` against the same list on the stack, bit for bit, preserved
+  and flushed; scalars of every type, an element's address and `&GAIN`; C's scopes (a local and a field hide a
+  constant, a method of a module before it does not see it, an `#include`d table after its `#include` and not before);
+  sizes of enumeration constants, operators, `sizeof`, casts and `?:` in fields (against a C++ struct's layout),
+  locals, a block's enumeration, tables and parameters; clang's errors, and FMinus's.
+- `FrontendTest.cpp`: the dumps of sizes as written, `[]`, a module's enumerations among its fields, and constants
+  where they are among functions, modules and enumerations.
+- `tests/lit/fminus/toplevel.fm`: the globals (an `#include`d one first), functions and a method with no alloca,
+  memset or store for them, a scalar read as its value, `-O2`'s loads and folded reads, `--run`, the dump;
+  `toplevel-errors.fm`, the errors from the command line.
 
 ## Pitfalls
 
@@ -4878,8 +5042,8 @@ it).
 
 **More arrays, and more pointers.** Recipe 12's arrays are one dimension deep. An array of arrays, `float m[4][4]`, is
 an `[4 x [4 x float]]` whose rows decay in turn; it needs `Type` to nest (its element a type, not a kind), and so do
-pointers to pointers and arrays of pointers. C's `float c[] = {1, 2, 3};` takes its size from its list, and `sizeof` of
-an array type (`sizeof(float[16])`) wants the grammar's abstract declarators. `bool*` and arrays of `bool` need `i8` in
+pointers to pointers and arrays of pointers. `sizeof` of an array type (`sizeof(float[16])`) wants the grammar's
+abstract declarators. `bool*` and arrays of `bool` need `i8` in
 memory (recipe 10 says why), and null C's `0` as a pointer constant. Casts between pointer types (`(float4*)samples`, a
 float buffer seen as frames; `free((void*)table)`, a `const` pointer freed) are C's and change nothing in the IR, but a
 `float4*` cast from a `float*` must still meet a `float4`'s alignment. Pointers to pointers are a `ptr` to a `ptr`, once
@@ -4977,11 +5141,13 @@ mixed-radix or Bluestein transform in the runtime, or to FFTW, which takes any (
 ones). On Apple systems vDSP is 2–3 times faster than either from about 512 points, but it comes from Accelerate, a
 system framework: a backend chosen when FMinus is built, not a library inside it.
 
-**State: globals and `static`.** File-scope variables lower to LLVM globals, and `static` locals likewise (recipe
-26's tables are the constant case already: a `const` local array of constants is a private constant global). For a
-plugin, prefer state each instance owns: a module (recipe 12), in memory the host gives it, as `examples/biquad/`'s
-filter and `examples/voices/`'s synth are, or memory the program allocates off the audio thread, as
-`examples/delay/` does (recipe 11). Nothing then allocates on the audio thread, and every instance has its own copy.
+**State: globals and `static`.** File-scope variables would lower to LLVM globals, and `static` locals likewise (recipes
+26 and 28 are the constant cases already: a `const` local array of constants is a private constant global, and a
+top-level constant a constant global of its name). One global for every instance of a plugin is shared state, written
+from every instance's audio thread. For a plugin, prefer state each instance owns: a module (recipe 12), in memory the
+host gives it, as `examples/biquad/`'s filter and `examples/voices/`'s synth are, or memory the program allocates off
+the audio thread, as `examples/delay/` does (recipe 11). Nothing then allocates on the audio thread, and every instance
+has its own copy.
 
 **More of `switch` and enumerations.** Recipe 27 leaves four things. *clang's `-Wswitch`*, a switch over an enumerated
 value that misses one of its constants, needs `enum Mode` to be a type of its own rather than `int`: a `Kind` with the
@@ -5014,11 +5180,11 @@ is one more: a method it copies takes about twice as long to compile, and `knobV
 The recipes in the compiler are their own reference: their code is in `src/`, and their tests in `tests/unit/`
 (`FrontendTest.cpp`, and `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `SwitchTest.cpp`, `EnumTest.cpp`, `IntTest.cpp`,
 `BitwiseTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `TableTest.cpp`,
-`ModuleTest.cpp`, `FftTest.cpp`, `HashTest.cpp`, `ParamTest.cpp`, `VectorTest.cpp` and `PolyTest.cpp` for the code
-generator; `MathTest.cpp`, `VersionTest.cpp`,
-`TbaaTest.cpp`, `ZeroInitTest.cpp`, `AttributeTest.cpp` and `DenormalTest.cpp` for recipes 15 to 20), `tests/library/`
-(`ProgramTest.cpp`, `StrictAliasingTest.cpp`, `DenormalsTest.cpp`) and `tests/lit/fminus/`. [recipes/](recipes/) holds
-the two that aren't, 5 and 6, as one patch against the compiler as it is ([recipes/README.md](recipes/README.md)):
+`TopLevelTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `HashTest.cpp`, `ParamTest.cpp`, `VectorTest.cpp` and
+`PolyTest.cpp` for the code generator; `MathTest.cpp`, `VersionTest.cpp`, `TbaaTest.cpp`, `ZeroInitTest.cpp`,
+`AttributeTest.cpp` and `DenormalTest.cpp` for recipes 15 to 20), `tests/library/` (`ProgramTest.cpp`,
+`StrictAliasingTest.cpp`, `DenormalsTest.cpp`) and `tests/lit/fminus/`. [recipes/](recipes/) holds the two that aren't,
+5 and 6, as one patch against the compiler as it is ([recipes/README.md](recipes/README.md)):
 
 ```bash
 git switch -c try-recipes
