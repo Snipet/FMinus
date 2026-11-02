@@ -505,13 +505,17 @@ namespace fminus::ir::detail
 
     // `name`, declared at `location` as an enumeration constant or a variable, where `previous` already has it in the
     // same scope: clang's words for each pair (two variables' without the note, as FMinus has always reported them).
+    // Clang says "as different kind of symbol" only when the enumeration constant came first; a constant after a
+    // variable, a parameter or a constant of the top level is a plain redefinition, with its note.
     void Lowering::redefinition(SourceLocation location, const std::string& name, bool enumerator,
                                 const Binding& previous)
     {
         const std::vector<Diagnostic> before{Diagnostic{previous.location, "previous definition is here", {}}};
         if (enumerator && previous.enumerator)
             diagnostics_.error(location, "redefinition of enumerator " + quoted(name), before);
-        else if (enumerator || previous.enumerator)
+        else if (enumerator)
+            diagnostics_.error(location, "redefinition of " + quoted(name), before);
+        else if (previous.enumerator)
             diagnostics_.error(location, "redefinition of " + quoted(name) + " as different kind of symbol", before);
         else
             error(location, "redefinition of " + quoted(name));

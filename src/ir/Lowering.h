@@ -336,7 +336,7 @@ namespace fminus::ir::detail
         // ---- Constants.cpp ------------------------------------------------------------------------------------------
         std::optional<std::int32_t> enumerator(const std::string& name) const;
         void declareEnum(const ast::Enum& enumeration);
-        void fileNameClash(SourceLocation location, const std::string& name, std::size_t position);
+        void fileNameClash(SourceLocation location, const std::string& name, std::size_t position, bool enumerator);
         ast::Type sized(SourceLocation location, const std::string& name, ast::Type type, const ast::Expr* size,
                         const std::vector<ast::ExprPtr>* list);
         void checkSizes(const ast::Function& function);

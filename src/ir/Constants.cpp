@@ -116,14 +116,17 @@ namespace fminus::ir::detail
                 continue;
             }
             if (file)
-                fileNameClash(constant.location, constant.name, enumeration.position);
+                fileNameClash(constant.location, constant.name, enumeration.position, true);
         }
     }
 
-    // `name`, declared in the file's scope at `location`, after `position` of the program's functions: C's file scope
-    // holds the functions' names too, and a module's name is a type's (a typedef's, to C), so a function or a module of
-    // the name is a redefinition "as different kind of symbol", reported at the later of the two.
-    void Lowering::fileNameClash(SourceLocation location, const std::string& name, std::size_t position)
+    // `name`, declared in the file's scope at `location` (an enumeration constant when `enumerator`, else a constant),
+    // after `position` of the program's functions: C's file scope holds the functions' names too, and a module's name
+    // is a type's (a typedef's, to C), so a function or a module of the name is a redefinition, reported at the later
+    // of the two. Clang calls it one "as different kind of symbol", except for an enumeration constant after a
+    // function, which is a plain "redefinition of 'f'".
+    void Lowering::fileNameClash(SourceLocation location, const std::string& name, std::size_t position,
+                                 bool enumerator)
     {
         const std::string message = "redefinition of " + quoted(name) + " as different kind of symbol";
         const auto previous = [](SourceLocation where) {
@@ -135,7 +138,8 @@ namespace fminus::ir::detail
             if (function.name != name)
                 continue;
             if (f < position)
-                diagnostics_.error(location, message, previous(function.location));
+                diagnostics_.error(location, enumerator ? "redefinition of " + quoted(name) : message,
+                                   previous(function.location));
             else
                 diagnostics_.error(function.location, message, previous(location));
             break;
@@ -331,7 +335,7 @@ namespace fminus::ir::detail
         if (!added)
             redefinition(location, decl.name, false, previous->second);
         else
-            fileNameClash(location, decl.name, constant.position);
+            fileNameClash(location, decl.name, constant.position, false);
     }
 
     // The value of the integer constant expression `expr`, or nothing after an error that says why, in clang's words.

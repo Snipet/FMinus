@@ -4720,14 +4720,16 @@ the constant the next one's after all, as clang counts it, so the rest still cou
 C gives enumeration constants and variables one name space, so the constants live where the variables do, in the code
 generator's scopes: a `Binding` is a variable (its slot) or a constant (its value, `enumerator`, and no slot), and
 each knows where it was declared, for the notes. In a block, a constant is the block's, a variable of an inner block
-hides it, and one of the same scope is clang's "redefinition of 'A' as different kind of symbol" (two constants:
-"redefinition of enumerator 'A'"), with "previous definition is here". At the top level and in a module it is the
-file's, `fileScope_`, as a C struct's enumeration constants are: `CodeGen.cpp` declares each enumeration in its place
-among the file's declarations (since recipe 28, as it lays out each module and defines each constant), so a function
-sees the constants declared before it, and a module's methods, which follow
-the module, see its own. A constant named as a function or a module of the file is a redefinition too, reported at
-whichever comes second. A name in a method is looked up as C++ looks one up in a member function (`enumerator`, on
-`named` since recipe 28): the blocks' scopes, then the module's fields and methods, then the file's.
+hides it, and one of the same scope is clang's "redefinition of 'A' as different kind of symbol" when the constant
+came first, a plain "redefinition of 'A'" when the variable did (two constants: "redefinition of enumerator 'A'"),
+each with "previous definition is here". At the top level and in a module it is the file's, `fileScope_`, as a C
+struct's enumeration constants are: `CodeGen.cpp` declares each enumeration in its place among the file's declarations
+(since recipe 28, as it lays out each module and defines each constant), so a function sees the constants declared
+before it, and a module's methods, which follow the module, see its own. A constant named as a function or a module of
+the file is a redefinition too, reported at whichever comes second (`fileNameClash`): "as different kind of symbol",
+but for a constant after a function, which clang calls a plain redefinition. A name in a method is looked up as C++
+looks one up in a member function (`enumerator`, on `named` since recipe 28): the blocks' scopes, then the module's
+fields and methods, then the file's.
 
 The scanner learns none of this, unlike a module's name (recipe 12). A module's name is a type, which the grammar must
 know to tell `T * p` from `a * b`; an enumeration constant is an expression wherever it stands, so the grammar never
@@ -4914,8 +4916,9 @@ constants of the top level hold at most 1 MiB, and this one holds 268435456 byte
 the stack; a top-level one has nowhere else to go, and the JIT's object would hold every byte of it, its zeros too, in
 the host's process, at about twice its size (recipe 26's measure): one line, `const float4 BIG[1 << 24];`, would cost
 half a gigabyte. The constant's name goes into `fileScope_`, beside the enumeration constants: a second of the name is
-"redefinition of 'A'", an enumeration constant "redefinition of 'A' as different kind of symbol" with its note, and
-so is a function or a module of the name (`fileNameClash`, which `declareEnum` shares), reported at the later.
+"redefinition of 'A'", and so is an enumeration constant after it, with its note; one before it, a function or a
+module of the name is "redefinition of 'A' as different kind of symbol" (`fileNameClash`, which `declareEnum`
+shares), reported at the later.
 
 ### Reading one
 

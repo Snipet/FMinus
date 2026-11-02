@@ -503,7 +503,7 @@ TEST_CASE("top-level constants' and sizes' errors are clang's", "[codegen][tople
              "test.fm:6:13: error: redefinition of 'A'\n"
              "test.fm:8:13: error: redefinition of 'B' as different kind of symbol\n"
              "test.fm:7:8: note: previous definition is here\n"
-             "test.fm:10:8: error: redefinition of 'C' as different kind of symbol\n"
+             "test.fm:10:8: error: redefinition of 'C'\n"
              "test.fm:9:13: note: previous definition is here\n"
              "test.fm:12:13: error: redefinition of 'f' as different kind of symbol\n"
              "test.fm:11:7: note: previous definition is here\n"

@@ -25,13 +25,13 @@ int g(int P, int k)
 // CHECK: enum-errors.fm:8:8: error: redefinition of enumerator 'A'
 // CHECK-NEXT: enum-errors.fm:7:8: note: previous definition is here
 // CHECK: enum-errors.fm:9:26: error: ISO C restricts enumerator values to range of 'int' (2147483648 is too large)
-// CHECK: enum-errors.fm:11:8: error: redefinition of 'f' as different kind of symbol
+// CHECK: enum-errors.fm:11:8: error: redefinition of 'f'{{$}}
 // CHECK-NEXT: enum-errors.fm:10:7: note: previous definition is here
 // CHECK: enum-errors.fm:11:15: error: integer constant expression must have integer type, not 'float'
 // CHECK: enum-errors.fm:11:25: error: use of undeclared identifier 'nope'
-// CHECK: enum-errors.fm:16:12: error: redefinition of 'P' as different kind of symbol
+// CHECK: enum-errors.fm:16:12: error: redefinition of 'P'{{$}}
 // CHECK-NEXT: enum-errors.fm:14:11: note: previous definition is here
-// CHECK: enum-errors.fm:18:12: error: redefinition of 'x' as different kind of symbol
+// CHECK: enum-errors.fm:18:12: error: redefinition of 'x'{{$}}
 // CHECK-NEXT: enum-errors.fm:17:9: note: previous definition is here
 // CHECK: enum-errors.fm:18:19: error: expression is not an integer constant expression
 // CHECK: enum-errors.fm:19:7: error: expression is not assignable
