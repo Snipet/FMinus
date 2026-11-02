@@ -314,6 +314,7 @@ namespace fminus::ir::detail
         void zero(llvm::Value* address, ast::Type type);
         void initializeArray(SourceLocation location, llvm::Value* address, ast::Type type,
                              const std::vector<ast::ExprPtr>& list);
+        llvm::Value* declareConstArray(SourceLocation location, const ast::DeclStmt& decl, ast::Type type);
 
         // ---- Calls.cpp ----------------------------------------------------------------------------------------------
         Value lowerCall(SourceLocation location, const ast::CallExpr& call);

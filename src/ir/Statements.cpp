@@ -293,7 +293,8 @@ namespace fminus::ir::detail
 
     // The initialiser is lowered before the name is bound, so `float x = x;` reads an outer x. Without one,
     // the variable starts at 0. An array or a module starts at 0 too (a memset), and then takes its initialiser: an
-    // array its list's elements, a module a copy of another.
+    // array its list's elements, a module a copy of another. A const array of constants is stored once instead
+    // (declareConstArray, Memory.cpp).
     void Lowering::declareVariable(SourceLocation location, const ast::DeclStmt& decl)
     {
         ast::Type type = decl.type;
@@ -305,6 +306,13 @@ namespace fminus::ir::detail
         if (!checkType(location, type))   // likewise
             type = ast::isArray(type) ? ast::Type::arrayOf(ast::Type::Float, type.count)
                                       : ast::Type::pointerTo(ast::Kind::Float, type.pointeeConst);
+        if (decl.isConst && ast::isArray(type) && !decl.init && !ast::isModule(ast::pointee(type)))
+        {
+            // A table: a constant of the module when its list is constants, a local otherwise (Memory.cpp).
+            if (!bind(decl.name, Binding{declareConstArray(location, decl, type), true, type}))
+                error(location, "redefinition of " + quoted(decl.name));
+            return;
+        }
         if (ast::isArray(type) || ast::isModule(type))
         {
             llvm::AllocaInst* slot = allocate(typeOf(type), decl.name);

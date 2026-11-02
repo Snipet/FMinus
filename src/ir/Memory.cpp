@@ -2,12 +2,16 @@
 // pointer reaches (`p[i]`, `*p`), a module's field (`m.y`, `p->y`, or `y` in a method), or components of any of them
 // (`v.x`, `p[i].zw`, `v.xy.x`). lvalue() finds one, read() and write() load and store it; reading a variable, an
 // assignment, ++ and & all go through them, so a new kind of lvalue joins every one at once. Also C's arrays (an
-// array's name stands for a pointer to its first element), and C's arithmetic on pointers, on addresses.
+// array's name stands for a pointer to its first element; a const one of constants is a constant of the module, stored
+// once), and C's arithmetic on pointers, on addresses.
 //
 // An element's address is a getelementptr, as clang's: inbounds (it stays within the object the pointer points
 // into, or one past its end, as C requires), on an index widened to 64 bits with sext, since the index is a signed
 // int.
 #include "ir/Lowering.h"
+
+#include <llvm/IR/Constants.h>
+#include <llvm/IR/GlobalVariable.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -311,6 +315,71 @@ namespace fminus::ir::detail
             llvm::Value* at = builder_.CreateConstInBoundsGEP2_64(typeOf(type), address, 0, i, "arrayinit");
             tag(builder_.CreateStore(convert(value, element, list[i]->location, Use::Initializing), at), element);
         }
+    }
+
+    // `const float t[4] = {1, 2, 3, 4};`: a const array, which nothing can write (an element through its name or a
+    // const float* is read-only, and a const float* converts to no float*). When every element of its list is a
+    // constant once lowered (a number, sizeof, operators and casts of them, a builtin of constants such as hash(3); not
+    // ?:, && or ||, which branch), the array is a constant of the module, stored once, as clang stores a static const
+    // one: a private unnamed_addr constant global named as clang names a local's (__const.f.t), which every call reads
+    // and none fills. Its elements are what the stack's array would hold, bit for bit: the list's values, converted to
+    // the element type as initializeArray converts them, then zeros (eight or more of them as one zeroinitializer, as
+    // clang writes them, so that a large array costs no constant per element). Otherwise it is a local as any array
+    // is: a stack slot, zeroed, then the list's values stored, which are lowered once, in order, before it. The one
+    // difference C could see is the address: every call's table is the same object, where C's would differ between
+    // nested calls of one function. Returns the global or the slot; `type` is the declaration's (an array of what
+    // FMinus can point to, but a module), and the declaration has no `= expr`.
+    llvm::Value* Lowering::declareConstArray(SourceLocation location, const ast::DeclStmt& decl, ast::Type type)
+    {
+        const ast::Type element = ast::pointee(type);
+        std::vector<llvm::Value*> values;
+        if (decl.list.size() > static_cast<std::size_t>(type.count))
+            error(location, "excess elements in array initializer");
+        else
+        {
+            for (const ast::ExprPtr& item : decl.list)
+                values.push_back(convert(lower(*item), element, item->location, Use::Initializing));
+        }
+        if (std::ranges::all_of(values, [](llvm::Value* value) { return llvm::isa<llvm::Constant>(value); }))
+        {
+            llvm::Type* elementType = typeOf(element);
+            auto* arrayType = llvm::cast<llvm::ArrayType>(typeOf(type));
+            const std::uint64_t count = arrayType->getNumElements();
+            // Up to the last element that is not zero; clang's EmitArrayConstant's shapes for what follows it.
+            std::vector<llvm::Constant*> given;
+            for (llvm::Value* value : values)
+                given.push_back(llvm::cast<llvm::Constant>(value));
+            while (!given.empty() && given.back()->isNullValue())
+                given.pop_back();
+            const std::uint64_t zeros = count - given.size();
+            llvm::Constant* contents = nullptr;
+            if (given.empty())
+                contents = llvm::ConstantAggregateZero::get(arrayType);
+            else if (zeros >= 8)
+                contents = llvm::ConstantStruct::getAnon(
+                    {llvm::ConstantArray::get(llvm::ArrayType::get(elementType, given.size()), given),
+                     llvm::ConstantAggregateZero::get(llvm::ArrayType::get(elementType, zeros))},
+                    true);   // packed: the two parts side by side, as the array lays them out
+            else
+            {
+                given.resize(count, llvm::Constant::getNullValue(elementType));
+                contents = llvm::ConstantArray::get(arrayType, given);
+            }
+            auto* table = new llvm::GlobalVariable(module_, contents->getType(), true,
+                                                   llvm::GlobalValue::PrivateLinkage, contents,
+                                                   "__const." + function_->name + "." + decl.name);
+            table->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+            table->setAlignment(alignOf(type));
+            return table;
+        }
+        llvm::AllocaInst* slot = allocate(typeOf(type), decl.name);
+        zero(slot, type);
+        for (std::size_t i = 0; i < values.size(); ++i)
+        {
+            llvm::Value* at = builder_.CreateConstInBoundsGEP2_64(typeOf(type), slot, 0, i, "arrayinit");
+            tag(builder_.CreateStore(values[i], at), element);
+        }
+        return slot;
     }
 
     // C's arithmetic on pointers. p + i and i + p are the element i after p (i may be negative), and p - i the one i

@@ -41,6 +41,7 @@
 
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/DataLayout.h>
+#include <llvm/IR/GlobalVariable.h>
 #include <llvm/IR/Verifier.h>
 #include <llvm/Support/Alignment.h>
 #include <llvm/Support/ModRef.h>
@@ -870,10 +871,13 @@ namespace fminus::ir::detail
 
     // A variable of the function around the region, captured: by value into a slot of the region's own, or by
     // reference, its address (the top of this file). The binding goes into the region's outermost scope, where the
-    // next look finds it.
+    // next look finds it. A const array of constants is a constant of the module (Memory.cpp, declareConstArray),
+    // which the region's function reads where it is, as the function around it does: nothing to capture.
     const Lowering::Binding* Lowering::capture(const std::string& name, const Binding& outer)
     {
         Region& region = regions_.back();
+        if (llvm::isa<llvm::GlobalVariable>(outer.slot))
+            return &scopes_[region.base].emplace(name, outer).first->second;
         const bool reference =
             ast::isArray(outer.type) || ast::isModule(outer.type) || region.byReference.contains(name);
         Binding binding{nullptr, outer.isConst, outer.type};
