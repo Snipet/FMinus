@@ -13,62 +13,57 @@
 
 namespace fminus::ir::detail
 {
-    namespace
+    // Whether `expr` is a constant expression (C11 6.6): constants, enumeration constants, sizeof, and operators, casts
+    // and ?: on constant expressions only, nothing the program computes as it runs. A variable is never one, const or
+    // not, as in C (C++ differs), and neither is a parameter, whatever the host's binding: a frozen one folds to a
+    // constant, but the program means the same as with a knob.
+    bool Lowering::isConstant(const ast::Expr& expr) const
     {
-        // Whether `expr` is a constant expression (C11 6.6): constants, sizeof, and operators, casts and ?: on
-        // constant expressions only, nothing the program computes as it runs. A variable is never one, const or not,
-        // as in C (C++ differs), and neither is a parameter, whatever the host's binding: a frozen one folds to a
-        // constant, but the program means the same as with a knob.
-        bool isConstant(const ast::Expr& expr)
-        {
-            return std::visit(
-                Overloaded{
-                    [](const ast::NumberExpr&) { return true; },
-                    [](const ast::BoolExpr&) { return true; },
-                    [](const ast::SizeofExpr&) { return true; },
-                    [](const ast::UnaryExpr& unary) {
-                        switch (unary.op)
-                        {
-                        case ast::UnaryOp::Negate:
-                        case ast::UnaryOp::Plus:
-                        case ast::UnaryOp::Not:
-                        case ast::UnaryOp::Complement:
-                            return isConstant(*unary.operand);
-                        case ast::UnaryOp::Dereference:
-                        case ast::UnaryOp::AddressOf:
-                            return false;
-                        }
+        return std::visit(
+            Overloaded{
+                [](const ast::NumberExpr&) { return true; },
+                [](const ast::BoolExpr&) { return true; },
+                [](const ast::SizeofExpr&) { return true; },
+                [&](const ast::UnaryExpr& unary) {
+                    switch (unary.op)
+                    {
+                    case ast::UnaryOp::Negate:
+                    case ast::UnaryOp::Plus:
+                    case ast::UnaryOp::Not:
+                    case ast::UnaryOp::Complement:
+                        return isConstant(*unary.operand);
+                    case ast::UnaryOp::Dereference:
+                    case ast::UnaryOp::AddressOf:
                         return false;
-                    },
-                    [](const ast::BinaryExpr& binary) { return isConstant(*binary.lhs) && isConstant(*binary.rhs); },
-                    [](const ast::LogicalExpr& logical) {
-                        return isConstant(*logical.lhs) && isConstant(*logical.rhs);
-                    },
-                    [](const ast::ConditionalExpr& conditional) {
-                        return isConstant(*conditional.condition) && isConstant(*conditional.thenValue)
-                               && isConstant(*conditional.elseValue);
-                    },
-                    [](const ast::CastExpr& cast) { return isConstant(*cast.operand); },
-                    [](const ast::ConstructExpr& construct) {
-                        for (const ast::ExprPtr& arg : construct.args)
-                        {
-                            if (!isConstant(*arg))
-                                return false;
-                        }
-                        return true;
-                    },
-                    [](const ast::MemberExpr& member) { return !member.arrow && isConstant(*member.base); },   // v.x
-                    [](const ast::VariableExpr&) { return false; },
-                    [](const ast::IndexExpr&) { return false; },
-                    [](const ast::CallExpr&) { return false; },
-                    [](const ast::MethodCallExpr&) { return false; },
-                    [](const ast::ThisExpr&) { return false; },
-                    [](const ast::AssignExpr&) { return false; },
-                    [](const ast::IncrementExpr&) { return false; },
+                    }
+                    return false;
                 },
-                expr.node);
-        }
-    } // namespace
+                [&](const ast::BinaryExpr& binary) { return isConstant(*binary.lhs) && isConstant(*binary.rhs); },
+                [&](const ast::LogicalExpr& logical) { return isConstant(*logical.lhs) && isConstant(*logical.rhs); },
+                [&](const ast::ConditionalExpr& conditional) {
+                    return isConstant(*conditional.condition) && isConstant(*conditional.thenValue)
+                           && isConstant(*conditional.elseValue);
+                },
+                [&](const ast::CastExpr& cast) { return isConstant(*cast.operand); },
+                [&](const ast::ConstructExpr& construct) {
+                    for (const ast::ExprPtr& arg : construct.args)
+                    {
+                        if (!isConstant(*arg))
+                            return false;
+                    }
+                    return true;
+                },
+                [&](const ast::MemberExpr& member) { return !member.arrow && isConstant(*member.base); },   // v.x
+                [&](const ast::VariableExpr& variable) { return enumerator(variable.name).has_value(); },
+                [](const ast::IndexExpr&) { return false; },
+                [](const ast::CallExpr&) { return false; },
+                [](const ast::MethodCallExpr&) { return false; },
+                [](const ast::ThisExpr&) { return false; },
+                [](const ast::AssignExpr&) { return false; },
+                [](const ast::IncrementExpr&) { return false; },
+            },
+            expr.node);
+    }
 
     // C11 6.8.5p6: a loop whose controlling expression is not a constant expression, and which does no I/O and
     // touches no volatile or atomic object, may be assumed to terminate. Clang tells LLVM so for C11 and later
@@ -108,7 +103,8 @@ namespace fminus::ir::detail
         // getTerminator(): since LLVM 23 it assumes a finished block.)
         const bool ownBlock = std::holds_alternative<ast::CaseStmt>(stmt.node)
                               || std::holds_alternative<ast::DefaultStmt>(stmt.node)
-                              || std::holds_alternative<ast::BlockStmt>(stmt.node);
+                              || std::holds_alternative<ast::BlockStmt>(stmt.node)
+                              || std::holds_alternative<ast::EnumStmt>(stmt.node);   // no code
         if (builder_.GetInsertBlock()->hasTerminator() && !ownBlock)
         {
             llvm::Function* function = builder_.GetInsertBlock()->getParent();
@@ -154,6 +150,7 @@ namespace fminus::ir::detail
                        [&](const ast::SwitchStmt& branch) { lowerSwitch(branch); },
                        [&](const ast::CaseStmt& label) { lowerLabel(stmt.location, label.value.get(), label.body); },
                        [&](const ast::DefaultStmt& label) { lowerLabel(stmt.location, nullptr, label.body); },
+                       [&](const ast::EnumStmt& statement) { declareEnum(statement.enumeration); },
                        [&](const ast::ParallelForStmt& loop) { lowerParallelFor(stmt.location, loop); },
                        [&](const ast::ParallelBlockStmt& block) { lowerParallelBlock(stmt.location, block); },
                    },
@@ -451,6 +448,10 @@ namespace fminus::ir::detail
     // (declareConstArray, Memory.cpp).
     void Lowering::declareVariable(SourceLocation location, const ast::DeclStmt& decl)
     {
+        const auto declare = [&](llvm::Value* slot, bool isConst, ast::Type type) {
+            if (!bind(decl.name, Binding{slot, isConst, type, location}))
+                redefinition(location, decl.name, false, scopes_.back().at(decl.name));
+        };
         ast::Type type = decl.type;
         if (type == ast::Type::Void)
         {
@@ -463,8 +464,7 @@ namespace fminus::ir::detail
         if (decl.isConst && ast::isArray(type) && !decl.init && !ast::isModule(ast::pointee(type)))
         {
             // A table: a constant of the module when its list is constants, a local otherwise (Memory.cpp).
-            if (!bind(decl.name, Binding{declareConstArray(location, decl, type), true, type}))
-                error(location, "redefinition of " + quoted(decl.name));
+            declare(declareConstArray(location, decl, type), true, type);
             return;
         }
         if (ast::isArray(type) || ast::isModule(type))
@@ -486,8 +486,7 @@ namespace fminus::ir::detail
             else if (decl.hasList)
                 error(location, "a module takes no initializer list: its fields start at 0 (set them in a method, "
                                 "such as init)");
-            if (!bind(decl.name, Binding{slot, decl.isConst, type}))
-                error(location, "redefinition of " + quoted(decl.name));
+            declare(slot, decl.isConst, type);
             return;
         }
         if (decl.hasList)
@@ -496,7 +495,20 @@ namespace fminus::ir::detail
                                        : llvm::Constant::getNullValue(typeOf(type));
         llvm::AllocaInst* slot = allocate(typeOf(type), decl.name);
         builder_.CreateStore(value, slot);
-        if (!bind(decl.name, Binding{slot, decl.isConst, type}))
-            error(location, "redefinition of " + quoted(decl.name));
+        declare(slot, decl.isConst, type);
+    }
+
+    // `name`, declared at `location` as an enumeration constant or a variable, where `previous` already has it in the
+    // same scope: clang's words for each pair (two variables' without the note, as FMinus has always reported them).
+    void Lowering::redefinition(SourceLocation location, const std::string& name, bool enumerator,
+                                const Binding& previous)
+    {
+        const std::vector<Diagnostic> before{Diagnostic{previous.location, "previous definition is here", {}}};
+        if (enumerator && previous.enumerator)
+            diagnostics_.error(location, "redefinition of enumerator " + quoted(name), before);
+        else if (enumerator || previous.enumerator)
+            diagnostics_.error(location, "redefinition of " + quoted(name) + " as different kind of symbol", before);
+        else
+            error(location, "redefinition of " + quoted(name));
     }
 } // namespace fminus::ir::detail

@@ -244,6 +244,10 @@ namespace fminus::ir::detail
                                    if (label.body)
                                        statement(*label.body);
                                },
+                               [&](const ast::EnumStmt& statement) {   // its constants hide what is outside
+                                   for (const ast::Enumerator& constant : statement.enumeration.enumerators)
+                                       declare(constant.name, ast::Type::Int);
+                               },
                                [&](const ast::ParallelForStmt& loop) {
                                    forLoop(loop.init, loop.condition, loop.step, *loop.body);
                                },
@@ -548,9 +552,10 @@ namespace fminus::ir::detail
     {
         Walker walker(regionSurroundings(
             function_,
-            [this](const std::string& name) -> std::optional<ast::Type> {
+            [this](const std::string& name) -> std::optional<ast::Type> {   // a variable, not a constant
                 const Binding* binding = lookup(name);
-                return binding != nullptr ? std::optional<ast::Type>(binding->type) : std::nullopt;
+                return binding != nullptr && !binding->enumerator ? std::optional<ast::Type>(binding->type)
+                                                                  : std::nullopt;
             },
             [this](const std::string& name) { return functions_.contains(name); }));
         if (!counter.empty())
@@ -601,11 +606,15 @@ namespace fminus::ir::detail
                 error(task.location, "a statement of a parallel block cannot declare a variable (" + quoted(decl->name)
                                          + " would end with it): declare it before the block, and assign it in one of "
                                            "the block's statements");
+            if (std::holds_alternative<ast::EnumStmt>(task.node))
+                error(task.location, "a statement of a parallel block cannot declare an enumeration (its constants "
+                                     "would end with it): declare it before the block");
             Walker walker(regionSurroundings(
                 function_,
                 [this](const std::string& name) -> std::optional<ast::Type> {
                     const Binding* binding = lookup(name);
-                    return binding != nullptr ? std::optional<ast::Type>(binding->type) : std::nullopt;
+                    return binding != nullptr && !binding->enumerator ? std::optional<ast::Type>(binding->type)
+                                                                      : std::nullopt;
                 },
                 [this](const std::string& name) { return functions_.contains(name); }));
             walker.statement(task);
@@ -729,7 +738,7 @@ namespace fminus::ir::detail
         llvm::AllocaInst* slot = allocate(i32, name.empty() ? "i" : name);
         builder_.CreateStore(body->getArg(1), slot);
         if (!name.empty())
-            bind(name, Binding{slot, counter->isConst, ast::Type::Int});
+            bind(name, Binding{slot, counter->isConst, ast::Type::Int, loop.init.front().location});
         llvm::BasicBlock* condBlock = newBlock("parallel.cond");
         llvm::BasicBlock* bodyBlock = newBlock("parallel.body");
         llvm::BasicBlock* incBlock = newBlock("parallel.inc");
@@ -884,11 +893,12 @@ namespace fminus::ir::detail
     // A variable of the function around the region, captured: by value into a slot of the region's own, or by
     // reference, its address (the top of this file). The binding goes into the region's outermost scope, where the
     // next look finds it. A const array of constants is a constant of the module (Memory.cpp, declareConstArray),
-    // which the region's function reads where it is, as the function around it does: nothing to capture.
+    // which the region's function reads where it is, as the function around it does: nothing to capture; nor is there
+    // for an enumeration constant, which has no slot.
     const Lowering::Binding* Lowering::capture(const std::string& name, const Binding& outer)
     {
         Region& region = regions_.back();
-        if (llvm::isa<llvm::GlobalVariable>(outer.slot))
+        if (outer.enumerator || llvm::isa<llvm::GlobalVariable>(outer.slot))
             return &scopes_[region.base].emplace(name, outer).first->second;
         const bool reference =
             ast::isArray(outer.type) || ast::isModule(outer.type) || region.byReference.contains(name);

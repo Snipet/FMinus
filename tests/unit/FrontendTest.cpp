@@ -157,6 +157,49 @@ TEST_CASE("switch parses as C's, and case and default as C23's labels: block ite
           == "test.fm:1:11: error: syntax error, unexpected default, expecting * or ) or , or identifier\n");
 }
 
+TEST_CASE("enumerations parse as C's, where they are among the functions and modules, and `enum Mode` is int",
+          "[frontend]")
+{
+    CHECK(parsed("enum Wave { SAW, SQUARE = 4, TRIANGLE = SQUARE + 1, };\n"
+                 "module Osc\n"
+                 "{\n"
+                 "    float phase;\n"
+                 "    enum Shape { SINE, PULSE = -1 };\n"
+                 "    param enum Wave wave [[fminus::range(0, 5)]];\n"
+                 "};\n"
+                 "enum { N = 8 };\n"
+                 "enum Wave pick(enum Wave w, int i)\n"
+                 "{\n"
+                 "    enum Local { A };\n"
+                 "    enum Local a = (enum Local)i;\n"
+                 "    return w + a + sizeof(enum Wave);\n"
+                 "}\n"
+                 "const enum { LAST };\n")
+          == "(enum Wave (SAW) (SQUARE 4) (TRIANGLE (+ SQUARE 1)))\n"
+             "(module Osc\n"
+             "  (enum Shape (SINE) (PULSE (- 1)))\n"
+             "  (field float phase)\n"
+             "  (param int wave [[fminus::range(0, 5)]]))\n"
+             "(enum (N 8))\n"
+             "(function int pick ((int w) (int i))\n"
+             "  (enum Local (A))\n"
+             "  (decl int a (cast int i))\n"
+             "  (return (+ (+ w a) (sizeof int))))\n"
+             "(enum (LAST))\n");
+    // A tag is a type from its enumeration's closing brace on, in its scope: a block's ends with it.
+    CHECK(parsed("int f() { { enum E { A }; enum E e = A; } enum E x = 0; return x; }")
+          == "test.fm:1:48: error: ISO C forbids forward references to 'enum' types\n");
+    CHECK(parsed("enum E { A = sizeof(enum E) };")
+          == "test.fm:1:26: error: ISO C forbids forward references to 'enum' types\n");
+    CHECK(parsed("enum E { A };\nint f() { enum E { B }; return B; }\nenum E { C };")
+          == "test.fm:3:6: error: redefinition of 'E'\n"
+             "test.fm:1:6: note: previous definition is here\n");
+    CHECK(parsed("enum E { };") == "test.fm:1:10: error: use of empty enum\n");
+    // Declared on its own: C's `enum E { A } e;` declares a variable too, which FMinus's enumeration does not.
+    CHECK(parsed("int f() { enum E { A } e; return 0; }")
+          == "test.fm:1:24: error: syntax error, unexpected identifier, expecting ;\n");
+}
+
 TEST_CASE("vector types, literals and swizzles parse as OpenCL C's", "[frontend]")
 {
     // A literal is a parenthesised type, then its elements; a swizzle binds tighter than any operator, as in C.

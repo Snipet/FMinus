@@ -19,7 +19,11 @@ namespace fminus::ir::detail
         return std::visit(
             Overloaded{
                 [&](const ast::NumberExpr& number) { return lowerNumber(expr.location, number); },
-                [&](const ast::VariableExpr&) { return readLValue(expr); },
+                [&](const ast::VariableExpr& variable) {
+                    if (const std::optional<std::int32_t> value = enumerator(variable.name))   // Constants.cpp
+                        return Value{builder_.getInt32(static_cast<std::uint32_t>(*value)), ast::Type::Int};
+                    return readLValue(expr);
+                },
                 [&](const ast::IndexExpr& index) {
                     if (const std::optional<unsigned> field = parameterOf(*index.base))
                         return lowerParameter(expr.location, *field, index);   // cutoff[i] (Modules.cpp)

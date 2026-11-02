@@ -218,6 +218,15 @@ namespace fminus::ast
             return "{" + text + "}";
         }
 
+        // (enum Mode (SAW) (SQUARE 4) (TRIANGLE)): each constant, with its value as written if it has one.
+        std::string dump(const Enum& enumeration)
+        {
+            std::string text = "(enum" + (enumeration.tag.empty() ? "" : " " + enumeration.tag);
+            for (const Enumerator& enumerator : enumeration.enumerators)
+                text += " (" + enumerator.name + (enumerator.value ? " " + dump(*enumerator.value) : "") + ")";
+            return text + ")";
+        }
+
         // One statement per line, `indent` spaces in; a block's items one level further in.
         std::string dump(const Stmt& stmt, const std::string& indent)
         {
@@ -272,6 +281,7 @@ namespace fminus::ast
                                       return indent + "(default"
                                              + (label.body ? "\n" + dump(*label.body, indent + "  ") : "") + ")";
                                   },
+                                  [&](const EnumStmt& statement) { return indent + dump(statement.enumeration); },
                                   [&](const ParallelForStmt& loop) {
                                       std::string init;
                                       for (const Stmt& item : loop.init)
@@ -346,15 +356,32 @@ namespace fminus::ast
 
     std::string dump(const Program& program)
     {
-        // A module as its fields: (module OnePole (field float y) (field float k)). Its methods follow it, as the
-        // functions they are: (method float OnePole::tick ((float x)) ...), without the `this` the parser added.
+        // A module as its enumerations and its fields: (module OnePole (field float y) (field float k)). Its methods
+        // follow it, as the functions they are: (method float OnePole::tick ((float x)) ...), without the `this` the
+        // parser added. An enumeration at the top level comes before the modules declared after it.
+        const auto enumsAt = [&](std::size_t position, std::size_t modules) {
+            std::string text;
+            for (const Enum& enumeration : program.enums)
+            {
+                if (enumeration.module == nullptr && enumeration.position == position && enumeration.modules == modules)
+                    text += dump(enumeration) + "\n";
+            }
+            return text;
+        };
         const auto modulesAt = [&](std::size_t position) {
             std::string text;
-            for (const std::unique_ptr<Module>& module : program.modules)
+            for (std::size_t m = 0; m <= program.modules.size(); ++m)
             {
-                if (module->position != position)
+                text += enumsAt(position, m);   // the ones after m modules
+                if (m == program.modules.size() || program.modules[m]->position != position)
                     continue;
+                const Module* module = program.modules[m].get();
                 text += "(module " + module->name;
+                for (const Enum& enumeration : program.enums)
+                {
+                    if (enumeration.module == module)
+                        text += "\n  " + dump(enumeration);
+                }
                 for (const Field& field : module->fields)
                 {
                     text += std::string(field.isParam ? "\n  (param " : "\n  (field ")

@@ -156,7 +156,7 @@ namespace fminus::ir::detail
             argument->setName(param.name);
             llvm::AllocaInst* slot = allocate(typeOf(type), param.name + ".addr");
             builder_.CreateStore(argument, slot);
-            if (!bind(param.name, Binding{slot, param.isConst, type}))
+            if (!bind(param.name, Binding{slot, param.isConst, type, param.location}))
                 error(param.location, "redefinition of parameter " + quoted(param.name));
         }
 

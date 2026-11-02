@@ -49,20 +49,33 @@ namespace fminus::ir
         // function (a module's methods among them), so calls may come before definitions; pass 2 lowers each
         // definition's body, and a prototype that no definition followed and that names libm's function gets what
         // libm's does (describeLibm); then every function marked nonallocating or nonblocking is checked against its
-        // calls.
+        // calls. The enumerations of the top level and the modules are declared among the definitions, each before
+        // the first function after it, so that a body sees the constants declared before it, as C's file scope does
+        // (Constants.cpp).
         // Under Denormals::Flush, last, every definition is marked flushing and the entry points are wrapped, which
         // needs every call known (Denormals.cpp).
         void Lowering::lower(const ast::Program& program)
         {
+            program_ = &program;
             layOut(program);
             for (const ast::Function& function : program.functions)
                 declare(function);
-            for (const ast::Function& function : program.functions)
+            std::size_t enums = 0;
+            const auto declareEnumsBefore = [&](std::size_t position) {
+                function_ = nullptr;   // at the file's scope: no function's names, no module's fields
+                scopes_.clear();
+                for (; enums < program.enums.size() && program.enums[enums].position <= position; ++enums)
+                    declareEnum(program.enums[enums]);
+            };
+            for (std::size_t f = 0; f < program.functions.size(); ++f)
             {
+                declareEnumsBefore(f);
+                const ast::Function& function = program.functions[f];
                 const auto found = functions_.find(function.name);
                 if (function.isDefinition && found != functions_.end() && found->second == &function)
                     define(function);   // the accepted definition, not a rejected duplicate
             }
+            declareEnumsBefore(program.functions.size());
             describeLibm();
             checkEffects(program);
             if (denormals_ == Denormals::Flush && !diagnostics_.hasErrors())

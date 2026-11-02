@@ -1,0 +1,85 @@
+// Enumerations, C's: a constant is an int, folded where it is read (no load, no slot), so a const table of them is a
+// constant of the module, a case label of one is its value, and a loop whose condition is one may run for ever (a
+// constant expression: no llvm.loop.mustprogress, as in C11 6.8.5p6). `enum Mode` is int. --emit ast shows each
+// enumeration where it is: at the top level among the functions, in its module, in its block.
+// RUN: fminus %s -O0 | FileCheck %s
+// RUN: fminus %s --emit ast | FileCheck %s --check-prefix=AST
+// RUN: fminus %s --run shaped 2 | FileCheck %s --check-prefix=RESULT
+
+enum Wave { SAW, SQUARE = 4, TRIANGLE, NEG = -3 };
+
+int table(int i)
+{
+    const int values[4] = {SAW, SQUARE, TRIANGLE, NEG};
+    return values[i];
+}
+
+int folded(void)
+{
+    return TRIANGLE * 2 + 1;
+}
+
+enum Wave cases(enum Wave w)
+{
+    switch (w)
+    {
+    case SAW: return SQUARE;
+    case TRIANGLE: return NEG;
+    }
+    return w;
+}
+
+module Osc
+{
+    enum Shape { SINE = 100, PULSE };
+    float phase;
+    int shape() { return PULSE; }
+};
+
+void forever(float* out)
+{
+    enum { RUNNING = 1 };
+    while (RUNNING)
+        out[0] += 1;
+}
+
+float shaped(float x)
+{
+    return x * PULSE + SINE;
+}
+
+// CHECK: @__const.table.values = private unnamed_addr constant [4 x i32] [i32 0, i32 4, i32 5, i32 -3], align 4
+// CHECK-LABEL: define i32 @table(i32 %i)
+// CHECK-NOT:     alloca [4 x i32]
+// CHECK:         getelementptr inbounds i32, ptr @__const.table.values
+// CHECK-LABEL: define i32 @folded()
+// CHECK-NEXT:  entry:
+// CHECK-NEXT:    ret i32 11
+// CHECK-LABEL: define i32 @cases(i32 %w)
+// CHECK:         switch i32 %{{.*}}, label %sw.epilog [
+// CHECK-NEXT:      i32 0, label %sw.bb
+// CHECK-NEXT:      i32 5, label %[[FIVE:sw.bb[0-9]+]]
+// CHECK-NEXT:    ]
+// CHECK:       sw.bb:
+// CHECK-NEXT:    ret i32 4
+// CHECK:       [[FIVE]]:
+// CHECK-NEXT:    ret i32 -3
+// CHECK-LABEL: define i32 @"Osc::shape"(ptr
+// CHECK-NOT:     load
+// CHECK:         ret i32 101
+// CHECK-LABEL: define void @forever(ptr %out)
+// CHECK:       while.cond:
+// CHECK-NEXT:    br i1 true, label %while.body, label %while.end
+// CHECK:       while.body:
+// CHECK:         br label %while.cond{{$}}
+
+// AST:      (enum Wave (SAW) (SQUARE 4) (TRIANGLE) (NEG (- 3)))
+// AST-NEXT: (function int table ((int i))
+// AST:      (module Osc
+// AST-NEXT:   (enum Shape (SINE 100) (PULSE))
+// AST-NEXT:   (field float phase))
+// AST:      (function void forever ((float * out))
+// AST-NEXT:   (enum (RUNNING 1))
+// AST-NEXT:   (while RUNNING
+
+// RESULT: 302

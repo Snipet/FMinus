@@ -5,7 +5,8 @@
 //     Functions.cpp     declarations and prototypes (libm's attributes), bodies and parameters, stack slots and scopes
 //     Statements.cpp    blocks, declarations, return, if, while, for, switch and its labels, break and continue
 //     Expressions.cpp   constants, variables, operators, &&, ||, ?:, casts, assignment, ++ and --
-//     Constants.cpp     C's integer constant expressions, worked out where they are written: a case label's value
+//     Constants.cpp     C's integer constant expressions, worked out where they are written (a case label's value,
+//                       an enumerator's), and enumerations: their constants, in a block's scope or the file's
 //     Calls.cpp         calls: the builtins (math functions, reductions, poly queries and memory, the heap, the FFT)
 //                       and the program's
 //     Math.cpp          sinf, cosf, tanf, expf, tanhf and logf in the vector and libm math modes: the runtime's
@@ -126,12 +127,15 @@ namespace fminus::ir::detail
 
         // A variable in scope: where it is (its stack slot; in a parallel region, the region's own slot for a copy of
         // a variable of the function around it, or that variable's address: Parallel.cpp), whether it may be
-        // assigned, and its type.
+        // assigned, and its type. Or an enumeration constant (Constants.cpp), which shares C's name space with the
+        // variables: an int with no slot, its value. Where it was declared, for a redefinition's note.
         struct Binding
         {
             llvm::Value* slot;
             bool isConst;
             ast::Type type;
+            SourceLocation location = {};
+            std::optional<std::int32_t> enumerator = std::nullopt;
         };
 
         // Where a value meets the type it must have, for the message when it cannot (clang's wording for each).
@@ -311,12 +315,16 @@ namespace fminus::ir::detail
         void lowerIf(const ast::IfStmt& branch);
         void lowerWhile(const ast::WhileStmt& loop);
         void lowerFor(const ast::ForStmt& loop);
+        bool isConstant(const ast::Expr& expr) const;
         void lowerSwitch(const ast::SwitchStmt& branch);
         void lowerLabel(SourceLocation location, const ast::Expr* value, const ast::StmtPtr& body);
         llvm::BasicBlock* bypass(const Switch& branch, llvm::BasicBlock* label);
         void declareVariable(SourceLocation location, const ast::DeclStmt& decl);
+        void redefinition(SourceLocation location, const std::string& name, bool enumerator, const Binding& previous);
 
         // ---- Constants.cpp ------------------------------------------------------------------------------------------
+        std::optional<std::int32_t> enumerator(const std::string& name) const;
+        void declareEnum(const ast::Enum& enumeration);
         std::optional<std::int32_t> integerConstant(const ast::Expr& expr);
         std::optional<Folded> fold(const ast::Expr& expr, bool evaluated);
         std::optional<Folded> foldBinary(SourceLocation location, ast::BinaryOp op, Folded lhs, Folded rhs,
@@ -351,7 +359,7 @@ namespace fminus::ir::detail
         Value lowerMember(SourceLocation location, const ast::MemberExpr& member);
 
         // ---- Memory.cpp ---------------------------------------------------------------------------------------------
-        static bool isLValue(const ast::Expr& expr);
+        bool isLValue(const ast::Expr& expr) const;
         std::optional<LValue> lvalue(const ast::Expr& expr, SourceLocation location);
         std::optional<LValue> element(SourceLocation location, Value pointer, std::optional<Value> index);
         bool writable(SourceLocation location, const LValue& target);
@@ -438,6 +446,8 @@ namespace fminus::ir::detail
         Math math_;                                                         // how sinf, cosf, ... compute
         std::unordered_map<std::string, const ast::Function*> functions_;   // the program's, by name
         std::vector<std::unordered_map<std::string, Binding>> scopes_;     // the current function's, inner last
+        std::unordered_map<std::string, Binding> fileScope_;               // the enumeration constants declared so far
+        const ast::Program* program_ = nullptr;                            // the program being lowered
         const ast::Function* function_ = nullptr;                          // the function being lowered
         std::vector<Breakable> breakables_;                                // the loops and switches around
         std::vector<Switch> switches_;                                     // the switches around, inner last

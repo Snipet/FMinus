@@ -573,6 +573,37 @@ namespace fminus::ast
         StmtPtr body;   // null for a block item
     };
 
+    // A constant of an enumeration: `B = 4`, whose value is an integer constant expression, or `C`, whose value is the
+    // one before it plus 1 (the first one's 0).
+    struct Enumerator
+    {
+        SourceLocation location;   // of its name
+        std::string name;
+        ExprPtr value;   // null without `= value`
+    };
+
+    // `enum Mode { SAW, SQUARE = 4, TRIANGLE };`: C's enumeration. Its constants are ints, names from just after each
+    // one's definition on, in the scope it is declared in: a block's, or the file's for one at the top level or in a
+    // module (a C struct's enumeration constants are the file's), seen by the functions and modules after it, and by
+    // the module's methods. Its tag, if it has one, makes `enum Mode` a name of the type int there.
+    struct Enum
+    {
+        SourceLocation location;   // of its tag, or of `enum` without one
+        std::string tag;           // empty for `enum { ... }`
+        std::vector<Enumerator> enumerators;
+        // One at the top level or in a module: how many of the program's functions and modules come before it, which
+        // see none of its constants, and the module it is in.
+        std::size_t position = 0;
+        std::size_t modules = 0;
+        const Module* module = nullptr;
+    };
+
+    // An enumeration declared in a block.
+    struct EnumStmt
+    {
+        Enum enumeration;
+    };
+
     // `parallel for (int i = first; i < end; ++i) body`: FMinus's, not C's. Its iterations run at once, spread over the
     // machine's cores, and all of them have finished when the loop ends. The fields are a ForStmt's; the code
     // generator (ir/Parallel.cpp) takes only that counting form (i <= end too, i++ and i += 1), with the bounds
@@ -596,7 +627,7 @@ namespace fminus::ast
     {
         SourceLocation location;
         std::variant<DeclStmt, ExprStmt, ReturnStmt, BlockStmt, EmptyStmt, IfStmt, WhileStmt, ForStmt, BreakStmt,
-                     ContinueStmt, SwitchStmt, CaseStmt, DefaultStmt, ParallelForStmt, ParallelBlockStmt>
+                     ContinueStmt, SwitchStmt, CaseStmt, DefaultStmt, EnumStmt, ParallelForStmt, ParallelBlockStmt>
             node;
     };
 
@@ -683,6 +714,7 @@ namespace fminus::ast
     {
         std::vector<Function> functions;   // with the modules' methods, in source order
         std::vector<std::unique_ptr<Module>> modules;
+        std::vector<Enum> enums;           // the top level's and the modules', in source order
     };
 
     template <typename Node>
@@ -703,5 +735,7 @@ namespace fminus::ast
     //       (decl float y (* x g))
     //       (*= y 2)
     //       (return y))
+    // A module and an enumeration at the top level are where they are among the functions:
+    //     (enum Mode (SAW) (SQUARE 4))
     std::string dump(const Program& program);
 } // namespace fminus::ast

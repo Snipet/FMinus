@@ -1,8 +1,17 @@
 // src/ir/Constants.cpp: C's integer constant expressions (C11 6.6p6), worked out where they are written, as a C
-// compiler works them out: a case label's value. Their operands are integer constants, `true` and `false`, sizeof, and
-// floating constants only as the immediate operands of casts (`(int)2.5f`), combined by the unary operators but * and &,
-// the binary ones, &&, || and ?:, and casts to int or bool; their type is int or bool. A variable is none, const or
-// not, as in C (isConstant, Statements.cpp, says the same of a loop's condition).
+// compiler works them out: a case label's value, an enumerator's. Their operands are integer constants, enumeration
+// constants, `true` and `false`, sizeof, and floating constants only as the immediate operands of casts (`(int)2.5f`),
+// combined by the unary operators but * and &, the binary ones, &&, || and ?:, and casts to int or bool; their type is
+// int or bool. A variable is none, const or not, as in C (isConstant, Statements.cpp, says the same of a loop's
+// condition).
+//
+// Enumerations (declareEnum) are C's: each constant an int, named from just after its own definition on, in the scope
+// the enumeration is declared in. In a block, that is the block's scope, where variables are too: C gives the two one
+// name space, so a variable of an inner block hides a constant, and one of the same scope is a redefinition. At the
+// top level, and in a module (as a C struct's), it is the file's, fileScope_, which the functions and modules after
+// the enumeration see, and a module's methods (CodeGen.cpp declares each in its place among the definitions). A name is
+// looked up as C++ looks it up in a member function (enumerator()): the blocks' scopes, then the module's fields and
+// methods, then the file's.
 //
 // Each operator computes as FMinus computes it as the program runs (Expressions.cpp), so a constant means what the same
 // expression means anywhere: a shift by its count's low five bits, / and % truncating toward zero. Where C makes the
@@ -33,6 +42,75 @@ namespace fminus::ir::detail
             return static_cast<std::int32_t>(static_cast<std::uint32_t>(static_cast<std::uint64_t>(value)));
         }
     } // namespace
+
+    // The value of the enumeration constant `name` names where it is used, or nothing for a name that is not one: a
+    // block's constant, unless a variable of an inner block hides it; then, in a method, nothing if the module has a
+    // field or a method of the name; then the file's.
+    std::optional<std::int32_t> Lowering::enumerator(const std::string& name) const
+    {
+        if (const Binding* binding = lookup(name))
+            return binding->enumerator;
+        const ast::Module* module = function_ != nullptr ? function_->module : nullptr;
+        if (module != nullptr
+            && (findField(*module, name, nullptr) != nullptr
+                || std::ranges::find(module->methods, name) != module->methods.end()))
+            return std::nullopt;
+        const auto found = fileScope_.find(name);
+        return found != fileScope_.end() ? found->second.enumerator : std::nullopt;
+    }
+
+    // An enumeration, its constants in order: each one's value its own, or the one before it plus 1 (the first's 0),
+    // bound from there on in the innermost scope, or the file's at the top level and in a module (scopes_ is empty
+    // then). A value in error makes its constant the next one's after all, as clang counts it, so the rest still count
+    // and its uses report nothing more. Clang's errors: a constant redefined, one past the greatest int, and, at the
+    // top level, one named as a function or a module.
+    void Lowering::declareEnum(const ast::Enum& enumeration)
+    {
+        const bool file = scopes_.empty();
+        std::unordered_map<std::string, Binding>& scope = file ? fileScope_ : scopes_.back();
+        std::int64_t next = 0;
+        for (const ast::Enumerator& constant : enumeration.enumerators)
+        {
+            std::optional<std::int32_t> value = constant.value ? integerConstant(*constant.value) : std::nullopt;
+            if (!constant.value && next > kGreatest)
+                error(constant.location, "ISO C restricts enumerator values to range of 'int' (" + std::to_string(next)
+                                             + " is too large)");
+            const std::int32_t bound = value ? *value : wrapped(next);
+            next = static_cast<std::int64_t>(bound) + 1;
+            const auto [previous, added] =
+                scope.try_emplace(constant.name, Binding{nullptr, true, ast::Type::Int, constant.location, bound});
+            if (!added)
+            {
+                redefinition(constant.location, constant.name, true, previous->second);
+                continue;
+            }
+            if (!file)
+                continue;
+            // C's file scope holds the functions' names too, and a module's name is a type's (a typedef's, to C).
+            const std::vector<Diagnostic> here{Diagnostic{constant.location, "previous definition is here", {}}};
+            for (std::size_t f = 0; f < program_->functions.size(); ++f)
+            {
+                const ast::Function& function = program_->functions[f];
+                if (function.name != constant.name)
+                    continue;
+                if (f < enumeration.position)
+                    redefinition(constant.location, constant.name, true, Binding{nullptr, false, ast::Type::Void,
+                                                                                 function.location});
+                else
+                    diagnostics_.error(function.location,
+                                       "redefinition of " + quoted(function.name) + " as different kind of symbol",
+                                       here);
+                break;
+            }
+            for (const std::unique_ptr<ast::Module>& module : program_->modules)
+            {
+                if (module->name == constant.name)   // declared after: before, its name is no identifier
+                    diagnostics_.error(module->location,
+                                       "redefinition of " + quoted(module->name) + " as different kind of symbol",
+                                       here);
+            }
+        }
+    }
 
     // The value of the integer constant expression `expr`, or nothing after an error that says why, in clang's words.
     std::optional<std::int32_t> Lowering::integerConstant(const ast::Expr& expr)
@@ -104,7 +182,10 @@ namespace fminus::ir::detail
                                   ast::Type::Int, std::nullopt};
                 },
                 [&](const ast::VariableExpr& variable) -> std::optional<Folded> {
-                    // A variable, a parameter or a field (in a method) is no constant; any other name is undeclared.
+                    // An enumeration constant is one; a variable, a parameter or a field (in a method) is none; any
+                    // other name is undeclared.
+                    if (const std::optional<std::int32_t> value = enumerator(variable.name))
+                        return Folded{*value, ast::Type::Int, std::nullopt};
                     const ast::Module* module = function_ != nullptr ? function_->module : nullptr;
                     if (lookup(variable.name) != nullptr
                         || (module != nullptr

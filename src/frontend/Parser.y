@@ -2,9 +2,9 @@
 // automatically, token constructors, locations, detailed errors with LAC). It builds the syntax tree (Ast.h) into the
 // ParseContext.
 //
-//     program      : (function | module)*
+//     program      : (function | module | enumeration)*
 //     function     : "const"? type pointer IDENTIFIER "(" params ")" attributes (block | ";")    or a prototype
-//     module       : "module" IDENTIFIER "{" (declaration | parameter | method)* "}" ";"     declarations: fields
+//     module       : "module" IDENTIFIER "{" (declaration | parameter | method | enumeration)* "}" ";"   fields
 //     parameter    : "param" type IDENTIFIER attributes ";"                     a field the host sets
 //     method       : "const"? type pointer IDENTIFIER "(" params ")" attributes block
 //     attributes   : ("[" "[" attribute ("," attribute)* "]" "]")*
@@ -12,9 +12,12 @@
 //     params       : (param ("," param)*)? | "void"                                  (void) is none, as in C
 //     param        : "const"? type pointer IDENTIFIER? | "const"? type IDENTIFIER "[" NUMBER? "]"   a pointer
 //     type         : "float" | "bool" | "int" | "void" | VECTOR_TYPE | "poly" ("float" | "bool") | MODULE_NAME
+//                  | "enum" IDENTIFIER                                  int, the name a tag declared before
 //     pointer      : ("*" ("const" | "restrict")*)?        with a *, the first const is the pointee's (const float*),
 //                                                          and one after it the pointer's own (float* const)
-//     block        : "{" (declaration | unlabeled | label)* "}"      C23's: a label is a block item of its own
+//     block        : "{" (declaration | enumeration | unlabeled | label)* "}"     C23's: a label is an item
+//     enumeration  : "const"? "enum" IDENTIFIER? "{" enumerator ("," enumerator)* ","? "}" ";"    C's, on its own
+//     enumerator   : IDENTIFIER ("=" expr)?                                  the expr an integer constant expression
 //     declaration  : "const"? type declarator ("," declarator)* ";"
 //     declarator   : pointer IDENTIFIER ("=" expr)?                                  as in C, `float *p, x;`
 //                  | IDENTIFIER "[" NUMBER "]" ("=" "{" (expr ("," expr)* ","?)? "}")?        an array
@@ -39,6 +42,7 @@
 //                  | "(" "poly" "float" ")" "(" expr ")" | expr "." IDENTIFIER       a broadcast; a swizzle or field
 //                  | expr "->" IDENTIFIER | expr ("." | "->") IDENTIFIER "(" (expr ("," expr)*)? ")" | "this"
 //                  | ("++" | "--") expr | expr ("++" | "--") | "(" ("float" | "int" | "bool") ")" expr    a cast
+//                  | "(" "enum" IDENTIFIER ")" expr                                  a cast to int, as C's to an enum
 //                  | expr ("=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=") expr
 //
 // Precedence and associativity are C's, from the loosest: assignment (right to left), ?: (right to left), ||, &&, |,
@@ -53,6 +57,11 @@
 // where a statement is expected (an if's branch, a switch's body), `case 1: s` is the label and its statement, a
 // CaseStmt with a body. The code generator checks that a label is in a switch, and that a case's value is an integer
 // constant expression.
+// An enumeration is declared on its own (C's `enum Mode { A } m;` declares no variable here), at the top level, in a
+// block or in a module. Its tag goes into the parse context's scopes, a block's from its `{` to its `}` (a module's
+// into the file's, as a C struct's), where `enum Mode` names the type int. Its constants stay identifiers, which the
+// code generator finds in its scopes, as it finds variables: in C they share one name space, and a local may hide
+// one.
 //
 // To add a construct: its tokens in Lexer.l and here, a rule here, a node in Ast.h, its dump in Ast.cpp and its
 // lowering in src/ir/ (Lowering.h says which file). Bison's report (build tree: src/generated/frontend/Parser.output)
@@ -110,19 +119,22 @@
             std::vector<ast::ExprPtr> list = {};
         };
 
-        // A module's body as it is parsed: its fields, and its methods (Functions named OnePole::tick).
+        // A module's body as it is parsed: its fields, its methods (Functions named OnePole::tick) and its
+        // enumerations.
         struct ModuleBody
         {
             std::vector<ast::Field> fields;
             std::vector<ast::Function> methods;
+            std::vector<ast::Enum> enums;
         };
 
         // A whole module declaration: the module, which the program already holds, and its methods, which go into
-        // the program's functions where the module is.
+        // the program's functions where the module is, and its enumerations, which go into the program's.
         struct ModuleDeclaration
         {
             ast::Module* module = nullptr;
             std::vector<ast::Function> methods;
+            std::vector<ast::Enum> enums;
         };
 
         // What a name is declared as, from the declaration's `const` and type and the name's pointer: `const float x`
@@ -212,6 +224,38 @@
             return static_cast<int>(value);
         }
 
+        // An enumeration as parsed: its tag, if it has one, declared in the innermost scope, where a second of the
+        // name is clang's error, and its constants.
+        fminus::ast::Enum declaredEnum(const fminus::frontend::location& keyword,
+                                       const fminus::frontend::location& name, std::string tag,
+                                       std::vector<fminus::ast::Enumerator> enumerators,
+                                       fminus::frontend::ParseContext& context)
+        {
+            fminus::ast::Enum enumeration;
+            enumeration.location = at(tag.empty() ? keyword : name);
+            if (!tag.empty())
+            {
+                const auto [previous, added] = context.tags.back().emplace(tag, enumeration.location);
+                if (!added)
+                    context.diagnostics.error(
+                        enumeration.location, "redefinition of '" + tag + "'",
+                        {fminus::Diagnostic{previous->second, "previous definition is here", {}}});
+            }
+            enumeration.tag = std::move(tag);
+            enumeration.enumerators = std::move(enumerators);
+            return enumeration;
+        }
+
+        // `enum Mode`, a type: int, when a tag of the name is visible. C has no enumeration declared ahead of its
+        // constants (C23 only with a fixed underlying type), and neither has FMinus.
+        fminus::ast::Type enumType(const fminus::frontend::location& name, const std::string& tag,
+                                   fminus::frontend::ParseContext& context)
+        {
+            if (context.tagNamed(tag) == nullptr)
+                context.diagnostics.error(at(name), "ISO C forbids forward references to 'enum' types");
+            return fminus::ast::Type::Int;
+        }
+
         // The name declared with its pointer, and, for an array, the array of what the rest declares: `float x[4]`
         // is a float[4], and `const float c[2]` a const float[2], whose elements are read-only.
         fminus::frontend::Declared declaredName(bool isConst, fminus::ast::Type type,
@@ -234,7 +278,7 @@
 %token RESTRICT "restrict" AMPERSAND "&" LBRACKET "[" RBRACKET "]" SIZEOF "sizeof" COLONCOLON "::"
 %token LT "<" LE "<=" GT ">" GE ">=" EQ "==" NE "!=" NOT "!" AND "&&" OR "||" QUESTION "?" COLON ":"
 %token IF "if" ELSE "else" WHILE "while" FOR "for" BREAK "break" CONTINUE "continue" PARALLEL "parallel"
-%token SWITCH "switch" CASE "case" DEFAULT "default"
+%token SWITCH "switch" CASE "case" DEFAULT "default" ENUM "enum"
 %token MODULE "module" THIS "this" ARROW "->" PARAM "param"
 %token <ast::Type> MODULE_NAME "module name"
 %token <ast::Type> VECTOR_TYPE "vector type"
@@ -250,7 +294,10 @@
 %nterm <std::vector<ast::Function>> items
 %nterm <ast::Function> function
 %nterm <ModuleDeclaration> module
-%nterm <std::string> module_name
+%nterm <std::string> module_name enum_tag
+%nterm <ast::Enum> enumeration
+%nterm <std::vector<ast::Enumerator>> enumerators
+%nterm <ast::Enumerator> enumerator
 %nterm <ModuleBody> module_body module_member
 %nterm <int> array_size
 %nterm <std::vector<ast::Attribute>> attributes attribute_list
@@ -305,8 +352,20 @@ items
                                                 $$ = $1;
                                                 ModuleDeclaration declaration = $2;
                                                 declaration.module->position = $$.size();
+                                                for (ast::Enum& enumeration : declaration.enums)
+                                                {
+                                                    enumeration.position = $$.size();
+                                                    parseContext.program.enums.push_back(std::move(enumeration));
+                                                }
                                                 for (ast::Function& method : declaration.methods)
                                                     $$.push_back(std::move(method));
+                                            }
+    | items enumeration                     {
+                                                $$ = $1;
+                                                ast::Enum enumeration = $2;
+                                                enumeration.position = $$.size();
+                                                enumeration.modules = parseContext.program.modules.size();
+                                                parseContext.program.enums.push_back(std::move(enumeration));
                                             }
     ;
 
@@ -326,6 +385,12 @@ module
                                                 $$.module = $3;
                                                 $$.module->fields = std::move(body.fields);
                                                 $$.methods = std::move(body.methods);
+                                                $$.enums = std::move(body.enums);
+                                                for (ast::Enum& enumeration : $$.enums)
+                                                {
+                                                    enumeration.modules = parseContext.program.modules.size() - 1;
+                                                    enumeration.module = $$.module;
+                                                }
                                                 parseContext.currentModule = nullptr;
                                             }
     ;
@@ -345,11 +410,13 @@ module_body
                                                     $$.fields.push_back(std::move(field));
                                                 for (ast::Function& method : member.methods)
                                                     $$.methods.push_back(std::move(method));
+                                                for (ast::Enum& enumeration : member.enums)
+                                                    $$.enums.push_back(std::move(enumeration));
                                             }
     ;
 
 // A declaration's names are fields; a parameter is a field the host sets; a function is a method, with `this` before
-// its parameters.
+// its parameters; an enumeration's constants are the file's, from here on.
 module_member
     : "param" type IDENTIFIER attributes ";"
                                             {
@@ -381,6 +448,7 @@ module_member
                                                                      ast::Param{at(@4), "this", self, true, false});
                                                 $$.methods.push_back(std::move(method));
                                             }
+    | enumeration                           { $$.enums.push_back($1); }
     ;
 
 function
@@ -505,6 +573,7 @@ type
     | "poly" "float"                        { $$ = ast::Type::PolyFloat; }
     | "poly" "bool"                         { $$ = ast::Type::PolyBool; }
     | MODULE_NAME                           { $$ = $1; }
+    | "enum" IDENTIFIER                     { $$ = enumType(@2, $2, parseContext); }
     ;
 
 // The types a cast names: C casts between scalars (a vector's literal is OpenCL C's (float4)(...)).
@@ -512,10 +581,13 @@ cast_type
     : "float"                               { $$ = ast::Type::Float; }
     | "int"                                 { $$ = ast::Type::Int; }
     | "bool"                                { $$ = ast::Type::Bool; }
+    | "enum" IDENTIFIER                     { $$ = enumType(@2, $2, parseContext); }
     ;
 
+// A block is a scope of the enumerations' tags too.
 block
-    : "{" block_items "}"                   { $$ = $2; }
+    : "{"                                   { parseContext.tags.emplace_back(); }
+      block_items "}"                       { parseContext.tags.pop_back(); $$ = $3; }
     ;
 
 block_items
@@ -527,8 +599,40 @@ block_items
 // CaseStmt or DefaultStmt without a body: the items after it follow it.
 block_item
     : declaration                           { $$ = $1; }
+    | enumeration                           {
+                                                ast::Enum enumeration = $1;
+                                                const SourceLocation where = enumeration.location;
+                                                $$.push_back(ast::Stmt{where, ast::EnumStmt{std::move(enumeration)}});
+                                            }
     | unlabeled                             { $$.push_back($1); }
     | label                                 { $$.push_back($1); }
+    ;
+
+// An enumeration, on its own: its tag, if any, a type from its closing brace on. C's `enum { }` is an error.
+enumeration
+    : qualifier "enum" enum_tag "{" enumerators "}" ";"
+                                            { $$ = declaredEnum(@2, @3, $3, $5, parseContext); }
+    | qualifier "enum" enum_tag "{" enumerators "," "}" ";"
+                                            { $$ = declaredEnum(@2, @3, $3, $5, parseContext); }
+    | qualifier "enum" enum_tag "{" "}" ";" {
+                                                parseContext.diagnostics.error(at(@5), "use of empty enum");
+                                                $$ = declaredEnum(@2, @3, $3, {}, parseContext);
+                                            }
+    ;
+
+enum_tag
+    : %empty                                { $$ = ""; }
+    | IDENTIFIER                            { $$ = $1; }
+    ;
+
+enumerators
+    : enumerator                            { $$.push_back($1); }
+    | enumerators "," enumerator            { $$ = $1; $$.push_back($3); }
+    ;
+
+enumerator
+    : IDENTIFIER                            { $$ = ast::Enumerator{at(@1), $1, nullptr}; }
+    | IDENTIFIER "=" expr                   { $$ = ast::Enumerator{at(@1), $1, $3}; }
     ;
 
 declaration

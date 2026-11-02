@@ -112,6 +112,7 @@ IDENTIFIER  [A-Za-z_][A-Za-z0-9_]*
 "switch"                    { return Parser::make_SWITCH(yyextra->where); }
 "case"                      { return Parser::make_CASE(yyextra->where); }
 "default"                   { return Parser::make_DEFAULT(yyextra->where); }
+"enum"                      { return Parser::make_ENUM(yyextra->where); }
 "parallel"                  { return Parser::make_PARALLEL(yyextra->where); }
 "module"                    { return Parser::make_MODULE(yyextra->where); }
 "this"                      { return Parser::make_THIS(yyextra->where); }

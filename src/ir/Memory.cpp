@@ -19,10 +19,13 @@
 namespace fminus::ir::detail
 {
     // Whether `expr` names something a program could store to; lvalue() then checks that it does. C's rule, which
-    // the grammar leaves to the code generator: `(a ? b : c) = 1` and `f().x = 1` are not assignable.
-    bool Lowering::isLValue(const ast::Expr& expr)
+    // the grammar leaves to the code generator: `(a ? b : c) = 1`, `f().x = 1` and an enumeration constant's `A = 1`
+    // are not assignable.
+    bool Lowering::isLValue(const ast::Expr& expr) const
     {
-        if (std::holds_alternative<ast::VariableExpr>(expr.node) || std::holds_alternative<ast::IndexExpr>(expr.node))
+        if (const auto* variable = std::get_if<ast::VariableExpr>(&expr.node))
+            return !enumerator(variable->name).has_value();
+        if (std::holds_alternative<ast::IndexExpr>(expr.node))
             return true;
         if (const auto* unary = std::get_if<ast::UnaryExpr>(&expr.node))
             return unary->op == ast::UnaryOp::Dereference;

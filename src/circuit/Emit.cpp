@@ -457,7 +457,7 @@ namespace fminus::circuit
                                              "float", "const", "return", "bool", "int", "void", "restrict", "sizeof",
                                              "float2", "float4", "float8", "poly", "true", "false", "if", "else",
                                              "while", "for", "break", "continue", "switch", "case", "default",
-                                             "parallel", "module", "this", "param",
+                                             "enum", "parallel", "module", "this", "param",
                                              // builtins (src/ir/Calls.cpp), and main, a program's entry
                                              "fabsf", "sqrtf", "sinf", "cosf", "expf", "logf", "floorf", "fminf",
                                              "fmaxf", "tanhf", "tanf", "malloc", "calloc", "free", "main"});
