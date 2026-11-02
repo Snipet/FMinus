@@ -4415,7 +4415,11 @@ message as a float, and the result type of a refused operator is `int`, what the
 `~` of a float is clang's "invalid argument type 'float' to unary expression". A vector is refused as a float is, since
 FMinus has no integer vectors ([simd.md](simd.md)). A compound assignment, `x &= 1` of a float `x`, reports its
 operator's error and stores nothing (`lowerAssign`): storing the poison `int` into a `float*` would only add an error
-clang does not give.
+clang does not give. An operand that reported an error of its own, the undeclared `y` of `a & y`, lowers to a poison
+`float`, which would draw the message too, about a float the program does not have; so the binary case of `lower`,
+`~`'s and `lowerAssign` note the error count before they lower their operands, and when it has grown they give a
+poison `int` and say nothing more. A poison value is no test for this: `(int)3e10f` folds to one with no error, and
+`(float)((int)3e10f) | 1` is still refused (bitwise-errors.fm).
 
 ### Shifts defined for every count
 

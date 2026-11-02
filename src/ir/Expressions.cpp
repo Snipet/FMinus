@@ -33,15 +33,18 @@ namespace fminus::ir::detail
                         return readLValue(expr);   // *p: what p points to
                     if (unary.op == ast::UnaryOp::AddressOf)
                         return lowerAddressOf(expr.location, *unary.operand);
+                    const std::size_t reported = diagnostics_.errors().size();
                     const Value operand = lower(*unary.operand);
+                    const bool complement = unary.op == ast::UnaryOp::Complement;
+                    if (complement && diagnostics_.errors().size() != reported)
+                        return poison(ast::Type::Int);   // the operand's own error says why: see binary()
                     const ast::Type type = ast::arithmeticOf(operand.type);   // an int, a float, a float vector
-                    const bool invalid = unary.op == ast::UnaryOp::Complement ? type != ast::Type::Int
-                                                                              : !ast::isArithmetic(operand.type);
+                    const bool invalid = complement ? type != ast::Type::Int : !ast::isArithmetic(operand.type);
                     if (invalid && unary.op != ast::UnaryOp::Not)
                     {
                         error(expr.location,
                               "invalid argument type " + quoted(ast::typeName(operand.type)) + " to unary expression");
-                        return poison(ast::Type::Float);
+                        return poison(complement ? ast::Type::Int : ast::Type::Float);
                     }
                     switch (unary.op)
                     {
@@ -71,8 +74,11 @@ namespace fminus::ir::detail
                     return poison(ast::Type::Float);
                 },
                 [&](const ast::BinaryExpr& operation) {
+                    const std::size_t reported = diagnostics_.errors().size();
                     const Value lhs = lower(*operation.lhs);
                     const Value rhs = lower(*operation.rhs);
+                    if (isBitwise(operation.op) && diagnostics_.errors().size() != reported)
+                        return poison(ast::Type::Int);   // an operand's own error says why: see binary()
                     return binary(expr.location, operation.op, lhs, rhs);
                 },
                 [&](const ast::LogicalExpr& logical) {
@@ -113,7 +119,10 @@ namespace fminus::ir::detail
     // type (an int meeting a float is a float; a scalar meeting a vector is broadcast to it), the operator works
     // lane by lane on vectors, and a comparison gives a bool, or a lane mask for vectors. The bitwise operators take
     // ints (a bool is one), as C's take integers, and give an int; for a shift, C promotes each operand on its own,
-    // which with int the only integer type is the same.
+    // which with int the only integer type is the same. An operand that reported an error of its own (an undeclared
+    // name, say) lowers to a poison float, which is no float to refuse: a bitwise operator, ~ or a bitwise compound
+    // assignment with one gives a poison int and says nothing more, so that error is the only one, as clang's (their
+    // callers check, by the error count; a poison value alone could be a constant's, as (int)3e10f's is).
     Lowering::Value Lowering::binary(SourceLocation location, ast::BinaryOp op, Value lhs, Value rhs)
     {
         if (isBitwise(op) && (ast::arithmeticOf(lhs.type) != ast::Type::Int
@@ -399,7 +408,9 @@ namespace fminus::ir::detail
     // is the one stored.
     Lowering::Value Lowering::lowerAssign(SourceLocation location, const ast::AssignExpr& assign)
     {
+        const std::size_t lowered = diagnostics_.errors().size();
         Value value = lower(*assign.value);
+        const bool valueFailed = diagnostics_.errors().size() != lowered;
         if (!isLValue(*assign.target))
         {
             error(location, "expression is not assignable");
@@ -410,6 +421,8 @@ namespace fminus::ir::detail
             return poison(ast::Type::Float);
         if (assign.op != ast::AssignOp::Assign)
         {
+            if (valueFailed && isBitwise(compoundOperator(assign.op)))
+                return poison(target->type);   // the value's own error says why: see binary()
             const std::size_t reported = diagnostics_.errors().size();
             value = compound(location, assign.op, read(*target), value);
             if (value.ir == nullptr || diagnostics_.errors().size() != reported)

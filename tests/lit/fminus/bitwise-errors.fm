@@ -1,5 +1,7 @@
 // The bitwise operators take ints (and bools, as ints): a float, a vector or a pointer operand is clang's error, at
-// the operator. A compound assignment's stores nothing after its operator's error, so it reports one.
+// the operator. A compound assignment's stores nothing after its operator's error, so it reports one. An operand
+// with an error of its own (an undeclared name, a call of no function) is no float to refuse: its error is the only
+// one, as clang's; a constant's poison, as (int)3e10f's, is no error, and its float is refused.
 // RUN: not fminus %s 2>&1 | FileCheck %s --implicit-check-not=error:
 
 int f(float x, int i, float4 v, float* p)
@@ -11,10 +13,29 @@ int f(float x, int i, float4 v, float* p)
     return a + b + ~x + ~v + (p << 1);
 }
 
-// CHECK: bitwise-errors.fm:7:15: error: invalid operands to binary expression ('float' and 'int')
-// CHECK: bitwise-errors.fm:8:15: error: invalid operands to binary expression ('int' and 'float')
-// CHECK: bitwise-errors.fm:9:7: error: invalid operands to binary expression ('float' and 'int')
-// CHECK: bitwise-errors.fm:10:7: error: invalid operands to binary expression ('float *' and 'int')
-// CHECK: bitwise-errors.fm:11:20: error: invalid argument type 'float' to unary expression
-// CHECK: bitwise-errors.fm:11:25: error: invalid argument type 'float4' to unary expression
-// CHECK: bitwise-errors.fm:11:33: error: invalid operands to binary expression ('float *' and 'int')
+// CHECK: bitwise-errors.fm:9:15: error: invalid operands to binary expression ('float' and 'int')
+// CHECK: bitwise-errors.fm:10:15: error: invalid operands to binary expression ('int' and 'float')
+// CHECK: bitwise-errors.fm:11:7: error: invalid operands to binary expression ('float' and 'int')
+// CHECK: bitwise-errors.fm:12:7: error: invalid operands to binary expression ('float *' and 'int')
+// CHECK: bitwise-errors.fm:13:20: error: invalid argument type 'float' to unary expression
+// CHECK: bitwise-errors.fm:13:25: error: invalid argument type 'float4' to unary expression
+// CHECK: bitwise-errors.fm:13:33: error: invalid operands to binary expression ('float *' and 'int')
+
+int g(int a, int b, float* p)
+{
+    int c = a & y;
+    c |= ~z + (nofn(a) & 1) + ((a + w) >> 2) + (a.x & 1);
+    a <<= q;
+    c = p[~1.5f] + ((a & u) | 1);
+    return c ^ (float)((int)3e10f);
+}
+
+// CHECK: bitwise-errors.fm:26:17: error: use of undeclared identifier 'y'
+// CHECK: bitwise-errors.fm:27:11: error: use of undeclared identifier 'z'
+// CHECK: bitwise-errors.fm:27:16: error: call to undeclared function 'nofn'
+// CHECK: bitwise-errors.fm:27:37: error: use of undeclared identifier 'w'
+// CHECK: bitwise-errors.fm:27:50: error: member reference base type 'int' is not a structure or union
+// CHECK: bitwise-errors.fm:28:11: error: use of undeclared identifier 'q'
+// CHECK: bitwise-errors.fm:29:11: error: invalid argument type 'float' to unary expression
+// CHECK: bitwise-errors.fm:29:26: error: use of undeclared identifier 'u'
+// CHECK: bitwise-errors.fm:30:14: error: invalid operands to binary expression ('int' and 'float')
