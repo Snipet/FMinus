@@ -97,6 +97,12 @@ namespace fminus::ir::detail
     bool isPolyMemory(std::string_view name);            // poly_load, poly_store
     bool isHash(std::string_view name);                  // hash, randf
 
+    // The most a table holds as a constant global, 1 MiB: 262,144 floats, 65,536 float4s. The JIT's object holds every
+    // byte of a global, its zeros too (in a read-only section, which it then copies), so a table costs the compiler
+    // about twice its size. A local const array over it is a stack slot (Memory.cpp, declareConstArray); a constant of
+    // the top level over it is an error (Constants.cpp, defineConstant).
+    inline constexpr std::uint64_t kMaxTableBytes = std::uint64_t{1} << 20;
+
     // A loop's branches back to `header`, but not `entry`, marked llvm.loop.mustprogress (Statements.cpp).
     void mustProgress(llvm::BasicBlock* header, const llvm::Instruction* entry);
 

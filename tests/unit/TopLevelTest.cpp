@@ -4,9 +4,11 @@
 // scalars of every type, which read what the same list on the stack holds, bit for bit (subnormals preserved or
 // flushed), their missing elements 0 and a size from a list; C's file scope (from each declaration on, hidden by a
 // local or a field, across an #include); sizes of enumeration constants and operators in fields, locals, tables and
-// parameters; and clang's errors. The IR, one constant global per table and no copies, is
-// tests/lit/fminus/toplevel.fm's.
+// parameters; a constant's private global, which neither a library call of its name nor a host finds; and clang's
+// errors. The IR, one constant global per table and no copies, is tests/lit/fminus/toplevel.fm's.
 #include "Compile.h"
+
+#include "fminus/FMinus.h"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -155,6 +157,7 @@ TEST_CASE("a top-level table is read by the functions and methods after it, thro
         tables += 1;
         CHECK(global.getName() == (tables == 1 ? "TABLE" : "GAIN"));
         CHECK(global.isConstant());
+        CHECK(global.hasPrivateLinkage());   // the program's own: no symbol of its name
     }
     CHECK(tables == 2);
     for (const llvm::Function& function : *module)
@@ -360,6 +363,44 @@ TEST_CASE("an array's size is an integer constant expression: in a field, a loca
     CHECK(lookup<int(int)>(*jit, "table")(13) == 0);
 }
 
+TEST_CASE("a top-level constant is the program's own: no symbol of its name, for a call or a host to find",
+          "[codegen][toplevel]")
+{
+    // A float % calls fmodf, a zeroed array memset (or bzero), and the fast math mode's expf of a variable calls expf:
+    // calls by name, which a global symbol of the name would take, data for a function.
+    const std::string source = "const float fmodf = 0.25f;\n"
+                               "const float memset[4] = {1, 2, 3, 4};\n"
+                               "const float bzero = 8;\n"
+                               "const float GAIN = 0.5f;\n"
+                               "float f(float x, int i)\n"
+                               "{\n"
+                               "    float zeros[256];\n"
+                               "    zeros[i] = x;\n"
+                               "    return x % 0.75f + fmodf + memset[i] + bzero + zeros[i] * GAIN + expf(x) * 0;\n"
+                               "}\n";
+    for (const fminus::Program::Math math :
+         {fminus::Program::Math::Vector, fminus::Program::Math::Libm, fminus::Program::Math::Fast})
+    {
+        for (const int optimisation : {0, 2})
+        {
+            INFO("math mode " << static_cast<int>(math) << ", -O" << optimisation);
+            fminus::Program::Options options;
+            options.math = math;
+            options.optimisation = optimisation;
+            std::string errors;
+            const auto program = fminus::Program::compile(source, errors, options);
+            INFO(errors);
+            REQUIRE(program);
+            auto* f = program->function<float(float, int)>("f", errors);
+            REQUIRE(f != nullptr);
+            CHECK(f(2.0f, 3) == 0.5f + 0.25f + 4 + 8 + 1);
+            CHECK(f(1.0f, 0) == 0.25f + 0.25f + 1 + 8 + 0.5f);
+            CHECK(program->address("GAIN", errors) == 0);   // no function, and no symbol either
+            CHECK_FALSE(errors.empty());
+        }
+    }
+}
+
 TEST_CASE("top-level constants' and sizes' errors are clang's", "[codegen][toplevel]")
 {
     // Writing to a constant, and initialisers that are no constants.
@@ -470,4 +511,60 @@ TEST_CASE("top-level constants' and sizes' errors are clang's", "[codegen][tople
              "test.fm:13:13: note: previous definition is here\n"
              "test.fm:16:8: error: redefinition of 'Late' as different kind of symbol\n"
              "test.fm:15:13: note: previous definition is here\n");
+
+    // A builtin's name is the file's already, as <math.h>'s is in C; a runtime function's is FMinus's own.
+    CHECK(errorsOf("const float sinf = 1;\n"
+                   "const int malloc[2] = {1, 2};\n"
+                   "const float randf = 1;\n"
+                   "const float fminus_rt_sinf = 1;\n"
+                   "const float fminus_rt_parallel_for = 1;\n"
+                   "float f(float x) { return sinf(x) + fminus_rt_sinf; }\n")
+          == "test.fm:1:13: error: redefinition of 'sinf' as different kind of symbol\n"
+             "test.fm:2:11: error: redefinition of 'malloc' as different kind of symbol\n"
+             "test.fm:3:13: error: redefinition of 'randf' as different kind of symbol\n"
+             "test.fm:4:13: error: 'fminus_rt_sinf' is the name of a function of FMinus's runtime, which the code it "
+             "generates calls: rename the constant\n"
+             "test.fm:5:13: error: 'fminus_rt_parallel_for' is the name of a function of FMinus's runtime, which the "
+             "code it generates calls: rename the constant\n");
+
+    // What C leaves undefined, which LLVM would fold to poison, is no constant; the arm a constant ?: does not take
+    // and an overflow that wraps (clang's warning) are.
+    CHECK(errorsOf("enum { LEN = 64 };\n"
+                   "const int SHIFT = LEN / (LEN - 64);\n"
+                   "const int REMAINDER = LEN % 0;\n"
+                   "const int LEAST = (-2147483647 - 1) / -1;\n"
+                   "const float T[3] = {1, (float)(1 % 0), 2};\n"
+                   "const int LARGE = (int)1e10f;\n"
+                   "const int NAN = (int)(0.0f / 0.0f);\n"
+                   "const float4 LANES[1] = {(float4)(1, 2, 3, (float)(LEN / 0))};\n"
+                   "const int PICKED = LEN > 0 ? 3 : 1 / 0;\n"
+                   "const int WRAPS = 2147483647 * 2;\n")
+          == "test.fm:2:23: error: initializer element is not a compile-time constant\n"
+             "test.fm:3:27: error: initializer element is not a compile-time constant\n"
+             "test.fm:4:37: error: initializer element is not a compile-time constant\n"
+             "test.fm:5:24: error: initializer element is not a compile-time constant\n"
+             "test.fm:6:19: error: initializer element is not a compile-time constant\n"
+             "test.fm:7:17: error: initializer element is not a compile-time constant\n"
+             "test.fm:8:26: error: initializer element is not a compile-time constant\n");
+
+    // FMinus's: a top-level table holds at most 1 MiB, its zeros too. After a size's error the array has its list's
+    // length, so the list reports nothing more.
+    CHECK(errorsOf("enum { COLS = 3 };\n"
+                   "const float ONE_MIB[1 << 18] = {1};\n"
+                   "const float OVER[(1 << 18) + 1] = {1};\n"
+                   "const float4 BIG[1 << 24];\n"
+                   "const float TYPO[ROW * COLS] = {1, 2, 3, 4};\n"
+                   "float f(void)\n"
+                   "{\n"
+                   "    float m[ROW] = {1, 2};\n"
+                   "    const float t[-COLS] = {1, 2, 3, 4};\n"
+                   "    return m[0] + t[0];\n"
+                   "}\n")
+          == "test.fm:3:13: error: array is too large for a constant: FMinus's constants of the top level hold at most "
+             "1 MiB, and this one holds 1048580 bytes\n"
+             "test.fm:4:14: error: array is too large for a constant: FMinus's constants of the top level hold at most "
+             "1 MiB, and this one holds 268435456 bytes\n"
+             "test.fm:5:18: error: use of undeclared identifier 'ROW'\n"
+             "test.fm:8:13: error: use of undeclared identifier 'ROW'\n"
+             "test.fm:9:19: error: 't' declared as an array with a negative size\n");
 }

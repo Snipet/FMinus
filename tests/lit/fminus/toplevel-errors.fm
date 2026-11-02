@@ -20,6 +20,14 @@ float g(int i)
 
 const float g = 1;
 
+// What C leaves undefined is no constant. FMinus's: no table over 1 MiB, nor a runtime function's name.
+const int UNDEFINED = N / (N - 4);
+const float LARGE[2] = {1, (int)1e10f};
+const float4 BIG[1 << 24];
+const float expf = 2;
+const float fminus_rt_malloc = 1;
+const float TYPO[ROW * N] = {1, 2, 3, 4, 5};   // one error: then the list is its length
+
 // CHECK: toplevel-errors.fm:9:20: error: initializer element is not a compile-time constant
 // CHECK: toplevel-errors.fm:10:22: error: expression is not an integer constant expression
 // CHECK: toplevel-errors.fm:11:24: error: 'NEGATIVE' declared as an array with a negative size
@@ -28,3 +36,9 @@ const float g = 1;
 // CHECK: toplevel-errors.fm:17:17: error: expression is not an integer constant expression
 // CHECK: toplevel-errors.fm:21:13: error: redefinition of 'g' as different kind of symbol
 // CHECK-NEXT: toplevel-errors.fm:14:7: note: previous definition is here
+// CHECK: toplevel-errors.fm:24:25: error: initializer element is not a compile-time constant
+// CHECK: toplevel-errors.fm:25:28: error: initializer element is not a compile-time constant
+// CHECK: toplevel-errors.fm:26:14: error: array is too large for a constant: FMinus's constants of the top level hold at most 1 MiB, and this one holds 268435456 bytes
+// CHECK: toplevel-errors.fm:27:13: error: redefinition of 'expf' as different kind of symbol
+// CHECK: toplevel-errors.fm:28:13: error: 'fminus_rt_malloc' is the name of a function of FMinus's runtime, which the code it generates calls: rename the constant
+// CHECK: toplevel-errors.fm:29:18: error: use of undeclared identifier 'ROW'

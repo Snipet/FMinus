@@ -15,7 +15,7 @@
 // fields and methods, then the file's.
 //
 // The top level's constants (defineConstant) are C's file-scope const objects, in the file's scope too: `const float
-// table[ROWS * COLS] = {...};`, each an LLVM constant global of its name, as clang makes one, stored once for every
+// table[ROWS * COLS] = {...};`, each an LLVM constant global of its name, private to the program, stored once for every
 // function and method declared after it.
 //
 // Each operator computes as FMinus computes it as the program runs (Expressions.cpp), so a constant means what the same
@@ -35,6 +35,7 @@
 #include <cstdint>
 #include <iterator>
 #include <limits>
+#include <string_view>
 #include <utility>
 
 namespace fminus::ir::detail
@@ -48,6 +49,35 @@ namespace fminus::ir::detail
         std::int32_t wrapped(std::int64_t value)
         {
             return static_cast<std::int32_t>(static_cast<std::uint32_t>(static_cast<std::uint64_t>(value)));
+        }
+
+        // The runtime's functions (runtime/RuntimeSymbols.def), which the code generator declares by name when a
+        // builtin calls one (fminus_rt_malloc for malloc, fminus_rt_sinf for sinf in the vector math mode).
+        constexpr std::string_view kRuntimeNames[] = {
+#define FMINUS_RUNTIME_SYMBOL(name) #name,
+#include "runtime/RuntimeSymbols.def"
+#undef FMINUS_RUNTIME_SYMBOL
+        };
+
+        // Whether `name` is a builtin's (Calls.cpp, Hash.cpp): <math.h>'s and <stdlib.h>'s functions are in C's file
+        // scope, so clang refuses a variable of the name there.
+        bool isBuiltinName(std::string_view name)
+        {
+            return findBuiltin(name) != nullptr || findAllocation(name) != nullptr || findFft(name) != nullptr
+                   || isReduction(name) || isPolyQuery(name) || isPolyMemory(name) || isHash(name);
+        }
+
+        // Whether `constant` is poison or undef, or holds one: what LLVM folds an operation C leaves undefined to, a
+        // division by zero, the least int divided by -1, a float converted to an int out of its range.
+        bool undefined(const llvm::Constant& constant)
+        {
+            if (llvm::isa<llvm::UndefValue>(constant))
+                return true;
+            if (llvm::isa<llvm::GlobalValue>(constant))   // an address, whatever the global holds
+                return false;
+            return std::ranges::any_of(constant.operands(), [](const llvm::Use& operand) {
+                return undefined(*llvm::cast<llvm::Constant>(operand.get()));
+            });
         }
     } // namespace
 
@@ -120,22 +150,22 @@ namespace fminus::ir::detail
     // The array `name` declares, `type` (an array, whose count the tree leaves at 0), with its size worked out: an
     // integer constant expression from 1 to 2^30, or, for `[]`, the length of its list (`list`, null without one).
     // Clang's errors, and FMinus's where C would allow more: a size of 0 (a GNU extension), one over 2^30, a size no
-    // constant (C's variable length array). After an error the array has one element, so its uses report no more.
+    // constant (C's variable length array). After an error the array has its list's length, or one element without a
+    // list, so neither the list nor the array's uses report more.
     ast::Type Lowering::sized(SourceLocation location, const std::string& name, ast::Type type, const ast::Expr* size,
                               const std::vector<ast::ExprPtr>* list)
     {
         constexpr std::int64_t kMost = std::int64_t{1} << 30;
-        type.count = 1;
+        const bool listed = list != nullptr && !list->empty() && static_cast<std::int64_t>(list->size()) <= kMost;
+        type.count = listed ? static_cast<int>(list->size()) : 1;
         if (size == nullptr)
         {
             if (list == nullptr)
                 error(location, "definition of variable with array type needs an explicit size or an initializer");
             else if (list->empty())
                 error(location, "zero size arrays are not allowed");
-            else if (static_cast<std::int64_t>(list->size()) > kMost)
+            else if (!listed)
                 error(location, "array is too large: FMinus's arrays have at most 2^30 elements");
-            else
-                type.count = static_cast<int>(list->size());
             return type;
         }
         const std::optional<Folded> folded = fold(*size, true);
@@ -181,19 +211,27 @@ namespace fminus::ir::detail
     }
 
     // A constant of the top level (Program::constants), C's file-scope const object: `const float table[N] = {...};`
-    // or `const float gain = 0.5f;`, an LLVM constant global of its name with C's external linkage, as clang makes it,
-    // which the functions and methods after it read where it is (a table, so no call copies it: Memory.cpp's read()) or
-    // as its value (a scalar, Expressions.cpp). An array takes its size from its list when it has none, and its missing
-    // elements are 0, in a table's shapes (tableContents, Memory.cpp); a scalar without an initialiser is 0.
+    // or `const float gain = 0.5f;`, an LLVM constant global of its name, which the functions and methods after it read
+    // where it is (a table, so no call copies it: Memory.cpp's read()) or as its value (a scalar, Expressions.cpp). An
+    // array takes its size from its list when it has none, and its missing elements are 0, in a table's shapes
+    // (tableContents, Memory.cpp); a scalar without an initialiser is 0.
+    //
+    // The global is private, as a C file's `static const` object is internal: only the program's own code reads it.
+    // A symbol of its name could take what the generated code calls by that name, a library's function (a float %
+    // calls fmodf, and expf in the fast math mode calls expf) or the runtime's, and a host would find it as one of the
+    // program's functions. So a constant is never named as a builtin (C's file scope has <math.h>'s functions in it,
+    // and clang refuses the name: "redefinition of 'sinf' as different kind of symbol"), nor as one of the runtime's
+    // functions (FMinus's error), which the code generator looks up by name in the module.
     //
     // The initialiser is lowered as a function's would be, into a function of no use (deleted after, with whatever
     // declarations only it used), so that it means what it would in a function, bit for bit: the same conversions,
     // and the same folding, flushed subnormals too. Every element must then be a constant: numbers, enumeration
     // constants, sizeof, a constant scalar of the top level, the address of a table's element, hash and randf of them,
     // and operators and casts on those, and ?:, && and || (atTopLevel). What the program would compute as it runs (a
-    // call, a table's element, a heap block) is clang's error, "initializer element is not a compile-time constant".
-    // FMinus's: a top-level declaration is const (FMinus has no global variables: a program's state is in its modules),
-    // and of no module.
+    // call, a table's element, a heap block) is clang's error, "initializer element is not a compile-time constant",
+    // and so is what C leaves undefined (1 / 0, (int)1e10f), which LLVM folds to poison. FMinus's: a top-level
+    // declaration is const (FMinus has no global variables: a program's state is in its modules), of no module, and of
+    // kMaxTableBytes at most.
     void Lowering::defineConstant(const ast::Constant& constant)
     {
         const ast::DeclStmt& decl = constant.declaration;
@@ -220,6 +258,14 @@ namespace fminus::ir::detail
         if (!checkType(location, type))
             type = ast::isArray(type) ? ast::Type::arrayOf(ast::Type::Float, type.count)
                                       : ast::Type::pointerTo(ast::Kind::Float, type.pointeeConst);
+        if (const std::uint64_t bytes =
+                ast::isArray(type) ? module_.getDataLayout().getTypeAllocSize(typeOf(type)).getFixedValue() : 0;
+            bytes > kMaxTableBytes)
+        {
+            error(location, "array is too large for a constant: FMinus's constants of the top level hold at most "
+                            "1 MiB, and this one holds " + std::to_string(bytes) + " bytes");
+            type.count = std::max(1, static_cast<int>(std::min<std::size_t>(decl.list.size(), 1u << 30)));
+        }
         const ast::Type element = ast::isArray(type) ? ast::pointee(type) : type;
 
         // The initialiser's values, lowered and converted where a function's would be.
@@ -248,6 +294,8 @@ namespace fminus::ir::detail
         for (const auto& [value, where] : values)
         {
             auto* folded = llvm::dyn_cast<llvm::Constant>(value);
+            if (folded != nullptr && undefined(*folded))
+                folded = nullptr;
             if (folded == nullptr && diagnostics_.errors().size() == reported)   // the first, as clang reports it
                 error(where, "initializer element is not a compile-time constant");
             constants.push_back(folded != nullptr ? folded : llvm::Constant::getNullValue(typeOf(element)));
@@ -268,8 +316,16 @@ namespace fminus::ir::detail
             contents = tableContents(llvm::cast<llvm::ArrayType>(typeOf(type)), std::move(constants));
         else
             contents = constants.empty() ? llvm::Constant::getNullValue(typeOf(type)) : constants.front();
-        auto* global = new llvm::GlobalVariable(module_, contents->getType(), true, llvm::GlobalValue::ExternalLinkage,
-                                                contents, decl.name);
+        const bool builtin = isBuiltinName(decl.name);
+        const bool runtime = std::ranges::find(kRuntimeNames, decl.name) != std::end(kRuntimeNames);
+        if (builtin)
+            error(location, "redefinition of " + quoted(decl.name) + " as different kind of symbol");
+        else if (runtime)
+            error(location, quoted(decl.name) + " is the name of a function of FMinus's runtime, which the code it "
+                                                "generates calls: rename the constant");
+        // Named after an error, the global would be what the runtime's or a builtin's declaration finds.
+        auto* global = new llvm::GlobalVariable(module_, contents->getType(), true, llvm::GlobalValue::PrivateLinkage,
+                                                contents, builtin || runtime ? "" : decl.name);
         global->setAlignment(alignOf(type));
         const auto [previous, added] = fileScope_.try_emplace(decl.name, Binding{global, true, type, location});
         if (!added)

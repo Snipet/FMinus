@@ -353,14 +353,12 @@ namespace fminus::ir::detail
     // clang writes them, so that the IR holds no constant per element). The one difference C could see is the
     // address: every call's table is the same object, where C's would differ between nested calls of one function.
     // Otherwise it is a local as any array is: a stack slot, zeroed, then the list's values stored, which are lowered
-    // once, in order, before it. So is an array over kMaxTableBytes, whatever its list: the JIT's object holds every
-    // byte of a global, its zeros too (in a read-only section, which it then copies), so a table costs the compiler
-    // about twice its size, where a stack slot costs nothing to compile, and an array may have 2^30 elements. Returns
-    // the global or the slot; `type` is the declaration's (an array of what FMinus can point to, but a module), and
-    // the declaration has no `= expr`.
+    // once, in order, before it. So is an array over kMaxTableBytes (1 MiB, Lowering.h), whatever its list: a table
+    // costs the compiler about twice its size, where a stack slot costs nothing to compile, and an array may have 2^30
+    // elements. Returns the global or the slot; `type` is the declaration's (an array of what FMinus can point to, but
+    // a module), and the declaration has no `= expr`.
     llvm::Value* Lowering::declareConstArray(SourceLocation location, const ast::DeclStmt& decl, ast::Type type)
     {
-        constexpr std::uint64_t kMaxTableBytes = std::uint64_t{1} << 20;   // 1 MiB: 262,144 floats, 65,536 float4s
         const ast::Type element = ast::pointee(type);
         std::vector<llvm::Value*> values;
         if (decl.list.size() > static_cast<std::size_t>(type.count))
