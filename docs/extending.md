@@ -4875,16 +4875,30 @@ struct types opaque before pass 1, and `isOpaque` says which are not laid out ye
 
 ### Constants
 
-`defineConstant` makes a constant an LLVM global of its name, `constant`, with C's external linkage, as clang makes a
-C file's const object: `@PARTIALS = constant ...`, aligned as its type. A table's contents are recipe 26's
-(`tableContents`): the list's values, then zeros, eight or more of them one `zeroinitializer`; a scalar without an
-initialiser is 0, and a table without a list all zeros.
+`defineConstant` makes a constant an LLVM global of its name, `constant`, aligned as its type: `@PARTIALS = private
+constant ...`. A table's contents are recipe 26's (`tableContents`): the list's values, then zeros, eight or more of
+them one `zeroinitializer`; a scalar without an initialiser is 0, and a table without a list all zeros.
+
+The global is private, as a C file's `static const` object is internal (clang gives a plain const object external
+linkage). Only the program's own code reads it, and a symbol of its name would be found by whatever looks one up by
+name: the calls LLVM's backend makes to a library's functions, whatever the program calls them (a float `%` calls
+`fmodf`, a zeroed array `memset` or `bzero`, `expf` of a variable in the fast math mode `expf`), which would jump into
+the constant's data; and a host, `Program::address("GAIN")`, which would have returned the data's address as a
+function's. A private global's symbol is local to its object (`L`-prefixed on Mach-O), so neither finds it. Within the
+module two kinds of name would still find it, since the code generator declares their functions by name: a builtin's
+(`sinf`, `malloc`, `randf`), which C's file scope holds already ("redefinition of 'sinf' as different kind of symbol",
+clang's), and a runtime function's (`RuntimeSymbols.def`; FMinus's "'fminus_rt_malloc' is the name of a function of
+FMinus's runtime, which the code it generates calls: rename the constant"). Either is refused, and its global left
+unnamed.
 
 The initialiser is lowered as a function's would be, into a function of no use (private, `fminus.top-level`, deleted
 after, with any declaration only it used), with `function_` a function of no name and no module (`topLevel_`): the same
 `lower`, `convert` and `DenormalFolder`, so a constant holds what a function's array of the same list holds, bit for
-bit, its subnormals flushed when the host flushes them. Every value must then be an `llvm::Constant`, or it is clang's
-"initializer element is not a compile-time constant", at the first that is not. What folds is a constant: numbers,
+bit, its subnormals flushed when the host flushes them. Every value must then be an `llvm::Constant` that holds no
+poison or undef (`undefined`), or it is clang's "initializer element is not a compile-time constant", at the first that
+is not. What C leaves undefined folds to poison: `1 / 0` and `LEN % 0`, which clang refuses too, and `INT_MIN / -1`,
+`(int)1e10f` and `(int)(0.0f / 0.0f)`, which clang folds to values (-2147483648, 2147483647 and 0). Read as its value,
+with no load, a poison constant would make poison of every function that read it. What folds is a constant: numbers,
 enumeration constants, `sizeof`, operators and casts of them, `hash` and `randf` of them, a constant scalar of the top
 level (below), the address of a table's element (`&PARTIALS[COLS]`, a constant expression). What the program would
 compute as it runs is not: a call (`sinf(1)` too, which every math mode lowers to a call), a table's element (a load),
@@ -4894,10 +4908,14 @@ they branch as before, so a local table holding one stays on the stack (recipe 2
 
 FMinus's own errors: a declaration at the top level that is not `const` ("FMinus has no variables at the top level:
 declare 'state' const, a constant of the program, or keep it in a module"), since a program's state lives in modules,
-each instance's own; and a module ("a module is no constant of the top level: its fields start at 0, and only its
-methods set them"). The constant's name goes into `fileScope_`, beside the enumeration constants: a second of the name
-is "redefinition of 'A'", an enumeration constant "redefinition of 'A' as different kind of symbol" with its note,
-and so is a function or a module of the name (`fileNameClash`, which `declareEnum` shares), reported at the later.
+each instance's own; a module ("a module is no constant of the top level: its fields start at 0, and only its methods
+set them"); and a table over `kMaxTableBytes`, recipe 26's 1 MiB ("array is too large for a constant: FMinus's
+constants of the top level hold at most 1 MiB, and this one holds 268435456 bytes"). A local table over it stays on
+the stack; a top-level one has nowhere else to go, and the JIT's object would hold every byte of it, its zeros too, in
+the host's process, at about twice its size (recipe 26's measure): one line, `const float4 BIG[1 << 24];`, would cost
+half a gigabyte. The constant's name goes into `fileScope_`, beside the enumeration constants: a second of the name is
+"redefinition of 'A'", an enumeration constant "redefinition of 'A' as different kind of symbol" with its note, and
+so is a function or a module of the name (`fileNameClash`, which `declareEnum` shares), reported at the later.
 
 ### Reading one
 
@@ -4921,8 +4939,8 @@ through a `const float*`).
   compiled compiles to the same IR, with four differences a test may see: a module's dump lists its enumerations among
   its fields, in source order; a size's dump is as written; an element of a const array assigned is clang's message;
   and a module's enumeration can no longer take the module's own `sizeof` (C's incomplete type).
-- **Hosts**: a top-level constant is a symbol of its name, data, in the JIT's and in an object's (`--emit obj`), as a C
-  file's const object is; nothing calls it. `module()` reports an array field's size as it was worked out.
+- **Hosts**: a top-level constant is no symbol, in the JIT's object or in one `--emit obj` writes: `Program::address`
+  finds functions only, as before. `module()` reports an array field's size as it was worked out.
 
 ### Tests
 
@@ -4933,12 +4951,15 @@ through a `const float*`).
   and flushed; scalars of every type, an element's address and `&GAIN`; C's scopes (a local and a field hide a
   constant, a method of a module before it does not see it, an `#include`d table after its `#include` and not before);
   sizes of enumeration constants, operators, `sizeof`, casts and `?:` in fields (against a C++ struct's layout),
-  locals, a block's enumeration, tables and parameters; clang's errors, and FMinus's.
+  locals, a block's enumeration, tables and parameters; constants named as the library functions LLVM calls (`fmodf`,
+  `memset`, `bzero`), run in every math mode at `-O0` and `-O2`, and no symbol for `Program::address`; clang's errors
+  (a builtin's name, what C leaves undefined), and FMinus's (a runtime function's name, a table over 1 MiB), and a
+  size's error with no second error for its list.
 - `FrontendTest.cpp`: the dumps of sizes as written, `[]`, a module's enumerations among its fields, and constants
   where they are among functions, modules and enumerations.
-- `tests/lit/fminus/toplevel.fm`: the globals (an `#include`d one first), functions and a method with no alloca,
-  memset or store for them, a scalar read as its value, `-O2`'s loads and folded reads, `--run`, the dump;
-  `toplevel-errors.fm`, the errors from the command line.
+- `tests/lit/fminus/toplevel.fm`: the private globals (an `#include`d one first), functions and a method with no
+  alloca, memset or store for them, a scalar read as its value, `-O2`'s loads and folded reads (and the tables only
+  those read gone), `--run`, the dump; `toplevel-errors.fm`, the errors from the command line.
 
 ## Pitfalls
 
@@ -5143,11 +5164,11 @@ system framework: a backend chosen when FMinus is built, not a library inside it
 
 **State: globals and `static`.** File-scope variables would lower to LLVM globals, and `static` locals likewise (recipes
 26 and 28 are the constant cases already: a `const` local array of constants is a private constant global, and a
-top-level constant a constant global of its name). One global for every instance of a plugin is shared state, written
-from every instance's audio thread. For a plugin, prefer state each instance owns: a module (recipe 12), in memory the
-host gives it, as `examples/biquad/`'s filter and `examples/voices/`'s synth are, or memory the program allocates off
-the audio thread, as `examples/delay/` does (recipe 11). Nothing then allocates on the audio thread, and every instance
-has its own copy.
+top-level constant a private constant global of its name). One global for every instance of a plugin is shared state,
+written from every instance's audio thread. For a plugin, prefer state each instance owns: a module (recipe 12), in
+memory the host gives it, as `examples/biquad/`'s filter and `examples/voices/`'s synth are, or memory the program
+allocates off the audio thread, as `examples/delay/` does (recipe 11). Nothing then allocates on the audio thread, and
+every instance has its own copy.
 
 **More of `switch` and enumerations.** Recipe 27 leaves four things. *clang's `-Wswitch`*, a switch over an enumerated
 value that misses one of its constants, needs `enum Mode` to be a type of its own rather than `int`: a `Kind` with the

@@ -278,9 +278,9 @@ prototypes and definition are C's:
 **Pass 2, the file in order.** The file's declarations are taken in source order, as C's file scope has them, each
 before the functions after it: an enumeration's constants (`declareEnum`), a module's layout (`layOut`, which
 declares its enumerations among its fields, and then gives its methods' `this` its attributes), a constant of the
-top level (`defineConstant`: an LLVM constant global of its name, its initialiser lowered into a function of no use,
-then deleted, and refused unless every value is a constant), and each function, whose parameters' array sizes are
-checked (`checkSizes`) and whose body, a definition's, is lowered. A body is lowered with an
+top level (`defineConstant`: a private LLVM constant global of its name, its initialiser lowered into a function of
+no use, then deleted, and refused unless every value is a constant), and each function, whose parameters' array sizes
+are checked (`checkSizes`) and whose body, a definition's, is lowered. A body is lowered with an
 `llvm::IRBuilder<DenormalFolder>`, which folds constants as `ConstantFolder` does, and under `Denormals::Flush` as
 flushing hardware computes them:
 
