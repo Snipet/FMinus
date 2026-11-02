@@ -6,7 +6,8 @@
 //     Statements.cpp    blocks, declarations, return, if, while, for, switch and its labels, break and continue
 //     Expressions.cpp   constants, variables, operators, &&, ||, ?:, casts, assignment, ++ and --
 //     Constants.cpp     C's integer constant expressions, worked out where they are written (a case label's value,
-//                       an enumerator's), and enumerations: their constants, in a block's scope or the file's
+//                       an enumerator's, an array's size), enumerations: their constants, in a block's scope or the
+//                       file's, and the top level's constants, the file's const objects
 //     Calls.cpp         calls: the builtins (math functions, reductions, poly queries and memory, the heap, the FFT)
 //                       and the program's
 //     Math.cpp          sinf, cosf, tanf, expf, tanhf and logf in the vector and libm math modes: the runtime's
@@ -161,6 +162,8 @@ namespace fminus::ir::detail
             std::string name;                 // the variable's; empty for an element
             ast::Type whole;                  // the type of what is at `address`
             std::vector<int> components;      // for components, the lanes of `whole` they are
+            std::string array = {};           // an element of a const array a variable names (t[i]): the variable's,
+            ast::Type arrayType = {};         // and its type, for clang's message when it is assigned
         };
 
         // A call a function's body makes, for Effects.cpp: where, and of what (a builtin, or a function by name).
@@ -297,6 +300,7 @@ namespace fminus::ir::detail
         // ---- Functions.cpp ------------------------------------------------------------------------------------------
         static bool sameSignature(const ast::Function& a, const ast::Function& b);
         void declare(const ast::Function& function);
+        void describeThis(const ast::Module& module);
         void define(const ast::Function& function);
         void describeLibm();
         llvm::AllocaInst* allocate(llvm::Type* type, const std::string& name);
@@ -304,6 +308,7 @@ namespace fminus::ir::detail
         bool bind(const std::string& name, Binding binding);
         const Binding* find(const std::string& name);
         const Binding* lookup(const std::string& name) const;
+        const Binding* named(const std::string& name) const;
 
         // ---- Statements.cpp -----------------------------------------------------------------------------------------
         void lowerStatements(const std::vector<ast::Stmt>& statements);
@@ -325,6 +330,12 @@ namespace fminus::ir::detail
         // ---- Constants.cpp ------------------------------------------------------------------------------------------
         std::optional<std::int32_t> enumerator(const std::string& name) const;
         void declareEnum(const ast::Enum& enumeration);
+        void fileNameClash(SourceLocation location, const std::string& name, std::size_t position);
+        ast::Type sized(SourceLocation location, const std::string& name, ast::Type type, const ast::Expr* size,
+                        const std::vector<ast::ExprPtr>* list);
+        void checkSizes(const ast::Function& function);
+        void defineConstant(const ast::Constant& constant);
+        bool atTopLevel() const;
         std::optional<std::int32_t> integerConstant(const ast::Expr& expr);
         std::optional<Folded> fold(const ast::Expr& expr, bool evaluated);
         std::optional<Folded> foldBinary(SourceLocation location, ast::BinaryOp op, Folded lhs, Folded rhs,
@@ -372,6 +383,7 @@ namespace fminus::ir::detail
         void initializeArray(SourceLocation location, llvm::Value* address, ast::Type type,
                              const std::vector<ast::ExprPtr>& list);
         llvm::Value* declareConstArray(SourceLocation location, const ast::DeclStmt& decl, ast::Type type);
+        llvm::Constant* tableContents(llvm::ArrayType* type, std::vector<llvm::Constant*> given);
 
         // ---- Calls.cpp ----------------------------------------------------------------------------------------------
         Value lowerCall(SourceLocation location, const ast::CallExpr& call);
@@ -393,7 +405,9 @@ namespace fminus::ir::detail
         Value lowerHash(SourceLocation location, const ast::CallExpr& call, const std::vector<Value>& args);
 
         // ---- Modules.cpp --------------------------------------------------------------------------------------------
-        void layOut(const ast::Program& program);
+        void prepareModules(const ast::Program& program);
+        void layOut(const ast::Module& module, std::size_t& enums);
+        ast::Type fieldType(const ast::Field& field) const;
         void checkParameter(const ast::Module& module, const ast::Field& field);
         llvm::Type* slotTypeOf(ast::Type type);
         ParamBinding bindingOf(const ast::Module& module, const ast::Field& field) const;
@@ -446,14 +460,16 @@ namespace fminus::ir::detail
         Math math_;                                                         // how sinf, cosf, ... compute
         std::unordered_map<std::string, const ast::Function*> functions_;   // the program's, by name
         std::vector<std::unordered_map<std::string, Binding>> scopes_;     // the current function's, inner last
-        std::unordered_map<std::string, Binding> fileScope_;               // the enumeration constants declared so far
+        std::unordered_map<std::string, Binding> fileScope_;   // the enumeration constants and constants so far
         const ast::Program* program_ = nullptr;                            // the program being lowered
         const ast::Function* function_ = nullptr;                          // the function being lowered
+        const ast::Function topLevel_{};   // what function_ is while a top-level constant's initialiser is lowered
         std::vector<Breakable> breakables_;                                // the loops and switches around
         std::vector<Switch> switches_;                                     // the switches around, inner last
         std::unordered_map<std::string, Effect> effects_;                  // each name's, from all its declarations
         std::unordered_map<std::string, std::vector<CallSite>> calls_;     // each definition's calls, in order
         std::unordered_map<const ast::Module*, llvm::StructType*> structs_;   // each module's layout
+        std::unordered_map<const ast::Field*, ast::Type> fieldTypes_;         // each field's, its array's size known
         std::map<std::string, ParamBinding> bindings_;                     // the host's, by qualified name
         std::map<std::pair<unsigned, bool>, llvm::Value*> entryLoads_;     // the method's parameters, read at entry
         std::vector<llvm::Instruction*> streamReads_;                      // its loads of its streams' samples

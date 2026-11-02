@@ -45,7 +45,10 @@ namespace fminus::ast
     //
     // An array is C's: `float history[16];`, a fixed number of elements side by side, of a type FMinus can point to
     // (a float, an int, a float vector or a module). Its name stands for a pointer to its first element, which p[i]
-    // indexes; it cannot be assigned, and a parameter declared as one is that pointer.
+    // indexes; it cannot be assigned, and a parameter declared as one is that pointer. Its size is an integer constant
+    // expression, `float buf[ROWS * COLS]` (C11 6.6p6: enumeration constants are, a const variable is not), which the
+    // code generator works out where the array is declared (the declaration keeps it as written, and the parser's
+    // type has a count of 0); `float t[] = {1, 2, 3}` takes its size from its list.
     //
     // A type is a kind, and for a pointer what it points to, for an array its elements and how many, for a module
     // which; two types are the same when every field is. Type::Float and the rest name the types that are only a
@@ -78,7 +81,7 @@ namespace fminus::ast
         Kind pointee = Kind::Void;        // a pointer's: what it points to; an array's: what its elements are
         bool pointeeConst = false;        // a pointer's: what it points to is read-only through it (const float*)
         const Module* module = nullptr;   // a module type's, and a pointer's or an array's whose pointee is one
-        int count = 0;                    // an array's: how many elements
+        int count = 0;   // an array's: how many elements (0 in the syntax tree, where its size is an expression)
 
         constexpr Type() = default;
         constexpr Type(Kind kind) : kind(kind) {}   // implicit: Kind::Float is the type float
@@ -483,12 +486,13 @@ namespace fminus::ast
     struct DeclStmt
     {
         bool isConst = false;      // the variable's: `const float x`, or `float* const p` (`const float* p` is not)
-        Type type = Type::Float;
+        Type type = Type::Float;   // an array's count is 0 here: `size` gives it
         std::string name;
         ExprPtr init;              // null without an initialiser
         bool isRestrict = false;   // `float* restrict p`: accepted, and changes nothing for a local
         bool hasList = false;      // `= {...}`
         std::vector<ExprPtr> list;
+        ExprPtr size;              // an array's size as written; null for `[]`, which its list sizes
     };
 
     // `expr;`: evaluated for its effect (an assignment, a call).
@@ -647,6 +651,7 @@ namespace fminus::ast
         Type type = Type::Float;
         bool isConst = false;      // the parameter's own, as DeclStmt's
         bool isRestrict = false;
+        ExprPtr size;              // `float x[N]`'s N, which C checks and then ignores: x is a float*
     };
 
     // A definition, or a prototype (`float f(float x);`, no body). As in C, a prototype declares a function defined
@@ -687,11 +692,13 @@ namespace fminus::ast
     {
         SourceLocation location;
         std::string name;
-        Type type = Type::Float;
+        Type type = Type::Float;   // an array's count is 0 here: `size` gives it
         bool isConst = false;
         bool hasInitializer = false;
         bool isParam = false;
         std::vector<Attribute> attributes;   // a parameter's
+        ExprPtr size;                        // an array's size as written, as DeclStmt's
+        std::size_t enums = 0;               // how many of the module's enumerations come before it, which it sees
     };
 
     // `module OnePole { float y; float k; void init(float cutoff, float rate) { ... } float tick(float x) { ... } };`:
@@ -709,12 +716,30 @@ namespace fminus::ast
         std::size_t position = 0;           // how many of the program's functions come before it, for dump()
     };
 
+    // `const float table[ROWS * COLS] = {...};` at the top level: a constant of the program, as a C file's const
+    // object is, which every function and method declared after it reads (an #included file's, after the #include).
+    // Its initialiser is constants: a number, an enumeration constant, sizeof, another top-level constant scalar, hash
+    // or randf of them, and operators, casts and ?: on those, which the code generator works out once. An array's
+    // missing elements are 0. FMinus has no variables at the top level: one that is not const is the code generator's
+    // error.
+    struct Constant
+    {
+        SourceLocation location;   // of its name
+        DeclStmt declaration;
+        // How many of the program's functions, modules and enumerations (the modules' too) come before it, which see
+        // none of it.
+        std::size_t position = 0;
+        std::size_t modules = 0;
+        std::size_t enums = 0;
+    };
+
     // The modules are kept by pointer, which a Type holds: they stay where they are while the program is built.
     struct Program
     {
         std::vector<Function> functions;   // with the modules' methods, in source order
         std::vector<std::unique_ptr<Module>> modules;
         std::vector<Enum> enums;           // the top level's and the modules', in source order
+        std::vector<Constant> constants;   // the top level's, in source order
     };
 
     template <typename Node>
@@ -735,7 +760,8 @@ namespace fminus::ast
     //       (decl float y (* x g))
     //       (*= y 2)
     //       (return y))
-    // A module and an enumeration at the top level are where they are among the functions:
+    // A module, an enumeration and a constant at the top level are where they are among the functions:
     //     (enum Mode (SAW) (SQUARE 4))
+    //     (decl const float[(* ROWS COLS)] table {1 2})
     std::string dump(const Program& program);
 } // namespace fminus::ast

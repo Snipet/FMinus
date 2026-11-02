@@ -1,0 +1,30 @@
+// The top level's constants' errors and arrays' sizes', as clang words them, FMinus's own where C allows more (no
+// variable at the top level; no variable length array). The rest are tests/unit/TopLevelTest.cpp's.
+// RUN: not fminus %s 2>&1 | FileCheck %s --implicit-check-not=error:
+
+enum { N = 4 };
+const int COUNT = 4;
+const float TABLE[N] = {1, 2};
+float f(void);
+const float CALL = f();
+const float BY_CONST[COUNT];
+const float NEGATIVE[N - 5];
+float state;
+
+float g(int i)
+{
+    TABLE[i] = 1;
+    float local[i];
+    return TABLE[i];
+}
+
+const float g = 1;
+
+// CHECK: toplevel-errors.fm:9:20: error: initializer element is not a compile-time constant
+// CHECK: toplevel-errors.fm:10:22: error: expression is not an integer constant expression
+// CHECK: toplevel-errors.fm:11:24: error: 'NEGATIVE' declared as an array with a negative size
+// CHECK: toplevel-errors.fm:12:7: error: FMinus has no variables at the top level: declare 'state' const, a constant of the program, or keep it in a module
+// CHECK: toplevel-errors.fm:16:14: error: cannot assign to variable 'TABLE' with const-qualified type 'const float[4]'
+// CHECK: toplevel-errors.fm:17:17: error: expression is not an integer constant expression
+// CHECK: toplevel-errors.fm:21:13: error: redefinition of 'g' as different kind of symbol
+// CHECK-NEXT: toplevel-errors.fm:14:7: note: previous definition is here

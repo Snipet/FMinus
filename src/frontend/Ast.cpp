@@ -1,7 +1,9 @@
 // src/frontend/Ast.cpp
 #include "frontend/Ast.h"
 
+#include <algorithm>
 #include <cstdlib>
+#include <utility>
 
 namespace fminus::ast
 {
@@ -192,9 +194,12 @@ namespace fminus::ast
         }
 
         // A declared name's type, as C spells it: `const float`, `const float * restrict`, `float * const`,
-        // `const float[16]`.
-        std::string declared(Type type, bool isConst, bool isRestrict)
+        // `const float[16]`. An array's size is as written, `float[(* ROWS COLS)]`, or nothing for `float[]`.
+        std::string declared(Type type, bool isConst, bool isRestrict, const Expr* size = nullptr)
         {
+            if (isArray(type))
+                return (isConst ? "const " : "") + typeName(pointee(type)) + "["
+                       + (size != nullptr ? dump(*size) : "") + "]";
             if (!isPointer(type))
                 return (isConst ? "const " : "") + typeName(type);
             return typeName(type) + (isConst ? " const" : "") + (isRestrict ? " restrict" : "");
@@ -227,15 +232,19 @@ namespace fminus::ast
             return text + ")";
         }
 
+        // (decl const float[4] t {1 2}), a block's or the top level's.
+        std::string dump(const DeclStmt& decl, const std::string& indent)
+        {
+            return indent + "(decl " + declared(decl.type, decl.isConst, decl.isRestrict, decl.size.get()) + " "
+                   + decl.name + (decl.init ? " " + dump(*decl.init) : "") + (decl.hasList ? " " + list(decl.list) : "")
+                   + ")";
+        }
+
         // One statement per line, `indent` spaces in; a block's items one level further in.
         std::string dump(const Stmt& stmt, const std::string& indent)
         {
             return std::visit(Overloaded{
-                                  [&](const DeclStmt& decl) {
-                                      return indent + "(decl " + declared(decl.type, decl.isConst, decl.isRestrict)
-                                             + " " + decl.name + (decl.init ? " " + dump(*decl.init) : "")
-                                             + (decl.hasList ? " " + list(decl.list) : "") + ")";
-                                  },
+                                  [&](const DeclStmt& decl) { return dump(decl, indent); },
                                   [&](const ExprStmt& statement) { return indent + dump(*statement.expr); },
                                   [&](const ReturnStmt& ret) {
                                       return indent + "(return" + (ret.value ? " " + dump(*ret.value) : "") + ")";
@@ -356,40 +365,57 @@ namespace fminus::ast
 
     std::string dump(const Program& program)
     {
-        // A module as its enumerations and its fields: (module OnePole (field float y) (field float k)). Its methods
-        // follow it, as the functions they are: (method float OnePole::tick ((float x)) ...), without the `this` the
-        // parser added. An enumeration at the top level comes before the modules declared after it.
-        const auto enumsAt = [&](std::size_t position, std::size_t modules) {
-            std::string text;
-            for (const Enum& enumeration : program.enums)
+        // A module as its enumerations and its fields, in order: (module OnePole (field float y) (field float k)).
+        // Its methods follow it, as the functions they are: (method float OnePole::tick ((float x)) ...), without the
+        // `this` the parser added. An enumeration or a constant at the top level comes before the modules declared
+        // after it, and a constant before the enumerations declared after it.
+        const auto declarationsAt = [&](std::size_t position, std::size_t modules) {
+            std::vector<std::pair<std::size_t, std::string>> items;   // in source order, by 2 * the enumerations before
+            for (std::size_t e = 0; e < program.enums.size(); ++e)
             {
+                const Enum& enumeration = program.enums[e];
                 if (enumeration.module == nullptr && enumeration.position == position && enumeration.modules == modules)
-                    text += dump(enumeration) + "\n";
+                    items.emplace_back(2 * e + 1, dump(enumeration) + "\n");
             }
+            for (const Constant& constant : program.constants)
+            {
+                if (constant.position == position && constant.modules == modules)
+                    items.emplace_back(2 * constant.enums, dump(constant.declaration, "") + "\n");
+            }
+            std::ranges::stable_sort(items, {}, [](const auto& item) { return item.first; });
+            std::string text;
+            for (const auto& item : items)
+                text += item.second;
             return text;
         };
         const auto modulesAt = [&](std::size_t position) {
             std::string text;
             for (std::size_t m = 0; m <= program.modules.size(); ++m)
             {
-                text += enumsAt(position, m);   // the ones after m modules
+                text += declarationsAt(position, m);   // the ones after m modules
                 if (m == program.modules.size() || program.modules[m]->position != position)
                     continue;
                 const Module* module = program.modules[m].get();
                 text += "(module " + module->name;
+                std::vector<const Enum*> enums;   // the module's
                 for (const Enum& enumeration : program.enums)
                 {
                     if (enumeration.module == module)
-                        text += "\n  " + dump(enumeration);
+                        enums.push_back(&enumeration);
                 }
+                std::size_t shown = 0;
                 for (const Field& field : module->fields)
                 {
+                    for (; shown < field.enums && shown < enums.size(); ++shown)
+                        text += "\n  " + dump(*enums[shown]);
                     text += std::string(field.isParam ? "\n  (param " : "\n  (field ")
-                            + declared(field.type, field.isConst, false) + " " + field.name;
+                            + declared(field.type, field.isConst, false, field.size.get()) + " " + field.name;
                     for (const Attribute& attribute : field.attributes)
                         text += " " + attributeText(attribute);
                     text += ")";
                 }
+                for (; shown < enums.size(); ++shown)
+                    text += "\n  " + dump(*enums[shown]);
                 text += ")\n";
             }
             return text;

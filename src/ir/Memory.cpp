@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <utility>
 
 namespace fminus::ir::detail
 {
@@ -47,6 +48,12 @@ namespace fminus::ir::detail
                 && (findField(*module, variable->name, nullptr) != nullptr
                     || std::ranges::find(module->methods, variable->name) != module->methods.end()))
                 return field(expr.location, self(), *module, variable->name, false);
+            if (binding == nullptr)   // then the file's: a constant of the top level (Constants.cpp)
+            {
+                const auto found = fileScope_.find(variable->name);
+                if (found != fileScope_.end() && !found->second.enumerator)
+                    binding = &found->second;
+            }
             if (binding == nullptr)
             {
                 error(expr.location, "use of undeclared identifier " + quoted(variable->name));
@@ -66,7 +73,8 @@ namespace fminus::ir::detail
             const std::size_t reported = diagnostics_.errors().size();
             Value base = lower(*index->base);
             Value offset = lower(*index->index);
-            if (!ast::isPointer(base.type) && ast::isPointer(offset.type))
+            const bool swapped = !ast::isPointer(base.type) && ast::isPointer(offset.type);
+            if (swapped)
                 std::swap(base, offset);   // C's i[p] is p[i]
             if (!ast::isPointer(base.type))
             {
@@ -79,7 +87,16 @@ namespace fminus::ir::detail
                 error(expr.location, "array subscript is not an integer");
                 return std::nullopt;
             }
-            return element(expr.location, base, offset);
+            std::optional<LValue> target = element(expr.location, base, offset);
+            // An element of a const array its variable names, t[i]: clang names the variable when it is assigned.
+            const auto* array = std::get_if<ast::VariableExpr>(&(swapped ? *index->index : *index->base).node);
+            const Binding* binding = array != nullptr ? named(array->name) : nullptr;
+            if (target && target->isConst && binding != nullptr && ast::isArray(binding->type) && binding->isConst)
+            {
+                target->array = array->name;
+                target->arrayType = binding->type;
+            }
+            return target;
         }
         if (const auto* unary = std::get_if<ast::UnaryExpr>(&expr.node))   // *p
         {
@@ -174,6 +191,12 @@ namespace fminus::ir::detail
         if (ast::isArray(target.type))
         {
             error(location, "array type " + quoted(ast::typeName(target.type)) + " is not assignable");
+            return false;
+        }
+        if (target.isConst && !target.array.empty())   // t[i] of a const array t
+        {
+            error(location, "cannot assign to variable " + quoted(target.array) + " with const-qualified type "
+                                + quoted("const " + ast::typeName(target.arrayType)));
             return false;
         }
         if (target.isConst && target.name.empty())
@@ -351,28 +374,10 @@ namespace fminus::ir::detail
         if (module_.getDataLayout().getTypeAllocSize(arrayType).getFixedValue() <= kMaxTableBytes
             && std::ranges::all_of(values, [](llvm::Value* value) { return llvm::isa<llvm::Constant>(value); }))
         {
-            llvm::Type* elementType = typeOf(element);
-            const std::uint64_t count = arrayType->getNumElements();
-            // Up to the last element that is not zero; clang's EmitArrayConstant's shapes for what follows it.
             std::vector<llvm::Constant*> given;
             for (llvm::Value* value : values)
                 given.push_back(llvm::cast<llvm::Constant>(value));
-            while (!given.empty() && given.back()->isNullValue())
-                given.pop_back();
-            const std::uint64_t zeros = count - given.size();
-            llvm::Constant* contents = nullptr;
-            if (given.empty())
-                contents = llvm::ConstantAggregateZero::get(arrayType);
-            else if (zeros >= 8)
-                contents = llvm::ConstantStruct::getAnon(
-                    {llvm::ConstantArray::get(llvm::ArrayType::get(elementType, given.size()), given),
-                     llvm::ConstantAggregateZero::get(llvm::ArrayType::get(elementType, zeros))},
-                    true);   // packed: the two parts side by side, as the array lays them out
-            else
-            {
-                given.resize(count, llvm::Constant::getNullValue(elementType));
-                contents = llvm::ConstantArray::get(arrayType, given);
-            }
+            llvm::Constant* contents = tableContents(arrayType, std::move(given));
             auto* table = new llvm::GlobalVariable(module_, contents->getType(), true,
                                                    llvm::GlobalValue::PrivateLinkage, contents,
                                                    "__const." + function_->name + "." + decl.name);
@@ -388,6 +393,28 @@ namespace fminus::ir::detail
             tag(builder_.CreateStore(values[i], at), element);
         }
         return slot;
+    }
+
+    // A table's contents, of `type`: `given`, constants of its element type (no more than its count), then zeros, in
+    // the shapes of clang's EmitArrayConstant. Up to the last element that is not zero; then, when eight or more zeros
+    // follow it, the two side by side in a packed struct, the zeros one zeroinitializer, so that the IR holds no
+    // constant per element of them (a table of zeros is one zeroinitializer); fewer, each in the array.
+    llvm::Constant* Lowering::tableContents(llvm::ArrayType* type, std::vector<llvm::Constant*> given)
+    {
+        llvm::Type* elementType = type->getElementType();
+        const std::uint64_t count = type->getNumElements();
+        while (!given.empty() && given.back()->isNullValue())
+            given.pop_back();
+        const std::uint64_t zeros = count - given.size();
+        if (given.empty())
+            return llvm::ConstantAggregateZero::get(type);
+        if (zeros >= 8)
+            return llvm::ConstantStruct::getAnon(
+                {llvm::ConstantArray::get(llvm::ArrayType::get(elementType, given.size()), given),
+                 llvm::ConstantAggregateZero::get(llvm::ArrayType::get(elementType, zeros))},
+                true);   // packed: the two parts side by side, as the array lays them out
+        given.resize(count, llvm::Constant::getNullValue(elementType));
+        return llvm::ConstantArray::get(type, given);
     }
 
     // C's arithmetic on pointers. p + i and i + p are the element i after p (i may be negative), and p - i the one i

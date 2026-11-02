@@ -45,37 +45,68 @@ namespace fminus::ir
         {
         }
 
-        // The modules are laid out first, in order, since a function's types may name them. Pass 1 declares every
-        // function (a module's methods among them), so calls may come before definitions; pass 2 lowers each
-        // definition's body, and a prototype that no definition followed and that names libm's function gets what
-        // libm's does (describeLibm); then every function marked nonallocating or nonblocking is checked against its
-        // calls. The enumerations of the top level and the modules are declared among the definitions, each before
-        // the first function after it, so that a body sees the constants declared before it, as C's file scope does
-        // (Constants.cpp).
+        // Pass 1 declares every function (a module's methods among them), so calls may come before definitions; pass
+        // 2 goes through the file in order, as C's file scope does, so that each declaration sees what is declared
+        // before it: the enumerations of the top level and the modules (Constants.cpp), the modules, each laid out
+        // where it is (Modules.cpp: a field's array may be sized by an enumeration constant before it), the top
+        // level's constants (Constants.cpp), and the functions, whose bodies it lowers there. A prototype that no
+        // definition followed and that names libm's function then gets what libm's does (describeLibm), and every
+        // function marked nonallocating or nonblocking is checked against its calls.
         // Under Denormals::Flush, last, every definition is marked flushing and the entry points are wrapped, which
         // needs every call known (Denormals.cpp).
         void Lowering::lower(const ast::Program& program)
         {
             program_ = &program;
-            layOut(program);
+            prepareModules(program);
             for (const ast::Function& function : program.functions)
                 declare(function);
+            // The next enumeration, constant and module, each in source order; between them, a constant before the
+            // enumerations and the modules declared after it, an enumeration of the top level before the modules
+            // after it, a module's own inside it (layOut). Each before the functions after it.
             std::size_t enums = 0;
-            const auto declareEnumsBefore = [&](std::size_t position) {
-                function_ = nullptr;   // at the file's scope: no function's names, no module's fields
-                scopes_.clear();
-                for (; enums < program.enums.size() && program.enums[enums].position <= position; ++enums)
-                    declareEnum(program.enums[enums]);
+            std::size_t constants = 0;
+            std::size_t modules = 0;
+            const auto declareBefore = [&](std::size_t position) {
+                for (;;)
+                {
+                    function_ = nullptr;   // at the file's scope: no function's names, no module's fields
+                    scopes_.clear();
+                    const ast::Enum* enumeration = enums < program.enums.size() ? &program.enums[enums] : nullptr;
+                    const ast::Constant* constant =
+                        constants < program.constants.size() ? &program.constants[constants] : nullptr;
+                    const ast::Module* module = modules < program.modules.size() ? program.modules[modules].get()
+                                                                                 : nullptr;
+                    if (constant != nullptr && constant->position <= position && constant->enums <= enums
+                        && constant->modules <= modules)
+                    {
+                        defineConstant(*constant);
+                        ++constants;
+                    }
+                    else if (enumeration != nullptr && enumeration->module == nullptr
+                             && enumeration->position <= position && enumeration->modules <= modules)
+                    {
+                        declareEnum(*enumeration);
+                        ++enums;
+                    }
+                    else if (module != nullptr && module->position <= position)
+                    {
+                        layOut(*module, enums);
+                        ++modules;
+                    }
+                    else
+                        return;
+                }
             };
             for (std::size_t f = 0; f < program.functions.size(); ++f)
             {
-                declareEnumsBefore(f);
+                declareBefore(f);
                 const ast::Function& function = program.functions[f];
+                checkSizes(function);
                 const auto found = functions_.find(function.name);
                 if (function.isDefinition && found != functions_.end() && found->second == &function)
                     define(function);   // the accepted definition, not a rejected duplicate
             }
-            declareEnumsBefore(program.functions.size());
+            declareBefore(program.functions.size());
             describeLibm();
             checkEffects(program);
             if (denormals_ == Denormals::Flush && !diagnostics_.hasErrors())

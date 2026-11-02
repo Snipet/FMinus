@@ -1,0 +1,3 @@
+// toplevel.fm's: an enumeration and the table it sizes, which the including file reads after its #include.
+enum { TAPS = 3 };
+const float KERNEL[TAPS] = {0.25f, 0.5f, 0.25f};

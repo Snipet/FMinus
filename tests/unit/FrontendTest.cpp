@@ -176,9 +176,9 @@ TEST_CASE("enumerations parse as C's, where they are among the functions and mod
                  "}\n"
                  "const enum { LAST };\n")
           == "(enum Wave (SAW) (SQUARE 4) (TRIANGLE (+ SQUARE 1)))\n"
-             "(module Osc\n"
-             "  (enum Shape (SINE) (PULSE (- 1)))\n"
+             "(module Osc\n"   // its enumerations and fields in order: a field's array sees those before it
              "  (field float phase)\n"
+             "  (enum Shape (SINE) (PULSE (- 1)))\n"
              "  (param int wave [[fminus::range(0, 5)]]))\n"
              "(enum (N 8))\n"
              "(function int pick ((int w) (int i))\n"
@@ -278,12 +278,51 @@ TEST_CASE("sizeof takes a type, as C's sizeof(type) does", "[frontend]")
 
 TEST_CASE("arrays parse as C's: a size after the name, a list, and a parameter that is a pointer", "[frontend]")
 {
+    // A size is an expression, kept as written: the code generator works it out (an integer constant expression).
     CHECK(parsed("void f(const float x[16], int k[]) { float a[4] = {1, 2,}, b; const int c[0x10]; a[1] = x[2]; }")
           == "(function void f ((const float * x) (int * k))\n"
              "  (decl float[4] a {1 2})\n"
              "  (decl float b)\n"
-             "  (decl const int[16] c)\n"
+             "  (decl const int[0x10] c)\n"
              "  (= ([] a 1) ([] x 2)))\n");
+    CHECK(parsed("enum { ROWS = 17, COLS = 12 };\n"
+                 "module Bank { float hist[ROWS << 1]; enum { TAPS = 4 }; float taps[TAPS]; };\n"
+                 "void f(float x[ROWS * COLS]) { float buf[ROWS * COLS]; const int t[] = {1, 2, 3}; float n[]; }")
+          == "(enum (ROWS 17) (COLS 12))\n"
+             "(module Bank\n"
+             "  (field float[(<< ROWS 1)] hist)\n"
+             "  (enum (TAPS 4))\n"
+             "  (field float[TAPS] taps))\n"
+             "(function void f ((float * x))\n"
+             "  (decl float[(* ROWS COLS)] buf)\n"
+             "  (decl const int[] t {1 2 3})\n"
+             "  (decl float[] n))\n");
+}
+
+TEST_CASE("top-level constants parse as C's file-scope declarations, where they are among the others", "[frontend]")
+{
+    // Before and after functions, modules and enumerations, each where it is; and a declaration of several names.
+    CHECK(parsed("const float gain = 0.5f;\n"
+                 "enum { N = 4 };\n"
+                 "const int sizes[N] = {1, 2}, count = N;\n"
+                 "module M { float x; };\n"
+                 "const float table[] = {1, 2, 3,};\n"
+                 "enum { K = 2 };\n"
+                 "float f() { return table[K] * gain; }\n"
+                 "const float4 lanes = (float4)(1);\n"
+                 "float state;\n")
+          == "(decl const float gain 0.5f)\n"
+             "(enum (N 4))\n"
+             "(decl const int[N] sizes {1 2})\n"
+             "(decl const int count N)\n"
+             "(module M\n"
+             "  (field float x))\n"
+             "(decl const float[] table {1 2 3})\n"
+             "(enum (K 2))\n"
+             "(function float f ()\n"
+             "  (return (* ([] table K) gain)))\n"
+             "(decl const float4 lanes (float4 1))\n"
+             "(decl float state)\n");   // FMinus's error, the code generator's: a top-level declaration is const
 }
 
 TEST_CASE("modules parse into fields and methods, and a module's name is a type from its declaration on",

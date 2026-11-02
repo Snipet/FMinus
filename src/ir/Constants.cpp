@@ -1,17 +1,22 @@
 // src/ir/Constants.cpp: C's integer constant expressions (C11 6.6p6), worked out where they are written, as a C
-// compiler works them out: a case label's value, an enumerator's. Their operands are integer constants, enumeration
-// constants, `true` and `false`, sizeof, and floating constants only as the immediate operands of casts (`(int)2.5f`),
-// combined by the unary operators but * and &, the binary ones, &&, || and ?:, and casts to int or bool; their type is
-// int or bool. A variable is none, const or not, as in C (isConstant, Statements.cpp, says the same of a loop's
-// condition).
+// compiler works them out: a case label's value, an enumerator's, an array's size (sized). Their operands are integer
+// constants, enumeration constants, `true` and `false`, sizeof, and floating constants only as the immediate operands
+// of casts (`(int)2.5f`), combined by the unary operators but * and &, the binary ones, &&, || and ?:, and casts to int
+// or bool; their type is int or bool. A variable is none, const or not, as in C17 (isConstant, Statements.cpp, says the
+// same of a loop's condition): a constant of the top level too, so a size is named by an enumeration constant, C's
+// idiom, `enum { ROWS = 17 };`.
 //
 // Enumerations (declareEnum) are C's: each constant an int, named from just after its own definition on, in the scope
 // the enumeration is declared in. In a block, that is the block's scope, where variables are too: C gives the two one
 // name space, so a variable of an inner block hides a constant, and one of the same scope is a redefinition. At the
 // top level, and in a module (as a C struct's), it is the file's, fileScope_, which the functions and modules after
 // the enumeration see, and a module's methods (CodeGen.cpp declares each in its place among the definitions). A name is
-// looked up as C++ looks it up in a member function (enumerator()): the blocks' scopes, then the module's fields and
-// methods, then the file's.
+// looked up as C++ looks it up in a member function (named(), Functions.cpp): the blocks' scopes, then the module's
+// fields and methods, then the file's.
+//
+// The top level's constants (defineConstant) are C's file-scope const objects, in the file's scope too: `const float
+// table[ROWS * COLS] = {...};`, each an LLVM constant global of its name, as clang makes one, stored once for every
+// function and method declared after it.
 //
 // Each operator computes as FMinus computes it as the program runs (Expressions.cpp), so a constant means what the same
 // expression means anywhere: a shift by its count's low five bits, / and % truncating toward zero. Where C makes the
@@ -24,10 +29,13 @@
 #include <llvm/ADT/APFloat.h>
 #include <llvm/ADT/APSInt.h>
 #include <llvm/IR/Constants.h>
+#include <llvm/IR/GlobalVariable.h>
 
 #include <algorithm>
 #include <cstdint>
+#include <iterator>
 #include <limits>
+#include <utility>
 
 namespace fminus::ir::detail
 {
@@ -45,18 +53,11 @@ namespace fminus::ir::detail
 
     // The value of the enumeration constant `name` names where it is used, or nothing for a name that is not one: a
     // block's constant, unless a variable of an inner block hides it; then, in a method, nothing if the module has a
-    // field or a method of the name; then the file's.
+    // field or a method of the name; then the file's (named()).
     std::optional<std::int32_t> Lowering::enumerator(const std::string& name) const
     {
-        if (const Binding* binding = lookup(name))
-            return binding->enumerator;
-        const ast::Module* module = function_ != nullptr ? function_->module : nullptr;
-        if (module != nullptr
-            && (findField(*module, name, nullptr) != nullptr
-                || std::ranges::find(module->methods, name) != module->methods.end()))
-            return std::nullopt;
-        const auto found = fileScope_.find(name);
-        return found != fileScope_.end() ? found->second.enumerator : std::nullopt;
+        const Binding* binding = named(name);
+        return binding != nullptr ? binding->enumerator : std::nullopt;
     }
 
     // An enumeration, its constants in order: each one's value its own, or the one before it plus 1 (the first's 0),
@@ -84,32 +85,197 @@ namespace fminus::ir::detail
                 redefinition(constant.location, constant.name, true, previous->second);
                 continue;
             }
-            if (!file)
-                continue;
-            // C's file scope holds the functions' names too, and a module's name is a type's (a typedef's, to C).
-            const std::vector<Diagnostic> here{Diagnostic{constant.location, "previous definition is here", {}}};
-            for (std::size_t f = 0; f < program_->functions.size(); ++f)
-            {
-                const ast::Function& function = program_->functions[f];
-                if (function.name != constant.name)
-                    continue;
-                if (f < enumeration.position)
-                    redefinition(constant.location, constant.name, true, Binding{nullptr, false, ast::Type::Void,
-                                                                                 function.location});
-                else
-                    diagnostics_.error(function.location,
-                                       "redefinition of " + quoted(function.name) + " as different kind of symbol",
-                                       here);
-                break;
-            }
-            for (const std::unique_ptr<ast::Module>& module : program_->modules)
-            {
-                if (module->name == constant.name)   // declared after: before, its name is no identifier
-                    diagnostics_.error(module->location,
-                                       "redefinition of " + quoted(module->name) + " as different kind of symbol",
-                                       here);
-            }
+            if (file)
+                fileNameClash(constant.location, constant.name, enumeration.position);
         }
+    }
+
+    // `name`, declared in the file's scope at `location`, after `position` of the program's functions: C's file scope
+    // holds the functions' names too, and a module's name is a type's (a typedef's, to C), so a function or a module of
+    // the name is a redefinition "as different kind of symbol", reported at the later of the two.
+    void Lowering::fileNameClash(SourceLocation location, const std::string& name, std::size_t position)
+    {
+        const std::string message = "redefinition of " + quoted(name) + " as different kind of symbol";
+        const auto previous = [](SourceLocation where) {
+            return std::vector<Diagnostic>{Diagnostic{where, "previous definition is here", {}}};
+        };
+        for (std::size_t f = 0; f < program_->functions.size(); ++f)
+        {
+            const ast::Function& function = program_->functions[f];
+            if (function.name != name)
+                continue;
+            if (f < position)
+                diagnostics_.error(location, message, previous(function.location));
+            else
+                diagnostics_.error(function.location, message, previous(location));
+            break;
+        }
+        for (const std::unique_ptr<ast::Module>& module : program_->modules)
+        {
+            if (module->name == name)   // declared after: before, its name is no identifier
+                diagnostics_.error(module->location, message, previous(location));
+        }
+    }
+
+    // The array `name` declares, `type` (an array, whose count the tree leaves at 0), with its size worked out: an
+    // integer constant expression from 1 to 2^30, or, for `[]`, the length of its list (`list`, null without one).
+    // Clang's errors, and FMinus's where C would allow more: a size of 0 (a GNU extension), one over 2^30, a size no
+    // constant (C's variable length array). After an error the array has one element, so its uses report no more.
+    ast::Type Lowering::sized(SourceLocation location, const std::string& name, ast::Type type, const ast::Expr* size,
+                              const std::vector<ast::ExprPtr>* list)
+    {
+        constexpr std::int64_t kMost = std::int64_t{1} << 30;
+        type.count = 1;
+        if (size == nullptr)
+        {
+            if (list == nullptr)
+                error(location, "definition of variable with array type needs an explicit size or an initializer");
+            else if (list->empty())
+                error(location, "zero size arrays are not allowed");
+            else if (static_cast<std::int64_t>(list->size()) > kMost)
+                error(location, "array is too large: FMinus's arrays have at most 2^30 elements");
+            else
+                type.count = static_cast<int>(list->size());
+            return type;
+        }
+        const std::optional<Folded> folded = fold(*size, true);
+        if (!folded)
+            return type;
+        if (folded->type == ast::Type::Float)
+            error(size->location, "size of array has non-integer type 'float'");
+        else if (folded->floating)   // an int a floating constant took part in, as (1.5f < 2)
+            notConstant(*folded->floating);
+        else if (folded->value < 0)
+            error(size->location, quoted(name) + " declared as an array with a negative size");
+        else if (folded->value == 0)
+            error(size->location, "zero size arrays are not allowed");
+        else if (folded->value > kMost)
+            error(size->location, "array is too large: FMinus's arrays have at most 2^30 elements");
+        else
+            type.count = folded->value;
+        return type;
+    }
+
+    // A function's parameters declared as arrays, `float x[N]`: pointers, as in C, whose sizes C still checks, as the
+    // file's scope has it where the function is (CodeGen.cpp: a method's module's enumerations too), with the
+    // parameters before each one, which are no constants (C's variable length array, which FMinus has not).
+    void Lowering::checkSizes(const ast::Function& function)
+    {
+        scopes_.emplace_back();
+        for (const ast::Param& param : function.params)
+        {
+            if (param.size != nullptr)
+                sized(param.location, param.name, ast::Type::arrayOf(ast::pointee(param.type), 0), param.size.get(),
+                      nullptr);
+            if (!param.name.empty())
+                scopes_.back().try_emplace(param.name, Binding{nullptr, param.isConst, param.type, param.location});
+        }
+        scopes_.clear();
+    }
+
+    // Whether the expression being lowered is a top-level constant's initialiser (defineConstant), which runs nowhere:
+    // a ?: or a && or || whose condition is a constant is then the value it picks (Expressions.cpp).
+    bool Lowering::atTopLevel() const
+    {
+        return function_ == &topLevel_;
+    }
+
+    // A constant of the top level (Program::constants), C's file-scope const object: `const float table[N] = {...};`
+    // or `const float gain = 0.5f;`, an LLVM constant global of its name with C's external linkage, as clang makes it,
+    // which the functions and methods after it read where it is (a table, so no call copies it: Memory.cpp's read()) or
+    // as its value (a scalar, Expressions.cpp). An array takes its size from its list when it has none, and its missing
+    // elements are 0, in a table's shapes (tableContents, Memory.cpp); a scalar without an initialiser is 0.
+    //
+    // The initialiser is lowered as a function's would be, into a function of no use (deleted after, with whatever
+    // declarations only it used), so that it means what it would in a function, bit for bit: the same conversions,
+    // and the same folding, flushed subnormals too. Every element must then be a constant: numbers, enumeration
+    // constants, sizeof, a constant scalar of the top level, the address of a table's element, hash and randf of them,
+    // and operators and casts on those, and ?:, && and || (atTopLevel). What the program would compute as it runs (a
+    // call, a table's element, a heap block) is clang's error, "initializer element is not a compile-time constant".
+    // FMinus's: a top-level declaration is const (FMinus has no global variables: a program's state is in its modules),
+    // and of no module.
+    void Lowering::defineConstant(const ast::Constant& constant)
+    {
+        const ast::DeclStmt& decl = constant.declaration;
+        const SourceLocation location = constant.location;
+        if (!decl.isConst)
+            error(location, "FMinus has no variables at the top level: declare " + quoted(decl.name)
+                                + " const, a constant of the program, or keep it in a module");
+        ast::Type type = decl.type;
+        if (type == ast::Type::Void)
+        {
+            error(location, "variable has incomplete type 'void'");
+            type = ast::Type::Float;   // so its uses report no more errors
+        }
+        if (ast::isModule(type) || (ast::isArray(type) && type.pointee == ast::Kind::Module))
+        {
+            error(location, "a module is no constant of the top level: its fields start at 0, and only its methods set "
+                            "them");
+            type = ast::isArray(type) ? ast::Type::arrayOf(ast::Type::Float, 0) : ast::Type::Float;
+        }
+        if (ast::isArray(type) && decl.size == nullptr && decl.init)
+            type.count = 1;   // its initialiser's error says why
+        else if (ast::isArray(type))
+            type = sized(location, decl.name, type, decl.size.get(), decl.hasList ? &decl.list : nullptr);
+        if (!checkType(location, type))
+            type = ast::isArray(type) ? ast::Type::arrayOf(ast::Type::Float, type.count)
+                                      : ast::Type::pointerTo(ast::Kind::Float, type.pointeeConst);
+        const ast::Type element = ast::isArray(type) ? ast::pointee(type) : type;
+
+        // The initialiser's values, lowered and converted where a function's would be.
+        llvm::Function* last = module_.empty() ? nullptr : &module_.getFunctionList().back();
+        llvm::Function* scratch =
+            llvm::Function::Create(llvm::FunctionType::get(builder_.getVoidTy(), false),
+                                   llvm::GlobalValue::PrivateLinkage, "fminus.top-level", module_);
+        builder_.SetInsertPoint(llvm::BasicBlock::Create(module_.getContext(), "entry", scratch));
+        function_ = &topLevel_;
+        const std::size_t reported = diagnostics_.errors().size();
+        std::vector<std::pair<llvm::Value*, SourceLocation>> values;
+        if (ast::isArray(type) && decl.init)
+            error(location, "array initializer must be an initializer list");
+        else if (ast::isArray(type) && decl.list.size() > static_cast<std::size_t>(type.count))
+            error(location, "excess elements in array initializer");
+        else if (ast::isArray(type))
+        {
+            for (const ast::ExprPtr& item : decl.list)
+                values.emplace_back(convert(lower(*item), element, item->location, Use::Initializing), item->location);
+        }
+        else if (decl.hasList)
+            error(location, "FMinus takes an initializer list for an array only");
+        else if (decl.init)
+            values.emplace_back(convert(lower(*decl.init), type, location, Use::Initializing), decl.init->location);
+        std::vector<llvm::Constant*> constants;
+        for (const auto& [value, where] : values)
+        {
+            auto* folded = llvm::dyn_cast<llvm::Constant>(value);
+            if (folded == nullptr && diagnostics_.errors().size() == reported)   // the first, as clang reports it
+                error(where, "initializer element is not a compile-time constant");
+            constants.push_back(folded != nullptr ? folded : llvm::Constant::getNullValue(typeOf(element)));
+        }
+        function_ = nullptr;
+        calls_.erase(topLevel_.name);   // what a call in it recorded for Effects.cpp
+        builder_.ClearInsertionPoint();
+        scratch->eraseFromParent();
+        for (auto next = last != nullptr ? std::next(last->getIterator()) : module_.begin(); next != module_.end();)
+        {
+            llvm::Function& declared = *next++;   // an intrinsic, say, of an arm a constant condition did not take
+            if (declared.isDeclaration() && declared.use_empty())
+                declared.eraseFromParent();
+        }
+
+        llvm::Constant* contents = nullptr;
+        if (ast::isArray(type))
+            contents = tableContents(llvm::cast<llvm::ArrayType>(typeOf(type)), std::move(constants));
+        else
+            contents = constants.empty() ? llvm::Constant::getNullValue(typeOf(type)) : constants.front();
+        auto* global = new llvm::GlobalVariable(module_, contents->getType(), true, llvm::GlobalValue::ExternalLinkage,
+                                                contents, decl.name);
+        global->setAlignment(alignOf(type));
+        const auto [previous, added] = fileScope_.try_emplace(decl.name, Binding{global, true, type, location});
+        if (!added)
+            redefinition(location, decl.name, false, previous->second);
+        else
+            fileNameClash(location, decl.name, constant.position);
     }
 
     // The value of the integer constant expression `expr`, or nothing after an error that says why, in clang's words.
@@ -182,12 +348,12 @@ namespace fminus::ir::detail
                                   ast::Type::Int, std::nullopt};
                 },
                 [&](const ast::VariableExpr& variable) -> std::optional<Folded> {
-                    // An enumeration constant is one; a variable, a parameter or a field (in a method) is none; any
-                    // other name is undeclared.
+                    // An enumeration constant is one; a variable, a parameter, a field (in a method) or a constant of
+                    // the top level is none (a const object, in C17); any other name is undeclared.
                     if (const std::optional<std::int32_t> value = enumerator(variable.name))
                         return Folded{*value, ast::Type::Int, std::nullopt};
                     const ast::Module* module = function_ != nullptr ? function_->module : nullptr;
-                    if (lookup(variable.name) != nullptr
+                    if (named(variable.name) != nullptr
                         || (module != nullptr
                             && (findField(*module, variable.name, nullptr) != nullptr
                                 || std::ranges::find(module->methods, variable.name) != module->methods.end())))

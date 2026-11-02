@@ -225,7 +225,7 @@ TEST_CASE("a const array whose list is not all constants is a local, its list co
                    "}\n")
           == "test.fm:3:17: error: excess elements in array initializer\n"
              "test.fm:4:17: error: array initializer must be an initializer list\n"
-             "test.fm:6:10: error: read-only variable is not assignable\n"
+             "test.fm:6:10: error: cannot assign to variable 'c' with const-qualified type 'const float[2]'\n"
              "test.fm:7:12: error: initializing 'float *' with an expression of type 'const float *' discards "
              "qualifiers\n"
              "test.fm:8:7: error: array type 'float[2]' is not assignable\n"

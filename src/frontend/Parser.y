@@ -2,7 +2,7 @@
 // automatically, token constructors, locations, detailed errors with LAC). It builds the syntax tree (Ast.h) into the
 // ParseContext.
 //
-//     program      : (function | module | enumeration)*
+//     program      : (function | module | enumeration | declaration)*     a declaration there is of constants
 //     function     : "const"? type pointer IDENTIFIER "(" params ")" attributes (block | ";")    or a prototype
 //     module       : "module" IDENTIFIER "{" (declaration | parameter | method | enumeration)* "}" ";"   fields
 //     parameter    : "param" type IDENTIFIER attributes ";"                     a field the host sets
@@ -10,7 +10,7 @@
 //     attributes   : ("[" "[" attribute ("," attribute)* "]" "]")*
 //     attribute    : IDENTIFIER ("::" (IDENTIFIER | "default"))? ("(" "-"? NUMBER ("," "-"? NUMBER)* ")")?
 //     params       : (param ("," param)*)? | "void"                                  (void) is none, as in C
-//     param        : "const"? type pointer IDENTIFIER? | "const"? type IDENTIFIER "[" NUMBER? "]"   a pointer
+//     param        : "const"? type pointer IDENTIFIER? | "const"? type IDENTIFIER array_size        a pointer
 //     type         : "float" | "bool" | "int" | "void" | VECTOR_TYPE | "poly" ("float" | "bool") | MODULE_NAME
 //                  | "enum" IDENTIFIER                                  int, the name a tag declared before
 //     pointer      : ("*" ("const" | "restrict")*)?        with a *, the first const is the pointee's (const float*),
@@ -20,8 +20,9 @@
 //     enumerator   : IDENTIFIER ("=" expr)?                                  the expr an integer constant expression
 //     declaration  : "const"? type declarator ("," declarator)* ";"
 //     declarator   : pointer IDENTIFIER ("=" expr)?                                  as in C, `float *p, x;`
-//                  | IDENTIFIER "[" NUMBER "]" ("=" "{" (expr ("," expr)* ","?)? "}")?        an array
+//                  | IDENTIFIER array_size ("=" "{" (expr ("," expr)* ","?)? "}")?          an array
 //                  | pointer IDENTIFIER "=" "{" (expr ("," expr)*)? "}"     parsed, for its error: only arrays
+//     array_size   : "[" expr? "]"              an integer constant expression, or none: the list's length
 //     statement    : label statement | unlabeled
 //     unlabeled    : block | expr ";" | "return" expr? ";" | ";"
 //                  | "if" "(" expr ")" statement ("else" statement)? | "while" "(" expr ")" statement
@@ -57,6 +58,10 @@
 // where a statement is expected (an if's branch, a switch's body), `case 1: s` is the label and its statement, a
 // CaseStmt with a body. The code generator checks that a label is in a switch, and that a case's value is an integer
 // constant expression.
+// An array's size is an expression, `float buf[ROWS * COLS]`, which the code generator works out: an integer constant
+// expression, whose enumeration constants only it knows the values of. A declaration at the top level declares
+// constants, `const float table[] = {...};`: Program::constants, where they are among the functions, modules and
+// enumerations, for the code generator to give each function and method those declared before it.
 // An enumeration is declared on its own (C's `enum Mode { A } m;` declares no variable here), at the top level, in a
 // block or in a module. Its tag goes into the parse context's scopes, a block's from its `{` to its `}` (a module's
 // into the file's, as a C struct's), where `enum Mode` names the type int. Its constants stay identifiers, which the
@@ -113,9 +118,10 @@
             SourceLocation location;
             Pointer pointer;
             std::string name;
-            ast::ExprPtr init;      // null without an initialiser
-            int count = 0;          // an array's elements; 0 for a name that is not an array
-            bool hasList = false;   // `= {...}`
+            ast::ExprPtr init;             // null without an initialiser
+            bool isArray = false;          // `name[size]` or `name[]`
+            ast::ExprPtr size = nullptr;   // an array's, as written; null for `[]`
+            bool hasList = false;          // `= {...}`
             std::vector<ast::ExprPtr> list = {};
         };
 
@@ -159,9 +165,7 @@
 %code {
     #include "frontend/Scanner.h"   // yylex
 
-    #include <charconv>
     #include <memory>
-    #include <system_error>
     #include <utility>
 
     namespace
@@ -193,35 +197,6 @@
                                        fminus::ast::ExprPtr target)
         {
             return fminus::ast::makeExpr(at(where), fminus::ast::IncrementExpr{op, std::move(target)});
-        }
-
-        // An array's size, a positive integer constant (C's, in decimal, octal or hex). Reports the error, and gives
-        // 1, for anything else.
-        int arraySize(const fminus::frontend::location& where, const std::string& spelling,
-                      fminus::frontend::ParseContext& context)
-        {
-            const bool hex = spelling.size() > 1 && spelling[0] == '0' && (spelling[1] == 'x' || spelling[1] == 'X');
-            if (spelling.find_first_of(hex ? ".pP" : ".eEfF") != std::string::npos)
-            {
-                context.diagnostics.error(at(where), "size of array has non-integer type 'float'");
-                return 1;
-            }
-            const int base = hex ? 16 : spelling.size() > 1 && spelling[0] == '0' ? 8 : 10;
-            long long value = 0;
-            const char* first = spelling.data() + (hex ? 2 : 0);
-            const char* last = spelling.data() + spelling.size();
-            const auto [end, failure] = std::from_chars(first, last, value, base);
-            if (end != last || failure != std::errc{} || value > (1 << 30))
-            {
-                context.diagnostics.error(at(where), "array is too large: FMinus's arrays have at most 2^30 elements");
-                return 1;
-            }
-            if (value == 0)
-            {
-                context.diagnostics.error(at(where), "zero size arrays are not allowed");
-                return 1;
-            }
-            return static_cast<int>(value);
         }
 
         // An enumeration as parsed: its tag, if it has one, declared in the innermost scope, where a second of the
@@ -257,18 +232,19 @@
         }
 
         // The name declared with its pointer, and, for an array, the array of what the rest declares: `float x[4]`
-        // is a float[4], and `const float c[2]` a const float[2], whose elements are read-only.
+        // is a float[4], and `const float c[2]` a const float[2], whose elements are read-only. The array's count is
+        // the code generator's to work out, from the declaration's size (DeclStmt::size).
         fminus::frontend::Declared declaredName(bool isConst, fminus::ast::Type type,
                                                 fminus::frontend::Declarator& d,
                                                 fminus::frontend::ParseContext& context)
         {
             fminus::frontend::Declared name = fminus::frontend::declared(isConst, type, d.pointer);
-            if (d.count == 0)
+            if (!d.isArray)
                 return name;
             if (d.pointer.isPointer)
                 context.diagnostics.error(d.location, "FMinus has no arrays of pointers");
             else
-                name.type = fminus::ast::Type::arrayOf(type, d.count);
+                name.type = fminus::ast::Type::arrayOf(type, 0);
             return name;
         }
     } // namespace
@@ -299,7 +275,7 @@
 %nterm <std::vector<ast::Enumerator>> enumerators
 %nterm <ast::Enumerator> enumerator
 %nterm <ModuleBody> module_body module_member
-%nterm <int> array_size
+%nterm <ast::ExprPtr> array_size
 %nterm <std::vector<ast::Attribute>> attributes attribute_list
 %nterm <ast::Attribute> attribute
 %nterm <std::vector<std::string>> attribute_args
@@ -344,7 +320,7 @@ program
     : items                                 { parseContext.program.functions = $1; }
     ;
 
-// The program's functions, a module's methods among them where the module is.
+// The program's functions, a module's methods among them where the module is. A declaration's names are constants.
 items
     : %empty                                {}
     | items function                        { $$ = $1; $$.push_back($2); }
@@ -366,6 +342,16 @@ items
                                                 enumeration.position = $$.size();
                                                 enumeration.modules = parseContext.program.modules.size();
                                                 parseContext.program.enums.push_back(std::move(enumeration));
+                                            }
+    | items declaration                     {
+                                                $$ = $1;
+                                                ast::Program& program = parseContext.program;
+                                                for (ast::Stmt& stmt : $2)
+                                                    program.constants.push_back(
+                                                        ast::Constant{stmt.location,
+                                                                      std::move(std::get<ast::DeclStmt>(stmt.node)),
+                                                                      $$.size(), program.modules.size(),
+                                                                      program.enums.size()});
                                             }
     ;
 
@@ -407,7 +393,10 @@ module_body
                                                 $$ = $1;
                                                 ModuleBody member = $2;
                                                 for (ast::Field& field : member.fields)
+                                                {
+                                                    field.enums = $$.enums.size();   // the module's before it
                                                     $$.fields.push_back(std::move(field));
+                                                }
                                                 for (ast::Function& method : member.methods)
                                                     $$.methods.push_back(std::move(method));
                                                 for (ast::Enum& enumeration : member.enums)
@@ -421,7 +410,7 @@ module_member
     : "param" type IDENTIFIER attributes ";"
                                             {
                                                 $$.fields.push_back(ast::Field{at(@3), $3, $2, false, false, true,
-                                                                               $4});
+                                                                               $4, nullptr, 0});
                                             }
     | declaration                           {
                                                 for (ast::Stmt& stmt : $1)
@@ -431,7 +420,8 @@ module_member
                                                                                    decl.type, decl.isConst,
                                                                                    decl.init != nullptr
                                                                                        || decl.hasList,
-                                                                                   false, {}});
+                                                                                   false, {}, std::move(decl.size),
+                                                                                   0});
                                                 }
                                             }
     | qualifier type pointer IDENTIFIER "(" params ")" attributes block
@@ -445,7 +435,8 @@ module_member
                                                 const ast::Type self =
                                                     ast::Type::pointerTo(ast::Type::moduleType(module), false);
                                                 method.params.insert(method.params.begin(),
-                                                                     ast::Param{at(@4), "this", self, true, false});
+                                                                     ast::Param{at(@4), "this", self, true, false,
+                                                                                nullptr});
                                                 $$.methods.push_back(std::move(method));
                                             }
     | enumeration                           { $$.enums.push_back($1); }
@@ -521,29 +512,22 @@ param_list
 param
     : qualifier type pointer IDENTIFIER     {
                                                 const Declared d = declared($1, $2, $3);
-                                                $$ = ast::Param{at(@4), $4, d.type, d.isConst, d.isRestrict};
+                                                $$ = ast::Param{at(@4), $4, d.type, d.isConst, d.isRestrict, nullptr};
                                             }
     | qualifier type pointer                {
                                                 const Declared d = declared($1, $2, $3);
-                                                $$ = ast::Param{at(@2), "", d.type, d.isConst, d.isRestrict};
+                                                $$ = ast::Param{at(@2), "", d.type, d.isConst, d.isRestrict, nullptr};
                                             }
-    | qualifier type pointer IDENTIFIER "[" array_size "]"
+    | qualifier type pointer IDENTIFIER array_size
                                             {
                                                 // C's: a parameter declared as an array is a pointer to its first
-                                                // element, and the size says nothing.
+                                                // element, and the size, checked, says nothing.
                                                 const Pointer pointer = $3;
                                                 if (pointer.isPointer)
                                                     parseContext.diagnostics.error(at(@4),
                                                                                    "FMinus has no arrays of pointers");
-                                                $$ = ast::Param{at(@4), $4, ast::Type::pointerTo($2, $1), false, false};
-                                            }
-    | qualifier type pointer IDENTIFIER "[" "]"
-                                            {
-                                                const Pointer pointer = $3;
-                                                if (pointer.isPointer)
-                                                    parseContext.diagnostics.error(at(@4),
-                                                                                   "FMinus has no arrays of pointers");
-                                                $$ = ast::Param{at(@4), $4, ast::Type::pointerTo($2, $1), false, false};
+                                                $$ = ast::Param{at(@4), $4, ast::Type::pointerTo($2, $1), false, false,
+                                                                $5};
                                             }
     ;
 
@@ -647,7 +631,8 @@ declaration
                                                                                          std::move(d.name),
                                                                                          std::move(d.init),
                                                                                          name.isRestrict, d.hasList,
-                                                                                         std::move(d.list)}});
+                                                                                         std::move(d.list),
+                                                                                         std::move(d.size)}});
                                                 }
                                             }
     ;
@@ -660,18 +645,21 @@ declarators
 declarator
     : pointer IDENTIFIER                    { $$ = Declarator{at(@2), $1, $2, nullptr}; }
     | pointer IDENTIFIER "=" expr           { $$ = Declarator{at(@2), $1, $2, $4}; }
-    | pointer IDENTIFIER "=" "{" args "}"   { $$ = Declarator{at(@2), $1, $2, nullptr, 0, true, $5}; }
-    | pointer IDENTIFIER "[" array_size "]" { $$ = Declarator{at(@2), $1, $2, nullptr, $4}; }
-    | pointer IDENTIFIER "[" array_size "]" "=" expr
-                                            { $$ = Declarator{at(@2), $1, $2, $7, $4}; }
-    | pointer IDENTIFIER "[" array_size "]" "=" "{" args "}"
-                                            { $$ = Declarator{at(@2), $1, $2, nullptr, $4, true, $8}; }
-    | pointer IDENTIFIER "[" array_size "]" "=" "{" arg_list "," "}"
-                                            { $$ = Declarator{at(@2), $1, $2, nullptr, $4, true, $8}; }
+    | pointer IDENTIFIER "=" "{" args "}"   { $$ = Declarator{at(@2), $1, $2, nullptr, false, nullptr, true, $5}; }
+    | pointer IDENTIFIER array_size         { $$ = Declarator{at(@2), $1, $2, nullptr, true, $3}; }
+    | pointer IDENTIFIER array_size "=" expr
+                                            { $$ = Declarator{at(@2), $1, $2, $5, true, $3}; }
+    | pointer IDENTIFIER array_size "=" "{" args "}"
+                                            { $$ = Declarator{at(@2), $1, $2, nullptr, true, $3, true, $6}; }
+    | pointer IDENTIFIER array_size "=" "{" arg_list "," "}"
+                                            { $$ = Declarator{at(@2), $1, $2, nullptr, true, $3, true, $6}; }
     ;
 
+// An array's size as written: an expression (the code generator checks that it is an integer constant expression,
+// and its value), or none, `[]`, for an array whose list gives it.
 array_size
-    : NUMBER                                { $$ = arraySize(@1, $1, parseContext); }
+    : "[" expr "]"                          { $$ = $2; }
+    | "[" "]"                               { $$ = nullptr; }
     ;
 
 // A statement where one is expected: an unlabeled one, or a label and the statement it labels.

@@ -95,7 +95,8 @@ TEST_CASE("array errors are reported as clang reports them", "[codegen][array]")
              "test.fm:11:11: error: FMinus takes an initializer list for an array only\n"
              "test.fm:12:5: error: returning 'float *' from a function with incompatible result type 'float'\n");
 
-    // The size is the parser's to check: a positive integer constant.
+    // The size is an integer constant expression from 1 to 2^30, which the code generator works out
+    // (TopLevelTest.cpp has its other errors).
     CHECK(errorsOf("void f() { float a[1.5]; }")
           == "test.fm:1:20: error: size of array has non-integer type 'float'\n");
     CHECK(errorsOf("void f() { float a[0]; }") == "test.fm:1:20: error: zero size arrays are not allowed\n");

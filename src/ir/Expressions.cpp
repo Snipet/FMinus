@@ -6,6 +6,7 @@
 
 #include <llvm/ADT/APFloat.h>
 #include <llvm/IR/Constants.h>
+#include <llvm/IR/GlobalVariable.h>
 #include <llvm/Support/Error.h>
 
 #include <charconv>
@@ -20,8 +21,17 @@ namespace fminus::ir::detail
             Overloaded{
                 [&](const ast::NumberExpr& number) { return lowerNumber(expr.location, number); },
                 [&](const ast::VariableExpr& variable) {
-                    if (const std::optional<std::int32_t> value = enumerator(variable.name))   // Constants.cpp
-                        return Value{builder_.getInt32(static_cast<std::uint32_t>(*value)), ast::Type::Int};
+                    if (const Binding* binding = named(variable.name))
+                    {
+                        if (binding->enumerator)   // Constants.cpp
+                            return Value{builder_.getInt32(static_cast<std::uint32_t>(*binding->enumerator)),
+                                         ast::Type::Int};
+                        // A constant of the top level that is no array reads as its value, as clang reads a const
+                        // object whose initialiser is a constant: what its memory holds, with no load.
+                        auto* global = llvm::dyn_cast_if_present<llvm::GlobalVariable>(binding->slot);
+                        if (global != nullptr && !ast::isArray(binding->type) && global->hasInitializer())
+                            return Value{global->getInitializer(), binding->type};
+                    }
                     return readLValue(expr);
                 },
                 [&](const ast::IndexExpr& index) {
@@ -256,6 +266,9 @@ namespace fminus::ir::detail
         llvm::PHINode* phi = builder_.CreatePHI(builder_.getInt1Ty(), 2, isAnd ? "land" : "lor");
         phi->addIncoming(builder_.getInt1(!isAnd), lhsEnd);   // && is false when a is; || is true when a is
         phi->addIncoming(rhs, rhsEnd);
+        // A top-level constant's initialiser runs nowhere: a constant a is the value it decides (Constants.cpp).
+        if (const auto* decided = llvm::dyn_cast<llvm::ConstantInt>(lhs); decided != nullptr && atTopLevel())
+            return decided->isOne() == isAnd ? rhs : builder_.getInt1(!isAnd);
         return phi;
     }
 
@@ -337,6 +350,9 @@ namespace fminus::ir::detail
         llvm::PHINode* phi = builder_.CreatePHI(typeOf(type), 2, "cond");
         phi->addIncoming(thenIR, thenEnd);
         phi->addIncoming(elseIR, elseEnd);
+        // A top-level constant's initialiser runs nowhere: a constant condition is the arm it picks (Constants.cpp).
+        if (const auto* picked = llvm::dyn_cast<llvm::ConstantInt>(condition); picked != nullptr && atTopLevel())
+            return {picked->isOne() ? thenIR : elseIR, type};
         return {phi, type};
     }
 
@@ -399,6 +415,12 @@ namespace fminus::ir::detail
         }
         if (!checkType(location, size.type))
             return poison(ast::Type::Int);
+        if (ast::isModule(size.type) && structs_.at(size.type.module)->isOpaque())   // in its own fields' sizes
+        {
+            error(location,
+                  "invalid application of 'sizeof' to an incomplete type " + quoted(ast::typeName(size.type)));
+            return poison(ast::Type::Int);
+        }
         return {builder_.getInt32(*sizeOf(size.type)), ast::Type::Int};
     }
 

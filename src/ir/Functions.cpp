@@ -15,6 +15,8 @@
 #include <llvm/TargetParser/Triple.h>
 #include <llvm/Transforms/Utils/BuildLibCalls.h>
 
+#include <algorithm>
+
 namespace fminus::ir::detail
 {
     bool Lowering::sameSignature(const ast::Function& a, const ast::Function& b)
@@ -108,20 +110,29 @@ namespace fminus::ir::detail
         }
         if (function.returnType == ast::Type::Bool)
             llvmFunction->addRetAttr(llvm::Attribute::ZExt);
-        // A method's `this` is never null and points to a whole module, aligned, as clang says of C++'s: what lets the
-        // optimiser hoist a field's load out of a loop.
-        if (function.module != nullptr)
+        functions_.emplace(function.name, &function);   // a method's `this` waits for its module's layout
+    }
+
+    // A method's `this` is never null and points to a whole module, aligned, as clang says of C++'s: what lets the
+    // optimiser hoist a field's load out of a loop. Once `module` is laid out (Modules.cpp), its methods say so.
+    void Lowering::describeThis(const ast::Module& module)
+    {
+        const ast::Type type = ast::Type::moduleType(&module);
+        const unsigned size = *sizeOf(type);
+        llvm::AttrBuilder attributes(module_.getContext());
+        attributes.addAttribute(llvm::Attribute::NonNull);
+        attributes.addAlignmentAttr(alignOf(type));
+        if (size > 0)
+            attributes.addDereferenceableAttr(size);
+        for (const std::string& method : module.methods)
         {
-            const ast::Type module = ast::Type::moduleType(function.module);
-            const unsigned size = *sizeOf(module);
-            llvm::AttrBuilder attributes(module_.getContext());
-            attributes.addAttribute(llvm::Attribute::NonNull);
-            attributes.addAlignmentAttr(alignOf(module));
-            if (size > 0)
-                attributes.addDereferenceableAttr(size);
-            llvmFunction->addParamAttrs(0, attributes);
+            llvm::Function* function = module_.getFunction(module.name + "::" + method);
+            const auto found = functions_.find(module.name + "::" + method);
+            // the method's own: not one of a second module of the name's, nor a duplicate's
+            if (function != nullptr && found != functions_.end() && found->second->module == &module
+                && !function->arg_empty() && !function->hasParamAttribute(0, llvm::Attribute::NonNull))
+                function->addParamAttrs(0, attributes);
         }
-        functions_.emplace(function.name, &function);
     }
 
     void Lowering::define(const ast::Function& function)
@@ -273,5 +284,22 @@ namespace fminus::ir::detail
                 return &found->second;
         }
         return nullptr;
+    }
+
+    // What `name` names where it is used, as C++ looks a name up in a method: a block's variable or enumeration
+    // constant; else, in a method, nothing if the module has a field or a method of the name (this's, which
+    // lvalue() and the calls find); else the file's enumeration constant or constant (Constants.cpp). Captures
+    // nothing; nullptr for a name none of them has.
+    const Lowering::Binding* Lowering::named(const std::string& name) const
+    {
+        if (const Binding* binding = lookup(name))
+            return binding;
+        const ast::Module* module = function_ != nullptr ? function_->module : nullptr;
+        if (module != nullptr
+            && (findField(*module, name, nullptr) != nullptr
+                || std::ranges::find(module->methods, name) != module->methods.end()))
+            return nullptr;
+        const auto found = fileScope_.find(name);
+        return found != fileScope_.end() ? &found->second : nullptr;
     }
 } // namespace fminus::ir::detail

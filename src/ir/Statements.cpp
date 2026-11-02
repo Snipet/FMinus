@@ -443,9 +443,10 @@ namespace fminus::ir::detail
     }
 
     // The initialiser is lowered before the name is bound, so `float x = x;` reads an outer x. Without one,
-    // the variable starts at 0. An array or a module starts at 0 too (a memset), and then takes its initialiser: an
-    // array its list's elements, a module a copy of another. A const array of constants is stored once instead
-    // (declareConstArray, Memory.cpp).
+    // the variable starts at 0. An array's size is worked out first (sized, Constants.cpp: an integer constant
+    // expression, or its list's length). An array or a module starts at 0 too (a memset), and then takes its
+    // initialiser: an array its list's elements, a module a copy of another. A const array of constants is stored
+    // once instead (declareConstArray, Memory.cpp).
     void Lowering::declareVariable(SourceLocation location, const ast::DeclStmt& decl)
     {
         const auto declare = [&](llvm::Value* slot, bool isConst, ast::Type type) {
@@ -453,6 +454,10 @@ namespace fminus::ir::detail
                 redefinition(location, decl.name, false, scopes_.back().at(decl.name));
         };
         ast::Type type = decl.type;
+        if (ast::isArray(type) && decl.size == nullptr && decl.init)
+            type.count = 1;   // its initialiser's error says why
+        else if (ast::isArray(type))
+            type = sized(location, decl.name, type, decl.size.get(), decl.hasList ? &decl.list : nullptr);
         if (type == ast::Type::Void)
         {
             error(location, "variable has incomplete type 'void'");

@@ -102,63 +102,18 @@ namespace fminus::ir::detail
         }
     } // namespace
 
-    // Every module's struct type, in declaration order, so a field may be a module declared before (whose layout is
-    // known), or point to any. A second module of a name is an error (the parser gave the name to the first). A field
-    // is refused when it has an initialiser or is const (nothing runs when a module is made, so it would only ever be
-    // 0), when its type is incomplete (void, or a module not yet laid out: its own, or a later one, by value) or one
-    // FMinus cannot point to, and when another member has its name. A refused field takes a float's place, so the
-    // module's uses report no more errors.
-    void Lowering::layOut(const ast::Program& program)
+    // Every module's struct type, opaque until layOut gives it its body, so that a field or a parameter may point to
+    // any module. A second module of a name is an error (the parser gave the name to the first). And every binding the
+    // host gave names a parameter of the program.
+    void Lowering::prepareModules(const ast::Program& program)
     {
-        for (const std::unique_ptr<ast::Module>& module : program.modules)
-            structs_.emplace(module.get(), llvm::StructType::create(module_.getContext(), module->name));
-        std::unordered_set<const ast::Module*> complete;
         std::unordered_set<std::string> modules;
         for (const std::unique_ptr<ast::Module>& module : program.modules)
         {
+            structs_.emplace(module.get(), llvm::StructType::create(module_.getContext(), module->name));
             if (!modules.insert(module->name).second)
                 error(module->location, "redefinition of " + quoted(module->name));
-            std::vector<llvm::Type*> elements;
-            std::unordered_set<std::string> names;
-            for (const ast::Field& field : module->fields)
-            {
-                ast::Type type = field.type;
-                if (!names.insert(field.name).second)
-                    error(field.location, "duplicate member " + quoted(field.name));
-                if (field.isParam)
-                {
-                    checkParameter(*module, field);
-                    elements.push_back(
-                        llvm::StructType::get(module_.getContext(), {builder_.getPtrTy(), slotTypeOf(type)}));
-                    continue;
-                }
-                if (field.hasInitializer)
-                    error(field.location, "a module's fields start at 0 and take no initializer: set "
-                                              + quoted(field.name) + " in a method, such as init");
-                if (field.isConst)
-                    error(field.location, "a module's fields cannot be const: they start at 0, and a method sets them");
-                const bool byValue = ast::isModule(type) || (ast::isArray(type) && type.pointee == ast::Kind::Module);
-                if (type == ast::Type::Void)
-                {
-                    error(field.location, "field has incomplete type 'void'");
-                    type = ast::Type::Float;
-                }
-                else if (byValue && !complete.contains(type.module))
-                {
-                    error(field.location, "field has incomplete type " + quoted(ast::typeName(type))
-                                              + ": a module holds only modules declared before it (and pointers)");
-                    type = ast::Type::Float;
-                }
-                else if (!checkType(field.location, type))
-                {
-                    type = ast::Type::Float;
-                }
-                elements.push_back(typeOf(type));
-            }
-            structs_.at(module.get())->setBody(elements);
-            complete.insert(module.get());
         }
-        // Every binding names a parameter of the program.
         for (const auto& [name, binding] : bindings_)
         {
             bool found = false;
@@ -170,6 +125,81 @@ namespace fminus::ir::detail
             if (!found)
                 error({1, 1}, "the host binds " + quoted(name) + ", but the program has no such parameter");
         }
+    }
+
+    // A module's struct type, where the module is among the file's declarations (CodeGen.cpp), so a field may be a
+    // module declared before (whose layout is known), and an array field's size an integer constant expression of the
+    // enumeration constants before it: the file's, and the module's own declared before the field (program_->enums
+    // from `enums` on; every one of them is declared here, the rest after the last field, for the methods). A field is
+    // refused when it has an initialiser or is const (nothing runs when a module is made, so it would only ever be 0),
+    // when its type is incomplete (void, `float a[]`, or a module not yet laid out: its own, or a later one, by value)
+    // or one FMinus cannot point to, and when another member has its name. A refused field takes a float's place, so
+    // the module's uses report no more errors. Then its methods' `this` is described (describeThis), which needs its
+    // size.
+    void Lowering::layOut(const ast::Module& module, std::size_t& enums)
+    {
+        const std::size_t first = enums;
+        const auto declareEnums = [&](std::size_t count) {   // the module's first `count`
+            for (; enums < program_->enums.size() && program_->enums[enums].module == &module && enums - first < count;
+                 ++enums)
+                declareEnum(program_->enums[enums]);
+        };
+        std::vector<llvm::Type*> elements;
+        std::unordered_set<std::string> names;
+        for (const ast::Field& field : module.fields)
+        {
+            declareEnums(field.enums);
+            ast::Type type = field.type;
+            if (!names.insert(field.name).second)
+                error(field.location, "duplicate member " + quoted(field.name));
+            if (field.isParam)
+            {
+                checkParameter(module, field);
+                elements.push_back(
+                    llvm::StructType::get(module_.getContext(), {builder_.getPtrTy(), slotTypeOf(type)}));
+                continue;
+            }
+            if (field.hasInitializer)
+                error(field.location, "a module's fields start at 0 and take no initializer: set "
+                                          + quoted(field.name) + " in a method, such as init");
+            if (field.isConst)
+                error(field.location, "a module's fields cannot be const: they start at 0, and a method sets them");
+            if (ast::isArray(type) && field.size == nullptr)
+            {
+                error(field.location, "field has incomplete type " + quoted(ast::typeName(ast::pointee(type)) + "[]"));
+                type = ast::Type::Float;
+            }
+            else if (ast::isArray(type))
+                type = sized(field.location, field.name, type, field.size.get(), nullptr);
+            const bool byValue = ast::isModule(type) || (ast::isArray(type) && type.pointee == ast::Kind::Module);
+            if (type == ast::Type::Void)
+            {
+                error(field.location, "field has incomplete type 'void'");
+                type = ast::Type::Float;
+            }
+            else if (byValue && structs_.at(type.module)->isOpaque())
+            {
+                error(field.location, "field has incomplete type " + quoted(ast::typeName(type))
+                                          + ": a module holds only modules declared before it (and pointers)");
+                type = ast::Type::Float;
+            }
+            else if (!checkType(field.location, type))
+            {
+                type = ast::Type::Float;
+            }
+            fieldTypes_.insert_or_assign(&field, type);
+            elements.push_back(typeOf(type));
+        }
+        declareEnums(std::numeric_limits<std::size_t>::max());
+        structs_.at(&module)->setBody(elements);
+        describeThis(module);
+    }
+
+    // A field's type, as layOut laid it out: an array's with its size worked out (the tree's count is 0).
+    ast::Type Lowering::fieldType(const ast::Field& field) const
+    {
+        const auto found = fieldTypes_.find(&field);
+        return found != fieldTypes_.end() ? found->second : field.type;
     }
 
     // A parameter's type (a float, an int or a bool), its binding (only a float can be a stream), and its attributes:
@@ -458,7 +488,7 @@ namespace fminus::ir::detail
             return std::nullopt;
         }
         llvm::Value* at = builder_.CreateStructGEP(structs_.at(&module), address, index, name);
-        return LValue{at, found->type, isConst, "", found->type, {}};
+        return LValue{at, fieldType(*found), isConst, "", fieldType(*found), {}};
     }
 
     // The method's `this`: the address of the module it was called on (its parameter's slot holds it).
@@ -554,7 +584,7 @@ namespace fminus::ir::detail
         if (found == functions_.end())
         {
             if (const ast::Field* field = findField(module, name, nullptr))
-                error(location, "called object type " + quoted(ast::typeName(field->type))
+                error(location, "called object type " + quoted(ast::typeName(fieldType(*field)))
                                     + " is not a function or function pointer");
             else
                 error(location, "no member named " + quoted(name) + " in " + quoted(module.name));
