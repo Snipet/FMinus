@@ -4540,6 +4540,12 @@ each converted to the element type as `initializeArray` converts it, and looks a
   instead of a stack slot.
 - **Anything else** (a variable, a call, a knob): a local, as before, with its list's values, computed once, stored
   after the zeroing.
+- **Over 1 MiB** (`kMaxTableBytes`: 262,144 floats, 65,536 `float4`s), whatever its list: a local too. A global's
+  every byte is built in the compiler's memory, its zeros too: the JIT's object holds them in a read-only section
+  (LLVM leaves a constant's zeros out of BSS), and JITLink copies them, so a table costs about twice its size to
+  compile, where a stack slot costs nothing until it is called. An array may have 2^30 elements: `fminus --run` of a
+  program with a 256 MB table (a two-element list) peaked at 573 MB with the table a global, and at 37 MB with it on
+  the stack.
 
 A binding holds an address whichever it is, so every read goes through `lvalue()` and `read()` unchanged: the name
 stands for a `const T*`, an element through it is read-only, and none can be written. A parallel region reads a table
@@ -4562,7 +4568,8 @@ deviations.
 
 - **Results do not change**, bit for bit; a const array of constants costs no time where it is declared.
 - **A large table takes its size in the JIT's memory**, once, where it took it on the stack, on every call: a table of
-  100,000 floats with a short list is 400 KB of `__const` in the object, zeros included.
+  100,000 floats with a short list is 400 KB of `__const` in the object, zeros included. One over 1 MiB stays on the
+  stack, as before.
 
 ### Tests
 
@@ -4572,7 +4579,8 @@ deviations.
   a loop, through a `const float*`, in nested calls, in two scopes of one name, in a `parallel for` and in a
   knob-versioned method; a list with a variable, a call's side effects in order, and `?:` on the stack; the errors.
 - `tests/lit/fminus/tables.fm`: the globals and their shapes, functions with no alloca, memset or store for them, a list
-  that is not constants on the stack, a region's context without the table, and `-O2`'s folded reads.
+  that is not constants on the stack, a region's context without the table, a 1 MiB table and one 16 bytes larger on
+  the stack, and `-O2`'s folded reads.
 
 ## Pitfalls
 

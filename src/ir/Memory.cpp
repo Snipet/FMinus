@@ -324,13 +324,17 @@ namespace fminus::ir::detail
     // one: a private unnamed_addr constant global named as clang names a local's (__const.f.t), which every call reads
     // and none fills. Its elements are what the stack's array would hold, bit for bit: the list's values, converted to
     // the element type as initializeArray converts them, then zeros (eight or more of them as one zeroinitializer, as
-    // clang writes them, so that a large array costs no constant per element). Otherwise it is a local as any array
-    // is: a stack slot, zeroed, then the list's values stored, which are lowered once, in order, before it. The one
-    // difference C could see is the address: every call's table is the same object, where C's would differ between
-    // nested calls of one function. Returns the global or the slot; `type` is the declaration's (an array of what
-    // FMinus can point to, but a module), and the declaration has no `= expr`.
+    // clang writes them, so that the IR holds no constant per element). The one difference C could see is the
+    // address: every call's table is the same object, where C's would differ between nested calls of one function.
+    // Otherwise it is a local as any array is: a stack slot, zeroed, then the list's values stored, which are lowered
+    // once, in order, before it. So is an array over kMaxTableBytes, whatever its list: the JIT's object holds every
+    // byte of a global, its zeros too (in a read-only section, which it then copies), so a table costs the compiler
+    // about twice its size, where a stack slot costs nothing to compile, and an array may have 2^30 elements. Returns
+    // the global or the slot; `type` is the declaration's (an array of what FMinus can point to, but a module), and
+    // the declaration has no `= expr`.
     llvm::Value* Lowering::declareConstArray(SourceLocation location, const ast::DeclStmt& decl, ast::Type type)
     {
+        constexpr std::uint64_t kMaxTableBytes = std::uint64_t{1} << 20;   // 1 MiB: 262,144 floats, 65,536 float4s
         const ast::Type element = ast::pointee(type);
         std::vector<llvm::Value*> values;
         if (decl.list.size() > static_cast<std::size_t>(type.count))
@@ -340,10 +344,11 @@ namespace fminus::ir::detail
             for (const ast::ExprPtr& item : decl.list)
                 values.push_back(convert(lower(*item), element, item->location, Use::Initializing));
         }
-        if (std::ranges::all_of(values, [](llvm::Value* value) { return llvm::isa<llvm::Constant>(value); }))
+        auto* arrayType = llvm::cast<llvm::ArrayType>(typeOf(type));
+        if (module_.getDataLayout().getTypeAllocSize(arrayType).getFixedValue() <= kMaxTableBytes
+            && std::ranges::all_of(values, [](llvm::Value* value) { return llvm::isa<llvm::Constant>(value); }))
         {
             llvm::Type* elementType = typeOf(element);
-            auto* arrayType = llvm::cast<llvm::ArrayType>(typeOf(type));
             const std::uint64_t count = arrayType->getNumElements();
             // Up to the last element that is not zero; clang's EmitArrayConstant's shapes for what follows it.
             std::vector<llvm::Constant*> given;
@@ -372,11 +377,11 @@ namespace fminus::ir::detail
             table->setAlignment(alignOf(type));
             return table;
         }
-        llvm::AllocaInst* slot = allocate(typeOf(type), decl.name);
+        llvm::AllocaInst* slot = allocate(arrayType, decl.name);
         zero(slot, type);
         for (std::size_t i = 0; i < values.size(); ++i)
         {
-            llvm::Value* at = builder_.CreateConstInBoundsGEP2_64(typeOf(type), slot, 0, i, "arrayinit");
+            llvm::Value* at = builder_.CreateConstInBoundsGEP2_64(arrayType, slot, 0, i, "arrayinit");
             tag(builder_.CreateStore(values[i], at), element);
         }
         return slot;
