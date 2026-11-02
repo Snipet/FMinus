@@ -101,6 +101,62 @@ TEST_CASE("the bitwise operators and shifts have C's precedence, and & is unary 
              "  (<<= a (>>= b 1))\n  (&= a 1)\n  (|= a 2)\n  (^= a b)\n  (return a))\n");
 }
 
+TEST_CASE("switch parses as C's, and case and default as C23's labels: block items, or a statement's", "[frontend]")
+{
+    // In a block, a label is an item of its own, so a declaration may follow one and one may end the block; where a
+    // statement is expected, a label labels the statement after it.
+    CHECK(parsed("int f(int x)\n"
+                 "{\n"
+                 "    switch (x)\n"
+                 "    {\n"
+                 "    case 1:\n"
+                 "    case 2 + 1: x = 0; break;\n"
+                 "    default: int y = x; x = y;\n"
+                 "    case 4:\n"
+                 "    }\n"
+                 "    switch (x) case 1: case 2: return 1;\n"
+                 "    if (x) default: x = 3;\n"
+                 "    switch (x) ;\n"
+                 "    return x ? 1 : 2;\n"
+                 "}\n")
+          == "(function int f ((int x))\n"
+             "  (switch x\n"
+             "    (block\n"
+             "      (case 1)\n"
+             "      (case (+ 2 1))\n"
+             "      (= x 0)\n"
+             "      (break)\n"
+             "      (default)\n"
+             "      (decl int y x)\n"
+             "      (= x y)\n"
+             "      (case 4)))\n"
+             "  (switch x\n"
+             "    (case 1\n"
+             "      (case 2\n"
+             "        (return 1))))\n"
+             "  (if x\n"
+             "    (default\n"
+             "      (= x 3)))\n"
+             "  (switch x\n"
+             "    (empty))\n"
+             "  (return (?: x 1 2)))\n");
+    // A case's value is an expression up to its colon, ?: included; `default` is a keyword, and an identifier in an
+    // attribute, as C23 reads a keyword there.
+    CHECK(parsed("int f(int x) { switch (x) { case x ? 1 : 2: break; } return 0; }")
+          == "(function int f ((int x))\n"
+             "  (switch x\n"
+             "    (block\n"
+             "      (case (?: x 1 2))\n"
+             "      (break)))\n"
+             "  (return 0))\n");
+    CHECK(parsed("module M { param int n [[fminus::default(3)]]; };")
+          == "(module M\n  (param int n [[fminus::default(3)]]))\n");
+    CHECK(parsed("int f(int x) { switch (x) { case 1 break; } }")
+          == "test.fm:1:36: error: syntax error, unexpected break\n");
+    CHECK(parsed("int f(int default) { return 0; }")
+          == "test.fm:1:11: error: syntax error, unexpected default, expecting * or ) or , or identifier\n");
+}
+
 TEST_CASE("vector types, literals and swizzles parse as OpenCL C's", "[frontend]")
 {
     // A literal is a parenthesised type, then its elements; a swizzle binds tighter than any operator, as in C.

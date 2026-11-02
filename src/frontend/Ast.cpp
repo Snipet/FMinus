@@ -260,6 +260,18 @@ namespace fminus::ast
                                   },
                                   [&](const BreakStmt&) { return indent + "(break)"; },
                                   [&](const ContinueStmt&) { return indent + "(continue)"; },
+                                  [&](const SwitchStmt& branch) {   // (switch x\n  (block ...))
+                                      return indent + "(switch " + dump(*branch.value) + "\n"
+                                             + dump(*branch.body, indent + "  ") + ")";
+                                  },
+                                  [&](const CaseStmt& label) {   // (case 1), or (case 1\n  s) with a body
+                                      return indent + "(case " + dump(*label.value)
+                                             + (label.body ? "\n" + dump(*label.body, indent + "  ") : "") + ")";
+                                  },
+                                  [&](const DefaultStmt& label) {
+                                      return indent + "(default"
+                                             + (label.body ? "\n" + dump(*label.body, indent + "  ") : "") + ")";
+                                  },
                                   [&](const ParallelForStmt& loop) {
                                       std::string init;
                                       for (const Stmt& item : loop.init)

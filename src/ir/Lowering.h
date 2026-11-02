@@ -3,8 +3,9 @@
 //     CodeGen.cpp       ir::lower(), and the two passes: declare every function, then define each body
 //     Types.cpp         FMinus's types as LLVM's, the conversions between them, the errors' helpers
 //     Functions.cpp     declarations and prototypes (libm's attributes), bodies and parameters, stack slots and scopes
-//     Statements.cpp    blocks, declarations, return, if, while, for, break and continue
+//     Statements.cpp    blocks, declarations, return, if, while, for, switch and its labels, break and continue
 //     Expressions.cpp   constants, variables, operators, &&, ||, ?:, casts, assignment, ++ and --
+//     Constants.cpp     C's integer constant expressions, worked out where they are written: a case label's value
 //     Calls.cpp         calls: the builtins (math functions, reductions, poly queries and memory, the heap, the FFT)
 //                       and the program's
 //     Math.cpp          sinf, cosf, tanf, expf, tanhf and logf in the vector and libm math modes: the runtime's
@@ -165,12 +166,50 @@ namespace fminus::ir::detail
             std::string callee;
         };
 
-        // The loops around the statement being lowered, innermost last: where break and continue go. A parallel
-        // region's body is one too, whose break (and a parallel { }'s continue) goes nowhere: an error.
-        struct Loop
+        // The loops and switches around the statement being lowered, innermost last: where break and continue go, and
+        // which switch a case label is of. break leaves the innermost of either, continue goes to the innermost loop's
+        // next iteration, and a label belongs to the innermost switch. A parallel region's body is one too, whose
+        // break (and a parallel { }'s continue) goes nowhere, and which no label reaches from outside: an error.
+        struct Breakable
         {
-            llvm::BasicBlock* breakTarget;
-            llvm::BasicBlock* continueTarget;
+            enum class Kind
+            {
+                Loop,
+                Switch,   // switches_.back(): a label's
+                Region,
+            };
+            Kind kind;
+            llvm::BasicBlock* breakTarget;      // a loop's end, or a switch's; null for a region
+            llvm::BasicBlock* continueTarget;   // a loop's next iteration, a parallel for's too; null otherwise
+        };
+
+        // A label a switch has (Statements.cpp): where its value is written, and the name it is written as when it is
+        // one (`case A:`, (int)A too), for the message about a duplicate.
+        struct CaseLabel
+        {
+            SourceLocation location;
+            std::string name;
+        };
+
+        // A switch being lowered (Statements.cpp): its instruction, to which each case label adds its value and its
+        // block, the first scope of its body (scopes_[base] on hold what the body declares), and its labels so far.
+        struct Switch
+        {
+            llvm::SwitchInst* instruction;
+            std::size_t base;
+            std::map<std::int32_t, CaseLabel> cases;
+            std::optional<SourceLocation> defaultLabel;
+        };
+
+        // A constant expression's value, as fold() works it out (Constants.cpp): an int's or a bool's (0 or 1), and
+        // which, or a float, whose value it does not need. `floating` is where a floating constant takes part other
+        // than as a cast's operand, the one place C allows one: a float's always has it, and an int that has it
+        // (1.5f < 2) is no integer constant expression either.
+        struct Folded
+        {
+            std::int32_t value = 0;
+            ast::Type type = ast::Type::Int;   // Int, Bool or Float
+            std::optional<SourceLocation> floating;
         };
 
         // What a method's reads of one stream use, computed where it starts (Modules.cpp, atEntry): whether it is
@@ -272,7 +311,17 @@ namespace fminus::ir::detail
         void lowerIf(const ast::IfStmt& branch);
         void lowerWhile(const ast::WhileStmt& loop);
         void lowerFor(const ast::ForStmt& loop);
+        void lowerSwitch(const ast::SwitchStmt& branch);
+        void lowerLabel(SourceLocation location, const ast::Expr* value, const ast::StmtPtr& body);
+        llvm::BasicBlock* bypass(const Switch& branch, llvm::BasicBlock* label);
         void declareVariable(SourceLocation location, const ast::DeclStmt& decl);
+
+        // ---- Constants.cpp ------------------------------------------------------------------------------------------
+        std::optional<std::int32_t> integerConstant(const ast::Expr& expr);
+        std::optional<Folded> fold(const ast::Expr& expr, bool evaluated);
+        std::optional<Folded> foldBinary(SourceLocation location, ast::BinaryOp op, Folded lhs, Folded rhs,
+                                         bool evaluated);
+        std::optional<Folded> notConstant(SourceLocation location);
 
         // ---- Expressions.cpp ----------------------------------------------------------------------------------------
         Value lower(const ast::Expr& expr);
@@ -390,7 +439,8 @@ namespace fminus::ir::detail
         std::unordered_map<std::string, const ast::Function*> functions_;   // the program's, by name
         std::vector<std::unordered_map<std::string, Binding>> scopes_;     // the current function's, inner last
         const ast::Function* function_ = nullptr;                          // the function being lowered
-        std::vector<Loop> loops_;
+        std::vector<Breakable> breakables_;                                // the loops and switches around
+        std::vector<Switch> switches_;                                     // the switches around, inner last
         std::unordered_map<std::string, Effect> effects_;                  // each name's, from all its declarations
         std::unordered_map<std::string, std::vector<CallSite>> calls_;     // each definition's calls, in order
         std::unordered_map<const ast::Module*, llvm::StructType*> structs_;   // each module's layout

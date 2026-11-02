@@ -232,6 +232,18 @@ namespace fminus::ir::detail
                                [&](const ast::ForStmt& loop) { forLoop(loop.init, loop.condition, loop.step, *loop.body); },
                                [](const ast::BreakStmt&) {},
                                [](const ast::ContinueStmt&) {},
+                               [&](const ast::SwitchStmt& branch) {
+                                   expression(*branch.value, Access::Kind::Read);
+                                   scoped([&] { statement(*branch.body); });
+                               },
+                               [&](const ast::CaseStmt& label) {   // its value is a constant: it reads nothing
+                                   if (label.body)
+                                       statement(*label.body);
+                               },
+                               [&](const ast::DefaultStmt& label) {
+                                   if (label.body)
+                                       statement(*label.body);
+                               },
                                [&](const ast::ParallelForStmt& loop) {
                                    forLoop(loop.init, loop.condition, loop.step, *loop.body);
                                },
@@ -727,9 +739,9 @@ namespace fminus::ir::detail
         llvm::Value* at = builder_.CreateLoad(i32, slot, name);
         builder_.CreateCondBr(builder_.CreateICmpSLT(at, body->getArg(2), "parallel.more"), bodyBlock, endBlock);
         builder_.SetInsertPoint(bodyBlock);
-        loops_.push_back({nullptr, incBlock});
+        breakables_.push_back({Breakable::Kind::Region, nullptr, incBlock});
         lowerScoped(*loop.body);
-        loops_.pop_back();
+        breakables_.pop_back();
         fallThrough(incBlock);
         builder_.SetInsertPoint(incBlock);
         builder_.CreateStore(builder_.CreateNSWAdd(builder_.CreateLoad(i32, slot, name), builder_.getInt32(1), "inc"),
@@ -768,9 +780,9 @@ namespace fminus::ir::detail
             llvm::BasicBlock* task = newBlock("parallel.statement");
             which->addCase(builder_.getInt32(static_cast<std::uint32_t>(i)), task);
             builder_.SetInsertPoint(task);
-            loops_.push_back({nullptr, nullptr});
+            breakables_.push_back({Breakable::Kind::Region, nullptr, nullptr});
             lowerScoped(block.tasks[i]);
-            loops_.pop_back();
+            breakables_.pop_back();
             fallThrough(incBlock);
         }
         builder_.SetInsertPoint(incBlock);

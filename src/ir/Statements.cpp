@@ -1,11 +1,15 @@
-// src/ir/Statements.cpp: statements. Blocks, declarations and return, and C's control flow: if, while, for, break and
-// continue, in blocks named as clang names them (if.then, while.cond, for.inc, ...). A loop whose condition is not a
-// constant expression must make progress, as in C11 (llvm.loop.mustprogress).
+// src/ir/Statements.cpp: statements. Blocks, declarations and return, and C's control flow: if, while, for, switch and
+// its labels, break and continue, in blocks named as clang names them (if.then, while.cond, for.inc, sw.bb, ...). A
+// loop whose condition is not a constant expression must make progress, as in C11 (llvm.loop.mustprogress).
 #include "ir/Lowering.h"
 
 #include <llvm/IR/Constants.h>
+#include <llvm/IR/GlobalVariable.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Metadata.h>
+
+#include <algorithm>
+#include <tuple>
 
 namespace fminus::ir::detail
 {
@@ -93,22 +97,23 @@ namespace fminus::ir::detail
     void Lowering::lowerStatements(const std::vector<ast::Stmt>& statements)
     {
         for (const ast::Stmt& stmt : statements)
-        {
-            // C accepts statements after a return (and, once the language has them, a break or a continue).
-            // They still lower, so their errors are found, into a block nothing branches to, which the
-            // optimiser deletes. (Not getTerminator(): since LLVM 23 it assumes a finished block.)
-            if (builder_.GetInsertBlock()->hasTerminator())
-            {
-                llvm::Function* function = builder_.GetInsertBlock()->getParent();
-                builder_.SetInsertPoint(
-                    llvm::BasicBlock::Create(module_.getContext(), "unreachable", function));
-            }
             lowerStatement(stmt);
-        }
     }
 
     void Lowering::lowerStatement(const ast::Stmt& stmt)
     {
+        // C accepts statements after a return, a break or a continue, and before a switch's first label. They still
+        // lower, so their errors are found, into a block nothing branches to, which the optimiser deletes. A label
+        // starts a block of its own, which the switch reaches, and a block's items each look for themselves. (Not
+        // getTerminator(): since LLVM 23 it assumes a finished block.)
+        const bool ownBlock = std::holds_alternative<ast::CaseStmt>(stmt.node)
+                              || std::holds_alternative<ast::DefaultStmt>(stmt.node)
+                              || std::holds_alternative<ast::BlockStmt>(stmt.node);
+        if (builder_.GetInsertBlock()->hasTerminator() && !ownBlock)
+        {
+            llvm::Function* function = builder_.GetInsertBlock()->getParent();
+            builder_.SetInsertPoint(llvm::BasicBlock::Create(module_.getContext(), "unreachable", function));
+        }
         std::visit(Overloaded{
                        [&](const ast::DeclStmt& decl) { declareVariable(stmt.location, decl); },
                        [&](const ast::ExprStmt& statement) { lower(*statement.expr); },
@@ -123,24 +128,32 @@ namespace fminus::ir::detail
                        [&](const ast::WhileStmt& loop) { lowerWhile(loop); },
                        [&](const ast::ForStmt& loop) { lowerFor(loop); },
                        [&](const ast::BreakStmt&) {
-                           if (loops_.empty())
+                           if (breakables_.empty())
                                error(stmt.location, "'break' statement not in loop or switch statement");
-                           else if (loops_.back().breakTarget == nullptr)   // a parallel region's body (Parallel.cpp)
+                           else if (breakables_.back().kind == Breakable::Kind::Region)   // its body (Parallel.cpp)
                                error(stmt.location, regions_.back().loop
                                                         ? "'break' cannot leave a parallel for: its iterations run "
                                                           "at once, and none can end the others"
                                                         : "'break' cannot leave a statement of a parallel block");
                            else
-                               builder_.CreateBr(loops_.back().breakTarget);
+                               builder_.CreateBr(breakables_.back().breakTarget);
                        },
                        [&](const ast::ContinueStmt&) {
-                           if (loops_.empty())
+                           // A switch is no loop: continue goes to the next iteration of the loop around it.
+                           const auto loop = std::ranges::find_if(breakables_.rbegin(), breakables_.rend(),
+                                                                  [](const Breakable& around) {
+                                                                      return around.kind != Breakable::Kind::Switch;
+                                                                  });
+                           if (loop == breakables_.rend())
                                error(stmt.location, "'continue' statement not in loop statement");
-                           else if (loops_.back().continueTarget == nullptr)
+                           else if (loop->continueTarget == nullptr)
                                error(stmt.location, "'continue' cannot leave a statement of a parallel block");
                            else
-                               builder_.CreateBr(loops_.back().continueTarget);
+                               builder_.CreateBr(loop->continueTarget);
                        },
+                       [&](const ast::SwitchStmt& branch) { lowerSwitch(branch); },
+                       [&](const ast::CaseStmt& label) { lowerLabel(stmt.location, label.value.get(), label.body); },
+                       [&](const ast::DefaultStmt& label) { lowerLabel(stmt.location, nullptr, label.body); },
                        [&](const ast::ParallelForStmt& loop) { lowerParallelFor(stmt.location, loop); },
                        [&](const ast::ParallelBlockStmt& block) { lowerParallelBlock(stmt.location, block); },
                    },
@@ -243,9 +256,9 @@ namespace fminus::ir::detail
             bodyBlock, endBlock);
 
         builder_.SetInsertPoint(bodyBlock);
-        loops_.push_back({endBlock, condBlock});
+        breakables_.push_back({Breakable::Kind::Loop, endBlock, condBlock});
         lowerScoped(*loop.body);
-        loops_.pop_back();
+        breakables_.pop_back();
         fallThrough(condBlock);
         if (!isConstant(*loop.condition))
             mustProgress(condBlock, entry);
@@ -275,9 +288,9 @@ namespace fminus::ir::detail
             builder_.CreateBr(bodyBlock);   // no condition: until a break or a return
 
         builder_.SetInsertPoint(bodyBlock);
-        loops_.push_back({endBlock, incBlock});
+        breakables_.push_back({Breakable::Kind::Loop, endBlock, incBlock});
         lowerScoped(*loop.body);
-        loops_.pop_back();
+        breakables_.pop_back();
         fallThrough(incBlock);
 
         builder_.SetInsertPoint(incBlock);
@@ -289,6 +302,147 @@ namespace fminus::ir::detail
 
         builder_.SetInsertPoint(endBlock);
         scopes_.pop_back();
+    }
+
+    // switch (value) body, as clang lowers it: the value (an int, or a bool promoted to one) goes to LLVM's switch, to
+    // which each label adds its value and its block as the body is lowered (lowerLabel), and whose default is the
+    // end, sw.epilog, until a default label replaces it. break goes to sw.epilog, and continue to the loop around.
+    // Nothing reaches what the body has before its first label (lowerStatement). An operand with an error of its own
+    // gives the switch no second error (see binary(), Expressions.cpp).
+    void Lowering::lowerSwitch(const ast::SwitchStmt& branch)
+    {
+        const std::size_t reported = diagnostics_.errors().size();
+        const Value value = lower(*branch.value);
+        llvm::Value* condition = poison(ast::Type::Int).ir;
+        if (ast::arithmeticOf(value.type) == ast::Type::Int)
+            condition = convert(value, ast::Type::Int, branch.value->location, Use::Initializing);
+        else if (diagnostics_.errors().size() == reported)
+            error(branch.value->location, "statement requires expression of integer type ("
+                                              + quoted(ast::typeName(value.type)) + " invalid)");
+        llvm::BasicBlock* endBlock = newBlock("sw.epilog");
+        llvm::SwitchInst* instruction = builder_.CreateSwitch(condition, endBlock);
+        breakables_.push_back({Breakable::Kind::Switch, endBlock, nullptr});
+        switches_.push_back({instruction, scopes_.size(), {}, std::nullopt});
+        lowerScoped(*branch.body);
+        switches_.pop_back();
+        breakables_.pop_back();
+        fallThrough(endBlock);
+        if (llvm::BasicBlock* last = &endBlock->getParent()->back(); last != endBlock)
+            endBlock->moveAfter(last);   // after the labels' blocks, as clang's
+        builder_.SetInsertPoint(endBlock);
+    }
+
+    namespace
+    {
+        // The name a case label's value is written as, `A` in `case A:` and `case (int)A:`, or none: clang names it so
+        // in a duplicate's message.
+        std::string labelName(const ast::Expr* value)
+        {
+            while (const auto* cast = std::get_if<ast::CastExpr>(&value->node))
+                value = cast->operand.get();
+            const auto* variable = std::get_if<ast::VariableExpr>(&value->node);
+            return variable != nullptr ? variable->name : "";
+        }
+    } // namespace
+
+    // A case label (`value`) or default (none), and the statement it labels, if any: a block of its own, sw.bb or
+    // sw.default, into which the code before it falls, and which the innermost switch jumps to for its value. The
+    // value is an integer constant expression (Constants.cpp). A label outside a switch, two of one value and two
+    // defaults are clang's errors, the duplicates with a note at the label before. A switch cannot jump into a
+    // parallel region inside it: the region's body is a function of its own (Parallel.cpp).
+    void Lowering::lowerLabel(SourceLocation location, const ast::Expr* value, const ast::StmtPtr& body)
+    {
+        const std::string keyword = value != nullptr ? "'case'" : "'default'";
+        const auto around = std::ranges::find_if(breakables_.rbegin(), breakables_.rend(), [](const Breakable& b) {
+            return b.kind != Breakable::Kind::Loop;
+        });
+        const bool inSwitch = std::ranges::any_of(breakables_, [](const Breakable& b) {
+            return b.kind == Breakable::Kind::Switch;
+        });
+        Switch* branch = nullptr;
+        if (!inSwitch)
+            error(location, keyword + " statement not in switch statement");
+        else if (around->kind == Breakable::Kind::Region)
+            error(location, keyword + (regions_.back().loop ? " cannot jump into a parallel for"
+                                                             : " cannot jump into a statement of a parallel block"));
+        else
+            branch = &switches_.back();
+
+        llvm::BasicBlock* block = newBlock(value != nullptr ? "sw.bb" : "sw.default");
+        fallThrough(block);
+        if (branch != nullptr && value != nullptr)
+        {
+            if (const std::optional<std::int32_t> constant = integerConstant(*value))
+            {
+                const CaseLabel label{value->location, labelName(value)};
+                const auto [previous, added] = branch->cases.try_emplace(*constant, label);
+                if (added)
+                    branch->instruction->addCase(builder_.getInt32(static_cast<std::uint32_t>(*constant)),
+                                                 bypass(*branch, block));
+                else
+                {
+                    // clang's: the value's name when both are written as one, else both names (or the number)
+                    const std::string number = std::to_string(*constant);
+                    const std::string before = previous->second.name.empty() ? number : previous->second.name;
+                    const std::string now = label.name.empty() ? number : label.name;
+                    diagnostics_.error(label.location,
+                                       before == now ? "duplicate case value " + quoted(now)
+                                                     : "duplicate case value: " + quoted(before) + " and "
+                                                           + quoted(now) + " both equal " + quoted(number),
+                                       {Diagnostic{previous->second.location, "previous case defined here", {}}});
+                    previous->second = label;   // clang compares each label with the one of its value before it
+                }
+            }
+        }
+        else if (branch != nullptr)
+        {
+            if (branch->defaultLabel)
+                diagnostics_.error(location, "multiple default labels in one switch",
+                                   {Diagnostic{*branch->defaultLabel, "previous case defined here", {}}});
+            else
+            {
+                branch->defaultLabel = location;
+                branch->instruction->setDefaultDest(bypass(*branch, block));
+            }
+        }
+        builder_.SetInsertPoint(block);
+        if (body)
+            lowerStatement(*body);
+    }
+
+    // Where the switch's jump to `label` lands: the label's block, or, when declarations of the switch's body are in
+    // scope there (before the label in its block, or in a block or a loop around it), a block, sw.zero, that zeroes
+    // each of their variables and goes on to the label's. C allows the jump and leaves such a variable indeterminate;
+    // FMinus starts every variable at 0, so it is 0 there too, as if its declaration had run without an initialiser.
+    // (An enumerator holds no memory, and a const table is a constant of the module, Memory.cpp: neither is zeroed.)
+    llvm::BasicBlock* Lowering::bypass(const Switch& branch, llvm::BasicBlock* label)
+    {
+        std::vector<std::tuple<std::string, std::size_t, Binding>> passed;
+        for (std::size_t scope = branch.base; scope < scopes_.size(); ++scope)
+        {
+            for (const auto& [name, binding] : scopes_[scope])
+            {
+                if (binding.slot != nullptr && !llvm::isa<llvm::GlobalVariable>(binding.slot))
+                    passed.emplace_back(name, scope, binding);
+            }
+        }
+        if (passed.empty())
+            return label;
+        std::ranges::sort(passed, {}, [](const auto& variable) {   // by name: the same IR every time
+            return std::pair(std::get<0>(variable), std::get<1>(variable));
+        });
+        const llvm::IRBuilderBase::InsertPointGuard resume(builder_);
+        llvm::BasicBlock* zeroes = newBlock("sw.zero");
+        builder_.SetInsertPoint(zeroes);
+        for (const auto& [name, scope, binding] : passed)
+        {
+            if (ast::isArray(binding.type) || ast::isModule(binding.type))
+                zero(binding.slot, binding.type);
+            else
+                builder_.CreateStore(llvm::Constant::getNullValue(typeOf(binding.type)), binding.slot);
+        }
+        builder_.CreateBr(label);
+        return zeroes;
     }
 
     // The initialiser is lowered before the name is bound, so `float x = x;` reads an outer x. Without one,

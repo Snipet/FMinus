@@ -8,22 +8,25 @@
 //     parameter    : "param" type IDENTIFIER attributes ";"                     a field the host sets
 //     method       : "const"? type pointer IDENTIFIER "(" params ")" attributes block
 //     attributes   : ("[" "[" attribute ("," attribute)* "]" "]")*
-//     attribute    : IDENTIFIER ("::" IDENTIFIER)? ("(" "-"? NUMBER ("," "-"? NUMBER)* ")")?
+//     attribute    : IDENTIFIER ("::" (IDENTIFIER | "default"))? ("(" "-"? NUMBER ("," "-"? NUMBER)* ")")?
 //     params       : (param ("," param)*)? | "void"                                  (void) is none, as in C
 //     param        : "const"? type pointer IDENTIFIER? | "const"? type IDENTIFIER "[" NUMBER? "]"   a pointer
 //     type         : "float" | "bool" | "int" | "void" | VECTOR_TYPE | "poly" ("float" | "bool") | MODULE_NAME
 //     pointer      : ("*" ("const" | "restrict")*)?        with a *, the first const is the pointee's (const float*),
 //                                                          and one after it the pointer's own (float* const)
-//     block        : "{" (declaration | statement)* "}"
+//     block        : "{" (declaration | unlabeled | label)* "}"      C23's: a label is a block item of its own
 //     declaration  : "const"? type declarator ("," declarator)* ";"
 //     declarator   : pointer IDENTIFIER ("=" expr)?                                  as in C, `float *p, x;`
 //                  | IDENTIFIER "[" NUMBER "]" ("=" "{" (expr ("," expr)* ","?)? "}")?        an array
 //                  | pointer IDENTIFIER "=" "{" (expr ("," expr)*)? "}"     parsed, for its error: only arrays
-//     statement    : block | expr ";" | "return" expr? ";" | ";"
+//     statement    : label statement | unlabeled
+//     unlabeled    : block | expr ";" | "return" expr? ";" | ";"
 //                  | "if" "(" expr ")" statement ("else" statement)? | "while" "(" expr ")" statement
 //                  | "for" "(" (declaration | expr? ";") expr? ";" expr? ")" statement | "break" ";" | "continue" ";"
+//                  | "switch" "(" expr ")" statement
 //                  | "parallel" "for" "(" (declaration | expr? ";") expr? ";" expr? ")" statement
 //                  | "parallel" block                    FMinus's: the iterations, or the statements, at once
+//     label        : "case" expr ":" | "default" ":"                         the expr an integer constant expression
 //     expr         : NUMBER | "true" | "false" | IDENTIFIER | IDENTIFIER "(" (expr ("," expr)*)? ")" | "(" expr ")"
 //                  | ("-" | "+" | "!" | "~" | "*" | "&") expr | expr "[" expr "]"   *p, &x, p[i]
 //                  | "sizeof" "(" "const"? type pointer ")"                          a type's size, an int
@@ -46,6 +49,10 @@
 // compiler returns a typedef's name, so `OnePole* p;` is a declaration and `a * b;` a product.
 // The grammar accepts any expression on the left of an assignment; the code generator rejects what is not an lvalue
 // (a variable, an element p[i] or *p, components of either: "expression is not assignable"), so fields can join it.
+// A case or default label is C23's: a block item of its own, so a declaration may follow one and one may end a block;
+// where a statement is expected (an if's branch, a switch's body), `case 1: s` is the label and its statement, a
+// CaseStmt with a body. The code generator checks that a label is in a switch, and that a case's value is an integer
+// constant expression.
 //
 // To add a construct: its tokens in Lexer.l and here, a rule here, a node in Ast.h, its dump in Ast.cpp and its
 // lowering in src/ir/ (Lowering.h says which file). Bison's report (build tree: src/generated/frontend/Parser.output)
@@ -227,6 +234,7 @@
 %token RESTRICT "restrict" AMPERSAND "&" LBRACKET "[" RBRACKET "]" SIZEOF "sizeof" COLONCOLON "::"
 %token LT "<" LE "<=" GT ">" GE ">=" EQ "==" NE "!=" NOT "!" AND "&&" OR "||" QUESTION "?" COLON ":"
 %token IF "if" ELSE "else" WHILE "while" FOR "for" BREAK "break" CONTINUE "continue" PARALLEL "parallel"
+%token SWITCH "switch" CASE "case" DEFAULT "default"
 %token MODULE "module" THIS "this" ARROW "->" PARAM "param"
 %token <ast::Type> MODULE_NAME "module name"
 %token <ast::Type> VECTOR_TYPE "vector type"
@@ -248,14 +256,14 @@
 %nterm <std::vector<ast::Attribute>> attributes attribute_list
 %nterm <ast::Attribute> attribute
 %nterm <std::vector<std::string>> attribute_args
-%nterm <std::string> attribute_arg
+%nterm <std::string> attribute_arg attribute_word
 %nterm <std::vector<ast::Param>> params param_list
 %nterm <ast::Param> param
 %nterm <bool> qualifier
 %nterm <Pointer> pointer pointer_qualifiers
 %nterm <ast::Type> type cast_type
 %nterm <std::vector<ast::Stmt>> block block_items block_item declaration
-%nterm <ast::Stmt> statement
+%nterm <ast::Stmt> statement unlabeled label
 %nterm <std::vector<ast::Stmt>> for_init
 %nterm <ast::ExprPtr> optional_expr
 %nterm <std::vector<Declarator>> declarators
@@ -402,11 +410,17 @@ attribute_list
     ;
 
 attribute
-    : IDENTIFIER "::" IDENTIFIER            { $$ = ast::Attribute{at(@1), $1 + "::" + $3, {}}; }
+    : IDENTIFIER "::" attribute_word        { $$ = ast::Attribute{at(@1), $1 + "::" + $3, {}}; }
     | IDENTIFIER                            { $$ = ast::Attribute{at(@1), $1, {}}; }
-    | IDENTIFIER "::" IDENTIFIER "(" attribute_args ")"
+    | IDENTIFIER "::" attribute_word "(" attribute_args ")"
                                             { $$ = ast::Attribute{at(@1), $1 + "::" + $3, $5}; }
     | IDENTIFIER "(" attribute_args ")"     { $$ = ast::Attribute{at(@1), $1, $3}; }
+    ;
+
+// A keyword in an attribute is an identifier, as C23 and C++ read one there ([[gnu::const]]): fminus::default.
+attribute_word
+    : IDENTIFIER                            { $$ = $1; }
+    | "default"                             { $$ = "default"; }
     ;
 
 // An attribute's arguments: numbers, a minus before any of them.
@@ -509,10 +523,12 @@ block_items
     | block_items block_item                { $$ = $1; for (ast::Stmt& item : $2) $$.push_back(std::move(item)); }
     ;
 
-// A block item is a list: a declaration gives one DeclStmt per declarator.
+// A block item is a list: a declaration gives one DeclStmt per declarator. A label is one of its own (C23's), a
+// CaseStmt or DefaultStmt without a body: the items after it follow it.
 block_item
     : declaration                           { $$ = $1; }
-    | statement                             { $$.push_back($1); }
+    | unlabeled                             { $$.push_back($1); }
+    | label                                 { $$.push_back($1); }
     ;
 
 declaration
@@ -554,7 +570,25 @@ array_size
     : NUMBER                                { $$ = arraySize(@1, $1, parseContext); }
     ;
 
+// A statement where one is expected: an unlabeled one, or a label and the statement it labels.
 statement
+    : unlabeled                             { $$ = $1; }
+    | label statement                       {
+                                                $$ = $1;
+                                                ast::StmtPtr body = ast::own($2);
+                                                if (auto* label = std::get_if<ast::CaseStmt>(&$$.node))
+                                                    label->body = std::move(body);
+                                                else
+                                                    std::get<ast::DefaultStmt>($$.node).body = std::move(body);
+                                            }
+    ;
+
+label
+    : "case" expr ":"                       { $$ = ast::Stmt{at(@1), ast::CaseStmt{$2, nullptr}}; }
+    | "default" ":"                         { $$ = ast::Stmt{at(@1), ast::DefaultStmt{nullptr}}; }
+    ;
+
+unlabeled
     : block                                 { $$ = ast::Stmt{at(@1), ast::BlockStmt{$1}}; }
     | expr ";"                              { $$ = ast::Stmt{at(@1), ast::ExprStmt{$1}}; }
     | "return" expr ";"                     { $$ = ast::Stmt{at(@1), ast::ReturnStmt{$2}}; }
@@ -569,6 +603,7 @@ statement
                                             { $$ = ast::Stmt{at(@1), ast::ForStmt{$3, $4, $6, ast::own($8)}}; }
     | "break" ";"                           { $$ = ast::Stmt{at(@1), ast::BreakStmt{}}; }
     | "continue" ";"                        { $$ = ast::Stmt{at(@1), ast::ContinueStmt{}}; }
+    | "switch" "(" expr ")" statement       { $$ = ast::Stmt{at(@1), ast::SwitchStmt{$3, ast::own($5)}}; }
     | "parallel" "for" "(" for_init optional_expr ";" optional_expr ")" statement
                                             {
                                                 $$ = ast::Stmt{at(@1), ast::ParallelForStmt{$4, $5, $7, ast::own($9)}};

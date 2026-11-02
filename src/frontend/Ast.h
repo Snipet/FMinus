@@ -547,6 +547,32 @@ namespace fminus::ast
     {
     };
 
+    // `switch (value) body`: C's. The value is an int (a bool is one, as C promotes it), and the body, usually a
+    // block, holds the labels the switch jumps to by the value: `case 1:` and `default:`, wherever they are in it (in
+    // a block or a loop inside it too). From one label's statements, control falls into the next's; `break` leaves
+    // the switch, and `continue` goes to the loop around it.
+    struct SwitchStmt
+    {
+        ExprPtr value;
+        StmtPtr body;
+    };
+
+    // `case value:`, a label of the switch around it, whose value is an integer constant expression (C11 6.6p6:
+    // integer constants, sizeof, and operators and casts of them). A label is a block item of its own, as in C23,
+    // without a body: what follows it in its block follows it. Where a statement is expected, `case 1: s` labels s, its
+    // body.
+    struct CaseStmt
+    {
+        ExprPtr value;
+        StmtPtr body;   // null for a block item
+    };
+
+    // `default:`, where the switch goes when no case has its value (without one, past the switch).
+    struct DefaultStmt
+    {
+        StmtPtr body;   // null for a block item
+    };
+
     // `parallel for (int i = first; i < end; ++i) body`: FMinus's, not C's. Its iterations run at once, spread over the
     // machine's cores, and all of them have finished when the loop ends. The fields are a ForStmt's; the code
     // generator (ir/Parallel.cpp) takes only that counting form (i <= end too, i++ and i += 1), with the bounds
@@ -570,7 +596,7 @@ namespace fminus::ast
     {
         SourceLocation location;
         std::variant<DeclStmt, ExprStmt, ReturnStmt, BlockStmt, EmptyStmt, IfStmt, WhileStmt, ForStmt, BreakStmt,
-                     ContinueStmt, ParallelForStmt, ParallelBlockStmt>
+                     ContinueStmt, SwitchStmt, CaseStmt, DefaultStmt, ParallelForStmt, ParallelBlockStmt>
             node;
     };
 
