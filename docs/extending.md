@@ -1,15 +1,16 @@
 # Extending the compiler
 
 How to add to FMinus. First, how a change moves through the compiler, and the few rules that keep that easy. Then
-twenty-three worked recipes. Eleven grow the C subset from a one-line builtin to C's control flow, a custom LLVM pass,
+twenty-four worked recipes. Eleven grow the C subset from a one-line builtin to C's control flow, a custom LLVM pass,
 `int`, `void` and pointers, the heap with the attributes that keep it off the audio thread, arrays and modules, FMinus's
 classes, an FFT from a C library built into the runtime, and parameters, the values a plugin's host sets. Six more are
 about the compiler rather than the language: math that gives a float one result wherever it is computed, knob versioning
 and flat streams, C's strict aliasing told to LLVM, zero-init elision, what the runtime's calls and loops promise, and
 subnormals flushed for the audio thread. Two more grow the language again: `#include`, which splits a program into
 files, and `parallel for` and `parallel { }`, a program's own threads. Two return to the math: kernels of FMinus's
-own, the same in every lane and on every target, and those kernels inline. The last two are for DSP's everyday code:
-C's bitwise operators with a hash and white noise from a counter, and constant tables stored once. Then the pitfalls
+own, the same in every lane and on every target, and those kernels inline. The last three are for DSP's everyday code:
+C's bitwise operators with a hash and white noise from a counter, constant tables stored once, and `switch` and
+enumerations. Then the pitfalls
 those recipes ran into, and design notes for what comes next. [simd.md](simd.md) has recipes 7 to 9, for vectors.
 
 Recipes 1 to 4 are in the compiler now (`tanhf` and `%`; `bool` and its operators; `if`, `while` and `for`), and so are
@@ -17,8 +18,8 @@ simd.md's 7 to 9, recipe 10 (`int`, `void` and pointers), recipe 11 (the heap), 
 13 (the FFT), recipe 14 (parameters), recipes 15 to 20 (the math modes, knob versioning, TBAA, zero-init elision, the
 runtime's attributes and loop progress, denormal control), recipe 21 (`#include`), recipe 22 (`parallel for` and
 `parallel { }`), recipes 23 and 24 (math kernels of FMinus's own, and inline), recipe 25 (the bitwise operators,
-`hash` and `randf`) and recipe 26 (constant tables), so their sections describe how the code you have got there: read
-a section beside the files it names.
+`hash` and `randf`), recipe 26 (constant tables) and recipe 27 (`switch` and `enum`), so their sections describe how
+the code you have got there: read a section beside the files it names.
 Recipes 5 and 6, a runtime function and a pass, are not part of the language; they live in [recipes/](recipes/) as a
 patch, so you can apply them to see them work. None of these are sketches: each was applied to this repository, built
 with `-Werror`, and tested in the dev and asan presets, every test passing. [architecture.md](architecture.md) describes
@@ -41,7 +42,7 @@ Most language features touch the same places, in this order:
 | 5 | `src/ir/` | its conversions and checks, and its lowering to LLVM IR, in the file its kind belongs to (`Lowering.h` lists them: types, functions, statements, expressions, calls, the math modes, vectors, memory, modules, effects, parallel regions, TBAA, denormals); a load or store of memory gets its type's tag (`tag`, recipe 17); a statement that holds code walks it in `Parallel.cpp`'s `Walker` too |
 | 6 | `src/runtime/` | if it needs C++ at run time, a runtime function (recipe 5); if a builtin calls it, its facts: in `kRuntimeFacts`, through `callRuntime` (recipe 19), or for a math builtin's, in `mathFunction` (`Math.cpp`, recipe 15) |
 | 7 | `tools/fminus/main.cpp`, `src/support/Aot.cpp` | for a new type: whether `--run` can pass and print it (its `switch` over the result type), and whether an executable's `main` may take or return it (`addEntryPoint`) |
-| 8 | `tests/` | a dump in `FrontendTest.cpp`; results in `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `IntTest.cpp`, `BitwiseTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `TableTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `HashTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp` or `ParallelTest.cpp` (their helpers are in `Compile.h`); IR or errors in `tests/lit/fminus/` |
+| 8 | `tests/` | a dump in `FrontendTest.cpp`; results in `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `SwitchTest.cpp`, `EnumTest.cpp`, `IntTest.cpp`, `BitwiseTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `TableTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `HashTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp` or `ParallelTest.cpp` (their helpers are in `Compile.h`); IR or errors in `tests/lit/fminus/` |
 | 9 | `examples/` | a program that uses it, and a line in `tests/lit/fminus/examples.test` that runs it |
 | 10 | `editors/vscode/syntaxes/fminus.tmLanguage.json` | a new keyword, type or builtin, so VSCode highlights it (its README says where) |
 | 11 | `README.md` | the language table, and the deviations from C if any |
@@ -55,7 +56,7 @@ when recipe 10 added `Kind::Pointer`, it stopped in `typeOf`, `typeName` and the
 nothing reminds you of.
 
 Each feature has an example to read beside its recipe: `examples/comparison/` for `bool` (recipe 3),
-`examples/waveforms/` for every statement (recipe 4), `examples/chord/` for `float4` and the vector math library
+`examples/waveforms/` for every statement (recipes 4 and 27), `examples/chord/` for `float4` and the vector math library
 (recipes 7 and 8), `examples/unison/` for `poly float` (recipe 9), `examples/biquad/` for a block of samples a
 call, through pointers (recipe 10), `examples/delay/` for state on the heap and a kernel that can't allocate
 (recipe 11), `examples/saturator/` and `examples/meter/` for `poly float` through a buffer, against plain loops
@@ -738,7 +739,8 @@ predecessors. The statements after it then lower into dead code. The function's 
 
 **Loops**: `loops_` is a stack of `{breakTarget, continueTarget}` pairs, pushed around each body. A `break` branches to
 the innermost loop's exit, and a `continue` to its next iteration. With no loop around them, they are clang's
-errors: "'break' statement not in loop or switch statement" and "'continue' statement not in loop statement".
+errors: "'break' statement not in loop or switch statement" and "'continue' statement not in loop statement". (Recipe
+27 renames it `breakables_`, whose `Breakable`s are switches and parallel regions too.)
 
 ```cpp
                                [&](const ast::BreakStmt&) {
@@ -4582,6 +4584,198 @@ deviations.
   that is not constants on the stack, a region's context without the table, a 1 MiB table and one 16 bytes larger on
   the stack, and `-O2`'s folded reads.
 
+## Recipe 27: `switch` and `enum`
+
+*In the compiler. Code: the keywords in `src/frontend/Lexer.l`; in `Parser.y`, the labels (`label`, `statement`,
+`unlabeled`), `switch`, the enumerations (`enumeration`, `enumerators`) and `enum Tag` as a type (`type`,
+`cast_type`); the tags' scopes in `ParseContext.h`; `SwitchStmt`, `CaseStmt`, `DefaultStmt`, `Enumerator`, `Enum`,
+`EnumStmt` and `Program::enums` in `Ast.h`, their dumps in `Ast.cpp`. In `src/ir/`: `Statements.cpp` (`lowerSwitch`,
+`lowerLabel`, `bypass`, the `Breakable` stack), `Constants.cpp` (C's integer constant expressions, `integerConstant`
+and `fold`; the enumerations, `declareEnum` and `enumerator`), `CodeGen.cpp` (the file's enumerations among the
+definitions), the constants read in `Expressions.cpp` and refused as lvalues in `Memory.cpp`, and `Parallel.cpp`.
+Tests: `tests/unit/SwitchTest.cpp` (`[switch]`), `tests/unit/EnumTest.cpp` (`[enum]`), `FrontendTest.cpp`,
+`tests/lit/fminus/switch.fm`, `switch-errors.fm`, `enum.fm` and `enum-errors.fm`. Example: `examples/waveforms/`'s
+`wave`.*
+
+An oscillator picks its waveform, a filter its response, a voice its stage: an `int` whose values a program could only
+name in comments, tested by a chain of `if`s. This recipe adds C's two answers: `switch`, which jumps to the statement
+of a value, and enumerations, named `int` constants, which a case label can be. Both are C's, with C23's labels, and
+with clang's errors.
+
+### Tokens and grammar
+
+Four keywords join Lexer.l: `switch`, `case`, `default` and `enum`. A keyword in an attribute is still a word there,
+as C23 and C++ read one (`[[gnu::const]]`), so `[[fminus::default(1000)]]` parses as before: `attribute_word` takes an
+identifier or `default` after the `::`.
+
+A label is C23's: a block item of its own, so a declaration may follow one (`case 0: float t = 2 * x;`, an error before
+C23) and one may end a block. Where a statement is expected, a label is the start of a labelled statement. C23 writes
+it so, and so does Parser.y:
+
+```yacc
+block_item
+    : declaration | enumeration | unlabeled | label
+    ;
+statement
+    : unlabeled                             { $$ = $1; }
+    | label statement                       { $$ = $1; ... the label's body = $2 }
+    ;
+label
+    : "case" expr ":"                       { $$ = ast::Stmt{at(@1), ast::CaseStmt{$2, nullptr}}; }
+    | "default" ":"                         { $$ = ast::Stmt{at(@1), ast::DefaultStmt{nullptr}}; }
+    ;
+```
+
+`unlabeled` is what `statement` was, and `switch "(" expr ")" statement` one more of its rules. A block never asks for
+a `statement`, so after `case 1:` in one there is nothing to choose: Bison finds no conflict. `case a ? b : c:` is a
+`?:` up to its last colon. In the tree, a label in a block is a `CaseStmt` or `DefaultStmt` without a body, and the
+items after it are its block's; `if (x) case 1: s` gives the label a body, `s`.
+
+An enumeration is declared on its own, at the top level, in a module or in a block:
+`qualifier "enum" enum_tag "{" enumerators ","? "}" ";"`. It starts with `qualifier`, as a declaration and a function
+do, so the three share their first reduction and `enum Mode {` against `enum Mode m;` is the next token's choice, `{`
+or not. `enum Mode`, without the braces, is a type in `type` and in `cast_type`: the type `int`, once a tag of the name
+is visible. C's `enum Mode { A } m;`, a variable declared with its enumeration, is a syntax error here.
+
+### `switch`
+
+`lowerSwitch` is clang's: the value, an `int` (a `bool` promoted to one, as C promotes it), goes to LLVM's `switch`,
+whose default is the end, `sw.epilog`, and the body is lowered after it. Each label is a block, `sw.bb` or
+`sw.default`, into which the code before it falls (`fallThrough`), and `lowerLabel` adds it to the instruction as it
+meets it: a case's value and block (`addCase`), or the default (`setDefaultDest`). So labels may be anywhere in the
+body, in a block or a loop inside it too, as C allows; jumping into a loop gives LLVM a loop with two entries, which it
+takes as it is. The code before the first label is reached by nothing, and lowers into an `unreachable` block, as code
+after a `return` does. `switch.fm`'s `pick` at `-O0`:
+
+```llvm
+  switch i32 %x1, label %sw.default [
+    i32 0, label %sw.bb
+    i32 1, label %sw.bb2
+    i32 14, label %sw.bb3
+    i32 -3, label %sw.bb4
+  ]
+```
+
+`break` and `continue` find their targets on recipe 4's stack, renamed `Breakable`: a loop, a switch or a parallel
+region, innermost last. `break` leaves the innermost loop or switch; `continue` skips the switches and goes to the
+innermost loop's next iteration; a label belongs to the innermost switch, and one met inside a parallel region before
+a switch is an error ("'case' cannot jump into a parallel for"), since the region's body is a function of its own.
+
+A jump to a label can pass declarations: `case 0: float t = 2 * x; ... break; case 1: ... t ...`, where `t` is in
+scope at `case 1` but its declaration never ran. C allows the jump, and the variable is indeterminate; FMinus starts
+every variable at 0, so `bypass` makes the switch's edge to such a label go through `sw.zero`, a block that stores 0 in
+each variable of the body's scopes still in scope there (a memset for an array or a module; an enumeration constant
+and a const table hold nothing to zero), then branches to the label. Falling into the label from above runs the
+declaration as written. mem2reg and dead-store elimination remove the zeros nothing reads.
+
+LLVM makes the most of it from `-O1`: a switch of constants becomes a table (`pick` is a range check and one load), a
+switch of two values a `select`, and one on a knob in a method's loop gets knob versioning's copies (recipe 16), one
+for each value of its domain, with no switch left in them. SimplifyCFG makes a switch of a chain of `if`s on one `int`
+too, so the code is the same either way: `switch` is for the program's reader.
+
+The errors are clang's: "statement requires expression of integer type ('float' invalid)", "duplicate case value
+'1'" and, for two names of one value, "duplicate case value: 'A' and 'B' both equal '1'" (a name being the case's
+value written as an enumeration constant, casts aside, as clang's `IgnoreParenCasts` has it), "multiple default
+labels in one switch", each with "previous case defined here" at the label before, and "'case' statement not in switch
+statement". A value with an error of its own (an undeclared name) gets no second one.
+
+### Integer constant expressions
+
+A case's value, and an enumerator's, is an integer constant expression, which a C compiler works out where it is
+written: C11 6.6p6's integer constants, enumeration constants, `sizeof`, and floating constants only as the immediate
+operands of casts (`(int)2.5f`), combined by the unary operators but `*` and `&`, the binary ones, `&&`, `||`, `?:` and
+casts to `int` or `bool`. `integerConstant` (`Constants.cpp`) folds one, over the tree, before anything is lowered:
+IRBuilder's folding would not do, since `&&`, `||` and `?:` branch even on constants (recipe 3), an `add nsw` of two
+constants folds to the wrapped value without a word, and a division by zero to poison.
+
+`fold` gives each node a value and a type, `int`, `bool` or `float`, and computes as FMinus computes at run time
+(`arithmetic`, recipe 25): `/` and `%` truncate toward zero, a shift takes its count's low five bits, `>>` shifts the
+sign in. So `case 1 << 33:` is `case 2:`, as `1 << 33` is 2 anywhere else. A `float` is carried by type only, with the
+place of its floating constant (`Folded::floating`): its value is never needed, since a `float` can only make the
+expression no constant. Where C makes the value an error, it is one, with clang's words:
+
+- a variable, const or not, a call, an assignment, `p[i]` or `*p`: "expression is not an integer constant expression",
+  at the operand (C++ would take a `const int`; C does not, nor does FMinus's `isConstant`);
+- a `float`-typed whole: "integer constant expression must have integer type, not 'float'"; a floating constant
+  elsewhere in an `int` (`1.5f < 2`, `(int)(0.5f + 1)`): no integer constant expression;
+- an `int` that overflows (C11 6.6p4: a constant expression's value is in its type's range): "overflow in expression;
+  result is -2147483648 with type 'int'", an error where clang warns;
+- a division by zero, and the least `int` divided by -1: no integer constant expression, with a note, "division by
+  zero is undefined" (clang's warning) or the value out of range.
+
+The last two are errors only where the expression is evaluated: `0 && 1 / 0` is the constant 0, and so is the arm of
+a `?:` its condition does not pick, since what is not evaluated has no value to be out of range, as clang has it
+(`IK_ICEIfUnevaluated`). What is no constant at all is reported wherever it is, as clang does: `0 && f()` is none.
+
+### Enumerations
+
+`declareEnum` gives each constant its value, its own or the one before it plus 1 (the first's 0), and binds it from
+just after its definition, as C11 6.2.1p7 says, so `enum { A = 1, B = A + 1 };` is 1 and 2, and an inner
+`enum { A = A + 50 };` reads the outer `A`. A constant past the greatest `int` is clang's "ISO C restricts enumerator
+values to range of 'int' (2147483648 is too large)": FMinus has no larger type for it to take. A value in error makes
+the constant the next one's after all, as clang counts it, so the rest still count and its uses report nothing more.
+
+C gives enumeration constants and variables one name space, so the constants live where the variables do, in the code
+generator's scopes: a `Binding` is a variable (its slot) or a constant (its value, `enumerator`, and no slot), and
+each knows where it was declared, for the notes. In a block, a constant is the block's, a variable of an inner block
+hides it, and one of the same scope is clang's "redefinition of 'A' as different kind of symbol" (two constants:
+"redefinition of enumerator 'A'"), with "previous definition is here". At the top level and in a module it is the
+file's, `fileScope_`, as a C struct's enumeration constants are: `CodeGen.cpp` declares each enumeration before the
+first function after it, so a function sees the constants declared before it, and a module's methods, which follow
+the module, see its own. A constant named as a function or a module of the file is a redefinition too, reported at
+whichever comes second. A name in a method is looked up as C++ looks one up in a member function (`enumerator`): the
+blocks' scopes, then the module's fields and methods, then the file's.
+
+The scanner learns none of this, unlike a module's name (recipe 12). A module's name is a type, which the grammar must
+know to tell `T * p` from `a * b`; an enumeration constant is an expression wherever it stands, so the grammar never
+needs to know one, and a variable may hide it, which a token of its own would make a syntax error. Only the tags are the
+parser's, since `enum Mode` must name a declared one: `ParseContext::tags` is a scope for each block being parsed (the
+rule `block` opens one at its `{` and closes it at its `}`), and the file's, where a module's tags go too. A second
+`enum Mode { }` in one scope is "redefinition of 'Mode'"; `enum Mode` without a visible tag is clang's "ISO C forbids
+forward references to 'enum' types", as FMinus declares no enumeration ahead of its constants (C23 does, with a fixed
+underlying type).
+
+A constant reads as an `i32` constant (`lower`), so a const table of constants is stored once (recipe 26), a case
+label takes one, and a loop whose condition is one (`while (RUNNING)`) is a constant expression, which may run for ever
+(`isConstant`, now `Lowering`'s, recipe 19). It is no lvalue (`isLValue`): `A = 1` and `A++` are "expression is not
+assignable", and `&A` "cannot take the address of an rvalue of type 'int'". A parallel region reads one where it is,
+capturing nothing, and the race walker takes an outer constant for no variable. `enum Mode` names `int`, where C's
+enumerated type is compatible with an integer type of the compiler's choosing (GCC's and clang's is `unsigned int` when
+no constant is negative, `int` otherwise): a local, a parameter, a result, a module's
+`param enum Mode mode [[fminus::range(0, 2)]]`, `sizeof(enum Mode)` (4) and `(enum Mode)x` all mean `int`, and messages
+say `'int'`.
+
+### What it changes for programs and hosts
+
+- **Programs gain** `switch`, labels and enumerations. `switch`, `case`, `default` and `enum` are keywords: a program
+  with a variable, a parameter or a function of one of those names renames it, and the circuit compiler refuses them as
+  a netlist's names (`isFMinusKeyword`). `[[fminus::default(...)]]` is unchanged. Nothing else compiles differently.
+- **A jump past a declaration** finds the variable 0, where C leaves it indeterminate (the README's deviations).
+- **Hosts need nothing**: an enumeration holds no memory, so no module's layout changes, and a `param enum Mode` is a
+  `param int` to a host, its range and default as written.
+
+### Tests
+
+- `tests/unit/SwitchTest.cpp`: fall-through, `break` and `default` (first, in the middle, none), two labels on one
+  statement, a label ending a block (C23), a body that is one labelled statement, a `bool`'s switch; a switch in a loop
+  (`break` leaves the switch, `continue` goes to the loop) and a switch in a switch; labels inside a loop and an `if`
+  of the body, a jump into the loop, and the declarations a jump passes (a float, a `float4`, an array) read as 0;
+  case values of constant arithmetic (shifts by 33 and of negatives, the least `int`, `/` and `%`, unevaluated
+  divisions by zero, `sizeof`, casts of floating constants); a switch in a `parallel for`, `continue` in it; clang's
+  errors, every one.
+- `tests/unit/EnumTest.cpp`: values implicit, explicit, negative and extreme, a trailing comma, constants in a const
+  table, arithmetic, an index and a call; `enum Wave` as a parameter, a result, a cast and `sizeof`; the scopes (a
+  method sees its module's and the file's, a field hides a file's constant, a block's constant hidden by an inner
+  variable, a value reading the outer name); case labels of constants and the duplicates' names; a `parallel for`
+  reading constants from three scopes; the errors.
+- `FrontendTest.cpp`: the dumps of switches, labels as items and as statements, `case x ? 1 : 2:`, `fminus::default`;
+  enumerations where they are among functions and modules, `enum Wave` as a type everywhere, and the tags' errors.
+- `tests/lit/fminus/switch.fm`: the `-O0` IR (the switch's cases, the blocks falling into each other, `sw.epilog`,
+  `sw.zero`), `-O2`'s table and select, the dump, `--run`; `switch-errors.fm`, each error once.
+- `tests/lit/fminus/enum.fm`: constants folded (no load), the table a constant global, the cases, a constant loop
+  without `llvm.loop.mustprogress`, the dump, `--run`; `enum-errors.fm`, each error once. `CircuitTest.cpp` checks
+  the keywords are refused as names, and `examples.test` runs `examples/waveforms/`'s `wave`.
+
 ## Pitfalls
 
 Each of these was hit while writing the language or its recipes. [simd.md](simd.md) has the vector ones.
@@ -4789,8 +4983,13 @@ plugin, prefer state each instance owns: a module (recipe 12), in memory the hos
 filter and `examples/voices/`'s synth are, or memory the program allocates off the audio thread, as
 `examples/delay/` does (recipe 11). Nothing then allocates on the audio thread, and every instance has its own copy.
 
-**`switch`.** It lowers to LLVM's `switch` instruction, and its `break` reuses recipe 4's loop stack (rename
-`Loop`). Fall-through and `default:` are C's.
+**More of `switch` and enumerations.** Recipe 27 leaves four things. *clang's `-Wswitch`*, a switch over an enumerated
+value that misses one of its constants, needs `enum Mode` to be a type of its own rather than `int`: a `Kind` with the
+enumeration's constants, which every `switch` over `type.kind` would then list. *An enumeration's values as a knob's
+domain* (recipe 16's list, for that reason): a `param enum Mode` could be versioned on its constants with no
+`fminus::range`. *C's declarations with an enumeration*, `enum Mode { A } m;`, and C23's fixed underlying type,
+`enum Mode : int`, which would allow a forward declaration. *A `case` range*, GCC's `case 1 ... 4:`, which clang
+lowers to its cases one by one when the range is small, and to a comparison when not.
 
 **Contraction and fast-math, C's way.** `#pragma STDC FP_CONTRACT ON` (C99) allows fusing `a * b + c`. Lower it to
 `llvm.fmuladd`, or set the `contract` flag through `IRBuilder::setFastMathFlags`. The other fast-math flags
@@ -4813,9 +5012,10 @@ is one more: a method it copies takes about twice as long to compile, and `knobV
 ## Reference solutions
 
 The recipes in the compiler are their own reference: their code is in `src/`, and their tests in `tests/unit/`
-(`FrontendTest.cpp`, and `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `IntTest.cpp`, `BitwiseTest.cpp`, `PointerTest.cpp`,
-`HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `TableTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `HashTest.cpp`,
-`ParamTest.cpp`, `VectorTest.cpp` and `PolyTest.cpp` for the code generator; `MathTest.cpp`, `VersionTest.cpp`,
+(`FrontendTest.cpp`, and `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `SwitchTest.cpp`, `EnumTest.cpp`, `IntTest.cpp`,
+`BitwiseTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `TableTest.cpp`,
+`ModuleTest.cpp`, `FftTest.cpp`, `HashTest.cpp`, `ParamTest.cpp`, `VectorTest.cpp` and `PolyTest.cpp` for the code
+generator; `MathTest.cpp`, `VersionTest.cpp`,
 `TbaaTest.cpp`, `ZeroInitTest.cpp`, `AttributeTest.cpp` and `DenormalTest.cpp` for recipes 15 to 20), `tests/library/`
 (`ProgramTest.cpp`, `StrictAliasingTest.cpp`, `DenormalsTest.cpp`) and `tests/lit/fminus/`. [recipes/](recipes/) holds
 the two that aren't, 5 and 6, as one patch against the compiler as it is ([recipes/README.md](recipes/README.md)):

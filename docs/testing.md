@@ -39,11 +39,11 @@ Each file states what it tests in its first line, then has a few helpers and the
 - `parsed(source)` (`FrontendTest.cpp`) returns the dump of the parsed program, or its errors. Compare whole
   strings, so a parser test reads as input → tree.
 - `compile(source, &errors)` (`Compile.h`, which the code generator's tests share: `CodeGenTest.cpp`,
-  `ControlFlowTest.cpp`, `IntTest.cpp`, `BitwiseTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`,
-  `ArrayTest.cpp`, `TableTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `HashTest.cpp`, `ParamTest.cpp`,
-  `VectorTest.cpp`, `PolyTest.cpp`, `ParallelTest.cpp`, and the compiler's own: `VersionTest.cpp`, `TbaaTest.cpp`,
-  `ZeroInitTest.cpp`, `AttributeTest.cpp`, `DenormalTest.cpp`) parses, lowers and JIT-compiles at -O2, and returns
-  the `Jit`, or null with the formatted errors.
+  `ControlFlowTest.cpp`, `SwitchTest.cpp`, `EnumTest.cpp`, `IntTest.cpp`, `BitwiseTest.cpp`, `PointerTest.cpp`,
+  `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `TableTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`,
+  `HashTest.cpp`, `ParamTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`, `ParallelTest.cpp`, and the compiler's own:
+  `VersionTest.cpp`, `TbaaTest.cpp`, `ZeroInitTest.cpp`, `AttributeTest.cpp`, `DenormalTest.cpp`) parses, lowers and
+  JIT-compiles at -O2, and returns the `Jit`, or null with the formatted errors.
   `lookup<float(float)>(*jit, "f")` gives a callable function, and `lookup<void(const float*, float*, int)>(*jit, "g")`
   one that takes a test's buffers (`std::array::data()`). A third parameter, the `ir::Options`, compiles at a chosen
   `poly float` width, `compile(source, &errors, {.polyLanes = 16})`, in another math mode (`{.math =

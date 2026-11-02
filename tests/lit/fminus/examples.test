@@ -3,6 +3,8 @@
 # RUN: fminus %S/../../../examples/waveforms/waveforms.fm --run main 0.25 1000 | FileCheck %s --check-prefix=SAW
 # RUN: fminus %S/../../../examples/waveforms/waveforms.fm --run main 0.25 10000 | FileCheck %s --check-prefix=SAW2
 # RUN: fminus %S/../../../examples/waveforms/waveforms.fm --run square 0.25 1000 48000 | FileCheck %s --check-prefix=SQ
+# RUN: fminus %S/../../../examples/waveforms/waveforms.fm --run wave 1 0.25 1000 | FileCheck %s --check-prefix=SQ
+# RUN: fminus %S/../../../examples/waveforms/waveforms.fm --run wave 2 0.25 1000 | FileCheck %s --check-prefix=SILENCE
 # RUN: fminus %S/../../../examples/waveforms/waveforms.fm --emit exe -o %t.waveforms
 # RUN: %t.waveforms 0.75 1000 | FileCheck %s --check-prefix=SAWNEG
 # RUN: fminus %S/../../../examples/chord/chord.fm --run main 60 1 | FileCheck %s --check-prefix=CHORD
@@ -21,6 +23,7 @@
 # SAW: 0.4867{{[0-9]*}}
 # SAW2: 0.63661975
 # SQ: 0.97351{{[0-9]*}}
+# SILENCE: {{^}}0{{$}}
 # SAWNEG: -0.4867{{[0-9]*}}
 
 # G4, and the span of the inversion: 2^(8/12). One vector expf for the four notes: FMinus's exp kernel on four lanes,

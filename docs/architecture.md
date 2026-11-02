@@ -131,6 +131,12 @@ subset of C's, is written out as EBNF in the file's header comment.
   reduces, so the declaration rule makes one `DeclStmt` per declarator, and `declared()` works out each one's type:
   with a `*`, the first `const` is the pointee's (`const float* p` points to read-only floats), and one after the `*`
   the pointer's own (`float* const p`). That is also why a block item is a *list* of statements.
+- **Labels and enumerations.** `case 1:` and `default:` are C23's labels: a block item of their own (so a declaration
+  may follow one), or, where a statement is expected, the start of a labelled statement (`statement: label statement
+  | unlabeled`). An enumeration is declared on its own, at the top level, in a module or in a block; it starts with
+  `qualifier`, as a declaration does, so `enum Mode {` and `enum Mode m;` part at the next token. Its tag goes into
+  `ParseContext::tags`, a scope for each block being parsed (the rule `block` opens one at its `{`), where `enum Mode`
+  names `int`; its constants stay identifiers, for the code generator's scopes.
 - **Functions** are a definition (`type name(params) { ... }`) or a prototype (`type name(params);`, in which
   parameter names may be omitted). Both build an `ast::Function`, with `isDefinition` telling them apart. A result or
   a parameter may be a pointer, and `(void)` is C's empty parameter list: the `params` rule turns a single unnamed
@@ -160,7 +166,11 @@ on it without the code generator.
     `ConstructExpr` (a vector literal), `MemberExpr` (a swizzle, `v.xy`, or a module's field, `m.y` and `p->y`),
     `MethodCallExpr` (`m.tick(x)`), `ThisExpr`;
   - statements: `DeclStmt`, `ExprStmt`, `ReturnStmt`, `BlockStmt`, `EmptyStmt`, `IfStmt`, `WhileStmt`, `ForStmt`,
-    `BreakStmt`, `ContinueStmt`.
+    `BreakStmt`, `ContinueStmt`, `SwitchStmt`, `CaseStmt` and `DefaultStmt` (a label, with a body only as a labelled
+    statement), `EnumStmt` (an `Enum` in a block), `ParallelForStmt`, `ParallelBlockStmt`.
+- **Enumerations.** An `Enum` is a tag (or none) and its `Enumerator`s, a name and a value as written (or none). The
+  program holds the top level's and the modules' in `Program::enums`, in source order, each with how many functions
+  and modules come before it and the module it is in.
 - **Types.** A `Type` is a `Kind` and, for a pointer, what it points to and whether that is `const`; for an array,
   its elements and how many; for a module, which (a pointer to its `Module`). The kinds are `void`, `float`, `bool`,
   `int`, the vectors `float2`, `float4`, `float8`, their lane masks `bool2`, `bool4`, `bool8`, `poly float` and
@@ -205,7 +215,8 @@ but its members are defined across the directory by what they lower:
 | `CodeGen.cpp` | `ir::lower()`, the constructor, and the passes: where the parts combine |
 | `Types.cpp` | FMinus's types as LLVM's (`typeOf`, `lanes`), the conversions (`convert`, `convertPointer`, `commonType`), errors and poison values |
 | `Functions.cpp` | declarations and prototypes (`declare`), libm's prototypes' attributes (`describeLibm`), bodies and parameters (`define`), stack slots and scopes (`find`, which captures a variable for a parallel region, and `lookup`, which does not) |
-| `Statements.cpp` | blocks, declarations, `return`, `if`, `while`, `for`, `break` and `continue` (none of which leaves a parallel region); a loop's `llvm.loop.mustprogress` when its condition is not a constant expression (`isConstant`, `mustProgress`) |
+| `Statements.cpp` | blocks, declarations, `return`, `if`, `while`, `for`, `switch` and its labels (`lowerSwitch`, `lowerLabel`; a jump past a declaration zeroes it, `bypass`), `break` and `continue` (`Breakable`: loops, switches and parallel regions, none of which a jump leaves or enters); a loop's `llvm.loop.mustprogress` when its condition is not a constant expression (`isConstant`, `mustProgress`); a redefinition's error by the kinds of the two names (`redefinition`) |
+| `Constants.cpp` | C's integer constant expressions, folded over the tree as FMinus computes (`integerConstant`, `fold`): a case's value, an enumerator's; enumerations (`declareEnum`), their constants bound in the block's scope or the file's (`fileScope_`), and a name's lookup as one (`enumerator`) |
 | `Expressions.cpp` | the expression `std::visit` (`lower`), constants, operators (`binary`, `arithmetic`; the bitwise ones on ints, `isBitwise`), `&&` and `\|\|`, `?:`, casts, assignment, `++` and `--` |
 | `Calls.cpp` | the builtin tables, calls, reductions, `poly_lanes` and `poly_index`, `poly_load` and `poly_store`, the heap's `malloc`, `calloc` and `free`, the FFT's `fft_*` (`lowerFft`, on the runtime's), `hash` and `randf` (to `Hash.cpp`), and `ir::builtins()`; the heap's and the FFT's runtime calls through `callRuntime`, whose declaration says what the function does (`kRuntimeFacts`, `describeRuntime`) |
 | `Math.cpp` | `sinf`, `cosf`, `tanf`, `expf`, `tanhf` and `logf` in the vector and libm math modes: calls of the vector mode's math intrinsics (`fminus.sin.f32`, `fminus.sin.v2f32`, `fminus.sin.v4f32`) or the libm mode's runtime function, a float's or four lanes' (`lowerMath`), declared with their attributes and vector variant (`mathFunction`), and the names the runtime keeps for them, which a program that calls one may not declare (`checkMathNames`) |
@@ -263,7 +274,10 @@ as `ConstantFolder` does, and under `Denormals::Flush` as flushing hardware comp
   such a variable indeterminate, and reading it undefined.
 - **Scopes are C's.** `scopes_` is a stack of name-to-slot maps. Parameters and the body's own declarations share the
   outermost scope, so redeclaring a parameter is an error. Each `{ ... }` pushes a scope, in which an outer name may
-  be shadowed. A name is looked up innermost first.
+  be shadowed. A name is looked up innermost first. An enumeration constant is a binding too, with its value and no
+  slot, since C gives constants and variables one name space; the top level's and the modules' are the file's,
+  `fileScope_`, which pass 2 fills in its place among the definitions, so a body sees the constants declared before
+  it. In a method, the module's fields come between the blocks' scopes and the file's, as in C++.
 - **Lvalues** (`Memory.cpp`) are what a program reads, assigns and takes the address of: a variable (its slot), an
   element a pointer reaches (`p[i]`, a `getelementptr inbounds` on the index sign-extended to 64 bits, as clang's;
   `*p`, the pointer itself), a module's field (`m.y`, `p->y`, or `y` in a method: a struct GEP from the module's
@@ -342,9 +356,10 @@ to `bool` and to the same pointer with `const` added (`convertPointer`).
   what a method read of its parameters where it started), and calls `fminus_rt_parallel_for` (extending.md, recipe
   22).
 - **Control flow** is blocks named as clang names them: `land.rhs` and `lor.rhs` for `&&` and `||`, `cond.true`,
-  `cond.false` and `cond.end` for `?:`, `if.then`, `while.cond`, `for.inc`, ... A `?:` with a vector condition is a
-  `select` instead, lane by lane. A loop whose condition is not a constant expression carries clang's
-  `llvm.loop.mustprogress` on its branches back, as C11 allows (recipe 19).
+  `cond.false` and `cond.end` for `?:`, `if.then`, `while.cond`, `for.inc`, `sw.bb`, `sw.default` and `sw.epilog`
+  for a `switch`, LLVM's instruction, ... A `?:` with a vector condition is a `select` instead, lane by lane. A loop
+  whose condition is not a constant expression carries clang's `llvm.loop.mustprogress` on its branches back, as C11
+  allows (recipe 19).
 - **On an error**, the lowering reports it, in clang's words, and returns `llvm::PoisonValue`. The IR stays
   well-formed, the next error is still found, and the module is thrown away at the end: `lower` returns null when
   `diagnostics.hasErrors()`.
@@ -586,12 +601,13 @@ pivots, so the float code computes what the reference computes, operation for op
 - **Semantics follow C unless a deviation is documented.** The README lists the deviations: `float` and `int` are the
   only arithmetic types, an unsuffixed `1.5` is a `float`, pointers point to six types and convert only through `void*`
   or by adding `const`, the heap's memory is aligned and zeroed, `%` works on floats, calls may precede definitions,
-  uninitialised variables are 0, falling off a non-void function's end is an error, a broken function effect is an
-  error, C's strict aliasing is a little stricter (allocated memory keeps one type, there is no character type, a vector
-  is its elements' type), the math builtins' results are their math mode's (by default one result for a float wherever
-  it is computed), subnormals are flushed if the host asks, threads are `parallel` regions, structured and checked for
-  what would race, and `main` returns a `float` or a `bool` and takes floats. As in C11 under clang, a loop whose
-  condition is not a constant may be assumed to end, and a heap block the program never uses may be removed.
+  uninitialised variables are 0 (one a switch's jump passes too), an enumeration is declared on its own and is `int`,
+  falling off a non-void function's end is an error, a broken function effect is an error, C's strict aliasing is a
+  little stricter (allocated memory keeps one type, there is no character type, a vector is its elements' type), the
+  math builtins' results are their math mode's (by default one result for a float wherever it is computed), subnormals
+  are flushed if the host asks, threads are `parallel` regions, structured and checked for what would race, and `main`
+  returns a `float` or a `bool` and takes floats. As in C11 under clang, a loop whose condition is not a constant may be
+  assumed to end, and a heap block the program never uses may be removed.
 - **The runtime stays free of LLVM and real-time safe.** It runs inside the audio thread's call tree. The pool's
   `fminus_rt_parallel_for` is too: it waits for nothing but the chunks it handed out, never for the pool, and its
   system calls, one for each sleeping thread the region has a seat for, wake threads without blocking; making and

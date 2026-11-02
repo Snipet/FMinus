@@ -22,7 +22,8 @@ Most of the recipes in [../extending.md](../extending.md) and [../simd.md](../si
 - recipe 23 (math kernels of FMinus's own, the same in every lane and on every target);
 - recipe 24 (the math kernels inline);
 - recipe 25 (C's bitwise operators, and `hash` and `randf`);
-- recipe 26 (constant tables: a const array of constants, stored once).
+- recipe 26 (constant tables: a const array of constants, stored once);
+- recipe 27 (`switch`, with C23's labels, and C's enumerations).
 
 Their code is in `src/`, and their tests in `tests/`.
 
@@ -32,7 +33,7 @@ One patch is left, for the two recipes that aren't part of the language:
 |---|---|---|
 | `5-runtime-function-and-pass.patch` | 5, 6 | a runtime function (`db_to_gain`, by prototype or builtin); an LLVM pass (`CountFlopsPass`, which records each function's floating-point operations as an attribute) |
 
-It applies, with no whitespace errors, to the compiler as it is, with all of the above. The suite then has 296 tests,
+It applies, with no whitespace errors, to the compiler as it is, with all of the above. The suite then has 310 tests,
 which pass in the dev and asan presets.
 
 ```bash

@@ -8,6 +8,7 @@
         { "include": "#attributes" },
         { "include": "#numbers" },
         { "include": "#modules" },
+        { "include": "#enums" },
         { "include": "#keywords" },
         { "include": "#types" },
         { "include": "#constants" },
@@ -114,9 +115,17 @@
                 "2": { "name": "entity.name.type.module.fminus" }
             }
         },
+        "enums": {
+            "comment": "An enumeration's tag, enum Mode: the keyword, and the name (of a declaration, enum Mode { ... }, or the type int, enum Mode m). The keyword alone, enum { ... }, is a type's word in types.",
+            "match": "\\b(enum)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "captures": {
+                "1": { "name": "storage.type.enum.fminus" },
+                "2": { "name": "entity.name.type.enum.fminus" }
+            }
+        },
         "keywords": {
             "patterns": [
-                { "name": "keyword.control.fminus", "match": "\\b(?:if|else|while|for|break|continue|return|parallel)\\b" },
+                { "name": "keyword.control.fminus", "match": "\\b(?:if|else|while|for|switch|case|default|break|continue|return|parallel)\\b" },
                 { "name": "variable.language.this.fminus", "match": "\\bthis\\b" }
             ]
         },
@@ -124,6 +133,7 @@
             "patterns": [
                 { "name": "storage.modifier.fminus", "match": "\\b(?:const|restrict|poly|param)\\b" },
                 { "name": "keyword.operator.sizeof.fminus", "match": "\\bsizeof\\b" },
+                { "name": "storage.type.enum.fminus", "match": "\\benum\\b" },
                 { "name": "storage.type.fminus", "match": "\\b(?:void|float|int|bool|float2|float4|float8)\\b" }
             ]
         },

@@ -1,9 +1,13 @@
 // examples/waveforms/waveforms.fm: band-limited waveforms by additive synthesis, one sample at a time: the sum of a
 // wave's harmonics, for every harmonic below Nyquist (above it, a harmonic would alias). C's control flow: for, while,
-// if, break and continue.
+// if, break and continue, and switch on an enumeration.
 //     fminus examples/waveforms/waveforms.fm --run main 0.25 1000          a 1 kHz sawtooth, a quarter period in
 //     fminus examples/waveforms/waveforms.fm --run square 0.25 1000 48000  a square wave
+//     fminus examples/waveforms/waveforms.fm --run wave 1 0.25 1000        the square again, by its name's number
 //     fminus examples/waveforms/waveforms.fm --emit exe -o waveforms && ./waveforms 0.25 1000
+
+// The waves this file makes, by name: SAWTOOTH is 0, SQUARE 1, and SILENCE 1 more.
+enum Wave { SAWTOOTH, SQUARE, SILENCE };
 
 float pi()
 {
@@ -49,6 +53,23 @@ float square(float phase, float frequency, float rate)
         sum += sinf(k * w) / k;
     }
     return 4 / pi() * sum;
+}
+
+// A sample of the wave `shape` names (--run passes it as a float), at 48 kHz: a switch picks the function, and any
+// other number, SILENCE's among them, is silence.
+float wave(float shape, float phase, float frequency)
+{
+    enum Wave which = (enum Wave)(int)shape;
+    switch (which)
+    {
+    case SAWTOOTH:
+        return sawtooth(phase, frequency, 48000);
+    case SQUARE:
+        return square(phase, frequency, 48000);
+    case SILENCE:
+    default:
+        return 0;
+    }
 }
 
 // A sample of a sawtooth at `frequency` Hz, at 48 kHz.
