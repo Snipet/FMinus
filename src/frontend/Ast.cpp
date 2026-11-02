@@ -39,6 +39,16 @@ namespace fminus::ast
                 return "==";
             case BinaryOp::NotEqual:
                 return "!=";
+            case BinaryOp::BitAnd:
+                return "&";
+            case BinaryOp::BitOr:
+                return "|";
+            case BinaryOp::BitXor:
+                return "^";
+            case BinaryOp::ShiftLeft:
+                return "<<";
+            case BinaryOp::ShiftRight:
+                return ">>";
             }
             return "?";
         }
@@ -59,6 +69,16 @@ namespace fminus::ast
                 return "/=";
             case AssignOp::Remainder:
                 return "%=";
+            case AssignOp::BitAnd:
+                return "&=";
+            case AssignOp::BitOr:
+                return "|=";
+            case AssignOp::BitXor:
+                return "^=";
+            case AssignOp::ShiftLeft:
+                return "<<=";
+            case AssignOp::ShiftRight:
+                return ">>=";
             }
             return "?";
         }
@@ -93,6 +113,8 @@ namespace fminus::ast
                 return "*";
             case UnaryOp::AddressOf:
                 return "&";
+            case UnaryOp::Complement:
+                return "~";
             }
             return "?";
         }

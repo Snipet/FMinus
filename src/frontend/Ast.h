@@ -271,8 +271,11 @@ namespace fminus::ast
         Not,           // !x: a bool
         Dereference,   // *p: what p points to, an lvalue
         AddressOf,     // &x: the address of an lvalue
+        Complement,    // ~x: an int's bits flipped
     };
 
+    // The bitwise operators (&, |, ^, << and >>) take ints, as C's take integers: a bool takes part as an int, and a
+    // float or a vector is an error.
     enum class BinaryOp
     {
         Add,
@@ -286,6 +289,11 @@ namespace fminus::ast
         GreaterEqual,
         Equal,
         NotEqual,
+        BitAnd,      // a & b
+        BitOr,       // a | b
+        BitXor,      // a ^ b
+        ShiftLeft,   // a << n: by n's low five bits, its bits shifted out lost (two's complement)
+        ShiftRight,  // a >> n: by n's low five bits, its sign shifted in (arithmetic)
     };
 
     // && and ||: C's, so the right operand runs only when the left does not decide.
@@ -304,6 +312,11 @@ namespace fminus::ast
         Multiply,
         Divide,
         Remainder,
+        BitAnd,       // &=
+        BitOr,        // |=
+        BitXor,       // ^=
+        ShiftLeft,    // <<=
+        ShiftRight,   // >>=
     };
 
     struct Expr;

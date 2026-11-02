@@ -1,7 +1,7 @@
-// src/ir/Expressions.cpp: expressions. Constants, variables, unary and binary operators (lane by lane on vectors), &&
-// and || (short-circuiting), ?: (only the branch taken runs, unless the condition is a vector: Vectors.cpp), casts,
-// assignment, ++ and --. Calls are Calls.cpp's, vector literals and swizzles Vectors.cpp's, methods and `this`
-// Modules.cpp's, and what an assignment stores to Memory.cpp's.
+// src/ir/Expressions.cpp: expressions. Constants, variables, unary and binary operators (lane by lane on vectors; the
+// bitwise ones on ints), && and || (short-circuiting), ?: (only the branch taken runs, unless the condition is a
+// vector: Vectors.cpp), casts, assignment, ++ and --. Calls are Calls.cpp's, vector literals and swizzles
+// Vectors.cpp's, methods and `this` Modules.cpp's, and what an assignment stores to Memory.cpp's.
 #include "ir/Lowering.h"
 
 #include <llvm/ADT/APFloat.h>
@@ -35,7 +35,9 @@ namespace fminus::ir::detail
                         return lowerAddressOf(expr.location, *unary.operand);
                     const Value operand = lower(*unary.operand);
                     const ast::Type type = ast::arithmeticOf(operand.type);   // an int, a float, a float vector
-                    if (!ast::isArithmetic(operand.type) && unary.op != ast::UnaryOp::Not)
+                    const bool invalid = unary.op == ast::UnaryOp::Complement ? type != ast::Type::Int
+                                                                              : !ast::isArithmetic(operand.type);
+                    if (invalid && unary.op != ast::UnaryOp::Not)
                     {
                         error(expr.location,
                               "invalid argument type " + quoted(ast::typeName(operand.type)) + " to unary expression");
@@ -56,6 +58,11 @@ namespace fminus::ir::detail
                     {
                         llvm::Value* test = convert(operand, ast::Type::Bool, expr.location, Use::Logical);
                         return Value{builder_.CreateNot(test, "lnot"), ast::Type::Bool};
+                    }
+                    case ast::UnaryOp::Complement:   // xor with -1, as clang's; a bool is an int first: ~true is -2
+                    {
+                        llvm::Value* value = convert(operand, type, expr.location, Use::Initializing);
+                        return Value{builder_.CreateNot(value, "not"), type};
                     }
                     case ast::UnaryOp::Dereference:   // above
                     case ast::UnaryOp::AddressOf:
@@ -96,11 +103,26 @@ namespace fminus::ir::detail
                || op == ast::BinaryOp::NotEqual;
     }
 
+    bool Lowering::isBitwise(ast::BinaryOp op)
+    {
+        return op == ast::BinaryOp::BitAnd || op == ast::BinaryOp::BitOr || op == ast::BinaryOp::BitXor
+               || op == ast::BinaryOp::ShiftLeft || op == ast::BinaryOp::ShiftRight;
+    }
+
     // A binary operator, as C's usual arithmetic conversions and OpenCL C's say: the operands meet in their common
     // type (an int meeting a float is a float; a scalar meeting a vector is broadcast to it), the operator works
-    // lane by lane on vectors, and a comparison gives a bool, or a lane mask for vectors.
+    // lane by lane on vectors, and a comparison gives a bool, or a lane mask for vectors. The bitwise operators take
+    // ints (a bool is one), as C's take integers, and give an int; for a shift, C promotes each operand on its own,
+    // which with int the only integer type is the same.
     Lowering::Value Lowering::binary(SourceLocation location, ast::BinaryOp op, Value lhs, Value rhs)
     {
+        if (isBitwise(op) && (ast::arithmeticOf(lhs.type) != ast::Type::Int
+                              || ast::arithmeticOf(rhs.type) != ast::Type::Int))
+        {
+            error(location, "invalid operands to binary expression (" + quoted(ast::typeName(lhs.type)) + " and "
+                                + quoted(ast::typeName(rhs.type)) + ")");
+            return poison(ast::Type::Int);
+        }
         if (ast::isPointer(lhs.type) || ast::isPointer(rhs.type))
             return pointerArithmetic(location, op, lhs, rhs);   // Memory.cpp
         ast::Type type = ast::Type::Float;
@@ -113,7 +135,12 @@ namespace fminus::ir::detail
 
     // The operator's instruction in `type`. For int, C's: + - * carry nsw, as clang's do, since signed overflow is
     // undefined (it is what lets LLVM widen a loop counter to 64 bits); / and % truncate toward zero, and dividing by
-    // 0 is undefined; the comparisons are signed. For floats and float vectors, IEEE's.
+    // 0 is undefined; the comparisons are signed. & | ^ are and, or and xor. A shift is defined for every operand, as
+    // OpenCL C defines it (where C leaves a count below 0 or from 32 on, and a left shift of a negative value or into
+    // the sign, undefined, and which LLVM would make poison): the count is its low five bits (n & 31, clang's
+    // shl.mask, which the shift instructions of arm64 and x86-64 apply themselves, so it costs nothing on a scalar),
+    // << is a shl without nsw or nuw, the bits shifted out lost, and >> is an ashr, the sign shifted in, as clang's
+    // is (C makes a negative value's implementation-defined). For floats and float vectors, IEEE's.
     llvm::Value* Lowering::arithmetic(ast::BinaryOp op, ast::Type type, llvm::Value* lhs, llvm::Value* rhs)
     {
         if (type == ast::Type::Int)
@@ -142,6 +169,16 @@ namespace fminus::ir::detail
                 return builder_.CreateICmpEQ(lhs, rhs, "cmp");
             case ast::BinaryOp::NotEqual:
                 return builder_.CreateICmpNE(lhs, rhs, "cmp");
+            case ast::BinaryOp::BitAnd:
+                return builder_.CreateAnd(lhs, rhs, "and");
+            case ast::BinaryOp::BitOr:
+                return builder_.CreateOr(lhs, rhs, "or");
+            case ast::BinaryOp::BitXor:
+                return builder_.CreateXor(lhs, rhs, "xor");
+            case ast::BinaryOp::ShiftLeft:
+                return builder_.CreateShl(lhs, builder_.CreateAnd(rhs, 31, "shl.mask"), "shl");
+            case ast::BinaryOp::ShiftRight:
+                return builder_.CreateAShr(lhs, builder_.CreateAnd(rhs, 31, "shr.mask"), "shr");
             }
         }
         switch (op)
@@ -169,6 +206,12 @@ namespace fminus::ir::detail
             return builder_.CreateFCmpOEQ(lhs, rhs, "cmp");
         case ast::BinaryOp::NotEqual:
             return builder_.CreateFCmpUNE(lhs, rhs, "cmp");
+        case ast::BinaryOp::BitAnd:   // ints only: binary() refused the operands
+        case ast::BinaryOp::BitOr:
+        case ast::BinaryOp::BitXor:
+        case ast::BinaryOp::ShiftLeft:
+        case ast::BinaryOp::ShiftRight:
+            break;
         }
         return poison(ast::Type::Float).ir;
     }
@@ -367,9 +410,10 @@ namespace fminus::ir::detail
             return poison(ast::Type::Float);
         if (assign.op != ast::AssignOp::Assign)
         {
+            const std::size_t reported = diagnostics_.errors().size();
             value = compound(location, assign.op, read(*target), value);
-            if (value.ir == nullptr)
-                return poison(target->type);
+            if (value.ir == nullptr || diagnostics_.errors().size() != reported)
+                return poison(target->type);   // the operator's error says why; storing would only add another
         }
         return {write(location, *target, value, Use::Assigning), target->type};
     }
@@ -397,6 +441,16 @@ namespace fminus::ir::detail
             return ast::BinaryOp::Divide;
         case ast::AssignOp::Remainder:
             return ast::BinaryOp::Remainder;
+        case ast::AssignOp::BitAnd:
+            return ast::BinaryOp::BitAnd;
+        case ast::AssignOp::BitOr:
+            return ast::BinaryOp::BitOr;
+        case ast::AssignOp::BitXor:
+            return ast::BinaryOp::BitXor;
+        case ast::AssignOp::ShiftLeft:
+            return ast::BinaryOp::ShiftLeft;
+        case ast::AssignOp::ShiftRight:
+            return ast::BinaryOp::ShiftRight;
         }
         return ast::BinaryOp::Add;
     }

@@ -1,0 +1,84 @@
+// The bitwise operators on int, as clang -O0 lowers C's: & | ^ are and, or and xor, ~ an xor with -1, and a bool an
+// int first (zext). A shift is defined for every count, as OpenCL C defines it: the count's low five bits (the and
+// clang names shl.mask and shr.mask), then a shl with no nsw or nuw (the bits shifted out lost, a negative value's
+// too) or an ashr (the sign shifted in). A constant count folds its mask away, and so does the backend for a
+// variable one: arm64's lsl and asr take the count's low five bits themselves. The compound assignments are the
+// operator and a store. --emit ast shows C's precedence.
+// RUN: fminus %s -O0 | FileCheck %s
+// RUN: fminus %s -O2 | FileCheck %s --check-prefix=OPT
+// RUN: fminus %s --emit ast | FileCheck %s --check-prefix=AST
+// RUN: fminus %s --run eight 1 | FileCheck %s --check-prefix=RESULT
+// RUN: %if system-darwin && arm64 %{ fminus %s -O2 --emit asm -o - | FileCheck %s --check-prefix=ASM %}
+
+int ops(int a, int b, bool c)
+{
+    return (a & b) | (a ^ c) | ~a;
+}
+
+int shifts(int a, int n)
+{
+    return (a << n) + (a >> n) + (a << 3) + (a >> 40);
+}
+
+int compound(int a, int b)
+{
+    a &= b;
+    a |= 1;
+    a ^= b;
+    a <<= b;
+    a >>= 2;
+    return a;
+}
+
+int precedence(int a, int b, int c)
+{
+    return a | b & c ^ a << 1 + 2 == ~b;
+}
+
+// --run passes and prints floats: 1 << 3.
+float eight(float x)
+{
+    return (float)((int)x << 3);
+}
+
+// CHECK-LABEL: define i32 @ops(i32 %a, i32 %b, i1 zeroext %c)
+// CHECK:         %and = and i32 %{{.*}}, %{{.*}}
+// CHECK:         %conv = zext i1 %{{.*}} to i32
+// CHECK:         %xor = xor i32 %{{.*}}, %conv
+// CHECK:         %or = or i32 %and, %xor
+// CHECK:         %not = xor i32 %{{.*}}, -1
+// CHECK:         or i32 %or, %not
+// CHECK-LABEL: define i32 @shifts(i32 %a, i32 %n)
+// CHECK:         %shl.mask = and i32 {{%.*}}, 31
+// CHECK-NEXT:    %shl = shl i32 {{%.*}}, %shl.mask
+// CHECK:         %shr.mask = and i32 {{%.*}}, 31
+// CHECK-NEXT:    %shr = ashr i32 {{%.*}}, %shr.mask
+// CHECK:         shl i32 {{%.*}}, 3
+// CHECK:         ashr i32 {{%.*}}, 8
+// CHECK-LABEL: define i32 @compound(i32 %a, i32 %b)
+// CHECK:         and i32
+// CHECK-NEXT:    store i32
+// CHECK:         or i32 {{%.*}}, 1
+// CHECK-NEXT:    store i32
+// CHECK:         xor i32
+// CHECK-NEXT:    store i32
+// CHECK:         and i32 {{%.*}}, 31
+// CHECK-NEXT:    shl i32
+// CHECK-NEXT:    store i32
+// CHECK:         ashr i32 {{%.*}}, 2
+// CHECK-NEXT:    store i32
+
+// OPT-LABEL: define i32 @shifts(
+// OPT-NOT:     shl n
+// OPT:         ret i32
+
+// AST: (function int precedence ((int a) (int b) (int c))
+// AST-NEXT:   (return (| a (^ (& b c) (== (<< a (+ 1 2)) (~ b))))))
+
+// RESULT: 8
+
+// The mask costs nothing on a scalar: lsl and asr by a register take its low five bits.
+// ASM-LABEL: _shifts:
+// ASM-NOT:     and
+// ASM:         lsl w{{[0-9]+}}, w0, w1
+// ASM:         ret

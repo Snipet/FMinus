@@ -28,6 +28,7 @@ namespace fminus::ir::detail
                         case ast::UnaryOp::Negate:
                         case ast::UnaryOp::Plus:
                         case ast::UnaryOp::Not:
+                        case ast::UnaryOp::Complement:
                             return isConstant(*unary.operand);
                         case ast::UnaryOp::Dereference:
                         case ast::UnaryOp::AddressOf:

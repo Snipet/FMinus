@@ -25,21 +25,23 @@
 //                  | "parallel" "for" "(" (declaration | expr? ";") expr? ";" expr? ")" statement
 //                  | "parallel" block                    FMinus's: the iterations, or the statements, at once
 //     expr         : NUMBER | "true" | "false" | IDENTIFIER | IDENTIFIER "(" (expr ("," expr)*)? ")" | "(" expr ")"
-//                  | ("-" | "+" | "!" | "*" | "&") expr | expr "[" expr "]"         *p, &x, p[i]
+//                  | ("-" | "+" | "!" | "~" | "*" | "&") expr | expr "[" expr "]"   *p, &x, p[i]
 //                  | "sizeof" "(" "const"? type pointer ")"                          a type's size, an int
-//                  | expr ("*" | "/" | "%") expr | expr ("+" | "-") expr
+//                  | expr ("*" | "/" | "%") expr | expr ("+" | "-") expr | expr ("<<" | ">>") expr
 //                  | expr ("<" | "<=" | ">" | ">=") expr | expr ("==" | "!=") expr
+//                  | expr "&" expr | expr "^" expr | expr "|" expr                   an int's bits
 //                  | expr "&&" expr | expr "||" expr | expr "?" expr ":" expr
 //                  | "(" VECTOR_TYPE ")" "(" (expr ("," expr)*)? ")"                 OpenCL C's vector literal
 //                  | "(" VECTOR_TYPE ")" "{" (expr ("," expr)* ","?)? "}"            C's: lanes left out are 0
 //                  | "(" "poly" "float" ")" "(" expr ")" | expr "." IDENTIFIER       a broadcast; a swizzle or field
 //                  | expr "->" IDENTIFIER | expr ("." | "->") IDENTIFIER "(" (expr ("," expr)*)? ")" | "this"
 //                  | ("++" | "--") expr | expr ("++" | "--") | "(" ("float" | "int" | "bool") ")" expr    a cast
-//                  | expr ("=" | "+=" | "-=" | "*=" | "/=" | "%=") expr
+//                  | expr ("=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=") expr
 //
-// Precedence and associativity are C's, from the loosest: assignment (right to left), ?: (right to left), ||, &&,
-// equality, relational, additive, multiplicative, unary (and casts), and the postfix operators: ".", "->", "[" and
-// "++" and "--" after their operand.
+// Precedence and associativity are C's, from the loosest: assignment (right to left), ?: (right to left), ||, &&, |,
+// ^, &, equality, relational, shifts, additive, multiplicative, unary (and casts), and the postfix operators: ".",
+// "->", "[" and "++" and "--" after their operand. So `a & b == c` is a & (b == c), as in C, and `a << 1 + 2` is
+// a << 3. The unary "&" and "-" take UNARY's precedence (%prec), their binary ones their own.
 // A module's name is a type from its declaration on: the scanner returns it as MODULE_NAME (ParseContext.h), as a C
 // compiler returns a typedef's name, so `OnePole* p;` is a declaration and `a * b;` a product.
 // The grammar accepts any expression on the left of an assignment; the code generator rejects what is not an lvalue
@@ -230,7 +232,9 @@
 %token <ast::Type> VECTOR_TYPE "vector type"
 %token DOT "." POLY "poly"
 %token PLUS "+" MINUS "-" STAR "*" SLASH "/" PERCENT "%" INCREMENT "++" DECREMENT "--"
+%token PIPE "|" CARET "^" TILDE "~" SHL "<<" SHR ">>"
 %token ASSIGN "=" PLUS_ASSIGN "+=" MINUS_ASSIGN "-=" STAR_ASSIGN "*=" SLASH_ASSIGN "/=" PERCENT_ASSIGN "%="
+%token AND_ASSIGN "&=" OR_ASSIGN "|=" XOR_ASSIGN "^=" SHL_ASSIGN "<<=" SHR_ASSIGN ">>="
 %token LPAREN "(" RPAREN ")" LBRACE "{" RBRACE "}" COMMA "," SEMI ";"
 %token <std::string> IDENTIFIER "identifier"
 %token <std::string> NUMBER "number"
@@ -264,12 +268,16 @@
 %precedence THEN
 %precedence "else"
 
-%right "=" "+=" "-=" "*=" "/=" "%="
+%right "=" "+=" "-=" "*=" "/=" "%=" "&=" "|=" "^=" "<<=" ">>="
 %right "?" ":"
 %left "||"
 %left "&&"
+%left "|"
+%left "^"
+%left "&"
 %left "==" "!="
 %left "<" "<=" ">" ">="
+%left "<<" ">>"
 %left "+" "-"
 %left "*" "/" "%"
 %precedence UNARY
@@ -588,6 +596,10 @@ expr
     | "-" expr %prec UNARY                  { $$ = ast::makeExpr(at(@1), ast::UnaryExpr{ast::UnaryOp::Negate, $2}); }
     | "+" expr %prec UNARY                  { $$ = ast::makeExpr(at(@1), ast::UnaryExpr{ast::UnaryOp::Plus, $2}); }
     | "!" expr %prec UNARY                  { $$ = ast::makeExpr(at(@1), ast::UnaryExpr{ast::UnaryOp::Not, $2}); }
+    | "~" expr %prec UNARY                  {
+                                                $$ = ast::makeExpr(at(@1),
+                                                                   ast::UnaryExpr{ast::UnaryOp::Complement, $2});
+                                            }
     | "*" expr %prec UNARY                  {
                                                 $$ = ast::makeExpr(at(@1),
                                                                    ast::UnaryExpr{ast::UnaryOp::Dereference, $2});
@@ -635,12 +647,22 @@ expr
     | expr "%" expr                         { $$ = binary(@2, ast::BinaryOp::Remainder, $1, $3); }
     | expr "+" expr                         { $$ = binary(@2, ast::BinaryOp::Add, $1, $3); }
     | expr "-" expr                         { $$ = binary(@2, ast::BinaryOp::Subtract, $1, $3); }
+    | expr "<<" expr                        { $$ = binary(@2, ast::BinaryOp::ShiftLeft, $1, $3); }
+    | expr ">>" expr                        { $$ = binary(@2, ast::BinaryOp::ShiftRight, $1, $3); }
+    | expr "&" expr                         { $$ = binary(@2, ast::BinaryOp::BitAnd, $1, $3); }
+    | expr "^" expr                         { $$ = binary(@2, ast::BinaryOp::BitXor, $1, $3); }
+    | expr "|" expr                         { $$ = binary(@2, ast::BinaryOp::BitOr, $1, $3); }
     | expr "=" expr                         { $$ = assign(@2, ast::AssignOp::Assign, $1, $3); }
     | expr "+=" expr                        { $$ = assign(@2, ast::AssignOp::Add, $1, $3); }
     | expr "-=" expr                        { $$ = assign(@2, ast::AssignOp::Subtract, $1, $3); }
     | expr "*=" expr                        { $$ = assign(@2, ast::AssignOp::Multiply, $1, $3); }
     | expr "/=" expr                        { $$ = assign(@2, ast::AssignOp::Divide, $1, $3); }
     | expr "%=" expr                        { $$ = assign(@2, ast::AssignOp::Remainder, $1, $3); }
+    | expr "&=" expr                        { $$ = assign(@2, ast::AssignOp::BitAnd, $1, $3); }
+    | expr "|=" expr                        { $$ = assign(@2, ast::AssignOp::BitOr, $1, $3); }
+    | expr "^=" expr                        { $$ = assign(@2, ast::AssignOp::BitXor, $1, $3); }
+    | expr "<<=" expr                       { $$ = assign(@2, ast::AssignOp::ShiftLeft, $1, $3); }
+    | expr ">>=" expr                       { $$ = assign(@2, ast::AssignOp::ShiftRight, $1, $3); }
     | expr "&&" expr                        { $$ = logical(@2, ast::LogicalOp::And, $1, $3); }
     | expr "||" expr                        { $$ = logical(@2, ast::LogicalOp::Or, $1, $3); }
     | expr "?" expr ":" expr                { $$ = ast::makeExpr(at(@2), ast::ConditionalExpr{$1, $3, $5}); }

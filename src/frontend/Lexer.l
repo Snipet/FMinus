@@ -142,6 +142,13 @@ IDENTIFIER  [A-Za-z_][A-Za-z0-9_]*
 "*="                        { return Parser::make_STAR_ASSIGN(yyextra->where); }
 "/="                        { return Parser::make_SLASH_ASSIGN(yyextra->where); }
 "%="                        { return Parser::make_PERCENT_ASSIGN(yyextra->where); }
+"&="                        { return Parser::make_AND_ASSIGN(yyextra->where); }
+"|="                        { return Parser::make_OR_ASSIGN(yyextra->where); }
+"^="                        { return Parser::make_XOR_ASSIGN(yyextra->where); }
+"<<="                       { return Parser::make_SHL_ASSIGN(yyextra->where); }
+">>="                       { return Parser::make_SHR_ASSIGN(yyextra->where); }
+"<<"                        { return Parser::make_SHL(yyextra->where); }
+">>"                        { return Parser::make_SHR(yyextra->where); }
 "->"                        { return Parser::make_ARROW(yyextra->where); }
 "+"                         { return Parser::make_PLUS(yyextra->where); }
 "<="                        { return Parser::make_LE(yyextra->where); }
@@ -154,6 +161,9 @@ IDENTIFIER  [A-Za-z_][A-Za-z0-9_]*
 ">"                         { return Parser::make_GT(yyextra->where); }
 "!"                         { return Parser::make_NOT(yyextra->where); }
 "&"                         { return Parser::make_AMPERSAND(yyextra->where); }
+"|"                         { return Parser::make_PIPE(yyextra->where); }
+"^"                         { return Parser::make_CARET(yyextra->where); }
+"~"                         { return Parser::make_TILDE(yyextra->where); }
 "?"                         { return Parser::make_QUESTION(yyextra->where); }
 "."                         { return Parser::make_DOT(yyextra->where); }
 "::"                        { return Parser::make_COLONCOLON(yyextra->where); }

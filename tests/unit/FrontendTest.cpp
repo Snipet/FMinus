@@ -77,6 +77,30 @@ TEST_CASE("comparisons, !, && and ||, and ?: have C's precedence", "[frontend]")
     CHECK(parsed("bool h() { return !true || false; }") == "(function bool h ()\n  (return (|| (! true) false)))\n");
 }
 
+TEST_CASE("the bitwise operators and shifts have C's precedence, and & is unary or binary as in C", "[frontend]")
+{
+    // Loosest first: ||, &&, |, ^, &, equality, relational, shifts, additive; ~ is unary.
+    CHECK(parsed("int f(int a, int b, int c) { return a | b & c; }")
+          == "(function int f ((int a) (int b) (int c))\n  (return (| a (& b c))))\n");
+    CHECK(parsed("int f(int a) { return a << 1 + 2; }") == "(function int f ((int a))\n  (return (<< a (+ 1 2))))\n");
+    CHECK(parsed("bool f(int a, int b) { return ~a == b; }")
+          == "(function bool f ((int a) (int b))\n  (return (== (~ a) b)))\n");
+    CHECK(parsed("int f(int a, int b, int c) { return a & b == c || a ^ b | c && a < b >> c; }")
+          == "(function int f ((int a) (int b) (int c))\n"
+             "  (return (|| (& a (== b c)) (&& (| (^ a b) c) (< a (>> b c))))))\n");
+    CHECK(parsed("int f(int a) { return a >> 1 << 2 & ~-a; }")
+          == "(function int f ((int a))\n  (return (& (<< (>> a 1) 2) (~ (- a)))))\n");
+    // & before an operand is the address, after one the operator; && is one token, as C's maximal munch has it.
+    CHECK(parsed("int f(int a, int* p) { p = &a; return a&*p & &a == p && a; }")
+          == "(function int f ((int a) (int * p))\n"
+             "  (= p (& a))\n"
+             "  (return (&& (& (& a (* p)) (== (& a) p)) a)))\n");
+    // The compound assignments bind as = does: loosest, right to left.
+    CHECK(parsed("int f(int a, int b) { a <<= b >>= 1; a &= 1; a |= 2; a ^= b; return a; }")
+          == "(function int f ((int a) (int b))\n"
+             "  (<<= a (>>= b 1))\n  (&= a 1)\n  (|= a 2)\n  (^= a b)\n  (return a))\n");
+}
+
 TEST_CASE("vector types, literals and swizzles parse as OpenCL C's", "[frontend]")
 {
     // A literal is a parenthesised type, then its elements; a swizzle binds tighter than any operator, as in C.

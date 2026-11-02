@@ -275,6 +275,7 @@ namespace fminus::ir::detail
         // ---- Expressions.cpp ----------------------------------------------------------------------------------------
         Value lower(const ast::Expr& expr);
         static bool isComparison(ast::BinaryOp op);
+        static bool isBitwise(ast::BinaryOp op);
         Value binary(SourceLocation location, ast::BinaryOp op, Value lhs, Value rhs);
         llvm::Value* arithmetic(ast::BinaryOp op, ast::Type type, llvm::Value* lhs, llvm::Value* rhs);
         llvm::Value* lowerLogical(SourceLocation location, const ast::LogicalExpr& logical);
