@@ -1,0 +1,39 @@
+// switch's errors, one each, in clang's words: a value that is not an int (a bool is one), a case's value that is no
+// integer constant expression or is of no integer type, two cases of one value and two defaults (with a note at the
+// first), and labels outside a switch. An operand's own error is the only one.
+// RUN: not fminus %s 2>&1 | FileCheck %s --implicit-check-not=error: --implicit-check-not=note:
+
+int f(int x, float y, int k)
+{
+    switch (y) { case 1: break; }
+    switch (q) { }
+    switch (x)
+    {
+    case 1: break;
+    case 0 + 1: break;
+    case k: break;
+    case 1.5f: break;
+    case 1 / 0: break;
+    case 2147483647 + 1: break;
+    case 0 && 1 / 0: break;
+    default: break;
+    default: break;
+    }
+    case 3: x = 1;
+    default: x = 2;
+    return x;
+}
+
+// CHECK: switch-errors.fm:8:13: error: statement requires expression of integer type ('float' invalid)
+// CHECK: switch-errors.fm:9:13: error: use of undeclared identifier 'q'
+// CHECK: switch-errors.fm:13:12: error: duplicate case value '1'
+// CHECK-NEXT: switch-errors.fm:12:10: note: previous case defined here
+// CHECK: switch-errors.fm:14:10: error: expression is not an integer constant expression
+// CHECK: switch-errors.fm:15:10: error: integer constant expression must have integer type, not 'float'
+// CHECK: switch-errors.fm:16:12: error: expression is not an integer constant expression
+// CHECK-NEXT: switch-errors.fm:16:12: note: division by zero is undefined
+// CHECK: switch-errors.fm:17:21: error: overflow in expression; result is -2147483648 with type 'int'
+// CHECK: switch-errors.fm:20:5: error: multiple default labels in one switch
+// CHECK-NEXT: switch-errors.fm:19:5: note: previous case defined here
+// CHECK: switch-errors.fm:22:5: error: 'case' statement not in switch statement
+// CHECK: switch-errors.fm:23:5: error: 'default' statement not in switch statement

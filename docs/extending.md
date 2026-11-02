@@ -1,22 +1,26 @@
 # Extending the compiler
 
 How to add to FMinus. First, how a change moves through the compiler, and the few rules that keep that easy. Then
-twenty-one worked recipes. Eleven grow the C subset from a one-line builtin to C's control flow, a custom LLVM pass,
+twenty-five worked recipes. Eleven grow the C subset from a one-line builtin to C's control flow, a custom LLVM pass,
 `int`, `void` and pointers, the heap with the attributes that keep it off the audio thread, arrays and modules, FMinus's
 classes, an FFT from a C library built into the runtime, and parameters, the values a plugin's host sets. Six more are
 about the compiler rather than the language: math that gives a float one result wherever it is computed, knob versioning
 and flat streams, C's strict aliasing told to LLVM, zero-init elision, what the runtime's calls and loops promise, and
 subnormals flushed for the audio thread. Two more grow the language again: `#include`, which splits a program into
-files, and `parallel for` and `parallel { }`, a program's own threads. The last two return to the math: kernels of
-FMinus's own, the same in every lane and on every target, and those kernels inline. Then the pitfalls those recipes ran
-into, and design notes for what comes next. [simd.md](simd.md) has recipes 7 to 9, for vectors.
+files, and `parallel for` and `parallel { }`, a program's own threads. Two return to the math: kernels of FMinus's
+own, the same in every lane and on every target, and those kernels inline. The last four are for DSP's everyday code:
+C's bitwise operators with a hash and white noise from a counter, constant tables stored once, `switch` and
+enumerations, and constants at the top level with arrays sized by constant expressions. Then the pitfalls
+those recipes ran into, and design notes for what comes next. [simd.md](simd.md) has recipes 7 to 9, for vectors.
 
 Recipes 1 to 4 are in the compiler now (`tanhf` and `%`; `bool` and its operators; `if`, `while` and `for`), and so are
 simd.md's 7 to 9, recipe 10 (`int`, `void` and pointers), recipe 11 (the heap), recipe 12 (arrays and modules), recipe
 13 (the FFT), recipe 14 (parameters), recipes 15 to 20 (the math modes, knob versioning, TBAA, zero-init elision, the
 runtime's attributes and loop progress, denormal control), recipe 21 (`#include`), recipe 22 (`parallel for` and
-`parallel { }`) and recipes 23 and 24 (math kernels of FMinus's own, and inline), so their sections describe how the
-code you have got there: read a section beside the files it names.
+`parallel { }`), recipes 23 and 24 (math kernels of FMinus's own, and inline), recipe 25 (the bitwise operators,
+`hash` and `randf`), recipe 26 (constant tables), recipe 27 (`switch` and `enum`) and recipe 28 (constants at the top
+level, and sizes of constant expressions), so their sections describe how the code you have got there: read a section
+beside the files it names.
 Recipes 5 and 6, a runtime function and a pass, are not part of the language; they live in [recipes/](recipes/) as a
 patch, so you can apply them to see them work. None of these are sketches: each was applied to this repository, built
 with `-Werror`, and tested in the dev and asan presets, every test passing. [architecture.md](architecture.md) describes
@@ -39,7 +43,7 @@ Most language features touch the same places, in this order:
 | 5 | `src/ir/` | its conversions and checks, and its lowering to LLVM IR, in the file its kind belongs to (`Lowering.h` lists them: types, functions, statements, expressions, calls, the math modes, vectors, memory, modules, effects, parallel regions, TBAA, denormals); a load or store of memory gets its type's tag (`tag`, recipe 17); a statement that holds code walks it in `Parallel.cpp`'s `Walker` too |
 | 6 | `src/runtime/` | if it needs C++ at run time, a runtime function (recipe 5); if a builtin calls it, its facts: in `kRuntimeFacts`, through `callRuntime` (recipe 19), or for a math builtin's, in `mathFunction` (`Math.cpp`, recipe 15) |
 | 7 | `tools/fminus/main.cpp`, `src/support/Aot.cpp` | for a new type: whether `--run` can pass and print it (its `switch` over the result type), and whether an executable's `main` may take or return it (`addEntryPoint`) |
-| 8 | `tests/` | a dump in `FrontendTest.cpp`; results in `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `IntTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp` or `ParallelTest.cpp` (their helpers are in `Compile.h`); IR or errors in `tests/lit/fminus/` |
+| 8 | `tests/` | a dump in `FrontendTest.cpp`; results in `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `SwitchTest.cpp`, `EnumTest.cpp`, `IntTest.cpp`, `BitwiseTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `TableTest.cpp`, `TopLevelTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `HashTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp` or `ParallelTest.cpp` (their helpers are in `Compile.h`); IR or errors in `tests/lit/fminus/` |
 | 9 | `examples/` | a program that uses it, and a line in `tests/lit/fminus/examples.test` that runs it |
 | 10 | `editors/vscode/syntaxes/fminus.tmLanguage.json` | a new keyword, type or builtin, so VSCode highlights it (its README says where) |
 | 11 | `README.md` | the language table, and the deviations from C if any |
@@ -53,12 +57,12 @@ when recipe 10 added `Kind::Pointer`, it stopped in `typeOf`, `typeName` and the
 nothing reminds you of.
 
 Each feature has an example to read beside its recipe: `examples/comparison/` for `bool` (recipe 3),
-`examples/waveforms/` for every statement (recipe 4), `examples/chord/` for `float4` and the vector math library
-(recipes 7 and 8), `examples/unison/` for `poly float` (recipe 9), `examples/biquad/` for a block of samples a
-call, through pointers (recipe 10), `examples/delay/` for state on the heap and a kernel that can't allocate
-(recipe 11), `examples/saturator/` and `examples/meter/` for `poly float` through a buffer, against plain loops
-(recipes 9 and 10), `examples/convolver/` and `examples/delay/echo.fm` for loops over a module's fields
-(recipe 17), and `examples/ensemble/` for `parallel for` and `parallel { }` (recipe 22).
+`examples/waveforms/` for every statement (recipes 4 and 27) and a constant of the top level (recipe 28),
+`examples/chord/` for `float4` and the vector math library (recipes 7 and 8), `examples/unison/` for `poly float`
+(recipe 9), `examples/biquad/` for a block of samples a call, through pointers (recipe 10), `examples/delay/` for state
+on the heap and a kernel that can't allocate (recipe 11), `examples/saturator/` and `examples/meter/` for `poly float`
+through a buffer, against plain loops (recipes 9 and 10), `examples/convolver/` and `examples/delay/echo.fm` for loops
+over a module's fields (recipe 17), and `examples/ensemble/` for `parallel for` and `parallel { }` (recipe 22).
 
 ## Ground rules
 
@@ -736,7 +740,8 @@ predecessors. The statements after it then lower into dead code. The function's 
 
 **Loops**: `loops_` is a stack of `{breakTarget, continueTarget}` pairs, pushed around each body. A `break` branches to
 the innermost loop's exit, and a `continue` to its next iteration. With no loop around them, they are clang's
-errors: "'break' statement not in loop or switch statement" and "'continue' statement not in loop statement".
+errors: "'break' statement not in loop or switch statement" and "'continue' statement not in loop statement". (Recipe
+27 renames it `breakables_`, whose `Breakable`s are switches and parallel regions too.)
 
 ```cpp
                                [&](const ast::BreakStmt&) {
@@ -1717,8 +1722,8 @@ A swizzle and a field are written alike, `v.x` and `m.y`, and the parser can't t
 type. So `SwizzleExpr` became `MemberExpr`, with an `arrow` flag for `p->y`, and the code generator decides by the
 base's type. `m.tick(x)` and `p->tick(x)` are `MethodCallExpr`s, and `this` a `ThisExpr`. An array is a declarator
 with a size after its name, `"[" NUMBER "]"`, and an initialiser list; a parameter declared as one is a pointer, as in
-C. The size is the parser's to check (a positive integer constant: `arraySize` in `Parser.y`), since the `Type` holds
-it.
+C. The size was the parser's to check (a positive integer constant), since the `Type` holds it; recipe 28 makes it any
+integer constant expression, which the code generator works out.
 
 ### A struct type per module
 
@@ -1835,7 +1840,7 @@ mirror of the modules has the same layout, and plays a score through both, bit f
 
 - `tests/unit/ArrayTest.cpp`: arrays zeroed, indexed, initialised from lists, decayed to pointers and compared as
   them, of ints and vectors, declared afresh in a loop, a C++ host's buffer as an array parameter; the errors, the
-  parser's for sizes included.
+  sizes' included.
 - `tests/unit/ModuleTest.cpp`: a module's methods run on a C++ host's struct, against C++; modules holding modules and
   arrays of them, methods calling methods with and without `this`, `this` passed on; sizes with padding, copies,
   modules on the heap, pointers to a module's own kind; the effects through methods; the errors, clang's where clang
@@ -4350,6 +4355,615 @@ Compilation, instructions to compile and link each program (`Program::compile` a
 the fifteen, from none (echo, which calls no math builtin) to +114% (the shaper, eight `tanhf`s a sample in each
 knob-versioned copy of its loop); in time, for example, the modular voice 120 ms to 154 ms in this build.
 
+## Recipe 25: bits: C's bitwise operators, and `hash` and `randf`
+
+*In the compiler. Code: the tokens in `src/frontend/Lexer.l`, their rules and precedence in `Parser.y`,
+`UnaryOp::Complement` and five `BinaryOp`s and `AssignOp`s in `Ast.h` (their spellings in `Ast.cpp`); in `src/ir/`,
+`Expressions.cpp` (`isBitwise`, `binary`, `arithmetic`, `lowerAssign`), `Hash.cpp` (`hash` and `randf`), and their
+names in `Calls.cpp` and `Functions.cpp`. Tests: `tests/unit/BitwiseTest.cpp` (`[bitwise]`), `FrontendTest.cpp`'s
+precedence, `tests/unit/HashTest.cpp` (`[hash]`), `tests/lit/fminus/bitwise.fm`, `bitwise-errors.fm` and `hash.fm`.
+Example: `examples/noise/`.*
+
+An `int`'s bits were out of reach: FMinus had none of `&`, `|`, `^`, `~`, `<<` and `>>`, and `&` was only the address.
+A flag word, a power of two's mask, a table index wrapped with `& (n - 1)`: each took a division or a loop. And noise:
+the generators that need nothing but shifts, xors and multiplies (xorshift, a PCG, a counter's hash) could not be
+written, so white noise took one with a division and a remainder a sample (Park and Miller's minimal standard, by
+Schrage's method), whose every state waits on the last. A loop of it runs a sample at a time. This recipe adds C's
+operators, and two builtins that make noise a function of a sample's index.
+
+### Tokens and precedence
+
+Ten tokens join Lexer.l: `|`, `^`, `~`, `<<`, `>>` and `&=`, `|=`, `^=`, `<<=`, `>>=` (`&` was there). Flex takes the
+longest match, so `&&` stays one token and `a&&b` is a logical and, as C's maximal munch has it; `<<=` is one token,
+not `<<` and `=`. Parser.y gives them C's levels, between `&&` and equality and between relational and additive:
+
+```
+%right "=" "+=" "-=" "*=" "/=" "%=" "&=" "|=" "^=" "<<=" ">>="
+%right "?" ":"
+%left "||"
+%left "&&"
+%left "|"
+%left "^"
+%left "&"
+%left "==" "!="
+%left "<" "<=" ">" ">="
+%left "<<" ">>"
+%left "+" "-"
+```
+
+So `a & b == c` is `a & (b == c)`, as in C (and as clang warns), `a << 1 + 2` is `a << 3`, and `~a == b` is
+`(~a) == b`. `&` is unary or binary by where it stands, as `-` is: the unary rule takes `%prec UNARY`, the binary one
+`"&"`'s level, and Bison needs nothing else (`-Wcounterexamples` finds no conflict). `~` is a unary operator like `!`.
+Each binary rule is one line through `binary()` or `assign()`, and the nodes are enumerators: `UnaryOp::Complement`,
+`BinaryOp::BitAnd`, `BitOr`, `BitXor`, `ShiftLeft`, `ShiftRight`, and the same five of `AssignOp`. `-Wswitch` then
+lists every switch that needs them: the dump's spellings, the unary operators' lowering, `arithmetic`'s float half,
+`compoundOperator`, and `isConstant` (Statements.cpp), for which `~` of a constant expression is one, as in C.
+
+### Ints only
+
+C's bitwise operators take integers, and FMinus's one integer type is `int`; a `bool` takes part as an `int`, as C's
+integer promotions say (`~true` is -2). `binary()` checks the operands before anything else, so a pointer gets the same
+message as a float, and the result type of a refused operator is `int`, what the expression would have had:
+
+```cpp
+        if (isBitwise(op) && (ast::arithmeticOf(lhs.type) != ast::Type::Int
+                              || ast::arithmeticOf(rhs.type) != ast::Type::Int))
+        {
+            error(location, "invalid operands to binary expression (" + quoted(ast::typeName(lhs.type)) + " and "
+                                + quoted(ast::typeName(rhs.type)) + ")");
+            return poison(ast::Type::Int);
+        }
+```
+
+`~` of a float is clang's "invalid argument type 'float' to unary expression". A vector is refused as a float is, since
+FMinus has no integer vectors ([simd.md](simd.md)). A compound assignment, `x &= 1` of a float `x`, reports its
+operator's error and stores nothing (`lowerAssign`): storing the poison `int` into a `float*` would only add an error
+clang does not give. An operand that reported an error of its own, the undeclared `y` of `a & y`, lowers to a poison
+`float`, which would draw the message too, about a float the program does not have; so the binary case of `lower`,
+`~`'s and `lowerAssign` note the error count before they lower their operands, and when it has grown they give a
+poison `int` and say nothing more. A poison value is no test for this: `(int)3e10f` folds to one with no error, and
+`(float)((int)3e10f) | 1` is still refused (bitwise-errors.fm).
+
+### Shifts defined for every count
+
+C leaves `x << n` and `x >> n` undefined for a count below 0 or from 32 on, and `x << n` for a negative `x` or one
+that shifts a 1 into the sign; a negative `x`'s `>>` is implementation-defined. LLVM's `shl` and `ashr` are poison for
+such a count, and a `shl nsw` (which clang does not emit, though it could) for such an `x`, and poison spreads: one
+sample's bad shift could become any value, or let the optimiser delete the code around it. A JIT whose output must be
+the same on every machine wants none of that, so FMinus defines them, as OpenCL C does:
+
+```cpp
+            case ast::BinaryOp::ShiftLeft:
+                return builder_.CreateShl(lhs, builder_.CreateAnd(rhs, 31, "shl.mask"), "shl");
+            case ast::BinaryOp::ShiftRight:
+                return builder_.CreateAShr(lhs, builder_.CreateAnd(rhs, 31, "shr.mask"), "shr");
+```
+
+- **The count is its low five bits** (`n & 31`), clang's own lowering for OpenCL C (it names the `and` `shl.mask`):
+  `x << 32` is `x`, `x << -1` is `x << 31`. A constant count folds its mask. A variable one costs nothing on a
+  scalar: arm64's `lsl` and `asr` by a register, and x86-64's `shl` and `sar`, take the count's low five bits
+  themselves, and the backend drops the `and` (bitwise.fm's ASM). A vector shift by a variable count keeps it, one
+  `and` a vector.
+- **`<<` is a `shl` without `nsw` or `nuw`**: the bits shifted out are lost, a negative value's too, as two's
+  complement has them (`-1 << 1` is -2, `1 << 31` the least `int`). C++20 defines it so.
+- **`>>` is an `ashr`**: the sign shifts in (`-8 >> 1` is -4), as clang's does.
+
+`&`, `|` and `^` are `and`, `or` and `xor`, and `~x` an `xor` with -1, as clang writes them. `+`, `-` and `*` on `int`
+keep their `nsw`: an `int`'s overflow is still undefined, which is what lets LLVM widen a loop's counter. With no
+`unsigned`, a logical shift right is an arithmetic one and a mask, `(x >> 17) & 0x7FFF`, and a hash or generator that
+multiplies must not overflow an `int`: the reason `hash` is a builtin.
+
+### `hash` and `randf`
+
+`hash(n)` mixes an `int`, a counter or a seed, into a well-spread one; `randf(n)` is a float uniform in [-1, 1) from the
+same bits. White noise is then a function of a sample's index, `out[i] = randf(start + i)`: no state but where a block
+starts, the same samples whatever the block size, and a loop of it vectorises. The mixer is Chris Wellons's lowbias32,
+from his hash prospector (public domain), on the int's 32 bits as C would hold them in a `uint32_t`:
+
+```c
+x ^= x >> 16; x *= 0x7feb352d; x ^= x >> 15; x *= 0x846ca68b; x ^= x >> 16;
+```
+
+His search found it among the least biased 32-bit hashes of two multiplies: a flipped input bit flips each output bit
+close to half the time (within 0.002 of a half, over a million random ints, which is the measurement's own noise). Each
+step is a bijection, so two ints never give one hash; `hash(0)` is 0. `Hash.cpp` emits it as instructions, `lshr` for
+C's unsigned shift and `mul` without `nsw` for its unsigned product, which wraps. `randf` takes the hash's top 24 bits
+as a signed int k (an `ashr` by 8), from -2^23 to 2^23 - 1, and gives k / 2^23 (`sitofp`, then `fmul` by 0x1p-23): 2^24
+values, evenly spaced from -1 to 1 - 2^-23, each as likely, their mean -2^-24.
+
+Every step is exact: integer arithmetic, a conversion of 24 bits to a float, which holds them, and a product by a power
+of two, which only moves the exponent and never reaches the subnormals. So a builtin made of them gives the same bits
+in every lane of a vectorised loop and its remainder, at `-O0` and `-O2`, constant-folded or not, in every math mode,
+with subnormals flushed or not, and on every target, with nothing to keep in step: the math kernels needed intrinsics
+LLVM cannot see into, a pass and three runtime functions to promise that (recipes 15, 23 and 24), and these need none.
+Being plain instructions, they are pure to LLVM: it folds, hoists, merges or removes a call of them as it does an `add`,
+and the loop vectoriser widens them into `<4 x i32>` operations, NEON's `ushr`, `eor` and `mul.4s`, with the product by
+2^-23 folded into the conversion (`scvtf.4s ..., #23`).
+
+The names are FMinus's own, as `reduce_add` is: a program's definition or prototype of `hash` or `randf` is "'hash' is
+a builtin and cannot be redefined". The argument converts as it would to a parameter of type `int` (a float is
+truncated toward zero); a pointer or a vector is clang's "passing 'float *' to parameter of incompatible type 'int'".
+Two sources that must not repeat each other take two seeds through `hash`: `randf(seed ^ count)` with
+`seed = hash(voice)`. An `int` counts 2^31 samples, 12.4 hours at 48 kHz; a source that may run longer wraps its count
+before `++` would overflow (`examples/noise/noise.fm`).
+
+### What it changes for programs and hosts
+
+- **Programs gain** the operators and the two builtins; nothing that compiled before compiles differently, except a
+  program with a function named `hash` or `randf`, which must rename it.
+- **A shift never makes a program undefined**, and means the same on every machine.
+- **Hosts need nothing**: the builtins call no runtime function, so there is no symbol to keep and no table to add.
+
+### Tests
+
+- `tests/unit/BitwiseTest.cpp`: `&`, `|`, `^` and `~` against C++'s over pairs of edge values (0, ±1, the least and
+  greatest `int`, bit patterns), `bool` operands; the shifts by 0, 1, 31, 32, 33, -1, -32 and the extremes, against
+  FMinus's definition in C++, at run time and folded; the compound assignments on locals, elements, fields, bools and
+  through pointers; `&` as the address, `&&` and `a&~b`; mixed precedence computed; clang's errors and their places.
+- `FrontendTest.cpp`: the dumps of `a | b & c`, `a << 1 + 2`, `~a == b`, `a & b == c` and the unary and binary `&`.
+- `tests/unit/HashTest.cpp`: golden values of both (a change to them changes every program's noise), the reference over
+  28,000 inputs; the same bits from a vectorised loop, a module's counter in blocks of 1, 3, 64 and 959, in each math
+  mode, at `-O0` and `-O2`, flushed or not; a million values' mean, variance and range, and each hash bit set half the
+  time; the arity, argument and redefinition errors.
+- `tests/lit/fminus/bitwise.fm`: the IR (`and`, `xor -1`, `shl.mask`, `shl` without flags, `ashr`), a constant count
+  folded, the dump, and arm64's `lsl` by a register with no `and`; `bitwise-errors.fm`: the errors, one each.
+- `tests/lit/fminus/hash.fm`: the instructions inline with no call at `-O0`; the noise loop's `<4 x i32>` vector body in
+  every math mode and flushed; a constant folded; `--run`'s values; arm64's `scvtf.4s` by 23.
+- `examples.test` runs `examples/noise/`: a second of noise's RMS, the same at `-O0` in the libm mode.
+
+### Measurements
+
+The noise loop, `out[i] = randf(start + i)` at `-O2` on arm64: 49 instructions a step of sixteen samples (four
+vectors of four), so 3.1 a sample, all of them integer vector instructions but the four conversions and the stores. A
+generator whose state waits on the last sample's cannot vectorise at all.
+
+## Recipe 26: constant tables, stored once
+
+*In the compiler. Code: `src/ir/Memory.cpp` (`declareConstArray`), called by `declareVariable` (`Statements.cpp`), and
+`capture` (`Parallel.cpp`). Tests: `tests/unit/TableTest.cpp` (`[table]`), `tests/lit/fminus/tables.fm`.*
+
+A wavetable, a window, a set of filter coefficients: `const float t[16] = {...};` in a function was an array on the
+stack, zeroed and filled on every call, as every local array is (recipe 12). Nothing can write a `const` array, so
+every call filled it with the same values: at `-O2`, a 16-float table read once a call cost 40 instructions, 35 of them
+building the constants and storing them, for one load. Clang stores a `static const` local once, as a private constant
+global, and gives a plain local with a constant initialiser a private global to `memcpy` from (`@__const.f.t`), whose
+copy InstCombine removes when the array is only read. FMinus's const array is only ever read, so it goes straight to
+the global: 5 instructions, an address and a load.
+
+### When an array is a table
+
+`declareVariable` hands a declaration to `declareConstArray` when it is `const`, an array of what FMinus can point to
+but a module, and has no `= expr` (an array's is an error). `declareConstArray` lowers the list's elements, in order,
+each converted to the element type as `initializeArray` converts it, and looks at what came out:
+
+- **Every element a constant** (`llvm::Constant`): a number, `sizeof`, operators and casts of them, and a builtin of
+  constants that folds (`hash(3)`, `poly_lanes()`); `?:`, `&&` and `||` branch even on constants (recipe 3), so a list
+  that holds one is not. The array is a global: `private unnamed_addr constant`, aligned as the array, named as clang
+  names a local's, `__const.<function>.<name>` (LLVM adds `.1` for a second of one name), and the name is bound to it
+  instead of a stack slot.
+- **Anything else** (a variable, a call, a knob): a local, as before, with its list's values, computed once, stored
+  after the zeroing.
+- **Over 1 MiB** (`kMaxTableBytes`: 262,144 floats, 65,536 `float4`s), whatever its list: a local too. A global's
+  every byte is built in the compiler's memory, its zeros too: the JIT's object holds them in a read-only section
+  (LLVM leaves a constant's zeros out of BSS), and JITLink copies them, so a table costs about twice its size to
+  compile, where a stack slot costs nothing until it is called. An array may have 2^30 elements: `fminus --run` of a
+  program with a 256 MB table (a two-element list) peaked at 573 MB with the table a global, and at 37 MB with it on
+  the stack.
+
+A binding holds an address whichever it is, so every read goes through `lvalue()` and `read()` unchanged: the name
+stands for a `const T*`, an element through it is read-only, and none can be written. A parallel region reads a table
+where it is, as the function around it does, rather than capturing its address into its context (`capture`).
+
+### Its contents, bit for bit
+
+The global holds what the stack's array would: the same lowered and converted values (folded by the same
+`DenormalFolder`, so under `Denormals::Flush` too), then zeros. The zeros take clang's shapes (`EmitArrayConstant`):
+up to the last element that is not zero, then, for eight zeros or more, one `zeroinitializer`, the two parts a packed
+struct (`<{ [2 x i32], [30 x i32] }>`, laid out as the array), so a long table with a short list costs no constant per
+element; an array without a list is a `zeroinitializer`. From `-O2` a constant index reads the constant itself.
+
+The one thing C could tell apart is the address. Each call of a C function has its own local array, so nested calls
+of one function hold two; a table is one object for every call, and `unnamed_addr` lets LLVM merge two equal tables
+into one, so a comparison of pointers into two of them (`p == q`) can find them the same. The README lists it with the
+deviations.
+
+### What it changes for programs and hosts
+
+- **Results do not change**, bit for bit; a const array of constants costs no time where it is declared. Recipe 28's
+  tables at the top level take the same shapes (`tableContents`).
+- **A large table takes its size in the JIT's memory**, once, where it took it on the stack, on every call: a table of
+  100,000 floats with a short list is 400 KB of `__const` in the object, zeros included. One over 1 MiB stays on the
+  stack, as before.
+
+### Tests
+
+- `tests/unit/TableTest.cpp`: tables of every element type and shape (a full list, a short one, eight zeros, none, a
+  100,000-element one; floats with -0, subnormals, a NaN and conversions from ints; ints from shifts, `~0` and
+  `hash(3)`; `float4`s) against the same arrays on the stack, bit for bit, subnormals preserved and flushed; a table in
+  a loop, through a `const float*`, in nested calls, in two scopes of one name, in a `parallel for` and in a
+  knob-versioned method; a list with a variable, a call's side effects in order, and `?:` on the stack; the errors.
+- `tests/lit/fminus/tables.fm`: the globals and their shapes, functions with no alloca, memset or store for them, a list
+  that is not constants on the stack, a region's context without the table, a 1 MiB table and one 16 bytes larger on
+  the stack, and `-O2`'s folded reads.
+
+## Recipe 27: `switch` and `enum`
+
+*In the compiler. Code: the keywords in `src/frontend/Lexer.l`; in `Parser.y`, the labels (`label`, `statement`,
+`unlabeled`), `switch`, the enumerations (`enumeration`, `enumerators`) and `enum Tag` as a type (`type`,
+`cast_type`); the tags' scopes in `ParseContext.h`; `SwitchStmt`, `CaseStmt`, `DefaultStmt`, `Enumerator`, `Enum`,
+`EnumStmt` and `Program::enums` in `Ast.h`, their dumps in `Ast.cpp`. In `src/ir/`: `Statements.cpp` (`lowerSwitch`,
+`lowerLabel`, `bypass`, the `Breakable` stack), `Constants.cpp` (C's integer constant expressions, `integerConstant`
+and `fold`; the enumerations, `declareEnum` and `enumerator`), `CodeGen.cpp` (the file's enumerations among the
+definitions), the constants read in `Expressions.cpp` and refused as lvalues in `Memory.cpp`, and `Parallel.cpp`.
+Tests: `tests/unit/SwitchTest.cpp` (`[switch]`), `tests/unit/EnumTest.cpp` (`[enum]`), `FrontendTest.cpp`,
+`tests/lit/fminus/switch.fm`, `switch-errors.fm`, `enum.fm` and `enum-errors.fm`. Example: `examples/waveforms/`'s
+`wave`.*
+
+An oscillator picks its waveform, a filter its response, a voice its stage: an `int` whose values a program could only
+name in comments, tested by a chain of `if`s. This recipe adds C's two answers: `switch`, which jumps to the statement
+of a value, and enumerations, named `int` constants, which a case label can be. Both are C's, with C23's labels, and
+with clang's errors.
+
+### Tokens and grammar
+
+Four keywords join Lexer.l: `switch`, `case`, `default` and `enum`. A keyword in an attribute is still a word there,
+as C23 and C++ read one (`[[gnu::const]]`), so `[[fminus::default(1000)]]` parses as before: `attribute_word` takes an
+identifier or `default` after the `::`.
+
+A label is C23's: a block item of its own, so a declaration may follow one (`case 0: float t = 2 * x;`, an error before
+C23) and one may end a block. Where a statement is expected, a label is the start of a labelled statement. C23 writes
+it so, and so does Parser.y:
+
+```yacc
+block_item
+    : declaration | enumeration | unlabeled | label
+    ;
+statement
+    : unlabeled                             { $$ = $1; }
+    | label statement                       { $$ = $1; ... the label's body = $2 }
+    ;
+label
+    : "case" expr ":"                       { $$ = ast::Stmt{at(@1), ast::CaseStmt{$2, nullptr}}; }
+    | "default" ":"                         { $$ = ast::Stmt{at(@1), ast::DefaultStmt{nullptr}}; }
+    ;
+```
+
+`unlabeled` is what `statement` was, and `switch "(" expr ")" statement` one more of its rules. A block never asks for
+a `statement`, so after `case 1:` in one there is nothing to choose: Bison finds no conflict. `case a ? b : c:` is a
+`?:` up to its last colon. In the tree, a label in a block is a `CaseStmt` or `DefaultStmt` without a body, and the
+items after it are its block's; `if (x) case 1: s` gives the label a body, `s`.
+
+An enumeration is declared on its own, at the top level, in a module or in a block:
+`qualifier "enum" enum_tag "{" enumerators ","? "}" ";"`. It starts with `qualifier`, as a declaration and a function
+do, so the three share their first reduction and `enum Mode {` against `enum Mode m;` is the next token's choice, `{`
+or not. `enum Mode`, without the braces, is a type in `type` and in `cast_type`: the type `int`, once a tag of the name
+is visible. C's `enum Mode { A } m;`, a variable declared with its enumeration, is a syntax error here.
+
+### `switch`
+
+`lowerSwitch` is clang's: the value, an `int` (a `bool` promoted to one, as C promotes it), goes to LLVM's `switch`,
+whose default is the end, `sw.epilog`, and the body is lowered after it. Each label is a block, `sw.bb` or
+`sw.default`, into which the code before it falls (`fallThrough`), and `lowerLabel` adds it to the instruction as it
+meets it: a case's value and block (`addCase`), or the default (`setDefaultDest`). So labels may be anywhere in the
+body, in a block or a loop inside it too, as C allows; jumping into a loop gives LLVM a loop with two entries, which it
+takes as it is. The code before the first label is reached by nothing, and lowers into an `unreachable` block, as code
+after a `return` does. `switch.fm`'s `pick` at `-O0`:
+
+```llvm
+  switch i32 %x1, label %sw.default [
+    i32 0, label %sw.bb
+    i32 1, label %sw.bb2
+    i32 14, label %sw.bb3
+    i32 -3, label %sw.bb4
+  ]
+```
+
+`break` and `continue` find their targets on recipe 4's stack, renamed `Breakable`: a loop, a switch or a parallel
+region, innermost last. `break` leaves the innermost loop or switch; `continue` skips the switches and goes to the
+innermost loop's next iteration; a label belongs to the innermost switch, and one met inside a parallel region before
+a switch is an error ("'case' cannot jump into a parallel for"), since the region's body is a function of its own.
+
+A jump to a label can pass declarations: `case 0: float t = 2 * x; ... break; case 1: ... t ...`, where `t` is in
+scope at `case 1` but its declaration never ran. C allows the jump, and the variable is indeterminate; FMinus starts
+every variable at 0, so `bypass` makes the switch's edge to such a label go through `sw.zero`, a block that stores 0 in
+each variable of the body's scopes still in scope there (a memset for an array or a module; an enumeration constant
+and a const table hold nothing to zero), then branches to the label. Falling into the label from above runs the
+declaration as written. mem2reg and dead-store elimination remove the zeros nothing reads.
+
+LLVM makes the most of it from `-O1`: a switch of constants becomes a table (`pick` is a range check and one load), a
+switch of two values a `select`, and one on a knob in a method's loop gets knob versioning's copies (recipe 16), one
+for each value of its domain, with no switch left in them. SimplifyCFG makes a switch of a chain of `if`s on one `int`
+too, so the code is the same either way: `switch` is for the program's reader.
+
+The errors are clang's: "statement requires expression of integer type ('float' invalid)", "duplicate case value
+'1'" and, for two names of one value, "duplicate case value: 'A' and 'B' both equal '1'" (a name being the case's
+value written as an enumeration constant, casts aside, as clang's `IgnoreParenCasts` has it), "multiple default
+labels in one switch", each with "previous case defined here" at the label before, and "'case' statement not in switch
+statement". A value with an error of its own (an undeclared name) gets no second one.
+
+### Integer constant expressions
+
+A case's value, and an enumerator's, is an integer constant expression, which a C compiler works out where it is
+written: C11 6.6p6's integer constants, enumeration constants, `sizeof`, and floating constants only as the immediate
+operands of casts (`(int)2.5f`), combined by the unary operators but `*` and `&`, the binary ones, `&&`, `||`, `?:` and
+casts to `int` or `bool`. `integerConstant` (`Constants.cpp`) folds one, over the tree, before anything is lowered:
+IRBuilder's folding would not do, since `&&`, `||` and `?:` branch even on constants (recipe 3), an `add nsw` of two
+constants folds to the wrapped value without a word, and a division by zero to poison.
+
+`fold` gives each node a value and a type, `int`, `bool` or `float`, and computes as FMinus computes at run time
+(`arithmetic`, recipe 25): `/` and `%` truncate toward zero, a shift takes its count's low five bits, `>>` shifts the
+sign in. So `case 1 << 33:` is `case 2:`, as `1 << 33` is 2 anywhere else. A `float` is carried by type only, with the
+place of its floating constant (`Folded::floating`): its value is never needed, since a `float` can only make the
+expression no constant. Where C makes the value an error, it is one, with clang's words:
+
+- a variable, const or not, a call, an assignment, `p[i]` or `*p`: "expression is not an integer constant expression",
+  at the operand (C++ would take a `const int`; C does not, nor does FMinus's `isConstant`);
+- a `float`-typed whole: "integer constant expression must have integer type, not 'float'"; a floating constant
+  elsewhere in an `int` (`1.5f < 2`, `(int)(0.5f + 1)`): no integer constant expression;
+- an `int` that overflows (C11 6.6p4: a constant expression's value is in its type's range): "overflow in expression;
+  result is -2147483648 with type 'int'", an error where clang warns;
+- a division by zero, and the least `int` divided by -1: no integer constant expression, with a note, "division by
+  zero is undefined" (clang's warning) or the value out of range.
+
+The last two are errors only where the expression is evaluated: `0 && 1 / 0` is the constant 0, and so is the arm of
+a `?:` its condition does not pick, since what is not evaluated has no value to be out of range, as clang has it
+(`IK_ICEIfUnevaluated`). What is no constant at all is reported wherever it is, as clang does: `0 && f()` is none.
+
+### Enumerations
+
+`declareEnum` gives each constant its value, its own or the one before it plus 1 (the first's 0), and binds it from
+just after its definition, as C11 6.2.1p7 says, so `enum { A = 1, B = A + 1 };` is 1 and 2, and an inner
+`enum { A = A + 50 };` reads the outer `A`. A constant past the greatest `int` is clang's "ISO C restricts enumerator
+values to range of 'int' (2147483648 is too large)": FMinus has no larger type for it to take. A value in error makes
+the constant the next one's after all, as clang counts it, so the rest still count and its uses report nothing more.
+
+C gives enumeration constants and variables one name space, so the constants live where the variables do, in the code
+generator's scopes: a `Binding` is a variable (its slot) or a constant (its value, `enumerator`, and no slot), and
+each knows where it was declared, for the notes. In a block, a constant is the block's, a variable of an inner block
+hides it, and one of the same scope is clang's "redefinition of 'A' as different kind of symbol" when the constant
+came first, a plain "redefinition of 'A'" when the variable did (two constants: "redefinition of enumerator 'A'"),
+each with "previous definition is here". At the top level and in a module it is the file's, `fileScope_`, as a C
+struct's enumeration constants are: `CodeGen.cpp` declares each enumeration in its place among the file's declarations
+(since recipe 28, as it lays out each module and defines each constant), so a function sees the constants declared
+before it, and a module's methods, which follow the module, see its own. A constant named as a function or a module of
+the file is a redefinition too, reported at whichever comes second (`fileNameClash`): "as different kind of symbol",
+but for a constant after a function, which clang calls a plain redefinition. A name in a method is looked up as C++
+looks one up in a member function (`enumerator`, on `named` since recipe 28): the blocks' scopes, then the module's
+fields and methods, then the file's.
+
+The scanner learns none of this, unlike a module's name (recipe 12). A module's name is a type, which the grammar must
+know to tell `T * p` from `a * b`; an enumeration constant is an expression wherever it stands, so the grammar never
+needs to know one, and a variable may hide it, which a token of its own would make a syntax error. Only the tags are the
+parser's, since `enum Mode` must name a declared one: `ParseContext::tags` is a scope for each block being parsed (the
+rule `block` opens one at its `{` and closes it at its `}`), and the file's, where a module's tags go too. A second
+`enum Mode { }` in one scope is "redefinition of 'Mode'"; `enum Mode` without a visible tag is clang's "ISO C forbids
+forward references to 'enum' types", as FMinus declares no enumeration ahead of its constants (C23 does, with a fixed
+underlying type).
+
+A constant reads as an `i32` constant (`lower`), so a const table of constants is stored once (recipe 26), a case
+label takes one, and a loop whose condition is one (`while (RUNNING)`) is a constant expression, which may run for ever
+(`isConstant`, now `Lowering`'s, recipe 19). It is no lvalue (`isLValue`): `A = 1` and `A++` are "expression is not
+assignable", and `&A` "cannot take the address of an rvalue of type 'int'". A parallel region reads one where it is,
+capturing nothing, and the race walker takes an outer constant for no variable. `enum Mode` names `int`, where C's
+enumerated type is compatible with an integer type of the compiler's choosing (GCC's and clang's is `unsigned int` when
+no constant is negative, `int` otherwise): a local, a parameter, a result, a module's
+`param enum Mode mode [[fminus::range(0, 2)]]`, `sizeof(enum Mode)` (4) and `(enum Mode)x` all mean `int`, and messages
+say `'int'`.
+
+### What it changes for programs and hosts
+
+- **Programs gain** `switch`, labels and enumerations. `switch`, `case`, `default` and `enum` are keywords: a program
+  with a variable, a parameter or a function of one of those names renames it, and the circuit compiler refuses them as
+  a netlist's names (`isFMinusKeyword`). `[[fminus::default(...)]]` is unchanged. Nothing else compiles differently.
+- **A jump past a declaration** finds the variable 0, where C leaves it indeterminate (the README's deviations).
+- **Hosts need nothing**: an enumeration holds no memory, so no module's layout changes, and a `param enum Mode` is a
+  `param int` to a host, its range and default as written.
+
+### Tests
+
+- `tests/unit/SwitchTest.cpp`: fall-through, `break` and `default` (first, in the middle, none), two labels on one
+  statement, a label ending a block (C23), a body that is one labelled statement, a `bool`'s switch; a switch in a loop
+  (`break` leaves the switch, `continue` goes to the loop) and a switch in a switch; labels inside a loop and an `if`
+  of the body, a jump into the loop, and the declarations a jump passes (a float, a `float4`, an array) read as 0;
+  case values of constant arithmetic (shifts by 33 and of negatives, the least `int`, `/` and `%`, unevaluated
+  divisions by zero, `sizeof`, casts of floating constants); a switch in a `parallel for`, `continue` in it; clang's
+  errors, every one.
+- `tests/unit/EnumTest.cpp`: values implicit, explicit, negative and extreme, a trailing comma, constants in a const
+  table, arithmetic, an index and a call; `enum Wave` as a parameter, a result, a cast and `sizeof`; the scopes (a
+  method sees its module's and the file's, a field hides a file's constant, a block's constant hidden by an inner
+  variable, a value reading the outer name); case labels of constants and the duplicates' names; a `parallel for`
+  reading constants from three scopes; the errors.
+- `FrontendTest.cpp`: the dumps of switches, labels as items and as statements, `case x ? 1 : 2:`, `fminus::default`;
+  enumerations where they are among functions and modules, `enum Wave` as a type everywhere, and the tags' errors.
+- `tests/lit/fminus/switch.fm`: the `-O0` IR (the switch's cases, the blocks falling into each other, `sw.epilog`,
+  `sw.zero`), `-O2`'s table and select, the dump, `--run`; `switch-errors.fm`, each error once.
+- `tests/lit/fminus/enum.fm`: constants folded (no load), the table a constant global, the cases, a constant loop
+  without `llvm.loop.mustprogress`, the dump, `--run`; `enum-errors.fm`, each error once. `CircuitTest.cpp` checks
+  the keywords are refused as names, and `examples.test` runs `examples/waveforms/`'s `wave`.
+
+## Recipe 28: constants at the top level, and sizes of constant expressions
+
+*In the compiler. Code: in `src/frontend/Parser.y`, a declaration among the `items` (`Program::constants`) and an
+array's size an expression (`array_size`); `Constant`, `DeclStmt::size`, `Field::size` and `Field::enums`, and
+`Param::size` in `Ast.h`, their dumps in `Ast.cpp`. In `src/ir/`: `CodeGen.cpp` (the file in source order),
+`Constants.cpp` (`sized`, `checkSizes`, `defineConstant`, `atTopLevel`, `fileNameClash`), `Modules.cpp`
+(`prepareModules`, `layOut` where the module is, `fieldType`), `Functions.cpp` (`describeThis`, `named`),
+`Memory.cpp` (a top-level constant as an lvalue, `tableContents`, a const array's element assigned), `Expressions.cpp`
+(a constant scalar read as its value, `?:`, `&&` and `||` on a constant at the top level, `sizeof` of a module not yet
+laid out) and `Statements.cpp` (a local's size); `module()`'s field types in `src/api/FMinus.cpp`. Tests:
+`tests/unit/TopLevelTest.cpp` (`[toplevel]`), `FrontendTest.cpp`, `tests/lit/fminus/toplevel.fm` and
+`toplevel-errors.fm`. Example: `examples/waveforms/`'s `PI`.*
+
+An instrument's tables are the program's, not a function's: a 17-by-12 table of partials that two functions and a
+module's method read, the sizes of a bank of filters, a window. Recipe 26 stores a function's const table once, but it
+is that function's: a second function needs a copy of its list, and a module's method a field filled by `init`. And a
+size was a number: `float table[204]`, with the stride, 12, written again in every index. This recipe adds C's two
+answers. A declaration at the top level declares constants, C's file-scope const objects, which every function and
+method after them reads; and an array's size is any integer constant expression, so `ROWS * COLS` names it, with
+enumeration constants (recipe 27):
+
+```c
+enum { ROWS = 17, COLS = 12 };
+const float PARTIALS[ROWS * COLS] = {1, 0.5f, 0.25f};   // the rest are 0
+const float GAIN = 0.5f;
+
+float partial(int row, int k) { return PARTIALS[row * COLS + k] * GAIN; }
+```
+
+### The grammar
+
+`items` takes a `declaration`, as a block and a module's body do. A declaration and a function share their start,
+`qualifier type pointer IDENTIFIER`, and the next token decides, `(` or not, as between a module's field and its
+method, so Bison finds no conflict. Each declarator becomes a `Constant`, its `DeclStmt` and how many functions,
+modules and enumerations come before it, which `dump` prints where it is: `(decl const float[(* ROWS COLS)] PARTIALS
+{1 0.5f 0.25f})`.
+
+An array's size was `"[" NUMBER "]"`, which the parser checked and put in the `Type`. It is an expression now,
+`array_size: "[" expr "]" | "[" "]"`, kept as written (`DeclStmt::size`, `Field::size`, `Param::size`), and the
+array's `Type` has a count of 0 in the tree: an enumeration constant's value is the code generator's (recipe 27), so
+every size is. `[]` takes its size from the list, `float t[] = {1, 2, 3}`, as C's does. A module's body is parsed into
+its fields, methods and enumerations apart, so a field records how many of its module's enumerations come before it
+(`Field::enums`): its size sees those, and not one declared after it, as in C. The dump shows a size as written,
+`int[0x10]`.
+
+### Sizes
+
+`sized` (`Constants.cpp`) works one out with recipe 27's `fold`: enumeration constants, `sizeof`, operators (the
+bitwise ones too), casts and `?:`, an `int` or a `bool`, from 1 to 2^30. Its errors are clang's, where clang has them:
+
+- a `float`: "size of array has non-integer type 'float'";
+- no constant: "expression is not an integer constant expression", at the operand that is none. C would make a local
+  array sized by a variable a variable length array, and refuse one at the top level or in a struct; FMinus has none.
+  A `const int` is no constant expression, in C17 as here (C23's `constexpr` object would be): a size is named by an
+  enumeration constant, C's idiom, `enum { TAPS = 64 };`;
+- negative: "'buf' declared as an array with a negative size"; an overflow, recipe 27's "overflow in expression";
+- 0, a GNU extension in C: "zero size arrays are not allowed"; over 2^30: "array is too large: FMinus's arrays have at
+  most 2^30 elements" (both FMinus's, as before);
+- `[]` without a list: "definition of variable with array type needs an explicit size or an initializer", and in a
+  module "field has incomplete type 'float[]'" (C's flexible array member is not FMinus's).
+
+After an error the array has one element, so its uses report nothing more. A local's size is worked out in
+`declareVariable`, with its block's enumerations in scope; a field's in `layOut`; a parameter's, `float x[N]`, a
+pointer whose size C still checks, in `checkSizes`, where the function is among the file's declarations, with the
+parameters before it in scope as variables (C99's `float x[n]` is a variable length parameter, which FMinus refuses as
+any size that is no constant). The tree stays as the parser made it: `layOut` keeps each field's type, its count
+worked out, in `fieldTypes_` (`fieldType`), and `module()` (the public API) names a field's array from the LLVM
+struct's.
+
+### The file in order
+
+The code generator laid out every module, declared every function and then lowered each body, declaring the
+enumerations before each. Now a field's size may name an enumeration constant, so a module's layout waits for the
+enumerations before it, and a constant is seen by what follows it. Pass 1 still declares every function, so calls may
+come before definitions; pass 2 (`CodeGen.cpp`) goes through the file in source order, as C's file scope does:
+
+```cpp
+                    if (constant != nullptr && constant->position <= position && constant->enums <= enums
+                        && constant->modules <= modules)
+                        defineConstant(*constant);              // before the enumerations and modules after it
+                    else if (enumeration != nullptr && enumeration->module == nullptr
+                             && enumeration->position <= position && enumeration->modules <= modules)
+                        declareEnum(*enumeration);              // before the modules after it
+                    else if (module != nullptr && module->position <= position)
+                        layOut(*module, enums);                 // its own enumerations among its fields
+```
+
+each before function `position`, which comes next: its parameters' sizes are checked, and its body lowered. A
+module's own enumerations are declared among its fields (`Field::enums`), and the rest after them, for its methods. A
+method's `this` was `nonnull align dereferenceable(size)` from pass 1, which needs the module's size; `describeThis`
+gives it when `layOut` has it. A module's `sizeof` before its layout is done, in its own fields' sizes or its own
+enumerations' values, is C's "invalid application of 'sizeof' to an incomplete type 'M'" (`prepareModules` makes the
+struct types opaque before pass 1, and `isOpaque` says which are not laid out yet); its methods see it whole.
+
+### Constants
+
+`defineConstant` makes a constant an LLVM global of its name, `constant`, aligned as its type: `@PARTIALS = private
+constant ...`. A table's contents are recipe 26's (`tableContents`): the list's values, then zeros, eight or more of
+them one `zeroinitializer`; a scalar without an initialiser is 0, and a table without a list all zeros.
+
+The global is private, as a C file's `static const` object is internal (clang gives a plain const object external
+linkage). Only the program's own code reads it, and a symbol of its name would be found by whatever looks one up by
+name: the calls LLVM's backend makes to a library's functions, whatever the program calls them (a float `%` calls
+`fmodf`, a zeroed array `memset` or `bzero`, `expf` of a variable in the fast math mode `expf`), which would jump into
+the constant's data; and a host, `Program::address("GAIN")`, which would have returned the data's address as a
+function's. A private global's symbol is local to its object (`L`-prefixed on Mach-O), so neither finds it. Within the
+module two kinds of name would still find it, since the code generator declares their functions by name: a builtin's
+(`sinf`, `malloc`, `randf`), which C's file scope holds already ("redefinition of 'sinf' as different kind of symbol",
+clang's), and a runtime function's (`RuntimeSymbols.def`; FMinus's "'fminus_rt_malloc' is the name of a function of
+FMinus's runtime, which the code it generates calls: rename the constant"). Either is refused, and its global left
+unnamed.
+
+The initialiser is lowered as a function's would be, into a function of no use (private, `fminus.top-level`, deleted
+after, with any declaration only it used), with `function_` a function of no name and no module (`topLevel_`): the same
+`lower`, `convert` and `DenormalFolder`, so a constant holds what a function's array of the same list holds, bit for
+bit, its subnormals flushed when the host flushes them. Every value must then be an `llvm::Constant` that holds no
+poison or undef (`undefined`), or it is clang's "initializer element is not a compile-time constant", at the first that
+is not. What C leaves undefined folds to poison: `1 / 0` and `LEN % 0`, which clang refuses too, and `INT_MIN / -1`,
+`(int)1e10f` and `(int)(0.0f / 0.0f)`, which clang folds to values (-2147483648, 2147483647 and 0). Read as its value,
+with no load, a poison constant would make poison of every function that read it. What folds is a constant: numbers,
+enumeration constants, `sizeof`, operators and casts of them, `hash` and `randf` of them, a constant scalar of the top
+level (below), the address of a table's element (`&PARTIALS[COLS]`, a constant expression). What the program would
+compute as it runs is not: a call (`sinf(1)` too, which every math mode lowers to a call), a table's element (a load),
+a heap block. `?:`, `&&` and `||` branch even on constants (recipe 3); at the top level (`atTopLevel`), where nothing
+runs, a constant condition is the value it picks, so `N > 2 ? 0.25f : 4` is a constant there, as in C. In a function
+they branch as before, so a local table holding one stays on the stack (recipe 26).
+
+FMinus's own errors: a declaration at the top level that is not `const` ("FMinus has no variables at the top level:
+declare 'state' const, a constant of the program, or keep it in a module"), since a program's state lives in modules,
+each instance's own; a module ("a module is no constant of the top level: its fields start at 0, and only its methods
+set them"); and a table over `kMaxTableBytes`, recipe 26's 1 MiB ("array is too large for a constant: FMinus's
+constants of the top level hold at most 1 MiB, and this one holds 268435456 bytes"). A local table over it stays on
+the stack; a top-level one has nowhere else to go, and the JIT's object would hold every byte of it, its zeros too, in
+the host's process, at about twice its size (recipe 26's measure): one line, `const float4 BIG[1 << 24];`, would cost
+half a gigabyte. The constant's name goes into `fileScope_`, beside the enumeration constants: a second of the name is
+"redefinition of 'A'", and so is an enumeration constant after it, with its note; one before it, a function or a
+module of the name is "redefinition of 'A' as different kind of symbol" (`fileNameClash`, which `declareEnum`
+shares), reported at the later.
+
+### Reading one
+
+`lvalue` finds a constant after the blocks' scopes and, in a method, the module's fields and methods (`named`, C++'s
+lookup in a member function), so a local or a field of the name hides it. A table decays to a pointer as any array:
+`getelementptr inbounds float, ptr @PARTIALS, i64 %idxprom` and a load, one object for every function, method and
+call, with no copy. A parallel region reads it where it is: it is in no function's scope, so nothing captures it. A
+scalar reads as its value, with no load, as clang reads a const object whose initialiser is a constant even at `-O0`
+(`fmul float %0, 5.000000e-01`); `&GAIN` is the global's address. So a constant scalar is a constant in another's
+initialiser (`const int M = N * 2;`, which C17 leaves to the compiler, 6.6p10, and clang takes), but in a constant
+expression it is a variable, as in C: a size, a case's value or an enumerator's.
+
+Assigning to one is clang's error: "cannot assign to variable 'GAIN' with const-qualified type 'const float'", and,
+for an element of a const array its variable names, a local's too, "cannot assign to variable 'PARTIALS' with
+const-qualified type 'const float[204]'" (it was "read-only variable is not assignable", which stays for an element
+through a `const float*`).
+
+### What it changes for programs and hosts
+
+- **Programs gain** top-level constants, sizes of constant expressions and `[]` sized by a list. Every program that
+  compiled compiles to the same IR, with four differences a test may see: a module's dump lists its enumerations among
+  its fields, in source order; a size's dump is as written; an element of a const array assigned is clang's message;
+  and a module's enumeration can no longer take the module's own `sizeof` (C's incomplete type).
+- **Hosts**: a top-level constant is no symbol, in the JIT's object or in one `--emit obj` writes: `Program::address`
+  finds functions only, as before. `module()` reports an array field's size as it was worked out.
+
+### Tests
+
+- `tests/unit/TopLevelTest.cpp`: the reporting program's case, a 17-by-12 table read by two functions, a module's
+  method, a `parallel for` and a pointer into it, through an enumeration's stride, against C++, with one constant
+  global and no stack slot or store for it; tables of floats (subnormals, -0, a NaN, `?:`, a constant scalar's value),
+  ints (`hash(3)`, `&&`, `||`), `float4`s, zeros and `[]` against the same list on the stack, bit for bit, preserved
+  and flushed; scalars of every type, an element's address and `&GAIN`; C's scopes (a local and a field hide a
+  constant, a method of a module before it does not see it, an `#include`d table after its `#include` and not before);
+  sizes of enumeration constants, operators, `sizeof`, casts and `?:` in fields (against a C++ struct's layout),
+  locals, a block's enumeration, tables and parameters; constants named as the library functions LLVM calls (`fmodf`,
+  `memset`, `bzero`), run in every math mode at `-O0` and `-O2`, and no symbol for `Program::address`; clang's errors
+  (a builtin's name, what C leaves undefined), and FMinus's (a runtime function's name, a table over 1 MiB), and a
+  size's error with no second error for its list.
+- `FrontendTest.cpp`: the dumps of sizes as written, `[]`, a module's enumerations among its fields, and constants
+  where they are among functions, modules and enumerations.
+- `tests/lit/fminus/toplevel.fm`: the private globals (an `#include`d one first), functions and a method with no
+  alloca, memset or store for them, a scalar read as its value, `-O2`'s loads and folded reads (and the tables only
+  those read gone), `--run`, the dump; `toplevel-errors.fm`, the errors from the command line.
+
 ## Pitfalls
 
 Each of these was hit while writing the language or its recipes. [simd.md](simd.md) has the vector ones.
@@ -4446,12 +5060,14 @@ semantic pass before lowering:
 
 Lowering then just reads the types. Each integer type lowers to an `iN`, and signedness lives in the operations,
 not the types: `udiv` and `urem` beside recipe 10's `sdiv` and `srem`, unsigned `icmp`s, `zext` where `int` uses
-`sext`, `uitofp` and `fptoui`. An `unsigned` has no `nsw`: it wraps, by definition.
+`sext`, `uitofp` and `fptoui`, and `lshr` where recipe 25's `>>` is an `ashr`. An `unsigned` has no `nsw`: it wraps, by
+definition, which is what a hash or a generator written in FMinus needs (recipe 25 made `hash` a builtin for want of
+it).
 
 **More arrays, and more pointers.** Recipe 12's arrays are one dimension deep. An array of arrays, `float m[4][4]`, is
 an `[4 x [4 x float]]` whose rows decay in turn; it needs `Type` to nest (its element a type, not a kind), and so do
-pointers to pointers and arrays of pointers. C's `float c[] = {1, 2, 3};` takes its size from its list, and `sizeof` of
-an array type (`sizeof(float[16])`) wants the grammar's abstract declarators. `bool*` and arrays of `bool` need `i8` in
+pointers to pointers and arrays of pointers. `sizeof` of an array type (`sizeof(float[16])`) wants the grammar's
+abstract declarators. `bool*` and arrays of `bool` need `i8` in
 memory (recipe 10 says why), and null C's `0` as a pointer constant. Casts between pointer types (`(float4*)samples`, a
 float buffer seen as frames; `free((void*)table)`, a `const` pointer freed) are C's and change nothing in the IR, but a
 `float4*` cast from a `float*` must still meet a `float4`'s alignment. Pointers to pointers are a `ptr` to a `ptr`, once
@@ -4549,13 +5165,21 @@ mixed-radix or Bluestein transform in the runtime, or to FFTW, which takes any (
 ones). On Apple systems vDSP is 2–3 times faster than either from about 512 points, but it comes from Accelerate, a
 system framework: a backend chosen when FMinus is built, not a library inside it.
 
-**State: globals and `static`.** File-scope variables lower to LLVM globals, and `static` locals likewise. For a
-plugin, prefer state each instance owns: a module (recipe 12), in memory the host gives it, as `examples/biquad/`'s
-filter and `examples/voices/`'s synth are, or memory the program allocates off the audio thread, as
-`examples/delay/` does (recipe 11). Nothing then allocates on the audio thread, and every instance has its own copy.
+**State: globals and `static`.** File-scope variables would lower to LLVM globals, and `static` locals likewise (recipes
+26 and 28 are the constant cases already: a `const` local array of constants is a private constant global, and a
+top-level constant a private constant global of its name). One global for every instance of a plugin is shared state,
+written from every instance's audio thread. For a plugin, prefer state each instance owns: a module (recipe 12), in
+memory the host gives it, as `examples/biquad/`'s filter and `examples/voices/`'s synth are, or memory the program
+allocates off the audio thread, as `examples/delay/` does (recipe 11). Nothing then allocates on the audio thread, and
+every instance has its own copy.
 
-**`switch`.** It lowers to LLVM's `switch` instruction, and its `break` reuses recipe 4's loop stack (rename
-`Loop`). Fall-through and `default:` are C's.
+**More of `switch` and enumerations.** Recipe 27 leaves four things. *clang's `-Wswitch`*, a switch over an enumerated
+value that misses one of its constants, needs `enum Mode` to be a type of its own rather than `int`: a `Kind` with the
+enumeration's constants, which every `switch` over `type.kind` would then list. *An enumeration's values as a knob's
+domain* (recipe 16's list, for that reason): a `param enum Mode` could be versioned on its constants with no
+`fminus::range`. *C's declarations with an enumeration*, `enum Mode { A } m;`, and C23's fixed underlying type,
+`enum Mode : int`, which would allow a forward declaration. *A `case` range*, GCC's `case 1 ... 4:`, which clang
+lowers to its cases one by one when the range is small, and to a comparison when not.
 
 **Contraction and fast-math, C's way.** `#pragma STDC FP_CONTRACT ON` (C99) allows fusing `a * b + c`. Lower it to
 `llvm.fmuladd`, or set the `contract` flag through `IRBuilder::setFastMathFlags`. The other fast-math flags
@@ -4578,12 +5202,13 @@ is one more: a method it copies takes about twice as long to compile, and `knobV
 ## Reference solutions
 
 The recipes in the compiler are their own reference: their code is in `src/`, and their tests in `tests/unit/`
-(`FrontendTest.cpp`, and `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `IntTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`,
-`EffectTest.cpp`, `ArrayTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `ParamTest.cpp`, `VectorTest.cpp` and `PolyTest.cpp`
-for the code generator; `MathTest.cpp`, `VersionTest.cpp`, `TbaaTest.cpp`, `ZeroInitTest.cpp`, `AttributeTest.cpp` and
-`DenormalTest.cpp` for recipes 15 to 20), `tests/library/` (`ProgramTest.cpp`, `StrictAliasingTest.cpp`,
-`DenormalsTest.cpp`) and `tests/lit/fminus/`. [recipes/](recipes/) holds the two that aren't, 5 and 6, as one patch
-against the compiler as it is ([recipes/README.md](recipes/README.md)):
+(`FrontendTest.cpp`, and `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `SwitchTest.cpp`, `EnumTest.cpp`, `IntTest.cpp`,
+`BitwiseTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `TableTest.cpp`,
+`TopLevelTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `HashTest.cpp`, `ParamTest.cpp`, `VectorTest.cpp` and
+`PolyTest.cpp` for the code generator; `MathTest.cpp`, `VersionTest.cpp`, `TbaaTest.cpp`, `ZeroInitTest.cpp`,
+`AttributeTest.cpp` and `DenormalTest.cpp` for recipes 15 to 20), `tests/library/` (`ProgramTest.cpp`,
+`StrictAliasingTest.cpp`, `DenormalsTest.cpp`) and `tests/lit/fminus/`. [recipes/](recipes/) holds the two that aren't,
+5 and 6, as one patch against the compiler as it is ([recipes/README.md](recipes/README.md)):
 
 ```bash
 git switch -c try-recipes

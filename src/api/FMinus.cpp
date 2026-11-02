@@ -227,7 +227,10 @@ namespace fminus
                 const auto index = static_cast<unsigned>(i);
                 const std::size_t offset = fields->getElementOffset(index).getFixedValue();
                 llvm::Type* element = type->getElementType(index);
-                info.fields.push_back({field.name, (field.isParam ? "param " : "") + ast::typeName(field.type), offset,
+                ast::Type fieldType = field.type;
+                if (ast::isArray(fieldType))   // its size as the code generator worked it out (the tree's is 0)
+                    fieldType.count = static_cast<int>(element->getArrayNumElements());
+                info.fields.push_back({field.name, (field.isParam ? "param " : "") + ast::typeName(fieldType), offset,
                                        layout.getTypeAllocSize(element).getFixedValue()});
                 if (!field.isParam)
                     continue;

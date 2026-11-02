@@ -2,48 +2,71 @@
 // automatically, token constructors, locations, detailed errors with LAC). It builds the syntax tree (Ast.h) into the
 // ParseContext.
 //
-//     program      : (function | module)*
+//     program      : (function | module | enumeration | declaration)*     a declaration there is of constants
 //     function     : "const"? type pointer IDENTIFIER "(" params ")" attributes (block | ";")    or a prototype
-//     module       : "module" IDENTIFIER "{" (declaration | parameter | method)* "}" ";"     declarations: fields
+//     module       : "module" IDENTIFIER "{" (declaration | parameter | method | enumeration)* "}" ";"   fields
 //     parameter    : "param" type IDENTIFIER attributes ";"                     a field the host sets
 //     method       : "const"? type pointer IDENTIFIER "(" params ")" attributes block
 //     attributes   : ("[" "[" attribute ("," attribute)* "]" "]")*
-//     attribute    : IDENTIFIER ("::" IDENTIFIER)? ("(" "-"? NUMBER ("," "-"? NUMBER)* ")")?
+//     attribute    : IDENTIFIER ("::" (IDENTIFIER | "default"))? ("(" "-"? NUMBER ("," "-"? NUMBER)* ")")?
 //     params       : (param ("," param)*)? | "void"                                  (void) is none, as in C
-//     param        : "const"? type pointer IDENTIFIER? | "const"? type IDENTIFIER "[" NUMBER? "]"   a pointer
+//     param        : "const"? type pointer IDENTIFIER? | "const"? type IDENTIFIER array_size        a pointer
 //     type         : "float" | "bool" | "int" | "void" | VECTOR_TYPE | "poly" ("float" | "bool") | MODULE_NAME
+//                  | "enum" IDENTIFIER                                  int, the name a tag declared before
 //     pointer      : ("*" ("const" | "restrict")*)?        with a *, the first const is the pointee's (const float*),
 //                                                          and one after it the pointer's own (float* const)
-//     block        : "{" (declaration | statement)* "}"
+//     block        : "{" (declaration | enumeration | unlabeled | label)* "}"     C23's: a label is an item
+//     enumeration  : "const"? "enum" IDENTIFIER? "{" enumerator ("," enumerator)* ","? "}" ";"    C's, on its own
+//     enumerator   : IDENTIFIER ("=" expr)?                                  the expr an integer constant expression
 //     declaration  : "const"? type declarator ("," declarator)* ";"
 //     declarator   : pointer IDENTIFIER ("=" expr)?                                  as in C, `float *p, x;`
-//                  | IDENTIFIER "[" NUMBER "]" ("=" "{" (expr ("," expr)* ","?)? "}")?        an array
+//                  | IDENTIFIER array_size ("=" "{" (expr ("," expr)* ","?)? "}")?          an array
 //                  | pointer IDENTIFIER "=" "{" (expr ("," expr)*)? "}"     parsed, for its error: only arrays
-//     statement    : block | expr ";" | "return" expr? ";" | ";"
+//     array_size   : "[" expr? "]"              an integer constant expression, or none: the list's length
+//     statement    : label statement | unlabeled
+//     unlabeled    : block | expr ";" | "return" expr? ";" | ";"
 //                  | "if" "(" expr ")" statement ("else" statement)? | "while" "(" expr ")" statement
 //                  | "for" "(" (declaration | expr? ";") expr? ";" expr? ")" statement | "break" ";" | "continue" ";"
+//                  | "switch" "(" expr ")" statement
 //                  | "parallel" "for" "(" (declaration | expr? ";") expr? ";" expr? ")" statement
 //                  | "parallel" block                    FMinus's: the iterations, or the statements, at once
+//     label        : "case" expr ":" | "default" ":"                         the expr an integer constant expression
 //     expr         : NUMBER | "true" | "false" | IDENTIFIER | IDENTIFIER "(" (expr ("," expr)*)? ")" | "(" expr ")"
-//                  | ("-" | "+" | "!" | "*" | "&") expr | expr "[" expr "]"         *p, &x, p[i]
+//                  | ("-" | "+" | "!" | "~" | "*" | "&") expr | expr "[" expr "]"   *p, &x, p[i]
 //                  | "sizeof" "(" "const"? type pointer ")"                          a type's size, an int
-//                  | expr ("*" | "/" | "%") expr | expr ("+" | "-") expr
+//                  | expr ("*" | "/" | "%") expr | expr ("+" | "-") expr | expr ("<<" | ">>") expr
 //                  | expr ("<" | "<=" | ">" | ">=") expr | expr ("==" | "!=") expr
+//                  | expr "&" expr | expr "^" expr | expr "|" expr                   an int's bits
 //                  | expr "&&" expr | expr "||" expr | expr "?" expr ":" expr
 //                  | "(" VECTOR_TYPE ")" "(" (expr ("," expr)*)? ")"                 OpenCL C's vector literal
 //                  | "(" VECTOR_TYPE ")" "{" (expr ("," expr)* ","?)? "}"            C's: lanes left out are 0
 //                  | "(" "poly" "float" ")" "(" expr ")" | expr "." IDENTIFIER       a broadcast; a swizzle or field
 //                  | expr "->" IDENTIFIER | expr ("." | "->") IDENTIFIER "(" (expr ("," expr)*)? ")" | "this"
 //                  | ("++" | "--") expr | expr ("++" | "--") | "(" ("float" | "int" | "bool") ")" expr    a cast
-//                  | expr ("=" | "+=" | "-=" | "*=" | "/=" | "%=") expr
+//                  | "(" "enum" IDENTIFIER ")" expr                                  a cast to int, as C's to an enum
+//                  | expr ("=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=") expr
 //
-// Precedence and associativity are C's, from the loosest: assignment (right to left), ?: (right to left), ||, &&,
-// equality, relational, additive, multiplicative, unary (and casts), and the postfix operators: ".", "->", "[" and
-// "++" and "--" after their operand.
+// Precedence and associativity are C's, from the loosest: assignment (right to left), ?: (right to left), ||, &&, |,
+// ^, &, equality, relational, shifts, additive, multiplicative, unary (and casts), and the postfix operators: ".",
+// "->", "[" and "++" and "--" after their operand. So `a & b == c` is a & (b == c), as in C, and `a << 1 + 2` is
+// a << 3. The unary "&" and "-" take UNARY's precedence (%prec), their binary ones their own.
 // A module's name is a type from its declaration on: the scanner returns it as MODULE_NAME (ParseContext.h), as a C
 // compiler returns a typedef's name, so `OnePole* p;` is a declaration and `a * b;` a product.
 // The grammar accepts any expression on the left of an assignment; the code generator rejects what is not an lvalue
 // (a variable, an element p[i] or *p, components of either: "expression is not assignable"), so fields can join it.
+// A case or default label is C23's: a block item of its own, so a declaration may follow one and one may end a block;
+// where a statement is expected (an if's branch, a switch's body), `case 1: s` is the label and its statement, a
+// CaseStmt with a body. The code generator checks that a label is in a switch, and that a case's value is an integer
+// constant expression.
+// An array's size is an expression, `float buf[ROWS * COLS]`, which the code generator works out: an integer constant
+// expression, whose enumeration constants only it knows the values of. A declaration at the top level declares
+// constants, `const float table[] = {...};`: Program::constants, where they are among the functions, modules and
+// enumerations, for the code generator to give each function and method those declared before it.
+// An enumeration is declared on its own (C's `enum Mode { A } m;` declares no variable here), at the top level, in a
+// block or in a module. Its tag goes into the parse context's scopes, a block's from its `{` to its `}` (a module's
+// into the file's, as a C struct's), where `enum Mode` names the type int. Its constants stay identifiers, which the
+// code generator finds in its scopes, as it finds variables: in C they share one name space, and a local may hide
+// one.
 //
 // To add a construct: its tokens in Lexer.l and here, a rule here, a node in Ast.h, its dump in Ast.cpp and its
 // lowering in src/ir/ (Lowering.h says which file). Bison's report (build tree: src/generated/frontend/Parser.output)
@@ -95,25 +118,29 @@
             SourceLocation location;
             Pointer pointer;
             std::string name;
-            ast::ExprPtr init;      // null without an initialiser
-            int count = 0;          // an array's elements; 0 for a name that is not an array
-            bool hasList = false;   // `= {...}`
+            ast::ExprPtr init;             // null without an initialiser
+            bool isArray = false;          // `name[size]` or `name[]`
+            ast::ExprPtr size = nullptr;   // an array's, as written; null for `[]`
+            bool hasList = false;          // `= {...}`
             std::vector<ast::ExprPtr> list = {};
         };
 
-        // A module's body as it is parsed: its fields, and its methods (Functions named OnePole::tick).
+        // A module's body as it is parsed: its fields, its methods (Functions named OnePole::tick) and its
+        // enumerations.
         struct ModuleBody
         {
             std::vector<ast::Field> fields;
             std::vector<ast::Function> methods;
+            std::vector<ast::Enum> enums;
         };
 
         // A whole module declaration: the module, which the program already holds, and its methods, which go into
-        // the program's functions where the module is.
+        // the program's functions where the module is, and its enumerations, which go into the program's.
         struct ModuleDeclaration
         {
             ast::Module* module = nullptr;
             std::vector<ast::Function> methods;
+            std::vector<ast::Enum> enums;
         };
 
         // What a name is declared as, from the declaration's `const` and type and the name's pointer: `const float x`
@@ -138,9 +165,7 @@
 %code {
     #include "frontend/Scanner.h"   // yylex
 
-    #include <charconv>
     #include <memory>
-    #include <system_error>
     #include <utility>
 
     namespace
@@ -174,48 +199,52 @@
             return fminus::ast::makeExpr(at(where), fminus::ast::IncrementExpr{op, std::move(target)});
         }
 
-        // An array's size, a positive integer constant (C's, in decimal, octal or hex). Reports the error, and gives
-        // 1, for anything else.
-        int arraySize(const fminus::frontend::location& where, const std::string& spelling,
-                      fminus::frontend::ParseContext& context)
+        // An enumeration as parsed: its tag, if it has one, declared in the innermost scope, where a second of the
+        // name is clang's error, and its constants.
+        fminus::ast::Enum declaredEnum(const fminus::frontend::location& keyword,
+                                       const fminus::frontend::location& name, std::string tag,
+                                       std::vector<fminus::ast::Enumerator> enumerators,
+                                       fminus::frontend::ParseContext& context)
         {
-            const bool hex = spelling.size() > 1 && spelling[0] == '0' && (spelling[1] == 'x' || spelling[1] == 'X');
-            if (spelling.find_first_of(hex ? ".pP" : ".eEfF") != std::string::npos)
+            fminus::ast::Enum enumeration;
+            enumeration.location = at(tag.empty() ? keyword : name);
+            if (!tag.empty())
             {
-                context.diagnostics.error(at(where), "size of array has non-integer type 'float'");
-                return 1;
+                const auto [previous, added] = context.tags.back().emplace(tag, enumeration.location);
+                if (!added)
+                    context.diagnostics.error(
+                        enumeration.location, "redefinition of '" + tag + "'",
+                        {fminus::Diagnostic{previous->second, "previous definition is here", {}}});
             }
-            const int base = hex ? 16 : spelling.size() > 1 && spelling[0] == '0' ? 8 : 10;
-            long long value = 0;
-            const char* first = spelling.data() + (hex ? 2 : 0);
-            const char* last = spelling.data() + spelling.size();
-            const auto [end, failure] = std::from_chars(first, last, value, base);
-            if (end != last || failure != std::errc{} || value > (1 << 30))
-            {
-                context.diagnostics.error(at(where), "array is too large: FMinus's arrays have at most 2^30 elements");
-                return 1;
-            }
-            if (value == 0)
-            {
-                context.diagnostics.error(at(where), "zero size arrays are not allowed");
-                return 1;
-            }
-            return static_cast<int>(value);
+            enumeration.tag = std::move(tag);
+            enumeration.enumerators = std::move(enumerators);
+            return enumeration;
+        }
+
+        // `enum Mode`, a type: int, when a tag of the name is visible. C has no enumeration declared ahead of its
+        // constants (C23 only with a fixed underlying type), and neither has FMinus.
+        fminus::ast::Type enumType(const fminus::frontend::location& name, const std::string& tag,
+                                   fminus::frontend::ParseContext& context)
+        {
+            if (context.tagNamed(tag) == nullptr)
+                context.diagnostics.error(at(name), "ISO C forbids forward references to 'enum' types");
+            return fminus::ast::Type::Int;
         }
 
         // The name declared with its pointer, and, for an array, the array of what the rest declares: `float x[4]`
-        // is a float[4], and `const float c[2]` a const float[2], whose elements are read-only.
+        // is a float[4], and `const float c[2]` a const float[2], whose elements are read-only. The array's count is
+        // the code generator's to work out, from the declaration's size (DeclStmt::size).
         fminus::frontend::Declared declaredName(bool isConst, fminus::ast::Type type,
                                                 fminus::frontend::Declarator& d,
                                                 fminus::frontend::ParseContext& context)
         {
             fminus::frontend::Declared name = fminus::frontend::declared(isConst, type, d.pointer);
-            if (d.count == 0)
+            if (!d.isArray)
                 return name;
             if (d.pointer.isPointer)
                 context.diagnostics.error(d.location, "FMinus has no arrays of pointers");
             else
-                name.type = fminus::ast::Type::arrayOf(type, d.count);
+                name.type = fminus::ast::Type::arrayOf(type, 0);
             return name;
         }
     } // namespace
@@ -225,12 +254,15 @@
 %token RESTRICT "restrict" AMPERSAND "&" LBRACKET "[" RBRACKET "]" SIZEOF "sizeof" COLONCOLON "::"
 %token LT "<" LE "<=" GT ">" GE ">=" EQ "==" NE "!=" NOT "!" AND "&&" OR "||" QUESTION "?" COLON ":"
 %token IF "if" ELSE "else" WHILE "while" FOR "for" BREAK "break" CONTINUE "continue" PARALLEL "parallel"
+%token SWITCH "switch" CASE "case" DEFAULT "default" ENUM "enum"
 %token MODULE "module" THIS "this" ARROW "->" PARAM "param"
 %token <ast::Type> MODULE_NAME "module name"
 %token <ast::Type> VECTOR_TYPE "vector type"
 %token DOT "." POLY "poly"
 %token PLUS "+" MINUS "-" STAR "*" SLASH "/" PERCENT "%" INCREMENT "++" DECREMENT "--"
+%token PIPE "|" CARET "^" TILDE "~" SHL "<<" SHR ">>"
 %token ASSIGN "=" PLUS_ASSIGN "+=" MINUS_ASSIGN "-=" STAR_ASSIGN "*=" SLASH_ASSIGN "/=" PERCENT_ASSIGN "%="
+%token AND_ASSIGN "&=" OR_ASSIGN "|=" XOR_ASSIGN "^=" SHL_ASSIGN "<<=" SHR_ASSIGN ">>="
 %token LPAREN "(" RPAREN ")" LBRACE "{" RBRACE "}" COMMA "," SEMI ";"
 %token <std::string> IDENTIFIER "identifier"
 %token <std::string> NUMBER "number"
@@ -238,20 +270,23 @@
 %nterm <std::vector<ast::Function>> items
 %nterm <ast::Function> function
 %nterm <ModuleDeclaration> module
-%nterm <std::string> module_name
+%nterm <std::string> module_name enum_tag
+%nterm <ast::Enum> enumeration
+%nterm <std::vector<ast::Enumerator>> enumerators
+%nterm <ast::Enumerator> enumerator
 %nterm <ModuleBody> module_body module_member
-%nterm <int> array_size
+%nterm <ast::ExprPtr> array_size
 %nterm <std::vector<ast::Attribute>> attributes attribute_list
 %nterm <ast::Attribute> attribute
 %nterm <std::vector<std::string>> attribute_args
-%nterm <std::string> attribute_arg
+%nterm <std::string> attribute_arg attribute_word
 %nterm <std::vector<ast::Param>> params param_list
 %nterm <ast::Param> param
 %nterm <bool> qualifier
 %nterm <Pointer> pointer pointer_qualifiers
 %nterm <ast::Type> type cast_type
 %nterm <std::vector<ast::Stmt>> block block_items block_item declaration
-%nterm <ast::Stmt> statement
+%nterm <ast::Stmt> statement unlabeled label
 %nterm <std::vector<ast::Stmt>> for_init
 %nterm <ast::ExprPtr> optional_expr
 %nterm <std::vector<Declarator>> declarators
@@ -264,12 +299,16 @@
 %precedence THEN
 %precedence "else"
 
-%right "=" "+=" "-=" "*=" "/=" "%="
+%right "=" "+=" "-=" "*=" "/=" "%=" "&=" "|=" "^=" "<<=" ">>="
 %right "?" ":"
 %left "||"
 %left "&&"
+%left "|"
+%left "^"
+%left "&"
 %left "==" "!="
 %left "<" "<=" ">" ">="
+%left "<<" ">>"
 %left "+" "-"
 %left "*" "/" "%"
 %precedence UNARY
@@ -281,7 +320,7 @@ program
     : items                                 { parseContext.program.functions = $1; }
     ;
 
-// The program's functions, a module's methods among them where the module is.
+// The program's functions, a module's methods among them where the module is. A declaration's names are constants.
 items
     : %empty                                {}
     | items function                        { $$ = $1; $$.push_back($2); }
@@ -289,8 +328,30 @@ items
                                                 $$ = $1;
                                                 ModuleDeclaration declaration = $2;
                                                 declaration.module->position = $$.size();
+                                                for (ast::Enum& enumeration : declaration.enums)
+                                                {
+                                                    enumeration.position = $$.size();
+                                                    parseContext.program.enums.push_back(std::move(enumeration));
+                                                }
                                                 for (ast::Function& method : declaration.methods)
                                                     $$.push_back(std::move(method));
+                                            }
+    | items enumeration                     {
+                                                $$ = $1;
+                                                ast::Enum enumeration = $2;
+                                                enumeration.position = $$.size();
+                                                enumeration.modules = parseContext.program.modules.size();
+                                                parseContext.program.enums.push_back(std::move(enumeration));
+                                            }
+    | items declaration                     {
+                                                $$ = $1;
+                                                ast::Program& program = parseContext.program;
+                                                for (ast::Stmt& stmt : $2)
+                                                    program.constants.push_back(
+                                                        ast::Constant{stmt.location,
+                                                                      std::move(std::get<ast::DeclStmt>(stmt.node)),
+                                                                      $$.size(), program.modules.size(),
+                                                                      program.enums.size()});
                                             }
     ;
 
@@ -310,6 +371,12 @@ module
                                                 $$.module = $3;
                                                 $$.module->fields = std::move(body.fields);
                                                 $$.methods = std::move(body.methods);
+                                                $$.enums = std::move(body.enums);
+                                                for (ast::Enum& enumeration : $$.enums)
+                                                {
+                                                    enumeration.modules = parseContext.program.modules.size() - 1;
+                                                    enumeration.module = $$.module;
+                                                }
                                                 parseContext.currentModule = nullptr;
                                             }
     ;
@@ -326,19 +393,24 @@ module_body
                                                 $$ = $1;
                                                 ModuleBody member = $2;
                                                 for (ast::Field& field : member.fields)
+                                                {
+                                                    field.enums = $$.enums.size();   // the module's before it
                                                     $$.fields.push_back(std::move(field));
+                                                }
                                                 for (ast::Function& method : member.methods)
                                                     $$.methods.push_back(std::move(method));
+                                                for (ast::Enum& enumeration : member.enums)
+                                                    $$.enums.push_back(std::move(enumeration));
                                             }
     ;
 
 // A declaration's names are fields; a parameter is a field the host sets; a function is a method, with `this` before
-// its parameters.
+// its parameters; an enumeration's constants are the file's, from here on.
 module_member
     : "param" type IDENTIFIER attributes ";"
                                             {
                                                 $$.fields.push_back(ast::Field{at(@3), $3, $2, false, false, true,
-                                                                               $4});
+                                                                               $4, nullptr, 0});
                                             }
     | declaration                           {
                                                 for (ast::Stmt& stmt : $1)
@@ -348,7 +420,8 @@ module_member
                                                                                    decl.type, decl.isConst,
                                                                                    decl.init != nullptr
                                                                                        || decl.hasList,
-                                                                                   false, {}});
+                                                                                   false, {}, std::move(decl.size),
+                                                                                   0});
                                                 }
                                             }
     | qualifier type pointer IDENTIFIER "(" params ")" attributes block
@@ -362,9 +435,11 @@ module_member
                                                 const ast::Type self =
                                                     ast::Type::pointerTo(ast::Type::moduleType(module), false);
                                                 method.params.insert(method.params.begin(),
-                                                                     ast::Param{at(@4), "this", self, true, false});
+                                                                     ast::Param{at(@4), "this", self, true, false,
+                                                                                nullptr});
                                                 $$.methods.push_back(std::move(method));
                                             }
+    | enumeration                           { $$.enums.push_back($1); }
     ;
 
 function
@@ -394,11 +469,17 @@ attribute_list
     ;
 
 attribute
-    : IDENTIFIER "::" IDENTIFIER            { $$ = ast::Attribute{at(@1), $1 + "::" + $3, {}}; }
+    : IDENTIFIER "::" attribute_word        { $$ = ast::Attribute{at(@1), $1 + "::" + $3, {}}; }
     | IDENTIFIER                            { $$ = ast::Attribute{at(@1), $1, {}}; }
-    | IDENTIFIER "::" IDENTIFIER "(" attribute_args ")"
+    | IDENTIFIER "::" attribute_word "(" attribute_args ")"
                                             { $$ = ast::Attribute{at(@1), $1 + "::" + $3, $5}; }
     | IDENTIFIER "(" attribute_args ")"     { $$ = ast::Attribute{at(@1), $1, $3}; }
+    ;
+
+// A keyword in an attribute is an identifier, as C23 and C++ read one there ([[gnu::const]]): fminus::default.
+attribute_word
+    : IDENTIFIER                            { $$ = $1; }
+    | "default"                             { $$ = "default"; }
     ;
 
 // An attribute's arguments: numbers, a minus before any of them.
@@ -431,29 +512,22 @@ param_list
 param
     : qualifier type pointer IDENTIFIER     {
                                                 const Declared d = declared($1, $2, $3);
-                                                $$ = ast::Param{at(@4), $4, d.type, d.isConst, d.isRestrict};
+                                                $$ = ast::Param{at(@4), $4, d.type, d.isConst, d.isRestrict, nullptr};
                                             }
     | qualifier type pointer                {
                                                 const Declared d = declared($1, $2, $3);
-                                                $$ = ast::Param{at(@2), "", d.type, d.isConst, d.isRestrict};
+                                                $$ = ast::Param{at(@2), "", d.type, d.isConst, d.isRestrict, nullptr};
                                             }
-    | qualifier type pointer IDENTIFIER "[" array_size "]"
+    | qualifier type pointer IDENTIFIER array_size
                                             {
                                                 // C's: a parameter declared as an array is a pointer to its first
-                                                // element, and the size says nothing.
+                                                // element, and the size, checked, says nothing.
                                                 const Pointer pointer = $3;
                                                 if (pointer.isPointer)
                                                     parseContext.diagnostics.error(at(@4),
                                                                                    "FMinus has no arrays of pointers");
-                                                $$ = ast::Param{at(@4), $4, ast::Type::pointerTo($2, $1), false, false};
-                                            }
-    | qualifier type pointer IDENTIFIER "[" "]"
-                                            {
-                                                const Pointer pointer = $3;
-                                                if (pointer.isPointer)
-                                                    parseContext.diagnostics.error(at(@4),
-                                                                                   "FMinus has no arrays of pointers");
-                                                $$ = ast::Param{at(@4), $4, ast::Type::pointerTo($2, $1), false, false};
+                                                $$ = ast::Param{at(@4), $4, ast::Type::pointerTo($2, $1), false, false,
+                                                                $5};
                                             }
     ;
 
@@ -483,6 +557,7 @@ type
     | "poly" "float"                        { $$ = ast::Type::PolyFloat; }
     | "poly" "bool"                         { $$ = ast::Type::PolyBool; }
     | MODULE_NAME                           { $$ = $1; }
+    | "enum" IDENTIFIER                     { $$ = enumType(@2, $2, parseContext); }
     ;
 
 // The types a cast names: C casts between scalars (a vector's literal is OpenCL C's (float4)(...)).
@@ -490,10 +565,13 @@ cast_type
     : "float"                               { $$ = ast::Type::Float; }
     | "int"                                 { $$ = ast::Type::Int; }
     | "bool"                                { $$ = ast::Type::Bool; }
+    | "enum" IDENTIFIER                     { $$ = enumType(@2, $2, parseContext); }
     ;
 
+// A block is a scope of the enumerations' tags too.
 block
-    : "{" block_items "}"                   { $$ = $2; }
+    : "{"                                   { parseContext.tags.emplace_back(); }
+      block_items "}"                       { parseContext.tags.pop_back(); $$ = $3; }
     ;
 
 block_items
@@ -501,10 +579,44 @@ block_items
     | block_items block_item                { $$ = $1; for (ast::Stmt& item : $2) $$.push_back(std::move(item)); }
     ;
 
-// A block item is a list: a declaration gives one DeclStmt per declarator.
+// A block item is a list: a declaration gives one DeclStmt per declarator. A label is one of its own (C23's), a
+// CaseStmt or DefaultStmt without a body: the items after it follow it.
 block_item
     : declaration                           { $$ = $1; }
-    | statement                             { $$.push_back($1); }
+    | enumeration                           {
+                                                ast::Enum enumeration = $1;
+                                                const SourceLocation where = enumeration.location;
+                                                $$.push_back(ast::Stmt{where, ast::EnumStmt{std::move(enumeration)}});
+                                            }
+    | unlabeled                             { $$.push_back($1); }
+    | label                                 { $$.push_back($1); }
+    ;
+
+// An enumeration, on its own: its tag, if any, a type from its closing brace on. C's `enum { }` is an error.
+enumeration
+    : qualifier "enum" enum_tag "{" enumerators "}" ";"
+                                            { $$ = declaredEnum(@2, @3, $3, $5, parseContext); }
+    | qualifier "enum" enum_tag "{" enumerators "," "}" ";"
+                                            { $$ = declaredEnum(@2, @3, $3, $5, parseContext); }
+    | qualifier "enum" enum_tag "{" "}" ";" {
+                                                parseContext.diagnostics.error(at(@5), "use of empty enum");
+                                                $$ = declaredEnum(@2, @3, $3, {}, parseContext);
+                                            }
+    ;
+
+enum_tag
+    : %empty                                { $$ = ""; }
+    | IDENTIFIER                            { $$ = $1; }
+    ;
+
+enumerators
+    : enumerator                            { $$.push_back($1); }
+    | enumerators "," enumerator            { $$ = $1; $$.push_back($3); }
+    ;
+
+enumerator
+    : IDENTIFIER                            { $$ = ast::Enumerator{at(@1), $1, nullptr}; }
+    | IDENTIFIER "=" expr                   { $$ = ast::Enumerator{at(@1), $1, $3}; }
     ;
 
 declaration
@@ -519,7 +631,8 @@ declaration
                                                                                          std::move(d.name),
                                                                                          std::move(d.init),
                                                                                          name.isRestrict, d.hasList,
-                                                                                         std::move(d.list)}});
+                                                                                         std::move(d.list),
+                                                                                         std::move(d.size)}});
                                                 }
                                             }
     ;
@@ -532,21 +645,42 @@ declarators
 declarator
     : pointer IDENTIFIER                    { $$ = Declarator{at(@2), $1, $2, nullptr}; }
     | pointer IDENTIFIER "=" expr           { $$ = Declarator{at(@2), $1, $2, $4}; }
-    | pointer IDENTIFIER "=" "{" args "}"   { $$ = Declarator{at(@2), $1, $2, nullptr, 0, true, $5}; }
-    | pointer IDENTIFIER "[" array_size "]" { $$ = Declarator{at(@2), $1, $2, nullptr, $4}; }
-    | pointer IDENTIFIER "[" array_size "]" "=" expr
-                                            { $$ = Declarator{at(@2), $1, $2, $7, $4}; }
-    | pointer IDENTIFIER "[" array_size "]" "=" "{" args "}"
-                                            { $$ = Declarator{at(@2), $1, $2, nullptr, $4, true, $8}; }
-    | pointer IDENTIFIER "[" array_size "]" "=" "{" arg_list "," "}"
-                                            { $$ = Declarator{at(@2), $1, $2, nullptr, $4, true, $8}; }
+    | pointer IDENTIFIER "=" "{" args "}"   { $$ = Declarator{at(@2), $1, $2, nullptr, false, nullptr, true, $5}; }
+    | pointer IDENTIFIER array_size         { $$ = Declarator{at(@2), $1, $2, nullptr, true, $3}; }
+    | pointer IDENTIFIER array_size "=" expr
+                                            { $$ = Declarator{at(@2), $1, $2, $5, true, $3}; }
+    | pointer IDENTIFIER array_size "=" "{" args "}"
+                                            { $$ = Declarator{at(@2), $1, $2, nullptr, true, $3, true, $6}; }
+    | pointer IDENTIFIER array_size "=" "{" arg_list "," "}"
+                                            { $$ = Declarator{at(@2), $1, $2, nullptr, true, $3, true, $6}; }
     ;
 
+// An array's size as written: an expression (the code generator checks that it is an integer constant expression,
+// and its value), or none, `[]`, for an array whose list gives it.
 array_size
-    : NUMBER                                { $$ = arraySize(@1, $1, parseContext); }
+    : "[" expr "]"                          { $$ = $2; }
+    | "[" "]"                               { $$ = nullptr; }
     ;
 
+// A statement where one is expected: an unlabeled one, or a label and the statement it labels.
 statement
+    : unlabeled                             { $$ = $1; }
+    | label statement                       {
+                                                $$ = $1;
+                                                ast::StmtPtr body = ast::own($2);
+                                                if (auto* label = std::get_if<ast::CaseStmt>(&$$.node))
+                                                    label->body = std::move(body);
+                                                else
+                                                    std::get<ast::DefaultStmt>($$.node).body = std::move(body);
+                                            }
+    ;
+
+label
+    : "case" expr ":"                       { $$ = ast::Stmt{at(@1), ast::CaseStmt{$2, nullptr}}; }
+    | "default" ":"                         { $$ = ast::Stmt{at(@1), ast::DefaultStmt{nullptr}}; }
+    ;
+
+unlabeled
     : block                                 { $$ = ast::Stmt{at(@1), ast::BlockStmt{$1}}; }
     | expr ";"                              { $$ = ast::Stmt{at(@1), ast::ExprStmt{$1}}; }
     | "return" expr ";"                     { $$ = ast::Stmt{at(@1), ast::ReturnStmt{$2}}; }
@@ -561,6 +695,7 @@ statement
                                             { $$ = ast::Stmt{at(@1), ast::ForStmt{$3, $4, $6, ast::own($8)}}; }
     | "break" ";"                           { $$ = ast::Stmt{at(@1), ast::BreakStmt{}}; }
     | "continue" ";"                        { $$ = ast::Stmt{at(@1), ast::ContinueStmt{}}; }
+    | "switch" "(" expr ")" statement       { $$ = ast::Stmt{at(@1), ast::SwitchStmt{$3, ast::own($5)}}; }
     | "parallel" "for" "(" for_init optional_expr ";" optional_expr ")" statement
                                             {
                                                 $$ = ast::Stmt{at(@1), ast::ParallelForStmt{$4, $5, $7, ast::own($9)}};
@@ -588,6 +723,10 @@ expr
     | "-" expr %prec UNARY                  { $$ = ast::makeExpr(at(@1), ast::UnaryExpr{ast::UnaryOp::Negate, $2}); }
     | "+" expr %prec UNARY                  { $$ = ast::makeExpr(at(@1), ast::UnaryExpr{ast::UnaryOp::Plus, $2}); }
     | "!" expr %prec UNARY                  { $$ = ast::makeExpr(at(@1), ast::UnaryExpr{ast::UnaryOp::Not, $2}); }
+    | "~" expr %prec UNARY                  {
+                                                $$ = ast::makeExpr(at(@1),
+                                                                   ast::UnaryExpr{ast::UnaryOp::Complement, $2});
+                                            }
     | "*" expr %prec UNARY                  {
                                                 $$ = ast::makeExpr(at(@1),
                                                                    ast::UnaryExpr{ast::UnaryOp::Dereference, $2});
@@ -635,12 +774,22 @@ expr
     | expr "%" expr                         { $$ = binary(@2, ast::BinaryOp::Remainder, $1, $3); }
     | expr "+" expr                         { $$ = binary(@2, ast::BinaryOp::Add, $1, $3); }
     | expr "-" expr                         { $$ = binary(@2, ast::BinaryOp::Subtract, $1, $3); }
+    | expr "<<" expr                        { $$ = binary(@2, ast::BinaryOp::ShiftLeft, $1, $3); }
+    | expr ">>" expr                        { $$ = binary(@2, ast::BinaryOp::ShiftRight, $1, $3); }
+    | expr "&" expr                         { $$ = binary(@2, ast::BinaryOp::BitAnd, $1, $3); }
+    | expr "^" expr                         { $$ = binary(@2, ast::BinaryOp::BitXor, $1, $3); }
+    | expr "|" expr                         { $$ = binary(@2, ast::BinaryOp::BitOr, $1, $3); }
     | expr "=" expr                         { $$ = assign(@2, ast::AssignOp::Assign, $1, $3); }
     | expr "+=" expr                        { $$ = assign(@2, ast::AssignOp::Add, $1, $3); }
     | expr "-=" expr                        { $$ = assign(@2, ast::AssignOp::Subtract, $1, $3); }
     | expr "*=" expr                        { $$ = assign(@2, ast::AssignOp::Multiply, $1, $3); }
     | expr "/=" expr                        { $$ = assign(@2, ast::AssignOp::Divide, $1, $3); }
     | expr "%=" expr                        { $$ = assign(@2, ast::AssignOp::Remainder, $1, $3); }
+    | expr "&=" expr                        { $$ = assign(@2, ast::AssignOp::BitAnd, $1, $3); }
+    | expr "|=" expr                        { $$ = assign(@2, ast::AssignOp::BitOr, $1, $3); }
+    | expr "^=" expr                        { $$ = assign(@2, ast::AssignOp::BitXor, $1, $3); }
+    | expr "<<=" expr                       { $$ = assign(@2, ast::AssignOp::ShiftLeft, $1, $3); }
+    | expr ">>=" expr                       { $$ = assign(@2, ast::AssignOp::ShiftRight, $1, $3); }
     | expr "&&" expr                        { $$ = logical(@2, ast::LogicalOp::And, $1, $3); }
     | expr "||" expr                        { $$ = logical(@2, ast::LogicalOp::Or, $1, $3); }
     | expr "?" expr ":" expr                { $$ = ast::makeExpr(at(@2), ast::ConditionalExpr{$1, $3, $5}); }

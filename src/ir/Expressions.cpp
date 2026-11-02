@@ -1,11 +1,12 @@
-// src/ir/Expressions.cpp: expressions. Constants, variables, unary and binary operators (lane by lane on vectors), &&
-// and || (short-circuiting), ?: (only the branch taken runs, unless the condition is a vector: Vectors.cpp), casts,
-// assignment, ++ and --. Calls are Calls.cpp's, vector literals and swizzles Vectors.cpp's, methods and `this`
-// Modules.cpp's, and what an assignment stores to Memory.cpp's.
+// src/ir/Expressions.cpp: expressions. Constants, variables, unary and binary operators (lane by lane on vectors; the
+// bitwise ones on ints), && and || (short-circuiting), ?: (only the branch taken runs, unless the condition is a
+// vector: Vectors.cpp), casts, assignment, ++ and --. Calls are Calls.cpp's, vector literals and swizzles
+// Vectors.cpp's, methods and `this` Modules.cpp's, and what an assignment stores to Memory.cpp's.
 #include "ir/Lowering.h"
 
 #include <llvm/ADT/APFloat.h>
 #include <llvm/IR/Constants.h>
+#include <llvm/IR/GlobalVariable.h>
 #include <llvm/Support/Error.h>
 
 #include <charconv>
@@ -19,7 +20,20 @@ namespace fminus::ir::detail
         return std::visit(
             Overloaded{
                 [&](const ast::NumberExpr& number) { return lowerNumber(expr.location, number); },
-                [&](const ast::VariableExpr&) { return readLValue(expr); },
+                [&](const ast::VariableExpr& variable) {
+                    if (const Binding* binding = named(variable.name))
+                    {
+                        if (binding->enumerator)   // Constants.cpp
+                            return Value{builder_.getInt32(static_cast<std::uint32_t>(*binding->enumerator)),
+                                         ast::Type::Int};
+                        // A constant of the top level that is no array reads as its value, as clang reads a const
+                        // object whose initialiser is a constant: what its memory holds, with no load.
+                        auto* global = llvm::dyn_cast_if_present<llvm::GlobalVariable>(binding->slot);
+                        if (global != nullptr && !ast::isArray(binding->type) && global->hasInitializer())
+                            return Value{global->getInitializer(), binding->type};
+                    }
+                    return readLValue(expr);
+                },
                 [&](const ast::IndexExpr& index) {
                     if (const std::optional<unsigned> field = parameterOf(*index.base))
                         return lowerParameter(expr.location, *field, index);   // cutoff[i] (Modules.cpp)
@@ -33,13 +47,18 @@ namespace fminus::ir::detail
                         return readLValue(expr);   // *p: what p points to
                     if (unary.op == ast::UnaryOp::AddressOf)
                         return lowerAddressOf(expr.location, *unary.operand);
+                    const std::size_t reported = diagnostics_.errors().size();
                     const Value operand = lower(*unary.operand);
+                    const bool complement = unary.op == ast::UnaryOp::Complement;
+                    if (complement && diagnostics_.errors().size() != reported)
+                        return poison(ast::Type::Int);   // the operand's own error says why: see binary()
                     const ast::Type type = ast::arithmeticOf(operand.type);   // an int, a float, a float vector
-                    if (!ast::isArithmetic(operand.type) && unary.op != ast::UnaryOp::Not)
+                    const bool invalid = complement ? type != ast::Type::Int : !ast::isArithmetic(operand.type);
+                    if (invalid && unary.op != ast::UnaryOp::Not)
                     {
                         error(expr.location,
                               "invalid argument type " + quoted(ast::typeName(operand.type)) + " to unary expression");
-                        return poison(ast::Type::Float);
+                        return poison(complement ? ast::Type::Int : ast::Type::Float);
                     }
                     switch (unary.op)
                     {
@@ -57,6 +76,11 @@ namespace fminus::ir::detail
                         llvm::Value* test = convert(operand, ast::Type::Bool, expr.location, Use::Logical);
                         return Value{builder_.CreateNot(test, "lnot"), ast::Type::Bool};
                     }
+                    case ast::UnaryOp::Complement:   // xor with -1, as clang's; a bool is an int first: ~true is -2
+                    {
+                        llvm::Value* value = convert(operand, type, expr.location, Use::Initializing);
+                        return Value{builder_.CreateNot(value, "not"), type};
+                    }
                     case ast::UnaryOp::Dereference:   // above
                     case ast::UnaryOp::AddressOf:
                         break;
@@ -64,8 +88,11 @@ namespace fminus::ir::detail
                     return poison(ast::Type::Float);
                 },
                 [&](const ast::BinaryExpr& operation) {
+                    const std::size_t reported = diagnostics_.errors().size();
                     const Value lhs = lower(*operation.lhs);
                     const Value rhs = lower(*operation.rhs);
+                    if (isBitwise(operation.op) && diagnostics_.errors().size() != reported)
+                        return poison(ast::Type::Int);   // an operand's own error says why: see binary()
                     return binary(expr.location, operation.op, lhs, rhs);
                 },
                 [&](const ast::LogicalExpr& logical) {
@@ -96,11 +123,29 @@ namespace fminus::ir::detail
                || op == ast::BinaryOp::NotEqual;
     }
 
+    bool Lowering::isBitwise(ast::BinaryOp op)
+    {
+        return op == ast::BinaryOp::BitAnd || op == ast::BinaryOp::BitOr || op == ast::BinaryOp::BitXor
+               || op == ast::BinaryOp::ShiftLeft || op == ast::BinaryOp::ShiftRight;
+    }
+
     // A binary operator, as C's usual arithmetic conversions and OpenCL C's say: the operands meet in their common
     // type (an int meeting a float is a float; a scalar meeting a vector is broadcast to it), the operator works
-    // lane by lane on vectors, and a comparison gives a bool, or a lane mask for vectors.
+    // lane by lane on vectors, and a comparison gives a bool, or a lane mask for vectors. The bitwise operators take
+    // ints (a bool is one), as C's take integers, and give an int; for a shift, C promotes each operand on its own,
+    // which with int the only integer type is the same. An operand that reported an error of its own (an undeclared
+    // name, say) lowers to a poison float, which is no float to refuse: a bitwise operator, ~ or a bitwise compound
+    // assignment with one gives a poison int and says nothing more, so that error is the only one, as clang's (their
+    // callers check, by the error count; a poison value alone could be a constant's, as (int)3e10f's is).
     Lowering::Value Lowering::binary(SourceLocation location, ast::BinaryOp op, Value lhs, Value rhs)
     {
+        if (isBitwise(op) && (ast::arithmeticOf(lhs.type) != ast::Type::Int
+                              || ast::arithmeticOf(rhs.type) != ast::Type::Int))
+        {
+            error(location, "invalid operands to binary expression (" + quoted(ast::typeName(lhs.type)) + " and "
+                                + quoted(ast::typeName(rhs.type)) + ")");
+            return poison(ast::Type::Int);
+        }
         if (ast::isPointer(lhs.type) || ast::isPointer(rhs.type))
             return pointerArithmetic(location, op, lhs, rhs);   // Memory.cpp
         ast::Type type = ast::Type::Float;
@@ -113,7 +158,12 @@ namespace fminus::ir::detail
 
     // The operator's instruction in `type`. For int, C's: + - * carry nsw, as clang's do, since signed overflow is
     // undefined (it is what lets LLVM widen a loop counter to 64 bits); / and % truncate toward zero, and dividing by
-    // 0 is undefined; the comparisons are signed. For floats and float vectors, IEEE's.
+    // 0 is undefined; the comparisons are signed. & | ^ are and, or and xor. A shift is defined for every operand, as
+    // OpenCL C defines it (where C leaves a count below 0 or from 32 on, and a left shift of a negative value or into
+    // the sign, undefined, and which LLVM would make poison): the count is its low five bits (n & 31, clang's
+    // shl.mask, which the shift instructions of arm64 and x86-64 apply themselves, so it costs nothing on a scalar),
+    // << is a shl without nsw or nuw, the bits shifted out lost, and >> is an ashr, the sign shifted in, as clang's
+    // is (C makes a negative value's implementation-defined). For floats and float vectors, IEEE's.
     llvm::Value* Lowering::arithmetic(ast::BinaryOp op, ast::Type type, llvm::Value* lhs, llvm::Value* rhs)
     {
         if (type == ast::Type::Int)
@@ -142,6 +192,16 @@ namespace fminus::ir::detail
                 return builder_.CreateICmpEQ(lhs, rhs, "cmp");
             case ast::BinaryOp::NotEqual:
                 return builder_.CreateICmpNE(lhs, rhs, "cmp");
+            case ast::BinaryOp::BitAnd:
+                return builder_.CreateAnd(lhs, rhs, "and");
+            case ast::BinaryOp::BitOr:
+                return builder_.CreateOr(lhs, rhs, "or");
+            case ast::BinaryOp::BitXor:
+                return builder_.CreateXor(lhs, rhs, "xor");
+            case ast::BinaryOp::ShiftLeft:
+                return builder_.CreateShl(lhs, builder_.CreateAnd(rhs, 31, "shl.mask"), "shl");
+            case ast::BinaryOp::ShiftRight:
+                return builder_.CreateAShr(lhs, builder_.CreateAnd(rhs, 31, "shr.mask"), "shr");
             }
         }
         switch (op)
@@ -169,6 +229,12 @@ namespace fminus::ir::detail
             return builder_.CreateFCmpOEQ(lhs, rhs, "cmp");
         case ast::BinaryOp::NotEqual:
             return builder_.CreateFCmpUNE(lhs, rhs, "cmp");
+        case ast::BinaryOp::BitAnd:   // ints only: binary() refused the operands
+        case ast::BinaryOp::BitOr:
+        case ast::BinaryOp::BitXor:
+        case ast::BinaryOp::ShiftLeft:
+        case ast::BinaryOp::ShiftRight:
+            break;
         }
         return poison(ast::Type::Float).ir;
     }
@@ -200,6 +266,9 @@ namespace fminus::ir::detail
         llvm::PHINode* phi = builder_.CreatePHI(builder_.getInt1Ty(), 2, isAnd ? "land" : "lor");
         phi->addIncoming(builder_.getInt1(!isAnd), lhsEnd);   // && is false when a is; || is true when a is
         phi->addIncoming(rhs, rhsEnd);
+        // A top-level constant's initialiser runs nowhere: a constant a is the value it decides (Constants.cpp).
+        if (const auto* decided = llvm::dyn_cast<llvm::ConstantInt>(lhs); decided != nullptr && atTopLevel())
+            return decided->isOne() == isAnd ? rhs : builder_.getInt1(!isAnd);
         return phi;
     }
 
@@ -281,6 +350,9 @@ namespace fminus::ir::detail
         llvm::PHINode* phi = builder_.CreatePHI(typeOf(type), 2, "cond");
         phi->addIncoming(thenIR, thenEnd);
         phi->addIncoming(elseIR, elseEnd);
+        // A top-level constant's initialiser runs nowhere: a constant condition is the arm it picks (Constants.cpp).
+        if (const auto* picked = llvm::dyn_cast<llvm::ConstantInt>(condition); picked != nullptr && atTopLevel())
+            return {picked->isOne() ? thenIR : elseIR, type};
         return {phi, type};
     }
 
@@ -343,6 +415,12 @@ namespace fminus::ir::detail
         }
         if (!checkType(location, size.type))
             return poison(ast::Type::Int);
+        if (ast::isModule(size.type) && structs_.at(size.type.module)->isOpaque())   // in its own fields' sizes
+        {
+            error(location,
+                  "invalid application of 'sizeof' to an incomplete type " + quoted(ast::typeName(size.type)));
+            return poison(ast::Type::Int);
+        }
         return {builder_.getInt32(*sizeOf(size.type)), ast::Type::Int};
     }
 
@@ -356,7 +434,9 @@ namespace fminus::ir::detail
     // is the one stored.
     Lowering::Value Lowering::lowerAssign(SourceLocation location, const ast::AssignExpr& assign)
     {
+        const std::size_t lowered = diagnostics_.errors().size();
         Value value = lower(*assign.value);
+        const bool valueFailed = diagnostics_.errors().size() != lowered;
         if (!isLValue(*assign.target))
         {
             error(location, "expression is not assignable");
@@ -367,9 +447,12 @@ namespace fminus::ir::detail
             return poison(ast::Type::Float);
         if (assign.op != ast::AssignOp::Assign)
         {
+            if (valueFailed && isBitwise(compoundOperator(assign.op)))
+                return poison(target->type);   // the value's own error says why: see binary()
+            const std::size_t reported = diagnostics_.errors().size();
             value = compound(location, assign.op, read(*target), value);
-            if (value.ir == nullptr)
-                return poison(target->type);
+            if (value.ir == nullptr || diagnostics_.errors().size() != reported)
+                return poison(target->type);   // the operator's error says why; storing would only add another
         }
         return {write(location, *target, value, Use::Assigning), target->type};
     }
@@ -397,6 +480,16 @@ namespace fminus::ir::detail
             return ast::BinaryOp::Divide;
         case ast::AssignOp::Remainder:
             return ast::BinaryOp::Remainder;
+        case ast::AssignOp::BitAnd:
+            return ast::BinaryOp::BitAnd;
+        case ast::AssignOp::BitOr:
+            return ast::BinaryOp::BitOr;
+        case ast::AssignOp::BitXor:
+            return ast::BinaryOp::BitXor;
+        case ast::AssignOp::ShiftLeft:
+            return ast::BinaryOp::ShiftLeft;
+        case ast::AssignOp::ShiftRight:
+            return ast::BinaryOp::ShiftRight;
         }
         return ast::BinaryOp::Add;
     }

@@ -1,0 +1,95 @@
+// hash and randf: a few integer instructions inline, no call. hash is Wellons's lowbias32 on the int's bits (lshr,
+// xor, mul without nsw: unsigned arithmetic), randf the hash's top 24 bits (ashr 8) over 2^23 (sitofp, fmul by
+// 0x1p-23). Nothing in them depends on the math mode or the subnormals, so each mode gives the same loop, and white
+// noise from a counter vectorises: four lanes of the integer instructions a step, at -O2. Constants fold.
+// RUN: fminus %s -O0 | FileCheck %s --check-prefix=O0
+// RUN: fminus %s -O2 | FileCheck %s --check-prefix=VEC
+// RUN: fminus %s -O2 --math libm | FileCheck %s --check-prefix=VEC
+// RUN: fminus %s -O2 --math fast | FileCheck %s --check-prefix=VEC
+// RUN: fminus %s -O2 --denormals=flush | FileCheck %s --check-prefix=FLUSH
+// RUN: fminus %s --run noise 1 | FileCheck %s --check-prefix=ONE
+// RUN: fminus %s --run noise 12345 -O0 | FileCheck %s --check-prefix=OTHER
+// RUN: %if system-darwin && arm64 %{ fminus %s -O2 --emit asm -o - | FileCheck %s --check-prefix=ASM %}
+
+// White noise from a count of samples: out[i] is the same whatever the block it is in.
+void white(float* restrict out, int n, int start) [[clang::nonblocking]]
+{
+    for (int i = 0; i < n; ++i)
+        out[i] = randf(start + i);
+}
+
+// A source that keeps its own count.
+module Noise
+{
+    int count;
+    void render(float* restrict out, int n) [[clang::nonblocking]]
+    {
+        for (int i = 0; i < n; ++i)
+            out[i] = randf(count++);
+    }
+};
+
+float noise(float n)
+{
+    return randf((int)n);
+}
+
+int seeded(int seed, int n)
+{
+    return hash(hash(seed) ^ n);
+}
+
+float folded()
+{
+    return randf(12345);
+}
+
+// O0-LABEL: define void @white(
+// O0-NOT:     call
+// O0:         %hash.shr = lshr i32 [[N:%.*]], 16
+// O0-NEXT:    %hash.xor = xor i32 [[N]], %hash.shr
+// O0-NEXT:    %hash.mul = mul i32 %hash.xor, 2146121005
+// O0-NEXT:    %hash.shr{{[0-9]+}} = lshr i32 %hash.mul, 15
+// O0:         mul i32 %{{.*}}, -2073254261
+// O0:         lshr i32 %{{.*}}, 16
+// O0:         %randf.bits = ashr i32 %{{.*}}, 8
+// O0-NEXT:    %randf.conv = sitofp i32 %randf.bits to float
+// O0-NEXT:    %randf = fmul float %randf.conv, f0x34000000
+// O0-NOT:     call
+// O0:         ret void
+
+// VEC-LABEL: define void @white(
+// VEC-NOT:     call
+// VEC:       vector.body:
+// VEC:         lshr <4 x i32> %{{.*}}, splat (i32 16)
+// VEC:         mul <4 x i32> %{{.*}}, splat (i32 2146121005)
+// VEC:         mul <4 x i32> %{{.*}}, splat (i32 -2073254261)
+// VEC:         ashr <4 x i32> %{{.*}}, splat (i32 8)
+// VEC:         sitofp <4 x i32> %{{.*}} to <4 x float>
+// VEC:         fmul {{(nnan )?}}<4 x float> %{{.*}}, splat (float f0x34000000)
+// VEC:         store <4 x float>
+// VEC-NOT:     call
+// VEC:         ret void
+// VEC-LABEL: define void @"Noise::render"(
+// VEC:       vector.body:
+// VEC:         mul <4 x i32> %{{.*}}, splat (i32 2146121005)
+// VEC:         store <4 x float>
+// VEC-LABEL: define noundef float @folded()
+// VEC-NEXT:  entry:
+// VEC-NEXT:    ret float f0xBF5DA208
+
+// Under flush-to-zero an entry point's body is a function of its own (denormals.fm): the same loop.
+// FLUSH-LABEL: define internal void @white.body(
+// FLUSH:       vector.body:
+// FLUSH:         mul <4 x i32> %{{.*}}, splat (i32 2146121005)
+// FLUSH:         sitofp <4 x i32> %{{.*}} to <4 x float>
+// FLUSH:         store <4 x float>
+
+// ONE: 0.8166981
+// OTHER: -0.86575365
+
+// On arm64 the product by 2^-23 goes into the conversion: scvtf with 23 fraction bits.
+// ASM-LABEL: _white:
+// ASM:         mul.4s
+// ASM:         sshr.4s v{{[0-9]+}}, v{{[0-9]+}}, #8
+// ASM:         scvtf.4s v{{[0-9]+}}, v{{[0-9]+}}, #23

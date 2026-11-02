@@ -1,0 +1,125 @@
+// A const array whose list is constants is a constant of the module, stored once, as clang stores a static const one:
+// a private unnamed_addr constant global named as clang names a local's (__const.<function>.<name>), which the function
+// reads and never fills, with no alloca, memset or store for it, at -O0 as at -O2. Eight or more zeros after the last
+// element that is not zero are one zeroinitializer (clang's shape); an array without a list is all of it. A const
+// array whose list holds a value computed as the function runs is a local, as any array is (arrays.fm), and so is one
+// over 1 MiB, whose every byte the JIT's object would hold.
+// RUN: fminus %s -O0 | FileCheck %s
+// RUN: fminus %s -O2 | FileCheck %s --check-prefix=OPT
+// RUN: fminus %s --run lookup 2 | FileCheck %s --check-prefix=RESULT
+
+float lookup(float x)
+{
+    const float t[4] = {1, 2.5f, -3, 1 << 3};
+    return t[(int)x & 3];
+}
+
+int sparse(int i)
+{
+    const int k[32] = {1, 2, 0, 0};
+    return k[i];
+}
+
+float4 frames(int i)
+{
+    const float4 f[3] = {(float4)(1, 2, 3, 4), (float4){5}};
+    return f[i];
+}
+
+float silent(int i)
+{
+    const float z[256];
+    return z[i];
+}
+
+float fixed()
+{
+    const float t[3] = {0.5f, 0.25f, 0.125f};
+    return t[1];
+}
+
+float filled(float x, int i)
+{
+    const float m[2] = {x, 1};
+    return m[i];
+}
+
+// A parallel region reads the table where it is: the context holds `out` alone (8 bytes), not the table's address.
+void spread(float* restrict out, int n)
+{
+    const float gains[4] = {1, -1, 0.5f, -0.5f};
+    parallel for (int i = 0; i < n; ++i)
+        out[i] = gains[i & 3] * i;
+}
+
+// 1 MiB is the largest table; 16 bytes more is a local, on the stack.
+float wide(int i)
+{
+    const float t[262144] = {1, 2};
+    return t[i];
+}
+
+float huge(int i)
+{
+    const float4 t[65537] = {(float4)(1)};
+    return t[i].x;
+}
+
+// CHECK: @__const.lookup.t = private unnamed_addr constant [4 x float] [float 1.000000e+00, float 2.500000e+00, float -3.000000e+00, float 8.000000e+00], align 4
+// CHECK: @__const.sparse.k = private unnamed_addr constant <{ [2 x i32], [30 x i32] }> <{ [2 x i32] [i32 1, i32 2], [30 x i32] zeroinitializer }>, align 4
+// CHECK: @__const.frames.f = private unnamed_addr constant [3 x <4 x float>] [<4 x float> <float 1.000000e+00, float 2.000000e+00, float 3.000000e+00, float 4.000000e+00>, <4 x float> <float 5.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00>, <4 x float> zeroinitializer], align 16
+// CHECK: @__const.silent.z = private unnamed_addr constant [256 x float] zeroinitializer, align 4
+// CHECK: @__const.fixed.t = private unnamed_addr constant [3 x float] [float 5.000000e-01, float 2.500000e-01, float 1.250000e-01], align 4
+// CHECK-NOT: @__const.filled
+// CHECK: @__const.spread.gains = private unnamed_addr constant [4 x float]
+// CHECK: @__const.wide.t = private unnamed_addr constant <{ [2 x float], [262142 x float] }> <{ [2 x float] [float 1.000000e+00, float 2.000000e+00], [262142 x float] zeroinitializer }>, align 4
+// CHECK-NOT: @__const.huge
+
+// CHECK-LABEL: define float @lookup(float %x)
+// CHECK-NOT:     alloca [4 x float]
+// CHECK-NOT:     memset
+// CHECK:         %arrayidx = getelementptr inbounds float, ptr @__const.lookup.t, i64 %idxprom
+// CHECK-NEXT:    load float, ptr %arrayidx
+// CHECK-NOT:     store
+// CHECK:         ret float
+// CHECK-LABEL: define i32 @sparse(i32 %i)
+// CHECK-NOT:     store i32 {{[0-9]}}
+// CHECK:         getelementptr inbounds i32, ptr @__const.sparse.k
+// CHECK:         ret i32
+// CHECK-LABEL: define <4 x float> @frames(i32 %i)
+// CHECK:         getelementptr inbounds <4 x float>, ptr @__const.frames.f
+// CHECK-LABEL: define float @silent(i32 %i)
+// CHECK-NOT:     memset
+// CHECK:         getelementptr inbounds float, ptr @__const.silent.z
+// CHECK-LABEL: define float @filled(float %x, i32 %i)
+// CHECK:         %m = alloca [2 x float]
+// CHECK:         call void @llvm.memset.p0.i64(ptr align 4 %m, i8 0, i64 8, i1 false)
+// CHECK:         store float %x1, ptr %arrayinit
+// CHECK:         store float 1.000000e+00, ptr %arrayinit{{[0-9]+}}
+// CHECK-LABEL: define void @spread(ptr noalias %out, i32 %n)
+// CHECK:         %spread.parallel.1.context = alloca [8 x i8], align 8
+// CHECK-LABEL: define float @wide(i32 %i)
+// CHECK-NOT:     alloca [262144 x float]
+// CHECK:         getelementptr inbounds float, ptr @__const.wide.t
+// CHECK-LABEL: define float @huge(i32 %i)
+// CHECK:         %t = alloca [65537 x <4 x float>], align 16
+// CHECK:         call void @llvm.memset.p0.i64(ptr align 16 %t, i8 0, i64 1048592, i1 false)
+// CHECK:         store <4 x float> splat (float 1.000000e+00), ptr %arrayinit
+// CHECK-LABEL: define internal void @spread.parallel.1(
+// CHECK:         getelementptr inbounds float, ptr @__const.spread.gains
+
+// At -O2 a variable index loads from the table, and a constant one reads the constant itself (as does any index of
+// a table of zeros): nothing is left of the table in that function.
+// OPT-LABEL: define float @lookup(float %x)
+// OPT-NOT:     store
+// OPT:         getelementptr inbounds nuw [4 x i8], ptr @__const.lookup.t
+// OPT-NEXT:    load float, ptr %{{.*}}
+// OPT-NEXT:    ret float
+// OPT-LABEL: define noundef float @silent(i32 %i)
+// OPT-NEXT:  entry:
+// OPT-NEXT:    ret float 0.000000e+00
+// OPT-LABEL: define noundef float @fixed()
+// OPT-NEXT:  entry:
+// OPT-NEXT:    ret float 2.500000e-01
+
+// RESULT: -3

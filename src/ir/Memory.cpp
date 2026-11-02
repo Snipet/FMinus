@@ -2,23 +2,31 @@
 // pointer reaches (`p[i]`, `*p`), a module's field (`m.y`, `p->y`, or `y` in a method), or components of any of them
 // (`v.x`, `p[i].zw`, `v.xy.x`). lvalue() finds one, read() and write() load and store it; reading a variable, an
 // assignment, ++ and & all go through them, so a new kind of lvalue joins every one at once. Also C's arrays (an
-// array's name stands for a pointer to its first element), and C's arithmetic on pointers, on addresses.
+// array's name stands for a pointer to its first element; a const one of constants is a constant of the module, stored
+// once), and C's arithmetic on pointers, on addresses.
 //
 // An element's address is a getelementptr, as clang's: inbounds (it stays within the object the pointer points
 // into, or one past its end, as C requires), on an index widened to 64 bits with sext, since the index is a signed
 // int.
 #include "ir/Lowering.h"
 
+#include <llvm/IR/Constants.h>
+#include <llvm/IR/GlobalVariable.h>
+
 #include <algorithm>
 #include <cstdint>
+#include <utility>
 
 namespace fminus::ir::detail
 {
     // Whether `expr` names something a program could store to; lvalue() then checks that it does. C's rule, which
-    // the grammar leaves to the code generator: `(a ? b : c) = 1` and `f().x = 1` are not assignable.
-    bool Lowering::isLValue(const ast::Expr& expr)
+    // the grammar leaves to the code generator: `(a ? b : c) = 1`, `f().x = 1` and an enumeration constant's `A = 1`
+    // are not assignable.
+    bool Lowering::isLValue(const ast::Expr& expr) const
     {
-        if (std::holds_alternative<ast::VariableExpr>(expr.node) || std::holds_alternative<ast::IndexExpr>(expr.node))
+        if (const auto* variable = std::get_if<ast::VariableExpr>(&expr.node))
+            return !enumerator(variable->name).has_value();
+        if (std::holds_alternative<ast::IndexExpr>(expr.node))
             return true;
         if (const auto* unary = std::get_if<ast::UnaryExpr>(&expr.node))
             return unary->op == ast::UnaryOp::Dereference;
@@ -40,6 +48,12 @@ namespace fminus::ir::detail
                 && (findField(*module, variable->name, nullptr) != nullptr
                     || std::ranges::find(module->methods, variable->name) != module->methods.end()))
                 return field(expr.location, self(), *module, variable->name, false);
+            if (binding == nullptr)   // then the file's: a constant of the top level (Constants.cpp)
+            {
+                const auto found = fileScope_.find(variable->name);
+                if (found != fileScope_.end() && !found->second.enumerator)
+                    binding = &found->second;
+            }
             if (binding == nullptr)
             {
                 error(expr.location, "use of undeclared identifier " + quoted(variable->name));
@@ -59,7 +73,8 @@ namespace fminus::ir::detail
             const std::size_t reported = diagnostics_.errors().size();
             Value base = lower(*index->base);
             Value offset = lower(*index->index);
-            if (!ast::isPointer(base.type) && ast::isPointer(offset.type))
+            const bool swapped = !ast::isPointer(base.type) && ast::isPointer(offset.type);
+            if (swapped)
                 std::swap(base, offset);   // C's i[p] is p[i]
             if (!ast::isPointer(base.type))
             {
@@ -72,7 +87,16 @@ namespace fminus::ir::detail
                 error(expr.location, "array subscript is not an integer");
                 return std::nullopt;
             }
-            return element(expr.location, base, offset);
+            std::optional<LValue> target = element(expr.location, base, offset);
+            // An element of a const array its variable names, t[i]: clang names the variable when it is assigned.
+            const auto* array = std::get_if<ast::VariableExpr>(&(swapped ? *index->index : *index->base).node);
+            const Binding* binding = array != nullptr ? named(array->name) : nullptr;
+            if (target && target->isConst && binding != nullptr && ast::isArray(binding->type) && binding->isConst)
+            {
+                target->array = array->name;
+                target->arrayType = binding->type;
+            }
+            return target;
         }
         if (const auto* unary = std::get_if<ast::UnaryExpr>(&expr.node))   // *p
         {
@@ -167,6 +191,12 @@ namespace fminus::ir::detail
         if (ast::isArray(target.type))
         {
             error(location, "array type " + quoted(ast::typeName(target.type)) + " is not assignable");
+            return false;
+        }
+        if (target.isConst && !target.array.empty())   // t[i] of a const array t
+        {
+            error(location, "cannot assign to variable " + quoted(target.array) + " with const-qualified type "
+                                + quoted("const " + ast::typeName(target.arrayType)));
             return false;
         }
         if (target.isConst && target.name.empty())
@@ -311,6 +341,78 @@ namespace fminus::ir::detail
             llvm::Value* at = builder_.CreateConstInBoundsGEP2_64(typeOf(type), address, 0, i, "arrayinit");
             tag(builder_.CreateStore(convert(value, element, list[i]->location, Use::Initializing), at), element);
         }
+    }
+
+    // `const float t[4] = {1, 2, 3, 4};`: a const array, which nothing can write (an element through its name or a
+    // const float* is read-only, and a const float* converts to no float*). When every element of its list is a
+    // constant once lowered (a number, sizeof, operators and casts of them, a builtin of constants such as hash(3); not
+    // ?:, && or ||, which branch), the array is a constant of the module, stored once, as clang stores a static const
+    // one: a private unnamed_addr constant global named as clang names a local's (__const.f.t), which every call reads
+    // and none fills. Its elements are what the stack's array would hold, bit for bit: the list's values, converted to
+    // the element type as initializeArray converts them, then zeros (eight or more of them as one zeroinitializer, as
+    // clang writes them, so that the IR holds no constant per element). The one difference C could see is the
+    // address: every call's table is the same object, where C's would differ between nested calls of one function.
+    // Otherwise it is a local as any array is: a stack slot, zeroed, then the list's values stored, which are lowered
+    // once, in order, before it. So is an array over kMaxTableBytes (1 MiB, Lowering.h), whatever its list: a table
+    // costs the compiler about twice its size, where a stack slot costs nothing to compile, and an array may have 2^30
+    // elements. Returns the global or the slot; `type` is the declaration's (an array of what FMinus can point to, but
+    // a module), and the declaration has no `= expr`.
+    llvm::Value* Lowering::declareConstArray(SourceLocation location, const ast::DeclStmt& decl, ast::Type type)
+    {
+        const ast::Type element = ast::pointee(type);
+        std::vector<llvm::Value*> values;
+        if (decl.list.size() > static_cast<std::size_t>(type.count))
+            error(location, "excess elements in array initializer");
+        else
+        {
+            for (const ast::ExprPtr& item : decl.list)
+                values.push_back(convert(lower(*item), element, item->location, Use::Initializing));
+        }
+        auto* arrayType = llvm::cast<llvm::ArrayType>(typeOf(type));
+        if (module_.getDataLayout().getTypeAllocSize(arrayType).getFixedValue() <= kMaxTableBytes
+            && std::ranges::all_of(values, [](llvm::Value* value) { return llvm::isa<llvm::Constant>(value); }))
+        {
+            std::vector<llvm::Constant*> given;
+            for (llvm::Value* value : values)
+                given.push_back(llvm::cast<llvm::Constant>(value));
+            llvm::Constant* contents = tableContents(arrayType, std::move(given));
+            auto* table = new llvm::GlobalVariable(module_, contents->getType(), true,
+                                                   llvm::GlobalValue::PrivateLinkage, contents,
+                                                   "__const." + function_->name + "." + decl.name);
+            table->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+            table->setAlignment(alignOf(type));
+            return table;
+        }
+        llvm::AllocaInst* slot = allocate(arrayType, decl.name);
+        zero(slot, type);
+        for (std::size_t i = 0; i < values.size(); ++i)
+        {
+            llvm::Value* at = builder_.CreateConstInBoundsGEP2_64(arrayType, slot, 0, i, "arrayinit");
+            tag(builder_.CreateStore(values[i], at), element);
+        }
+        return slot;
+    }
+
+    // A table's contents, of `type`: `given`, constants of its element type (no more than its count), then zeros, in
+    // the shapes of clang's EmitArrayConstant. Up to the last element that is not zero; then, when eight or more zeros
+    // follow it, the two side by side in a packed struct, the zeros one zeroinitializer, so that the IR holds no
+    // constant per element of them (a table of zeros is one zeroinitializer); fewer, each in the array.
+    llvm::Constant* Lowering::tableContents(llvm::ArrayType* type, std::vector<llvm::Constant*> given)
+    {
+        llvm::Type* elementType = type->getElementType();
+        const std::uint64_t count = type->getNumElements();
+        while (!given.empty() && given.back()->isNullValue())
+            given.pop_back();
+        const std::uint64_t zeros = count - given.size();
+        if (given.empty())
+            return llvm::ConstantAggregateZero::get(type);
+        if (zeros >= 8)
+            return llvm::ConstantStruct::getAnon(
+                {llvm::ConstantArray::get(llvm::ArrayType::get(elementType, given.size()), given),
+                 llvm::ConstantAggregateZero::get(llvm::ArrayType::get(elementType, zeros))},
+                true);   // packed: the two parts side by side, as the array lays them out
+        given.resize(count, llvm::Constant::getNullValue(elementType));
+        return llvm::ConstantArray::get(type, given);
     }
 
     // C's arithmetic on pointers. p + i and i + p are the element i after p (i may be negative), and p - i the one i

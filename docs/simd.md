@@ -130,7 +130,9 @@ parentheses, and C's braces, with C's meaning ("Literals", below). A function th
 Two of OpenCL C's rules are left out. OpenCL C's comparisons of float vectors give `int4` (0 or -1 per lane), which
 FMinus can't express: it has `int` since recipe 10, but no integer vectors. FMinus gives a lane mask instead, which
 converts to 0 or 1 per lane as a float. And OpenCL C allows three-component vectors (`float3`, stored as four);
-FMinus doesn't.
+FMinus doesn't. Without integer vectors, the bitwise operators (extending.md, recipe 25) are `int`'s alone: a float
+vector or a mask is "invalid operands to binary expression", as a float is. A loop of them over ints vectorises all
+the same, into LLVM's `<4 x i32>`, as `randf`'s does.
 
 ### Types and masks
 

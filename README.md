@@ -6,24 +6,27 @@ the same IR can also be compiled ahead of time into a native executable.
 
 **Status:** FMinus v0, a deliberately small subset of C that goes all the way through, from source to the JIT, to expand
 on. It has functions over `float`, `int` and `bool`, and `void` ones; declarations, assignments, blocks, `if`, `while`,
-`for`, `break`, `continue` and `return`; arithmetic with `%`, `++` and `--`, casts, comparisons, `!`, `&&`, `||` and
-`?:`; calls and `<math.h>`'s float functions (below). It has pointers, `const` and `restrict` ones, so a function can
-take a C++ host's buffers and process a whole block in one call, C's arrays, and C's heap (`malloc`, `calloc`, `free`),
-with clang's `[[clang::nonblocking]]` checked so that the code on the audio thread can't reach it. It has modules, its
-classes: fields and methods, as C++'s structs with member functions, which hold each other and arrays of each other and
-live wherever their host puts them, and parameters, the values a plugin's host sets, which a method reads a sample at a
-time and the host compiles as knobs, as streams or as constants. It has an FFT, real and complex, whose plans are made
-off the audio thread and whose transforms run on it (PFFFT, compiled into FMinus's runtime library). It has SIMD: OpenCL
-C's `float2`, `float4` and `float8`, and `poly float`, a vector as wide as the machine's. It has threads of its own,
-structured: `parallel for` spreads a loop's iterations over the machine's cores and `parallel { }` runs a block's
-statements at once, each finished where it ends, with the races the compiler can see refused, on a pool of threads that
-a `[[clang::nonblocking]]` function may use. A program with a `float main(...)` also builds into an executable. Its
-compiler has optimisations of its own, from `-O1`: a method gets a copy of its code for each value of a knob that steers
-its loop, and a local's zeroing (an array's, or a module's overwritten whole) is removed where nothing reads the zeros.
-It tells LLVM C's strict-aliasing rule, that a loop whose condition is not a constant may be assumed to end, and what
-the runtime's functions do. Its math builtins give a float one result wherever it is computed, and a host may have
-subnormals flushed to zero. `examples/plugin/` is a JUCE plugin whose DSP is an FMinus program. The build, the
-dependencies and the toolchain's smoke tests are in place around it.
+`for`, `switch` with its `case` and `default` labels, `break`, `continue` and `return`; C's enumerations, named `int`
+constants, and a C file's const objects at the top level, tables and scalars that the functions after them share;
+arithmetic with `%`, `++` and `--`, C's bitwise operators on `int`, casts, comparisons, `!`, `&&`, `||` and
+`?:`; calls and `<math.h>`'s float functions (below), and `hash` and `randf`, white noise from a counter, the same bits
+wherever they are computed. It has pointers, `const` and `restrict` ones, so a
+function can take a C++ host's buffers and process a whole block in one call, C's arrays, and C's heap (`malloc`,
+`calloc`, `free`), with clang's `[[clang::nonblocking]]` checked so that the code on the audio thread can't reach it. It
+has modules, its classes: fields and methods, as C++'s structs with member functions, which hold each other and arrays
+of each other and live wherever their host puts them, and parameters, the values a plugin's host sets, which a method
+reads a sample at a time and the host compiles as knobs, as streams or as constants. It has an FFT, real and complex,
+whose plans are made off the audio thread and whose transforms run on it (PFFFT, compiled into FMinus's runtime
+library). It has SIMD: OpenCL C's `float2`, `float4` and `float8`, and `poly float`, a vector as wide as the machine's.
+It has threads of its own, structured: `parallel for` spreads a loop's iterations over the machine's cores and
+`parallel { }` runs a block's statements at once, each finished where it ends, with the races the compiler can see
+refused, on a pool of threads that a `[[clang::nonblocking]]` function may use. A program with a `float main(...)` also
+builds into an executable. Its compiler has optimisations of its own, from `-O1`: a method gets a copy of its code for
+each value of a knob that steers its loop, and a local's zeroing (an array's, or a module's overwritten whole) is
+removed where nothing reads the zeros. It tells LLVM C's strict-aliasing rule, that a loop whose condition is not a
+constant may be assumed to end, and what the runtime's functions do. Its math builtins give a float one result wherever
+it is computed, and a host may have subnormals flushed to zero. `examples/plugin/` is a JUCE plugin whose DSP is an
+FMinus program. The build, the dependencies and the toolchain's smoke tests are in place around it.
 
 Documentation: [docs/](docs/README.md). It covers the architecture, writing a program with `main`, a guide to
 extending the compiler with worked recipes, SIMD (vector types, a vector math library, and vectors as wide as the
@@ -77,8 +80,10 @@ src/                    the fminus library: every .cpp is a source, every gramma
                         Frontend.h (parse), Scanner.h (the glue between scanner and parser)
   ir/                   the syntax tree to LLVM IR: CodeGen.h (ir::lower), Lowering.h (the code generator's class
                         and its parts' map), CodeGen.cpp (the passes), Types, Functions, Statements, Expressions,
-                        Calls, Math (the math modes), Vectors, Memory, Modules, Effects, Tbaa (strict aliasing's
-                        tags) and Denormals (flush-to-zero; with Denormals.h) .cpp
+                        Constants (integer constant expressions, array sizes, enumerations, the top level's
+                        constants), Calls, Math (the math modes), Hash
+                        (hash and randf), Vectors, Memory, Modules, Effects, Tbaa (strict aliasing's tags) and
+                        Denormals (flush-to-zero; with Denormals.h) .cpp
   jit/                  Jit: LLJIT for FMinus modules (host CPU, pipeline, runtime)
   opt/                  FMinus's own LLVM passes: KnobVersioning (a method's copies for its knobs' values),
                         ZeroInitElision (a local's zeroing, removed where nothing reads it) and MathKernels (the
@@ -96,7 +101,9 @@ examples/<name>/        one example per directory: an FMinus program, and a harn
                         and timed; a plan to grow it
   note/                 a whole program with a main: a MIDI note's frequency (docs/programs.md)
   comparison/           a main that returns a bool: whether its two arguments are equal
-  waveforms/            band-limited sawtooth and square waves by additive synthesis: for, while, if, break, continue
+  waveforms/            band-limited sawtooth and square waves by additive synthesis: for, while, if, break,
+                        continue, a switch on an enumeration, and a constant of the top level
+  noise/                white noise from a count of samples (randf), and a voice's source of its own (hash)
   chord/                a chord's four notes in a float4: one vector expf, literals, swizzles, reductions
   unison/               detuned sawtooth voices, one a lane of a poly float: a strip-mined loop with a mask
   delay/                a feedback delay whose line the program allocates, run by a [[clang::nonblocking]] kernel:
@@ -210,15 +217,15 @@ float half(float x) { x /= 2; return x; }
 
 | | |
 |---|---|
-| program | function definitions, `float name(float a, const float b) { ... }` or `void name(...)`, and prototypes, `float name(float);`; `f(void)` is C's empty list; after the parameters, clang's `[[clang::nonallocating]]` or `[[clang::nonblocking]]`, checked: the function may not reach the heap (nor, nonblocking, an external function not marked so); modules, `module OnePole { float y; float tick(float x) { return y += x; } };`, whose fields are declarations without initialisers and whose methods are functions that see the fields by name (`this` is the module's address); a module's parameters, `param float cutoff [[fminus::range(20, 20000)]] [[fminus::default(1000)]];` (a `float`, `int` or `bool`), which the host sets and a method reads as `cutoff[i]`, its value at sample i of the call |
-| declarations | `float x = e;`, `const float k = e;`, `float* p = out;`, several at once (`float a = 1, b;`; in `float *p, x;` only `p` is a pointer, as in C); arrays, `float h[16];` and `int k[3] = {1, 2, 3};` (the elements left out are 0); modules, `OnePole lp;` and `OnePole b = a;` (a copy); block-scoped, shadowing allowed in an inner block |
-| statements | `{ ... }`, `e;`, `return e;` and `return;`, `;`, `if (c) s else s` (an `else` closes the nearest `if`), `while (c) s`, `for (init; c; step) s` (its declarations are the loop's), `break;`, `continue;`; a `while` or `for` whose condition is not a constant expression may be assumed to end, as in C11 (6.8.5p6), and `while (1)` and `for (;;)` may run for ever; FMinus's `parallel for (int i = first; i < end; ++i) s`, its iterations at once over the machine's cores, and `parallel { s1 s2 ... }`, its statements at once, each finished, all of it, where it ends (below) |
-| expressions | constants, names, calls, `( )`, unary `-` `+` `!`, `++` and `--` (before or after), casts `(int)x` `(float)x` `(bool)x`, `* / %`, `+ -`, `< <= > >=`, `== !=`, `&&`, `\|\|` (both short-circuit), `?:` (only the branch taken runs), and `= += -= *= /= %=` (right to left; an assignment's value is the one stored), with C's precedence; pointers' `p[i]`, `*p`, `&x`, `p + i`, `p - q` and comparisons; an array's `a[i]` (its name stands for a pointer to its first element); a module's fields `m.y` and `p->y`, its methods `m.tick(x)` and `p->tick(x)`, and `this`; `sizeof(type)`, an `int`; vector literals, OpenCL C's `(float4)(a, b, c, d)` and C's `(float4){a, b}` (the lanes left out are 0), and swizzles `v.wzyx`, `v.s0` |
-| constants | C's: floating ones are floats (`1.5`, `1.`, `.5`, `2e3`, `1.5e-3f`, hex floats `0x1.8p1`, `0x1p-3f`), integer ones ints (`2`, `010` in octal, `0x1F` in hex); `true` and `false` |
+| program | function definitions, `float name(float a, const float b) { ... }` or `void name(...)`, and prototypes, `float name(float);`; `f(void)` is C's empty list; after the parameters, clang's `[[clang::nonallocating]]` or `[[clang::nonblocking]]`, checked: the function may not reach the heap (nor, nonblocking, an external function not marked so); modules, `module OnePole { float y; float tick(float x) { return y += x; } };`, whose fields are declarations without initialisers and whose methods are functions that see the fields by name (`this` is the module's address); a module's parameters, `param float cutoff [[fminus::range(20, 20000)]] [[fminus::default(1000)]];` (a `float`, `int` or `bool`), which the host sets and a method reads as `cutoff[i]`, its value at sample i of the call; enumerations and constants (below) |
+| declarations | `float x = e;`, `const float k = e;`, `float* p = out;`, several at once (`float a = 1, b;`; in `float *p, x;` only `p` is a pointer, as in C); arrays, `float h[16];` and `int k[3] = {1, 2, 3};` (the elements left out are 0), `float buf[ROWS * COLS];` (a size is C's integer constant expression: an enumeration constant names one, a `const int` does not) and `float t[] = {1, 2, 3};` (its list's length), and a `const` one of constants, `const float t[4] = {1, 2, 3, 4};`, stored once (up to 1 MiB), a constant of the program that no call fills; at the top level, constants, C's file-scope const objects: `const float table[ROWS * COLS] = {...};` and `const float gain = 0.5f;`, their initialisers constants (numbers, enumeration constants, `sizeof`, other constant scalars of the top level, `hash` and `randf` of them, an element's address, operators, casts, `?:`, `&&` and `\|\|`), each stored once (up to 1 MiB), which every function and method declared after it reads (an `#include`d file's after the `#include`); modules, `OnePole lp;` and `OnePole b = a;` (a copy); block-scoped, shadowing allowed in an inner block; C's enumerations, `enum Wave { SAW, SQUARE = 4, TRIANGLE };` (`SAW` is 0, `TRIANGLE` 5, each an `int` constant), declared on their own at the top level (the functions and modules after it see its constants), in a module (its methods too) or in a block, a name each in the scope a variable would have |
+| statements | `{ ... }`, `e;`, `return e;` and `return;`, `;`, `if (c) s else s` (an `else` closes the nearest `if`), `while (c) s`, `for (init; c; step) s` (its declarations are the loop's), `break;`, `continue;`, `switch (v) { case 1: s ... default: s }` (C's: an `int` or `bool` value, its cases integer constant expressions, which fall through to the next until a `break`; `case` and `default` are C23's labels, so a declaration may follow one); a `while` or `for` whose condition is not a constant expression may be assumed to end, as in C11 (6.8.5p6), and `while (1)` and `for (;;)` may run for ever; FMinus's `parallel for (int i = first; i < end; ++i) s`, its iterations at once over the machine's cores, and `parallel { s1 s2 ... }`, its statements at once, each finished, all of it, where it ends (below) |
+| expressions | constants, names, calls, `( )`, unary `-` `+` `!` `~`, `++` and `--` (before or after), casts `(int)x` `(float)x` `(bool)x`, `* / %`, `+ -`, `<< >>`, `< <= > >=`, `== !=`, `&`, `^`, `\|` (the bitwise ones on `int`s), `&&`, `\|\|` (both short-circuit), `?:` (only the branch taken runs), and `= += -= *= /= %= &= \|= ^= <<= >>=` (right to left; an assignment's value is the one stored), with C's precedence; pointers' `p[i]`, `*p`, `&x`, `p + i`, `p - q` and comparisons; an array's `a[i]` (its name stands for a pointer to its first element); a module's fields `m.y` and `p->y`, its methods `m.tick(x)` and `p->tick(x)`, and `this`; `sizeof(type)`, an `int`; vector literals, OpenCL C's `(float4)(a, b, c, d)` and C's `(float4){a, b}` (the lanes left out are 0), and swizzles `v.wzyx`, `v.s0` |
+| constants | C's: floating ones are floats (`1.5`, `1.`, `.5`, `2e3`, `1.5e-3f`, hex floats `0x1.8p1`, `0x1p-3f`), integer ones ints (`2`, `010` in octal, `0x1F` in hex); `true` and `false`; enumeration constants, ints; integer constant expressions (a case's value, an enumerator's, an array's size) are C's, folded as FMinus computes |
 | comments | `// ...` and `/* ... */` |
 | directives | `#include "file"`, the file read where the line is, as in C, and once only (as if every file began with `#pragma once`), found where the host says: `fminus` looks beside the including file, then in `-I`'s directories; `#pragma`, ignored |
-| types | `float` (IEEE single precision), `int` (32 bits, signed: C's `/` and `%`, overflow undefined) and `bool` (C23's: 0 or 1, computed as an int; a number is `x != 0` as a bool); `void`, a function's result; pointers to `float`, `int`, `float2`, `float4`, `float8` and modules, `const` (`const float*`, read-only through it) and `restrict` (C99's promise that nothing else reaches it), and `void*` (an address with no type, which converts to and from any pointer); arrays of `float`, `int`, the float vectors and modules; modules, by name (`OnePole`), from their declaration on; `float2`, `float4`, `float8` (OpenCL C's vectors, lane by lane, scalars broadcast); `poly float` and `poly bool`, as many lanes as the machine's vectors ([docs/simd.md](docs/simd.md)) |
-| builtins | `fabsf sqrtf floorf fminf fmaxf` (LLVM intrinsics, exact) and `sinf cosf tanf expf logf tanhf` (by the math mode: the runtime's, with one result for a float wherever it is computed, by default), on floats and vectors; `malloc calloc free` (C's, with `int` sizes); `reduce_add reduce_min reduce_max` (a vector to a float); `poly_lanes` (an int) and `poly_index`; `poly_load poly_store` (a poly float from or to a `float*`, with an optional mask); the FFT: `fft_create(n)` and `fft_create_complex(n)` (a plan, a `void*`; they allocate), `fft_forward(plan, in, out)` and `fft_inverse(plan, in, out)` (real when one side is floats, complex when both are `float2`s; unnormalised), `fft_destroy(plan)` |
+| types | `float` (IEEE single precision), `int` (32 bits, signed: C's `/` and `%`, overflow undefined) and `bool` (C23's: 0 or 1, computed as an int; a number is `x != 0` as a bool); `void`, a function's result; pointers to `float`, `int`, `float2`, `float4`, `float8` and modules, `const` (`const float*`, read-only through it) and `restrict` (C99's promise that nothing else reaches it), and `void*` (an address with no type, which converts to and from any pointer); arrays of `float`, `int`, the float vectors and modules; modules, by name (`OnePole`), from their declaration on; `enum Wave`, an `int`, after its enumeration; `float2`, `float4`, `float8` (OpenCL C's vectors, lane by lane, scalars broadcast); `poly float` and `poly bool`, as many lanes as the machine's vectors ([docs/simd.md](docs/simd.md)) |
+| builtins | `fabsf sqrtf floorf fminf fmaxf` (LLVM intrinsics, exact) and `sinf cosf tanf expf logf tanhf` (by the math mode: the runtime's, with one result for a float wherever it is computed, by default), on floats and vectors; `malloc calloc free` (C's, with `int` sizes); `reduce_add reduce_min reduce_max` (a vector to a float); `poly_lanes` (an int) and `poly_index`; `poly_load poly_store` (a poly float from or to a `float*`, with an optional mask); the FFT: `fft_create(n)` and `fft_create_complex(n)` (a plan, a `void*`; they allocate), `fft_forward(plan, in, out)` and `fft_inverse(plan, in, out)` (real when one side is floats, complex when both are `float2`s; unnormalised), `fft_destroy(plan)`; `hash(n)` (an `int` mixed into a well-spread one) and `randf(n)` (a float uniform in [-1, 1) from it: white noise, `out[i] = randf(start + i)`) |
 
 Where FMinus differs from C, it is on purpose:
 
@@ -231,8 +238,23 @@ Where FMinus differs from C, it is on purpose:
   no casts between pointer types. Converting a pointer to one of another type (other than through a `void*`), or
   dropping its `const`, is an error, where C warns.
 - **Arrays are C's, one dimension deep**: of `float`, `int`, the float vectors or modules (no arrays of arrays, of
-  pointers or of `bool`), their size an integer constant, and zeroed like every variable. An initialiser list may be
-  shorter than the array, never longer (C only warns).
+  pointers or of `bool`), their size an integer constant expression from 1 to 2^30 (no variable length arrays, and
+  no zero-length ones, GNU's), and zeroed like every variable. An initialiser list may be
+  shorter than the array, never longer (C only warns). A `const` one whose list is constants (and of 1 MiB or less)
+  is stored once, a constant of the program, as C stores a `static const` one: every call reads the same elements as
+  C's would, but from one object, so its address is the same in every call, nested ones too, where C gives each call
+  its own, and two equal tables may be one object ([docs/extending.md](docs/extending.md), recipe 26).
+- **The top level holds no variables**, only constants: a declaration there is `const`, its initialiser constants, a
+  constant of the program, as C's file-scope const object is (an LLVM constant global of its name, of 1 MiB at
+  most), which no call fills or copies. A program's state lives in its modules, each instance's own. C has
+  file-scope variables; what it takes for a constant initialiser FMinus takes too, and a constant scalar of the top
+  level, which C17 leaves to the compiler (6.6p10) and clang accepts (`const int M = N * 2;`), but not a table's
+  element (`table[1]`), which clang also accepts, nor what C leaves undefined, which clang refuses for `1 / 0` but
+  folds to a value for `(int)1e10f` and `INT_MIN / -1`. The global is the program's own, as a `static const` one is
+  a C file's: no symbol of its name, for a call by that name or a host to find. A constant is no integer constant
+  expression, in C17 as in FMinus: an array's size, a case's value or an enumerator's is named by an enumeration
+  constant, C's idiom (`enum { ROWS = 17, COLS = 12 };`). A constant scalar reads as its value, as clang reads one,
+  with no load ([docs/extending.md](docs/extending.md), recipe 28).
 - **Modules are FMinus's own**, C++'s structs with member functions, and less: no constructors (a module's fields
   start at 0 wherever it lives, and take no initialisers: a method such as `init` sets them), no const methods, no
   inheritance, overloading, access control or static members. A module goes to a function and back by pointer only
@@ -260,6 +282,13 @@ Where FMinus differs from C, it is on purpose:
   transform allocates nothing. Bins are `float2`s, (re, im), and neither direction scales: inverse(forward(x)) is n
   times x, as in FFTW and PFFFT. A plan is opaque: a program hands it to the FFT's builtins, and reads or writes
   nothing through it.
+- **`hash` and `randf` are FMinus's own**, as C has nothing like them (its `rand` keeps a state, and gives the C
+  library's numbers): `hash(n)` mixes an `int` into a well-spread one (Chris Wellons's lowbias32 on its 32 bits, a
+  bijection), and `randf(n)` is the hash's top 24 bits as a float uniform in [-1, 1) (k / 2^23, k from -2^23 to
+  2^23 - 1). Each is a few integer instructions inline, with no state: the same `n` gives the same bits wherever it is
+  computed, in every lane of a vectorised loop, at every level, in every math mode and on every machine, so white noise
+  is `out[i] = randf(start + i)`, about three instructions a sample on arm64. A program declares no function of
+  either name ([docs/extending.md](docs/extending.md), recipe 25).
 - **Memory is read and written as the type it holds**, C's strict-aliasing rule, which FMinus tells LLVM as clang
   does (TBAA): an `int` read as a `float` through a `void*` is undefined. FMinus is stricter in three places: a float
   vector or `poly float` is its elements' type, `float`; allocated memory keeps one type at each place until it is
@@ -308,13 +337,28 @@ Where FMinus differs from C, it is on purpose:
   `fminus_rt_parallel_for`, the runtime's ([docs/extending.md](docs/extending.md), recipe 22).
 - **`%` works on floats**, with `fmodf`'s semantics: the result has the sign of the dividend, so `-7.5 % 2` is
   `-1.5`. C allows `%` on integers only; HLSL allows it on floats. `%=` goes with it.
+- **A shift is defined for every count and value**, as OpenCL C defines it: `x << n` and `x >> n` shift by `n`'s low
+  five bits (`n & 31`: `x << 32` is `x`, `x << -1` is `x << 31`), `<<` drops the bits shifted out of two's complement
+  (`-1 << 1` is -2, `1 << 31` is the least `int`), and `>>` shifts the sign in (`-8 >> 1` is -4). C leaves a count
+  below 0 or from 32 on undefined, and a left shift of a negative value or into the sign; a negative value's right
+  shift is implementation-defined (clang's is arithmetic, as FMinus's). So a program means the same on every machine,
+  which LLVM could not promise of a shift it may take for poison, and a scalar shift costs nothing for it (the shift
+  instructions of arm64 and x86-64 take the count's low five bits themselves). `&`, `|`, `^` and `~` are C's; `+`,
+  `-` and `*` on `int` still overflow as C's do, undefined. With no `unsigned`, a logical shift right is an arithmetic
+  one and a mask: `(x >> 17) & 0x7FFF` ([docs/extending.md](docs/extending.md), recipe 25).
 - **A function may be called before its definition** without a prototype, because the compiler declares every
   function first. A prototype with no definition declares an external C function, as in C: the JIT resolves it in
   the process (`float atanf(float x);` calls libm's), and the linker resolves it in an executable. On Apple systems,
   whose libm sets no `errno`, a prototype of libm's function says it writes no memory, as clang's `<math.h>` says
   there, so a call on a loop's invariants is made once, before the loop ([docs/extending.md](docs/extending.md),
   recipe 19).
-- **A declaration without an initialiser starts at 0**, and a pointer at null. C leaves the variable indeterminate.
+- **Enumerations are C's, a little smaller**: one is declared on its own (C's `enum Wave { SAW } w;` also declares `w`),
+  never ahead of its constants, and `enum Wave` is `int` whatever its constants are, where GCC and clang make it an
+  `unsigned int` when none is negative. A case's value or an enumerator's that overflows an `int` is an error, where
+  clang warns ([docs/extending.md](docs/extending.md), recipe 27).
+- **A declaration without an initialiser starts at 0**, and a pointer at null, and so does a variable whose
+  declaration a switch's jump to a label passes (`case 1:` after `case 0: float t = x;`). C leaves the variable
+  indeterminate.
   From `-O1`, the optimiser removes a local's zeroing where nothing reads the zeros: an array's that loops overwrite,
   and a module's that a copy of another overwrites. `-O0` keeps every one ([docs/extending.md](docs/extending.md),
   recipe 18).
@@ -337,14 +381,16 @@ unused, while `while (1)` and `for (;;)` may run for ever. A function as a whole
 C++ one is.
 
 A v0 program with `f` suffixes, with prototypes for calls ahead of a definition, with vectors only in C's form (braces,
-given clang's `ext_vector_type`), and without `%` on floats, `poly`, modules, `parallel` or `main`, is therefore also a
-valid C program with the same meaning, given `<math.h>` (`<stdlib.h>` for the heap; C23 for the attributes) and
-`-ffp-contract=off`. The example above and `examples/delay/delay.fm` compile as C under `-Wall -Wextra -Werror`, the
-latter with clang's `-Wfunction-effects` too. One with modules is C++ instead, spelled `struct` for `module` and
-`__restrict` for `restrict`, as long as no module has parameters, which are FMinus's own: `examples/voices/voices.fm`'s
-modules but `Synth` compile so, with `-Wno-perf-constraint-implies-noexcept` (C++ wants a nonblocking function
-`noexcept` too). The other examples use modules with parameters, `poly`, `parallel`, FMinus's own builtins (the
-convolver's FFT) or a `main`; hello's one function is C.
+given clang's `ext_vector_type`), and without `%` on floats, `poly`, modules, `parallel`, `main`, FMinus's own builtins
+(`hash`, `randf`, the FFT), a shift that C leaves undefined or a negative value in a variable of an enumeration with no
+negative constant (which GCC and clang make unsigned), is therefore also a valid C program with the same meaning, given
+`<math.h>` (`<stdlib.h>` for the heap; C23 for the attributes and a declaration after a label) and `-ffp-contract=off`.
+The example above and `examples/delay/delay.fm` compile as C under `-Wall -Wextra -Werror`, the latter with clang's
+`-Wfunction-effects` too. One with modules is C++ instead, spelled `struct` for `module` and `__restrict` for
+`restrict`, as long as no module has parameters, which are FMinus's own: `examples/voices/voices.fm`'s modules but
+`Synth` compile so, with `-Wno-perf-constraint-implies-noexcept` (C++ wants a nonblocking function `noexcept` too). The
+other examples use modules with parameters, `poly`, `parallel`, FMinus's own builtins (the convolver's FFT, the noise's
+`randf`) or a `main`; hello's one function is C.
 
 Every FMinus function becomes an external LLVM function of the same name with the C calling convention (a `float` is
 LLVM's `float`, an `int` an `i32`, a pointer a `ptr`), so C++ calls JIT'd code through a pointer of the matching type:
@@ -395,10 +441,10 @@ types:
    in `src/ir/`, in the file its kind belongs to (statements in `Statements.cpp`, vectors in `Vectors.cpp`, ...;
    `Lowering.h` has the list).
 4. Its tests: a dump in `tests/unit/FrontendTest.cpp`, a result in the code generator's tests (`CodeGenTest.cpp`,
-   `ControlFlowTest.cpp`, `IntTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`,
-   `ModuleTest.cpp`, `FftTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`, `ParallelTest.cpp`, which share `Compile.h`),
-   IR or errors in
-   `tests/lit/fminus/*.fm` (`// RUN:` lines, checked by FileCheck).
+   `ControlFlowTest.cpp`, `SwitchTest.cpp`, `EnumTest.cpp`, `IntTest.cpp`, `BitwiseTest.cpp`, `PointerTest.cpp`,
+   `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `TableTest.cpp`, `TopLevelTest.cpp`, `ModuleTest.cpp`,
+   `FftTest.cpp`, `HashTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`, `ParallelTest.cpp`, which share `Compile.h`), IR or
+   errors in `tests/lit/fminus/*.fm` (`// RUN:` lines, checked by FileCheck).
 
 `examples/biquad/` is a kernel to grow the language around. It is a biquad low-pass module with coefficients recomputed
 every sample, its cutoff a stream, which filters a block a call, with a harness that calls it once, compares it with C++
@@ -584,7 +630,7 @@ preset has a workflow (`cmake --workflow --preset <name>`) except `xcode`, which
 ## Handy
 
 - `build-dev/bin/fminus-hostinfo [--features]`: the triple, CPU, features and data layout the JIT targets here.
-- VSCode: `python3 editors/vscode/package.py`, then `code --install-extension build-vscode/fminus-0.10.0.vsix`, for
+- VSCode: `python3 editors/vscode/package.py`, then `code --install-extension build-vscode/fminus-0.12.0.vsix`, for
   FMinus syntax highlighting, lit's `RUN:` and `CHECK:` lines included
   ([editors/vscode/README.md](editors/vscode/README.md)).
 - `build-dev/bin/fminus`: FMinus source to its tree, IR, assembly or an object, or run in the JIT (above).

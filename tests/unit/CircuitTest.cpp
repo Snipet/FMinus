@@ -1362,6 +1362,19 @@ TEST_CASE("prewarp applies to a one-state OTA block, and warns elsewhere", "[cir
           "t.cir:3:1: warning: '.prewarp on' is ignored: it prewarps an OTA's cutoff, and the netlist has none\n");
 }
 
+TEST_CASE("the language's keywords are refused as names: switch, case, default and enum too", "[circuit]")
+{
+    for (const char* name : {"switch", "case", "default", "enum", "while", "param"})
+    {
+        INFO(name);
+        CHECK(fc::isFMinusKeyword(name));
+        CHECK(errorsOf(".input u in\n.output y o\n.pot " + std::string(name) + "\nR1 in o {1k + " + name
+                       + "}\nR2 o 0 1k\n")
+              == "t.cir:3:6: error: pot '" + std::string(name)
+                     + "' is an FMinus keyword or builtin, or a name the module uses: rename it\n");
+    }
+}
+
 TEST_CASE("an OTA module's step names are refused as names", "[circuit]")
 {
     // every name the OTA's step, its law-input lines and its ADAA tail use, as a pot, an input and the module

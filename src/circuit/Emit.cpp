@@ -456,7 +456,8 @@ namespace fminus::circuit
             std::to_array<std::string_view>({// keywords (src/frontend/Lexer.l)
                                              "float", "const", "return", "bool", "int", "void", "restrict", "sizeof",
                                              "float2", "float4", "float8", "poly", "true", "false", "if", "else",
-                                             "while", "for", "break", "continue", "parallel", "module", "this", "param",
+                                             "while", "for", "break", "continue", "switch", "case", "default",
+                                             "enum", "parallel", "module", "this", "param",
                                              // builtins (src/ir/Calls.cpp), and main, a program's entry
                                              "fabsf", "sqrtf", "sinf", "cosf", "expf", "logf", "floorf", "fminf",
                                              "fmaxf", "tanhf", "tanf", "malloc", "calloc", "free", "main"});

@@ -1,0 +1,91 @@
+// A constant of the top level is C's file-scope const object: a private LLVM constant global of its name, one for
+// each, which every function and method after it reads where it is, with no copy (no alloca, memset or store for it),
+// at -O0 as at -O2. A scalar reads as its value, with no load. Missing elements are 0, eight or more of them
+// one zeroinitializer (a local table's shapes); a size is an integer constant expression of enumeration constants, or
+// a list's length. An #included file's constants are the including file's after the #include (Inputs/toplevel/).
+// RUN: fminus %s -O0 -I %S/Inputs/toplevel | FileCheck %s
+// RUN: fminus %s -O2 -I %S/Inputs/toplevel | FileCheck %s --check-prefix=OPT
+// RUN: fminus %s -I %S/Inputs/toplevel --run element 0 3 | FileCheck %s --check-prefix=RESULT
+// RUN: fminus %s -I %S/Inputs/toplevel --emit ast | FileCheck %s --check-prefix=AST
+
+#include "kernel.fm"
+
+enum { ROWS = 17, COLS = 12, STRIDE = COLS };
+const float TABLE[ROWS * COLS] = {1, 2, 3, 0.5f};
+const float GAIN = 0.5f;
+const int STEPS[] = {1, 2, 4, 8};
+
+float at(int r, int c)
+{
+    return TABLE[r * STRIDE + c];
+}
+
+module Lookup
+{
+    float scale;
+    float read(int r, int c) { return TABLE[r * STRIDE + c] * GAIN * scale; }
+};
+
+float element(float r, float c)   // for --run, which passes floats
+{
+    return at((int)r, (int)c) + GAIN * STEPS[0];
+}
+
+float smooth(const float* x)
+{
+    float s = 0;
+    for (int i = 0; i < TAPS; ++i)
+        s += KERNEL[i] * x[i];
+    return s * STEPS[3];
+}
+
+// CHECK: @KERNEL = private constant [3 x float] [float 2.500000e-01, float 5.000000e-01, float 2.500000e-01], align 4
+// CHECK: @TABLE = private constant <{ [4 x float], [200 x float] }> <{ [4 x float] [float 1.000000e+00, float 2.000000e+00, float 3.000000e+00, float 5.000000e-01], [200 x float] zeroinitializer }>, align 4
+// CHECK: @GAIN = private constant float 5.000000e-01, align 4
+// CHECK: @STEPS = private constant [4 x i32] [i32 1, i32 2, i32 4, i32 8], align 4
+// CHECK-NOT: @{{.*}} = {{.*}}global
+
+// CHECK-LABEL: define float @at(i32 %r, i32 %c)
+// CHECK-NOT:     alloca [
+// CHECK-NOT:     memset
+// CHECK:         %0 = mul nsw i32 %r1, 12
+// CHECK:         %arrayidx = getelementptr inbounds float, ptr @TABLE, i64 %idxprom
+// CHECK-NEXT:    load float, ptr %arrayidx
+// CHECK-NOT:     store
+// CHECK:         ret float
+// CHECK-LABEL: define float @"Lookup::read"(
+// CHECK-NOT:     alloca [
+// CHECK:         getelementptr inbounds float, ptr @TABLE
+// CHECK:         fmul float %{{.*}}, 5.000000e-01
+// CHECK-LABEL: define float @smooth(ptr %x)
+// CHECK-NOT:     alloca [
+// CHECK:         icmp slt i32 %{{.*}}, 3
+// CHECK:         getelementptr inbounds float, ptr @KERNEL
+// CHECK:         load i32, ptr getelementptr inbounds (i32, ptr @STEPS, i64 3)
+
+// At -O2 a variable index loads from the table, and a constant one reads the constant itself: smooth's loop is the
+// kernel's three values, and STEPS[3] is 8, so the two tables, which nothing else reads, are gone.
+// OPT-NOT: @KERNEL =
+// OPT: @TABLE = private unnamed_addr constant <{ [4 x float], [200 x float] }>
+// OPT-NOT: @STEPS =
+// OPT-LABEL: define float @at(i32 %r, i32 %c)
+// OPT-NOT:     store
+// OPT:         getelementptr inbounds {{.*}}, ptr @TABLE, i64 %idxprom
+// OPT-NEXT:    load float
+// OPT-NEXT:    ret float
+// OPT-LABEL: define float @smooth(
+// OPT-NOT:     @KERNEL
+// OPT-NOT:     @STEPS
+// OPT:         fmul float %{{.*}}, 2.500000e-01
+// OPT:         fmul float %{{.*}}, 8.000000e+00
+// OPT-NEXT:    ret float
+
+// RESULT: 1
+
+// AST: (enum (TAPS 3))
+// AST-NEXT: (decl const float[TAPS] KERNEL {0.25f 0.5f 0.25f})
+// AST-NEXT: (enum (ROWS 17) (COLS 12) (STRIDE COLS))
+// AST-NEXT: (decl const float[(* ROWS COLS)] TABLE {1 2 3 0.5f})
+// AST-NEXT: (decl const float GAIN 0.5f)
+// AST-NEXT: (decl const int[] STEPS {1 2 4 8})
+// AST-NEXT: (function float at

@@ -77,6 +77,129 @@ TEST_CASE("comparisons, !, && and ||, and ?: have C's precedence", "[frontend]")
     CHECK(parsed("bool h() { return !true || false; }") == "(function bool h ()\n  (return (|| (! true) false)))\n");
 }
 
+TEST_CASE("the bitwise operators and shifts have C's precedence, and & is unary or binary as in C", "[frontend]")
+{
+    // Loosest first: ||, &&, |, ^, &, equality, relational, shifts, additive; ~ is unary.
+    CHECK(parsed("int f(int a, int b, int c) { return a | b & c; }")
+          == "(function int f ((int a) (int b) (int c))\n  (return (| a (& b c))))\n");
+    CHECK(parsed("int f(int a) { return a << 1 + 2; }") == "(function int f ((int a))\n  (return (<< a (+ 1 2))))\n");
+    CHECK(parsed("bool f(int a, int b) { return ~a == b; }")
+          == "(function bool f ((int a) (int b))\n  (return (== (~ a) b)))\n");
+    CHECK(parsed("int f(int a, int b, int c) { return a & b == c || a ^ b | c && a < b >> c; }")
+          == "(function int f ((int a) (int b) (int c))\n"
+             "  (return (|| (& a (== b c)) (&& (| (^ a b) c) (< a (>> b c))))))\n");
+    CHECK(parsed("int f(int a) { return a >> 1 << 2 & ~-a; }")
+          == "(function int f ((int a))\n  (return (& (<< (>> a 1) 2) (~ (- a)))))\n");
+    // & before an operand is the address, after one the operator; && is one token, as C's maximal munch has it.
+    CHECK(parsed("int f(int a, int* p) { p = &a; return a&*p & &a == p && a; }")
+          == "(function int f ((int a) (int * p))\n"
+             "  (= p (& a))\n"
+             "  (return (&& (& (& a (* p)) (== (& a) p)) a)))\n");
+    // The compound assignments bind as = does: loosest, right to left.
+    CHECK(parsed("int f(int a, int b) { a <<= b >>= 1; a &= 1; a |= 2; a ^= b; return a; }")
+          == "(function int f ((int a) (int b))\n"
+             "  (<<= a (>>= b 1))\n  (&= a 1)\n  (|= a 2)\n  (^= a b)\n  (return a))\n");
+}
+
+TEST_CASE("switch parses as C's, and case and default as C23's labels: block items, or a statement's", "[frontend]")
+{
+    // In a block, a label is an item of its own, so a declaration may follow one and one may end the block; where a
+    // statement is expected, a label labels the statement after it.
+    CHECK(parsed("int f(int x)\n"
+                 "{\n"
+                 "    switch (x)\n"
+                 "    {\n"
+                 "    case 1:\n"
+                 "    case 2 + 1: x = 0; break;\n"
+                 "    default: int y = x; x = y;\n"
+                 "    case 4:\n"
+                 "    }\n"
+                 "    switch (x) case 1: case 2: return 1;\n"
+                 "    if (x) default: x = 3;\n"
+                 "    switch (x) ;\n"
+                 "    return x ? 1 : 2;\n"
+                 "}\n")
+          == "(function int f ((int x))\n"
+             "  (switch x\n"
+             "    (block\n"
+             "      (case 1)\n"
+             "      (case (+ 2 1))\n"
+             "      (= x 0)\n"
+             "      (break)\n"
+             "      (default)\n"
+             "      (decl int y x)\n"
+             "      (= x y)\n"
+             "      (case 4)))\n"
+             "  (switch x\n"
+             "    (case 1\n"
+             "      (case 2\n"
+             "        (return 1))))\n"
+             "  (if x\n"
+             "    (default\n"
+             "      (= x 3)))\n"
+             "  (switch x\n"
+             "    (empty))\n"
+             "  (return (?: x 1 2)))\n");
+    // A case's value is an expression up to its colon, ?: included; `default` is a keyword, and an identifier in an
+    // attribute, as C23 reads a keyword there.
+    CHECK(parsed("int f(int x) { switch (x) { case x ? 1 : 2: break; } return 0; }")
+          == "(function int f ((int x))\n"
+             "  (switch x\n"
+             "    (block\n"
+             "      (case (?: x 1 2))\n"
+             "      (break)))\n"
+             "  (return 0))\n");
+    CHECK(parsed("module M { param int n [[fminus::default(3)]]; };")
+          == "(module M\n  (param int n [[fminus::default(3)]]))\n");
+    CHECK(parsed("int f(int x) { switch (x) { case 1 break; } }")
+          == "test.fm:1:36: error: syntax error, unexpected break\n");
+    CHECK(parsed("int f(int default) { return 0; }")
+          == "test.fm:1:11: error: syntax error, unexpected default, expecting * or ) or , or identifier\n");
+}
+
+TEST_CASE("enumerations parse as C's, where they are among the functions and modules, and `enum Mode` is int",
+          "[frontend]")
+{
+    CHECK(parsed("enum Wave { SAW, SQUARE = 4, TRIANGLE = SQUARE + 1, };\n"
+                 "module Osc\n"
+                 "{\n"
+                 "    float phase;\n"
+                 "    enum Shape { SINE, PULSE = -1 };\n"
+                 "    param enum Wave wave [[fminus::range(0, 5)]];\n"
+                 "};\n"
+                 "enum { N = 8 };\n"
+                 "enum Wave pick(enum Wave w, int i)\n"
+                 "{\n"
+                 "    enum Local { A };\n"
+                 "    enum Local a = (enum Local)i;\n"
+                 "    return w + a + sizeof(enum Wave);\n"
+                 "}\n"
+                 "const enum { LAST };\n")
+          == "(enum Wave (SAW) (SQUARE 4) (TRIANGLE (+ SQUARE 1)))\n"
+             "(module Osc\n"   // its enumerations and fields in order: a field's array sees those before it
+             "  (field float phase)\n"
+             "  (enum Shape (SINE) (PULSE (- 1)))\n"
+             "  (param int wave [[fminus::range(0, 5)]]))\n"
+             "(enum (N 8))\n"
+             "(function int pick ((int w) (int i))\n"
+             "  (enum Local (A))\n"
+             "  (decl int a (cast int i))\n"
+             "  (return (+ (+ w a) (sizeof int))))\n"
+             "(enum (LAST))\n");
+    // A tag is a type from its enumeration's closing brace on, in its scope: a block's ends with it.
+    CHECK(parsed("int f() { { enum E { A }; enum E e = A; } enum E x = 0; return x; }")
+          == "test.fm:1:48: error: ISO C forbids forward references to 'enum' types\n");
+    CHECK(parsed("enum E { A = sizeof(enum E) };")
+          == "test.fm:1:26: error: ISO C forbids forward references to 'enum' types\n");
+    CHECK(parsed("enum E { A };\nint f() { enum E { B }; return B; }\nenum E { C };")
+          == "test.fm:3:6: error: redefinition of 'E'\n"
+             "test.fm:1:6: note: previous definition is here\n");
+    CHECK(parsed("enum E { };") == "test.fm:1:10: error: use of empty enum\n");
+    // Declared on its own: C's `enum E { A } e;` declares a variable too, which FMinus's enumeration does not.
+    CHECK(parsed("int f() { enum E { A } e; return 0; }")
+          == "test.fm:1:24: error: syntax error, unexpected identifier, expecting ;\n");
+}
+
 TEST_CASE("vector types, literals and swizzles parse as OpenCL C's", "[frontend]")
 {
     // A literal is a parenthesised type, then its elements; a swizzle binds tighter than any operator, as in C.
@@ -155,12 +278,51 @@ TEST_CASE("sizeof takes a type, as C's sizeof(type) does", "[frontend]")
 
 TEST_CASE("arrays parse as C's: a size after the name, a list, and a parameter that is a pointer", "[frontend]")
 {
+    // A size is an expression, kept as written: the code generator works it out (an integer constant expression).
     CHECK(parsed("void f(const float x[16], int k[]) { float a[4] = {1, 2,}, b; const int c[0x10]; a[1] = x[2]; }")
           == "(function void f ((const float * x) (int * k))\n"
              "  (decl float[4] a {1 2})\n"
              "  (decl float b)\n"
-             "  (decl const int[16] c)\n"
+             "  (decl const int[0x10] c)\n"
              "  (= ([] a 1) ([] x 2)))\n");
+    CHECK(parsed("enum { ROWS = 17, COLS = 12 };\n"
+                 "module Bank { float hist[ROWS << 1]; enum { TAPS = 4 }; float taps[TAPS]; };\n"
+                 "void f(float x[ROWS * COLS]) { float buf[ROWS * COLS]; const int t[] = {1, 2, 3}; float n[]; }")
+          == "(enum (ROWS 17) (COLS 12))\n"
+             "(module Bank\n"
+             "  (field float[(<< ROWS 1)] hist)\n"
+             "  (enum (TAPS 4))\n"
+             "  (field float[TAPS] taps))\n"
+             "(function void f ((float * x))\n"
+             "  (decl float[(* ROWS COLS)] buf)\n"
+             "  (decl const int[] t {1 2 3})\n"
+             "  (decl float[] n))\n");
+}
+
+TEST_CASE("top-level constants parse as C's file-scope declarations, where they are among the others", "[frontend]")
+{
+    // Before and after functions, modules and enumerations, each where it is; and a declaration of several names.
+    CHECK(parsed("const float gain = 0.5f;\n"
+                 "enum { N = 4 };\n"
+                 "const int sizes[N] = {1, 2}, count = N;\n"
+                 "module M { float x; };\n"
+                 "const float table[] = {1, 2, 3,};\n"
+                 "enum { K = 2 };\n"
+                 "float f() { return table[K] * gain; }\n"
+                 "const float4 lanes = (float4)(1);\n"
+                 "float state;\n")
+          == "(decl const float gain 0.5f)\n"
+             "(enum (N 4))\n"
+             "(decl const int[N] sizes {1 2})\n"
+             "(decl const int count N)\n"
+             "(module M\n"
+             "  (field float x))\n"
+             "(decl const float[] table {1 2 3})\n"
+             "(enum (K 2))\n"
+             "(function float f ()\n"
+             "  (return (* ([] table K) gain)))\n"
+             "(decl const float4 lanes (float4 1))\n"
+             "(decl float state)\n");   // FMinus's error, the code generator's: a top-level declaration is const
 }
 
 TEST_CASE("modules parse into fields and methods, and a module's name is a type from its declaration on",

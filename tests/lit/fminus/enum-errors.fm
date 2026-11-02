@@ -1,0 +1,38 @@
+// Enumerations' errors, one each, in clang's words: a constant used before its enumeration, redefined (as a constant,
+// or as another kind of name: a variable, a parameter, a function, a module), past the greatest int, a value that is
+// no integer constant expression, and a constant assigned or taken the address of, as C has no lvalue of one.
+// RUN: not fminus %s 2>&1 | FileCheck %s --implicit-check-not=error: --implicit-check-not=note:
+
+float early(float x) { return x + LATE; }
+enum { A, B };
+enum { A = 3 };
+enum { BIG = 2147483647, OVER };
+float f(float x) { return x; }
+enum { f, V = 1.5f, W = nope };
+enum { LATE = 4 };
+
+int g(int P, int k)
+{
+    enum { P };
+    int x = 2;
+    enum { x, K = k };
+    A = 2;
+    float* p = &B;
+    return x + K;
+}
+
+// CHECK: enum-errors.fm:6:35: error: use of undeclared identifier 'LATE'
+// CHECK: enum-errors.fm:8:8: error: redefinition of enumerator 'A'
+// CHECK-NEXT: enum-errors.fm:7:8: note: previous definition is here
+// CHECK: enum-errors.fm:9:26: error: ISO C restricts enumerator values to range of 'int' (2147483648 is too large)
+// CHECK: enum-errors.fm:11:8: error: redefinition of 'f'{{$}}
+// CHECK-NEXT: enum-errors.fm:10:7: note: previous definition is here
+// CHECK: enum-errors.fm:11:15: error: integer constant expression must have integer type, not 'float'
+// CHECK: enum-errors.fm:11:25: error: use of undeclared identifier 'nope'
+// CHECK: enum-errors.fm:16:12: error: redefinition of 'P'{{$}}
+// CHECK-NEXT: enum-errors.fm:14:11: note: previous definition is here
+// CHECK: enum-errors.fm:18:12: error: redefinition of 'x'{{$}}
+// CHECK-NEXT: enum-errors.fm:17:9: note: previous definition is here
+// CHECK: enum-errors.fm:18:19: error: expression is not an integer constant expression
+// CHECK: enum-errors.fm:19:7: error: expression is not assignable
+// CHECK: enum-errors.fm:20:16: error: cannot take the address of an rvalue of type 'int'
