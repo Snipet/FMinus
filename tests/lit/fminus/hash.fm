@@ -1,7 +1,7 @@
 // hash and randf: a few integer instructions inline, no call. hash is Wellons's lowbias32 on the int's bits (lshr,
 // xor, mul without nsw: unsigned arithmetic), randf the hash's top 24 bits (ashr 8) over 2^23 (sitofp, fmul by
-// 0x1p-23). Nothing in them depends on the math mode or the subnormals, so the IR is the same in each, and white noise
-// from a counter vectorises: four lanes of the integer instructions a step, at -O2. Constants fold.
+// 0x1p-23). Nothing in them depends on the math mode or the subnormals, so each mode gives the same loop, and white
+// noise from a counter vectorises: four lanes of the integer instructions a step, at -O2. Constants fold.
 // RUN: fminus %s -O0 | FileCheck %s --check-prefix=O0
 // RUN: fminus %s -O2 | FileCheck %s --check-prefix=VEC
 // RUN: fminus %s -O2 --math libm | FileCheck %s --check-prefix=VEC

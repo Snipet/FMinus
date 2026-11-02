@@ -132,8 +132,8 @@
             "match": "\\b(?:true|false)\\b"
         },
         "builtins": {
-            "comment": "The builtins: <math.h>'s float functions, <stdlib.h>'s heap, the FFT, and the recipes' reductions, poly queries, poly loads and stores, and runtime function.",
-            "match": "\\b(fabsf|sqrtf|sinf|cosf|tanf|expf|logf|floorf|fminf|fmaxf|tanhf|malloc|calloc|free|fft_create|fft_create_complex|fft_forward|fft_inverse|fft_destroy|reduce_add|reduce_min|reduce_max|poly_lanes|poly_index|poly_load|poly_store|db_to_gain)\\s*(?=\\()",
+            "comment": "The builtins: <math.h>'s float functions, <stdlib.h>'s heap, the FFT, hash and randf, and the recipes' reductions, poly queries, poly loads and stores, and runtime function.",
+            "match": "\\b(fabsf|sqrtf|sinf|cosf|tanf|expf|logf|floorf|fminf|fmaxf|tanhf|malloc|calloc|free|fft_create|fft_create_complex|fft_forward|fft_inverse|fft_destroy|hash|randf|reduce_add|reduce_min|reduce_max|poly_lanes|poly_index|poly_load|poly_store|db_to_gain)\\s*(?=\\()",
             "captures": { "1": { "name": "support.function.builtin.fminus" } }
         },
         "functions": {
@@ -150,7 +150,10 @@
             }
         },
         "operators": {
+            "comment": "Longer spellings before their prefixes: <<= before << before <= before <, &= and && before &.",
             "patterns": [
+                { "name": "keyword.operator.assignment.compound.bitwise.fminus", "match": "<<=|>>=|[&|^]=" },
+                { "name": "keyword.operator.bitwise.shift.fminus", "match": "<<|>>" },
                 { "name": "keyword.operator.comparison.fminus", "match": "==|!=|<=|>=|<|>" },
                 { "name": "keyword.operator.logical.fminus", "match": "&&|\\|\\||!" },
                 { "name": "keyword.operator.increment-decrement.fminus", "match": "\\+\\+|--" },
@@ -158,7 +161,8 @@
                 { "name": "keyword.operator.assignment.fminus", "match": "=" },
                 { "name": "keyword.operator.arithmetic.fminus", "match": "[+\\-*/%]" },
                 { "name": "keyword.operator.ternary.fminus", "match": "[?:]" },
-                { "name": "keyword.operator.address.fminus", "match": "&" }
+                { "name": "keyword.operator.bitwise.fminus", "match": "[|^~]" },
+                { "name": "keyword.operator.bitwise.fminus", "comment": "or the address-of operator: the grammar cannot tell C's two apart", "match": "&" }
             ]
         },
         "punctuation": {

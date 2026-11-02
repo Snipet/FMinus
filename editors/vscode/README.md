@@ -3,9 +3,10 @@
 Syntax highlighting for FMinus (`.fm`): keywords (`parallel` among them), types (`float`, `int`, `bool`, `void`, and the
 SIMD recipes' `float4` and `poly float`) and qualifiers (`const`, `restrict`, `poly`, `param`), modules (`module
 OnePole`, with the name it declares, and `this`), `true` and `false`, C's constants including hex floats and hex
-integers (and `2f` marked as the error it is), operators (`++`, `&`, `[]`, `->`, `sizeof` too), attributes
-(`[[clang::nonblocking]]`, and a parameter's `[[fminus::range(20, 20000)]]` with its numbers), builtins (`sinf`,
-`tanhf`, `malloc`, `fft_forward`, `reduce_add`, ...), function and method names, and swizzles and fields (`v.wzyx`,
+integers (and `2f` marked as the error it is), operators (`++`, `&`, `[]`, `->`, `sizeof` too, and the bitwise `|`,
+`^`, `~`, `<<`, `>>` and their assignments), attributes (`[[clang::nonblocking]]`, and a parameter's
+`[[fminus::range(20, 20000)]]` with its numbers), builtins (`sinf`, `tanhf`, `malloc`, `fft_forward`, `hash`, `randf`,
+`reduce_add`, ...), function and method names, and swizzles and fields (`v.wzyx`,
 `p->y`), and the directives `#include "file"` and `#pragma` (any other is marked as the error it is). In lit tests,
 `RUN:`, `REQUIRES:`, `CHECK:` and the other check prefixes stand out inside their comments. `//` and `/* */` toggle as
 comments, and brackets match and close.
@@ -22,8 +23,8 @@ It is declarative: three JSON files, no code, nothing that runs on your files.
 ## Installing
 
 ```bash
-python3 editors/vscode/package.py                               # build-vscode/fminus-0.10.0.vsix
-code --install-extension build-vscode/fminus-0.10.0.vsix
+python3 editors/vscode/package.py                               # build-vscode/fminus-0.11.0.vsix
+code --install-extension build-vscode/fminus-0.11.0.vsix
 ```
 
 Then reload the window (Developer: Reload Window). `code` comes with VSCode; if it isn't on PATH, run "Shell Command:
@@ -33,7 +34,8 @@ VSIX...". To update, bump `version` in `package.json`, package again and install
 ## When the language grows
 
 A new keyword or type is a word in the `keywords` or `types` rule of the grammar; a builtin is a name in `builtins`; an
-operator goes in `operators`, longer spellings before their prefixes (`<=` before `<`). Rules are tried in the order of
-the top-level `patterns`, so keywords come before `functions` (otherwise `if (` would look like a call).
+operator goes in `operators`, longer spellings before their prefixes (`<<=` before `<<` before `<=` before `<`). Rules
+are tried in the order of the top-level `patterns`, so keywords come before `functions` (otherwise `if (` would look
+like a call).
 
 To see the scopes a token gets, run "Developer: Inspect Editor Tokens and Scopes" from the command palette.

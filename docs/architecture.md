@@ -114,10 +114,11 @@ subset of C's, is written out as EBNF in the file's header comment.
   once. `api.token.constructor` gives the scanner `Parser::make_FLOAT(location)` and friends.
 - **C's precedence.** The `%right`, `%left` and `%precedence` lines give the operators C's precedence and associativity,
   from the loosest at the top to the tightest at the bottom: assignment (right to left), `?:` (right to left), `||`,
-  `&&`, equality, relational, additive, multiplicative (`*`, `/` and `%`), unary (`%prec UNARY`: `-`, `!`, `*p`, `&x`, a
-  prefix `++`, a cast), and the postfix operators, `.` (a swizzle or a field), `->`, `[`, and `++` and `--` after their
-  operand. `*` and `&` are binary or unary by where they stand, as in C's grammar: after an expression `*` is a product,
-  at the start of one it is `*p`. The small helpers in the `%code` block, `binary()`, `logical()`, `assign()` and
+  `&&`, `|`, `^`, `&`, equality, relational, the shifts (`<<` and `>>`), additive, multiplicative (`*`, `/` and `%`),
+  unary (`%prec UNARY`: `-`, `!`, `~`, `*p`, `&x`, a prefix `++`, a cast), and the postfix operators, `.` (a swizzle or
+  a field), `->`, `[`, and `++` and `--` after their operand. `*` and `&` are binary or unary by where they stand, as
+  in C's grammar: after an expression `*` is a product and `&` a bitwise and, at the start of one they are `*p` and
+  `&x`. The small helpers in the `%code` block, `binary()`, `logical()`, `assign()` and
   `increment()`, keep each operator's rule to one line. The dangling `else` is resolved with `%precedence THEN` below
   `"else"`: an `else` closes the nearest `if`, as in C.
 - **Assignment is an expression.** `expr "=" expr` (and `+=`, `++` ...) accepts any expression as its target, as C's
@@ -205,14 +206,15 @@ but its members are defined across the directory by what they lower:
 | `Types.cpp` | FMinus's types as LLVM's (`typeOf`, `lanes`), the conversions (`convert`, `convertPointer`, `commonType`), errors and poison values |
 | `Functions.cpp` | declarations and prototypes (`declare`), libm's prototypes' attributes (`describeLibm`), bodies and parameters (`define`), stack slots and scopes (`find`, which captures a variable for a parallel region, and `lookup`, which does not) |
 | `Statements.cpp` | blocks, declarations, `return`, `if`, `while`, `for`, `break` and `continue` (none of which leaves a parallel region); a loop's `llvm.loop.mustprogress` when its condition is not a constant expression (`isConstant`, `mustProgress`) |
-| `Expressions.cpp` | the expression `std::visit` (`lower`), constants, operators (`binary`, `arithmetic`), `&&` and `\|\|`, `?:`, casts, assignment, `++` and `--` |
-| `Calls.cpp` | the builtin tables, calls, reductions, `poly_lanes` and `poly_index`, `poly_load` and `poly_store`, the heap's `malloc`, `calloc` and `free`, the FFT's `fft_*` (`lowerFft`, on the runtime's), and `ir::builtins()`; the heap's and the FFT's runtime calls through `callRuntime`, whose declaration says what the function does (`kRuntimeFacts`, `describeRuntime`) |
+| `Expressions.cpp` | the expression `std::visit` (`lower`), constants, operators (`binary`, `arithmetic`; the bitwise ones on ints, `isBitwise`), `&&` and `\|\|`, `?:`, casts, assignment, `++` and `--` |
+| `Calls.cpp` | the builtin tables, calls, reductions, `poly_lanes` and `poly_index`, `poly_load` and `poly_store`, the heap's `malloc`, `calloc` and `free`, the FFT's `fft_*` (`lowerFft`, on the runtime's), `hash` and `randf` (to `Hash.cpp`), and `ir::builtins()`; the heap's and the FFT's runtime calls through `callRuntime`, whose declaration says what the function does (`kRuntimeFacts`, `describeRuntime`) |
 | `Math.cpp` | `sinf`, `cosf`, `tanf`, `expf`, `tanhf` and `logf` in the vector and libm math modes: calls of the vector mode's math intrinsics (`fminus.sin.f32`, `fminus.sin.v2f32`, `fminus.sin.v4f32`) or the libm mode's runtime function, a float's or four lanes' (`lowerMath`), declared with their attributes and vector variant (`mathFunction`), and the names the runtime keeps for them, which a program that calls one may not declare (`checkMathNames`) |
+| `Hash.cpp` | `hash` and `randf`: lowbias32's integer instructions inline (`mixBits`), and the hash's top 24 bits over 2^23 (`lowerHash`) |
 | `Vectors.cpp` | vector literals in both forms, swizzles, `?:` with a vector condition |
-| `Memory.cpp` | lvalues (`lvalue`, `read`, `write`): variables, elements (`p[i]`, `*p`), fields, components of any of them; arrays (a name that stands for a pointer, a list); `&x`; pointer arithmetic |
+| `Memory.cpp` | lvalues (`lvalue`, `read`, `write`): variables, elements (`p[i]`, `*p`), fields, components of any of them; arrays (a name that stands for a pointer, a list; a `const` one of constants a private constant global, `declareConstArray`); `&x`; pointer arithmetic |
 | `Modules.cpp` | each module's struct type (`layOut`), fields (`field`), `this`, method calls (`callMethod`), copies; parameters, read by their binding (`lowerParameter`, `atEntry`), a stream's null test, value, base and stride (a flat call, read with no branch; the stride's `opaqueUnit`), their domains for knob versioning (`tagDomain`), and their streams' alias scope (`scopeStreams`) |
 | `Effects.cpp` | `[[clang::nonallocating]]` and `[[clang::nonblocking]]`: each function's calls (recorded by `lowerCall`), checked once every body is lowered |
-| `Parallel.cpp` | `parallel for` and `parallel { }`: what would race refused (`Walker`, `checkParallelFor`, `checkParallelBlock`, and whether a method changes its module, `changesModule`), each region's body a function of the runtime's task type (`beginRegion`, `endRegion`), and what the body uses of the function around it captured into a context, by value or by reference (`capture`, `captured`, `capturedParameter`, `outerValue`) |
+| `Parallel.cpp` | `parallel for` and `parallel { }`: what would race refused (`Walker`, `checkParallelFor`, `checkParallelBlock`, and whether a method changes its module, `changesModule`), each region's body a function of the runtime's task type (`beginRegion`, `endRegion`), and what the body uses of the function around it captured into a context, by value or by reference (`capture`, `captured`, `capturedParameter`, `outerValue`; a const table, a constant of the module, is read where it is) |
 | `Tbaa.cpp` | C's strict aliasing, told to LLVM: FMinus's tree of four types and each access's tag (`accessTag`, `tag`), which every load and store calls |
 | `Denormals.cpp` | `Denormals::Flush`: `DenormalFolder` (`Denormals.h`, the builder's constant folder, which flushes as the mode does), every definition marked `denormal_fpenv(preservesign)`, and each entry point wrapped to set the mode and call its body through an address LLVM cannot see into (`flushDenormals`, `wrapEntry`) |
 
@@ -303,7 +305,10 @@ to `bool` and to the same pointer with `const` added (`convertPointer`).
   vector when either is one. On `float`s it is `fneg`, `fadd`, `fsub`, `fmul`, `fdiv` and `frem` with no fast-math
   flags, so it is IEEE exact, as clang does with `-ffp-contract=off`. `frem` is `%`, with `fmodf`'s semantics; AArch64
   has no instruction for it, so it becomes a call to `fmodf`. On `int`s it is clang's: `add nsw`, `sub nsw`, `mul
-  nsw` (signed overflow is undefined, which lets LLVM widen a loop counter), `sdiv` and `srem`, and signed `icmp`s.
+  nsw` (signed overflow is undefined, which lets LLVM widen a loop counter), `sdiv` and `srem`, and signed `icmp`s;
+  `&`, `|`, `^` and `~` are `and`, `or`, `xor` and an `xor` with -1, and the shifts a `shl` (no `nsw`) or an `ashr` of
+  the count's low five bits (`and 31`, OpenCL C's definition), so that no shift is poison. The bitwise operators take
+  ints only: a float, a vector or a pointer is clang's "invalid operands to binary expression".
   With a pointer, it is pointer arithmetic (`pointerArithmetic`): `p + i` is a `getelementptr`, `p - q` LLVM's
   `CreatePtrDiff` (the addresses' difference divided by the element's size), and comparisons are unsigned `icmp`s of
   the addresses.
@@ -316,16 +321,16 @@ to `bool` and to the same pointer with `const` added (`convertPointer`).
   calls of functions LLVM does not know (`Math.cpp`), which it can neither fold nor pair, so a float gets one result
   wherever it is computed (extending.md, recipe 15): the vector mode's math intrinsics, which become FMinus's kernels
   at the end of the pipeline (below), or the libm mode's. Then `kAllocations`, C's `malloc`, `calloc` and `free`,
-  which call the runtime's functions (below) with 64-bit sizes and give back a `void*`. Then they try the program's
-  functions. Argument counts are checked with clang's "too many/too few arguments to function call". Every call of the
-  heap or of a program function is recorded for the effects' check. The heap's and the FFT's runtime functions are
-  declared through `callRuntime`, with the attributes that say what each does (an allocator of zeroed memory, a
-  transform that reads one buffer and writes another; recipe 19), unless the program declares a function of that name
-  itself. The math builtins' names are kept: a program that calls `sinf` may not declare a function named
-  `fminus_rt_sinf`, `fminus_rt_sin_f4` or `fminus_rt_libm_sinf` (each builtin has its three), in any math mode, the fast
-  one's too, so that whether a program compiles does not depend on the mode. `checkMathNames` reports it at the call,
-  with a note at the declaration, so no function of the program gets a runtime function's attributes or becomes a vector
-  variant.
+  which call the runtime's functions (below) with 64-bit sizes and give back a `void*`, the FFT's builtins, and `hash`
+  and `randf`, integer instructions inline (`Hash.cpp`). Then they try the program's functions. Argument counts are
+  checked with clang's "too many/too few arguments to function call". Every call of the heap or of a program function is
+  recorded for the effects' check. The heap's and the FFT's runtime functions are declared through `callRuntime`, with
+  the attributes that say what each does (an allocator of zeroed memory, a transform that reads one buffer and writes
+  another; recipe 19), unless the program declares a function of that name itself. The math builtins' names are kept: a
+  program that calls `sinf` may not declare a function named `fminus_rt_sinf`, `fminus_rt_sin_f4` or
+  `fminus_rt_libm_sinf` (each builtin has its three), in any math mode, the fast one's too, so that whether a program
+  compiles does not depend on the mode. `checkMathNames` reports it at the call, with a note at the declaration, so no
+  function of the program gets a runtime function's attributes or becomes a vector variant.
 - **Effects** (`Effects.cpp`) run after every body: a function marked `[[clang::nonallocating]]` or
   `[[clang::nonblocking]]` (C23's syntax, after its parameters) is checked call by call, as clang's
   `-Wfunction-effects` checks it, down through the program's unmarked functions; a call that could reach the heap

@@ -1,22 +1,24 @@
 # Extending the compiler
 
 How to add to FMinus. First, how a change moves through the compiler, and the few rules that keep that easy. Then
-twenty-one worked recipes. Eleven grow the C subset from a one-line builtin to C's control flow, a custom LLVM pass,
+twenty-three worked recipes. Eleven grow the C subset from a one-line builtin to C's control flow, a custom LLVM pass,
 `int`, `void` and pointers, the heap with the attributes that keep it off the audio thread, arrays and modules, FMinus's
 classes, an FFT from a C library built into the runtime, and parameters, the values a plugin's host sets. Six more are
 about the compiler rather than the language: math that gives a float one result wherever it is computed, knob versioning
 and flat streams, C's strict aliasing told to LLVM, zero-init elision, what the runtime's calls and loops promise, and
 subnormals flushed for the audio thread. Two more grow the language again: `#include`, which splits a program into
-files, and `parallel for` and `parallel { }`, a program's own threads. The last two return to the math: kernels of
-FMinus's own, the same in every lane and on every target, and those kernels inline. Then the pitfalls those recipes ran
-into, and design notes for what comes next. [simd.md](simd.md) has recipes 7 to 9, for vectors.
+files, and `parallel for` and `parallel { }`, a program's own threads. Two return to the math: kernels of FMinus's
+own, the same in every lane and on every target, and those kernels inline. The last two are for DSP's everyday code:
+C's bitwise operators with a hash and white noise from a counter, and constant tables stored once. Then the pitfalls
+those recipes ran into, and design notes for what comes next. [simd.md](simd.md) has recipes 7 to 9, for vectors.
 
 Recipes 1 to 4 are in the compiler now (`tanhf` and `%`; `bool` and its operators; `if`, `while` and `for`), and so are
 simd.md's 7 to 9, recipe 10 (`int`, `void` and pointers), recipe 11 (the heap), recipe 12 (arrays and modules), recipe
 13 (the FFT), recipe 14 (parameters), recipes 15 to 20 (the math modes, knob versioning, TBAA, zero-init elision, the
 runtime's attributes and loop progress, denormal control), recipe 21 (`#include`), recipe 22 (`parallel for` and
-`parallel { }`) and recipes 23 and 24 (math kernels of FMinus's own, and inline), so their sections describe how the
-code you have got there: read a section beside the files it names.
+`parallel { }`), recipes 23 and 24 (math kernels of FMinus's own, and inline), recipe 25 (the bitwise operators,
+`hash` and `randf`) and recipe 26 (constant tables), so their sections describe how the code you have got there: read
+a section beside the files it names.
 Recipes 5 and 6, a runtime function and a pass, are not part of the language; they live in [recipes/](recipes/) as a
 patch, so you can apply them to see them work. None of these are sketches: each was applied to this repository, built
 with `-Werror`, and tested in the dev and asan presets, every test passing. [architecture.md](architecture.md) describes
@@ -39,7 +41,7 @@ Most language features touch the same places, in this order:
 | 5 | `src/ir/` | its conversions and checks, and its lowering to LLVM IR, in the file its kind belongs to (`Lowering.h` lists them: types, functions, statements, expressions, calls, the math modes, vectors, memory, modules, effects, parallel regions, TBAA, denormals); a load or store of memory gets its type's tag (`tag`, recipe 17); a statement that holds code walks it in `Parallel.cpp`'s `Walker` too |
 | 6 | `src/runtime/` | if it needs C++ at run time, a runtime function (recipe 5); if a builtin calls it, its facts: in `kRuntimeFacts`, through `callRuntime` (recipe 19), or for a math builtin's, in `mathFunction` (`Math.cpp`, recipe 15) |
 | 7 | `tools/fminus/main.cpp`, `src/support/Aot.cpp` | for a new type: whether `--run` can pass and print it (its `switch` over the result type), and whether an executable's `main` may take or return it (`addEntryPoint`) |
-| 8 | `tests/` | a dump in `FrontendTest.cpp`; results in `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `IntTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp` or `ParallelTest.cpp` (their helpers are in `Compile.h`); IR or errors in `tests/lit/fminus/` |
+| 8 | `tests/` | a dump in `FrontendTest.cpp`; results in `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `IntTest.cpp`, `BitwiseTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `TableTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `HashTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp` or `ParallelTest.cpp` (their helpers are in `Compile.h`); IR or errors in `tests/lit/fminus/` |
 | 9 | `examples/` | a program that uses it, and a line in `tests/lit/fminus/examples.test` that runs it |
 | 10 | `editors/vscode/syntaxes/fminus.tmLanguage.json` | a new keyword, type or builtin, so VSCode highlights it (its README says where) |
 | 11 | `README.md` | the language table, and the deviations from C if any |
@@ -4350,6 +4352,224 @@ Compilation, instructions to compile and link each program (`Program::compile` a
 the fifteen, from none (echo, which calls no math builtin) to +114% (the shaper, eight `tanhf`s a sample in each
 knob-versioned copy of its loop); in time, for example, the modular voice 120 ms to 154 ms in this build.
 
+## Recipe 25: bits: C's bitwise operators, and `hash` and `randf`
+
+*In the compiler. Code: the tokens in `src/frontend/Lexer.l`, their rules and precedence in `Parser.y`,
+`UnaryOp::Complement` and five `BinaryOp`s and `AssignOp`s in `Ast.h` (their spellings in `Ast.cpp`); in `src/ir/`,
+`Expressions.cpp` (`isBitwise`, `binary`, `arithmetic`, `lowerAssign`), `Hash.cpp` (`hash` and `randf`), and their
+names in `Calls.cpp` and `Functions.cpp`. Tests: `tests/unit/BitwiseTest.cpp` (`[bitwise]`), `FrontendTest.cpp`'s
+precedence, `tests/unit/HashTest.cpp` (`[hash]`), `tests/lit/fminus/bitwise.fm`, `bitwise-errors.fm` and `hash.fm`.
+Example: `examples/noise/`.*
+
+An `int`'s bits were out of reach: FMinus had none of `&`, `|`, `^`, `~`, `<<` and `>>`, and `&` was only the address.
+A flag word, a power of two's mask, a table index wrapped with `& (n - 1)`: each took a division or a loop. And noise:
+the generators that need nothing but shifts, xors and multiplies (xorshift, a PCG, a counter's hash) could not be
+written, so white noise took one with a division and a remainder a sample (Park and Miller's minimal standard, by
+Schrage's method), whose every state waits on the last. A loop of it runs a sample at a time. This recipe adds C's
+operators, and two builtins that make noise a function of a sample's index.
+
+### Tokens and precedence
+
+Ten tokens join Lexer.l: `|`, `^`, `~`, `<<`, `>>` and `&=`, `|=`, `^=`, `<<=`, `>>=` (`&` was there). Flex takes the
+longest match, so `&&` stays one token and `a&&b` is a logical and, as C's maximal munch has it; `<<=` is one token,
+not `<<` and `=`. Parser.y gives them C's levels, between `&&` and equality and between relational and additive:
+
+```
+%right "=" "+=" "-=" "*=" "/=" "%=" "&=" "|=" "^=" "<<=" ">>="
+%right "?" ":"
+%left "||"
+%left "&&"
+%left "|"
+%left "^"
+%left "&"
+%left "==" "!="
+%left "<" "<=" ">" ">="
+%left "<<" ">>"
+%left "+" "-"
+```
+
+So `a & b == c` is `a & (b == c)`, as in C (and as clang warns), `a << 1 + 2` is `a << 3`, and `~a == b` is
+`(~a) == b`. `&` is unary or binary by where it stands, as `-` is: the unary rule takes `%prec UNARY`, the binary one
+`"&"`'s level, and Bison needs nothing else (`-Wcounterexamples` finds no conflict). `~` is a unary operator like `!`.
+Each binary rule is one line through `binary()` or `assign()`, and the nodes are enumerators: `UnaryOp::Complement`,
+`BinaryOp::BitAnd`, `BitOr`, `BitXor`, `ShiftLeft`, `ShiftRight`, and the same five of `AssignOp`. `-Wswitch` then
+lists every switch that needs them: the dump's spellings, the unary operators' lowering, `arithmetic`'s float half,
+`compoundOperator`, and `isConstant` (Statements.cpp), for which `~` of a constant expression is one, as in C.
+
+### Ints only
+
+C's bitwise operators take integers, and FMinus's one integer type is `int`; a `bool` takes part as an `int`, as C's
+integer promotions say (`~true` is -2). `binary()` checks the operands before anything else, so a pointer gets the same
+message as a float, and the result type of a refused operator is `int`, what the expression would have had:
+
+```cpp
+        if (isBitwise(op) && (ast::arithmeticOf(lhs.type) != ast::Type::Int
+                              || ast::arithmeticOf(rhs.type) != ast::Type::Int))
+        {
+            error(location, "invalid operands to binary expression (" + quoted(ast::typeName(lhs.type)) + " and "
+                                + quoted(ast::typeName(rhs.type)) + ")");
+            return poison(ast::Type::Int);
+        }
+```
+
+`~` of a float is clang's "invalid argument type 'float' to unary expression". A vector is refused as a float is, since
+FMinus has no integer vectors ([simd.md](simd.md)). A compound assignment, `x &= 1` of a float `x`, reports its
+operator's error and stores nothing (`lowerAssign`): storing the poison `int` into a `float*` would only add an error
+clang does not give.
+
+### Shifts defined for every count
+
+C leaves `x << n` and `x >> n` undefined for a count below 0 or from 32 on, and `x << n` for a negative `x` or one
+that shifts a 1 into the sign; a negative `x`'s `>>` is implementation-defined. LLVM's `shl` and `ashr` are poison for
+such a count, and a `shl nsw` (which clang does not emit, though it could) for such an `x`, and poison spreads: one
+sample's bad shift could become any value, or let the optimiser delete the code around it. A JIT whose output must be
+the same on every machine wants none of that, so FMinus defines them, as OpenCL C does:
+
+```cpp
+            case ast::BinaryOp::ShiftLeft:
+                return builder_.CreateShl(lhs, builder_.CreateAnd(rhs, 31, "shl.mask"), "shl");
+            case ast::BinaryOp::ShiftRight:
+                return builder_.CreateAShr(lhs, builder_.CreateAnd(rhs, 31, "shr.mask"), "shr");
+```
+
+- **The count is its low five bits** (`n & 31`), clang's own lowering for OpenCL C (it names the `and` `shl.mask`):
+  `x << 32` is `x`, `x << -1` is `x << 31`. A constant count folds its mask. A variable one costs nothing on a
+  scalar: arm64's `lsl` and `asr` by a register, and x86-64's `shl` and `sar`, take the count's low five bits
+  themselves, and the backend drops the `and` (bitwise.fm's ASM). A vector shift by a variable count keeps it, one
+  `and` a vector.
+- **`<<` is a `shl` without `nsw` or `nuw`**: the bits shifted out are lost, a negative value's too, as two's
+  complement has them (`-1 << 1` is -2, `1 << 31` the least `int`). C++20 defines it so.
+- **`>>` is an `ashr`**: the sign shifts in (`-8 >> 1` is -4), as clang's does.
+
+`&`, `|` and `^` are `and`, `or` and `xor`, and `~x` an `xor` with -1, as clang writes them. `+`, `-` and `*` on `int`
+keep their `nsw`: an `int`'s overflow is still undefined, which is what lets LLVM widen a loop's counter. With no
+`unsigned`, a logical shift right is an arithmetic one and a mask, `(x >> 17) & 0x7FFF`, and a hash or generator that
+multiplies must not overflow an `int`: the reason `hash` is a builtin.
+
+### `hash` and `randf`
+
+`hash(n)` mixes an `int`, a counter or a seed, into a well-spread one; `randf(n)` is a float uniform in [-1, 1) from the
+same bits. White noise is then a function of a sample's index, `out[i] = randf(start + i)`: no state but where a block
+starts, the same samples whatever the block size, and a loop of it vectorises. The mixer is Chris Wellons's lowbias32,
+from his hash prospector (public domain), on the int's 32 bits as C would hold them in a `uint32_t`:
+
+```c
+x ^= x >> 16; x *= 0x7feb352d; x ^= x >> 15; x *= 0x846ca68b; x ^= x >> 16;
+```
+
+His search found it among the least biased 32-bit hashes of two multiplies: a flipped input bit flips each output bit
+close to half the time (within 0.002 of a half, over a million random ints, which is the measurement's own noise). Each
+step is a bijection, so two ints never give one hash; `hash(0)` is 0. `Hash.cpp` emits it as instructions, `lshr` for
+C's unsigned shift and `mul` without `nsw` for its unsigned product, which wraps. `randf` takes the hash's top 24 bits
+as a signed int k (an `ashr` by 8), from -2^23 to 2^23 - 1, and gives k / 2^23 (`sitofp`, then `fmul` by 0x1p-23): 2^24
+values, evenly spaced from -1 to 1 - 2^-23, each as likely, their mean -2^-24.
+
+Every step is exact: integer arithmetic, a conversion of 24 bits to a float, which holds them, and a product by a power
+of two, which only moves the exponent and never reaches the subnormals. So a builtin made of them gives the same bits
+in every lane of a vectorised loop and its remainder, at `-O0` and `-O2`, constant-folded or not, in every math mode,
+with subnormals flushed or not, and on every target, with nothing to keep in step: the math kernels needed intrinsics
+LLVM cannot see into, a pass and three runtime functions to promise that (recipes 15, 23 and 24), and these need none.
+Being plain instructions, they are pure to LLVM: it folds, hoists, merges or removes a call of them as it does an `add`,
+and the loop vectoriser widens them into `<4 x i32>` operations, NEON's `ushr`, `eor` and `mul.4s`, with the product by
+2^-23 folded into the conversion (`scvtf.4s ..., #23`).
+
+The names are FMinus's own, as `reduce_add` is: a program's definition or prototype of `hash` or `randf` is "'hash' is
+a builtin and cannot be redefined". The argument converts as it would to a parameter of type `int` (a float is
+truncated toward zero); a pointer or a vector is clang's "passing 'float *' to parameter of incompatible type 'int'".
+Two sources that must not repeat each other take two seeds through `hash`: `randf(seed ^ count)` with
+`seed = hash(voice)`. An `int` counts 2^31 samples, 12.4 hours at 48 kHz; a source that may run longer wraps its count
+before `++` would overflow (`examples/noise/noise.fm`).
+
+### What it changes for programs and hosts
+
+- **Programs gain** the operators and the two builtins; nothing that compiled before compiles differently, except a
+  program with a function named `hash` or `randf`, which must rename it.
+- **A shift never makes a program undefined**, and means the same on every machine.
+- **Hosts need nothing**: the builtins call no runtime function, so there is no symbol to keep and no table to add.
+
+### Tests
+
+- `tests/unit/BitwiseTest.cpp`: `&`, `|`, `^` and `~` against C++'s over pairs of edge values (0, ±1, the least and
+  greatest `int`, bit patterns), `bool` operands; the shifts by 0, 1, 31, 32, 33, -1, -32 and the extremes, against
+  FMinus's definition in C++, at run time and folded; the compound assignments on locals, elements, fields, bools and
+  through pointers; `&` as the address, `&&` and `a&~b`; mixed precedence computed; clang's errors and their places.
+- `FrontendTest.cpp`: the dumps of `a | b & c`, `a << 1 + 2`, `~a == b`, `a & b == c` and the unary and binary `&`.
+- `tests/unit/HashTest.cpp`: golden values of both (a change to them changes every program's noise), the reference over
+  28,000 inputs; the same bits from a vectorised loop, a module's counter in blocks of 1, 3, 64 and 959, in each math
+  mode, at `-O0` and `-O2`, flushed or not; a million values' mean, variance and range, and each hash bit set half the
+  time; the arity, argument and redefinition errors.
+- `tests/lit/fminus/bitwise.fm`: the IR (`and`, `xor -1`, `shl.mask`, `shl` without flags, `ashr`), a constant count
+  folded, the dump, and arm64's `lsl` by a register with no `and`; `bitwise-errors.fm`: the errors, one each.
+- `tests/lit/fminus/hash.fm`: the instructions inline with no call at `-O0`; the noise loop's `<4 x i32>` vector body in
+  every math mode and flushed; a constant folded; `--run`'s values; arm64's `scvtf.4s` by 23.
+- `examples.test` runs `examples/noise/`: a second of noise's RMS, the same at `-O0` in the libm mode.
+
+### Measurements
+
+The noise loop, `out[i] = randf(start + i)` at `-O2` on arm64: 49 instructions a step of sixteen samples (four
+vectors of four), so 3.1 a sample, all of them integer vector instructions but the four conversions and the stores. A
+generator whose state waits on the last sample's cannot vectorise at all.
+
+## Recipe 26: constant tables, stored once
+
+*In the compiler. Code: `src/ir/Memory.cpp` (`declareConstArray`), called by `declareVariable` (`Statements.cpp`), and
+`capture` (`Parallel.cpp`). Tests: `tests/unit/TableTest.cpp` (`[table]`), `tests/lit/fminus/tables.fm`.*
+
+A wavetable, a window, a set of filter coefficients: `const float t[16] = {...};` in a function was an array on the
+stack, zeroed and filled on every call, as every local array is (recipe 12). Nothing can write a `const` array, so
+every call filled it with the same values: at `-O2`, a 16-float table read once a call cost 40 instructions, 35 of them
+building the constants and storing them, for one load. Clang stores a `static const` local once, as a private constant
+global, and gives a plain local with a constant initialiser a private global to `memcpy` from (`@__const.f.t`), whose
+copy InstCombine removes when the array is only read. FMinus's const array is only ever read, so it goes straight to
+the global: 5 instructions, an address and a load.
+
+### When an array is a table
+
+`declareVariable` hands a declaration to `declareConstArray` when it is `const`, an array of what FMinus can point to
+but a module, and has no `= expr` (an array's is an error). `declareConstArray` lowers the list's elements, in order,
+each converted to the element type as `initializeArray` converts it, and looks at what came out:
+
+- **Every element a constant** (`llvm::Constant`): a number, `sizeof`, operators and casts of them, and a builtin of
+  constants that folds (`hash(3)`, `poly_lanes()`); `?:`, `&&` and `||` branch even on constants (recipe 3), so a list
+  that holds one is not. The array is a global: `private unnamed_addr constant`, aligned as the array, named as clang
+  names a local's, `__const.<function>.<name>` (LLVM adds `.1` for a second of one name), and the name is bound to it
+  instead of a stack slot.
+- **Anything else** (a variable, a call, a knob): a local, as before, with its list's values, computed once, stored
+  after the zeroing.
+
+A binding holds an address whichever it is, so every read goes through `lvalue()` and `read()` unchanged: the name
+stands for a `const T*`, an element through it is read-only, and none can be written. A parallel region reads a table
+where it is, as the function around it does, rather than capturing its address into its context (`capture`).
+
+### Its contents, bit for bit
+
+The global holds what the stack's array would: the same lowered and converted values (folded by the same
+`DenormalFolder`, so under `Denormals::Flush` too), then zeros. The zeros take clang's shapes (`EmitArrayConstant`):
+up to the last element that is not zero, then, for eight zeros or more, one `zeroinitializer`, the two parts a packed
+struct (`<{ [2 x i32], [30 x i32] }>`, laid out as the array), so a long table with a short list costs no constant per
+element; an array without a list is a `zeroinitializer`. From `-O2` a constant index reads the constant itself.
+
+The one thing C could tell apart is the address. Each call of a C function has its own local array, so nested calls
+of one function hold two; a table is one object for every call, and `unnamed_addr` lets LLVM merge two equal tables
+into one, so a comparison of pointers into two of them (`p == q`) can find them the same. The README lists it with the
+deviations.
+
+### What it changes for programs and hosts
+
+- **Results do not change**, bit for bit; a const array of constants costs no time where it is declared.
+- **A large table takes its size in the JIT's memory**, once, where it took it on the stack, on every call: a table of
+  100,000 floats with a short list is 400 KB of `__const` in the object, zeros included.
+
+### Tests
+
+- `tests/unit/TableTest.cpp`: tables of every element type and shape (a full list, a short one, eight zeros, none, a
+  100,000-element one; floats with -0, subnormals, a NaN and conversions from ints; ints from shifts, `~0` and
+  `hash(3)`; `float4`s) against the same arrays on the stack, bit for bit, subnormals preserved and flushed; a table in
+  a loop, through a `const float*`, in nested calls, in two scopes of one name, in a `parallel for` and in a
+  knob-versioned method; a list with a variable, a call's side effects in order, and `?:` on the stack; the errors.
+- `tests/lit/fminus/tables.fm`: the globals and their shapes, functions with no alloca, memset or store for them, a list
+  that is not constants on the stack, a region's context without the table, and `-O2`'s folded reads.
+
 ## Pitfalls
 
 Each of these was hit while writing the language or its recipes. [simd.md](simd.md) has the vector ones.
@@ -4446,7 +4666,9 @@ semantic pass before lowering:
 
 Lowering then just reads the types. Each integer type lowers to an `iN`, and signedness lives in the operations,
 not the types: `udiv` and `urem` beside recipe 10's `sdiv` and `srem`, unsigned `icmp`s, `zext` where `int` uses
-`sext`, `uitofp` and `fptoui`. An `unsigned` has no `nsw`: it wraps, by definition.
+`sext`, `uitofp` and `fptoui`, and `lshr` where recipe 25's `>>` is an `ashr`. An `unsigned` has no `nsw`: it wraps, by
+definition, which is what a hash or a generator written in FMinus needs (recipe 25 made `hash` a builtin for want of
+it).
 
 **More arrays, and more pointers.** Recipe 12's arrays are one dimension deep. An array of arrays, `float m[4][4]`, is
 an `[4 x [4 x float]]` whose rows decay in turn; it needs `Type` to nest (its element a type, not a kind), and so do
@@ -4549,7 +4771,8 @@ mixed-radix or Bluestein transform in the runtime, or to FFTW, which takes any (
 ones). On Apple systems vDSP is 2–3 times faster than either from about 512 points, but it comes from Accelerate, a
 system framework: a backend chosen when FMinus is built, not a library inside it.
 
-**State: globals and `static`.** File-scope variables lower to LLVM globals, and `static` locals likewise. For a
+**State: globals and `static`.** File-scope variables lower to LLVM globals, and `static` locals likewise (recipe
+26's tables are the constant case already: a `const` local array of constants is a private constant global). For a
 plugin, prefer state each instance owns: a module (recipe 12), in memory the host gives it, as `examples/biquad/`'s
 filter and `examples/voices/`'s synth are, or memory the program allocates off the audio thread, as
 `examples/delay/` does (recipe 11). Nothing then allocates on the audio thread, and every instance has its own copy.
@@ -4578,12 +4801,12 @@ is one more: a method it copies takes about twice as long to compile, and `knobV
 ## Reference solutions
 
 The recipes in the compiler are their own reference: their code is in `src/`, and their tests in `tests/unit/`
-(`FrontendTest.cpp`, and `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `IntTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`,
-`EffectTest.cpp`, `ArrayTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `ParamTest.cpp`, `VectorTest.cpp` and `PolyTest.cpp`
-for the code generator; `MathTest.cpp`, `VersionTest.cpp`, `TbaaTest.cpp`, `ZeroInitTest.cpp`, `AttributeTest.cpp` and
-`DenormalTest.cpp` for recipes 15 to 20), `tests/library/` (`ProgramTest.cpp`, `StrictAliasingTest.cpp`,
-`DenormalsTest.cpp`) and `tests/lit/fminus/`. [recipes/](recipes/) holds the two that aren't, 5 and 6, as one patch
-against the compiler as it is ([recipes/README.md](recipes/README.md)):
+(`FrontendTest.cpp`, and `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `IntTest.cpp`, `BitwiseTest.cpp`, `PointerTest.cpp`,
+`HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `TableTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `HashTest.cpp`,
+`ParamTest.cpp`, `VectorTest.cpp` and `PolyTest.cpp` for the code generator; `MathTest.cpp`, `VersionTest.cpp`,
+`TbaaTest.cpp`, `ZeroInitTest.cpp`, `AttributeTest.cpp` and `DenormalTest.cpp` for recipes 15 to 20), `tests/library/`
+(`ProgramTest.cpp`, `StrictAliasingTest.cpp`, `DenormalsTest.cpp`) and `tests/lit/fminus/`. [recipes/](recipes/) holds
+the two that aren't, 5 and 6, as one patch against the compiler as it is ([recipes/README.md](recipes/README.md)):
 
 ```bash
 git switch -c try-recipes
