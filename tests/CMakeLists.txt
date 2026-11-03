@@ -10,6 +10,10 @@
 # smoke/ checks the toolchain itself: LLJIT and the O3 pipeline on the host CPU (JitSmokeTest.cpp), and Bison + Flex
 # through fminus_add_grammar (smoke/calc/, a reentrant scanner feeding a C++ variant parser: a pattern to copy).
 #
+# On Windows both Catch2 executables carry utf8.manifest: UTF-8 as their code page, so that ctest's filter, a test's
+# whole name, reaches Catch2 as the TEST_CASE spells it, "§" and all (the console's code page would garble it, and the
+# test would match nothing and fail).
+#
 # lit: every *.test, *.fm and *.ll under lit/, through bin/fminus-lit, a lit wrapper that maps the source tree to this
 # build tree. FMinus's tools, FileCheck, not, count and LLVM's tools are on PATH. ctest runs the suite as one test
 # ("lit"); `bin/fminus-lit -v ../tests/lit/smoke` runs part of it by hand.
@@ -36,6 +40,12 @@ add_executable(fminus-library-tests ${_fminus_library_tests})
 fminus_target_defaults(fminus-library-tests CXX_STANDARD 17)
 target_link_libraries(fminus-library-tests PRIVATE FMinus::FMinus Catch2::Catch2WithMain)
 catch_discover_tests(fminus-library-tests DISCOVERY_MODE PRE_TEST)
+
+if(WIN32)
+  # Merged into each executable's manifest by the link step (CMake's MSVC rules, which clang-cl takes too).
+  target_sources(fminus-tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/utf8.manifest")
+  target_sources(fminus-library-tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/utf8.manifest")
+endif()
 
 # ---- lit ------------------------------------------------------------------------------------------------------------
 if(FMINUS_LIT_PYTHON)

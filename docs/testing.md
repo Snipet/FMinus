@@ -31,6 +31,11 @@ the JIT and AOT smoke tests abort with a false "container-overflow" inside LLVM'
 hand from `build-asan/`, set it yourself. Under tsan, one test skips itself: `ZeroInitTest.cpp`'s check that its dirty
 stack reaches a JIT'd function's locals, since ThreadSanitizer's runtime writes the frames in between (below).
 
+On Windows `fminus-tests` and `fminus-library-tests` run in UTF-8 (`tests/utf8.manifest`, their active code page;
+Windows 10 1903 or later), so ctest's filter, a test's whole name, reaches Catch2 as the `TEST_CASE` spells it: without
+it a name that is not ASCII (`§9.2 reproduced, ...`) arrives in the console's code page, matches no test case ("No test
+cases matched"), and fails without running.
+
 ## Unit tests (Catch2)
 
 Each file states what it tests in its first line, then has a few helpers and the `TEST_CASE`s. The helpers in
