@@ -34,16 +34,26 @@
 #include <tuple>
 #include <vector>
 
+#if defined(_WIN32)
+#include <malloc.h>   // _aligned_malloc, _aligned_free
+#endif
+
 namespace
 {
     namespace fc = fminus::circuit;
     using fminus::Program;
 
+    // C's aligned_alloc and the free that goes with it. The Windows C runtime has no aligned_alloc: its aligned memory
+    // comes from _aligned_malloc and goes back to _aligned_free, not free (as in MathTest.cpp).
     struct Free
     {
         void operator()(void* p) const
         {
+#if defined(_WIN32)
+            _aligned_free(p);
+#else
             std::free(p);
+#endif
         }
     };
 
@@ -51,7 +61,12 @@ namespace
     std::unique_ptr<void, Free> instance(const Program::Module& module)
     {
         const std::size_t alignment = std::max(module.alignment, alignof(std::max_align_t));
-        void* memory = std::aligned_alloc(alignment, (module.size + alignment - 1) / alignment * alignment);
+        const std::size_t size = (module.size + alignment - 1) / alignment * alignment;
+#if defined(_WIN32)
+        void* memory = _aligned_malloc(size, alignment);
+#else
+        void* memory = std::aligned_alloc(alignment, size);
+#endif
         std::memset(memory, 0, module.size);
         return std::unique_ptr<void, Free>(memory);
     }
