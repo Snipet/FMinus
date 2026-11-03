@@ -1,7 +1,8 @@
 // hash and randf: a few integer instructions inline, no call. hash is Wellons's lowbias32 on the int's bits (lshr,
 // xor, mul without nsw: unsigned arithmetic), randf the hash's top 24 bits (ashr 8) over 2^23 (sitofp, fmul by
 // 0x1p-23). Nothing in them depends on the math mode or the subnormals, so each mode gives the same loop, and white
-// noise from a counter vectorises: four lanes of the integer instructions a step, at -O2. Constants fold.
+// noise from a counter vectorises at -O2: the integer instructions on as many lanes a step as the target's vectors
+// hold (4 on arm64's NEON, 16 with x86's AVX-512: W below, the same through each loop). Constants fold.
 // RUN: fminus %s -O0 | FileCheck %s --check-prefix=O0
 // RUN: fminus %s -O2 | FileCheck %s --check-prefix=VEC
 // RUN: fminus %s -O2 --math libm | FileCheck %s --check-prefix=VEC
@@ -61,19 +62,19 @@ float folded()
 // VEC-LABEL: define void @white(
 // VEC-NOT:     call
 // VEC:       vector.body:
-// VEC:         lshr <4 x i32> %{{.*}}, splat (i32 16)
-// VEC:         mul <4 x i32> %{{.*}}, splat (i32 2146121005)
-// VEC:         mul <4 x i32> %{{.*}}, splat (i32 -2073254261)
-// VEC:         ashr <4 x i32> %{{.*}}, splat (i32 8)
-// VEC:         sitofp <4 x i32> %{{.*}} to <4 x float>
-// VEC:         fmul {{(nnan )?}}<4 x float> %{{.*}}, splat (float f0x34000000)
-// VEC:         store <4 x float>
+// VEC:         lshr <[[W:[0-9]+]] x i32> %{{.*}}, splat (i32 16)
+// VEC:         mul <[[W]] x i32> %{{.*}}, splat (i32 2146121005)
+// VEC:         mul <[[W]] x i32> %{{.*}}, splat (i32 -2073254261)
+// VEC:         ashr <[[W]] x i32> %{{.*}}, splat (i32 8)
+// VEC:         sitofp <[[W]] x i32> %{{.*}} to <[[W]] x float>
+// VEC:         fmul {{(nnan )?}}<[[W]] x float> %{{.*}}, splat (float f0x34000000)
+// VEC:         store <[[W]] x float>
 // VEC-NOT:     call
 // VEC:         ret void
 // VEC-LABEL: define void @"Noise::render"(
 // VEC:       vector.body:
-// VEC:         mul <4 x i32> %{{.*}}, splat (i32 2146121005)
-// VEC:         store <4 x float>
+// VEC:         mul <[[R:[0-9]+]] x i32> %{{.*}}, splat (i32 2146121005)
+// VEC:         store <[[R]] x float>
 // VEC-LABEL: define noundef float @folded()
 // VEC-NEXT:  entry:
 // VEC-NEXT:    ret float f0xBF5DA208
