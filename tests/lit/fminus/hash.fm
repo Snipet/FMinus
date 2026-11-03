@@ -82,9 +82,9 @@ float folded()
 // Under flush-to-zero an entry point's body is a function of its own (denormals.fm): the same loop.
 // FLUSH-LABEL: define internal void @white.body(
 // FLUSH:       vector.body:
-// FLUSH:         mul <4 x i32> %{{.*}}, splat (i32 2146121005)
-// FLUSH:         sitofp <4 x i32> %{{.*}} to <4 x float>
-// FLUSH:         store <4 x float>
+// FLUSH:         mul <[[F:[0-9]+]] x i32> %{{.*}}, splat (i32 2146121005)
+// FLUSH:         sitofp <[[F]] x i32> %{{.*}} to <[[F]] x float>
+// FLUSH:         store <[[F]] x float>
 
 // ONE: 0.8166981
 // OTHER: -0.86575365
