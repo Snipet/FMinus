@@ -243,9 +243,9 @@ they lower:
 | File | Lowering's members for |
 |---|---|
 | `CodeGen.cpp` | `ir::lower()`, the constructor, and the passes: where the parts combine, the file's declarations in source order |
-| `Types.cpp` | FMinus's types as LLVM's (`typeOf`, `lanes`), the conversions (`convert`, `convertPointer`, `commonType`), errors and poison values |
+| `Types.cpp` | FMinus's types as LLVM's (`typeOf`, `lanes`), the conversions (`convert`, `convertPointer`, `commonType`), errors and poison values (`poison`, and `recovery` after an error) |
 | `Functions.cpp` | declarations and prototypes (`declare`), a method's `this` once its module is laid out (`describeThis`), libm's prototypes' attributes (`describeLibm`), bodies and parameters (`define`), stack slots and scopes (`find`, which captures a variable for a parallel region, `lookup`, which does not, and `named`, C++'s lookup in a method: the blocks', the module's members, the file's) |
-| `Statements.cpp` | blocks, declarations, `return`, `if`, `while`, `for`, `switch` and its labels (`lowerSwitch`, `lowerLabel`; a jump past a declaration zeroes it, `bypass`), `break` and `continue` (`Breakable`: loops, switches and parallel regions, none of which a jump leaves or enters); a loop's `llvm.loop.mustprogress` when its condition is not a constant expression (`isConstant`, `mustProgress`); a redefinition's error by the kinds of the two names (`redefinition`) |
+| `Statements.cpp` | blocks, declarations, `return`, `if`, `while`, `for`, `switch` and its labels (`lowerSwitch`, `lowerLabel`; a jump past a declaration zeroes it, `bypass`), `break` and `continue` (`Breakable`: loops, switches and parallel regions, none of which a jump leaves or enters); a loop's `llvm.loop.mustprogress` when its condition is not a constant expression (`isConstant`, `mustProgress`); a condition that folds to a constant branches one way (`folds`, `branchOn`); a redefinition's error by the kinds of the two names (`redefinition`) |
 | `Constants.cpp` | C's integer constant expressions, folded over the tree as FMinus computes (`integerConstant`, `fold`): a case's value, an enumerator's, an array's size (`sized`; a parameter's, `checkSizes`); enumerations (`declareEnum`), their constants bound in the block's scope or the file's (`fileScope_`), and a name's lookup as one (`enumerator`); the top level's constants (`defineConstant`), constant globals of the file's scope, their initialisers lowered as a function's would be (`atTopLevel`); a name of the file's that is a function's or a module's too (`fileNameClash`) |
 | `Expressions.cpp` | the expression `std::visit` (`lower`), constants, operators (`binary`, `arithmetic`; the bitwise ones on ints, `isBitwise`), `&&` and `\|\|`, `?:`, casts, assignment, `++` and `--` |
 | `Calls.cpp` | the builtin tables, calls, reductions, `poly_lanes` and `poly_index`, `poly_load` and `poly_store`, the heap's `malloc`, `calloc` and `free`, the FFT's `fft_*` (`lowerFft`, on the runtime's), `hash` and `randf` (to `Hash.cpp`), and `ir::builtins()`; the heap's and the FFT's runtime calls through `callRuntime`, whose declaration says what the function does (`kRuntimeFacts`, `describeRuntime`) |
@@ -341,7 +341,9 @@ flushing hardware computes them:
   isn't enough, because dead code can branch), the function falls off its end. That is "non-void function 'g' does
   not return a value", an error as in C++. Otherwise the block gets an `unreachable` terminator. A statement's
   constant condition branches one way (`branchOn`), as clang's does, so the end after `while (1)` without a `break`, or
-  after `if (1) return x;`, is not reached.
+  after `if (1) return x;`, is not reached. Whether a condition is one is the tree's to say (`folds`: a constant
+  expression, or one that reads a constant of the top level), never the IR's, where a frozen parameter is a constant
+  too: a program compiles the same whatever the host binds its parameters to.
 - **Verification.** `llvm::verifyFunction` checks each function, and anything it rejects is reported as an internal
   error, because the IR is wrong rather than the program.
 
@@ -355,7 +357,9 @@ to `bool` and to the same pointer with `const` added (`convertPointer`).
 
 A `Value` also says whether its expression reported an error (`failed`, which `lower` sets by counting the errors, as
 clang's "contains errors"): an operator, a subscript, `*`, `&`, `->` and a conversion given a failed value say nothing
-more, and give a poison of the type they would have had, so each mistake is one error. An enumerated type is the type
+more, and give a poison of the type they would have had (`recovery`, failed in turn), so each mistake is one error. A
+value is failed only where an error is behind it: a plain `poison` is not, so a stand-in with no error behind it (a
+`?:` of two `void` calls) still has each of its uses checked. An enumerated type is the type
 `int` (or `bool`) with its enumeration's id beside it (`Type::enumeration`, which `==` ignores): a value keeps it where
 C keeps the enumerated type, and `lowerSwitch` reads it for clang's `-Wswitch`, FMinus's one warning.
 
@@ -653,7 +657,8 @@ pivots, so the float code computes what the reference computes, operation for op
   compiler lists what to update" into silent bugs.
 - **Lowering reports and continues.** Return a poison value of the expected type, never a null pointer, and let
   `lower` discard the module at the end. A check of an operand tests `failed` first: an operand with an error of its
-  own gets no second one.
+  own gets no second one. Only an error makes a value failed (`lower`'s count, or `recovery` for an operand's): a
+  failed value with none behind it would let an invalid program compile.
 - **Every variable lives in an entry-block `alloca`.** Allocate through `allocate()`, whatever block the builder is
   in, and let mem2reg do the SSA construction.
 - **Every function is verified.** An invalid function is the compiler's bug: it is reported as an internal error

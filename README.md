@@ -370,7 +370,10 @@ Where FMinus differs from C, it is on purpose:
   recipe 18).
 - **A non-void function that can reach its end is an error**, as in C++. Clang only warns in C. As in clang's check,
   a constant condition takes one branch: the end after a `while (1)` or `for (;;)` that only a `break` would leave, or
-  after `if (1) return x;`, is not reached, and needs no return.
+  after `if (1) return x;`, is not reached, and needs no return. A constant of the top level folds there too
+  (`while (RUN)` with `const int RUN = 1;`), and a parameter never does, whatever the host binds it to, so a program
+  compiles the same with a knob, a stream or a frozen value. clang also folds a block's `const` variable, `&&`, `||`
+  and `?:` there; FMinus does not (`while (1 && 1)` asks for a return).
 - **The preprocessor is `#include "file"`, the conditionals and macros that only they read.** A macro, the program's
   (`#define LEVEL 2`) or the host's, is read where C reads it as a condition, in `#if`'s and `#elif`'s expressions and
   by `#ifdef`, `#ifndef` and `defined`: its name in code is an error, never a substitution (for a constant, an `enum`
@@ -425,8 +428,9 @@ operand with an error of its own (an undeclared name) is no operand for an opera
 a conversion to complain about, as clang's recovery has it, so `*(p + y)` is the one error about `y`. The parser stops
 at the first syntax error. FMinus's one warning is clang's `-Wswitch`: a `switch` without a `default` on a value of an
 enumerated type, whose cases miss some of its constants (`warning: enumeration value 'NOISE' not handled in switch
-[-Wswitch]`). The program still compiles; `fminus` prints the warnings with the errors, in source order, as clang
-does.
+[-Wswitch]`). A value that folds to a constant (a constant of the top level) gets none, as in clang, which says "no
+case matching constant switch condition" there instead; FMinus does not. The program still compiles; `fminus` prints
+the warnings with the errors, in source order, as clang does.
 
 ```bash
 build-dev/bin/fminus chain.fm                      # the optimised IR (-O2)

@@ -83,7 +83,8 @@ over a module's fields (recipe 17), and `examples/ensemble/` for `parallel for` 
 - **Report and continue.** In the code generator, `error(location, message)` records an error, in clang's wording.
   Then return a poison value of the expected type (`poison(ast::Type::Float)`), never a null pointer, so lowering
   goes on and finds the next error. `lower` throws the module away at the end. A check of an operand's type tests the
-  operand's `failed` first (recipe 32): an operand with an error of its own gets no second one.
+  operand's `failed` first (recipe 32): an operand with an error of its own gets no second one, and what you return
+  for it is a `recovery()`, failed in turn. Never return a failed value that no error is behind.
 - **Leave the IR valid.** Every block ends in exactly one terminator (`ret`, `br`). A phi lists every predecessor
   exactly once. Allocas belong in the entry block (`allocate()`). `verifyFunction` runs on every function and reports
   a violation as an internal error.
@@ -5859,14 +5860,15 @@ does well enough, or skips the groups that `#ifdef`, `#ifndef` and `defined` on 
 
 ## Recipe 32: one error a mistake, enumerated types, and the first warning
 
-*In the compiler. Code: `Lowering::Value::failed` (`src/ir/Lowering.h`), set in `lower` and read by `binary`,
-`recovered`, the unary operators and `lowerConditional` (`Expressions.cpp`), `lvalue` and `lowerAddressOf`
-(`Memory.cpp`), `lowerMember` and `lowerSelect` (`Vectors.cpp`), `lowerMethodCall` and `lowerParameter` (`Modules.cpp`)
-and `convert` and `poison` (`Types.cpp`); `branchOn` (`Statements.cpp`); `sizeOf` (`Types.cpp`) and `lowerSizeof`
-(`Expressions.cpp`); `declareEnum` (`Constants.cpp`); the enumerations' rules in `Parser.y` (`enumeration`,
-`enum_head`, `enum_base`, `enum_declarators`, and `underlyingType`, `sameTag`, `declaredEnum`, `forwardEnum`,
-`enumType`, `declarationsOf`, `addFields` and `addConstants`), `Tag` in `ParseContext.h`, `Type::enumeration` and
-`Enum`'s `id`, `fixed` and `underlying` in `Ast.h`; `lowerSwitch`, `unhandled` and `begin` (`Statements.cpp`);
+*In the compiler. Code: `Lowering::Value::failed` (`src/ir/Lowering.h`), set in `lower` and by `recovery`, and read by
+`binary`, `recovered`, the unary operators and `lowerConditional` (`Expressions.cpp`), `lvalue`, `readLValue` and
+`lowerAddressOf` (`Memory.cpp`), `lowerMember` and `lowerSelect` (`Vectors.cpp`), `lowerMethodCall` and
+`lowerParameter` (`Modules.cpp`) and `convert`, `poison` and `recovery` (`Types.cpp`); `branchOn`, `folds` and
+`isConstant` (`Statements.cpp`); `sizeOf` (`Types.cpp`) and `lowerSizeof` (`Expressions.cpp`); `declareEnum`
+(`Constants.cpp`); the enumerations' rules in `Parser.y` (`enumeration`, `enum_head`, `enum_base`, `enum_declarators`,
+and `underlyingType`, `sameTag`, `declaredEnum`, `forwardEnum`, `enumType`, `declarationsOf`, `addFields` and
+`addConstants`), `Tag` in `ParseContext.h`, `Type::enumeration`, `Expr::opening` and `Enum`'s `id`, `fixed` and
+`underlying` in `Ast.h`; `lowerSwitch`, `unhandled` and `begin` (`Statements.cpp`);
 `Diagnostics::warning` (`src/frontend/Diagnostics.h`), `Program::warnings` (`include/fminus/FMinus.h`), and the
 warnings `fminus` prints (`tools/fminus/main.cpp`). Tests: `tests/unit/RecoveryTest.cpp` (`[recovery]`),
 `EnumTest.cpp`, `SwitchTest.cpp`, `FrontendTest.cpp`, `tests/library/ProgramTest.cpp`, and
@@ -5897,13 +5899,19 @@ operands; this recipe gives the count to every expression. `lower` counts the er
     }
 ```
 
-`failed` is clang's "contains errors": the expression, or a part of it, reported an error. `poison()`, the stand-in
-for a value an error kept from being computed, is failed too. What takes a failed value says nothing more about it:
+`failed` is clang's "contains errors": the expression, or a part of it, reported an error. It is set only where an
+error is behind it: by `lower`'s count, and by `recovery()`, the stand-in for what an operand's error kept from being
+computed, or a declaration's (a function declared to return a `bool *`, refused at its declaration, since FMinus has
+no pointers to `bool`: an operator on its result reports nothing more). `poison()`, the plain stand-in, is not failed: a
+`?:` of two `void` calls has no value and no error, and each of its uses must report one, as a `void` call's do,
+"initializing 'float' with an expression of incompatible type 'void'". A failed value with no error behind it would be
+taken silently everywhere, and the program would compile on a poison. What takes a failed value says nothing more
+about it:
 
-- **An operator** (`binary`) gives a poison of the type it would likely have had (`recovered`): an `int` for a bitwise
-  one, a `bool` for a comparison (a vector operand's lane mask), otherwise the other operand's type as it computes, a
-  pointer staying one, so that `p + y` is a `float*` and what uses it reports nothing either. The unary operators
-  likewise.
+- **An operator** (`binary`) gives a `recovery()` of the type it would likely have had (`recovered`): an `int` for a
+  bitwise one, a `bool` for a comparison (a vector operand's lane mask), otherwise the other operand's type as it
+  computes, a pointer staying one, so that `p + y` is a `float*` and what uses it reports nothing either. The unary
+  operators likewise.
 - **A subscript, `*`, `->` and `&`** (`lvalue`, `lowerAddressOf`): a base or an operand that failed is no "subscripted
   value is not a pointer", no "indirection requires pointer operand" and no "cannot take the address of an rvalue". A
   pointer whose index failed still gives its element, of its type.
@@ -5920,12 +5928,20 @@ with no error, and `(float)((int)3e10f) | 1` is still refused (recipe 25).
 A non-void function that can reach its end is an error (recipe 4), and `reachable()` follows the CFG from the entry.
 `while (1)` branched on `i1 true` to its body or its end, so its end looked reachable, and a function that ended in
 one needed a `return` that could never run, where clang's check, which folds constant conditions, asks for none.
-`branchOn` is clang's: a condition that is a constant once lowered (the IR folds a constant expression's test against
-0) branches to the one block it picks, so `while (1)`, `while (1.5f)`, `for (; RUNNING;)` with an enumeration constant
-and `if (1)` reach what follows only through a `break`, or the other branch. The branch not taken is still lowered,
-for its errors, and the optimiser deletes it. `&&`, `||` and `?:` branch even on constants (recipe 3), so `while (1 &&
-1)` still asks for a return. A check that may fail (Bounds.cpp) keeps its conditional branch, on `false` for a
-constant index: the code after it must stay reachable (Pitfalls).
+`branchOn` is clang's: a condition that folds to a constant branches to the one block it picks, so `while (1)`,
+`while (1.5f)`, `for (; RUNNING;)` with an enumeration constant, `while (RUN)` with `const int RUN = 1;` at the top
+level, and `if (1)` reach what follows only through a `break`, or the other branch. The branch not taken is still
+lowered, for its errors, and the optimiser deletes it.
+
+Whether the condition folds is the tree's to say, `folds()`: a constant expression (`isConstant`), or one that also
+reads a constant of the top level that is no array, which `lower` reads as its initialiser's value, as clang folds a
+const object's. The value is the IR's, which folds such a test against 0 to an `i1`. The IR alone would not do: a
+frozen parameter's read lowers to a constant too, and `if (on[0]) return x;` at the end of a function would compile
+frozen and be refused with a knob, so the same source's errors would hang on the host's bindings. A parameter is no
+constant to `folds`, whatever its binding. `&&`, `||` and `?:` branch even on constants (recipe 3), so `while (1 &&
+1)` still asks for a return, and so does a `const` of a block, which clang folds and FMinus reads from its slot. A
+check that may fail (Bounds.cpp) keeps its conditional branch, on `false` for a constant index: the code after it must
+stay reachable (Pitfalls).
 
 ### `sizeof` past an `int`, and an enumeration constant named as a builtin
 
@@ -5999,12 +6015,15 @@ waves.fm:14:13: note: add missing switch cases
 
 `declareEnum` keeps each enumeration's constants by its id (`enumerations_`), and `lowerSwitch`, after the body, hands
 `unhandled` the value's enumeration and the switch's cases. It says nothing when the switch has a `default`, when a case
-was in error (no constant, or a duplicate: `Switch::erroneous`), when the value is a constant, or when the enumeration
-has no constants yet (one declared ahead, whose list comes after the switch, as clang finds it incomplete). Otherwise
-it lists the values no case has, by each value's first constant and in order of value, as clang does (`enum { B = 1, A
-= 0, A2 = 0 }` misses `'A'` and `'B'`), in clang's four forms: one, two, three, and "4 enumeration values not handled in
-switch: 'B', 'C', 'D'...". The warning is at where the value begins (`begin`: `m->mode` at `m`), as clang places it,
-with clang's note.
+was in error (no constant, or a duplicate: `Switch::erroneous`), when the value folds to a constant (`folds()`, as
+`branchOn` asks: `const enum Shape { SAW, SQUARE } shape = SQUARE;` at the top level is one, and clang says instead
+"no case matching constant switch condition '1'", a warning FMinus does not give), or when the enumeration has no
+constants yet (one declared ahead, whose list comes after the switch, as clang finds it incomplete). Otherwise it lists
+the values no case has, by each value's first constant and in order of value, as clang does (`enum { B = 1, A = 0, A2 =
+0 }` misses `'A'` and `'B'`), in clang's four forms: one, two, three, and "4 enumeration values not handled in switch:
+'B', 'C', 'D'...". The warning is at where the value begins, as clang places it, with clang's note: `begin` gives
+`m->mode` at `m`, and `(e)` at its `(`, which the tree keeps on the expression inside the parentheses
+(`Expr::opening`, the outermost one's), since it has no node for them.
 
 A warning is a `Diagnostic` too, in `Diagnostics::warnings()`, apart from the errors, so that `errors().size()`, which
 the code generator's counts read, counts errors only. `format()` prints both in source order, each with its severity,
@@ -6030,11 +6049,14 @@ error.
 ### Tests
 
 - `tests/unit/RecoveryTest.cpp`: an undeclared name, or a call of no function, under every construct above, one error
-  each, at clang's column; an operator's own error still reported, and its result taking nothing more; functions that
-  end after `while (1)`, `for (;;)`, `while (RUNNING)`, `while (1.5f)`, `if (1)`, `if (0) else` and nested ones, run,
-  and those whose end is reached (a `break`, `while (n)`, `if (0)`, `for (; 0;)`) still refused, with a dead branch's
-  error; `sizeof` past the greatest `int` (2 GiB + 4, 16 GiB) and of 2^31 - 4 bytes; builtins' names as the file's
-  enumeration constants, and one in a block.
+  each, at clang's column; an operator's own error still reported, and its result taking nothing more; a `?:` of two
+  `void` calls as an initialiser, a result, an operand, an argument, a pointer, `*`'s and `-`'s operand, an assigned
+  value, a subscript and a condition, each clang's error, and as a statement, run; functions that end after
+  `while (1)`, `for (;;)`, `while (RUNNING)`, `while (1.5f)`, `if (1)`, `if (0) else`, nested ones and a constant of
+  the top level, run, and those whose end is reached (a `break`, `while (n)`, `if (0)`, `for (; 0;)`) still refused,
+  with a dead branch's error; a parameter's `if` and `while` refused alike as a knob, a stream and frozen; `sizeof`
+  past the greatest `int` (2 GiB + 4, 16 GiB) and of 2^31 - 4 bytes; builtins' names as the file's enumeration
+  constants, and one in a block.
 - `EnumTest.cpp`: names declared after a list, run: a local, a pointer to it, an array of the type, a module's field
   and a field sized by its own enumeration's constant, a const table and a constant at the top level; C23's fixed
   types, run: `int` declared ahead and used before its list, `bool` taking any number as a bool, `sizeof` of each, one
@@ -6042,8 +6064,9 @@ error.
 - `SwitchTest.cpp`: `-Wswitch`'s four forms and their notes from a program that runs; values by their first name in
   order of value; every source of an enumerated value (a variable, a field in a method and through a pointer, a host's
   parameter, a result, a cast, an assignment, an element, `*p`, C23's `bool`, an enumeration without a tag), each at its
-  column; and none for a default, every constant, an `int`'s cast, arithmetic, `-e`, `?:`, a constant, an `int`, an
-  enumeration declared ahead whose list comes later, and a case in error.
+  column, and a parenthesised one at its `(`; and none for a default, every constant, an `int`'s cast, arithmetic,
+  `-e`, `?:`, a constant, an `int`, an enumeration declared ahead whose list comes later, a constant of the top level,
+  and a case in error.
 - `FrontendTest.cpp`: the trees of names after a list at the top level, in a module and in a block; fixed types and
   a tag declared ahead; each tag error, with its note.
 - `tests/library/ProgramTest.cpp`: `Program::warnings()` of a program that runs, empty for one with none, and a failed
@@ -6081,6 +6104,8 @@ Each of these was hit while writing the language or its recipes. [simd.md](simd.
 | A C++ reference in a harness runs slower than the same code in FMinus | the examples and tests compile with LLVM's definitions, which turn on libc++'s hardening: a `std::vector`'s `operator[]` checks every index | write the reference on raw pointers, as the kernel is (`examples/delay/bench.cpp`) |
 | A test of `sizeof(poly float)` fails to parse, at a function named `poly` | `poly` is a keyword | another name |
 | The JIT crashes on a `void` value, or the verifier on a `void` phi | `PoisonValue` of `void`, or a `?:` that joins two `void` calls | `poison(Type::Void)` has no IR; `lowerConditional` builds no phi for `void` |
+| An invalid program compiles, to `undef`, with no error (`float x = c ? f() : g();` of two `void` calls) | a stand-in with no error behind it was failed (recipe 32), and every use of a failed value is silent | `poison()` is not failed; only `lower`'s count and `recovery()`, where an operand's or a declaration's error is behind it, fail a value |
+| A program compiles with a frozen parameter and is refused with a knob | a decision taken on the IR, where a frozen parameter's read is a constant (`branchOn` on a `ConstantInt`) | decide on the tree (`folds()`), and take only the value from the IR |
 | The compiler crashes on `p->y`, and `--emit ast` prints a `OnePole*` as `? *` | a pointer built from a type's kind, `pointerTo(type.kind, ...)`, lost its module | pass the `Type`: `pointerTo(type, ...)` keeps `module` |
 | A C++ reference differs from FMinus in the last bit, though the formulas match | clang's default `-ffp-contract=on` fuses `y + k * (x - y)` written as one expression into a multiply-add; FMinus never fuses | build the reference with `-ffp-contract=off` (the examples are), or round once a statement (`ModuleTest.cpp`'s `next`) |
 | A host's `aligned_alloc` returns null for a module | macOS's wants an alignment of at least a pointer's, and every implementation a size that is a multiple of it | round both up to `alignof(std::max_align_t)` (`examples/voices/bench.cpp`) |
