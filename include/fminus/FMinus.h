@@ -427,9 +427,11 @@ namespace fminus
         //
         // A check costs a compare and a branch where the optimiser cannot prove the access within the array (a ring
         // buffer's index; a loop over the array that its own condition keeps within it has none), and a load and a
-        // branch after each call of a function with checks that inlining leaves; a loop with a check may not vectorise.
-        // The optimiser treats a failed check as a trap until the last pass makes it a return, so a build without the
-        // checks is as fast as before, and one with them computes what it would without them until a check fails.
+        // branch after each call of a function with checks that inlining leaves. The optimiser treats a failed check as
+        // a trap until the last pass makes it a return, so a loop with one keeps a field it updates in memory, a store
+        // each iteration (docs/extending.md, recipe 30, has the measurements), and a build with the checks computes
+        // what it would without them until a check fails. A build without them is the code it was. The program
+        // compiles with its machine code, as compile() returns (the first look-up of a function only finds it).
         //
         // One record a Program, which every thread that runs it shares: in a parallel region, the first part to fail
         // is recorded, and the others stop at their next call of a function with checks. While the record holds a
