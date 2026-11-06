@@ -77,6 +77,15 @@ void run(Osc* o, float* out, int n) [[clang::nonblocking]]
         return found != code.end() ? &*found : nullptr;
     }
 
+    // The function `name`, which must be there.
+    const Jit::Code& required(const std::vector<Jit::Code>& code, const std::string& name)
+    {
+        const Jit::Code* found = named(code, name);
+        INFO(name);
+        REQUIRE(found != nullptr);
+        return *found;
+    }
+
     std::vector<std::string> names(const std::vector<Jit::Code>& code)
     {
         std::vector<std::string> all;
@@ -114,7 +123,7 @@ TEST_CASE("code ranges: each function's code where its look-up says, sized, sort
                     CHECK(found->address == llvm::cantFail(jit->lookup(function)).getValue());
                     CHECK(found->size > 0);
                 }
-                CHECK(named(code, "run")->address == run);
+                CHECK(required(code, "run").address == run);
                 CHECK((named(code, "run.body") != nullptr) == (denormals == Denormals::Flush));
                 CHECK(named(code, "run.parallel.1") != nullptr);
                 CHECK(named(code, "fminus.large.sin") != nullptr);
@@ -142,11 +151,11 @@ TEST_CASE("code ranges: what the optimiser inlined into each function, and at -O
         REQUIRE(static_cast<bool>(jit->lookup("run")));
         const std::vector<Jit::Code> code = jit->code();
         using Names = std::vector<std::string>;
-        CHECK(named(code, "Osc::process")->inlined == Names{"Osc::tick"});
-        CHECK(named(code, "run")->inlined == Names{"Osc::process", "Osc::tick"});
-        CHECK(named(code, "run.parallel.1")->inlined == Names{"shape"});
-        CHECK(named(code, "Osc::tick")->inlined.empty());   // its own code, which the program keeps for its callers
-        CHECK(named(code, "shape")->inlined.empty());
+        CHECK(required(code, "Osc::process").inlined == Names{"Osc::tick"});
+        CHECK(required(code, "run").inlined == Names{"Osc::process", "Osc::tick"});
+        CHECK(required(code, "run.parallel.1").inlined == Names{"shape"});
+        CHECK(required(code, "Osc::tick").inlined.empty());   // its own code, which the program keeps for its callers
+        CHECK(required(code, "shape").inlined.empty());
     }
     SECTION("-O0: every function's code is its own")
     {

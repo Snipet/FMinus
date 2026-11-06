@@ -257,8 +257,10 @@ TEST_CASE("codeRanges: the optimiser's inlining reads the same when compile() op
         CHECK(a[i].inlined == b[i].inlined);
         CHECK(a[i].size == b[i].size);   // the same machine code
     }
-    CHECK(named(a, "run")->kind == Kind::Function);   // no entry point's wrapper without Denormals::Flush
-    CHECK(named(a, "run")->inlined == Names{"Osc::process", "Osc::tick"});
+    const Program::CodeRange* run = named(a, "run");
+    REQUIRE(run != nullptr);
+    CHECK(run->kind == Kind::Function);   // no entry point's wrapper without Denormals::Flush
+    CHECK(run->inlined == Names{"Osc::process", "Osc::tick"});
 
     Program::Options none;
     none.optimisation = 0;
@@ -470,7 +472,9 @@ TEST_CASE("codeRanges: a reference sampler finds a program's time in the functio
             {
                 // Both methods are inlined into spin, whose range says so: their samples are spin's, and their own
                 // ranges, which nothing calls, take none.
-                CHECK(named(ranges, "spin")->inlined == Names{"Work::fast", "Work::slow"});
+                const Program::CodeRange* spun = named(ranges, "spin");
+                REQUIRE(spun != nullptr);
+                CHECK(spun->inlined == Names{"Work::fast", "Work::slow"});
                 CHECK(count("spin") >= profile.inProgram * 9 / 10);
                 CHECK(count("Work::slow") == 0);
                 CHECK(count("Work::fast") == 0);

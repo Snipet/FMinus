@@ -4,6 +4,7 @@
 #include "support/HostTarget.h"
 #include "support/JitRuntime.h"
 
+#include <llvm/ADT/DenseSet.h>
 #include <llvm/ExecutionEngine/JITEventListener.h>
 #include <llvm/ExecutionEngine/JITLink/JITLink.h>
 #include <llvm/ExecutionEngine/Orc/JITTargetMachineBuilder.h>
@@ -60,6 +61,48 @@ namespace fminus::jit
 
     namespace
     {
+        bool executable(const llvm::jitlink::Symbol& symbol)
+        {
+            return (std::to_underlying(symbol.getSection().getMemProt())
+                    & std::to_underlying(llvm::orc::MemProt::Exec))
+                   != 0;
+        }
+
+        // Before JITLink prunes a graph: it removes each symbol that is not live, and keeps each block a live symbol
+        // reaches. An ELF object's call of a local function (a parallel region's body, an entry point's) names its
+        // section's symbol and an offset, .text + 0x1c0, not the function's, so the function's own symbol would go,
+        // its code kept but its name lost. This marks live each named symbol of an executable section whose block the
+        // link keeps, the blocks the live symbols reach, walked as prune() walks them: nothing is linked that would not
+        // be.
+        llvm::Error keepNamesOfKeptCode(llvm::jitlink::LinkGraph& graph)
+        {
+            std::vector<llvm::jitlink::Symbol*> pending;
+            for (llvm::jitlink::Symbol* symbol : graph.defined_symbols())
+            {
+                if (symbol->isLive())
+                    pending.push_back(symbol);
+            }
+            llvm::DenseSet<const llvm::jitlink::Block*> kept;
+            while (!pending.empty())
+            {
+                llvm::jitlink::Block& block = pending.back()->getBlock();
+                pending.pop_back();
+                if (!kept.insert(&block).second)
+                    continue;
+                for (llvm::jitlink::Edge& edge : block.edges())
+                {
+                    if (edge.getTarget().isDefined())
+                        pending.push_back(&edge.getTarget());
+                }
+            }
+            for (llvm::jitlink::Symbol* symbol : graph.defined_symbols())
+            {
+                if (symbol->hasName() && executable(*symbol) && kept.contains(&symbol->getBlock()))
+                    symbol->setLive(true);
+            }
+            return llvm::Error::success();
+        }
+
         // JITLink's: each object's graph, once its code has its addresses and every fix-up is applied (a post-fix-up
         // pass), written down as pending, and kept when the link is emitted. Code stays until the JIT ends, so there is
         // nothing to remove.
@@ -71,15 +114,13 @@ namespace fminus::jit
             void modifyPassConfig(llvm::orc::MaterializationResponsibility& responsibility, llvm::jitlink::LinkGraph&,
                                   llvm::jitlink::PassConfiguration& config) override
             {
+                config.PrePrunePasses.push_back(keepNamesOfKeptCode);
                 config.PostFixupPasses.push_back(
                     [log = log_, key = static_cast<const void*>(&responsibility)](llvm::jitlink::LinkGraph& graph) {
                         std::vector<Jit::Code> code;
                         for (llvm::jitlink::Symbol* symbol : graph.defined_symbols())
                         {
-                            const bool executable = (std::to_underlying(symbol->getSection().getMemProt())
-                                                     & std::to_underlying(llvm::orc::MemProt::Exec))
-                                                    != 0;
-                            if (!executable || !symbol->hasName() || symbol->getSize() == 0)
+                            if (!executable(*symbol) || !symbol->hasName() || symbol->getSize() == 0)
                                 continue;
                             if (std::optional<std::string> name = log->nameOf(*symbol->getName()))
                                 code.push_back({std::move(*name), symbol->getAddress().getValue(), symbol->getSize(),
