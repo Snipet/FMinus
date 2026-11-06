@@ -214,8 +214,21 @@ namespace fminus::ir::detail
             builder_.CreateBr(target);
     }
 
+    // A branch on `condition` to `whenTrue` or `whenFalse`; on a constant (`while (1)`, `if (true)`), to the one it
+    // picks alone, as clang branches on one. The IR folds a constant expression's test against 0 to a constant, so what
+    // only the other edge would reach is reached by nothing: after a `while (1)` without a break, the end of a non-void
+    // function needs no return (Functions.cpp), as clang's CFG finds. The block the branch does not take is still
+    // lowered, for its errors, and the optimiser deletes it.
+    void Lowering::branchOn(llvm::Value* condition, llvm::BasicBlock* whenTrue, llvm::BasicBlock* whenFalse)
+    {
+        if (const auto* constant = llvm::dyn_cast<llvm::ConstantInt>(condition))
+            builder_.CreateBr(constant->isOne() ? whenTrue : whenFalse);
+        else
+            builder_.CreateCondBr(condition, whenTrue, whenFalse);
+    }
+
     // if.then and if.else join at if.end. A branch that returns never gets there; when neither does, if.end
-    // is unreachable, and so is what follows.
+    // is unreachable, and so is what follows. A constant condition takes one branch (branchOn()).
     void Lowering::lowerIf(const ast::IfStmt& branch)
     {
         llvm::Value* condition =
@@ -223,7 +236,7 @@ namespace fminus::ir::detail
         llvm::BasicBlock* thenBlock = newBlock("if.then");
         llvm::BasicBlock* elseBlock = branch.elseBranch ? newBlock("if.else") : nullptr;
         llvm::BasicBlock* endBlock = newBlock("if.end");
-        builder_.CreateCondBr(condition, thenBlock, elseBlock != nullptr ? elseBlock : endBlock);
+        branchOn(condition, thenBlock, elseBlock != nullptr ? elseBlock : endBlock);
 
         builder_.SetInsertPoint(thenBlock);
         lowerScoped(*branch.thenBranch);
@@ -239,7 +252,8 @@ namespace fminus::ir::detail
 
     // while.cond tests and branches to while.body or while.end; the body goes back to while.cond. break goes
     // to while.end, continue to while.cond. The branches back carry llvm.loop.mustprogress unless the condition is a
-    // constant expression (mustProgress).
+    // constant expression (mustProgress). A constant condition branches to one of the two (branchOn()): `while (1)`
+    // reaches while.end only by a break.
     void Lowering::lowerWhile(const ast::WhileStmt& loop)
     {
         llvm::BasicBlock* condBlock = newBlock("while.cond");
@@ -248,9 +262,8 @@ namespace fminus::ir::detail
         const llvm::Instruction* entry = builder_.CreateBr(condBlock);
 
         builder_.SetInsertPoint(condBlock);
-        builder_.CreateCondBr(
-            convert(lower(*loop.condition), ast::Type::Bool, loop.condition->location, Use::Condition),
-            bodyBlock, endBlock);
+        branchOn(convert(lower(*loop.condition), ast::Type::Bool, loop.condition->location, Use::Condition),
+                 bodyBlock, endBlock);
 
         builder_.SetInsertPoint(bodyBlock);
         breakables_.push_back({Breakable::Kind::Loop, endBlock, condBlock});
@@ -265,7 +278,8 @@ namespace fminus::ir::detail
 
     // for (init; cond; step) body: init, then for.cond -> for.body -> for.inc (the step) -> for.cond, until
     // for.end. continue goes to for.inc, so the step still runs. The init's declarations are the loop's. for.inc's
-    // branch back carries llvm.loop.mustprogress when there is a condition and it is not a constant expression.
+    // branch back carries llvm.loop.mustprogress when there is a condition and it is not a constant expression. With
+    // no condition, or a constant one (branchOn()), only a break reaches for.end.
     void Lowering::lowerFor(const ast::ForStmt& loop)
     {
         scopes_.emplace_back();
@@ -278,9 +292,8 @@ namespace fminus::ir::detail
 
         builder_.SetInsertPoint(condBlock);
         if (loop.condition)
-            builder_.CreateCondBr(
-                convert(lower(*loop.condition), ast::Type::Bool, loop.condition->location, Use::Condition),
-                bodyBlock, endBlock);
+            branchOn(convert(lower(*loop.condition), ast::Type::Bool, loop.condition->location, Use::Condition),
+                     bodyBlock, endBlock);
         else
             builder_.CreateBr(bodyBlock);   // no condition: until a break or a return
 
@@ -305,15 +318,15 @@ namespace fminus::ir::detail
     // which each label adds its value and its block as the body is lowered (lowerLabel), and whose default is the
     // end, sw.epilog, until a default label replaces it. break goes to sw.epilog, and continue to the loop around.
     // Nothing reaches what the body has before its first label (lowerStatement). An operand with an error of its own
-    // gives the switch no second error (see binary(), Expressions.cpp).
+    // gives the switch no second error (Value). A value of an enumerated type that is no constant, without a default,
+    // gets clang's -Wswitch for the constants no case has (unhandled()).
     void Lowering::lowerSwitch(const ast::SwitchStmt& branch)
     {
-        const std::size_t reported = diagnostics_.errors().size();
         const Value value = lower(*branch.value);
         llvm::Value* condition = poison(ast::Type::Int).ir;
         if (ast::arithmeticOf(value.type) == ast::Type::Int)
             condition = convert(value, ast::Type::Int, branch.value->location, Use::Initializing);
-        else if (diagnostics_.errors().size() == reported)
+        else if (!value.failed)
             error(branch.value->location, "statement requires expression of integer type ("
                                               + quoted(ast::typeName(value.type)) + " invalid)");
         llvm::BasicBlock* endBlock = newBlock("sw.epilog");
@@ -321,12 +334,93 @@ namespace fminus::ir::detail
         breakables_.push_back({Breakable::Kind::Switch, endBlock, nullptr});
         switches_.push_back({instruction, scopes_.size(), {}, std::nullopt});
         lowerScoped(*branch.body);
+        const Switch lowered = std::move(switches_.back());
         switches_.pop_back();
         breakables_.pop_back();
         fallThrough(endBlock);
         if (llvm::BasicBlock* last = &endBlock->getParent()->back(); last != endBlock)
             endBlock->moveAfter(last);   // after the labels' blocks, as clang's
         builder_.SetInsertPoint(endBlock);
+        if (!value.failed && ast::arithmeticOf(value.type) == ast::Type::Int && !isConstant(*branch.value))
+            unhandled(begin(*branch.value), value.type.enumeration, lowered);
+    }
+
+    // Where `expr` begins: its first operand's beginning for an operator written after it (`m->mode`, `e = A`, `a[i]`),
+    // as clang places a diagnostic about a whole expression; the tree places those at the operator. The rest begin
+    // where the tree places them.
+    SourceLocation Lowering::begin(const ast::Expr& expr)
+    {
+        const SourceLocation here = expr.location;
+        return std::visit(Overloaded{
+                              [&](const ast::BinaryExpr& binary) { return begin(*binary.lhs); },
+                              [&](const ast::LogicalExpr& logical) { return begin(*logical.lhs); },
+                              [&](const ast::AssignExpr& assign) { return begin(*assign.target); },
+                              [&](const ast::ConditionalExpr& conditional) { return begin(*conditional.condition); },
+                              [&](const ast::MemberExpr& member) { return begin(*member.base); },
+                              [&](const ast::MethodCallExpr& call) { return begin(*call.object); },
+                              [&](const ast::IndexExpr& index) { return begin(*index.base); },
+                              [&](const ast::IncrementExpr& increment) {
+                                  const bool postfix = increment.op == ast::IncrementOp::PostIncrement
+                                                       || increment.op == ast::IncrementOp::PostDecrement;
+                                  return postfix ? begin(*increment.target) : here;
+                              },
+                              [&](const ast::NumberExpr&) { return here; },
+                              [&](const ast::VariableExpr&) { return here; },
+                              [&](const ast::BoolExpr&) { return here; },
+                              [&](const ast::UnaryExpr&) { return here; },
+                              [&](const ast::CallExpr&) { return here; },
+                              [&](const ast::ConstructExpr&) { return here; },
+                              [&](const ast::ThisExpr&) { return here; },
+                              [&](const ast::CastExpr&) { return here; },
+                              [&](const ast::SizeofExpr&) { return here; },
+                          },
+                          expr.node);
+    }
+
+    // clang's -Wswitch, FMinus's one warning: a switch without a default over a value of an enumerated type (one that
+    // is no constant), whose cases miss some of the enumeration's constants, names them, where the value begins, in
+    // clang's words and with its note, each value by its first constant and in order of value, as clang lists them:
+    // "enumeration value 'C' not handled in switch [-Wswitch]". Nothing when a case is in error, or when the
+    // enumeration has no constants yet (C23 declares one ahead of them, `enum Mode : int;`, and a switch before its
+    // list knows none). clang's other -Wswitch, a case value that is none of the enumeration's, is not FMinus's.
+    void Lowering::unhandled(SourceLocation location, int enumeration, const Switch& lowered)
+    {
+        if (enumeration == 0 || lowered.defaultLabel || lowered.erroneous)
+            return;
+        const auto found = enumerations_.find(enumeration);
+        if (found == enumerations_.end())
+            return;
+        std::vector<std::pair<std::int32_t, std::string>> constants = found->second;
+        std::ranges::stable_sort(constants, {}, [](const auto& constant) { return constant.first; });
+        std::vector<std::string> missing;
+        for (std::size_t i = 0; i < constants.size(); ++i)
+        {
+            if (i > 0 && constants[i].first == constants[i - 1].first)
+                continue;   // a value's first name stands for it
+            if (!lowered.cases.contains(constants[i].first))
+                missing.push_back(quoted(constants[i].second));
+        }
+        std::string message;
+        switch (missing.size())
+        {
+        case 0:
+            return;
+        case 1:
+            message = "enumeration value " + missing[0] + " not handled in switch";
+            break;
+        case 2:
+            message = "enumeration values " + missing[0] + " and " + missing[1] + " not handled in switch";
+            break;
+        case 3:
+            message = "enumeration values " + missing[0] + ", " + missing[1] + ", and " + missing[2]
+                      + " not handled in switch";
+            break;
+        default:
+            message = std::to_string(missing.size()) + " enumeration values not handled in switch: " + missing[0]
+                      + ", " + missing[1] + ", " + missing[2] + "...";
+            break;
+        }
+        diagnostics_.warning(location, message + " [-Wswitch]", {Diagnostic{location, "add missing switch cases", {}}});
     }
 
     namespace
@@ -369,7 +463,10 @@ namespace fminus::ir::detail
         fallThrough(block);
         if (branch != nullptr && value != nullptr)
         {
-            if (const std::optional<std::int32_t> constant = integerConstant(*value))
+            const std::optional<std::int32_t> constant = integerConstant(*value);
+            if (!constant)
+                branch->erroneous = true;
+            else
             {
                 const CaseLabel label{value->location, labelName(value)};
                 const auto [previous, added] = branch->cases.try_emplace(*constant, label);
@@ -378,6 +475,7 @@ namespace fminus::ir::detail
                                                  bypass(*branch, block));
                 else
                 {
+                    branch->erroneous = true;
                     // clang's: the value's name when both are written as one, else both names (or the number)
                     const std::string number = std::to_string(*constant);
                     const std::string before = previous->second.name.empty() ? number : previous->second.name;
@@ -483,7 +581,7 @@ namespace fminus::ir::detail
                     error(location, "array initializer must be an initializer list");
                 else if (value.type == type)
                     copy(slot, value.ir, type);
-                else
+                else if (!value.failed)   // else its own error says why (Value)
                     incompatible(location, Use::Initializing, value.type, type);
             }
             if (decl.hasList && ast::isArray(type))

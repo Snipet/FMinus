@@ -72,18 +72,20 @@ namespace fminus::ir::detail
                           + " is the host's: a method reads it, and cannot assign it or take its address");
                 return std::nullopt;
             }
-            const std::size_t reported = diagnostics_.errors().size();
             Value base = lower(*index->base);
             Value offset = lower(*index->index);
             const bool swapped = !ast::isPointer(base.type) && ast::isPointer(offset.type);
             if (swapped)
                 std::swap(base, offset);   // C's i[p] is p[i]
+            // An operand's own error says why (Value): a pointer whose index failed still gives its element, poison.
             if (!ast::isPointer(base.type))
             {
-                if (diagnostics_.errors().size() == reported)   // else the operands' own errors say why
+                if (!base.failed && !offset.failed)
                     error(expr.location, "subscripted value is not a pointer");
                 return std::nullopt;
             }
+            if (offset.failed)
+                offset = poison(ast::Type::Int);
             if (offset.type != ast::Type::Int && offset.type != ast::Type::Bool)
             {
                 error(expr.location, "array subscript is not an integer");
@@ -103,6 +105,8 @@ namespace fminus::ir::detail
         if (const auto* unary = std::get_if<ast::UnaryExpr>(&expr.node))   // *p
         {
             const Value pointer = lower(*unary->operand);
+            if (pointer.failed && !ast::isPointer(pointer.type))
+                return std::nullopt;   // its own error says why (Value)
             if (!ast::isPointer(pointer.type))
             {
                 error(expr.location,
@@ -117,6 +121,8 @@ namespace fminus::ir::detail
         if (member.arrow)
         {
             const Value pointer = lower(*member.base);
+            if (pointer.failed && (!ast::isPointer(pointer.type) || pointer.type.pointee != ast::Kind::Module))
+                return std::nullopt;   // its own error says why (Value)
             if (!ast::isPointer(pointer.type))
             {
                 error(expr.location, "member reference type " + quoted(ast::typeName(pointer.type))
@@ -312,8 +318,9 @@ namespace fminus::ir::detail
         const Value failed = poison(ast::Type::pointerTo(ast::Kind::Float, false));
         if (!isLValue(operand))
         {
-            const ast::Type type = lower(operand).type;
-            error(location, "cannot take the address of an rvalue of type " + quoted(ast::typeName(type)));
+            const Value value = lower(operand);
+            if (!value.failed)   // else its own error says why (Value): &(a + y)
+                error(location, "cannot take the address of an rvalue of type " + quoted(ast::typeName(value.type)));
             return failed;
         }
         const std::optional<LValue> target = lvalue(operand, location, true);

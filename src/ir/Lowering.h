@@ -141,11 +141,18 @@ namespace fminus::ir::detail
         // two FMinus types may share an LLVM type: one whose width the target decides would be <4 x float> on
         // NEON, as float4 is. A module's value is its address (a ptr): it is copied from there, never loaded whole.
         // A pointer into an array the code generator can see carries its extent, under Options::boundsCheck (above).
+        //
+        // `failed` is clang's "contains errors": the expression, or a part of it, reported an error (lower() counts
+        // them), or the value stands in for one an error kept from being computed (poison()). What takes such a value
+        // says nothing more about it: an operator gives a poison of the type it would likely have had, and a
+        // conversion a poison of its target's type, so the first error is the only one, as clang reports it. Its
+        // type is no test for this: the stand-in for an undeclared name is a float, which most operators take.
         struct Value
         {
             llvm::Value* ir = nullptr;
             ast::Type type = ast::Type::Float;
             const Extent* extent = nullptr;
+            bool failed = false;
         };
 
         // A variable in scope: where it is (its stack slot; in a parallel region, the region's own slot for a copy of
@@ -222,13 +229,15 @@ namespace fminus::ir::detail
         };
 
         // A switch being lowered (Statements.cpp): its instruction, to which each case label adds its value and its
-        // block, the first scope of its body (scopes_[base] on hold what the body declares), and its labels so far.
+        // block, the first scope of its body (scopes_[base] on hold what the body declares), its labels so far, and
+        // whether one was in error (no constant, or a duplicate): clang's -Wswitch then says nothing.
         struct Switch
         {
             llvm::SwitchInst* instruction;
             std::size_t base;
             std::map<std::int32_t, CaseLabel> cases;
             std::optional<SourceLocation> defaultLabel;
+            bool erroneous = false;
         };
 
         // A constant expression's value, as fold() works it out (Constants.cpp): an int's or a bool's (0 or 1), and
@@ -313,7 +322,7 @@ namespace fminus::ir::detail
         void pointerMismatch(SourceLocation location, Use use, ast::Type from, ast::Type to, bool discardsConst);
         bool checkType(SourceLocation location, ast::Type type);
         void noPointerTo(SourceLocation location, ast::Type pointee);
-        std::optional<unsigned> sizeOf(ast::Type type);
+        std::optional<std::uint64_t> sizeOf(ast::Type type);
         llvm::Align alignOf(ast::Type type);
         bool commonType(SourceLocation location, ast::Type a, ast::Type b, ast::Type& type);
         void polyMismatch(SourceLocation location, ast::Type a, ast::Type b);
@@ -340,12 +349,15 @@ namespace fminus::ir::detail
         void lowerReturn(SourceLocation location, const ast::ReturnStmt& ret);
         llvm::BasicBlock* newBlock(const char* name);
         void fallThrough(llvm::BasicBlock* target);
+        void branchOn(llvm::Value* condition, llvm::BasicBlock* whenTrue, llvm::BasicBlock* whenFalse);
         void lowerIf(const ast::IfStmt& branch);
         void lowerWhile(const ast::WhileStmt& loop);
         void lowerFor(const ast::ForStmt& loop);
         bool isConstant(const ast::Expr& expr) const;
         void lowerSwitch(const ast::SwitchStmt& branch);
         void lowerLabel(SourceLocation location, const ast::Expr* value, const ast::StmtPtr& body);
+        void unhandled(SourceLocation location, int enumeration, const Switch& lowered);
+        static SourceLocation begin(const ast::Expr& expr);
         llvm::BasicBlock* bypass(const Switch& branch, llvm::BasicBlock* label);
         void declareVariable(SourceLocation location, const ast::DeclStmt& decl);
         void redefinition(SourceLocation location, const std::string& name, bool enumerator, const Binding& previous);
@@ -370,6 +382,7 @@ namespace fminus::ir::detail
         static bool isComparison(ast::BinaryOp op);
         static bool isBitwise(ast::BinaryOp op);
         Value binary(SourceLocation location, ast::BinaryOp op, Value lhs, Value rhs);
+        static ast::Type recovered(ast::BinaryOp op, const Value& lhs, const Value& rhs);
         llvm::Value* arithmetic(ast::BinaryOp op, ast::Type type, llvm::Value* lhs, llvm::Value* rhs);
         llvm::Value* lowerLogical(SourceLocation location, const ast::LogicalExpr& logical);
         Value lowerConditional(SourceLocation location, const ast::ConditionalExpr& conditional);
@@ -495,6 +508,8 @@ namespace fminus::ir::detail
         std::unordered_map<std::string, const ast::Function*> functions_;   // the program's, by name
         std::vector<std::unordered_map<std::string, Binding>> scopes_;     // the current function's, inner last
         std::unordered_map<std::string, Binding> fileScope_;   // the enumeration constants and constants so far
+        // Each enumeration's constants declared so far, by its id (Type::enumeration): value and name, in order.
+        std::unordered_map<int, std::vector<std::pair<std::int32_t, std::string>>> enumerations_;
         const ast::Program* program_ = nullptr;                            // the program being lowered
         const ast::Function* function_ = nullptr;                          // the function being lowered
         const ast::Function topLevel_{};   // what function_ is while a top-level constant's initialiser is lowered

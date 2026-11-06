@@ -305,7 +305,8 @@ namespace fminus::ir::detail
         const Value at = lower(*index.index);
         if (at.type != ast::Type::Int && at.type != ast::Type::Bool)
         {
-            error(location, "array subscript is not an integer");
+            if (!at.failed)   // else its own error says why (Value)
+                error(location, "array subscript is not an integer");
             return poison(type);
         }
         const ParamBinding binding = bindingOf(module, parameter);
@@ -521,6 +522,8 @@ namespace fminus::ir::detail
         if (call.arrow)
         {
             const Value pointer = lower(*call.object);
+            if (pointer.failed && (!ast::isPointer(pointer.type) || pointer.type.pointee != ast::Kind::Module))
+                return poison(ast::Type::Float);   // its own error says why (Value)
             if (!ast::isPointer(pointer.type))
             {
                 error(location, "member reference type " + quoted(ast::typeName(pointer.type)) + " is not a pointer"
@@ -554,6 +557,8 @@ namespace fminus::ir::detail
             {
                 object = lower(*call.object);
             }
+            if (object.failed && !ast::isModule(object.type))
+                return poison(ast::Type::Float);   // its own error says why (Value)
             if (ast::isPointer(object.type) && object.type.pointee == ast::Kind::Module)
             {
                 error(location, "member reference type " + quoted(ast::typeName(object.type))

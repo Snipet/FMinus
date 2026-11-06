@@ -286,6 +286,8 @@ namespace fminus::ir::detail
             ast::Type type = ast::Type::Float;
             for (const Value& arg : args)
             {
+                if (arg.failed && !ast::isArithmetic(arg.type))
+                    return poison(ast::Type::Float);   // its own error says why (Value)
                 if (!ast::isArithmetic(arg.type))
                 {
                     incompatible(location, Use::Passing, arg.type, ast::Type::Float);
