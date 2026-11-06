@@ -901,7 +901,7 @@ expr
     : NUMBER                                { $$ = ast::makeExpr(at(@1), ast::NumberExpr{$1}); }
     | IDENTIFIER                            { $$ = ast::makeExpr(at(@1), ast::VariableExpr{$1}); }
     | IDENTIFIER "(" args ")"               { $$ = ast::makeExpr(at(@1), ast::CallExpr{$1, $3}); }
-    | "(" expr ")"                          { $$ = $2; }
+    | "(" expr ")"                          { $$ = $2; $$->opening = at(@1); }   // the outermost's, set last
     | "-" expr %prec UNARY                  { $$ = ast::makeExpr(at(@1), ast::UnaryExpr{ast::UnaryOp::Negate, $2}); }
     | "+" expr %prec UNARY                  { $$ = ast::makeExpr(at(@1), ast::UnaryExpr{ast::UnaryOp::Plus, $2}); }
     | "!" expr %prec UNARY                  { $$ = ast::makeExpr(at(@1), ast::UnaryExpr{ast::UnaryOp::Not, $2}); }

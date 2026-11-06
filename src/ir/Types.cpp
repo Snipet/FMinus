@@ -292,14 +292,26 @@ namespace fminus::ir::detail
                             + ": a poly type has as many lanes as the target's vectors");
     }
 
-    // A value of `type` that stands in for one an error kept from being computed: failed, so that what takes it says
-    // nothing more (Value). void has no values: its stand-in has no IR, which nothing reads, since every use of a void
-    // value is an error of its own.
+    // A value of `type` that stands in for one an error kept from being computed. It is not failed by itself (Value):
+    // lower() marks it failed when the expression reported the error, so a stand-in that no error is behind is checked
+    // as any value is, and its uses report what is wrong with them. void has no values: its stand-in has no IR, which
+    // nothing reads, since every use of a void value is an error of its own.
     Lowering::Value Lowering::poison(ast::Type type)
     {
         if (type == ast::Type::Void)
-            return {nullptr, type, nullptr, true};
-        return {llvm::PoisonValue::get(valueTypeOf(type)), type, nullptr, true};
+            return {nullptr, type};
+        return {llvm::PoisonValue::get(valueTypeOf(type)), type};
+    }
+
+    // A poison of `type` that is failed (Value), as clang's RecoveryExpr contains errors, for where an error this
+    // expression did not report is behind it: an operand's own (failed), or a declaration's that left a type FMinus
+    // cannot use (a function's `bool *` result, refused where it is declared). Only there: a failed value with no
+    // error behind it would let every use of it go unreported, and the program compile on a poison.
+    Lowering::Value Lowering::recovery(ast::Type type)
+    {
+        Value value = poison(type);
+        value.failed = true;
+        return value;
     }
 
     void Lowering::error(SourceLocation location, std::string message)

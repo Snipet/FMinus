@@ -272,12 +272,13 @@ namespace fminus::ir::detail
         return {builder_.CreateShuffleVector(loaded, source.components), source.type};
     }
 
-    // An lvalue expression's value: a variable's, an element's (p[i], *p). Poison after an error.
+    // An lvalue expression's value: a variable's, an element's (p[i], *p). A recovery() after an error, which lvalue()
+    // reported, or an operand's or a declaration's that it found (element()).
     Lowering::Value Lowering::readLValue(const ast::Expr& expr)
     {
         const std::optional<LValue> source = lvalue(expr, expr.location);
         if (!source)
-            return poison(ast::Type::Float);
+            return recovery(ast::Type::Float);
         return read(*source, boundsCheck_ && ast::isArray(source->type) ? spelled(expr) : std::string());
     }
 
@@ -315,7 +316,7 @@ namespace fminus::ir::detail
     // in memory, since mem2reg cannot promote a slot that escapes; after inlining, SROA often can.
     Lowering::Value Lowering::lowerAddressOf(SourceLocation location, const ast::Expr& operand)
     {
-        const Value failed = poison(ast::Type::pointerTo(ast::Kind::Float, false));
+        const Value failed = recovery(ast::Type::pointerTo(ast::Kind::Float, false));   // after an error, each
         if (!isLValue(operand))
         {
             const Value value = lower(operand);
@@ -513,7 +514,7 @@ namespace fminus::ir::detail
             return poison(isComparison(op) ? ast::Type::Bool : pointer.type);
         }
         if (!ast::canPointTo(pointer.type.pointee))
-            return poison(pointer.type);   // its declaration reported it
+            return recovery(pointer.type);   // its declaration reported it
         llvm::Value* index = builder_.CreateSExt(convert(offset, ast::Type::Int, location, Use::Initializing),
                                                  builder_.getInt64Ty(), "idx.ext");
         if (op == ast::BinaryOp::Subtract)

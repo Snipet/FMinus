@@ -142,11 +142,14 @@ namespace fminus::ir::detail
         // NEON, as float4 is. A module's value is its address (a ptr): it is copied from there, never loaded whole.
         // A pointer into an array the code generator can see carries its extent, under Options::boundsCheck (above).
         //
-        // `failed` is clang's "contains errors": the expression, or a part of it, reported an error (lower() counts
-        // them), or the value stands in for one an error kept from being computed (poison()). What takes such a value
-        // says nothing more about it: an operator gives a poison of the type it would likely have had, and a
-        // conversion a poison of its target's type, so the first error is the only one, as clang reports it. Its
-        // type is no test for this: the stand-in for an undeclared name is a float, which most operators take.
+        // `failed` is clang's "contains errors": the expression, or a part of it, reported an error, and it is set only
+        // where one is behind it: by lower(), which counts the errors its expression reports, and by recovery(), the
+        // stand-in for what an operand's error, or a declaration's, kept from being computed. A plain poison() is not
+        // failed: `c ? f() : g()` of two void calls has no value and no error, and each of its uses must report one, as
+        // a void call's do. What takes a failed value says nothing more about it: an operator gives a recovery() of the
+        // type it would likely have had, and a conversion a poison of its target's type, so the first error is the
+        // only one, as clang reports it. Its type is no test for this: the stand-in for an undeclared name is a float,
+        // which most operators take.
         struct Value
         {
             llvm::Value* ir = nullptr;
@@ -327,6 +330,7 @@ namespace fminus::ir::detail
         bool commonType(SourceLocation location, ast::Type a, ast::Type b, ast::Type& type);
         void polyMismatch(SourceLocation location, ast::Type a, ast::Type b);
         Value poison(ast::Type type);
+        Value recovery(ast::Type type);
         void error(SourceLocation location, std::string message);
 
         // ---- Functions.cpp ------------------------------------------------------------------------------------------
@@ -349,11 +353,13 @@ namespace fminus::ir::detail
         void lowerReturn(SourceLocation location, const ast::ReturnStmt& ret);
         llvm::BasicBlock* newBlock(const char* name);
         void fallThrough(llvm::BasicBlock* target);
-        void branchOn(llvm::Value* condition, llvm::BasicBlock* whenTrue, llvm::BasicBlock* whenFalse);
+        void branchOn(const ast::Expr& test, llvm::Value* condition, llvm::BasicBlock* whenTrue,
+                      llvm::BasicBlock* whenFalse);
         void lowerIf(const ast::IfStmt& branch);
         void lowerWhile(const ast::WhileStmt& loop);
         void lowerFor(const ast::ForStmt& loop);
-        bool isConstant(const ast::Expr& expr) const;
+        bool isConstant(const ast::Expr& expr, bool folding = false) const;
+        bool folds(const ast::Expr& expr) const;
         void lowerSwitch(const ast::SwitchStmt& branch);
         void lowerLabel(SourceLocation location, const ast::Expr* value, const ast::StmtPtr& body);
         void unhandled(SourceLocation location, int enumeration, const Switch& lowered);

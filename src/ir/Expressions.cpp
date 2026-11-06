@@ -53,10 +53,10 @@ namespace fminus::ir::detail
                     const bool complement = unary.op == ast::UnaryOp::Complement;
                     const ast::Type type = ast::arithmeticOf(operand.type);   // an int, a float, a float vector
                     if (operand.failed)   // its own error says why (Value): the type the operator would give
-                        return poison(complement                         ? ast::Type::Int
-                                      : unary.op == ast::UnaryOp::Not    ? ast::Type::Bool
-                                      : ast::isArithmetic(operand.type) ? type
-                                                                         : ast::Type::Float);
+                        return recovery(complement                        ? ast::Type::Int
+                                        : unary.op == ast::UnaryOp::Not   ? ast::Type::Bool
+                                        : ast::isArithmetic(operand.type) ? type
+                                                                          : ast::Type::Float);
                     const bool invalid = complement ? type != ast::Type::Int : !ast::isArithmetic(operand.type);
                     if (invalid && unary.op != ast::UnaryOp::Not)
                     {
@@ -138,13 +138,13 @@ namespace fminus::ir::detail
     // ints (a bool is one), as C's take integers, and give an int; for a shift, C promotes each operand on its own,
     // which with int the only integer type is the same. An operand that reported an error of its own (an undeclared
     // name, say: it lowers to a poison float) fails (Value), and the operator then says nothing more, so that error is
-    // the only one, as clang's: `p + y`, `y & 1` and `x |= y` give a poison of the type they would likely have had
+    // the only one, as clang's: `p + y`, `y & 1` and `x |= y` give a recovery() of the type they would likely have had
     // (recovered), and report no "invalid operands". (A poison value alone is no test for this: (int)3e10f folds to
     // one with no error.)
     Lowering::Value Lowering::binary(SourceLocation location, ast::BinaryOp op, Value lhs, Value rhs)
     {
         if (lhs.failed || rhs.failed)
-            return poison(recovered(op, lhs, rhs));
+            return recovery(recovered(op, lhs, rhs));
         if (isBitwise(op) && (ast::arithmeticOf(lhs.type) != ast::Type::Int
                               || ast::arithmeticOf(rhs.type) != ast::Type::Int))
         {
@@ -322,7 +322,7 @@ namespace fminus::ir::detail
         llvm::BasicBlock* elseEnd = builder_.GetInsertBlock();
         if (thenValue.failed || elseValue.failed)
         {
-            // An arm's own error says why (Value): a poison of the other arm's type, which nothing reports on.
+            // An arm's own error says why (Value): a recovery() of the other arm's type, which nothing reports on.
             const Value& other = thenValue.failed ? elseValue : thenValue;
             const bool usable = !other.failed && !ast::isModule(other.type) && other.type != ast::Type::Void;
             builder_.SetInsertPoint(thenEnd);
@@ -330,7 +330,7 @@ namespace fminus::ir::detail
             builder_.SetInsertPoint(elseEnd);
             builder_.CreateBr(endBlock);
             builder_.SetInsertPoint(endBlock);
-            return poison(usable ? other.type : ast::Type::Float);
+            return recovery(usable ? other.type : ast::Type::Float);
         }
 
         // Two of one type give that type (two bools give a bool, two voids nothing); otherwise the usual arithmetic
@@ -385,7 +385,7 @@ namespace fminus::ir::detail
 
         builder_.SetInsertPoint(endBlock);
         if (type == ast::Type::Void)
-            return poison(type);   // nothing to join
+            return {nullptr, type};   // nothing to join, and no value, as a void call has none: its uses are errors
         llvm::PHINode* phi = builder_.CreatePHI(typeOf(type), 2, "cond");
         phi->addIncoming(thenIR, thenEnd);
         phi->addIncoming(elseIR, elseEnd);
@@ -489,11 +489,11 @@ namespace fminus::ir::detail
         }
         const std::optional<LValue> target = lvalue(*assign.target, location);
         if (!target || !writable(location, *target))
-            return poison(ast::Type::Float);
+            return recovery(ast::Type::Float);   // lvalue()'s error, or writable()'s
         if (assign.op != ast::AssignOp::Assign)
         {
             if (value.failed)
-                return poison(target->type);   // the value's own error says why (Value)
+                return recovery(target->type);   // the value's own error says why (Value)
             const std::size_t reported = diagnostics_.errors().size();
             value = compound(location, assign.op, read(*target), value);
             if (value.ir == nullptr || diagnostics_.errors().size() != reported)
@@ -554,7 +554,7 @@ namespace fminus::ir::detail
         }
         const std::optional<LValue> target = lvalue(*increment.target, location);
         if (!target || !writable(location, *target))
-            return poison(ast::Type::Float);
+            return recovery(ast::Type::Float);   // lvalue()'s error, or writable()'s
         const Value before = read(*target);
         const Value one{builder_.getInt32(1), ast::Type::Int};
         const Value after =

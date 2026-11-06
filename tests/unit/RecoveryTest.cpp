@@ -1,9 +1,12 @@
 // tests/unit/RecoveryTest.cpp: what the code generator reports once, or no longer (extending.md, recipe 32). An
 // operand with an error of its own (an undeclared name, a call of no function) fails, and what takes it says nothing
 // more, as clang's recovery says nothing more: an operator, a subscript, *, & and ->, ?:, a call, and a conversion
-// where a value initialises, is assigned, passed or returned. A constant condition branches one way, so the end of a
-// non-void function after a `while (1)` without a break, or after `if (1) return`, is reached by nothing. sizeof past
-// an int is an error, not a wrapped int, and an enumeration constant of the file is not named as a builtin.
+// where a value initialises, is assigned, passed or returned. A stand-in that no error is behind is no failed value:
+// `c ? f() : g()` of two void calls has no value, and each use of it is an error, as a void call's is. A constant
+// condition branches one way, so the end of a non-void function after a `while (1)` without a break, or after
+// `if (1) return`, is reached by nothing; a frozen parameter is no constant, so the program compiles as it does with a
+// knob. sizeof past an int is an error, not a wrapped int, and an enumeration constant of the file is not named as a
+// builtin.
 #include "Compile.h"
 
 #include <catch2/catch_test_macros.hpp>
@@ -65,6 +68,53 @@ TEST_CASE("an operand's own error is the only one: what takes it reports nothing
           == "test.fm:1:42: error: invalid operands to binary expression ('float *' and 'float *')\n");
 }
 
+TEST_CASE("a ?: of two void calls has no value: each use of it is clang's error, as a void call's is",
+          "[codegen][recovery]")
+{
+    // No error is behind it, so nothing may take it silently: each place reports what clang reports there (at the
+    // place FMinus gives that message for a void call too).
+    const std::vector<std::pair<const char*, const char*>> cases{
+        {"float h(int c) { float x = c ? f() : g(); return x; }",
+         "test.fm:2:24: error: initializing 'float' with an expression of incompatible type 'void'\n"},
+        {"float h(int c) { return c ? f() : g(); }",
+         "test.fm:2:18: error: returning 'void' from a function with incompatible result type 'float'\n"},
+        {"float h(int c) { return (c ? f() : g()) + 1.0f; }",
+         "test.fm:2:41: error: invalid operands to binary expression ('void' and 'float')\n"},
+        {"float k(float x) { return x; } float h(int c) { return k(c ? f() : g()); }",
+         "test.fm:2:56: error: passing 'void' to parameter of incompatible type 'float'\n"},
+        {"float h(int c) { float* p = c ? f() : g(); return *p; }",
+         "test.fm:2:25: error: initializing 'float *' with an expression of incompatible type 'void'\n"},
+        {"float h(int c) { return *(c ? f() : g()); }",
+         "test.fm:2:25: error: indirection requires pointer operand ('void' invalid)\n"},
+        {"float h(int c) { float x; x = c ? f() : g(); return x; }",
+         "test.fm:2:29: error: assigning to 'float' from incompatible type 'void'\n"},
+        {"float h(int c) { return -(c ? f() : g()); }",
+         "test.fm:2:25: error: invalid argument type 'void' to unary expression\n"},
+        {"float h(int c, float* a) { return a[c ? f() : g()]; }",
+         "test.fm:2:36: error: array subscript is not an integer\n"},
+        {"float h(int c) { if (c ? f() : g()) return 1.0f; return 0.0f; }",
+         "test.fm:2:24: error: statement requires expression of scalar type ('void' invalid)\n"},
+        {"float h(int c) { while (c ? f() : g()) { } return 0.0f; }",
+         "test.fm:2:27: error: statement requires expression of scalar type ('void' invalid)\n"},
+    };
+    for (const auto& [source, expected] : cases)
+    {
+        INFO(source);
+        CHECK(errorsOf(std::string("void f(void) {} void g(void) {}\n") + source) == expected);
+    }
+
+    // As a statement it is C's: the call the condition picks runs.
+    std::string errors;
+    auto jit = compile("void f(float* p) { *p = 1; } void g(float* p) { *p = 2; }\n"
+                       "float h(int c) { float x = 0; c ? f(&x) : g(&x); return x; }",
+                       &errors);
+    INFO(errors);
+    REQUIRE(jit);
+    CHECK(errors.empty());
+    CHECK(lookup<float(int)>(*jit, "h")(1) == 1.0f);
+    CHECK(lookup<float(int)>(*jit, "h")(0) == 2.0f);
+}
+
 TEST_CASE("a constant condition branches one way: after while (1) without a break, a function needs no return",
           "[codegen][recovery]")
 {
@@ -101,6 +151,53 @@ TEST_CASE("a constant condition branches one way: after while (1) without a brea
     // The branch not taken is still lowered, for its errors.
     CHECK(errorsOf("int f(int n) { if (0) return nope; return n; }")
           == "test.fm:1:30: error: use of undeclared identifier 'nope'\n");
+
+    // A constant of the top level folds, as clang folds a const object's value: its loop is left only by a return.
+    errors.clear();
+    jit = compile("const int RUN = 1;\nconst float ON = 0.5f;\n"
+                  "int run(int n) { while (RUN) { if (n > 3) return n; ++n; } }\n"
+                  "int on(int n) { if (ON) return n; }\n",
+                  &errors);
+    INFO(errors);
+    REQUIRE(jit);
+    CHECK(errors.empty());
+    CHECK(lookup<int(int)>(*jit, "run")(1) == 4);
+    CHECK(lookup<int(int)>(*jit, "on")(7) == 7);
+}
+
+TEST_CASE("a frozen parameter is no constant condition: the program compiles as it does with a knob or a stream",
+          "[codegen][recovery][param]")
+{
+    // Frozen, `on[0]` lowers to `true`, but the tree decides whether a condition is a constant, so the end is reached
+    // under every binding, and every binding gets the error: an if, and a loop that a frozen condition would have made
+    // one only a return leaves.
+    using Kind = fminus::ir::ParamBinding::Kind;
+    const auto bound = [](const char* name, Kind kind, double value) {
+        fminus::ir::Options options;
+        options.parameters = {{name, {kind, value}}};
+        return options;
+    };
+    constexpr const char* kError = "test.fm:1:33: error: non-void function 'M::run' does not return a value\n";
+    for (const char* program : {"module M { param bool on; float run(float x) { if (on[0]) return x; } };",
+                                "module M { param bool on; float run(float x) { while (on[0]) { return x; } } };"})
+    {
+        INFO(program);
+        for (const fminus::ir::Options& options : {bound("M::on", Kind::Knob, 0.0), bound("M::on", Kind::Frozen, 1.0)})
+        {
+            std::string errors;
+            CHECK(compile(program, &errors, options) == nullptr);
+            CHECK(errors == kError);
+        }
+    }
+    // A float's, under each of the three bindings.
+    constexpr const char* kLevel = "module M { param float level; float run(float x) { if (level[0]) return x; } };";
+    for (const fminus::ir::Options& options : {bound("M::level", Kind::Knob, 0.0), bound("M::level", Kind::Stream, 0.0),
+                                               bound("M::level", Kind::Frozen, 0.5)})
+    {
+        std::string errors;
+        CHECK(compile(kLevel, &errors, options) == nullptr);
+        CHECK(errors == "test.fm:1:37: error: non-void function 'M::run' does not return a value\n");
+    }
 }
 
 TEST_CASE("sizeof past the greatest int is an error, not a wrapped int; a module's size is 64 bits",

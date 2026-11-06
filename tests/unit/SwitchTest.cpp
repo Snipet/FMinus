@@ -436,6 +436,17 @@ TEST_CASE("clang's -Wswitch: a switch over an enumerated type, without a default
                     "test.fm:22:13: warning: enumeration value 'Y' not handled in switch [-Wswitch]\n"
                     "test.fm:22:13: note: add missing switch cases\n");
 
+    // A parenthesised value begins at its outermost opening parenthesis, as clang places it, also as an operand.
+    jit = compile("enum E { A, B };\n"
+                  "int f(enum E e) { switch ((e)) { case A: return 1; } switch (((e)) = A) { case A: return 2; } "
+                  "return 0; }",
+                  &errors);
+    REQUIRE(jit);
+    CHECK(errors == "test.fm:2:27: warning: enumeration value 'B' not handled in switch [-Wswitch]\n"
+                    "test.fm:2:27: note: add missing switch cases\n"
+                    "test.fm:2:62: warning: enumeration value 'B' not handled in switch [-Wswitch]\n"
+                    "test.fm:2:62: note: add missing switch cases\n");
+
     // None: a default, every constant, what C promotes (an int's cast, arithmetic, -e, ?:), a constant, an int, an
     // enumeration declared ahead whose constants come after the switch, and a switch whose case is in error.
     jit = compile("enum E { A, B };\n"
@@ -457,6 +468,14 @@ TEST_CASE("clang's -Wswitch: a switch over an enumerated type, without a default
                   &errors);
     REQUIRE(jit);
     CHECK(errors.empty());
+    // Nor a value that folds to a constant, as clang folds a const object's (it says "no case matching constant switch
+    // condition '1'" instead, a warning FMinus does not give): a constant of the top level of the enumerated type.
+    jit = compile("const enum E { A, B, C } SHAPE = B;\n"
+                  "int f() { switch (SHAPE) { case A: return 1; } switch ((SHAPE)) { case C: return 2; } return 0; }",
+                  &errors);
+    REQUIRE(jit);
+    CHECK(errors.empty());
+    CHECK(lookup<int()>(*jit, "f")() == 0);
     CHECK(errorsOf("enum E { A, B };\nint f(enum E e) { switch (e) { case A: return 1; case nope: return 2; } }")
           == "test.fm:2:5: error: non-void function 'f' does not return a value\n"
              "test.fm:2:55: error: use of undeclared identifier 'nope'\n");

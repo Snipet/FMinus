@@ -491,6 +491,10 @@ namespace fminus::ast
         ExprPtr operand;
     };
 
+    // An expression, where the tree places it (an operator written after its first operand at the operator: `a + b` at
+    // `+`), and, when the source parenthesises it, `(e)`, where its outermost opening parenthesis is: the tree keeps no
+    // node for the parentheses, and a diagnostic about the whole expression begins there, as clang's does
+    // (Lowering::begin).
     struct Expr
     {
         SourceLocation location;
@@ -498,6 +502,7 @@ namespace fminus::ast
                      ConditionalExpr, ConstructExpr, MemberExpr, MethodCallExpr, ThisExpr, IncrementExpr, CastExpr,
                      IndexExpr, SizeofExpr>
             node;
+        std::optional<SourceLocation> opening = std::nullopt;
     };
 
     struct Stmt;
@@ -775,7 +780,7 @@ namespace fminus::ast
     template <typename Node>
     ExprPtr makeExpr(SourceLocation location, Node node)
     {
-        return std::make_unique<Expr>(Expr{location, std::move(node)});
+        return std::make_unique<Expr>(Expr{location, std::move(node), std::nullopt});
     }
 
     // The type's name, as clang writes it in its messages: `float`, `poly float`, `const float *`.

@@ -24,7 +24,7 @@ namespace fminus::ir::detail
         const Value elseValue = lower(*conditional.elseValue);
         const ast::Type type = ast::arithmeticOf(mask);
         if (thenValue.failed || elseValue.failed)
-            return poison(type);   // an arm's own error says why (Value)
+            return recovery(type);   // an arm's own error says why (Value)
         ast::Type branches = type;
         if (!commonType(location, thenValue.type, elseValue.type, branches))
             return poison(type);
@@ -190,7 +190,7 @@ namespace fminus::ir::detail
     {
         const Value base = lower(*swizzle.base);
         if (base.failed && !ast::isModule(base.type) && !ast::isVector(base.type))
-            return poison(ast::Type::Float);   // its own error says why (Value)
+            return recovery(ast::Type::Float);   // its own error says why (Value)
         if (ast::isModule(base.type))
         {
             const std::optional<LValue> field = this->field(location, base.ir, *base.type.module, swizzle.name, false);

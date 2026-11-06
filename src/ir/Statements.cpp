@@ -16,8 +16,9 @@ namespace fminus::ir::detail
     // Whether `expr` is a constant expression (C11 6.6): constants, enumeration constants, sizeof, and operators, casts
     // and ?: on constant expressions only, nothing the program computes as it runs. A variable is never one, const or
     // not, as in C (C++ differs), and neither is a parameter, whatever the host's binding: a frozen one folds to a
-    // constant, but the program means the same as with a knob.
-    bool Lowering::isConstant(const ast::Expr& expr) const
+    // constant, but the program means the same as with a knob. `folding` also takes what reads a constant of the top
+    // level (folds()).
+    bool Lowering::isConstant(const ast::Expr& expr, bool folding) const
     {
         return std::visit(
             Overloaded{
@@ -31,30 +32,44 @@ namespace fminus::ir::detail
                     case ast::UnaryOp::Plus:
                     case ast::UnaryOp::Not:
                     case ast::UnaryOp::Complement:
-                        return isConstant(*unary.operand);
+                        return isConstant(*unary.operand, folding);
                     case ast::UnaryOp::Dereference:
                     case ast::UnaryOp::AddressOf:
                         return false;
                     }
                     return false;
                 },
-                [&](const ast::BinaryExpr& binary) { return isConstant(*binary.lhs) && isConstant(*binary.rhs); },
-                [&](const ast::LogicalExpr& logical) { return isConstant(*logical.lhs) && isConstant(*logical.rhs); },
-                [&](const ast::ConditionalExpr& conditional) {
-                    return isConstant(*conditional.condition) && isConstant(*conditional.thenValue)
-                           && isConstant(*conditional.elseValue);
+                [&](const ast::BinaryExpr& binary) {
+                    return isConstant(*binary.lhs, folding) && isConstant(*binary.rhs, folding);
                 },
-                [&](const ast::CastExpr& cast) { return isConstant(*cast.operand); },
+                [&](const ast::LogicalExpr& logical) {
+                    return isConstant(*logical.lhs, folding) && isConstant(*logical.rhs, folding);
+                },
+                [&](const ast::ConditionalExpr& conditional) {
+                    return isConstant(*conditional.condition, folding) && isConstant(*conditional.thenValue, folding)
+                           && isConstant(*conditional.elseValue, folding);
+                },
+                [&](const ast::CastExpr& cast) { return isConstant(*cast.operand, folding); },
                 [&](const ast::ConstructExpr& construct) {
                     for (const ast::ExprPtr& arg : construct.args)
                     {
-                        if (!isConstant(*arg))
+                        if (!isConstant(*arg, folding))
                             return false;
                     }
                     return true;
                 },
-                [&](const ast::MemberExpr& member) { return !member.arrow && isConstant(*member.base); },   // v.x
-                [&](const ast::VariableExpr& variable) { return enumerator(variable.name).has_value(); },
+                [&](const ast::MemberExpr& member) {
+                    return !member.arrow && isConstant(*member.base, folding);   // v.x
+                },
+                [&](const ast::VariableExpr& variable) {
+                    if (enumerator(variable.name))
+                        return true;
+                    // A constant of the top level that is no array: lower() reads it as its initialiser's value.
+                    const Binding* binding = folding ? named(variable.name) : nullptr;
+                    const auto* global =
+                        binding != nullptr ? llvm::dyn_cast_if_present<llvm::GlobalVariable>(binding->slot) : nullptr;
+                    return global != nullptr && !ast::isArray(binding->type) && global->hasInitializer();
+                },
                 [](const ast::IndexExpr&) { return false; },
                 [](const ast::CallExpr&) { return false; },
                 [](const ast::MethodCallExpr&) { return false; },
@@ -63,6 +78,17 @@ namespace fminus::ir::detail
                 [](const ast::IncrementExpr&) { return false; },
             },
             expr.node);
+    }
+
+    // Whether `expr` folds to a constant, as clang folds a condition where it decides what its flow analysis reaches
+    // and whether a switch's value is a constant: a constant expression (isConstant), or one that also reads a
+    // constant of the top level, `const int RUNNING = 1;`, which is its value wherever it is read (Expressions.cpp). On
+    // the tree, never on the IR: a parameter is none, whatever the host binds it to, so that a program compiles the
+    // same, with the same errors and warnings, with a knob, a stream or a frozen value (whose read lowers to a
+    // constant).
+    bool Lowering::folds(const ast::Expr& expr) const
+    {
+        return isConstant(expr, true);
     }
 
     // C11 6.8.5p6: a loop whose controlling expression is not a constant expression, and which does no I/O and
@@ -214,14 +240,18 @@ namespace fminus::ir::detail
             builder_.CreateBr(target);
     }
 
-    // A branch on `condition` to `whenTrue` or `whenFalse`; on a constant (`while (1)`, `if (true)`), to the one it
-    // picks alone, as clang branches on one. The IR folds a constant expression's test against 0 to a constant, so what
-    // only the other edge would reach is reached by nothing: after a `while (1)` without a break, the end of a non-void
-    // function needs no return (Functions.cpp), as clang's CFG finds. The block the branch does not take is still
-    // lowered, for its errors, and the optimiser deletes it.
-    void Lowering::branchOn(llvm::Value* condition, llvm::BasicBlock* whenTrue, llvm::BasicBlock* whenFalse)
+    // A branch on `condition`, the test `test` lowered, to `whenTrue` or `whenFalse`; on a constant (`while (1)`,
+    // `if (true)`), to the one it picks alone, as clang branches on one. Whether it is one is the tree's to say
+    // (folds()), and its value the IR's, which folds a constant's test against 0 to a constant: what only the other
+    // edge would reach is then reached by nothing, so after a `while (1)` without a break the end of a non-void
+    // function needs no return (Functions.cpp), as clang's CFG finds. A frozen parameter's test is a constant in the
+    // IR too, but no constant to the tree: the branch stays, and the program compiles as it does with a knob. The block
+    // the branch does not take is still lowered, for its errors, and the optimiser deletes it.
+    void Lowering::branchOn(const ast::Expr& test, llvm::Value* condition, llvm::BasicBlock* whenTrue,
+                            llvm::BasicBlock* whenFalse)
     {
-        if (const auto* constant = llvm::dyn_cast<llvm::ConstantInt>(condition))
+        const auto* constant = llvm::dyn_cast<llvm::ConstantInt>(condition);
+        if (constant != nullptr && folds(test))
             builder_.CreateBr(constant->isOne() ? whenTrue : whenFalse);
         else
             builder_.CreateCondBr(condition, whenTrue, whenFalse);
@@ -236,7 +266,7 @@ namespace fminus::ir::detail
         llvm::BasicBlock* thenBlock = newBlock("if.then");
         llvm::BasicBlock* elseBlock = branch.elseBranch ? newBlock("if.else") : nullptr;
         llvm::BasicBlock* endBlock = newBlock("if.end");
-        branchOn(condition, thenBlock, elseBlock != nullptr ? elseBlock : endBlock);
+        branchOn(*branch.condition, condition, thenBlock, elseBlock != nullptr ? elseBlock : endBlock);
 
         builder_.SetInsertPoint(thenBlock);
         lowerScoped(*branch.thenBranch);
@@ -262,8 +292,9 @@ namespace fminus::ir::detail
         const llvm::Instruction* entry = builder_.CreateBr(condBlock);
 
         builder_.SetInsertPoint(condBlock);
-        branchOn(convert(lower(*loop.condition), ast::Type::Bool, loop.condition->location, Use::Condition),
-                 bodyBlock, endBlock);
+        branchOn(*loop.condition,
+                 convert(lower(*loop.condition), ast::Type::Bool, loop.condition->location, Use::Condition), bodyBlock,
+                 endBlock);
 
         builder_.SetInsertPoint(bodyBlock);
         breakables_.push_back({Breakable::Kind::Loop, endBlock, condBlock});
@@ -292,7 +323,8 @@ namespace fminus::ir::detail
 
         builder_.SetInsertPoint(condBlock);
         if (loop.condition)
-            branchOn(convert(lower(*loop.condition), ast::Type::Bool, loop.condition->location, Use::Condition),
+            branchOn(*loop.condition,
+                     convert(lower(*loop.condition), ast::Type::Bool, loop.condition->location, Use::Condition),
                      bodyBlock, endBlock);
         else
             builder_.CreateBr(bodyBlock);   // no condition: until a break or a return
@@ -318,8 +350,9 @@ namespace fminus::ir::detail
     // which each label adds its value and its block as the body is lowered (lowerLabel), and whose default is the
     // end, sw.epilog, until a default label replaces it. break goes to sw.epilog, and continue to the loop around.
     // Nothing reaches what the body has before its first label (lowerStatement). An operand with an error of its own
-    // gives the switch no second error (Value). A value of an enumerated type that is no constant, without a default,
-    // gets clang's -Wswitch for the constants no case has (unhandled()).
+    // gives the switch no second error (Value). A value of an enumerated type that does not fold to a constant
+    // (folds(), as clang's check folds it: a constant of the top level is one), without a default, gets clang's
+    // -Wswitch for the constants no case has (unhandled()).
     void Lowering::lowerSwitch(const ast::SwitchStmt& branch)
     {
         const Value value = lower(*branch.value);
@@ -341,15 +374,17 @@ namespace fminus::ir::detail
         if (llvm::BasicBlock* last = &endBlock->getParent()->back(); last != endBlock)
             endBlock->moveAfter(last);   // after the labels' blocks, as clang's
         builder_.SetInsertPoint(endBlock);
-        if (!value.failed && ast::arithmeticOf(value.type) == ast::Type::Int && !isConstant(*branch.value))
+        if (!value.failed && ast::arithmeticOf(value.type) == ast::Type::Int && !folds(*branch.value))
             unhandled(begin(*branch.value), value.type.enumeration, lowered);
     }
 
-    // Where `expr` begins: its first operand's beginning for an operator written after it (`m->mode`, `e = A`, `a[i]`),
-    // as clang places a diagnostic about a whole expression; the tree places those at the operator. The rest begin
-    // where the tree places them.
+    // Where `expr` begins: its opening parenthesis when it has one (`(e)`), and its first operand's beginning for an
+    // operator written after it (`m->mode`, `e = A`, `a[i]`), as clang places a diagnostic about a whole expression;
+    // the tree places those at the operator. The rest begin where the tree places them.
     SourceLocation Lowering::begin(const ast::Expr& expr)
     {
+        if (expr.opening)
+            return *expr.opening;
         const SourceLocation here = expr.location;
         return std::visit(Overloaded{
                               [&](const ast::BinaryExpr& binary) { return begin(*binary.lhs); },
@@ -378,11 +413,12 @@ namespace fminus::ir::detail
     }
 
     // clang's -Wswitch, FMinus's one warning: a switch without a default over a value of an enumerated type (one that
-    // is no constant), whose cases miss some of the enumeration's constants, names them, where the value begins, in
-    // clang's words and with its note, each value by its first constant and in order of value, as clang lists them:
-    // "enumeration value 'C' not handled in switch [-Wswitch]". Nothing when a case is in error, or when the
-    // enumeration has no constants yet (C23 declares one ahead of them, `enum Mode : int;`, and a switch before its
-    // list knows none). clang's other -Wswitch, a case value that is none of the enumeration's, is not FMinus's.
+    // does not fold to a constant), whose cases miss some of the enumeration's constants, names them, where the value
+    // begins, in clang's words and with its note, each value by its first constant and in order of value, as clang
+    // lists them: "enumeration value 'C' not handled in switch [-Wswitch]". Nothing when a case is in error, or when
+    // the enumeration has no constants yet (C23 declares one ahead of them, `enum Mode : int;`, and a switch before
+    // its list knows none). clang's other -Wswitch, a case value that is none of the enumeration's, is not FMinus's;
+    // nor is its warning for a constant value that no case has, "no case matching constant switch condition '1'".
     void Lowering::unhandled(SourceLocation location, int enumeration, const Switch& lowered)
     {
         if (enumeration == 0 || lowered.defaultLabel || lowered.erroneous)
