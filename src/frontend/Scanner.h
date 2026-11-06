@@ -58,9 +58,18 @@ namespace fminus::frontend
         std::set<std::string, std::less<>> read;
         std::vector<OpenInclude> open;
 
-        // The macros defined so far, the host's first, and the conditionals being read, the innermost last.
+        // The macros defined so far, the host's first, and the conditionals being read, the innermost last; and the
+        // work of expanding the macros in the conditions so far (Preprocessor.h's evaluate, which bounds it).
         Macros macros;
         std::vector<Conditional> conditionals;
+        std::size_t expanded = 0;
+
+        // Whether only spaces and comments come before the scanner on its line, where a # begins a directive in C:
+        // FMinus's begins its line (Lexer.l's "#" rules). A line's end makes it true; text makes it false, and so does
+        // each call of the scanner after the first (`started`), which follows a token the parser took. A block comment
+        // keeps it as it was where the comment began, as C reads a # after one.
+        bool lineStart = true;
+        bool started = false;
 
         // Whether the scanner is in a skipped group, where only the conditionals' lines are read.
         bool skipping() const

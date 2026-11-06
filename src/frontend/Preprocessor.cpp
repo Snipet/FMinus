@@ -19,6 +19,12 @@ namespace fminus::frontend
         constexpr std::size_t kMaxTokens = 65536;   // an #if's tokens after expansion: `#define B A A` doubles them
         constexpr int kMaxDepth = 256;              // nested parentheses, operators or macros; clang's bracket depth
 
+        // The work of expanding macros in a compilation's conditions, all of them: the bytes of the values expanded,
+        // and one for each macro, so that one whose value is empty counts too. kMaxTokens bounds a line's tokens, but
+        // `#define C0`, then C1 a thousand C0s, C2 a thousand C1s and C3 a thousand C2s, makes no token at all from
+        // a billion expansions; and a line under both bounds can be repeated.
+        constexpr std::size_t kMaxExpansion = 1 << 20;
+
         bool isSpace(char c)
         {
             return c == ' ' || c == '\t' || c == '\r' || c == '\f' || c == '\v';
@@ -112,9 +118,10 @@ namespace fminus::frontend
         }
 
         // `tokens` into `out` with their macros expanded: a macro's name becomes its value's tokens, expanded in turn,
-        // except inside its own value (`expanding`, C's rule), and defined's operand stays the name it is.
+        // except inside its own value (`expanding`, C's rule), and defined's operand stays the name it is. Each
+        // expansion adds its work to `expanded` (kMaxExpansion).
         void expand(const std::vector<Token>& tokens, const Macros& macros, std::vector<std::string>& expanding,
-                    std::vector<Token>& out)
+                    std::size_t& expanded, std::vector<Token>& out)
         {
             const auto push = [&out](const Token& token) {
                 if (out.size() == kMaxTokens)
@@ -148,10 +155,15 @@ namespace fminus::frontend
                 if (expanding.size() == kMaxDepth)
                     throw PreprocessorError{token.offset, token.length,
                                             "macro expansion nested too deeply: more than 256 macros"};
+                expanded += 1 + macro->second.size();
+                if (expanded > kMaxExpansion)
+                    throw PreprocessorError{token.offset, token.length,
+                                            "macro expansion is too long: the program's conditions expand more than "
+                                            "1048576 bytes of macros"};
                 std::vector<Token> value;
                 lex(macro->second, 0, value, &token);
                 expanding.push_back(token.text);
-                expand(value, macros, expanding, out);
+                expand(value, macros, expanding, expanded, out);
                 expanding.pop_back();
             }
         }
@@ -439,6 +451,14 @@ namespace fminus::frontend
         std::string text(line);
         for (std::size_t i = from; i < text.size();)
         {
+            if (const char quote = text[i]; quote == '"' || quote == '\'')
+            {
+                std::size_t end = i + 1;
+                while (end < text.size() && text[end] != quote)
+                    end += text[end] == '\\' ? 2 : 1;
+                i = std::min(end + 1, text.size());
+                continue;
+            }
             if (text.compare(i, 2, "//") == 0)
             {
                 std::fill(text.begin() + static_cast<std::ptrdiff_t>(i), text.end(), ' ');
@@ -459,14 +479,14 @@ namespace fminus::frontend
         return text;
     }
 
-    std::int64_t evaluate(std::string_view line, std::size_t from, const Macros& macros)
+    std::int64_t evaluate(std::string_view line, std::size_t from, const Macros& macros, std::size_t& expanded)
     {
         std::vector<Token> tokens;
         lex(line, from, tokens, nullptr);
-        std::vector<Token> expanded;
+        std::vector<Token> out;
         std::vector<std::string> expanding;
-        expand(tokens, macros, expanding, expanded);
-        return Evaluator(std::move(expanded), line.size(), macros).run();
+        expand(tokens, macros, expanding, expanded, out);
+        return Evaluator(std::move(out), line.size(), macros).run();
     }
 
     std::string normalisedValue(std::string_view value)

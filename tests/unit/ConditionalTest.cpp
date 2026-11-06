@@ -253,6 +253,13 @@ TEST_CASE("the host's defines are macros from before the first line", "[frontend
         CHECK(fminus::frontend::macroNameError(keyword)
               == "'" + std::string(keyword) + "' cannot be used as a macro name: it is one of FMinus's keywords");
     }
+    // The scanner reads each name, so a keyword is a word its rules read as one, whole: a longer or another word is
+    // a name, and a macro's.
+    for (const char* name : {"Float", "float3", "float2x", "iff", "_if", "params", "modules", "this_", "true1"})
+    {
+        INFO(name);
+        CHECK(fminus::frontend::macroNameError(name) == std::nullopt);
+    }
 }
 
 TEST_CASE("a macro is read only in conditions: its name in code is an error", "[frontend][conditional]")
@@ -387,4 +394,66 @@ TEST_CASE("the directives' errors are clang's, at their places", "[frontend][con
         doubling["M" + std::to_string(i)] = "M" + std::to_string(i - 1) + " + M" + std::to_string(i - 1);
     CHECK(condition("M20", doubling) == "test.fm:1:5: error: macro expansion is too long: more than 65536 tokens\n");
     CHECK(condition("M10 == 1024", doubling) == "yes");
+
+    // Expanding counts its work, not only its tokens: a macro of nothing (`#define C0`, a flag's form) adds no token,
+    // and three levels of a thousand of them would be a billion expansions. The bound is the compilation's, so a line
+    // under it, repeated, reaches it too: there, C2 of a hundred C1s of a hundred C0s, 40300 a line (each value 299
+    // bytes, and one for each macro), past 1048576 in the 27th #if.
+    const std::string tooLong = "error: macro expansion is too long: the program's conditions expand more than 1048576 "
+                                "bytes of macros\n";
+    const auto define = [](int level, int count) {
+        std::string line = "#define C" + std::to_string(level);
+        for (int k = 0; k < count; ++k)
+            line += " C" + std::to_string(level - 1);
+        return line + "\n";
+    };
+    CHECK(parsed("#define C0\n" + define(1, 1000) + define(2, 1000) + define(3, 1000) + "#if C3 + 1\n#endif\n")
+          == "test.fm:5:5: " + tooLong);
+    std::string repeated = "#define C0\n" + define(1, 100) + define(2, 100);
+    for (int k = 0; k < 30; ++k)
+        repeated += "#if C2 + 1\n#endif\n";
+    CHECK(parsed(repeated) == "test.fm:56:5: " + tooLong);
+    CHECK(parsed(std::string(repeated, 0, repeated.find("#if")) + "#if C2 + 1\nfloat f() { return 1; }\n#endif\n")
+          == kOne);
+}
+
+TEST_CASE("a directive is one line, which its # begins: no comment comes before the #, or runs on past the line",
+          "[frontend][conditional]")
+{
+    // C reads a # after a comment that begins its line as a directive. FMinus's begin their lines, so such a # is an
+    // error, in a skipped group as in code: read as a skipped group's text, it would choose another group than C does.
+    const std::string before = "error: a comment before a directive's '#' is not supported: a directive begins its "
+                               "line, after spaces only\n";
+    CHECK(parsed("#if 0\n/* off */ #else\nfloat a(float x) { return x; }\n#endif\nfloat b(float x) { return x; }\n")
+          == "test.fm:2:11: " + before);
+    CHECK(parsed("/* note */ #define DEBUG\n") == "test.fm:1:12: " + before);
+    CHECK(parsed("  /* a\n  b */ #ifdef DEBUG\n#endif\n") == "test.fm:2:8: " + before);   // the comment began its line
+    CHECK(parsed("#if 0\n\f/**/\v#else\n#endif\n") == "test.fm:2:7: " + before);   // C's other spaces
+    CHECK(parsed("#include \"note.fm\"\n", {}, {{"note.fm", "/* a note */ #define DEBUG\n"}})
+          == "In file included from test.fm:1:\nnote.fm:1:14: " + before);
+    // After text, a # is text in a skipped group, as in C, a comment between or not (and in code, an error).
+    CHECK(parsed("#if 0\nx /* a\n b */ #else\n#endif\nfloat f() { return 1; }\n") == kOne);
+    CHECK(parsed("float f() { return 1; } /* c */ #define X\n") == "test.fm:1:33: error: unexpected character '#'\n");
+    // A comment between the # and the directive's name is C's: spaces.
+    CHECK(parsed("#if 0\n#/* c */else\nfloat f() { return 1; }\n#endif\n") == kOne);
+
+    // A /* comment in a directive's line ends there, whatever the directive and in any group. C would carry the line
+    // on to the comment's end, and read the lines between as the comment: here, #else and #endif in the first, and in
+    // the second the #endif, so that C's #if 0 is left open.
+    const std::string open = "error: a directive's /* comment must end on its line\n";
+    CHECK(parsed("#if 0\n#pragma note /*\n#else\n#endif\n#if 1 //*/\nfloat a(float x) { return x; }\n#endif\n")
+          == "test.fm:2:14: " + open);
+    CHECK(parsed("#if 0\n#if X /*\n#endif */\n#else\nfloat a(float x) { return x; }\n#endif\n")
+          == "test.fm:2:7: " + open);
+    CHECK(parsed("#pragma note /*\nfloat a(float x) { return x; } */\n") == "test.fm:1:14: " + open);
+    CHECK(parsed("#if 1\nfloat f() { return 1; }\n#elif X /*\n#endif */\n#endif\n") == "test.fm:3:9: " + open);
+    CHECK(parsed("#if 0\n#if 1\n#else /*\n#endif\n */\n#endif\n") == "test.fm:3:7: " + open);
+    CHECK(parsed("#include \"debug.fm\" /* open\n", {}, {{"debug.fm", ""}}) == "test.fm:1:21: " + open);
+    CHECK(parsed("# /* open\n") == "test.fm:1:3: " + open);
+    // A quote's text is no comment, as in C: a host's #pragma lines may quote a /*. Left open, a quote runs to the
+    // line's end, as clang reads one.
+    CHECK(parsed("#pragma panel label x \"a /* b\"\nfloat f() { return 1; }\n") == kOne);
+    CHECK(parsed("#if 0\n#pragma panel label x \"a /* b\"\n#else\nfloat f() { return 1; }\n#endif\n") == kOne);
+    CHECK(parsed("#pragma note 'a /* b\nfloat f() { return 1; }\n") == kOne);
+    CHECK(parsed("#define X 1 // it's\n#if X\nfloat f() { return 1; }\n#endif\n") == kOne);
 }

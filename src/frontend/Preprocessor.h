@@ -33,15 +33,18 @@ namespace fminus::frontend
     };
 
     // The directive's line from `from` on, its comments made spaces, as C's translation reads a line before the
-    // directive does (the bytes keep their places). A /* comment must end on the line: a directive ends at its line's
-    // end. Throws PreprocessorError.
+    // directive does (the bytes keep their places). A string literal's or a character constant's text is no comment:
+    // a quote runs to its match (a \ escaping the byte after it) or, left open, to the line's end, as clang reads one.
+    // A /* comment must end on the line: a directive ends at its line's end. Throws PreprocessorError.
     std::string withoutComments(std::string_view line, std::size_t from);
 
     // The value of the expression from `from` to the end of `line` (an #if's or an #elif's, after withoutComments):
     // its macros expanded, each to its value, C's way (a macro is not expanded inside its own value). The operands of
-    // && and || and the branch of ?: that are not computed raise no error, as in C. Throws PreprocessorError: a
-    // token in a macro's value is at fault at the macro's name.
-    std::int64_t evaluate(std::string_view line, std::size_t from, const Macros& macros);
+    // && and || and the branch of ?: that are not computed raise no error, as in C. `expanded` counts the work of
+    // expanding across a compilation's conditions, the bytes of the values expanded and one for each macro, which
+    // this adds to: past 1048576, an error, so that no program's conditions, however many, take long. Throws
+    // PreprocessorError: a token in a macro's value is at fault at the macro's name.
+    std::int64_t evaluate(std::string_view line, std::size_t from, const Macros& macros, std::size_t& expanded);
 
     // A value as Macros keeps it: trimmed, each run of spaces one space.
     std::string normalisedValue(std::string_view value);
