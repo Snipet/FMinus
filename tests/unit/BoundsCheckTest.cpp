@@ -327,6 +327,60 @@ TEST_CASE("a module's fields, an array of modules and a ring buffer's index are 
     }
 }
 
+TEST_CASE("a method called through a pointer into an array of modules is called on one of its modules", "[bounds]")
+{
+    // (voices + n)->bump() and (&voices[n])->bump() may form voices + 2, one past the end, but not call bump on it,
+    // which would write guard: the call is checked as an element, as (voices + n)->level is. Each check of a call is
+    // at the method's name, where the call's errors are.
+    const char* const bank = "module Voice\n"
+                             "{\n"
+                             "    float level;\n"
+                             "    void bump() { level = level + 1.0f; }\n"
+                             "};\n"
+                             "module Bank\n"
+                             "{\n"
+                             "    Voice voices[2];\n"
+                             "    float guard;\n"
+                             "    void viaArrow(int n) { (voices + n)->bump(); }\n"
+                             "    void viaAddress(int n) { (&voices[n])->bump(); }\n"
+                             "    void viaField(int n) { (voices + n)->level = 1.0f; }\n"
+                             "    void viaElement(int n) { voices[n].bump(); }\n"
+                             "};\n";
+    for (int level = 0; level <= 3; ++level)
+    {
+        INFO("-O" << level);
+        const Checked checked = compileAt(bank, level);
+        // Bank is { Voice voices[2]; float guard; }, three floats.
+        const char* const names[] = {"Bank::viaArrow", "Bank::viaAddress", "Bank::viaField", "Bank::viaElement"};
+        const char* const expected[] = {
+            "test.fm:10:42: index 2 out of bounds for 'voices' of type 'Voice[2]'",
+            "test.fm:11:44: index 2 out of bounds for 'voices' of type 'Voice[2]'",
+            "test.fm:12:40: index 2 out of bounds for 'voices' of type 'Voice[2]'",
+            "test.fm:13:36: index 2 out of bounds for 'voices' of type 'Voice[2]'",
+        };
+        for (std::size_t way = 0; way < std::size(names); ++way)
+        {
+            INFO(names[way]);
+            auto* call = lookup<void(float*, int)>(*checked.jit, names[way]);
+            std::array<float, 3> instance{};
+            call(instance.data(), 1);
+            CHECK(instance == std::array<float, 3>{0.0f, 1.0f, 0.0f});
+            CHECK(checked.record().site == 0);
+            call(instance.data(), 2);   // voices[2] would be guard
+            CHECK(instance == std::array<float, 3>{0.0f, 1.0f, 0.0f});
+            CHECK(checked.failed() == expected[way]);
+            CHECK(checked.record().index == 2);
+            checked.clear();
+        }
+        // Further than one past the end, the pointer formed fails first.
+        auto* viaArrow = lookup<void(float*, int)>(*checked.jit, "Bank::viaArrow");
+        std::array<float, 3> instance{};
+        viaArrow(instance.data(), 3);
+        CHECK(checked.failed() == "test.fm:10:36: pointer offset 3 out of bounds for 'voices' of type 'Voice[2]'");
+        checked.clear();
+    }
+}
+
 TEST_CASE("a poly_load or poly_store checks every lane it reaches, or with a mask each lane the mask takes",
           "[bounds]")
 {

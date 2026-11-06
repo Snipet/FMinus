@@ -147,12 +147,12 @@ TEST_CASE("functions compute what they say", "[codegen]")
   its index, and nothing the source does after the failed access has happened (a write after the call,
   `BoundsCheckTest.cpp` shows at each level). That a caller unwinds after its call is visible at `-O0`, where calls stay
   calls; from `-O1` the inliner makes most of them one function. A test of a check's message compares it whole, file,
-  line and column included (the column is the subscript's `[`, a pointer's `+` or `-`, a dereference's `*`). A loop the
-  check bounds may be unrolled whole, with no loop left to count, so a test of the checks and the loop budget together
-  indexes by what the optimiser cannot bound. A parallel region's failing part is whichever ran first: a test checks the
-  index is one of theirs. The record is the program's global, `fminus_rt_bounds`: `lookup<fminus_rt_bounds_state>(*jit,
-  ...)` reads and clears it as a host does; `opt::boundsSites(module)`, read before the JIT takes the module, says what
-  each number means.
+  line and column included (the column is the subscript's `[`, a pointer's `+` or `-`, a dereference's `*`, a field's
+  `->`, a method call's name). A loop the check bounds may be unrolled whole, with no loop left to count, so a test of
+  the checks and the loop budget together indexes by what the optimiser cannot bound. A parallel region's failing part
+  is whichever ran first: a test checks the index is one of theirs. The record is the program's global,
+  `fminus_rt_bounds`: `lookup<fminus_rt_bounds_state>(*jit, ...)` reads and clears it as a host does;
+  `opt::boundsSites(module)`, read before the JIT takes the module, says what each number means.
 
 ## lit and FileCheck
 

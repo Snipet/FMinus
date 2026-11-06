@@ -533,6 +533,8 @@ namespace fminus::ir::detail
                                     + " is not a structure or union");
                 return poison(ast::Type::Float);
             }
+            if (pointer.extent != nullptr)   // (voices + v)->tick(): one of the array's modules, as (voices + v)->y is
+                checkBounds(location, *pointer.extent, elementOf(*pointer.extent, nullptr), 1);
             module = pointer.type.module;
             address = pointer.ir;
             isConst = pointer.type.pointeeConst;

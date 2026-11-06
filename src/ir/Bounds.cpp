@@ -7,11 +7,14 @@
 //   - p + i and p - i (pointerArithmetic, Memory.cpp) and &p[i] (lowerAddressOf) carry it on, i elements on
 //     (movedExtent), and are checked as pointers formed, which may point to any of its elements or one past the last,
 //     as C allows (width 0);
-//   - p[i], *p and p->y (element() and lvalue(), Memory.cpp) are checked as elements, one of its own (width 1);
+//   - p[i], *p and p->y (element() and lvalue(), Memory.cpp) and p->tick() (lowerMethodCall, Modules.cpp) are checked
+//     as elements, one of its own (width 1);
 //   - poly_load(p) and poly_store(p, v) (lowerPolyMemory, Calls.cpp) as every lane they reach (width: the poly lanes),
 //     or, with a mask, as each lane the mask takes (checkLanes).
 // Anything else carries none, and its accesses are not checked: a pointer a variable, a field or a parameter holds
-// (`float* p = buf;` is unchecked through p), what a call returns or a ?: chooses, a void*.
+// (`float* p = buf;` is unchecked through p), what a call returns or a ?: chooses, a void*. Nor are fft_forward's and
+// fft_inverse's buffers (lowerFft, Calls.cpp), which the runtime reads and writes as far as the plan's size, known only
+// when it runs.
 //
 // A check compares the element's index, an i64 from the array's first (a negative one is a huge unsigned number),
 // against the extent, unsigned, and branches, likely in bounds, to the code after it; the other side calls
