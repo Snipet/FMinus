@@ -266,7 +266,7 @@
 									{:else if r.outcome.kind === 'include'}
 										<span>a directive: <code>#include "file"</code> reads the file from here; <code>#if</code>, <code>#ifdef</code>, <code>#else</code>, <code>#endif</code> and the other conditionals choose the groups read, and a skipped group's lines are skipped unread; <code>#define</code> and <code>#undef</code> make a macro for them; <code>#pragma</code> is ignored</span>
 									{:else if r.outcome.kind === 'error'}
-										<span class="error">error: {r.outcome.message}</span>
+										{#if r.outcome.otherwise}<span class="muted">skipped, or </span>{/if}<span class="error">error: {r.outcome.message}</span>
 									{:else if r.outcome.kind === 'begin'}
 										<span>enters {#each r.outcome.conditions as c, k (c)}{#if k}<span class="muted"> or </span>{/if}<code>{c}</code>{/each}</span>
 									{:else}
