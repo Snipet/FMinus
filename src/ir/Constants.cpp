@@ -169,43 +169,132 @@ namespace fminus::ir::detail
         }
     }
 
-    // The array `name` declares, `type` (an array, whose count the tree leaves at 0), with its size worked out: an
-    // integer constant expression from 1 to 2^30, or, for `[]`, the length of its list (`list`, null without one).
-    // Clang's errors, and FMinus's where C would allow more: a size of 0 (a GNU extension), one over 2^30, a size no
-    // constant (C's variable length array). After an error the array has its list's length, or one element without a
-    // list, so neither the list nor the array's uses report more.
+    // The array `name` declares, `type` (an array, whose counts the tree leaves at 0), with its size worked out: an
+    // integer constant expression from 1 to 2^30, or, for `[]`, as many elements as its list reaches (`listed`, the
+    // declaration, when it has a list; placeList, Memory.cpp). A 2-D array's rows' size, `rowSize`, is one too, which
+    // C does not let `[]` leave out; its list then reaches as many rows as it starts, and its elements, rows times
+    // their size, are 2^30 at most. Clang's errors, and FMinus's where C would allow more: a size of 0 (a GNU
+    // extension), one over 2^30, a size no constant (C's variable length array). After an error the array has as many
+    // elements as its list reaches, or one without a list, so neither the list nor the array's uses report more. A
+    // row whose size is in error, or missing, is as wide as the list's widest braced row (one element without one),
+    // and the array has as many rows as written, or as its list reaches with them when that is more: the row's error
+    // is the declaration's only one, as clang's type is invalid after it, and nothing measured against a row the array
+    // does not have (a list's excess, the size a list gives) is reported.
     ast::Type Lowering::sized(SourceLocation location, const std::string& name, ast::Type type, const ast::Expr* size,
-                              const std::vector<ast::ExprPtr>* list)
+                              const ast::Expr* rowSize, const ast::DeclStmt* listed)
     {
         constexpr std::int64_t kMost = std::int64_t{1} << 30;
-        const bool listed = list != nullptr && !list->empty() && static_cast<std::int64_t>(list->size()) <= kMost;
-        type.count = listed ? static_cast<int>(list->size()) : 1;
+        const bool rows = ast::hasRows(type);
+        bool rowFailed = false;
+        if (rows)
+        {
+            std::optional<std::int32_t> row;
+            if (rowSize == nullptr)
+                error(location,
+                      "array has incomplete element type " + quoted(ast::typeName(ast::elementOf(type)) + "[]"));
+            else
+                row = arraySize(name, *rowSize);
+            rowFailed = !row;
+            type.rowCount = row.value_or(1);
+            if (rowFailed && listed != nullptr)
+            {
+                for (const ast::Brace& brace : listed->braces)
+                {
+                    if (brace.depth == 1)   // a row's, `{1, 2}`
+                        type.rowCount = static_cast<int>(
+                            std::clamp<std::uint64_t>(brace.count, static_cast<std::uint64_t>(type.rowCount), kMost));
+                }
+            }
+        }
+        const std::uint64_t width = rows ? static_cast<std::uint64_t>(type.rowCount) : 1;   // elements an entry has
+        // How many entries (elements, or rows) the list reaches, placed as C places it (its errors are reported
+        // where it is lowered); 0 without one.
+        std::uint64_t reach = 0;
+        bool placed = true;
+        if (listed != nullptr)
+        {
+            ast::Type unbounded = type;
+            unbounded.count = 0;
+            const Placed list = placeList(unbounded, *listed, false);
+            reach = (list.reach + width - 1) / width;
+            placed = list.ok;
+        }
+        const bool fits = reach > 0 && reach * width <= static_cast<std::uint64_t>(kMost);
+        type.count = fits ? static_cast<int>(reach) : 1;
+        if (rowFailed)
+        {
+            if (const std::optional<std::int32_t> count = size != nullptr ? arraySize(name, *size) : std::nullopt)
+                type.count = static_cast<int>(std::min(std::max(static_cast<std::uint64_t>(*count), fits ? reach : 0),
+                                                       static_cast<std::uint64_t>(kMost) / width));
+            return type;
+        }
         if (size == nullptr)
         {
-            if (list == nullptr)
+            if (listed == nullptr)
                 error(location, "definition of variable with array type needs an explicit size or an initializer");
-            else if (list->empty())
+            else if (reach == 0 && placed)
                 error(location, "zero size arrays are not allowed");
-            else if (!listed)
+            else if (!fits && placed)
                 error(location, "array is too large: FMinus's arrays have at most 2^30 elements");
             return type;
         }
-        const std::optional<Folded> folded = fold(*size, true);
-        if (!folded)
+        const std::optional<std::int32_t> count = arraySize(name, *size);
+        if (!count)
             return type;
-        if (folded->type == ast::Type::Float)
-            error(size->location, "size of array has non-integer type 'float'");
+        if (static_cast<std::uint64_t>(*count) * width > static_cast<std::uint64_t>(kMost))
+            error(size->location, "array is too large: FMinus's arrays have at most 2^30 elements, and this one has "
+                                      + std::to_string(static_cast<std::uint64_t>(*count) * width));
+        else
+            type.count = *count;
+        return type;
+    }
+
+    // The array a declaration declares, `type` (its tree's, or the stand-in after an error), sized: by its sizes, or
+    // its list (sized). One initialised with `= expr` and no size has one element (and a row of one), and the error
+    // its initialiser reports.
+    ast::Type Lowering::declaredArray(SourceLocation location, const ast::DeclStmt& decl, ast::Type type)
+    {
+        if (decl.size == nullptr && decl.init)
+        {
+            type.count = 1;
+            if (ast::hasRows(type))
+                type.rowCount = 1;
+            return type;
+        }
+        return sized(location, decl.name, type, decl.size.get(), decl.rowSize.get(), decl.hasList ? &decl : nullptr);
+    }
+
+    // An array of `array`'s shape whose elements are floats: what a declaration whose elements' type was refused
+    // declares instead, so that its uses report no more errors.
+    ast::Type Lowering::floatsLike(ast::Type array)
+    {
+        if (ast::hasRows(array))
+            return ast::Type::arrayOf(ast::Type::arrayOf(ast::Type::Float, array.rowCount), array.count);
+        return ast::Type::arrayOf(ast::Type::Float, array.count);
+    }
+
+    // An array's size as written, `size`, of the array `name` (none for a type's, sizeof(float[N])): an integer
+    // constant expression from 1 to 2^30, or nothing after its error.
+    std::optional<std::int32_t> Lowering::arraySize(const std::string& name, const ast::Expr& size)
+    {
+        constexpr std::int64_t kMost = std::int64_t{1} << 30;
+        const std::optional<Folded> folded = fold(size, true);
+        if (!folded)
+            return std::nullopt;
+        if (ast::isFloating(folded->type))
+            error(size.location, "size of array has non-integer type " + quoted(ast::typeName(folded->type)));
         else if (folded->floating)   // an int a floating constant took part in, as (1.5f < 2)
             notConstant(*folded->floating);
         else if (folded->value < 0)
-            error(size->location, quoted(name) + " declared as an array with a negative size");
+            error(size.location, name.empty() ? std::string("array size is negative")
+                                              : quoted(name) + " declared as an array with a negative size");
         else if (folded->value == 0)
-            error(size->location, "zero size arrays are not allowed");
+            error(size.location, "zero size arrays are not allowed");
         else if (folded->value > kMost)
-            error(size->location, "array is too large: FMinus's arrays have at most 2^30 elements");
+            error(size.location, "array is too large: FMinus's arrays have at most 2^30 elements");
         else
-            type.count = folded->value;
-        return type;
+            return folded->value;
+        return std::nullopt;
     }
 
     // A function's parameters declared as arrays, `float x[N]`: pointers, as in C, whose sizes C still checks, as the
@@ -218,7 +307,7 @@ namespace fminus::ir::detail
         {
             if (param.size != nullptr)
                 sized(param.location, param.name, ast::Type::arrayOf(ast::pointee(param.type), 0), param.size.get(),
-                      nullptr);
+                      nullptr, nullptr);
             if (!param.name.empty())
                 scopes_.back().try_emplace(param.name, Binding{nullptr, param.isConst, param.type, param.location});
         }
@@ -258,6 +347,7 @@ namespace fminus::ir::detail
     {
         const ast::DeclStmt& decl = constant.declaration;
         const SourceLocation location = constant.location;
+        refuseAttributes(decl);
         if (!decl.isConst)
             error(location, "FMinus has no variables at the top level: declare " + quoted(decl.name)
                                 + " const, a constant of the program, or keep it in a module");
@@ -267,28 +357,30 @@ namespace fminus::ir::detail
             error(location, "variable has incomplete type 'void'");
             type = ast::Type::Float;   // so its uses report no more errors
         }
-        if (ast::isModule(type) || (ast::isArray(type) && type.pointee == ast::Kind::Module))
+        if (ast::isModule(type) || (ast::isArray(type) && ast::isModule(ast::elementOf(type))))
         {
             error(location, "a module is no constant of the top level: its fields start at 0, and only its methods set "
                             "them");
-            type = ast::isArray(type) ? ast::Type::arrayOf(ast::Type::Float, 0) : ast::Type::Float;
+            type = ast::isArray(type) ? floatsLike(type) : ast::Type::Float;
         }
-        if (ast::isArray(type) && decl.size == nullptr && decl.init)
-            type.count = 1;   // its initialiser's error says why
-        else if (ast::isArray(type))
-            type = sized(location, decl.name, type, decl.size.get(), decl.hasList ? &decl.list : nullptr);
+        if (ast::isArray(type))
+            type = declaredArray(location, decl, type);
         if (!checkType(location, type))
-            type = ast::isArray(type) ? ast::Type::arrayOf(ast::Type::Float, type.count)
-                                      : ast::Type::pointerTo(ast::Kind::Float, type.pointeeConst);
+            type = ast::isArray(type) ? floatsLike(type) : ast::Type::pointerTo(ast::Kind::Float, type.pointeeConst);
         if (const std::uint64_t bytes =
                 ast::isArray(type) ? module_.getDataLayout().getTypeAllocSize(typeOf(type)).getFixedValue() : 0;
             bytes > kMaxTableBytes)
         {
             error(location, "array is too large for a constant: FMinus's constants of the top level hold at most "
                             "1 MiB, and this one holds " + std::to_string(bytes) + " bytes");
-            type.count = std::max(1, static_cast<int>(std::min<std::size_t>(decl.list.size(), 1u << 30)));
+            // As many elements (or rows) as its list reaches, so that the list reports no more.
+            const std::uint64_t width = ast::hasRows(type) ? static_cast<std::uint64_t>(type.rowCount) : 1;
+            ast::Type unbounded = type;
+            unbounded.count = 0;
+            const std::uint64_t reach = (placeList(unbounded, decl, false).reach + width - 1) / width;
+            type.count = static_cast<int>(std::clamp<std::uint64_t>(reach, 1, std::uint64_t{1} << 30));
         }
-        const ast::Type element = ast::isArray(type) ? ast::pointee(type) : type;
+        const ast::Type element = ast::isArray(type) ? ast::elementOf(type) : type;
 
         // The initialiser's values, lowered and converted where a function's would be.
         llvm::Function* last = module_.empty() ? nullptr : &module_.getFunctionList().back();
@@ -299,19 +391,24 @@ namespace fminus::ir::detail
         function_ = &topLevel_;
         const std::size_t reported = diagnostics_.errors().size();
         std::vector<std::pair<llvm::Value*, SourceLocation>> values;
+        std::vector<std::uint64_t> places;   // an array's: each value's element, from the first (placeList)
         if (ast::isArray(type) && decl.init)
             error(location, "array initializer must be an initializer list");
-        else if (ast::isArray(type) && decl.list.size() > static_cast<std::size_t>(type.count))
-            error(location, "excess elements in array initializer");
         else if (ast::isArray(type))
         {
-            for (const ast::ExprPtr& item : decl.list)
-                values.emplace_back(convert(lower(*item), element, item->location, Use::Initializing), item->location);
+            const Placed placed = placeList(type, decl, true);
+            for (const auto& [at, item] : placed.values)
+            {
+                values.emplace_back(convert(lowerAs(*item, element), element, item->location, Use::Initializing),
+                                    item->location);
+                places.push_back(at);
+            }
         }
         else if (decl.hasList)
             error(location, "FMinus takes an initializer list for an array only");
         else if (decl.init)
-            values.emplace_back(convert(lower(*decl.init), type, location, Use::Initializing), decl.init->location);
+            values.emplace_back(convert(lowerAs(*decl.init, type), type, location, Use::Initializing),
+                                decl.init->location);
         std::vector<llvm::Constant*> constants;
         for (const auto& [value, where] : values)
         {
@@ -335,7 +432,12 @@ namespace fminus::ir::detail
 
         llvm::Constant* contents = nullptr;
         if (ast::isArray(type))
-            contents = tableContents(llvm::cast<llvm::ArrayType>(typeOf(type)), std::move(constants));
+        {
+            std::vector<std::pair<std::uint64_t, llvm::Constant*>> given;
+            for (std::size_t i = 0; i < constants.size(); ++i)
+                given.emplace_back(places[i], constants[i]);
+            contents = tableOf(type, given);
+        }
         else
             contents = constants.empty() ? llvm::Constant::getNullValue(typeOf(type)) : constants.front();
         const bool builtin = isBuiltinName(decl.name);
@@ -362,9 +464,10 @@ namespace fminus::ir::detail
         const std::optional<Folded> folded = fold(expr, true);
         if (!folded)
             return std::nullopt;
-        if (folded->type == ast::Type::Float)
+        if (ast::isFloating(folded->type))
         {
-            error(expr.location, "integer constant expression must have integer type, not 'float'");
+            error(expr.location, "integer constant expression must have integer type, not "
+                                     + quoted(ast::typeName(folded->type)));
             return std::nullopt;
         }
         if (folded->floating)   // an int that a floating constant took part in, as 1.5f < 2 or !1.5f
@@ -410,8 +513,8 @@ namespace fminus::ir::detail
                     const std::optional<Value> value = lowered([&] { return lowerNumber(expr.location, number); });
                     if (!value)
                         return std::nullopt;
-                    if (value->type == ast::Type::Float)
-                        return Folded{0, ast::Type::Float, expr.location};
+                    if (ast::isFloating(value->type))
+                        return Folded{0, value->type, expr.location};
                     return Folded{static_cast<std::int32_t>(llvm::cast<llvm::ConstantInt>(value->ir)->getSExtValue()),
                                   ast::Type::Int, std::nullopt};
                 },
@@ -445,14 +548,15 @@ namespace fminus::ir::detail
                     const std::optional<Folded> operand = fold(*unary.operand, evaluated);
                     if (!operand)
                         return std::nullopt;
-                    if (operand->type == ast::Type::Float && unary.op == ast::UnaryOp::Complement)
+                    if (ast::isFloating(operand->type) && unary.op == ast::UnaryOp::Complement)
                     {
-                        error(expr.location, "invalid argument type 'float' to unary expression");
+                        error(expr.location, "invalid argument type " + quoted(ast::typeName(operand->type))
+                                                 + " to unary expression");
                         return std::nullopt;
                     }
-                    const ast::Type type = unary.op == ast::UnaryOp::Not ? ast::Type::Bool
-                                           : operand->type == ast::Type::Float ? ast::Type::Float
-                                                                               : ast::Type::Int;
+                    const ast::Type type = unary.op == ast::UnaryOp::Not       ? ast::Type::Bool
+                                           : ast::isFloating(operand->type) ? operand->type
+                                                                            : ast::Type::Int;
                     if (operand->floating)
                         return Folded{0, type, operand->floating};
                     const std::int64_t x = operand->value;   // a bool's is 0 or 1, an int's own
@@ -503,11 +607,13 @@ namespace fminus::ir::detail
                         fold(*conditional.elseValue, evaluated && known && !truth);
                     if (!condition || !thenValue || !elseValue)
                         return std::nullopt;
-                    // C's usual arithmetic conversions: two bools give a bool, a float anywhere a float
+                    // C's usual arithmetic conversions: two bools give a bool, a double anywhere a double, a float
+                    // anywhere else a float
                     const ast::Type type =
-                        thenValue->type == ast::Type::Float || elseValue->type == ast::Type::Float ? ast::Type::Float
-                        : thenValue->type == ast::Type::Bool && elseValue->type == ast::Type::Bool ? ast::Type::Bool
-                                                                                                   : ast::Type::Int;
+                        thenValue->type == ast::Type::Double || elseValue->type == ast::Type::Double ? ast::Type::Double
+                        : thenValue->type == ast::Type::Float || elseValue->type == ast::Type::Float ? ast::Type::Float
+                        : thenValue->type == ast::Type::Bool && elseValue->type == ast::Type::Bool   ? ast::Type::Bool
+                                                                                                     : ast::Type::Int;
                     for (const std::optional<SourceLocation>& floating :
                          {condition->floating, thenValue->floating, elseValue->floating})
                     {
@@ -517,12 +623,12 @@ namespace fminus::ir::detail
                     return Folded{truth ? thenValue->value : elseValue->value, type, std::nullopt};
                 },
                 [&](const ast::CastExpr& cast) -> std::optional<Folded> {
-                    if (cast.type == ast::Type::Float)
+                    if (ast::isFloating(cast.type))
                     {
                         const std::optional<Folded> operand = fold(*cast.operand, evaluated);
                         if (!operand)
                             return std::nullopt;
-                        return Folded{0, ast::Type::Float, operand->floating ? operand->floating : expr.location};
+                        return Folded{0, cast.type, operand->floating ? operand->floating : expr.location};
                     }
                     // A floating constant as the cast's own operand is C's one place for one: (int) truncates toward
                     // zero, and a value out of an int's range makes no constant; (bool) is != 0.
@@ -532,7 +638,7 @@ namespace fminus::ir::detail
                             lowered([&] { return lowerNumber(cast.operand->location, *number); });
                         if (!value)
                             return std::nullopt;
-                        if (value->type == ast::Type::Float)
+                        if (ast::isFloating(value->type))
                         {
                             const llvm::APFloat& floating = llvm::cast<llvm::ConstantFP>(value->ir)->getValueAPF();
                             if (cast.type == ast::Type::Bool)
@@ -569,19 +675,23 @@ namespace fminus::ir::detail
     }
 
     // A binary operator on two constants, as arithmetic() computes it on ints. The bitwise operators take ints, as
-    // binary()'s do; a float anywhere else makes a float, or a bool that is no constant (a comparison).
+    // binary()'s do; a float or a double anywhere else makes one (a double where either is), or a bool that is no
+    // constant (a comparison).
     std::optional<Lowering::Folded> Lowering::foldBinary(SourceLocation location, ast::BinaryOp op, Folded lhs,
                                                          Folded rhs, bool evaluated)
     {
-        const bool floats = lhs.type == ast::Type::Float || rhs.type == ast::Type::Float;
+        const bool floats = ast::isFloating(lhs.type) || ast::isFloating(rhs.type);
         if (isBitwise(op) && floats)
         {
             error(location, "invalid operands to binary expression (" + quoted(ast::typeName(lhs.type)) + " and "
                                 + quoted(ast::typeName(rhs.type)) + ")");
             return std::nullopt;
         }
-        const ast::Type type = isComparison(op) ? ast::Type::Bool : floats ? ast::Type::Float : ast::Type::Int;
-        if (lhs.floating || rhs.floating)   // a Float always has one
+        const ast::Type type = isComparison(op)                                                  ? ast::Type::Bool
+                               : lhs.type == ast::Type::Double || rhs.type == ast::Type::Double ? ast::Type::Double
+                               : floats                                                         ? ast::Type::Float
+                                                                                                : ast::Type::Int;
+        if (lhs.floating || rhs.floating)   // a Float or a Double always has one
             return Folded{0, type, lhs.floating ? lhs.floating : rhs.floating};
         const std::int64_t a = lhs.value;
         const std::int64_t b = rhs.value;

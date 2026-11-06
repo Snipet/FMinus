@@ -223,12 +223,12 @@ TEST_CASE("a const array whose list is not all constants is a local, its list co
                    "    const bool d[2] = {true};\n"
                    "    return a[0] + b[0] + c[i];\n"
                    "}\n")
-          == "test.fm:3:17: error: excess elements in array initializer\n"
+          == "test.fm:3:31: error: excess elements in array initializer\n"
              "test.fm:4:17: error: array initializer must be an initializer list\n"
              "test.fm:6:10: error: cannot assign to variable 'c' with const-qualified type 'const float[2]'\n"
              "test.fm:7:12: error: initializing 'float *' with an expression of type 'const float *' discards "
              "qualifiers\n"
              "test.fm:8:7: error: array type 'float[2]' is not assignable\n"
-             "test.fm:9:16: error: FMinus has arrays of float, int, float2, float4, float8 and modules, not of "
+             "test.fm:9:16: error: FMinus has arrays of float, double, int, float2, float4, float8 and modules, not of "
              "'bool'\n");
 }

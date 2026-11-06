@@ -9,11 +9,13 @@
 //
 // A function's C++ type is its FMinus declaration's C type, and FMinus checks nothing at this boundary: a Signature
 // that does not match the declaration is undefined behaviour. Every function has C's calling convention and its own
-// name, unmangled.
+// name, unmangled. A host that learns a function's signature only as it runs calls it by name instead, through call(),
+// which checks the arguments against the declaration (Callable, below).
 //
 //   FMinus                         C++
-//   float, int, bool, void         float, int, bool, void
-//   float*, const int*, void*, ... the same pointer (restrict is a promise to FMinus's optimiser, not a type)
+//   float, double, int, bool, void float, double, int, bool, void
+//   float*, const int*, double*,   the same pointer (restrict is a promise to FMinus's optimiser, not a type)
+//   void*, ...
 //   float2, float4                 clang's float __attribute__((ext_vector_type(2))), (4)
 //   float8                         none: the C ABI passes it in memory, FMinus in registers (docs/simd.md); keep it
 //                                  inside FMinus
@@ -38,8 +40,8 @@
 // and the region has finished when the statement has. Running one allocates nothing and takes no lock, so a
 // nonblocking process() may have them (Options::threads limits them).
 //
-// Lifetime: a function pointer is valid while its Program lives. Destroy a Program only when no thread can still be
-// running its code.
+// Lifetime: a function pointer is valid while its Program lives, and its code stays where it is (codeRanges(), for a
+// profiler). Destroy a Program only when no thread can still be running its code.
 //
 // Parameters: a module's `param float cutoff;` is a value the host sets, read in a method as cutoff[i], at sample i of
 // the call. How it reads is the host's choice when it compiles (Options::parameters, Binding): a knob (the value, read
@@ -113,7 +115,7 @@ namespace fminus
             }
         };
 
-        // What the program does with subnormal floats, chosen when it compiles.
+        // What the program does with subnormal floats and doubles, chosen when it compiles.
         //   Preserve  IEEE's gradual underflow, as C has it: a subnormal is a number like any other. The default.
         //   Flush     flush-to-zero, the mode a plugin's audio thread runs in: a subnormal input reads as 0 and a
         //             subnormal result is 0, each with its sign. LLVM folds and optimises for that mode, and each entry
@@ -122,7 +124,8 @@ namespace fminus
         //             x86-64). Writing the register is slow (about 18 ns a call on an M5), so an entry point called
         //             in that mode already writes nothing (under 1 ns): set it around the block, as a host's ScopedFtz
         //             does, and call anything else in it too. The code assumes the mode: run in IEEE's, a subnormal's
-        //             result may differ from what the compiler folded.
+        //             result may differ from what the compiler folded. One gap: a float/double conversion of a
+        //             subnormal that only LLVM's optimiser finds constant is folded as IEEE's (recipe 33).
         enum class Denormals
         {
             Preserve,
@@ -130,7 +133,9 @@ namespace fminus
         };
 
         // How sinf, cosf, tanf, expf, tanhf and logf compute, chosen when the program compiles (fabsf, sqrtf, floorf,
-        // fminf and fmaxf are exact, and the same in every mode).
+        // fminf and fmaxf are exact, and the same in every mode, as are the double functions sqrt, fabs, floor, fmin,
+        // fmax and fma; a double has no sin of FMinus's: sinf rounds it to a float, and a prototype of C's, `double
+        // sin(double x);`, calls the C library's, which is no audio-thread code).
         //   Vector  a float gets one result wherever the program computes it: in a loop's vectorised body or its
         //           remainder, so wherever a block ends; in a float4, a float8 or a poly float of any width; at any
         //           optimisation level; from a frozen parameter or a knob; on arm64 and x86-64 alike. What it computes
@@ -269,8 +274,9 @@ namespace fminus
         // The program's warnings, one a line as clang prints them, each naming its flag, notes included
         // (`program.fm:7:13: warning: enumeration value 'TRIANGLE' not handled in switch [-Wswitch]`); empty when it
         // has none. A warning is about a program that compiles, and runs as written: a host may show it beside the
-        // program. FMinus's one warning is clang's -Wswitch, a switch without a default on a value of an enumerated
-        // type that misses some of its constants.
+        // program. FMinus's warnings are clang's -Wswitch, a switch without a default on a value of an enumerated
+        // type that misses some of its constants, and -Wunknown-attributes, a field's or a parameter's attribute
+        // without a namespace that C23 does not have, which FMinus ignores (Attribute, below).
         const std::string& warnings() const;
 
         // The program's LLVM IR as the code generator wrote it, as text, when Options::keepIr kept it (Lowered or
@@ -290,6 +296,32 @@ namespace fminus
         // (which includes it). FMinus has then checked that it cannot reach malloc, calloc or free.
         bool nonAllocating(std::string_view name) const;
 
+        // An attribute of a field or a parameter, written after its name, C23's way:
+        // `float level [[ui::unit("dB")]] [[fminus::range(-60, 0)]];` has two. FMinus's own have a meaning,
+        // fminus::range (a parameter's, or a field's of numbers) and fminus::default (a parameter's), and a clang::
+        // one, a function's, is refused on a field. Every other is the host's, passed on as written for the host to
+        // decide what it means, a unit, a label or a display hint: FMinus checks only that its numbers are numbers
+        // (docs/extending.md, recipe 35). One exception: a name without a namespace that is none of C23's standard
+        // attributes (deprecated, maybe_unused and the rest), `[[range(0, 1)]]`, is ignored with clang's warning
+        // (warnings()), and is in no list a host reads. Name a host's attributes in a namespace of its own.
+        struct Attribute
+        {
+            // An argument: a number, or a string literal (C's, its escapes resolved, adjacent ones joined).
+            struct Argument
+            {
+                bool isString = false;   // a string's; a number's otherwise
+                double number = 0;       // a number's value (0 for a string)
+                std::string text;        // a string's bytes (UTF-8 as the source has them); a number as written
+                                         // ("-60", "2e4", "0x10")
+            };
+
+            std::string name;                  // as written, its namespace and all: "ui::unit", "fminus::range"
+            std::vector<Argument> arguments;   // in order; none for `[[ui::hidden]]`
+        };
+
+        // The last of `attributes` named `name` ("ui::unit"), or nullptr: the one that counts when a field has two.
+        static const Attribute* findAttribute(const std::vector<Attribute>& attributes, std::string_view name) noexcept;
+
         // A module's parameter, `param float cutoff [[fminus::range(20, 20000)]] [[fminus::default(1000)]];`. Its
         // slot in an instance is the C struct { const float* stream; T value; }, T a float, an int32_t or a bool (a
         // byte), whatever its binding: the stream's pointer at streamOffset, the value at valueOffset.
@@ -304,6 +336,8 @@ namespace fminus
             std::optional<double> minimum;        // fminus::range(minimum, maximum): what the host's control spans;
             std::optional<double> maximum;        // FMinus neither clamps to it nor checks it
             std::optional<double> defaultValue;   // fminus::default(value): what setDefaults sets
+            std::vector<Attribute> attributes = {};   // all of them, in order, these two too: `[[ui::unit("Hz")]]`
+                                                      // (but none FMinus ignored: Attribute)
         };
 
         // A module of the program (FMinus's class), as a host sees it. An instance is `size` bytes, aligned to
@@ -317,10 +351,22 @@ namespace fminus
             struct Field
             {
                 std::string name;
-                std::string type;          // as FMinus writes it: "float", "float4", "float[16]", "Osc", "Osc *";
-                                           // a parameter's "param float" (its slot)
+                std::string type;          // as FMinus writes it: "float", "double", "float4", "float[16]",
+                                           // "double[8]", "float[4][16]", "Osc", "Osc *"; a parameter's "param float"
+                                           // (its slot). A "double" is 8 bytes, C++'s double, aligned to 8: a host
+                                           // that reads fields by type reads one as a double, not as a float
+                                           // (docs/extending.md, recipe 33)
                 std::size_t offset = 0;    // in bytes, from the instance's address
                 std::size_t size = 0;
+                std::string element = {};   // an array's elements' type ("float", "Osc"); empty for no array
+                // An array's shape: how many elements each dimension holds, outermost first: {16} for "float[16]",
+                // {4, 16} for "float[4][16]", whose 4 rows of 16 lie side by side, size / 4 bytes each (C's layout:
+                // element [i][j] is at offset + (i * 16 + j) * sizeof(float)). Empty for a field that is no array
+                // (docs/extending.md, recipe 34).
+                std::vector<std::size_t> extents = {};
+                // Its attributes, in order: `float level [[ui::unit("dB")]];`'s, a parameter's (its Parameter has them
+                // too), but none FMinus ignored (Attribute). Empty for a field that has none.
+                std::vector<Attribute> attributes = {};
             };
 
             std::string name;
@@ -494,6 +540,342 @@ namespace fminus
 
         // Clears the record, so that the next call runs whole: before any call of the program, init's included.
         void clearBoundsViolation() noexcept;
+
+        // Calling a function by name, for a host that learns a function's signature as it runs rather than when it is
+        // built (function<Signature>, above, is for one it knows): a console that calls the function its user names, a
+        // test runner, a tool that tries one of a program's functions on values it chooses. callable() describes the
+        // function, its parameters and its result, as values; call() checks the host's arguments against them, calls
+        // the function with them on the calling thread, and returns its result. What goes wrong is a value too, a
+        // CallResult with a status and a message: a name that is no function, a type call() does not pass, an argument
+        // of the wrong type, the wrong number of them, never undefined behaviour.
+        //
+        //   using Value = fminus::Program::Value;
+        //   std::string errors;
+        //   const Program::Callable* softclip = program->callable("softclip", errors);   // nullptr: errors says why
+        //   Program::CallResult result = program->call(*softclip, {Value::of(0.5f), Value::of(2.0f)});
+        //   if (result.ok())
+        //       show(result.value.number);              // the float it returned, as a double
+        //   else                                        // with Value::of(2): "argument 2 of 'softclip' is 'int', not
+        //       show(result.message());                 // 'float' (its parameter 'drive')"
+        //
+        // What call() passes: C's scalars, bool, int, float and double (an enumerated type's as its int or bool), and
+        // pointers to int, float, double or a module, or void*, which point to the host's memory (Value::array,
+        // Value::instance); it returns a scalar or nothing. A function that takes or returns anything else (a vector,
+        // a poly float, a pointer to a vector, a pointer as its result) has no Callable: callable() says which of its
+        // types call() does not pass. Each argument's type must be its parameter's, as call() converts nothing (a host
+        // whose numbers are all doubles converts each with Value::scalar). A pointer must also not drop a const (a
+        // const float* to a float*), must be aligned to its elements' type, and a module's instance must be one of
+        // this Program's Module (below). A pointer's extent is the host's to know: C passes none, and FMinus checks no
+        // access through one, bounds checks or not (a parameter written `float x[16]` is a float*, as C has it). A
+        // function that is passed a buffer is passed its length too, as C's are, and must not read past it.
+        //
+        // The instance: a method runs on one, its first parameter, `this`, which is Value::instance(memory, module), an
+        // instance the host made as Module says (zeroed, aligned, its parameters set), never null. What the method
+        // changes stays in it for the next call, by name or through a pointer. A function that is no method runs on its
+        // arguments and what they point to, as FMinus has no variables outside functions but its constants. The module
+        // is the host's word for how the memory is laid out, which call() cannot see, so it must be this Program's own
+        // (module() gives it): another Program's, of the same name, is refused even when it was compiled from the same
+        // source. A host that keeps an instance across a recompile, knowing its layout is the same, passes it with the
+        // new Program's Module.
+        //
+        // Threads: callable() compiles, on the calling thread, the code that calls the function, the first time it is
+        // asked for it: a thunk of a few instructions, which loads each argument as the function's parameter type and
+        // calls it as C does, through the target's calling convention. That takes a millisecond or so, allocates and
+        // takes the Program's lock (and compiles the program's code, if no function was looked up yet), so it runs off
+        // the audio thread. Its Callable is the Program's, the same one each time, valid while the Program lives: a
+        // host keeps the pointer, as it keeps a function's, and asks a recompiled Program for its own. A Callable
+        // cannot be copied, so the one call() is given is the one callable() described. call() through a Callable runs
+        // the function on the calling thread, any thread, on several at once (each with an instance of its own: a
+        // method's changes are as atomic as its C++ call's), and adds no lock and no allocation to what the function
+        // does, unless the host's call is wrong (Mismatch: its message allocates) or the function takes more than 16
+        // arguments. A call the loop budget or a bounds check stops allocates nothing: its error is empty, and
+        // CallResult::message() words it, off the audio thread. call(name, ...) looks the Callable up first, as
+        // callable() does.
+        //
+        // The safety options apply as they do to a call through a pointer: in a program compiled with the loop budget
+        // the call counts against it, and one that runs out returns early, Status::OutOfBudget, with
+        // loopBudgetExceeded() set; with bounds checks, a check that fails stops the call, Status::OutOfBounds, with
+        // boundsViolation() set. Each status is the Program's state after the call, so set the budget (setLoopBudget)
+        // and clear the record (clearBoundsViolation) before each call, and re-initialise an instance a stopped call
+        // ran on (the loop budget's paragraph, above). The budget and the record are the Program's, one of each, which
+        // every thread's calls share: a status is the call's own only when no other call of the Program overlaps it.
+        // With several threads calling at once, one call's failure is every overlapping call's status (and a call that
+        // returns after another's failed check returns early too, as the bounds checks' paragraph says), and one
+        // thread's setLoopBudget or clearBoundsViolation is the others' too. A host that calls a program compiled with
+        // either option from several threads serialises those calls, or reads the statuses as the program's.
+
+        // A value call() passes to a function, or one it returns: a scalar, or a pointer to the host's memory.
+        struct Value
+        {
+            enum class Kind : std::uint8_t
+            {
+                Void,   // none: a void function's result, or a call that did not run
+                Bool,
+                Int,
+                Float,
+                Double,
+                Pointer,
+            };
+
+            Kind kind = Kind::Void;
+            double number = 0;          // a Bool's (0 or 1), an Int's, a Float's or a Double's value: a double holds
+                                        // each exactly
+            void* pointer = nullptr;    // a Pointer's: the host's first element, or its instance
+            Kind element = Kind::Void;  // a Pointer's elements: Int, Float or Double, or Void for a module's instances
+            const Module* module = nullptr;   // a Pointer to a module's instances: the module
+            bool readOnly = false;      // a Pointer through which the function may only read: a const float* takes it,
+                                        // a float* does not
+
+            static Value of(bool value) noexcept
+            {
+                return scalarOf(Kind::Bool, value ? 1.0 : 0.0);
+            }
+
+            static Value of(int value) noexcept
+            {
+                return scalarOf(Kind::Int, static_cast<double>(value));
+            }
+
+            static Value of(float value) noexcept
+            {
+                return scalarOf(Kind::Float, static_cast<double>(value));
+            }
+
+            static Value of(double value) noexcept
+            {
+                return scalarOf(Kind::Double, value);
+            }
+
+            // Not a pointer, which would convert to a bool: Value::array or Value::instance says what it points to.
+            template <typename T>
+            static Value of(T* value) = delete;
+
+            // A scalar of `kind` (Bool, Int, Float or Double) from a number, converted as setValue converts a
+            // parameter's value: a float's rounded, an int's truncated toward 0 (and clamped to an int's range, NaN 0),
+            // a bool's true unless 0. Any other kind gives a Void value, which no parameter takes.
+            static Value scalar(Kind kind, double number) noexcept;
+
+            // The host's elements, as a function's `int*`, `float*` or `double*` takes them (or its `const` one, or
+            // `void*`), from the first; a const one only as its `const float*` or `const void*` does.
+            static Value array(int* elements) noexcept
+            {
+                return pointerTo(Kind::Int, elements, false);
+            }
+
+            static Value array(const int* elements) noexcept
+            {
+                return pointerTo(Kind::Int, const_cast<int*>(elements), true);
+            }
+
+            static Value array(float* elements) noexcept
+            {
+                return pointerTo(Kind::Float, elements, false);
+            }
+
+            static Value array(const float* elements) noexcept
+            {
+                return pointerTo(Kind::Float, const_cast<float*>(elements), true);
+            }
+
+            static Value array(double* elements) noexcept
+            {
+                return pointerTo(Kind::Double, elements, false);
+            }
+
+            static Value array(const double* elements) noexcept
+            {
+                return pointerTo(Kind::Double, const_cast<double*>(elements), true);
+            }
+
+            // An instance of `module` the host made (Module, above), or the first of an array of them: a method's
+            // `this`, or a function's `Osc*` (or `const Osc*`, or `void*`).
+            static Value instance(void* memory, const Module& module) noexcept
+            {
+                Value value = pointerTo(Kind::Void, memory, false);
+                value.module = &module;
+                return value;
+            }
+
+        private:
+            static Value scalarOf(Kind kind, double number) noexcept
+            {
+                Value value;
+                value.kind = kind;
+                value.number = number;
+                return value;
+            }
+
+            static Value pointerTo(Kind element, void* pointer, bool readOnly) noexcept
+            {
+                Value value;
+                value.kind = Kind::Pointer;
+                value.pointer = pointer;
+                value.element = element;
+                value.readOnly = readOnly;
+                return value;
+            }
+        };
+
+        // A function as call() calls it: its name and its signature, as values. The Program's own, which callable()
+        // gives as a pointer: it cannot be copied or moved, so the Callable call() is given is the one callable()
+        // described, and what call() checks is the function's signature. A host copies the fields it shows.
+        struct Callable
+        {
+            // One of its parameters, which call() checks an argument against (not a module's Parameter, above).
+            struct Param
+            {
+                std::string name;   // as declared: "x"; "this" for a method's instance; empty for one with no name
+                std::string type;   // as FMinus writes it: "float", "const float *", "Osc *", "void *"
+                Value::Kind kind = Value::Kind::Float;     // Bool, Int, Float, Double or Pointer
+                Value::Kind element = Value::Kind::Void;   // a Pointer's elements: Int, Float or Double; Void for a
+                                                           // module's instances, or for void*, which takes any
+                const Module* module = nullptr;            // a Pointer to a module's instances: the module
+                bool readOnly = false;                     // a Pointer to const: it takes a const Value::array too
+            };
+
+            std::string name;                         // as callable() takes it: "softclip", "Osc::tick"
+            const Module* module = nullptr;           // a method's module: its `this` is parameters[0]
+            Value::Kind result = Value::Kind::Void;   // Void, Bool, Int, Float or Double
+            std::string resultType;                   // as FMinus writes it: "float", "void"
+            std::vector<Param> parameters;            // in order, a method's `this` first
+
+            Callable() = default;   // none of a Program's, which call() refuses
+            Callable(const Callable&) = delete;
+            Callable& operator=(const Callable&) = delete;
+            Callable(Callable&&) = delete;
+            Callable& operator=(Callable&&) = delete;
+            ~Callable() = default;
+
+        private:
+            friend class Program;
+            const void* owner_ = nullptr;   // the Program's
+            std::uintptr_t thunk_ = 0;      // the code that calls it (src/jit/Call.h)
+        };
+
+        // What a call by name did: whether it ran, and its result, or why not.
+        struct CallResult
+        {
+            enum class Status : std::uint8_t
+            {
+                Ok,            // the function ran and returned: `value` is its result
+                NoFunction,    // the program defines no function of the name (it may declare one: a prototype alone)
+                Unsupported,   // the function takes or returns a type call() does not pass (above)
+                LinkError,     // the function is the program's, but its code did not link (a function it calls is
+                               // declared and defined nowhere), or the code that calls it did not compile: LLVM's
+                               // words, "'g' cannot be called: Failed to materialize symbols: ..."
+                Mismatch,      // the arguments are not the function's: their number, a type, a null instance, a pointer
+                               // not aligned, an instance of another Program's module, a Callable of another Program's
+                OutOfBudget,   // it ran out of the loop budget and returned early (loopBudgetExceeded)
+                OutOfBounds,   // a bounds check failed, and it returned early (boundsViolation)
+            };
+
+            Status status = Status::Ok;
+            // The function's result, of its result type (Void for a void function); after OutOfBudget or OutOfBounds,
+            // what it returned early, 0, false or nothing; Void when it did not run.
+            Value value;
+            // Why it did not run, one line, as FMinus words its errors: "'softclip' takes 2 arguments, not 3", "the
+            // program has no function 'softclp'". Empty when it is Ok, and after OutOfBudget or OutOfBounds, which a
+            // call on the audio thread meets, and so allocate nothing: message() words them.
+            std::string error;
+            // After OutOfBounds, the check that failed, as boundsViolation() had it when the call returned (its strings
+            // are the Program's, valid while it lives); nothing otherwise.
+            std::optional<BoundsViolation> violation;
+
+            bool ok() const noexcept
+            {
+                return status == Status::Ok;
+            }
+
+            // What went wrong, one line: `error`, or what stopped the call, "'spin' ran past its loop budget and
+            // returned early", "'tap' stopped: taps.fm:3:16: index 20 out of bounds for 'taps' of type 'float[16]'";
+            // empty when it is Ok. It allocates, so a host on the audio thread keeps the CallResult and words it
+            // elsewhere, while the Program lives.
+            std::string message() const;
+
+        private:
+            friend class Program;
+            const Callable* function_ = nullptr;   // the Callable that ran, for message()
+        };
+
+        // The function `name` (a method as "Osc::tick") as call() calls it, its thunk compiled now, on this thread, if
+        // it has not been yet; nullptr, with `errors` set, when the program defines no such function, call() cannot
+        // pass one of its types, or its code does not link (CallResult::Status, above). A function the program only
+        // declares (`float atanf(float x);`, the C library's) is none of its own, and has no Callable.
+        const Callable* callable(std::string_view name, std::string& errors);
+
+        // Calls `function`, one of this Program's Callables, with `count` arguments, checked against its parameters.
+        CallResult call(const Callable& function, const Value* arguments, std::size_t count);
+        CallResult call(const Callable& function, const std::vector<Value>& arguments);
+
+        // Looks the function up (callable(), which compiles its thunk the first time), then calls it.
+        CallResult call(std::string_view name, const std::vector<Value>& arguments);
+
+        // Profiling: where the program's machine code is, for a sampling profiler in the host, which interrupts a
+        // thread now and then (a timer's signal, or the thread suspended and its registers read), takes its program
+        // counter, and counts the samples that fall in each function's code: a profile of the program as it runs, per
+        // function, per method and per module, with nothing added to its code.
+        //
+        //   std::vector<Program::CodeRange> ranges = program->codeRanges(errors);   // once, off the audio thread
+        //   ...
+        //   if (const Program::CodeRange* range = Program::codeRangeAt(ranges, pc))   // each sample, on the
+        //       ++samples[range->function];                                         // sampler's thread: "Osc::tick"
+        //
+        // A range is the machine code's, as the optimiser left it, not the source's. A function the optimiser inlined
+        // into its caller (a method that a process loop calls, from -O1) runs inside the caller's code, so its samples
+        // are the caller's, whose range lists it in `inlined`; its own range, which the program keeps for the host's
+        // calls, takes samples only when something calls it. At -O0 nothing is inlined, and each function's samples are
+        // its own. A parallel region's body is a range of its own (Kind::Parallel), run by the pool's threads and the
+        // caller's: a sampler of the calling thread alone sees only its share. Code that is not the program's has no
+        // range: the runtime's (the pool, an FFT, fminus_rt_sinf where a math kernel is called rather than inlined),
+        // the C library's (Math::Libm's sinf, a prototype's function) and the host's own, which the host names from
+        // its own symbols (dladdr), or charges to the program's function that called it by walking the stack.
+        //
+        // One function's machine code: the bytes [address, address + size).
+        struct CodeRange
+        {
+            // What the code is.
+            enum class Kind : std::uint8_t
+            {
+                Function,     // a function's code, as the program defines it: "Osc::tick"; under Denormals::Flush, an
+                              // entry point's body, "process.body"
+                EntryPoint,   // under Denormals::Flush, an entry point's few instructions that set the floating-point
+                              // mode around its body and hand the caller's back: "process"
+                Parallel,     // a parallel for's or a parallel { }'s body: "run.parallel.1"
+                Thunk,        // the code call() calls the function through: "fminus.call.softclip"
+                Support,      // FMinus's own, no function's: a math kernel's path for large arguments,
+                              // "fminus.large.sin"
+            };
+
+            std::uintptr_t address = 0;   // its first byte, in this process
+            std::size_t size = 0;         // its bytes from there; on macOS and Windows, whose objects give no
+                                          // sizes, to the next range's start, its padding included
+            Kind kind = Kind::Function;
+            std::string symbol;           // the code's name in the program's object: "Osc::tick", "run.parallel.1"
+            std::string function;         // the program's function it is the code of, as function() names it:
+                                          // "Osc::tick", "run" for "run.parallel.1"; empty for Support
+            std::string module;           // the function's module, for a method: "Osc"; empty otherwise
+            // The program's functions the optimiser inlined into this code, whose samples are this range's: "Osc::tick"
+            // in "Osc::process". Read from the calls, counted, before the optimiser and after: a function is inlined
+            // when this code calls it fewer times after than it did before, with the calls each function inlined into
+            // it brought, even if it still calls it at another call. A call the optimiser deleted as dead, or merged
+            // with another, looks the same as one it inlined. Sorted; empty when there are none.
+            std::vector<std::string> inlined = {};
+        };
+
+        // Every range of the program's machine code, sorted by address, none overlapping another: each function the
+        // program defines, each parallel region, FMinus's own, and the thunk of each Callable made so far. The
+        // program's code is linked now, on this thread, if no function has been looked up yet (as address() links
+        // it), so the list after compile() is the program's whole. Empty, with `errors` set, when its code does not
+        // link (CallResult's LinkError). The code stays where the list says while the Program lives (the JIT neither
+        // moves nor frees it), so a host takes the list once, after compile() and its callable()s, and a sampler reads
+        // it from any thread without a lock. It is the host's copy, made on each call: it allocates, off the audio
+        // thread.
+        std::vector<CodeRange> codeRanges(std::string& errors);
+
+        // The range of `ranges` (codeRanges(), sorted by address) that holds `address`, a sampled program counter, or
+        // nullptr when none does: a binary search, with no allocation and no lock, which a sampler's thread calls for
+        // each sample.
+        static const CodeRange* codeRangeAt(const std::vector<CodeRange>& ranges, std::uintptr_t address) noexcept;
 
     private:
         struct Impl;

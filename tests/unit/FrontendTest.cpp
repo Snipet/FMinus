@@ -1,8 +1,11 @@
 // tests/unit/FrontendTest.cpp: FMinus v0's scanner and parser (src/frontend/), through the syntax tree's dump.
 #include "frontend/Frontend.h"
+#include "frontend/Parser.tab.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
+#include <cctype>
 #include <string>
 #include <string_view>
 
@@ -285,6 +288,19 @@ TEST_CASE("poly types parse as a qualifier and a scalar type", "[frontend]")
              "  (return (?: m a b)))\n");
 }
 
+TEST_CASE("double parses as C's: a type, a pointer's and an array's, and a cast; poly double is an error",
+          "[frontend]")
+{
+    CHECK(parsed("double f(double x, const double* p) { double t[2] = {0.1, x}; return (double)(float)x + p[0]; }")
+          == "(function double f ((double x) (const double * p))\n"
+             "  (decl double[2] t {0.1 x})\n"
+             "  (return (+ (cast double (cast float x)) ([] p 0))))\n");
+    CHECK(parsed("poly double f(poly double x) { return x; }")
+          == "test.fm:1:6: error: FMinus has poly float and poly bool, not 'poly double': a double is no vector lane\n"
+             "test.fm:1:20: error: FMinus has poly float and poly bool, not 'poly double': a double is no vector "
+             "lane\n");
+}
+
 TEST_CASE("constants keep their spelling: C's decimal, hex and integer forms", "[frontend]")
 {
     CHECK(parsed("float f() { return fmaxf(fminf(1, .5), g(2e3, 1.e-2f, 3.25E+1F, 0x1.8p1, 0x1p-3f, 1.)); }")
@@ -359,6 +375,32 @@ TEST_CASE("arrays parse as C's: a size after the name, a list, and a parameter t
              "  (decl float[(* ROWS COLS)] buf)\n"
              "  (decl const int[] t {1 2 3})\n"
              "  (decl float[] n))\n");
+}
+
+TEST_CASE("2-D arrays parse as C's: two sizes, rows braced in a list, and sizeof of an array type", "[frontend]")
+{
+    // Each size as written; a braced list's values in their braces, as written (C's rules place them later).
+    CHECK(parsed("enum { ROWS = 4 };\n"
+                 "const float table[2][3] = {{1, 2}, {}, 3,};\n"
+                 "module Bank { float gain[ROWS][ROWS * 4]; };\n"
+                 "int f() { int g[][2] = {{1, {2}}, 3}; float h[2][2]; h[1][0] = g[0][1];"
+                 " return sizeof(float[4][16]) + sizeof(int[ROWS]); }")
+          == "(enum (ROWS 4))\n"
+             "(decl const float[2][3] table {{1 2} {} 3})\n"
+             "(module Bank\n"
+             "  (field float[ROWS][(* ROWS 4)] gain))\n"
+             "(function int f ()\n"
+             "  (decl int[][2] g {{1 {2}} 3})\n"
+             "  (decl float[2][2] h)\n"
+             "  (= ([] ([] h 1) 0) ([] ([] g 0) 1))\n"
+             "  (return (+ (sizeof float[4][16]) (sizeof int[ROWS]))))\n");
+    // A third dimension, a parameter of a 2-D array (a pointer to rows, which FMinus has no parameter of), and an
+    // array of pointers in sizeof, at their places.
+    CHECK(parsed("float a[2][3][4];\nvoid f(float g[2][3]) { }\nint s() { return sizeof(float*[2]); }")
+          == "test.fm:1:14: error: FMinus's arrays have at most two dimensions\n"
+             "test.fm:2:14: error: FMinus has no parameters of 2-D arrays, which would be pointers to rows: pass a row "
+             "(a float*), or the module that holds the array\n"
+             "test.fm:3:30: error: FMinus has no arrays of pointers\n");
 }
 
 TEST_CASE("top-level constants parse as C's file-scope declarations, where they are among the others", "[frontend]")
@@ -445,6 +487,56 @@ TEST_CASE("a module's parameters parse with their attributes, and only in a modu
     CHECK(parsed("param float x;") == "test.fm:1:1: error: syntax error, unexpected param\n");
 }
 
+TEST_CASE("attributes follow a field's name, as C23 writes them, and take numbers and strings", "[frontend]")
+{
+    // After the name, before an array's sizes, in each declarator of a declaration and after an enumeration's list;
+    // a parameter's take strings too, and C's adjacent string literals are one.
+    CHECK(parsed("module Meter\n"
+                 "{\n"
+                 "    float level [[ui::unit(\"dB\"), ui::label(\"Out\" \"put\")]] [[fminus::range(-60, 0)]];\n"
+                 "    float taps [[ui::hidden]] [16], grid [[ui::shape(\"rows\", 2)]] [2][3];\n"
+                 "    enum Mode { A, B } mode [[ui::label(\"Mode\")]];\n"
+                 "    param float gain [[fminus::range(-24, 12)]] [[ui::unit(\"dB\")]];\n"
+                 "};\n")
+          == "(module Meter\n"
+             "  (field float level [[ui::unit(\"dB\")]] [[ui::label(\"Output\")]] [[fminus::range(-60, 0)]])\n"
+             "  (field float[16] taps [[ui::hidden]])\n"
+             "  (field float[2][3] grid [[ui::shape(\"rows\", 2)]])\n"
+             "  (enum Mode (A) (B))\n"
+             "  (field int mode [[ui::label(\"Mode\")]])\n"
+             "  (param float gain [[fminus::range(-24, 12)]] [[ui::unit(\"dB\")]]))\n");
+    // A local's and a constant's parse, for the code generator to refuse.
+    CHECK(parsed("const float k [[ui::unit(\"dB\")]] = 1;\nfloat f() { float x [[a]] = k, *p [[b]]; return x; }\n")
+          == "(decl const float k [[ui::unit(\"dB\")]] 1)\n"
+             "(function float f ()\n"
+             "  (decl float x [[a]] k)\n"
+             "  (decl float * p [[b]])\n"
+             "  (return x))\n");
+    // C's escapes, resolved, and written back as C writes them: a quote, a backslash, \n and \t, a control character
+    // in octal; hex and octal bytes and universal character names (in UTF-8: B5, then F0 9F 98 80) as themselves.
+    CHECK(parsed(R"fm(module M { float x [[ui::text("q\"b\\s\n\t\x41\101\u00B5\U0001F600\1\a\?\'")]]; };)fm")
+          == "(module M\n"
+             "  (field float x [[ui::text(\"q\\\"b\\\\s\\n\\tAA\xC2\xB5\xF0\x9F\x98\x80\\001\\007?'\")]]))\n");
+
+    // An attribute's namespace and name are identifiers, and C23 reads a keyword there as one: each of the parser's
+    // tokens that is spelt as an identifier (its keywords, a new one's too), then a vector type and a module's name,
+    // which the scanner makes types.
+    using fminus::frontend::Parser;
+    for (int kind = 0; kind < Parser::YYNTOKENS; ++kind)
+    {
+        const std::string word = Parser::symbol_name(static_cast<Parser::symbol_kind_type>(kind));
+        const auto wordChar = [](char c) { return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_'; };
+        if (std::isalpha(static_cast<unsigned char>(word.front())) == 0 || !std::ranges::all_of(word, wordChar))
+            continue;
+        const std::string attributes = "[[" + word + "::" + word + "(1)]] [[ui::" + word + "]] [[" + word + "]]";
+        CHECK(parsed("module M { float x " + attributes + "; };")
+              == "(module M\n  (field float x " + attributes + "))\n");
+    }
+    CHECK(parsed("module meter { float v; };\nmodule M { float x [[meter::label(\"x\")]] [[float4::meter]]; };\n")
+          == "(module meter\n  (field float v))\n"
+             "(module M\n  (field float x [[meter::label(\"x\")]] [[float4::meter]]))\n");
+}
+
 TEST_CASE("errors print in source order, each with its notes after it", "[frontend]")
 {
     fminus::Diagnostics diagnostics("x.fm");
@@ -463,6 +555,28 @@ TEST_CASE("syntax and scanner errors carry their locations", "[frontend]")
     CHECK(parsed("float f(float x) { return 1f; }") == "test.fm:1:27: error: invalid suffix 'f' on integer constant\n");
     CHECK(parsed("float f(float x) /* never\nclosed { return x; }")
           == "test.fm:1:18: error: unterminated /* comment\n");
+    // A string literal is C's, and an attribute's argument only.
+    CHECK(parsed("module M { float x [[ui::label(\"never closed)]]; };")
+          == "test.fm:1:32: error: missing terminating '\"' character\n");
+    CHECK(parsed(R"fm(module M { float x [[ui::label("a\qb")]]; };)fm")
+          == "test.fm:1:34: error: unknown escape sequence '\\q'\n");
+    CHECK(parsed(R"fm(module M { float x [[ui::label("a\x100")]]; };)fm")
+          == "test.fm:1:34: error: hex escape sequence out of range\n");
+    CHECK(parsed(R"fm(module M { float x [[ui::label("a\xg")]]; };)fm")
+          == "test.fm:1:34: error: \\x used with no following hex digits\n");
+    CHECK(parsed(R"fm(module M { float x [[ui::label("\400")]]; };)fm")
+          == "test.fm:1:33: error: octal escape sequence out of range\n");
+    CHECK(parsed(R"fm(module M { float x [[ui::label("\u12")]]; };)fm")
+          == "test.fm:1:33: error: incomplete universal character name\n");
+    CHECK(parsed(R"fm(module M { float x [[ui::label("\uD800")]]; };)fm")
+          == "test.fm:1:33: error: invalid universal character\n");
+    CHECK(parsed("float f() { return \"x\"; }") == "test.fm:1:20: error: syntax error, unexpected string literal\n");
+    // An attribute after an array's size would be its type's (C23), and a string is no attribute's name.
+    CHECK(parsed("module M { float taps[16] [[ui::label(\"Taps\")]] [[ui::hidden]]; };")
+          == "test.fm:1:29: error: 'ui::label' attribute cannot be applied to types: the attributes of 'taps' go after "
+             "its name, before its size\n");
+    CHECK(parsed("module M { float x [[\"dB\"]]; };")
+          == "test.fm:1:22: error: syntax error, unexpected string literal\n");
     // Bison lists what it expected only when that is at most four tokens, and a function can start in eight ways.
     CHECK(parsed("fn f(x: float) -> float { return x; }")
           == "test.fm:1:1: error: syntax error, unexpected identifier\n");

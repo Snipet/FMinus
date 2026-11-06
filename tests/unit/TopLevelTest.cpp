@@ -437,7 +437,7 @@ TEST_CASE("top-level constants' and sizes' errors are clang's", "[codegen][tople
              "test.fm:16:24: error: initializer element is not a compile-time constant\n"
              "test.fm:17:27: error: initializer element is not a compile-time constant\n"
              "test.fm:18:20: error: initializer element is not a compile-time constant\n"
-             "test.fm:19:11: error: excess elements in array initializer\n"
+             "test.fm:19:28: error: excess elements in array initializer\n"
              "test.fm:20:13: error: FMinus takes an initializer list for an array only\n"
              "test.fm:21:13: error: array initializer must be an initializer list\n");
 

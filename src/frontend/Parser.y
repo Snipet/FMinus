@@ -8,10 +8,13 @@
 //     parameter    : "param" type IDENTIFIER attributes ";"                     a field the host sets
 //     method       : "const"? type pointer IDENTIFIER "(" params ")" attributes block
 //     attributes   : ("[" "[" attribute ("," attribute)* "]" "]")*
-//     attribute    : IDENTIFIER ("::" (IDENTIFIER | "default"))? ("(" "-"? NUMBER ("," "-"? NUMBER)* ")")?
+//     attribute    : attribute_word ("::" attribute_word)? ("(" attribute_arg ("," attribute_arg)* ")")?
+//     attribute_word: IDENTIFIER | MODULE_NAME | a keyword                  C23 reads a keyword there as a name
+//     attribute_arg: "-"? NUMBER | STRING+                 a number, or a string (C's adjacent literals are one)
 //     params       : (param ("," param)*)? | "void"                                  (void) is none, as in C
-//     param        : "const"? type pointer IDENTIFIER? | "const"? type IDENTIFIER array_size        a pointer
-//     type         : "float" | "bool" | "int" | "void" | VECTOR_TYPE | "poly" ("float" | "bool") | MODULE_NAME
+//     param        : "const"? type pointer IDENTIFIER? | "const"? type IDENTIFIER array_sizes       a pointer
+//     type         : "float" | "double" | "bool" | "int" | "void" | VECTOR_TYPE | "poly" ("float" | "bool")
+//                  | MODULE_NAME
 //                  | "enum" IDENTIFIER                  int (or its fixed type), the name a tag declared before
 //     pointer      : ("*" ("const" | "restrict")*)?        with a *, the first const is the pointee's (const float*),
 //                                                          and one after it the pointer's own (float* const)
@@ -21,9 +24,12 @@
 //                  | "const"? "enum" IDENTIFIER ":" type ";"         C23's: a tag with a fixed type, ahead of its list
 //     enumerator   : IDENTIFIER ("=" expr)?                                  the expr an integer constant expression
 //     declaration  : "const"? type declarator ("," declarator)* ";"
-//     declarator   : pointer IDENTIFIER ("=" expr)?                                  as in C, `float *p, x;`
-//                  | IDENTIFIER array_size ("=" "{" (expr ("," expr)* ","?)? "}")?          an array
-//                  | pointer IDENTIFIER "=" "{" (expr ("," expr)*)? "}"     parsed, for its error: only arrays
+//     declarator   : pointer IDENTIFIER attributes ("=" expr)?            as in C, `float *p, x;`; C23's attributes
+//                  | IDENTIFIER attributes array_sizes ("=" initializer_list)?        an array
+//                  | pointer IDENTIFIER attributes "=" initializer_list        parsed, for its error: only arrays
+//     initializer_list : "{" (initializer ("," initializer)* ","?)? "}"              C's, C23's {} too
+//     initializer  : expr | initializer_list                         a braced list, a 2-D array's row
+//     array_sizes  : array_size array_size?                         FMinus's arrays are one or two dimensions deep
 //     array_size   : "[" expr? "]"              an integer constant expression, or none: the list's length
 //     statement    : label statement | unlabeled
 //     unlabeled    : block | expr ";" | "return" expr? ";" | ";"
@@ -35,7 +41,7 @@
 //     label        : "case" expr ":" | "default" ":"                         the expr an integer constant expression
 //     expr         : NUMBER | "true" | "false" | IDENTIFIER | IDENTIFIER "(" (expr ("," expr)*)? ")" | "(" expr ")"
 //                  | ("-" | "+" | "!" | "~" | "*" | "&") expr | expr "[" expr "]"   *p, &x, p[i]
-//                  | "sizeof" "(" "const"? type pointer ")"                          a type's size, an int
+//                  | "sizeof" "(" "const"? type pointer array_sizes? ")"             a type's size, an int
 //                  | expr ("*" | "/" | "%") expr | expr ("+" | "-") expr | expr ("<<" | ">>") expr
 //                  | expr ("<" | "<=" | ">" | ">=") expr | expr ("==" | "!=") expr
 //                  | expr "&" expr | expr "^" expr | expr "|" expr                   an int's bits
@@ -44,7 +50,8 @@
 //                  | "(" VECTOR_TYPE ")" "{" (expr ("," expr)* ","?)? "}"            C's: lanes left out are 0
 //                  | "(" "poly" "float" ")" "(" expr ")" | expr "." IDENTIFIER       a broadcast; a swizzle or field
 //                  | expr "->" IDENTIFIER | expr ("." | "->") IDENTIFIER "(" (expr ("," expr)*)? ")" | "this"
-//                  | ("++" | "--") expr | expr ("++" | "--") | "(" ("float" | "int" | "bool") ")" expr    a cast
+//                  | ("++" | "--") expr | expr ("++" | "--")
+//                  | "(" ("float" | "double" | "int" | "bool") ")" expr                       a cast
 //                  | "(" "enum" IDENTIFIER ")" expr                                  a cast to int, as C's to an enum
 //                  | expr ("=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=") expr
 //
@@ -129,6 +136,26 @@
             ast::ExprPtr size = nullptr;   // an array's, as written; null for `[]`
             bool hasList = false;          // `= {...}`
             std::vector<ast::ExprPtr> list = {};
+            bool rows = false;                // `name[size][rowSize]`: a 2-D array
+            ast::ExprPtr rowSize = nullptr;   // its rows' size, as written; null for `[]`, which C refuses
+            std::vector<ast::Brace> braces = {};
+            std::vector<ast::Attribute> attributes = {};   // C23's, after the name: `level [[ui::unit("dB")]]`
+        };
+
+        // An array's sizes as written: `[size]`, or a 2-D array's `[size][rowSize]` (`rows`). Null for `[]`.
+        struct ArraySizes
+        {
+            ast::ExprPtr size = nullptr;
+            bool rows = false;
+            ast::ExprPtr rowSize = nullptr;
+            std::vector<ast::Attribute> attributes = {};   // a declarator's after its sizes: its type's, an error
+        };
+
+        // An initialiser list as written, `{1, {2, 3}}`: its values in order, and the braces among them (ast::Brace).
+        struct InitList
+        {
+            std::vector<ast::ExprPtr> items;
+            std::vector<ast::Brace> braces;
         };
 
         // C23's fixed underlying type of an enumeration as written, `: int`: the type and where; or none.
@@ -359,8 +386,9 @@
         }
 
         // The name declared with its pointer, and, for an array, the array of what the rest declares: `float x[4]`
-        // is a float[4], and `const float c[2]` a const float[2], whose elements are read-only. The array's count is
-        // the code generator's to work out, from the declaration's size (DeclStmt::size).
+        // is a float[4], `float g[4][16]` a float[4][16] (an array of rows), and `const float c[2]` a const float[2],
+        // whose elements are read-only. The array's counts are the code generator's to work out, from the
+        // declaration's sizes (DeclStmt::size and rowSize).
         fminus::frontend::Declared declaredName(bool isConst, fminus::ast::Type type,
                                                 fminus::frontend::Declarator& d,
                                                 fminus::frontend::ParseContext& context)
@@ -371,8 +399,56 @@
             if (d.pointer.isPointer)
                 context.diagnostics.error(d.location, "FMinus has no arrays of pointers");
             else
-                name.type = fminus::ast::Type::arrayOf(type, 0);
+                name.type = fminus::ast::Type::arrayOf(d.rows ? fminus::ast::Type::arrayOf(type, 0) : type, 0);
             return name;
+        }
+
+        // A declarator's name, its pointer and the attributes after the name.
+        fminus::frontend::Declarator named(const fminus::frontend::location& where, fminus::frontend::Pointer pointer,
+                                           std::string name, std::vector<fminus::ast::Attribute> attributes)
+        {
+            fminus::frontend::Declarator d{at(where), pointer, std::move(name), nullptr};
+            d.attributes = std::move(attributes);
+            return d;
+        }
+
+        // A declarator's array sizes, `[4][16]`. Attributes after them, `taps[16] [[...]]`, would be C23's for the
+        // array's type, which takes none in FMinus: the first is the error, in clang's words, and they then go with
+        // the name's, as if written there.
+        void setSizes(fminus::frontend::Declarator& d, fminus::frontend::ArraySizes sizes,
+                      fminus::frontend::ParseContext& context)
+        {
+            d.isArray = true;
+            d.size = std::move(sizes.size);
+            d.rows = sizes.rows;
+            d.rowSize = std::move(sizes.rowSize);
+            if (sizes.attributes.empty())
+                return;
+            context.diagnostics.error(sizes.attributes.front().location,
+                                      "'" + sizes.attributes.front().name + "' attribute cannot be applied to types: "
+                                          "the attributes of '" + d.name + "' go after its name, before its size");
+            for (fminus::ast::Attribute& attribute : sizes.attributes)
+                d.attributes.push_back(std::move(attribute));
+        }
+
+        // A declarator's initialiser list, `= {...}`.
+        void setList(fminus::frontend::Declarator& d, fminus::frontend::InitList list)
+        {
+            d.hasList = true;
+            d.list = std::move(list.items);
+            d.braces = std::move(list.braces);
+        }
+
+        // `items` appended to `list`: their values after its, and their braces after its, moved along.
+        void append(fminus::frontend::InitList& list, fminus::frontend::InitList items)
+        {
+            for (fminus::ast::Brace brace : items.braces)
+            {
+                brace.first += list.items.size();
+                list.braces.push_back(brace);
+            }
+            for (fminus::ast::ExprPtr& item : items.items)
+                list.items.push_back(std::move(item));
         }
 
         // A declaration's statements, one DeclStmt for each declarator: `const float a = 1, *p;`.
@@ -387,20 +463,22 @@
                 statements.push_back(fminus::ast::Stmt{
                     d.location, fminus::ast::DeclStmt{name.isConst, name.type, std::move(d.name), std::move(d.init),
                                                       name.isRestrict, d.hasList, std::move(d.list),
-                                                      std::move(d.size)}});
+                                                      std::move(d.size), std::move(d.rowSize),
+                                                      std::move(d.braces), std::move(d.attributes)}});
             }
             return statements;
         }
 
-        // A module's fields, from a declaration's statements.
+        // A module's fields, from a declaration's statements, with their attributes.
         void addFields(std::vector<fminus::ast::Stmt> declarations, std::vector<fminus::ast::Field>& fields)
         {
             for (fminus::ast::Stmt& stmt : declarations)
             {
                 auto& decl = std::get<fminus::ast::DeclStmt>(stmt.node);
                 fields.push_back(fminus::ast::Field{stmt.location, std::move(decl.name), decl.type, decl.isConst,
-                                                   decl.init != nullptr || decl.hasList, false, {},
-                                                   std::move(decl.size), 0});
+                                                   decl.init != nullptr || decl.hasList, false,
+                                                   std::move(decl.attributes), std::move(decl.size), 0,
+                                                   std::move(decl.rowSize)});
             }
         }
 
@@ -419,6 +497,7 @@
 }
 
 %token FLOAT "float" CONST "const" RETURN "return" BOOL "bool" INT "int" VOID "void" TRUE "true" FALSE "false"
+%token DOUBLE "double"
 %token RESTRICT "restrict" AMPERSAND "&" LBRACKET "[" RBRACKET "]" SIZEOF "sizeof" COLONCOLON "::"
 %token LT "<" LE "<=" GT ">" GE ">=" EQ "==" NE "!=" NOT "!" AND "&&" OR "||" QUESTION "?" COLON ":"
 %token IF "if" ELSE "else" WHILE "while" FOR "for" BREAK "break" CONTINUE "continue" PARALLEL "parallel"
@@ -434,6 +513,7 @@
 %token LPAREN "(" RPAREN ")" LBRACE "{" RBRACE "}" COMMA "," SEMI ";"
 %token <std::string> IDENTIFIER "identifier"
 %token <std::string> NUMBER "number"
+%token <std::string> STRING "string literal"
 
 %nterm <std::vector<ast::Function>> items
 %nterm <ast::Function> function
@@ -447,10 +527,13 @@
 %nterm <ast::Enumerator> enumerator
 %nterm <ModuleBody> module_body module_member
 %nterm <ast::ExprPtr> array_size
-%nterm <std::vector<ast::Attribute>> attributes attribute_list
+%nterm <ArraySizes> array_sizes declarator_sizes
+%nterm <InitList> initializer_list initializers initializer
+%nterm <std::vector<ast::Attribute>> attributes attribute_specifiers attribute_specifier attribute_list
 %nterm <ast::Attribute> attribute
-%nterm <std::vector<std::string>> attribute_args
-%nterm <std::string> attribute_arg attribute_word
+%nterm <std::vector<ast::AttributeArg>> attribute_args
+%nterm <ast::AttributeArg> attribute_arg
+%nterm <std::string> attribute_word string_literal
 %nterm <std::vector<ast::Param>> params param_list
 %nterm <ast::Param> param
 %nterm <bool> qualifier
@@ -619,11 +702,23 @@ function
     ;
 
 // C23's attribute specifiers, after a function's parameter list, where clang's function attributes go:
-// `void process(...) [[clang::nonblocking]]`.
+// `void process(...) [[clang::nonblocking]]`; after a parameter's name or a declarator's, where they appertain to
+// what it declares: `float level [[ui::unit("dB")]];`. None is an empty list, which the parser takes before it reads
+// a `[` (a declarator's size, or an attribute: the next token says which).
 attributes
     : %empty                                {}
-    | attributes "[" "[" attribute_list "]" "]"
-                                            { $$ = $1; for (ast::Attribute& a : $4) $$.push_back(std::move(a)); }
+    | attributes attribute_specifier        { $$ = $1; for (ast::Attribute& a : $2) $$.push_back(std::move(a)); }
+    ;
+
+// One or more, where a `[` that is no attribute's could come instead (after an array's size).
+attribute_specifiers
+    : attribute_specifier                   { $$ = $1; }
+    | attribute_specifiers attribute_specifier
+                                            { $$ = $1; for (ast::Attribute& a : $2) $$.push_back(std::move(a)); }
+    ;
+
+attribute_specifier
+    : "[" "[" attribute_list "]" "]"        { $$ = $3; }
     ;
 
 attribute_list
@@ -632,28 +727,66 @@ attribute_list
     ;
 
 attribute
-    : IDENTIFIER "::" attribute_word        { $$ = ast::Attribute{at(@1), $1 + "::" + $3, {}}; }
-    | IDENTIFIER                            { $$ = ast::Attribute{at(@1), $1, {}}; }
-    | IDENTIFIER "::" attribute_word "(" attribute_args ")"
+    : attribute_word "::" attribute_word    { $$ = ast::Attribute{at(@1), $1 + "::" + $3, {}}; }
+    | attribute_word                        { $$ = ast::Attribute{at(@1), $1, {}}; }
+    | attribute_word "::" attribute_word "(" attribute_args ")"
                                             { $$ = ast::Attribute{at(@1), $1 + "::" + $3, $5}; }
-    | IDENTIFIER "(" attribute_args ")"     { $$ = ast::Attribute{at(@1), $1, $3}; }
+    | attribute_word "(" attribute_args ")" { $$ = ast::Attribute{at(@1), $1, $3}; }
     ;
 
-// A keyword in an attribute is an identifier, as C23 and C++ read one there ([[gnu::const]]): fminus::default.
+// An attribute's namespace and its name: an identifier, which may be a module's name, as `[[meter::label("Peak")]]`'s
+// is in a program with a module meter, or a keyword, which C23 reads there as an identifier: `fminus::default`,
+// `[[ui::enum("a", "b")]]`, `[[gnu::const]]`. Every token the scanner makes of an identifier's spelling is here
+// (FrontendTest checks each keyword of the parser's tokens): the type words, the statements' and FMinus's own.
 attribute_word
     : IDENTIFIER                            { $$ = $1; }
+    | MODULE_NAME                           { const ast::Type type = $1; $$ = type.module->name; }
+    | VECTOR_TYPE                           { $$ = ast::typeName($1); }
+    | "float"                               { $$ = "float"; }
+    | "double"                              { $$ = "double"; }
+    | "bool"                                { $$ = "bool"; }
+    | "int"                                 { $$ = "int"; }
+    | "void"                                { $$ = "void"; }
+    | "const"                               { $$ = "const"; }
+    | "restrict"                            { $$ = "restrict"; }
+    | "sizeof"                              { $$ = "sizeof"; }
+    | "true"                                { $$ = "true"; }
+    | "false"                               { $$ = "false"; }
+    | "return"                              { $$ = "return"; }
+    | "if"                                  { $$ = "if"; }
+    | "else"                                { $$ = "else"; }
+    | "while"                               { $$ = "while"; }
+    | "for"                                 { $$ = "for"; }
+    | "break"                               { $$ = "break"; }
+    | "continue"                            { $$ = "continue"; }
+    | "switch"                              { $$ = "switch"; }
+    | "case"                                { $$ = "case"; }
     | "default"                             { $$ = "default"; }
+    | "enum"                                { $$ = "enum"; }
+    | "parallel"                            { $$ = "parallel"; }
+    | "poly"                                { $$ = "poly"; }
+    | "module"                              { $$ = "module"; }
+    | "this"                                { $$ = "this"; }
+    | "param"                               { $$ = "param"; }
     ;
 
-// An attribute's arguments: numbers, a minus before any of them.
+// An attribute's arguments: numbers, a minus before any of them, and strings (C23's balanced tokens, of which FMinus
+// takes these).
 attribute_args
     : attribute_arg                         { $$.push_back($1); }
     | attribute_args "," attribute_arg      { $$ = $1; $$.push_back($3); }
     ;
 
 attribute_arg
-    : NUMBER                                { $$ = $1; }
-    | "-" NUMBER                            { $$ = "-" + $2; }
+    : NUMBER                                { $$ = ast::AttributeArg{$1, false}; }
+    | "-" NUMBER                            { $$ = ast::AttributeArg{"-" + $2, false}; }
+    | string_literal                        { $$ = ast::AttributeArg{$1, true}; }
+    ;
+
+// C's adjacent string literals are one: "Cut" "off" is "Cutoff".
+string_literal
+    : STRING                                { $$ = $1; }
+    | string_literal STRING                 { $$ = $1 + $2; }
     ;
 
 // `(void)` is C's empty list: one unnamed parameter of type void, which is no parameter.
@@ -681,16 +814,23 @@ param
                                                 const Declared d = declared($1, $2, $3);
                                                 $$ = ast::Param{at(@2), "", d.type, d.isConst, d.isRestrict, nullptr};
                                             }
-    | qualifier type pointer IDENTIFIER array_size
+    | qualifier type pointer IDENTIFIER array_sizes
                                             {
                                                 // C's: a parameter declared as an array is a pointer to its first
-                                                // element, and the size, checked, says nothing.
+                                                // element, and the size, checked, says nothing. A 2-D one's would be
+                                                // a pointer to its first row, which FMinus has no parameter of.
                                                 const Pointer pointer = $3;
+                                                ArraySizes sizes = $5;
                                                 if (pointer.isPointer)
                                                     parseContext.diagnostics.error(at(@4),
                                                                                    "FMinus has no arrays of pointers");
+                                                else if (sizes.rows)
+                                                    parseContext.diagnostics.error(
+                                                        at(@4), "FMinus has no parameters of 2-D arrays, which would "
+                                                                "be pointers to rows: pass a row (a float*), or the "
+                                                                "module that holds the array");
                                                 $$ = ast::Param{at(@4), $4, ast::Type::pointerTo($2, $1), false, false,
-                                                                $5};
+                                                                std::move(sizes.size)};
                                             }
     ;
 
@@ -713,12 +853,20 @@ qualifier
 
 type
     : "float"                               { $$ = ast::Type::Float; }
+    | "double"                              { $$ = ast::Type::Double; }
     | "bool"                                { $$ = ast::Type::Bool; }
     | "int"                                 { $$ = ast::Type::Int; }
     | "void"                                { $$ = ast::Type::Void; }
     | VECTOR_TYPE                           { $$ = $1; }
     | "poly" "float"                        { $$ = ast::Type::PolyFloat; }
     | "poly" "bool"                         { $$ = ast::Type::PolyBool; }
+    | "poly" "double"                       {
+                                                // A poly type's lanes are floats (or bools): a double is no lane.
+                                                parseContext.diagnostics.error(at(@2), "FMinus has poly float and poly "
+                                                                               "bool, not 'poly double': a double is "
+                                                                               "no vector lane");
+                                                $$ = ast::Type::PolyFloat;
+                                            }
     | MODULE_NAME                           { $$ = $1; }
     | "enum" IDENTIFIER                     { $$ = enumType(@2, $2, parseContext); }
     ;
@@ -726,6 +874,7 @@ type
 // The types a cast names: C casts between scalars (a vector's literal is OpenCL C's (float4)(...)).
 cast_type
     : "float"                               { $$ = ast::Type::Float; }
+    | "double"                              { $$ = ast::Type::Double; }
     | "int"                                 { $$ = ast::Type::Int; }
     | "bool"                                { $$ = ast::Type::Bool; }
     | "enum" IDENTIFIER                     { $$ = enumType(@2, $2, parseContext); }
@@ -824,17 +973,77 @@ declarators
     | declarators "," declarator            { $$ = $1; $$.push_back($3); }
     ;
 
+// C23's attributes after a declarator's name appertain to what it declares: a field's are the host's
+// (Field::attributes), and a local's or a constant's are the code generator's error. They and the sizes after them
+// are read without a rule ending between them, since a `[` after the attributes may begin either.
 declarator
-    : pointer IDENTIFIER                    { $$ = Declarator{at(@2), $1, $2, nullptr}; }
-    | pointer IDENTIFIER "=" expr           { $$ = Declarator{at(@2), $1, $2, $4}; }
-    | pointer IDENTIFIER "=" "{" args "}"   { $$ = Declarator{at(@2), $1, $2, nullptr, false, nullptr, true, $5}; }
-    | pointer IDENTIFIER array_size         { $$ = Declarator{at(@2), $1, $2, nullptr, true, $3}; }
-    | pointer IDENTIFIER array_size "=" expr
-                                            { $$ = Declarator{at(@2), $1, $2, $5, true, $3}; }
-    | pointer IDENTIFIER array_size "=" "{" args "}"
-                                            { $$ = Declarator{at(@2), $1, $2, nullptr, true, $3, true, $6}; }
-    | pointer IDENTIFIER array_size "=" "{" arg_list "," "}"
-                                            { $$ = Declarator{at(@2), $1, $2, nullptr, true, $3, true, $6}; }
+    : pointer IDENTIFIER attributes         { $$ = named(@2, $1, $2, $3); }
+    | pointer IDENTIFIER attributes "=" expr
+                                            { $$ = named(@2, $1, $2, $3); $$.init = $5; }
+    | pointer IDENTIFIER attributes "=" initializer_list
+                                            { $$ = named(@2, $1, $2, $3); setList($$, $5); }
+    | pointer IDENTIFIER attributes declarator_sizes
+                                            { $$ = named(@2, $1, $2, $3); setSizes($$, $4, parseContext); }
+    | pointer IDENTIFIER attributes declarator_sizes "=" expr
+                                            {
+                                                $$ = named(@2, $1, $2, $3);
+                                                setSizes($$, $4, parseContext);
+                                                $$.init = $6;
+                                            }
+    | pointer IDENTIFIER attributes declarator_sizes "=" initializer_list
+                                            {
+                                                $$ = named(@2, $1, $2, $3);
+                                                setSizes($$, $4, parseContext);
+                                                setList($$, $6);
+                                            }
+    ;
+
+// A declarator's sizes, and any attributes after them (setSizes' error).
+declarator_sizes
+    : array_sizes                           { $$ = $1; }
+    | array_sizes attribute_specifiers      { $$ = $1; $$.attributes = $2; }
+    ;
+
+// An initialiser list: its values, and the braces of the lists inside it, a 2-D array's rows (ast::Brace). C23's
+// `{}` is an empty one, and a comma may end one.
+initializer_list
+    : "{" "}"                               {}
+    | "{" initializers "}"                  { $$ = $2; }
+    | "{" initializers "," "}"              { $$ = $2; }
+    ;
+
+initializers
+    : initializer                           { $$ = $1; }
+    | initializers "," initializer          { $$ = $1; append($$, $3); }
+    ;
+
+// A value, or a braced list: its values, inside a brace that holds them all, one level deeper than its own.
+initializer
+    : expr                                  { $$.items.push_back($1); }
+    | initializer_list                      {
+                                                InitList list = $1;
+                                                $$.braces.push_back(ast::Brace{at(@1), 0, list.items.size(), 1});
+                                                for (ast::Brace& brace : list.braces)
+                                                    ++brace.depth;
+                                                append($$, std::move(list));
+                                            }
+    ;
+
+// An array's sizes as written: one, or a 2-D array's two, the rows' last. A third is FMinus's error (C would have an
+// array of arrays of arrays), which keeps the first two.
+array_sizes
+    : array_size                            { $$.size = $1; }
+    | array_sizes array_size                {
+                                                $$ = $1;
+                                                if ($$.rows)
+                                                    parseContext.diagnostics.error(at(@2), "FMinus's arrays have at "
+                                                                                           "most two dimensions");
+                                                else
+                                                {
+                                                    $$.rows = true;
+                                                    $$.rowSize = $2;
+                                                }
+                                            }
     ;
 
 // An array's size as written: an expression (the code generator checks that it is an integer constant expression,
@@ -919,7 +1128,23 @@ expr
     | expr "[" expr "]"                     { $$ = ast::makeExpr(at(@2), ast::IndexExpr{$1, $3}); }
     | "sizeof" "(" qualifier type pointer ")"
                                             {
-                                                $$ = ast::makeExpr(at(@1), ast::SizeofExpr{declared($3, $4, $5).type});
+                                                $$ = ast::makeExpr(at(@1), ast::SizeofExpr{declared($3, $4, $5).type,
+                                                                                           nullptr, nullptr});
+                                            }
+    | "sizeof" "(" qualifier type pointer array_sizes ")"
+                                            {
+                                                // An array type's name, C's abstract declarator: `float[4][16]`.
+                                                const Pointer pointer = $5;
+                                                ArraySizes sizes = $6;
+                                                ast::Type type = declared($3, $4, pointer).type;
+                                                if (pointer.isPointer)
+                                                    parseContext.diagnostics.error(at(@5), "FMinus has no arrays of "
+                                                                                           "pointers");
+                                                else
+                                                    type = ast::Type::arrayOf(
+                                                        sizes.rows ? ast::Type::arrayOf(type, 0) : type, 0);
+                                                $$ = ast::makeExpr(at(@1), ast::SizeofExpr{type, std::move(sizes.size),
+                                                                                           std::move(sizes.rowSize)});
                                             }
     | "++" expr %prec UNARY                 { $$ = increment(@1, ast::IncrementOp::PreIncrement, $2); }
     | "--" expr %prec UNARY                 { $$ = increment(@1, ast::IncrementOp::PreDecrement, $2); }

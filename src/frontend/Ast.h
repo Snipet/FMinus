@@ -12,16 +12,22 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <variant>
 #include <vector>
 
 namespace fminus::ast
 {
-    // The value types. float is IEEE single precision (LLVM's float). int is C's on every target FMinus runs on: 32
-    // bits, signed. Two ints compute as ints (`/` truncates toward zero), and an int meeting a float converts to it,
-    // as C's usual arithmetic conversions say. bool is C23's: 0 or 1, which computes as an int, and to which a number
-    // converts as `x != 0` (a NaN is true). void is C's: what a function returns when it returns nothing, and no
-    // variable or parameter has it (`f(void)` is C's empty parameter list).
+    // The value types. float is IEEE single precision (LLVM's float), and double IEEE double precision (LLVM's
+    // double), C's two floating types. int is C's on every target FMinus runs on: 32 bits, signed. Two ints compute as
+    // ints (`/` truncates toward zero), an int meeting a float converts to it, and an int or a float meeting a double
+    // converts to the double, as C's usual arithmetic conversions say. bool is C23's: 0 or 1, which computes as an
+    // int, and to which a number converts as `x != 0` (a NaN is true). void is C's: what a function returns when it
+    // returns nothing, and no variable or parameter has it (`f(void)` is C's empty parameter list).
+    //
+    // A floating constant is a float unless it has a double to meet (Lowering::lowerAs): FMinus's types are float
+    // first, and `x * 0.5` of a float x is a float product, as it always was. A double has no vector form: no lane of
+    // a float vector or a poly float is one, and a double never meets one (clang's error for the truncation).
     //
     // float2, float4 and float8 are OpenCL C's vector types: that many floats side by side, computed on together. A
     // float4 fills one 128-bit NEON register; a float8 is two. Comparing two of them gives a lane mask, a bool2, bool4
@@ -32,8 +38,8 @@ namespace fminus::ast
     // target is known), so it means the same on every target. Comparing two gives a poly bool, which a program can
     // declare.
     //
-    // A pointer is C's: the address of a float, an int, a float2, a float4 or a float8 (FMinus has no pointers to
-    // pointers, to bool or to poly types). `const float*` points to floats a program reads but cannot write through
+    // A pointer is C's: the address of a float, a double, an int, a float2, a float4 or a float8 (FMinus has no
+    // pointers to pointers, to bool or to poly types). `const float*` points to floats a program reads but cannot write through
     // it. p[i] is the i-th element from p, *p is p[0], and &x is x's address; p + i, p - i, p - q (how many elements
     // apart, an int) and comparisons of two pointers of one type are C's. A void* is an address with no type, what
     // malloc returns: it converts to and from any other pointer, as in C, and has no elements.
@@ -44,11 +50,18 @@ namespace fminus::ast
     // pointer to a module is C's, and `p->y` its field.
     //
     // An array is C's: `float history[16];`, a fixed number of elements side by side, of a type FMinus can point to
-    // (a float, an int, a float vector or a module). Its name stands for a pointer to its first element, which p[i]
+    // (a float, a double, an int, a float vector or a module). Its name stands for a pointer to its first element, which p[i]
     // indexes; it cannot be assigned, and a parameter declared as one is that pointer. Its size is an integer constant
     // expression, `float buf[ROWS * COLS]` (C11 6.6p6: enumeration constants are, a const variable is not), which the
     // code generator works out where the array is declared (the declaration keeps it as written, and the parser's
     // type has a count of 0); `float t[] = {1, 2, 3}` takes its size from its list.
+    //
+    // An array may be of arrays, two dimensions deep: `float grid[4][16];` is C's array of 4 rows, each a float[16],
+    // side by side (64 floats, row by row). Its name stands for a pointer to its first row, a `float (*)[16]`, which
+    // grid[i] indexes: the row, an array, which stands for a pointer to its first float in turn, so grid[i][j] is C's
+    // element, and grid[i] goes wherever a float* does. A pointer to a row is a type of its own (pointee Kind::Array,
+    // with the row's elements and count beside it), which a program reaches only through such an array's name: no
+    // variable, parameter or field is one, and none converts to or from any other pointer.
     //
     // A type is a kind, and for a pointer what it points to, for an array its elements and how many, for a module
     // which; two types are the same when each of those is. Type::Float and the rest name the types that are only a
@@ -67,6 +80,7 @@ namespace fminus::ast
     {
         Void,
         Float,
+        Double,
         Bool,
         Int,
         Float2,
@@ -86,16 +100,21 @@ namespace fminus::ast
     {
         Kind kind = Kind::Float;
         Kind pointee = Kind::Void;        // a pointer's: what it points to; an array's: what its elements are
+                                          // (Kind::Array for rows: rowKind and rowCount say what they are)
         bool pointeeConst = false;        // a pointer's: what it points to is read-only through it (const float*)
-        const Module* module = nullptr;   // a module type's, and a pointer's or an array's whose pointee is one
-        int count = 0;   // an array's: how many elements (0 in the syntax tree, where its size is an expression)
+        const Module* module = nullptr;   // a module type's, and a pointer's or an array's whose pointee (or whose
+                                          // rows' elements) is one
+        int count = 0;   // an array's: how many elements, or rows (0 in the syntax tree, where its size is an expression)
         int enumeration = 0;   // an enumerated type's Enum::id, or a pointer's or an array's whose pointee is one; 0
                                // for none (above: not part of the type's identity)
+        Kind rowKind = Kind::Void;   // when the pointee is a row (Kind::Array): what the row's elements are
+        int rowCount = 0;            // and how many it has (0 in the syntax tree, as `count`)
 
         constexpr Type() = default;
         constexpr Type(Kind kind) : kind(kind) {}   // implicit: Kind::Float is the type float
 
-        // A pointer to `pointee`, which is a kind or a module type (FMinus has no pointers to pointers or arrays).
+        // A pointer to `pointee`, which is a kind or a module type, or a row: a one-dimensional array, what a 2-D
+        // array's name stands for a pointer to (FMinus has no pointers to pointers).
         static constexpr Type pointerTo(Type pointee, bool isConst)
         {
             Type type(Kind::Pointer);
@@ -103,6 +122,11 @@ namespace fminus::ast
             type.module = pointee.module;
             type.pointeeConst = isConst;
             type.enumeration = pointee.enumeration;
+            if (pointee.kind == Kind::Array)
+            {
+                type.rowKind = pointee.pointee;
+                type.rowCount = pointee.count;
+            }
             return type;
         }
 
@@ -120,7 +144,8 @@ namespace fminus::ast
             return type;
         }
 
-        // An array of `count` elements of `element`, a kind or a module type.
+        // An array of `count` elements of `element`, a kind or a module type, or a one-dimensional array (rows: a
+        // 2-D array, `float[4][16]` an array of 4 of float[16]).
         static constexpr Type arrayOf(Type element, int count)
         {
             Type type(Kind::Array);
@@ -128,6 +153,11 @@ namespace fminus::ast
             type.module = element.module;
             type.count = count;
             type.enumeration = element.enumeration;
+            if (element.kind == Kind::Array)
+            {
+                type.rowKind = element.pointee;
+                type.rowCount = element.count;
+            }
             return type;
         }
 
@@ -135,14 +165,17 @@ namespace fminus::ast
         friend constexpr bool operator==(Type a, Type b)
         {
             return a.kind == b.kind && a.pointee == b.pointee && a.pointeeConst == b.pointeeConst
-                   && a.module == b.module && a.count == b.count;
+                   && a.module == b.module && a.count == b.count && a.rowKind == b.rowKind
+                   && a.rowCount == b.rowCount;
         }
 
-        static const Type Void, Float, Bool, Int, Float2, Float4, Float8, Bool2, Bool4, Bool8, PolyFloat, PolyBool;
+        static const Type Void, Float, Double, Bool, Int, Float2, Float4, Float8, Bool2, Bool4, Bool8, PolyFloat,
+            PolyBool;
     };
 
     inline constexpr Type Type::Void{Kind::Void};
     inline constexpr Type Type::Float{Kind::Float};
+    inline constexpr Type Type::Double{Kind::Double};
     inline constexpr Type Type::Bool{Kind::Bool};
     inline constexpr Type Type::Int{Kind::Int};
     inline constexpr Type Type::Float2{Kind::Float2};
@@ -170,6 +203,7 @@ namespace fminus::ast
             return 0;
         case Kind::Void:
         case Kind::Float:
+        case Kind::Double:
         case Kind::Bool:
         case Kind::Int:
         case Kind::Pointer:
@@ -209,9 +243,18 @@ namespace fminus::ast
         return type.kind == Kind::Array;
     }
 
-    // What a pointer of `type` points to, or what the elements of an array of `type` are.
+    // What a pointer of `type` points to, or what the elements of an array of `type` are: a row, for a 2-D array's.
     inline Type pointee(Type type)
     {
+        if (type.pointee == Kind::Array)
+        {
+            Type row(Kind::Array);
+            row.pointee = type.rowKind;
+            row.count = type.rowCount;
+            row.module = type.module;
+            row.enumeration = type.enumeration;
+            return row;
+        }
         Type element(type.pointee);
         if (type.pointee == Kind::Module)
             element.module = type.module;
@@ -219,17 +262,39 @@ namespace fminus::ast
         return element;
     }
 
-    // Whether FMinus has pointers to `kind`: to float, int, float2, float4, float8, void and modules.
-    inline bool canPointTo(Kind kind)
+    // Whether the elements of an array of `type`, or what a pointer of it points to, are rows: a 2-D array, and the
+    // pointer its name stands for.
+    inline bool hasRows(Type type)
     {
-        return kind == Kind::Float || kind == Kind::Int || kind == Kind::Float2 || kind == Kind::Float4
-               || kind == Kind::Float8 || kind == Kind::Void || kind == Kind::Module;
+        return (type.kind == Kind::Array || type.kind == Kind::Pointer) && type.pointee == Kind::Array;
     }
 
-    // Whether two pointers point to the same type (const aside): the same kind, and the same module for modules.
+    // What an array of `type` holds, a row's elements for a 2-D array: float for float[16] and for float[4][16].
+    inline Type elementOf(Type type)
+    {
+        const Type element = pointee(type);
+        return hasRows(type) ? pointee(element) : element;
+    }
+
+    // Whether FMinus has pointers to `kind`: to float, double, int, float2, float4, float8, void and modules.
+    inline bool canPointTo(Kind kind)
+    {
+        return kind == Kind::Float || kind == Kind::Double || kind == Kind::Int || kind == Kind::Float2
+               || kind == Kind::Float4 || kind == Kind::Float8 || kind == Kind::Void || kind == Kind::Module;
+    }
+
+    // Whether `type` is one of C's floating types, float or double: what `x != 0` tests as a float, and what converts
+    // to an int by truncating toward zero.
+    inline bool isFloating(Type type)
+    {
+        return type == Type::Float || type == Type::Double;
+    }
+
+    // Whether two pointers point to the same type (const aside): the same kind, the same module for modules, and the
+    // same row for rows.
     inline bool samePointee(Type a, Type b)
     {
-        return a.pointee == b.pointee && a.module == b.module;
+        return a.pointee == b.pointee && a.module == b.module && a.rowKind == b.rowKind && a.rowCount == b.rowCount;
     }
 
     // Whether a value of `type` takes part in arithmetic: every type's but void's, a pointer's (whose arithmetic is
@@ -351,7 +416,8 @@ namespace fminus::ast
 
     // A constant as written, f suffix included. An integer constant (2, 010 in octal, 0x1F in hex: no point and no
     // exponent) is an int, as in C. Any other is a float, which the code generator rounds once, straight to float (in
-    // C, an unsuffixed 1.5 would be a double).
+    // C, an unsuffixed 1.5 would be a double), unless it has no suffix and meets a double: then it is the double
+    // nearest its spelling, as C reads it (Lowering::lowerAs).
     struct NumberExpr
     {
         std::string spelling;
@@ -476,15 +542,18 @@ namespace fminus::ast
         ExprPtr index;
     };
 
-    // `sizeof(float)`, `sizeof(float4*)`: a type's size in bytes, an int (C's is a size_t). FMinus has no sizeof of an
-    // expression.
+    // `sizeof(float)`, `sizeof(float4*)`, `sizeof(float[4][16])`: a type's size in bytes, an int (C's is a size_t).
+    // FMinus has no sizeof of an expression. An array's sizes are expressions, as a declaration's (DeclStmt), which
+    // the code generator works out.
     struct SizeofExpr
     {
-        Type type = Type::Float;
+        Type type = Type::Float;   // an array's counts are 0 here: `size` and `rowSize` give them
+        ExprPtr size;
+        ExprPtr rowSize;
     };
 
-    // `(int)x`, `(float)x`, `(bool)x`: C's casts between scalar types, the implicit conversions written out. (int)
-    // truncates toward zero.
+    // `(int)x`, `(float)x`, `(double)x`, `(bool)x`: C's casts between scalar types, the implicit conversions written
+    // out. (int) truncates toward zero, and (float) of a double rounds to nearest.
     struct CastExpr
     {
         Type type = Type::Float;
@@ -507,21 +576,57 @@ namespace fminus::ast
 
     struct Stmt;
 
+    // A braced list inside an initialiser list: `{1, 2}` in `float g[2][2] = {{1, 2}, {3, 4}};`, a row's. The list
+    // keeps its values in order, braced or not (DeclStmt::list); a Brace says which of them it holds, `count` from
+    // `first`, where its `{` is, and how deep (1 in the outer list, 2 in one of those). C's rules then place each
+    // value in the array (ir/Memory.cpp, placeList).
+    struct Brace
+    {
+        SourceLocation location;
+        std::size_t first = 0;
+        std::size_t count = 0;
+        int depth = 1;
+    };
+
+    // An attribute's argument as written: a number ("-60", "1e3", "0x10"), or a string literal's characters, its
+    // escapes resolved and adjacent literals joined, as C joins them ("dB" for `"dB"`).
+    struct AttributeArg
+    {
+        std::string text;
+        bool isString = false;
+    };
+
+    // `[[clang::nonblocking]]` after a function's parameters, `[[fminus::range(20, 20000)]]` after a parameter's name,
+    // `[[ui::unit("dB")]]` after a field's: C23's attribute syntax, with clang's names for a function's. The tree keeps
+    // an attribute as written; the code generator gives it its meaning (ir/Effects.cpp, ir/Modules.cpp). A field's or
+    // a parameter's may take arguments, numbers and strings, and one FMinus has no meaning for is the host's
+    // (fminus::Program::Attribute).
+    struct Attribute
+    {
+        SourceLocation location;
+        std::string name;                   // "clang::nonblocking", or a name without its namespace
+        std::vector<AttributeArg> args;     // between its parentheses, in order
+    };
+
     // `[const] float name = init;`: a variable of the enclosing block, from its declaration to the block's end. One per
     // declarator: `float a = 1, b;` is two, and `float *p, x;` a pointer and a float, as in C. Without an initialiser
     // the variable starts at 0, and a pointer at null (C leaves them indeterminate, and reading them undefined). An
-    // array's initialiser is a list, `float c[4] = {1, 2};`, whose missing elements are 0; a module is initialised
-    // from another of its type, or starts at 0.
+    // array's initialiser is a list, `float c[4] = {1, 2};`, whose missing elements are 0, and a 2-D array's may brace
+    // its rows, `float g[2][3] = {{1, 2}, {3}};`, as C's does; a module is initialised from another of its type, or
+    // starts at 0.
     struct DeclStmt
     {
         bool isConst = false;      // the variable's: `const float x`, or `float* const p` (`const float* p` is not)
-        Type type = Type::Float;   // an array's count is 0 here: `size` gives it
+        Type type = Type::Float;   // an array's count is 0 here: `size` gives it (and a 2-D one's rowCount `rowSize`)
         std::string name;
         ExprPtr init;              // null without an initialiser
         bool isRestrict = false;   // `float* restrict p`: accepted, and changes nothing for a local
         bool hasList = false;      // `= {...}`
-        std::vector<ExprPtr> list;
+        std::vector<ExprPtr> list;   // its values, in order, braced or not
         ExprPtr size;              // an array's size as written; null for `[]`, which its list sizes
+        ExprPtr rowSize = nullptr;          // a 2-D array's rows' size as written, `[16]` in `float g[4][16]`
+        std::vector<Brace> braces = {};     // the braces inside the list, in the order their `{`s are
+        std::vector<Attribute> attributes = {};   // C23's, after the name: a field's (Field), refused elsewhere
     };
 
     // `expr;`: evaluated for its effect (an assignment, a call).
@@ -692,16 +797,6 @@ namespace fminus::ast
     // A definition, or a prototype (`float f(float x);`, no body). As in C, a prototype declares a function defined
     // later or elsewhere: one with no definition in the program is external, resolved when the code is linked (the
     // JIT looks in the process, so `float atanf(float x);` calls libm's).
-    // `[[clang::nonblocking]]` after a function's parameters: C23's attribute syntax, with clang's names. The tree
-    // keeps an attribute as written; the code generator gives it its meaning (ir/Effects.cpp). A parameter's take
-    // arguments, numbers: `[[fminus::range(20, 20000), fminus::default(1000)]]`.
-    struct Attribute
-    {
-        SourceLocation location;
-        std::string name;                 // "clang::nonblocking", or a name without its namespace
-        std::vector<std::string> args;    // the numbers between its parentheses, as written ("-60", "1e3")
-    };
-
     // A method is a function too: named `OnePole::tick`, with `module` set, and a first parameter the parser adds,
     // `this`, a pointer to the module (what C++ passes, and what a C++ host passes when it calls the method).
     struct Function
@@ -723,6 +818,7 @@ namespace fminus::ast
     // sample i of the call. How it gets there is the host's choice when it compiles the program (ir::Options): a
     // stream (a buffer of samples, set before each call), a knob (one value, which may change between any two calls,
     // read once a call), or frozen (a constant, compiled in). Its attributes give the host a range and a default.
+    // Any field may carry attributes for the host, a range, a unit or a label (Program::Module::Field::attributes).
     struct Field
     {
         SourceLocation location;
@@ -731,9 +827,10 @@ namespace fminus::ast
         bool isConst = false;
         bool hasInitializer = false;
         bool isParam = false;
-        std::vector<Attribute> attributes;   // a parameter's
+        std::vector<Attribute> attributes;   // after its name: `float level [[ui::unit("dB")]];`
         ExprPtr size;                        // an array's size as written, as DeclStmt's
         std::size_t enums = 0;               // how many of the module's enumerations come before it, which it sees
+        ExprPtr rowSize = nullptr;           // a 2-D array's rows' size as written, as DeclStmt's
     };
 
     // `module OnePole { float y; float k; void init(float cutoff, float rate) { ... } float tick(float x) { ... } };`:
@@ -787,8 +884,21 @@ namespace fminus::ast
     std::string typeName(Type type);
 
     // An attribute's argument as a number, as C writes one: an integer (0x1F, 010, 12, -3) or a floating constant
-    // (1e3, 0.5f). Nothing for anything else.
+    // (1e3, 0.5f). Nothing for anything else, an integer too large for any of C's integer types among it.
     std::optional<double> attributeNumber(std::string spelling);
+
+    // An attribute's argument as a number: nothing for a string, even "12".
+    inline std::optional<double> attributeNumber(const AttributeArg& arg)
+    {
+        return arg.isString ? std::nullopt : attributeNumber(arg.text);
+    }
+
+    // Whether an attribute is one FMinus ignores, as clang ignores one it does not know: a name without a namespace
+    // that is none of C23's standard attributes (deprecated, fallthrough, maybe_unused, nodiscard, noreturn,
+    // reproducible and unsequenced, each also written __name__). C keeps the names without a namespace for its
+    // standard, so none is a host's: the code generator warns of one, clang's -Wunknown-attributes, and the host never
+    // sees it (fminus::Program::Attribute).
+    bool isIgnoredAttribute(std::string_view name);
 
     // The tree as s-expressions, one function after another, for `fminus --emit ast` and tests:
     //     (function float gain ((float x) (const float g))

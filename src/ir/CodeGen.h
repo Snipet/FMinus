@@ -134,14 +134,15 @@ namespace fminus::ir
     };
 
     // Lowers `program` into a new module in `context`, named after the diagnostics' file. Every FMinus function becomes
-    // an external LLVM function of the same name with the C calling convention (float is f32), so C++ calls the JIT'd
-    // or linked code as float(float, ...). Returns nullptr when it reported errors into `diagnostics`; it reports every
+    // an external LLVM function of the same name with the C calling convention (float is f32, double f64), so C++
+    // calls the JIT'd or linked code as float(float, ...). Returns nullptr when it reported errors into `diagnostics`; it reports every
     // error it finds, not only the first.
     std::unique_ptr<llvm::Module> lower(const ast::Program& program, llvm::LLVMContext& context,
                                         Diagnostics& diagnostics, const Options& options = {});
 
     // The builtins a program can call, with their parameter counts: <math.h>'s float functions (fabsf, sqrtf,
-    // sinf, ...), lowered to LLVM intrinsics, or the transcendental ones to the runtime's functions (Math).
+    // sinf, ...), lowered to LLVM intrinsics, or the transcendental ones to the runtime's functions (Math), then its
+    // double functions that are instructions (sqrt, fabs, floor, fmin, fmax, fma).
     struct BuiltinInfo
     {
         std::string_view name;

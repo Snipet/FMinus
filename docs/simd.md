@@ -682,13 +682,14 @@ ABI. To export one, lower it as clang does: a `ptr sret(<8 x float>)` first para
 `ptr`s, a `void` return. Recipe 3 met the same question for `bool` (`zeroext`); every type that crosses the boundary
 asks it.
 
-`fminus --run` crosses the boundary too: it calls the JIT'd function through a C++ pointer type, and its command line
-has floats only. So it refuses a vector parameter ("--run: 'g' takes a parameter of type 'float4'; --run passes floats
-only") and a vector result ("--run: 'f' returns 'float4'; --run prints floats, bools and ints only"). The second
-comes from the
-driver's `switch` over the result type (`tools/fminus/main.cpp`), which has no `default:`: when this recipe added
-`Float2` to `Bool8`, `-Wswitch` stopped the build there until they were handled, and recipe 9's poly types did the
-same. An executable's `main` refuses them the same way (programs.md).
+`fminus --run` crosses the boundary too, and so does a host's `Program::call`: each calls the JIT'd function through a
+thunk of its signature, which passes C's scalars and pointers (extending.md's recipe 36). So `--run` refuses a vector
+parameter ("--run: 'g' takes a parameter of type 'float4'; --run passes bools, ints, floats, doubles and arrays of
+ints, floats and doubles only") and a vector result ("--run: 'f' returns 'float4'; --run prints bools, ints, floats and
+doubles only"), and `call()` a function of either. Both come from a `switch` over FMinus's types with no `default:`,
+`jit::callType` (`src/jit/Call.cpp`) now, the driver's `switch` over the result type when this recipe was written:
+when this recipe added `Float2` to `Bool8`, `-Wswitch` stopped the build there until they were handled, and recipe
+9's poly types did the same. An executable's `main` refuses them the same way (programs.md).
 
 ### Tests
 

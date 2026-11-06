@@ -3,7 +3,9 @@
 // linking libfminus_runtime.a. Add a line whenever Runtime.h gains a function.
 FMINUS_RUNTIME_SYMBOL(fminus_rt_abi_version)
 FMINUS_RUNTIME_SYMBOL(fminus_rt_main_args)
+FMINUS_RUNTIME_SYMBOL(fminus_rt_main_double_args)
 FMINUS_RUNTIME_SYMBOL(fminus_rt_main_result)
+FMINUS_RUNTIME_SYMBOL(fminus_rt_main_double_result)
 FMINUS_RUNTIME_SYMBOL(fminus_rt_main_bool_result)
 FMINUS_RUNTIME_SYMBOL(fminus_rt_main_loop_budget)
 FMINUS_RUNTIME_SYMBOL(fminus_rt_main_bounds)

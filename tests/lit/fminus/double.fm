@@ -1,0 +1,93 @@
+// double, C's IEEE double precision (docs/extending.md, recipe 33): a double is LLVM's double, 8 bytes aligned to 8,
+// tagged "double" for strict aliasing; a float meeting one widens (fpext), and one going to a float rounds (fptrunc). A
+// floating constant is a float unless the arithmetic it is part of has a double: then it is C's double, its bits as
+// clang's. --run passes and prints doubles (and floats beside them), and an executable's main takes and returns them;
+// --emit obj and asm too.
+// RUN: fminus %s -O0 | FileCheck %s --check-prefix=IR
+// RUN: fminus %s --run third | FileCheck %s --check-prefix=THIRD
+// RUN: fminus %s --run tenth 3 | FileCheck %s --check-prefix=TENTH
+// RUN: fminus %s --run narrow 3 | FileCheck %s --check-prefix=NARROW
+// RUN: fminus %s --run clock 48000 | FileCheck %s --check-prefix=CLOCK
+// RUN: fminus %s --run mixed 0.1 0.2 | FileCheck %s --check-prefix=MIXED
+// RUN: fminus %s --emit exe -o %t
+// RUN: %t 3600 48000 | FileCheck %s --check-prefix=MAIN
+// RUN: not %t 1 x 2>&1 | FileCheck %s --check-prefix=NAN
+// RUN: fminus %s --entry -O0 | FileCheck %s --check-prefix=ENTRY
+// RUN: fminus %s --emit obj -o %t.o
+// RUN: llvm-objdump -t %t.o | FileCheck %s --check-prefix=OBJ
+
+// A third, C's: 1.0 and 3.0 are doubles where the result is one.
+double third()
+{
+    return 1.0 / 3.0;
+}
+
+// x * 0.1 is a double product where it goes to a double, and a float product where it goes to a float.
+double tenth(float x)
+{
+    return x * 0.1;
+}
+
+float narrow(float x)
+{
+    return x * 0.1;
+}
+
+// Slow state: a second of samples, counted in a double.
+double clock(double rate)
+{
+    double t = 0;
+    for (int i = 0; i < (int)rate; ++i)
+        t += 1.0 / rate;
+    return t;
+}
+
+double mixed(double a, float b)
+{
+    return a + b;
+}
+
+// seconds at a rate, counted a sample at a time: main takes a double and a float, and returns a double.
+double main(double seconds, float rate)
+{
+    double t = 0;
+    const int n = (int)(seconds * rate);
+    for (int i = 0; i < n; ++i)
+        t += 1.0 / rate;
+    return t;
+}
+
+// THIRD: 0.3333333333333333
+// TENTH: 0.30000000000000004
+// NARROW: 0.3
+// CLOCK: 1.000000000000893
+// MIXED: 0.3000000029802322
+// MAIN: 3599.999983778296
+// NAN: 'x' is not a number
+
+// IR-LABEL: define double @third()
+// IR:         ret double f0x3FD5555555555555
+// IR-LABEL: define double @tenth(float %x)
+// IR:         %[[X:.*]] = load float, ptr %x.addr, align 4, !tbaa ![[FLOAT:[0-9]+]]
+// IR:         %[[WIDE:.*]] = fpext float %[[X]] to double
+// IR:         fmul double %[[WIDE]], 1.000000e-01
+// IR-LABEL: define float @narrow(float %x)
+// IR:         fmul float %{{.*}}, 1.000000e-01
+// IR-LABEL: define double @clock(double %rate)
+// IR:         %t = alloca double, align 8
+// IR:         load double, ptr %t, align 8, !tbaa ![[DOUBLE:[0-9]+]]
+// IR:         fdiv double 1.000000e+00
+// IR:       ![[FLOAT]] = !{![[FLOATTYPE:[0-9]+]], ![[FLOATTYPE]], i64 0}
+// IR:       ![[FLOATTYPE]] = !{!"float", ![[ROOT:[0-9]+]], i64 0}
+// IR:       ![[DOUBLE]] = !{![[DOUBLETYPE:[0-9]+]], ![[DOUBLETYPE]], i64 0}
+// IR:       ![[DOUBLETYPE]] = !{!"double", ![[ROOT]], i64 0}
+
+// ENTRY:       @main.kinds = private unnamed_addr constant [3 x i8] c"df\00"
+// ENTRY-LABEL: define i32 @main(i32 %argc, ptr %argv)
+// ENTRY:         %args = alloca [2 x double]
+// ENTRY:         %status = call i32 @fminus_rt_main_double_args(i32 %argc, ptr %argv, i32 2, ptr @main.kinds, ptr %args)
+// ENTRY:         fptrunc double %{{.*}} to float
+// ENTRY:         %result = call double @fminus.main(double %{{.*}}, float %{{.*}})
+// ENTRY:         call void @fminus_rt_main_double_result(double %result)
+
+// OBJ: {{_?}}third

@@ -327,6 +327,68 @@ TEST_CASE("a module's fields, an array of modules and a ring buffer's index are 
     }
 }
 
+TEST_CASE("a 2-D array's every dimension is checked, each against its own extent, named in the message", "[bounds]")
+{
+    const char* const grid = "module Bank\n"
+                             "{\n"
+                             "    float gain[4][16];\n"
+                             "    float at(int v, int i) { return gain[v][i]; }\n"
+                             "    void set(int v, int i, float x) { gain[v][i] = x; }\n"
+                             "    float sum(int v) { float s = 0; for (int i = 0; i < 16; ++i) s += gain[v][i];"
+                             " return s; }\n"
+                             "};\n"
+                             "float row(float v, float i)\n"
+                             "{\n"
+                             "    const float t[2][3] = {{1, 2, 3}, {4, 5, 6}};\n"
+                             "    const float* r = t[(int)v];\n"   // a row, decayed: checked as an element of t
+                             "    return *(t[1] + (int)i);\n"      // a pointer formed from a row: its own extent
+                             "}\n";
+    for (int level = 0; level <= 3; ++level)
+    {
+        INFO("-O" << level);
+        const Checked checked = compileAt(grid, level);
+        auto* at = lookup<float(void*, int, int)>(*checked.jit, "Bank::at");
+        auto* set = lookup<void(void*, int, int, float)>(*checked.jit, "Bank::set");
+        auto* sum = lookup<float(void*, int)>(*checked.jit, "Bank::sum");
+        auto* row = lookup<float(float, float)>(*checked.jit, "row");
+        alignas(16) std::array<float, 64 + 4> bank{};   // the bank, and what lies past it
+        set(bank.data(), 3, 15, 2.0f);
+        set(bank.data(), 1, 0, 3.0f);
+        CHECK(checked.record().site == 0);
+        CHECK(bank[3 * 16 + 15] == 2.0f);
+        CHECK(at(bank.data(), 1, 0) == 3.0f);
+        CHECK(sum(bank.data(), 3) == 2.0f);
+
+        CHECK(at(bank.data(), 4, 0) == 0.0f);   // the rows: 4 of them
+        CHECK(checked.failed() == "test.fm:4:41: index 4 out of bounds for 'gain' of type 'float[4][16]'");
+        checked.clear();
+        CHECK(at(bank.data(), 0, 16) == 0.0f);   // a row's elements: 16, though row 1 follows in memory
+        CHECK(checked.failed() == "test.fm:4:44: index 16 out of bounds for 'gain[v]' of type 'float[16]'");
+        checked.clear();
+        set(bank.data(), 2, -1, 9.0f);
+        CHECK(checked.failed() == "test.fm:5:46: index -1 out of bounds for 'gain[v]' of type 'float[16]'");
+        CHECK(checked.record().index == -1);
+        checked.clear();
+        CHECK(bank[2 * 16 - 1] == 0.0f);   // the store never happened
+        set(bank.data(), 4, 0, 9.0f);
+        CHECK(checked.failed() == "test.fm:5:43: index 4 out of bounds for 'gain' of type 'float[4][16]'");
+        checked.clear();
+        CHECK(bank[64] == 0.0f);
+        CHECK(sum(bank.data(), -1) == 0.0f);
+        CHECK(checked.failed() == "test.fm:6:75: index -1 out of bounds for 'gain' of type 'float[4][16]'");
+        checked.clear();
+
+        CHECK(row(1.0f, 2.0f) == 6.0f);
+        CHECK(checked.record().site == 0);
+        CHECK(row(2.0f, 0.0f) == 0.0f);   // t[2], a row past the last, even to make a pointer of it
+        CHECK(checked.failed() == "test.fm:11:23: index 2 out of bounds for 't' of type 'float[2][3]'");
+        checked.clear();
+        CHECK(row(0.0f, 4.0f) == 0.0f);   // t[1] + 4: past the row's end, one past is 3
+        CHECK(checked.failed() == "test.fm:12:19: pointer offset 4 out of bounds for 't[1]' of type 'float[3]'");
+        checked.clear();
+    }
+}
+
 TEST_CASE("a method called through a pointer into an array of modules is called on one of its modules", "[bounds]")
 {
     // (voices + n)->bump() and (&voices[n])->bump() may form voices + 2, one past the end, but not call bump on it,

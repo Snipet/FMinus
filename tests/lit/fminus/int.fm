@@ -1,8 +1,9 @@
 // int: C's integer arithmetic, as clang -O0 writes it (+ - * carry nsw; / and % are sdiv and srem), its conversions to
-// and from float, and the usual arithmetic conversions. --run prints an int.
+// and from float, and the usual arithmetic conversions. --run passes and prints ints.
 // RUN: fminus %s -O0 | FileCheck %s
 // RUN: fminus %s --run floors 2.5 | FileCheck %s --check-prefix=RESULT
-// RUN: not fminus %s --run mix 1 2 2>&1 | FileCheck %s --check-prefix=PARAM
+// RUN: fminus %s --run mix 1 2 | FileCheck %s --check-prefix=MIX
+// RUN: not fminus %s --run mix 1.5 2 2>&1 | FileCheck %s --check-prefix=PARAM
 
 int mix(int a, int b)
 {
@@ -43,4 +44,5 @@ int floors(float x)
 // CHECK:         add nsw i32 {{%.*}}, 1
 
 // RESULT: 3
-// PARAM: fminus: --run: 'mix' takes a parameter of type 'int'; --run passes floats only
+// MIX: 4
+// PARAM: fminus: --run: '1.5' is not an int

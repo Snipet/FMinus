@@ -2,6 +2,8 @@
 #include "frontend/Ast.h"
 
 #include <algorithm>
+#include <array>
+#include <cerrno>
 #include <cstdlib>
 #include <utility>
 
@@ -121,6 +123,9 @@ namespace fminus::ast
             return "?";
         }
 
+        std::string declared(Type type, bool isConst, bool isRestrict, const Expr* size = nullptr,
+                             const Expr* rowSize = nullptr);
+
         std::string dump(const Expr& expr)
         {
             return std::visit(Overloaded{
@@ -179,7 +184,11 @@ namespace fminus::ast
                                       return std::string("(") + opName(increment.op) + " " + dump(*increment.target)
                                              + ")";
                                   },
-                                  [](const SizeofExpr& size) {   // (sizeof float *)
+                                  [](const SizeofExpr& size) {   // (sizeof float *), (sizeof float[4][(* 2 N)])
+                                      if (isArray(size.type))
+                                          return "(sizeof " + declared(size.type, false, false, size.size.get(),
+                                                                       size.rowSize.get())
+                                                 + ")";
                                       return "(sizeof " + typeName(size.type) + ")";
                                   },
                                   [](const IndexExpr& index) {   // ([] p i)
@@ -194,33 +203,91 @@ namespace fminus::ast
         }
 
         // A declared name's type, as C spells it: `const float`, `const float * restrict`, `float * const`,
-        // `const float[16]`. An array's size is as written, `float[(* ROWS COLS)]`, or nothing for `float[]`.
-        std::string declared(Type type, bool isConst, bool isRestrict, const Expr* size = nullptr)
+        // `const float[16]`. An array's size is as written, `float[(* ROWS COLS)]`, or nothing for `float[]`, and a
+        // 2-D array's rows' after it, `float[4][16]`.
+        std::string declared(Type type, bool isConst, bool isRestrict, const Expr* size, const Expr* rowSize)
         {
             if (isArray(type))
-                return (isConst ? "const " : "") + typeName(pointee(type)) + "["
-                       + (size != nullptr ? dump(*size) : "") + "]";
+                return (isConst ? "const " : "") + typeName(elementOf(type)) + "["
+                       + (size != nullptr ? dump(*size) : "") + "]"
+                       + (hasRows(type) ? "[" + (rowSize != nullptr ? dump(*rowSize) : "") + "]" : "");
             if (!isPointer(type))
                 return (isConst ? "const " : "") + typeName(type);
             return typeName(type) + (isConst ? " const" : "") + (isRestrict ? " restrict" : "");
         }
 
-        // [[fminus::range(20, 20000)]], [[clang::nonblocking]]
+        // A string as a C string literal: "dB", a quote, a backslash and a control character escaped ("a\"b",
+        // "\n", "\001"), any other byte as it is (UTF-8's too).
+        std::string stringLiteral(const std::string& text)
+        {
+            std::string literal = "\"";
+            for (const char c : text)
+            {
+                const auto byte = static_cast<unsigned char>(c);
+                if (c == '"' || c == '\\')
+                    literal += std::string("\\") + c;
+                else if (c == '\n')
+                    literal += "\\n";
+                else if (c == '\t')
+                    literal += "\\t";
+                else if (byte < 0x20 || byte == 0x7f)
+                {
+                    literal += '\\';
+                    literal += static_cast<char>('0' + (byte >> 6));
+                    literal += static_cast<char>('0' + ((byte >> 3) & 7));
+                    literal += static_cast<char>('0' + (byte & 7));
+                }
+                else
+                    literal += c;
+            }
+            return literal + "\"";
+        }
+
+        // [[fminus::range(20, 20000)]], [[clang::nonblocking]], [[ui::unit("dB")]]
         std::string attributeText(const Attribute& attribute)
         {
             std::string args;
-            for (const std::string& arg : attribute.args)
-                args += (args.empty() ? "" : ", ") + arg;
+            for (const AttributeArg& arg : attribute.args)
+                args += (args.empty() ? "" : ", ") + (arg.isString ? stringLiteral(arg.text) : arg.text);
             return "[[" + attribute.name + (attribute.args.empty() ? "" : "(" + args + ")") + "]]";
         }
 
-        // An array's initialiser list: {1 2}.
-        std::string list(const std::vector<ExprPtr>& elements)
+        std::string attributesText(const std::vector<Attribute>& attributes)
         {
             std::string text;
-            for (const ExprPtr& element : elements)
-                text += (text.empty() ? "" : " ") + dump(*element);
-            return "{" + text + "}";
+            for (const Attribute& attribute : attributes)
+                text += " " + attributeText(attribute);
+            return text;
+        }
+
+        // The values of an initialiser list from `first` to `end`, the braces in them that are `depth` + 1 deep each
+        // in its own, from `brace` on (the braces are in the order their `{`s are, so a brace's own come after it).
+        std::string listed(const std::vector<ExprPtr>& elements, const std::vector<Brace>& braces, std::size_t first,
+                           std::size_t end, int depth, std::size_t& brace)
+        {
+            std::string text;
+            const auto add = [&](const std::string& piece) { text += (text.empty() ? "" : " ") + piece; };
+            for (std::size_t i = first;;)
+            {
+                if (brace < braces.size() && braces[brace].depth == depth + 1 && braces[brace].first == i
+                    && i + braces[brace].count <= end)
+                {
+                    const Brace& inner = braces[brace++];
+                    add("{" + listed(elements, braces, i, i + inner.count, depth + 1, brace) + "}");
+                    i += inner.count;
+                    continue;
+                }
+                if (i >= end)
+                    return text;
+                add(dump(*elements[i++]));
+            }
+        }
+
+        // An array's initialiser list: {1 2}, and a 2-D array's rows braced, {{1 2} {3}}.
+        std::string list(const std::vector<ExprPtr>& elements, const std::vector<Brace>& braces)
+        {
+            std::size_t brace = 0;
+            return "{" + listed(elements, braces, 0, elements.size(), 0, brace) + "}";
         }
 
         // (enum Mode (SAW) (SQUARE 4) (TRIANGLE)): each constant, with its value as written if it has one; C23's fixed
@@ -238,9 +305,10 @@ namespace fminus::ast
         // (decl const float[4] t {1 2}), a block's or the top level's.
         std::string dump(const DeclStmt& decl, const std::string& indent)
         {
-            return indent + "(decl " + declared(decl.type, decl.isConst, decl.isRestrict, decl.size.get()) + " "
-                   + decl.name + (decl.init ? " " + dump(*decl.init) : "") + (decl.hasList ? " " + list(decl.list) : "")
-                   + ")";
+            return indent + "(decl "
+                   + declared(decl.type, decl.isConst, decl.isRestrict, decl.size.get(), decl.rowSize.get()) + " "
+                   + decl.name + attributesText(decl.attributes) + (decl.init ? " " + dump(*decl.init) : "")
+                   + (decl.hasList ? " " + list(decl.list, decl.braces) : "") + ")";
         }
 
         // One statement per line, `indent` spaces in; a block's items one level further in.
@@ -317,15 +385,43 @@ namespace fminus::ast
     std::optional<double> attributeNumber(std::string spelling)
     {
         const bool hex = spelling.find("0x") != std::string::npos || spelling.find("0X") != std::string::npos;
-        if (!hex && !spelling.empty() && (spelling.back() == 'f' || spelling.back() == 'F'))
+        // An f suffix: a hex float's follows its exponent, whose digits are decimal (0x1p-3f); in 0x1F, F is a digit.
+        if ((!hex || spelling.find_first_of("pP") != std::string::npos) && !spelling.empty()
+            && (spelling.back() == 'f' || spelling.back() == 'F'))
             spelling.pop_back();
         const bool floating = spelling.find_first_of(hex ? ".pP" : ".eE") != std::string::npos;
+        const bool negative = spelling.starts_with('-');
+        const char* text = spelling.c_str();
+        if (spelling.size() == (negative ? 1u : 0u))
+            return std::nullopt;
         char* end = nullptr;
-        const double value = floating ? std::strtod(spelling.c_str(), &end)
-                                      : static_cast<double>(std::strtoll(spelling.c_str(), &end, 0));
-        if (spelling.empty() || end != spelling.c_str() + spelling.size())
+        double value = 0;
+        if (floating)
+            value = std::strtod(text, &end);
+        else
+        {
+            // An integer's digits, its minus apart, fit C's widest type, unsigned long long, or it is none: clang
+            // refuses "integer literal is too large to be represented in any integer type", where strtoull saturates.
+            errno = 0;
+            const unsigned long long magnitude = std::strtoull(text + (negative ? 1 : 0), &end, 0);
+            if (errno == ERANGE)
+                return std::nullopt;
+            value = negative ? 0.0 - static_cast<double>(magnitude) : static_cast<double>(magnitude);   // -0 is 0
+        }
+        if (end != text + spelling.size())
             return std::nullopt;
         return value;
+    }
+
+    bool isIgnoredAttribute(std::string_view name)
+    {
+        if (name.find("::") != std::string_view::npos)
+            return false;
+        if (name.size() > 4 && name.starts_with("__") && name.ends_with("__"))
+            name = name.substr(2, name.size() - 4);   // [[__deprecated__]] is [[deprecated]]
+        constexpr std::array<std::string_view, 7> kStandard{"deprecated", "fallthrough",  "maybe_unused", "nodiscard",
+                                                            "noreturn",   "reproducible", "unsequenced"};
+        return std::ranges::find(kStandard, name) == kStandard.end();
     }
 
     std::string typeName(Type type)
@@ -336,6 +432,8 @@ namespace fminus::ast
             return "void";
         case Kind::Float:
             return "float";
+        case Kind::Double:
+            return "double";
         case Kind::Bool:
             return "bool";
         case Kind::Int:
@@ -356,11 +454,17 @@ namespace fminus::ast
             return "poly float";
         case Kind::PolyBool:
             return "poly bool";
-        case Kind::Pointer:
+        case Kind::Pointer:   // a pointer to a row in clang's spelling: float (*)[16]
+            if (hasRows(type))
+                return (type.pointeeConst ? "const " : "") + typeName(elementOf(type)) + " (*)["
+                       + std::to_string(type.rowCount) + "]";
             return (type.pointeeConst ? "const " : "") + typeName(pointee(type)) + " *";
         case Kind::Module:
             return type.module != nullptr ? type.module->name : "?";
-        case Kind::Array:   // clang's spelling: float[16]
+        case Kind::Array:   // clang's spelling: float[16], float[4][16]
+            if (hasRows(type))
+                return typeName(elementOf(type)) + "[" + std::to_string(type.count) + "]["
+                       + std::to_string(type.rowCount) + "]";
             return typeName(pointee(type)) + "[" + std::to_string(type.count) + "]";
         }
         return "?";
@@ -412,10 +516,8 @@ namespace fminus::ast
                     for (; shown < field.enums && shown < enums.size(); ++shown)
                         text += "\n  " + dump(*enums[shown]);
                     text += std::string(field.isParam ? "\n  (param " : "\n  (field ")
-                            + declared(field.type, field.isConst, false, field.size.get()) + " " + field.name;
-                    for (const Attribute& attribute : field.attributes)
-                        text += " " + attributeText(attribute);
-                    text += ")";
+                            + declared(field.type, field.isConst, false, field.size.get(), field.rowSize.get()) + " "
+                            + field.name + attributesText(field.attributes) + ")";
                 }
                 for (; shown < enums.size(); ++shown)
                     text += "\n  " + dump(*enums[shown]);
@@ -439,9 +541,7 @@ namespace fminus::ast
                 text += std::string(i == first ? "(" : " (") + declared(param.type, param.isConst, param.isRestrict)
                         + (param.name.empty() ? "" : " " + param.name) + ")";
             }
-            text += ")";
-            for (const Attribute& attribute : function.attributes)
-                text += " " + attributeText(attribute);
+            text += ")" + attributesText(function.attributes);
             for (const Stmt& stmt : function.body)
                 text += "\n" + dump(stmt, "  ");
             text += ")\n";

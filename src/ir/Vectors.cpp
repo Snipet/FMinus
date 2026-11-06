@@ -46,7 +46,8 @@ namespace fminus::ir::detail
 
     // (float4)(a, b, c, d), OpenCL C's vector literal: one scalar is broadcast; otherwise the arguments' lanes,
     // in order, must fill the vector exactly. (poly float)(x) is a broadcast only: a program does not know how
-    // many lanes it would have to fill, and a poly argument cannot fill a fixed number.
+    // many lanes it would have to fill, and a poly argument cannot fill a fixed number. A double argument is rounded
+    // to its lane's float, as the literal's type says (in C's form, (float4){d}, too).
     Lowering::Value Lowering::lowerConstruct(SourceLocation location, const ast::ConstructExpr& construct)
     {
         const unsigned count = lanes(construct.type);
@@ -56,7 +57,14 @@ namespace fminus::ir::detail
         if (construct.braces)
             return lowerBraces(location, construct, args);
         if (args.size() == 1 && !ast::isVector(args[0].type))
-            return {convert(args[0], construct.type, location, Use::Initializing), construct.type};
+        {
+            // A double is rounded to a float first, as the literal names its lanes' type (OpenCL C's (float4)(0.0)):
+            // the one place a double becomes a lane, written out.
+            Value scalar = args[0];
+            if (scalar.type == ast::Type::Double)
+                scalar = {convert(scalar, ast::Type::Float, location, Use::Initializing), ast::Type::Float};
+            return {convert(scalar, construct.type, location, Use::Initializing), construct.type};
+        }
         if (ast::isPoly(construct.type))
         {
             error(location, "a poly float literal takes one scalar, which it broadcasts");

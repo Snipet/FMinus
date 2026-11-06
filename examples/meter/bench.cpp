@@ -6,7 +6,8 @@
 //   - rms_poly differs from a C++ emulation of its order of additions, at any width from 1 to 64 lanes;
 //   - peak_poly's reading changes with the width;
 //   - Meter's fields, after each block, are not a C++ meter's in the same order, over fading noise; or, after an
-//     impulse and a silent block, its held peak is not --decay (the knob not reaching the module);
+//     impulse and a silent block, its held peak is not --decay (the knob not reaching the module); or a field has no
+//     meter::label and fminus::range(0, 1), the attributes that say how a host shows it;
 //   - a kernel is not [[clang::nonblocking]].
 // It checks with one reading for the whole signal, and one a block of 64 and of 61 (blocks whose last poly float is
 // partial), and with blocks of 0 to 3 samples.
@@ -123,6 +124,9 @@ namespace
         const fminus::Program::Parameter* decay = nullptr;
         std::size_t heldOffset = 0;
         std::size_t levelOffset = 0;
+        std::string heldLabel;    // their meter::label attributes, how a host names them
+        std::string levelLabel;
+        bool scaled = true;       // both fminus::range(0, 1), the scale a host draws them on
         void (*measure)(void* meter, const float* input, int n) = nullptr;
 
         // Zeroed, as a host makes it, its decay at `value`.
@@ -151,12 +155,21 @@ namespace
         meter.measure = program.function<void(void*, const float*, int)>("Meter::measure", errors);
         if (meter.module == nullptr || meter.decay == nullptr || meter.measure == nullptr)
             return meter;
-        for (const fminus::Program::Module::Field& field : meter.module->fields)
+        using fminus::Program;
+        for (const Program::Module::Field& field : meter.module->fields)
         {
-            if (field.name == "held")
-                meter.heldOffset = field.offset;
-            else if (field.name == "level")
-                meter.levelOffset = field.offset;
+            if (field.name != "held" && field.name != "level")
+                continue;
+            // What the host shows: the label, a string, and the scale, two numbers.
+            const Program::Attribute* label = Program::findAttribute(field.attributes, "meter::label");
+            const Program::Attribute* range = Program::findAttribute(field.attributes, "fminus::range");
+            const std::string text = label != nullptr && label->arguments.size() == 1 && label->arguments[0].isString
+                                         ? label->arguments[0].text
+                                         : "";
+            meter.scaled = meter.scaled && range != nullptr && range->arguments.size() == 2
+                           && range->arguments[0].number == 0 && range->arguments[1].number == 1;
+            (field.name == "held" ? meter.heldOffset : meter.levelOffset) = field.offset;
+            (field.name == "held" ? meter.heldLabel : meter.levelLabel) = text;
         }
         const std::size_t alignment = std::max(meter.module->alignment, alignof(std::max_align_t));
         meter.memory.reset(
@@ -282,6 +295,8 @@ namespace
         bool meterInOrder = true;
         bool decayHeld = true;
         bool nonBlocking = true;
+        bool shown = true;   // the fields' labels and scales, their attributes
+        std::string labels;
         // For the meter, the noise fades out, so its held peak falls by its decay; and an impulse then silence, after
         // which the held peak is the decay itself, then its square (1 times decay, exactly).
         const std::vector<float> impulse = [] {
@@ -351,6 +366,8 @@ namespace
                 return false;
             }
             nonBlocking = nonBlocking && program->nonBlocking("Meter::measure");
+            labels = std::format("{} and {}", meter.heldLabel, meter.levelLabel);
+            shown = shown && !meter.heldLabel.empty() && !meter.levelLabel.empty() && meter.scaled;
             for (const std::size_t block : {std::size_t{0}, std::size_t{64}, std::size_t{61}})
             {
                 const std::vector<float> fields = runMeter(meter, fading, decay, block);
@@ -361,11 +378,14 @@ namespace
         }
         std::cout << std::format("example-meter: max |FMinus - C++| = {:.3g} (tolerance {:.3g}); at 1 to 64 lanes, "
                                  "rms_poly adds in its lanes' order: {}, peak_poly reads what peak does: {}, and "
-                                 "Meter's fields are a C++ meter's at decay {}, over fading noise: {} (after an "
-                                 "impulse, its held peak the decay: {}); every kernel nonblocking: {}\n",
-                                 worstAgainstCpp, tolerance, rmsInOrder ? "yes" : "no", samePeak ? "yes" : "no", decay,
-                                 meterInOrder ? "yes" : "no", decayHeld ? "yes" : "no", nonBlocking ? "yes" : "no");
-        return worstAgainstCpp <= tolerance && rmsInOrder && samePeak && meterInOrder && decayHeld && nonBlocking;
+                                 "Meter's fields ({}, labelled and on a scale of 0 to 1: {}) are a C++ meter's at "
+                                 "decay {}, over fading noise: {} (after an impulse, its held peak the decay: {}); "
+                                 "every kernel nonblocking: {}\n",
+                                 worstAgainstCpp, tolerance, rmsInOrder ? "yes" : "no", samePeak ? "yes" : "no", labels,
+                                 shown ? "yes" : "no", decay, meterInOrder ? "yes" : "no", decayHeld ? "yes" : "no",
+                                 nonBlocking ? "yes" : "no");
+        return worstAgainstCpp <= tolerance && rmsInOrder && samePeak && meterInOrder && decayHeld && nonBlocking
+               && shown;
     }
 } // namespace
 

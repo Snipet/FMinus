@@ -159,6 +159,24 @@ namespace fminus::ir::detail
         return folder_.FoldCmp(predicate, a, b);
     }
 
+    // A double's conversion to a float, or a float's to a double, of a constant: a subnormal operand reads as zero, and
+    // a subnormal result is zero, as FCVT does under FPCR.FZ and CVTSD2SS and CVTSS2SD under MXCSR's FTZ and DAZ:
+    // (float)1e-40 of a double is 0. LLVM's own folding does not flush a conversion (ConstantFoldCastOperand ignores
+    // the function's denormal_fpenv), so an fpext or an fptrunc of a subnormal that only the optimiser finds constant
+    // is folded as IEEE has it, where the flushing hardware would compute 0: what docs/extending.md, recipe 33, notes.
+    llvm::Value* DenormalFolder::FoldCast(llvm::Instruction::CastOps opcode, llvm::Value* value,
+                                          llvm::Type* type) const
+    {
+        if (!flush_ || (opcode != llvm::Instruction::FPExt && opcode != llvm::Instruction::FPTrunc))
+            return folder_.FoldCast(opcode, value, type);
+        auto* constant = llvm::dyn_cast<llvm::Constant>(value);
+        llvm::Constant* operand = constant != nullptr ? flushed(constant) : nullptr;
+        if (operand == nullptr)
+            return nullptr;
+        auto* result = llvm::dyn_cast_or_null<llvm::Constant>(folder_.FoldCast(opcode, operand, type));
+        return result != nullptr ? flushed(result) : nullptr;
+    }
+
     // Every definition marked flushing, then each entry point wrapped. A function is called when any definition's
     // body calls it, by the calls lowerCall and callMethod record for Effects.cpp (calls_): one in dead code counts
     // too. A target whose mode FMinus cannot set is an error at 1:1, as a binding that names nothing is: the option

@@ -1,0 +1,73 @@
+// 2-D arrays (docs/extending.md, recipe 34): C's arrays of arrays, [2 x [3 x float]] in the IR, zeroed and filled
+// from their list as C places its values (a braced row, or row by row); the name stands for a pointer to the first
+// row, which an index takes to a row, whose name stands for a pointer to its first float in turn. A const table of
+// constants is a constant of the module, its rows nested. Loops over both dimensions vectorise, and --bounds-check
+// checks each dimension against its own extent, naming which in the message; a loop whose conditions keep both
+// indexes in bounds keeps no check, and vectorises as it does without them.
+// RUN: fminus %s -O0 | FileCheck %s
+// RUN: fminus %s -O2 | FileCheck %s --check-prefix=OPT
+// RUN: fminus %s -O2 --bounds-check | FileCheck %s --check-prefix=OPT
+// RUN: fminus %s --run at 1 0 | FileCheck %s --check-prefix=AT
+// RUN: fminus %s --bounds-check --run at 0 2 | FileCheck %s --check-prefix=EDGE
+// RUN: not fminus %s --bounds-check --run at 2 0 2>&1 | FileCheck %s --check-prefix=ROWS
+// RUN: not fminus %s --bounds-check --run at 0 3 2>&1 | FileCheck %s --check-prefix=ROW
+// RUN: fminus %s --run sized | FileCheck %s --check-prefix=SIZED
+// RUN: fminus %s --emit ast | FileCheck %s --check-prefix=AST
+
+const float kGrid[2][3] = {{1, 2, 3}, {4}};
+
+float at(float r, float c)
+{
+    float g[2][3] = {{1, 2}, {3}};
+    return g[(int)r][(int)c] + kGrid[(int)r][(int)c];
+}
+
+module Bank
+{
+    float gain[4][16];
+
+    void scale(float k)
+    {
+        for (int v = 0; v < 4; ++v)
+            for (int i = 0; i < 16; ++i)
+                gain[v][i] *= k;
+    }
+};
+
+float sized()
+{
+    return sizeof(float[4][16]) + sizeof(Bank);
+}
+
+// CHECK: @kGrid = private constant [2 x [3 x float]] {{\[}}[3 x float] [float 1.000000e+00, float 2.000000e+00, float 3.000000e+00], [3 x float] [float 4.000000e+00, float 0.000000e+00, float 0.000000e+00]], align 4
+// CHECK-LABEL: define float @at(float %r, float %c)
+// CHECK:         %g = alloca [2 x [3 x float]], align 4
+// CHECK:         call void @llvm.memset.p0.i64(ptr align 4 %g, i8 0, i64 24, i1 false)
+// CHECK:         %arrayinit = getelementptr inbounds [2 x [3 x float]], ptr %g, i64 0, i64 0, i64 0
+// CHECK:         store float 1.000000e+00, ptr %arrayinit
+// CHECK:         %arrayinit1 = getelementptr inbounds [2 x [3 x float]], ptr %g, i64 0, i64 0, i64 1
+// CHECK:         store float 2.000000e+00, ptr %arrayinit1
+// CHECK:         %arrayinit2 = getelementptr inbounds [2 x [3 x float]], ptr %g, i64 0, i64 1, i64 0
+// CHECK:         store float 3.000000e+00, ptr %arrayinit2
+// CHECK:         %arraydecay = getelementptr inbounds [2 x [3 x float]], ptr %g, i64 0, i64 0
+// CHECK:         %arrayidx = getelementptr inbounds [3 x float], ptr %arraydecay, i64 %idxprom
+// CHECK:         %arraydecay4 = getelementptr inbounds [3 x float], ptr %arrayidx, i64 0, i64 0
+// CHECK:         %arrayidx8 = getelementptr inbounds float, ptr %arraydecay4, i64 %idxprom7
+// CHECK:         %arrayidx12 = getelementptr inbounds [3 x float], ptr @kGrid, i64 %idxprom11
+
+// OPT-LABEL: define void @"Bank::scale"
+// OPT-NOT:     %bounds.
+// OPT:         load <{{[0-9]+}} x float>
+// OPT:         fmul <{{[0-9]+}} x float>
+// OPT-NOT:     %bounds.
+// OPT:       {{^}$}}
+
+// AT: 7
+// EDGE: 3
+// ROWS: fminus: --run: 'at' stopped: {{.*}}array2d.fm:22:13: index 2 out of bounds for 'g' of type 'float[2][3]'
+// ROW: fminus: --run: 'at' stopped: {{.*}}array2d.fm:22:21: index 3 out of bounds for 'g[...]' of type 'float[3]'
+// SIZED: 512
+
+// AST: (decl const float[2][3] kGrid {{[{][{]}}1 2 3} {4}})
+// AST:   (decl float[2][3] g {{[{][{]}}1 2} {3}})
+// AST:   (field float[4][16] gain))

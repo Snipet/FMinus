@@ -13,7 +13,8 @@
 //
 // Meter, a module, is the meter a host shows: a peak that is held and falls a little each block, and the last block's
 // RMS, read from its fields after each call. How fast the peak falls is its parameter, a knob (docs/extending.md,
-// recipe 14).
+// recipe 14). Its fields' attributes tell the host how to show them: a label, an attribute of the host's own, and the
+// span of the meter's scale (recipe 35).
 //
 // Every kernel is [[clang::nonblocking]]: it may run on the audio thread.
 
@@ -69,8 +70,8 @@ float rms_poly(const float* restrict input, int n) [[clang::nonblocking]]
 module Meter
 {
     param float decay [[fminus::range(0, 1)]] [[fminus::default(0.9)]];   // what is left of the held peak a block on
-    float held;    // the peak, held
-    float level;   // the last block's RMS
+    float held [[meter::label("Peak")]] [[fminus::range(0, 1)]];   // the peak, held
+    float level [[meter::label("RMS")]] [[fminus::range(0, 1)]];   // the last block's RMS
 
     void measure(const float* restrict input, int n) [[clang::nonblocking]]
     {

@@ -154,6 +154,7 @@ namespace fminus::ir::detail
                 error(field.location, "duplicate member " + quoted(field.name));
             if (field.isParam)
             {
+                checkAttributes(field, type, false);
                 checkParameter(module, field);
                 elements.push_back(
                     llvm::StructType::get(module_.getContext(), {builder_.getPtrTy(), slotTypeOf(type)}));
@@ -164,14 +165,24 @@ namespace fminus::ir::detail
                                           + quoted(field.name) + " in a method, such as init");
             if (field.isConst)
                 error(field.location, "a module's fields cannot be const: they start at 0, and a method sets them");
+            const std::size_t reported = diagnostics_.errors().size();   // what follows reports the type's
             if (ast::isArray(type) && field.size == nullptr)
             {
-                error(field.location, "field has incomplete type " + quoted(ast::typeName(ast::pointee(type)) + "[]"));
+                // A 2-D array's row is sized first, as clang builds the type: `float d[][]` is an array of an
+                // incomplete element type, and after a row size's own error the field reports nothing more.
+                const std::string element = ast::typeName(ast::elementOf(type));
+                if (!ast::hasRows(type))
+                    error(field.location, "field has incomplete type " + quoted(element + "[]"));
+                else if (field.rowSize == nullptr)
+                    error(field.location, "array has incomplete element type " + quoted(element + "[]"));
+                else if (const std::optional<std::int32_t> row = arraySize(field.name, *field.rowSize))
+                    error(field.location,
+                          "field has incomplete type " + quoted(element + "[][" + std::to_string(*row) + "]"));
                 type = ast::Type::Float;
             }
             else if (ast::isArray(type))
-                type = sized(field.location, field.name, type, field.size.get(), nullptr);
-            const bool byValue = ast::isModule(type) || (ast::isArray(type) && type.pointee == ast::Kind::Module);
+                type = sized(field.location, field.name, type, field.size.get(), field.rowSize.get(), nullptr);
+            const bool byValue = ast::isModule(ast::isArray(type) ? ast::elementOf(type) : type);
             if (type == ast::Type::Void)
             {
                 error(field.location, "field has incomplete type 'void'");
@@ -187,6 +198,7 @@ namespace fminus::ir::detail
             {
                 type = ast::Type::Float;
             }
+            checkAttributes(field, type, diagnostics_.errors().size() != reported);
             fieldTypes_.insert_or_assign(&field, type);
             elements.push_back(typeOf(type));
         }
@@ -202,8 +214,8 @@ namespace fminus::ir::detail
         return found != fieldTypes_.end() ? found->second : field.type;
     }
 
-    // A parameter's type (a float, an int or a bool), its binding (only a float can be a stream), and its attributes:
-    // fminus::range(minimum, maximum) and fminus::default(value), numbers, the default within the range.
+    // A parameter's type (a float, an int or a bool) and its binding (only a float can be a stream); checkAttributes
+    // checks its attributes.
     void Lowering::checkParameter(const ast::Module& module, const ast::Field& field)
     {
         const ast::Type type = field.type;
@@ -215,36 +227,88 @@ namespace fminus::ir::detail
             error(field.location,
                   "parameter " + quoted(field.name) + " is " + what + ": only a float parameter can be a stream");
         }
+    }
+
+    // A field's attributes, a parameter's among them, where `type` is the field's as layOut worked it out (an array's
+    // with its sizes), or, with `refused`, what layOut put in place of a type it reported an error for, which is then
+    // the declaration's one error. FMinus's own: fminus::range(minimum, maximum), two numbers in order, a parameter's
+    // or a field's of numbers (what the host's control or display spans), and fminus::default(value), one number, a
+    // parameter's, within its range; another of its namespace is unknown. Clang's are a function's (Effects.cpp). A
+    // name without a namespace that is none of C23's standard attributes is ignored, with clang's warning: C keeps
+    // those names for its standard, and `range` is more likely fminus::range misspelt than anything a host reads.
+    // Any other is the host's, a unit, a label or a hint, which FMinus passes on as written (Program::Attribute), its
+    // numbers checked as numbers C writes: C23 ignores an attribute it does not know, and the host may know it.
+    void Lowering::checkAttributes(const ast::Field& field, ast::Type type, bool refused)
+    {
+        const ast::Type element = ast::isArray(type) ? ast::elementOf(type) : type;
+        const bool numeric = ast::isArithmetic(element) && element != ast::Type::Bool && !ast::isMask(element);
         std::optional<double> minimum, maximum, initial;
         for (const ast::Attribute& attribute : field.attributes)
         {
-            std::vector<double> numbers;
-            for (const std::string& arg : attribute.args)
+            if (ast::isIgnoredAttribute(attribute.name))
             {
+                std::vector<Diagnostic> notes;
+                if (attribute.name == "range" || (attribute.name == "default" && field.isParam))
+                    notes.push_back(
+                        {attribute.location, "did you mean " + quoted("fminus::" + attribute.name) + "?", {}});
+                diagnostics_.warning(attribute.location,
+                                     "unknown attribute " + quoted(attribute.name) + " ignored [-Wunknown-attributes]",
+                                     std::move(notes));
+                continue;
+            }
+            std::vector<double> numbers;
+            bool valid = true;
+            for (const ast::AttributeArg& arg : attribute.args)
+            {
+                if (arg.isString)
+                    continue;
                 if (const std::optional<double> number = ast::attributeNumber(arg))
                     numbers.push_back(*number);
                 else
-                    error(attribute.location, "invalid number " + quoted(arg) + " in " + quoted(attribute.name));
+                {
+                    error(attribute.location, "invalid number " + quoted(arg.text) + " in " + quoted(attribute.name));
+                    valid = false;
+                }
             }
-            if (numbers.size() != attribute.args.size())
+            if (!valid)
                 continue;
-            if (attribute.name == "fminus::range" && numbers.size() == 2)
+            const bool onlyNumbers = numbers.size() == attribute.args.size();
+            if (attribute.name == "fminus::range")
             {
-                minimum = numbers[0];
-                maximum = numbers[1];
-                if (*minimum >= *maximum)
-                    error(attribute.location, "fminus::range's minimum must be below its maximum");
+                if (!onlyNumbers || numbers.size() != 2)
+                    error(attribute.location, "'fminus::range' takes two numbers, a minimum and a maximum");
+                else if (!field.isParam && !numeric && !refused)
+                    error(attribute.location, "'fminus::range' attribute only applies to fields of numbers (float, "
+                                              "double, int, a float vector and arrays of them), not "
+                                                  + quoted(ast::typeName(type)));
+                else
+                {
+                    minimum = numbers[0];
+                    maximum = numbers[1];
+                    if (*minimum >= *maximum)
+                        error(attribute.location, "fminus::range's minimum must be below its maximum");
+                }
             }
-            else if (attribute.name == "fminus::default" && numbers.size() == 1)
-                initial = numbers[0];
-            else if (attribute.name == "fminus::range")
-                error(attribute.location, "'fminus::range' takes two numbers, a minimum and a maximum");
             else if (attribute.name == "fminus::default")
-                error(attribute.location, "'fminus::default' takes one number");
-            else
+            {
+                if (!field.isParam)
+                    error(attribute.location, "'fminus::default' attribute only applies to parameters: a field starts "
+                                              "at 0, and a method such as init sets it");
+                else if (!onlyNumbers || numbers.size() != 1)
+                    error(attribute.location, "'fminus::default' takes one number");
+                else
+                    initial = numbers[0];
+            }
+            else if (attribute.name.starts_with("fminus::"))
                 error(attribute.location,
                       "unknown attribute " + quoted(attribute.name)
-                          + ": a parameter takes fminus::range(min, max) and fminus::default(value)");
+                          + (field.isParam ? ": a parameter takes fminus::range(min, max) and fminus::default(value)"
+                                           : ": a field takes fminus::range(min, max)"));
+            else if (attribute.name == "clang::nonblocking" || attribute.name == "clang::nonallocating")
+                error(attribute.location, quoted(attribute.name) + " attribute only applies to functions");
+            else if (attribute.name.starts_with("clang::"))
+                error(attribute.location, "unknown attribute " + quoted(attribute.name)
+                                              + ": FMinus has clang::nonallocating and clang::nonblocking");
         }
         if (minimum && maximum && initial && (*initial < *minimum || *initial > *maximum))
             error(field.location, std::format("the default of {}, {}, is outside its fminus::range({}, {})",
@@ -574,9 +638,15 @@ namespace fminus::ir::detail
             module = object.type.module;
             address = object.ir;
         }
+        // A numeric argument for a double parameter is C's double (lowerAs).
+        const auto method = functions_.find(module->name + "::" + call.method);
         std::vector<Value> args;
-        for (const ast::ExprPtr& arg : call.args)
-            args.push_back(lower(*arg));
+        for (std::size_t i = 0; i < call.args.size(); ++i)
+        {
+            const bool known = method != functions_.end() && i + 1 < method->second->params.size();
+            args.push_back(known ? lowerAs(*call.args[i], method->second->params[i + 1].type)
+                                 : lower(*call.args[i]));
+        }
         return callMethod(location, *module, address, isConst, call.method, args);
     }
 

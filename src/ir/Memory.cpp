@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <utility>
 
 namespace fminus::ir::detail
@@ -92,8 +93,12 @@ namespace fminus::ir::detail
                 return std::nullopt;
             }
             std::optional<LValue> target = element(expr.location, base, offset, address);
-            // An element of a const array its variable names, t[i]: clang names the variable when it is assigned.
-            const auto* array = std::get_if<ast::VariableExpr>(&(swapped ? *index->index : *index->base).node);
+            // An element of a const array its variable names, t[i] (or t[i][j], a 2-D one's): clang names the variable
+            // when it is assigned.
+            const ast::Expr* root = swapped ? index->index.get() : index->base.get();
+            if (const auto* row = std::get_if<ast::IndexExpr>(&root->node))
+                root = std::holds_alternative<ast::VariableExpr>(row->base->node) ? row->base.get() : row->index.get();
+            const auto* array = std::get_if<ast::VariableExpr>(&root->node);
             const Binding* binding = array != nullptr ? named(array->name) : nullptr;
             if (target && target->isConst && binding != nullptr && ast::isArray(binding->type) && binding->isConst)
             {
@@ -171,9 +176,11 @@ namespace fminus::ir::detail
 
     // The element `pointer` points to (*p), or the index-th from it (p[i]): its address, and its type, const when
     // the pointer's is a const T*. Nothing for a pointer to what FMinus cannot point to (its declaration reported
-    // that). A pointer into an array the code generator can see is checked first (Bounds.cpp): the element must be
-    // one of the array's, or, for its `address` (&p[i]), at most one past the last; the element carries the extent on,
-    // for &.
+    // that). A pointer to a row, what a 2-D array's name stands for, gives the row, an array (which a read makes a
+    // pointer to its first element in turn: grid[i][j]). A pointer into an array the code generator can see is checked
+    // first (Bounds.cpp): the element must be one of the array's, or, for its `address` (&p[i]), at most one past the
+    // last; the element carries the extent on, for &. A row is checked as an element (grid[4] of a float[4][16] is
+    // out, whatever is done with it), and its own elements against the row (Bounds.cpp).
     std::optional<Lowering::LValue> Lowering::element(SourceLocation location, Value pointer,
                                                       std::optional<Value> index, bool address)
     {
@@ -184,8 +191,11 @@ namespace fminus::ir::detail
                                   : "indirection not permitted on operand of type " + quoted(ast::typeName(pointer.type)));
             return std::nullopt;
         }
-        if (!ast::canPointTo(type.kind))
+        const bool row = ast::isArray(type);
+        if (!ast::canPointTo(type.kind) && !row)
             return std::nullopt;
+        if (row)
+            address = false;
         llvm::Value* at = pointer.ir;
         llvm::Value* offset = nullptr;
         if (index)
@@ -346,28 +356,88 @@ namespace fminus::ir::detail
         builder_.CreateMemSet(address, builder_.getInt8(0), *sizeOf(type), alignOf(type));
     }
 
-    // `float c[4] = {1, 2};`: the list's elements, converted to the element type, in order; the rest stay 0. C only
-    // warns about excess elements (and drops them); FMinus refuses them, as it does a vector literal's. An array of
-    // modules takes no list: its modules start at 0, as every module does.
-    void Lowering::initializeArray(SourceLocation location, llvm::Value* address, ast::Type type,
-                                   const std::vector<ast::ExprPtr>& list)
+    // Where `decl`'s list puts each of its values in an array of `type`, as C's rules place them: the values in order,
+    // each in the next element, a 2-D array's row by row; and a braced list, `{1, 2}`, a 2-D array's row, from the
+    // row's first element, after which the next value starts the next row (C's brace elision, `{{1}, 2, 3}`, too). A
+    // count of 0 is no bound, for an array whose list sizes it. C only warns about excess elements (and drops them),
+    // and about braces around one element (and takes the first value in them): FMinus refuses both, in clang's words,
+    // where the excess or the brace is. Reported when `report`; the placement is then not `ok`, and holds the values
+    // placed before the error.
+    Lowering::Placed Lowering::placeList(ast::Type type, const ast::DeclStmt& decl, bool report)
     {
-        const ast::Type element = ast::pointee(type);
-        if (list.size() > static_cast<std::size_t>(type.count))
+        Placed placed;
+        const auto fail = [&](SourceLocation where, const char* message) {
+            if (report)
+                error(where, message);
+            placed.ok = false;
+            return placed;
+        };
+        const bool rows = ast::hasRows(type);
+        const std::uint64_t width = rows ? static_cast<std::uint64_t>(type.rowCount) : 1;
+        const std::uint64_t total = type.count == 0 ? std::numeric_limits<std::uint64_t>::max()
+                                                    : static_cast<std::uint64_t>(type.count) * width;
+        const std::vector<ast::ExprPtr>& values = decl.list;
+        const std::vector<ast::Brace>& braces = decl.braces;
+        std::uint64_t at = 0;   // the next element
+        std::size_t brace = 0;
+        for (std::size_t i = 0;;)
         {
-            error(location, "excess elements in array initializer");
-            return;
+            if (brace < braces.size() && braces[brace].first == i)
+            {
+                const ast::Brace& row = braces[brace++];
+                if (!rows || row.depth > 1 || at % width != 0)   // around one element: C takes it as the element's
+                    return fail(row.location, "braces around scalar initializer");
+                if (brace < braces.size() && braces[brace].depth > 1)   // one inside it, which comes next
+                    return fail(braces[brace].location, "braces around scalar initializer");
+                if (at >= total)
+                    return fail(row.location, "excess elements in array initializer");
+                if (row.count > width)
+                    return fail(values[i + width]->location, "excess elements in array initializer");
+                for (std::size_t k = 0; k < row.count; ++k)
+                    placed.values.emplace_back(at + k, values[i + k].get());
+                at += width;
+                i += row.count;
+                placed.reach = at;
+                continue;
+            }
+            if (i >= values.size())
+                return placed;
+            if (at >= total)
+                return fail(values[i]->location, "excess elements in array initializer");
+            placed.values.emplace_back(at++, values[i++].get());
+            placed.reach = at;
         }
-        if (ast::isModule(element) && !list.empty())
+    }
+
+    // The address of the element `at` (from the first, row by row) of the array of `array`'s type at `address`.
+    llvm::Value* Lowering::elementAt(ast::Type array, llvm::Value* address, std::uint64_t at, const char* name)
+    {
+        if (!ast::hasRows(array))
+            return builder_.CreateConstInBoundsGEP2_64(typeOf(array), address, 0, at, name);
+        const auto width = static_cast<std::uint64_t>(array.rowCount);
+        return builder_.CreateInBoundsGEP(
+            typeOf(array), address, {builder_.getInt64(0), builder_.getInt64(at / width), builder_.getInt64(at % width)},
+            name);
+    }
+
+    // `float c[4] = {1, 2};`: the list's values, converted to the element type, in order, each where placeList puts
+    // it (`float g[2][3] = {{1, 2}, {3}};`, a 2-D array's rows); the rest stay 0. An array of modules takes no list:
+    // its modules start at 0, as every module does.
+    void Lowering::initializeArray(SourceLocation location, llvm::Value* address, ast::Type type,
+                                   const ast::DeclStmt& decl)
+    {
+        const ast::Type element = ast::elementOf(type);
+        if (ast::isModule(element) && (!decl.list.empty() || !decl.braces.empty()))
         {
             error(location, "an array of modules takes no initializer list: its modules start at 0");
             return;
         }
-        for (std::size_t i = 0; i < list.size(); ++i)
+        for (const auto& [at, item] : placeList(type, decl, true).values)
         {
-            const Value value = lower(*list[i]);
-            llvm::Value* at = builder_.CreateConstInBoundsGEP2_64(typeOf(type), address, 0, i, "arrayinit");
-            tag(builder_.CreateStore(convert(value, element, list[i]->location, Use::Initializing), at), element);
+            const Value value = lowerAs(*item, element);
+            tag(builder_.CreateStore(convert(value, element, item->location, Use::Initializing),
+                                     elementAt(type, address, at, "arrayinit")),
+                element);
         }
     }
 
@@ -385,25 +455,20 @@ namespace fminus::ir::detail
     // costs the compiler about twice its size, where a stack slot costs nothing to compile, and an array may have 2^30
     // elements. Returns the global or the slot; `type` is the declaration's (an array of what FMinus can point to, but
     // a module), and the declaration has no `= expr`.
-    llvm::Value* Lowering::declareConstArray(SourceLocation location, const ast::DeclStmt& decl, ast::Type type)
+    llvm::Value* Lowering::declareConstArray(const ast::DeclStmt& decl, ast::Type type)
     {
-        const ast::Type element = ast::pointee(type);
-        std::vector<llvm::Value*> values;
-        if (decl.list.size() > static_cast<std::size_t>(type.count))
-            error(location, "excess elements in array initializer");
-        else
-        {
-            for (const ast::ExprPtr& item : decl.list)
-                values.push_back(convert(lower(*item), element, item->location, Use::Initializing));
-        }
+        const ast::Type element = ast::elementOf(type);
+        std::vector<std::pair<std::uint64_t, llvm::Value*>> values;
+        for (const auto& [at, item] : placeList(type, decl, true).values)
+            values.emplace_back(at, convert(lowerAs(*item, element), element, item->location, Use::Initializing));
         auto* arrayType = llvm::cast<llvm::ArrayType>(typeOf(type));
         if (module_.getDataLayout().getTypeAllocSize(arrayType).getFixedValue() <= kMaxTableBytes
-            && std::ranges::all_of(values, [](llvm::Value* value) { return llvm::isa<llvm::Constant>(value); }))
+            && std::ranges::all_of(values, [](const auto& value) { return llvm::isa<llvm::Constant>(value.second); }))
         {
-            std::vector<llvm::Constant*> given;
-            for (llvm::Value* value : values)
-                given.push_back(llvm::cast<llvm::Constant>(value));
-            llvm::Constant* contents = tableContents(arrayType, std::move(given));
+            std::vector<std::pair<std::uint64_t, llvm::Constant*>> given;
+            for (const auto& [at, value] : values)
+                given.emplace_back(at, llvm::cast<llvm::Constant>(value));
+            llvm::Constant* contents = tableOf(type, given);
             auto* table = new llvm::GlobalVariable(module_, contents->getType(), true,
                                                    llvm::GlobalValue::PrivateLinkage, contents,
                                                    "__const." + function_->name + "." + decl.name);
@@ -413,11 +478,8 @@ namespace fminus::ir::detail
         }
         llvm::AllocaInst* slot = allocate(arrayType, decl.name);
         zero(slot, type);
-        for (std::size_t i = 0; i < values.size(); ++i)
-        {
-            llvm::Value* at = builder_.CreateConstInBoundsGEP2_64(arrayType, slot, 0, i, "arrayinit");
-            tag(builder_.CreateStore(values[i], at), element);
-        }
+        for (const auto& [at, value] : values)
+            tag(builder_.CreateStore(value, elementAt(type, slot, at, "arrayinit")), element);
         return slot;
     }
 
@@ -443,6 +505,50 @@ namespace fminus::ir::detail
         return llvm::ConstantArray::get(type, given);
     }
 
+    // A table's contents, of the array `type`: `given`, each element's constant and its index from the first, in
+    // order (a 2-D array's row by row), and zeros, in tableContents' shapes. A 2-D array's rows are each a table of
+    // their own, in an array of them, a table of rows; or, when a row's zeros make it a struct, side by side in a
+    // packed struct, the rows after the last given one a zeroinitializer. Either way the bytes are the array's, row by
+    // row (each row's size a multiple of its elements' alignment, so no padding between them).
+    llvm::Constant* Lowering::tableOf(ast::Type type,
+                                      const std::vector<std::pair<std::uint64_t, llvm::Constant*>>& given)
+    {
+        auto* arrayType = llvm::cast<llvm::ArrayType>(typeOf(type));
+        if (!ast::hasRows(type))
+        {
+            std::vector<llvm::Constant*> elements;
+            for (const auto& [at, value] : given)
+            {
+                elements.resize(at, llvm::Constant::getNullValue(arrayType->getElementType()));
+                elements.push_back(value);
+            }
+            return tableContents(arrayType, std::move(elements));
+        }
+        auto* rowType = llvm::cast<llvm::ArrayType>(arrayType->getElementType());
+        const auto width = static_cast<std::uint64_t>(type.rowCount);
+        llvm::Constant* zero = llvm::Constant::getNullValue(rowType->getElementType());
+        std::vector<std::vector<llvm::Constant*>> rows;   // up to the last row given a value
+        for (const auto& [at, value] : given)
+        {
+            rows.resize(std::max<std::size_t>(rows.size(), at / width + 1));
+            std::vector<llvm::Constant*>& row = rows[at / width];
+            row.resize(at % width, zero);
+            row.push_back(value);
+        }
+        std::vector<llvm::Constant*> contents;
+        bool plain = true;   // every row an array of its type
+        for (std::vector<llvm::Constant*>& row : rows)
+        {
+            contents.push_back(tableContents(rowType, std::move(row)));
+            plain = plain && contents.back()->getType() == rowType;
+        }
+        if (plain)
+            return tableContents(arrayType, std::move(contents));
+        if (const std::uint64_t after = static_cast<std::uint64_t>(type.count) - rows.size(); after > 0)
+            contents.push_back(llvm::ConstantAggregateZero::get(llvm::ArrayType::get(rowType, after)));
+        return llvm::ConstantStruct::getAnon(contents, true);
+    }
+
     // C's arithmetic on pointers. p + i and i + p are the element i after p (i may be negative), and p - i the one i
     // before; p - q is how many elements apart two pointers of one type are, an int (C's is a ptrdiff_t, which
     // FMinus does not have); and two pointers of one type compare as addresses. const does not matter to any of
@@ -465,7 +571,8 @@ namespace fminus::ir::detail
             const bool comparison = isComparison(op);
             // A void* compares with any pointer, as in C: it converts to the void* first.
             const bool samePointee = ast::samePointee(lhs.type, rhs.type) || voidPointee;
-            if (samePointee && op == ast::BinaryOp::Subtract && ast::canPointTo(lhs.type.pointee))
+            if (samePointee && op == ast::BinaryOp::Subtract
+                && (ast::canPointTo(lhs.type.pointee) || ast::hasRows(lhs.type)))
             {
                 llvm::Value* difference =
                     builder_.CreatePtrDiff(typeOf(ast::pointee(lhs.type)), lhs.ir, rhs.ir, "sub.ptr.div");
@@ -513,7 +620,7 @@ namespace fminus::ir::detail
             error(location, "invalid operands to binary expression " + operands);
             return poison(isComparison(op) ? ast::Type::Bool : pointer.type);
         }
-        if (!ast::canPointTo(pointer.type.pointee))
+        if (!ast::canPointTo(pointer.type.pointee) && !ast::hasRows(pointer.type))
             return recovery(pointer.type);   // its declaration reported it
         llvm::Value* index = builder_.CreateSExt(convert(offset, ast::Type::Int, location, Use::Initializing),
                                                  builder_.getInt64Ty(), "idx.ext");

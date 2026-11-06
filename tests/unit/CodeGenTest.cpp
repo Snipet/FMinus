@@ -78,7 +78,7 @@ TEST_CASE("builtins are <math.h>'s float functions: LLVM's intrinsics, and the r
     CHECK(std::abs(lookup<float(float)>(*jit, "g")(0.25f) - 1.25f) < 1e-6f);
     CHECK(lookup<float(float)>(*jit, "h")(0.5f) == fminus::math::tanh(0.5f));   // the default math mode (MathTest.cpp)
     CHECK(lookup<float(float)>(*jit, "t")(0.5f) == fminus::math::tan(0.5f));
-    CHECK(fminus::ir::builtins().size() == 11);
+    CHECK(fminus::ir::builtins().size() == 17);   // and sqrt, fabs, floor, fmin, fmax and fma, on doubles
 }
 
 TEST_CASE("% is fmodf's remainder: the sign of the dividend", "[codegen]")

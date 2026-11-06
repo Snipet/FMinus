@@ -7,6 +7,7 @@
 
 #include "frontend/Frontend.h"
 #include "ir/CodeGen.h"
+#include "jit/Call.h"
 #include "jit/Jit.h"
 #include "opt/BoundsCheck.h"
 #include "opt/LoopBudget.h"
@@ -27,10 +28,15 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <format>
 #include <functional>
+#include <iterator>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <optional>
+#include <set>
+#include <tuple>
 #include <utility>
 
 namespace fminus
@@ -87,13 +93,30 @@ namespace fminus
             return {kind, binding.value};
         }
 
+        // A field's attributes as the host sees them, its numbers' values worked out (the code generator has checked
+        // that each is one), without those FMinus ignored with a warning (`[[range(0, 1)]]`, no namespace's).
+        std::vector<Program::Attribute> attributesOf(const ast::Field& field)
+        {
+            std::vector<Program::Attribute> attributes;
+            for (const ast::Attribute& written : field.attributes)
+            {
+                if (ast::isIgnoredAttribute(written.name))
+                    continue;
+                Program::Attribute& attribute = attributes.emplace_back();
+                attribute.name = written.name;
+                for (const ast::AttributeArg& arg : written.args)
+                    attribute.arguments.push_back({arg.isString, ast::attributeNumber(arg).value_or(0.0), arg.text});
+            }
+            return attributes;
+        }
+
         // A parameter's range and default, from its attributes (the code generator has checked them).
         void describe(const ast::Field& field, Program::Parameter& parameter)
         {
             for (const ast::Attribute& attribute : field.attributes)
             {
                 std::vector<double> numbers;
-                for (const std::string& arg : attribute.args)
+                for (const ast::AttributeArg& arg : attribute.args)
                     numbers.push_back(ast::attributeNumber(arg).value_or(0.0));
                 if (attribute.name == "fminus::range" && numbers.size() == 2)
                 {
@@ -119,6 +142,243 @@ namespace fminus
         {
             return *reinterpret_cast<T*>(static_cast<unsigned char*>(instance) + offset);
         }
+
+        // C's conversion toward 0, where an int holds it; past an int's ends, the end (and NaN is 0).
+        std::int32_t clampedInt(double value)
+        {
+            const double clamped = std::isnan(value) ? 0.0
+                                                     : std::clamp(std::trunc(value),
+                                                                  double{std::numeric_limits<std::int32_t>::min()},
+                                                                  double{std::numeric_limits<std::int32_t>::max()});
+            return static_cast<std::int32_t>(clamped);
+        }
+
+        // ---- calls by name (Program::call) ----
+
+        using Kind = Program::Value::Kind;
+
+        std::string quoted(std::string_view name)
+        {
+            return "'" + std::string(name) + "'";
+        }
+
+        const char* kindName(Kind kind)
+        {
+            switch (kind)
+            {
+            case Kind::Void:
+                return "void";
+            case Kind::Bool:
+                return "bool";
+            case Kind::Int:
+                return "int";
+            case Kind::Float:
+                return "float";
+            case Kind::Double:
+                return "double";
+            case Kind::Pointer:
+                return "void *";
+            }
+            return "void";
+        }
+
+        // How call() passes a value of `type`, as a thunk does (jit::callType, whose switch over FMinus's types makes
+        // a new type say how it crosses): Void for void, a scalar as itself, a pointer as a Pointer; nothing for a
+        // type no thunk passes.
+        std::optional<Kind> kindOf(const ast::Type& type)
+        {
+            const std::optional<jit::CallType> passed = jit::callType(type);
+            if (!passed)
+                return std::nullopt;
+            switch (*passed)
+            {
+            case jit::CallType::Void:
+                return Kind::Void;
+            case jit::CallType::Bool:
+                return Kind::Bool;
+            case jit::CallType::Int:
+                return Kind::Int;
+            case jit::CallType::Float:
+                return Kind::Float;
+            case jit::CallType::Double:
+                return Kind::Double;
+            case jit::CallType::Pointer:
+                return Kind::Pointer;
+            }
+            return std::nullopt;
+        }
+
+        const Program::Module* moduleNamed(const std::vector<Program::Module>& modules, std::string_view name)
+        {
+            for (const Program::Module& module : modules)
+            {
+                if (module.name == name)
+                    return &module;
+            }
+            return nullptr;
+        }
+
+        // A function's signature as call() passes it, into `callable`; or why call() cannot pass one of its types.
+        std::string describeCall(const ast::Function& function, const std::vector<Program::Module>& modules,
+                                 Program::Callable& callable)
+        {
+            callable.name = function.name;
+            callable.module = function.module != nullptr ? moduleNamed(modules, function.module->name) : nullptr;
+            callable.resultType = ast::typeName(function.returnType);
+            callable.parameters.clear();
+            std::string unsupported;
+            const std::optional<Kind> result = kindOf(function.returnType);
+            if (result && *result != Kind::Pointer)
+                callable.result = *result;
+            else
+                unsupported = quoted(function.name) + " returns " + quoted(callable.resultType)
+                            + "; call() returns nothing, or a bool, an int, a float or a double";
+            for (const ast::Param& declared : function.params)
+            {
+                Program::Callable::Param& param = callable.parameters.emplace_back();
+                param.name = declared.name;
+                param.type = ast::typeName(declared.type);
+                const std::optional<Kind> kind = kindOf(declared.type);
+                bool passes = kind.has_value() && *kind != Kind::Void;
+                if (passes)
+                    param.kind = *kind;
+                if (passes && *kind == Kind::Pointer)
+                {
+                    // To an int, a float, a double, a module or void (any): not to a vector, nor to a row.
+                    const ast::Type pointee = ast::pointee(declared.type);
+                    const std::optional<Kind> element = kindOf(pointee);
+                    param.readOnly = declared.type.pointeeConst;
+                    if (ast::isModule(pointee) && pointee.module != nullptr)
+                        param.module = moduleNamed(modules, pointee.module->name);
+                    else if (element && *element != Kind::Pointer && *element != Kind::Bool)
+                        param.element = *element;
+                    else
+                        passes = false;
+                }
+                if (!passes && unsupported.empty())
+                    unsupported = quoted(function.name) + " takes a parameter of type " + quoted(param.type)
+                                + "; call() passes bools, ints, floats, doubles and pointers to ints, floats, doubles, "
+                                  "modules and void only";
+            }
+            return unsupported;
+        }
+
+        jit::CallType callTypeOf(Kind kind)
+        {
+            switch (kind)
+            {
+            case Kind::Void:
+                return jit::CallType::Void;
+            case Kind::Bool:
+                return jit::CallType::Bool;
+            case Kind::Int:
+                return jit::CallType::Int;
+            case Kind::Float:
+                return jit::CallType::Float;
+            case Kind::Double:
+                return jit::CallType::Double;
+            case Kind::Pointer:
+                return jit::CallType::Pointer;
+            }
+            return jit::CallType::Void;
+        }
+
+        // A value's type as FMinus writes it: "float", "const float *", "Osc *".
+        std::string typeOf(const Program::Value& value)
+        {
+            if (value.kind != Kind::Pointer)
+                return kindName(value.kind);
+            const std::string pointee = value.module != nullptr ? value.module->name : kindName(value.element);
+            return (value.readOnly ? "const " : "") + pointee + " *";
+        }
+
+        // Why `argument` is no argument for parameter `index` of `function`, or nothing when it is one.
+        std::optional<std::string> mismatch(const Program::Callable& function, std::size_t index,
+                                            const Program::Value& argument)
+        {
+            const Program::Callable::Param& param = function.parameters[index];
+            const auto wrong = [&](const std::string& what) {
+                std::string message = std::format("argument {} of {} {}", index + 1, quoted(function.name), what);
+                if (!param.name.empty())
+                    message += " (its parameter " + quoted(param.name) + ")";
+                return message;
+            };
+            const auto is = [&] { return wrong("is " + quoted(typeOf(argument)) + ", not " + quoted(param.type)); };
+            if (argument.kind != param.kind)
+                return is();
+            if (param.kind != Kind::Pointer)
+                return std::nullopt;
+            if (argument.readOnly && !param.readOnly)   // C's "discards qualifiers"
+                return is();
+            const bool anything = param.element == Kind::Void && param.module == nullptr;   // void*
+            if (!anything)
+            {
+                if (param.module == nullptr ? argument.module != nullptr || argument.element != param.element
+                                            : argument.module == nullptr || argument.module->name != param.module->name)
+                    return is();
+                // The module is the host's word for the memory's layout, which nothing here can see: this program's
+                // own, then, as another program's of the name may lay out otherwise a module it holds (by value, in an
+                // array, through a pointer) though its own fields are alike.
+                if (param.module != nullptr && argument.module != param.module)
+                    return wrong("is an instance of another program's module " + quoted(param.module->name));
+            }
+            if (argument.pointer == nullptr && index == 0 && function.module != nullptr)
+                return wrong("is a null " + quoted(param.type) + ": a method runs on an instance");
+            const std::size_t alignment = param.module != nullptr      ? param.module->alignment
+                                          : param.element == Kind::Double ? alignof(double)
+                                          : param.element == Kind::Void   ? 1
+                                                                          : 4;
+            if (reinterpret_cast<std::uintptr_t>(argument.pointer) % alignment != 0)
+                return wrong(std::format("is not aligned to {} bytes, as a {} must be", alignment, quoted(param.type)));
+            return std::nullopt;
+        }
+
+        jit::CallSlot slotOf(const Program::Value& value)
+        {
+            switch (value.kind)
+            {
+            case Kind::Bool:
+                return jit::CallSlot::of<std::uint8_t>(value.number != 0.0 ? 1 : 0);
+            case Kind::Int:
+                return jit::CallSlot::of(clampedInt(value.number));
+            case Kind::Float:
+                return jit::CallSlot::of(static_cast<float>(value.number));
+            case Kind::Double:
+                return jit::CallSlot::of(value.number);
+            case Kind::Pointer:
+                return jit::CallSlot::of(value.pointer);
+            case Kind::Void:
+                break;
+            }
+            return {};
+        }
+
+        Program::Value resultOf(Kind kind, const jit::CallSlot& slot)
+        {
+            switch (kind)
+            {
+            case Kind::Bool:
+                return Program::Value::of(slot.as<std::uint8_t>() != 0);
+            case Kind::Int:
+                return Program::Value::of(slot.as<std::int32_t>());
+            case Kind::Float:
+                return Program::Value::of(slot.as<float>());
+            case Kind::Double:
+                return Program::Value::of(slot.as<double>());
+            case Kind::Void:
+            case Kind::Pointer:   // no result call() returns
+                break;
+            }
+            return {};
+        }
+
+        Program::CallResult failure(Program::CallResult::Status status, std::string message)
+        {
+            Program::CallResult result;
+            result.status = status;
+            result.error = std::move(message);
+            return result;
+        }
     } // namespace
 
     struct Program::Impl
@@ -139,6 +399,19 @@ namespace fminus
         fminus_rt_bounds_state unchecked{0, 0, 0};
         fminus_rt_bounds_state* bounds = &unchecked;
         std::vector<opt::BoundsSite> boundsSites;
+        // Each function of the program as call() calls it, or why call() cannot (`unsupported`): its thunk compiled
+        // when callable() is first asked for it, under `calls`. The map itself does not change once compile() has
+        // returned.
+        struct Entry
+        {
+            Callable callable;
+            std::string unsupported;
+            bool defined = false;   // a prototype alone (`float atanf(float x);`) is the C library's, no Callable
+        };
+        std::map<std::string, Entry, std::less<>> callables;
+        std::mutex calls;
+        // A function the program defines, whose look-up links the program's code (codeRanges); empty when it has none.
+        std::string linkName;
 
         Impl() = default;
         Impl(const Impl&) = delete;
@@ -249,10 +522,21 @@ namespace fminus
                 const std::size_t offset = fields->getElementOffset(index).getFixedValue();
                 llvm::Type* element = type->getElementType(index);
                 ast::Type fieldType = field.type;
-                if (ast::isArray(fieldType))   // its size as the code generator worked it out (the tree's is 0)
+                std::vector<std::size_t> extents;
+                if (ast::isArray(fieldType) && element->isArrayTy())   // its sizes as the code generator worked them
+                {                                                       // out (the tree's are 0)
                     fieldType.count = static_cast<int>(element->getArrayNumElements());
+                    extents.push_back(element->getArrayNumElements());
+                    if (ast::hasRows(fieldType) && element->getArrayElementType()->isArrayTy())
+                    {
+                        fieldType.rowCount = static_cast<int>(element->getArrayElementType()->getArrayNumElements());
+                        extents.push_back(element->getArrayElementType()->getArrayNumElements());
+                    }
+                }
                 info.fields.push_back({field.name, (field.isParam ? "param " : "") + ast::typeName(fieldType), offset,
-                                       layout.getTypeAllocSize(element).getFixedValue()});
+                                       layout.getTypeAllocSize(element).getFixedValue(),
+                                       ast::isArray(fieldType) ? ast::typeName(ast::elementOf(fieldType)) : "",
+                                       std::move(extents), attributesOf(field)});
                 if (!field.isParam)
                     continue;
                 // The slot, { const float* stream; T value; }.
@@ -266,6 +550,7 @@ namespace fminus
                 parameter.streamOffset = offset + slot->getElementOffset(0).getFixedValue();
                 parameter.valueOffset = offset + slot->getElementOffset(1).getFixedValue();
                 describe(field, parameter);
+                parameter.attributes = info.fields.back().attributes;
             }
             for (const std::string& method : declared->methods)
                 info.methods.push_back(declared->name + "::" + method);
@@ -288,9 +573,13 @@ namespace fminus
             prepareModule(*module, **machine);
         if (keepLowered)
             loweredIr = printed(*module);
+        jit::Jit::Calls callsBefore;   // what the optimiser inlined, for codeRanges(), as the JIT reads it of a module
+        jit::Jit::Calls callsAfter;    // it optimises itself
         if (keepOptimised)
         {
+            callsBefore = jit::Jit::directCalls(*module);
             optimiseModule(*module, **machine, level);
+            callsAfter = jit::Jit::directCalls(*module);
             optimisedIr = printed(*module);
         }
 
@@ -301,6 +590,8 @@ namespace fminus
             errors = llvm::toString(created.takeError()) + "\n";
             return nullptr;
         }
+        if (keepOptimised)
+            (*created)->recordInlining(jit::Jit::inlinedCalls(callsBefore, callsAfter));
         if (llvm::Error error = (*created)->add(std::move(module), std::move(context)))
         {
             errors = llvm::toString(std::move(error)) + "\n";
@@ -342,6 +633,18 @@ namespace fminus
         impl->loweredIr = std::move(loweredIr);
         impl->optimisedIr = std::move(optimisedIr);
         impl->warnings = diagnostics.format();   // no errors: only warnings, if any
+        // Each function's signature, for call(): the definition's parameter names, or the first declaration's.
+        for (const ast::Function& function : program->functions)
+        {
+            auto [entry, first] = impl->callables.try_emplace(function.name);
+            if (!first && !function.isDefinition)
+                continue;
+            entry->second.unsupported = describeCall(function, impl->modules, entry->second.callable);
+            entry->second.callable.owner_ = impl.get();
+            entry->second.defined = entry->second.defined || function.isDefinition;
+            if (function.isDefinition && impl->linkName.empty())
+                impl->linkName = function.name;
+        }
         for (const ast::Function& function : program->functions)
         {
             const Effect effect = declaredEffect(function);
@@ -425,20 +728,24 @@ namespace fminus
         return nullptr;
     }
 
+    const Program::Attribute* Program::findAttribute(const std::vector<Attribute>& attributes,
+                                                     std::string_view name) noexcept
+    {
+        for (auto attribute = attributes.rbegin(); attribute != attributes.rend(); ++attribute)
+        {
+            if (attribute->name == name)
+                return &*attribute;
+        }
+        return nullptr;
+    }
+
     // The method's load is LLVM's `load atomic unordered`, which can't tear and reads a value some store wrote: these
     // are C++'s relaxed stores to it, which can't tear either.
     void Program::setValue(void* instance, const Parameter& parameter, double value) noexcept
     {
         if (parameter.type == "int")
-        {
-            // C's conversion toward 0, where an int holds it; past an int's ends, the end (and NaN is 0).
-            const double clamped = std::isnan(value) ? 0.0
-                                                     : std::clamp(std::trunc(value),
-                                                                  double{std::numeric_limits<std::int32_t>::min()},
-                                                                  double{std::numeric_limits<std::int32_t>::max()});
             std::atomic_ref(at<std::int32_t>(instance, parameter.valueOffset))
-                .store(static_cast<std::int32_t>(clamped), std::memory_order_relaxed);
-        }
+                .store(clampedInt(value), std::memory_order_relaxed);
         else if (parameter.type == "bool")
             std::atomic_ref(at<bool>(instance, parameter.valueOffset)).store(value != 0.0, std::memory_order_relaxed);
         else
@@ -523,6 +830,242 @@ namespace fminus
         const opt::BoundsSite site{std::string(file), line, column, std::string(array), std::string(type), extent,
                                    width};
         return opt::boundsMessage(site, index);
+    }
+
+    Program::Value Program::Value::scalar(Kind kind, double number) noexcept
+    {
+        switch (kind)
+        {
+        case Kind::Bool:
+            return of(number != 0.0);
+        case Kind::Int:
+            return of(static_cast<int>(clampedInt(number)));
+        case Kind::Float:
+            return of(static_cast<float>(number));
+        case Kind::Double:
+            return of(number);
+        case Kind::Void:
+        case Kind::Pointer:
+            break;
+        }
+        return {};
+    }
+
+    // The thunk is compiled once, under the lock: a second thread asking for it waits, then finds it. The function is
+    // the program's own, defined in its module, and looked up first, so that the thunk's reference to it resolves (a
+    // module that fails to link fails there, as for address()).
+    const Program::Callable* Program::callable(std::string_view name, std::string& errors)
+    {
+        const auto found = impl_->callables.find(name);
+        if (found == impl_->callables.end())
+        {
+            errors = "the program has no function " + quoted(name) + "\n";
+            return nullptr;
+        }
+        Impl::Entry& entry = found->second;
+        if (!entry.defined)
+        {
+            errors = quoted(name) + " is declared in the program but not defined there: call() calls the functions it "
+                                    "defines\n";
+            return nullptr;
+        }
+        if (!entry.unsupported.empty())
+        {
+            errors = entry.unsupported + "\n";
+            return nullptr;
+        }
+        const std::lock_guard<std::mutex> lock(impl_->calls);
+        if (entry.callable.thunk_ == 0)
+        {
+            if (auto function = impl_->jit->lookup(llvm::StringRef(name.data(), name.size())); !function)
+            {
+                errors = quoted(name) + " cannot be called: " + llvm::toString(function.takeError()) + "\n";
+                return nullptr;
+            }
+            std::vector<jit::CallType> parameters;
+            for (const Callable::Param& param : entry.callable.parameters)
+                parameters.push_back(callTypeOf(param.kind));
+            auto thunk = jit::callThunk(*impl_->jit, llvm::StringRef(name.data(), name.size()),
+                                        callTypeOf(entry.callable.result), parameters);
+            if (!thunk)
+            {
+                errors = llvm::toString(thunk.takeError()) + "\n";
+                return nullptr;
+            }
+            entry.callable.thunk_ = reinterpret_cast<std::uintptr_t>(*thunk);
+        }
+        errors.clear();
+        return &entry.callable;
+    }
+
+    // The arguments go in slots on the stack (on the heap past 16), the thunk calls the function, and the program's
+    // record and flag say whether it stopped early: the bounds checks' first, as a failed check is the reason a call
+    // that also ran out of its budget stopped where it did. A stopped call allocates nothing (message() words it), as
+    // it may be the audio thread's. `function` is the Program's own, as a Callable cannot be copied: owner_ says whose.
+    Program::CallResult Program::call(const Callable& function, const Value* arguments, std::size_t count)
+    {
+        using Status = CallResult::Status;
+        if (function.owner_ != impl_.get() || function.thunk_ == 0)
+            return failure(Status::Mismatch, quoted(function.name) + " is not a Callable of this program's: callable() "
+                                                                     "gives them");
+        if (count != function.parameters.size())
+            return failure(Status::Mismatch,
+                           std::format("{} takes {} argument{}, not {}", quoted(function.name),
+                                       function.parameters.size(), function.parameters.size() == 1 ? "" : "s", count));
+        constexpr std::size_t kOnStack = 16;
+        std::array<jit::CallSlot, kOnStack> local;
+        std::vector<jit::CallSlot> many;
+        jit::CallSlot* slots = local.data();
+        if (count > kOnStack)
+        {
+            many.resize(count);
+            slots = many.data();
+        }
+        for (std::size_t i = 0; i < count; ++i)
+        {
+            if (std::optional<std::string> wrong = mismatch(function, i, arguments[i]))
+                return failure(Status::Mismatch, std::move(*wrong));
+            slots[i] = slotOf(arguments[i]);
+        }
+        jit::CallSlot out;
+        reinterpret_cast<jit::Thunk>(function.thunk_)(slots, &out);
+        CallResult result;
+        result.value = resultOf(function.result, out);
+        result.function_ = &function;
+        result.violation = boundsViolation();
+        if (result.violation)
+            result.status = Status::OutOfBounds;
+        else if (loopBudgetExceeded())
+            result.status = Status::OutOfBudget;
+        return result;
+    }
+
+    std::string Program::CallResult::message() const
+    {
+        if (!error.empty() || function_ == nullptr)
+            return error;
+        if (status == Status::OutOfBounds)
+            return quoted(function_->name) + " stopped" + (violation ? ": " + violation->message() : std::string());
+        if (status == Status::OutOfBudget)
+            return quoted(function_->name) + " ran past its loop budget and returned early";
+        return error;
+    }
+
+    Program::CallResult Program::call(const Callable& function, const std::vector<Value>& arguments)
+    {
+        return call(function, arguments.data(), arguments.size());
+    }
+
+    // Why callable() gave no Callable is the entry's to say, not the error's: a name the program does not define (or
+    // only declares), a type call() does not pass, or else a definition whose code, or thunk, did not link.
+    Program::CallResult Program::call(std::string_view name, const std::vector<Value>& arguments)
+    {
+        std::string errors;
+        const Callable* function = callable(name, errors);
+        if (function == nullptr)
+        {
+            using Status = CallResult::Status;
+            const auto found = impl_->callables.find(name);
+            Status status = Status::NoFunction;
+            if (found != impl_->callables.end() && found->second.defined)
+                status = found->second.unsupported.empty() ? Status::LinkError : Status::Unsupported;
+            if (!errors.empty() && errors.back() == '\n')
+                errors.pop_back();
+            return failure(status, std::move(errors));
+        }
+        return call(*function, arguments.data(), arguments.size());
+    }
+
+    // ---- code ranges, for a profiler (Program::codeRanges) ----
+
+    namespace
+    {
+        constexpr std::string_view kThunkPrefix = "fminus.call.";   // jit::thunkName's
+
+        // What the code named `symbol` is, and the program's function it is the code of: an FMinus name has no '.',
+        // so what follows the first is the code generator's or the JIT's.
+        //   f                f's code; under Denormals::Flush, an entry point's around f.body (`entries`)
+        //   f.body           the entry point f's body (ir/Denormals.cpp)
+        //   f.parallel.n     a parallel region of f (ir/Parallel.cpp), and f.parallel.n.parallel.m one inside it
+        //   fminus.call.f    f's thunk (jit/Call.h)
+        //   anything else    FMinus's own: fminus.large.sin (opt/MathKernels.cpp)
+        // `defines` says whether the program defines a function of a name.
+        template <typename Defines>
+        std::pair<Program::CodeRange::Kind, std::string> attributed(std::string_view symbol, const Defines& defines,
+                                                                    const std::set<std::string, std::less<>>& entries)
+        {
+            using Code = Program::CodeRange::Kind;
+            const std::size_t dot = symbol.find('.');
+            const std::string_view stem = symbol.substr(0, dot);
+            const std::string_view rest = dot == std::string_view::npos ? std::string_view() : symbol.substr(dot);
+            if (defines(stem) && rest.empty())
+                return {entries.contains(stem) ? Code::EntryPoint : Code::Function, std::string(stem)};
+            if (defines(stem) && rest == ".body")
+                return {Code::Function, std::string(stem)};
+            if (defines(stem) && rest.starts_with(".parallel."))
+                return {Code::Parallel, std::string(stem)};
+            if (symbol.starts_with(kThunkPrefix) && defines(symbol.substr(kThunkPrefix.size())))
+                return {Code::Thunk, std::string(symbol.substr(kThunkPrefix.size()))};
+            return {Code::Support, std::string()};
+        }
+    } // namespace
+
+    std::vector<Program::CodeRange> Program::codeRanges(std::string& errors)
+    {
+        errors.clear();
+        if (!impl_->linkName.empty())   // links the program's module, if no look-up has yet: a symbol of it links all
+        {
+            if (auto linked = impl_->jit->lookup(impl_->linkName); !linked)
+            {
+                errors = llvm::toString(linked.takeError()) + "\n";
+                return {};
+            }
+        }
+        const std::vector<jit::Jit::Code> code = impl_->jit->code();
+        const auto defines = [this](std::string_view name) {
+            const auto found = impl_->callables.find(name);
+            return found != impl_->callables.end() && found->second.defined;
+        };
+        std::set<std::string, std::less<>> entries;   // the entry points whose body is code of its own (f.body)
+        for (const jit::Jit::Code& function : code)
+        {
+            if (function.name.ends_with(".body"))
+                entries.emplace(function.name.substr(0, function.name.size() - 5));
+        }
+        std::vector<CodeRange> ranges;
+        ranges.reserve(code.size());
+        for (const jit::Jit::Code& function : code)
+        {
+            CodeRange& range = ranges.emplace_back();
+            range.address = static_cast<std::uintptr_t>(function.address);
+            range.size = static_cast<std::size_t>(function.size);
+            range.symbol = function.name;
+            std::tie(range.kind, range.function) = attributed(function.name, defines, entries);
+            if (const auto found = impl_->callables.find(range.function);
+                found != impl_->callables.end() && found->second.callable.module != nullptr)
+                range.module = found->second.callable.module->name;
+            std::set<std::string> inlined;   // as the program names them, each once, the range's own function not
+            for (const std::string& callee : function.inlined)
+            {
+                std::string name = attributed(callee, defines, entries).second;
+                if (!name.empty() && name != range.function)
+                    inlined.insert(std::move(name));
+            }
+            range.inlined.assign(inlined.begin(), inlined.end());
+        }
+        return ranges;
+    }
+
+    const Program::CodeRange* Program::codeRangeAt(const std::vector<CodeRange>& ranges,
+                                                    std::uintptr_t address) noexcept
+    {
+        // The last range that starts at or before the address, if it reaches it.
+        const auto after = std::upper_bound(ranges.begin(), ranges.end(), address,
+                                            [](std::uintptr_t at, const CodeRange& range) { return at < range.address; });
+        if (after == ranges.begin())
+            return nullptr;
+        const CodeRange& range = *std::prev(after);
+        return address - range.address < range.size ? &range : nullptr;
     }
 } // namespace fminus
 

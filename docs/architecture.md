@@ -44,15 +44,15 @@ see the whole flow. For a host, the public API strings parse, lower and the JIT 
 
 - `SourceLocation` is a line and a column, both counted from 1 (the column counts bytes), and a file: an index into
   the compilation's files, 0 for the program's own.
-- `Diagnostics` belongs to one compilation: the program's file, and the files its `#include`s read, each added by
-  the scanner (`addFile(name, includedFrom)`) with the location of the `#include` that read it. `error(location,
-  message, notes)` records an error, with the notes that explain it (clang's: `[[clang::nonblocking]]`'s errors have
-  one for each call down to the `malloc`), and `warning(location, message, notes)` a warning, whose message ends with
-  its flag (`[-Wswitch]`, the one FMinus has), kept apart so that `errors()` counts errors only. `hasErrors()` tells a
-  stage whether to hand over a result: a warning does not stop one. `format()` renders `file:line:column: error:
-  message` and `...: warning: message` lines together, sorted into source order, each followed by its
-  `file:line:column: note: message` lines, wherever they point. A line in an included file comes after clang's include
-  stack, `In file included from main.fm:2:` for each `#include` on the way to it, when the line before it was in
+- `Diagnostics` belongs to one compilation: the program's file, and the files its `#include`s read, each added by the
+  scanner (`addFile(name, includedFrom)`) with the location of the `#include` that read it. `error(location, message,
+  notes)` records an error, with the notes that explain it (clang's: `[[clang::nonblocking]]`'s errors have one for each
+  call down to the `malloc`), and `warning(location, message, notes)` a warning, whose message ends with its flag
+  (`[-Wswitch]` or `[-Wunknown-attributes]`, FMinus's two), kept apart so that `errors()` counts errors only.
+  `hasErrors()` tells a stage whether to hand over a result: a warning does not stop one. `format()` renders
+  `file:line:column: error: message` and `...: warning: message` lines together, sorted into source order, each followed
+  by its `file:line:column: note: message` lines, wherever they point. A line in an included file comes after clang's
+  include stack, `In file included from main.fm:2:` for each `#include` on the way to it, when the line before it was in
   another file.
 - The sort matters because the code generator reports in two passes (declarations, then bodies), so its errors
   arrive out of order. Source order is the order the text is read in: an included file's lines sort where its
@@ -86,6 +86,10 @@ Flex generates `Lexer.yy.cpp` and `Lexer.yy.hpp` into `build-*/src/generated/fro
   `+=` and `++` beat `+`, `&&` beat `&`, and `/*` beat `/`, so `i+++j` is `i++ + j`, as in C. Keywords (`float`,
   `int`, `if`, `restrict`, ...) therefore come before `{IDENTIFIER}`: `float` is a keyword and `floaty` an
   identifier.
+- **Strings.** A string literal is C's, one `STRING` token whose value is its characters: `stringValue` resolves C's
+  escapes (simple, octal and hex bytes, and universal character names, in UTF-8), and an unknown escape, a byte past
+  255 or a line that ends inside one is clang's error, at the escape. FMinus has strings only as an attribute's
+  arguments (the parser's), and in a skipped group they are read as strings, so a `/*` in one opens no comment.
 - **Errors.** An unexpected character throws `Parser::syntax_error`. The parser catches it and reports it through
   `Parser::error`, like any syntax error.
 - **Directives.** A line whose first character after spaces is `#` is one rule, `^[ \t]*"#"[^\n]*`, which
@@ -146,8 +150,16 @@ subset of C's, is written out as EBNF in the file's header comment.
   the pointer's own (`float* const p`). That is also why a block item is a *list* of statements. An array's size is
   an expression, `"[" expr? "]"` (`array_size`), kept as written in the `DeclStmt` (or `Field`, or `Param`), whose
   array type the parser leaves with a count of 0: the size is an integer constant expression, which only the code
-  generator can work out, since only it knows the enumeration constants' values. At the top level, a declaration
-  declares constants, `Program::constants`, each with how many functions, modules and enumerations come before it.
+  generator can work out, since only it knows the enumeration constants' values. A 2-D array has two
+  (`array_sizes`), the rows' in `rowSize`, and its list may brace its rows: the list keeps its values in order, and
+  the braces among them beside it (`ast::Brace`), which the code generator places as C does (`placeList`). At the top
+  level, a declaration declares constants, `Program::constants`, each with how many functions, modules and
+  enumerations come before it. C23's attributes after a declarator's name, `float level [[ui::unit("dB")]];`, go into
+  its `DeclStmt` and from there into a field's `Field`; the declarator's alternatives each spell out
+  `pointer IDENTIFIER attributes`, so that no rule ends between the attributes and the sizes after them, whose `[`
+  either could begin. An attribute's namespace and name are each an `attribute_word`: an identifier, a module's name
+  (`MODULE_NAME`) or a keyword, as C23 reads a keyword there. Their arguments are numbers and strings (`attribute_arg`;
+  adjacent literals are joined, as C joins them).
 - **Labels and enumerations.** `case 1:` and `default:` are C23's labels: a block item of their own (so a declaration
   may follow one), or, where a statement is expected, the start of a labelled statement (`statement: label statement
   | unlabeled`). An enumeration is declared at the top level, in a module or in a block, with the names of its type
@@ -202,15 +214,18 @@ on it without the code generator.
   `poly bool`, whose width the target decides, `Pointer`, `Module` and `Array`. `Type::Float` and the rest name the
   types that are only a kind, and a `Kind` converts to its `Type`, so `type == Type::Float` reads as it says;
   `Type::pointerTo(Kind::Float, true)` is `const float*`, `Type::arrayOf(Kind::Float, 16)` is `float[16]` (in the
-  tree an array's count is 0, its declaration's size the expression that gives it). Helpers
-  answer the questions the rules ask: `lanes`, `isVector`, `isMask`, `isPoly`, `isPointer`, `isModule`, `isArray`,
-  `pointee`, `samePointee`, `canPointTo`, `isArithmetic`, `vectorOf`, `maskOf`, `arithmeticOf` ([simd.md](simd.md)).
-- **Modules.** A `Module` is a name, its `Field`s (a name and a type each; a parameter's, `param float cutoff;`, is
-  marked, with its attributes) and its methods' names. Its methods are `Function`s of the program, named
-  `OnePole::tick`, with `module` set and a first parameter, `this`, that the parser adds. The program holds its modules
-  by `std::unique_ptr`, so a `Type` may point to one. A module's name is a type from its declaration on: the scanner
-  returns it as `MODULE_NAME` (`ParseContext.h`), as a C compiler does a typedef's, so `OnePole* p;` is a declaration
-  and `a * b;` a product.
+  tree an array's count is 0, its declaration's size the expression that gives it). A 2-D array's elements are rows:
+  its pointee is `Array`, and `rowKind` and `rowCount` say what a row is, so `float[4][16]` is an array of 4 rows of
+  16 floats, and the pointer its name stands for, `float (*)[16]`, a pointer to rows. Helpers answer the questions the
+  rules ask: `lanes`, `isVector`, `isMask`, `isPoly`, `isPointer`, `isModule`, `isArray`, `pointee` (a row, for a 2-D
+  array's), `hasRows`, `elementOf`, `samePointee`, `canPointTo`, `isArithmetic`, `vectorOf`, `maskOf`, `arithmeticOf`
+  ([simd.md](simd.md)).
+- **Modules.** A `Module` is a name, its `Field`s (a name, a type and attributes each, `AttributeArg`s the numbers and
+  strings of each; a parameter's, `param float cutoff;`, is marked) and its methods' names. Its methods are `Function`s
+  of the program, named `OnePole::tick`, with `module` set and a first parameter, `this`, that the parser adds. The
+  program holds its modules by `std::unique_ptr`, so a `Type` may point to one. A module's name is a type from its
+  declaration on: the scanner returns it as `MODULE_NAME` (`ParseContext.h`), as a C compiler does a typedef's, so
+  `OnePole* p;` is a declaration and `a * b;` a product.
 - **Ownership.** Children are owned: `ExprPtr = std::unique_ptr<Expr>`, and a `BlockStmt` holds a
   `std::vector<Stmt>`. `Param`, `Function` (definition or prototype) and `Program` are aggregates of those.
 - **Exhaustive walks.** Code that walks the tree uses `std::visit` with an `Overloaded{...}` set of lambdas and no
@@ -245,15 +260,15 @@ they lower:
 | `CodeGen.cpp` | `ir::lower()`, the constructor, and the passes: where the parts combine, the file's declarations in source order |
 | `Types.cpp` | FMinus's types as LLVM's (`typeOf`, `lanes`), the conversions (`convert`, `convertPointer`, `commonType`), errors and poison values (`poison`, and `recovery` after an error) |
 | `Functions.cpp` | declarations and prototypes (`declare`), a method's `this` once its module is laid out (`describeThis`), libm's prototypes' attributes (`describeLibm`), bodies and parameters (`define`), stack slots and scopes (`find`, which captures a variable for a parallel region, `lookup`, which does not, and `named`, C++'s lookup in a method: the blocks', the module's members, the file's) |
-| `Statements.cpp` | blocks, declarations, `return`, `if`, `while`, `for`, `switch` and its labels (`lowerSwitch`, `lowerLabel`; a jump past a declaration zeroes it, `bypass`), `break` and `continue` (`Breakable`: loops, switches and parallel regions, none of which a jump leaves or enters); a loop's `llvm.loop.mustprogress` when its condition is not a constant expression (`isConstant`, `mustProgress`); a condition that folds to a constant branches one way (`folds`, `branchOn`); a redefinition's error by the kinds of the two names (`redefinition`) |
+| `Statements.cpp` | blocks, declarations, `return`, `if`, `while`, `for`, `switch` and its labels (`lowerSwitch`, `lowerLabel`; a jump past a declaration zeroes it, `bypass`), `break` and `continue` (`Breakable`: loops, switches and parallel regions, none of which a jump leaves or enters); a loop's `llvm.loop.mustprogress` when its condition is not a constant expression (`isConstant`, `mustProgress`); a condition that folds to a constant branches one way (`folds`, `branchOn`); a redefinition's error by the kinds of the two names (`redefinition`); a local's or a constant's attributes refused (`refuseAttributes`) |
 | `Constants.cpp` | C's integer constant expressions, folded over the tree as FMinus computes (`integerConstant`, `fold`): a case's value, an enumerator's, an array's size (`sized`; a parameter's, `checkSizes`); enumerations (`declareEnum`), their constants bound in the block's scope or the file's (`fileScope_`), and a name's lookup as one (`enumerator`); the top level's constants (`defineConstant`), constant globals of the file's scope, their initialisers lowered as a function's would be (`atTopLevel`); a name of the file's that is a function's or a module's too (`fileNameClash`) |
 | `Expressions.cpp` | the expression `std::visit` (`lower`), constants, operators (`binary`, `arithmetic`; the bitwise ones on ints, `isBitwise`), `&&` and `\|\|`, `?:`, casts, assignment, `++` and `--` |
 | `Calls.cpp` | the builtin tables, calls, reductions, `poly_lanes` and `poly_index`, `poly_load` and `poly_store`, the heap's `malloc`, `calloc` and `free`, the FFT's `fft_*` (`lowerFft`, on the runtime's), `hash` and `randf` (to `Hash.cpp`), and `ir::builtins()`; the heap's and the FFT's runtime calls through `callRuntime`, whose declaration says what the function does (`kRuntimeFacts`, `describeRuntime`) |
 | `Math.cpp` | `sinf`, `cosf`, `tanf`, `expf`, `tanhf` and `logf` in the vector and libm math modes: calls of the vector mode's math intrinsics (`fminus.sin.f32`, `fminus.sin.v2f32`, `fminus.sin.v4f32`) or the libm mode's runtime function, a float's or four lanes' (`lowerMath`), declared with their attributes and vector variant (`mathFunction`), and the names the runtime keeps for them, which a program that calls one may not declare (`checkMathNames`) |
 | `Hash.cpp` | `hash` and `randf`: lowbias32's integer instructions inline (`mixBits`), and the hash's top 24 bits over 2^23 (`lowerHash`) |
 | `Vectors.cpp` | vector literals in both forms, swizzles, `?:` with a vector condition |
-| `Memory.cpp` | lvalues (`lvalue`, `read`, `write`): variables (a top-level constant too), elements (`p[i]`, `*p`), fields, components of any of them; arrays (a name that stands for a pointer, a list; a `const` one of constants a private constant global, `declareConstArray`, its contents in clang's shapes, `tableContents`); `&x`; pointer arithmetic |
-| `Modules.cpp` | each module's struct type (`prepareModules`, opaque; `layOut`, its body, where the module is), fields (`field`, `fieldType`), `this`, method calls (`callMethod`), copies; parameters, read by their binding (`lowerParameter`, `atEntry`), a stream's null test, value, base and stride (a flat call, read with no branch; the stride's `opaqueUnit`), their domains for knob versioning (`tagDomain`), and their streams' alias scope (`scopeStreams`) |
+| `Memory.cpp` | lvalues (`lvalue`, `read`, `write`): variables (a top-level constant too), elements (`p[i]`, `*p`; a 2-D array's row, which decays in turn), fields, components of any of them; arrays (a name that stands for a pointer, a list placed as C places it, `placeList`; a `const` one of constants a private constant global, `declareConstArray`, its contents in clang's shapes, `tableContents` and, row by row, `tableOf`); `&x`; pointer arithmetic |
+| `Modules.cpp` | each module's struct type (`prepareModules`, opaque; `layOut`, its body, where the module is), fields (`field`, `fieldType`) and their attributes (`checkAttributes`: FMinus's own checked, one without a namespace that C23 does not have ignored with clang's `-Wunknown-attributes`, the host's passed on), `this`, method calls (`callMethod`), copies; parameters, read by their binding (`lowerParameter`, `atEntry`), a stream's null test, value, base and stride (a flat call, read with no branch; the stride's `opaqueUnit`), their domains for knob versioning (`tagDomain`), and their streams' alias scope (`scopeStreams`) |
 | `Effects.cpp` | `[[clang::nonallocating]]` and `[[clang::nonblocking]]`: each function's calls (recorded by `lowerCall`), checked once every body is lowered |
 | `Parallel.cpp` | `parallel for` and `parallel { }`: what would race refused (`Walker`, `checkParallelFor`, `checkParallelBlock`, and whether a method changes its module, `changesModule`), each region's body a function of the runtime's task type (`beginRegion`, `endRegion`), and what the body uses of the function around it captured into a context, by value or by reference (`capture`, `captured`, `capturedParameter`, `outerValue`; a const table, a constant of the module, is read where it is) |
 | `Tbaa.cpp` | C's strict aliasing, told to LLVM: FMinus's tree of four types and each access's tag (`accessTag`, `tag`), which every load and store calls |
@@ -283,11 +298,11 @@ scalar. A bool knob's read, an int knob's when its `fminus::range` has integer e
 stream's test carry the values they can take (`!fminus.domain`), for knob versioning (recipe 16), which makes the stride
 a constant again in each copy. Any other int knob is left untagged, and no method is versioned on it.
 
-**Pass 1, declare.** Every function name gets one `llvm::Function`, with external linkage, its C name and the C
-calling convention (`float` is `float`, `int` is `i32`, a pointer is `ptr`, a `void` result is `void`). C++ therefore
-calls JIT'd code as `float(float, ...)` or `void(const float*, float*, int)`, and functions may call each other in any
-order. The attributes are clang's: a `bool` is `zeroext`, and a `restrict` pointer `noalias`. The rules for a name's
-prototypes and definition are C's:
+**Pass 1, declare.** Every function name gets one `llvm::Function`, with external linkage, its C name and the C calling
+convention (`float` is `float`, `double` is `double`, `int` is `i32`, a pointer is `ptr`, a `void` result is `void`).
+C++ therefore calls JIT'd code as `float(float, ...)` or `void(const float*, float*, int)`, and functions may call each
+other in any order. The attributes are clang's: a `bool` is `zeroext`, and a `restrict` pointer `noalias`. The rules for
+a name's prototypes and definition are C's:
 
 - a prototype and a definition must agree ("conflicting types for 'f'");
 - a second definition is "redefinition of 'f'";
@@ -361,7 +376,7 @@ more, and give a poison of the type they would have had (`recovery`, failed in t
 value is failed only where an error is behind it: a plain `poison` is not, so a stand-in with no error behind it (a
 `?:` of two `void` calls) still has each of its uses checked. An enumerated type is the type
 `int` (or `bool`) with its enumeration's id beside it (`Type::enumeration`, which `==` ignores): a value keeps it where
-C keeps the enumerated type, and `lowerSwitch` reads it for clang's `-Wswitch`, FMinus's one warning.
+C keeps the enumerated type, and `lowerSwitch` reads it for clang's `-Wswitch`, FMinus's first warning.
 
 - **Constants**: an integer constant is an `i32`, read in its base (`010` is octal) and refused when it doesn't fit
   in an `int`. A floating one goes through `llvm::APFloat::convertFromString`, after the `f` suffix is dropped,
@@ -488,10 +503,11 @@ C keeps the enumerated type, and `lowerSwitch` reads it for clang's `-Wswitch`, 
 
 `jit::Jit` wraps ORC's `LLJIT`:
 
-- **`create(level, modules)`** builds an LLJIT for the host CPU, defines the FMinus runtime in it, and installs an IR
-  transform layer that runs `optimiseModule` on each module before code generation. LLJIT optimises nothing by
+- **`create(level, modules, linker)`** builds an LLJIT for the host CPU, defines the FMinus runtime in it, and installs
+  an IR transform layer that runs `optimiseModule` on each module before code generation. LLJIT optimises nothing by
   itself. With `Modules::Optimised` it installs none, and generates code from each module as it comes: one optimised
-  already, at the JIT's level (below, "The IR as text").
+  already, at the JIT's level (below, "The IR as text"). The linker is LLJIT's for the target (JITLink on macOS and
+  Linux, RuntimeDyld on Windows), or with `Linker::RuntimeDyld` RuntimeDyld on any, for the tests of `code()`.
 - **`add(module, context)`** sets the module up for the JIT's target and hands it over, with the `LLVMContext` it
   lives in, as a `ThreadSafeModule`. Nothing is compiled yet.
 - **`lookup(name)`** compiles what the symbol needs, on the calling thread, and returns its address. The caller casts
@@ -500,11 +516,34 @@ C keeps the enumerated type, and `lowerSwitch` reads it for clang's `-Wswitch`, 
   math builtins' among them in the vector and libm modes, and process symbols through LLJIT's default process-symbol
   link order. These include libm's `sinf` and libsystem_m's `_simd_sin_f4` behind the `sinf` builtin in the fast mode,
   and any external function a prototype declares (`float atanf(float x);`).
+- **`code()`** is where each function's machine code is, for a host's sampling profiler: its name as the module has
+  it, its address and size, and the module's functions the optimiser inlined into it, sorted by address (below,
+  "Where the code is").
 - **Lifetimes.** The `Jit` owns its `TargetMachine` and `LLJIT` (destroyed in reverse order), and the `LLJIT` owns
-  every module added. Function pointers stay valid as long as the `Jit` lives.
+  every module added. Function pointers stay valid as long as the `Jit` lives, and the code stays where it was linked.
 
 Compilation is lazy: it runs the first time a symbol is looked up. In a plugin, look up on a background thread and
 hand the pointer to the audio thread.
+
+**Calls by signature** (`jit/Call.h`). A function whose signature the caller learns only as it runs is called through
+a thunk: `callThunk(jit, name, result, parameters)` adds a module of one function, `fminus.call.<name>`, of the C++
+type `void(const CallSlot* arguments, CallSlot* result)`, which loads each argument from its 8-byte slot as the
+function's parameter type (a `CallType`: bool, int, float, double or pointer), calls the function as C does, and
+stores the result. LLVM lowers the call, so every target's calling convention is its own to get right, and the
+program's module is untouched. `callType` maps FMinus's types to what a thunk passes, its `switch` over every `Kind`
+with no `default:`. `Program::callable` and `call` (the public API, below) and `fminus --run` call through thunks
+([extending.md](extending.md), recipe 36).
+
+**Where the code is** (`Jit::code`). As each object links, the JIT writes down its functions: a JITLink plugin
+(`LinkedCode`) reads each named symbol of an executable section from the link graph once its fix-ups are applied, and
+keeps them when the link is emitted (before the graph is pruned, it keeps the names of the code the link keeps, which an
+ELF object's calls of local functions, through their section's symbol, would lose); under RuntimeDyld, a
+`JITEventListener` (`LoadedCode`) reads the loaded object's symbol table, sized by `object::computeSymbolSizes`, at each
+section's load address. Names lose the target's global prefix (macOS's `_`), and the assembler's labels are dropped. The
+transform layer also reads each module's direct calls before and after `optimiseModule` (`directCalls`, counted), and
+`inlinedCalls` works out from the two which functions each function now holds. `Program::codeRanges` adds which of the
+program's functions each symbol is the code of: a function's, an entry point's and its body (`f.body`), a parallel
+region's (`f.parallel.n`), a thunk (`fminus.call.f`), or FMinus's own ([extending.md](extending.md), recipe 37).
 
 **The IR as text** (`Program::Options::keepIr`). A host that shows what FMinus made of a program asks `Program::compile`
 to keep its IR, printed as LLVM prints a module: as `ir::lower` wrote it, after `prepareModule` (`loweredIr()`), and
@@ -512,10 +551,11 @@ optimised (`optimisedIr()`). To print the optimised module, `compile` makes the 
 `prepareModule` and `optimiseModule`, on a machine made as the JIT's is, and creates its `Jit` with
 `Modules::Optimised`: the text is the module the JIT generates code from, and the same as `fminus --emit ll` prints for
 the same source, options and file name (`tests/unit/KeepIrTest.cpp` runs the driver and compares). The optimiser then
-runs in `compile`, and the first look-up runs only the code generator. Off, the default, nothing is printed and the
-module goes to the JIT unoptimised, as before. The lowered IR is not what `fminus -O0` prints: `-O0`'s pipeline still
-makes the vector math mode's intrinsics (`fminus.exp.f32`) calls of the runtime's functions (`fminus_rt_expf`), and in
-the fast mode, on Apple systems, a `float4`'s `llvm.sin.v4f32` a call of the vector library's `_simd_sin_f4`.
+runs in `compile`, which reads the module's calls around it and hands the JIT what was inlined (`recordInlining`), as
+the transform layer would have, and the first look-up runs only the code generator. Off, the default, nothing is printed
+and the module goes to the JIT unoptimised, as before. The lowered IR is not what `fminus -O0` prints: `-O0`'s pipeline
+still makes the vector math mode's intrinsics (`fminus.exp.f32`) calls of the runtime's functions (`fminus_rt_expf`),
+and in the fast mode, on Apple systems, a `float4`'s `llvm.sin.v4f32` a call of the vector library's `_simd_sin_f4`.
 
 ## Ahead of time: `support/Aot.h`
 
@@ -580,7 +620,7 @@ Because the JIT and executables share one runtime, the two compile the same prog
 
 | Target | Source | Uses |
 |---|---|---|
-| `fminus` | `tools/fminus/main.cpp` | parse, lower, then `--emit ast/ll/asm/obj/exe` or `--run` in the JIT; a `.cir` input, or an `#include` of one, is the text `fminus::circuit::generate` writes (`--emit fm` prints it; `--self-test` runs `fminus::circuit::selfTest` first, on `--threads` threads); FMinus's messages on that text are re-cited at the netlist's lines |
+| `fminus` | `tools/fminus/main.cpp` | parse, lower, then `--emit ast/ll/asm/obj/exe` or `--run` in the JIT (through a thunk of the function's signature, `jit/Call.h`); a `.cir` input, or an `#include` of one, is the text `fminus::circuit::generate` writes (`--emit fm` prints it; `--self-test` runs `fminus::circuit::selfTest` first, on `--threads` threads); FMinus's messages on that text are re-cited at the netlist's lines |
 | `fminus-build` | `tools/fminus-build/main.cpp` | LLVM IR to exe/obj/asm/ll (HostTarget + Aot) |
 | `fminus-hostinfo` | `tools/fminus-hostinfo/main.cpp` | the triple, CPU, features and data layout the JIT targets |
 | `example-biquad` | `examples/biquad/bench.cpp` | biquad.fm's module, its cutoff a stream, against C++, compared and timed, through `fminus::Program` |
@@ -609,8 +649,11 @@ Because the JIT and executables share one runtime, the two compile the same prog
 
 `include/fminus/FMinus.h` is the public API: `fminus::Program` compiles a source (parse, lower for the machine's
 `poly float` width, add the module to a `jit::Jit`), looks its functions up as C function pointers, and says which are
-marked `nonblocking` or `nonallocating`; it describes each module and its parameters, sets a parameter's value or
-stream in an instance, and keeps the program's IR as text when the host asks (`Options::keepIr`). `fminus::math`
+marked `nonblocking` or `nonallocating`; it calls a function by name, its signature as values, its arguments checked
+and its errors values (`callable`, `call`: a thunk from `jit/Call.h`); it lists where its machine code is, for a host's
+sampling profiler (`codeRanges`, `codeRangeAt`: from `Jit::code`); it describes each module, its fields'
+attributes among them, and its parameters, sets a parameter's value or stream in an instance, and keeps the program's
+IR as text when the host asks (`Options::keepIr`). `fminus::math`
 gives C++ the math builtins as the default math mode computes them. It has no LLVM in it and needs C++17, so
 `FMinus::FMinus` gives its users neither LLVM's include directories and definitions nor FMinus's C++23
 (`fminus_target_defaults` makes a target's standard its own), only the libraries to link. The tree's tools, examples

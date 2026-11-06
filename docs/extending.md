@@ -1,36 +1,43 @@
 # Extending the compiler
 
 How to add to FMinus. First, how a change moves through the compiler, and the few rules that keep that easy. Then
-twenty-nine worked recipes. Eleven grow the C subset from a one-line builtin to C's control flow, a custom LLVM pass,
+thirty-two worked recipes. Eleven grow the C subset from a one-line builtin to C's control flow, a custom LLVM pass,
 `int`, `void` and pointers, the heap with the attributes that keep it off the audio thread, arrays and modules, FMinus's
 classes, an FFT from a C library built into the runtime, and parameters, the values a plugin's host sets. Six more are
 about the compiler rather than the language: math that gives a float one result wherever it is computed, knob versioning
 and flat streams, C's strict aliasing told to LLVM, zero-init elision, what the runtime's calls and loops promise, and
 subnormals flushed for the audio thread. Two more grow the language again: `#include`, which splits a program into
-files, and `parallel for` and `parallel { }`, a program's own threads. Two return to the math: kernels of FMinus's
-own, the same in every lane and on every target, and those kernels inline. The last four are for DSP's everyday code:
-C's bitwise operators with a hash and white noise from a counter, constant tables stored once, `switch` and
-enumerations, and constants at the top level with arrays sized by constant expressions. The last two are for the host:
-a loop budget, which stops a program that would loop for ever before it holds the audio thread, and bounds checks for
-development builds, which stop a call before an index leaves its array. Then one returns to C's preprocessor: its
-conditionals, `#if` and `#ifdef`, which compile a program's instrumentation in or out. The last is for whoever reads the
-errors: one error for each mistake, enumerated types as C has them, and FMinus's first warning, clang's `-Wswitch`.
-Then the pitfalls those recipes ran into, and design notes for what comes next. [simd.md](simd.md) has recipes 7 to 9,
-for vectors.
+files, and `parallel for` and `parallel { }`, a program's own threads. Two return to the math: kernels of FMinus's own,
+the same in every lane and on every target, and those kernels inline. The last four are for DSP's everyday code: C's
+bitwise operators with a hash and white noise from a counter, constant tables stored once, `switch` and enumerations,
+and constants at the top level with arrays sized by constant expressions. The last two are for the host: a loop budget,
+which stops a program that would loop for ever before it holds the audio thread, and bounds checks for development
+builds, which stop a call before an index leaves its array. Then one returns to C's preprocessor: its conditionals,
+`#if` and `#ifdef`, which compile a program's instrumentation in or out. Then one is for whoever reads the errors: one
+error for each mistake, enumerated types as C has them, and FMinus's first warning, clang's `-Wswitch`. The next adds
+C's `double`, for accumulators and slow state, and decides what an unsuffixed floating constant is when FMinus has two
+floating types. Then one adds C's arrays of arrays, 2-D arrays, with C's initialiser lists for them and a bounds check
+for each dimension. The next is for the host again: attributes on a module's fields, a unit, a label or a range, which
+FMinus passes on to the host, with C's string literals for their arguments. The last two are for the host too:
+calling a function by name, its signature learnt as the host runs, through a thunk the JIT compiles for it, its
+arguments checked and its errors values; and where the JIT put each function's machine code, which a sampling profiler
+maps its samples to, with what the optimiser inlined into it. Then the pitfalls those recipes ran into, and design notes
+for what comes next. [simd.md](simd.md) has recipes 7 to 9, for vectors.
 
 Recipes 1 to 4 are in the compiler now (`tanhf` and `%`; `bool` and its operators; `if`, `while` and `for`), and so are
 simd.md's 7 to 9, recipe 10 (`int`, `void` and pointers), recipe 11 (the heap), recipe 12 (arrays and modules), recipe
 13 (the FFT), recipe 14 (parameters), recipes 15 to 20 (the math modes, knob versioning, TBAA, zero-init elision, the
 runtime's attributes and loop progress, denormal control), recipe 21 (`#include`), recipe 22 (`parallel for` and
-`parallel { }`), recipes 23 and 24 (math kernels of FMinus's own, and inline), recipe 25 (the bitwise operators,
-`hash` and `randf`), recipe 26 (constant tables), recipe 27 (`switch` and `enum`), recipe 28 (constants at the top
-level, and sizes of constant expressions), recipe 29 (the loop budget), recipe 30 (bounds checks), recipe 31 (`#if`
-and `#ifdef`) and recipe 32 (one error a mistake, enumerated types, `-Wswitch`), so their sections describe how the
-code you have got there: read a section beside the files it names.
-Recipes 5 and 6, a runtime function and a pass, are not part of the language; they live in [recipes/](recipes/) as a
-patch, so you can apply them to see them work. None of these are sketches: each was applied to this repository, built
-with `-Werror`, and tested in the dev and asan presets, every test passing. [architecture.md](architecture.md) describes
-the stages they touch.
+`parallel { }`), recipes 23 and 24 (math kernels of FMinus's own, and inline), recipe 25 (the bitwise operators, `hash`
+and `randf`), recipe 26 (constant tables), recipe 27 (`switch` and `enum`), recipe 28 (constants at the top level, and
+sizes of constant expressions), recipe 29 (the loop budget), recipe 30 (bounds checks), recipe 31 (`#if` and `#ifdef`),
+recipe 32 (one error a mistake, enumerated types, `-Wswitch`), recipe 33 (`double`), recipe 34 (2-D arrays), recipe 35
+(field attributes), recipe 36 (calls by name) and recipe 37 (code ranges, for a profiler), so their sections describe
+how the code you have got there: read a section beside the files it names. Recipes 5 and 6, a runtime function and a
+pass, are not part of the language; they live in [recipes/](recipes/) as a patch, so you can apply them to see them
+work. None of these are sketches: each was applied to this repository, built with `-Werror`, and tested in the dev and
+asan presets, every test passing.
+[architecture.md](architecture.md) describes the stages they touch.
 
 FMinus follows C. When a recipe has a semantic choice to make, it makes C's: conversions, short-circuiting, which
 `if` an `else` belongs to, what `continue` does in a `for`. And it reports errors in clang's words. The README lists
@@ -48,8 +55,8 @@ Most language features touch the same places, in this order:
 | 4 | `src/frontend/Ast.cpp` | its `dump` |
 | 5 | `src/ir/` | its conversions and checks, and its lowering to LLVM IR, in the file its kind belongs to (`Lowering.h` lists them: types, functions, statements, expressions, calls, the math modes, vectors, memory, modules, effects, parallel regions, TBAA, denormals); a load or store of memory gets its type's tag (`tag`, recipe 17); a statement that holds code walks it in `Parallel.cpp`'s `Walker` too |
 | 6 | `src/runtime/` | if it needs C++ at run time, a runtime function (recipe 5); if a builtin calls it, its facts: in `kRuntimeFacts`, through `callRuntime` (recipe 19), or for a math builtin's, in `mathFunction` (`Math.cpp`, recipe 15) |
-| 7 | `tools/fminus/main.cpp`, `src/support/Aot.cpp` | for a new type: whether `--run` can pass and print it (its `switch` over the result type), and whether an executable's `main` may take or return it (`addEntryPoint`) |
-| 8 | `tests/` | a dump in `FrontendTest.cpp`; results in `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `SwitchTest.cpp`, `EnumTest.cpp`, `IntTest.cpp`, `BitwiseTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `TableTest.cpp`, `TopLevelTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `HashTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp` or `ParallelTest.cpp` (their helpers are in `Compile.h`); IR or errors in `tests/lit/fminus/` |
+| 7 | `src/jit/Call.cpp`, `src/support/Aot.cpp` | for a new type: whether a call by name, `Program::call` and `--run`, passes and returns it (`callType`'s `switch`, recipe 36), and whether an executable's `main` may take or return it (`addEntryPoint`) |
+| 8 | `tests/` | a dump in `FrontendTest.cpp`; results in `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `SwitchTest.cpp`, `EnumTest.cpp`, `IntTest.cpp`, `BitwiseTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `TableTest.cpp`, `TopLevelTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `HashTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`, `ParallelTest.cpp`, `DoubleTest.cpp`, `Array2DTest.cpp` or `FieldAttributeTest.cpp` (their helpers are in `Compile.h`); IR or errors in `tests/lit/fminus/` |
 | 9 | `examples/` | a program that uses it, and a line in `tests/lit/fminus/examples.test` that runs it |
 | 10 | `editors/vscode/syntaxes/fminus.tmLanguage.json` | a new keyword, type or builtin, so VSCode highlights it (its README says where) |
 | 11 | `README.md` | the language table, and the deviations from C if any |
@@ -58,9 +65,9 @@ Steps 3 to 5 need no searching. Once the node exists, the build fails at every w
 `std::visit` without a matching lambda fails to compile, and a `switch` without the new enumerator trips `-Wswitch`,
 an error under `-Werror`. Fix the errors in order and the feature is wired through. `std::visit` names only the
 first alternative it can't handle, so after you fix one, the next appears. The same goes for step 7's `switch`: when
-recipe 7 added `Float2` to `Bool8`, the build stopped in the driver until `--run` said what to do with a vector, and
-when recipe 10 added `Kind::Pointer`, it stopped in `typeOf`, `typeName` and the driver. Steps 9 and 10 are the ones
-nothing reminds you of.
+recipe 7 added `Float2` to `Bool8`, the build stopped in the driver until `--run` said what to do with a vector (that
+`switch` is `jit::callType`'s now, recipe 36), and when recipe 10 added `Kind::Pointer`, it stopped in `typeOf`,
+`typeName` and the driver. Steps 9 and 10 are the ones nothing reminds you of.
 
 Each feature has an example to read beside its recipe: `examples/comparison/` for `bool` (recipe 3),
 `examples/waveforms/` for every statement (recipes 4 and 27) and a constant of the top level (recipe 28),
@@ -1311,8 +1318,9 @@ others wait for a reason:
   `poly_store` ([simd.md](simd.md), "Loads and stores").
 - Pointers to pointers, `void*`, null constants and casts between pointer types: nothing needs them yet.
 
-A declaration of any other is "FMinus has pointers to float, int, float2, float4 and float8, not to 'bool'". The
-variable is then bound as a `float*`, so its uses report nothing more.
+A declaration of any other is "FMinus has pointers to float, double, int, float2, float4, float8, void and modules, not
+to 'bool'" (as recipes 11, 12 and 33 left it). The variable is then bound as a `float*`, so its uses report nothing
+more.
 
 **Elements.** `p[i]` and `*p` are lvalues (`IndexExpr`, and a `UnaryExpr` with `Dereference`), and both end in
 `element`:
@@ -1373,8 +1381,9 @@ they overlap; `pointers.fm` checks both. A `restrict` on a local pointer is acce
 
 **At the C boundary** a pointer is an address in a general register (`x0` to `x7` on AArch64), and an `int` the low
 half of one (`w0` to `w7`), with no attributes needed; floats travel separately, in `s0` to `s7`. So the C++
-function pointer type only has to name the same parameters in the same order. `--run` passes floats only, and
-refuses an `int` or pointer parameter ("takes a parameter of type 'int'"); it prints an `int` result.
+function pointer type only has to name the same parameters in the same order. `--run` passed floats only then, and
+refused an `int` or pointer parameter; it printed an `int` result. Since recipe 36 it passes ints, and arrays for
+pointers, through a thunk of the function's signature.
 
 ### Tests
 
@@ -2048,7 +2057,7 @@ module_member
 A parameter is a `Field` with `isParam` set and its attributes, so it is laid out, copied and zeroed as a field is.
 Attributes gain arguments: `attribute_args` is a list of numbers, each with a leading `-` if it has one, kept as
 written (`"-60"`, `"2e4"`) so the tree's dump shows them as the source does; `ast::attributeNumber` reads one, as C
-reads a constant.
+reads a constant. (Recipe 35 adds strings, and attributes on every field.)
 
 ### One slot for every binding
 
@@ -2070,10 +2079,11 @@ compiles a new program, then swaps the function pointers, and the instance's sta
 line) carries on; a host that compiles a program with a stream and one without can run either on the same instance.
 A stream is a `float` only: a gate or a mode a sample is something else (events, below).
 
-`checkParameter` checks the rest: the type, the binding (an `int` stream is "parameter 'mode' is an int: only a
-float parameter can be a stream"), and the attributes. `fminus::range(minimum, maximum)` takes two numbers in order,
-`fminus::default(value)` one, inside the range if there is one, and any other attribute is unknown. A binding that
-names no parameter of the program is an error too, at 1:1, as an option that names nothing would be. The range and the
+`checkParameter` checks the rest: the type and the binding (an `int` stream is "parameter 'mode' is an int: only a
+float parameter can be a stream"); `checkAttributes`, the attributes. `fminus::range(minimum, maximum)` takes two
+numbers in order, `fminus::default(value)` one, inside the range if there is one, and another name of FMinus's
+namespace is unknown; any other attribute is the host's, which FMinus passes on (recipe 35). A binding that names no
+parameter of the program is an error too, at 1:1, as an option that names nothing would be. The range and the
 default are for the host: FMinus checks them against each other, and neither clamps to them nor checks a value the
 host sets.
 
@@ -5751,7 +5761,8 @@ unary operators by recursive descent, computing as it goes:
 - **Arithmetic is defined for every operand**, as FMinus's code is: `+ - *` and unary `-` wrap, the least integer
   divided by -1 is itself (its remainder 0), and a shift takes its count's low six bits (OpenCL C's rule for a 64-bit
   integer, as FMinus shifts an `int` by its count's low five), the right one arithmetic. clang warns of an overflow
-  there; FMinus does not (its one warning is `-Wswitch`, recipe 32), and the result is defined.
+  there; FMinus does not (its warnings are `-Wswitch`, recipe 32, and `-Wunknown-attributes`, recipe 35), and the
+  result is defined.
 - **Limits**, so that a program cannot hang the compiler or exhaust its stack: 256 levels of parentheses, unary
   operators and `?:` (clang's bracket depth), 256 macros expanding inside one another, 65536 tokens after expansion
   (`#define B A A` doubles a line's tokens with each such macro), and the work of expanding, counted across all of a
@@ -6076,6 +6087,949 @@ error.
   program; `large-modules.fm`: a 16 GiB module's `memcpy`, `memset` and `dereferenceable` at 64 bits, and its `sizeof`
   refused (`-D SIZEOF`). `enum.fm`'s constant loop branches to its body alone.
 
+## Recipe 33: `double`, for accumulators and slow state
+
+*In the compiler. Code: `Kind::Double`, `Type::Double` and `isFloating` (`src/frontend/Ast.h`), `typeName`
+(`Ast.cpp`), the `double` keyword (`Lexer.l`) and its rules in `Parser.y` (`type`, `cast_type`, and `poly double`
+refused); `typeOf`, `convert`, `commonType`, `sizeOf` and `checkType` (`src/ir/Types.cpp`); `lower`, `lowerAs`,
+`lowerWith`, `hasDouble`, `staticType`, `lowerConditional`, `lowerNumber`, `lowerCast` and `lowerAssign`
+(`Expressions.cpp`), and `lowerAs` where a value goes somewhere typed: `lowerReturn` and `declareVariable`
+(`Statements.cpp`), `initializeArray` and `declareConstArray` (`Memory.cpp`), `defineConstant` and `fold`
+(`Constants.cpp`), `lowerCall` (`Calls.cpp`) and `lowerMethodCall` (`Modules.cpp`); `kBuiltins`' double functions and
+`kLibmDoubles` (`Calls.cpp`), and a double builtin's prototype (`declare`, `Functions.cpp`); `lowerConstruct`
+(`Vectors.cpp`); the `"double"` tag (`Tbaa.cpp`); `DenormalFolder::FoldCast` (`Denormals.h`, `Denormals.cpp`);
+`addEntryPoint` (`src/support/Aot.cpp`) and `fminus_rt_main_double_args` and `fminus_rt_main_double_result`
+(`src/runtime/Runtime.cpp`); `--run` (`tools/fminus/main.cpp`); `isFMinusKeyword` (`src/circuit/Emit.cpp`). Tests:
+`tests/unit/DoubleTest.cpp` (`[double]`), `FrontendTest.cpp`, `AotTest.cpp`, `tests/library/DoubleTest.cpp`, and
+`tests/lit/fminus/double.fm` and `double-errors.fm`.*
+
+A float has 24 bits, and some of a program's state needs more. An engine's coolant warms by a millionth of a degree a
+block: at 90 degrees, half a float's ulp is 3.8e-6, so `t += 1e-6f` rounds back to 90 every time and the temperature
+never moves. A clock counted in seconds a sample at a time, at 48 kHz, reads 57.8 after a minute, two seconds behind. A
+one-pole's coefficient a hair below 1 is a different filter rounded to a float. C's answer is `double`, and this recipe
+adds it: C's IEEE double precision, for accumulators, clocks and slow state, beside the floats that a block's audio is.
+
+### The type
+
+`double` is a kind of its own, `Kind::Double`, LLVM's `double`: 8 bytes, aligned to 8 by the data layout, in a module's
+struct as C lays one out (a `float` then a `double` puts the double at offset 8). It goes wherever a float goes but
+into a vector: a variable, a parameter, a result, a field, an array's element (`canPointTo` takes it, so `double*` and
+`double t[8]` are C's), a constant of the top level and a table stored once. Its TBAA tag is clang's, `"double"`, a
+leaf of its own beside `"float"`, so a store of a double changes no float. `sizeof(double)` is 8.
+
+A double is no vector lane: FMinus's vectors are floats, and there is no `double4` or `poly double` (the parser refuses
+the second by name). A double meeting a vector is clang's error for the truncation its broadcast would be,
+`cannot convert between scalar type 'double' and vector type 'float4' as implicit conversion would cause truncation`,
+from `commonType`; `float4 v = d;` is `initializing 'float4' with an expression of incompatible type 'double'`, from
+`convert`. A vector literal names its lanes' type, so there a double rounds to a float, as a cast would:
+`(float4)(d)` and `(float4){d, d}` are OpenCL C's and clang's. LLVM's vectorisers still put doubles side by side in a
+loop over a `double` array: two lanes in a NEON register, four in an AVX one.
+
+### C's conversions
+
+`convert` gains four instructions: `fpext` from a float (exact), `fptrunc` to a float (rounded to nearest, to infinity
+past the greatest float), `sitofp` and `uitofp` from an int and a bool, and `fptosi` to an int, truncating, as from a
+float. A double is `x != 0` as a bool, `fcmp une` as a float's is. `commonType` is C's usual arithmetic conversions: two
+ints are an int, a double anywhere is a double, a float anywhere else a float, so `f + i + d` adds `f + i` in float,
+then widens it, as C does. What C refuses of a double, FMinus refuses in clang's words: a bitwise operator
+(`invalid operands to binary expression ('double' and 'int')`), `~`, a switch's value, a subscript (`array subscript is
+not an integer`) and an integer constant expression (`size of array has non-integer type 'double'`). `%` is `fmod`'s,
+as it is `fmodf`'s on floats. A module's parameter stays a float, an int or a bool: its slot is what a host's
+`setValue` writes and a stream's buffer is floats.
+
+### Floating constants: floats first
+
+The decision is what an unsuffixed `0.1` is. C says a double, so `x * 0.1` of a float `x` widens `x`, multiplies in
+double and rounds the product back. FMinus has always said a float, and every program written for it, its examples
+and every host's, computes `x * 0.1` as a float product. Taking C's rule would change those programs' bits wherever a
+double product rounds to another float than the float product (rarely, but not never), and their speed everywhere: an
+`fpext` and an `fptrunc` around every multiply by a constant, and a loop of them vectorised at half the lanes. GLSL
+keeps float first and spells a double constant `0.1lf`, which C cannot read.
+
+FMinus keeps float first, and lets a constant be C's double where its arithmetic has a double in it. A constant's
+arithmetic is the expression around it as far as `+`, `-`, `*`, `/`, `%`, unary `+` and `-`, the arms of `?:` and
+parentheses reach. It has a double when one of its operands is a double, when the two sides of a comparison it is in
+have one, or when its value goes to one: a `double` variable it initialises or is assigned to (or whose value it
+changes, `d *= 0.999`), a parameter, a result or a cast. Then every unsuffixed constant in it is the double nearest its
+spelling, and the arithmetic computes as C's does, step for step: the same types at each operator, so the same bits.
+Where it has no double, it computes as it always did:
+
+| Expression | FMinus | C |
+|---|---|---|
+| `float y = x * 0.1;` | a float product | a double product, rounded to float |
+| `double y = x * 0.1;` | a double product | the same |
+| `double third = 1.0 / 3.0;` | C's third | the same |
+| `x * 0.1 * d` | `(double)x * 0.1 * d` | the same |
+| `d < 0.1`, `d == 0.1` | compared with C's 0.1 | the same |
+| `d *= 0.999;`, `t += 1.0 / rate;` (a float `rate`) | C's 0.999; a double quotient | the same |
+| `c ? 0.1 : d` | C's 0.1 | the same |
+| `sinf(x * 0.1)`, `(float)(x * 0.1)` | a float product | a double product, rounded to float |
+| `(int)(x * 0.1)` | a float product | a double product |
+
+So a program without doubles means what it meant before they came, bit for bit, and one with doubles means C's
+wherever its constants meet them. What differs from C is what always did: a constant in arithmetic of floats whose
+value stays a float (or becomes an int).
+
+The code generator decides it in `lower`. Each call takes a flag the arithmetic around it set, `doubleArithmetic_`,
+for that call only: `+`, `-`, `*`, `/` and `%`, a sign and `?:`'s arms pass theirs on to their operands, and every
+other expression's parts start an arithmetic of their own. At the top of an arithmetic there is no flag, and
+`hasDouble` looks for a double among its operands:
+
+```cpp
+    // FMinus's floating constants are floats first ... unless the arithmetic it is part of has a double.
+    Lowering::Value Lowering::lowerAs(const ast::Expr& expr, ast::Type type)
+    {
+        return lowerWith(expr, type == ast::Type::Double || hasDouble(expr));
+    }
+
+    bool Lowering::hasDouble(const ast::Expr& expr) const
+    {
+        if (std::holds_alternative<ast::NumberExpr>(expr.node))
+            return false;
+        // a sign, + - * / %, and ?:'s arms: the same arithmetic
+        ...
+        return staticType(expr) == std::optional<ast::Type>(ast::Type::Double);
+    }
+```
+
+The operands have to be known before anything is lowered: in `x * 0.1 * d` the constant comes before `d`, and the
+code generator lowers left to right, the order a program's side effects happen in, which no constant may change. So
+`staticType` works an operand's type out from the declarations alone, as lowering it would give it: a variable's (or a
+field's by name in a method), `m.y` and `p->y`, `a[i]` and `*p`, a call's result (a function's, a method's, a double
+builtin's), a cast's, an assignment's or an increment's target, `p + i`, and a `?:` whose arms agree. A comparison's
+two sides are one arithmetic, so `d < 0.1` asks both. Where a value goes is known before it is lowered too: a
+declaration's type, the function's result, a parameter's (`lowerCall` looks the callee up by name first, a method's
+too), a cast's, an assignment's target (`staticType` again), an array's element. Those call `lowerAs(expr, type)`, and
+`lower(expr)` is `lowerAs(expr, void)`. A constant whose arithmetic has a double reaches `lowerNumber` with the flag
+set, and reads its spelling into `APFloat::IEEEdouble()` instead of `IEEEsingle()`: one rounding, from the decimal, as
+clang's. A double's constant past a float's range is no error (`1e300`); a float's still is.
+
+Integer constants stay ints, so `d + 1 / 2` adds 0, as C does. An integer constant expression's floating constant is
+the float it always was (`case 1.5:` is "not 'float'"); `fold` takes a cast to `double` as it takes one to `float`.
+
+### The math
+
+C's double functions that are one instruction are builtins: `sqrt`, `fabs`, `floor`, `fmin`, `fmax` and `fma`, each
+an LLVM intrinsic on `double` (`llvm.sqrt.f64`, ..., `llvm.fma.f64`), exact and the same in every math mode, a
+`Builtin` whose `type` is `Kind::Double`. They take doubles only: an argument converts to one (a numeric argument is
+C's double, `fmax(d, 0.5)`), and a vector is an error. `fma` rounds once, as C's does; FMinus still contracts nothing
+else into one. Their names became builtins as `tanf` did, so a program's own `floor` is "a builtin and cannot be
+redefined", and a prototype must be C's, `double sqrt(double x);` (a `float sqrt(float x);` "conflicts").
+
+The transcendental ones are not: FMinus's kernels (recipe 23) are fitted to a float's 24 bits, and a double's would
+need fits, tests and ulp tables of their own. `sinf(d)` takes its double as C's prototype converts it, rounded to a
+float, and computes in float. A program that wants the C library's double `sin` declares it, `double sin(double x);`,
+as any external function (on Apple systems `describeLibm` marks it as writing no memory, as it marks `powf`); a call
+without the prototype is clang's error with a note that says so:
+
+```
+synth.fm:9:28: error: call to undeclared function 'sin'
+synth.fm:9:28: note: FMinus's sinf computes in float, and rounds a double argument to one; a prototype, 'double sin(double x);', calls the C library's on doubles
+```
+
+That leaves the C library on the audio path, which the float functions avoid: keep a double's transcendentals off the
+audio thread, or compute them in float.
+
+### Hosts, `--run` and executables
+
+A function of doubles is C's to a host: `program->function<double(double)>("seconds", errors)`. A module's double field
+is `"double"` (or `"double[8]"`) in `Module::Field::type`, 8 bytes an element at its offset, and a host that reads
+fields by their type (a trace, an inspector) reads it as C++'s `double`; one that knew only `"float"`, `"int"` and
+`"bool"` finds no match for it, and so never reads it as a float. `fminus --run` passed every argument as a float or
+every one as a double, as the function's parameters were, and refused a mix (recipe 36's thunk passes each as its own
+type), and prints a double as the shortest decimal that reads back as it. An executable's
+`main` may return a double and take doubles beside floats: its C `main` reads them through `fminus_rt_main_double_args`,
+each as its kind says (`strtod` or `strtof`, whose float the double holds exactly), and prints through
+`fminus_rt_main_double_result`; a `main` of floats keeps the functions and the code it had. Both are new runtime
+symbols, so a runtime built before them links no program that uses them, and every program it linked still links.
+`--emit obj` and `asm` need nothing: a double is LLVM's own.
+
+### Subnormals
+
+Under `Denormals::Flush`, a double's subnormals flush as a float's do: AArch64's FPCR.FZ and x86's MXCSR FTZ and DAZ
+apply to both, and LLVM's `denormal_fpenv` attribute covers every type. The code generator's folder flushes the two
+conversions as well (`FoldCast`): `(float)(double)1e-40` folds to 0, as FCVT and CVTSD2SS give it flushing. LLVM's own
+folding does not flush a conversion (`ConstantFoldCastOperand` ignores the function's mode), so an `fpext` or
+`fptrunc` of a subnormal that only the optimiser finds constant folds as IEEE's, where the hardware would give 0: the
+same kind of gap as LLVM's `x * 1.0` to `x`, which leaves a subnormal `x` that a flushing multiply would have zeroed.
+
+### What it changes for programs and hosts
+
+- **Programs** without doubles compile to the same IR, bit for bit: no constant changes type, and no conversion is
+  added. `double` is a keyword, and `sqrt`, `fabs`, `floor`, `fmin`, `fmax` and `fma` are builtins: a program that
+  named something so renames it (the circuit compiler refuses them as a netlist's names too).
+- **Messages** that list FMinus's types name `double` (`FMinus has pointers to float, double, int, ...`), `--run`'s
+  say it passes and prints doubles, and `main`'s that it may return and take them.
+- **Hosts** get `"double"` fields, aligned to 8, and `ir::builtins()` six more names.
+
+### Tests
+
+- `tests/unit/DoubleTest.cpp`: constants float first, as they were (`x * 0.1`, `1.0 / 3.0`, `x < 0.1` and a cast to
+  float, all floats); C's doubles where the arithmetic has one, against C++'s own doubles: a result, an initialiser, a
+  float operand, an operand after the constant, a comparison, a compound assignment, a `?:`'s arm, a cast, a parameter,
+  a table's list, `1e300 * 10`, and a float's `1e39` still refused; the usual arithmetic conversions and casts both
+  ways, a NaN as a bool, `%`, `++` and `--`; a float's slow state stuck at 90 where a double's moves; a module's double
+  fields and array, a top-level constant and table, `double*` both ways and `sizeof`; the six builtins against
+  `<cmath>`, `fma`'s one rounding against the product's two, `sqrtf` of a double, and libm's `sin` by prototype;
+  subnormals flushed in folding, in a computation and in a conversion; and the errors above, in clang's words.
+- `FrontendTest.cpp`: `double` as a parameter, a pointer's pointee, an array's element and a cast; `poly double`.
+- `AotTest.cpp`: a `double main(double, float)`'s entry, its readers and printer.
+- `tests/library/DoubleTest.cpp`: `module()`'s description of double fields (type, offset, size, alignment), the host
+  reading and writing them, a function of doubles; doubles under the loop budget, bounds checks (`'taps' of type
+  'double[8]'`) and `#ifdef`.
+- `tests/lit/fminus/double.fm`: the IR (`fpext`, the double constant, the `"double"` tag beside `"float"`), `--run`'s
+  results and refusal, an executable's `main` of a double and a float, its entry, and `--emit obj`;
+  `double-errors.fm`: each error once, and `poly double`.
+
+## Recipe 34: 2-D arrays, C's arrays of arrays
+
+*In the compiler. Code: `Type::rowKind` and `rowCount`, `pointerTo`, `arrayOf`, `pointee`, `hasRows`, `elementOf` and
+`samePointee` (`src/frontend/Ast.h`), `Brace`, `DeclStmt::rowSize` and `braces`, `Field::rowSize` and `SizeofExpr`'s
+sizes (`Ast.h`); `typeName`, `declared` and `list` (`Ast.cpp`); `array_sizes`, `initializer_list`, `initializers`,
+`initializer`, `declaredName`, `setSizes`, `setList` and `append`, the parameter's rule and `sizeof`'s (`Parser.y`);
+`checkType` (`src/ir/Types.cpp`); `sized`, `arraySize`, `declaredArray`, `floatsLike` and `defineConstant`
+(`Constants.cpp`); `element`, `lvalue`, `placeList`, `elementAt`, `initializeArray`, `declareConstArray`, `tableOf` and
+`pointerArithmetic` (`Memory.cpp`); `declareVariable` (`Statements.cpp`); `layOut` (`Modules.cpp`); `lowerSizeof` and
+`lowerConditional` (`Expressions.cpp`); `Module::Field::element` and `extents` (`include/fminus/FMinus.h`,
+`src/api/FMinus.cpp`). Tests: `tests/unit/Array2DTest.cpp` (`[array2d]`), `BoundsCheckTest.cpp`, `FrontendTest.cpp`,
+`tests/library/Array2DTest.cpp`, and `tests/lit/fminus/array2d.fm` and `array2d-errors.fm`.*
+
+A bank of wavetables is four tables of 256 samples; a reverb's delay network is eight lines of 2048; a mixer's gains
+are a matrix. Recipe 12's arrays are one dimension deep, so a program wrote either `float bank[4 * 256]` and indexed it
+as `bank[t * 256 + i]`, or a module of one row, `module Row { float v[256]; }; Row bank[4];`, and `bank[t].v[i]`.
+Both work, and both hide the shape: the bounds checks see one array of 1024 floats, a host sees 1024 floats, and a
+reader sees arithmetic. C's answer is an array of arrays, and this recipe adds it: `float bank[4][256];`, rows side by
+side, `bank[t][i]` an element and `bank[t]` a row, a `float*` wherever one goes.
+
+### The type: a row beside the element
+
+C's `float[4][256]` is an array of 4 `float[256]`s, and its name stands for a pointer to its first row, a
+`float (*)[256]`. A `Type` is a value: a kind, and for an array or a pointer the kind of its elements (`pointee`), with
+a module or an enumeration beside it. Making it nest, an element that is a `Type` of its own, would make every type a
+tree and every comparison a walk, for arrays that go two levels deep. So a row is described where an element's kind is:
+`pointee` is `Kind::Array`, and two fields say what the row is.
+
+```cpp
+        Kind rowKind = Kind::Void;   // when the pointee is a row (Kind::Array): what the row's elements are
+        int rowCount = 0;            // and how many it has (0 in the syntax tree, as `count`)
+```
+
+`arrayOf(arrayOf(float, 256), 4)` is `float[4][256]`: an array of 4, its pointee `Kind::Array`, its rows of 256
+floats. `pointerTo(float[256])` is the pointer its name stands for, `float (*)[256]`. `pointee()` of either gives the
+row back, an array again, so everything that asks "what is an element of this" gets the row, and the row's own
+`pointee()` is a float. `elementOf` goes straight to the float, and `hasRows` says whether a type has rows. `==` and
+`samePointee` compare the row too, so `float (*)[256]` is not `float (*)[16]`.
+
+The choice pays for itself where nothing was written. Every rule that tests a pointer's pointee (`pointee ==
+Kind::Module` for `p->y`, `canPointTo(pointee)`, `pointee == kind` for `poly_load`'s float pointer, `samePointee` for
+an assignment) sees `Kind::Array`, which none of them takes, so a pointer to rows is refused everywhere a float pointer
+or a module pointer goes, in the words those rules already had: `float* p = grid;` is "incompatible pointer types
+initializing 'float *' with an expression of type 'float (*)[16]'", clang's. The places that take a row say so:
+`element()`, which gives the row an index reaches, and `pointerArithmetic`, which moves a pointer to rows by rows.
+
+### A row decays, and its elements are indexed
+
+Nothing new lowers `grid[i][j]`. `grid` is read as any array is (`read()`, Memory.cpp): a pointer to its first
+element, which is now its first row. `grid[i]` is `element()` on that pointer: a GEP of the row type, `[16 x float]`,
+by `i`, and an lvalue of the row's type, an array. Reading an array decays it, so the row stands for a pointer to its
+first float, and `[j]` is a float's element:
+
+```cpp
+        const bool row = ast::isArray(type);   // a pointer to rows: the element is a row
+        if (!ast::canPointTo(type.kind) && !row)
+            return std::nullopt;
+```
+
+```llvm
+; float g[2][3]; ... g[r][c]   (fminus -O0)
+  %arraydecay = getelementptr inbounds [2 x [3 x float]], ptr %g, i64 0, i64 0
+  %arrayidx = getelementptr inbounds [3 x float], ptr %arraydecay, i64 %idxprom
+  %arraydecay4 = getelementptr inbounds [3 x float], ptr %arrayidx, i64 0, i64 0
+  %arrayidx8 = getelementptr inbounds float, ptr %arraydecay4, i64 %idxprom7
+```
+
+InstCombine folds the four into one address, and the loop vectoriser sees what it sees for a 1-D array: a loop over a
+row's floats, at a constant stride. `for (v ...) for (i ...) gain[v][i] *= k;` over a `float gain[8][64]` field
+vectorises its inner loop at the target's width, as `for (i ...) flat[i] *= k;` does over a `float flat[512]`.
+
+The rest follows from decay. `grid[i]` goes wherever a `float*` does (a parameter, `poly_load(grid[i] + j)`,
+`float* row = grid[i];`); `*grid` is the first row, `grid + 2` the third, and `(grid + 2) - grid` is 2. A row is no
+lvalue to store to ("array type 'float[16]' is not assignable"), and an element of a const table names its variable
+when it is assigned (`lvalue` looks through `t[i]` to `t`: "cannot assign to variable 't' with const-qualified type
+'const float[2][3]'"). A module's field, a constant of the top level, a local, a const table and an array a parallel
+region captures are arrays as before, so each of them may be a 2-D array too; so is an array of modules,
+`Voice voices[2][8];`, whose `voices[i][j].tick()` is a method's call on a module, and whose row, `voices[i]`, is a
+`Voice*`.
+
+### What a program cannot have: a pointer to rows
+
+No variable, field or parameter holds a `float (*)[16]`. C writes one `float (*p)[16]`, which FMinus's declarators do
+not parse (they have one `*`, before the name), and `&grid[i]` is refused as `&` of any array is ("FMinus has pointers
+to ..., not to 'float[16]'"). A parameter declared as a 2-D array would be one too: C's `void f(float g[4][16])` takes a
+`float (*)[16]`. The parser refuses it ("FMinus has no parameters of 2-D arrays, which would be pointers to rows: pass
+a row (a float*), or the module that holds the array"), for a reason of its own: a parameter's type is fixed in the
+first pass (`declare`, Functions.cpp), before the file's enumerations are declared, and a row's size, `[COLS]`, is an
+integer constant expression of them. A function takes a row, or the module whose method reaches the array by name.
+
+### Sizes, and `sizeof` of an array type
+
+A declarator takes one or two sizes (`array_sizes`): `[4][16]`, the rows' last, in `DeclStmt::rowSize` (and
+`Field::rowSize`), as written. A third is "FMinus's arrays have at most two dimensions". `sized` (Constants.cpp) works
+the row's size out first (`arraySize`, the integer constant expression's rules), since C does not let `[]` leave it out
+("array has incomplete element type 'float[]'"), and then the count of rows: written, or as many as the list starts.
+The elements in all, rows times their size, are at most 2^30, as a 1-D array's are. A row whose size is in error, or
+missing, makes the declaration's one error, as it makes clang's type invalid: the row is then as wide as the list's
+widest braced row, and the array has its rows as written, or as many as the list reaches with that row when it reaches
+more, so neither the list (its excess) nor the count (the size a list gives) reports more, as a 1-D array whose size is
+in error takes its list's length. A field without either size, `float d[][]`, is the same error, not "field has
+incomplete type".
+
+`sizeof` takes an array type now, C's abstract declarator: `sizeof(float[4][16])` is 256, `sizeof(int[N])` four times
+N. Its sizes are expressions too (`SizeofExpr::size` and `rowSize`), so `lowerSizeof` sizes the type as a declaration's.
+`sizeof(float[])` is C's incomplete type. FMinus still has no `sizeof` of an expression (Where to go next).
+
+### Initialiser lists: C's placement
+
+A 2-D array's list may brace its rows, `{{1, 2}, {3}}`, or not, `{1, 2, 3}`, or mix the two, and C says where each
+value goes: a braced list starts a row, from the row's first element, and its values fill that row; a value outside a
+brace goes to the next element, crossing into the next row as it needs (C's brace elision); after a braced row, the next
+value starts the next row. So `float g[3][3] = {{1}, 2, 3, 4, {5}};` is rows `1 0 0`, `2 3 4` and `5 0 0`.
+
+The tree keeps a list as its values in order (`DeclStmt::list`, as before), and the braces among them beside it
+(`ast::Brace`: where its `{` is, which values it holds, how deep it is). Recipe 12's code reads `list` as it always
+did, and a 1-D array's list has no braces. The grammar builds both bottom up: a value is an item, and a braced list is
+an item whose values move into the list around it, its brace first, one level deeper than its own braces:
+
+```yacc
+initializer
+    : expr                                  { $$.items.push_back($1); }
+    | initializer_list                      {
+                                                InitList list = $1;
+                                                $$.braces.push_back(ast::Brace{at(@1), 0, list.items.size(), 1});
+                                                for (ast::Brace& brace : list.braces)
+                                                    ++brace.depth;
+                                                append($$, std::move(list));
+                                            }
+    ;
+```
+
+`placeList` (Memory.cpp) then places the values as C does, for every array, a 1-D one's too: each value and the element
+it goes to, counted from the first, row by row, and how far the list reaches (what sizes `[]`). Where C only warns,
+FMinus refuses, in clang's words, at the value or the brace: an excess value ("excess elements in array initializer",
+at the first value too many, clang's place, which recipe 12 put at the declaration), and a brace around one element
+("braces around scalar initializer": a 1-D array's, one inside a row, or one that would start mid-row, where C would
+take it as one element's).
+`initializeArray`, `declareConstArray` and `defineConstant` store each value at its element (`elementAt`: a GEP of
+`0, row, column`).
+
+A const table of constants is stored once, as recipe 26's are, row by row: `tableOf` makes each row a table of its own
+(`tableContents`, clang's shapes), then the rows a table of rows. When a row has eight zeros or more at its end it is a
+struct, as a 1-D table's is, and the rows go side by side in a packed struct instead, the rows after the last one given
+a single `zeroinitializer`. The bytes are the array's either way: a row's size is a multiple of its elements'
+alignment, so no padding comes between rows.
+
+```llvm
+@kGrid = private constant [2 x [3 x float]] [[3 x float] [float 1.0, float 2.0, float 3.0], [3 x float] [float 4.0, float 0.0, float 0.0]]
+@sparse = private constant <{ [1 x [4 x i32]], [15 x [4 x i32]] }> <{ [1 x [4 x i32]] [[4 x i32] [i32 1, i32 0, i32 0, i32 0]], [15 x [4 x i32]] zeroinitializer }>
+```
+
+### Bounds checks, a dimension at a time
+
+Recipe 30 checks an access against the extent its pointer carries, made where an array decays. A 2-D array decays
+twice, so it is checked twice: `grid[i]` against the rows (`index 4 out of bounds for 'grid' of type 'float[4][16]'`),
+and `grid[i][j]` against the row (`index 16 out of bounds for 'grid[i]' of type 'float[16]'`), each named as the source
+names it (`spelled`), so the message says which dimension. That is UBSan's `-fsanitize=array-bounds`, which checks
+each subscript of a C array of arrays against its own bound: `grid[0][16]` is out of bounds though `grid[1][0]` lies
+there. A row is checked as an element wherever it is used, even to make a pointer of it (`float* end = grid[4];` is
+out), and a pointer formed from a row may point one past the row's end, no further. A loop whose conditions keep both
+indexes in their bounds has no check, and vectorises as it does without them.
+
+### Hosts
+
+A module's 2-D field is `"float[4][16]"` in `Module::Field::type`, and two new members spell its shape out:
+`element`, `"float"`, and `extents`, `{4, 16}`, outermost first (`{16}` for a `"float[16]"`, empty for a field that is
+no array). The rows lie side by side, as C++'s `float[4][16]` at the field's offset, so element `[i][j]` is at
+`offset + (i * 16 + j) * sizeof(float)`. A host that counted a field's elements by multiplying the numbers in its type's
+brackets counts 64, and reads them in order, rows one after another.
+
+### What it changes for programs and hosts
+
+- **Programs** without 2-D arrays compile to the same IR. A list's excess value is reported where it is, not at the
+  declaration, and a brace inside a 1-D array's list is "braces around scalar initializer", not a syntax error.
+- **Messages** name the new types as clang does: `float[4][16]`, `float (*)[16]`.
+- **Hosts** get `Module::Field::element` and `extents`, and fields typed `"float[4][16]"`.
+
+### Tests
+
+- `tests/unit/Array2DTest.cpp`: 2-D locals zeroed and indexed, a row passed as a `float*` and moved as one, the rows
+  side by side, the name a pointer to rows (`*(g + 2)`, `(g + 2) - g`, a comparison), a `?:` of rows, `sizeof` of array
+  types, a fresh array each declaration; a module's 2-D fields of modules, doubles (a constant C's double), `float4`s
+  and ints, copied with their module, and its `sizeof`; lists braced, flat, mixed, `{}` rows and `[]` sized by a list;
+  the tables' shapes in the IR (a plain table of rows, trailing zero rows, a row a struct, a local table, a local filled
+  at run time) and their values; loops over both dimensions vectorised; a `parallel for` over rows, a local captured,
+  a switch's jump past one; and the errors above, in clang's words.
+- `BoundsCheckTest.cpp`: each dimension checked at every level, `'gain'` and `'gain[v]'` in the messages, a row checked
+  as an element, a pointer formed from a row.
+- `FrontendTest.cpp`: the dumps of 2-D declarations, fields, braced lists and `sizeof(float[4][16])`; a third dimension,
+  a 2-D parameter and `sizeof(float*[2])` refused.
+- `tests/library/Array2DTest.cpp`: `module()`'s shape of 2-D fields (type, element, extents, offset, size) and of the
+  others (a 1-D field, arrays of modules of one and two dimensions, a scalar, a pointer), the host reading and writing
+  rows, voices sharing one bank of tables; 2-D arrays under the loop budget, bounds checks (`BoundsViolation`'s array,
+  type and extent for each dimension) and `#if`.
+- `tests/lit/fminus/array2d.fm`: the IR of a 2-D local, its list and a table, the vectorised loop (with
+  `--bounds-check` too, which leaves it no check), `--run` and `--bounds-check`'s messages for each dimension, the
+  dump; `array2d-errors.fm`: each error once (a row without its size, whose list then reports nothing more), and the
+  parser's.
+
+## Recipe 35: attributes on fields, for the host
+
+*In the compiler. Code: `AttributeArg`, `Attribute`, `DeclStmt::attributes` and `Field::attributes`
+(`src/frontend/Ast.h`); `stringLiteral`, `attributeText`, `attributeNumber` and `isIgnoredAttribute` (`Ast.cpp`); the
+`STRING` token, its rules and `stringValue`, and the skipped groups' string rule (`Lexer.l`); `attributes`,
+`attribute_specifiers`, `attribute_specifier`, `attribute_word`, `attribute_arg`, `string_literal`, `declarator`,
+`declarator_sizes`, `named`, `setSizes` and `addFields` (`Parser.y`); `checkAttributes` (`src/ir/Modules.cpp`) and
+`refuseAttributes` (`Statements.cpp`, from `declareVariable` and `defineConstant`, and `Parallel.cpp`, from
+`lowerParallelFor`); `Program::Attribute`, `findAttribute`, `Module::Field::attributes` and
+`Parameter::attributes` (`include/fminus/FMinus.h`, `src/api/FMinus.cpp`); the meter example's labels
+(`examples/meter/`); the VS Code grammar's `strings`. Tests: `tests/unit/FieldAttributeTest.cpp` (`[fieldattr]`),
+`FrontendTest.cpp`, `tests/library/FieldAttributeTest.cpp`, and `tests/lit/fminus/field-attributes.fm` and
+`field-attributes-errors.fm`.*
+
+A host shows a program's state: a meter's level, an engine's speed, a filter's cutoff. Recipe 14 gave a parameter what
+a host's control needs, a range and a default; a field, which a host reads for a display, a trace or an inspector, had
+nothing, so a host that wanted a field's unit or label kept a table of its own beside the program, or read its
+comments. C23 has a place for such things: an attribute after a declarator's name appertains to what it declares, and
+an implementation ignores one it does not know. This recipe lets a field carry attributes, takes C's string literals
+as their arguments, and passes the ones FMinus does not know to the host, which decides what they mean:
+
+```c
+module Meter
+{
+    param float decay [[fminus::range(0, 1)]] [[fminus::default(0.9)]] [[ui::label("Decay")]];
+    float level [[ui::unit("dB"), ui::label("Level")]] [[fminus::range(-60, 0)]];
+    float taps [[ui::hidden]] [16];
+};
+```
+
+### Where they go: after the name
+
+C23 has attribute specifiers in several places, and the place says what one appertains to: after a declarator's name,
+the entity it declares; after an array's size, the array's type; at the start of a declaration, every entity it
+declares. FMinus takes the first, where a parameter's have always been. So `float taps [[ui::hidden]] [16];` is the
+field's, and `float taps[16] [[ui::hidden]]` is clang's error, "'ui::hidden' attribute cannot be applied to types",
+with where the attribute goes; the start of a declaration is a syntax error. Each declarator has its own (`float a
+[[x]], b;` gives `a` one and `b` none), and so do the names an enumeration declares after its list.
+
+The declarator is a rule that locals, fields and constants share, and the attributes come in there. After the name, a
+`[` may begin an attribute or an array's size, and Bison must decide at that token whether a rule ends. With a rule of
+its own, `declared_name: pointer IDENTIFIER attributes`, and `declarator: declared_name array_sizes`, it must choose at
+the `[` after an attribute between ending `declared_name` (a size follows) and reading another attribute: a
+shift/reduce conflict. So each alternative of `declarator` spells out `pointer IDENTIFIER attributes` (`named` builds
+the `Declarator`), and the two `[`s are shifts in one state, which the next token tells apart (`[[` is an attribute's,
+anything else a size's). `attributes` may be empty, and its empty list is reduced before any `[`, on every path. After
+the sizes, though, a `[` may be a third size's, so `declarator_sizes` reads attributes there as
+`attribute_specifiers`, one or more, for `setSizes` to report.
+
+An attribute's namespace and its name are identifiers, and C23 reads a keyword there as one (`[[ui::enum("a", "b")]]`,
+`fminus::default`), so each is an `attribute_word`: `IDENTIFIER`, `MODULE_NAME` (the scanner makes a module's name a
+type, so `[[meter::label("Peak")]]` in a program with a module `meter` is that module's name) or any keyword, spelt
+out one by one, a vector type's too. A namespace is any of these, and the host's to choose, so a program's own names
+must not take it from the host. A new keyword goes in `attribute_word` too: `FrontendTest.cpp` reads each of the
+parser's tokens spelt as an identifier from its table (`Parser::symbol_name`) and checks it there.
+
+### Strings
+
+C23's attribute arguments are balanced tokens, anything at all. FMinus took numbers, and now takes strings too: C's
+string literals, with C's escapes (the simple ones, `\n`, `\"`, `\\`; octal and hex bytes, `\101` and `\x41`; universal
+character names, `µ`, in UTF-8), adjacent literals joined, `"Out" "put"` (`string_literal`). A literal is one
+token, `STRING`, whose value is its characters: the scanner's `stringValue` resolves the escapes, and an escape that
+is wrong is clang's error at the escape, "unknown escape sequence '\q'" (which clang only warns of), "hex escape
+sequence out of range", "\x used with no following hex digits", "incomplete universal character name"; a line that
+ends inside one is "missing terminating '"' character". FMinus has no `char` and no string type, so a string where an
+expression goes is a syntax error, "unexpected string literal". A skipped group of an `#if` reads strings as strings,
+as C does: a `/*` inside one opens no comment, which would swallow the `#endif`.
+
+The tree keeps each argument as written, an `AttributeArg`: a number's spelling, or a string's characters with
+`isString`. The dump writes a string back as a C literal (`stringLiteral`: a quote, a backslash and a control character
+escaped), so `--emit ast` reads as the source does.
+
+### What FMinus checks, and what it passes on
+
+`checkAttributes` runs on each field as its module is laid out (`layOut`), a parameter's too:
+
+| Attribute | Where | What FMinus does |
+|---|---|---|
+| `fminus::range(min, max)` | a parameter, or a field of numbers: `float`, `double`, `int`, a float vector, or an array of them | two numbers, the minimum below the maximum: what a host's control or display spans. FMinus neither clamps to it nor checks it |
+| `fminus::default(value)` | a parameter | one number, inside the range: what `setDefaults` sets. On a field it is an error: a field starts at 0, and a method such as `init` sets it |
+| another `fminus::` name | | "unknown attribute": the namespace is FMinus's |
+| `clang::nonblocking`, `clang::nonallocating` | | "only applies to functions"; another `clang::` name is unknown, as it is on a function |
+| a name without a namespace that is none of C23's standard attributes | | ignored, with clang's warning: "unknown attribute 'range' ignored [-Wunknown-attributes]", and a note, "did you mean 'fminus::range'?", for `range` (and `default` on a parameter). The host never sees it |
+| any other | | the host's, kept as written. Its numbers must be numbers C writes ("invalid number '08'"; an integer too large for `unsigned long long`, which clang refuses, is none) |
+
+The last row is C23's rule with one change: an implementation ignores an attribute it does not know, and FMinus,
+which does not know `ui::unit`, passes it on to the host, which may. On a parameter, such an attribute was an error
+before this recipe; now only an unknown name in FMinus's namespace is. C's standard attributes, `[[deprecated]]` and
+the rest (`isIgnoredAttribute` has their names, `__deprecated__` too), go to the host as well, as FMinus gives them no
+meaning; a host names its own in a namespace (`ui::`), since C keeps the names without one for its standard. Any other
+name without a namespace is no one's, so FMinus warns of it as clang does and drops it (`attributesOf` in
+`src/api/FMinus.cpp` asks `isIgnoredAttribute` too): `[[range(20, 20000)]]` is far more likely `fminus::range` without
+its namespace than anything a host reads, and passed on quietly, it would leave the parameter with no range and no
+message saying why. `attributeNumber` reads a number as C writes it, and learned a hex float's `f` suffix here
+(`0x1p-3f`, which it refused before; in `0x1F` the `F` is a digit). An integer's digits must fit `unsigned long long`,
+C's widest integer type: `strtoull` would saturate `99999999999999999999` and hand the host 2^64 - 1 beside its
+spelling, so `errno`'s `ERANGE` makes it no number.
+
+`checkAttributes` runs on a field once `layOut` has worked out its type: `fminus::range` then names the type as
+declared (`'Osc[4]'`, not the tree's unsized `'Osc[0]'`), and on a field whose type was an error of its own (`void`,
+an array of `bool`, `float x[]`) it reports nothing more, as recipe 32's rule has it. A parameter's runs first, as
+its type needs no working out.
+
+A local's attributes, and a constant's at the top level, have no host to go to: `refuseAttributes` reports the first,
+"'ui::unit' attribute only applies to a module's fields and parameters". A `parallel for`'s counter is a local too,
+which `lowerParallelFor` binds itself rather than through `declareVariable`, so it calls `refuseAttributes` as well. A
+function's are as recipe 11 made them: `clang::nonblocking` and `clang::nonallocating`, any other an error.
+
+The attributes change no code: the module's layout, its methods and its IR are the same as without them
+(`FieldAttributeTest.cpp` compares the IR).
+
+### The host's side
+
+`Program::Module::Field::attributes` lists a field's in order, each a `Program::Attribute`: its `name` as written,
+namespace and all (`"ui::unit"`), and its `arguments`, each an `Argument` with `isString`, `number` (a number's value,
+0 for a string) and `text` (a string's bytes, UTF-8 as the source has them, or a number's spelling, `"-60"`). Two in
+one `[[ ]]` are two entries, as two `[[ ]]`s are. A parameter's are its field's, and its `Parameter::attributes` too,
+so a host that builds its dials from `parameters` finds a dial's unit beside its range.
+`Program::findAttribute(attributes, name)` gives the last of a name, or null: the one that counts when a field says it
+twice, as the last `fminus::range` does.
+
+```cpp
+using fminus::Program;
+for (const Program::Module::Field& field : program->module("Meter")->fields)
+{
+    if (const Program::Attribute* unit = Program::findAttribute(field.attributes, "ui::unit"))
+        show(field.name, unit->arguments.at(0).text);   // "level", "dB"
+}
+```
+
+The meter example (`examples/meter/`) labels its two readings, `[[meter::label("Peak")]]`, and gives them a scale,
+`[[fminus::range(0, 1)]]`; its harness reads both as a host would, and names the readings by their labels in its
+report. The safety options and the conditionals leave a field's attributes alone: a program compiled with the loop
+budget or bounds checks has the same, and a field in an `#ifdef DEBUG` group has its own when the host defines
+`DEBUG`.
+
+### What it changes for programs and hosts
+
+- **Programs** without attributes on fields compile to the same IR. A parameter's attribute outside FMinus's and clang's
+  namespaces, an error before, is the host's, or, without a namespace and none of C's standard ones, a warning. A `"` in
+  code was an unexpected character, and now begins a string; in a skipped group, a `/*` inside a string no longer opens
+  a comment.
+- **Messages** are the ones above, in clang's words, and FMinus has a second warning, `-Wunknown-attributes`.
+- **Hosts** get `Program::Attribute`, `findAttribute`, `Module::Field::attributes` and `Parameter::attributes`, all
+  additions: every member that was there is as it was. The VS Code grammar (0.15.0) colours any namespace's attribute
+  names, and strings with their escapes, an unknown one marked.
+
+### Tests
+
+- `tests/unit/FieldAttributeTest.cpp`: a module's IR the same with and without attributes, and its method's results;
+  each error above, in clang's words, a `parallel for`'s counter's among them, and one error for a field whose type
+  is its own error; the warning and its notes, and C's standard attributes with none; the numbers C writes, a hex
+  float with its suffix and the widest integers among them, and those too large; `fminus::range` on each type of
+  numbers; a string that is no number, even `"12"`; strings in an `#if`'s skipped group and in its kept one.
+- `FrontendTest.cpp`: the dumps of fields' attributes (in each declarator, before the sizes, after an enumeration's
+  list, a parameter's strings, adjacent literals), a local's and a constant's, and C's escapes written back; every
+  keyword of the parser's, a vector type and a module's name as an attribute's namespace and name; the scanner's errors
+  for strings, and the parser's for an attribute after a size and a string where an expression or an attribute's name
+  goes.
+- `tests/library/FieldAttributeTest.cpp`: `Module::Field::attributes` and `Parameter::attributes` as a host reads them
+  (names, numbers with their values and spellings, strings with their escapes resolved and their UTF-8, two in one
+  `[[ ]]`, none), `findAttribute`'s last and null, an ignored attribute in `warnings()` and in no list, and the same
+  under the loop budget, bounds checks and `#ifdef`.
+- `tests/lit/fminus/field-attributes.fm`: the dump, and the IR (at `-O0`, and at `-O2` with bounds checks and the loop
+  budget) with no trace of them; `field-attributes-errors.fm`: each error once, the scanner's and the parser's, and
+  the warning of a program that compiles.
+- `example.meter` (`examples/meter/bench.cpp --check`): the readings' labels and scales, read as a host reads them.
+
+## Recipe 36: calling a function by name, for the host
+
+*In the compiler. Code: `CallType`, `CallSlot`, `Thunk`, `thunkName`, `callThunk` and `callType` (`src/jit/Call.h`,
+`Call.cpp`); `Program::Value`, `Program::Callable`, `Program::CallResult` (and its `message`), `callable` and `call`
+(`include/fminus/FMinus.h`), with `kindOf`, `describeCall`, `mismatch`, `slotOf` and `resultOf`
+(`src/api/FMinus.cpp`); `--run`'s `RunArgument`, `readScalar` and `runPasses` (`tools/fminus/main.cpp`). Tests:
+`tests/library/CallTest.cpp` and `tests/unit/CallThunkTest.cpp` (`[call]`), and `tests/lit/fminus/run.fm`.*
+
+A host calls a JIT'd function through a C++ pointer of its type, `function<float(float, float)>("softclip", errors)`,
+a type its own code names when it is built. Some hosts learn the type only as they run: a console that calls the
+function its user names, with the arguments the user typed; a test runner that reads its cases from a file; a tool
+that tries one of a program's functions on values it chooses, as a chat's assistant might. C++ calls a pointer only
+through a type it compiled, so such a host has nothing to call it with, and a pointer of a guessed type that does not
+match the declaration is undefined behaviour. `fminus --run` met the same problem and answered it with templates: one
+instantiation of the call for each count of arguments up to 8, of floats or of doubles. That cannot grow to four
+scalar types and pointers in any order (five types in each of 8 places is 390,625 parameter lists). This recipe compiles
+the call instead, one small function for each function a host calls, and gives the host an API that checks its arguments
+against the declaration and returns the result, or what went wrong, as a value:
+
+```cpp
+using Value = fminus::Program::Value;
+std::string errors;
+const fminus::Program::Callable* softclip = program->callable("softclip", errors);   // nullptr: errors says why
+fminus::Program::CallResult result = program->call(*softclip, {Value::of(0.5f), Value::of(4.0f)});
+if (result.ok())
+    show(result.value.number);   // 0.6666667, the float it returned, as a double
+else
+    show(result.message());      // with Value::of(4): "argument 2 of 'softclip' is 'int', not 'float' (its
+                                 // parameter 'drive')"
+```
+
+### The thunk: one C++ type for every signature
+
+`jit::callThunk` compiles, for a function such as `float softclip(float x, float drive)`, a function of one C++ type,
+`void(const CallSlot* arguments, CallSlot* result)`. A `CallSlot` is 8 bytes aligned to 8, with the value at its start
+in its own type: a bool a byte, an int 4 bytes, a float 4, a double and a pointer 8. The thunk loads each argument from
+its slot as the function's parameter type, calls the function, and stores the result in the result's slot. In outline,
+in LLVM IR:
+
+```llvm
+define void @"fminus.call.softclip"(ptr noalias %arguments, ptr noalias %result) {
+entry:
+  %slot = getelementptr inbounds i8, ptr %arguments, i64 0
+  %arg = load float, ptr %slot, align 8
+  %slot1 = getelementptr inbounds i8, ptr %arguments, i64 8
+  %arg2 = load float, ptr %slot1, align 8
+  %0 = call float @softclip(float %arg, float %arg2)
+  store float %0, ptr %result, align 8
+  ret void
+}
+declare float @softclip(float, float)
+```
+
+The call is LLVM's to lower, so the target's calling convention is LLVM's to get right: AAPCS64 and Apple's variant of
+it on arm64, System V's and Windows' on x86-64, which register each argument takes (System V and AAPCS64 count general
+and vector registers apart, Windows by position), and which go on the stack once those run out (Apple's packs them by
+size). A bool is the one type whose declaration says more than its IR type: the code generator declares one `zeroext`
+(recipe 3), as clang does, so the thunk declares and calls the function the same way, and reads the byte in its slot as
+`!= 0`, as C++ reads a bool, so a slot whose other bytes hold anything still passes 0 or 1. A bool result goes back as a
+byte, 0 or 1.
+
+The thunk is a module of its own (`thunkName`'s `fminus.call.` and the function's name, which no FMinus name can be),
+added to the program's JIT beside the program's module, rather than a function in that module. So the program's code and
+its IR are what they were: `optimisedIr()` is still the text `fminus --emit ll` prints, a host that never calls by name
+compiles no thunk, and a host that calls one function pays for one thunk, the first time (1.5 to 2.5 ms on an M5, LLVM's
+pipeline and code generator on a module of one function). `callThunk` looks nothing up itself: its callers look the
+function up first, so that the function's own module is compiled and found, and the thunk's reference to it resolves
+when the thunk links. A second thunk of one function in one JIT is LLVM's duplicate definition, which
+`Program::callable` avoids by compiling each once, under the Program's lock, and keeping it.
+
+`jit::callType` says how a thunk passes each of FMinus's types: `Void` (a result only), `Bool`, `Int`, `Float`,
+`Double` and `Pointer`, an enumerated type's as its `int` or `bool`, and nothing for a vector, a `poly` type, a module
+or an array. Its `switch` has no `default:`, so a new `Kind` stops the build there until it says how it crosses, the
+role the driver's `switch` over `--run`'s result type had (step 7 of the table above).
+
+### What a host sees: `Value`, `Callable`, `CallResult`
+
+A `Program::Value` is an argument or a result: a `kind` (`Void`, `Bool`, `Int`, `Float`, `Double` or `Pointer`), a
+`number` for a scalar (a double holds each of the four exactly), and for a pointer its address, its elements' kind, the
+module whose instances it points to, and whether the function may only read through it. The host makes one with
+`Value::of(0.5f)`, `of(2)`, `of(true)` or `of(0.5)`, `Value::array(buffer)` (an `int*`, `float*` or `double*`, or its
+`const` one) and `Value::instance(memory, module)`; `of` of a pointer is deleted, since C++ would otherwise convert it
+to a bool.
+
+`callable(name, errors)` gives the function as a `Callable`: its `name`, its module if it is a method, its `result` and
+`resultType`, and each parameter's `name`, `type` as FMinus writes it (`"const float *"`), `kind`, and for a pointer its
+`element`, `module` and `readOnly`. `compile()` describes every function the program declares (`describeCall`), and
+`callable()` compiles the thunk the first time it is asked for one. The `Callable` is the Program's own, in its map, and
+`callable()` gives a pointer to it: it cannot be copied or moved, so the one `call()` is given is the one `callable()`
+described, not a copy whose `parameters` a host edited (a method's `this` dropped, say, which the thunk would still load
+from the first slot), nor a copy kept past its Program, which a new Program whose `Impl` took the old one's address
+would take for its own. A host keeps the pointer while the Program lives, as it keeps a function's (one kept longer
+dangles, as a function's does), and copies the fields it shows. One it makes itself is no Program's, and `call()`
+refuses it. A function that takes or returns a type no thunk passes, or a pointer to a vector or to rows, or that
+returns a pointer, has no `Callable`, and the error says which type ("'broadcast' returns 'float4'; call() returns
+nothing, or a bool, an int, a float or a double"). Nor does a function the program only declares,
+`float atanf(float x);`: it is the C library's, not the program's, and LLJIT's `lookup` looks in the program's own
+`JITDylib`, not in the process its prototypes link to. A function the program defines whose code does not link has
+none either: `compile()` links nothing unless a safety option needs its code, so
+`float g(float x) { return nowhere(x); }`, beside a prototype of `nowhere` that nothing defines, compiles, and its
+look-up fails ("'g' cannot be called: Failed to materialize symbols: ..."). `call(name, ...)` tells these apart by the
+function, not by the message: `NoFunction` for a name the program does not define, `Unsupported` for a type,
+`LinkError` for a definition that did not link.
+
+`call(callable, arguments)` checks the arguments (`mismatch`), packs them into slots (`slotOf`: on the stack, past 16 on
+the heap), calls the thunk, and returns a `CallResult`: its `status`, the `value` the function returned, the `error`,
+one line in FMinus's words of why it did not run, and after a failed bounds check the `violation` it met. `message()`
+words any status, the `error` or what stopped the call, and is empty when the status is `Ok`. `call(name, arguments)`
+looks the `Callable` up first.
+
+### What `call()` checks
+
+| The host passes | For a parameter of type | What `call()` does |
+|---|---|---|
+| the wrong number of arguments | | `Mismatch`: "'softclip' takes 2 arguments, not 1" |
+| a `Value` of another kind: `of(2)` | `float` | `Mismatch`: "argument 2 of 'softclip' is 'int', not 'float' (its parameter 'drive')". `call()` converts nothing: a host whose numbers are all doubles (a JSON tool's) converts each with `Value::scalar(param.kind, number)`, as `setValue` converts a parameter's value |
+| `array(const float*)` | `float *` | `Mismatch`: "is 'const float *', not 'float *'", C's "discards qualifiers". A `float*` for a `const float *` is fine |
+| `array(int*)` | `float *` | `Mismatch`: "is 'int *', not 'float *'" |
+| any pointer | `void *`, `const void *` | taken, as C converts it (a `const` one only for a `const void *`) |
+| `instance(memory, module)`, `module` this Program's `Osc` (`program->module("Osc")`) | `Osc *` | taken: the module is the host's word for how the memory is laid out, which `call()` cannot see |
+| an instance of another Program's `Osc`, of the same source or not | `Osc *` | `Mismatch`: "is an instance of another program's module 'Osc'". Its own fields may match this one's while a module it holds by value, in an array or through a pointer does not (two `Line`s of one size, their fields swapped), and comparing layouts deeply would be a second definition of a module's type; a host that keeps an instance across a recompile, knowing its layout is the same, passes it with the new Program's `Module` |
+| a null instance | a method's `this` | `Mismatch`: "is a null 'Osc *': a method runs on an instance". Another pointer may be null, as in C |
+| a pointer not aligned to its elements (4 bytes for an `int` or a `float`, 8 for a `double`, the module's alignment for an instance) | | `Mismatch`: "is not aligned to 4 bytes, as a 'float *' must be". The function's loads assume the alignment, as C's do |
+| a `Callable` of another Program's, or one the host made | | `Mismatch`: "'softclip' is not a Callable of this program's: callable() gives them". A copy does not compile |
+
+An extent is not checked, nor passed: C passes none, a parameter written `float x[16]` is a `float*` whose size C
+checks and then ignores, and bounds checks see no host's buffer (recipe 30). A function that is passed a buffer is
+passed its length, as C's are; the host makes the buffer that long.
+
+### Where the call runs
+
+`call()` runs the function on the calling thread, any thread, and several threads may call at once: the thunk is a
+plain call, and what `call()` adds is a compare for each argument, the slots, and two loads after the call (the bounds
+record and the loop budget's flag). On an M5, with other builds running, a call of `softclip` through its `Callable`
+took about 15 ns, against 1 ns through its pointer, and `call(name, ...)`, which finds the `Callable` in a map each
+time, about 28 ns. It takes no lock, and allocates only for more than 16 arguments, or when the host's call is wrong
+(a `Mismatch`'s message; `call(name, ...)`'s failures too, as `callable()` allocates). A call the loop budget or a
+bounds check stops allocates nothing, as it may be the audio thread's: its `error` is empty, the result keeps the
+`violation` (whose strings are the Program's), and `message()` words it later, on another thread. `callable()` takes
+the Program's lock and allocates, and compiles the thunk the first time, so it runs off the audio thread, as a
+function's first look-up does.
+
+A method runs on an instance, its `this`: an instance the host made as `Module` says (zeroed, aligned, its parameters
+set with `setDefaults` and `setValue`), and what the method changes stays in it for the next call, by name or through
+a pointer. Two threads that call methods at once give each its own instance, as with any C++ call. A function that is
+no method runs on its arguments and what they point to: FMinus has no variables outside functions but its constants.
+
+### The safety options
+
+A call by name is a call: in a program compiled with the loop budget it counts against the budget, and one that runs
+out returns early, `Status::OutOfBudget`, with `loopBudgetExceeded()` set and the value it returned early (0); with
+bounds checks, a check that fails stops it, `Status::OutOfBounds`, with the record's check as the result's `violation`,
+which `message()` words ("'tap' stopped: program.fm:17:16: index 4 out of bounds for 'taps' of type 'float[4]'"), a 2-D
+array's dimension by dimension. The bounds record is read first, since a check that failed is why a call that also ran
+out stopped where it did. Each status is the Program's state after the call, so a host sets the budget and clears the
+record before each call, as for a call through a pointer, and re-initialises an instance a stopped call ran on.
+
+The budget and the record are the Program's, one of each, which every thread's calls share, so a status is the call's
+own only when no other call of the Program overlaps it. Two threads calling at once share one failure: the call that
+ran whole returns the other's `OutOfBounds` (and a call that returns after another's failed check returns early too,
+the bounds checks' rule), and one thread's `setLoopBudget` or `clearBoundsViolation` is the other's too, which may
+clear a record before the call that set it reads it. A host that calls a program compiled with either option from
+several threads serialises those calls, or reads the statuses as the program's; without the options there is no
+shared state, and calls overlap freely.
+
+### `--run`
+
+`fminus --run` calls through the same thunk (`callThunk`, after its own look-up of the function), so it passes what
+`call()` passes from a command line: each argument read as its parameter's type, as CLI11 reads one (`true`, `0`, `-3`,
+`0.5`), in any mix and number, and for a pointer to an int, a float or a double an array, its elements separated by
+commas (`1,-2,0.5`), which it prints after the call when the function may have written to it:
+
+```bash
+$ fminus run.fm --run scale 1,-2,0.5 3 2
+x = {2, -4, 1}
+```
+
+A function of no result runs and prints its arrays. A module's instance is a host's to make, so `--run` refuses an
+`Osc *` parameter, and a method; "--run: '1.5' is not an int" and "'x' is not a float, an element of the array '1,x'"
+say which argument it could not read. What it prints for a float or a double is as before, the shortest decimal that
+reads back as it.
+
+### What it changes for programs and hosts
+
+- **Programs** compile to the same IR and the same code. The thunks are modules of their own, made only when a host
+  calls by name.
+- **Messages**: `--run` passes ints, bools, mixed types, more than 8 arguments and arrays, so its refusals of them are
+  gone; its refusals of the types it does not pass name the ones it does ("--run passes bools, ints, floats, doubles
+  and arrays of ints, floats and doubles only"; "--run prints bools, ints, floats and doubles only").
+- **Hosts** get `Program::Value`, `Callable`, `CallResult`, `callable()` and `call()`, all additions: every member that
+  was there is as it was.
+
+### Tests
+
+- `tests/library/CallTest.cpp`: each scalar type and a mix, bit for bit as the function's own pointer computes them;
+  twenty arguments of the four types (on the stack, and in heap slots); arrays written and read, `void*` taking any
+  pointer, and a `const` array, another element type and a misaligned pointer refused; a method on the host's instance,
+  which keeps its state and reads a knob the host sets, through a function's `Osc *` too, a null instance, another
+  program's refused, of the same source too, and taken with this program's `Module`; another program's `Delay` whose
+  fields match but whose `Line` has its fields swapped, refused; the `Callable`s' descriptions; each error as a status
+  and a message (no function, a builtin, a prototype alone, a definition that does not link, a vector, a pointer result,
+  a pointer to a vector, the count, a type, a `Callable` of another program's or the host's own, and none copied, at
+  compile time); `Value::scalar`'s conversions; the loop budget and bounds checks stopping a call, with no message until
+  `message()` words it (a double in a budgeted loop, a 2-D array's dimension), and a call after the record is cleared;
+  four threads calling one `Callable` on instances of their own, and asking `callable()` for it at once; the IR kept as
+  text unchanged by a call, and an `#ifdef`'s function.
+- `tests/unit/CallThunkTest.cpp`: each type in its slot and back, a bool's byte read as C++ reads one whatever its
+  other bytes hold, a bool result as 0 or 1, twelve arguments past the vector registers, a second thunk's error, and
+  `callType`'s map.
+- `tests/lit/fminus/run.fm`: `--run` of a mix of a float, an int and a bool, of arrays written (printed) and read (not
+  printed), of a function of no result, of twelve arguments, with bounds checks and the loop budget, and its refusals;
+  `int.fm`, `double.fm` and `main.fm`: `--run` of ints, of a double beside a float, and of a bool, which it refused
+  before; `simd.fm` and `poly.fm`: its refusals of vectors, reworded.
+
+## Recipe 37: where the code is, for a sampling profiler
+
+*In the compiler. Code: `Jit::Code`, `code`, `Calls`, `directCalls`, `Inlined`, `inlinedCalls`, `recordInlining` and
+`Linker`, with `CodeLog`, `keepNamesOfKeptCode`, `LinkedCode`, `LoadedCode` and `callersFirst` (`src/jit/Jit.h`,
+`Jit.cpp`);
+`Program::CodeRange`, `codeRanges` and `codeRangeAt` (`include/fminus/FMinus.h`), with `attributed`
+(`src/api/FMinus.cpp`). Tests:
+`tests/unit/CodeRangesTest.cpp` and `tests/library/ProfileTest.cpp` (`[profile]`).*
+
+A program that takes too long on the audio thread does not say where the time goes. A host can find out without
+changing the program: a sampling profiler interrupts the thread that runs it a few thousand times a second, reads
+where it was, its program counter, and counts the samples that fall in each function. The program runs as it always
+does, with nothing added to its code, and the counts are the share of its time each function takes. What such a
+profiler lacks for JIT'd code is the map from an address to a function: the code has no file on disk and no symbol
+table the system's tools read (`dladdr` finds nothing in it), and its addresses change each time the program compiles.
+This recipe writes the map down as the JIT links each object, and gives it to the host with each function's module and
+what the optimiser inlined into it:
+
+```cpp
+std::string errors;
+std::vector<fminus::Program::CodeRange> ranges = program->codeRanges(errors);   // after compile(), off the audio thread
+...
+if (const fminus::Program::CodeRange* range = fminus::Program::codeRangeAt(ranges, pc))   // each sample, on the
+    ++samples[range->function];                                                         // sampler's thread
+```
+
+### Where the linker puts the code
+
+LLJIT compiles a module to an object file in memory, then links it into memory of its own with one of two linkers,
+which it picks by the target (`LLJITBuilderState::prepareForConstruction`). JITLink, on macOS and Linux, turns the
+object into a graph of blocks and symbols, gives them addresses, applies the fix-ups, and runs the passes a plugin
+adds at each step. `LinkedCode` is such a plugin: its pass runs after the fix-ups, when every symbol has its final
+address, and writes down each symbol with a name in an executable section, its address and its size. It adds a pass
+before the graph is pruned too. Pruning removes each symbol that is not live and keeps each block a live symbol
+reaches, and an ELF object's call of a local function (a parallel region's body, an entry point's) names its section's
+symbol and an offset, `.text + 0x1c0`, not the function's: the function's code stays, in the section's block, but its
+name would go (on Linux the first run of the tests found `run`, and not `run.parallel.1` or `fminus.large.sin`).
+`keepNamesOfKeptCode` walks the blocks the live symbols reach, as the pruning does, and marks live each named symbol of
+an executable section in one of them, so nothing is linked that would not be; a Mach-O object's calls name their
+functions, and there it changes nothing. The link can
+still fail after that pass (finalising the memory), so its list waits, keyed by the link's
+`MaterializationResponsibility`, until the plugin hears that the link was emitted (`notifyEmitted`), and is dropped if
+it failed. RuntimeDyld, Windows' (LLJIT picks it for COFF), runs no passes; it tells a `JITEventListener` of each object
+it has loaded, with the object and where it put each section. `LoadedCode` reads the object's symbol table, its
+functions, sizes them with `object::computeSymbolSizes`, and places each at its section's load address plus its offset
+in the section. Both write into a `CodeLog` the `Jit` shares with them, and `Jit::code()` copies it, sorted by address.
+
+The object's names are the linker's, with the target's global prefix (macOS's `_`: `_Osc::tick`). `code()` gives the
+module's, without it, and drops the symbols that are no function of the module: the assembler's labels (macOS's
+`ltmp0` at the start of each section, which has no prefix), ELF's local labels (`.L`) and AArch64 ELF's mapping
+symbols (`$x`). The sizes are the object's: an ELF object gives each function's (`st_size`), and a Mach-O or COFF object
+none, so each runs to the next symbol, the padding before it included (what the next function's alignment leaves, if
+anything). No program counter lands in padding, so a sample finds its function either way.
+
+The tests check both linkers on every system: `Jit::create` takes a `Linker`, and `Linker::RuntimeDyld` gives the JIT
+RuntimeDyld wherever it runs, made as LLJIT makes Windows' (its `createObjectLinkingLayer`, with COFF's two flags when
+the target is COFF), so the path Windows takes runs on macOS and Linux too. The two do not link quite the same code:
+LLJIT gives JITLink the small code model, and leaves RuntimeDyld the target's for a JIT, the large one on x86-64 and on
+AArch64 but Windows', in which code that names an address (a global's, a constant's, a function's) is not the same. On
+an M5, `run`, which passes its parallel region's address to the pool, is 8 bytes longer. Where the code is the same, the
+two lists give each function the same place and size, but the last, which RuntimeDyld runs to the end of its section;
+the tests check that with functions that name no address.
+
+### What the optimiser did: `inlined`
+
+A range is the machine code's, not the source's. From `-O1` the optimiser inlines a small function into its caller,
+`Osc::tick` into `Osc::process`'s loop, so the samples of tick's work fall in process's code. FMinus emits no debug
+information, which would say of each instruction which inlined call it came from (a `DILocation`'s `inlinedAt`); a
+profile by source line waits for it. What can be said cheaply is which functions a range holds. `Jit::directCalls`
+lists, for each function a module defines, the functions of the module it calls by name, and how many calls of each it
+makes. The JIT reads them before the optimiser and after (its IR transform, around `optimiseModule`), and `inlinedCalls`
+compares the two. Had the optimiser inlined nothing, F would call G after as often as before, and as often again as each
+function inlined into F called G; each of those calls missing after is inlined into F, and brings G's own calls with it.
+So G is listed when F calls it fewer times than that, even if F still calls it at another call:
+`out[i] = g(out[i], 0) + g(out[i], mode)` inlines g where its mode is 0, whose path is short, and calls it where the
+mode is the caller's. The walk takes each function after all that call it on the way from F (a reverse post-order, which
+a recursion's call back up does not wait for), so its count is whole when it is read. A callee each of whose calls F
+still makes keeps its code, and the walk goes no further through it. A call the optimiser deleted as dead (behind a
+frozen `bool`, say), or merged with another, looks the same as one it inlined, and is listed too; one it copied,
+unrolling a loop, can hide one it inlined. A program compiled with `keepIr` is optimised by `Program::compile` itself,
+which reads the calls around its own `optimiseModule` and hands the JIT their `inlinedCalls` (`recordInlining`). On an
+M5 the two reads and the walk take under 0.1 ms for a circuit's module of 3,300 instructions
+(`examples/circuits/screamer.cir`), against 30 to 50 ms of `-O2`'s pipeline.
+
+An inlined function keeps its own code too, as every function of the program is external (the host may call it), so
+`Osc::tick`'s range is still there; it takes samples only when something calls it, and nothing in the program then
+does. At `-O0` nothing is inlined, and each function's samples are its own: a host that wants to see the time a
+function's own work takes profiles a build at `-O0` beside the one that plays (the shares differ from it, as `-O0`'s
+code is slower in its own ways).
+
+### Which function a symbol is
+
+The code generator and the JIT name what they make after the function it belongs to, with a `.`, which no FMinus name
+has, before what it is:
+
+| Symbol | `kind` | `function` |
+|---|---|---|
+| `Osc::tick` | `Function` | `Osc::tick`, and `module` `Osc` |
+| `process`, when there is a `process.body` | `EntryPoint`: under `Denormals::Flush`, an entry point is a few instructions that set the mode around a call of its body and hand the caller's back (recipe 20) | `process` |
+| `process.body` | `Function` | `process` |
+| `run.parallel.1` | `Parallel`: a region's body, which the pool's threads and the caller run (recipe 22) | `run` |
+| `fminus.call.softclip` | `Thunk`: what `call()` calls the function through (recipe 36) | `softclip` |
+| `fminus.large.sin` | `Support`: FMinus's own, a math kernel's path for an argument past its range (recipe 23) | none |
+
+`attributed` reads a symbol so; `codeRanges` adds a method's `module` (from its `Callable`), and reads each name of
+`inlined` the same way, listing each of the program's functions once, never the range's own.
+
+### What a host does with it
+
+`codeRanges(errors)` links the program first, if no function has been looked up yet (a look-up of one of its functions
+links its whole module, so it looks up the first the program defines), so the list after `compile()` is whole; a thunk
+joins it when `callable()` makes it. A program whose code does not link has none, and `errors` says why (LLVM's
+words, as for `call()`'s `LinkError`). The list is the host's copy, sorted by address, the ranges apart. The JIT neither
+moves nor frees what it has linked, so the code stays where the list says while the Program lives: the host takes the
+list once, off the audio thread, and its sampler reads it on its own thread with `codeRangeAt`, a binary search with no
+allocation and no lock.
+
+Sampling is the host's: FMinus takes no samples itself. `tests/library/ProfileTest.cpp` has a reference sampler for
+macOS and Linux. A thread sends the thread that runs the program `SIGPROF` every 200 µs (`pthread_kill`), and the
+handler stores the program counter the kernel saved in its context (`uc_mcontext`: on macOS
+`__darwin_arm_thread_state64_get_pc`, which also undoes arm64e's pointer authentication, or `__rip`; on Linux
+`gregs[REG_RIP]` or `pc`) into memory set aside before, as a signal handler may neither allocate nor lock. When it has
+400, it stops, and the samples are mapped and counted. On Windows a sampler suspends the thread instead
+(`SuspendThread`, then `GetThreadContext`'s `Rip`), as macOS's `thread_get_state` can, and the test does not run there.
+ThreadSanitizer holds a signal back until the thread next runs instrumented code, which the JIT's never is, so the test
+does not run under it either. What it found on an M5, in six runs of 400 samples, for `spin`, which calls `Work::slow`
+(a loop of 3n iterations) and `Work::fast` (the same loop, n), each call longer than the time between two samples, so
+that the samples do not fall in step with the calls:
+
+| | `-O0` | `-O2` |
+|---|---|---|
+| `Work::slow` | 72–75% | 0 |
+| `Work::fast` | 25–28% | 0 |
+| `spin` | 0 | 99.75–100%, its range's `inlined` `Work::fast` and `Work::slow` |
+
+All but one sample fell in the program's code (the one, at `-O2`, in the test's own loop around `spin`). Code that is
+not the program's has no range, and `codeRangeAt` gives null for it: the runtime's (the pool, an FFT, `fminus_rt_sinf`
+where a math kernel is called rather than inlined), the C library's (`Math::Libm`'s `sinf`, a prototype's function)
+and the host's own. A host names those from its own symbols (`dladdr`), or charges them to the program's function that
+called them by walking the stack. A parallel region runs on the pool's threads as well as the caller's, so a sampler of
+the calling thread sees its share of the region only.
+
+### What it changes for programs and hosts
+
+- **Programs** compile to the same code. The JIT writes down each function's name, address and size as it links, and
+  reads a module's calls twice around the optimiser.
+- **Hosts** get `Program::CodeRange`, `codeRanges()` and `codeRangeAt()`, all additions: every member that was there is
+  as it was.
+- **The JIT** (`jit/Jit.h`) gets `code()`, `directCalls`, `inlinedCalls`, `recordInlining`, and a `Linker` for
+  `create`, whose default is LLJIT's choice, as before.
+
+### Tests
+
+- `tests/unit/CodeRangesTest.cpp`: through JITLink and RuntimeDyld, with and without `Denormals::Flush`, each function's
+  code at the address its look-up gives, sized, sorted and apart, nothing before a look-up, no global prefix and no
+  assembler's label, an entry point and its body, a parallel region's body and FMinus's own `fminus.large.sin`;
+  functions that name no address, placed and sized alike by both linkers, the last at least as large through
+  RuntimeDyld; what `-O2` inlined (tick into process, both into run, `shape` into the parallel region) and `-O0`
+  nothing; a method inlined at one call and called at another, listed in its caller's code; `inlinedCalls`'s walk
+  (through a callee, stopping at a kept one, recursion, a function the optimiser removed) and its counts (a callee
+  inlined at one of two calls, a call copied, a diamond, counts past a `size_t`'s range); a thunk's code once it is
+  made.
+- `tests/library/ProfileTest.cpp`: each range's kind, function and module, at the address `address()` gives, the list
+  whole after `compile()` with no look-up, `codeRangeAt` inside, at the edges and outside every range, the same ranges
+  again with a thunk's added after `callable()`; the same inlining when `compile()` optimises (`keepIr`), and none at
+  `-O0`; a program whose code does not link, and one with no function; and the reference sampler at `-O0` and `-O2`.
+
 ## Pitfalls
 
 Each of these was hit while writing the language or its recipes. [simd.md](simd.md) has the vector ones.
@@ -6085,6 +7039,7 @@ Each of these was hit while writing the language or its recipes. [simd.md](simd.
 | Code lands in a dead block, or the verifier reports a block without a terminator, wherever you ask whether the current block is finished | LLVM 23's `BasicBlock::getTerminator()` assumes a finished block; on an unfinished one it returns `&InstList.back()`, a bogus non-null pointer (the assert is compiled out under `NDEBUG`) | `hasTerminator()`, or `getTerminatorOrNull()` |
 | A syntax-error test changes text after you add an unrelated token | Bison's `parse.error detailed` lists the expected tokens only when there are at most four, and a new token that can start a construct joins the list (or pushes it past four) | update the test; or `%define parse.error custom` and write `Parser::report_syntax_error` |
 | Bison: "shift/reduce conflict on token "else"" | the dangling else (recipe 4) | `%precedence THEN` below `%precedence "else"`, and `%prec THEN` on the if without an else |
+| Bison: "shift/reduce conflict on token "["" after a declarator's attributes, and only a warning, so the build goes on | a rule that ends after the attributes (`declared_name`), before sizes that also begin with `[`: Bison must choose at the `[` whether to end it, and keeps the shift | no rule ending between the two: each alternative spells out `pointer IDENTIFIER attributes` (recipe 35); read `Parser.output` for "conflicts" after a grammar change |
 | The build fails in `Ast.cpp` and `src/ir/` after you add a node or an enumerator | `std::visit` needs every alternative; `-Wswitch` every enumerator | handle each one: this is the checklist working |
 | An IR test fails after an unrelated change | an exact match on a line that gained an attribute, a name or a flag | match loosely: `{{.*}}`, `[[NAME:%.*]]`, `CHECK-LABEL`, `CHECK-DAG` |
 | The verifier: "PHINode should have one entry for each predecessor" | the phi names the block a branch started in, but lowering it (a nested `&&` or `?:`) moved the builder on | take `builder_.GetInsertBlock()` after lowering each operand or branch |
@@ -6108,6 +7063,8 @@ Each of these was hit while writing the language or its recipes. [simd.md](simd.
 | A program compiles with a frozen parameter and is refused with a knob | a decision taken on the IR, where a frozen parameter's read is a constant (`branchOn` on a `ConstantInt`) | decide on the tree (`folds()`), and take only the value from the IR |
 | The compiler crashes on `p->y`, and `--emit ast` prints a `OnePole*` as `? *` | a pointer built from a type's kind, `pointerTo(type.kind, ...)`, lost its module | pass the `Type`: `pointerTo(type, ...)` keeps `module` |
 | A C++ reference differs from FMinus in the last bit, though the formulas match | clang's default `-ffp-contract=on` fuses `y + k * (x - y)` written as one expression into a multiply-add; FMinus never fuses | build the reference with `-ffp-contract=off` (the examples are), or round once a statement (`ModuleTest.cpp`'s `next`) |
+| A double accumulator drifts as a float would | what it adds was computed in float before it widened: `float step = 1.0 / rate;`, then `t += step;` (the constant's arithmetic ends at the float `step`) | compute it where it goes to the double, `t += 1.0 / rate;`, whose arithmetic has the double `t` (recipe 33) |
+| A constant beside a double is a float after all (`x * 0.1 * d` gave a float product) | the constant was lowered before the operand that makes its arithmetic a double, which only lowering it would have shown | `staticType`, which works the operand's type out from the declarations before anything is lowered; never reorder the lowering, which is the program's order of evaluation |
 | A host's `aligned_alloc` returns null for a module | macOS's wants an alignment of at least a pointer's, and every implementation a size that is a multiple of it | round both up to `alignof(std::max_align_t)` (`examples/voices/bench.cpp`) |
 | One error in a module hides every other | an error the parser reports (a redefined module) stops the run before the code generator | report it in the code generator (`layOut`), and the parser carries on |
 | A method's loop over a field's buffer (`tail[i] += result[i]`) runs at half C++'s speed, and doesn't vectorise | without TBAA, LLVM assumes a `float` store may change the field, a pointer, and loads it again every iteration | the type's tag on every load and store (recipe 17); under `--no-strict-aliasing`, read the field into a local before the loop |
@@ -6182,17 +7139,21 @@ Each of these was hit while writing the language or its recipes. [simd.md](simd.
 | `-Wswitch` warns on `switch (mode + 0)`, or on a `?:` of two enumerated values, where clang does not | a result type copied from an operand keeps `Type::enumeration`, which `==` ignores | give a promoted result a fresh type (`arithmeticOf` does), or clear `enumeration` |
 | A test passes under `fminus-tests` and fails under ctest with "Unrecognised token" | ctest runs each Catch2 test case by its name, and Catch2 reads a name that starts with `-` (`-Wswitch: ...`) as an option | start the name with a word (`clang's -Wswitch: ...`) |
 | The names after an enumeration's list cannot use its tag (`enum E { A } e = (enum E)0;` is a forward reference) | the rule that declares the tag reduces after the declarators | reduce the enumeration at its closing brace (`enum_head`), and the declarators after it |
+| "invalid application of 'sizeof' to an incomplete type 'fminus::ast::Expr'" in `unique_ptr`, from every file that includes `Ast.h` | a node declared before `Expr` is complete (`SizeofExpr`) gave its `ExprPtr` a default member initializer, `= nullptr`, which instantiates the deleter there | leave those without one (an `ExprPtr` starts null anyway); a node after `Expr` (`DeclStmt`, `Field`) may have it |
+| `-Werror,-Wmissing-field-initializers` in `Parser.tab.cpp` after a node gains a field | an action's aggregate initialiser (`ast::SizeofExpr{type}`) leaves the new one out | name every field in the action (`ast::SizeofExpr{type, nullptr, nullptr}`) |
+| A test's runaway loop returns at once, and the loop budget is never exceeded | a loop with no effect the optimiser keeps (a store LICM sinks, a counter nothing reads) may be assumed to end (`llvm.loop.mustprogress`, recipe 19), and is deleted | give the loop a value the function returns, which it cannot compute without running it |
 
 ## Where to go next
 
 Design notes for growing the C subset beyond the recipes: what each feature involves and which LLVM pieces it uses.
 This code is not written or verified. `examples/biquad/README.md` suggests an order driven by a real kernel.
 
-**A type checker, and the rest of C's arithmetic types.** Recipe 3 converts with LLVM's types. Recipe 7 takes the
-first step away from that: every lowered expression carries its FMinus type (simd.md, "Every value carries its
-FMinus type"), and recipe 10 adds `int` and pointers to it. That still computes types while lowering, which stops
-scaling once types multiply, as C's do quickly: `unsigned`, `long`, the narrower integers, `double`. Give the tree a
-semantic pass before lowering:
+**A type checker, and the rest of C's arithmetic types.** Recipe 3 converts with LLVM's types. Recipe 7 takes the first
+step away from that: every lowered expression carries its FMinus type (simd.md, "Every value carries its FMinus type"),
+and recipe 10 adds `int` and pointers to it. That still computes types while lowering, which stops scaling once types
+multiply, as C's do quickly: `unsigned`, `long`, the narrower integers. Recipe 33's `double` took the first piece of it,
+`staticType`, an expression's type from the declarations alone, which its constants need before their arithmetic is
+lowered. Give the tree a semantic pass before lowering:
 
 - resolve every name to its declaration;
 - compute every expression's type with C's usual arithmetic conversions and integer promotions;
@@ -6206,10 +7167,11 @@ not the types: `udiv` and `urem` beside recipe 10's `sdiv` and `srem`, unsigned 
 definition, which is what a hash or a generator written in FMinus needs (recipe 25 made `hash` a builtin for want of
 it).
 
-**More arrays, and more pointers.** Recipe 12's arrays are one dimension deep. An array of arrays, `float m[4][4]`, is
-an `[4 x [4 x float]]` whose rows decay in turn; it needs `Type` to nest (its element a type, not a kind), and so do
-pointers to pointers and arrays of pointers. `sizeof` of an array type (`sizeof(float[16])`) wants the grammar's
-abstract declarators. `bool*` and arrays of `bool` need `i8` in
+**More arrays, and more pointers.** Recipe 34's arrays are two dimensions deep, a row described beside its element's
+kind (`rowKind`, `rowCount`). A third dimension, pointers to pointers and arrays of pointers need `Type` to nest (its
+element a type, not a kind), and so would a parameter of a 2-D array, a pointer to rows: its row's size is an integer
+constant expression, so the function's types would be worked out where the function is, not in the first pass, or the
+pass would wait for the file's enumerations. `bool*` and arrays of `bool` need `i8` in
 memory (recipe 10 says why), and null C's `0` as a pointer constant. Casts between pointer types (`(float4*)samples`, a
 float buffer seen as frames; `free((void*)table)`, a `const` pointer freed) are C's and change nothing in the IR, but a
 `float4*` cast from a `float*` must still meet a `float4`'s alignment. Pointers to pointers are a `ptr` to a `ptr`, once
@@ -6359,8 +7321,9 @@ The recipes in the compiler are their own reference: their code is in `src/`, an
 `BitwiseTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `TableTest.cpp`,
 `TopLevelTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `HashTest.cpp`, `ParamTest.cpp`, `VectorTest.cpp` and
 `PolyTest.cpp` for the code generator; `MathTest.cpp`, `VersionTest.cpp`, `TbaaTest.cpp`, `ZeroInitTest.cpp`,
-`AttributeTest.cpp` and `DenormalTest.cpp` for recipes 15 to 20; `RecoveryTest.cpp` for recipe 32), `tests/library/`
-(`ProgramTest.cpp`, `StrictAliasingTest.cpp`, `DenormalsTest.cpp`) and `tests/lit/fminus/`. [recipes/](recipes/) holds
+`AttributeTest.cpp` and `DenormalTest.cpp` for recipes 15 to 20; `RecoveryTest.cpp` for recipe 32;
+`FieldAttributeTest.cpp` for recipe 35), `tests/library/` (`ProgramTest.cpp`, `StrictAliasingTest.cpp`,
+`DenormalsTest.cpp`, `FieldAttributeTest.cpp`) and `tests/lit/fminus/`. [recipes/](recipes/) holds
 the two that aren't, 5 and 6, as one patch against the compiler as it is ([recipes/README.md](recipes/README.md)):
 
 ```bash

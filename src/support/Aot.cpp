@@ -162,14 +162,20 @@ namespace fminus::aot
             return llvm::createStringError("an executable needs a main function, such as float main(float x)");
         llvm::LLVMContext& context = module.getContext();
         llvm::Type* floatType = llvm::Type::getFloatTy(context);
+        llvm::Type* doubleType = llvm::Type::getDoubleTy(context);
         const llvm::FunctionType* programType = program->getFunctionType();
         llvm::Type* resultType = programType->getReturnType();
         const bool printsBool = resultType->isIntegerTy(1);   // an FMinus bool
-        bool floats = (resultType == floatType || printsBool) && !programType->isVarArg();
+        bool numbers = (resultType == floatType || resultType == doubleType || printsBool) && !programType->isVarArg();
+        bool doubles = false;   // a double parameter: the arguments are read as their types say
         for (const llvm::Type* param : programType->params())
-            floats = floats && param == floatType;
-        if (!floats)
-            return llvm::createStringError("'main' must return float or bool and take only float parameters");
+        {
+            numbers = numbers && (param == floatType || param == doubleType);
+            doubles = doubles || param == doubleType;
+        }
+        if (!numbers)
+            return llvm::createStringError(
+                "'main' must return float, double or bool and take only float and double parameters");
         program->setName("fminus.main");
         program->setLinkage(llvm::GlobalValue::InternalLinkage);
 
@@ -184,12 +190,19 @@ namespace fminus::aot
         llvm::Argument* argv = entry->getArg(1);
         argc->setName("argc");
         argv->setName("argv");
-        const llvm::FunctionCallee readArgs = module.getOrInsertFunction("fminus_rt_main_args", intType, intType,
-                                                                         pointerType, intType, pointerType);
+        // A main of floats reads them as floats; one with a double among them reads each as its type says, into
+        // doubles (a float's widened, exactly), with the kinds in a string, "fd" for (float, double).
+        const llvm::FunctionCallee readArgs =
+            doubles ? module.getOrInsertFunction("fminus_rt_main_double_args", intType, intType, pointerType, intType,
+                                                 pointerType, pointerType)
+                    : module.getOrInsertFunction("fminus_rt_main_args", intType, intType, pointerType, intType,
+                                                 pointerType);
         // A bool crosses the C ABI zero-extended, as FMinus's own bool parameters do (ir/CodeGen.cpp).
-        llvm::FunctionCallee printResult =
-            module.getOrInsertFunction(printsBool ? "fminus_rt_main_bool_result" : "fminus_rt_main_result",
-                                       builder.getVoidTy(), resultType);
+        llvm::FunctionCallee printResult = module.getOrInsertFunction(
+            printsBool                  ? "fminus_rt_main_bool_result"
+            : resultType == doubleType ? "fminus_rt_main_double_result"
+                                       : "fminus_rt_main_result",
+            builder.getVoidTy(), resultType);
         if (printsBool)
             llvm::cast<llvm::Function>(printResult.getCallee())->addParamAttr(0, llvm::Attribute::ZExt);
 
@@ -198,15 +211,30 @@ namespace fminus::aot
         llvm::BasicBlock* usage = llvm::BasicBlock::Create(context, "usage", entry);
         builder.SetInsertPoint(start);
         const unsigned count = programType->getNumParams();
-        llvm::ArrayType* argsType = llvm::ArrayType::get(floatType, count);
+        llvm::ArrayType* argsType = llvm::ArrayType::get(doubles ? doubleType : floatType, count);
         llvm::Value* args = builder.CreateAlloca(argsType, nullptr, "args");
-        llvm::Value* status = builder.CreateCall(readArgs, {argc, argv, builder.getInt32(count), args}, "status");
+        std::vector<llvm::Value*> readArgsArgs{argc, argv, builder.getInt32(count)};
+        if (doubles)
+        {
+            std::string kinds;
+            for (const llvm::Type* param : programType->params())
+                kinds += param == doubleType ? 'd' : 'f';
+            readArgsArgs.push_back(builder.CreateGlobalString(kinds, "main.kinds", 0, &module));
+        }
+        readArgsArgs.push_back(args);
+        llvm::Value* status = builder.CreateCall(readArgs, readArgsArgs, "status");
         builder.CreateCondBr(builder.CreateICmpEQ(status, builder.getInt32(0)), run, usage);
 
         builder.SetInsertPoint(run);
         std::vector<llvm::Value*> values;
         for (unsigned i = 0; i < count; ++i)
-            values.push_back(builder.CreateLoad(floatType, builder.CreateConstInBoundsGEP2_32(argsType, args, 0, i)));
+        {
+            llvm::Value* value = builder.CreateLoad(argsType->getElementType(),
+                                                    builder.CreateConstInBoundsGEP2_32(argsType, args, 0, i));
+            if (doubles && programType->getParamType(i) == floatType)
+                value = builder.CreateFPTrunc(value, floatType);   // exact: it was a float, widened
+            values.push_back(value);
+        }
         // A program with a parallel region runs it on the runtime's pool, there while main runs.
         const bool parallel = module.getFunction("fminus_rt_parallel_for") != nullptr;
         if (parallel)

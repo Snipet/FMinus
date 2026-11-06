@@ -218,7 +218,7 @@ namespace fminus::ir::detail
                 builder_.CreateRet(poison(result).ir);
             return;
         }
-        const Value value = lower(*ret.value);
+        const Value value = lowerAs(*ret.value, result);
         if (returnsVoid)
         {
             error(location, "void function " + quoted(function_->name) + " should not return a value");
@@ -583,27 +583,25 @@ namespace fminus::ir::detail
     // once instead (declareConstArray, Memory.cpp).
     void Lowering::declareVariable(SourceLocation location, const ast::DeclStmt& decl)
     {
+        refuseAttributes(decl);
         const auto declare = [&](llvm::Value* slot, bool isConst, ast::Type type) {
             if (!bind(decl.name, Binding{slot, isConst, type, location}))
                 redefinition(location, decl.name, false, scopes_.back().at(decl.name));
         };
         ast::Type type = decl.type;
-        if (ast::isArray(type) && decl.size == nullptr && decl.init)
-            type.count = 1;   // its initialiser's error says why
-        else if (ast::isArray(type))
-            type = sized(location, decl.name, type, decl.size.get(), decl.hasList ? &decl.list : nullptr);
+        if (ast::isArray(type))
+            type = declaredArray(location, decl, type);   // its initialiser's error says why when it has `= expr`
         if (type == ast::Type::Void)
         {
             error(location, "variable has incomplete type 'void'");
             type = ast::Type::Float;   // so its uses report no more errors
         }
         if (!checkType(location, type))   // likewise
-            type = ast::isArray(type) ? ast::Type::arrayOf(ast::Type::Float, type.count)
-                                      : ast::Type::pointerTo(ast::Kind::Float, type.pointeeConst);
-        if (decl.isConst && ast::isArray(type) && !decl.init && !ast::isModule(ast::pointee(type)))
+            type = ast::isArray(type) ? floatsLike(type) : ast::Type::pointerTo(ast::Kind::Float, type.pointeeConst);
+        if (decl.isConst && ast::isArray(type) && !decl.init && !ast::isModule(ast::elementOf(type)))
         {
             // A table: a constant of the module when its list is constants, a local otherwise (Memory.cpp).
-            declare(declareConstArray(location, decl, type), true, type);
+            declare(declareConstArray(decl, type), true, type);
             return;
         }
         if (ast::isArray(type) || ast::isModule(type))
@@ -621,7 +619,7 @@ namespace fminus::ir::detail
                     incompatible(location, Use::Initializing, value.type, type);
             }
             if (decl.hasList && ast::isArray(type))
-                initializeArray(location, slot, type, decl.list);
+                initializeArray(location, slot, type, decl);
             else if (decl.hasList)
                 error(location, "a module takes no initializer list: its fields start at 0 (set them in a method, "
                                 "such as init)");
@@ -630,11 +628,21 @@ namespace fminus::ir::detail
         }
         if (decl.hasList)
             error(location, "FMinus takes an initializer list for an array only");
-        llvm::Value* value = decl.init ? convert(lower(*decl.init), type, location, Use::Initializing)
+        llvm::Value* value = decl.init ? convert(lowerAs(*decl.init, type), type, location, Use::Initializing)
                                        : llvm::Constant::getNullValue(typeOf(type));
         llvm::AllocaInst* slot = allocate(typeOf(type), decl.name);
         builder_.CreateStore(value, slot);
         declare(slot, decl.isConst, type);
+    }
+
+    // A local's attributes, or a constant's of the top level: C23 lets a declarator have them, and FMinus gives them
+    // to a module's fields and parameters only, for the host (checkAttributes). The first is the error, in clang's
+    // words for an attribute on what it does not apply to.
+    void Lowering::refuseAttributes(const ast::DeclStmt& decl)
+    {
+        if (!decl.attributes.empty())
+            error(decl.attributes.front().location,
+                  quoted(decl.attributes.front().name) + " attribute only applies to a module's fields and parameters");
     }
 
     // `name`, declared at `location` as an enumeration constant or a variable, where `previous` already has it in the
