@@ -128,6 +128,42 @@ TEST_CASE("a Program that does not compile gives FMinus's messages, as clang wor
     CHECK(errors.find("note:") != std::string::npos);
 }
 
+TEST_CASE("a Program's warnings: a program that compiles has them, one that does not has them among its errors",
+          "[library]")
+{
+    // clang's -Wswitch: the program compiles, and runs as written; its warning names the constant no case has.
+    const std::string source = "enum Wave { SAW, SQUARE, TRIANGLE };\n"
+                               "int level(int w)\n"
+                               "{\n"
+                               "    enum Wave wave = (enum Wave)w;\n"
+                               "    switch (wave) { case SAW: return 1; case SQUARE: return 2; }\n"
+                               "    return 0;\n"
+                               "}\n";
+    std::string errors;
+    fminus::Program::Options options;
+    options.fileName = "host.fm";
+    auto program = fminus::Program::compile(source, errors, options);
+    REQUIRE(program != nullptr);
+    CHECK(errors.empty());
+    CHECK(program->warnings() == "host.fm:5:13: warning: enumeration value 'TRIANGLE' not handled in switch "
+                                 "[-Wswitch]\n"
+                                 "host.fm:5:13: note: add missing switch cases\n");
+    auto* level = program->function<int(int)>("level", errors);
+    REQUIRE(level != nullptr);
+    CHECK(level(1) == 2);
+    CHECK(level(2) == 0);
+
+    auto quiet = fminus::Program::compile("int f(int x) { return x; }\n", errors);
+    REQUIRE(quiet != nullptr);
+    CHECK(quiet->warnings().empty());
+
+    // A program that does not compile: its warnings among its errors, in source order, as clang prints them.
+    CHECK(fminus::Program::compile(source + "int broken() { return nope; }\n", errors, options) == nullptr);
+    CHECK(errors == "host.fm:5:13: warning: enumeration value 'TRIANGLE' not handled in switch [-Wswitch]\n"
+                    "host.fm:5:13: note: add missing switch cases\n"
+                    "host.fm:8:23: error: use of undeclared identifier 'nope'\n");
+}
+
 TEST_CASE("a Program's function that does not exist is a null pointer and an error", "[library]")
 {
     std::string errors;

@@ -1,7 +1,8 @@
 // Enumerations, C's: a constant is an int, folded where it is read (no load, no slot), so a const table of them is a
 // constant of the module, a case label of one is its value, and a loop whose condition is one may run for ever (a
-// constant expression: no llvm.loop.mustprogress, as in C11 6.8.5p6). `enum Mode` is int. --emit ast shows each
-// enumeration where it is: at the top level among the functions, in its module, in its block.
+// constant expression: no llvm.loop.mustprogress, as in C11 6.8.5p6), its condition a branch to its body alone.
+// `enum Mode` is int. --emit ast shows each enumeration where it is: at the top level among the functions, in its
+// module, in its block. (`cases` has no case for SQUARE or NEG: -Wswitch's warning, which enum-switch.fm checks.)
 // RUN: fminus %s -O0 | FileCheck %s
 // RUN: fminus %s --emit ast | FileCheck %s --check-prefix=AST
 // RUN: fminus %s --run shaped 2 | FileCheck %s --check-prefix=RESULT
@@ -69,7 +70,7 @@ float shaped(float x)
 // CHECK:         ret i32 101
 // CHECK-LABEL: define void @forever(ptr %out)
 // CHECK:       while.cond:
-// CHECK-NEXT:    br i1 true, label %while.body, label %while.end
+// CHECK-NEXT:    br label %while.body{{$}}
 // CHECK:       while.body:
 // CHECK:         br label %while.cond{{$}}
 

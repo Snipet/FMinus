@@ -1,0 +1,48 @@
+// clang's -Wswitch, FMinus's one warning: a switch without a default over a value of an enumerated type, whose cases
+// miss some of its constants. fminus prints it as clang does, with its note, where the value begins, and the program
+// compiles and runs as written. A default, or a case for every constant, has none.
+// RUN: fminus %s --run level 2 2>&1 | FileCheck %s --implicit-check-not=warning: --implicit-check-not=error:
+
+enum Wave { SAW, SQUARE, TRIANGLE, NOISE };
+
+module Osc
+{
+    enum Wave wave;
+    float gain;
+    float shape()
+    {
+        switch (wave)
+        {
+        case SAW: return 1;
+        case SQUARE: return 2;
+        }
+        return gain;
+    }
+};
+
+float level(float x)
+{
+    enum Wave w = (enum Wave)(int)x;
+    switch (w)
+    {
+    case SAW: return 1;
+    default: return 0;
+    }
+}
+
+float every(Osc* osc)
+{
+    switch (osc->wave)
+    {
+    case SAW:
+    case SQUARE:
+    case TRIANGLE:
+    case NOISE:
+        return 1;
+    }
+    return 0;
+}
+
+// CHECK: enum-switch.fm:14:17: warning: enumeration values 'TRIANGLE' and 'NOISE' not handled in switch [-Wswitch]
+// CHECK-NEXT: enum-switch.fm:14:17: note: add missing switch cases
+// CHECK: 0{{$}}

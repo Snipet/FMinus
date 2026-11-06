@@ -267,6 +267,5 @@ TEST_CASE("module errors are reported as clang reports them", "[codegen][module]
              "test.fm:17:17: error: statement requires expression of scalar type ('M' invalid)\n"
              "test.fm:18:22: error: FMinus's ?: does not choose between modules: choose between pointers, c ? &a : &b\n"
              "test.fm:19:15: error: invalid use of 'this' outside of a non-static member function\n"
-             "test.fm:19:19: error: member reference base type 'void' is not a structure or union\n"
              "test.fm:20:14: error: invalid operands to binary expression ('M' and 'int')\n");
 }

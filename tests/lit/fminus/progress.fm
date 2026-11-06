@@ -84,7 +84,7 @@ float until_float(float x)
             return x;
         x *= 2;
     }
-    return -1;   // never reached, but FMinus's check that a function returns does not fold the condition
+    return -1;   // never reached: the condition is a constant, and this function could end without the return
 }
 
 // CHECK-LABEL: define void @steps(
