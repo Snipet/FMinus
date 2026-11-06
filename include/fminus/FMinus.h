@@ -124,7 +124,8 @@ namespace fminus
         //             x86-64). Writing the register is slow (about 18 ns a call on an M5), so an entry point called
         //             in that mode already writes nothing (under 1 ns): set it around the block, as a host's ScopedFtz
         //             does, and call anything else in it too. The code assumes the mode: run in IEEE's, a subnormal's
-        //             result may differ from what the compiler folded.
+        //             result may differ from what the compiler folded. One gap: a float/double conversion of a
+        //             subnormal that only LLVM's optimiser finds constant is folded as IEEE's (recipe 33).
         enum class Denormals
         {
             Preserve,

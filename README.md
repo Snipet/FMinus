@@ -349,9 +349,10 @@ Where FMinus differs from C, it is on purpose:
   conflicts.
 - **Subnormals are C's unless the host asks for flush-to-zero** (`Program::Options::denormals`,
   `fminus --denormals=flush`): then a subnormal input reads as 0 and a subnormal result is 0, each with its sign, a
-  float's and a double's, in folding as at run time, and each entry point (a `[[clang::nonblocking]]` function the
-  program does not call) sets the mode on entry and restores the caller's on return. C's floats underflow gradually;
-  clang's `-fdenormal-fp-math=preserve-sign` is the same choice.
+  float's and a double's, in folding as at run time (but for a float/double conversion of a subnormal that only
+  LLVM's optimiser finds constant, which it folds as IEEE's: docs/extending.md, recipe 33), and each entry point (a
+  `[[clang::nonblocking]]` function the program does not call) sets the mode on entry and restores the caller's on
+  return. C's floats underflow gradually; clang's `-fdenormal-fp-math=preserve-sign` is the same choice.
 - **Vectors are OpenCL C's**, which C has none of: `float2`, `float4`, `float8`, their literals and swizzles, and math
   functions that take them. A comparison of vectors gives a lane mask (OpenCL C gives 0 or -1 in an `int` vector), and
   `?:` with a vector condition picks each lane, so both sides run. Literals come in OpenCL C's form,
