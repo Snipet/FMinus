@@ -683,9 +683,9 @@ ABI. To export one, lower it as clang does: a `ptr sret(<8 x float>)` first para
 asks it.
 
 `fminus --run` crosses the boundary too: it calls the JIT'd function through a C++ pointer type, and its command line
-has floats only. So it refuses a vector parameter ("--run: 'g' takes a parameter of type 'float4'; --run passes floats
-only") and a vector result ("--run: 'f' returns 'float4'; --run prints floats, bools and ints only"). The second
-comes from the
+has floats only (and doubles, extending.md's recipe 33). So it refuses a vector parameter ("--run: 'g' takes a parameter
+of type 'float4'; --run passes floats and doubles only") and a vector result ("--run: 'f' returns 'float4'; --run prints
+floats, doubles, bools and ints only"). The second comes from the
 driver's `switch` over the result type (`tools/fminus/main.cpp`), which has no `default:`: when this recipe added
 `Float2` to `Bool8`, `-Wswitch` stopped the build there until they were handled, and recipe 9's poly types did the
 same. An executable's `main` refuses them the same way (programs.md).

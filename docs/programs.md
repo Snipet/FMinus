@@ -42,22 +42,30 @@ On Windows, `-o note` writes `note.exe` (clang-cl, the linking driver there, add
 
 ## `main`
 
-A program's entry is a function named `main` that returns a `float` or a `bool` and takes any number of `float`
-parameters, including none:
+A program's entry is a function named `main` that returns a `float`, a `double` or a `bool` and takes any number of
+`float` and `double` parameters, including none:
 
 ```c
 float main() { return 0.5f; }                                // ./prog prints 0.5
 float main(float a, float b) { return sqrtf(a * a + b * b); } // ./prog 3 4 prints 5
 bool main(float a, float b) { return a == b; }                // ./prog 2 2 prints true (examples/comparison/)
+double main(double seconds, float rate)                       // ./prog 3600 48000 prints 3599.999983778296
+{
+    double t = 0;
+    for (int i = 0; i < (int)(seconds * rate); ++i)
+        t += 1.0 / rate;                                      // C's double 1.0, and a double quotient: t is one
+    return t;
+}
 ```
 
 The executable:
 
-- **reads one command-line argument per parameter**, as C's `strtof` reads it. Decimal and hex floats, `inf` and `nan`
-  are numbers; `C4` and `1.5x` are not.
+- **reads one command-line argument per parameter**, as C's `strtof` reads a float and `strtod` a double. Decimal and
+  hex floats, `inf` and `nan` are numbers; `C4` and `1.5x` are not.
 - **calls `main`** with them;
 - **prints its result** and a newline on stdout, as `fminus --run` prints a result: a float as the shortest decimal
-  that reads back as the same float (`0.6666667`, `440`, `inf`), a `bool` as `true` or `false`;
+  that reads back as the same float (`0.6666667`, `440`, `inf`), a double as the shortest that reads back as the same
+  double (`0.6666666666666666`), a `bool` as `true` or `false`;
 - **exits with 0**, or with **2** after a message on stderr when the arguments are wrong: too few, too many, or one
   that is not a number. (`fminus` itself exits with 1 when a program doesn't compile.)
 
@@ -70,8 +78,8 @@ them ("Where to go next").
 `main` is otherwise an ordinary function:
 
 - other functions may call it;
-- `fminus --run main ...` calls it in the JIT, as any function. `--run` takes floats on its command line, so it calls
-  functions whose parameters are all `float`, and prints a `float`, `bool` or `int` result;
+- `fminus --run main ...` calls it in the JIT, as any function. `--run` takes numbers on its command line, so it calls
+  functions whose parameters are all `float` or all `double`, and prints a `float`, `double`, `bool` or `int` result;
 - a host program finds it with `jit->lookup("main")`, as `float (*)(float)` or `bool (*)(float, float)`;
 - a program without one compiles, runs in the JIT, and emits IR, assembly and objects as before. Only an executable
   needs it.
@@ -79,8 +87,9 @@ them ("Where to go next").
 | Problem | Message |
 |---|---|
 | `--emit exe` and no `main` (or only a prototype) | fminus: an executable needs a main function, such as float main(float x) |
-| a `main` with another type, such as `float main(bool b)` or `float main(float4 v)` | fminus: 'main' must return float or bool and take only float parameters |
-| `--run` of a function with a `bool` parameter | fminus: --run: 'f' takes a parameter of type 'bool'; --run passes floats only |
+| a `main` with another type, such as `float main(bool b)` or `float main(float4 v)` | fminus: 'main' must return float, double or bool and take only float and double parameters |
+| `--run` of a function with a `bool` parameter | fminus: --run: 'f' takes a parameter of type 'bool'; --run passes floats and doubles only |
+| `--run` of a function of a `float` and a `double` | fminus: --run: 'f' takes floats and doubles; --run passes every argument as one type |
 | `--emit exe` without `-o` | fminus: --emit exe: an executable needs a file name (-o) |
 
 ## The commands
@@ -111,9 +120,9 @@ printing a result.
 
 ## How an executable gets its entry
 
-C's entry point is `int main(int argc, char** argv)`. FMinus's `main` is `float main(float, ...)` or
-`bool main(float, ...)`, under the same name. So before the module is optimised, `fminus::aot::addEntryPoint`
-(`src/support/Aot.h`) does three things:
+C's entry point is `int main(int argc, char** argv)`. FMinus's `main` is `float main(float, ...)`, `double main(...)` or
+`bool main(...)`, its parameters floats and doubles, under the same name. So before the module is optimised,
+`fminus::aot::addEntryPoint` (`src/support/Aot.h`) does three things:
 
 1. **It renames the program's `main` to `fminus.main`** and gives it internal linkage. No FMinus function can have
    that name, since an identifier can't contain a dot. Internal linkage lets the inliner fold it into its caller.
@@ -149,7 +158,8 @@ usage:
 
 3. **It verifies the new function**, and refuses a module without a `main` definition or with a `main` of another
    type. The check is on the LLVM function's type, so it covers every type the language gains: a result must be
-   `float` or `i1` (a `bool`), and every parameter `float`, so a `float4` (`<4 x float>`) is refused wherever it is.
+   `float`, `double` or `i1` (a `bool`), and every parameter `float` or `double`, so a `float4` (`<4 x float>`) is
+   refused wherever it is.
 
 For a `bool main`, the result goes to `fminus_rt_main_bool_result` instead, declared and called with `zeroext` on its
 parameter: the C ABI passes a `bool` zero-extended, as FMinus's own `bool` parameters are (extending.md, recipe 3).
@@ -158,6 +168,23 @@ parameter: the C ABI passes a `bool` zero-extended, as FMinus's own `bool` param
 ; fminus examples/comparison/comparison.fm --entry -O0
   %result = call i1 @fminus.main(float %2, float %4)
   call void @fminus_rt_main_bool_result(i1 zeroext %result)
+```
+
+A `main` with a `double` among its parameters reads them all into doubles, each as its type says (`strtod` for a
+double, `strtof` for a float, which the double holds exactly), through `fminus_rt_main_double_args`, whose fourth
+argument is a string of their kinds, a character each; the entry rounds a float's back, exactly. A `double main`
+prints through `fminus_rt_main_double_result`. A `main` of floats keeps `fminus_rt_main_args`, its code unchanged:
+
+```llvm
+; fminus clock.fm --entry -O0 (double main(double seconds, float rate))
+@main.kinds = private unnamed_addr constant [3 x i8] c"df\00", align 1
+  ...
+  %args = alloca [2 x double], align 8
+  %status = call i32 @fminus_rt_main_double_args(i32 %argc, ptr %argv, i32 2, ptr @main.kinds, ptr %args)
+  ...
+  %5 = fptrunc double %4 to float
+  %result = call double @fminus.main(double %2, float %5)
+  call void @fminus_rt_main_double_result(double %result)
 ```
 
 The runtime functions are in `src/runtime/Runtime.cpp`, so they are in `libfminus_runtime.a`, which every executable
@@ -169,17 +196,27 @@ links:
     // wrong (the wrong number of arguments, or one that is not a number) and returns 2, the executable's exit status.
     std::int32_t fminus_rt_main_args(std::int32_t argc, char** argv, std::int32_t count, float* args) noexcept;
 
+    // The same for a main with a double among its parameters: reads each of its `count` arguments as `kinds` says, a
+    // character a parameter: 'd' as C's strtod reads a double, 'f' as strtof reads a float (stored widened, exactly,
+    // which the entry rounds back), into `args`.
+    std::int32_t fminus_rt_main_double_args(std::int32_t argc, char** argv, std::int32_t count, const char* kinds,
+                                            double* args) noexcept;
+
     // An executable's end: prints main's result and a newline on stdout as `fminus --run` prints a result, the
     // shortest decimal that reads back as the same float.
     void fminus_rt_main_result(float result) noexcept;
+
+    // The same for a main that returns double: the shortest decimal that reads back as the same double.
+    void fminus_rt_main_double_result(double result) noexcept;
 
     // The same for a main that returns bool: prints true or false.
     void fminus_rt_main_bool_result(bool result) noexcept;
 ```
 
-`fminus_rt_main_result` writes with `std::to_chars` into a buffer on the stack: no allocation, no exceptions, and the
-same digits as the driver's `std::format("{}")`, which prints a `bool` as `true` or `false` too. All three are listed
-in `RuntimeSymbols.def` like every runtime function, although only executables call them.
+`fminus_rt_main_result` and `fminus_rt_main_double_result` write with `std::to_chars` into a buffer on the stack: no
+allocation, no exceptions, and the same digits as the driver's `std::format("{}")`, which prints a `bool` as `true` or
+`false` too. All five are listed in `RuntimeSymbols.def` like every runtime function, although only executables call
+them.
 
 The order in the driver matters. The entry is added **before** `prepareModule` and `optimiseModule`, so the pipeline
 optimises it with the rest: at `-O2`, `fminus.main` and the functions it calls are inlined into `main`, and the

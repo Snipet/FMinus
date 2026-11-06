@@ -30,7 +30,10 @@ Most of the recipes in [../extending.md](../extending.md) and [../simd.md](../si
 - recipe 30 (bounds checks, for development builds: checks where the code generator sees the array, a pass that
   makes a failed one a return);
 - recipe 31 (C's conditionals, `#if`, `#ifdef` and the rest, on macros a program or its host defines, read only in
-  conditions).
+  conditions);
+- recipe 32 (one error a mistake, enumerated types as C has them, and the first warning, `-Wswitch`);
+- recipe 33 (`double`, for accumulators and slow state: floating constants floats first, and C's doubles in arithmetic
+  that has one).
 
 Their code is in `src/`, and their tests in `tests/`.
 

@@ -283,11 +283,11 @@ scalar. A bool knob's read, an int knob's when its `fminus::range` has integer e
 stream's test carry the values they can take (`!fminus.domain`), for knob versioning (recipe 16), which makes the stride
 a constant again in each copy. Any other int knob is left untagged, and no method is versioned on it.
 
-**Pass 1, declare.** Every function name gets one `llvm::Function`, with external linkage, its C name and the C
-calling convention (`float` is `float`, `int` is `i32`, a pointer is `ptr`, a `void` result is `void`). C++ therefore
-calls JIT'd code as `float(float, ...)` or `void(const float*, float*, int)`, and functions may call each other in any
-order. The attributes are clang's: a `bool` is `zeroext`, and a `restrict` pointer `noalias`. The rules for a name's
-prototypes and definition are C's:
+**Pass 1, declare.** Every function name gets one `llvm::Function`, with external linkage, its C name and the C calling
+convention (`float` is `float`, `double` is `double`, `int` is `i32`, a pointer is `ptr`, a `void` result is `void`).
+C++ therefore calls JIT'd code as `float(float, ...)` or `void(const float*, float*, int)`, and functions may call each
+other in any order. The attributes are clang's: a `bool` is `zeroext`, and a `restrict` pointer `noalias`. The rules for
+a name's prototypes and definition are C's:
 
 - a prototype and a definition must agree ("conflicting types for 'f'");
 - a second definition is "redefinition of 'f'";

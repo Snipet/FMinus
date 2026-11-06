@@ -1,22 +1,23 @@
 # Extending the compiler
 
-How to add to FMinus. First, how a change moves through the compiler, and the few rules that keep that easy. Then
-twenty-nine worked recipes. Eleven grow the C subset from a one-line builtin to C's control flow, a custom LLVM pass,
-`int`, `void` and pointers, the heap with the attributes that keep it off the audio thread, arrays and modules, FMinus's
-classes, an FFT from a C library built into the runtime, and parameters, the values a plugin's host sets. Six more are
-about the compiler rather than the language: math that gives a float one result wherever it is computed, knob versioning
-and flat streams, C's strict aliasing told to LLVM, zero-init elision, what the runtime's calls and loops promise, and
-subnormals flushed for the audio thread. Two more grow the language again: `#include`, which splits a program into
-files, and `parallel for` and `parallel { }`, a program's own threads. Two return to the math: kernels of FMinus's
-own, the same in every lane and on every target, and those kernels inline. The last four are for DSP's everyday code:
-C's bitwise operators with a hash and white noise from a counter, constant tables stored once, `switch` and
-enumerations, and constants at the top level with arrays sized by constant expressions. The last two are for the host:
-a loop budget, which stops a program that would loop for ever before it holds the audio thread, and bounds checks for
-development builds, which stop a call before an index leaves its array. Then one returns to C's preprocessor: its
-conditionals, `#if` and `#ifdef`, which compile a program's instrumentation in or out. The last is for whoever reads the
-errors: one error for each mistake, enumerated types as C has them, and FMinus's first warning, clang's `-Wswitch`.
-Then the pitfalls those recipes ran into, and design notes for what comes next. [simd.md](simd.md) has recipes 7 to 9,
-for vectors.
+How to add to FMinus. First, how a change moves through the compiler, and the few rules that keep that easy. Then thirty
+worked recipes. Eleven grow the C subset from a one-line builtin to C's control flow, a custom LLVM pass, `int`, `void`
+and pointers, the heap with the attributes that keep it off the audio thread, arrays and modules, FMinus's classes, an
+FFT from a C library built into the runtime, and parameters, the values a plugin's host sets. Six more are about the
+compiler rather than the language: math that gives a float one result wherever it is computed, knob versioning and flat
+streams, C's strict aliasing told to LLVM, zero-init elision, what the runtime's calls and loops promise, and subnormals
+flushed for the audio thread. Two more grow the language again: `#include`, which splits a program into files, and
+`parallel for` and `parallel { }`, a program's own threads. Two return to the math: kernels of FMinus's own, the same in
+every lane and on every target, and those kernels inline. The last four are for DSP's everyday code: C's bitwise
+operators with a hash and white noise from a counter, constant tables stored once, `switch` and enumerations, and
+constants at the top level with arrays sized by constant expressions. The last two are for the host: a loop budget,
+which stops a program that would loop for ever before it holds the audio thread, and bounds checks for development
+builds, which stop a call before an index leaves its array. Then one returns to C's preprocessor: its conditionals,
+`#if` and `#ifdef`, which compile a program's instrumentation in or out. Then one is for whoever reads the errors: one
+error for each mistake, enumerated types as C has them, and FMinus's first warning, clang's `-Wswitch`. The last adds
+C's `double`, for accumulators and slow state, and decides what an unsuffixed floating constant is when FMinus has two
+floating types. Then the pitfalls those recipes ran into, and design notes for what comes next. [simd.md](simd.md) has
+recipes 7 to 9, for vectors.
 
 Recipes 1 to 4 are in the compiler now (`tanhf` and `%`; `bool` and its operators; `if`, `while` and `for`), and so are
 simd.md's 7 to 9, recipe 10 (`int`, `void` and pointers), recipe 11 (the heap), recipe 12 (arrays and modules), recipe
@@ -25,8 +26,8 @@ runtime's attributes and loop progress, denormal control), recipe 21 (`#include`
 `parallel { }`), recipes 23 and 24 (math kernels of FMinus's own, and inline), recipe 25 (the bitwise operators,
 `hash` and `randf`), recipe 26 (constant tables), recipe 27 (`switch` and `enum`), recipe 28 (constants at the top
 level, and sizes of constant expressions), recipe 29 (the loop budget), recipe 30 (bounds checks), recipe 31 (`#if`
-and `#ifdef`) and recipe 32 (one error a mistake, enumerated types, `-Wswitch`), so their sections describe how the
-code you have got there: read a section beside the files it names.
+and `#ifdef`), recipe 32 (one error a mistake, enumerated types, `-Wswitch`) and recipe 33 (`double`), so their
+sections describe how the code you have got there: read a section beside the files it names.
 Recipes 5 and 6, a runtime function and a pass, are not part of the language; they live in [recipes/](recipes/) as a
 patch, so you can apply them to see them work. None of these are sketches: each was applied to this repository, built
 with `-Werror`, and tested in the dev and asan presets, every test passing. [architecture.md](architecture.md) describes
@@ -49,7 +50,7 @@ Most language features touch the same places, in this order:
 | 5 | `src/ir/` | its conversions and checks, and its lowering to LLVM IR, in the file its kind belongs to (`Lowering.h` lists them: types, functions, statements, expressions, calls, the math modes, vectors, memory, modules, effects, parallel regions, TBAA, denormals); a load or store of memory gets its type's tag (`tag`, recipe 17); a statement that holds code walks it in `Parallel.cpp`'s `Walker` too |
 | 6 | `src/runtime/` | if it needs C++ at run time, a runtime function (recipe 5); if a builtin calls it, its facts: in `kRuntimeFacts`, through `callRuntime` (recipe 19), or for a math builtin's, in `mathFunction` (`Math.cpp`, recipe 15) |
 | 7 | `tools/fminus/main.cpp`, `src/support/Aot.cpp` | for a new type: whether `--run` can pass and print it (its `switch` over the result type), and whether an executable's `main` may take or return it (`addEntryPoint`) |
-| 8 | `tests/` | a dump in `FrontendTest.cpp`; results in `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `SwitchTest.cpp`, `EnumTest.cpp`, `IntTest.cpp`, `BitwiseTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `TableTest.cpp`, `TopLevelTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `HashTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp` or `ParallelTest.cpp` (their helpers are in `Compile.h`); IR or errors in `tests/lit/fminus/` |
+| 8 | `tests/` | a dump in `FrontendTest.cpp`; results in `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `SwitchTest.cpp`, `EnumTest.cpp`, `IntTest.cpp`, `BitwiseTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `TableTest.cpp`, `TopLevelTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `HashTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`, `ParallelTest.cpp` or `DoubleTest.cpp` (their helpers are in `Compile.h`); IR or errors in `tests/lit/fminus/` |
 | 9 | `examples/` | a program that uses it, and a line in `tests/lit/fminus/examples.test` that runs it |
 | 10 | `editors/vscode/syntaxes/fminus.tmLanguage.json` | a new keyword, type or builtin, so VSCode highlights it (its README says where) |
 | 11 | `README.md` | the language table, and the deviations from C if any |
@@ -1311,8 +1312,9 @@ others wait for a reason:
   `poly_store` ([simd.md](simd.md), "Loads and stores").
 - Pointers to pointers, `void*`, null constants and casts between pointer types: nothing needs them yet.
 
-A declaration of any other is "FMinus has pointers to float, int, float2, float4 and float8, not to 'bool'". The
-variable is then bound as a `float*`, so its uses report nothing more.
+A declaration of any other is "FMinus has pointers to float, double, int, float2, float4, float8, void and modules, not
+to 'bool'" (as recipes 11, 12 and 33 left it). The variable is then bound as a `float*`, so its uses report nothing
+more.
 
 **Elements.** `p[i]` and `*p` are lvalues (`IndexExpr`, and a `UnaryExpr` with `Dereference`), and both end in
 `element`:
@@ -1373,8 +1375,9 @@ they overlap; `pointers.fm` checks both. A `restrict` on a local pointer is acce
 
 **At the C boundary** a pointer is an address in a general register (`x0` to `x7` on AArch64), and an `int` the low
 half of one (`w0` to `w7`), with no attributes needed; floats travel separately, in `s0` to `s7`. So the C++
-function pointer type only has to name the same parameters in the same order. `--run` passes floats only, and
-refuses an `int` or pointer parameter ("takes a parameter of type 'int'"); it prints an `int` result.
+function pointer type only has to name the same parameters in the same order. `--run` passes floats (and, since recipe
+33, doubles) only, and refuses an `int` or pointer parameter ("takes a parameter of type 'int'"); it prints an `int`
+result.
 
 ### Tests
 
@@ -6076,6 +6079,200 @@ error.
   program; `large-modules.fm`: a 16 GiB module's `memcpy`, `memset` and `dereferenceable` at 64 bits, and its `sizeof`
   refused (`-D SIZEOF`). `enum.fm`'s constant loop branches to its body alone.
 
+## Recipe 33: `double`, for accumulators and slow state
+
+*In the compiler. Code: `Kind::Double`, `Type::Double` and `isFloating` (`src/frontend/Ast.h`), `typeName`
+(`Ast.cpp`), the `double` keyword (`Lexer.l`) and its rules in `Parser.y` (`type`, `cast_type`, and `poly double`
+refused); `typeOf`, `convert`, `commonType`, `sizeOf` and `checkType` (`src/ir/Types.cpp`); `lower`, `lowerAs`,
+`lowerWith`, `hasDouble`, `staticType`, `lowerConditional`, `lowerNumber`, `lowerCast` and `lowerAssign`
+(`Expressions.cpp`), and `lowerAs` where a value goes somewhere typed: `lowerReturn` and `declareVariable`
+(`Statements.cpp`), `initializeArray` and `declareConstArray` (`Memory.cpp`), `defineConstant` and `fold`
+(`Constants.cpp`), `lowerCall` (`Calls.cpp`) and `lowerMethodCall` (`Modules.cpp`); `kBuiltins`' double functions and
+`kLibmDoubles` (`Calls.cpp`), and a double builtin's prototype (`declare`, `Functions.cpp`); `lowerConstruct`
+(`Vectors.cpp`); the `"double"` tag (`Tbaa.cpp`); `DenormalFolder::FoldCast` (`Denormals.h`, `Denormals.cpp`);
+`addEntryPoint` (`src/support/Aot.cpp`) and `fminus_rt_main_double_args` and `fminus_rt_main_double_result`
+(`src/runtime/Runtime.cpp`); `--run` (`tools/fminus/main.cpp`); `isFMinusKeyword` (`src/circuit/Emit.cpp`). Tests:
+`tests/unit/DoubleTest.cpp` (`[double]`), `FrontendTest.cpp`, `AotTest.cpp`, `tests/library/DoubleTest.cpp`, and
+`tests/lit/fminus/double.fm` and `double-errors.fm`.*
+
+A float has 24 bits, and some of a program's state needs more. An engine's coolant warms by a millionth of a degree a
+block: at 90 degrees, half a float's ulp is 3.8e-6, so `t += 1e-6f` rounds back to 90 every time and the temperature
+never moves. A clock counted in seconds a sample at a time drifts by a sample in a few minutes. A one-pole's
+coefficient a hair below 1 is a different filter rounded to a float. C's answer is `double`, and this recipe adds it:
+C's IEEE double precision, for accumulators, clocks and slow state, beside the floats that a block's audio is.
+
+### The type
+
+`double` is a kind of its own, `Kind::Double`, LLVM's `double`: 8 bytes, aligned to 8 by the data layout, in a module's
+struct as C lays one out (a `float` then a `double` puts the double at offset 8). It goes wherever a float goes but
+into a vector: a variable, a parameter, a result, a field, an array's element (`canPointTo` takes it, so `double*` and
+`double t[8]` are C's), a constant of the top level and a table stored once. Its TBAA tag is clang's, `"double"`, a
+leaf of its own beside `"float"`, so a store of a double changes no float. `sizeof(double)` is 8.
+
+A double is no vector lane: FMinus's vectors are floats, and there is no `double4` or `poly double` (the parser refuses
+the second by name). A double meeting a vector is clang's error for the truncation its broadcast would be,
+`cannot convert between scalar type 'double' and vector type 'float4' as implicit conversion would cause truncation`,
+from `commonType`; `float4 v = d;` is `initializing 'float4' with an expression of incompatible type 'double'`, from
+`convert`. A vector literal names its lanes' type, so there a double rounds to a float, as a cast would:
+`(float4)(d)` and `(float4){d, d}` are OpenCL C's and clang's. LLVM's vectorisers still put doubles side by side in a
+loop over a `double` array: two lanes in a NEON register, four in an AVX one.
+
+### C's conversions
+
+`convert` gains four instructions: `fpext` from a float (exact), `fptrunc` to a float (rounded to nearest, to infinity
+past the greatest float), `sitofp` and `uitofp` from an int and a bool, and `fptosi` to an int, truncating, as from a
+float. A double is `x != 0` as a bool, `fcmp une` as a float's is. `commonType` is C's usual arithmetic conversions: two
+ints are an int, a double anywhere is a double, a float anywhere else a float, so `f + i + d` adds `f + i` in float,
+then widens it, as C does. What C refuses of a double, FMinus refuses in clang's words: a bitwise operator
+(`invalid operands to binary expression ('double' and 'int')`), `~`, a switch's value, a subscript (`array subscript is
+not an integer`) and an integer constant expression (`size of array has non-integer type 'double'`). `%` is `fmod`'s,
+as it is `fmodf`'s on floats. A module's parameter stays a float, an int or a bool: its slot is what a host's
+`setValue` writes and a stream's buffer is floats.
+
+### Floating constants: floats first
+
+The decision is what an unsuffixed `0.1` is. C says a double, so `x * 0.1` of a float `x` widens `x`, multiplies in
+double and rounds the product back. FMinus has always said a float, and every program written for it, its examples
+and every host's, computes `x * 0.1` as a float product. Taking C's rule would change those programs' bits wherever a
+double product rounds to another float than the float product (rarely, but not never), and their speed everywhere: an
+`fpext` and an `fptrunc` around every multiply by a constant, and a loop of them vectorised at half the lanes. GLSL
+keeps float first and spells a double constant `0.1lf`, which C cannot read.
+
+FMinus keeps float first, and lets a constant be C's double where its arithmetic has a double in it. A constant's
+arithmetic is the expression around it as far as `+`, `-`, `*`, `/`, `%`, unary `+` and `-`, the arms of `?:` and
+parentheses reach. It has a double when one of its operands is a double, when the two sides of a comparison it is in
+have one, or when its value goes to one: a `double` variable it initialises or is assigned to (or whose value it
+changes, `d *= 0.999`), a parameter, a result or a cast. Then every unsuffixed constant in it is the double nearest its
+spelling, and the arithmetic computes as C's does, step for step: the same types at each operator, so the same bits.
+Where it has no double, it computes as it always did:
+
+| Expression | FMinus | C |
+|---|---|---|
+| `float y = x * 0.1;` | a float product | a double product, rounded to float |
+| `double y = x * 0.1;` | a double product | the same |
+| `double third = 1.0 / 3.0;` | C's third | the same |
+| `x * 0.1 * d` | `(double)x * 0.1 * d` | the same |
+| `d < 0.1`, `d == 0.1` | compared with C's 0.1 | the same |
+| `d *= 0.999;`, `t += 1.0 / rate;` (a float `rate`) | C's 0.999; a double quotient | the same |
+| `c ? 0.1 : d` | C's 0.1 | the same |
+| `sinf(x * 0.1)`, `(float)(x * 0.1)` | a float product | a double product, rounded to float |
+| `(int)(x * 0.1)` | a float product | a double product |
+
+So a program without doubles means what it meant before they came, bit for bit, and one with doubles means C's
+wherever its constants meet them. What differs from C is what always did: a constant in arithmetic of floats whose
+value stays a float (or becomes an int).
+
+The code generator decides it in `lower`. Each call takes a flag the arithmetic around it set, `doubleArithmetic_`,
+for that call only: `+`, `-`, `*`, `/` and `%`, a sign and `?:`'s arms pass theirs on to their operands, and every
+other expression's parts start an arithmetic of their own. At the top of an arithmetic there is no flag, and
+`hasDouble` looks for a double among its operands:
+
+```cpp
+    // FMinus's floating constants are floats first ... unless the arithmetic it is part of has a double.
+    Lowering::Value Lowering::lowerAs(const ast::Expr& expr, ast::Type type)
+    {
+        return lowerWith(expr, type == ast::Type::Double || hasDouble(expr));
+    }
+
+    bool Lowering::hasDouble(const ast::Expr& expr) const
+    {
+        if (std::holds_alternative<ast::NumberExpr>(expr.node))
+            return false;
+        // a sign, + - * / %, and ?:'s arms: the same arithmetic
+        ...
+        return staticType(expr) == std::optional<ast::Type>(ast::Type::Double);
+    }
+```
+
+The operands have to be known before anything is lowered: in `x * 0.1 * d` the constant comes before `d`, and the
+code generator lowers left to right, the order a program's side effects happen in, which no constant may change. So
+`staticType` works an operand's type out from the declarations alone, as lowering it would give it: a variable's (or a
+field's by name in a method), `m.y` and `p->y`, `a[i]` and `*p`, a call's result (a function's, a method's, a double
+builtin's), a cast's, an assignment's or an increment's target, `p + i`, and a `?:` whose arms agree. A comparison's
+two sides are one arithmetic, so `d < 0.1` asks both. Where a value goes is known before it is lowered too: a
+declaration's type, the function's result, a parameter's (`lowerCall` looks the callee up by name first, a method's
+too), a cast's, an assignment's target (`staticType` again), an array's element. Those call `lowerAs(expr, type)`, and
+`lower(expr)` is `lowerAs(expr, void)`. A constant whose arithmetic has a double reaches `lowerNumber` with the flag
+set, and reads its spelling into `APFloat::IEEEdouble()` instead of `IEEEsingle()`: one rounding, from the decimal, as
+clang's. A double's constant past a float's range is no error (`1e300`); a float's still is.
+
+Integer constants stay ints, so `d + 1 / 2` adds 0, as C does. An integer constant expression's floating constant is
+the float it always was (`case 1.5:` is "not 'float'"); `fold` takes a cast to `double` as it takes one to `float`.
+
+### The math
+
+C's double functions that are one instruction are builtins: `sqrt`, `fabs`, `floor`, `fmin`, `fmax` and `fma`, each
+an LLVM intrinsic on `double` (`llvm.sqrt.f64`, ..., `llvm.fma.f64`), exact and the same in every math mode, a
+`Builtin` whose `type` is `Kind::Double`. They take doubles only: an argument converts to one (a numeric argument is
+C's double, `fmax(d, 0.5)`), and a vector is an error. `fma` rounds once, as C's does; FMinus still contracts nothing
+else into one. Their names became builtins as `tanf` did, so a program's own `floor` is "a builtin and cannot be
+redefined", and a prototype must be C's, `double sqrt(double x);` (a `float sqrt(float x);` "conflicts").
+
+The transcendental ones are not: FMinus's kernels (recipe 23) are fitted to a float's 24 bits, and a double's would
+need fits, tests and ulp tables of their own. `sinf(d)` takes its double as C's prototype converts it, rounded to a
+float, and computes in float. A program that wants the C library's double `sin` declares it, `double sin(double x);`,
+as any external function (on Apple systems `describeLibm` marks it as writing no memory, as it marks `powf`); a call
+without the prototype is clang's error with a note that says so:
+
+```
+synth.fm:9:28: error: call to undeclared function 'sin'
+synth.fm:9:28: note: FMinus's sinf computes in float, and rounds a double argument to one; a prototype, 'double sin(double x);', calls the C library's on doubles
+```
+
+That leaves the C library on the audio path, which the float functions avoid: keep a double's transcendentals off the
+audio thread, or compute them in float.
+
+### Hosts, `--run` and executables
+
+A function of doubles is C's to a host: `program->function<double(double)>("seconds", errors)`. A module's double field
+is `"double"` (or `"double[8]"`) in `Module::Field::type`, 8 bytes an element at its offset, and a host that reads
+fields by their type (a trace, an inspector) reads it as C++'s `double`; one that knew only `"float"`, `"int"` and
+`"bool"` finds no match for it, and so never reads it as a float. `fminus --run` passes every argument as a float or
+every one as a double, as the function's parameters are (`--run: 'f' takes floats and doubles; --run passes every
+argument as one type` otherwise), and prints a double as the shortest decimal that reads back as it. An executable's
+`main` may return a double and take doubles beside floats: its C `main` reads them through `fminus_rt_main_double_args`,
+each as its kind says (`strtod` or `strtof`, whose float the double holds exactly), and prints through
+`fminus_rt_main_double_result`; a `main` of floats keeps the functions and the code it had. Both are new runtime
+symbols, so a runtime built before them links no program that uses them, and every program it linked still links.
+`--emit obj` and `asm` need nothing: a double is LLVM's own.
+
+### Subnormals
+
+Under `Denormals::Flush`, a double's subnormals flush as a float's do: AArch64's FPCR.FZ and x86's MXCSR FTZ and DAZ
+apply to both, and LLVM's `denormal_fpenv` attribute covers every type. The code generator's folder flushes the two
+conversions as well (`FoldCast`): `(float)(double)1e-40` folds to 0, as FCVT and CVTSD2SS give it flushing. LLVM's own
+folding does not flush a conversion (`ConstantFoldCastOperand` ignores the function's mode), so an `fpext` or
+`fptrunc` of a subnormal that only the optimiser finds constant folds as IEEE's, where the hardware would give 0: the
+same kind of gap as LLVM's `x * 1.0` to `x`, which leaves a subnormal `x` that a flushing multiply would have zeroed.
+
+### What it changes for programs and hosts
+
+- **Programs** without doubles compile to the same IR, bit for bit: no constant changes type, and no conversion is
+  added. `double` is a keyword, and `sqrt`, `fabs`, `floor`, `fmin`, `fmax` and `fma` are builtins: a program that
+  named something so renames it (the circuit compiler refuses them as a netlist's names too).
+- **Messages** that list FMinus's types name `double` (`FMinus has pointers to float, double, int, ...`), `--run`'s
+  say it passes and prints doubles, and `main`'s that it may return and take them.
+- **Hosts** get `"double"` fields, aligned to 8, and `ir::builtins()` six more names.
+
+### Tests
+
+- `tests/unit/DoubleTest.cpp`: constants float first, as they were (`x * 0.1`, `1.0 / 3.0`, `x < 0.1` and a cast to
+  float, all floats); C's doubles where the arithmetic has one, against C++'s own doubles: a result, an initialiser, a
+  float operand, an operand after the constant, a comparison, a compound assignment, a `?:`'s arm, a cast, a parameter,
+  a table's list, `1e300 * 10`, and a float's `1e39` still refused; the usual arithmetic conversions and casts both
+  ways, a NaN as a bool, `%`, `++` and `--`; a float's slow state stuck at 90 where a double's moves; a module's double
+  fields and array, a top-level constant and table, `double*` both ways and `sizeof`; the six builtins against
+  `<cmath>`, `fma`'s one rounding against the product's two, `sqrtf` of a double, and libm's `sin` by prototype;
+  subnormals flushed in folding, in a computation and in a conversion; and the errors above, in clang's words.
+- `FrontendTest.cpp`: `double` as a parameter, a pointer's pointee, an array's element and a cast; `poly double`.
+- `AotTest.cpp`: a `double main(double, float)`'s entry, its readers and printer.
+- `tests/library/DoubleTest.cpp`: `module()`'s description of double fields (type, offset, size, alignment), the host
+  reading and writing them, a function of doubles; doubles under the loop budget, bounds checks (`'taps' of type
+  'double[8]'`) and `#ifdef`.
+- `tests/lit/fminus/double.fm`: the IR (`fpext`, the double constant, the `"double"` tag beside `"float"`), `--run`'s
+  results and refusal, an executable's `main` of a double and a float, its entry, and `--emit obj`;
+  `double-errors.fm`: each error once, and `poly double`.
+
 ## Pitfalls
 
 Each of these was hit while writing the language or its recipes. [simd.md](simd.md) has the vector ones.
@@ -6108,6 +6305,8 @@ Each of these was hit while writing the language or its recipes. [simd.md](simd.
 | A program compiles with a frozen parameter and is refused with a knob | a decision taken on the IR, where a frozen parameter's read is a constant (`branchOn` on a `ConstantInt`) | decide on the tree (`folds()`), and take only the value from the IR |
 | The compiler crashes on `p->y`, and `--emit ast` prints a `OnePole*` as `? *` | a pointer built from a type's kind, `pointerTo(type.kind, ...)`, lost its module | pass the `Type`: `pointerTo(type, ...)` keeps `module` |
 | A C++ reference differs from FMinus in the last bit, though the formulas match | clang's default `-ffp-contract=on` fuses `y + k * (x - y)` written as one expression into a multiply-add; FMinus never fuses | build the reference with `-ffp-contract=off` (the examples are), or round once a statement (`ModuleTest.cpp`'s `next`) |
+| A double accumulator drifts as a float would | what it adds was computed in float before it widened: `float step = 1.0 / rate;`, then `t += step;` (the constant's arithmetic ends at the float `step`) | compute it where it goes to the double, `t += 1.0 / rate;`, whose arithmetic has the double `t` (recipe 33) |
+| A constant beside a double is a float after all (`x * 0.1 * d` gave a float product) | the constant was lowered before the operand that makes its arithmetic a double, which only lowering it would have shown | `staticType`, which works the operand's type out from the declarations before anything is lowered; never reorder the lowering, which is the program's order of evaluation |
 | A host's `aligned_alloc` returns null for a module | macOS's wants an alignment of at least a pointer's, and every implementation a size that is a multiple of it | round both up to `alignof(std::max_align_t)` (`examples/voices/bench.cpp`) |
 | One error in a module hides every other | an error the parser reports (a redefined module) stops the run before the code generator | report it in the code generator (`layOut`), and the parser carries on |
 | A method's loop over a field's buffer (`tail[i] += result[i]`) runs at half C++'s speed, and doesn't vectorise | without TBAA, LLVM assumes a `float` store may change the field, a pointer, and loads it again every iteration | the type's tag on every load and store (recipe 17); under `--no-strict-aliasing`, read the field into a local before the loop |
@@ -6188,11 +6387,12 @@ Each of these was hit while writing the language or its recipes. [simd.md](simd.
 Design notes for growing the C subset beyond the recipes: what each feature involves and which LLVM pieces it uses.
 This code is not written or verified. `examples/biquad/README.md` suggests an order driven by a real kernel.
 
-**A type checker, and the rest of C's arithmetic types.** Recipe 3 converts with LLVM's types. Recipe 7 takes the
-first step away from that: every lowered expression carries its FMinus type (simd.md, "Every value carries its
-FMinus type"), and recipe 10 adds `int` and pointers to it. That still computes types while lowering, which stops
-scaling once types multiply, as C's do quickly: `unsigned`, `long`, the narrower integers, `double`. Give the tree a
-semantic pass before lowering:
+**A type checker, and the rest of C's arithmetic types.** Recipe 3 converts with LLVM's types. Recipe 7 takes the first
+step away from that: every lowered expression carries its FMinus type (simd.md, "Every value carries its FMinus type"),
+and recipe 10 adds `int` and pointers to it. That still computes types while lowering, which stops scaling once types
+multiply, as C's do quickly: `unsigned`, `long`, the narrower integers. Recipe 33's `double` took the first piece of it,
+`staticType`, an expression's type from the declarations alone, which its constants need before their arithmetic is
+lowered. Give the tree a semantic pass before lowering:
 
 - resolve every name to its declaration;
 - compute every expression's type with C's usual arithmetic conversions and integer promotions;
