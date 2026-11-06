@@ -1,23 +1,24 @@
 # Extending the compiler
 
-How to add to FMinus. First, how a change moves through the compiler, and the few rules that keep that easy. Then thirty
-worked recipes. Eleven grow the C subset from a one-line builtin to C's control flow, a custom LLVM pass, `int`, `void`
-and pointers, the heap with the attributes that keep it off the audio thread, arrays and modules, FMinus's classes, an
-FFT from a C library built into the runtime, and parameters, the values a plugin's host sets. Six more are about the
-compiler rather than the language: math that gives a float one result wherever it is computed, knob versioning and flat
-streams, C's strict aliasing told to LLVM, zero-init elision, what the runtime's calls and loops promise, and subnormals
-flushed for the audio thread. Two more grow the language again: `#include`, which splits a program into files, and
-`parallel for` and `parallel { }`, a program's own threads. Two return to the math: kernels of FMinus's own, the same in
-every lane and on every target, and those kernels inline. The last four are for DSP's everyday code: C's bitwise
-operators with a hash and white noise from a counter, constant tables stored once, `switch` and enumerations, and
-constants at the top level with arrays sized by constant expressions. The last two are for the host: a loop budget,
+How to add to FMinus. First, how a change moves through the compiler, and the few rules that keep that easy. Then
+thirty-one worked recipes. Eleven grow the C subset from a one-line builtin to C's control flow, a custom LLVM pass,
+`int`, `void` and pointers, the heap with the attributes that keep it off the audio thread, arrays and modules, FMinus's
+classes, an FFT from a C library built into the runtime, and parameters, the values a plugin's host sets. Six more are
+about the compiler rather than the language: math that gives a float one result wherever it is computed, knob versioning
+and flat streams, C's strict aliasing told to LLVM, zero-init elision, what the runtime's calls and loops promise, and
+subnormals flushed for the audio thread. Two more grow the language again: `#include`, which splits a program into
+files, and `parallel for` and `parallel { }`, a program's own threads. Two return to the math: kernels of FMinus's own,
+the same in every lane and on every target, and those kernels inline. The last four are for DSP's everyday code: C's
+bitwise operators with a hash and white noise from a counter, constant tables stored once, `switch` and enumerations,
+and constants at the top level with arrays sized by constant expressions. The last two are for the host: a loop budget,
 which stops a program that would loop for ever before it holds the audio thread, and bounds checks for development
 builds, which stop a call before an index leaves its array. Then one returns to C's preprocessor: its conditionals,
 `#if` and `#ifdef`, which compile a program's instrumentation in or out. Then one is for whoever reads the errors: one
-error for each mistake, enumerated types as C has them, and FMinus's first warning, clang's `-Wswitch`. The last adds
+error for each mistake, enumerated types as C has them, and FMinus's first warning, clang's `-Wswitch`. The next adds
 C's `double`, for accumulators and slow state, and decides what an unsuffixed floating constant is when FMinus has two
-floating types. Then the pitfalls those recipes ran into, and design notes for what comes next. [simd.md](simd.md) has
-recipes 7 to 9, for vectors.
+floating types. The last adds C's arrays of arrays, 2-D arrays, with C's initialiser lists for them and a bounds check
+for each dimension. Then the pitfalls those recipes ran into, and design notes for what comes next. [simd.md](simd.md)
+has recipes 7 to 9, for vectors.
 
 Recipes 1 to 4 are in the compiler now (`tanhf` and `%`; `bool` and its operators; `if`, `while` and `for`), and so are
 simd.md's 7 to 9, recipe 10 (`int`, `void` and pointers), recipe 11 (the heap), recipe 12 (arrays and modules), recipe
@@ -26,8 +27,8 @@ runtime's attributes and loop progress, denormal control), recipe 21 (`#include`
 `parallel { }`), recipes 23 and 24 (math kernels of FMinus's own, and inline), recipe 25 (the bitwise operators,
 `hash` and `randf`), recipe 26 (constant tables), recipe 27 (`switch` and `enum`), recipe 28 (constants at the top
 level, and sizes of constant expressions), recipe 29 (the loop budget), recipe 30 (bounds checks), recipe 31 (`#if`
-and `#ifdef`), recipe 32 (one error a mistake, enumerated types, `-Wswitch`) and recipe 33 (`double`), so their
-sections describe how the code you have got there: read a section beside the files it names.
+and `#ifdef`), recipe 32 (one error a mistake, enumerated types, `-Wswitch`), recipe 33 (`double`) and recipe 34 (2-D
+arrays), so their sections describe how the code you have got there: read a section beside the files it names.
 Recipes 5 and 6, a runtime function and a pass, are not part of the language; they live in [recipes/](recipes/) as a
 patch, so you can apply them to see them work. None of these are sketches: each was applied to this repository, built
 with `-Werror`, and tested in the dev and asan presets, every test passing. [architecture.md](architecture.md) describes
@@ -50,7 +51,7 @@ Most language features touch the same places, in this order:
 | 5 | `src/ir/` | its conversions and checks, and its lowering to LLVM IR, in the file its kind belongs to (`Lowering.h` lists them: types, functions, statements, expressions, calls, the math modes, vectors, memory, modules, effects, parallel regions, TBAA, denormals); a load or store of memory gets its type's tag (`tag`, recipe 17); a statement that holds code walks it in `Parallel.cpp`'s `Walker` too |
 | 6 | `src/runtime/` | if it needs C++ at run time, a runtime function (recipe 5); if a builtin calls it, its facts: in `kRuntimeFacts`, through `callRuntime` (recipe 19), or for a math builtin's, in `mathFunction` (`Math.cpp`, recipe 15) |
 | 7 | `tools/fminus/main.cpp`, `src/support/Aot.cpp` | for a new type: whether `--run` can pass and print it (its `switch` over the result type), and whether an executable's `main` may take or return it (`addEntryPoint`) |
-| 8 | `tests/` | a dump in `FrontendTest.cpp`; results in `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `SwitchTest.cpp`, `EnumTest.cpp`, `IntTest.cpp`, `BitwiseTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `TableTest.cpp`, `TopLevelTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `HashTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`, `ParallelTest.cpp` or `DoubleTest.cpp` (their helpers are in `Compile.h`); IR or errors in `tests/lit/fminus/` |
+| 8 | `tests/` | a dump in `FrontendTest.cpp`; results in `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `SwitchTest.cpp`, `EnumTest.cpp`, `IntTest.cpp`, `BitwiseTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `TableTest.cpp`, `TopLevelTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `HashTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`, `ParallelTest.cpp`, `DoubleTest.cpp` or `Array2DTest.cpp` (their helpers are in `Compile.h`); IR or errors in `tests/lit/fminus/` |
 | 9 | `examples/` | a program that uses it, and a line in `tests/lit/fminus/examples.test` that runs it |
 | 10 | `editors/vscode/syntaxes/fminus.tmLanguage.json` | a new keyword, type or builtin, so VSCode highlights it (its README says where) |
 | 11 | `README.md` | the language table, and the deviations from C if any |
@@ -6273,6 +6274,198 @@ same kind of gap as LLVM's `x * 1.0` to `x`, which leaves a subnormal `x` that a
   results and refusal, an executable's `main` of a double and a float, its entry, and `--emit obj`;
   `double-errors.fm`: each error once, and `poly double`.
 
+## Recipe 34: 2-D arrays, C's arrays of arrays
+
+*In the compiler. Code: `Type::rowKind` and `rowCount`, `pointerTo`, `arrayOf`, `pointee`, `hasRows`, `elementOf` and
+`samePointee` (`src/frontend/Ast.h`), `Brace`, `DeclStmt::rowSize` and `braces`, `Field::rowSize` and `SizeofExpr`'s
+sizes (`Ast.h`); `typeName`, `declared` and `list` (`Ast.cpp`); `array_sizes`, `initializer_list`, `initializers`,
+`initializer`, `declaredName`, `setSizes`, `setList` and `append`, the parameter's rule and `sizeof`'s (`Parser.y`);
+`checkType` (`src/ir/Types.cpp`); `sized`, `arraySize`, `declaredArray`, `floatsLike` and `defineConstant`
+(`Constants.cpp`); `element`, `lvalue`, `placeList`, `elementAt`, `initializeArray`, `declareConstArray`, `tableOf` and
+`pointerArithmetic` (`Memory.cpp`); `declareVariable` (`Statements.cpp`); `layOut` (`Modules.cpp`); `lowerSizeof` and
+`lowerConditional` (`Expressions.cpp`); `Module::Field::element` and `extents` (`include/fminus/FMinus.h`,
+`src/api/FMinus.cpp`). Tests: `tests/unit/Array2DTest.cpp` (`[array2d]`), `BoundsCheckTest.cpp`, `FrontendTest.cpp`,
+`tests/library/Array2DTest.cpp`, and `tests/lit/fminus/array2d.fm` and `array2d-errors.fm`.*
+
+A bank of wavetables is four tables of 256 samples; a reverb's delay network is eight lines of 2048; a mixer's gains
+are a matrix. Recipe 12's arrays are one dimension deep, so a program wrote either `float bank[4 * 256]` and indexed it
+as `bank[t * 256 + i]`, or a module of one row, `module Row { float v[256]; }; Row bank[4];`, and `bank[t].v[i]`.
+Both work, and both hide the shape: the bounds checks see one array of 1024 floats, a host sees 1024 floats, and a
+reader sees arithmetic. C's answer is an array of arrays, and this recipe adds it: `float bank[4][256];`, rows side by
+side, `bank[t][i]` an element and `bank[t]` a row, a `float*` wherever one goes.
+
+### The type: a row beside the element
+
+C's `float[4][256]` is an array of 4 `float[256]`s, and its name stands for a pointer to its first row, a
+`float (*)[256]`. A `Type` is a value: a kind, and for an array or a pointer the kind of its elements (`pointee`), with
+a module or an enumeration beside it. Making it nest, an element that is a `Type` of its own, would make every type a
+tree and every comparison a walk, for arrays that go two levels deep. So a row is described where an element's kind is:
+`pointee` is `Kind::Array`, and two fields say what the row is.
+
+```cpp
+        Kind rowKind = Kind::Void;   // when the pointee is a row (Kind::Array): what the row's elements are
+        int rowCount = 0;            // and how many it has (0 in the syntax tree, as `count`)
+```
+
+`arrayOf(arrayOf(float, 256), 4)` is `float[4][256]`: an array of 4, its pointee `Kind::Array`, its rows of 256
+floats. `pointerTo(float[256])` is the pointer its name stands for, `float (*)[256]`. `pointee()` of either gives the
+row back, an array again, so everything that asks "what is an element of this" gets the row, and the row's own
+`pointee()` is a float. `elementOf` goes straight to the float, and `hasRows` says whether a type has rows. `==` and
+`samePointee` compare the row too, so `float (*)[256]` is not `float (*)[16]`.
+
+The choice pays for itself where nothing was written. Every rule that tests a pointer's pointee (`pointee ==
+Kind::Module` for `p->y`, `canPointTo(pointee)`, `pointee == kind` for `poly_load`'s float pointer, `samePointee` for
+an assignment) sees `Kind::Array`, which none of them takes, so a pointer to rows is refused everywhere a float pointer
+or a module pointer goes, in the words those rules already had: `float* p = grid;` is "incompatible pointer types
+initializing 'float *' with an expression of type 'float (*)[16]'", clang's. The places that take a row say so:
+`element()`, which gives the row an index reaches, and `pointerArithmetic`, which moves a pointer to rows by rows.
+
+### A row decays, and its elements are indexed
+
+Nothing new lowers `grid[i][j]`. `grid` is read as any array is (`read()`, Memory.cpp): a pointer to its first
+element, which is now its first row. `grid[i]` is `element()` on that pointer: a GEP of the row type, `[16 x float]`,
+by `i`, and an lvalue of the row's type, an array. Reading an array decays it, so the row stands for a pointer to its
+first float, and `[j]` is a float's element:
+
+```cpp
+        const bool row = ast::isArray(type);   // a pointer to rows: the element is a row
+        if (!ast::canPointTo(type.kind) && !row)
+            return std::nullopt;
+```
+
+```llvm
+; float g[2][3]; ... g[r][c]   (fminus -O0)
+  %arraydecay = getelementptr inbounds [2 x [3 x float]], ptr %g, i64 0, i64 0
+  %arrayidx = getelementptr inbounds [3 x float], ptr %arraydecay, i64 %idxprom
+  %arraydecay4 = getelementptr inbounds [3 x float], ptr %arrayidx, i64 0, i64 0
+  %arrayidx8 = getelementptr inbounds float, ptr %arraydecay4, i64 %idxprom7
+```
+
+InstCombine folds the four into one address, and the loop vectoriser sees what it sees for a 1-D array: a loop over a
+row's floats, at a constant stride. `for (v ...) for (i ...) gain[v][i] *= k;` over a `float gain[8][64]` field
+vectorises its inner loop at the target's width, as `for (i ...) flat[i] *= k;` does over a `float flat[512]`.
+
+The rest follows from decay. `grid[i]` goes wherever a `float*` does (a parameter, `poly_load(grid[i] + j)`,
+`float* row = grid[i];`); `*grid` is the first row, `grid + 2` the third, and `(grid + 2) - grid` is 2. A row is no
+lvalue to store to ("array type 'float[16]' is not assignable"), and an element of a const table names its variable
+when it is assigned (`lvalue` looks through `t[i]` to `t`: "cannot assign to variable 't' with const-qualified type
+'const float[2][3]'"). A module's field, a constant of the top level, a local, a const table and an array a parallel
+region captures are arrays as before, so each of them may be a 2-D array too; so is an array of modules,
+`Voice voices[2][8];`, whose `voices[i][j].tick()` is a method's call on a module, and whose row, `voices[i]`, is a
+`Voice*`.
+
+### What a program cannot have: a pointer to rows
+
+No variable, field or parameter holds a `float (*)[16]`. C writes one `float (*p)[16]`, which FMinus's declarators do
+not parse (they have one `*`, before the name), and `&grid[i]` is refused as `&` of any array is ("FMinus has pointers
+to ..., not to 'float[16]'"). A parameter declared as a 2-D array would be one too: C's `void f(float g[4][16])` takes a
+`float (*)[16]`. The parser refuses it ("FMinus has no parameters of 2-D arrays, which would be pointers to rows: pass
+a row (a float*), or the module that holds the array"), for a reason of its own: a parameter's type is fixed in the
+first pass (`declare`, Functions.cpp), before the file's enumerations are declared, and a row's size, `[COLS]`, is an
+integer constant expression of them. A function takes a row, or the module whose method reaches the array by name.
+
+### Sizes, and `sizeof` of an array type
+
+A declarator takes one or two sizes (`array_sizes`): `[4][16]`, the rows' last, in `DeclStmt::rowSize` (and
+`Field::rowSize`), as written. A third is "FMinus's arrays have at most two dimensions". `sized` (Constants.cpp) works
+the row's size out first (`arraySize`, the integer constant expression's rules), since C does not let `[]` leave it out
+("array has incomplete element type 'float[]'"), and then the count of rows: written, or as many as the list starts.
+The elements in all, rows times their size, are at most 2^30, as a 1-D array's are.
+
+`sizeof` takes an array type now, C's abstract declarator: `sizeof(float[4][16])` is 256, `sizeof(int[N])` four times
+N. Its sizes are expressions too (`SizeofExpr::size` and `rowSize`), so `lowerSizeof` sizes the type as a declaration's.
+`sizeof(float[])` is C's incomplete type. FMinus still has no `sizeof` of an expression (Where to go next).
+
+### Initialiser lists: C's placement
+
+A 2-D array's list may brace its rows, `{{1, 2}, {3}}`, or not, `{1, 2, 3}`, or mix the two, and C says where each
+value goes: a braced list starts a row, from the row's first element, and its values fill that row; a value outside a
+brace goes to the next element, crossing into the next row as it needs (C's brace elision); after a braced row, the next
+value starts the next row. So `float g[3][3] = {{1}, 2, 3, 4, {5}};` is rows `1 0 0`, `2 3 4` and `5 0 0`.
+
+The tree keeps a list as its values in order (`DeclStmt::list`, as before), and the braces among them beside it
+(`ast::Brace`: where its `{` is, which values it holds, how deep it is). Recipe 12's code reads `list` as it always
+did, and a 1-D array's list has no braces. The grammar builds both bottom up: a value is an item, and a braced list is
+an item whose values move into the list around it, its brace first, one level deeper than its own braces:
+
+```yacc
+initializer
+    : expr                                  { $$.items.push_back($1); }
+    | initializer_list                      {
+                                                InitList list = $1;
+                                                $$.braces.push_back(ast::Brace{at(@1), 0, list.items.size(), 1});
+                                                for (ast::Brace& brace : list.braces)
+                                                    ++brace.depth;
+                                                append($$, std::move(list));
+                                            }
+    ;
+```
+
+`placeList` (Memory.cpp) then places the values as C does, for every array, a 1-D one's too: each value and the element
+it goes to, counted from the first, row by row, and how far the list reaches (what sizes `[]`). Where C only warns,
+FMinus refuses, in clang's words, at the value or the brace: an excess value ("excess elements in array initializer",
+at the first value too many, clang's place, which recipe 12 put at the declaration), and a brace around one element
+("braces around scalar initializer": a 1-D array's, one inside a row, or one that would start mid-row, where C would
+take it as one element's).
+`initializeArray`, `declareConstArray` and `defineConstant` store each value at its element (`elementAt`: a GEP of
+`0, row, column`).
+
+A const table of constants is stored once, as recipe 26's are, row by row: `tableOf` makes each row a table of its own
+(`tableContents`, clang's shapes), then the rows a table of rows. When a row has eight zeros or more at its end it is a
+struct, as a 1-D table's is, and the rows go side by side in a packed struct instead, the rows after the last one given
+a single `zeroinitializer`. The bytes are the array's either way: a row's size is a multiple of its elements'
+alignment, so no padding comes between rows.
+
+```llvm
+@kGrid = private constant [2 x [3 x float]] [[3 x float] [float 1.0, float 2.0, float 3.0], [3 x float] [float 4.0, float 0.0, float 0.0]]
+@sparse = private constant <{ [1 x [4 x i32]], [15 x [4 x i32]] }> <{ [1 x [4 x i32]] [[4 x i32] [i32 1, i32 0, i32 0, i32 0]], [15 x [4 x i32]] zeroinitializer }>
+```
+
+### Bounds checks, a dimension at a time
+
+Recipe 30 checks an access against the extent its pointer carries, made where an array decays. A 2-D array decays
+twice, so it is checked twice: `grid[i]` against the rows (`index 4 out of bounds for 'grid' of type 'float[4][16]'`),
+and `grid[i][j]` against the row (`index 16 out of bounds for 'grid[i]' of type 'float[16]'`), each named as the source
+names it (`spelled`), so the message says which dimension. That is UBSan's `-fsanitize=array-bounds`, which checks
+each subscript of a C array of arrays against its own bound: `grid[0][16]` is out of bounds though `grid[1][0]` lies
+there. A row is checked as an element wherever it is used, even to make a pointer of it (`float* end = grid[4];` is
+out), and a pointer formed from a row may point one past the row's end, no further. A loop whose conditions keep both
+indexes in their bounds has no check, and vectorises as it does without them.
+
+### Hosts
+
+A module's 2-D field is `"float[4][16]"` in `Module::Field::type`, and two new members spell its shape out:
+`element`, `"float"`, and `extents`, `{4, 16}`, outermost first (`{16}` for a `"float[16]"`, empty for a field that is
+no array). The rows lie side by side, as C++'s `float[4][16]` at the field's offset, so element `[i][j]` is at
+`offset + (i * 16 + j) * sizeof(float)`. A host that counted a field's elements by multiplying the numbers in its type's
+brackets counts 64, and reads them in order, rows one after another.
+
+### What it changes for programs and hosts
+
+- **Programs** without 2-D arrays compile to the same IR. A list's excess value is reported where it is, not at the
+  declaration, and a brace inside a 1-D array's list is "braces around scalar initializer", not a syntax error.
+- **Messages** name the new types as clang does: `float[4][16]`, `float (*)[16]`.
+- **Hosts** get `Module::Field::element` and `extents`, and fields typed `"float[4][16]"`.
+
+### Tests
+
+- `tests/unit/Array2DTest.cpp`: 2-D locals zeroed and indexed, a row passed as a `float*` and moved as one, the rows
+  side by side, the name a pointer to rows (`*(g + 2)`, `(g + 2) - g`, a comparison), a `?:` of rows, `sizeof` of array
+  types, a fresh array each declaration; a module's 2-D fields of modules, doubles (a constant C's double), `float4`s
+  and ints, copied with their module, and its `sizeof`; lists braced, flat, mixed, `{}` rows and `[]` sized by a list;
+  the tables' shapes in the IR (a plain table of rows, trailing zero rows, a row a struct, a local table, a local filled
+  at run time) and their values; loops over both dimensions vectorised; a `parallel for` over rows, a local captured,
+  a switch's jump past one; and the errors above, in clang's words.
+- `BoundsCheckTest.cpp`: each dimension checked at every level, `'gain'` and `'gain[v]'` in the messages, a row checked
+  as an element, a pointer formed from a row.
+- `FrontendTest.cpp`: the dumps of 2-D declarations, fields, braced lists and `sizeof(float[4][16])`; a third dimension,
+  a 2-D parameter and `sizeof(float*[2])` refused.
+- `tests/library/Array2DTest.cpp`: `module()`'s shape of 2-D fields (type, element, extents, offset, size) and of the
+  others, the host reading and writing rows, voices sharing one bank of tables; 2-D arrays under the loop budget,
+  bounds checks (`BoundsViolation`'s array, type and extent for each dimension) and `#if`.
+- `tests/lit/fminus/array2d.fm`: the IR of a 2-D local, its list and a table, the vectorised loop, `--run` and
+  `--bounds-check`'s messages for each dimension, the dump; `array2d-errors.fm`: each error once, and the parser's.
+
 ## Pitfalls
 
 Each of these was hit while writing the language or its recipes. [simd.md](simd.md) has the vector ones.
@@ -6381,6 +6574,9 @@ Each of these was hit while writing the language or its recipes. [simd.md](simd.
 | `-Wswitch` warns on `switch (mode + 0)`, or on a `?:` of two enumerated values, where clang does not | a result type copied from an operand keeps `Type::enumeration`, which `==` ignores | give a promoted result a fresh type (`arithmeticOf` does), or clear `enumeration` |
 | A test passes under `fminus-tests` and fails under ctest with "Unrecognised token" | ctest runs each Catch2 test case by its name, and Catch2 reads a name that starts with `-` (`-Wswitch: ...`) as an option | start the name with a word (`clang's -Wswitch: ...`) |
 | The names after an enumeration's list cannot use its tag (`enum E { A } e = (enum E)0;` is a forward reference) | the rule that declares the tag reduces after the declarators | reduce the enumeration at its closing brace (`enum_head`), and the declarators after it |
+| "invalid application of 'sizeof' to an incomplete type 'fminus::ast::Expr'" in `unique_ptr`, from every file that includes `Ast.h` | a node declared before `Expr` is complete (`SizeofExpr`) gave its `ExprPtr` a default member initializer, `= nullptr`, which instantiates the deleter there | leave those without one (an `ExprPtr` starts null anyway); a node after `Expr` (`DeclStmt`, `Field`) may have it |
+| `-Werror,-Wmissing-field-initializers` in `Parser.tab.cpp` after a node gains a field | an action's aggregate initialiser (`ast::SizeofExpr{type}`) leaves the new one out | name every field in the action (`ast::SizeofExpr{type, nullptr, nullptr}`) |
+| A test's runaway loop returns at once, and the loop budget is never exceeded | a loop with no effect the optimiser keeps (a store LICM sinks, a counter nothing reads) may be assumed to end (`llvm.loop.mustprogress`, recipe 19), and is deleted | give the loop a value the function returns, which it cannot compute without running it |
 
 ## Where to go next
 
@@ -6406,10 +6602,11 @@ not the types: `udiv` and `urem` beside recipe 10's `sdiv` and `srem`, unsigned 
 definition, which is what a hash or a generator written in FMinus needs (recipe 25 made `hash` a builtin for want of
 it).
 
-**More arrays, and more pointers.** Recipe 12's arrays are one dimension deep. An array of arrays, `float m[4][4]`, is
-an `[4 x [4 x float]]` whose rows decay in turn; it needs `Type` to nest (its element a type, not a kind), and so do
-pointers to pointers and arrays of pointers. `sizeof` of an array type (`sizeof(float[16])`) wants the grammar's
-abstract declarators. `bool*` and arrays of `bool` need `i8` in
+**More arrays, and more pointers.** Recipe 34's arrays are two dimensions deep, a row described beside its element's
+kind (`rowKind`, `rowCount`). A third dimension, pointers to pointers and arrays of pointers need `Type` to nest (its
+element a type, not a kind), and so would a parameter of a 2-D array, a pointer to rows: its row's size is an integer
+constant expression, so the function's types would be worked out where the function is, not in the first pass, or the
+pass would wait for the file's enumerations. `bool*` and arrays of `bool` need `i8` in
 memory (recipe 10 says why), and null C's `0` as a pointer constant. Casts between pointer types (`(float4*)samples`, a
 float buffer seen as frames; `free((void*)table)`, a `const` pointer freed) are C's and change nothing in the IR, but a
 `float4*` cast from a `float*` must still meet a `float4`'s alignment. Pointers to pointers are a `ptr` to a `ptr`, once

@@ -146,8 +146,11 @@ subset of C's, is written out as EBNF in the file's header comment.
   the pointer's own (`float* const p`). That is also why a block item is a *list* of statements. An array's size is
   an expression, `"[" expr? "]"` (`array_size`), kept as written in the `DeclStmt` (or `Field`, or `Param`), whose
   array type the parser leaves with a count of 0: the size is an integer constant expression, which only the code
-  generator can work out, since only it knows the enumeration constants' values. At the top level, a declaration
-  declares constants, `Program::constants`, each with how many functions, modules and enumerations come before it.
+  generator can work out, since only it knows the enumeration constants' values. A 2-D array has two
+  (`array_sizes`), the rows' in `rowSize`, and its list may brace its rows: the list keeps its values in order, and
+  the braces among them beside it (`ast::Brace`), which the code generator places as C does (`placeList`). At the top
+  level, a declaration declares constants, `Program::constants`, each with how many functions, modules and
+  enumerations come before it.
 - **Labels and enumerations.** `case 1:` and `default:` are C23's labels: a block item of their own (so a declaration
   may follow one), or, where a statement is expected, the start of a labelled statement (`statement: label statement
   | unlabeled`). An enumeration is declared at the top level, in a module or in a block, with the names of its type
@@ -202,9 +205,12 @@ on it without the code generator.
   `poly bool`, whose width the target decides, `Pointer`, `Module` and `Array`. `Type::Float` and the rest name the
   types that are only a kind, and a `Kind` converts to its `Type`, so `type == Type::Float` reads as it says;
   `Type::pointerTo(Kind::Float, true)` is `const float*`, `Type::arrayOf(Kind::Float, 16)` is `float[16]` (in the
-  tree an array's count is 0, its declaration's size the expression that gives it). Helpers
-  answer the questions the rules ask: `lanes`, `isVector`, `isMask`, `isPoly`, `isPointer`, `isModule`, `isArray`,
-  `pointee`, `samePointee`, `canPointTo`, `isArithmetic`, `vectorOf`, `maskOf`, `arithmeticOf` ([simd.md](simd.md)).
+  tree an array's count is 0, its declaration's size the expression that gives it). A 2-D array's elements are rows:
+  its pointee is `Array`, and `rowKind` and `rowCount` say what a row is, so `float[4][16]` is an array of 4 rows of
+  16 floats, and the pointer its name stands for, `float (*)[16]`, a pointer to rows. Helpers answer the questions the
+  rules ask: `lanes`, `isVector`, `isMask`, `isPoly`, `isPointer`, `isModule`, `isArray`, `pointee` (a row, for a 2-D
+  array's), `hasRows`, `elementOf`, `samePointee`, `canPointTo`, `isArithmetic`, `vectorOf`, `maskOf`, `arithmeticOf`
+  ([simd.md](simd.md)).
 - **Modules.** A `Module` is a name, its `Field`s (a name and a type each; a parameter's, `param float cutoff;`, is
   marked, with its attributes) and its methods' names. Its methods are `Function`s of the program, named
   `OnePole::tick`, with `module` set and a first parameter, `this`, that the parser adds. The program holds its modules
@@ -252,7 +258,7 @@ they lower:
 | `Math.cpp` | `sinf`, `cosf`, `tanf`, `expf`, `tanhf` and `logf` in the vector and libm math modes: calls of the vector mode's math intrinsics (`fminus.sin.f32`, `fminus.sin.v2f32`, `fminus.sin.v4f32`) or the libm mode's runtime function, a float's or four lanes' (`lowerMath`), declared with their attributes and vector variant (`mathFunction`), and the names the runtime keeps for them, which a program that calls one may not declare (`checkMathNames`) |
 | `Hash.cpp` | `hash` and `randf`: lowbias32's integer instructions inline (`mixBits`), and the hash's top 24 bits over 2^23 (`lowerHash`) |
 | `Vectors.cpp` | vector literals in both forms, swizzles, `?:` with a vector condition |
-| `Memory.cpp` | lvalues (`lvalue`, `read`, `write`): variables (a top-level constant too), elements (`p[i]`, `*p`), fields, components of any of them; arrays (a name that stands for a pointer, a list; a `const` one of constants a private constant global, `declareConstArray`, its contents in clang's shapes, `tableContents`); `&x`; pointer arithmetic |
+| `Memory.cpp` | lvalues (`lvalue`, `read`, `write`): variables (a top-level constant too), elements (`p[i]`, `*p`; a 2-D array's row, which decays in turn), fields, components of any of them; arrays (a name that stands for a pointer, a list placed as C places it, `placeList`; a `const` one of constants a private constant global, `declareConstArray`, its contents in clang's shapes, `tableContents` and, row by row, `tableOf`); `&x`; pointer arithmetic |
 | `Modules.cpp` | each module's struct type (`prepareModules`, opaque; `layOut`, its body, where the module is), fields (`field`, `fieldType`), `this`, method calls (`callMethod`), copies; parameters, read by their binding (`lowerParameter`, `atEntry`), a stream's null test, value, base and stride (a flat call, read with no branch; the stride's `opaqueUnit`), their domains for knob versioning (`tagDomain`), and their streams' alias scope (`scopeStreams`) |
 | `Effects.cpp` | `[[clang::nonallocating]]` and `[[clang::nonblocking]]`: each function's calls (recorded by `lowerCall`), checked once every body is lowered |
 | `Parallel.cpp` | `parallel for` and `parallel { }`: what would race refused (`Walker`, `checkParallelFor`, `checkParallelBlock`, and whether a method changes its module, `changesModule`), each region's body a function of the runtime's task type (`beginRegion`, `endRegion`), and what the body uses of the function around it captured into a context, by value or by reference (`capture`, `captured`, `capturedParameter`, `outerValue`; a const table, a constant of the module, is read where it is) |
