@@ -91,8 +91,10 @@ TEST_CASE("functions compute what they say", "[codegen]")
   flat streams), `[tbaa]`, `[zeroinit]`, `[attributes]` and `[progress]` (the runtime's and libm's attributes, and loop
   progress), `[denormals]`, `[parallel]` (parallel regions, and `[runtime]` among them for the pool on its own),
   `[ir]` (`Program::Options::keepIr`'s texts), `[budget]` (the loop budget: `LoopBudgetTest.cpp`, in the unit tests and
-  the library's), `[bounds]` (bounds checks: `BoundsCheckTest.cpp`, in both too), `[circuit]` (the circuit compiler:
-  `CircuitTest.cpp` its netlists,
+  the library's), `[bounds]` (bounds checks: `BoundsCheckTest.cpp`, in both too), `[include]` (`#include`:
+  `IncludeTest.cpp`, in both), `[conditional]` (`#if`, `#ifdef` and macros, with a host's defines:
+  `ConditionalTest.cpp`, in both, whose `parsed` takes the defines and `condition` an `#if`'s expression),
+  `[circuit]` (the circuit compiler: `CircuitTest.cpp` its netlists,
   plans, equations (an OTA's against report §7.2's hand derivation; an inductor's, an E's and a G's stamps by hand, and
   RL and RLC responses as the bilinear map), the DC operating point by hand and its errors, the offset form (a biased
   netlist's module the unbiased one's), the diode forms (a string as one diode of n N, an asymmetric pair's K and law,

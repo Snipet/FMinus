@@ -38,7 +38,7 @@
             ]
         },
         "directives": {
-            "comment": "Lexer.l's directives, a line that starts with #: #include \"file\" and #pragma (ignored). FMinus has no other; C's are errors.",
+            "comment": "Lexer.l's directives, a line that starts with #: #include \"file\", #pragma (ignored), C's conditionals (#if, #ifdef, #ifndef, #elif, #elifdef, #elifndef, #else, #endif) and the macros they read (#define, #undef). FMinus has no other; C's are errors.",
             "patterns": [
                 {
                     "name": "meta.preprocessor.include.fminus",
@@ -58,9 +58,59 @@
                     }
                 },
                 {
+                    "name": "meta.preprocessor.conditional.fminus",
+                    "begin": "^\\s*(#)\\s*(if|elif)\\b",
+                    "beginCaptures": {
+                        "1": { "name": "punctuation.definition.directive.fminus" },
+                        "2": { "name": "keyword.control.directive.conditional.fminus" }
+                    },
+                    "end": "$",
+                    "patterns": [{ "include": "#directive-expression" }]
+                },
+                {
+                    "name": "meta.preprocessor.conditional.fminus",
+                    "match": "^\\s*(#)\\s*(ifdef|ifndef|elifdef|elifndef)\\b\\s*([A-Za-z_][A-Za-z0-9_]*)?",
+                    "captures": {
+                        "1": { "name": "punctuation.definition.directive.fminus" },
+                        "2": { "name": "keyword.control.directive.conditional.fminus" },
+                        "3": { "name": "entity.name.function.preprocessor.fminus" }
+                    }
+                },
+                {
+                    "name": "meta.preprocessor.conditional.fminus",
+                    "match": "^\\s*(#)\\s*(else|endif)\\b",
+                    "captures": {
+                        "1": { "name": "punctuation.definition.directive.fminus" },
+                        "2": { "name": "keyword.control.directive.conditional.fminus" }
+                    }
+                },
+                {
+                    "name": "meta.preprocessor.macro.fminus",
+                    "begin": "^\\s*(#)\\s*(define|undef)\\b\\s*([A-Za-z_][A-Za-z0-9_]*)?",
+                    "beginCaptures": {
+                        "1": { "name": "punctuation.definition.directive.fminus" },
+                        "2": { "name": "keyword.control.directive.define.fminus" },
+                        "3": { "name": "entity.name.function.preprocessor.fminus" }
+                    },
+                    "end": "$",
+                    "patterns": [{ "include": "#directive-expression" }]
+                },
+                {
                     "name": "invalid.illegal.directive.fminus",
                     "match": "^\\s*#\\s*\\w*"
                 }
+            ]
+        },
+        "directive-expression": {
+            "comment": "An #if's or #elif's expression, or a #define's value: defined, true and false, numbers, operators, comments and the macros' names.",
+            "patterns": [
+                { "include": "#comments" },
+                { "name": "keyword.control.directive.conditional.defined.fminus", "match": "\\bdefined\\b" },
+                { "include": "#constants" },
+                { "include": "#numbers" },
+                { "include": "#operators" },
+                { "include": "#punctuation" },
+                { "name": "entity.name.function.preprocessor.fminus", "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b" }
             ]
         },
         "lit-directive": {

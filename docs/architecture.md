@@ -94,6 +94,14 @@ Flex generates `Lexer.yy.cpp` and `Lexer.yy.hpp` into `build-*/src/generated/fro
   an `#include` of one of them reads nothing. Bison's positions carry the file (`api.filename.type` is
   `const SourceFile`, which holds its index in the `Diagnostics`; null is the program's own file), and the parser's
   `at()` turns a location into a `SourceLocation` with `sourceLocation` (`Scanner.h`). Recipe 21 has the details.
+- **Conditionals.** `#if`, `#ifdef`, `#ifndef`, `#elif`, `#else` and `#endif` (and C23's `#elifdef` and `#elifndef`)
+  choose the groups the scanner reads, on macros `#define` and `#undef` make and the host gives (`Frontend.h`'s
+  `Defines`, `Program::Options::defines`). `ScannerState::conditionals` is a stack of `Conditional`s, each ending in
+  its own file; a skipped group is the exclusive start condition `SKIPPED`, whose rules only count lines and read
+  comments and the conditionals' lines, so its text never reaches the parser. An `#if`'s expression is evaluated by
+  `Preprocessor.cpp`, C's integer constant expression of the preprocessor in 64-bit integers; a macro is read only
+  there and by `#ifdef` and `defined`, and its name in code is an error (`{IDENTIFIER}`'s check), so no text is
+  substituted before the parser reads it. Recipe 31 has the details.
 
 `Scanner.h` is the glue between the scanner and the parser:
 

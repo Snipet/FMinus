@@ -128,7 +128,8 @@ export function parseFlex(src, file) {
 			rules[r].action = rules[r + 1].action;
 		}
 	}
-	for (const r of rules) r.outcome = outcome(r.action);
+	const names = ['INITIAL', ...conditions.map((c) => c.name)];
+	for (const r of rules) r.outcome = outcome(r.action, names);
 	return { header, options, conditions, definitions, rules };
 }
 
@@ -172,10 +173,12 @@ function scanPattern(src, i, fail) {
 }
 
 /** What an action does, as the docs show it. A directive's rule reads an #include's file from a buffer of its own
- * (yy_scan_bytes); the end of the input's goes back to the file an #include interrupted (yy_switch_to_buffer). */
-function outcome(action) {
+ * (yy_scan_bytes); the end of the input's goes back to the file an #include interrupted (yy_switch_to_buffer). A BEGIN
+ * enters the start conditions (`names`: INITIAL and the declared ones) it names, one or, through ?:, either of two. */
+function outcome(action, names) {
 	const tokens = [...action.matchAll(/\bmake_([A-Za-z_][A-Za-z0-9_]*)\s*\(/g)].map((m) => m[1]);
-	const begin = action.match(/\bBEGIN\s*\(?\s*([A-Za-z_]\w*)/);
+	const argument = action.match(/\bBEGIN\s*\(([^;]*)\)\s*;/) ?? action.match(/\bBEGIN\s+([A-Za-z_]\w*)/);
+	const entered = argument ? [...argument[1].matchAll(/[A-Za-z_]\w*/g)].map((m) => m[0]).filter((w) => names.includes(w)) : [];
 	const thrown = action.match(/\bsyntax_error\s*\(([\s\S]*)\)\s*;/);
 	if (/\byy_scan_bytes\s*\(/.test(action)) return { kind: 'include' };
 	if (tokens.length) return { kind: 'tokens', tokens, resumes: /\byy_switch_to_buffer\s*\(/.test(action) };
@@ -183,6 +186,6 @@ function outcome(action) {
 		const literals = [...thrown[1].matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((m) => m[1].replace(/\\(.)/g, '$1'));
 		return { kind: 'error', message: literals.join('…') };
 	}
-	if (begin) return { kind: 'begin', condition: begin[1] };
+	if (entered.length) return { kind: 'begin', condition: entered.join(' or '), conditions: entered };
 	return { kind: 'skip' };
 }

@@ -27,7 +27,8 @@ removed where nothing reads the zeros. It tells LLVM C's strict-aliasing rule, t
 constant may be assumed to end, and what the runtime's functions do. Its math builtins give a float one result wherever
 it is computed, and a host may have subnormals flushed to zero, give a program a loop budget, so that a call that
 would loop for ever returns early instead of holding the audio thread, and compile it with bounds checks while it is
-written, so that an index outside its array stops the call and says where. `examples/plugin/` is a JUCE plugin whose DSP
+written, so that an index outside its array stops the call and says where. A program's instrumentation can sit in C's
+conditionals, `#ifdef DEBUG` ... `#endif`, compiled in when the host defines `DEBUG` and skipped, unread, when not. `examples/plugin/` is a JUCE plugin whose DSP
 is an FMinus program. The build, the dependencies and the toolchain's smoke tests are in place around it.
 
 Documentation: [docs/](docs/README.md). It covers the architecture, writing a program with `main`, a guide to
@@ -79,7 +80,8 @@ src/                    the fminus library: every .cpp is a source, every gramma
                         which the library holds, and the math builtins' functions, Math.cpp, on FMinus's math
                         kernels, MathKernels.h)
   frontend/             FMinus v0's front end: Lexer.l, Parser.y, Ast.h (the syntax tree), Diagnostics.h,
-                        Frontend.h (parse), Scanner.h (the glue between scanner and parser)
+                        Frontend.h (parse), Scanner.h (the glue between scanner and parser), Preprocessor.h (macros,
+                        and the expressions of #if)
   ir/                   the syntax tree to LLVM IR: CodeGen.h (ir::lower), Lowering.h (the code generator's class
                         and its parts' map), CodeGen.cpp (the passes), Types, Functions, Statements, Expressions,
                         Constants (integer constant expressions, array sizes, enumerations, the top level's
@@ -226,7 +228,7 @@ float half(float x) { x /= 2; return x; }
 | expressions | constants, names, calls, `( )`, unary `-` `+` `!` `~`, `++` and `--` (before or after), casts `(int)x` `(float)x` `(bool)x`, `* / %`, `+ -`, `<< >>`, `< <= > >=`, `== !=`, `&`, `^`, `\|` (the bitwise ones on `int`s), `&&`, `\|\|` (both short-circuit), `?:` (only the branch taken runs), and `= += -= *= /= %= &= \|= ^= <<= >>=` (right to left; an assignment's value is the one stored), with C's precedence; pointers' `p[i]`, `*p`, `&x`, `p + i`, `p - q` and comparisons; an array's `a[i]` (its name stands for a pointer to its first element); a module's fields `m.y` and `p->y`, its methods `m.tick(x)` and `p->tick(x)`, and `this`; `sizeof(type)`, an `int`; vector literals, OpenCL C's `(float4)(a, b, c, d)` and C's `(float4){a, b}` (the lanes left out are 0), and swizzles `v.wzyx`, `v.s0` |
 | constants | C's: floating ones are floats (`1.5`, `1.`, `.5`, `2e3`, `1.5e-3f`, hex floats `0x1.8p1`, `0x1p-3f`), integer ones ints (`2`, `010` in octal, `0x1F` in hex); `true` and `false`; enumeration constants, ints; integer constant expressions (a case's value, an enumerator's, an array's size) are C's, folded as FMinus computes |
 | comments | `// ...` and `/* ... */` |
-| directives | `#include "file"`, the file read where the line is, as in C, and once only (as if every file began with `#pragma once`), found where the host says: `fminus` looks beside the including file, then in `-I`'s directories; `#pragma`, ignored |
+| directives | `#include "file"`, the file read where the line is, as in C, and once only (as if every file began with `#pragma once`), found where the host says: `fminus` looks beside the including file, then in `-I`'s directories; C's conditionals, `#if`, `#ifdef`, `#ifndef`, `#elif`, `#else` and `#endif` (and C23's `#elifdef` and `#elifndef`), whose skipped groups are never scanned, on macros that `#define NAME value` and `#undef` make, or the host (`fminus -D NAME[=value]`), read in their conditions only; `#pragma`, ignored |
 | types | `float` (IEEE single precision), `int` (32 bits, signed: C's `/` and `%`, overflow undefined) and `bool` (C23's: 0 or 1, computed as an int; a number is `x != 0` as a bool); `void`, a function's result; pointers to `float`, `int`, `float2`, `float4`, `float8` and modules, `const` (`const float*`, read-only through it) and `restrict` (C99's promise that nothing else reaches it), and `void*` (an address with no type, which converts to and from any pointer); arrays of `float`, `int`, the float vectors and modules; modules, by name (`OnePole`), from their declaration on; `enum Wave`, an `int`, after its enumeration; `float2`, `float4`, `float8` (OpenCL C's vectors, lane by lane, scalars broadcast); `poly float` and `poly bool`, as many lanes as the machine's vectors ([docs/simd.md](docs/simd.md)) |
 | builtins | `fabsf sqrtf floorf fminf fmaxf` (LLVM intrinsics, exact) and `sinf cosf tanf expf logf tanhf` (by the math mode: the runtime's, with one result for a float wherever it is computed, by default), on floats and vectors; `malloc calloc free` (C's, with `int` sizes); `reduce_add reduce_min reduce_max` (a vector to a float); `poly_lanes` (an int) and `poly_index`; `poly_load poly_store` (a poly float from or to a `float*`, with an optional mask); the FFT: `fft_create(n)` and `fft_create_complex(n)` (a plan, a `void*`; they allocate), `fft_forward(plan, in, out)` and `fft_inverse(plan, in, out)` (real when one side is floats, complex when both are `float2`s; unnormalised), `fft_destroy(plan)`; `hash(n)` (an `int` mixed into a well-spread one) and `randf(n)` (a float uniform in [-1, 1) from it: white noise, `out[i] = randf(start + i)`) |
 
@@ -366,11 +368,17 @@ Where FMinus differs from C, it is on purpose:
   and a module's that a copy of another overwrites. `-O0` keeps every one ([docs/extending.md](docs/extending.md),
   recipe 18).
 - **A non-void function that can reach its end is an error**, as in C++. Clang only warns in C.
-- **The preprocessor is `#include "file"` alone**: no macros, no `#if`, and no `#include <...>`, as FMinus has no
-  system headers. They are errors, and `#pragma` is ignored, as C ignores the pragmas it doesn't know. Each file is
+- **The preprocessor is `#include "file"`, the conditionals and macros that only they read.** A macro, the program's
+  (`#define LEVEL 2`) or the host's, is read where C reads it as a condition, in `#if`'s and `#elif`'s expressions and
+  by `#ifdef`, `#ifndef` and `defined`: its name in code is an error, never a substitution (for a constant, an `enum`
+  or a `const`), so a program FMinus compiles means the same in C, and nothing is rewritten before the parser reads
+  it. A function-like macro, a macro named as a keyword, `#error`, `#line` and `#include <...>` (FMinus has no system
+  headers) are errors, and `#pragma` is ignored, as C ignores the pragmas it doesn't know. An `#if`'s arithmetic is
+  64-bit and defined for every operand, as FMinus's code is (a shift takes its count's low six bits). Each file is
   read once, as if it began with `#pragma once`: two files that both include a third (a module both use) read it the
-  first time only, where C would define everything in it twice. A directive's errors are clang's, `extra tokens at end
-  of #include directive` too, which clang only warns of ([docs/extending.md](docs/extending.md), recipe 21).
+  first time only, where C would define everything in it twice. A directive is one line, a `/*` comment in it ending
+  there. A directive's errors are clang's, `extra tokens at end of #endif directive` and a macro redefined with
+  another value too, which clang only warns of ([docs/extending.md](docs/extending.md), recipes 21 and 31).
 - **Arithmetic is IEEE single precision**, with no contraction into fused multiply-adds (clang's
   `-ffp-contract=off`), and subnormals as IEEE has them unless the host flushes them (above).
 
@@ -424,6 +432,7 @@ build-dev/bin/fminus synth.fm --math libm          # sinf, cosf, ... as libm's (
 build-dev/bin/fminus lp.fm --denormals=flush       # subnormals flushed to zero: folded so, and set by entry points
 build-dev/bin/fminus lp.fm --no-strict-aliasing    # no TBAA: for a program that reads memory as another type
 build-dev/bin/fminus synth.fm -I lib               # #include "name": beside the including file, then in lib/
+build-dev/bin/fminus synth.fm -D DEBUG -D LEVEL=2  # macros for #if and #ifdef, as clang's -D (-D DEBUG is 1)
 build-dev/bin/fminus voices.fm --threads 4         # a parallel region on 4 threads at most (0: every core; 1: alone)
 build-dev/bin/fminus osc.fm --run f 1 --loop-budget 1000000   # the loop budget: a call that would loop for ever
                                                    # returns early (status 3); stderr says what it took
@@ -514,8 +523,8 @@ gain(in, out, n, 0.5f);                                       // one call a bloc
   subnormals are kept or flushed to zero (`Denormals::Preserve` or `Flush`), `threads` the most threads a parallel
   region runs on (0, the default, is every core; 1 runs each on the calling thread alone), `keepIr` which of the
   program's LLVM IR to keep as text (below), `loopBudget` whether its loops count against a budget (`false`;
-  below), and `boundsCheck` whether its accesses are checked against their arrays (`false`; below). The header says
-  what each costs.
+  below), `boundsCheck` whether its accesses are checked against their arrays (`false`; below), and `defines` the
+  macros for its `#if`s (below). The header says what each costs.
 - **Threads.** `compile()` and the first look-up of each function run LLVM's optimiser and code generator on the
   calling thread: they take milliseconds and allocate. Different programs may compile on different threads at once.
   In a plugin, compile off the audio thread and hand the pointer over (below). A program's `parallel for` and
@@ -565,6 +574,17 @@ gain(in, out, n, 0.5f);                                       // one call a bloc
   for bit; a check costs a compare and a branch where the optimiser cannot prove it, and a loop that updates a field
   may then store it every iteration (the measured ones a third to two fifths slower: recipe 30). Off by default, and
   without it the code is the same, byte for byte.
+- **Macros.** `Options::defines` defines macros before the program's first line, as C's `-D` does: each name's value,
+  `"1"` for a flag as `-D DEBUG` gives it, `""` for none. A program reads them in `#if`, `#elif`, `#ifdef` and
+  `#ifndef`, so a development build compiles in the instrumentation that sits in `#ifdef DEBUG` groups (a field, a
+  statement, a method, an `#include`), and the build that plays skips those lines unread: they cost nothing, there or
+  in the compile, and a module's layout may differ between the two (read `module()` for each). A program's
+  `#ifndef LEVEL` / `#define LEVEL 2` / `#endif` is a default the host's value overrides. A name that is no
+  identifier, `defined` or a keyword fails `compile()`, and so does a host's macro whose name the program uses in code:
+  name them as C names its own (`DEBUG`, `HOST_VERSION`). A host that reads the program's text itself (an editor's
+  language service, or its own `#pragma` lines) sees every directive as a line that starts with `#`, and the lines of
+  the groups FMinus skips too: it reads both branches, or skips the groups its own defines skip
+  ([docs/extending.md](docs/extending.md), recipe 31).
 - **Lifetime.** A function pointer is valid while its `Program` lives.
 
 `include/fminus/Circuit.h` is the circuit compiler's: `fminus::circuit::generate(netlist, "pedal.cir")` turns a

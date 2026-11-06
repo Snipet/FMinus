@@ -1,7 +1,7 @@
 # Extending the compiler
 
 How to add to FMinus. First, how a change moves through the compiler, and the few rules that keep that easy. Then
-twenty-seven worked recipes. Eleven grow the C subset from a one-line builtin to C's control flow, a custom LLVM pass,
+twenty-eight worked recipes. Eleven grow the C subset from a one-line builtin to C's control flow, a custom LLVM pass,
 `int`, `void` and pointers, the heap with the attributes that keep it off the audio thread, arrays and modules, FMinus's
 classes, an FFT from a C library built into the runtime, and parameters, the values a plugin's host sets. Six more are
 about the compiler rather than the language: math that gives a float one result wherever it is computed, knob versioning
@@ -12,8 +12,9 @@ own, the same in every lane and on every target, and those kernels inline. The l
 C's bitwise operators with a hash and white noise from a counter, constant tables stored once, `switch` and
 enumerations, and constants at the top level with arrays sized by constant expressions. The last two are for the host:
 a loop budget, which stops a program that would loop for ever before it holds the audio thread, and bounds checks for
-development builds, which stop a call before an index leaves its array. Then the pitfalls those recipes ran into, and
-design notes for what comes next. [simd.md](simd.md) has recipes 7 to 9, for vectors.
+development builds, which stop a call before an index leaves its array. The last returns to C's preprocessor: its
+conditionals, `#if` and `#ifdef`, which compile a program's instrumentation in or out. Then the pitfalls those recipes
+ran into, and design notes for what comes next. [simd.md](simd.md) has recipes 7 to 9, for vectors.
 
 Recipes 1 to 4 are in the compiler now (`tanhf` and `%`; `bool` and its operators; `if`, `while` and `for`), and so are
 simd.md's 7 to 9, recipe 10 (`int`, `void` and pointers), recipe 11 (the heap), recipe 12 (arrays and modules), recipe
@@ -21,8 +22,8 @@ simd.md's 7 to 9, recipe 10 (`int`, `void` and pointers), recipe 11 (the heap), 
 runtime's attributes and loop progress, denormal control), recipe 21 (`#include`), recipe 22 (`parallel for` and
 `parallel { }`), recipes 23 and 24 (math kernels of FMinus's own, and inline), recipe 25 (the bitwise operators,
 `hash` and `randf`), recipe 26 (constant tables), recipe 27 (`switch` and `enum`), recipe 28 (constants at the top
-level, and sizes of constant expressions), recipe 29 (the loop budget) and recipe 30 (bounds checks), so their sections
-describe how the code you have got there: read a section beside the files it names.
+level, and sizes of constant expressions), recipe 29 (the loop budget), recipe 30 (bounds checks) and recipe 31 (`#if`
+and `#ifdef`), so their sections describe how the code you have got there: read a section beside the files it names.
 Recipes 5 and 6, a runtime function and a pass, are not part of the language; they live in [recipes/](recipes/) as a
 patch, so you can apply them to see them work. None of these are sketches: each was applied to this repository, built
 with `-Werror`, and tested in the dev and asan presets, every test passing. [architecture.md](architecture.md) describes
@@ -3607,8 +3608,9 @@ Tests: `tests/unit/IncludeTest.cpp` (`[include]`), `tests/library/IncludeTest.cp
 
 A module worth reusing, a one-pole or an oscillator, wants a file of its own, and C's way to use one is the
 preprocessor's `#include "file"`: the file's text is read in place of the line. FMinus does what C does there and no
-more: no macros and no conditional compilation, which a language with modules, `const` and parameters needs less than
-C does. Two choices are its own, both because FMinus has no headers:
+more. (It had no macros and no conditional compilation then, which a language with modules, `const` and parameters
+needs less than C does; recipe 31 added the conditionals, with macros that only they read.) Two choices are its own,
+both because FMinus has no headers:
 
 - **Each file is read once**, as if every file began with `#pragma once`. In C, a header without a guard included
   twice declares everything twice: harmless for prototypes, an error for definitions. FMinus's files hold definitions
@@ -3625,7 +3627,8 @@ C does. Two choices are its own, both because FMinus has no headers:
 | `#include <file>` | an error: FMinus has no system headers | |
 | `#pragma ...` | nothing, as C ignores the pragmas it doesn't know; `#pragma once` is what every file does anyway | |
 | `#` | nothing: C's null directive | |
-| `#define`, `#if`, `#ifdef`, ... | an error: `#define is not supported: FMinus's directives are #include and #pragma` | |
+| `#define`, `#if`, `#ifdef`, ... | an error then; recipe 31's now | |
+| `#error`, `#line`, `#warning`, `#embed` | an error: `#error is not supported: FMinus's directives are #include, #pragma, #define, #undef and the conditionals (...)` | |
 | any other `#name` | `invalid preprocessing directive` | |
 
 A directive is a line whose first character, after spaces, is `#`, followed by spaces and comments only. A `#`
@@ -5627,6 +5630,196 @@ the loop (Where the checks go, above); the wavetable's and the voices' checks hi
 has none. Compiling takes as long, within the noise: `examples/voices/`, whose program has seven checks, 11.4 ms without
 them and 11.7 with. These are development builds; without the option nothing is checked, and nothing costs anything.
 
+## Recipe 31: conditional compilation, `#if` and `#ifdef`
+
+*In the compiler. Code: `src/frontend/Lexer.l` (the start condition `SKIPPED` and its rules, the directive rule in it
+too, the end of a comment and of a file, the macro check in `{IDENTIFIER}`, and `conditional`, `macro` and
+`macroNameError` in its last section), `src/frontend/Preprocessor.h` and `.cpp` (`Macros`, `withoutComments`,
+`evaluate`), `src/frontend/Scanner.h` (`Conditional`, `ScannerState::macros` and `conditionals`) and `Frontend.h`
+(`Defines`, `parse`'s `defines`); `Program::Options::defines` (`include/fminus/FMinus.h`, `src/api/FMinus.cpp`);
+`fminus -D` (`tools/fminus/main.cpp`). Tests: `tests/unit/ConditionalTest.cpp` (`[conditional]`),
+`tests/library/ConditionalTest.cpp` and `tests/lit/fminus/conditional.fm`.*
+
+A program being written carries instrumentation: a meter's peak, a counter of the voices stolen, a field a host shows
+while its author tunes a filter. It wants to be there while the program is written and gone from the build that plays,
+without being commented in and out by hand. C's way is the preprocessor's conditionals, and FMinus now has them:
+
+```c
+module Meter
+{
+    float y;
+#ifdef DEBUG
+    float peak;   // the loudest |x| so far: a debug build's
+#endif
+
+    float tick(float x)
+    {
+        y = 0.5f * x;
+#if defined(DEBUG) && LEVEL >= 2
+        peak = fmaxf(peak, fabsf(x));
+#endif
+        return y;
+    }
+};
+```
+
+`DEBUG` and `LEVEL` are macros: the program's own (`#define LEVEL 2`) or the host's, `Program::Options::defines`, as
+`fminus -D DEBUG` and C's `-D` define them. Without `DEBUG`, the lines between are skipped: the scanner never reads
+them, the parser never sees them, and the module is the one without them, field and all.
+
+### Why C's conditionals, and not a `debug { }` block
+
+Two designs serve "instrumentation that compiles out". One is a statement of FMinus's own, `debug { ... }`, compiled
+when the host sets a flag and dropped otherwise: a keyword, a grammar rule and an option, smaller to build than
+anything here. But it serves statements only. The field that holds the peak, a method only a debug build has, the
+`#include` of a module that draws a scope, a host's own `#pragma` lines: none of these is a statement, and each place
+would want a rule of its own (the top level, a module's members). It reserves `debug`, a word programs use as a name.
+And it is not C: a program with one is no longer a C program, and a C compiler reads it only through a macro,
+`#define debug if (0)`, which is a statement again.
+
+The conditionals act on lines, before the parser sees a token, so one mechanism covers every place a line can be.
+They are C's: FMinus gains no syntax, a C compiler reads a program's conditionals as they are, and an editor's
+language service that lexes the text itself, as a plugin's code editor may, already reads a directive as one line
+that starts with `#`. Their cost is the scanner's: a start condition, a stack of conditionals and an evaluator for
+`#if`'s expressions. FMinus keeps that small by keeping one thing out, macro substitution: a macro is a condition, read
+in `#if`, `#elif`, `#ifdef`, `#ifndef` and `defined`, and its name in code is an error. So no text is ever rewritten
+before the parser reads it, a reader sees the code that runs, and a program FMinus compiles means the same in C.
+
+### What a program writes
+
+| Line | What it does | Its errors (clang's words) |
+|---|---|---|
+| `#define NAME` or `#define NAME value` | defines a macro: its value the rest of the line, comments gone and each run of spaces one space (C's comparison), empty for none | `macro name missing`, `macro name must be an identifier`, `'defined' cannot be used as a macro name`, `'NAME' macro redefined` (another value: clang warns); FMinus's own: `'float' cannot be used as a macro name: it is one of FMinus's keywords`, `function-like macros are not supported: ...` |
+| `#undef NAME` | forgets it (one that isn't is nothing) | `macro name missing`, `macro name must be an identifier`, `'defined' cannot be used as a macro name`, `extra tokens at end of #undef directive` (clang warns) |
+| `#if expression` | reads the group up to the next conditional when the expression is not 0 | the expression's (below) |
+| `#ifdef NAME`, `#ifndef NAME` | `#if defined(NAME)`, and `#if !defined(NAME)` | `macro name missing`, `macro name must be an identifier`, `extra tokens at end of #ifdef directive` |
+| `#elif expression`, and C23's `#elifdef NAME` and `#elifndef NAME` | the next group, when no group before it was read and its condition holds; after a group read, its condition is never computed | `#elif without #if`, `#elif after #else` |
+| `#else` | the last group, when no other was read | `#else without #if`, `#else after #else`, `extra tokens at end of #else directive` (clang warns) |
+| `#endif` | the end of the conditional | `#endif without #if`, `extra tokens at end of #endif directive` (clang warns), and at the file's end, `unterminated conditional directive` at the `#if` left open |
+| a macro's name in code | an error, never a substitution | `macro expansion is not supported: 'NAME' is a macro, which FMinus reads only in #if, #elif, #ifdef and #ifndef (for a constant, declare an enum or a const)` |
+
+The keywords are refused as macros because C would substitute one in code, where FMinus reads it as the keyword:
+`#define float double` would mean one thing to clang and another to FMinus. `#error`, `#warning`, `#line` and `#embed`
+are still errors (`#error is not supported: FMinus's directives are ...`). A directive is one line, as before: a `/*`
+comment that starts in one must end on it (`a directive's /* comment must end on its line`), where C would carry the
+directive on to the comment's end.
+
+### Expressions
+
+An `#if`'s expression is C's integer constant expression of the preprocessor (C17 6.10.1), computed in 64-bit
+integers, C's `intmax_t`. `evaluate` (`Preprocessor.cpp`) lexes the line into C's preprocessing tokens, expands its
+macros, and parses what results by precedence climbing over C's ten levels of binary operators, with `?:` and the
+unary operators by recursive descent, computing as it goes:
+
+- **Operands.** Integers as FMinus writes them, decimal, octal and hex, with no suffix (FMinus has no `unsigned` or
+  `long`): `1u` is `invalid suffix 'u' on integer constant`, `1.5` `floating point literal in preprocessor
+  expression`, and past 2^63-1 `integer literal is too large to be represented in a signed integer type`. `defined
+  NAME` and `defined(NAME)`, 1 when NAME is a macro. `true` and `false`, 1 and 0, as in C23. Any other name, a
+  keyword too, is 0, as in C.
+- **Macros** expand to their values' tokens, in turn, C's way: as text (`#define TWO 1 + 1` makes `TWO * 2` 3), and
+  never inside their own value (`#define A A` makes `A` the name `A`, so 0). `defined`'s operand is never expanded. A
+  token from a macro's value is at fault at the macro's name: `#define X 2.5` then `#if X` points at the `X`.
+- **Operators**: `! ~ - +`, `* / %`, `+ -`, `<< >>`, the comparisons, `& ^ |`, `&& ||` and `?:`, with C's precedence.
+  `&&`, `||` and `?:` compute only what C computes: `#if 0 && 1 / 0` is no error, `#if 1 / 0` is `division by zero in
+  preprocessor expression`.
+- **Arithmetic is defined for every operand**, as FMinus's code is: `+ - *` and unary `-` wrap, the least integer
+  divided by -1 is itself (its remainder 0), and a shift takes its count's low six bits (OpenCL C's rule for a 64-bit
+  integer, as FMinus shifts an `int` by its count's low five), the right one arithmetic. clang warns of an overflow
+  there; FMinus has no warnings, and a defined result.
+- **Limits**, so that a program cannot hang the compiler or exhaust its stack: 256 levels of parentheses, unary
+  operators and `?:` (clang's bracket depth), 256 macros expanding inside one another, and 65536 tokens after
+  expansion (`#define B A A` doubles a line's tokens with each such macro).
+
+The errors are clang's, at clang's columns: `expected value in expression`, `expected ')' in preprocessor expression`,
+`token is not a valid binary operator in a preprocessor subexpression`, `expected end of line in preprocessor
+expression`, `invalid token at start of a preprocessor expression`, `expected ':'`, `macro name missing`, `missing ')'
+after 'defined'`. clang adds a note, `to match this '('`; FMinus's directive errors have none.
+
+### Skipped groups: a start condition
+
+The scanner reads a skipped group in a start condition of its own, `SKIPPED`, exclusive, which has the directive rule
+(`<INITIAL,SKIPPED>^[ \t]*"#"[^\n]*`) and rules that only count: text up to a `/` or the line's end, a `/`, a `//`
+comment, line ends. The group's text is never matched against FMinus's tokens, so it need not be FMinus at all: `#if 0`
+around a paragraph of prose is fine, as in C. Two things are still read, as C's translation phases read them before
+the directives:
+
+- **Block comments.** `<INITIAL,SKIPPED>"/*"` enters `BLOCK_COMMENT` from either, and its `*/` goes back to `SKIPPED`
+  or `INITIAL`, whichever `ScannerState::skipping()` says. So a `/*` in a skipped group hides an `#endif` inside the
+  comment, as in C, and one left open is `unterminated /* comment`.
+- **The conditionals' lines.** In a skipped group, `directive()` reads only a directive's name: `#if`, `#ifdef` and
+  `#ifndef` open a conditional, and `#elif`, `#else` and `#endif` close a group; any other line, an unknown directive,
+  an `#include` or a `#define`, is text, as C's skipped groups have it. After each directive the rule's action sets
+  the start condition from the stack: `BEGIN(yyextra->skipping() ? SKIPPED : INITIAL)`.
+
+A `Conditional` (`Scanner.h`) is one `#if` on the stack, to its `#endif`: where its name is, for `unterminated
+conditional directive`; its file; whether a group has been read (`taken`: the groups after it are skipped, their
+conditions never computed); whether its `#else` has been; and whether the group being read is skipped. One that opens
+in a skipped group is `inert`, taken and skipped from the start: its `#elif`s are never computed and its lines' extra
+tokens never read, though `#else after #else` is still clang's error there. Because the scanner keeps counting lines in
+`SKIPPED` (each rule steps the location, as the whitespace rules do), every location after a skipped group is right.
+
+### Conditionals and files
+
+C's conditionals end in the file they begin in. `Conditional::file` is `ScannerState::open`'s size where it opened:
+an `#else`, `#elif` or `#endif` whose innermost conditional is another file's is `#endif without #if`, and the
+`<<EOF>>` rules, the program's end and an included file's, refuse a conditional the ending file opened (`SKIPPED`'s
+own `<<EOF>>` always does: the scanner can only be skipping in the file being read, since a skipped `#include` reads
+nothing). Macros are the compilation's, as C's: one an included file defines is defined after its `#include`, in the
+including file too.
+
+### The host's side
+
+`Program::Options::defines` is a map from a macro's name to its value, defined before the program's first line, as
+`fminus -D NAME[=value]` defines it (`-D DEBUG` is `{"DEBUG", "1"}`, `-D EMPTY=` is `""`). `compile()` refuses a name
+that `macroNameError` refuses (`fminus::Program: defines: '1X': macro name must be an identifier`), and `fminus` too
+(`fminus: -D 1X: ...`). A program that has a default for one writes C's idiom, which the host's value overrides:
+
+```c
+#ifndef LEVEL
+#define LEVEL 2
+#endif
+```
+
+A program's `#define` of a host's macro to another value is `'LEVEL' macro redefined`, as two of the program's own
+would be. A host's macro whose name the program uses in code is an error at that name, so a host that defines `DEBUG`
+for every program refuses one that has a variable named `DEBUG`: name a host's macros as C names its own (upper case,
+a prefix of the host's).
+
+A host that reads a program's text itself sees what FMinus sees, line by line: every directive is a line that starts
+with `#`. The lines of a group FMinus skips are there too, so a host that reads its own `#pragma` lines (a plugin's
+panel layout, say) or indexes declarations (an editor's language service) either reads both branches, which an editor
+does well enough, or skips the groups that `#ifdef`, `#ifndef` and `defined` on its own defines skip.
+
+### What it changes for programs and hosts
+
+- **Off, nothing.** A program without these directives scans as before, and the code of one whose groups are skipped
+  is the code of the program without their lines: a skipped group costs no compile time beyond counting its lines, and
+  nothing at run time. The suite's other tests are unchanged, but for the messages of the directives FMinus still
+  lacks, which now list these.
+- **Programs** that used `#define`, `#if` and the rest were refused before; now they compile, unless they substitute a
+  macro in code, which stays an error with a message that says why.
+- **The playing build and the debug build differ in their modules' layouts** when a field is conditional: a host that
+  allocates instances reads `Program::module()` for each build, as it always should.
+
+### Tests
+
+- `tests/unit/ConditionalTest.cpp`: each conditional choosing its group (`#ifdef` and `#ifndef`, an `#elif` chain, C23's
+  `#elifdef` and `#elifndef`, nested conditionals, a skipped group's own `#else`); a module's field and a method's
+  statement compiled in and out; a skipped group never scanned (prose, an unknown directive, an `#include` the resolver
+  is never asked for, a `#define` never made), a block comment hiding an `#endif`, a `#` inside a line, lines counted
+  through a skipped group; expressions (precedence, every operator, octal and hex, wrapping, shifts past 63, the least
+  integer divided by -1, `true` and `false`, names that are 0, short-circuiting and `?:`, macros expanded as text, in
+  turn and not inside themselves, `defined`'s operand unexpanded); the host's defines (a redefinition, the `#ifndef`
+  idiom, a bad name) and `macroNameError` over every keyword; a macro's name in code, the host's too, and a skipped
+  group's names unread; conditionals ending in their own file, macros crossing files, a skipped `#include`; every
+  error above at clang's column, and the limits.
+- `tests/library/ConditionalTest.cpp`: `Options::defines` from C++17, a meter whose field and statement compile in with
+  `DEBUG` (its module's fields, its result) and out without it, the program's `LEVEL` default overridden by the host's;
+  a bad name, a keyword, and a host's macro used in code.
+- `tests/lit/fminus/conditional.fm`: `fminus -D`, the meter's results with and without `DEBUG` and with `LEVEL=1`, its
+  syntax tree with and without the field, a skipped group of prose, an error inside a group read only with `-D
+  BROKEN`, a `-D` whose name the code uses, and a bad name.
+
 ## Pitfalls
 
 Each of these was hit while writing the language or its recipes. [simd.md](simd.md) has the vector ones.
@@ -5716,6 +5909,9 @@ Each of these was hit while writing the language or its recipes. [simd.md](simd.
 | A bounds check in a constant of the top level's initialiser crashes the code generator, or leaves a declaration that is then deleted | the initialiser is lowered into a scratch function that is erased afterwards, with every declaration only it used (recipe 28) | no checks at the top level (`atTopLevel()`), where nothing runs |
 | With bounds checks on, `(voices + n)->bump()` at `n` one past the end writes the field after the array of modules, and nothing is recorded, while `(voices + n)->level` is caught | the pointer formed may be one past the end (width 0), and the method call's arrow branch (`lowerMethodCall`) used the pointer without the element check that `lvalue`'s arrow branch makes | check every access through a pointer that carries an extent as an element (width 1) where it is lowered: a field, a method's call, a dereference |
 | A host re-initialises an instance after a failed bounds check, and it plays half set up, with no violation reported | the host called `init` before clearing the record: each call of a function that may stop then unwinds its caller, so `init` returned after its first one, and the first failure is kept, so nothing new was recorded | clear the record first (`clearBoundsViolation()`), then re-initialise |
+| An `#if` reads a macro the file defines as 0, and its group is skipped | the `#define` comes after the `#if`: a macro is defined from its line on, and a name that is not one is 0 in `#if`, as in C | define it above its first use; a default the host may override as `#ifndef NAME`, `#define NAME value`, `#endif` at the top |
+| C23's `#elifdef` in a skipped group would end it in C, and FMinus reads on past it to the `#endif`, skipping the group C reads | in a skipped group a line is text unless it is a conditional FMinus knows, as C ignores a skipped group's other lines: a conditional directive left out is a silent difference there, not an error | have every conditional C has (`#elifdef` and `#elifndef` too), or refuse the missing ones in skipped groups as well |
+| The site's table of scanner rules says a rule "enters yyextra" | `site/scripts/lib/flex.js` took the first word in `BEGIN(...)` for the start condition, and `BEGIN(yyextra->skipping() ? SKIPPED : INITIAL)` starts with an expression | flex.js reads the start conditions a `BEGIN` names, those Lexer.l declares and `INITIAL` |
 | `FileCheck --check-prefix=PICK` fails on a line of another prefix | a variable `[[PICK:[0-9]+]]` on an `O0:` line contains `PICK:`, which FileCheck reads as a check of that prefix | name variables apart from every prefix (`S_PICK`) |
 | `CHECK-NOT: bounds` fails on IR with no bounds checks | `getelementptr inbounds` | match a name of the feature's own (`fminus_rt_bounds`, `fminus.bounds`) |
 | A library test's `CHECK(view == "line")` does not link: undefined `Catch::StringMaker<std::string_view>` | the library tests are C++17 against a Catch2 built as the build tree's C++23, which compiled no `string_view` support into it | compare `std::string(view)` |
@@ -5860,6 +6056,15 @@ domain* (recipe 16's list, for that reason): a `param enum Mode` could be versio
 `fminus::range`. *C's declarations with an enumeration*, `enum Mode { A } m;`, and C23's fixed underlying type,
 `enum Mode : int`, which would allow a forward declaration. *A `case` range*, GCC's `case 1 ... 4:`, which clang
 lowers to its cases one by one when the range is small, and to a comparison when not.
+
+**Macro substitution, if it is ever wanted.** Recipe 31's macros are conditions only. Substituting an object-like
+macro in code would happen in the scanner: `{IDENTIFIER}` finds the macro, lexes its value into a queue of tokens
+placed at the use (as `evaluate` places a value's tokens at the macro's name), and `nextToken` drains the queue before
+it reads on, the macro's name hidden while its own tokens are read (C's rule, which `expand` keeps with `expanding`).
+The queue bypasses Flex's rules, so a keyword or a module's name in a value needs the rules' look-ups done by hand.
+Function-like macros add arguments collected across lines and C's `#` and `##`. Either gives up what recipe 31 keeps,
+that the code a reader sees is the code the parser reads; FMinus's `const`s, enumerations and parameters cover most of
+what C's object-like macros are for.
 
 **Contraction and fast-math, C's way.** `#pragma STDC FP_CONTRACT ON` (C99) allows fusing `a * b + c`. Lower it to
 `llvm.fmuladd`, or set the `contract` flag through `IRBuilder::setFastMathFlags`. The other fast-math flags
