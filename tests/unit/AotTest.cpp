@@ -56,6 +56,23 @@ TEST_CASE("the program's main becomes internal, and a C main runs it", "[aot]")
     CHECK(module->getFunction("fminus_rt_main_result") != nullptr);
 }
 
+TEST_CASE("a main with a double reads each argument as its type says, and prints a double result", "[aot]")
+{
+    llvm::LLVMContext context;
+    std::unique_ptr<llvm::Module> module = parse(
+        context, "define double @main(double %t, float %x) {\n  %w = fpext float %x to double\n"
+                 "  %s = fadd double %t, %w\n  ret double %s\n}\n");
+    REQUIRE_FALSE(llvm::errorToBool(fminus::aot::addEntryPoint(*module)));
+    CHECK(module->getFunction("fminus_rt_main_args") == nullptr);
+    const llvm::Function* read = module->getFunction("fminus_rt_main_double_args");
+    REQUIRE(read != nullptr);
+    CHECK(read->arg_size() == 5);   // argc, argv, the count, the kinds ("df") and the doubles
+    const llvm::Function* print = module->getFunction("fminus_rt_main_double_result");
+    REQUIRE(print != nullptr);
+    CHECK(print->getArg(0)->getType()->isDoubleTy());
+    CHECK(module->getFunction("fminus_rt_main_result") == nullptr);
+}
+
 TEST_CASE("a bool main's result is printed as true or false", "[aot]")
 {
     llvm::LLVMContext context;
@@ -69,13 +86,16 @@ TEST_CASE("a bool main's result is printed as true or false", "[aot]")
     CHECK(module->getFunction("fminus_rt_main_result") == nullptr);
 }
 
-TEST_CASE("an executable needs a main that takes floats and returns a float or a bool", "[aot]")
+TEST_CASE("an executable needs a main that takes floats and doubles and returns a float, a double or a bool", "[aot]")
 {
     const std::string missing = "an executable needs a main function, such as float main(float x)";
-    const std::string signature = "'main' must return float or bool and take only float parameters";
+    const std::string signature =
+        "'main' must return float, double or bool and take only float and double parameters";
     CHECK(entryError("define float @f() {\n  ret float 1.0\n}\n") == missing);
     CHECK(entryError("declare float @main(float)\n") == missing);   // a prototype is not a program
     CHECK(entryError("define i1 @main() {\n  ret i1 true\n}\n").empty());
+    CHECK(entryError("define double @main(double %t, float %x) {\n  ret double %t\n}\n").empty());
+    CHECK(entryError("define float @main(double %t) {\n  ret float 1.0\n}\n").empty());
     CHECK(entryError("define i32 @main() {\n  ret i32 0\n}\n") == signature);
     CHECK(entryError("define float @main(i1 %b) {\n  ret float 1.0\n}\n") == signature);
     CHECK(entryError("define float @main(<4 x float> %v) {\n  ret float 1.0\n}\n") == signature);

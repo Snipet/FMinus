@@ -43,4 +43,4 @@ int floors(float x)
 // CHECK:         add nsw i32 {{%.*}}, 1
 
 // RESULT: 3
-// PARAM: fminus: --run: 'mix' takes a parameter of type 'int'; --run passes floats only
+// PARAM: fminus: --run: 'mix' takes a parameter of type 'int'; --run passes floats and doubles only

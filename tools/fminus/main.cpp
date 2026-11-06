@@ -6,7 +6,9 @@
 //     fminus gain.fm --emit asm -o -        this machine's assembly (--emit obj: an object file)
 //     fminus gain.fm --emit exe -o gain     an executable that runs the program's main (support/Aot.h)
 //     fminus gain.fm --entry                the IR with that executable's C main (also for asm and obj)
-//     fminus gain.fm --run gain 0.5 2       JIT-compiles the program, calls gain(0.5, 2) and prints the result
+//     fminus gain.fm --run gain 0.5 2       JIT-compiles the program, calls gain(0.5, 2) and prints the result (its
+//                                           parameters floats, or doubles; its result a float, a double, a bool or
+//                                           an int)
 //     fminus unison.fm --poly-lanes 16      as if this machine's vectors held 16 floats (any target's poly float)
 //     fminus lowpass.fm --stream Lowpass::cutoff --freeze Lowpass::mode=2
 //                                           a parameter read from a buffer, one compiled in (a knob otherwise)
@@ -106,16 +108,17 @@ namespace
         bool started;
     };
 
-    // Calls the JIT'd Result(float, ...) at `address` with args.size() arguments: Result is float, bool or int.
-    template <typename Result, std::size_t... I>
-    Result callWith(llvm::orc::ExecutorAddr address, const std::vector<float>& args, std::index_sequence<I...>)
+    // Calls the JIT'd Result(Arg, ...) at `address` with args.size() arguments: Result is float, double, bool or int,
+    // and Arg float or double.
+    template <typename Result, typename Arg, std::size_t... I>
+    Result callWith(llvm::orc::ExecutorAddr address, const std::vector<Arg>& args, std::index_sequence<I...>)
     {
-        using Function = Result (*)(decltype(static_cast<void>(I), 0.0f)...);
+        using Function = Result (*)(decltype(static_cast<void>(I), Arg{})...);
         return address.toPtr<Function>()(args[I]...);
     }
 
-    template <typename Result, std::size_t... N>
-    Result call(llvm::orc::ExecutorAddr address, const std::vector<float>& args, std::index_sequence<N...>)
+    template <typename Result, typename Arg, std::size_t... N>
+    Result call(llvm::orc::ExecutorAddr address, const std::vector<Arg>& args, std::index_sequence<N...>)
     {
         Result result{};
         static_cast<void>(
@@ -400,7 +403,7 @@ int main(int argc, char** argv)
     std::string emit = "ll";
     int level = 2;
     std::string run;
-    std::vector<float> runArgs;
+    std::vector<std::string> runArgs;   // numbers, read as the function's parameters' type (float or double)
     bool entry = false;
     unsigned polyLanes = 0;
     std::vector<std::string> streams;
@@ -416,7 +419,7 @@ int main(int argc, char** argv)
     bool boundsCheck = false;
     CircuitSettings circuitSettings;
     app.add_option("input", input, "FMinus source file ('-' for stdin)")->required();
-    app.add_option("args", runArgs, "The arguments of --run's function");
+    app.add_option("args", runArgs, "The arguments of --run's function")->check(CLI::Number);
     app.add_option("-o,--output", output, "The output file ('-' is stdout)")->capture_default_str();
     app.add_option("--emit", emit,
                    "What to write: ast, ll, asm, obj, exe (an executable that runs main), or fm (the FMinus module a "
@@ -587,11 +590,31 @@ int main(int argc, char** argv)
                                     runArgs.size()));
         if (runArgs.size() > kMaxRunArgs)
             return fail(std::format("--run: at most {} arguments", kMaxRunArgs));
+        // Every argument a float, or every one a double, read as CLI11 reads a number of that type.
+        bool doubles = false;
         for (const fminus::ast::Param& param : function->params)
         {
-            if (param.type != fminus::ast::Type::Float)
-                return fail(std::format("--run: '{}' takes a parameter of type '{}'; --run passes floats only", run,
-                                        fminus::ast::typeName(param.type)));
+            if (param.type != fminus::ast::Type::Float && param.type != fminus::ast::Type::Double)
+                return fail(std::format("--run: '{}' takes a parameter of type '{}'; --run passes floats and doubles "
+                                        "only",
+                                        run, fminus::ast::typeName(param.type)));
+            doubles = doubles || param.type == fminus::ast::Type::Double;
+        }
+        if (doubles && std::ranges::any_of(function->params, [](const fminus::ast::Param& param) {
+                return param.type == fminus::ast::Type::Float;
+            }))
+            return fail(std::format("--run: '{}' takes floats and doubles; --run passes every argument as one type",
+                                    run));
+        std::vector<float> floatArgs;
+        std::vector<double> doubleArgs;
+        for (const std::string& number : runArgs)
+        {
+            float single = 0;
+            double wide = 0;
+            if (doubles ? !CLI::detail::lexical_cast(number, wide) : !CLI::detail::lexical_cast(number, single))
+                return fail(std::format("--run: '{}' is not a number", number));
+            floatArgs.push_back(single);
+            doubleArgs.push_back(wide);
         }
 
         // What each bounds check's number means (opt/BoundsCheck.h), read before the JIT takes the module.
@@ -627,21 +650,27 @@ int main(int argc, char** argv)
             record = found->toPtr<const fminus_rt_bounds_state*>();
         }
         // Through a pointer of the function's own type: a bool or an int comes back in a general register (a bool
-        // zero-extended), a float in a vector register. std::format prints a bool as true or false.
+        // zero-extended), a float or a double in a vector register. std::format prints a bool as true or false, and a
+        // float or a double as the shortest decimal that reads back as it.
         constexpr auto counts = std::make_index_sequence<kMaxRunArgs + 1>{};
+        const auto result = [&]<typename Result>() {
+            return doubles ? call<Result>(*address, doubleArgs, counts) : call<Result>(*address, floatArgs, counts);
+        };
         switch (function->returnType.kind)
         {
         case fminus::ast::Kind::Float:
-            llvm::outs() << std::format("{}\n", call<float>(*address, runArgs, counts));
+            llvm::outs() << std::format("{}\n", result.template operator()<float>());
+            break;
+        case fminus::ast::Kind::Double:
+            llvm::outs() << std::format("{}\n", result.template operator()<double>());
             break;
         case fminus::ast::Kind::Bool:
-            llvm::outs() << std::format("{}\n", call<bool>(*address, runArgs, counts));
+            llvm::outs() << std::format("{}\n", result.template operator()<bool>());
             break;
         case fminus::ast::Kind::Int:
-            llvm::outs() << std::format("{}\n", call<int>(*address, runArgs, counts));
+            llvm::outs() << std::format("{}\n", result.template operator()<int>());
             break;
         case fminus::ast::Kind::Void:
-        case fminus::ast::Kind::Double:
         case fminus::ast::Kind::Float2:   // a vector stays inside FMinus, or goes to a C++ host (docs/simd.md)
         case fminus::ast::Kind::Float4:
         case fminus::ast::Kind::Float8:
@@ -653,7 +682,7 @@ int main(int argc, char** argv)
         case fminus::ast::Kind::Pointer:
         case fminus::ast::Kind::Module:   // never a result (the code generator refused it)
         case fminus::ast::Kind::Array:
-            return fail(std::format("--run: '{}' returns '{}'; --run prints floats, bools and ints only", run,
+            return fail(std::format("--run: '{}' returns '{}'; --run prints floats, doubles, bools and ints only", run,
                                     fminus::ast::typeName(function->returnType)));
         }
         // A check that failed, on stderr: what the call printed is what it returned early, and the status is 4.

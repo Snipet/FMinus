@@ -55,9 +55,18 @@ extern "C"
     // wrong (the wrong number of arguments, or one that is not a number) and returns 2, the executable's exit status.
     std::int32_t fminus_rt_main_args(std::int32_t argc, char** argv, std::int32_t count, float* args) noexcept;
 
+    // The same for a main with a double among its parameters: reads each of its `count` arguments as `kinds` says, a
+    // character a parameter: 'd' as C's strtod reads a double, 'f' as strtof reads a float (stored widened, exactly,
+    // which the entry rounds back), into `args`.
+    std::int32_t fminus_rt_main_double_args(std::int32_t argc, char** argv, std::int32_t count, const char* kinds,
+                                            double* args) noexcept;
+
     // An executable's end: prints main's result and a newline on stdout as `fminus --run` prints a result, the
     // shortest decimal that reads back as the same float.
     void fminus_rt_main_result(float result) noexcept;
+
+    // The same for a main that returns double: the shortest decimal that reads back as the same double.
+    void fminus_rt_main_double_result(double result) noexcept;
 
     // The same for a main that returns bool: prints true or false.
     void fminus_rt_main_bool_result(bool result) noexcept;
