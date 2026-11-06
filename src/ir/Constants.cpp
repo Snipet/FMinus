@@ -193,8 +193,8 @@ namespace fminus::ir::detail
         const std::optional<Folded> folded = fold(*size, true);
         if (!folded)
             return type;
-        if (folded->type == ast::Type::Float)
-            error(size->location, "size of array has non-integer type 'float'");
+        if (ast::isFloating(folded->type))
+            error(size->location, "size of array has non-integer type " + quoted(ast::typeName(folded->type)));
         else if (folded->floating)   // an int a floating constant took part in, as (1.5f < 2)
             notConstant(*folded->floating);
         else if (folded->value < 0)
@@ -306,12 +306,14 @@ namespace fminus::ir::detail
         else if (ast::isArray(type))
         {
             for (const ast::ExprPtr& item : decl.list)
-                values.emplace_back(convert(lower(*item), element, item->location, Use::Initializing), item->location);
+                values.emplace_back(convert(lowerAs(*item, element), element, item->location, Use::Initializing),
+                                    item->location);
         }
         else if (decl.hasList)
             error(location, "FMinus takes an initializer list for an array only");
         else if (decl.init)
-            values.emplace_back(convert(lower(*decl.init), type, location, Use::Initializing), decl.init->location);
+            values.emplace_back(convert(lowerAs(*decl.init, type), type, location, Use::Initializing),
+                                decl.init->location);
         std::vector<llvm::Constant*> constants;
         for (const auto& [value, where] : values)
         {
@@ -362,9 +364,10 @@ namespace fminus::ir::detail
         const std::optional<Folded> folded = fold(expr, true);
         if (!folded)
             return std::nullopt;
-        if (folded->type == ast::Type::Float)
+        if (ast::isFloating(folded->type))
         {
-            error(expr.location, "integer constant expression must have integer type, not 'float'");
+            error(expr.location, "integer constant expression must have integer type, not "
+                                     + quoted(ast::typeName(folded->type)));
             return std::nullopt;
         }
         if (folded->floating)   // an int that a floating constant took part in, as 1.5f < 2 or !1.5f
@@ -410,8 +413,8 @@ namespace fminus::ir::detail
                     const std::optional<Value> value = lowered([&] { return lowerNumber(expr.location, number); });
                     if (!value)
                         return std::nullopt;
-                    if (value->type == ast::Type::Float)
-                        return Folded{0, ast::Type::Float, expr.location};
+                    if (ast::isFloating(value->type))
+                        return Folded{0, value->type, expr.location};
                     return Folded{static_cast<std::int32_t>(llvm::cast<llvm::ConstantInt>(value->ir)->getSExtValue()),
                                   ast::Type::Int, std::nullopt};
                 },
@@ -445,14 +448,15 @@ namespace fminus::ir::detail
                     const std::optional<Folded> operand = fold(*unary.operand, evaluated);
                     if (!operand)
                         return std::nullopt;
-                    if (operand->type == ast::Type::Float && unary.op == ast::UnaryOp::Complement)
+                    if (ast::isFloating(operand->type) && unary.op == ast::UnaryOp::Complement)
                     {
-                        error(expr.location, "invalid argument type 'float' to unary expression");
+                        error(expr.location, "invalid argument type " + quoted(ast::typeName(operand->type))
+                                                 + " to unary expression");
                         return std::nullopt;
                     }
-                    const ast::Type type = unary.op == ast::UnaryOp::Not ? ast::Type::Bool
-                                           : operand->type == ast::Type::Float ? ast::Type::Float
-                                                                               : ast::Type::Int;
+                    const ast::Type type = unary.op == ast::UnaryOp::Not       ? ast::Type::Bool
+                                           : ast::isFloating(operand->type) ? operand->type
+                                                                            : ast::Type::Int;
                     if (operand->floating)
                         return Folded{0, type, operand->floating};
                     const std::int64_t x = operand->value;   // a bool's is 0 or 1, an int's own
@@ -503,11 +507,13 @@ namespace fminus::ir::detail
                         fold(*conditional.elseValue, evaluated && known && !truth);
                     if (!condition || !thenValue || !elseValue)
                         return std::nullopt;
-                    // C's usual arithmetic conversions: two bools give a bool, a float anywhere a float
+                    // C's usual arithmetic conversions: two bools give a bool, a double anywhere a double, a float
+                    // anywhere else a float
                     const ast::Type type =
-                        thenValue->type == ast::Type::Float || elseValue->type == ast::Type::Float ? ast::Type::Float
-                        : thenValue->type == ast::Type::Bool && elseValue->type == ast::Type::Bool ? ast::Type::Bool
-                                                                                                   : ast::Type::Int;
+                        thenValue->type == ast::Type::Double || elseValue->type == ast::Type::Double ? ast::Type::Double
+                        : thenValue->type == ast::Type::Float || elseValue->type == ast::Type::Float ? ast::Type::Float
+                        : thenValue->type == ast::Type::Bool && elseValue->type == ast::Type::Bool   ? ast::Type::Bool
+                                                                                                     : ast::Type::Int;
                     for (const std::optional<SourceLocation>& floating :
                          {condition->floating, thenValue->floating, elseValue->floating})
                     {
@@ -517,12 +523,12 @@ namespace fminus::ir::detail
                     return Folded{truth ? thenValue->value : elseValue->value, type, std::nullopt};
                 },
                 [&](const ast::CastExpr& cast) -> std::optional<Folded> {
-                    if (cast.type == ast::Type::Float)
+                    if (ast::isFloating(cast.type))
                     {
                         const std::optional<Folded> operand = fold(*cast.operand, evaluated);
                         if (!operand)
                             return std::nullopt;
-                        return Folded{0, ast::Type::Float, operand->floating ? operand->floating : expr.location};
+                        return Folded{0, cast.type, operand->floating ? operand->floating : expr.location};
                     }
                     // A floating constant as the cast's own operand is C's one place for one: (int) truncates toward
                     // zero, and a value out of an int's range makes no constant; (bool) is != 0.
@@ -532,7 +538,7 @@ namespace fminus::ir::detail
                             lowered([&] { return lowerNumber(cast.operand->location, *number); });
                         if (!value)
                             return std::nullopt;
-                        if (value->type == ast::Type::Float)
+                        if (ast::isFloating(value->type))
                         {
                             const llvm::APFloat& floating = llvm::cast<llvm::ConstantFP>(value->ir)->getValueAPF();
                             if (cast.type == ast::Type::Bool)
@@ -569,19 +575,23 @@ namespace fminus::ir::detail
     }
 
     // A binary operator on two constants, as arithmetic() computes it on ints. The bitwise operators take ints, as
-    // binary()'s do; a float anywhere else makes a float, or a bool that is no constant (a comparison).
+    // binary()'s do; a float or a double anywhere else makes one (a double where either is), or a bool that is no
+    // constant (a comparison).
     std::optional<Lowering::Folded> Lowering::foldBinary(SourceLocation location, ast::BinaryOp op, Folded lhs,
                                                          Folded rhs, bool evaluated)
     {
-        const bool floats = lhs.type == ast::Type::Float || rhs.type == ast::Type::Float;
+        const bool floats = ast::isFloating(lhs.type) || ast::isFloating(rhs.type);
         if (isBitwise(op) && floats)
         {
             error(location, "invalid operands to binary expression (" + quoted(ast::typeName(lhs.type)) + " and "
                                 + quoted(ast::typeName(rhs.type)) + ")");
             return std::nullopt;
         }
-        const ast::Type type = isComparison(op) ? ast::Type::Bool : floats ? ast::Type::Float : ast::Type::Int;
-        if (lhs.floating || rhs.floating)   // a Float always has one
+        const ast::Type type = isComparison(op)                                                  ? ast::Type::Bool
+                               : lhs.type == ast::Type::Double || rhs.type == ast::Type::Double ? ast::Type::Double
+                               : floats                                                         ? ast::Type::Float
+                                                                                                : ast::Type::Int;
+        if (lhs.floating || rhs.floating)   // a Float or a Double always has one
             return Folded{0, type, lhs.floating ? lhs.floating : rhs.floating};
         const std::int64_t a = lhs.value;
         const std::int64_t b = rhs.value;

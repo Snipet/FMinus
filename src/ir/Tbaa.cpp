@@ -5,11 +5,12 @@
 // a method's loop over its module's buffer (`tail[i] += result[i]`, both fields) loads the fields once, before the
 // loop, where it would load them again after every store of a float, and the loop runs on vectors.
 //
-// FMinus's tree is a root and four scalar types under it, in clang's style (MDBuilder::createTBAAScalarTypeNode) and
+// FMinus's tree is a root and five scalar types under it, in clang's style (MDBuilder::createTBAAScalarTypeNode) and
 // with clang's names:
 //
 //     !{!"FMinus TBAA"}                   the root (accesses tagged in another tree, clang's, may alias FMinus's)
 //       !{!"float", root, i64 0}          float, and every float vector: float2, float4, float8, poly float
+//       !{!"double", root, i64 0}         double: a store of a double changes no float, and a float's no double
 //       !{!"int", root, i64 0}
 //       !{!"bool", root, i64 0}           bool, and the lane masks
 //       !{!"any pointer", root, i64 0}    every pointer, whatever it points to, void* too
@@ -46,6 +47,8 @@ namespace fminus::ir::detail
             case ast::Kind::Float8:
             case ast::Kind::PolyFloat:
                 return "float";
+            case ast::Kind::Double:
+                return "double";
             case ast::Kind::Int:
                 return "int";
             case ast::Kind::Bool:

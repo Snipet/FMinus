@@ -12,16 +12,23 @@
 #include <charconv>
 #include <cstdint>
 #include <limits>
+#include <optional>
+#include <utility>
+#include <variant>
 
 namespace fminus::ir::detail
 {
     // `expr` lowered, failed when it or a part of it reported an error (Value: what takes it then says nothing more).
+    // Its arithmetic's floating constants are doubles when the arithmetic has a double (lowerAs): what the arithmetic
+    // around it says (doubleArithmetic_, for this call only), or, at the top of its arithmetic, what hasDouble finds.
     Lowering::Value Lowering::lower(const ast::Expr& expr)
     {
         const std::size_t reported = diagnostics_.errors().size();
+        const std::optional<bool> given = std::exchange(doubleArithmetic_, std::nullopt);
+        const auto wide = [&] { return given ? *given : hasDouble(expr); };
         Value value = std::visit(
             Overloaded{
-                [&](const ast::NumberExpr& number) { return lowerNumber(expr.location, number); },
+                [&](const ast::NumberExpr& number) { return lowerNumber(expr.location, number, wide()); },
                 [&](const ast::VariableExpr& variable) {
                     if (const Binding* binding = named(variable.name))
                     {
@@ -49,7 +56,8 @@ namespace fminus::ir::detail
                         return readLValue(expr);   // *p: what p points to
                     if (unary.op == ast::UnaryOp::AddressOf)
                         return lowerAddressOf(expr.location, *unary.operand);
-                    const Value operand = lower(*unary.operand);
+                    const bool sign = unary.op == ast::UnaryOp::Negate || unary.op == ast::UnaryOp::Plus;
+                    const Value operand = sign ? lowerWith(*unary.operand, wide()) : lower(*unary.operand);
                     const bool complement = unary.op == ast::UnaryOp::Complement;
                     const ast::Type type = ast::arithmeticOf(operand.type);   // an int, a float, a float vector
                     if (operand.failed)   // its own error says why (Value): the type the operator would give
@@ -92,6 +100,17 @@ namespace fminus::ir::detail
                     return poison(ast::Type::Float);
                 },
                 [&](const ast::BinaryExpr& operation) {
+                    // + - * / % pass their arithmetic's on; a comparison's two sides are one arithmetic of their own
+                    // (d < 0.1 compares with C's 0.1); a bitwise operator's are each their own.
+                    if (isComparison(operation.op) || isArithmetic(operation.op))
+                    {
+                        const bool doubles = isArithmetic(operation.op)
+                                                 ? wide()
+                                                 : hasDouble(*operation.lhs) || hasDouble(*operation.rhs);
+                        const Value lhs = lowerWith(*operation.lhs, doubles);
+                        const Value rhs = lowerWith(*operation.rhs, doubles);
+                        return binary(expr.location, operation.op, lhs, rhs);
+                    }
                     const Value lhs = lower(*operation.lhs);
                     const Value rhs = lower(*operation.rhs);
                     return binary(expr.location, operation.op, lhs, rhs);
@@ -100,7 +119,7 @@ namespace fminus::ir::detail
                     return Value{lowerLogical(expr.location, logical), ast::Type::Bool};
                 },
                 [&](const ast::ConditionalExpr& conditional) {
-                    return lowerConditional(expr.location, conditional);
+                    return lowerConditional(expr.location, conditional, wide());
                 },
                 [&](const ast::ConstructExpr& construct) { return lowerConstruct(expr.location, construct); },
                 [&](const ast::MemberExpr& member) {
@@ -117,6 +136,147 @@ namespace fminus::ir::detail
             expr.node);
         value.failed = value.failed || diagnostics_.errors().size() != reported;
         return value;
+    }
+
+    // FMinus's floating constants are floats first: a constant without a suffix is a float, as FMinus has always had
+    // it (`x * 0.5` of a float x is a float product), unless the arithmetic it is part of has a double. Its arithmetic
+    // is the expression around it as far as + - * / %, unary + and -, the arms of ?: and parentheses reach: the leaves
+    // are its operands, and what takes its value is where it goes. It has a double when an operand is one (hasDouble),
+    // when the two sides of a comparison it is in have one, or when its value goes to a double: `type`, the type it is
+    // wanted as (a declaration's or an assignment's target, a parameter, a result, a cast). Then each floating constant
+    // in it without a suffix is the double nearest its spelling, and the arithmetic computes as C's does, every step of
+    // it the same: `double t = x * 0.1;` is C's double product, and `double third = 1.0 / 3.0;` C's third, not a float's
+    // widened. An arithmetic with no double computes as it always did: a program without doubles means the same, bit
+    // for bit. lower(expr) is lowerAs(expr, void): its arithmetic has a double only when hasDouble finds one.
+    Lowering::Value Lowering::lowerAs(const ast::Expr& expr, ast::Type type)
+    {
+        return lowerWith(expr, type == ast::Type::Double || hasDouble(expr));
+    }
+
+    // `expr`, a part of an arithmetic whose floating constants are doubles or not: `doubles`, which the next lower()
+    // takes (doubleArithmetic_), and passes on to its own arithmetic's parts.
+    Lowering::Value Lowering::lowerWith(const ast::Expr& expr, bool doubles)
+    {
+        doubleArithmetic_ = doubles;
+        return lower(expr);
+    }
+
+    // + - * / %: the operators an arithmetic is made of (lowerAs).
+    bool Lowering::isArithmetic(ast::BinaryOp op)
+    {
+        return op == ast::BinaryOp::Add || op == ast::BinaryOp::Subtract || op == ast::BinaryOp::Multiply
+               || op == ast::BinaryOp::Divide || op == ast::BinaryOp::Remainder;
+    }
+
+    // Whether the arithmetic `expr` is (lowerAs) has an operand of type double: one of its leaves, as staticType knows
+    // it before anything is lowered (a variable, a field, an element, a call's result, a cast, an assignment's value).
+    // A constant is no double here, nor is a comparison, whose sides are an arithmetic of their own.
+    bool Lowering::hasDouble(const ast::Expr& expr) const
+    {
+        if (std::holds_alternative<ast::NumberExpr>(expr.node))
+            return false;
+        if (const auto* unary = std::get_if<ast::UnaryExpr>(&expr.node);
+            unary != nullptr && (unary->op == ast::UnaryOp::Negate || unary->op == ast::UnaryOp::Plus))
+            return hasDouble(*unary->operand);
+        if (const auto* binary = std::get_if<ast::BinaryExpr>(&expr.node); binary != nullptr && isArithmetic(binary->op))
+            return hasDouble(*binary->lhs) || hasDouble(*binary->rhs);
+        if (const auto* conditional = std::get_if<ast::ConditionalExpr>(&expr.node))
+            return hasDouble(*conditional->thenValue) || hasDouble(*conditional->elseValue);
+        return staticType(expr) == std::optional<ast::Type>(ast::Type::Double);
+    }
+
+    // `expr`'s type, worked out from the declarations alone, as lowering it would give it, or nothing where that takes
+    // more: a variable's, a module's field's (m.y, p->y, a field by name in a method), an element's (a[i], *p, a
+    // parameter's cutoff[i]), a call's result (a function's, a method's, a double builtin's), a cast's, an assignment's
+    // or an increment's target's, a pointer's after p + i, and a ?:'s whose arms have one. What hasDouble asks of an arithmetic's operands, which it must know before they are
+    // lowered: a constant beside them, lowered first, takes its type from what they are.
+    std::optional<ast::Type> Lowering::staticType(const ast::Expr& expr) const
+    {
+        const ast::Module* module = function_ != nullptr ? function_->module : nullptr;
+        // The module a value of `type` is, or a pointer of `type` points to.
+        const auto moduleOf = [](std::optional<ast::Type> type, bool pointer) -> const ast::Module* {
+            if (!type)
+                return nullptr;
+            if (pointer && ast::isPointer(*type) && type->pointee == ast::Kind::Module)
+                return type->module;
+            return !pointer && ast::isModule(*type) ? type->module : nullptr;
+        };
+        // A field's type, if `owner` has a field `name` that is no parameter.
+        const auto fieldOf = [&](const ast::Module* owner, const std::string& name) -> std::optional<ast::Type> {
+            const ast::Field* field = owner != nullptr ? findField(*owner, name, nullptr) : nullptr;
+            if (field == nullptr || field->isParam)
+                return std::nullopt;
+            return fieldType(*field);
+        };
+        // A function's result, if the program declares one of the name.
+        const auto resultOf = [&](const std::string& name) -> std::optional<ast::Type> {
+            const auto found = functions_.find(name);
+            return found != functions_.end() ? std::optional(found->second->returnType) : std::nullopt;
+        };
+        // What a pointer or an array of `type` reaches.
+        const auto elementOf = [](std::optional<ast::Type> type) -> std::optional<ast::Type> {
+            if (type && (ast::isPointer(*type) || ast::isArray(*type)))
+                return ast::pointee(*type);
+            return std::nullopt;
+        };
+        return std::visit(
+            Overloaded{
+                [&](const ast::VariableExpr& variable) -> std::optional<ast::Type> {
+                    if (const Binding* binding = named(variable.name))
+                        return binding->enumerator ? ast::Type::Int : binding->type;
+                    return fieldOf(module, variable.name);
+                },
+                [&](const ast::CastExpr& cast) -> std::optional<ast::Type> { return cast.type; },
+                [&](const ast::CallExpr& call) -> std::optional<ast::Type> {
+                    if (module != nullptr && functions_.contains(module->name + "::" + call.callee))
+                        return resultOf(module->name + "::" + call.callee);
+                    if (const Builtin* builtin = findBuiltin(call.callee))
+                        return builtin->type == ast::Kind::Double ? std::optional(ast::Type::Double) : std::nullopt;
+                    return resultOf(call.callee);
+                },
+                [&](const ast::MethodCallExpr& call) -> std::optional<ast::Type> {
+                    const ast::Module* owner = moduleOf(staticType(*call.object), call.arrow);
+                    return owner != nullptr ? resultOf(owner->name + "::" + call.method) : std::nullopt;
+                },
+                [&](const ast::MemberExpr& member) -> std::optional<ast::Type> {
+                    return fieldOf(moduleOf(staticType(*member.base), member.arrow), member.name);
+                },
+                [&](const ast::IndexExpr& index) -> std::optional<ast::Type> {
+                    if (const std::optional<unsigned> field = parameterOf(*index.base))
+                        return module->fields[*field].type;   // cutoff[i]
+                    const std::optional<ast::Type> base = elementOf(staticType(*index.base));
+                    return base ? base : elementOf(staticType(*index.index));   // C's i[p]
+                },
+                [&](const ast::UnaryExpr& unary) -> std::optional<ast::Type> {
+                    if (unary.op == ast::UnaryOp::Dereference)
+                        return elementOf(staticType(*unary.operand));
+                    return std::nullopt;
+                },
+                [&](const ast::BinaryExpr& binary) -> std::optional<ast::Type> {
+                    // p + i and p - i: the pointer's type, a base for p[i] and p->y
+                    if (binary.op != ast::BinaryOp::Add && binary.op != ast::BinaryOp::Subtract)
+                        return std::nullopt;
+                    const std::optional<ast::Type> lhs = staticType(*binary.lhs);
+                    if (lhs && ast::isPointer(*lhs))
+                        return lhs;
+                    const std::optional<ast::Type> rhs = staticType(*binary.rhs);
+                    return binary.op == ast::BinaryOp::Add && rhs && ast::isPointer(*rhs) ? rhs : std::nullopt;
+                },
+                [&](const ast::ConditionalExpr& conditional) -> std::optional<ast::Type> {
+                    // two arms of one type: (c ? p : q)->y
+                    const std::optional<ast::Type> thenType = staticType(*conditional.thenValue);
+                    return thenType == staticType(*conditional.elseValue) ? thenType : std::nullopt;
+                },
+                [&](const ast::AssignExpr& assign) { return staticType(*assign.target); },
+                [&](const ast::IncrementExpr& increment) { return staticType(*increment.target); },
+                [&](const ast::ThisExpr&) -> std::optional<ast::Type> {
+                    if (module == nullptr)
+                        return std::nullopt;
+                    return ast::Type::pointerTo(ast::Type::moduleType(module), false);
+                },
+                [](const auto&) -> std::optional<ast::Type> { return std::nullopt; },
+            },
+            expr.node);
     }
 
     bool Lowering::isComparison(ast::BinaryOp op)
@@ -298,8 +458,11 @@ namespace fminus::ir::detail
     }
 
     // c ? a : b, as clang lowers it: only the branch taken runs, so it takes blocks and a phi (a select would
-    // run both). SimplifyCFG turns a small one without side effects into a select at -O1 and above.
-    Lowering::Value Lowering::lowerConditional(SourceLocation location, const ast::ConditionalExpr& conditional)
+    // run both). SimplifyCFG turns a small one without side effects into a select at -O1 and above. Its arms are part
+    // of the arithmetic around it, whose floating constants are doubles or not (`doubles`, lowerAs); its condition is
+    // an arithmetic of its own.
+    Lowering::Value Lowering::lowerConditional(SourceLocation location, const ast::ConditionalExpr& conditional,
+                                               bool doubles)
     {
         const Value test = lower(*conditional.condition);
         if (ast::isVector(test.type))
@@ -315,10 +478,10 @@ namespace fminus::ir::detail
         // Each branch may end in another block than it started in (a nested ?:): the phi needs the last. Both
         // are lowered before their type is known, then converted to it at their ends.
         builder_.SetInsertPoint(trueBlock);
-        const Value thenValue = lower(*conditional.thenValue);
+        const Value thenValue = lowerWith(*conditional.thenValue, doubles);
         llvm::BasicBlock* thenEnd = builder_.GetInsertBlock();
         builder_.SetInsertPoint(falseBlock);
-        const Value elseValue = lower(*conditional.elseValue);
+        const Value elseValue = lowerWith(*conditional.elseValue, doubles);
         llvm::BasicBlock* elseEnd = builder_.GetInsertBlock();
         if (thenValue.failed || elseValue.failed)
         {
@@ -397,8 +560,10 @@ namespace fminus::ir::detail
 
     // A constant, from its spelling. One with no point and no exponent is an integer constant, an int, as in C
     // (lowerInteger). Any other is a float, rounded once, from its spelling straight to float (no detour through
-    // double): APFloat reads decimal and hex floats alike, and the f suffix is C's and goes.
-    Lowering::Value Lowering::lowerNumber(SourceLocation location, const ast::NumberExpr& number)
+    // double): APFloat reads decimal and hex floats alike, and the f suffix is C's and goes. One without the suffix
+    // in an arithmetic that has a double (`doubles`, lowerAs) is a double instead, C's, rounded once from its spelling
+    // to double.
+    Lowering::Value Lowering::lowerNumber(SourceLocation location, const ast::NumberExpr& number, bool doubles)
     {
         const bool hex = number.spelling.size() > 1 && number.spelling[0] == '0'
                          && (number.spelling[1] == 'x' || number.spelling[1] == 'X');
@@ -406,19 +571,21 @@ namespace fminus::ir::detail
             return {lowerInteger(location, number.spelling, hex), ast::Type::Int};
 
         std::string spelling = number.spelling;
-        if (!spelling.empty() && (spelling.back() == 'f' || spelling.back() == 'F'))
+        const bool suffixed = !spelling.empty() && (spelling.back() == 'f' || spelling.back() == 'F');
+        if (suffixed)
             spelling.pop_back();
-        llvm::APFloat value(llvm::APFloat::IEEEsingle());
+        const ast::Type type = doubles && !suffixed ? ast::Type::Double : ast::Type::Float;
+        llvm::APFloat value(type == ast::Type::Double ? llvm::APFloat::IEEEdouble() : llvm::APFloat::IEEEsingle());
         auto status = value.convertFromString(spelling, llvm::APFloat::rmNearestTiesToEven);
         if (!status)
         {
             llvm::consumeError(status.takeError());
             error(location, "invalid floating-point constant " + quoted(number.spelling));
-            return poison(ast::Type::Float);
+            return poison(type);
         }
         if ((*status & llvm::APFloat::opOverflow) != 0)
-            error(location, "magnitude of floating-point constant too large for type 'float'");
-        return {llvm::ConstantFP::get(module_.getContext(), value), ast::Type::Float};
+            error(location, "magnitude of floating-point constant too large for type " + quoted(ast::typeName(type)));
+        return {llvm::ConstantFP::get(module_.getContext(), value), type};
     }
 
     // An integer constant: hex after 0x, octal after a leading 0 (010 is 8), decimal otherwise. It must fit in an
@@ -471,17 +638,19 @@ namespace fminus::ir::detail
         return {builder_.getInt32(static_cast<std::uint32_t>(bytes)), ast::Type::Int};
     }
 
-    // (float)x, (int)x, (bool)x: C's casts between scalars. Each is the implicit conversion, written out.
+    // (float)x, (double)x, (int)x, (bool)x: C's casts between scalars. Each is the implicit conversion, written out;
+    // (double)0.1 is C's double 0.1 (lowerAs).
     Lowering::Value Lowering::lowerCast(SourceLocation location, const ast::CastExpr& cast)
     {
-        return {convert(lower(*cast.operand), cast.type, location, Use::Casting), cast.type};
+        return {convert(lowerAs(*cast.operand, cast.type), cast.type, location, Use::Casting), cast.type};
     }
 
     // `target op value`: the target must be an lvalue that is not const (Memory.cpp). The value of the expression
-    // is the one stored.
+    // is the one stored. The value goes to the target, an operand of the operator too: `d *= 0.999` of a double d
+    // multiplies by C's 0.999 (lowerAs, with the target's type as staticType knows it).
     Lowering::Value Lowering::lowerAssign(SourceLocation location, const ast::AssignExpr& assign)
     {
-        Value value = lower(*assign.value);
+        Value value = lowerAs(*assign.value, staticType(*assign.target).value_or(ast::Type::Void));
         if (!isLValue(*assign.target))
         {
             error(location, "expression is not assignable");

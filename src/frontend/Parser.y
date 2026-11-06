@@ -11,7 +11,8 @@
 //     attribute    : IDENTIFIER ("::" (IDENTIFIER | "default"))? ("(" "-"? NUMBER ("," "-"? NUMBER)* ")")?
 //     params       : (param ("," param)*)? | "void"                                  (void) is none, as in C
 //     param        : "const"? type pointer IDENTIFIER? | "const"? type IDENTIFIER array_size        a pointer
-//     type         : "float" | "bool" | "int" | "void" | VECTOR_TYPE | "poly" ("float" | "bool") | MODULE_NAME
+//     type         : "float" | "double" | "bool" | "int" | "void" | VECTOR_TYPE | "poly" ("float" | "bool")
+//                  | MODULE_NAME
 //                  | "enum" IDENTIFIER                  int (or its fixed type), the name a tag declared before
 //     pointer      : ("*" ("const" | "restrict")*)?        with a *, the first const is the pointee's (const float*),
 //                                                          and one after it the pointer's own (float* const)
@@ -44,7 +45,8 @@
 //                  | "(" VECTOR_TYPE ")" "{" (expr ("," expr)* ","?)? "}"            C's: lanes left out are 0
 //                  | "(" "poly" "float" ")" "(" expr ")" | expr "." IDENTIFIER       a broadcast; a swizzle or field
 //                  | expr "->" IDENTIFIER | expr ("." | "->") IDENTIFIER "(" (expr ("," expr)*)? ")" | "this"
-//                  | ("++" | "--") expr | expr ("++" | "--") | "(" ("float" | "int" | "bool") ")" expr    a cast
+//                  | ("++" | "--") expr | expr ("++" | "--")
+//                  | "(" ("float" | "double" | "int" | "bool") ")" expr                       a cast
 //                  | "(" "enum" IDENTIFIER ")" expr                                  a cast to int, as C's to an enum
 //                  | expr ("=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=") expr
 //
@@ -419,6 +421,7 @@
 }
 
 %token FLOAT "float" CONST "const" RETURN "return" BOOL "bool" INT "int" VOID "void" TRUE "true" FALSE "false"
+%token DOUBLE "double"
 %token RESTRICT "restrict" AMPERSAND "&" LBRACKET "[" RBRACKET "]" SIZEOF "sizeof" COLONCOLON "::"
 %token LT "<" LE "<=" GT ">" GE ">=" EQ "==" NE "!=" NOT "!" AND "&&" OR "||" QUESTION "?" COLON ":"
 %token IF "if" ELSE "else" WHILE "while" FOR "for" BREAK "break" CONTINUE "continue" PARALLEL "parallel"
@@ -713,12 +716,20 @@ qualifier
 
 type
     : "float"                               { $$ = ast::Type::Float; }
+    | "double"                              { $$ = ast::Type::Double; }
     | "bool"                                { $$ = ast::Type::Bool; }
     | "int"                                 { $$ = ast::Type::Int; }
     | "void"                                { $$ = ast::Type::Void; }
     | VECTOR_TYPE                           { $$ = $1; }
     | "poly" "float"                        { $$ = ast::Type::PolyFloat; }
     | "poly" "bool"                         { $$ = ast::Type::PolyBool; }
+    | "poly" "double"                       {
+                                                // A poly type's lanes are floats (or bools): a double is no lane.
+                                                parseContext.diagnostics.error(at(@2), "FMinus has poly float and poly "
+                                                                               "bool, not 'poly double': a double is "
+                                                                               "no vector lane");
+                                                $$ = ast::Type::PolyFloat;
+                                            }
     | MODULE_NAME                           { $$ = $1; }
     | "enum" IDENTIFIER                     { $$ = enumType(@2, $2, parseContext); }
     ;
@@ -726,6 +737,7 @@ type
 // The types a cast names: C casts between scalars (a vector's literal is OpenCL C's (float4)(...)).
 cast_type
     : "float"                               { $$ = ast::Type::Float; }
+    | "double"                              { $$ = ast::Type::Double; }
     | "int"                                 { $$ = ast::Type::Int; }
     | "bool"                                { $$ = ast::Type::Bool; }
     | "enum" IDENTIFIER                     { $$ = enumType(@2, $2, parseContext); }

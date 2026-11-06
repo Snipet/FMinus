@@ -365,7 +365,7 @@ namespace fminus::ir::detail
         }
         for (std::size_t i = 0; i < list.size(); ++i)
         {
-            const Value value = lower(*list[i]);
+            const Value value = lowerAs(*list[i], element);
             llvm::Value* at = builder_.CreateConstInBoundsGEP2_64(typeOf(type), address, 0, i, "arrayinit");
             tag(builder_.CreateStore(convert(value, element, list[i]->location, Use::Initializing), at), element);
         }
@@ -394,7 +394,7 @@ namespace fminus::ir::detail
         else
         {
             for (const ast::ExprPtr& item : decl.list)
-                values.push_back(convert(lower(*item), element, item->location, Use::Initializing));
+                values.push_back(convert(lowerAs(*item, element), element, item->location, Use::Initializing));
         }
         auto* arrayType = llvm::cast<llvm::ArrayType>(typeOf(type));
         if (module_.getDataLayout().getTypeAllocSize(arrayType).getFixedValue() <= kMaxTableBytes

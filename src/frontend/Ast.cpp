@@ -336,6 +336,8 @@ namespace fminus::ast
             return "void";
         case Kind::Float:
             return "float";
+        case Kind::Double:
+            return "double";
         case Kind::Bool:
             return "bool";
         case Kind::Int:

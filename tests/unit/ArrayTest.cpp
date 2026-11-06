@@ -89,9 +89,10 @@ TEST_CASE("array errors are reported as clang reports them", "[codegen][array]")
              "test.fm:6:7: error: array type 'float[4]' is not assignable\n"
              "test.fm:7:7: error: array type 'float[4]' is not assignable\n"
              "test.fm:8:6: error: array type 'float[4]' is not assignable\n"
-             "test.fm:9:10: error: FMinus has arrays of float, int, float2, float4, float8 and modules, not of 'bool'\n"
-             "test.fm:10:5: error: FMinus has pointers to float, int, float2, float4, float8, void and modules, not to "
-             "'float[4]'\n"
+             "test.fm:9:10: error: FMinus has arrays of float, double, int, float2, float4, float8 and modules, not of "
+             "'bool'\n"
+             "test.fm:10:5: error: FMinus has pointers to float, double, int, float2, float4, float8, void and modules, "
+             "not to 'float[4]'\n"
              "test.fm:11:11: error: FMinus takes an initializer list for an array only\n"
              "test.fm:12:5: error: returning 'float *' from a function with incompatible result type 'float'\n");
 

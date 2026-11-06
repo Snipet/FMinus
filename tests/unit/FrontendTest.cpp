@@ -285,6 +285,19 @@ TEST_CASE("poly types parse as a qualifier and a scalar type", "[frontend]")
              "  (return (?: m a b)))\n");
 }
 
+TEST_CASE("double parses as C's: a type, a pointer's and an array's, and a cast; poly double is an error",
+          "[frontend]")
+{
+    CHECK(parsed("double f(double x, const double* p) { double t[2] = {0.1, x}; return (double)(float)x + p[0]; }")
+          == "(function double f ((double x) (const double * p))\n"
+             "  (decl double[2] t {0.1 x})\n"
+             "  (return (+ (cast double (cast float x)) ([] p 0))))\n");
+    CHECK(parsed("poly double f(poly double x) { return x; }")
+          == "test.fm:1:6: error: FMinus has poly float and poly bool, not 'poly double': a double is no vector lane\n"
+             "test.fm:1:20: error: FMinus has poly float and poly bool, not 'poly double': a double is no vector "
+             "lane\n");
+}
+
 TEST_CASE("constants keep their spelling: C's decimal, hex and integer forms", "[frontend]")
 {
     CHECK(parsed("float f() { return fmaxf(fminf(1, .5), g(2e3, 1.e-2f, 3.25E+1F, 0x1.8p1, 0x1p-3f, 1.)); }")

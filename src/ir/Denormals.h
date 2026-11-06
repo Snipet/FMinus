@@ -18,14 +18,17 @@ namespace fminus::ir::detail
     public:
         explicit DenormalFolder(bool flush) : flush_(flush) {}
 
-        // The folds that see subnormals: fadd, fsub, fmul, fdiv and frem, and fcmp (Denormals.cpp).
+        // The folds that see subnormals: fadd, fsub, fmul, fdiv and frem, fcmp, and the conversions between float and
+        // double, fpext and fptrunc (Denormals.cpp).
         llvm::Value* FoldBinOp(llvm::Instruction::BinaryOps opcode, llvm::Value* lhs, llvm::Value* rhs) const override;
         llvm::Value* FoldBinOpFMF(llvm::Instruction::BinaryOps opcode, llvm::Value* lhs, llvm::Value* rhs,
                                   llvm::FastMathFlags flags) const override;
         llvm::Value* FoldCmp(llvm::CmpInst::Predicate predicate, llvm::Value* lhs, llvm::Value* rhs) const override;
+        llvm::Value* FoldCast(llvm::Instruction::CastOps opcode, llvm::Value* value, llvm::Type* type) const override;
 
         // The rest are ConstantFolder's. fneg only flips a sign bit, which flushing leaves alone (Arm's FNEG, SSE's
-        // xorps), and FMinus's casts take no subnormal to anything that differs (a float below 1 is 0 as an int).
+        // xorps), and FMinus's other casts take no subnormal to anything that differs (a float below 1 is 0 as an
+        // int).
         llvm::Value* FoldExactBinOp(llvm::Instruction::BinaryOps opcode, llvm::Value* lhs, llvm::Value* rhs,
                                     bool isExact) const override
         {
@@ -80,11 +83,6 @@ namespace fminus::ir::detail
         llvm::Value* FoldShuffleVector(llvm::Value* a, llvm::Value* b, llvm::ArrayRef<int> mask) const override
         {
             return folder_.FoldShuffleVector(a, b, mask);
-        }
-
-        llvm::Value* FoldCast(llvm::Instruction::CastOps opcode, llvm::Value* value, llvm::Type* type) const override
-        {
-            return folder_.FoldCast(opcode, value, type);
         }
 
         llvm::Value* FoldIntrinsic(llvm::Intrinsic::ID id, llvm::ArrayRef<llvm::Value*> operands, llvm::Type* type,

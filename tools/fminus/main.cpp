@@ -641,6 +641,7 @@ int main(int argc, char** argv)
             llvm::outs() << std::format("{}\n", call<int>(*address, runArgs, counts));
             break;
         case fminus::ast::Kind::Void:
+        case fminus::ast::Kind::Double:
         case fminus::ast::Kind::Float2:   // a vector stays inside FMinus, or goes to a C++ host (docs/simd.md)
         case fminus::ast::Kind::Float4:
         case fminus::ast::Kind::Float8:

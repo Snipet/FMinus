@@ -17,11 +17,16 @@
 
 namespace fminus::ast
 {
-    // The value types. float is IEEE single precision (LLVM's float). int is C's on every target FMinus runs on: 32
-    // bits, signed. Two ints compute as ints (`/` truncates toward zero), and an int meeting a float converts to it,
-    // as C's usual arithmetic conversions say. bool is C23's: 0 or 1, which computes as an int, and to which a number
-    // converts as `x != 0` (a NaN is true). void is C's: what a function returns when it returns nothing, and no
-    // variable or parameter has it (`f(void)` is C's empty parameter list).
+    // The value types. float is IEEE single precision (LLVM's float), and double IEEE double precision (LLVM's
+    // double), C's two floating types. int is C's on every target FMinus runs on: 32 bits, signed. Two ints compute as
+    // ints (`/` truncates toward zero), an int meeting a float converts to it, and an int or a float meeting a double
+    // converts to the double, as C's usual arithmetic conversions say. bool is C23's: 0 or 1, which computes as an
+    // int, and to which a number converts as `x != 0` (a NaN is true). void is C's: what a function returns when it
+    // returns nothing, and no variable or parameter has it (`f(void)` is C's empty parameter list).
+    //
+    // A floating constant is a float unless it has a double to meet (Lowering::lowerAs): FMinus's types are float
+    // first, and `x * 0.5` of a float x is a float product, as it always was. A double has no vector form: no lane of
+    // a float vector or a poly float is one, and a double never meets one (clang's error for the truncation).
     //
     // float2, float4 and float8 are OpenCL C's vector types: that many floats side by side, computed on together. A
     // float4 fills one 128-bit NEON register; a float8 is two. Comparing two of them gives a lane mask, a bool2, bool4
@@ -32,8 +37,8 @@ namespace fminus::ast
     // target is known), so it means the same on every target. Comparing two gives a poly bool, which a program can
     // declare.
     //
-    // A pointer is C's: the address of a float, an int, a float2, a float4 or a float8 (FMinus has no pointers to
-    // pointers, to bool or to poly types). `const float*` points to floats a program reads but cannot write through
+    // A pointer is C's: the address of a float, a double, an int, a float2, a float4 or a float8 (FMinus has no
+    // pointers to pointers, to bool or to poly types). `const float*` points to floats a program reads but cannot write through
     // it. p[i] is the i-th element from p, *p is p[0], and &x is x's address; p + i, p - i, p - q (how many elements
     // apart, an int) and comparisons of two pointers of one type are C's. A void* is an address with no type, what
     // malloc returns: it converts to and from any other pointer, as in C, and has no elements.
@@ -44,7 +49,7 @@ namespace fminus::ast
     // pointer to a module is C's, and `p->y` its field.
     //
     // An array is C's: `float history[16];`, a fixed number of elements side by side, of a type FMinus can point to
-    // (a float, an int, a float vector or a module). Its name stands for a pointer to its first element, which p[i]
+    // (a float, a double, an int, a float vector or a module). Its name stands for a pointer to its first element, which p[i]
     // indexes; it cannot be assigned, and a parameter declared as one is that pointer. Its size is an integer constant
     // expression, `float buf[ROWS * COLS]` (C11 6.6p6: enumeration constants are, a const variable is not), which the
     // code generator works out where the array is declared (the declaration keeps it as written, and the parser's
@@ -67,6 +72,7 @@ namespace fminus::ast
     {
         Void,
         Float,
+        Double,
         Bool,
         Int,
         Float2,
@@ -138,11 +144,13 @@ namespace fminus::ast
                    && a.module == b.module && a.count == b.count;
         }
 
-        static const Type Void, Float, Bool, Int, Float2, Float4, Float8, Bool2, Bool4, Bool8, PolyFloat, PolyBool;
+        static const Type Void, Float, Double, Bool, Int, Float2, Float4, Float8, Bool2, Bool4, Bool8, PolyFloat,
+            PolyBool;
     };
 
     inline constexpr Type Type::Void{Kind::Void};
     inline constexpr Type Type::Float{Kind::Float};
+    inline constexpr Type Type::Double{Kind::Double};
     inline constexpr Type Type::Bool{Kind::Bool};
     inline constexpr Type Type::Int{Kind::Int};
     inline constexpr Type Type::Float2{Kind::Float2};
@@ -170,6 +178,7 @@ namespace fminus::ast
             return 0;
         case Kind::Void:
         case Kind::Float:
+        case Kind::Double:
         case Kind::Bool:
         case Kind::Int:
         case Kind::Pointer:
@@ -219,11 +228,18 @@ namespace fminus::ast
         return element;
     }
 
-    // Whether FMinus has pointers to `kind`: to float, int, float2, float4, float8, void and modules.
+    // Whether FMinus has pointers to `kind`: to float, double, int, float2, float4, float8, void and modules.
     inline bool canPointTo(Kind kind)
     {
-        return kind == Kind::Float || kind == Kind::Int || kind == Kind::Float2 || kind == Kind::Float4
-               || kind == Kind::Float8 || kind == Kind::Void || kind == Kind::Module;
+        return kind == Kind::Float || kind == Kind::Double || kind == Kind::Int || kind == Kind::Float2
+               || kind == Kind::Float4 || kind == Kind::Float8 || kind == Kind::Void || kind == Kind::Module;
+    }
+
+    // Whether `type` is one of C's floating types, float or double: what `x != 0` tests as a float, and what converts
+    // to an int by truncating toward zero.
+    inline bool isFloating(Type type)
+    {
+        return type == Type::Float || type == Type::Double;
     }
 
     // Whether two pointers point to the same type (const aside): the same kind, and the same module for modules.
@@ -351,7 +367,8 @@ namespace fminus::ast
 
     // A constant as written, f suffix included. An integer constant (2, 010 in octal, 0x1F in hex: no point and no
     // exponent) is an int, as in C. Any other is a float, which the code generator rounds once, straight to float (in
-    // C, an unsuffixed 1.5 would be a double).
+    // C, an unsuffixed 1.5 would be a double), unless it has no suffix and meets a double: then it is the double
+    // nearest its spelling, as C reads it (Lowering::lowerAs).
     struct NumberExpr
     {
         std::string spelling;
@@ -483,8 +500,8 @@ namespace fminus::ast
         Type type = Type::Float;
     };
 
-    // `(int)x`, `(float)x`, `(bool)x`: C's casts between scalar types, the implicit conversions written out. (int)
-    // truncates toward zero.
+    // `(int)x`, `(float)x`, `(double)x`, `(bool)x`: C's casts between scalar types, the implicit conversions written
+    // out. (int) truncates toward zero, and (float) of a double rounds to nearest.
     struct CastExpr
     {
         Type type = Type::Float;

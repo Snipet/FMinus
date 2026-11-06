@@ -574,9 +574,15 @@ namespace fminus::ir::detail
             module = object.type.module;
             address = object.ir;
         }
+        // A numeric argument for a double parameter is C's double (lowerAs).
+        const auto method = functions_.find(module->name + "::" + call.method);
         std::vector<Value> args;
-        for (const ast::ExprPtr& arg : call.args)
-            args.push_back(lower(*arg));
+        for (std::size_t i = 0; i < call.args.size(); ++i)
+        {
+            const bool known = method != functions_.end() && i + 1 < method->second->params.size();
+            args.push_back(known ? lowerAs(*call.args[i], method->second->params[i + 1].type)
+                                 : lower(*call.args[i]));
+        }
         return callMethod(location, *module, address, isConst, call.method, args);
     }
 

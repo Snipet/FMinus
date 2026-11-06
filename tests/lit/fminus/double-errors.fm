@@ -1,0 +1,32 @@
+// double's errors, one each, in clang's words where clang has them: a double meeting a vector (its broadcast would
+// round it to the vector's floats), a double as an integer constant expression (an array's size, an enumerator's; a
+// case's 1.5 is a float, as a floating constant is where no double is), a bitwise operator, a switch and an index on
+// one, a parameter of the host's, a prototype of a double builtin of other types, and a double sin, which FMinus does
+// not have (a note says how to call the C library's).
+// RUN: not fminus %s 2>&1 | FileCheck %s --implicit-check-not=error: --implicit-check-not=note:
+// RUN: echo 'poly double f(); float g() { return 1; }' | not fminus - 2>&1 | FileCheck %s --check-prefix=POLY
+
+float4 lanes(float4 v, double d) { return v + d; }
+enum { SIZE = (double)4 };
+const float sized[(double)4] = {1};
+module Knobs { param double gain; };
+int bits(double d) { return d << 1; }
+int index(double d) { const float t[2] = {1, 2}; return t[d]; }
+int cases(int i) { switch (i) { case 1.5: return 1; default: return 0; } }
+float sqrt(float x);
+float sine(double d) { return sin(d) + tanh(d); }
+
+// CHECK: double-errors.fm:9:45: error: cannot convert between scalar type 'double' and vector type 'float4' as implicit conversion would cause truncation
+// CHECK: double-errors.fm:10:15: error: integer constant expression must have integer type, not 'double'
+// CHECK: double-errors.fm:11:19: error: size of array has non-integer type 'double'
+// CHECK: double-errors.fm:12:29: error: a parameter is a float, an int or a bool, not 'double'
+// CHECK: double-errors.fm:13:31: error: invalid operands to binary expression ('double' and 'int')
+// CHECK: double-errors.fm:14:58: error: array subscript is not an integer
+// CHECK: double-errors.fm:15:38: error: integer constant expression must have integer type, not 'float'
+// CHECK: double-errors.fm:16:7: error: conflicting types for 'sqrt'
+// CHECK: double-errors.fm:17:31: error: call to undeclared function 'sin'
+// CHECK-NEXT: double-errors.fm:17:31: note: FMinus's sinf computes in float, and rounds a double argument to one; a prototype, 'double sin(double x);', calls the C library's on doubles
+// CHECK: double-errors.fm:17:40: error: call to undeclared function 'tanh'
+// CHECK-NEXT: double-errors.fm:17:40: note: FMinus's tanhf computes in float, and rounds a double argument to one; a prototype, 'double tanh(double x);', calls the C library's on doubles
+
+// POLY: <stdin>:1:6: error: FMinus has poly float and poly bool, not 'poly double': a double is no vector lane

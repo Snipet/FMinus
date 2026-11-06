@@ -218,7 +218,7 @@ namespace fminus::ir::detail
                 builder_.CreateRet(poison(result).ir);
             return;
         }
-        const Value value = lower(*ret.value);
+        const Value value = lowerAs(*ret.value, result);
         if (returnsVoid)
         {
             error(location, "void function " + quoted(function_->name) + " should not return a value");
@@ -630,7 +630,7 @@ namespace fminus::ir::detail
         }
         if (decl.hasList)
             error(location, "FMinus takes an initializer list for an array only");
-        llvm::Value* value = decl.init ? convert(lower(*decl.init), type, location, Use::Initializing)
+        llvm::Value* value = decl.init ? convert(lowerAs(*decl.init, type), type, location, Use::Initializing)
                                        : llvm::Constant::getNullValue(typeOf(type));
         llvm::AllocaInst* slot = allocate(typeOf(type), decl.name);
         builder_.CreateStore(value, slot);

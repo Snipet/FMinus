@@ -229,6 +229,6 @@ TEST_CASE("a const array whose list is not all constants is a local, its list co
              "test.fm:7:12: error: initializing 'float *' with an expression of type 'const float *' discards "
              "qualifiers\n"
              "test.fm:8:7: error: array type 'float[2]' is not assignable\n"
-             "test.fm:9:16: error: FMinus has arrays of float, int, float2, float4, float8 and modules, not of "
+             "test.fm:9:16: error: FMinus has arrays of float, double, int, float2, float4, float8 and modules, not of "
              "'bool'\n");
 }

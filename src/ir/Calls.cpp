@@ -11,6 +11,7 @@
 #include <llvm/IR/Constants.h>
 #include <llvm/Support/ModRef.h>
 
+#include <algorithm>
 #include <array>
 #include <optional>
 
@@ -19,7 +20,9 @@ namespace fminus::ir::detail
     // <math.h>'s float functions -> the LLVM intrinsic each lowers to, overloaded on float, and for the transcendental
     // ones the stem of the runtime functions the vector and libm math modes call instead (Math.cpp). fabsf, sqrtf,
     // floorf, fminf and fmaxf become instructions, exact in every mode; sinf, cosf, expf, logf, tanhf and tanf have
-    // none.
+    // none. Then <math.h>'s double functions that are instructions too, exact: sqrt, fabs, floor, fmin, fmax and fma
+    // (a fused multiply-add, rounded once, as C's fma is: FMinus contracts nothing else into one). FMinus has no double
+    // sin, cos, ...: its kernels are a float's, and a double's would be libm's (lowerCall's note says how to call it).
     constexpr std::array kBuiltins{
         Builtin{"fabsf", llvm::Intrinsic::fabs, 1},        Builtin{"sqrtf", llvm::Intrinsic::sqrt, 1},
         Builtin{"sinf", llvm::Intrinsic::sin, 1, "sin"},   Builtin{"cosf", llvm::Intrinsic::cos, 1, "cos"},
@@ -27,7 +30,20 @@ namespace fminus::ir::detail
         Builtin{"floorf", llvm::Intrinsic::floor, 1},      Builtin{"fminf", llvm::Intrinsic::minnum, 2},
         Builtin{"fmaxf", llvm::Intrinsic::maxnum, 2},      Builtin{"tanhf", llvm::Intrinsic::tanh, 1, "tanh"},
         Builtin{"tanf", llvm::Intrinsic::tan, 1, "tan"},
+        Builtin{"sqrt", llvm::Intrinsic::sqrt, 1, {}, ast::Kind::Double},
+        Builtin{"fabs", llvm::Intrinsic::fabs, 1, {}, ast::Kind::Double},
+        Builtin{"floor", llvm::Intrinsic::floor, 1, {}, ast::Kind::Double},
+        Builtin{"fmin", llvm::Intrinsic::minnum, 2, {}, ast::Kind::Double},
+        Builtin{"fmax", llvm::Intrinsic::maxnum, 2, {}, ast::Kind::Double},
+        Builtin{"fma", llvm::Intrinsic::fma, 3, {}, ast::Kind::Double},
     };
+
+    namespace
+    {
+        // <math.h>'s double functions whose float ones FMinus computes with its own kernels (sinf, ...): what the
+        // error for a call of one without a prototype explains.
+        constexpr std::array<std::string_view, 6> kLibmDoubles{"sin", "cos", "tan", "exp", "log", "tanh"};
+    } // namespace
 
     // C's heap, <stdlib.h>'s functions, on the runtime's (runtime/Runtime.h): memory aligned to 64 bytes and zeroed.
     constexpr std::array kAllocations{
@@ -241,12 +257,30 @@ namespace fminus::ir::detail
 
     Lowering::Value Lowering::lowerCall(SourceLocation location, const ast::CallExpr& call)
     {
+        // The types the arguments are passed as, where the callee says before they are lowered: a method's
+        // parameters (after `this`), a double builtin's doubles, a function's parameters. A numeric argument takes a
+        // double's (lowerAs): f(0.1) of a double parameter passes C's 0.1.
+        std::vector<ast::Type> passedAs;
+        const ast::Module* module = function_->module;
+        const Builtin* builtin = findBuiltin(call.callee);
+        if (const auto method = module != nullptr ? functions_.find(module->name + "::" + call.callee) : functions_.end();
+            method != functions_.end())
+        {
+            for (std::size_t i = 1; i < method->second->params.size(); ++i)
+                passedAs.push_back(method->second->params[i].type);
+        }
+        else if (builtin != nullptr && builtin->type == ast::Kind::Double)
+            passedAs.assign(builtin->arity, ast::Type::Double);
+        else if (const auto function = functions_.find(call.callee); function != functions_.end())
+        {
+            for (const ast::Param& param : function->second->params)
+                passedAs.push_back(param.type);
+        }
         std::vector<Value> args;
-        for (const ast::ExprPtr& arg : call.args)
-            args.push_back(lower(*arg));
+        for (std::size_t i = 0; i < call.args.size(); ++i)
+            args.push_back(i < passedAs.size() ? lowerAs(*call.args[i], passedAs[i]) : lower(*call.args[i]));
 
-        if (const ast::Module* module = function_->module;
-            module != nullptr && functions_.contains(module->name + "::" + call.callee))
+        if (module != nullptr && functions_.contains(module->name + "::" + call.callee))
             return callMethod(location, *module, self(), false, call.callee, args);
         if (isReduction(call.callee))
             return lowerReduction(location, call, args);
@@ -277,23 +311,27 @@ namespace fminus::ir::detail
         if (isHash(call.callee))
             return lowerHash(location, call, args);   // Hash.cpp
         std::vector<llvm::Value*> irArgs;
-        if (const Builtin* builtin = findBuiltin(call.callee))
+        if (builtin != nullptr)
         {
             if (args.size() != builtin->arity)
                 return wrongArity(location, args.size(), builtin->arity);
             // Overloaded on its arguments, as OpenCL C's math functions are: with a vector argument it is the
-            // vector intrinsic (llvm.fabs.v4f32), and scalar arguments beside it are broadcast.
-            ast::Type type = ast::Type::Float;
+            // vector intrinsic (llvm.fabs.v4f32), and scalar arguments beside it are broadcast. A double argument
+            // converts to a float, as C converts it for a float parameter (sqrtf(d) rounds d first), and to no vector.
+            // A double function takes doubles, which every scalar converts to, and no vector.
+            const ast::Type scalar = builtin->type == ast::Kind::Double ? ast::Type::Double : ast::Type::Float;
+            ast::Type type = scalar;
             for (const Value& arg : args)
             {
                 if (arg.failed && !ast::isArithmetic(arg.type))
-                    return recovery(ast::Type::Float);   // its own error says why (Value)
-                if (!ast::isArithmetic(arg.type))
+                    return recovery(scalar);   // its own error says why (Value)
+                if (!ast::isArithmetic(arg.type) || (scalar == ast::Type::Double && ast::isVector(arg.type)))
                 {
-                    incompatible(location, Use::Passing, arg.type, ast::Type::Float);
-                    return poison(ast::Type::Float);
+                    incompatible(location, Use::Passing, arg.type, scalar);
+                    return poison(scalar);
                 }
-                if (!commonType(location, type, arg.type, type))
+                if (scalar == ast::Type::Float
+                    && !commonType(location, type, arg.type == ast::Type::Double ? scalar : arg.type, type))
                     return poison(ast::Type::Float);
             }
             for (const Value& arg : args)
@@ -309,7 +347,14 @@ namespace fminus::ir::detail
         const auto found = functions_.find(call.callee);
         if (found == functions_.end())
         {
-            error(location, "call to undeclared function " + quoted(call.callee));
+            std::vector<Diagnostic> notes;
+            if (std::ranges::find(kLibmDoubles, call.callee) != kLibmDoubles.end())
+                notes.push_back({location,
+                                 "FMinus's " + call.callee + "f computes in float, and rounds a double argument to "
+                                     "one; a prototype, 'double " + call.callee + "(double x);', calls the C "
+                                     "library's on doubles",
+                                 {}});
+            diagnostics_.error(location, "call to undeclared function " + quoted(call.callee), std::move(notes));
             return poison(ast::Type::Float);
         }
         const ast::Function& callee = *found->second;

@@ -5,7 +5,8 @@
  * Comments are C's: // to the end of the line, and block comments, which do not nest. Constants are C's: floating
  * ones (1.5, 1., .5, 2e3, 1.5e-3f, hex floats such as 0x1.8p1 and 0x1p-3f) and integer ones (2, 010 in octal, 0x1F in
  * hex), one token whose spelling tells the code generator which. The f or F suffix is allowed only where C allows it
- * (not on 2; in 0x1F the F is a digit), and is kept in the spelling.
+ * (not on 2; in 0x1F the F is a digit), and is kept in the spelling. A floating constant without one is a float or a
+ * double by where it is used, which the code generator decides (ir/Expressions.cpp, lowerAs).
  * To add a token: a rule here, its %token in Parser.y. Keywords come before {IDENTIFIER}: with equal lengths, Flex
  * picks the earlier rule. A keyword's rule is all macroNameError needs to refuse it as a macro's name: it reads the name
  * with this scanner. An identifier that names a module declared so far is a type, MODULE_NAME (ParseContext.h).
@@ -140,6 +141,7 @@ IDENTIFIER  [A-Za-z_][A-Za-z0-9_]*
 <BLOCK_COMMENT><<EOF>>      { throw Parser::syntax_error(yyextra->commentStart, "unterminated /* comment"); }
 
 "float"                     { return Parser::make_FLOAT(yyextra->where); }
+"double"                    { return Parser::make_DOUBLE(yyextra->where); }
 "const"                     { return Parser::make_CONST(yyextra->where); }
 "return"                    { return Parser::make_RETURN(yyextra->where); }
 "bool"                      { return Parser::make_BOOL(yyextra->where); }

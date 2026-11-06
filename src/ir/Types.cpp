@@ -22,6 +22,8 @@ namespace fminus::ir::detail
             return builder_.getVoidTy();
         case ast::Kind::Float:
             return builder_.getFloatTy();
+        case ast::Kind::Double:
+            return builder_.getDoubleTy();
         case ast::Kind::Bool:
             return builder_.getInt1Ty();
         case ast::Kind::Int:
@@ -53,13 +55,15 @@ namespace fminus::ir::detail
         return ast::isModule(type) || ast::isArray(type) ? builder_.getPtrTy() : typeOf(type);
     }
 
-    // C's implicit conversions, and OpenCL C's for vectors. Between scalars: a bool is 0 or 1 as an int or a
-    // float; an int is exact as a float up to 2^24 and rounded beyond; a float becomes an int truncated toward
-    // zero (out of int's range the result is undefined, as in C); and a number is `x != 0` as a bool (so a NaN
-    // is true). A scalar becomes a vector by being broadcast to every lane (a poly bool takes a bool), and a
-    // lane mask is 0 or 1 per lane as the float vector of its size. Nothing else converts from a vector, and
-    // nothing at all from void (a call of a void function has no value): those are errors, reported for `use`. A
-    // value that failed converts silently.
+    // C's implicit conversions, and OpenCL C's for vectors. Between scalars: a bool is 0 or 1 as an int, a float or a
+    // double; an int is exact as a float up to 2^24 and rounded beyond, and exact as a double; a float is exact as a
+    // double, and a double rounds to the nearest float (to infinity past the greatest); a float or a double becomes an
+    // int truncated toward zero (out of int's range the result is undefined, as in C); and a number is `x != 0` as a
+    // bool (so a NaN is true). A scalar becomes a vector by being broadcast to every lane (a poly bool takes a bool),
+    // and a lane mask is 0 or 1 per lane as the float vector of its size. A double does not: a vector's lanes are
+    // floats, and it would be rounded to one silently (clang's error; a vector literal's element converts, as a cast
+    // does: Vectors.cpp). Nothing else converts from a vector, and nothing at all from void (a call of a void function
+    // has no value): those are errors, reported for `use`. A value that failed converts silently.
     llvm::Value* Lowering::convert(Value value, ast::Type type, SourceLocation location, Use use)
     {
         if (value.type == type)
@@ -77,23 +81,31 @@ namespace fminus::ir::detail
             return convertPointer(value, type, location, use);
         if (!ast::isVector(value.type))
         {
+            if (ast::isVector(type) && value.type == ast::Type::Double)
+            {
+                incompatible(location, use, value.type, type);
+                return poison(type).ir;
+            }
             if (ast::isVector(type))
             {
                 const ast::Type scalarType = ast::isMask(type) ? ast::Type::Bool : ast::Type::Float;
                 llvm::Value* scalar = convert(value, scalarType, location, use);
                 return builder_.CreateVectorSplat(lanes(type), scalar, "splat");
             }
-            const bool fromFloat = value.type == ast::Type::Float;
+            const bool fromFloating = ast::isFloating(value.type);
             if (type == ast::Type::Bool)
             {
                 llvm::Value* zero = llvm::Constant::getNullValue(value.ir->getType());
-                return fromFloat ? builder_.CreateFCmpUNE(value.ir, zero, "tobool")
-                                 : builder_.CreateICmpNE(value.ir, zero, "tobool");
+                return fromFloating ? builder_.CreateFCmpUNE(value.ir, zero, "tobool")
+                                    : builder_.CreateICmpNE(value.ir, zero, "tobool");
             }
             if (type == ast::Type::Int)
-                return fromFloat ? builder_.CreateFPToSI(value.ir, typeOf(type), "conv")
-                                 : builder_.CreateZExt(value.ir, typeOf(type), "conv");
-            if (type == ast::Type::Float)
+                return fromFloating ? builder_.CreateFPToSI(value.ir, typeOf(type), "conv")
+                                    : builder_.CreateZExt(value.ir, typeOf(type), "conv");
+            if (ast::isFloating(type) && fromFloating)   // float to double, exact, or double to float, rounded
+                return type == ast::Type::Double ? builder_.CreateFPExt(value.ir, typeOf(type), "conv")
+                                                 : builder_.CreateFPTrunc(value.ir, typeOf(type), "conv");
+            if (ast::isFloating(type))
                 return value.type == ast::Type::Int ? builder_.CreateSIToFP(value.ir, typeOf(type), "conv")
                                                     : builder_.CreateUIToFP(value.ir, typeOf(type), "conv");
         }
@@ -164,7 +176,7 @@ namespace fminus::ir::detail
     {
         if (ast::isArray(type) && (!ast::canPointTo(type.pointee) || type.pointee == ast::Kind::Void))
         {
-            error(location, "FMinus has arrays of float, int, float2, float4, float8 and modules, not of "
+            error(location, "FMinus has arrays of float, double, int, float2, float4, float8 and modules, not of "
                                 + quoted(ast::typeName(ast::pointee(type))));
             return false;
         }
@@ -176,12 +188,12 @@ namespace fminus::ir::detail
 
     void Lowering::noPointerTo(SourceLocation location, ast::Type pointee)
     {
-        error(location, "FMinus has pointers to float, int, float2, float4, float8, void and modules, not to "
-                            + quoted(ast::typeName(pointee)));
+        error(location, "FMinus has pointers to float, double, int, float2, float4, float8, void and modules, not "
+                        "to " + quoted(ast::typeName(pointee)));
     }
 
-    // A type's size in bytes, as C and clang's ext_vector_type have it on the 64-bit targets FMinus runs on: a float4
-    // is 16, a pointer 8, a poly float as many floats as the target's vectors hold (16 bytes with NEON, 64 with
+    // A type's size in bytes, as C and clang's ext_vector_type have it on the 64-bit targets FMinus runs on: a double
+    // is 8, a float4 16, a pointer 8, a poly float as many floats as the target's vectors hold (16 bytes with NEON, 64 with
     // AVX-512). A lane mask has a byte a lane. void has no size. A module's and an array's are the data layout's: a C
     // struct's and array's, padding included, which may pass 4 GB (an array of 2^30 float4s is 16 GB): 64 bits, as
     // C's size_t, for a copy's memcpy and a declaration's memset.
@@ -196,6 +208,8 @@ namespace fminus::ir::detail
         case ast::Kind::Int:
         case ast::Kind::Float:
             return 4;
+        case ast::Kind::Double:
+            return 8;
         case ast::Kind::Float2:
         case ast::Kind::Float4:
         case ast::Kind::Float8:
@@ -252,9 +266,10 @@ namespace fminus::ir::detail
     }
 
     // The type two operands meet in, as C's usual arithmetic conversions and OpenCL C's decide it: the vector
-    // type when either one is a vector (the other is broadcast to it), otherwise float when either one is a
-    // float, otherwise int. A bool takes part as an int, and a lane mask as the float vector of its size. Vectors
-    // of two sizes do not meet: clang's error, and false.
+    // type when either one is a vector (the other is broadcast to it), otherwise double when either one is a double,
+    // float when either one is a float, otherwise int. A bool takes part as an int, and a lane mask as the float vector
+    // of its size. Vectors of two sizes do not meet, nor a vector and a double, whose broadcast would round it to the
+    // vector's floats: clang's errors, and false.
     bool Lowering::commonType(SourceLocation location, ast::Type a, ast::Type b, ast::Type& type)
     {
         if (!ast::isArithmetic(a) || !ast::isArithmetic(b))
@@ -276,10 +291,19 @@ namespace fminus::ir::detail
                                 + quoted(ast::typeName(a)) + " and " + quoted(ast::typeName(b)) + ")");
             return false;
         }
+        if (ast::isVector(ta) != ast::isVector(tb) && (ta == ast::Type::Double || tb == ast::Type::Double))
+        {
+            error(location, "cannot convert between scalar type 'double' and vector type "
+                                + quoted(ast::typeName(ast::isVector(ta) ? a : b))
+                                + " as implicit conversion would cause truncation");
+            return false;
+        }
         if (ast::isVector(ta) || ast::isVector(tb))
             type = ast::isVector(ta) ? ta : tb;
+        else if (ta == ast::Type::Int && tb == ast::Type::Int)
+            type = ast::Type::Int;
         else
-            type = ta == ast::Type::Int && tb == ast::Type::Int ? ast::Type::Int : ast::Type::Float;
+            type = ta == ast::Type::Double || tb == ast::Type::Double ? ast::Type::Double : ast::Type::Float;
         return true;
     }
 

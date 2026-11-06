@@ -52,9 +52,17 @@ namespace fminus::ir::detail
             // refused.
             const unsigned arity = builtin != nullptr ? builtin->arity : allocation != nullptr ? allocation->arity
                                                                                                 : fft->arity;
+            // A double function's is <math.h>'s, `double sqrt(double x);`, of doubles only.
+            const bool doubles = builtin != nullptr && builtin->type == ast::Kind::Double;
+            const bool conflicts =
+                function.params.size() != arity
+                || (doubles && (function.returnType != ast::Type::Double
+                                || std::ranges::any_of(function.params, [](const ast::Param& param) {
+                                       return param.type != ast::Type::Double;
+                                   })));
             if (function.isDefinition)
                 error(function.location, quoted(function.name) + " is a builtin and cannot be redefined");
-            else if (function.params.size() != arity)
+            else if (conflicts)
                 error(function.location, "conflicting types for " + quoted(function.name));
             return;
         }

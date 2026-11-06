@@ -12,8 +12,9 @@
 // name, unmangled.
 //
 //   FMinus                         C++
-//   float, int, bool, void         float, int, bool, void
-//   float*, const int*, void*, ... the same pointer (restrict is a promise to FMinus's optimiser, not a type)
+//   float, double, int, bool, void float, double, int, bool, void
+//   float*, const int*, double*,   the same pointer (restrict is a promise to FMinus's optimiser, not a type)
+//   void*, ...
 //   float2, float4                 clang's float __attribute__((ext_vector_type(2))), (4)
 //   float8                         none: the C ABI passes it in memory, FMinus in registers (docs/simd.md); keep it
 //                                  inside FMinus
@@ -113,7 +114,7 @@ namespace fminus
             }
         };
 
-        // What the program does with subnormal floats, chosen when it compiles.
+        // What the program does with subnormal floats and doubles, chosen when it compiles.
         //   Preserve  IEEE's gradual underflow, as C has it: a subnormal is a number like any other. The default.
         //   Flush     flush-to-zero, the mode a plugin's audio thread runs in: a subnormal input reads as 0 and a
         //             subnormal result is 0, each with its sign. LLVM folds and optimises for that mode, and each entry
@@ -130,7 +131,9 @@ namespace fminus
         };
 
         // How sinf, cosf, tanf, expf, tanhf and logf compute, chosen when the program compiles (fabsf, sqrtf, floorf,
-        // fminf and fmaxf are exact, and the same in every mode).
+        // fminf and fmaxf are exact, and the same in every mode, as are the double functions sqrt, fabs, floor, fmin,
+        // fmax and fma; a double has no sin of FMinus's: sinf rounds it to a float, and a prototype of C's, `double
+        // sin(double x);`, calls the C library's, which is no audio-thread code).
         //   Vector  a float gets one result wherever the program computes it: in a loop's vectorised body or its
         //           remainder, so wherever a block ends; in a float4, a float8 or a poly float of any width; at any
         //           optimisation level; from a frozen parameter or a knob; on arm64 and x86-64 alike. What it computes
@@ -317,8 +320,11 @@ namespace fminus
             struct Field
             {
                 std::string name;
-                std::string type;          // as FMinus writes it: "float", "float4", "float[16]", "Osc", "Osc *";
-                                           // a parameter's "param float" (its slot)
+                std::string type;          // as FMinus writes it: "float", "double", "float4", "float[16]",
+                                           // "double[8]", "Osc", "Osc *"; a parameter's "param float" (its slot).
+                                           // A "double" is 8 bytes, C++'s double, aligned to 8: a host that reads
+                                           // fields by type reads one as a double, not as a float
+                                           // (docs/extending.md, recipe 33)
                 std::size_t offset = 0;    // in bytes, from the instance's address
                 std::size_t size = 0;
             };

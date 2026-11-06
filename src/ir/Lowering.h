@@ -64,13 +64,15 @@ namespace fminus::ir::detail
     // transcendental one also names its stem (Math.cpp): "sin" for the math intrinsics fminus.sin.f32, fminus.sin.v2f32
     // and fminus.sin.v4f32 and the runtime functions fminus_rt_sinf, fminus_rt_sin_f4 and fminus_rt_libm_sinf, which
     // the vector and libm modes call instead of LLVM's intrinsic. An exact one (fabsf, sqrtf, ...) has none, and is its
-    // intrinsic in every mode.
+    // intrinsic in every mode. `type` is what it computes on: a float's (<math.h>'s float functions, overloaded on the
+    // float vectors), or a double's (C's double functions, sqrt, fabs, ..., exact, on doubles only).
     struct Builtin
     {
         std::string_view name;
         llvm::Intrinsic::ID intrinsic;
         unsigned arity;
         std::string_view runtime = {};
+        ast::Kind type = ast::Kind::Float;
     };
 
     // An allocation builtin (Calls.cpp): C's name, the runtime function it calls (runtime/Runtime.h) and its arity.
@@ -244,13 +246,13 @@ namespace fminus::ir::detail
         };
 
         // A constant expression's value, as fold() works it out (Constants.cpp): an int's or a bool's (0 or 1), and
-        // which, or a float, whose value it does not need. `floating` is where a floating constant takes part other
-        // than as a cast's operand, the one place C allows one: a float's always has it, and an int that has it
-        // (1.5f < 2) is no integer constant expression either.
+        // which, or a float or a double, whose value it does not need. `floating` is where a floating constant takes
+        // part other than as a cast's operand, the one place C allows one: a float's and a double's always have it,
+        // and an int that has it (1.5f < 2) is no integer constant expression either.
         struct Folded
         {
             std::int32_t value = 0;
-            ast::Type type = ast::Type::Int;   // Int, Bool or Float
+            ast::Type type = ast::Type::Int;   // Int, Bool, Float or Double
             std::optional<SourceLocation> floating;
         };
 
@@ -385,14 +387,19 @@ namespace fminus::ir::detail
 
         // ---- Expressions.cpp ----------------------------------------------------------------------------------------
         Value lower(const ast::Expr& expr);
+        Value lowerAs(const ast::Expr& expr, ast::Type type);
+        Value lowerWith(const ast::Expr& expr, bool doubles);
+        static bool isArithmetic(ast::BinaryOp op);
+        bool hasDouble(const ast::Expr& expr) const;
+        std::optional<ast::Type> staticType(const ast::Expr& expr) const;
         static bool isComparison(ast::BinaryOp op);
         static bool isBitwise(ast::BinaryOp op);
         Value binary(SourceLocation location, ast::BinaryOp op, Value lhs, Value rhs);
         static ast::Type recovered(ast::BinaryOp op, const Value& lhs, const Value& rhs);
         llvm::Value* arithmetic(ast::BinaryOp op, ast::Type type, llvm::Value* lhs, llvm::Value* rhs);
         llvm::Value* lowerLogical(SourceLocation location, const ast::LogicalExpr& logical);
-        Value lowerConditional(SourceLocation location, const ast::ConditionalExpr& conditional);
-        Value lowerNumber(SourceLocation location, const ast::NumberExpr& number);
+        Value lowerConditional(SourceLocation location, const ast::ConditionalExpr& conditional, bool doubles);
+        Value lowerNumber(SourceLocation location, const ast::NumberExpr& number, bool doubles = false);
         llvm::Value* lowerInteger(SourceLocation location, const std::string& spelling, bool hex);
         Value lowerCast(SourceLocation location, const ast::CastExpr& cast);
         Value lowerSizeof(SourceLocation location, const ast::SizeofExpr& size);
@@ -538,6 +545,9 @@ namespace fminus::ir::detail
         std::unordered_map<std::string, unsigned> regionCount_;            // each function's regions so far
         std::optional<std::unordered_map<std::string, bool>> changes_;     // whether each method changes its module
         bool boundsCheck_;                                                 // whether accesses are checked (Bounds.cpp)
+        // Whether the arithmetic the next lower() is part of has a double, as the arithmetic around it says: its floating
+        // constants are then doubles (Expressions.cpp, lowerAs). None at the top of an arithmetic.
+        std::optional<bool> doubleArithmetic_;
         std::deque<Extent> extents_;                                       // the arrays' extents values carry
     };
 } // namespace fminus::ir::detail
