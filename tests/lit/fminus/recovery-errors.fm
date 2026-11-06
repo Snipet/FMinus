@@ -1,0 +1,35 @@
+// An operand with an error of its own (an undeclared name, a call of no function) gives what takes it no error of its
+// own, as clang's recovery gives none: pointer arithmetic, a subscript, *, & of an rvalue, ->, a comparison, a
+// conversion where a value initialises, is assigned, passed or returned, ?:, a member, a method. One error each.
+// RUN: not fminus %s 2>&1 | FileCheck %s --implicit-check-not=error:
+
+module M
+{
+    float a;
+    float get() { return a; }
+};
+
+float take(float* p) { return p[0]; }
+
+float* f(float* p, int c, float a)
+{
+    float x = *(p + y1) + p[y2] + *y3 + y4->a + take(y5) + nofn().x + y6->get();
+    float* q = &(a + y7);
+    q = y8;
+    bool b = y9 < p;
+    M m = y10;
+    return c ? q : y11;
+}
+
+// CHECK: recovery-errors.fm:16:21: error: use of undeclared identifier 'y1'
+// CHECK: recovery-errors.fm:16:29: error: use of undeclared identifier 'y2'
+// CHECK: recovery-errors.fm:16:36: error: use of undeclared identifier 'y3'
+// CHECK: recovery-errors.fm:16:41: error: use of undeclared identifier 'y4'
+// CHECK: recovery-errors.fm:16:54: error: use of undeclared identifier 'y5'
+// CHECK: recovery-errors.fm:16:60: error: call to undeclared function 'nofn'
+// CHECK: recovery-errors.fm:16:71: error: use of undeclared identifier 'y6'
+// CHECK: recovery-errors.fm:17:22: error: use of undeclared identifier 'y7'
+// CHECK: recovery-errors.fm:18:9: error: use of undeclared identifier 'y8'
+// CHECK: recovery-errors.fm:19:14: error: use of undeclared identifier 'y9'
+// CHECK: recovery-errors.fm:20:11: error: use of undeclared identifier 'y10'
+// CHECK: recovery-errors.fm:21:20: error: use of undeclared identifier 'y11'

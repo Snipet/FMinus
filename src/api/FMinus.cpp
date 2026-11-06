@@ -8,6 +8,8 @@
 #include "frontend/Frontend.h"
 #include "ir/CodeGen.h"
 #include "jit/Jit.h"
+#include "opt/BoundsCheck.h"
+#include "opt/LoopBudget.h"
 #include "runtime/Runtime.h"
 #include "support/HostTarget.h"
 
@@ -24,6 +26,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <limits>
 #include <map>
@@ -127,6 +130,15 @@ namespace fminus
         bool pool = false;   // a user of the runtime's pool, for its parallel regions (runtime/Parallel.cpp)
         std::string loweredIr;     // Options::keepIr's texts, or empty
         std::string optimisedIr;
+        std::string warnings;      // as Diagnostics::format() prints them, or empty
+        // The program's loop budget (Options::loopBudget), in the JIT's memory; without the option, one nothing reads.
+        fminus_rt_loop_budget_state unbudgeted{std::numeric_limits<std::int64_t>::max(), 0};
+        fminus_rt_loop_budget_state* budget = &unbudgeted;
+        // Its bounds checks' record (Options::boundsCheck), in the JIT's memory, and what each check's number means;
+        // without the option, a record nothing writes, and no checks.
+        fminus_rt_bounds_state unchecked{0, 0, 0};
+        fminus_rt_bounds_state* bounds = &unchecked;
+        std::vector<opt::BoundsSite> boundsSites;
 
         Impl() = default;
         Impl(const Impl&) = delete;
@@ -164,6 +176,13 @@ namespace fminus
             return nullptr;
         }
 
+        for (const auto& [name, value] : options.defines)
+            if (const std::optional<std::string> wrong = frontend::macroNameError(name))
+            {
+                errors = "fminus::Program: defines: '" + name + "': " + *wrong + "\n";
+                return nullptr;
+            }
+
         Diagnostics diagnostics(options.fileName);
         frontend::IncludeResolver include;
         if (options.include)
@@ -174,7 +193,7 @@ namespace fminus
                     return std::nullopt;
                 return frontend::IncludedFile{std::move(file->fileName), std::move(file->source)};
             };
-        const std::optional<ast::Program> program = frontend::parse(source, diagnostics, include);
+        const std::optional<ast::Program> program = frontend::parse(source, diagnostics, include, options.defines);
         if (!program)
         {
             errors = diagnostics.format();
@@ -202,6 +221,8 @@ namespace fminus
         lowering.denormals = options.denormals == Denormals::Flush ? ir::Denormals::Flush : ir::Denormals::Preserve;
         lowering.targetTriple = (*machine)->getTargetTriple().str();   // which register an entry point sets
         lowering.threads = options.threads;
+        lowering.loopBudget = options.loopBudget;
+        lowering.boundsCheck = options.boundsCheck;
 
         auto context = std::make_unique<llvm::LLVMContext>();
         std::unique_ptr<llvm::Module> module = ir::lower(*program, *context, diagnostics, lowering);
@@ -250,6 +271,9 @@ namespace fminus
                 info.methods.push_back(declared->name + "::" + method);
         }
 
+        // What each bounds check's number means, for boundsViolation().
+        std::vector<opt::BoundsSite> boundsSites = opt::boundsSites(*module);
+
         // A program with a parallel region runs it on the runtime's pool, from now until it is destroyed.
         const bool parallel = module->getFunction("fminus_rt_parallel_for") != nullptr && options.threads != 1;
 
@@ -285,6 +309,29 @@ namespace fminus
 
         auto impl = std::make_unique<Impl>();
         impl->jit = std::move(*created);
+        // The budget the program defines (opt/LoopBudget.h). Finding it compiles the module, here rather than at the
+        // first look-up of a function.
+        if (options.loopBudget)
+        {
+            auto budget = impl->jit->lookup(opt::kLoopBudgetSymbol);
+            if (!budget)
+            {
+                errors = llvm::toString(budget.takeError()) + "\n";
+                return nullptr;
+            }
+            impl->budget = budget->toPtr<fminus_rt_loop_budget_state*>();
+        }
+        if (options.boundsCheck)   // the record, which the checks write (opt/BoundsCheck.h)
+        {
+            auto record = impl->jit->lookup(opt::kBoundsSymbol);
+            if (!record)
+            {
+                errors = llvm::toString(record.takeError()) + "\n";
+                return nullptr;
+            }
+            impl->bounds = record->toPtr<fminus_rt_bounds_state*>();
+            impl->boundsSites = std::move(boundsSites);
+        }
         if (parallel)
         {
             fminus_rt_parallel_start();
@@ -294,6 +341,7 @@ namespace fminus
         impl->modules = std::move(modules);
         impl->loweredIr = std::move(loweredIr);
         impl->optimisedIr = std::move(optimisedIr);
+        impl->warnings = diagnostics.format();   // no errors: only warnings, if any
         for (const ast::Function& function : program->functions)
         {
             const Effect effect = declaredEffect(function);
@@ -330,6 +378,11 @@ namespace fminus
     const std::string& Program::optimisedIr() const
     {
         return impl_->optimisedIr;
+    }
+
+    const std::string& Program::warnings() const
+    {
+        return impl_->warnings;
     }
 
     bool Program::nonBlocking(std::string_view name) const
@@ -417,6 +470,59 @@ namespace fminus
             if (parameter.defaultValue)
                 setValue(instance, parameter, *parameter.defaultValue);
         }
+    }
+
+    // The program's own accesses are relaxed (monotonic) atomics too (opt/LoopBudget.h). The flag is cleared first:
+    // a call that starts after both stores sees both. `left` is never below -1, which keeps the program's counts from
+    // wrapping (opt/LoopBudget.cpp): any negative budget is -1, a call that stops at its first check.
+    void Program::setLoopBudget(std::int64_t backEdges) noexcept
+    {
+        std::atomic_ref(impl_->budget->stopped).store(0, std::memory_order_relaxed);
+        std::atomic_ref(impl_->budget->left).store(std::max<std::int64_t>(backEdges, -1), std::memory_order_relaxed);
+    }
+
+    std::int64_t Program::loopBudgetLeft() const noexcept
+    {
+        return std::atomic_ref(impl_->budget->left).load(std::memory_order_relaxed);
+    }
+
+    bool Program::loopBudgetExceeded() const noexcept
+    {
+        return std::atomic_ref(impl_->budget->stopped).load(std::memory_order_relaxed) != 0;
+    }
+
+    // The program's own accesses of the record are relaxed (monotonic) atomics too (opt/BoundsCheck.h): the site's a
+    // compare-and-swap from 0, then the index. The index is cleared first, so that a call that starts after both
+    // stores and fails a check writes it over 0.
+    std::optional<Program::BoundsViolation> Program::boundsViolation() const noexcept
+    {
+        const std::int32_t site = std::atomic_ref(impl_->bounds->site).load(std::memory_order_relaxed);
+        if (site <= 0 || static_cast<std::size_t>(site) > impl_->boundsSites.size())
+            return std::nullopt;
+        const opt::BoundsSite& check = impl_->boundsSites[static_cast<std::size_t>(site) - 1];
+        BoundsViolation violation;
+        violation.file = check.file;
+        violation.line = check.line;
+        violation.column = check.column;
+        violation.array = check.array;
+        violation.type = check.type;
+        violation.extent = check.extent;
+        violation.index = std::atomic_ref(impl_->bounds->index).load(std::memory_order_relaxed);
+        violation.width = check.width;
+        return violation;
+    }
+
+    void Program::clearBoundsViolation() noexcept
+    {
+        std::atomic_ref(impl_->bounds->index).store(0, std::memory_order_relaxed);
+        std::atomic_ref(impl_->bounds->site).store(0, std::memory_order_relaxed);
+    }
+
+    std::string Program::BoundsViolation::message() const
+    {
+        const opt::BoundsSite site{std::string(file), line, column, std::string(array), std::string(type), extent,
+                                   width};
+        return opt::boundsMessage(site, index);
     }
 } // namespace fminus
 

@@ -196,6 +196,13 @@ namespace fminus
             // where the files are, a directory of its own or files it keeps in memory, as fminus reads them from disk
             // (beside the including file, then -I's directories).
             IncludeResolver include;
+            // Macros defined before the program's first line, as C's -D defines them (fminus -D NAME[=value]): each
+            // name's value, "1" for a flag as -D NAME gives it, or "" for none. A program reads them in #if, #elif,
+            // #ifdef and #ifndef, as it reads its own #define's: `#ifdef DEBUG` ... `#endif` around instrumentation
+            // compiles it in when the host defines DEBUG, and skips its lines unread when it doesn't. FMinus never
+            // substitutes a macro in code: its name there is an error. A name that is no identifier, `defined` or a
+            // keyword fails compile.
+            std::map<std::string, std::string> defines;
             // Each parameter's binding, by its qualified name ("Lowpass::cutoff"); one not named is a knob. A name
             // that is no parameter of the program, or a stream that is not a float, is a compile error.
             std::map<std::string, Binding> parameters;
@@ -221,11 +228,20 @@ namespace fminus
             // Which of the program's LLVM IR to keep as text, for loweredIr() and optimisedIr() (KeepIr, above). None,
             // the default, prints nothing and holds nothing.
             KeepIr keepIr = KeepIr::None;
+            // The loop budget, runaway-loop protection: the code counts its loops' iterations and its recursive calls
+            // against a budget the host sets before each call (setLoopBudget, below), and a call that runs out returns
+            // early, with a flag the host reads (loopBudgetExceeded). Off, the default, the code is as it was.
+            bool loopBudget = false;
+            // Bounds checks, for development builds: every access whose array the compiler can see is checked against
+            // the array's extent, and a call whose check fails returns early, with the check recorded for the host
+            // (boundsViolation, below). Off, the default, the code is as it was, and as fast.
+            bool boundsCheck = false;
         };
 
         // Compiles `source`. Returns nullptr when it does not compile, with `errors` holding FMinus's messages, one a
-        // line, as clang words them (`program.fm:3:12: error: use of undeclared identifier 'x'`), notes included.
-        // `errors` is empty on success.
+        // line, as clang words them (`program.fm:3:12: error: use of undeclared identifier 'x'`), notes included, and
+        // any warnings among them where they are, as clang prints both. `errors` is empty on success, and a program
+        // that compiles with warnings has them in warnings().
         static std::unique_ptr<Program> compile(std::string_view source, std::string& errors, const Options& options);
         static std::unique_ptr<Program> compile(std::string_view source, std::string& errors);
 
@@ -249,6 +265,13 @@ namespace fminus
         // How many lanes a poly float has in this program: Options::polyLanes, or this machine's vector width in
         // floats (4 with NEON or SSE, 8 with AVX2).
         unsigned polyLanes() const;
+
+        // The program's warnings, one a line as clang prints them, each naming its flag, notes included
+        // (`program.fm:7:13: warning: enumeration value 'TRIANGLE' not handled in switch [-Wswitch]`); empty when it
+        // has none. A warning is about a program that compiles, and runs as written: a host may show it beside the
+        // program. FMinus's one warning is clang's -Wswitch, a switch without a default on a value of an enumerated
+        // type that misses some of its constants.
+        const std::string& warnings() const;
 
         // The program's LLVM IR as the code generator wrote it, as text, when Options::keepIr kept it (Lowered or
         // Both); empty otherwise.
@@ -336,6 +359,141 @@ namespace fminus
 
         // Sets each of the module's parameters that has an fminus::default to it (setValue), in `instance`.
         static void setDefaults(void* instance, const Module& module) noexcept;
+
+        // The loop budget (Options::loopBudget): runaway-loop protection, for a program that might loop for ever, or
+        // for far longer than a block may take, on the audio thread. Its code counts down the budget: a loop whose
+        // count the optimiser knows when it starts (a for over a block, a vectorised loop) is charged that count there,
+        // before it runs; any other loop (a while on the data) one at each branch back to its start; and a function
+        // that can call itself again one at each call. When the count would go below zero, the function sets the flag
+        // and returns at once, 0, null or nothing, and so does each of the program's functions that called it, back to
+        // the host: no caller goes on with a value that was never computed. Before then, a call computes what it would
+        // without the budget, bit for bit: the checks go in after the optimiser has made every decision, and only count
+        // and branch. A loop with a count costs a subtraction and a branch where it starts, any other a subtraction and
+        // a branch an iteration, in registers, and a call a load and a store of the budget (an atomic min, below, in
+        // what a parallel region's threads run; docs/extending.md, recipe 29, has the measurements). What a call takes
+        // depends on the optimised code: a vectorised loop counts once a vector of samples, and a loop the optimiser
+        // unrolled or removed counts what it became.
+        //
+        // A call that ran out leaves the instance and what it wrote of the output as the optimised code had them when
+        // it stopped, which need not be any point of the source: the optimiser keeps a module's field in a register
+        // through a loop and stores it after the loop, sinks and merges stores, so some of the call's writes may be
+        // missing, out of order with the source, or out of step with each other (a write index advanced past its wrap,
+        // say). A host that runs the program again first re-initialises the instance as it made it (zeroes it, then
+        // setDefaults() and its own parameter values and streams), or discards it.
+        //
+        //   Program::Options options;
+        //   options.loopBudget = true;
+        //   auto program = Program::compile(source, errors, options);
+        //   ...
+        //   program->setLoopBudget(10'000'000);           // on the audio thread, before each call
+        //   process(instance, in, out, n);
+        //   if (program->loopBudgetExceeded())            // it returned early: silence it, report it, and
+        //       ...                                       // re-initialise the instance before the next call
+        //
+        // One budget a Program, which every thread that runs it shares. A parallel region's threads each count from
+        // where their part starts, and write back what they have left as a minimum, so that what is left never goes up
+        // during a call: each thread takes at most the budget, the region at most its thread count times it, and a
+        // part that starts after one ran out stops at its first check. What is left after a region is the least any
+        // part left (the flag is what says one ran out). A loop that runs for ever only through undefined behaviour (an
+        // int that overflows past its end, which C lets the optimiser assume never happens) is charged the count the
+        // optimiser assumed. The program compiles with its machine code, as compile() returns (the first look-up of a
+        // function only finds it). Unlimited until the host sets it. Each of these is a relaxed atomic load or store,
+        // no allocation and no lock: the audio thread may call them. In a program compiled without the budget they
+        // read and write a budget nothing counts down, and loopBudgetExceeded() is false.
+        //
+        // Sets the budget for the next call, `backEdges` branches back (a loop with a count is charged them all as it
+        // starts; at 0 the first branch back stops the call; a negative budget is -1, which stops the call at its
+        // first check), and clears the flag. The host sets it before each call it limits; otherwise what is left
+        // carries over to the next call.
+        void setLoopBudget(std::int64_t backEdges) noexcept;
+
+        // What is left of the budget: what was set less what the calls since have taken; -1 once a call has run out
+        // (never less, so that however many calls follow without setLoopBudget, none of the program's counts wraps).
+        std::int64_t loopBudgetLeft() const noexcept;
+
+        // Whether a call since setLoopBudget ran out of the budget and returned early.
+        bool loopBudgetExceeded() const noexcept;
+
+        // Bounds checks (Options::boundsCheck), for development builds: an index outside its array reads or writes
+        // whatever lies beside it (another field, the host's memory), which corrupts the host or crashes it, perhaps
+        // much later. Compiled with the checks, every access whose array the compiler can see is checked against the
+        // array's extent: a[i], m.taps[i], p->taps[i] and voices[v] (an array of modules), *(a + i), a pointer formed
+        // from one (a + i, &a[i], which may point one past its end, as C allows), and a poly_load or poly_store through
+        // one (each lane it reaches, or with a mask each lane the mask takes): of a local array, a module's field, a
+        // constant table. A pointer the program keeps has no extent the compiler knows, and its accesses are not
+        // checked: one a variable, a field or a parameter holds (`float* p = buf;`, then p[i]), what a function
+        // returns, a heap block (malloc's), a host's buffer. Nor are fft_forward's and fft_inverse's buffers: the
+        // transform reads and writes as many elements as its plan has, which only the running program knows, so a
+        // buffer shorter than the plan is overrun as it would be without the checks.
+        //
+        // When a check fails, the function records it, unless the record holds one already (the first is kept), and
+        // returns at once, 0, null or nothing, and so does each of the program's functions that called it, back to the
+        // host, as with the loop budget: no caller goes on with a value that was never computed, and the access never
+        // happens. What the call leaves in the instance and the output is whichever of the optimised code's stores had
+        // run, which need not be any point of the source (the loop budget's paragraph, above): a host that runs the
+        // program again first clears the record (clearBoundsViolation, below), then re-initialises the instance, or
+        // discards it. In that order: a method such as init is a call too, which a record still holding the check
+        // would stop partway.
+        //
+        //   Program::Options options;
+        //   options.boundsCheck = true;                   // while developing; the build that plays has none
+        //   auto program = Program::compile(source, errors, options);
+        //   ...
+        //   process(instance, in, out, n);
+        //   if (auto failed = program->boundsViolation()) // it returned early: silence it, and off the audio thread
+        //   {
+        //       report(failed->message());                // "synth.fm:12:9: index 16 out of bounds for 'line' of
+        //                                                 // type 'float[16]'"
+        //       program->clearBoundsViolation();          // first: then init runs whole
+        //       init(instance);
+        //   }
+        //
+        // A check costs a compare and a branch where the optimiser cannot prove the access within the array (a ring
+        // buffer's index; a loop over the array that its own condition keeps within it has none), and a load and a
+        // branch after each call of a function with checks that inlining leaves. The optimiser treats a failed check as
+        // a trap until the last pass makes it a return, so a loop with one keeps a field it updates in memory, a store
+        // each iteration (docs/extending.md, recipe 30, has the measurements), and a build with the checks computes
+        // what it would without them until a check fails. A build without them is the code it was. The program
+        // compiles with its machine code, as compile() returns (the first look-up of a function only finds it).
+        //
+        // One record a Program, which every thread that runs it shares. While it holds a check, each function of the
+        // program returns early as soon as a call it makes of a function with checks (or one that calls such a
+        // function) returns, however it got there: the callee runs its own body, unless its own calls stop it, and
+        // the caller returns 0, null or nothing after it, though its own indexes are fine. Calls the optimiser
+        // inlined are no calls, so a function whose code is all inlined runs to its end. In a parallel region, the
+        // first part to fail is recorded; each of the others stops at a failed check of its own or that way, or else
+        // runs to its end, and the function that ran the region returns when the region ends. So clear the record
+        // before the program runs again, re-initialising the instance included. Each of these is a relaxed atomic
+        // load or store, no allocation and no lock: the audio thread may call them. In a program compiled without the
+        // checks there is never a violation.
+        //
+        // A bounds check that failed: where in the source the access is, which array, and the element it reached.
+        // The strings are the Program's, valid while it lives.
+        struct BoundsViolation
+        {
+            std::string_view file;     // the source file, as errors name it (Options::fileName, or an #include's)
+            int line = 0;              // the access's line in that file, from 1
+            int column = 0;            // and its column, from 1, in bytes, as the errors count it
+            std::string_view array;    // the array as the source names it ("buf", "m.taps", "voices[v].line"), or
+                                       // empty when it has no name
+            std::string_view type;     // its type, as FMinus writes it: "float[16]"
+            std::int64_t extent = 0;   // its elements
+            std::int64_t index = 0;    // the element the access reached, from the array's first
+            // How many elements from `index` the access reaches: 1 for an element (a[i], *p, p->y), a poly_load's or
+            // poly_store's lanes, and 0 for a pointer formed (a + i, &a[i]), which may also be one past the end.
+            int width = 1;
+
+            // What it says, in UBSan's words with the array's name and where it is: "synth.fm:12:9: index 16 out of
+            // bounds for 'line' of type 'float[16]'", "pointer offset 17 ...", "4 elements from index 14 ...". It
+            // allocates: off the audio thread.
+            std::string message() const;
+        };
+
+        // The first check that failed since clearBoundsViolation (or since the program compiled), or nothing.
+        std::optional<BoundsViolation> boundsViolation() const noexcept;
+
+        // Clears the record, so that the next call runs whole: before any call of the program, init's included.
+        void clearBoundsViolation() noexcept;
 
     private:
         struct Impl;

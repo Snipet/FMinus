@@ -16,7 +16,8 @@ namespace fminus
         int file = 0;
     };
 
-    // An error, and the notes that explain it (each a location and a message of its own, as clang's notes are).
+    // An error or a warning, and the notes that explain it (each a location and a message of its own, as clang's notes
+    // are).
     struct Diagnostic
     {
         SourceLocation location;
@@ -24,8 +25,10 @@ namespace fminus
         std::vector<Diagnostic> notes;
     };
 
-    // The errors of one compilation: of the program's own file, and of the files its #includes read. Errors only for
-    // now: add a severity when warnings arrive.
+    // The errors and warnings of one compilation: of the program's own file, and of the files its #includes read. An
+    // error stops the program from compiling; a warning, which names its flag as clang's do ("... [-Wswitch]"), does
+    // not. The two are kept apart, so that errors().size() counts errors only, which the code generator's rule for an
+    // operand's own error reads (Lowering::Value::failed).
     class Diagnostics
     {
     public:
@@ -48,6 +51,12 @@ namespace fminus
         {
             return errors_;
         }
+        // A warning: its message ends with its flag, as clang prints it ("... not handled in switch [-Wswitch]").
+        void warning(SourceLocation location, std::string message, std::vector<Diagnostic> notes = {});
+        const std::vector<Diagnostic>& warnings() const
+        {
+            return warnings_;
+        }
         // The program's own file's name.
         const std::string& fileName() const
         {
@@ -65,9 +74,10 @@ namespace fminus
             return static_cast<int>(files_.size());
         }
 
-        // Every error as "<file>:<line>:<column>: error: <message>\n", in source order (errors() keeps the order
-        // reported: the code generator's declaration pass reports before it lowers the bodies), each followed by its
-        // notes, "<file>:<line>:<column>: note: <message>\n", in their own order wherever they point. Source order is
+        // Every error as "<file>:<line>:<column>: error: <message>\n" and every warning as "...: warning: <message>\n",
+        // together in source order, as clang prints them (errors() and warnings() keep the order reported: the code
+        // generator's declaration pass reports before it lowers the bodies), each followed by its notes,
+        // "<file>:<line>:<column>: note: <message>\n", in their own order wherever they point. Source order is
         // the order the compiler reads the text in: an included file's lines come where its #include is. A line in an
         // included file follows clang's "In file included from <file>:<line>:\n" lines, from the program's own file
         // in, when the line before it was in another file.
@@ -76,5 +86,6 @@ namespace fminus
     private:
         std::vector<File> files_;
         std::vector<Diagnostic> errors_;
+        std::vector<Diagnostic> warnings_;
     };
 } // namespace fminus

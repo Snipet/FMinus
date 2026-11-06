@@ -1,5 +1,6 @@
 // tests/unit/IncludeTest.cpp: #include (src/frontend/Lexer.l): its file read where the directive is, each file once,
-// the messages naming the file with clang's include stack, and the directives FMinus does not have.
+// the messages naming the file with clang's include stack, and the directives FMinus does not have (the conditionals
+// and macros it has are ConditionalTest.cpp's).
 #include "frontend/Frontend.h"
 
 #include <catch2/catch_test_macros.hpp>
@@ -166,10 +167,10 @@ TEST_CASE("the directives FMinus does not have are errors, in clang's words wher
              "\"file\")\n");
     CHECK(parsed("#include \"twice.fm\" twice\n")
           == "test.fm:1:21: error: extra tokens at end of #include directive\n");
-    CHECK(parsed("#define GAIN 2\n")
-          == "test.fm:1:2: error: #define is not supported: FMinus's directives are #include and #pragma\n");
-    CHECK(parsed("  # ifdef X\n")
-          == "test.fm:1:5: error: #ifdef is not supported: FMinus's directives are #include and #pragma\n");
+    const std::string directives = "FMinus's directives are #include, #pragma, #define, #undef and the conditionals "
+                                   "(#if, #ifdef, #ifndef, #elif, #elifdef, #elifndef, #else, #endif)\n";
+    CHECK(parsed("#line 2\n") == "test.fm:1:2: error: #line is not supported: " + directives);
+    CHECK(parsed("  # error X\n") == "test.fm:1:5: error: #error is not supported: " + directives);
     CHECK(parsed("#includes \"twice.fm\"\n") == "test.fm:1:2: error: invalid preprocessing directive\n");
     CHECK(parsed("#!\n") == "test.fm:1:2: error: invalid preprocessing directive\n");
     CHECK(parsed("#\n# // C's null directive\nfloat f() { return 1; }\n") == "(function float f ()\n  (return 1))\n");

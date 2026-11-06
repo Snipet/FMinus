@@ -1,0 +1,102 @@
+// A large argument in a wide vector (opt/MathKernels.cpp, largeFunction): sinf, cosf and tanf of a poly float give
+// each lane the scalar function of that lane when some lanes are past 2^16, infinite or NaN, and take the branch that
+// calls the runtime for them. Each such lane calls fminus.large.<stem>, of the preserve_all calling convention, which
+// must give back every vector register as it found it: the kernel keeps its vectors in registers across the calls. On
+// x86-64 with AVX, LLVM put a vzeroupper before that function's return, after it had restored the registers' upper
+// halves, and an 8-lane kernel's upper four lanes came out as the kernel's result for 0. There the wrapper is compiled
+// without vzeroupper (its target-features end in -vzeroupper) and calls llvm.x86.avx.vzeroupper itself, before the
+// runtime's function, where LLVM put one too.
+// RUN: fminus %s -O2 --poly-lanes 8 --run main 70000 | FileCheck %s --check-prefix=SAME
+// RUN: fminus %s -O2 --poly-lanes 8 --run main inf | FileCheck %s --check-prefix=SAME
+// RUN: fminus %s -O2 --poly-lanes 8 --run main nan | FileCheck %s --check-prefix=SAME
+// RUN: fminus %s -O1 --poly-lanes 8 --run main 1e30 | FileCheck %s --check-prefix=SAME
+// RUN: fminus %s -O3 --poly-lanes 16 --run main 70000 | FileCheck %s --check-prefix=SAME
+// RUN: fminus %s -O2 --poly-lanes 4 --run main 70000 | FileCheck %s --check-prefix=SAME
+// RUN: fminus %s -O2 --poly-lanes 8 --emit exe -o %t
+// RUN: %t 70000 | FileCheck %s --check-prefix=SAME
+// RUN: fminus %s -O2 --poly-lanes 8 | FileCheck %s --check-prefix=IR
+// RUN: %if avx %{ fminus %s -O2 --poly-lanes 8 | FileCheck %s --check-prefix=AVX %}
+// RUN: %if !avx %{ fminus %s -O2 --poly-lanes 8 | FileCheck %s --check-prefix=PLAIN --implicit-check-not=vzeroupper %}
+// RUN: %if avx %{ fminus %s -O2 --poly-lanes 8 --emit asm -o - | FileCheck %s --check-prefix=AVXASM %}
+
+// Whether two floats are the same result: equal, or both NaN.
+bool same(float a, float b)
+{
+    return a == b || (a != a && b != b);
+}
+
+// sinf, cosf and tanf of 64 arguments, poly_lanes() at a time, against each function of each argument: the number of
+// results that differ, times 100, plus the first one's index; -1 when every one is the same. Two arguments are `big`
+// (and -big), in different vectors, in a lane of the lower half of one and of the upper half of the other.
+float main(float big)
+{
+    float in[64];
+    float s[64];
+    float c[64];
+    float t[64];
+    for (int i = 0; i < 64; ++i)
+        in[i] = 0.37f * (float)i - 9.0f;
+    in[1] = big;
+    in[22] = -big;
+    for (int i = 0; i + poly_lanes() <= 64; i += poly_lanes())
+    {
+        const poly float x = poly_load(in + i);
+        poly_store(s + i, sinf(x));
+        poly_store(c + i, cosf(x));
+        poly_store(t + i, tanf(x));
+    }
+    int bad = 0;
+    int first = -1;
+    for (int i = 0; i < 64; ++i)
+    {
+        if (!same(s[i], sinf(in[i])) || !same(c[i], cosf(in[i])) || !same(t[i], tanf(in[i])))
+        {
+            bad = bad + 1;
+            if (first < 0)
+                first = i;
+        }
+    }
+    return (float)(bad * 100 + first);
+}
+
+// SAME: -1
+
+// Each of the three kernels' 8 lanes, two vectors of 4 here, takes the branch for a large argument: a call a lane.
+// IR-LABEL: define float @main(
+// IR-COUNT-8: call preserve_allcc float @fminus.large.sin(float
+// IR-COUNT-8: call preserve_allcc float @fminus.large.cos(float
+// IR-COUNT-8: call preserve_allcc float @fminus.large.tan(float
+
+// The wrappers. Elsewhere (arm64, x86-64 without AVX): a call of the runtime, of the machine's features.
+// PLAIN: define internal preserve_allcc float @fminus.large.sin(float %0) #[[LARGE:[0-9]+]] {
+// PLAIN-NEXT: entry:
+// PLAIN-NEXT:   [[R:%.*]] = call float @fminus_rt_sinf(float %0)
+// PLAIN-NEXT:   ret float [[R]]
+// PLAIN:      define internal preserve_allcc float @fminus.large.cos(float %0) #[[LARGE]] {
+// PLAIN:      define internal preserve_allcc float @fminus.large.tan(float %0) #[[LARGE]] {
+// PLAIN:      attributes #[[LARGE]] = { cold nofree noinline nosync nounwind willreturn memory(none) }
+
+// On x86-64 with AVX, the machine's features less vzeroupper, and a vzeroupper before the runtime's call.
+// AVX: define internal preserve_allcc float @fminus.large.sin(float %0) #[[LARGE:[0-9]+]] {
+// AVX-NEXT: entry:
+// AVX-NEXT:   call void @llvm.x86.avx.vzeroupper()
+// AVX-NEXT:   [[R:%.*]] = call float @fminus_rt_sinf(float %0)
+// AVX-NEXT:   ret float [[R]]
+// AVX:      define internal preserve_allcc float @fminus.large.cos(float %0) #[[LARGE]] {
+// AVX-NEXT: entry:
+// AVX-NEXT:   call void @llvm.x86.avx.vzeroupper()
+// AVX:      define internal preserve_allcc float @fminus.large.tan(float %0) #[[LARGE]] {
+// AVX-NEXT: entry:
+// AVX-NEXT:   call void @llvm.x86.avx.vzeroupper()
+// AVX:      attributes #[[LARGE]] = { cold nofree noinline nosync nounwind willreturn memory(none) "target-features"="{{.*}}+avx,{{(.*,)?}}-vzeroupper" }
+
+// In the machine code, the wrapper's one vzeroupper comes before the runtime's call (the JIT's code model calls it
+// through a register), and none after it: the restores of ymm1-ymm15 are the last thing before the return.
+// AVXASM-LABEL: fminus.large.sin:
+// AVXASM:         vzeroupper
+// AVXASM:         fminus_rt_sinf
+// AVXASM:         call
+// AVXASM-NOT:     vzeroupper
+// AVXASM:         , %ymm{{[0-9]+}}
+// AVXASM-NOT:     vzeroupper
+// AVXASM:         ret

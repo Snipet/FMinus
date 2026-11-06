@@ -195,9 +195,71 @@ TEST_CASE("enumerations parse as C's, where they are among the functions and mod
           == "test.fm:3:6: error: redefinition of 'E'\n"
              "test.fm:1:6: note: previous definition is here\n");
     CHECK(parsed("enum E { };") == "test.fm:1:10: error: use of empty enum\n");
-    // Declared on its own: C's `enum E { A } e;` declares a variable too, which FMinus's enumeration does not.
-    CHECK(parsed("int f() { enum E { A } e; return 0; }")
-          == "test.fm:1:24: error: syntax error, unexpected identifier, expecting ;\n");
+}
+
+TEST_CASE("an enumeration declares names of its type after its list, and C23's fixed underlying type parses",
+          "[frontend]")
+{
+    // C's `enum E { A } e;`: the enumeration, then the declaration of `e`, whose type is `enum E` (int); a constant at
+    // the top level, a field in a module (after the module's enumeration), a local in a block. The tag is a type from
+    // the closing brace on, so the names after it may use it.
+    CHECK(parsed("const enum Size { SMALL = 2, LARGE } sizes[2] = {SMALL, LARGE}, one = (enum Size)1;\n"
+                 "module Voice { enum Stage { IDLE, ON } stage, stages[ON + 1]; };\n"
+                 "int f() { enum { A } a = A, *p = &a; enum { B } ; return a; }\n")
+          == "(enum Size (SMALL 2) (LARGE))\n"
+             "(decl const int[2] sizes {SMALL LARGE})\n"
+             "(decl const int one (cast int 1))\n"
+             "(module Voice\n"
+             "  (enum Stage (IDLE) (ON))\n"
+             "  (field int stage)\n"
+             "  (field int[(+ ON 1)] stages))\n"
+             "(function int f ()\n"
+             "  (enum (A))\n"
+             "  (decl int a A)\n"
+             "  (decl int * p (& a))\n"
+             "  (enum (B))\n"
+             "  (return a))\n");
+    // C23's fixed underlying type, int or bool, after the tag; a tag declared ahead of its list with one is a type
+    // from there on, and adds nothing to the tree.
+    CHECK(parsed("enum Mode : int;\n"
+                 "enum Mode first(enum Mode m) { return m; }\n"
+                 "enum Mode : int { A, B };\n"
+                 "enum Flag : bool { OFF, ON } flag;\n"
+                 "enum : int { C };\n")
+          == "(function int first ((int m))\n"
+             "  (return m))\n"
+             "(enum Mode : int (A) (B))\n"
+             "(enum Flag : bool (OFF) (ON))\n"
+             "(decl bool flag)\n"
+             "(enum : int (C))\n");
+    // The tags' errors, clang's: a type no integer, redeclarations that disagree on the fixed type (a note at the one
+    // before), a definition twice, a declaration ahead without a tag or without a fixed type.
+    CHECK(parsed("enum E : float { A };") == "test.fm:1:10: error: non-integral type 'float' is an invalid underlying "
+                                             "type\n");
+    CHECK(parsed("enum F { X };\nenum E : enum F { A };")
+          == "test.fm:2:10: error: an enumerated type is no underlying type: C23 takes an integer type that is not an "
+             "enumeration\n");
+    CHECK(parsed("enum E : int;\nenum E : bool;")
+          == "test.fm:2:6: error: enumeration redeclared with different underlying type 'bool' (was 'int')\n"
+             "test.fm:1:6: note: previous declaration is here\n");
+    CHECK(parsed("enum E : int;\nenum E { A };")
+          == "test.fm:2:6: error: enumeration previously declared with fixed underlying type\n"
+             "test.fm:1:6: note: previous declaration is here\n");
+    CHECK(parsed("enum E { A };\nenum E : int;")
+          == "test.fm:2:6: error: enumeration previously declared with nonfixed underlying type\n"
+             "test.fm:1:6: note: previous declaration is here\n");
+    CHECK(parsed("enum E : int;\nenum E : int { A };\nenum E : int { B };")
+          == "test.fm:3:6: error: redefinition of 'E'\n"
+             "test.fm:2:6: note: previous definition is here\n");
+    CHECK(parsed("enum : int;") == "test.fm:1:11: error: unnamed enumeration must be a definition\n");
+    CHECK(parsed("enum E;") == "test.fm:1:6: error: ISO C forbids forward references to 'enum' types\n");
+    // A declaration ahead in an inner scope declares a tag of its own there, as C's does; one of a tag already
+    // defined there declares nothing (C11 6.7.2.3p3).
+    CHECK(parsed("enum E { A };\nenum E;\nint f() { enum E : bool; enum E : bool { B }; return B; }")
+          == "(enum E (A))\n"
+             "(function int f ()\n"
+             "  (enum E : bool (B))\n"
+             "  (return B))\n");
 }
 
 TEST_CASE("vector types, literals and swizzles parse as OpenCL C's", "[frontend]")

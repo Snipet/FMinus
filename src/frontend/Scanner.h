@@ -2,13 +2,15 @@
 // tests/smoke/calc/:
 //   - the parser's header first, for its symbol and location types;
 //   - the scanner's state (Flex's yyextra), here the location (and where an open block comment began), the parse
-//     context, whose modules' names the scanner returns as types, and the files #include reads;
+//     context, whose modules' names the scanner returns as types, the files #include reads, and the macros and
+//     the conditionals being read (Preprocessor.h);
 //   - the scanner's function under its own name (Flex defines it through YY_DECL), and the yylex the parser calls
 //     forwarding to it: the prefixed scanner #defines yylex to fminuslex in its own files.
 #pragma once
 
 #include "frontend/Frontend.h"
 #include "frontend/Parser.tab.hpp"
+#include "frontend/Preprocessor.h"
 
 #include <deque>
 #include <set>
@@ -26,6 +28,21 @@ namespace fminus::frontend
         location where;
     };
 
+    // An #if, #ifdef or #ifndef being read, to its #endif: where its name is (for "unterminated conditional
+    // directive"), its file (ScannerState::open's size there: a conditional ends in the file it begins in), whether one
+    // of its groups has been read (the groups after it are skipped), whether its #else has been, and whether the group
+    // being read is skipped, its text never scanned. One that begins in a skipped group is inert: it is skipped whole,
+    // and its #elif, #else and #endif count only for where it ends.
+    struct Conditional
+    {
+        location where;
+        std::size_t file = 0;
+        bool taken = false;
+        bool sawElse = false;
+        bool skipping = false;
+        bool inert = false;
+    };
+
     struct ScannerState
     {
         location where;
@@ -40,6 +57,25 @@ namespace fminus::frontend
         std::deque<SourceFile> files;
         std::set<std::string, std::less<>> read;
         std::vector<OpenInclude> open;
+
+        // The macros defined so far, the host's first, and the conditionals being read, the innermost last; and the
+        // work of expanding the macros in the conditions so far (Preprocessor.h's evaluate, which bounds it).
+        Macros macros;
+        std::vector<Conditional> conditionals;
+        std::size_t expanded = 0;
+
+        // Whether only spaces and comments come before the scanner on its line, where a # begins a directive in C:
+        // FMinus's begins its line (Lexer.l's "#" rules). A line's end makes it true; text makes it false, and so does
+        // each call of the scanner after the first (`started`), which follows a token the parser took. A block comment
+        // keeps it as it was where the comment began, as C reads a # after one.
+        bool lineStart = true;
+        bool started = false;
+
+        // Whether the scanner is in a skipped group, where only the conditionals' lines are read.
+        bool skipping() const
+        {
+            return !conditionals.empty() && conditionals.back().skipping;
+        }
     };
 
     // The source location of a Bison location's start.

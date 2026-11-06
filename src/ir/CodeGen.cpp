@@ -18,7 +18,9 @@
 #include "ir/CodeGen.h"
 
 #include "ir/Lowering.h"
+#include "opt/BoundsCheck.h"
 #include "opt/KnobVersioning.h"
+#include "opt/LoopBudget.h"
 #include "support/HostTarget.h"
 
 #include <llvm/IR/LLVMContext.h>
@@ -26,6 +28,7 @@
 #include <llvm/IR/Module.h>
 
 #include <memory>
+#include <string>
 
 namespace fminus::ir
 {
@@ -42,6 +45,7 @@ namespace fminus::ir
             , denormals_(options.denormals)
             , targetTriple_(options.targetTriple)
             , threads_(options.threads)
+            , boundsCheck_(options.boundsCheck)
         {
         }
 
@@ -128,6 +132,36 @@ namespace fminus::ir
         // linked into one.
         const char* math = options.math == Math::Vector ? "vector" : options.math == Math::Libm ? "libm" : "fast";
         module->addModuleFlag(llvm::Module::Error, kMathFlag, llvm::MDString::get(context, math));
+        // The loop budget's flag, for the pass at the end of the pipeline, and the budget itself, defined before any
+        // function; and the bounds checks' flag and record, the same way. The JIT learns a module's symbols when it is
+        // added, before it is optimised, so each is there from the start. A function of its name would be a second
+        // symbol of that name: an error, and then no global, so that the rest lowers as it would and reports what else
+        // is wrong.
+        const auto reserved = [&](const char* symbol, const std::string& who, const std::string& what) {
+            for (const ast::Function& function : program.functions)
+            {
+                if (function.module == nullptr && function.name == symbol)
+                {
+                    diagnostics.error(function.location, who + " '" + symbol + "' for " + what
+                                                             + ", and this program declares a function of that name: "
+                                                               "rename it");
+                    return true;
+                }
+            }
+            return false;
+        };
+        if (options.loopBudget)
+        {
+            module->addModuleFlag(llvm::Module::Max, opt::kLoopBudgetFlag, 1);
+            if (!reserved(opt::kLoopBudgetSymbol, "the loop budget reserves", "its counter"))
+                opt::loopBudgetGlobal(*module);
+        }
+        if (options.boundsCheck)
+        {
+            module->addModuleFlag(llvm::Module::Max, opt::kBoundsCheckFlag, 1);
+            if (!reserved(opt::kBoundsSymbol, "the bounds checks reserve", "their record"))
+                opt::boundsGlobal(*module);
+        }
         detail::Lowering(*module, diagnostics, options).lower(program);
         if (diagnostics.hasErrors())
             return nullptr;

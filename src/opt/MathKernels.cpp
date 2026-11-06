@@ -9,8 +9,13 @@
 #include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Instructions.h>
+#include <llvm/IR/Intrinsics.h>
+#include <llvm/IR/IntrinsicsX86.h>
 #include <llvm/IR/MDBuilder.h>
 #include <llvm/IR/Module.h>
+#include <llvm/MC/MCSubtargetInfo.h>
+#include <llvm/Target/TargetMachine.h>
+#include <llvm/TargetParser/Triple.h>
 #include <llvm/Transforms/Scalar/EarlyCSE.h>
 #include <llvm/Transforms/Scalar/InstSimplifyPass.h>
 #include <llvm/Transforms/Scalar/SimplifyCFG.h>
@@ -57,7 +62,16 @@ namespace fminus::opt
         // registers: the register allocator spilled them, and reloaded them every iteration. With this one the cost is
         // on the branch, which almost never runs. (FMinus's names have no dot, so no program has a function of this
         // name.)
-        llvm::Function* largeFunction(llvm::Module& module, std::string_view stem)
+        //
+        // On x86-64 with AVX, `features` (MathKernelsPass's) are the machine's and -vzeroupper. There a preserve_all
+        // function saves ymm1-ymm15 and restores them before it returns, and LLVM's vzeroupper insertion put a
+        // vzeroupper after the restores, just before the ret: it zeroed the upper halves of the registers it had just
+        // restored, so a kernel of 8 lanes, any of whose lanes was past the limit, gave its upper four lanes the
+        // kernel's result for 0 (the caller keeps a 256-bit vector in a register across the call). Without that
+        // feature LLVM puts no vzeroupper in this function. The one it put before the runtime's call, which spares
+        // the runtime's SSE code the cost of running with the upper halves in use (the restores bring them back), is
+        // put there by hand. A function's target-features replace the machine's, so `features` name them all.
+        llvm::Function* largeFunction(llvm::Module& module, std::string_view stem, std::string_view features)
         {
             const std::string name = "fminus.large." + std::string(stem);
             if (llvm::Function* existing = module.getFunction(name))
@@ -77,6 +91,11 @@ namespace fminus::opt
             function->setNoSync();
             function->setDoesNotFreeMemory();
             llvm::IRBuilder<> body(llvm::BasicBlock::Create(context, "entry", function));
+            if (!features.empty())
+            {
+                function->addFnAttr("target-features", features);
+                body.CreateCall(llvm::Intrinsic::getOrInsertDeclaration(&module, llvm::Intrinsic::x86_avx_vzeroupper));
+            }
             body.CreateRet(body.CreateCall(runtime, {function->getArg(0)}));
             return function;
         }
@@ -97,6 +116,7 @@ namespace fminus::opt
             llvm::Type* intType;     // i32, or <N x i32>
             unsigned lanes;          // 0 for a float
             std::string name;        // each instruction's, so the kernel reads as one in the IR: "sin", "sin1", ...
+            std::string_view largeFeatures;   // fminus.large.<stem>'s target-features (largeFunction)
 
             F c(float v)
             {
@@ -228,7 +248,7 @@ namespace fminus::opt
                 const std::string_view stem = which == kernels::Large::Sin   ? "sin"
                                               : which == kernels::Large::Cos ? "cos"
                                                                              : "tan";
-                llvm::Function* exactly = largeFunction(module, stem);
+                llvm::Function* exactly = largeFunction(module, stem, largeFeatures);
                 const auto call = [&](llvm::Value* lane) {
                     llvm::CallInst* one = large.CreateCall(exactly, {lane}, name);
                     one->setCallingConv(llvm::CallingConv::PreserveAll);
@@ -276,8 +296,8 @@ namespace fminus::opt
             return function.getDenormalMode(llvm::APFloat::IEEEsingle()) == llvm::DenormalMode::getPreserveSign();
         }
 
-        // The call's kernel, inline, in its place.
-        void expand(llvm::CallInst& call, std::string_view stem)
+        // The call's kernel, inline, in its place; a large argument's wrapper of `largeFeatures` (largeFunction).
+        void expand(llvm::CallInst& call, std::string_view stem, std::string_view largeFeatures)
         {
             llvm::Function& function = *call.getFunction();
             llvm::IRBuilder<ir::detail::DenormalFolder> builder(call.getContext(),
@@ -290,7 +310,7 @@ namespace fminus::opt
             if (vector != nullptr)
                 intType = llvm::VectorType::get(intType, vector->getElementCount());
             const unsigned lanes = vector != nullptr ? vector->getNumElements() : 0;
-            IROps ops{builder, *function.getParent(), type, intType, lanes, std::string(stem)};
+            IROps ops{builder, *function.getParent(), type, intType, lanes, std::string(stem), largeFeatures};
             llvm::Value* result = kernel(ops, stem, call.getArgOperand(0));
             call.replaceAllUsesWith(result);
             call.eraseFromParent();
@@ -357,6 +377,17 @@ namespace fminus::opt
         return std::string(stem);
     }
 
+    MathKernelsPass::MathKernelsPass(bool inlineKernels, const llvm::TargetMachine& machine)
+        : inlineKernels_(inlineKernels)
+    {
+        // x86-64 with AVX: a large argument's wrapper is compiled without vzeroupper (largeFunction says why).
+        if (machine.getTargetTriple().isX86() && machine.getMCSubtargetInfo().checkFeatures("+avx"))
+        {
+            const llvm::StringRef features = machine.getTargetFeatureString();
+            largeFeatures_ = features.empty() ? "-vzeroupper" : features.str() + ",-vzeroupper";
+        }
+    }
+
     llvm::PreservedAnalyses MathKernelsPass::run(llvm::Module& module, llvm::ModuleAnalysisManager& analyses)
     {
         std::vector<std::pair<llvm::Function*, std::string>> intrinsics;
@@ -383,7 +414,7 @@ namespace fminus::opt
             {
                 changed.push_back(call->getFunction());
                 if (inlineKernels_)
-                    expand(*call, stem);
+                    expand(*call, stem, largeFeatures_);
                 else
                     callRuntime(*call, stem);
             }

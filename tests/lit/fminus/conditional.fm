@@ -1,0 +1,73 @@
+// C's conditionals on macros, the file's (#define) and the command line's (-D, as clang's: -D DEBUG is 1): a debug
+// build's instrumentation compiled in with -D DEBUG, and its lines skipped, never scanned, without it.
+// RUN: fminus %s --run peak 3 | FileCheck %s --check-prefix=PLAIN
+// RUN: fminus %s --run peak 3 -D DEBUG | FileCheck %s --check-prefix=DEBUG
+// RUN: fminus %s --run peak 3 -DDEBUG -DLEVEL=1 | FileCheck %s --check-prefix=QUIET
+// RUN: fminus %s --emit ast -D DEBUG | FileCheck %s --check-prefix=AST
+// RUN: fminus %s --emit ast | FileCheck %s --check-prefix=AST-PLAIN
+// RUN: not fminus %s -D BROKEN 2>&1 | FileCheck %s --check-prefix=BROKEN
+// RUN: not fminus %s -D x 2>&1 | FileCheck %s --check-prefix=IN-CODE
+// RUN: not fminus %s -D 1X 2>&1 | FileCheck %s --check-prefix=NAME
+
+#ifndef LEVEL
+#define LEVEL 2   // the program's default: -D LEVEL=1 comes first
+#endif
+
+module Meter
+{
+    float y;
+#ifdef DEBUG
+    float peak;   /* the loudest |x| so far */
+#endif
+
+    float tick(float x)
+    {
+        y = 0.5f * x;
+#if defined(DEBUG) && LEVEL >= 2
+        peak = fmaxf(peak, fabsf(x));
+#endif
+        return y;
+    }
+};
+
+float peak(float x)
+{
+    Meter m;
+    m.tick(x);
+    m.tick(-2.0f * x);
+#ifdef DEBUG
+    return m.peak;
+#else
+    return m.y;
+#endif
+}
+
+#ifdef BROKEN
+#if 1 / 0
+#endif
+#endif
+
+#if 0
+Not FMinus: never scanned, 'quotes and all.
+#endif
+
+// PLAIN: -3
+// DEBUG: 6
+// QUIET: 0
+
+// AST: (module Meter
+// AST-NEXT: (field float y)
+// AST-NEXT: (field float peak))
+// AST: (= peak (call fmaxf peak (call fabsf x)))
+// AST: (return (. m peak))
+
+// AST-PLAIN: (module Meter
+// AST-PLAIN-NEXT: (field float y))
+// AST-PLAIN-NOT: (field float peak)
+// AST-PLAIN: (return (. m y))
+
+// BROKEN: conditional.fm:46:7: error: division by zero in preprocessor expression
+
+// IN-CODE: conditional.fm:23:22: error: macro expansion is not supported: 'x' is a macro
+
+// NAME: fminus: -D 1X: macro name must be an identifier

@@ -1,7 +1,9 @@
 // src/support/HostTarget.cpp
 #include "support/HostTarget.h"
 
+#include "opt/BoundsCheck.h"
 #include "opt/KnobVersioning.h"
+#include "opt/LoopBudget.h"
 #include "opt/MathKernels.h"
 #include "opt/ZeroInitElision.h"
 #include "support/LLVMInit.h"
@@ -146,12 +148,30 @@ namespace fminus
         // vectorises as it would llvm.sin's but cannot evaluate. Last, after the vectorisers, every call becomes the
         // kernel itself, inline, from the template the runtime's functions instantiate (runtime/MathKernels.h): the
         // backend schedules it with the code around it, and keeps its constants out of loops. At -O0 it becomes a call
-        // of the runtime's function instead. Nothing defines the intrinsics, so this runs at every level.
+        // of the runtime's function instead. Nothing defines the intrinsics, so this runs at every level. The machine
+        // says what a large argument's wrapper needs on x86-64 (MathKernels.cpp, largeFunction).
         passes.registerOptimizerLastEPCallback(
-            [](llvm::ModulePassManager& modulePasses, llvm::OptimizationLevel level, llvm::ThinOrFullLTOPhase) {
-                modulePasses.addPass(opt::MathKernelsPass(level != llvm::OptimizationLevel::O0));
+            [&machine](llvm::ModulePassManager& modulePasses, llvm::OptimizationLevel level, llvm::ThinOrFullLTOPhase) {
+                modulePasses.addPass(opt::MathKernelsPass(level != llvm::OptimizationLevel::O0, machine));
             });
         // ---- end of math kernels ------------------------------------------------------------------------------------
+        // ---- Bounds checks (opt/BoundsCheck.h), at every level, for a module whose flag asks for them ---------------
+        // After the math kernels and before the loop budget: each failed check, a trap to the optimiser until now,
+        // becomes a return, and each call of a function that may stop one that returns too when it did. The loop
+        // budget then writes its count back before every return, these among them.
+        passes.registerOptimizerLastEPCallback(
+            [](llvm::ModulePassManager& modulePasses, llvm::OptimizationLevel, llvm::ThinOrFullLTOPhase) {
+                modulePasses.addPass(opt::BoundsCheckPass());
+            });
+        // ---- end of bounds checks -----------------------------------------------------------------------------------
+        // ---- The loop budget (opt/LoopBudget.h), at every level, for a module whose flag asks for it ----------------
+        // Last of all, after the math kernels: the loops it counts are the ones the machine code will run, and nothing
+        // the optimiser decides can depend on it.
+        passes.registerOptimizerLastEPCallback(
+            [](llvm::ModulePassManager& modulePasses, llvm::OptimizationLevel, llvm::ThinOrFullLTOPhase) {
+                modulePasses.addPass(opt::LoopBudgetPass());
+            });
+        // ---- end of the loop budget ---------------------------------------------------------------------------------
 
         passes.registerModuleAnalyses(modules);
         passes.registerCGSCCAnalyses(cgsccs);

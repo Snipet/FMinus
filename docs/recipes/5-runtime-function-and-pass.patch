@@ -57,10 +57,10 @@ index a3e5e0e..6694760 100644
          if (found == functions_.end())
          {
 diff --git a/src/ir/Functions.cpp b/src/ir/Functions.cpp
-index f2fd835..3651795 100644
+index fb60c65..c3787c0 100644
 --- a/src/ir/Functions.cpp
 +++ b/src/ir/Functions.cpp
-@@ -35,8 +35,8 @@ namespace fminus::ir::detail
+@@ -37,8 +37,8 @@ namespace fminus::ir::detail
          Effect& effect = effects_[function.name];
          effect = std::max(effect, declaredEffect(function));
  
@@ -72,10 +72,10 @@ index f2fd835..3651795 100644
              error(function.location, quoted(function.name) + " is a builtin and cannot be redefined");
              return;
 diff --git a/src/ir/Lowering.h b/src/ir/Lowering.h
-index 6e4936e..7c8d1a2 100644
+index 30eab34..4f8e692 100644
 --- a/src/ir/Lowering.h
 +++ b/src/ir/Lowering.h
-@@ -85,10 +85,20 @@ namespace fminus::ir::detail
+@@ -88,10 +88,20 @@ namespace fminus::ir::detail
          bool allocates;
      };
  
@@ -195,7 +195,7 @@ index 0000000..bbd5aff
 +    void registerPasses(llvm::PassBuilder& passes);
 +} // namespace fminus::opt
 diff --git a/src/runtime/Runtime.cpp b/src/runtime/Runtime.cpp
-index cb1b142..85828e8 100644
+index 6fc5bf7..821062d 100644
 --- a/src/runtime/Runtime.cpp
 +++ b/src/runtime/Runtime.cpp
 @@ -2,6 +2,7 @@
@@ -206,7 +206,7 @@ index cb1b142..85828e8 100644
  #include <cstdio>
  #include <cstdlib>
  #include <cstring>
-@@ -90,3 +91,8 @@ extern "C" void fminus_rt_free(void* memory) noexcept
+@@ -97,3 +98,8 @@ extern "C" void fminus_rt_free(void* memory) noexcept
      std::free(memory);
  #endif
  }
@@ -216,10 +216,10 @@ index cb1b142..85828e8 100644
 +    return std::pow(10.0f, db / 20.0f);
 +}
 diff --git a/src/runtime/Runtime.h b/src/runtime/Runtime.h
-index f03a680..081ac39 100644
+index c3ccc3c..54a7a30 100644
 --- a/src/runtime/Runtime.h
 +++ b/src/runtime/Runtime.h
-@@ -110,4 +110,8 @@ extern "C"
+@@ -127,4 +127,8 @@ extern "C"
      float fminus_rt_libm_tanhf(float x) noexcept;
      float fminus_rt_libm_logf(float x) noexcept;
      float fminus_rt_libm_tanf(float x) noexcept;
@@ -229,27 +229,27 @@ index f03a680..081ac39 100644
 +    float fminus_rt_db_to_gain(float db) noexcept;
  }
 diff --git a/src/runtime/RuntimeSymbols.def b/src/runtime/RuntimeSymbols.def
-index 4257e9f..095b2a5 100644
+index ea56078..05e292f 100644
 --- a/src/runtime/RuntimeSymbols.def
 +++ b/src/runtime/RuntimeSymbols.def
-@@ -36,3 +36,4 @@ FMINUS_RUNTIME_SYMBOL(fminus_rt_libm_tanf)
+@@ -37,3 +37,4 @@ FMINUS_RUNTIME_SYMBOL(fminus_rt_libm_tanf)
  FMINUS_RUNTIME_SYMBOL(fminus_rt_parallel_for)
  FMINUS_RUNTIME_SYMBOL(fminus_rt_parallel_start)
  FMINUS_RUNTIME_SYMBOL(fminus_rt_parallel_stop)
 +FMINUS_RUNTIME_SYMBOL(fminus_rt_db_to_gain)
 diff --git a/src/support/HostTarget.cpp b/src/support/HostTarget.cpp
-index c013123..8758e08 100644
+index 7c15fa2..f0d91b8 100644
 --- a/src/support/HostTarget.cpp
 +++ b/src/support/HostTarget.cpp
-@@ -3,6 +3,7 @@
- 
+@@ -4,6 +4,7 @@
  #include "opt/KnobVersioning.h"
+ #include "opt/LoopBudget.h"
  #include "opt/MathKernels.h"
 +#include "opt/Passes.h"
  #include "opt/ZeroInitElision.h"
  #include "support/LLVMInit.h"
  
-@@ -92,6 +93,7 @@ namespace fminus
+@@ -93,6 +94,7 @@ namespace fminus
          tuning.SLPVectorization = true;
          raiseSlpThreshold();
          llvm::PassBuilder passes(&machine, tuning);

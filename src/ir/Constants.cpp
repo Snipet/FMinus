@@ -92,20 +92,35 @@ namespace fminus::ir::detail
 
     // An enumeration, its constants in order: each one's value its own, or the one before it plus 1 (the first's 0),
     // bound from there on in the innermost scope, or the file's at the top level and in a module (scopes_ is empty
-    // then). A value in error makes its constant the next one's after all, as clang counts it, so the rest still count
-    // and its uses report nothing more. Clang's errors: a constant redefined, one past the greatest int, and, at the
-    // top level, one named as a function or a module.
+    // then), and kept by its id for a switch over its type (enumerations_, Statements.cpp's unhandled()). A value in
+    // error makes its constant the next one's after all, as clang counts it, so the rest still count and its uses
+    // report nothing more. Clang's errors: a constant redefined, one past the greatest int (or out of C23's fixed
+    // underlying type, `enum Mode : bool`), and, at the top level, one named as a builtin (C's file scope holds
+    // <math.h>'s functions, and clang refuses `enum { sinf };` after its #include: "redefinition of 'sinf'", as for a
+    // function of the file), a function or a module. In a block, a constant of a builtin's name is the block's, as a
+    // variable of one is.
     void Lowering::declareEnum(const ast::Enum& enumeration)
     {
         const bool file = scopes_.empty();
         std::unordered_map<std::string, Binding>& scope = file ? fileScope_ : scopes_.back();
+        // C23's fixed underlying type bounds the values: bool's 0 and 1, int's an int. Without one, C restricts them to
+        // an int's range too, in other words.
+        const bool isBool = enumeration.fixed && enumeration.underlying == ast::Type::Bool;
+        const std::string underlying = quoted(ast::typeName(enumeration.underlying));
+        std::vector<std::pair<std::int32_t, std::string>>& constants = enumerations_[enumeration.id];
+        constants.clear();
         std::int64_t next = 0;
         for (const ast::Enumerator& constant : enumeration.enumerators)
         {
             std::optional<std::int32_t> value = constant.value ? integerConstant(*constant.value) : std::nullopt;
-            if (!constant.value && next > kGreatest)
-                error(constant.location, "ISO C restricts enumerator values to range of 'int' (" + std::to_string(next)
-                                             + " is too large)");
+            if (!constant.value && next > (isBool ? 1 : kGreatest))
+                error(constant.location, enumeration.fixed
+                                             ? "enumerator value " + std::to_string(next)
+                                                   + " is not representable in the underlying type " + underlying
+                                             : "ISO C restricts enumerator values to range of 'int' ("
+                                                   + std::to_string(next) + " is too large)");
+            else if (value && isBool && *value != 0 && *value != 1)
+                error(constant.location, "enumerator value is not representable in the underlying type 'bool'");
             const std::int32_t bound = value ? *value : wrapped(next);
             next = static_cast<std::int64_t>(bound) + 1;
             const auto [previous, added] =
@@ -115,7 +130,10 @@ namespace fminus::ir::detail
                 redefinition(constant.location, constant.name, true, previous->second);
                 continue;
             }
-            if (file)
+            constants.emplace_back(bound, constant.name);
+            if (file && isBuiltinName(constant.name))   // C's file scope has <math.h>'s functions: clang's words
+                error(constant.location, "redefinition of " + quoted(constant.name));
+            else if (file)
                 fileNameClash(constant.location, constant.name, enumeration.position, true);
         }
     }

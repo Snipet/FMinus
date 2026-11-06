@@ -15,9 +15,11 @@
 
 namespace fminus::ir::detail
 {
+    // `expr` lowered, failed when it or a part of it reported an error (Value: what takes it then says nothing more).
     Lowering::Value Lowering::lower(const ast::Expr& expr)
     {
-        return std::visit(
+        const std::size_t reported = diagnostics_.errors().size();
+        Value value = std::visit(
             Overloaded{
                 [&](const ast::NumberExpr& number) { return lowerNumber(expr.location, number); },
                 [&](const ast::VariableExpr& variable) {
@@ -47,12 +49,14 @@ namespace fminus::ir::detail
                         return readLValue(expr);   // *p: what p points to
                     if (unary.op == ast::UnaryOp::AddressOf)
                         return lowerAddressOf(expr.location, *unary.operand);
-                    const std::size_t reported = diagnostics_.errors().size();
                     const Value operand = lower(*unary.operand);
                     const bool complement = unary.op == ast::UnaryOp::Complement;
-                    if (complement && diagnostics_.errors().size() != reported)
-                        return poison(ast::Type::Int);   // the operand's own error says why: see binary()
                     const ast::Type type = ast::arithmeticOf(operand.type);   // an int, a float, a float vector
+                    if (operand.failed)   // its own error says why (Value): the type the operator would give
+                        return recovery(complement                        ? ast::Type::Int
+                                        : unary.op == ast::UnaryOp::Not   ? ast::Type::Bool
+                                        : ast::isArithmetic(operand.type) ? type
+                                                                          : ast::Type::Float);
                     const bool invalid = complement ? type != ast::Type::Int : !ast::isArithmetic(operand.type);
                     if (invalid && unary.op != ast::UnaryOp::Not)
                     {
@@ -88,11 +92,8 @@ namespace fminus::ir::detail
                     return poison(ast::Type::Float);
                 },
                 [&](const ast::BinaryExpr& operation) {
-                    const std::size_t reported = diagnostics_.errors().size();
                     const Value lhs = lower(*operation.lhs);
                     const Value rhs = lower(*operation.rhs);
-                    if (isBitwise(operation.op) && diagnostics_.errors().size() != reported)
-                        return poison(ast::Type::Int);   // an operand's own error says why: see binary()
                     return binary(expr.location, operation.op, lhs, rhs);
                 },
                 [&](const ast::LogicalExpr& logical) {
@@ -114,6 +115,8 @@ namespace fminus::ir::detail
                 [&](const ast::SizeofExpr& size) { return lowerSizeof(expr.location, size); },
             },
             expr.node);
+        value.failed = value.failed || diagnostics_.errors().size() != reported;
+        return value;
     }
 
     bool Lowering::isComparison(ast::BinaryOp op)
@@ -134,11 +137,14 @@ namespace fminus::ir::detail
     // lane by lane on vectors, and a comparison gives a bool, or a lane mask for vectors. The bitwise operators take
     // ints (a bool is one), as C's take integers, and give an int; for a shift, C promotes each operand on its own,
     // which with int the only integer type is the same. An operand that reported an error of its own (an undeclared
-    // name, say) lowers to a poison float, which is no float to refuse: a bitwise operator, ~ or a bitwise compound
-    // assignment with one gives a poison int and says nothing more, so that error is the only one, as clang's (their
-    // callers check, by the error count; a poison value alone could be a constant's, as (int)3e10f's is).
+    // name, say: it lowers to a poison float) fails (Value), and the operator then says nothing more, so that error is
+    // the only one, as clang's: `p + y`, `y & 1` and `x |= y` give a recovery() of the type they would likely have had
+    // (recovered), and report no "invalid operands". (A poison value alone is no test for this: (int)3e10f folds to
+    // one with no error.)
     Lowering::Value Lowering::binary(SourceLocation location, ast::BinaryOp op, Value lhs, Value rhs)
     {
+        if (lhs.failed || rhs.failed)
+            return recovery(recovered(op, lhs, rhs));
         if (isBitwise(op) && (ast::arithmeticOf(lhs.type) != ast::Type::Int
                               || ast::arithmeticOf(rhs.type) != ast::Type::Int))
         {
@@ -154,6 +160,25 @@ namespace fminus::ir::detail
         llvm::Value* result = arithmetic(op, type, convert(lhs, type, location, Use::Initializing),
                                          convert(rhs, type, location, Use::Initializing));
         return {result, isComparison(op) ? ast::maskOf(type) : type};
+    }
+
+    // The type `lhs op rhs` gives when an operand failed (Value): an int for a bitwise operator; a bool for a
+    // comparison, or the lane mask of a vector operand that did not fail; otherwise the type of the operand that did
+    // not fail, as it computes (a pointer stays one: p + y is a pointer), or a float. A guess, which keeps what uses
+    // the result from reporting more.
+    ast::Type Lowering::recovered(ast::BinaryOp op, const Value& lhs, const Value& rhs)
+    {
+        const Value* other = !lhs.failed ? &lhs : !rhs.failed ? &rhs : nullptr;
+        if (isBitwise(op))
+            return ast::Type::Int;
+        if (isComparison(op))
+            return other != nullptr && ast::isVector(other->type) ? ast::maskOf(ast::arithmeticOf(other->type))
+                                                                  : ast::Type::Bool;
+        if (other != nullptr && ast::isPointer(other->type))
+            return other->type;
+        if (other != nullptr && ast::isArithmetic(other->type))
+            return ast::arithmeticOf(other->type);
+        return ast::Type::Float;
     }
 
     // The operator's instruction in `type`. For int, C's: + - * carry nsw, as clang's do, since signed overflow is
@@ -295,6 +320,18 @@ namespace fminus::ir::detail
         builder_.SetInsertPoint(falseBlock);
         const Value elseValue = lower(*conditional.elseValue);
         llvm::BasicBlock* elseEnd = builder_.GetInsertBlock();
+        if (thenValue.failed || elseValue.failed)
+        {
+            // An arm's own error says why (Value): a recovery() of the other arm's type, which nothing reports on.
+            const Value& other = thenValue.failed ? elseValue : thenValue;
+            const bool usable = !other.failed && !ast::isModule(other.type) && other.type != ast::Type::Void;
+            builder_.SetInsertPoint(thenEnd);
+            builder_.CreateBr(endBlock);
+            builder_.SetInsertPoint(elseEnd);
+            builder_.CreateBr(endBlock);
+            builder_.SetInsertPoint(endBlock);
+            return recovery(usable ? other.type : ast::Type::Float);
+        }
 
         // Two of one type give that type (two bools give a bool, two voids nothing); otherwise the usual arithmetic
         // conversions decide (a scalar and a vector give the vector). A void meets only a void, and a pointer only
@@ -337,6 +374,8 @@ namespace fminus::ir::detail
             meet = commonType(location, thenValue.type, elseValue.type, type);
         if (!meet)
             type = ast::Type::Float;
+        if (!ast::isPointer(type))
+            type.enumeration = 0;   // two of an enumerated type give its integer type, as C's conversions do
         builder_.SetInsertPoint(thenEnd);
         llvm::Value* thenIR = meet ? convert(thenValue, type, location, Use::Initializing) : poison(type).ir;
         builder_.CreateBr(endBlock);
@@ -346,7 +385,7 @@ namespace fminus::ir::detail
 
         builder_.SetInsertPoint(endBlock);
         if (type == ast::Type::Void)
-            return poison(type);   // nothing to join
+            return {nullptr, type};   // nothing to join, and no value, as a void call has none: its uses are errors
         llvm::PHINode* phi = builder_.CreatePHI(typeOf(type), 2, "cond");
         phi->addIncoming(thenIR, thenEnd);
         phi->addIncoming(elseIR, elseEnd);
@@ -405,7 +444,8 @@ namespace fminus::ir::detail
     }
 
     // sizeof(type): the type's size in bytes (Types.cpp), an int constant; a module's, padding included, is what to
-    // allocate for one.
+    // allocate for one. C's sizeof is a size_t, and FMinus's an int: a size past the greatest int (a module of an array
+    // of 2^30 floats, 4 GB) is an error, not a wrapped or negative int.
     Lowering::Value Lowering::lowerSizeof(SourceLocation location, const ast::SizeofExpr& size)
     {
         if (size.type == ast::Type::Void)
@@ -421,7 +461,14 @@ namespace fminus::ir::detail
                   "invalid application of 'sizeof' to an incomplete type " + quoted(ast::typeName(size.type)));
             return poison(ast::Type::Int);
         }
-        return {builder_.getInt32(*sizeOf(size.type)), ast::Type::Int};
+        const std::uint64_t bytes = *sizeOf(size.type);
+        if (bytes > static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max()))
+        {
+            error(location, quoted(ast::typeName(size.type)) + " is too large for sizeof: " + std::to_string(bytes)
+                                + " bytes, and FMinus's sizeof is an 'int'");
+            return poison(ast::Type::Int);
+        }
+        return {builder_.getInt32(static_cast<std::uint32_t>(bytes)), ast::Type::Int};
     }
 
     // (float)x, (int)x, (bool)x: C's casts between scalars. Each is the implicit conversion, written out.
@@ -434,9 +481,7 @@ namespace fminus::ir::detail
     // is the one stored.
     Lowering::Value Lowering::lowerAssign(SourceLocation location, const ast::AssignExpr& assign)
     {
-        const std::size_t lowered = diagnostics_.errors().size();
         Value value = lower(*assign.value);
-        const bool valueFailed = diagnostics_.errors().size() != lowered;
         if (!isLValue(*assign.target))
         {
             error(location, "expression is not assignable");
@@ -444,11 +489,11 @@ namespace fminus::ir::detail
         }
         const std::optional<LValue> target = lvalue(*assign.target, location);
         if (!target || !writable(location, *target))
-            return poison(ast::Type::Float);
+            return recovery(ast::Type::Float);   // lvalue()'s error, or writable()'s
         if (assign.op != ast::AssignOp::Assign)
         {
-            if (valueFailed && isBitwise(compoundOperator(assign.op)))
-                return poison(target->type);   // the value's own error says why: see binary()
+            if (value.failed)
+                return recovery(target->type);   // the value's own error says why (Value)
             const std::size_t reported = diagnostics_.errors().size();
             value = compound(location, assign.op, read(*target), value);
             if (value.ir == nullptr || diagnostics_.errors().size() != reported)
@@ -509,7 +554,7 @@ namespace fminus::ir::detail
         }
         const std::optional<LValue> target = lvalue(*increment.target, location);
         if (!target || !writable(location, *target))
-            return poison(ast::Type::Float);
+            return recovery(ast::Type::Float);   // lvalue()'s error, or writable()'s
         const Value before = read(*target);
         const Value one{builder_.getInt32(1), ast::Type::Int};
         const Value after =

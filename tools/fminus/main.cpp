@@ -15,8 +15,16 @@
 //     fminus synth.fm --math libm           sinf, cosf, ... as libm's (--math vector, the default: the same result
 //                                           wherever computed; --math fast: LLVM's intrinsics, as clang's)
 //     fminus synth.fm -I lib                #include "name" looks beside the including file, then in lib/
+//     fminus synth.fm -D DEBUG -D LEVEL=2   macros for #if, #ifdef and #ifndef, as clang's -D (DEBUG is 1)
 //     fminus voices.fm --threads 4          a parallel for or parallel { } on 4 threads at most (0, the default:
 //                                           one for each core; 1: each region on the calling thread alone)
+//     fminus spin.fm --run spin 3 --loop-budget 1000000
+//                                           the loop budget: the call may take a million iterations of its loops,
+//                                           and stops early past them (also for --emit: the IR's checks, an
+//                                           executable's main)
+//     fminus taps.fm --run tap 20 --bounds-check
+//                                           bounds checks: an index outside its array stops the call, which says
+//                                           where (also for --emit, as the loop budget)
 //     fminus diodetone.cir --emit fm        the FMinus module a circuit netlist generates (fminus::circuit,
 //                                           docs/circuits.md); a .cir compiles and runs as that text would
 //     fminus play.fm --run dc 1             play.fm's #include "diodetone.cir" reads the module it generates
@@ -29,6 +37,8 @@
 #include "frontend/Frontend.h"
 #include "ir/CodeGen.h"
 #include "jit/Jit.h"
+#include "opt/BoundsCheck.h"
+#include "opt/LoopBudget.h"
 #include "runtime/Runtime.h"
 #include "support/Aot.h"
 #include "support/HostTarget.h"
@@ -48,6 +58,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdint>
 #include <cstdlib>
 #include <exception>
 #include <format>
@@ -399,7 +410,10 @@ int main(int argc, char** argv)
     std::string denormals = "preserve";
     std::string math = "vector";
     std::vector<std::string> includeDirectories;
+    std::vector<std::string> defineSpecs;
     unsigned threads = 0;
+    std::optional<std::int64_t> loopBudget;
+    bool boundsCheck = false;
     CircuitSettings circuitSettings;
     app.add_option("input", input, "FMinus source file ('-' for stdin)")->required();
     app.add_option("args", runArgs, "The arguments of --run's function");
@@ -440,10 +454,22 @@ int main(int argc, char** argv)
     app.add_option("-I", includeDirectories,
                    "Where #include \"name\" looks after the including file's directory, in order (clang's -I)")
         ->allow_extra_args(false);
+    app.add_option("-D", defineSpecs,
+                   "Define a macro for #if, #ifdef and #ifndef: NAME (its value 1) or NAME=value, as clang's -D")
+        ->allow_extra_args(false);
     app.add_option("--threads", threads,
                    "The most threads a parallel for or parallel { } runs on, the calling thread's among them (0: one "
                    "for each core; 1: each region on the calling thread alone); and --self-test's threads")
         ->capture_default_str();
+    app.add_option("--loop-budget", loopBudget,
+                   "Compile with the loop budget, runaway-loop protection: a loop's iterations count (as it starts, "
+                   "for a loop whose count is known), and each call of a recursive function, and a call that takes more "
+                   "than this many returns early (--run's call, an executable's main; --emit ll and asm show the checks)")
+        ->check(CLI::NonNegativeNumber);
+    app.add_flag("--bounds-check", boundsCheck,
+                 "Compile with bounds checks, for development: an access outside an array the compiler can see (a[i], "
+                 "m.taps[i], a + i, &a[i]) stops the call, which says where, the array and the index (--run's call, "
+                 "an executable's main; --emit ll and asm show the checks)");
     app.add_flag("--self-test", circuitSettings.selfTest,
                  "Run the self-test of each circuit netlist (.cir) the program reads and generate it with the answer: "
                  "it chooses the configuration the netlist leaves open (seconds; docs/circuits.md)");
@@ -483,9 +509,19 @@ int main(int argc, char** argv)
     }
     else if (emit == "fm")
         return fail("--emit fm: " + input + " is not a circuit netlist (.cir)");
+    fminus::frontend::Defines defines;
+    for (const std::string& spec : defineSpecs)
+    {
+        const std::size_t equals = spec.find('=');
+        const std::string name = spec.substr(0, equals);
+        if (const std::optional<std::string> wrong = fminus::frontend::macroNameError(name))
+            return fail("-D " + spec + ": " + *wrong);
+        defines[name] = equals == std::string::npos ? "1" : spec.substr(equals + 1);
+    }
     fminus::Diagnostics diagnostics(sourceName);
     std::optional<fminus::ast::Program> program = fminus::frontend::parse(
-        text, diagnostics, DiskIncludes(includeDirectories, diagnostics.fileName(), &circuits, circuitSettings));
+        text, diagnostics, DiskIncludes(includeDirectories, diagnostics.fileName(), &circuits, circuitSettings),
+        defines);
     llvm::errs() << circuits.messages;
     if (circuits.failed)
         return 1;
@@ -522,6 +558,8 @@ int main(int argc, char** argv)
     options.denormals = denormals == "flush" ? fminus::ir::Denormals::Flush : fminus::ir::Denormals::Preserve;
     options.targetTriple = (*machine)->getTargetTriple().str();   // which register an entry point sets
     options.threads = threads;
+    options.loopBudget = loopBudget.has_value();
+    options.boundsCheck = boundsCheck;
 
     // Syntax tree -> LLVM IR.
     auto context = std::make_unique<llvm::LLVMContext>();
@@ -531,6 +569,7 @@ int main(int argc, char** argv)
         llvm::errs() << recited(diagnostics.format(), circuits);
         return 1;
     }
+    llvm::errs() << recited(diagnostics.format(), circuits);   // its warnings, as clang prints them, if any
 
     // LLVM IR -> JIT -> a call.
     if (!run.empty())
@@ -555,6 +594,8 @@ int main(int argc, char** argv)
                                         fminus::ast::typeName(param.type)));
         }
 
+        // What each bounds check's number means (opt/BoundsCheck.h), read before the JIT takes the module.
+        const std::vector<fminus::opt::BoundsSite> sites = fminus::opt::boundsSites(*module);
         // A program with a parallel region runs it on the runtime's pool, started for the call (runtime/Runtime.h).
         const RuntimePool pool(module->getFunction("fminus_rt_parallel_for") != nullptr && threads != 1);
         auto jit = fminus::jit::Jit::create(optimisation);
@@ -565,6 +606,26 @@ int main(int argc, char** argv)
         auto address = (*jit)->lookup(run);
         if (!address)
             return fail(address.takeError());
+        // The program's loop budget (opt/LoopBudget.h), set for the call, as a host sets it.
+        fminus_rt_loop_budget_state* budget = nullptr;
+        if (loopBudget)
+        {
+            auto found = (*jit)->lookup(fminus::opt::kLoopBudgetSymbol);
+            if (!found)
+                return fail(found.takeError());
+            budget = found->toPtr<fminus_rt_loop_budget_state*>();
+            budget->left = *loopBudget;
+            budget->stopped = 0;
+        }
+        // The program's bounds checks' record, read after the call, as a host reads it.
+        const fminus_rt_bounds_state* record = nullptr;
+        if (boundsCheck)
+        {
+            auto found = (*jit)->lookup(fminus::opt::kBoundsSymbol);
+            if (!found)
+                return fail(found.takeError());
+            record = found->toPtr<const fminus_rt_bounds_state*>();
+        }
         // Through a pointer of the function's own type: a bool or an int comes back in a general register (a bool
         // zero-extended), a float in a vector register. std::format prints a bool as true or false.
         constexpr auto counts = std::make_index_sequence<kMaxRunArgs + 1>{};
@@ -594,13 +655,34 @@ int main(int argc, char** argv)
             return fail(std::format("--run: '{}' returns '{}'; --run prints floats, bools and ints only", run,
                                     fminus::ast::typeName(function->returnType)));
         }
+        // A check that failed, on stderr: what the call printed is what it returned early, and the status is 4.
+        if (record != nullptr && record->site > 0 && static_cast<std::size_t>(record->site) <= sites.size())
+        {
+            llvm::errs() << std::format("fminus: --run: '{}' stopped: {}\n", run,
+                                        fminus::opt::boundsMessage(sites[static_cast<std::size_t>(record->site) - 1],
+                                                                   record->index));
+            return 4;
+        }
+        // What the call took of its budget, on stderr; when it ran out, what it printed is what it returned early,
+        // and the status is 3.
+        if (budget != nullptr)
+        {
+            if (budget->stopped != 0)
+            {
+                llvm::errs() << std::format("fminus: --run: '{}' ran past its loop budget of {} and returned early\n",
+                                            run, *loopBudget);
+                return 3;
+            }
+            llvm::errs() << std::format("fminus: --run: '{}' took {} of its loop budget of {}\n", run,
+                                        *loopBudget - budget->left, *loopBudget);
+        }
         return 0;
     }
 
     // LLVM IR -> optimised for this machine -> IR, assembly, an object file or an executable.
     if (entry || emit == "exe")
     {
-        if (llvm::Error error = fminus::aot::addEntryPoint(*module))
+        if (llvm::Error error = fminus::aot::addEntryPoint(*module, loopBudget))
             return fail(std::move(error));
     }
     fminus::prepareModule(*module, **machine);

@@ -47,7 +47,8 @@ namespace fminus::frontend
         };
     } // namespace
 
-    std::optional<ast::Program> parse(std::string_view source, Diagnostics& diagnostics, const IncludeResolver& include)
+    std::optional<ast::Program> parse(std::string_view source, Diagnostics& diagnostics, const IncludeResolver& include,
+                                      const Defines& defines)
     {
         if (source.size() > static_cast<std::size_t>(INT_MAX))
         {
@@ -60,6 +61,15 @@ namespace fminus::frontend
         state.diagnostics = &diagnostics;
         state.include = include ? &include : nullptr;
         state.read.insert(diagnostics.fileName());
+        for (const auto& [name, value] : defines)
+        {
+            if (const std::optional<std::string> wrong = macroNameError(name))
+            {
+                diagnostics.error({}, "invalid macro definition '" + name + "': " + *wrong);
+                return std::nullopt;
+            }
+            state.macros.emplace(name, normalisedValue(value));
+        }
         ScannerHandle scanner(source, state);
         Parser parser(scanner.get(), context);
         if (parser.parse() != 0 || diagnostics.hasErrors())

@@ -2,7 +2,8 @@
 // the JIT: fall-through, break and default, labels in any order, inside blocks and loops of the body, a switch in a
 // loop (break leaves the switch, continue goes to the loop), nested switches, an empty one, a bool's, case values from
 // constant arithmetic (C's integer constant expressions, worked out as FMinus computes), the declarations a jump
-// passes zeroed, a switch in a parallel for, and clang's errors.
+// passes zeroed, a switch in a parallel for, and clang's errors; and clang's -Wswitch, FMinus's warning, for a switch
+// over a value of an enumerated type that misses some of its constants (recipe 32).
 #include "Compile.h"
 
 #include <catch2/catch_test_macros.hpp>
@@ -101,8 +102,7 @@ TEST_CASE("in a loop, break leaves the switch and continue goes to the loop's ne
                        "    {\n"
                        "        switch (i) { case 3: return i * 100 + n; }\n"
                        "        ++i;\n"
-                       "    }\n"
-                       "    return 0;\n"   // to FMinus, the end after a while (1) is reachable
+                       "    }\n"   // no return: only a break would leave the while (1), as clang's CFG finds
                        "}\n",
                        &errors);
     INFO(errors);
@@ -348,4 +348,135 @@ TEST_CASE("switch's errors are clang's: the value's type, duplicates, constants,
              "test.fm:6:26: error: 'continue' statement not in loop statement\n"
              "test.fm:10:48: error: 'case' cannot jump into a parallel for\n"
              "test.fm:11:32: error: 'default' cannot jump into a statement of a parallel block\n");
+}
+
+TEST_CASE("clang's -Wswitch: a switch over an enumerated type, without a default, names the constants it misses",
+          "[codegen][switch][enum]")
+{
+    std::string errors;
+    // The warnings are the program's, which compiles and runs: one each for a missing constant, two, three, and more
+    // (the first three, then ...), each at the switch's value, with clang's note.
+    auto jit = compile("enum Wave { SAW, SQUARE, TRIANGLE, NOISE, PULSE };\n"
+                       "int one(enum Wave w) { switch (w) { case SAW: case SQUARE: case TRIANGLE: case NOISE: "
+                       "return 1; } return 0; }\n"
+                       "int two(enum Wave w) { switch (w) { case SAW: case SQUARE: case TRIANGLE: return 1; } "
+                       "return 0; }\n"
+                       "int three(enum Wave w) { switch (w) { case SAW: case SQUARE: return 1; } return 0; }\n"
+                       "int four(enum Wave w) { switch (w) { case SAW: return 1; } return 0; }\n",
+                       &errors);
+    REQUIRE(jit);
+    CHECK(errors == "test.fm:2:32: warning: enumeration value 'PULSE' not handled in switch [-Wswitch]\n"
+                    "test.fm:2:32: note: add missing switch cases\n"
+                    "test.fm:3:32: warning: enumeration values 'NOISE' and 'PULSE' not handled in switch [-Wswitch]\n"
+                    "test.fm:3:32: note: add missing switch cases\n"
+                    "test.fm:4:34: warning: enumeration values 'TRIANGLE', 'NOISE', and 'PULSE' not handled in switch "
+                    "[-Wswitch]\n"
+                    "test.fm:4:34: note: add missing switch cases\n"
+                    "test.fm:5:33: warning: 4 enumeration values not handled in switch: 'SQUARE', 'TRIANGLE', "
+                    "'NOISE'... [-Wswitch]\n"
+                    "test.fm:5:33: note: add missing switch cases\n");
+    CHECK(lookup<int(int)>(*jit, "four")(0) == 1);
+
+    // Each value once, by its first constant, in order of value, as clang lists them.
+    jit = compile("enum E { C2 = 2, A = 0, B = 1, A2 = 0 };\n"
+                  "int f(enum E e) { switch (e) { case B: return 1; } return 0; }",
+                  &errors);
+    REQUIRE(jit);
+    CHECK(errors == "test.fm:2:27: warning: enumeration values 'A' and 'C2' not handled in switch [-Wswitch]\n"
+                    "test.fm:2:27: note: add missing switch cases\n");
+
+    // Every value of the enumerated type: a variable, a parameter, a field (in a method, through a pointer: where the
+    // value begins, as clang places it), a result, a cast, an assignment, an element, *p, a parameter of the host's,
+    // C23's bool, an enumeration without a tag declaring its variable.
+    jit = compile("enum E { A, B };\n"
+                  "enum F : bool { OFF, ON };\n"
+                  "enum E get();\n"
+                  "module M\n"
+                  "{\n"
+                  "    enum E e;\n"
+                  "    param enum E knob;\n"
+                  "    int g() { switch (e) { case A: return 1; } switch (knob[0]) { case A: return 2; } return 0; }\n"
+                  "};\n"
+                  "int f(M* m, enum E* p, int x, enum F flag)\n"
+                  "{\n"
+                  "    enum E local = B;\n"
+                  "    enum E all[2];\n"
+                  "    enum { X, Y } anonymous = X;\n"
+                  "    switch (m->e) { case A: return 1; }\n"
+                  "    switch (get()) { case A: return 2; }\n"
+                  "    switch ((enum E)x) { case A: return 3; }\n"
+                  "    switch (local = A) { case A: return 4; }\n"
+                  "    switch (all[x]) { case A: return 5; }\n"
+                  "    switch (*p) { case A: return 6; }\n"
+                  "    switch (flag) { case ON: return 7; }\n"
+                  "    switch (anonymous) { case X: return 8; }\n"
+                  "    return 0;\n"
+                  "}\n"
+                  "enum E get() { return B; }\n",
+                  &errors);
+    REQUIRE(jit);
+    CHECK(errors == "test.fm:8:23: warning: enumeration value 'B' not handled in switch [-Wswitch]\n"
+                    "test.fm:8:23: note: add missing switch cases\n"
+                    "test.fm:8:56: warning: enumeration value 'B' not handled in switch [-Wswitch]\n"
+                    "test.fm:8:56: note: add missing switch cases\n"
+                    "test.fm:15:13: warning: enumeration value 'B' not handled in switch [-Wswitch]\n"
+                    "test.fm:15:13: note: add missing switch cases\n"
+                    "test.fm:16:13: warning: enumeration value 'B' not handled in switch [-Wswitch]\n"
+                    "test.fm:16:13: note: add missing switch cases\n"
+                    "test.fm:17:13: warning: enumeration value 'B' not handled in switch [-Wswitch]\n"
+                    "test.fm:17:13: note: add missing switch cases\n"
+                    "test.fm:18:13: warning: enumeration value 'B' not handled in switch [-Wswitch]\n"
+                    "test.fm:18:13: note: add missing switch cases\n"
+                    "test.fm:19:13: warning: enumeration value 'B' not handled in switch [-Wswitch]\n"
+                    "test.fm:19:13: note: add missing switch cases\n"
+                    "test.fm:20:13: warning: enumeration value 'B' not handled in switch [-Wswitch]\n"
+                    "test.fm:20:13: note: add missing switch cases\n"
+                    "test.fm:21:13: warning: enumeration value 'OFF' not handled in switch [-Wswitch]\n"
+                    "test.fm:21:13: note: add missing switch cases\n"
+                    "test.fm:22:13: warning: enumeration value 'Y' not handled in switch [-Wswitch]\n"
+                    "test.fm:22:13: note: add missing switch cases\n");
+
+    // A parenthesised value begins at its outermost opening parenthesis, as clang places it, also as an operand.
+    jit = compile("enum E { A, B };\n"
+                  "int f(enum E e) { switch ((e)) { case A: return 1; } switch (((e)) = A) { case A: return 2; } "
+                  "return 0; }",
+                  &errors);
+    REQUIRE(jit);
+    CHECK(errors == "test.fm:2:27: warning: enumeration value 'B' not handled in switch [-Wswitch]\n"
+                    "test.fm:2:27: note: add missing switch cases\n"
+                    "test.fm:2:62: warning: enumeration value 'B' not handled in switch [-Wswitch]\n"
+                    "test.fm:2:62: note: add missing switch cases\n");
+
+    // None: a default, every constant, what C promotes (an int's cast, arithmetic, -e, ?:), a constant, an int, an
+    // enumeration declared ahead whose constants come after the switch, and a switch whose case is in error.
+    jit = compile("enum E { A, B };\n"
+                  "enum Later : int;\n"
+                  "int f(enum E e, int c, enum Later later)\n"
+                  "{\n"
+                  "    switch (e) { case A: return 1; default: return 2; }\n"
+                  "    switch (e) { case A: case B: return 3; }\n"
+                  "    switch ((int)e) { case A: return 4; }\n"
+                  "    switch (e + 0) { case A: return 5; }\n"
+                  "    switch (-e) { case A: return 6; }\n"
+                  "    switch (c ? e : B) { case A: return 7; }\n"
+                  "    switch ((enum E)1) { case A: return 8; }\n"
+                  "    switch (c) { case A: return 9; }\n"
+                  "    switch (later) { case 0: return 10; }\n"
+                  "    return 0;\n"
+                  "}\n"
+                  "enum Later : int { L0, L1 };\n",
+                  &errors);
+    REQUIRE(jit);
+    CHECK(errors.empty());
+    // Nor a value that folds to a constant, as clang folds a const object's (it says "no case matching constant switch
+    // condition '1'" instead, a warning FMinus does not give): a constant of the top level of the enumerated type.
+    jit = compile("const enum E { A, B, C } SHAPE = B;\n"
+                  "int f() { switch (SHAPE) { case A: return 1; } switch ((SHAPE)) { case C: return 2; } return 0; }",
+                  &errors);
+    REQUIRE(jit);
+    CHECK(errors.empty());
+    CHECK(lookup<int()>(*jit, "f")() == 0);
+    CHECK(errorsOf("enum E { A, B };\nint f(enum E e) { switch (e) { case A: return 1; case nope: return 2; } }")
+          == "test.fm:2:5: error: non-void function 'f' does not return a value\n"
+             "test.fm:2:55: error: use of undeclared identifier 'nope'\n");
 }

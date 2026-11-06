@@ -223,13 +223,14 @@ module Lfo
 // calls the runtime's function: the loop around the branch keeps its values in registers that a call of C's
 // convention would take. Neither function is speculatable, so nothing hoists them out of the branch. (The intrinsics'
 // attributes, and their vector variants, are MathTest.cpp's to check, after ir::lower: no output of fminus has them.)
+// On x86-64 with AVX the wrapper also has target-features and a vzeroupper of its own (math-large.fm checks them).
 // VECTOR: declare float @fminus_rt_sinf(float) {{.*}}#[[RUNTIME:[0-9]+]]
 // VECTOR: define internal preserve_allcc float @fminus.large.sin(float %0) #[[LARGE:[0-9]+]] {
 // VECTOR-NEXT: entry:
-// VECTOR-NEXT:   [[R:%.*]] = call float @fminus_rt_sinf(float %0)
+// VECTOR:        [[R:%.*]] = call float @fminus_rt_sinf(float %0)
 // VECTOR-NEXT:   ret float [[R]]
 // VECTOR: attributes #[[RUNTIME]] = { nocallback nofree nosync nounwind willreturn memory(none) }
-// VECTOR: attributes #[[LARGE]] = { cold nofree noinline nosync nounwind willreturn memory(none) }
+// VECTOR: attributes #[[LARGE]] = { cold nofree noinline nosync nounwind willreturn memory(none){{( "target-features"="[^"]*")?}} }
 // VECTOR: !{i32 1, !"fminus.math", !"vector"}
 // VECTOR: ![[UNLIKELY]] = !{!"branch_weights", i32 1, i32 1048575}
 // VECTOR0: declare float @fminus_rt_sinf(float) {{.*}}#[[RUNTIME0:[0-9]+]]

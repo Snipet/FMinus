@@ -22,6 +22,7 @@
 //     Tbaa.cpp          C's strict aliasing, told to LLVM: the type tag (!tbaa) on every load and store of memory
 //     Denormals.cpp     Denormals::Flush: constants folded as flushing hardware computes them (Denormals.h), every
 //                       function marked so for LLVM, and each entry point setting the mode around its body
+//     Bounds.cpp        Options::boundsCheck: the arrays an access reaches, and the checks of its index against them
 // A new node is lowered in the file its kind belongs to. The build says which members still need it: a std::visit
 // without its lambda fails to compile, and a switch without its enumerator trips -Wswitch.
 #pragma once
@@ -36,6 +37,7 @@
 #include <llvm/IR/Module.h>
 
 #include <cstdint>
+#include <deque>
 #include <map>
 #include <optional>
 #include <string>
@@ -123,13 +125,37 @@ namespace fminus::ir::detail
         void lower(const ast::Program& program);
 
     private:
+        // Under Options::boundsCheck, the array a pointer points into, where the code generator can see it
+        // (Bounds.cpp): the pointer an array's name stands for, and what p + i, p - i and &p[i] make of one. Where in
+        // it the pointer is, its element from the array's first, an i64 (null for the first itself); how many elements
+        // it has; and how the source names it and its type, for the message when a check fails.
+        struct Extent
+        {
+            llvm::Value* offset = nullptr;
+            std::int64_t count = 0;
+            std::string name;
+            ast::Type type;
+        };
+
         // A lowered expression: its IR and its FMinus type. The rules read the FMinus type, never the IR's, since
         // two FMinus types may share an LLVM type: one whose width the target decides would be <4 x float> on
         // NEON, as float4 is. A module's value is its address (a ptr): it is copied from there, never loaded whole.
+        // A pointer into an array the code generator can see carries its extent, under Options::boundsCheck (above).
+        //
+        // `failed` is clang's "contains errors": the expression, or a part of it, reported an error, and it is set only
+        // where one is behind it: by lower(), which counts the errors its expression reports, and by recovery(), the
+        // stand-in for what an operand's error, or a declaration's, kept from being computed. A plain poison() is not
+        // failed: `c ? f() : g()` of two void calls has no value and no error, and each of its uses must report one, as
+        // a void call's do. What takes a failed value says nothing more about it: an operator gives a recovery() of the
+        // type it would likely have had, and a conversion a poison of its target's type, so the first error is the
+        // only one, as clang reports it. Its type is no test for this: the stand-in for an undeclared name is a float,
+        // which most operators take.
         struct Value
         {
             llvm::Value* ir = nullptr;
             ast::Type type = ast::Type::Float;
+            const Extent* extent = nullptr;
+            bool failed = false;
         };
 
         // A variable in scope: where it is (its stack slot; in a parallel region, the region's own slot for a copy of
@@ -170,6 +196,7 @@ namespace fminus::ir::detail
             std::vector<int> components;      // for components, the lanes of `whole` they are
             std::string array = {};           // an element of a const array a variable names (t[i]): the variable's,
             ast::Type arrayType = {};         // and its type, for clang's message when it is assigned
+            const Extent* extent = nullptr;   // an element's array, where it is in it (Options::boundsCheck)
         };
 
         // A call a function's body makes, for Effects.cpp: where, and of what (a builtin, or a function by name).
@@ -205,13 +232,15 @@ namespace fminus::ir::detail
         };
 
         // A switch being lowered (Statements.cpp): its instruction, to which each case label adds its value and its
-        // block, the first scope of its body (scopes_[base] on hold what the body declares), and its labels so far.
+        // block, the first scope of its body (scopes_[base] on hold what the body declares), its labels so far, and
+        // whether one was in error (no constant, or a duplicate): clang's -Wswitch then says nothing.
         struct Switch
         {
             llvm::SwitchInst* instruction;
             std::size_t base;
             std::map<std::int32_t, CaseLabel> cases;
             std::optional<SourceLocation> defaultLabel;
+            bool erroneous = false;
         };
 
         // A constant expression's value, as fold() works it out (Constants.cpp): an int's or a bool's (0 or 1), and
@@ -296,11 +325,12 @@ namespace fminus::ir::detail
         void pointerMismatch(SourceLocation location, Use use, ast::Type from, ast::Type to, bool discardsConst);
         bool checkType(SourceLocation location, ast::Type type);
         void noPointerTo(SourceLocation location, ast::Type pointee);
-        std::optional<unsigned> sizeOf(ast::Type type);
+        std::optional<std::uint64_t> sizeOf(ast::Type type);
         llvm::Align alignOf(ast::Type type);
         bool commonType(SourceLocation location, ast::Type a, ast::Type b, ast::Type& type);
         void polyMismatch(SourceLocation location, ast::Type a, ast::Type b);
         Value poison(ast::Type type);
+        Value recovery(ast::Type type);
         void error(SourceLocation location, std::string message);
 
         // ---- Functions.cpp ------------------------------------------------------------------------------------------
@@ -323,12 +353,17 @@ namespace fminus::ir::detail
         void lowerReturn(SourceLocation location, const ast::ReturnStmt& ret);
         llvm::BasicBlock* newBlock(const char* name);
         void fallThrough(llvm::BasicBlock* target);
+        void branchOn(const ast::Expr& test, llvm::Value* condition, llvm::BasicBlock* whenTrue,
+                      llvm::BasicBlock* whenFalse);
         void lowerIf(const ast::IfStmt& branch);
         void lowerWhile(const ast::WhileStmt& loop);
         void lowerFor(const ast::ForStmt& loop);
-        bool isConstant(const ast::Expr& expr) const;
+        bool isConstant(const ast::Expr& expr, bool folding = false) const;
+        bool folds(const ast::Expr& expr) const;
         void lowerSwitch(const ast::SwitchStmt& branch);
         void lowerLabel(SourceLocation location, const ast::Expr* value, const ast::StmtPtr& body);
+        void unhandled(SourceLocation location, int enumeration, const Switch& lowered);
+        static SourceLocation begin(const ast::Expr& expr);
         llvm::BasicBlock* bypass(const Switch& branch, llvm::BasicBlock* label);
         void declareVariable(SourceLocation location, const ast::DeclStmt& decl);
         void redefinition(SourceLocation location, const std::string& name, bool enumerator, const Binding& previous);
@@ -353,6 +388,7 @@ namespace fminus::ir::detail
         static bool isComparison(ast::BinaryOp op);
         static bool isBitwise(ast::BinaryOp op);
         Value binary(SourceLocation location, ast::BinaryOp op, Value lhs, Value rhs);
+        static ast::Type recovered(ast::BinaryOp op, const Value& lhs, const Value& rhs);
         llvm::Value* arithmetic(ast::BinaryOp op, ast::Type type, llvm::Value* lhs, llvm::Value* rhs);
         llvm::Value* lowerLogical(SourceLocation location, const ast::LogicalExpr& logical);
         Value lowerConditional(SourceLocation location, const ast::ConditionalExpr& conditional);
@@ -377,10 +413,11 @@ namespace fminus::ir::detail
 
         // ---- Memory.cpp ---------------------------------------------------------------------------------------------
         bool isLValue(const ast::Expr& expr) const;
-        std::optional<LValue> lvalue(const ast::Expr& expr, SourceLocation location);
-        std::optional<LValue> element(SourceLocation location, Value pointer, std::optional<Value> index);
+        std::optional<LValue> lvalue(const ast::Expr& expr, SourceLocation location, bool address = false);
+        std::optional<LValue> element(SourceLocation location, Value pointer, std::optional<Value> index,
+                                      bool address = false);
         bool writable(SourceLocation location, const LValue& target);
-        Value read(const LValue& source);
+        Value read(const LValue& source, std::string named = {});
         Value readLValue(const ast::Expr& expr);
         llvm::Value* write(SourceLocation location, const LValue& target, Value value, Use use);
         Value lowerAddressOf(SourceLocation location, const ast::Expr& operand);
@@ -458,6 +495,16 @@ namespace fminus::ir::detail
         void flushDenormals(const ast::Program& program);
         void wrapEntry(llvm::Function& function, SourceLocation location, bool arm);
 
+        // ---- Bounds.cpp ---------------------------------------------------------------------------------------------
+        const Extent* arrayExtent(ast::Type array, std::string name);
+        const Extent* movedExtent(const Extent& extent, llvm::Value* index);
+        llvm::Value* elementOf(const Extent& extent, llvm::Value* index);
+        void checkBounds(SourceLocation location, const Extent& extent, llvm::Value* index, unsigned width);
+        void checkLanes(SourceLocation location, const Extent& extent, llvm::Value* mask);
+        void failBounds(SourceLocation location, const Extent& extent, unsigned width, llvm::Value* inBounds,
+                        llvm::Value* index);
+        static std::string spelled(const ast::Expr& expr);
+
         // ---- the state of one lowering ----------------------------------------------------------------------------
         llvm::Module& module_;
         Diagnostics& diagnostics_;
@@ -467,6 +514,8 @@ namespace fminus::ir::detail
         std::unordered_map<std::string, const ast::Function*> functions_;   // the program's, by name
         std::vector<std::unordered_map<std::string, Binding>> scopes_;     // the current function's, inner last
         std::unordered_map<std::string, Binding> fileScope_;   // the enumeration constants and constants so far
+        // Each enumeration's constants declared so far, by its id (Type::enumeration): value and name, in order.
+        std::unordered_map<int, std::vector<std::pair<std::int32_t, std::string>>> enumerations_;
         const ast::Program* program_ = nullptr;                            // the program being lowered
         const ast::Function* function_ = nullptr;                          // the function being lowered
         const ast::Function topLevel_{};   // what function_ is while a top-level constant's initialiser is lowered
@@ -488,5 +537,7 @@ namespace fminus::ir::detail
         std::vector<llvm::Function*> outlined_;                            // every region's function
         std::unordered_map<std::string, unsigned> regionCount_;            // each function's regions so far
         std::optional<std::unordered_map<std::string, bool>> changes_;     // whether each method changes its module
+        bool boundsCheck_;                                                 // whether accesses are checked (Bounds.cpp)
+        std::deque<Extent> extents_;                                       // the arrays' extents values carry
     };
 } // namespace fminus::ir::detail

@@ -1,7 +1,9 @@
 // tests/unit/EnumTest.cpp: C's enumerations (extending.md, recipe 27), run through the JIT: values implicit, explicit
 // and negative, constants used as ints (and `enum Mode` as the type int), C's scopes (a block's, hidden by an inner
 // variable; the file's for the top level and modules, seen by what follows and by a module's methods, a field hiding
-// one in a method), case labels and constant tables of them, in a parallel for, and clang's errors.
+// one in a method), case labels and constant tables of them, in a parallel for, and clang's errors. Recipe 32's: names
+// declared with an enumeration (`enum Mode { A } m;`), and C23's fixed underlying type, `enum Mode : int` or `: bool`,
+// declared ahead of its constants too.
 #include "Compile.h"
 
 #include <catch2/catch_test_macros.hpp>
@@ -230,4 +232,77 @@ TEST_CASE("enumerations' errors are clang's: redefinitions, values, and a consta
                    "}\n")
           == "test.fm:3:16: error: a statement of a parallel block cannot declare an enumeration (its constants would "
              "end with it): declare it before the block\n");
+}
+
+TEST_CASE("an enumeration declares names of its type after its list: locals, fields and constants", "[codegen][enum]")
+{
+    std::string errors;
+    auto jit = compile("const enum Size { SMALL = 2, LARGE = 5 } sizes[2] = {SMALL, LARGE}, one = (enum Size)1;\n"
+                       "module Voice\n"
+                       "{\n"
+                       "    enum Stage { IDLE, ATTACK, RELEASE } stage, history[RELEASE + 1];\n"   // sized by its own
+                       "    float level;\n"
+                       "    int start() { stage = ATTACK; history[ATTACK] = stage; return stage + history[1]; }\n"
+                       "};\n"
+                       "int pick(int i)\n"
+                       "{\n"
+                       "    enum Step { ONE = 1, TWO } s = TWO, *p = &s, t[2] = {ONE, TWO};\n"
+                       "    *p = (enum Step)(s + t[i]);\n"
+                       "    return s;\n"
+                       "}\n"
+                       "int size(int i) { return sizes[i] + one; }\n"
+                       "int start(Voice* v) { return v->start() + sizeof(Voice); }\n",
+                       &errors);
+    INFO(errors);
+    REQUIRE(jit);
+    CHECK(lookup<int(int)>(*jit, "pick")(0) == 3);
+    CHECK(lookup<int(int)>(*jit, "pick")(1) == 4);
+    CHECK(lookup<int(int)>(*jit, "size")(1) == 6);
+    struct Voice
+    {
+        int stage;
+        int history[3];
+        float level;
+    } voice{};
+    CHECK(lookup<int(Voice*)>(*jit, "start")(&voice) == 2 + static_cast<int>(sizeof(Voice)));
+    CHECK(voice.stage == 1);
+    CHECK(voice.history[1] == 1);
+}
+
+TEST_CASE("C23's fixed underlying type: int or bool, its constants in its range, its tag declared ahead",
+          "[codegen][enum]")
+{
+    std::string errors;
+    auto jit = compile("enum Later : int;\n"   // a type from here on, its constants still to come
+                       "int twice(enum Later l) { return l * 2 + sizeof(enum Later); }\n"
+                       "enum Later : int { FIRST = 5, NEXT };\n"
+                       "enum Flag : bool { OFF, ON };\n"
+                       "int flag(int x)\n"
+                       "{\n"
+                       "    enum Flag f = x;\n"   // a bool: any number but 0 is true
+                       "    return f + 10 * sizeof(enum Flag) + 100 * NEXT;\n"
+                       "}\n"
+                       "int inner()\n"
+                       "{\n"
+                       "    enum Local : bool;\n"
+                       "    enum Local : bool { NO, YES } yes = YES;\n"
+                       "    return yes;\n"
+                       "}\n",
+                       &errors);
+    INFO(errors);
+    REQUIRE(jit);
+    CHECK(lookup<int(int)>(*jit, "twice")(3) == 10);
+    CHECK(lookup<int(int)>(*jit, "flag")(7) == 1 + 10 + 600);
+    CHECK(lookup<int(int)>(*jit, "flag")(0) == 0 + 10 + 600);
+    CHECK(lookup<int()>(*jit, "inner")() == 1);
+
+    // The values C23 bounds by the fixed type, in clang's words: an implicit one past its range names its value, an
+    // explicit one does not.
+    CHECK(errorsOf("enum A : bool { A0, A1, A2 };\n"
+                   "enum B : bool { B0 = 2, B1 = -1, B2 = true };\n"
+                   "enum C : int { C0 = 2147483647, C1 };\n")
+          == "test.fm:1:25: error: enumerator value 2 is not representable in the underlying type 'bool'\n"
+             "test.fm:2:17: error: enumerator value is not representable in the underlying type 'bool'\n"
+             "test.fm:2:25: error: enumerator value is not representable in the underlying type 'bool'\n"
+             "test.fm:3:33: error: enumerator value 2147483648 is not representable in the underlying type 'int'\n");
 }

@@ -51,9 +51,16 @@ namespace fminus::ast
     // type has a count of 0); `float t[] = {1, 2, 3}` takes its size from its list.
     //
     // A type is a kind, and for a pointer what it points to, for an array its elements and how many, for a module
-    // which; two types are the same when every field is. Type::Float and the rest name the types that are only a
+    // which; two types are the same when each of those is. Type::Float and the rest name the types that are only a
     // kind, and a kind converts to its type, so `type == Type::Float` reads as it says. A switch over a type is a
     // switch over `type.kind`, and -Wswitch lists the kinds it misses.
+    //
+    // An enumerated type, `enum Mode`, is the type int (or bool, C23's fixed underlying type `enum Mode : bool`), as
+    // C's is compatible with an integer type, and carries which enumeration it is (`enumeration`, its Enum::id) beside
+    // it: what a switch over a value of the type is checked against (clang's -Wswitch, the code generator's one
+    // warning). It is no part of the type's identity, which == compares without it, so every rule for an int holds for
+    // an `enum Mode` as it did, and messages say 'int'. A value keeps it where C keeps the enumerated type (a variable,
+    // a field, a parameter, a result, a cast, an assignment), and loses it where C promotes it: `mode + 1` is an int.
     struct Module;
 
     enum class Kind
@@ -82,6 +89,8 @@ namespace fminus::ast
         bool pointeeConst = false;        // a pointer's: what it points to is read-only through it (const float*)
         const Module* module = nullptr;   // a module type's, and a pointer's or an array's whose pointee is one
         int count = 0;   // an array's: how many elements (0 in the syntax tree, where its size is an expression)
+        int enumeration = 0;   // an enumerated type's Enum::id, or a pointer's or an array's whose pointee is one; 0
+                               // for none (above: not part of the type's identity)
 
         constexpr Type() = default;
         constexpr Type(Kind kind) : kind(kind) {}   // implicit: Kind::Float is the type float
@@ -93,7 +102,15 @@ namespace fminus::ast
             type.pointee = pointee.kind;
             type.module = pointee.module;
             type.pointeeConst = isConst;
+            type.enumeration = pointee.enumeration;
             return type;
+        }
+
+        // The enumerated type of the enumeration `id`: its underlying type (int, or bool), which it is to every rule.
+        static constexpr Type enumerated(Type underlying, int id)
+        {
+            underlying.enumeration = id;
+            return underlying;
         }
 
         static constexpr Type moduleType(const Module* module)
@@ -110,10 +127,16 @@ namespace fminus::ast
             type.pointee = element.kind;
             type.module = element.module;
             type.count = count;
+            type.enumeration = element.enumeration;
             return type;
         }
 
-        friend constexpr bool operator==(Type, Type) = default;
+        // The same type: every field but `enumeration` (above).
+        friend constexpr bool operator==(Type a, Type b)
+        {
+            return a.kind == b.kind && a.pointee == b.pointee && a.pointeeConst == b.pointeeConst
+                   && a.module == b.module && a.count == b.count;
+        }
 
         static const Type Void, Float, Bool, Int, Float2, Float4, Float8, Bool2, Bool4, Bool8, PolyFloat, PolyBool;
     };
@@ -192,6 +215,7 @@ namespace fminus::ast
         Type element(type.pointee);
         if (type.pointee == Kind::Module)
             element.module = type.module;
+        element.enumeration = type.enumeration;
         return element;
     }
 
@@ -254,11 +278,11 @@ namespace fminus::ast
         }
     }
 
-    // The type a value of `type` computes as: a bool as an int (C's integer promotion), a lane mask as the float vector
-    // of its size.
+    // The type a value of `type` computes as: a bool as an int (C's integer promotion), an enumerated type as its
+    // integer type (an int, without the enumeration: C promotes it), a lane mask as the float vector of its size.
     inline Type arithmeticOf(Type type)
     {
-        if (type == Type::Bool)
+        if (type == Type::Bool || type == Type::Int)
             return Type::Int;
         if (type == Type::PolyBool)
             return Type::PolyFloat;
@@ -467,6 +491,10 @@ namespace fminus::ast
         ExprPtr operand;
     };
 
+    // An expression, where the tree places it (an operator written after its first operand at the operator: `a + b` at
+    // `+`), and, when the source parenthesises it, `(e)`, where its outermost opening parenthesis is: the tree keeps no
+    // node for the parentheses, and a diagnostic about the whole expression begins there, as clang's does
+    // (Lowering::begin).
     struct Expr
     {
         SourceLocation location;
@@ -474,6 +502,7 @@ namespace fminus::ast
                      ConditionalExpr, ConstructExpr, MemberExpr, MethodCallExpr, ThisExpr, IncrementExpr, CastExpr,
                      IndexExpr, SizeofExpr>
             node;
+        std::optional<SourceLocation> opening = std::nullopt;
     };
 
     struct Stmt;
@@ -589,12 +618,18 @@ namespace fminus::ast
     // `enum Mode { SAW, SQUARE = 4, TRIANGLE };`: C's enumeration. Its constants are ints, names from just after each
     // one's definition on, in the scope it is declared in: a block's, or the file's for one at the top level or in a
     // module (a C struct's enumeration constants are the file's), seen by the functions and modules after it, and by
-    // the module's methods. Its tag, if it has one, makes `enum Mode` a name of the type int there.
+    // the module's methods. Its tag, if it has one, makes `enum Mode` a name of its enumerated type there: int, with
+    // the enumeration's id (Type::enumerated). C23's fixed underlying type, `enum Mode : int { ... }` or `: bool`, is
+    // `underlying`, whose range each constant's value must be in; C23 declares such a tag ahead of its constants,
+    // `enum Mode : int;`, which the parser keeps (the tag's id is the enumeration's) and the tree does not.
     struct Enum
     {
         SourceLocation location;   // of its tag, or of `enum` without one
         std::string tag;           // empty for `enum { ... }`
         std::vector<Enumerator> enumerators;
+        int id = 0;                       // its type's (Type::enumeration), from 1, one for each enumeration parsed
+        bool fixed = false;               // `enum Mode : int`
+        Type underlying = Type::Int;      // int, or a fixed type's: int or bool
         // One at the top level or in a module: how many of the program's functions and modules come before it, which
         // see none of its constants, and the module it is in.
         std::size_t position = 0;
@@ -745,7 +780,7 @@ namespace fminus::ast
     template <typename Node>
     ExprPtr makeExpr(SourceLocation location, Node node)
     {
-        return std::make_unique<Expr>(Expr{location, std::move(node)});
+        return std::make_unique<Expr>(Expr{location, std::move(node), std::nullopt});
     }
 
     // The type's name, as clang writes it in its messages: `float`, `poly float`, `const float *`.

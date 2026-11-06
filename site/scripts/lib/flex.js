@@ -128,8 +128,19 @@ export function parseFlex(src, file) {
 			rules[r].action = rules[r + 1].action;
 		}
 	}
-	for (const r of rules) r.outcome = outcome(r.action);
+	const names = ['INITIAL', ...conditions.map((c) => c.name)];
+	const constants = stringConstants(src);
+	for (const r of rules) r.outcome = outcome(r.action, names, constants);
 	return { header, options, conditions, definitions, rules };
+}
+
+/** The string constants the file's C++ defines (`constexpr const char* kName = "..." "...";`), by name: an action may
+ * throw one as its message. */
+function stringConstants(src) {
+	const constants = new Map();
+	for (const m of src.matchAll(/\bconstexpr\s+const\s+char\s*\*\s*([A-Za-z_]\w*)\s*=\s*((?:"(?:[^"\\]|\\.)*"\s*)+);/g))
+		constants.set(m[1], [...m[2].matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((l) => l[1].replace(/\\(.)/g, '$1')).join(''));
+	return constants;
 }
 
 /** The end of a pattern: the first whitespace outside quotes, a character class and braces. */
@@ -172,17 +183,28 @@ function scanPattern(src, i, fail) {
 }
 
 /** What an action does, as the docs show it. A directive's rule reads an #include's file from a buffer of its own
- * (yy_scan_bytes); the end of the input's goes back to the file an #include interrupted (yy_switch_to_buffer). */
-function outcome(action) {
+ * (yy_scan_bytes); the end of the input's goes back to the file an #include interrupted (yy_switch_to_buffer). A BEGIN
+ * enters the start conditions (`names`: INITIAL and the declared ones) it names, one or, through ?:, either of two. An
+ * error's message is its string literals, a constant's (`constants`) as its text, with … where the action computes a
+ * part; an action that throws in two places has both messages, and one whose every throw is under an `if` otherwise
+ * skips its input. */
+function outcome(action, names, constants) {
 	const tokens = [...action.matchAll(/\bmake_([A-Za-z_][A-Za-z0-9_]*)\s*\(/g)].map((m) => m[1]);
-	const begin = action.match(/\bBEGIN\s*\(?\s*([A-Za-z_]\w*)/);
-	const thrown = action.match(/\bsyntax_error\s*\(([\s\S]*)\)\s*;/);
+	const argument = action.match(/\bBEGIN\s*\(([^;]*)\)\s*;/) ?? action.match(/\bBEGIN\s+([A-Za-z_]\w*)/);
+	const entered = argument ? [...argument[1].matchAll(/[A-Za-z_]\w*/g)].map((m) => m[0]).filter((w) => names.includes(w)) : [];
+	const thrown = [
+		...action.matchAll(/\b(if\s*\((?:[^()]|\([^()]*\))*\)\s*)?throw\s+Parser::syntax_error\s*\(([\s\S]*?)\)\s*;/g),
+	];
 	if (/\byy_scan_bytes\s*\(/.test(action)) return { kind: 'include' };
 	if (tokens.length) return { kind: 'tokens', tokens, resumes: /\byy_switch_to_buffer\s*\(/.test(action) };
-	if (thrown) {
-		const literals = [...thrown[1].matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((m) => m[1].replace(/\\(.)/g, '$1'));
-		return { kind: 'error', message: literals.join('…') };
+	if (thrown.length) {
+		const message = (args) =>
+			[...args.matchAll(/"((?:[^"\\]|\\.)*)"|\b([A-Za-z_]\w*)\b/g)]
+				.flatMap((m) => (m[1] !== undefined ? [m[1].replace(/\\(.)/g, '$1')] : constants.has(m[2]) ? [constants.get(m[2])] : []))
+				.join('…');
+		const otherwise = thrown.every((m) => m[1] !== undefined) ? 'skip' : undefined;
+		return { kind: 'error', message: thrown.map((m) => message(m[2])).join(', or '), otherwise };
 	}
-	if (begin) return { kind: 'begin', condition: begin[1] };
+	if (entered.length) return { kind: 'begin', condition: entered.join(' or '), conditions: entered };
 	return { kind: 'skip' };
 }

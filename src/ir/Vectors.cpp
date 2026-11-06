@@ -23,6 +23,8 @@ namespace fminus::ir::detail
         const Value thenValue = lower(*conditional.thenValue);
         const Value elseValue = lower(*conditional.elseValue);
         const ast::Type type = ast::arithmeticOf(mask);
+        if (thenValue.failed || elseValue.failed)
+            return recovery(type);   // an arm's own error says why (Value)
         ast::Type branches = type;
         if (!commonType(location, thenValue.type, elseValue.type, branches))
             return poison(type);
@@ -187,10 +189,17 @@ namespace fminus::ir::detail
     Lowering::Value Lowering::lowerMember(SourceLocation location, const ast::MemberExpr& swizzle)
     {
         const Value base = lower(*swizzle.base);
+        if (base.failed && !ast::isModule(base.type) && !ast::isVector(base.type))
+            return recovery(ast::Type::Float);   // its own error says why (Value)
         if (ast::isModule(base.type))
         {
             const std::optional<LValue> field = this->field(location, base.ir, *base.type.module, swizzle.name, false);
-            return field ? read(*field) : poison(ast::Type::Float);
+            if (!field)
+                return poison(ast::Type::Float);
+            if (!boundsCheck_ || !ast::isArray(field->type))
+                return read(*field);
+            const std::string named = spelled(*swizzle.base);   // m.taps, voices[v].taps: for a failed check's message
+            return read(*field, named.empty() ? swizzle.name : named + "." + swizzle.name);
         }
         if (ast::isPointer(base.type) && base.type.pointee == ast::Kind::Module)
         {

@@ -1,7 +1,7 @@
 # Extending the compiler
 
 How to add to FMinus. First, how a change moves through the compiler, and the few rules that keep that easy. Then
-twenty-five worked recipes. Eleven grow the C subset from a one-line builtin to C's control flow, a custom LLVM pass,
+twenty-nine worked recipes. Eleven grow the C subset from a one-line builtin to C's control flow, a custom LLVM pass,
 `int`, `void` and pointers, the heap with the attributes that keep it off the audio thread, arrays and modules, FMinus's
 classes, an FFT from a C library built into the runtime, and parameters, the values a plugin's host sets. Six more are
 about the compiler rather than the language: math that gives a float one result wherever it is computed, knob versioning
@@ -10,17 +10,23 @@ subnormals flushed for the audio thread. Two more grow the language again: `#inc
 files, and `parallel for` and `parallel { }`, a program's own threads. Two return to the math: kernels of FMinus's
 own, the same in every lane and on every target, and those kernels inline. The last four are for DSP's everyday code:
 C's bitwise operators with a hash and white noise from a counter, constant tables stored once, `switch` and
-enumerations, and constants at the top level with arrays sized by constant expressions. Then the pitfalls
-those recipes ran into, and design notes for what comes next. [simd.md](simd.md) has recipes 7 to 9, for vectors.
+enumerations, and constants at the top level with arrays sized by constant expressions. The last two are for the host:
+a loop budget, which stops a program that would loop for ever before it holds the audio thread, and bounds checks for
+development builds, which stop a call before an index leaves its array. Then one returns to C's preprocessor: its
+conditionals, `#if` and `#ifdef`, which compile a program's instrumentation in or out. The last is for whoever reads the
+errors: one error for each mistake, enumerated types as C has them, and FMinus's first warning, clang's `-Wswitch`.
+Then the pitfalls those recipes ran into, and design notes for what comes next. [simd.md](simd.md) has recipes 7 to 9,
+for vectors.
 
 Recipes 1 to 4 are in the compiler now (`tanhf` and `%`; `bool` and its operators; `if`, `while` and `for`), and so are
 simd.md's 7 to 9, recipe 10 (`int`, `void` and pointers), recipe 11 (the heap), recipe 12 (arrays and modules), recipe
 13 (the FFT), recipe 14 (parameters), recipes 15 to 20 (the math modes, knob versioning, TBAA, zero-init elision, the
 runtime's attributes and loop progress, denormal control), recipe 21 (`#include`), recipe 22 (`parallel for` and
 `parallel { }`), recipes 23 and 24 (math kernels of FMinus's own, and inline), recipe 25 (the bitwise operators,
-`hash` and `randf`), recipe 26 (constant tables), recipe 27 (`switch` and `enum`) and recipe 28 (constants at the top
-level, and sizes of constant expressions), so their sections describe how the code you have got there: read a section
-beside the files it names.
+`hash` and `randf`), recipe 26 (constant tables), recipe 27 (`switch` and `enum`), recipe 28 (constants at the top
+level, and sizes of constant expressions), recipe 29 (the loop budget), recipe 30 (bounds checks), recipe 31 (`#if`
+and `#ifdef`) and recipe 32 (one error a mistake, enumerated types, `-Wswitch`), so their sections describe how the
+code you have got there: read a section beside the files it names.
 Recipes 5 and 6, a runtime function and a pass, are not part of the language; they live in [recipes/](recipes/) as a
 patch, so you can apply them to see them work. None of these are sketches: each was applied to this repository, built
 with `-Werror`, and tested in the dev and asan presets, every test passing. [architecture.md](architecture.md) describes
@@ -36,7 +42,7 @@ Most language features touch the same places, in this order:
 
 | # | Where | What to add |
 |---|---|---|
-| 1 | `src/frontend/Lexer.l` | a rule for each new token. Keywords go before `{IDENTIFIER}`. |
+| 1 | `src/frontend/Lexer.l` | a rule for each new token. Keywords go before `{IDENTIFIER}`; `macroNameError` reads a name with the scanner itself, so a new keyword is refused as a macro's name with nothing more to add. |
 | 2 | `src/frontend/Parser.y` | the tokens (`%token`), their precedence if they are operators, and the grammar rules with their actions |
 | 3 | `src/frontend/Ast.h` | a node: an alternative of `Expr::node` or `Stmt::node`, or an enumerator of `UnaryOp`, `BinaryOp`, `AssignOp`, `IncrementOp`, `Kind` (a type's) |
 | 4 | `src/frontend/Ast.cpp` | its `dump` |
@@ -76,7 +82,9 @@ over a module's fields (recipe 17), and `examples/ensemble/` for `parallel for` 
   read alike.
 - **Report and continue.** In the code generator, `error(location, message)` records an error, in clang's wording.
   Then return a poison value of the expected type (`poison(ast::Type::Float)`), never a null pointer, so lowering
-  goes on and finds the next error. `lower` throws the module away at the end.
+  goes on and finds the next error. `lower` throws the module away at the end. A check of an operand's type tests the
+  operand's `failed` first (recipe 32): an operand with an error of its own gets no second one, and what you return
+  for it is a `recovery()`, failed in turn. Never return a failed value that no error is behind.
 - **Leave the IR valid.** Every block ends in exactly one terminator (`ret`, `br`). A phi lists every predecessor
   exactly once. Allocas belong in the entry block (`allocate()`). `verifyFunction` runs on every function and reports
   a violation as an internal error.
@@ -715,6 +723,7 @@ second terminator after its `ret`.
 **`if`**: if.then and if.else (when there is an else) join at if.end. When both branches return, if.end has no
 predecessors. The statements after it then lower into dead code. The function's end is unreachable too, so no
 "does not return a value" error is reported. `reachable()`, a depth-first walk from the entry, already handles that.
+(Recipe 32 branches on a constant condition one way, so the end after `while (1)` is unreachable too.)
 
 ```cpp
             void lowerIf(const ast::IfStmt& branch)
@@ -3605,8 +3614,9 @@ Tests: `tests/unit/IncludeTest.cpp` (`[include]`), `tests/library/IncludeTest.cp
 
 A module worth reusing, a one-pole or an oscillator, wants a file of its own, and C's way to use one is the
 preprocessor's `#include "file"`: the file's text is read in place of the line. FMinus does what C does there and no
-more: no macros and no conditional compilation, which a language with modules, `const` and parameters needs less than
-C does. Two choices are its own, both because FMinus has no headers:
+more. (It had no macros and no conditional compilation then, which a language with modules, `const` and parameters
+needs less than C does; recipe 31 added the conditionals, with macros that only they read.) Two choices are its own,
+both because FMinus has no headers:
 
 - **Each file is read once**, as if every file began with `#pragma once`. In C, a header without a guard included
   twice declares everything twice: harmless for prototypes, an error for definitions. FMinus's files hold definitions
@@ -3623,7 +3633,8 @@ C does. Two choices are its own, both because FMinus has no headers:
 | `#include <file>` | an error: FMinus has no system headers | |
 | `#pragma ...` | nothing, as C ignores the pragmas it doesn't know; `#pragma once` is what every file does anyway | |
 | `#` | nothing: C's null directive | |
-| `#define`, `#if`, `#ifdef`, ... | an error: `#define is not supported: FMinus's directives are #include and #pragma` | |
+| `#define`, `#if`, `#ifdef`, ... | an error then; recipe 31's now | |
+| `#error`, `#line`, `#warning`, `#embed` | an error: `#error is not supported: FMinus's directives are #include, #pragma, #define, #undef and the conditionals (...)` | |
 | any other `#name` | `invalid preprocessing directive` | |
 
 A directive is a line whose first character, after spaces, is `#`, followed by spaces and comments only. A `#`
@@ -4224,6 +4235,29 @@ Four details carry it:
   them every iteration: tremolo's `process` had 72 loads from the stack, most of them in its loops, and has 13 with the
   wrapper. Neither function is speculatable, so no pass hoists the call out of its branch. The branch costs a compare
   and a branch never taken.
+
+  On x86-64 with AVX the wrapper saves `ymm1`-`ymm15` and restores them before it returns, and LLVM's vzeroupper
+  insertion (`X86InsertVZeroUpper.cpp`) then put a `vzeroupper` between the restores and the `ret`, zeroing the upper
+  halves it had just restored. The caller of an 8-lane kernel keeps the 256-bit vector in a register across the
+  calls, so when any lane was past 2^16, an infinity or a NaN, the upper four lanes of each vector came out as the
+  kernel's result for 0: `cosf` gave 1 there (on arm64, and at 4 lanes, nothing changed). So there the wrapper's
+  `target-features` are the machine's and `-vzeroupper` (a function's features replace the machine's, so it names
+  them all), and LLVM puts no `vzeroupper` in it; the one LLVM put before the runtime's call is right, since it lets
+  the runtime's SSE code run without the cost of upper halves in use, so the wrapper calls `llvm.x86.avx.vzeroupper`
+  there itself:
+
+  ```llvm
+  define internal preserve_allcc float @fminus.large.sin(float %0) #4 {
+  entry:
+    call void @llvm.x86.avx.vzeroupper()
+    %1 = call float @fminus_rt_sinf(float %0)
+    ret float %1
+  }
+  attributes #4 = { cold ... memory(none) "target-features"="+avx,+avx2,...,-vzeroupper" }
+  ```
+
+  `MathKernelsPass` takes the target machine for this (`HostTarget.cpp` passes it). `preserve_all` is FMinus's only
+  convention other than C's, and `fminus.large.<sin|cos|tan>` the only functions that have it.
 - **Folding.** The builder is the code generator's `DenormalFolder` (recipe 20), flushing as the function computes,
   and after the pass EarlyCSE, InstSimplify and SimplifyCFG run on the functions it changed. A constant's kernel folds
   to a constant: `sinf(0.5f)` is `ret float f0x3EF57744`, the runtime's result, and a frozen parameter's `sinf` leaves
@@ -4306,6 +4340,11 @@ rewritten where that shortens the chain and leaves every result as it was (check
   `poly float` kernels; a drive's two channels' `tanhf` paired into one two-lane kernel; a constant folded to
   `0x3EF57744`; the frozen parameter's sine gone from its loop; `-O0`'s runtime calls; no intrinsic left at either
   level.
+- `tests/lit/fminus/math-large.fm`: `sinf`, `cosf` and `tanf` of 4-, 8- and 16-lane `poly float`s with a lane past
+  2^16, an infinity or a NaN, each lane against the scalar function, JIT'd at `-O1` to `-O3` and as an executable; the
+  wrappers' IR; and on x86-64 with AVX (the lit feature `avx`) their features and their machine code: one
+  `vzeroupper`, before the runtime's call, and none between the restores and the `ret`. On such a machine the
+  `MathTest.cpp` matrix's 8-lane `poly float` runs fail without the fix too.
 - `versions.fm` and `examples.test` check the kernels where they checked the runtime's calls.
 
 ### Measurements
@@ -4421,7 +4460,8 @@ operator's error and stores nothing (`lowerAssign`): storing the poison `int` in
 clang does not give. An operand that reported an error of its own, the undeclared `y` of `a & y`, lowers to a poison
 `float`, which would draw the message too, about a float the program does not have; so the binary case of `lower`,
 `~`'s and `lowerAssign` note the error count before they lower their operands, and when it has grown they give a
-poison `int` and say nothing more. A poison value is no test for this: `(int)3e10f` folds to one with no error, and
+poison `int` and say nothing more. (Recipe 32 gives every expression that count, `Value::failed`, and every operator
+the rule.) A poison value is no test for this: `(int)3e10f` folds to one with no error, and
 `(float)((int)3e10f) | 1` is still refused (bitwise-errors.fm).
 
 ### Shifts defined for every count
@@ -4637,7 +4677,8 @@ An enumeration is declared on its own, at the top level, in a module or in a blo
 `qualifier "enum" enum_tag "{" enumerators ","? "}" ";"`. It starts with `qualifier`, as a declaration and a function
 do, so the three share their first reduction and `enum Mode {` against `enum Mode m;` is the next token's choice, `{`
 or not. `enum Mode`, without the braces, is a type in `type` and in `cast_type`: the type `int`, once a tag of the name
-is visible. C's `enum Mode { A } m;`, a variable declared with its enumeration, is a syntax error here.
+is visible. C's `enum Mode { A } m;`, a variable declared with its enumeration, is a syntax error here (recipe 32 takes
+it, and C23's fixed underlying type).
 
 ### `switch`
 
@@ -4738,7 +4779,7 @@ parser's, since `enum Mode` must name a declared one: `ParseContext::tags` is a 
 rule `block` opens one at its `{` and closes it at its `}`), and the file's, where a module's tags go too. A second
 `enum Mode { }` in one scope is "redefinition of 'Mode'"; `enum Mode` without a visible tag is clang's "ISO C forbids
 forward references to 'enum' types", as FMinus declares no enumeration ahead of its constants (C23 does, with a fixed
-underlying type).
+underlying type, and since recipe 32 so does FMinus).
 
 A constant reads as an `i32` constant (`lower`), so a const table of constants is stored once (recipe 26), a case
 label takes one, and a loop whose condition is one (`while (RUNNING)`) is a constant expression, which may run for ever
@@ -4748,7 +4789,7 @@ capturing nothing, and the race walker takes an outer constant for no variable. 
 enumerated type is compatible with an integer type of the compiler's choosing (GCC's and clang's is `unsigned int` when
 no constant is negative, `int` otherwise): a local, a parameter, a result, a module's
 `param enum Mode mode [[fminus::range(0, 2)]]`, `sizeof(enum Mode)` (4) and `(enum Mode)x` all mean `int`, and messages
-say `'int'`.
+say `'int'`. (Recipe 32's `int` carries which enumeration it is, for `-Wswitch`, and is still `int` to every rule.)
 
 ### What it changes for programs and hosts
 
@@ -4964,6 +5005,1077 @@ through a `const float*`).
   alloca, memset or store for them, a scalar read as its value, `-O2`'s loads and folded reads (and the tables only
   those read gone), `--run`, the dump; `toplevel-errors.fm`, the errors from the command line.
 
+## Recipe 29: the loop budget, runaway-loop protection
+
+*In the compiler. Code: `src/opt/LoopBudget.h` and `.cpp` (`LoopBudgetPass`, and the budget's global,
+`loopBudgetGlobal`); `ir::Options::loopBudget` and its module flag in `src/ir/CodeGen.h` and `.cpp`; the pipeline's last
+pass in `src/support/HostTarget.cpp`; `Program::Options::loopBudget`, `setLoopBudget`, `loopBudgetLeft` and
+`loopBudgetExceeded` in `include/fminus/FMinus.h` and `src/api/FMinus.cpp`; `fminus --loop-budget n` in
+`tools/fminus/main.cpp`; an executable's in `addEntryPoint` (`src/support/Aot.cpp`), with
+`fminus_rt_loop_budget_state` and `fminus_rt_main_loop_budget` in `src/runtime/`. Tests:
+`tests/unit/LoopBudgetTest.cpp` (`[budget]`), `tests/library/LoopBudgetTest.cpp` and
+`tests/lit/fminus/loop-budget.fm`.*
+
+A program that never stops holds the thread that called it. In a plugin that is the audio thread, and the host waits
+for its block: the whole session freezes, and the only way out is to kill the host. It takes one ordinary bug. This
+oscillator wraps its phase in a loop, and an infinite frequency (a knob read as a division by zero upstream, say) makes
+the phase infinite, and infinity less one is infinity:
+
+```c
+module Osc
+{
+    param float frequency [[fminus::default(440)]];
+    float phase;
+
+    void process(float* restrict out, int n) [[clang::nonblocking]]
+    {
+        const float step = frequency[0] / 48000.0f;
+        for (int i = 0; i < n; ++i)
+        {
+            phase = phase + step;
+            while (phase >= 1.0f)
+                phase = phase - 1.0f;
+            out[i] = phase;
+        }
+    }
+};
+```
+
+C has no answer, and a host has no safe one: a thread cannot be stopped from outside without leaving whatever it held.
+So the program stops itself. Compiled with the loop budget, it counts its own work against a budget the host sets
+before each call, and a call that runs out returns early, with a flag the host reads:
+
+```cpp
+fminus::Program::Options options;
+options.loopBudget = true;                                    // off by default
+auto program = fminus::Program::compile(source, errors, options);
+...
+program->setLoopBudget(10'000'000);                           // on the audio thread, before each call
+process(instance, out, n);
+if (program->loopBudgetExceeded())                            // it returned early: silence it, report it
+    ...
+```
+
+The counting is a pass of FMinus's own, the last of the pipeline, so nothing the optimiser decides depends on it: a call
+that stays within its budget computes what it would without it, bit for bit, and runs at the same speed (Measurements,
+below).
+
+### What counts
+
+- **A loop whose count is known where it starts** is charged it there, before it runs. That is most of a DSP program's
+  loops: a `for` over a block, a vectorised loop and its remainder, a loop over a module's voices or a filter's taps.
+- **Any other cycle** counts one at each branch back to its start: a `while` on the data, a loop that leaves through a
+  `break`, the phase wrap above.
+- **A function that can call itself again** counts one each time it starts, so a recursion that runs long without a
+  loop runs out too.
+
+The count is the optimised code's, not the source's. A rotated loop branches back once less than it iterates, a
+vectorised loop once a vector of samples, an unrolled loop once a group of iterations, and a loop the optimiser
+removed not at all. `halvings(1024)`, a `while` that halves its argument, takes 10 at `-O0` and 9 at `-O2`;
+`sum(100)`, a `for` of a float sum, 100 at `-O0` and 24 at `-O2` on arm64, where LLVM interleaves it by four
+(`loop-budget.fm`). The budget is a safety net, not a meter: set it to many times what a block should take (a block of
+a thousand samples whose voices loop over a hundred partials takes a few hundred thousand at most).
+
+### Where the checks go: last
+
+`LoopBudgetPass` is a module pass, registered at `OptimizerLast` after the math kernels (`HostTarget.cpp`), and runs at
+every level (`isRequired`). It acts on a module whose flag `fminus.loop-budget` is 1, which `ir::lower` writes when
+`ir::Options::loopBudget` is set, so the option travels with the module to wherever it is optimised, as the math mode
+does (recipe 15).
+
+Why last. The code generator could have put a check in every loop it lowers, but LLVM's loop vectoriser leaves alone a
+loop that can leave from its middle on a condition it computes (a `for` over a block with a `break` on the data stays
+scalar at `-O2`), so the check would have cost every vectorised loop its vectorisation, and a math builtin's loop most
+of its speed. After the pipeline,
+every decision has been made: the loops that vectorise have, the copies knob versioning makes are made, the kernels are
+inline. The pass adds a counter and branches, and no floating-point operation moves.
+
+Which functions it changes, from the module's call graph:
+
+- a function **counts** when it has a cycle, or can call itself again: through its own calls, or through a function it
+  hands a runtime function (a parallel region's body, which `fminus_rt_parallel_for` runs). Its cycles are
+  `CycleInfo`'s rather than `LoopInfo`'s, irreducible ones included: FMinus's structured code makes none, but a pass
+  might, and every closed path through a function passes through some cycle's header from inside that cycle, so
+  instrumenting each header's branches back leaves no path that can go round uncounted;
+- a function **may stop** when it counts, or calls one that may stop. Each such call is followed by a check of the flag.
+
+In a function that counts, the count is a stack slot, written as the code generator writes a variable, and
+`PromoteMemToReg` makes it a register once every check is in place: the function reads the budget once where it starts,
+and writes it back before it returns and before each call that may stop (and reads it again after). A loop without a
+count:
+
+```llvm
+while.body:
+  %0 = fmul nnan float %x.addr.08, 5.000000e-01
+  ...
+  br i1 %cmp, label %while.body.budget, label %while.end
+
+while.body.budget:                                ; on the branch back
+  %budget.left = sub i64 %budget.slot.0, 1
+  %budget.out = icmp slt i64 %budget.left, 0
+  br i1 %budget.out, label %budget.stop, label %while.body, !prof !5   ; unlikely
+```
+
+On arm64 that is a `SUB` and a `TBZ` on its way back, beside the loop's own test. A loop with a count gets nothing in
+it: ScalarEvolution's count of its branches back (`getBackedgeTakenCount`), expanded in its preheader, is charged
+there, and a vectorised loop's is a shift (`plan` and `countOf`):
+
+```llvm
+vector.ph:
+  %n.vec = and i32 %conv, 2147483644
+  %0 = add nsw i32 %n.vec, -4
+  %1 = zext i32 %0 to i64
+  %2 = lshr i64 %1, 2
+  %budget.left = sub i64 %budget.start, %2
+  %budget.out = icmp slt i64 %budget.left, 0
+  br i1 %budget.out, label %budget.stop, label %vector.body, !prof !5
+```
+
+A loop gets a count when ScalarEvolution knows an exact one for all its exits (a `break` on the data has none), loop
+invariant, of at most 64 bits and 12 terms, with no recurrence of an outer loop in it (a triangle's inner loop, `for (j
+= 0; j < i; ++j)`, whose count changes every outer iteration, would make the expander add an induction variable to the
+outer loop), and safe to compute where the loop starts (no division by what may be zero). Any other counts a branch
+back at a time, and so does every loop at `-O0`, whose counters live in memory where ScalarEvolution cannot follow
+them. A loop the pass charged runs all of its iterations or none: the charge fails before the first.
+
+Why charge it rather than count. The first version counted every loop at its branches back, and paid for it where it
+hurts, in the inner loops: a synth's loop over its eight voices, a sample at a time (`examples/voices/`), took 9% longer
+at `-O2`, since its body is two dozen instructions and the check added two, an iteration. And a vectorised loop of
+`tanhf` (`examples/saturator/`), one block with its own branch back, became two blocks with a branch each; the code
+generator scheduled and allocated the two differently (spilling less, interleaving less), and the loop took 9% longer,
+with almost no more work in it. Folding the check into the loop's own branch (`br (%done | %out)`, kept one branch by
+`!unpredictable`, without which SelectionDAG splits an `or` of conditions into two branches) got the `tanhf` loop to 4%
+and made the voices' 14%. Charged before it starts, a counted loop is the code it was.
+
+The price is one assumption. ScalarEvolution's count may rest on what C leaves undefined: `for (int i = 0; i != n; i +=
+2)` with an odd `n` never ends, through an `int` that overflows, and C lets the optimiser assume it does not (the loop
+is marked `llvm.loop.mustprogress`, recipe 19, and the `add` is `nsw`). Such a loop is charged the count the optimiser
+assumed, and runs as the machine code runs it. Most do end: the vectoriser's trip count and IndVarSimplify's rewritten
+exit test follow the same count.
+
+### Stopping, and returning
+
+When the count would go below zero the function writes -1 for what is left, sets the flag and returns at once, a zero
+of its type, null or nothing:
+
+```llvm
+budget.stop:
+  store atomic i64 -1, ptr @fminus_rt_loop_budget monotonic, align 8
+  store atomic i32 1, ptr getelementptr inbounds ({ i64, i32 }, ptr @fminus_rt_loop_budget, i32 0, i32 1) monotonic, align 4
+  ret float 0.000000e+00
+```
+
+and every function of the program that called it returns too, at once, with nothing written: after each call of a
+function that may stop, the flag decides.
+
+```llvm
+  store atomic i64 %budget.left, ptr @fminus_rt_loop_budget monotonic, align 8
+  %5 = call i32 @calls(i32 %4, float %x)
+  %budget.stopped5 = load atomic i32, ptr getelementptr inbounds (...) monotonic, align 4
+  %6 = icmp ne i32 %budget.stopped5, 0
+  br i1 %6, label %budget.unwind, label %if.end.budget, !prof !6
+...
+budget.unwind:
+  ret i32 0
+```
+
+So no caller goes on with a value that was never computed. But what the program leaves in memory, its modules' state and
+what it wrote of the output, is whichever of the optimised code's stores had run, and that need not be any point of the
+source. The oscillator above, at `-O2`, keeps `phase` in a register through the block's loop (LICM promotes it,
+`%phase.promoted`) and stores it after the loop: stopped in the wrap of a sample, it has written the samples before and
+left `phase` as it was before the call. The optimiser sinks and merges stores too, so some of a stopped call's writes
+may be missing, out of order with the source, or out of step with each other. A ring buffer that writes `buf[w]`,
+advances `w`, loops, then wraps `w` at `size` may be left with `w == size`, and the next call would write past the
+buffer (unless the program is compiled with bounds checks, recipe 30, which stop the call there). So a host that runs
+the program again first re-initialises the instance as it made it (zeroes it, then `setDefaults` and its own
+parameters), or throws it away; `LoopBudgetTest.cpp` shows the oscillator's case.
+
+A stop writes -1, not its count, which a charge may have taken far below zero. `left` is then never below -1: the
+host sets it to -1 or more (`setLoopBudget` makes a negative budget -1), a stop writes -1, and every other write is of
+a count that passed its check or of what was read. So a function's count starts at -1 or more, a charge takes at most
+`INT64_MAX` (`countOf` charges no count that may be larger: a loop over bytes, written by hand, could take 2^64 - 1),
+and no subtraction wraps, however many calls run out without the host setting the budget again. The first version
+wrote its count: a loop `for (float* p = a; p != e; ++p)` over a range written one short, `e` one below `a`, is
+charged (e - a - 4) / 4 unsigned, 2^62 - 2; two calls took `left` near `INT64_MIN`, and the third's charge wrapped it
+positive and let the loop write through memory.
+
+The calls checked are direct calls of the program's functions that may stop, and calls of a runtime function handed
+one (a parallel region's body: the region's threads each count, and the caller checks after the region). Inline asm is
+no call, and FMinus has no function pointers: its only indirect call is an entry point's call of its body under
+`Denormals::Flush` (recipe 20), whose wrapper restores the host's floating-point mode and returns what the body
+returned, which is right as it is.
+
+A function that may stop no longer promises what it did, and the pass says so: it reads and writes memory that is no
+argument's (the budget: `memory(readwrite, argmem: none, ...)` from `memory(none)`), it returns (`noreturn` goes, as
+a loop that never ended was what made it), and its result may be 0 or null (`nonnull`, `dereferenceable`, `range`,
+`nofpclass` and a parameter's `returned` go, from it and from its calls). No pass of the optimiser runs after it, but
+the code generator reads some of these, and an attribute that is false is undefined behaviour waiting.
+
+### The budget, the program's own
+
+The budget is a global of the program, `fminus_rt_loop_budget`, the `{ int64_t left; int32_t stopped; }` of
+`runtime/Runtime.h`'s `fminus_rt_loop_budget_state`, defined unlimited until the host sets it:
+
+```llvm
+@fminus_rt_loop_budget = dso_local global { i64, i32 } { i64 9223372036854775807, i32 0 }, align 8
+```
+
+Three reasons for a global of the module rather than one of the runtime's or the host's. Each `Program` has its own, so
+two programs count apart. It lives in the JIT's own memory, beside the code that reads it, as a constant table does, so
+the code reaches it as it reaches its own data, with nothing in the host's address space to resolve. And an object
+`fminus --emit obj` writes defines it too, for its host to declare (`extern "C" fminus_rt_loop_budget_state
+fminus_rt_loop_budget;`) and set.
+
+`ir::lower` defines it, not the pass: LLJIT takes a module's symbols when it is added, before its IR transform layer
+optimises it, and a symbol a pass at the end of the pipeline made would be one the JIT does not know (the pass makes
+it only for IR written by hand, for `fminus-build`). `Program::compile` then looks it up, which compiles the module, so
+with the budget, compile() generates the machine code and the first look-up of a function only finds it. A program that
+declares a function of its name is an error while the budget is on ("the loop budget reserves 'fminus_rt_loop_budget'
+for its counter, and this program declares a function of that name: rename it"), and nothing to it without.
+
+Every access the program makes is a relaxed (monotonic) atomic, as are the host's (`std::atomic_ref`), so a parallel
+region's threads may share it without a data race. Each part of a region (a chunk of a `parallel for`, which the pool
+hands out as threads come free) counts from what `left` held where it started. A function a region's threads may run,
+the region's body and every function it reaches, writes its count back with an `atomicrmw min` rather than a store,
+so `left` never goes up while the program runs:
+
+```llvm
+parallel.end:
+  %4 = atomicrmw min ptr @fminus_rt_loop_budget, i64 %budget.slot.0 monotonic, align 8
+  ret void
+```
+
+With a store, a part that read `left` before another ran out could store its own positive count over that one's -1
+when it returned (a quick chunk on a thread the system had paused, say), and every part after it would start with a
+fresh budget: a region's spinning chunks could each take a whole budget. With the min, a part that starts after a stop
+reads -1 and stops at its first check, and each thread takes at most the budget, so the region takes at most its
+thread count times it, which is what a safety net needs. What is left after the region is the least any part left. The
+flag is shared, and the caller sees it after the region. Every other function stores: no other thread writes `left`
+while it runs, and the min would cost an atomic read-modify-write at each call and return (`LDSMIN` on arm64, a
+compare-and-swap loop on x86-64).
+
+### The host's side
+
+- `setLoopBudget(n)` sets `left` to n (a negative n to -1, which stops a call at its first check) and clears the flag;
+  the host calls it before each call it limits. What is left carries over otherwise: after a call that ran out, the
+  next stops at its first check.
+- `loopBudgetExceeded()` reads the flag, `loopBudgetLeft()` what is left (what was set less what the calls since took,
+  -1 once one ran out), each a relaxed load: the audio thread may call them.
+- After a call that ran out, the host silences the program and re-initialises the instance before it runs it again, or
+  throws it away (Stopping, and returning, above).
+- A program compiled without the option reads and writes a budget nothing counts down: `loopBudgetExceeded()` is
+  false.
+- `fminus --run f ... --loop-budget n` sets it for the call and says on stderr what the call took, or that it ran past
+  it (status 3, and what it printed is what it returned early). `fminus --emit exe --loop-budget n` makes the C main a
+  host: it sets the budget before main and, when main runs out, says so on stderr (`fminus_rt_main_loop_budget`) and
+  exits with 3. That main is the host's, so the pass leaves it alone (`kLoopBudgetHostAttribute`), and it calls the
+  program's `main` through its address passed through an empty inline asm (`call ptr asm "", "=r,0"(ptr
+  @fminus.main)`, as `Denormals::Flush`'s wrapper calls its body, recipe 20). Until the pass puts the program's checks
+  in, a `main` whose loop never ends never returns, and touches no budget: called directly, FunctionAttrs marked it
+  `noreturn`, and SimplifyCFG deleted everything after its call, the flag's check, the message and the `ret 3`, for an
+  `unreachable`; the stopped call returned into it and trapped (status 133 on arm64) from `-O1` up. An indirect call
+  carries none of `main`'s attributes, and no inliner inlines it. The C main's own accesses of the budget are volatile
+  besides.
+
+### What it changes for programs and hosts
+
+- **Off, the default**, nothing: the module has no flag, no global and no check (`loop-budget.fm`'s `OFF`).
+- **On**, a call within its budget computes what it does without it, bit for bit, at every level (`LoopBudgetTest.cpp`
+  compares kernels of each kind, and the measurements below every example's); a program cannot name a function
+  `fminus_rt_loop_budget`; compile() generates the machine code; the IR shows the checks and the attributes above. A
+  call that runs out leaves its instance as the optimised code had it, which the host re-initialises.
+- **What it does not catch**: a loop charged a count it will not keep (undefined behaviour, above); a recursion deeper
+  than the stack, which overflows it before a larger budget runs out; time spent outside the program, in an external
+  function it calls; and a loop whose iterations are each slow, which a count of iterations does not see as time. A
+  budget of iterations is no clock, and a host that wants one sets the budget from what its blocks take.
+
+### Tests
+
+- `tests/unit/LoopBudgetTest.cpp`, in the JIT at each level: a loop that never ends returns early with the flag, and
+  `left` at -1; unlimited until set, what is left carried to the next call, and a `while`'s exact count at `-O0`; a
+  counted (vectorised) loop charged before it starts, all of it or none, its charge exactly what it takes; -1 left
+  after a stop, so that a pointer loop charged 2^62 - 2 stops however many calls run out; a loop over bytes (IR by
+  hand), whose count may not fit an `int64_t`, counted a branch back at a time; a loop's stores to its output there up
+  to the branch back where it stopped; a stopped oscillator's `phase` not stored at all, at no point of the source; a
+  recursion's calls counted (`fib(10)`'s 177 at `-O0`), and every caller returning 0 when the deepest runs out; kernels
+  of each kind (a vectorised loop of `tanhf` and `sinf`, a recurrence of a `float4`'s coefficients, nested loops,
+  `while` loops in a `for`) bit for bit with and without the budget; the reserved name.
+- `tests/library/LoopBudgetTest.cpp`, through `Program`: the oscillator above, its infinite frequency stopped, the flag
+  and -1 left, the next call stopped too, and run again on an instance made again; a negative budget is -1; bit for
+  bit; a program without the budget; a `parallel for` whose iterations spin, on the pool and on one thread; an entry
+  point under `Denormals::Flush` that stops and hands the host's mode back; the checks in `optimisedIr()`.
+- `tests/lit/fminus/loop-budget.fm`: the IR at `-O0` (the global, a branch back's check, the stop, a recursion's entry,
+  a call's flag and the unwind, the attributes, the flag) and at `-O2` (a counted loop's charge), nothing without the
+  option; `--run`'s counts and messages, an executable's main and its call through the laundered address, a `while
+  (1)` main built at `-O2` that exits with 3, the reserved name; and `Inputs/loop-budget/region.fm`, a region's body
+  and what it calls writing back with `atomicrmw min`, a function only the caller runs with a store.
+
+### Measurements
+
+On an M5, at `-O2`, blocks of 256 samples, the host setting the budget before each call, the best of 300 runs of 65536
+samples each, the two alternating, with the machine busy with other builds (its noise is about a percent):
+
+| Kernel | Off (ns a sample) | On | Change | Output |
+|---|---|---|---|---|
+| a gain, vectorised | 0.170 | 0.171 | +0.7% | identical |
+| `examples/saturator/` `process_tanhf` (a vectorised loop of the kernel) | 1.463 | 1.464 | 0.0% | identical |
+| `process` (a rational tanh) | 1.173 | 1.173 | 0.0% | identical |
+| `process_poly` | 1.203 | 1.202 | -0.1% | identical |
+| `examples/biquad/` (a recurrence, its cutoff a stream) | 11.227 | 11.243 | +0.1% | identical |
+| `examples/voices/` (eight voices a sample) | 16.098 | 16.069 | -0.2% | identical |
+| `examples/convolver/` (2048 taps by FFT) | 30.143 | 30.204 | +0.2% | identical |
+| `examples/delay/` (an echo) | 1.300 | 1.301 | 0.0% | identical |
+| a phase wrap, two `while` loops a sample | 44.365 | 43.865 | -1.1% | identical |
+| a 32-tap FIR, nested loops | 13.500 | 13.500 | 0.0% | identical |
+
+At `-O1` and `-O3` the same, within a percent, but for the gain, the cheapest kernel there is, a load, a multiply and a
+store a sample: with the budget it ran at 0.17 ns a sample in every measure, without it at 0.17 or at 0.15 by level
+and block size, so in two of them the budget was 13% slower (`-O1` in blocks of 256, 0.148 to 0.167) and 14% (`-O2` in
+blocks of 1024, 0.145 to 0.166). Its vectorised loop is the same ten instructions either way, 24 bytes further on for
+the charge ahead of it: this is where the loop lands, which a loop running at well under a cycle a sample feels. A call
+itself costs about a nanosecond more (the budget's load through the GOT, the charges, the store): the biquad and the
+echo in blocks of 16 samples, 0.1% and 0.9%. Counting every loop at its branches back, the first version, cost the
+voices 9% and the `tanhf` loop 9% (above). At `-O0`, where every loop counts a branch at a time and every value between
+blocks is in memory, a loop of a few instructions takes up to twice as long (the gain 2.2 ns a sample to 4.5, the FIR
+82 to 128, the convolver 130 to 171); `-O0` is for reading the IR. Compiling takes a few percent longer (the pass's
+analyses, and the code it adds): the saturator 58 ms to 63, the convolver 98 to 114, under the same load. None of
+these kernels has a parallel region: a function a region's threads run writes its count back with an atomic min
+(`LDSMIN` on arm64) at each call and return instead of a store, which these numbers do not measure.
+
+## Recipe 30: bounds checks, for development builds
+
+*In the compiler. Code: `src/ir/Bounds.cpp` (the checks, and the extents values carry; `Lowering::Extent` in
+`src/ir/Lowering.h`), with the accesses in `src/ir/Memory.cpp` (`read`, `element`, `lvalue`, `lowerAddressOf`,
+`pointerArithmetic`), `src/ir/Vectors.cpp` (a module's field), `src/ir/Modules.cpp` (`lowerMethodCall`, `p->tick()`)
+and `src/ir/Calls.cpp` (`poly_load`, `poly_store`);
+`src/opt/BoundsCheck.h` and `.cpp` (`BoundsCheckPass`, the record's global, the checks' descriptions and their
+messages); `src/opt/EarlyReturn.h` and `.cpp`, what it shares with the loop budget's pass; `ir::Options::boundsCheck`
+and its module flag in `src/ir/CodeGen.h` and `.cpp`; the pass in `src/support/HostTarget.cpp`;
+`Program::Options::boundsCheck`, `boundsViolation`, `clearBoundsViolation` and `BoundsViolation` in
+`include/fminus/FMinus.h` and `src/api/FMinus.cpp`; `fminus --bounds-check` in `tools/fminus/main.cpp`; an
+executable's in `addEntryPoint` (`src/support/Aot.cpp`), with `fminus_rt_bounds_state` and `fminus_rt_main_bounds` in
+`src/runtime/`. Tests: `tests/unit/BoundsCheckTest.cpp` (`[bounds]`), `tests/library/BoundsCheckTest.cpp` and
+`tests/lit/fminus/bounds-check.fm`.*
+
+An index past an array's end, or before its start, reads or writes whatever lies beside the array: another field of
+the module, the stack, the host's memory. C calls it undefined, and in a plugin it corrupts the host or crashes it,
+often much later and somewhere else. It takes one ordinary bug. This echo's delay is a parameter, and its read position
+wraps once, so a delay longer than the line reads before it:
+
+```c
+module Echo
+{
+    param int delay [[fminus::range(1, 512)]] [[fminus::default(100)]];
+    float line[512];
+    int at;
+
+    void process(const float* restrict in, float* restrict out, int n) [[clang::nonblocking]]
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            int back = at - delay[i];
+            if (back < 0)
+                back += 512;
+            const float y = line[back];           // a delay of 700: line[-188]
+            line[at] = in[i] + 0.5f * y;
+            out[i] = in[i] + y;
+            at = at == 511 ? 0 : at + 1;
+        }
+    }
+};
+```
+
+Compiled with bounds checks, every access whose array the compiler can see is checked against the array's extent, and
+a call whose check fails returns early, with the check recorded for the host:
+
+```cpp
+fminus::Program::Options options;
+options.boundsCheck = true;                                   // off by default; a development build's
+auto program = fminus::Program::compile(source, errors, options);
+...
+process(instance, in, out, n);
+if (auto failed = program->boundsViolation())                 // it returned early: silence it
+{
+    report(failed->message());                                // off the audio thread: "echo.fm:14:33: index -188 out
+                                                              // of bounds for 'line' of type 'float[512]'"
+    program->clearBoundsViolation();                          // first, so that init runs whole
+    init(instance);
+}
+```
+
+The checks are for a program while it is written: a host compiles with them while its author tries the program out,
+and without them for the build that plays, which is the code it was, byte for byte (Measurements, below).
+
+### What is checked
+
+The code generator checks where it can see the array: an array's name stands for a pointer to its first element
+(recipe 12), and that pointer carries the array's extent, its element count, its name as the source writes it and its
+type (`Lowering::Extent`, created in `read` where the array decays). What is made from it carries the extent on:
+
+- **an element**, `a[i]`, `*p`, `p->y`, and the module a method is called on through one, `p->tick()`: one of the
+  array's own, its index from 0 to the count less one (width 1);
+- **a pointer formed**, `a + i`, `p - i`, `&a[i]`: any element or one past the last, as C allows (C11 6.5.6p8), so
+  `a + 4` and `&a[4]` of a `float a[4]` are fine, an end to compare against, and `a + 5` and `a - 1` fail (width 0);
+- **a `poly_load` or `poly_store`** through one: every lane it reaches, the poly width from the index (width: the
+  lanes), or, with a mask, each lane the mask takes, the first outside reported (`checkLanes`).
+
+The arrays are every array the program declares: a local, a module's field (`taps[k]` in a method, `m.taps[k]`,
+`p->taps[k]`), an array of modules and an element's field (`voices[v].render()`, `(voices + v)->render()`,
+`voices[v].taps[k]`), a constant table (recipe 26, and the top level's, recipe 28), an array a parallel region uses of
+the function around it. The index is the element's from the array's first: `(a + 3)[i]` checks `3 + i`.
+
+What carries no extent is not checked: a pointer a variable, a field or a parameter holds (`float* p = buf;`, then
+`p[i]`), what a function returns, what `?:` chooses, a `void*`. So the heap's blocks and a host's buffers, which only
+reach a program through such pointers, are not checked: their extents are known only at run time, and keeping them
+would change the module's layout or a pointer's size. A constant of the top level runs nowhere (its initialiser is
+lowered into a function that is deleted, recipe 28), so `const float* const p = &table[6];` is no check either. And
+`fft_forward` and `fft_inverse` check none of their buffers, though they may carry extents: the runtime reads and
+writes as many elements as the plan has (recipe 13), and the plan's size is known only when the program runs, so a
+`float buf[8]` handed to `fft_forward(fft_create(64), buf, bins)` is overrun, with the checks or without.
+
+### Where the checks go: first
+
+The loop budget's checks go in last, after every decision, because they must not change one (recipe 29). These go in
+first, where the access is, as clang's `-fsanitize=array-bounds` with `-fsanitize-trap` puts them, because the
+optimiser must know of them: a failed check is the end of the call, and nothing after it may run, or be moved before
+it. The check is an unsigned comparison of the element's index, widened to an `i64` (a negative one is a huge unsigned
+number), against the extent, and a branch, likely in bounds, past a call of `fminus.bounds.stop` that never returns:
+
+```llvm
+  %idxprom = sext i32 %1 to i64
+  %bounds.in = icmp ult i64 %idxprom, 512
+  br i1 %bounds.in, label %bounds.ok, label %bounds.fail, !prof !13   ; likely
+
+bounds.ok:
+  %arrayidx = getelementptr inbounds float, ptr %arraydecay, i64 %idxprom
+  ...
+bounds.fail:
+  call void @fminus.bounds.stop(i32 1, i64 %idxprom)
+  unreachable
+```
+
+`fminus.bounds.stop` is `noreturn nounwind cold`, and writes only memory the program cannot reach (`memory
+(inaccessiblemem: write)`): to the optimiser a trap that loads of the program's own memory may move across, so a loop's
+loads of a module's fields still leave the loop. Its arguments are the check's number, from 1, and the index. The
+optimiser then does what it does with any trap: it removes a check it can prove (in a `for` over the array whose own
+condition is the extent, `i <u 16` folds away from `-O1`), keeps the others, and moves no store past one, so the access
+a failed check guards never happens, and nor does anything after it. A check of an index that is a constant within the
+array is no check at all (`a[3]` costs nothing); one that is a constant outside it fails whenever it runs, and is a
+branch too (on `false`), so that what follows stays reachable to the code generator's own rules: a non-void function
+that can reach its end is the same error with the checks as without.
+
+A trap can bound a loop: in `while (s < n) { s += 1.0f + a[i & 7]; i = i + 1; }` over a `float a[4]`, `i` cannot reach
+4, so the optimiser unrolls the loop into four iterations, with no loop left for the loop budget to count. And a loop
+whose check the optimiser turns into a trip count, `out[i] = table[i + offset]` with `offset` a field, still vectorises:
+its vector loop runs to the earlier of `n` and `1024 - offset`, and the remainder checks. What a check does cost is the
+loop's freedom with a field it updates: `at` in the echo above is stored each iteration, where without the check LICM
+keeps `at` in a register and stores it after the loop. Sinking the store to the loop's exits would add a store on the
+failed check's path, where the iteration that failed had stored nothing, which LLVM may not do to memory another thread
+could see. A loop like the echo's is then a third slower (the comb in Measurements).
+
+Each check's description goes into the module's named metadata, `!fminus.bounds.sites`, in the order of the numbers:
+its file (an `#include`'d file's name, as errors give it), line and column (a subscript's `[`, a pointer's `+` or `-`,
+a dereference's `*`, a `poly_load`'s name), the array as written, its type, its extent and the access's width:
+
+```llvm
+!fminus.bounds.sites = !{!3, !4}
+!3 = !{!"echo.fm", i32 14, i32 33, !"line", !"float[512]", i64 512, i32 1}
+!4 = !{!"echo.fm", i32 15, i32 17, !"line", !"float[512]", i64 512, i32 1}
+```
+
+The array as written is a variable's name, a field's (`m.taps`, `p->taps`, `this->taps`, or `taps` in a method), an
+element's index when it is a name or a number (`voices[v].taps`; `voices[...]` otherwise), and empty when there is
+none. A copy of a function, knob versioning's (recipe 16) or the inliner's, keeps its checks' numbers, so a check means
+the same wherever it runs.
+
+### Stopping, and returning
+
+`BoundsCheckPass` is a module pass, registered at `OptimizerLast` after the math kernels and before the loop budget
+(`HostTarget.cpp`), and runs at every level (`isRequired`), for a module whose flag `fminus.bounds-check` is 1. It
+makes each stop a branch to its function's one stop block, which records the check, unless the record holds one
+already, and returns, a zero of its type, null or nothing (the echo's `process` at `-O2`, its two checks' stops):
+
+```llvm
+bounds.stop:
+  %bounds.site = phi i32 [ 1, %bounds.fail ], [ 2, %bounds.fail23 ]
+  %bounds.index = phi i64 [ %idxprom, %bounds.fail ], [ %idxprom20, %bounds.fail23 ]
+  %bounds.first = cmpxchg ptr @fminus_rt_bounds, i32 0, i32 %bounds.site monotonic monotonic, align 8
+  %bounds.won = extractvalue { i32, i1 } %bounds.first, 1
+  br i1 %bounds.won, label %bounds.record, label %bounds.return
+bounds.record:
+  store atomic i64 %bounds.index, ptr getelementptr inbounds ({ i32, i32, i64 }, ptr @fminus_rt_bounds, i32 0, i32 2) monotonic, align 8
+  br label %bounds.return
+bounds.return:
+  ret void
+```
+
+and every function of the program that called it returns too: after each call of a function that may stop (one that
+has a check, or calls one that may, or hands one to a runtime function, a parallel region's body), it reads the record,
+and returns at once if it holds a check:
+
+```llvm
+  %0 = call float @pick(float %i1)
+  %bounds.recorded = load atomic i32, ptr @fminus_rt_bounds monotonic, align 8
+  %1 = icmp ne i32 %bounds.recorded, 0
+  br i1 %1, label %bounds.unwind, label %entry.bounds, !prof !12   ; unlikely
+bounds.unwind:
+  ret float 0.000000e+00
+```
+
+After inlining few calls are left (at `-O2` a module's `process` is usually one function), and each costs a load and a
+branch. A callee that always failed a check was `noreturn` to the optimiser, which left `unreachable` after its calls;
+the record is always set when such a callee returns, so the read after the call always unwinds into the return. The
+functions it changes, and the calls of them, get their attributes adjusted to what is now true of them (they return,
+their result may be 0 or null, they write memory that is no argument's: `mayReturnEarly`, `src/opt/EarlyReturn.h`,
+which the loop budget's pass uses too, with `reachedFunctions`, which calls run which functions), and carry
+`"fminus-bounds-check"`, so that a second run leaves them alone. The pass runs before the loop budget's, so that the
+budget's count is written back on these returns too (`BoundsCheckTest.cpp` has both in one program).
+
+The first failure is kept: the site is a compare-and-swap from 0, and the index is written only by the call that won
+it, so a parallel region's threads may fail at once and the record still holds one check and its own index. While the
+record holds a check, every read after a call unwinds, however the call got there: a function returns as soon as a
+call it makes of a function that may stop returns, though its own indexes are fine. The callee runs its own body,
+unless its own calls stop it, and a function whose code is all inlined, with no such call left, runs to its end, as
+does a parallel region's part with none (the function that ran the region returns when the region ends). So the host
+clears the record before the program runs again, and before anything else it calls, re-initialising the instance
+included: an `init` called while the record still holds the check returns after its first such call, the instance half
+set up, and nothing says so, since the first failure is kept (`tests/library/BoundsCheckTest.cpp` runs both orders).
+What the call leaves in the instance and the output is whichever of the optimised code's stores had run, as with the
+loop budget: everything the source did before the failed access may not have been stored yet (a field kept in a
+register), and nothing after it was. A host clears the record, then re-initialises the instance, or throws it away.
+
+### The record, the program's own
+
+The record is a global of the program, `fminus_rt_bounds`, the `{ int32_t site; int32_t reserved; int64_t index; }` of
+`runtime/Runtime.h`'s `fminus_rt_bounds_state`, defined empty:
+
+```llvm
+@fminus_rt_bounds = dso_local global { i32, i32, i64 } zeroinitializer, align 8
+```
+
+for the loop budget's reasons (recipe 29): each `Program` has its own, it lives beside the code that writes it, and an
+object `fminus --emit obj` writes defines it for its host. `ir::lower` defines it, with the module flag, before any
+function, since LLJIT learns a module's symbols when it is added; `Program::compile` looks it up, which compiles the
+module, and reads the checks' descriptions from the module's metadata before the JIT takes it. A program that declares
+a function of its name is an error while the checks are on ("the bounds checks reserve 'fminus_rt_bounds' for their
+record, and this program declares a function of that name: rename it"), and nothing without. The site 0 is no check,
+so a record of zeros is empty.
+
+### The host's side
+
+- `boundsViolation()` is the first check that failed since `clearBoundsViolation()` (or since the program compiled), or
+  nothing: a `BoundsViolation` with the file, line and column, the array, its type and extent, the index and the
+  access's width, its strings the `Program`'s own (`std::string_view`s, valid while it lives). It allocates nothing, and
+  its loads are relaxed atomics: the audio thread may call it. `message()` words it, as UBSan words its own with the
+  array's name and where it is: `index 16 out of bounds for 'line' of type 'float[16]'`, `pointer offset 17 out of
+  bounds ...`, `4 elements from index 14 out of bounds ...`; it allocates, so a host calls it off the audio thread.
+- `clearBoundsViolation()` empties the record, a relaxed store: after the host has silenced the program and read the
+  violation, and before its next call of the program, re-initialising the instance included (a method such as `init`
+  is a call too, and the record would stop it partway): clear, then re-initialise the instance (or throw it away).
+- A program compiled without the checks never has a violation.
+- `fminus --run f ... --bounds-check` says where on stderr when a check fails (`fminus: --run: 'f' stopped: ...`), with
+  status 4, and what it printed is what the call returned early. `fminus --emit exe --bounds-check` gives the C main
+  the checks' messages as two tables of strings, the text before the index and the text after it, by number; after
+  `main` it reads the record, and when it holds a check prints the message (`fminus_rt_main_bounds`) and exits with 4.
+  It calls `main` through its laundered address, as with the loop budget (recipe 29): a `main` that always fails a
+  check is `noreturn` until the pass, which would delete what follows a direct call.
+
+### What it changes for programs and hosts
+
+- **Off, the default**, nothing: no extent is made, no check, no record, no metadata and no flag, and the IR is the
+  same, byte for byte, as before the option existed (every example and every lit test's program, at `-O0`, `-O2` and
+  `-O3`; `BoundsCheckTest.cpp` checks that the module has none of them).
+- **On**, a call within its arrays computes what it does without the checks, bit for bit (`BoundsCheckTest.cpp` and
+  `tests/library/BoundsCheckTest.cpp` compare a comb filter and the echo above); a program cannot name a function
+  `fminus_rt_bounds`; compile() generates the machine code. A call whose check fails returns early, its instance as the
+  optimised code had it, which the host re-initialises once it has cleared the record.
+- **What it does not catch**: an access through a pointer the program keeps (above), a heap block's or a host
+  buffer's; `fft_forward`'s and `fft_inverse`'s buffers shorter than their plan (above); a stream parameter's
+  `cutoff[i]` past the samples the host gave; and an array of arrays, which FMinus does not have.
+
+### Tests
+
+- `tests/unit/BoundsCheckTest.cpp`, in the JIT at each level: an index outside its array stops the call and records the
+  check and the index (8, -1, 10^9); each check described where it is, the array as written (`taps`, `voices`,
+  `voices[v].taps`, `p->taps`, a `float4[2]`'s `w`, a pointer's `+`, a dereference's `*`); a pointer formed one past the
+  end and no further, and the element it reaches; a stop returning through every caller (`-O0`, where the calls stay)
+  with no write after the calls; the first failure kept, and while it is, a call returning once its first call of a
+  function with checks returns; a module's ring buffer, an array of modules, what lies past a field's array untouched;
+  a method called through a pointer into an array of modules (`(voices + n)->bump()`, `(&voices[n])->bump()`), checked
+  as an element, so that one past the end is formed but not called on; a `poly_load`'s and a `poly_store`'s lanes, a
+  masked one's only those taken; a parallel region's part failing, the code after the region not run; a loop the
+  optimiser proves within its array with no check; a comb filter bit for bit with and without; the loop budget and the
+  checks together, the budget's count written back on a check's return; nothing of the checks without the option; a
+  constant index outside its array, and the same errors with and without; the reserved name.
+- `tests/library/BoundsCheckTest.cpp`, through `Program`: the echo above, its long delay stopped and reported (file,
+  line, column, array, type, extent, index, width, message), the first failure kept, cleared and run again; an `init`
+  run at `-O0` before the record is cleared stopping after its first call, the instance half set up, and run whole
+  after; an `#include`'d file's check named by that file; bit for bit, the instance too; a program without the
+  checks, and the checks in `optimisedIr()`; an entry point under `Denormals::Flush` that stops and hands the host's
+  mode back.
+- `tests/lit/fminus/bounds-check.fm`: the IR at `-O0` (the record, a check, the stop block, a call's read of the record
+  and the unwind, the attribute, the descriptions) and at `-O2` (a loop with no check left), nothing without the option;
+  `--run`'s messages for an element, an index below 0, a call, a pointer formed; an executable's main, its C main's
+  read of the record, a `main` that always fails built at `-O2`; the reserved name.
+
+### Measurements
+
+On the same M5, blocks of 256 samples, the best of 40 runs of 65536 samples each, the two alternating, with the machine
+busy with other builds (ns a sample):
+
+| Kernel | Off | On | Change | Output |
+|---|---|---|---|---|
+| a gain over the host's buffers (no array: no check) | 0.061 | 0.061 | 0% | identical |
+| a comb on a ring buffer in a field, `line[at]`, `at` a field | 0.70 | 0.93 | +32% | identical |
+| a wavetable, `table[(int)phase]` | 3.16 | 3.16 | 0% | identical |
+| `out[i] = in[i] + 0.5f * table[i + offset]`, vectorised either way | 0.059 | 0.060 | +2% | identical |
+| a 32-tap FIR, its history `history[at]` and `history[(at - k) & 31]` | 8.25 | 11.6 | +40% (at `-O3`: -7%) | identical |
+| eight voices of an array of modules, each a wavetable | 12.08 | 11.73 | -3% | identical |
+
+The same at `-O1` and `-O3`, within a few percent, but for the FIR, which `-O3` unrolls whole either way and runs at 4.7
+and 4.4. The comb and the FIR pay for the field each updates every sample, a store each iteration instead of one after
+the loop (Where the checks go, above); the wavetable's and the voices' checks hide in their loops' latency, and the gain
+has none. Compiling takes as long, within the noise: `examples/voices/`, whose program has seven checks, 11.4 ms without
+them and 11.7 with. These are development builds; without the option nothing is checked, and nothing costs anything.
+
+## Recipe 31: conditional compilation, `#if` and `#ifdef`
+
+*In the compiler. Code: `src/frontend/Lexer.l` (the start condition `SKIPPED` and its rules, the directive rule in it
+too, the `#` rules, the end of a comment and of a file, the macro check in `{IDENTIFIER}`, and `directive`,
+`conditional`, `define`, `macroName`, `isKeyword` and `macroNameError` in its last section),
+`src/frontend/Preprocessor.h` and `.cpp` (`Macros`, `withoutComments`, `evaluate`), `src/frontend/Scanner.h`
+(`Conditional`, and `ScannerState`'s `macros`, `conditionals`, `expanded` and `lineStart`) and `Frontend.h` (`Defines`,
+`parse`'s `defines`); `Program::Options::defines` (`include/fminus/FMinus.h`, `src/api/FMinus.cpp`); `fminus -D`
+(`tools/fminus/main.cpp`). Tests: `tests/unit/ConditionalTest.cpp` (`[conditional]`),
+`tests/library/ConditionalTest.cpp` and `tests/lit/fminus/conditional.fm`.*
+
+A program being written carries instrumentation: a meter's peak, a counter of the voices stolen, a field a host shows
+while its author tunes a filter. It wants to be there while the program is written and gone from the build that plays,
+without being commented in and out by hand. C's way is the preprocessor's conditionals, and FMinus now has them:
+
+```c
+module Meter
+{
+    float y;
+#ifdef DEBUG
+    float peak;   // the loudest |x| so far: a debug build's
+#endif
+
+    float tick(float x)
+    {
+        y = 0.5f * x;
+#if defined(DEBUG) && LEVEL >= 2
+        peak = fmaxf(peak, fabsf(x));
+#endif
+        return y;
+    }
+};
+```
+
+`DEBUG` and `LEVEL` are macros: the program's own (`#define LEVEL 2`) or the host's, `Program::Options::defines`, as
+`fminus -D DEBUG` and C's `-D` define them. Without `DEBUG`, the lines between are skipped: the scanner never reads
+them, the parser never sees them, and the module is the one without them, field and all.
+
+### Why C's conditionals, and not a `debug { }` block
+
+Two designs serve "instrumentation that compiles out". One is a statement of FMinus's own, `debug { ... }`, compiled
+when the host sets a flag and dropped otherwise: a keyword, a grammar rule and an option, smaller to build than
+anything here. But it serves statements only. The field that holds the peak, a method only a debug build has, the
+`#include` of a module that draws a scope, a host's own `#pragma` lines: none of these is a statement, and each place
+would want a rule of its own (the top level, a module's members). It reserves `debug`, a word programs use as a name.
+And it is not C: a program with one is no longer a C program, and a C compiler reads it only through a macro,
+`#define debug if (0)`, which is a statement again.
+
+The conditionals act on lines, before the parser sees a token, so one mechanism covers every place a line can be.
+They are C's: FMinus gains no syntax, a C compiler reads a program's conditionals as they are, and an editor's
+language service that lexes the text itself, as a plugin's code editor may, already reads a directive as one line
+that starts with `#`. Their cost is the scanner's: a start condition, a stack of conditionals and an evaluator for
+`#if`'s expressions. FMinus keeps that small by keeping one thing out, macro substitution: a macro is a condition, read
+in `#if`, `#elif`, `#ifdef`, `#ifndef` and `defined`, and its name in code is an error. So no text is ever rewritten
+before the parser reads it, a reader sees the code that runs, and a program FMinus compiles means the same in C.
+
+### What a program writes
+
+| Line | What it does | Its errors (clang's words) |
+|---|---|---|
+| `#define NAME` or `#define NAME value` | defines a macro: its value the rest of the line, comments gone and each run of spaces one space (C's comparison), empty for none | `macro name missing`, `macro name must be an identifier`, `'defined' cannot be used as a macro name`, `'NAME' macro redefined` (another value: clang warns); FMinus's own: `'float' cannot be used as a macro name: it is one of FMinus's keywords`, `function-like macros are not supported: ...` |
+| `#undef NAME` | forgets it (one that isn't is nothing) | `macro name missing`, `macro name must be an identifier`, `'defined' cannot be used as a macro name`, `extra tokens at end of #undef directive` (clang warns) |
+| `#if expression` | reads the group up to the next conditional when the expression is not 0 | the expression's (below) |
+| `#ifdef NAME`, `#ifndef NAME` | `#if defined(NAME)`, and `#if !defined(NAME)` | `macro name missing`, `macro name must be an identifier`, `extra tokens at end of #ifdef directive` |
+| `#elif expression`, and C23's `#elifdef NAME` and `#elifndef NAME` | the next group, when no group before it was read and its condition holds; after a group read, its condition is never computed | `#elif without #if`, `#elif after #else` |
+| `#else` | the last group, when no other was read | `#else without #if`, `#else after #else`, `extra tokens at end of #else directive` (clang warns) |
+| `#endif` | the end of the conditional | `#endif without #if`, `extra tokens at end of #endif directive` (clang warns), and at the file's end, `unterminated conditional directive` at the `#if` left open |
+| a macro's name in code | an error, never a substitution | `macro expansion is not supported: 'NAME' is a macro, which FMinus reads only in #if, #elif, #ifdef and #ifndef (for a constant, declare an enum or a const)` |
+
+The keywords are refused as macros because C would substitute one in code, where FMinus reads it as the keyword:
+`#define float double` would mean one thing to clang and another to FMinus. `macroNameError` asks the scanner itself
+(`isKeyword` reads the name with a scanner of its own and looks at the token), so the keywords it refuses are the
+rules before `{IDENTIFIER}`, a keyword added later too. `#error`, `#warning`, `#line` and `#embed` are still errors
+(`#error is not supported: FMinus's directives are ...`).
+
+A directive is one line, as before, which its `#` begins, after spaces. Two rules keep FMinus from reading a line
+otherwise than C, in a skipped group too, where a difference would be silent (the other group compiled):
+
+- **A `/*` comment that starts in a directive's line must end on it** (`a directive's /* comment must end on its
+  line`), where C would carry the directive on to the comment's end and read the lines between as the comment.
+  `directive()` checks every directive's line first, whatever its name and in any group: a `#pragma`, a skipped
+  group's `#include`, an inert `#if`, an `#elif` never computed. A quote's text is no comment, as in C (a host's
+  `#pragma panel label x "a /* b"` is fine), and a quote left open runs to the line's end, as clang reads one. A
+  comment between the `#` and the name is spaces, as in C: `#/* note */else` is an `#else`.
+- **No comment comes before a directive's `#`** (`a comment before a directive's '#' is not supported: a directive
+  begins its line, after spaces only`). C reads `/* note */ #else` as a directive; the directive rule's `^` cannot
+  match after the comment, so FMinus refuses the `#` there, in code and in a skipped group, instead of reading it as
+  text. `ScannerState::lineStart` says whether only spaces and comments come before the scanner on its line: a line's
+  end sets it, text clears it (in `SKIPPED`, its text rule; in `INITIAL`, every call of the scanner after the first,
+  which follows a token), and a block comment keeps it as it was where the comment began, as C reads a `#` after one:
+  `x /* a` / `b */ #else` is text in a skipped group, as in C.
+
+### Expressions
+
+An `#if`'s expression is C's integer constant expression of the preprocessor (C17 6.10.1), computed in 64-bit
+integers, C's `intmax_t`. `evaluate` (`Preprocessor.cpp`) lexes the line into C's preprocessing tokens, expands its
+macros, and parses what results by precedence climbing over C's ten levels of binary operators, with `?:` and the
+unary operators by recursive descent, computing as it goes:
+
+- **Operands.** Integers as FMinus writes them, decimal, octal and hex, with no suffix (FMinus has no `unsigned` or
+  `long`): `1u` is `invalid suffix 'u' on integer constant`, `1.5` `floating point literal in preprocessor
+  expression`, and past 2^63-1 `integer literal is too large to be represented in a signed integer type`. `defined
+  NAME` and `defined(NAME)`, 1 when NAME is a macro. `true` and `false`, 1 and 0, as in C23. Any other name, a
+  keyword too, is 0, as in C.
+- **Macros** expand to their values' tokens, in turn, C's way: as text (`#define TWO 1 + 1` makes `TWO * 2` 3), and
+  never inside their own value (`#define A A` makes `A` the name `A`, so 0). `defined`'s operand is never expanded. A
+  token from a macro's value is at fault at the macro's name: `#define X 2.5` then `#if X` points at the `X`.
+- **Operators**: `! ~ - +`, `* / %`, `+ -`, `<< >>`, the comparisons, `& ^ |`, `&& ||` and `?:`, with C's precedence.
+  `&&`, `||` and `?:` compute only what C computes: `#if 0 && 1 / 0` is no error, `#if 1 / 0` is `division by zero in
+  preprocessor expression`.
+- **Arithmetic is defined for every operand**, as FMinus's code is: `+ - *` and unary `-` wrap, the least integer
+  divided by -1 is itself (its remainder 0), and a shift takes its count's low six bits (OpenCL C's rule for a 64-bit
+  integer, as FMinus shifts an `int` by its count's low five), the right one arithmetic. clang warns of an overflow
+  there; FMinus does not (its one warning is `-Wswitch`, recipe 32), and the result is defined.
+- **Limits**, so that a program cannot hang the compiler or exhaust its stack: 256 levels of parentheses, unary
+  operators and `?:` (clang's bracket depth), 256 macros expanding inside one another, 65536 tokens after expansion
+  (`#define B A A` doubles a line's tokens with each such macro), and the work of expanding, counted across all of a
+  compilation's conditions: each macro expanded counts one and the bytes of its value, at most 1048576 in all
+  (`macro expansion is too long: the program's conditions expand more than 1048576 bytes of macros`). The tokens
+  alone would not do: a macro of nothing (`#define C0`, a flag's form) adds none, and `C1` a thousand `C0`s, `C2` a
+  thousand `C1`s and `C3` a thousand `C2`s make `#if C3 + 1` a billion expansions; and a line under any bound of its
+  own can be repeated. A real program's conditions expand a few bytes each, and the bound costs at most some tens of
+  milliseconds to reach.
+
+The errors are clang's, at clang's columns: `expected value in expression`, `expected ')' in preprocessor expression`,
+`token is not a valid binary operator in a preprocessor subexpression`, `expected end of line in preprocessor
+expression`, `invalid token at start of a preprocessor expression`, `expected ':'`, `macro name missing`, `missing ')'
+after 'defined'`. clang adds a note, `to match this '('`; FMinus's directive errors have none.
+
+### Skipped groups: a start condition
+
+The scanner reads a skipped group in a start condition of its own, `SKIPPED`, exclusive, which has the directive rule
+(`<INITIAL,SKIPPED>^[ \t]*"#"[^\n]*`) and rules that only count: spaces, text up to a `/`, a `#` or the line's end, a
+`/`, a `#` inside a line (an error after only comments, above), a `//` comment, line ends. The group's text is never
+matched against FMinus's tokens, so it need not be FMinus at all: `#if 0` around a paragraph of prose is fine, as in C.
+Two things are still read, as C's translation phases read them before the directives:
+
+- **Block comments.** `<INITIAL,SKIPPED>"/*"` enters `BLOCK_COMMENT` from either, and its `*/` goes back to `SKIPPED`
+  or `INITIAL`, whichever `ScannerState::skipping()` says. So a `/*` in a skipped group hides an `#endif` inside the
+  comment, as in C, and one left open is `unterminated /* comment`.
+- **The conditionals' lines.** In a skipped group, `directive()` reads only a directive's name, once it has checked
+  that the line's comments end on it: `#if`, `#ifdef` and `#ifndef` open a conditional, and `#elif`, `#else` and
+  `#endif` close a group; any other line, an unknown directive, an `#include` or a `#define`, is text, as C's skipped
+  groups have it. After each directive the rule's action sets the start condition from the stack:
+  `BEGIN(yyextra->skipping() ? SKIPPED : INITIAL)`.
+
+A `Conditional` (`Scanner.h`) is one `#if` on the stack, to its `#endif`: where its name is, for `unterminated
+conditional directive`; its file; whether a group has been read (`taken`: the groups after it are skipped, their
+conditions never computed); whether its `#else` has been; and whether the group being read is skipped. One that opens
+in a skipped group is `inert`, taken and skipped from the start: its `#elif`s are never computed and its lines' extra
+tokens never read, though `#else after #else` is still clang's error there. Because the scanner keeps counting lines in
+`SKIPPED` (each rule steps the location, as the whitespace rules do), every location after a skipped group is right.
+
+### Conditionals and files
+
+C's conditionals end in the file they begin in. `Conditional::file` is `ScannerState::open`'s size where it opened:
+an `#else`, `#elif` or `#endif` whose innermost conditional is another file's is `#endif without #if`, and the
+`<<EOF>>` rules, the program's end and an included file's, refuse a conditional the ending file opened (`SKIPPED`'s
+own `<<EOF>>` always does: the scanner can only be skipping in the file being read, since a skipped `#include` reads
+nothing). Macros are the compilation's, as C's: one an included file defines is defined after its `#include`, in the
+including file too.
+
+### The host's side
+
+`Program::Options::defines` is a map from a macro's name to its value, defined before the program's first line, as
+`fminus -D NAME[=value]` defines it (`-D DEBUG` is `{"DEBUG", "1"}`, `-D EMPTY=` is `""`). `compile()` refuses a name
+that `macroNameError` refuses (`fminus::Program: defines: '1X': macro name must be an identifier`), and `fminus` too
+(`fminus: -D 1X: ...`). A program that has a default for one writes C's idiom, which the host's value overrides:
+
+```c
+#ifndef LEVEL
+#define LEVEL 2
+#endif
+```
+
+A program's `#define` of a host's macro to another value is `'LEVEL' macro redefined`, as two of the program's own
+would be. A host's macro whose name the program uses in code is an error at that name, so a host that defines `DEBUG`
+for every program refuses one that has a variable named `DEBUG`: name a host's macros as C names its own (upper case,
+a prefix of the host's).
+
+A host that reads a program's text itself sees what FMinus sees, line by line: every directive is a line that starts
+with `#`. The lines of a group FMinus skips are there too, so a host that reads its own `#pragma` lines (a plugin's
+panel layout, say) or indexes declarations (an editor's language service) either reads both branches, which an editor
+does well enough, or skips the groups that `#ifdef`, `#ifndef` and `defined` on its own defines skip.
+
+### What it changes for programs and hosts
+
+- **Off, nothing.** A program without these directives scans as before, and the code of one whose groups are skipped
+  is the code of the program without their lines: a skipped group costs no compile time beyond counting its lines, and
+  nothing at run time. The suite's other tests are unchanged, but for the messages of the directives FMinus still
+  lacks, which now list these.
+- **Programs** that used `#define`, `#if` and the rest were refused before; now they compile, unless they substitute a
+  macro in code, which stays an error with a message that says why. One that FMinus took before is refused now: a
+  `#pragma` whose `/*` comment runs on past its line, which C would read as one comment with the lines after it.
+- **The playing build and the debug build differ in their modules' layouts** when a field is conditional: a host that
+  allocates instances reads `Program::module()` for each build, as it always should.
+
+### Tests
+
+- `tests/unit/ConditionalTest.cpp`: each conditional choosing its group (`#ifdef` and `#ifndef`, an `#elif` chain, C23's
+  `#elifdef` and `#elifndef`, nested conditionals, a skipped group's own `#else`); a module's field and a method's
+  statement compiled in and out; a skipped group never scanned (prose, an unknown directive, an `#include` the resolver
+  is never asked for, a `#define` never made), a block comment hiding an `#endif`, a `#` inside a line, lines counted
+  through a skipped group; expressions (precedence, every operator, octal and hex, wrapping, shifts past 63, the least
+  integer divided by -1, `true` and `false`, names that are 0, short-circuiting and `?:`, macros expanded as text, in
+  turn and not inside themselves, `defined`'s operand unexpanded); the host's defines (a redefinition, the `#ifndef`
+  idiom, a bad name) and `macroNameError` over every keyword; a macro's name in code, the host's too, and a skipped
+  group's names unread; conditionals ending in their own file, macros crossing files, a skipped `#include`; every
+  error above at clang's column, and the limits, nested empty macros and a line repeated past the compilation's
+  bound among them; a directive's line: a `#` after a comment that begins its line refused, in code, in a skipped
+  group and in an included file, and after text read as C reads it; a `/*` left open in a `#pragma`, a skipped
+  group's directive, an inert conditional, an `#elif` never computed, an `#include` and a null directive; quotes in
+  a `#pragma`; and names near a keyword that are a macro's.
+- `tests/library/ConditionalTest.cpp`: `Options::defines` from C++17, a meter whose field and statement compile in with
+  `DEBUG` (its module's fields, its result) and out without it, the program's `LEVEL` default overridden by the host's;
+  a bad name, a keyword, and a host's macro used in code.
+- `tests/lit/fminus/conditional.fm`: `fminus -D`, the meter's results with and without `DEBUG` and with `LEVEL=1`, its
+  syntax tree with and without the field, a skipped group of prose, an error inside a group read only with `-D
+  BROKEN`, a `-D` whose name the code uses, and a bad name.
+
+## Recipe 32: one error a mistake, enumerated types, and the first warning
+
+*In the compiler. Code: `Lowering::Value::failed` (`src/ir/Lowering.h`), set in `lower` and by `recovery`, and read by
+`binary`, `recovered`, the unary operators and `lowerConditional` (`Expressions.cpp`), `lvalue`, `readLValue` and
+`lowerAddressOf` (`Memory.cpp`), `lowerMember` and `lowerSelect` (`Vectors.cpp`), `lowerMethodCall` and
+`lowerParameter` (`Modules.cpp`) and `convert`, `poison` and `recovery` (`Types.cpp`); `branchOn`, `folds` and
+`isConstant` (`Statements.cpp`); `sizeOf` (`Types.cpp`) and `lowerSizeof` (`Expressions.cpp`); `declareEnum`
+(`Constants.cpp`); the enumerations' rules in `Parser.y` (`enumeration`, `enum_head`, `enum_base`, `enum_declarators`,
+and `underlyingType`, `sameTag`, `declaredEnum`, `forwardEnum`, `enumType`, `declarationsOf`, `addFields` and
+`addConstants`), `Tag` in `ParseContext.h`, `Type::enumeration`, `Expr::opening` and `Enum`'s `id`, `fixed` and
+`underlying` in `Ast.h`; `lowerSwitch`, `unhandled` and `begin` (`Statements.cpp`);
+`Diagnostics::warning` (`src/frontend/Diagnostics.h`), `Program::warnings` (`include/fminus/FMinus.h`), and the
+warnings `fminus` prints (`tools/fminus/main.cpp`). Tests: `tests/unit/RecoveryTest.cpp` (`[recovery]`),
+`EnumTest.cpp`, `SwitchTest.cpp`, `FrontendTest.cpp`, `tests/library/ProgramTest.cpp`, and
+`tests/lit/fminus/recovery-errors.fm`, `enum-switch.fm` and `large-modules.fm`.*
+
+Whoever reads FMinus's errors (a person at an editor, a plugin's status line, a model fixing its own program) reads the
+first one and acts on it, and an error that only follows from it sends them looking for a second mistake that isn't
+there. This recipe makes each mistake one error, as clang's recovery does; it takes back three errors that C would not
+give and one wrapped number; it gives enumerations what C gives them and recipe 27 left out; and it adds FMinus's first
+warning, clang's `-Wswitch`, which finds the case a switch over an enumeration forgot.
+
+### An expression with an error of its own
+
+An undeclared name lowers to a poison float, so that the lowering goes on and finds the program's other errors. A
+float is a fine operand for most operators, but not for all: `*(p + y)` with no `y` was three errors, the name, `+`'s
+"invalid operands to binary expression ('float *' and 'float')" and `*`'s "indirection requires pointer operand",
+where clang gives one. Recipe 25 stopped the cascade for the bitwise operators by counting errors around their
+operands; this recipe gives the count to every expression. `lower` counts the errors its expression reports, and the
+`Value` it returns says whether there were any:
+
+```cpp
+    Lowering::Value Lowering::lower(const ast::Expr& expr)
+    {
+        const std::size_t reported = diagnostics_.errors().size();
+        Value value = std::visit(/* ... each node ... */, expr.node);
+        value.failed = value.failed || diagnostics_.errors().size() != reported;
+        return value;
+    }
+```
+
+`failed` is clang's "contains errors": the expression, or a part of it, reported an error. It is set only where an
+error is behind it: by `lower`'s count, and by `recovery()`, the stand-in for what an operand's error kept from being
+computed, or a declaration's (a function declared to return a `bool *`, refused at its declaration, since FMinus has
+no pointers to `bool`: an operator on its result reports nothing more). `poison()`, the plain stand-in, is not failed: a
+`?:` of two `void` calls has no value and no error, and each of its uses must report one, as a `void` call's do,
+"initializing 'float' with an expression of incompatible type 'void'". A failed value with no error behind it would be
+taken silently everywhere, and the program would compile on a poison. What takes a failed value says nothing more
+about it:
+
+- **An operator** (`binary`) gives a `recovery()` of the type it would likely have had (`recovered`): an `int` for a
+  bitwise one, a `bool` for a comparison (a vector operand's lane mask), otherwise the other operand's type as it
+  computes, a pointer staying one, so that `p + y` is a `float*` and what uses it reports nothing either. The unary
+  operators likewise.
+- **A subscript, `*`, `->` and `&`** (`lvalue`, `lowerAddressOf`): a base or an operand that failed is no "subscripted
+  value is not a pointer", no "indirection requires pointer operand" and no "cannot take the address of an rvalue". A
+  pointer whose index failed still gives its element, of its type.
+- **A conversion** (`convert`): a failed value converts to any type, silently, as a poison of it. So initialising,
+  assigning, passing, returning and testing one report nothing more: `float* q = y;` is the one error about `y`.
+- **`?:`, a member, a method, a builtin's argument**: the same.
+
+An operator whose operands are fine but which is in error itself, `p + q` of two pointers, reports its error, and its
+result is failed in turn: `*(p + q)` is one error. The rule needs the count, not the IR: `(int)3e10f` folds to a poison
+with no error, and `(float)((int)3e10f) | 1` is still refused (recipe 25).
+
+### A constant condition takes one branch
+
+A non-void function that can reach its end is an error (recipe 4), and `reachable()` follows the CFG from the entry.
+`while (1)` branched on `i1 true` to its body or its end, so its end looked reachable, and a function that ended in
+one needed a `return` that could never run, where clang's check, which folds constant conditions, asks for none.
+`branchOn` is clang's: a condition that folds to a constant branches to the one block it picks, so `while (1)`,
+`while (1.5f)`, `for (; RUNNING;)` with an enumeration constant, `while (RUN)` with `const int RUN = 1;` at the top
+level, and `if (1)` reach what follows only through a `break`, or the other branch. The branch not taken is still
+lowered, for its errors, and the optimiser deletes it.
+
+Whether the condition folds is the tree's to say, `folds()`: a constant expression (`isConstant`), or one that also
+reads a constant of the top level that is no array, which `lower` reads as its initialiser's value, as clang folds a
+const object's. The value is the IR's, which folds such a test against 0 to an `i1`. The IR alone would not do: a
+frozen parameter's read lowers to a constant too, and `if (on[0]) return x;` at the end of a function would compile
+frozen and be refused with a knob, so the same source's errors would hang on the host's bindings. A parameter is no
+constant to `folds`, whatever its binding. `&&`, `||` and `?:` branch even on constants (recipe 3), so `while (1 &&
+1)` still asks for a return, and so does a `const` of a block, which clang folds and FMinus reads from its slot. A
+check that may fail (Bounds.cpp) keeps its conditional branch, on `false` for a constant index: the code after it must
+stay reachable (Pitfalls).
+
+### `sizeof` past an `int`, and an enumeration constant named as a builtin
+
+`sizeOf` gave an `unsigned`, the data layout's 64-bit size truncated: a module of `float4 lanes[1073741824]`, 16 GiB,
+was 0 to `sizeof`, and a copy of one was a `memcpy` of nothing. It gives a `std::uint64_t` now, C's `size_t`, which a
+copy's `memcpy`, a declaration's `memset` and a method's `dereferenceable` take whole. FMinus's `sizeof` is an `int`,
+so a size past the greatest one is an error, `'Huge' is too large for sizeof: 17179869200 bytes, and FMinus's sizeof
+is an 'int'`, not a negative or wrapped `int`.
+
+C's file scope has `<math.h>`'s functions in it, and clang refuses `enum { sinf };` after its `#include`:
+"redefinition of 'sinf'" (an enumeration constant after a function is a plain redefinition to clang, recipe 27).
+`declareEnum` says so of a constant of the file named as one of FMinus's builtins, as recipe 28 refuses a constant of
+the top level. In a block, the constant is the block's own, as a variable of the name is.
+
+### Enumerations: names of their type, and C23's fixed underlying type
+
+C declares variables with an enumeration, `enum Mode { SAW, SQUARE } mode;`, and recipe 27 refused it. `enumeration`
+now ends with `enum_declarators`, a declaration's declarators or none, and gives an `EnumDeclaration`: the enumeration,
+then the names, as `declaration`'s DeclStmts of its type (`declarationsOf`). Each place takes them as it takes a
+declaration: a block's statements after the `EnumStmt`, a module's fields (`addFields`) after the module's enumeration,
+so a field's array may be sized by its own enumeration's constant (`enum { LEN = 4 } count, buf[LEN];`), and the top
+level's constants (`addConstants`), which must be `const`, as every constant there. The tag is a type from the closing
+brace on, as in C, so the names may use it: `enum_head`, the enumeration up to its brace, reduces there and declares
+the tag before the declarators are read.
+
+C23 gives an enumeration a fixed underlying type, `enum Mode : int { ... }`, which its constants must fit and which is
+the type `enum Mode` names, and which lets a tag be declared ahead of its constants, `enum Mode : int;` (a type from
+there on, complete). FMinus's integer types are `int` and `bool`, and `enum_base` takes either; another type is clang's
+"non-integral type 'float' is an invalid underlying type". `ParseContext`'s tags are `Tag`s now: where, the
+enumeration's id, the fixed type if any, and whether the constants are defined. A declaration ahead, `forwardEnum`,
+declares a tag in the innermost scope; the definition after it, `declaredEnum`, finds it there and takes its id. Two
+declarations of a tag in one scope must agree, in clang's words with a note at the first ("enumeration redeclared with
+different underlying type 'bool' (was 'int')", "enumeration previously declared with fixed underlying type"); a second
+definition is the "redefinition of 'Mode'" it was; `enum : int;` is "unnamed enumeration must be a definition", and
+`enum Mode;` without a fixed type C's forward reference, unless the tag is already defined, which it then names, as C
+allows. `declareEnum` checks the values against the fixed type, as clang does: an implicit one past it,
+"enumerator value 2 is not representable in the underlying type 'bool'", an explicit one, "enumerator value is not
+representable in the underlying type 'bool'". `--emit ast` shows the type after the tag, `(enum Mode : int (SAW))`.
+
+### The enumerated type
+
+`-Wswitch` (below) needs to know that a switch's value is of an enumerated type, and recipe 27 made `enum Mode` the
+type `int`. Recipe 27's Where to go next proposed a `Kind` of its own, which every switch over a type's kind would then
+list, and every rule for an `int` would have to take. This recipe keeps `enum Mode` an `int` (or a `bool`), and gives
+`ast::Type` which enumeration it is beside it, `enumeration`, the `Enum`'s id, which the parser numbers:
+
+```cpp
+        int enumeration = 0;   // an enumerated type's Enum::id, or a pointer's or an array's whose pointee is one
+
+        friend constexpr bool operator==(Type a, Type b)   // every field but `enumeration`
+        {
+            return a.kind == b.kind && a.pointee == b.pointee && a.pointeeConst == b.pointeeConst
+                   && a.module == b.module && a.count == b.count;
+        }
+```
+
+`==` ignores it, so every rule that asks whether a type is an `int` still says yes, every message still says `'int'`,
+and nothing else in the compiler changes. A value keeps it where it keeps its type and C keeps the enumerated type: a
+variable, a parameter, a field, a result, a cast, an assignment, `++`, an element, `*p` (`pointerTo`, `arrayOf` and
+`pointee` carry it). It goes where C promotes: `arithmeticOf` gives a plain `int`, so `mode + 1`, `-mode` and
+`c ? a : b` have none, and an enumeration constant is an `int`, as in C before C23.
+
+### `-Wswitch`, and FMinus's warnings
+
+clang warns of a switch without a `default` on a value of an enumerated type whose cases miss some of its constants:
+
+```
+waves.fm:14:13: warning: enumeration values 'TRIANGLE' and 'NOISE' not handled in switch [-Wswitch]
+waves.fm:14:13: note: add missing switch cases
+```
+
+`declareEnum` keeps each enumeration's constants by its id (`enumerations_`), and `lowerSwitch`, after the body, hands
+`unhandled` the value's enumeration and the switch's cases. It says nothing when the switch has a `default`, when a case
+was in error (no constant, or a duplicate: `Switch::erroneous`), when the value folds to a constant (`folds()`, as
+`branchOn` asks: `const enum Shape { SAW, SQUARE } shape = SQUARE;` at the top level is one, and clang says instead
+"no case matching constant switch condition '1'", a warning FMinus does not give), or when the enumeration has no
+constants yet (one declared ahead, whose list comes after the switch, as clang finds it incomplete). Otherwise it lists
+the values no case has, by each value's first constant and in order of value, as clang does (`enum { B = 1, A = 0, A2 =
+0 }` misses `'A'` and `'B'`), in clang's four forms: one, two, three, and "4 enumeration values not handled in switch:
+'B', 'C', 'D'...". The warning is at where the value begins, as clang places it, with clang's note: `begin` gives
+`m->mode` at `m`, and `(e)` at its `(`, which the tree keeps on the expression inside the parentheses
+(`Expr::opening`, the outermost one's), since it has no node for them.
+
+A warning is a `Diagnostic` too, in `Diagnostics::warnings()`, apart from the errors, so that `errors().size()`, which
+the code generator's counts read, counts errors only. `format()` prints both in source order, each with its severity,
+as clang prints them. `fminus` prints a compiled program's warnings to stderr and goes on; `Program::warnings()` holds
+them for a host, and a program that does not compile has them among its `errors`. clang's other `-Wswitch`, "case value
+not in enumerated type", is not FMinus's (Where to go next), and there is no flag to turn a warning off or into an
+error.
+
+### What it changes for programs and hosts
+
+- **Programs** that FMinus refused and C accepts now compile: an enumeration with names after its list, C23's fixed
+  type and a tag declared ahead, a non-void function ending in a loop only a `break` leaves, or in `if (1) return`. Two
+  it took are refused: `sizeof` of a type past 2 GB, and an enumeration constant of the file named as a builtin.
+- **Error messages** are fewer: a program with an undeclared name, say, gets one error where it got two or three. A
+  host that counts a program's errors counts fewer; one that matches them by text finds the first unchanged.
+- **Warnings** are new: `Program::warnings()`, empty for a program with none, and lines that begin `warning:` among a
+  failed program's `errors`. A host that shows `errors` shows them as clang does; one that reads it line by line takes
+  `warning:` and `note:` lines beside `error:` ones. The header's API is otherwise unchanged.
+- **IR** changes only where a condition is a constant, `while (1)`'s `br label %while.body` where it had
+  `br i1 true, ...` (the same code at `-O1` and up), and where a module is past 4 GB: its copies and zeroing were
+  `memcpy`s and `memset`s of the size's low 32 bits.
+
+### Tests
+
+- `tests/unit/RecoveryTest.cpp`: an undeclared name, or a call of no function, under every construct above, one error
+  each, at clang's column; an operator's own error still reported, and its result taking nothing more; a `?:` of two
+  `void` calls as an initialiser, a result, an operand, an argument, a pointer, `*`'s and `-`'s operand, an assigned
+  value, a subscript and a condition, each clang's error, and as a statement, run; functions that end after
+  `while (1)`, `for (;;)`, `while (RUNNING)`, `while (1.5f)`, `if (1)`, `if (0) else`, nested ones and a constant of
+  the top level, run, and those whose end is reached (a `break`, `while (n)`, `if (0)`, `for (; 0;)`) still refused,
+  with a dead branch's error; a parameter's `if` and `while` refused alike as a knob, a stream and frozen; `sizeof`
+  past the greatest `int` (2 GiB + 4, 16 GiB) and of 2^31 - 4 bytes; builtins' names as the file's enumeration
+  constants, and one in a block.
+- `EnumTest.cpp`: names declared after a list, run: a local, a pointer to it, an array of the type, a module's field
+  and a field sized by its own enumeration's constant, a const table and a constant at the top level; C23's fixed
+  types, run: `int` declared ahead and used before its list, `bool` taking any number as a bool, `sizeof` of each, one
+  declared ahead in a block; the values' errors against `bool` and `int`.
+- `SwitchTest.cpp`: `-Wswitch`'s four forms and their notes from a program that runs; values by their first name in
+  order of value; every source of an enumerated value (a variable, a field in a method and through a pointer, a host's
+  parameter, a result, a cast, an assignment, an element, `*p`, C23's `bool`, an enumeration without a tag), each at its
+  column, and a parenthesised one at its `(`; and none for a default, every constant, an `int`'s cast, arithmetic,
+  `-e`, `?:`, a constant, an `int`, an enumeration declared ahead whose list comes later, a constant of the top level,
+  and a case in error.
+- `FrontendTest.cpp`: the trees of names after a list at the top level, in a module and in a block; fixed types and
+  a tag declared ahead; each tag error, with its note.
+- `tests/library/ProgramTest.cpp`: `Program::warnings()` of a program that runs, empty for one with none, and a failed
+  program's `errors` with its warning first, in source order.
+- `tests/lit/fminus/recovery-errors.fm`: every cascade above in one function, one error each;
+  `enum-switch.fm`: `fminus` printing the warning and its note, a field's switch at its column, and running the
+  program; `large-modules.fm`: a 16 GiB module's `memcpy`, `memset` and `dereferenceable` at 64 bits, and its `sizeof`
+  refused (`-D SIZEOF`). `enum.fm`'s constant loop branches to its body alone.
+
 ## Pitfalls
 
 Each of these was hit while writing the language or its recipes. [simd.md](simd.md) has the vector ones.
@@ -4992,6 +6104,8 @@ Each of these was hit while writing the language or its recipes. [simd.md](simd.
 | A C++ reference in a harness runs slower than the same code in FMinus | the examples and tests compile with LLVM's definitions, which turn on libc++'s hardening: a `std::vector`'s `operator[]` checks every index | write the reference on raw pointers, as the kernel is (`examples/delay/bench.cpp`) |
 | A test of `sizeof(poly float)` fails to parse, at a function named `poly` | `poly` is a keyword | another name |
 | The JIT crashes on a `void` value, or the verifier on a `void` phi | `PoisonValue` of `void`, or a `?:` that joins two `void` calls | `poison(Type::Void)` has no IR; `lowerConditional` builds no phi for `void` |
+| An invalid program compiles, to `undef`, with no error (`float x = c ? f() : g();` of two `void` calls) | a stand-in with no error behind it was failed (recipe 32), and every use of a failed value is silent | `poison()` is not failed; only `lower`'s count and `recovery()`, where an operand's or a declaration's error is behind it, fail a value |
+| A program compiles with a frozen parameter and is refused with a knob | a decision taken on the IR, where a frozen parameter's read is a constant (`branchOn` on a `ConstantInt`) | decide on the tree (`folds()`), and take only the value from the IR |
 | The compiler crashes on `p->y`, and `--emit ast` prints a `OnePole*` as `? *` | a pointer built from a type's kind, `pointerTo(type.kind, ...)`, lost its module | pass the `Type`: `pointerTo(type, ...)` keeps `module` |
 | A C++ reference differs from FMinus in the last bit, though the formulas match | clang's default `-ffp-contract=on` fuses `y + k * (x - y)` written as one expression into a multiply-add; FMinus never fuses | build the reference with `-ffp-contract=off` (the examples are), or round once a statement (`ModuleTest.cpp`'s `next`) |
 | A host's `aligned_alloc` returns null for a module | macOS's wants an alignment of at least a pointer's, and every implementation a size that is a multiple of it | round both up to `alignof(std::max_align_t)` (`examples/voices/bench.cpp`) |
@@ -5010,6 +6124,7 @@ Each of these was hit while writing the language or its recipes. [simd.md](simd.
 | A four-lane runtime function's fast path calls libsystem_m and returns, with a stack frame, rather than branching to it | from a `noexcept` function, a call of a function not known not to throw is inside a `std::terminate` landing pad | declare the C functions it calls `noexcept` (`runtime/Math.cpp`) |
 | A C++ reference that calls `fminus::math` runs six times slower than with `std::sin` | an opaque function is called every time; clang merged `std::sin`'s repeated calls | `[[gnu::const]]` on the declarations (`FMINUS_MATH_CONST`) |
 | C++'s `std::sin(x)` differs from libm's `sinf(x)` by an ulp, in a function that also takes `std::cos(x)`, and only in an optimised build | clang pairs the two into `__sincosf_stret` from `-O1` on Apple systems; a debug build calls the two | compare with `fminus::math` (recipe 15); against libm, call through pointers clang can't see through (`ProgramTest.cpp`) |
+| On x86-64 with AVX, a `poly float`'s `sinf` of 8 lanes or more gives its upper four lanes `sinf(0)` when any lane is past 2^16, an infinity or a NaN; arm64, and 4 lanes, are right | the `preserve_all` wrapper `fminus.large.sin` restores `ymm1`-`ymm15`, and LLVM's vzeroupper insertion then puts a `vzeroupper` before its `ret`, zeroing the upper halves it has just restored | compile the wrapper without the tuning feature (`target-features`: the machine's and `-vzeroupper`), and call `llvm.x86.avx.vzeroupper` before the runtime's function by hand (`largeFunction`, recipe 24; `math-large.fm`) |
 | A lane's `_simd_sin_f4` changes when its neighbour is 2e6, an infinity or a NaN | libsystem_m takes another path for all four lanes when any is past 1e6 or not finite | the runtime's guard: such vectors lane by lane (`kSinCosLimit`) |
 | LLVM asserts on a loop of `sinf`, or removes a call of a program's `fminus_rt_sinf` that may loop forever | the program declared a function of a runtime math name: the four-lane one became the scalar function's vector variant, the scalar one took the runtime's attributes | refuse the names of a called builtin's runtime functions, in every mode (`checkMathNames`, recipe 15) |
 | `BranchInst` is deprecated | LLVM 23 splits it into `CondBrInst` and `UncondBrInst` | `llvm::dyn_cast<llvm::CondBrInst>`, and its `getCondition()` |
@@ -5040,6 +6155,33 @@ Each of these was hit while writing the language or its recipes. [simd.md](simd.
 | `fminus_rt_parallel_stop` waits for ever on a pool thread asleep in `std::atomic::wait`, now and then, under load | the system ran the thread for the first time after the stop had bumped `signal`, and the thread took the bumped value for where it started | hand a thread `signal` as it was when it was made, and look at `stopping` before sleeping (`runtime/Parallel.cpp`'s `work`) |
 | A test that a region ran on two threads or more fails now and then, on a busy machine | the pool's threads may not run before the caller has taken every chunk itself | a few tries, and check that one of them ran on two (`ParallelTest.cpp`) |
 | A capture's binding goes stale, or a region captures a variable twice | a reference into `regions_` kept across the body's lowering, whose own regions push onto it | take what a region needs (its function) before lowering its body; `endRegion` takes the region off the stack |
+| "JIT session error: Unexpected definitions in module ...: [ _fminus_rt_loop_budget ]", then "Failed to materialize symbols", for an external symbol a pass in the pipeline defines | LLJIT takes a module's symbols when it is added, before its IR transform layer optimises it, and refuses an object that defines more | define it in the code generator, as `ir::lower` defines the loop budget's global (recipe 29); an internal function a pass adds (`fminus.large.sin`) is no symbol of the module's |
+| A vectorised loop runs slower after a branch that is never taken is added to its branch back | the loop is now two machine blocks, which the code generator schedules and allocates as it would any code, not as a loop of one block | keep the loop one block: put the work before it (recipe 29 charges a counted loop in its preheader) |
+| An executable built with `--loop-budget` dies of SIGTRAP (status 133) when its `main` runs out, from `-O1` up | the C main called `main` directly; FunctionAttrs marked a `main` whose loop never ends `noreturn` before the budget's pass, and SimplifyCFG put `unreachable` in place of the flag's check after the call | call `main` through its address passed through an empty inline asm, so that no attribute of it reaches the caller (`addEntryPoint`, recipe 29) |
+| A parallel region whose chunks spin takes many budgets before it stops | each chunk reads `left` where it starts; one that read it before another ran out stored its positive count over the -1, and the chunks after it started afresh | write the count back with `atomicrmw min` in every function a region's threads run, so `left` never goes up during a call (recipe 29) |
+| A budget that ran out stops nothing after a few calls the host did not set it for | a stop wrote its own count, and charges near 2^62 took `left` past `INT64_MIN`, where the next subtraction wrapped it positive | a stop writes -1, `setLoopBudget` makes a negative budget -1, and no count that may exceed `INT64_MAX` is charged (recipe 29) |
+| A branch on `(a \| b)` comes out as two branches | SelectionDAG splits an `and` or `or` of conditions into branches where jumps are cheap (AArch64) | mark the branch `!unpredictable`, which keeps one (recipe 29 tried it), or give the `or` a second use |
+| A test of a loop that both the loop budget and a bounds check stop expects the budget to count its iterations, and it counts none from `-O1` | a failed check is a trap to the optimiser, which may bound the loop by it: in `while (s < n) { s += 1.0f + a[i & 7]; i = i + 1; }` over a `float a[4]`, `i` cannot reach 4, so LLVM unrolls the loop whole | index by what the optimiser cannot bound (recipe 30's test indexes by `(int)s`) |
+| A bounds check's loop stores a field every iteration, a third slower, where without the check it stores it once after the loop | sinking the store to the loop's exits would add one on the failed check's path, where the failed iteration had stored nothing, which LLVM may not do to memory another thread could see | none needed for a development build; recipe 30's Measurements has the cost |
+| A constant index outside its array makes the statements after it unreachable, and a non-void function's missing `return` is no longer an error | an unconditional branch to the check's failure leaves the code after it with no predecessor, and `reachable()` follows the CFG | keep it a conditional branch, on `false`, as for any check |
+| A bounds check in a constant of the top level's initialiser crashes the code generator, or leaves a declaration that is then deleted | the initialiser is lowered into a scratch function that is erased afterwards, with every declaration only it used (recipe 28) | no checks at the top level (`atTopLevel()`), where nothing runs |
+| With bounds checks on, `(voices + n)->bump()` at `n` one past the end writes the field after the array of modules, and nothing is recorded, while `(voices + n)->level` is caught | the pointer formed may be one past the end (width 0), and the method call's arrow branch (`lowerMethodCall`) used the pointer without the element check that `lvalue`'s arrow branch makes | check every access through a pointer that carries an extent as an element (width 1) where it is lowered: a field, a method's call, a dereference |
+| A host re-initialises an instance after a failed bounds check, and it plays half set up, with no violation reported | the host called `init` before clearing the record: each call of a function that may stop then unwinds its caller, so `init` returned after its first one, and the first failure is kept, so nothing new was recorded | clear the record first (`clearBoundsViolation()`), then re-initialise |
+| An `#if` reads a macro the file defines as 0, and its group is skipped | the `#define` comes after the `#if`: a macro is defined from its line on, and a name that is not one is 0 in `#if`, as in C | define it above its first use; a default the host may override as `#ifndef NAME`, `#define NAME value`, `#endif` at the top |
+| C23's `#elifdef` in a skipped group would end it in C, and FMinus reads on past it to the `#endif`, skipping the group C reads | in a skipped group a line is text unless it is a conditional FMinus knows, as C ignores a skipped group's other lines: a conditional directive left out is a silent difference there, not an error | have every conditional C has (`#elifdef` and `#elifndef` too), or refuse the missing ones in skipped groups as well |
+| A skipped group's `/* note */ #else` is text to FMinus and an `#else` to C, so each compiles another group, and neither says so | the directive rule's `^` cannot match after a comment, and `SKIPPED`'s text rule took the `#` | track whether only spaces and comments come before the scanner on its line (`lineStart`), and refuse a `#` there, in both start conditions |
+| A `/*` left open in a `#pragma`, or in a skipped group's directive, is swallowed, and C reads the lines after it as the comment | only the directives FMinus evaluated made their comments spaces, and with them the check | check every directive's line first, in `directive()`, quotes aside |
+| `#if` on nested macros of nothing (`#define C0`, then a thousand `C0`s in `C1`, and so on) hangs the compiler, though no bound is reached | the bound counted the tokens expanded, and an empty value adds none; a line under a bound of its own can also be repeated | count the work, a macro and its value's bytes, across the compilation (`ScannerState::expanded`) |
+| The site's table of scanner rules says a rule "enters yyextra" | `site/scripts/lib/flex.js` took the first word in `BEGIN(...)` for the start condition, and `BEGIN(yyextra->skipping() ? SKIPPED : INITIAL)` starts with an expression | flex.js reads the start conditions a `BEGIN` names, those Lexer.l declares and `INITIAL` |
+| The site's table of scanner rules shows `error:` with no message, or a rule that skips its input as an error | the action throws a constant (`kCommentBeforeDirective`), which has no string literal in the action, and its throw is under an `if` | flex.js reads the file's `constexpr const char*` constants, lists each throw's message, and shows a rule whose every throw is under an `if` as skipped, or that error |
+| `FileCheck --check-prefix=PICK` fails on a line of another prefix | a variable `[[PICK:[0-9]+]]` on an `O0:` line contains `PICK:`, which FileCheck reads as a check of that prefix | name variables apart from every prefix (`S_PICK`) |
+| `CHECK-NOT: bounds` fails on IR with no bounds checks | `getelementptr inbounds` | match a name of the feature's own (`fminus_rt_bounds`, `fminus.bounds`) |
+| A library test's `CHECK(view == "line")` does not link: undefined `Catch::StringMaker<std::string_view>` | the library tests are C++17 against a Catch2 built as the build tree's C++23, which compiled no `string_view` support into it | compare `std::string(view)` |
+| "'BranchInst' is deprecated: Use UncondBrInst/CondBrInst/Instruction instead" | LLVM 23 split the branch instruction | `llvm::UncondBrInst::Create`, or an `IRBuilder` |
+| A new check of an operand's type adds a second error after an undeclared name | the name's stand-in is a poison float, which the check refuses | test `failed` first (`Lowering::Value`), and give a poison of the type the result would have had |
+| `-Wswitch` warns on `switch (mode + 0)`, or on a `?:` of two enumerated values, where clang does not | a result type copied from an operand keeps `Type::enumeration`, which `==` ignores | give a promoted result a fresh type (`arithmeticOf` does), or clear `enumeration` |
+| A test passes under `fminus-tests` and fails under ctest with "Unrecognised token" | ctest runs each Catch2 test case by its name, and Catch2 reads a name that starts with `-` (`-Wswitch: ...`) as an option | start the name with a word (`clang's -Wswitch: ...`) |
+| The names after an enumeration's list cannot use its tag (`enum E { A } e = (enum E)0;` is a forward reference) | the rule that declares the tag reduces after the declarators | reduce the enumeration at its closing brace (`enum_head`), and the declarators after it |
 
 ## Where to go next
 
@@ -5173,13 +6315,24 @@ memory the host gives it, as `examples/biquad/`'s filter and `examples/voices/`'
 allocates off the audio thread, as `examples/delay/` does (recipe 11). Nothing then allocates on the audio thread, and
 every instance has its own copy.
 
-**More of `switch` and enumerations.** Recipe 27 leaves four things. *clang's `-Wswitch`*, a switch over an enumerated
-value that misses one of its constants, needs `enum Mode` to be a type of its own rather than `int`: a `Kind` with the
-enumeration's constants, which every `switch` over `type.kind` would then list. *An enumeration's values as a knob's
-domain* (recipe 16's list, for that reason): a `param enum Mode` could be versioned on its constants with no
-`fminus::range`. *C's declarations with an enumeration*, `enum Mode { A } m;`, and C23's fixed underlying type,
-`enum Mode : int`, which would allow a forward declaration. *A `case` range*, GCC's `case 1 ... 4:`, which clang
-lowers to its cases one by one when the range is small, and to a comparison when not.
+**More of `switch` and enumerations.** Recipe 32 built `-Wswitch`, names declared with an enumeration and C23's fixed
+underlying type; four things remain. *clang's other `-Wswitch`*, "case value not in enumerated type 'enum Mode'", a
+case for a value none of the enumeration's constants has: `unhandled` has both lists, and the message names the type
+as clang does, `'enum Mode'` (an enumeration without a tag is clang's `'enum (unnamed at file:line:column)'`), which
+needs the tag kept by id beside the constants. *Warnings a host controls*: a `-Wno-switch`, or `-Werror`, as
+`Program::Options` and `fminus` flags. *An enumeration's values as a knob's domain* (recipe 16's list, for that
+reason): a `param enum Mode` could be versioned on its constants, which its `Type::enumeration` now names, with no
+`fminus::range`. *A `case` range*, GCC's `case 1 ... 4:`, which clang lowers to its cases one by one when the range is
+small, and to a comparison when not.
+
+**Macro substitution, if it is ever wanted.** Recipe 31's macros are conditions only. Substituting an object-like
+macro in code would happen in the scanner: `{IDENTIFIER}` finds the macro, lexes its value into a queue of tokens
+placed at the use (as `evaluate` places a value's tokens at the macro's name), and `nextToken` drains the queue before
+it reads on, the macro's name hidden while its own tokens are read (C's rule, which `expand` keeps with `expanding`).
+The queue bypasses Flex's rules, so a keyword or a module's name in a value needs the rules' look-ups done by hand.
+Function-like macros add arguments collected across lines and C's `#` and `##`. Either gives up what recipe 31 keeps,
+that the code a reader sees is the code the parser reads; FMinus's `const`s, enumerations and parameters cover most of
+what C's object-like macros are for.
 
 **Contraction and fast-math, C's way.** `#pragma STDC FP_CONTRACT ON` (C99) allows fusing `a * b + c`. Lower it to
 `llvm.fmuladd`, or set the `contract` flag through `IRBuilder::setFastMathFlags`. The other fast-math flags
@@ -5206,9 +6359,9 @@ The recipes in the compiler are their own reference: their code is in `src/`, an
 `BitwiseTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `TableTest.cpp`,
 `TopLevelTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `HashTest.cpp`, `ParamTest.cpp`, `VectorTest.cpp` and
 `PolyTest.cpp` for the code generator; `MathTest.cpp`, `VersionTest.cpp`, `TbaaTest.cpp`, `ZeroInitTest.cpp`,
-`AttributeTest.cpp` and `DenormalTest.cpp` for recipes 15 to 20), `tests/library/` (`ProgramTest.cpp`,
-`StrictAliasingTest.cpp`, `DenormalsTest.cpp`) and `tests/lit/fminus/`. [recipes/](recipes/) holds the two that aren't,
-5 and 6, as one patch against the compiler as it is ([recipes/README.md](recipes/README.md)):
+`AttributeTest.cpp` and `DenormalTest.cpp` for recipes 15 to 20; `RecoveryTest.cpp` for recipe 32), `tests/library/`
+(`ProgramTest.cpp`, `StrictAliasingTest.cpp`, `DenormalsTest.cpp`) and `tests/lit/fminus/`. [recipes/](recipes/) holds
+the two that aren't, 5 and 6, as one patch against the compiler as it is ([recipes/README.md](recipes/README.md)):
 
 ```bash
 git switch -c try-recipes

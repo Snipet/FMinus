@@ -10,6 +10,8 @@
 
 #include <llvm/Support/Error.h>
 
+#include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -52,5 +54,15 @@ namespace fminus::aot
     // with a parallel region gets the runtime's pool around the call (fminus_rt_parallel_start and _stop). Call it
     // before prepareModule and optimising. Fails when the module defines no main, or a main that takes anything but
     // floats or returns anything but a float or a bool.
-    llvm::Error addEntryPoint(llvm::Module& module);
+    //
+    // With `loopBudget`, for a module compiled with the loop budget (ir::Options::loopBudget, opt/LoopBudget.h), the C
+    // main sets the program's budget to it before the call, and when main runs past it says so on stderr
+    // (fminus_rt_main_loop_budget) and exits with 3 instead of printing what main returned (a negative budget is -1,
+    // which stops main at its first check). The C main is then a host's code, which the pass leaves alone
+    // (kLoopBudgetHostAttribute). For a module compiled with bounds checks (ir::Options::boundsCheck, its flag) that
+    // has any, the C main reads the program's record after the call, and when main failed one says where on stderr
+    // (opt::boundsMessage's words, fminus_rt_main_bounds) and exits with 4 instead. With either, it calls main through
+    // its address passed through an empty inline asm: an indirect call, so main is never inlined into it, and nothing
+    // the optimiser finds of main before the passes (that it never returns, say) changes the code after the call.
+    llvm::Error addEntryPoint(llvm::Module& module, std::optional<std::int64_t> loopBudget = std::nullopt);
 } // namespace fminus::aot

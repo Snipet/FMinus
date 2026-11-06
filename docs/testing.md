@@ -46,9 +46,13 @@ Each file states what it tests in its first line, then has a few helpers and the
 - `compile(source, &errors)` (`Compile.h`, which the code generator's tests share: `CodeGenTest.cpp`,
   `ControlFlowTest.cpp`, `SwitchTest.cpp`, `EnumTest.cpp`, `IntTest.cpp`, `BitwiseTest.cpp`, `PointerTest.cpp`,
   `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `TableTest.cpp`, `TopLevelTest.cpp`, `ModuleTest.cpp`,
-  `FftTest.cpp`, `HashTest.cpp`, `ParamTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`, `ParallelTest.cpp`, and the
-  compiler's own: `VersionTest.cpp`, `TbaaTest.cpp`, `ZeroInitTest.cpp`, `AttributeTest.cpp`, `DenormalTest.cpp`)
-  parses, lowers and JIT-compiles at -O2, and returns the `Jit`, or null with the formatted errors.
+  `FftTest.cpp`, `HashTest.cpp`, `ParamTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`, `ParallelTest.cpp`,
+  `RecoveryTest.cpp`, and the
+  compiler's own: `VersionTest.cpp`, `TbaaTest.cpp`, `ZeroInitTest.cpp`, `AttributeTest.cpp`, `DenormalTest.cpp`,
+  `LoopBudgetTest.cpp`, whose `compileAt` compiles at any level with the budget on or off, and `BoundsCheckTest.cpp`,
+  whose `compileAt` does the same with the bounds checks and keeps the checks' descriptions)
+  parses, lowers and JIT-compiles at -O2, and returns the `Jit`, or null with the formatted errors; a program that
+  compiles with warnings (`-Wswitch`) has them in `errors`, which a test of one compares as a whole.
   `lookup<float(float)>(*jit, "f")` gives a callable function, and `lookup<void(const float*, float*, int)>(*jit, "g")`
   one that takes a test's buffers (`std::array::data()`). A third parameter, the `ir::Options`, compiles at a chosen
   `poly float` width, `compile(source, &errors, {.polyLanes = 16})`, in another math mode
@@ -88,7 +92,11 @@ TEST_CASE("functions compute what they say", "[codegen]")
   `[pointer]`, `[heap]`, `[effects]`, `[math]` (the math modes and their kernels), `[versions]` (knob versioning and
   flat streams), `[tbaa]`, `[zeroinit]`, `[attributes]` and `[progress]` (the runtime's and libm's attributes, and loop
   progress), `[denormals]`, `[parallel]` (parallel regions, and `[runtime]` among them for the pool on its own),
-  `[ir]` (`Program::Options::keepIr`'s texts), `[circuit]` (the circuit compiler: `CircuitTest.cpp` its netlists,
+  `[ir]` (`Program::Options::keepIr`'s texts), `[budget]` (the loop budget: `LoopBudgetTest.cpp`, in the unit tests and
+  the library's), `[bounds]` (bounds checks: `BoundsCheckTest.cpp`, in both too), `[include]` (`#include`:
+  `IncludeTest.cpp`, in both), `[conditional]` (`#if`, `#ifdef` and macros, with a host's defines:
+  `ConditionalTest.cpp`, in both, whose `parsed` takes the defines and `condition` an `#if`'s expression),
+  `[circuit]` (the circuit compiler: `CircuitTest.cpp` its netlists,
   plans, equations (an OTA's against report §7.2's hand derivation; an inductor's, an E's and a G's stamps by hand, and
   RL and RLC responses as the bilinear map), the DC operating point by hand and its errors, the offset form (a biased
   netlist's module the unbiased one's), the diode forms (a string as one diode of n N, an asymmetric pair's K and law,
@@ -130,6 +138,25 @@ TEST_CASE("functions compute what they say", "[codegen]")
   cost is their CPU time, which POSIX's clocks give whatever else the machine runs (the process's less the caller's:
   `CLOCK_PROCESS_CPUTIME_ID`, `CLOCK_THREAD_CPUTIME_ID`), where wall time would not. Run them under `tsan` too: the
   pool is what it checks.
+- **The loop budget** counts the optimised code's loops, which change with the level, the target's vector width and
+  LLVM's version. A test of an exact count compiles at `-O0`, where each `while` and `for` branches back once an
+  iteration and each call of a recursive function counts one (`fib(10)` takes 177); at `-O1` and up a test checks what
+  holds everywhere: a loop that never ends stops, a counted loop runs whole or not at all, a caller returns after a
+  callee that ran out, and the output is the same bit for bit within the budget. One test pins an optimiser choice on
+  purpose: a stopped oscillator whose `phase` LICM kept in a register, never stored, which is the case the docs warn a
+  host of. The budget is the program's global, `fminus_rt_loop_budget`: `lookup<fminus_rt_loop_budget_state>(*jit,
+  ...)` reads and writes it as a host does (`left` -1 or more, as `setLoopBudget` keeps it).
+- **Bounds checks** are a trap to the optimiser until the pass at the end makes them returns, so what a test of one can
+  rely on at every level is what a trap gives: the call returns early, 0, the record holds the first failed check and
+  its index, and nothing the source does after the failed access has happened (a write after the call,
+  `BoundsCheckTest.cpp` shows at each level). That a caller unwinds after its call is visible at `-O0`, where calls stay
+  calls; from `-O1` the inliner makes most of them one function. A test of a check's message compares it whole, file,
+  line and column included (the column is the subscript's `[`, a pointer's `+` or `-`, a dereference's `*`, a field's
+  `->`, a method call's name). A loop the check bounds may be unrolled whole, with no loop left to count, so a test of
+  the checks and the loop budget together indexes by what the optimiser cannot bound. A parallel region's failing part
+  is whichever ran first: a test checks the index is one of theirs. The record is the program's global,
+  `fminus_rt_bounds`: `lookup<fminus_rt_bounds_state>(*jit, ...)` reads and clears it as a host does;
+  `opt::boundsSites(module)`, read before the JIT takes the module, says what each number means.
 
 ## lit and FileCheck
 
@@ -183,6 +210,7 @@ float gain(float x, float g)
 | `REQUIRES: asan`, `ubsan`, `tsan` | the sanitizer build |
 | `REQUIRES: system-darwin` (or `system-linux`) | the host's system (`veclib.fm`, which runs `--math fast`, needs Apple's vector math library) |
 | `%if arm64 %{ ... %}` | a RUN line only on arm64, so the rest of the file still runs elsewhere (`simd.fm`, `poly.fm`); `%if system-darwin && arm64 %{ ... %}` for Apple's assembly (`math.fm`) |
+| `%if avx %{ ... %}` | an x86-64 host whose JIT targets AVX, as `fminus-hostinfo --features` lists it (`lit.cfg.py` asks it): x86-64's vector machine code (`math-large.fm`) |
 
 On PATH: `fminus`, `fminus-build`, `fminus-hostinfo`, then `FileCheck`, `not`, `count`, `opt`, `llc`, `llvm-mca`,
 `llvm-objdump`, ... from the LLVM flavor. To check an error, send stderr to FileCheck and expect failure:

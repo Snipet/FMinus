@@ -118,7 +118,7 @@ namespace fminus::ir::detail
     void Lowering::describeThis(const ast::Module& module)
     {
         const ast::Type type = ast::Type::moduleType(&module);
-        const unsigned size = *sizeOf(type);
+        const std::uint64_t size = *sizeOf(type);
         llvm::AttrBuilder attributes(module_.getContext());
         attributes.addAttribute(llvm::Attribute::NonNull);
         attributes.addAlignmentAttr(alignOf(type));
@@ -185,7 +185,9 @@ namespace fminus::ir::detail
             }
             else
             {
-                builder_.CreateUnreachable();   // the end follows a return: nothing runs here
+                // The end follows a return, or a loop only a break leaves (`while (1)` without one: Statements.cpp's
+                // branchOn()): nothing runs here.
+                builder_.CreateUnreachable();
             }
         }
 

@@ -58,11 +58,14 @@ namespace fminus::ir::detail
     // zero (out of int's range the result is undefined, as in C); and a number is `x != 0` as a bool (so a NaN
     // is true). A scalar becomes a vector by being broadcast to every lane (a poly bool takes a bool), and a
     // lane mask is 0 or 1 per lane as the float vector of its size. Nothing else converts from a vector, and
-    // nothing at all from void (a call of a void function has no value): those are errors, reported for `use`.
+    // nothing at all from void (a call of a void function has no value): those are errors, reported for `use`. A
+    // value that failed converts silently.
     llvm::Value* Lowering::convert(Value value, ast::Type type, SourceLocation location, Use use)
     {
         if (value.type == type)
             return value.ir;
+        if (value.failed)   // its own error says why: it converts to anything, as a poison of the type (Value)
+            return poison(type).ir;
         const bool aggregate = ast::isModule(value.type) || ast::isModule(type) || ast::isArray(value.type)
                                || ast::isArray(type);
         if (value.type == ast::Type::Void || type == ast::Type::Void || aggregate)   // a module converts to nothing
@@ -180,8 +183,9 @@ namespace fminus::ir::detail
     // A type's size in bytes, as C and clang's ext_vector_type have it on the 64-bit targets FMinus runs on: a float4
     // is 16, a pointer 8, a poly float as many floats as the target's vectors hold (16 bytes with NEON, 64 with
     // AVX-512). A lane mask has a byte a lane. void has no size. A module's and an array's are the data layout's: a C
-    // struct's and array's, padding included.
-    std::optional<unsigned> Lowering::sizeOf(ast::Type type)
+    // struct's and array's, padding included, which may pass 4 GB (an array of 2^30 float4s is 16 GB): 64 bits, as
+    // C's size_t, for a copy's memcpy and a declaration's memset.
+    std::optional<std::uint64_t> Lowering::sizeOf(ast::Type type)
     {
         switch (type.kind)
         {
@@ -206,7 +210,7 @@ namespace fminus::ir::detail
             return 8;
         case ast::Kind::Module:
         case ast::Kind::Array:
-            return static_cast<unsigned>(module_.getDataLayout().getTypeAllocSize(typeOf(type)).getFixedValue());
+            return module_.getDataLayout().getTypeAllocSize(typeOf(type)).getFixedValue();
         }
         return std::nullopt;
     }
@@ -288,13 +292,26 @@ namespace fminus::ir::detail
                             + ": a poly type has as many lanes as the target's vectors");
     }
 
-    // A value of `type` that stands in for one an error kept from being computed. void has no values: its stand-in
-    // has no IR, which nothing reads, since every use of a void value is an error of its own.
+    // A value of `type` that stands in for one an error kept from being computed. It is not failed by itself (Value):
+    // lower() marks it failed when the expression reported the error, so a stand-in that no error is behind is checked
+    // as any value is, and its uses report what is wrong with them. void has no values: its stand-in has no IR, which
+    // nothing reads, since every use of a void value is an error of its own.
     Lowering::Value Lowering::poison(ast::Type type)
     {
         if (type == ast::Type::Void)
             return {nullptr, type};
         return {llvm::PoisonValue::get(valueTypeOf(type)), type};
+    }
+
+    // A poison of `type` that is failed (Value), as clang's RecoveryExpr contains errors, for where an error this
+    // expression did not report is behind it: an operand's own (failed), or a declaration's that left a type FMinus
+    // cannot use (a function's `bool *` result, refused where it is declared). Only there: a failed value with no
+    // error behind it would let every use of it go unreported, and the program compile on a poison.
+    Lowering::Value Lowering::recovery(ast::Type type)
+    {
+        Value value = poison(type);
+        value.failed = true;
+        return value;
     }
 
     void Lowering::error(SourceLocation location, std::string message)
