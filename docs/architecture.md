@@ -101,7 +101,9 @@ Flex generates `Lexer.yy.cpp` and `Lexer.yy.hpp` into `build-*/src/generated/fro
   comments and the conditionals' lines, so its text never reaches the parser. An `#if`'s expression is evaluated by
   `Preprocessor.cpp`, C's integer constant expression of the preprocessor in 64-bit integers; a macro is read only
   there and by `#ifdef` and `defined`, and its name in code is an error (`{IDENTIFIER}`'s check), so no text is
-  substituted before the parser reads it. Recipe 31 has the details.
+  substituted before the parser reads it. A directive is one line, which its `#` begins: the scanner refuses a `#`
+  after a comment that begins its line (`ScannerState::lineStart`) and a `/*` that runs past a directive's line, in
+  any group, rather than read either otherwise than C. Recipe 31 has the details.
 
 `Scanner.h` is the glue between the scanner and the parser:
 

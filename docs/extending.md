@@ -39,7 +39,7 @@ Most language features touch the same places, in this order:
 
 | # | Where | What to add |
 |---|---|---|
-| 1 | `src/frontend/Lexer.l` | a rule for each new token. Keywords go before `{IDENTIFIER}`. |
+| 1 | `src/frontend/Lexer.l` | a rule for each new token. Keywords go before `{IDENTIFIER}`; `macroNameError` reads a name with the scanner itself, so a new keyword is refused as a macro's name with nothing more to add. |
 | 2 | `src/frontend/Parser.y` | the tokens (`%token`), their precedence if they are operators, and the grammar rules with their actions |
 | 3 | `src/frontend/Ast.h` | a node: an alternative of `Expr::node` or `Stmt::node`, or an enumerator of `UnaryOp`, `BinaryOp`, `AssignOp`, `IncrementOp`, `Kind` (a type's) |
 | 4 | `src/frontend/Ast.cpp` | its `dump` |
@@ -5633,11 +5633,12 @@ them and 11.7 with. These are development builds; without the option nothing is 
 ## Recipe 31: conditional compilation, `#if` and `#ifdef`
 
 *In the compiler. Code: `src/frontend/Lexer.l` (the start condition `SKIPPED` and its rules, the directive rule in it
-too, the end of a comment and of a file, the macro check in `{IDENTIFIER}`, and `conditional`, `macro` and
-`macroNameError` in its last section), `src/frontend/Preprocessor.h` and `.cpp` (`Macros`, `withoutComments`,
-`evaluate`), `src/frontend/Scanner.h` (`Conditional`, `ScannerState::macros` and `conditionals`) and `Frontend.h`
-(`Defines`, `parse`'s `defines`); `Program::Options::defines` (`include/fminus/FMinus.h`, `src/api/FMinus.cpp`);
-`fminus -D` (`tools/fminus/main.cpp`). Tests: `tests/unit/ConditionalTest.cpp` (`[conditional]`),
+too, the `#` rules, the end of a comment and of a file, the macro check in `{IDENTIFIER}`, and `directive`,
+`conditional`, `define`, `macroName`, `isKeyword` and `macroNameError` in its last section),
+`src/frontend/Preprocessor.h` and `.cpp` (`Macros`, `withoutComments`, `evaluate`), `src/frontend/Scanner.h`
+(`Conditional`, and `ScannerState`'s `macros`, `conditionals`, `expanded` and `lineStart`) and `Frontend.h` (`Defines`,
+`parse`'s `defines`); `Program::Options::defines` (`include/fminus/FMinus.h`, `src/api/FMinus.cpp`); `fminus -D`
+(`tools/fminus/main.cpp`). Tests: `tests/unit/ConditionalTest.cpp` (`[conditional]`),
 `tests/library/ConditionalTest.cpp` and `tests/lit/fminus/conditional.fm`.*
 
 A program being written carries instrumentation: a meter's peak, a counter of the voices stolen, a field a host shows
@@ -5699,10 +5700,27 @@ before the parser reads it, a reader sees the code that runs, and a program FMin
 | a macro's name in code | an error, never a substitution | `macro expansion is not supported: 'NAME' is a macro, which FMinus reads only in #if, #elif, #ifdef and #ifndef (for a constant, declare an enum or a const)` |
 
 The keywords are refused as macros because C would substitute one in code, where FMinus reads it as the keyword:
-`#define float double` would mean one thing to clang and another to FMinus. `#error`, `#warning`, `#line` and `#embed`
-are still errors (`#error is not supported: FMinus's directives are ...`). A directive is one line, as before: a `/*`
-comment that starts in one must end on it (`a directive's /* comment must end on its line`), where C would carry the
-directive on to the comment's end.
+`#define float double` would mean one thing to clang and another to FMinus. `macroNameError` asks the scanner itself
+(`isKeyword` reads the name with a scanner of its own and looks at the token), so the keywords it refuses are the
+rules before `{IDENTIFIER}`, a keyword added later too. `#error`, `#warning`, `#line` and `#embed` are still errors
+(`#error is not supported: FMinus's directives are ...`).
+
+A directive is one line, as before, which its `#` begins, after spaces. Two rules keep FMinus from reading a line
+otherwise than C, in a skipped group too, where a difference would be silent (the other group compiled):
+
+- **A `/*` comment that starts in a directive's line must end on it** (`a directive's /* comment must end on its
+  line`), where C would carry the directive on to the comment's end and read the lines between as the comment.
+  `directive()` checks every directive's line first, whatever its name and in any group: a `#pragma`, a skipped
+  group's `#include`, an inert `#if`, an `#elif` never computed. A quote's text is no comment, as in C (a host's
+  `#pragma panel label x "a /* b"` is fine), and a quote left open runs to the line's end, as clang reads one. A
+  comment between the `#` and the name is spaces, as in C: `#/* note */else` is an `#else`.
+- **No comment comes before a directive's `#`** (`a comment before a directive's '#' is not supported: a directive
+  begins its line, after spaces only`). C reads `/* note */ #else` as a directive; the directive rule's `^` cannot
+  match after the comment, so FMinus refuses the `#` there, in code and in a skipped group, instead of reading it as
+  text. `ScannerState::lineStart` says whether only spaces and comments come before the scanner on its line: a line's
+  end sets it, text clears it (in `SKIPPED`, its text rule; in `INITIAL`, every call of the scanner after the first,
+  which follows a token), and a block comment keeps it as it was where the comment began, as C reads a `#` after one:
+  `x /* a` / `b */ #else` is text in a skipped group, as in C.
 
 ### Expressions
 
@@ -5727,8 +5745,14 @@ unary operators by recursive descent, computing as it goes:
   integer, as FMinus shifts an `int` by its count's low five), the right one arithmetic. clang warns of an overflow
   there; FMinus has no warnings, and a defined result.
 - **Limits**, so that a program cannot hang the compiler or exhaust its stack: 256 levels of parentheses, unary
-  operators and `?:` (clang's bracket depth), 256 macros expanding inside one another, and 65536 tokens after
-  expansion (`#define B A A` doubles a line's tokens with each such macro).
+  operators and `?:` (clang's bracket depth), 256 macros expanding inside one another, 65536 tokens after expansion
+  (`#define B A A` doubles a line's tokens with each such macro), and the work of expanding, counted across all of a
+  compilation's conditions: each macro expanded counts one and the bytes of its value, at most 1048576 in all
+  (`macro expansion is too long: the program's conditions expand more than 1048576 bytes of macros`). The tokens
+  alone would not do: a macro of nothing (`#define C0`, a flag's form) adds none, and `C1` a thousand `C0`s, `C2` a
+  thousand `C1`s and `C3` a thousand `C2`s make `#if C3 + 1` a billion expansions; and a line under any bound of its
+  own can be repeated. A real program's conditions expand a few bytes each, and the bound costs at most some tens of
+  milliseconds to reach.
 
 The errors are clang's, at clang's columns: `expected value in expression`, `expected ')' in preprocessor expression`,
 `token is not a valid binary operator in a preprocessor subexpression`, `expected end of line in preprocessor
@@ -5738,18 +5762,19 @@ after 'defined'`. clang adds a note, `to match this '('`; FMinus's directive err
 ### Skipped groups: a start condition
 
 The scanner reads a skipped group in a start condition of its own, `SKIPPED`, exclusive, which has the directive rule
-(`<INITIAL,SKIPPED>^[ \t]*"#"[^\n]*`) and rules that only count: text up to a `/` or the line's end, a `/`, a `//`
-comment, line ends. The group's text is never matched against FMinus's tokens, so it need not be FMinus at all: `#if 0`
-around a paragraph of prose is fine, as in C. Two things are still read, as C's translation phases read them before
-the directives:
+(`<INITIAL,SKIPPED>^[ \t]*"#"[^\n]*`) and rules that only count: spaces, text up to a `/`, a `#` or the line's end, a
+`/`, a `#` inside a line (an error after only comments, above), a `//` comment, line ends. The group's text is never
+matched against FMinus's tokens, so it need not be FMinus at all: `#if 0` around a paragraph of prose is fine, as in C.
+Two things are still read, as C's translation phases read them before the directives:
 
 - **Block comments.** `<INITIAL,SKIPPED>"/*"` enters `BLOCK_COMMENT` from either, and its `*/` goes back to `SKIPPED`
   or `INITIAL`, whichever `ScannerState::skipping()` says. So a `/*` in a skipped group hides an `#endif` inside the
   comment, as in C, and one left open is `unterminated /* comment`.
-- **The conditionals' lines.** In a skipped group, `directive()` reads only a directive's name: `#if`, `#ifdef` and
-  `#ifndef` open a conditional, and `#elif`, `#else` and `#endif` close a group; any other line, an unknown directive,
-  an `#include` or a `#define`, is text, as C's skipped groups have it. After each directive the rule's action sets
-  the start condition from the stack: `BEGIN(yyextra->skipping() ? SKIPPED : INITIAL)`.
+- **The conditionals' lines.** In a skipped group, `directive()` reads only a directive's name, once it has checked
+  that the line's comments end on it: `#if`, `#ifdef` and `#ifndef` open a conditional, and `#elif`, `#else` and
+  `#endif` close a group; any other line, an unknown directive, an `#include` or a `#define`, is text, as C's skipped
+  groups have it. After each directive the rule's action sets the start condition from the stack:
+  `BEGIN(yyextra->skipping() ? SKIPPED : INITIAL)`.
 
 A `Conditional` (`Scanner.h`) is one `#if` on the stack, to its `#endif`: where its name is, for `unterminated
 conditional directive`; its file; whether a group has been read (`taken`: the groups after it are skipped, their
@@ -5797,7 +5822,8 @@ does well enough, or skips the groups that `#ifdef`, `#ifndef` and `defined` on 
   nothing at run time. The suite's other tests are unchanged, but for the messages of the directives FMinus still
   lacks, which now list these.
 - **Programs** that used `#define`, `#if` and the rest were refused before; now they compile, unless they substitute a
-  macro in code, which stays an error with a message that says why.
+  macro in code, which stays an error with a message that says why. One that FMinus took before is refused now: a
+  `#pragma` whose `/*` comment runs on past its line, which C would read as one comment with the lines after it.
 - **The playing build and the debug build differ in their modules' layouts** when a field is conditional: a host that
   allocates instances reads `Program::module()` for each build, as it always should.
 
@@ -5812,7 +5838,11 @@ does well enough, or skips the groups that `#ifdef`, `#ifndef` and `defined` on 
   turn and not inside themselves, `defined`'s operand unexpanded); the host's defines (a redefinition, the `#ifndef`
   idiom, a bad name) and `macroNameError` over every keyword; a macro's name in code, the host's too, and a skipped
   group's names unread; conditionals ending in their own file, macros crossing files, a skipped `#include`; every
-  error above at clang's column, and the limits.
+  error above at clang's column, and the limits, nested empty macros and a line repeated past the compilation's
+  bound among them; a directive's line: a `#` after a comment that begins its line refused, in code, in a skipped
+  group and in an included file, and after text read as C reads it; a `/*` left open in a `#pragma`, a skipped
+  group's directive, an inert conditional, an `#elif` never computed, an `#include` and a null directive; quotes in
+  a `#pragma`; and names near a keyword that are a macro's.
 - `tests/library/ConditionalTest.cpp`: `Options::defines` from C++17, a meter whose field and statement compile in with
   `DEBUG` (its module's fields, its result) and out without it, the program's `LEVEL` default overridden by the host's;
   a bad name, a keyword, and a host's macro used in code.
@@ -5911,7 +5941,11 @@ Each of these was hit while writing the language or its recipes. [simd.md](simd.
 | A host re-initialises an instance after a failed bounds check, and it plays half set up, with no violation reported | the host called `init` before clearing the record: each call of a function that may stop then unwinds its caller, so `init` returned after its first one, and the first failure is kept, so nothing new was recorded | clear the record first (`clearBoundsViolation()`), then re-initialise |
 | An `#if` reads a macro the file defines as 0, and its group is skipped | the `#define` comes after the `#if`: a macro is defined from its line on, and a name that is not one is 0 in `#if`, as in C | define it above its first use; a default the host may override as `#ifndef NAME`, `#define NAME value`, `#endif` at the top |
 | C23's `#elifdef` in a skipped group would end it in C, and FMinus reads on past it to the `#endif`, skipping the group C reads | in a skipped group a line is text unless it is a conditional FMinus knows, as C ignores a skipped group's other lines: a conditional directive left out is a silent difference there, not an error | have every conditional C has (`#elifdef` and `#elifndef` too), or refuse the missing ones in skipped groups as well |
+| A skipped group's `/* note */ #else` is text to FMinus and an `#else` to C, so each compiles another group, and neither says so | the directive rule's `^` cannot match after a comment, and `SKIPPED`'s text rule took the `#` | track whether only spaces and comments come before the scanner on its line (`lineStart`), and refuse a `#` there, in both start conditions |
+| A `/*` left open in a `#pragma`, or in a skipped group's directive, is swallowed, and C reads the lines after it as the comment | only the directives FMinus evaluated made their comments spaces, and with them the check | check every directive's line first, in `directive()`, quotes aside |
+| `#if` on nested macros of nothing (`#define C0`, then a thousand `C0`s in `C1`, and so on) hangs the compiler, though no bound is reached | the bound counted the tokens expanded, and an empty value adds none; a line under a bound of its own can also be repeated | count the work, a macro and its value's bytes, across the compilation (`ScannerState::expanded`) |
 | The site's table of scanner rules says a rule "enters yyextra" | `site/scripts/lib/flex.js` took the first word in `BEGIN(...)` for the start condition, and `BEGIN(yyextra->skipping() ? SKIPPED : INITIAL)` starts with an expression | flex.js reads the start conditions a `BEGIN` names, those Lexer.l declares and `INITIAL` |
+| The site's table of scanner rules shows `error:` with no message, or a rule that skips its input as an error | the action throws a constant (`kCommentBeforeDirective`), which has no string literal in the action, and its throw is under an `if` | flex.js reads the file's `constexpr const char*` constants, lists each throw's message, and shows a rule whose every throw is under an `if` as skipped, or that error |
 | `FileCheck --check-prefix=PICK` fails on a line of another prefix | a variable `[[PICK:[0-9]+]]` on an `O0:` line contains `PICK:`, which FileCheck reads as a check of that prefix | name variables apart from every prefix (`S_PICK`) |
 | `CHECK-NOT: bounds` fails on IR with no bounds checks | `getelementptr inbounds` | match a name of the feature's own (`fminus_rt_bounds`, `fminus.bounds`) |
 | A library test's `CHECK(view == "line")` does not link: undefined `Catch::StringMaker<std::string_view>` | the library tests are C++17 against a Catch2 built as the build tree's C++23, which compiled no `string_view` support into it | compare `std::string(view)` |

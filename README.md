@@ -376,9 +376,11 @@ Where FMinus differs from C, it is on purpose:
   headers) are errors, and `#pragma` is ignored, as C ignores the pragmas it doesn't know. An `#if`'s arithmetic is
   64-bit and defined for every operand, as FMinus's code is (a shift takes its count's low six bits). Each file is
   read once, as if it began with `#pragma once`: two files that both include a third (a module both use) read it the
-  first time only, where C would define everything in it twice. A directive is one line, a `/*` comment in it ending
-  there. A directive's errors are clang's, `extra tokens at end of #endif directive` and a macro redefined with
-  another value too, which clang only warns of ([docs/extending.md](docs/extending.md), recipes 21 and 31).
+  first time only, where C would define everything in it twice. A directive is one line, which its `#` begins (a
+  comment before the `#` is an error, where C reads the directive) and on which a `/*` comment in it ends, in a
+  skipped group too. A directive's errors are clang's, `extra tokens at end of #endif directive` and a macro
+  redefined with another value too, which clang only warns of ([docs/extending.md](docs/extending.md), recipes 21 and
+  31).
 - **Arithmetic is IEEE single precision**, with no contraction into fused multiply-adds (clang's
   `-ffp-contract=off`), and subnormals as IEEE has them unless the host flushes them (above).
 
