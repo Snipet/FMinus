@@ -30,10 +30,13 @@
 #include <cstdint>
 #include <format>
 #include <functional>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <mutex>
 #include <optional>
+#include <set>
+#include <tuple>
 #include <utility>
 
 namespace fminus
@@ -407,6 +410,8 @@ namespace fminus
         };
         std::map<std::string, Entry, std::less<>> callables;
         std::mutex calls;
+        // A function the program defines, whose look-up links the program's code (codeRanges); empty when it has none.
+        std::string linkName;
 
         Impl() = default;
         Impl(const Impl&) = delete;
@@ -568,9 +573,13 @@ namespace fminus
             prepareModule(*module, **machine);
         if (keepLowered)
             loweredIr = printed(*module);
+        jit::Jit::Calls callsBefore;   // what the optimiser inlined, for codeRanges(), as the JIT reads it of a module
+        jit::Jit::Calls callsAfter;    // it optimises itself
         if (keepOptimised)
         {
+            callsBefore = jit::Jit::directCalls(*module);
             optimiseModule(*module, **machine, level);
+            callsAfter = jit::Jit::directCalls(*module);
             optimisedIr = printed(*module);
         }
 
@@ -581,6 +590,8 @@ namespace fminus
             errors = llvm::toString(created.takeError()) + "\n";
             return nullptr;
         }
+        if (keepOptimised)
+            (*created)->recordInlining(jit::Jit::inlinedCalls(callsBefore, callsAfter));
         if (llvm::Error error = (*created)->add(std::move(module), std::move(context)))
         {
             errors = llvm::toString(std::move(error)) + "\n";
@@ -631,6 +642,8 @@ namespace fminus
             entry->second.unsupported = describeCall(function, impl->modules, entry->second.callable);
             entry->second.callable.owner_ = impl.get();
             entry->second.defined = entry->second.defined || function.isDefinition;
+            if (function.isDefinition && impl->linkName.empty())
+                impl->linkName = function.name;
         }
         for (const ast::Function& function : program->functions)
         {
@@ -961,6 +974,98 @@ namespace fminus
             return failure(status, std::move(errors));
         }
         return call(*function, arguments.data(), arguments.size());
+    }
+
+    // ---- code ranges, for a profiler (Program::codeRanges) ----
+
+    namespace
+    {
+        constexpr std::string_view kThunkPrefix = "fminus.call.";   // jit::thunkName's
+
+        // What the code named `symbol` is, and the program's function it is the code of: an FMinus name has no '.',
+        // so what follows the first is the code generator's or the JIT's.
+        //   f                f's code; under Denormals::Flush, an entry point's around f.body (`entries`)
+        //   f.body           the entry point f's body (ir/Denormals.cpp)
+        //   f.parallel.n     a parallel region of f (ir/Parallel.cpp), and f.parallel.n.parallel.m one inside it
+        //   fminus.call.f    f's thunk (jit/Call.h)
+        //   anything else    FMinus's own: fminus.large.sin (opt/MathKernels.cpp)
+        // `defines` says whether the program defines a function of a name.
+        template <typename Defines>
+        std::pair<Program::CodeRange::Kind, std::string> attributed(std::string_view symbol, const Defines& defines,
+                                                                    const std::set<std::string, std::less<>>& entries)
+        {
+            using Code = Program::CodeRange::Kind;
+            const std::size_t dot = symbol.find('.');
+            const std::string_view stem = symbol.substr(0, dot);
+            const std::string_view rest = dot == std::string_view::npos ? std::string_view() : symbol.substr(dot);
+            if (defines(stem) && rest.empty())
+                return {entries.contains(stem) ? Code::EntryPoint : Code::Function, std::string(stem)};
+            if (defines(stem) && rest == ".body")
+                return {Code::Function, std::string(stem)};
+            if (defines(stem) && rest.starts_with(".parallel."))
+                return {Code::Parallel, std::string(stem)};
+            if (symbol.starts_with(kThunkPrefix) && defines(symbol.substr(kThunkPrefix.size())))
+                return {Code::Thunk, std::string(symbol.substr(kThunkPrefix.size()))};
+            return {Code::Support, std::string()};
+        }
+    } // namespace
+
+    std::vector<Program::CodeRange> Program::codeRanges(std::string& errors)
+    {
+        errors.clear();
+        if (!impl_->linkName.empty())   // links the program's module, if no look-up has yet: a symbol of it links all
+        {
+            if (auto linked = impl_->jit->lookup(impl_->linkName); !linked)
+            {
+                errors = llvm::toString(linked.takeError()) + "\n";
+                return {};
+            }
+        }
+        const std::vector<jit::Jit::Code> code = impl_->jit->code();
+        const auto defines = [this](std::string_view name) {
+            const auto found = impl_->callables.find(name);
+            return found != impl_->callables.end() && found->second.defined;
+        };
+        std::set<std::string, std::less<>> entries;   // the entry points whose body is code of its own (f.body)
+        for (const jit::Jit::Code& function : code)
+        {
+            if (function.name.ends_with(".body"))
+                entries.emplace(function.name.substr(0, function.name.size() - 5));
+        }
+        std::vector<CodeRange> ranges;
+        ranges.reserve(code.size());
+        for (const jit::Jit::Code& function : code)
+        {
+            CodeRange& range = ranges.emplace_back();
+            range.address = static_cast<std::uintptr_t>(function.address);
+            range.size = static_cast<std::size_t>(function.size);
+            range.symbol = function.name;
+            std::tie(range.kind, range.function) = attributed(function.name, defines, entries);
+            if (const auto found = impl_->callables.find(range.function);
+                found != impl_->callables.end() && found->second.callable.module != nullptr)
+                range.module = found->second.callable.module->name;
+            std::set<std::string> inlined;   // as the program names them, each once, the range's own function not
+            for (const std::string& callee : function.inlined)
+            {
+                std::string name = attributed(callee, defines, entries).second;
+                if (!name.empty() && name != range.function)
+                    inlined.insert(std::move(name));
+            }
+            range.inlined.assign(inlined.begin(), inlined.end());
+        }
+        return ranges;
+    }
+
+    const Program::CodeRange* Program::codeRangeAt(const std::vector<CodeRange>& ranges,
+                                                    std::uintptr_t address) noexcept
+    {
+        // The last range that starts at or before the address, if it reaches it.
+        const auto after = std::upper_bound(ranges.begin(), ranges.end(), address,
+                                            [](std::uintptr_t at, const CodeRange& range) { return at < range.address; });
+        if (after == ranges.begin())
+            return nullptr;
+        const CodeRange& range = *std::prev(after);
+        return address - range.address < range.size ? &range : nullptr;
     }
 } // namespace fminus
 

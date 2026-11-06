@@ -40,8 +40,8 @@
 // and the region has finished when the statement has. Running one allocates nothing and takes no lock, so a
 // nonblocking process() may have them (Options::threads limits them).
 //
-// Lifetime: a function pointer is valid while its Program lives. Destroy a Program only when no thread can still be
-// running its code.
+// Lifetime: a function pointer is valid while its Program lives, and its code stays where it is (codeRanges(), for a
+// profiler). Destroy a Program only when no thread can still be running its code.
 //
 // Parameters: a module's `param float cutoff;` is a value the host sets, read in a method as cutoff[i], at sample i of
 // the call. How it reads is the host's choice when it compiles (Options::parameters, Binding): a knob (the value, read
@@ -808,6 +808,72 @@ namespace fminus
 
         // Looks the function up (callable(), which compiles its thunk the first time), then calls it.
         CallResult call(std::string_view name, const std::vector<Value>& arguments);
+
+        // Profiling: where the program's machine code is, for a sampling profiler in the host, which interrupts a
+        // thread now and then (a timer's signal, or the thread suspended and its registers read), takes its program
+        // counter, and counts the samples that fall in each function's code: a profile of the program as it runs, per
+        // function, per method and per module, with nothing added to its code.
+        //
+        //   std::vector<Program::CodeRange> ranges = program->codeRanges(errors);   // once, off the audio thread
+        //   ...
+        //   if (const Program::CodeRange* range = Program::codeRangeAt(ranges, pc))   // each sample, on the
+        //       ++samples[range->function];                                         // sampler's thread: "Osc::tick"
+        //
+        // A range is the machine code's, as the optimiser left it, not the source's. A function the optimiser inlined
+        // into its caller (a method that a process loop calls, from -O1) runs inside the caller's code, so its samples
+        // are the caller's, whose range lists it in `inlined`; its own range, which the program keeps for the host's
+        // calls, takes samples only when something calls it. At -O0 nothing is inlined, and each function's samples are
+        // its own. A parallel region's body is a range of its own (Kind::Parallel), run by the pool's threads and the
+        // caller's: a sampler of the calling thread alone sees only its share. Code that is not the program's has no
+        // range: the runtime's (the pool, an FFT, fminus_rt_sinf where a math kernel is called rather than inlined),
+        // the C library's (Math::Libm's sinf, a prototype's function) and the host's own, which the host names from
+        // its own symbols (dladdr), or charges to the program's function that called it by walking the stack.
+        //
+        // One function's machine code: the bytes [address, address + size).
+        struct CodeRange
+        {
+            // What the code is.
+            enum class Kind : std::uint8_t
+            {
+                Function,     // a function's code, as the program defines it: "Osc::tick"; under Denormals::Flush, an
+                              // entry point's body, "process.body"
+                EntryPoint,   // under Denormals::Flush, an entry point's few instructions that set the floating-point
+                              // mode around its body and hand the caller's back: "process"
+                Parallel,     // a parallel for's or a parallel { }'s body: "run.parallel.1"
+                Thunk,        // the code call() calls the function through: "fminus.call.softclip"
+                Support,      // FMinus's own, no function's: a math kernel's path for large arguments,
+                              // "fminus.large.sin"
+            };
+
+            std::uintptr_t address = 0;   // its first byte, in this process
+            std::size_t size = 0;         // its bytes from there; on macOS and Windows, whose objects give no
+                                          // sizes, to the next range's start, its padding included
+            Kind kind = Kind::Function;
+            std::string symbol;           // the code's name in the program's object: "Osc::tick", "run.parallel.1"
+            std::string function;         // the program's function it is the code of, as function() names it:
+                                          // "Osc::tick", "run" for "run.parallel.1"; empty for Support
+            std::string module;           // the function's module, for a method: "Osc"; empty otherwise
+            // The program's functions the optimiser inlined into this code, whose samples are this range's: "Osc::tick"
+            // in "Osc::process". Read from the calls, before the optimiser and after: a function called before and not
+            // after is inlined, and so is each function it called, through it, that this code no longer calls (a call
+            // the optimiser deleted as dead looks the same). Sorted; empty when there are none.
+            std::vector<std::string> inlined = {};
+        };
+
+        // Every range of the program's machine code, sorted by address, none overlapping another: each function the
+        // program defines, each parallel region, FMinus's own, and the thunk of each Callable made so far. The
+        // program's code is linked now, on this thread, if no function has been looked up yet (as address() links
+        // it), so the list after compile() is the program's whole. Empty, with `errors` set, when its code does not
+        // link (CallResult's LinkError). The code stays where the list says while the Program lives (the JIT neither
+        // moves nor frees it), so a host takes the list once, after compile() and its callable()s, and a sampler reads
+        // it from any thread without a lock. It is the host's copy, made on each call: it allocates, off the audio
+        // thread.
+        std::vector<CodeRange> codeRanges(std::string& errors);
+
+        // The range of `ranges` (codeRanges(), sorted by address) that holds `address`, a sampled program counter, or
+        // nullptr when none does: a binary search, with no allocation and no lock, which a sampler's thread calls for
+        // each sample.
+        static const CodeRange* codeRangeAt(const std::vector<CodeRange>& ranges, std::uintptr_t address) noexcept;
 
     private:
         struct Impl;
