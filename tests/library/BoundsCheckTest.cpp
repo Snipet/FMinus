@@ -1,9 +1,10 @@
 // tests/library/BoundsCheckTest.cpp: Program::Options::boundsCheck, bounds checks for development builds, as a plugin
 // host uses them (C++17, FMinus::FMinus alone): a process() whose index leaves its array returns early, and the host
 // reads where (boundsViolation: the file, an #include's too, the line and column, the array, its type and extent, the
-// index) and clears it; the first failure is kept; from an entry point that flushes subnormals the host's
-// floating-point mode comes back as it was. Within its arrays a call computes what it would without the checks, bit for
-// bit, and a program compiled without them has none, in its IR too.
+// index) and clears it, before it re-initialises the instance (an init run while the record holds a check stops
+// partway); the first failure is kept; from an entry point that flushes subnormals the host's floating-point mode comes
+// back as it was. Within its arrays a call computes what it would without the checks, bit for bit, and a program
+// compiled without them has none, in its IR too.
 #include "fminus/FMinus.h"
 
 #include <catch2/catch_test_macros.hpp>
@@ -146,6 +147,63 @@ TEST_CASE("Options::boundsCheck: a process() that reads before its array returns
     process(instance.memory, in.data(), out.data(), 256);
     CHECK_FALSE(program->boundsViolation());
     CHECK(out[255] == 2.5f);
+}
+
+TEST_CASE("Options::boundsCheck: the host clears the record, then re-initialises: an init run before stops partway",
+          "[library][bounds]")
+{
+    // At -O0 init's calls of clear stay calls, each of a function with a check, after which init reads the record.
+    const char* const voice = "module Voice\n"
+                              "{\n"
+                              "    float taps[4];\n"
+                              "    float gain;\n"
+                              "    int ready;\n"
+                              "    void clear(int k) { taps[k] = 0.0f; }\n"
+                              "    void init()\n"
+                              "    {\n"
+                              "        for (int k = 0; k < 4; ++k)\n"
+                              "            clear(k);\n"
+                              "        gain = 0.5f;\n"
+                              "        ready = 1;\n"
+                              "    }\n"
+                              "    float tap(int k) { return taps[k] * gain; }\n"
+                              "    int isReady() { return ready; }\n"
+                              "};\n";
+    std::string errors;
+    fminus::Program::Options options;
+    options.boundsCheck = true;
+    options.optimisation = 0;
+    options.fileName = "voice.fm";
+    auto program = fminus::Program::compile(voice, errors, options);
+    INFO(errors);
+    REQUIRE(program);
+    auto* init = program->function<void(void*)>("Voice::init", errors);
+    auto* tap = program->function<float(void*, int)>("Voice::tap", errors);
+    auto* isReady = program->function<int(void*)>("Voice::isReady", errors);
+    REQUIRE(init != nullptr);
+    REQUIRE(tap != nullptr);
+    REQUIRE(isReady != nullptr);
+    Instance instance(*program->module("Voice"));
+
+    CHECK(tap(instance.memory, 4) == 0.0f);   // the bug: taps[4]
+    REQUIRE(program->boundsViolation());
+    CHECK(program->boundsViolation()->message() == "voice.fm:14:35: index 4 out of bounds for 'taps' of type "
+                                                   "'float[4]'");
+
+    // The wrong order: init first. Its first call of clear returns, the record still holds the check, and init returns
+    // after it, the instance half set up; and the first failure is kept, so nothing says so.
+    init(instance.memory);
+    CHECK(isReady(instance.memory) == 0);
+    REQUIRE(program->boundsViolation());
+    CHECK(program->boundsViolation()->index == 4);
+
+    // The right one: clear the record, then re-initialise.
+    program->clearBoundsViolation();
+    init(instance.memory);
+    CHECK_FALSE(program->boundsViolation());
+    CHECK(isReady(instance.memory) == 1);
+    CHECK(tap(instance.memory, 3) == 0.0f);
+    CHECK_FALSE(program->boundsViolation());
 }
 
 TEST_CASE("Options::boundsCheck: a check in an #include'd file names that file", "[library][bounds]")

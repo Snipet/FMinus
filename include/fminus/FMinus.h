@@ -407,14 +407,18 @@ namespace fminus
         // one (each lane it reaches, or with a mask each lane the mask takes): of a local array, a module's field, a
         // constant table. A pointer the program keeps has no extent the compiler knows, and its accesses are not
         // checked: one a variable, a field or a parameter holds (`float* p = buf;`, then p[i]), what a function
-        // returns, a heap block (malloc's), a host's buffer.
+        // returns, a heap block (malloc's), a host's buffer. Nor are fft_forward's and fft_inverse's buffers: the
+        // transform reads and writes as many elements as its plan has, which only the running program knows, so a
+        // buffer shorter than the plan is overrun as it would be without the checks.
         //
         // When a check fails, the function records it, unless the record holds one already (the first is kept), and
         // returns at once, 0, null or nothing, and so does each of the program's functions that called it, back to the
         // host, as with the loop budget: no caller goes on with a value that was never computed, and the access never
         // happens. What the call leaves in the instance and the output is whichever of the optimised code's stores had
         // run, which need not be any point of the source (the loop budget's paragraph, above): a host that runs the
-        // program again first re-initialises the instance, or discards it.
+        // program again first clears the record (clearBoundsViolation, below), then re-initialises the instance, or
+        // discards it. In that order: a method such as init is a call too, which a record still holding the check
+        // would stop partway.
         //
         //   Program::Options options;
         //   options.boundsCheck = true;                   // while developing; the build that plays has none
@@ -422,8 +426,12 @@ namespace fminus
         //   ...
         //   process(instance, in, out, n);
         //   if (auto failed = program->boundsViolation()) // it returned early: silence it, and off the audio thread
+        //   {
         //       report(failed->message());                // "synth.fm:12:9: index 16 out of bounds for 'line' of
-        //                                                 // type 'float[16]'"; then clearBoundsViolation()
+        //                                                 // type 'float[16]'"
+        //       program->clearBoundsViolation();          // first: then init runs whole
+        //       init(instance);
+        //   }
         //
         // A check costs a compare and a branch where the optimiser cannot prove the access within the array (a ring
         // buffer's index; a loop over the array that its own condition keeps within it has none), and a load and a
@@ -433,12 +441,16 @@ namespace fminus
         // what it would without them until a check fails. A build without them is the code it was. The program
         // compiles with its machine code, as compile() returns (the first look-up of a function only finds it).
         //
-        // One record a Program, which every thread that runs it shares: in a parallel region, the first part to fail
-        // is recorded, and the others stop at their next call of a function with checks. While the record holds a
-        // check, a call returns early at its first call of such a function, however it got there: clear it before the
-        // program runs again (re-initialising the instance included). Each of these is a relaxed atomic load or
-        // store, no allocation and no lock: the audio thread may call them. In a program compiled without the checks
-        // there is never a violation.
+        // One record a Program, which every thread that runs it shares. While it holds a check, each function of the
+        // program returns early as soon as a call it makes of a function with checks (or one that calls such a
+        // function) returns, however it got there: the callee runs its own body, unless its own calls stop it, and
+        // the caller returns 0, null or nothing after it, though its own indexes are fine. Calls the optimiser
+        // inlined are no calls, so a function whose code is all inlined runs to its end. In a parallel region, the
+        // first part to fail is recorded; each of the others stops at a failed check of its own or that way, or else
+        // runs to its end, and the function that ran the region returns when the region ends. So clear the record
+        // before the program runs again, re-initialising the instance included. Each of these is a relaxed atomic
+        // load or store, no allocation and no lock: the audio thread may call them. In a program compiled without the
+        // checks there is never a violation.
 
         // A bounds check that failed: where in the source the access is, which array, and the element it reached.
         // The strings are the Program's, valid while it lives.
@@ -465,7 +477,7 @@ namespace fminus
         // The first check that failed since clearBoundsViolation (or since the program compiled), or nothing.
         std::optional<BoundsViolation> boundsViolation() const noexcept;
 
-        // Clears the record, so that the next call runs again.
+        // Clears the record, so that the next call runs whole: before any call of the program, init's included.
         void clearBoundsViolation() noexcept;
 
     private:

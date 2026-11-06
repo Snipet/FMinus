@@ -559,10 +559,12 @@ gain(in, out, n, 0.5f);                                       // one call a bloc
   called it, before the access: `boundsViolation()` is the first such check since `clearBoundsViolation()`, a
   `BoundsViolation` with the file, line and column, the array as the source names it, its type and extent, and the
   index (`message()`: `echo.fm:14:33: index -188 out of bounds for 'line' of type 'float[512]'`). A pointer the
-  program keeps (a variable's, a parameter's: a heap block, a host's buffer) is not checked. Within its arrays a call
-  computes what it would without the checks, bit for bit; a check costs a compare and a branch where the optimiser
-  cannot prove it, and a loop that updates a field may then store it every iteration (the measured ones a third to
-  two fifths slower: recipe 30). Off by default, and without it the code is the same, byte for byte.
+  program keeps (a variable's, a parameter's: a heap block, a host's buffer) is not checked, nor are an FFT's buffers
+  against its plan's size. While the record holds a check, each call of the program returns early, so clear it before
+  calling the program again, `init` included. Within its arrays a call computes what it would without the checks, bit
+  for bit; a check costs a compare and a branch where the optimiser cannot prove it, and a loop that updates a field
+  may then store it every iteration (the measured ones a third to two fifths slower: recipe 30). Off by default, and
+  without it the code is the same, byte for byte.
 - **Lifetime.** A function pointer is valid while its `Program` lives.
 
 `include/fminus/Circuit.h` is the circuit compiler's: `fminus::circuit::generate(netlist, "pedal.cir")` turns a
@@ -715,9 +717,11 @@ These are constraints a plugin runs into. `examples/plugin/`, a JUCE plugin, mee
   ([docs/extending.md](docs/extending.md), recipe 29).
 - **An index outside its array.** While a program is written, compile it with `Program::Options::boundsCheck`, and
   after each call check `boundsViolation()`: the call returned early, before the access, and the plugin can silence
-  the program, show `message()` (off the audio thread: it allocates), and re-initialise the instance (or discard it)
-  and `clearBoundsViolation()` before the next call. Compile the build that plays without it, which is as fast as
-  ever ([docs/extending.md](docs/extending.md), recipe 30).
+  the program, show `message()` (off the audio thread: it allocates), then `clearBoundsViolation()`, and only then
+  re-initialise the instance (or discard it): while the record holds the check, `init` would return partway, as any
+  call would. The checks see only arrays the program declares: a delay line in a heap block (`calloc`'s) is not
+  checked, and one in a field array is. Compile the build that plays without it, which is as fast as ever
+  ([docs/extending.md](docs/extending.md), recipe 30).
 - **Size and symbols.** Static LLVM adds tens of megabytes. Export only the plugin's entry points (an
   exported-symbols list), so LLVM's symbols cannot clash with another copy of LLVM in the host process.
 - **Bit-exactness across machines.** FMinus fuses and reassociates nothing, and in its default math mode a float's
