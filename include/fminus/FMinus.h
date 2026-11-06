@@ -293,6 +293,30 @@ namespace fminus
         // (which includes it). FMinus has then checked that it cannot reach malloc, calloc or free.
         bool nonAllocating(std::string_view name) const;
 
+        // An attribute of a field or a parameter, written after its name, C23's way:
+        // `float level [[ui::unit("dB")]] [[fminus::range(-60, 0)]];` has two. FMinus's own have a meaning,
+        // fminus::range (a parameter's, or a field's of numbers) and fminus::default (a parameter's), and a clang::
+        // one, a function's, is refused on a field. Every other is the host's, passed on as written for the host to
+        // decide what it means, a unit, a label or a display hint: FMinus checks only that its numbers are numbers
+        // (docs/extending.md, recipe 35).
+        struct Attribute
+        {
+            // An argument: a number, or a string literal (C's, its escapes resolved, adjacent ones joined).
+            struct Argument
+            {
+                bool isString = false;   // a string's; a number's otherwise
+                double number = 0;       // a number's value (0 for a string)
+                std::string text;        // a string's bytes (UTF-8 as the source has them); a number as written
+                                         // ("-60", "2e4", "0x10")
+            };
+
+            std::string name;                  // as written, its namespace and all: "ui::unit", "fminus::range"
+            std::vector<Argument> arguments;   // in order; none for `[[ui::hidden]]`
+        };
+
+        // The last of `attributes` named `name` ("ui::unit"), or nullptr: the one that counts when a field has two.
+        static const Attribute* findAttribute(const std::vector<Attribute>& attributes, std::string_view name) noexcept;
+
         // A module's parameter, `param float cutoff [[fminus::range(20, 20000)]] [[fminus::default(1000)]];`. Its
         // slot in an instance is the C struct { const float* stream; T value; }, T a float, an int32_t or a bool (a
         // byte), whatever its binding: the stream's pointer at streamOffset, the value at valueOffset.
@@ -307,6 +331,7 @@ namespace fminus
             std::optional<double> minimum;        // fminus::range(minimum, maximum): what the host's control spans;
             std::optional<double> maximum;        // FMinus neither clamps to it nor checks it
             std::optional<double> defaultValue;   // fminus::default(value): what setDefaults sets
+            std::vector<Attribute> attributes = {};   // all of them, in order, these two too: `[[ui::unit("Hz")]]`
         };
 
         // A module of the program (FMinus's class), as a host sees it. An instance is `size` bytes, aligned to
@@ -333,6 +358,9 @@ namespace fminus
                 // element [i][j] is at offset + (i * 16 + j) * sizeof(float)). Empty for a field that is no array
                 // (docs/extending.md, recipe 34).
                 std::vector<std::size_t> extents = {};
+                // Its attributes, in order: `float level [[ui::unit("dB")]];`'s, a parameter's (its Parameter has them
+                // too). Empty for a field that has none.
+                std::vector<Attribute> attributes = {};
             };
 
             std::string name;

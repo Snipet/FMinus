@@ -484,6 +484,38 @@ TEST_CASE("a module's parameters parse with their attributes, and only in a modu
     CHECK(parsed("param float x;") == "test.fm:1:1: error: syntax error, unexpected param\n");
 }
 
+TEST_CASE("attributes follow a field's name, as C23 writes them, and take numbers and strings", "[frontend]")
+{
+    // After the name, before an array's sizes, in each declarator of a declaration and after an enumeration's list;
+    // a parameter's take strings too, and C's adjacent string literals are one.
+    CHECK(parsed("module Meter\n"
+                 "{\n"
+                 "    float level [[ui::unit(\"dB\"), ui::label(\"Out\" \"put\")]] [[fminus::range(-60, 0)]];\n"
+                 "    float taps [[ui::hidden]] [16], grid [[ui::shape(\"rows\", 2)]] [2][3];\n"
+                 "    enum Mode { A, B } mode [[ui::label(\"Mode\")]];\n"
+                 "    param float gain [[fminus::range(-24, 12)]] [[ui::unit(\"dB\")]];\n"
+                 "};\n")
+          == "(module Meter\n"
+             "  (field float level [[ui::unit(\"dB\")]] [[ui::label(\"Output\")]] [[fminus::range(-60, 0)]])\n"
+             "  (field float[16] taps [[ui::hidden]])\n"
+             "  (field float[2][3] grid [[ui::shape(\"rows\", 2)]])\n"
+             "  (enum Mode (A) (B))\n"
+             "  (field int mode [[ui::label(\"Mode\")]])\n"
+             "  (param float gain [[fminus::range(-24, 12)]] [[ui::unit(\"dB\")]]))\n");
+    // A local's and a constant's parse, for the code generator to refuse.
+    CHECK(parsed("const float k [[ui::unit(\"dB\")]] = 1;\nfloat f() { float x [[a]] = k, *p [[b]]; return x; }\n")
+          == "(decl const float k [[ui::unit(\"dB\")]] 1)\n"
+             "(function float f ()\n"
+             "  (decl float x [[a]] k)\n"
+             "  (decl float * p [[b]])\n"
+             "  (return x))\n");
+    // C's escapes, resolved, and written back as C writes them: a quote, a backslash, \n and \t, a control character
+    // in octal; hex and octal bytes and universal character names (in UTF-8: B5, then F0 9F 98 80) as themselves.
+    CHECK(parsed(R"fm(module M { float x [[ui::text("q\"b\\s\n\t\x41\101\u00B5\U0001F600\1\a\?\'")]]; };)fm")
+          == "(module M\n"
+             "  (field float x [[ui::text(\"q\\\"b\\\\s\\n\\tAA\xC2\xB5\xF0\x9F\x98\x80\\001\\007?'\")]]))\n");
+}
+
 TEST_CASE("errors print in source order, each with its notes after it", "[frontend]")
 {
     fminus::Diagnostics diagnostics("x.fm");
@@ -502,6 +534,28 @@ TEST_CASE("syntax and scanner errors carry their locations", "[frontend]")
     CHECK(parsed("float f(float x) { return 1f; }") == "test.fm:1:27: error: invalid suffix 'f' on integer constant\n");
     CHECK(parsed("float f(float x) /* never\nclosed { return x; }")
           == "test.fm:1:18: error: unterminated /* comment\n");
+    // A string literal is C's, and an attribute's argument only.
+    CHECK(parsed("module M { float x [[ui::label(\"never closed)]]; };")
+          == "test.fm:1:32: error: missing terminating '\"' character\n");
+    CHECK(parsed(R"fm(module M { float x [[ui::label("a\qb")]]; };)fm")
+          == "test.fm:1:34: error: unknown escape sequence '\\q'\n");
+    CHECK(parsed(R"fm(module M { float x [[ui::label("a\x100")]]; };)fm")
+          == "test.fm:1:34: error: hex escape sequence out of range\n");
+    CHECK(parsed(R"fm(module M { float x [[ui::label("a\xg")]]; };)fm")
+          == "test.fm:1:34: error: \\x used with no following hex digits\n");
+    CHECK(parsed(R"fm(module M { float x [[ui::label("\400")]]; };)fm")
+          == "test.fm:1:33: error: octal escape sequence out of range\n");
+    CHECK(parsed(R"fm(module M { float x [[ui::label("\u12")]]; };)fm")
+          == "test.fm:1:33: error: incomplete universal character name\n");
+    CHECK(parsed(R"fm(module M { float x [[ui::label("\uD800")]]; };)fm")
+          == "test.fm:1:33: error: invalid universal character\n");
+    CHECK(parsed("float f() { return \"x\"; }") == "test.fm:1:20: error: syntax error, unexpected string literal\n");
+    // An attribute after an array's size would be its type's (C23), and a string is no attribute's name.
+    CHECK(parsed("module M { float taps[16] [[ui::label(\"Taps\")]] [[ui::hidden]]; };")
+          == "test.fm:1:29: error: 'ui::label' attribute cannot be applied to types: the attributes of 'taps' go after "
+             "its name, before its size\n");
+    CHECK(parsed("module M { float x [[\"dB\"]]; };")
+          == "test.fm:1:22: error: syntax error, unexpected string literal, expecting identifier\n");
     // Bison lists what it expected only when that is at most four tokens, and a function can start in eight ways.
     CHECK(parsed("fn f(x: float) -> float { return x; }")
           == "test.fm:1:1: error: syntax error, unexpected identifier\n");

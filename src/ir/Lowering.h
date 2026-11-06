@@ -379,6 +379,7 @@ namespace fminus::ir::detail
         static SourceLocation begin(const ast::Expr& expr);
         llvm::BasicBlock* bypass(const Switch& branch, llvm::BasicBlock* label);
         void declareVariable(SourceLocation location, const ast::DeclStmt& decl);
+        void refuseAttributes(const ast::DeclStmt& decl);
         void redefinition(SourceLocation location, const std::string& name, bool enumerator, const Binding& previous);
 
         // ---- Constants.cpp ------------------------------------------------------------------------------------------
@@ -475,6 +476,7 @@ namespace fminus::ir::detail
         void layOut(const ast::Module& module, std::size_t& enums);
         ast::Type fieldType(const ast::Field& field) const;
         void checkParameter(const ast::Module& module, const ast::Field& field);
+        void checkAttributes(const ast::Field& field);
         llvm::Type* slotTypeOf(ast::Type type);
         ParamBinding bindingOf(const ast::Module& module, const ast::Field& field) const;
         std::optional<unsigned> parameterOf(const ast::Expr& base) const;

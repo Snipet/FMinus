@@ -8,7 +8,8 @@
 //     parameter    : "param" type IDENTIFIER attributes ";"                     a field the host sets
 //     method       : "const"? type pointer IDENTIFIER "(" params ")" attributes block
 //     attributes   : ("[" "[" attribute ("," attribute)* "]" "]")*
-//     attribute    : IDENTIFIER ("::" (IDENTIFIER | "default"))? ("(" "-"? NUMBER ("," "-"? NUMBER)* ")")?
+//     attribute    : IDENTIFIER ("::" (IDENTIFIER | "default"))? ("(" attribute_arg ("," attribute_arg)* ")")?
+//     attribute_arg: "-"? NUMBER | STRING+                 a number, or a string (C's adjacent literals are one)
 //     params       : (param ("," param)*)? | "void"                                  (void) is none, as in C
 //     param        : "const"? type pointer IDENTIFIER? | "const"? type IDENTIFIER array_sizes       a pointer
 //     type         : "float" | "double" | "bool" | "int" | "void" | VECTOR_TYPE | "poly" ("float" | "bool")
@@ -22,9 +23,9 @@
 //                  | "const"? "enum" IDENTIFIER ":" type ";"         C23's: a tag with a fixed type, ahead of its list
 //     enumerator   : IDENTIFIER ("=" expr)?                                  the expr an integer constant expression
 //     declaration  : "const"? type declarator ("," declarator)* ";"
-//     declarator   : pointer IDENTIFIER ("=" expr)?                                  as in C, `float *p, x;`
-//                  | IDENTIFIER array_sizes ("=" initializer_list)?                   an array
-//                  | pointer IDENTIFIER "=" initializer_list        parsed, for its error: only arrays
+//     declarator   : pointer IDENTIFIER attributes ("=" expr)?            as in C, `float *p, x;`; C23's attributes
+//                  | IDENTIFIER attributes array_sizes ("=" initializer_list)?        an array
+//                  | pointer IDENTIFIER attributes "=" initializer_list        parsed, for its error: only arrays
 //     initializer_list : "{" (initializer ("," initializer)* ","?)? "}"              C's, C23's {} too
 //     initializer  : expr | initializer_list                         a braced list, a 2-D array's row
 //     array_sizes  : array_size array_size?                         FMinus's arrays are one or two dimensions deep
@@ -137,6 +138,7 @@
             bool rows = false;                // `name[size][rowSize]`: a 2-D array
             ast::ExprPtr rowSize = nullptr;   // its rows' size, as written; null for `[]`, which C refuses
             std::vector<ast::Brace> braces = {};
+            std::vector<ast::Attribute> attributes = {};   // C23's, after the name: `level [[ui::unit("dB")]]`
         };
 
         // An array's sizes as written: `[size]`, or a 2-D array's `[size][rowSize]` (`rows`). Null for `[]`.
@@ -145,6 +147,7 @@
             ast::ExprPtr size = nullptr;
             bool rows = false;
             ast::ExprPtr rowSize = nullptr;
+            std::vector<ast::Attribute> attributes = {};   // a declarator's after its sizes: its type's, an error
         };
 
         // An initialiser list as written, `{1, {2, 3}}`: its values in order, and the braces among them (ast::Brace).
@@ -399,13 +402,32 @@
             return name;
         }
 
-        // A declarator's array sizes, `[4][16]`.
-        void setSizes(fminus::frontend::Declarator& d, fminus::frontend::ArraySizes sizes)
+        // A declarator's name, its pointer and the attributes after the name.
+        fminus::frontend::Declarator named(const fminus::frontend::location& where, fminus::frontend::Pointer pointer,
+                                           std::string name, std::vector<fminus::ast::Attribute> attributes)
+        {
+            fminus::frontend::Declarator d{at(where), pointer, std::move(name), nullptr};
+            d.attributes = std::move(attributes);
+            return d;
+        }
+
+        // A declarator's array sizes, `[4][16]`. Attributes after them, `taps[16] [[...]]`, would be C23's for the
+        // array's type, which takes none in FMinus: the first is the error, in clang's words, and they then go with
+        // the name's, as if written there.
+        void setSizes(fminus::frontend::Declarator& d, fminus::frontend::ArraySizes sizes,
+                      fminus::frontend::ParseContext& context)
         {
             d.isArray = true;
             d.size = std::move(sizes.size);
             d.rows = sizes.rows;
             d.rowSize = std::move(sizes.rowSize);
+            if (sizes.attributes.empty())
+                return;
+            context.diagnostics.error(sizes.attributes.front().location,
+                                      "'" + sizes.attributes.front().name + "' attribute cannot be applied to types: "
+                                          "the attributes of '" + d.name + "' go after its name, before its size");
+            for (fminus::ast::Attribute& attribute : sizes.attributes)
+                d.attributes.push_back(std::move(attribute));
         }
 
         // A declarator's initialiser list, `= {...}`.
@@ -441,20 +463,21 @@
                     d.location, fminus::ast::DeclStmt{name.isConst, name.type, std::move(d.name), std::move(d.init),
                                                       name.isRestrict, d.hasList, std::move(d.list),
                                                       std::move(d.size), std::move(d.rowSize),
-                                                      std::move(d.braces)}});
+                                                      std::move(d.braces), std::move(d.attributes)}});
             }
             return statements;
         }
 
-        // A module's fields, from a declaration's statements.
+        // A module's fields, from a declaration's statements, with their attributes.
         void addFields(std::vector<fminus::ast::Stmt> declarations, std::vector<fminus::ast::Field>& fields)
         {
             for (fminus::ast::Stmt& stmt : declarations)
             {
                 auto& decl = std::get<fminus::ast::DeclStmt>(stmt.node);
                 fields.push_back(fminus::ast::Field{stmt.location, std::move(decl.name), decl.type, decl.isConst,
-                                                   decl.init != nullptr || decl.hasList, false, {},
-                                                   std::move(decl.size), 0, std::move(decl.rowSize)});
+                                                   decl.init != nullptr || decl.hasList, false,
+                                                   std::move(decl.attributes), std::move(decl.size), 0,
+                                                   std::move(decl.rowSize)});
             }
         }
 
@@ -489,6 +512,7 @@
 %token LPAREN "(" RPAREN ")" LBRACE "{" RBRACE "}" COMMA "," SEMI ";"
 %token <std::string> IDENTIFIER "identifier"
 %token <std::string> NUMBER "number"
+%token <std::string> STRING "string literal"
 
 %nterm <std::vector<ast::Function>> items
 %nterm <ast::Function> function
@@ -502,12 +526,13 @@
 %nterm <ast::Enumerator> enumerator
 %nterm <ModuleBody> module_body module_member
 %nterm <ast::ExprPtr> array_size
-%nterm <ArraySizes> array_sizes
+%nterm <ArraySizes> array_sizes declarator_sizes
 %nterm <InitList> initializer_list initializers initializer
-%nterm <std::vector<ast::Attribute>> attributes attribute_list
+%nterm <std::vector<ast::Attribute>> attributes attribute_specifiers attribute_specifier attribute_list
 %nterm <ast::Attribute> attribute
-%nterm <std::vector<std::string>> attribute_args
-%nterm <std::string> attribute_arg attribute_word
+%nterm <std::vector<ast::AttributeArg>> attribute_args
+%nterm <ast::AttributeArg> attribute_arg
+%nterm <std::string> attribute_word string_literal
 %nterm <std::vector<ast::Param>> params param_list
 %nterm <ast::Param> param
 %nterm <bool> qualifier
@@ -676,11 +701,23 @@ function
     ;
 
 // C23's attribute specifiers, after a function's parameter list, where clang's function attributes go:
-// `void process(...) [[clang::nonblocking]]`.
+// `void process(...) [[clang::nonblocking]]`; after a parameter's name or a declarator's, where they appertain to
+// what it declares: `float level [[ui::unit("dB")]];`. None is an empty list, which the parser takes before it reads
+// a `[` (a declarator's size, or an attribute: the next token says which).
 attributes
     : %empty                                {}
-    | attributes "[" "[" attribute_list "]" "]"
-                                            { $$ = $1; for (ast::Attribute& a : $4) $$.push_back(std::move(a)); }
+    | attributes attribute_specifier        { $$ = $1; for (ast::Attribute& a : $2) $$.push_back(std::move(a)); }
+    ;
+
+// One or more, where a `[` that is no attribute's could come instead (after an array's size).
+attribute_specifiers
+    : attribute_specifier                   { $$ = $1; }
+    | attribute_specifiers attribute_specifier
+                                            { $$ = $1; for (ast::Attribute& a : $2) $$.push_back(std::move(a)); }
+    ;
+
+attribute_specifier
+    : "[" "[" attribute_list "]" "]"        { $$ = $3; }
     ;
 
 attribute_list
@@ -702,15 +739,23 @@ attribute_word
     | "default"                             { $$ = "default"; }
     ;
 
-// An attribute's arguments: numbers, a minus before any of them.
+// An attribute's arguments: numbers, a minus before any of them, and strings (C23's balanced tokens, of which FMinus
+// takes these).
 attribute_args
     : attribute_arg                         { $$.push_back($1); }
     | attribute_args "," attribute_arg      { $$ = $1; $$.push_back($3); }
     ;
 
 attribute_arg
-    : NUMBER                                { $$ = $1; }
-    | "-" NUMBER                            { $$ = "-" + $2; }
+    : NUMBER                                { $$ = ast::AttributeArg{$1, false}; }
+    | "-" NUMBER                            { $$ = ast::AttributeArg{"-" + $2, false}; }
+    | string_literal                        { $$ = ast::AttributeArg{$1, true}; }
+    ;
+
+// C's adjacent string literals are one: "Cut" "off" is "Cutoff".
+string_literal
+    : STRING                                { $$ = $1; }
+    | string_literal STRING                 { $$ = $1 + $2; }
     ;
 
 // `(void)` is C's empty list: one unnamed parameter of type void, which is no parameter.
@@ -897,20 +942,35 @@ declarators
     | declarators "," declarator            { $$ = $1; $$.push_back($3); }
     ;
 
+// C23's attributes after a declarator's name appertain to what it declares: a field's are the host's
+// (Field::attributes), and a local's or a constant's are the code generator's error. They and the sizes after them
+// are read without a rule ending between them, since a `[` after the attributes may begin either.
 declarator
-    : pointer IDENTIFIER                    { $$ = Declarator{at(@2), $1, $2, nullptr}; }
-    | pointer IDENTIFIER "=" expr           { $$ = Declarator{at(@2), $1, $2, $4}; }
-    | pointer IDENTIFIER "=" initializer_list
-                                            { $$ = Declarator{at(@2), $1, $2, nullptr}; setList($$, $4); }
-    | pointer IDENTIFIER array_sizes        { $$ = Declarator{at(@2), $1, $2, nullptr}; setSizes($$, $3); }
-    | pointer IDENTIFIER array_sizes "=" expr
-                                            { $$ = Declarator{at(@2), $1, $2, $5}; setSizes($$, $3); }
-    | pointer IDENTIFIER array_sizes "=" initializer_list
+    : pointer IDENTIFIER attributes         { $$ = named(@2, $1, $2, $3); }
+    | pointer IDENTIFIER attributes "=" expr
+                                            { $$ = named(@2, $1, $2, $3); $$.init = $5; }
+    | pointer IDENTIFIER attributes "=" initializer_list
+                                            { $$ = named(@2, $1, $2, $3); setList($$, $5); }
+    | pointer IDENTIFIER attributes declarator_sizes
+                                            { $$ = named(@2, $1, $2, $3); setSizes($$, $4, parseContext); }
+    | pointer IDENTIFIER attributes declarator_sizes "=" expr
                                             {
-                                                $$ = Declarator{at(@2), $1, $2, nullptr};
-                                                setSizes($$, $3);
-                                                setList($$, $5);
+                                                $$ = named(@2, $1, $2, $3);
+                                                setSizes($$, $4, parseContext);
+                                                $$.init = $6;
                                             }
+    | pointer IDENTIFIER attributes declarator_sizes "=" initializer_list
+                                            {
+                                                $$ = named(@2, $1, $2, $3);
+                                                setSizes($$, $4, parseContext);
+                                                setList($$, $6);
+                                            }
+    ;
+
+// A declarator's sizes, and any attributes after them (setSizes' error).
+declarator_sizes
+    : array_sizes                           { $$ = $1; }
+    | array_sizes attribute_specifiers      { $$ = $1; $$.attributes = $2; }
     ;
 
 // An initialiser list: its values, and the braces of the lists inside it, a 2-D array's rows (ast::Brace). C23's

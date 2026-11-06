@@ -583,6 +583,7 @@ namespace fminus::ir::detail
     // once instead (declareConstArray, Memory.cpp).
     void Lowering::declareVariable(SourceLocation location, const ast::DeclStmt& decl)
     {
+        refuseAttributes(decl);
         const auto declare = [&](llvm::Value* slot, bool isConst, ast::Type type) {
             if (!bind(decl.name, Binding{slot, isConst, type, location}))
                 redefinition(location, decl.name, false, scopes_.back().at(decl.name));
@@ -632,6 +633,16 @@ namespace fminus::ir::detail
         llvm::AllocaInst* slot = allocate(typeOf(type), decl.name);
         builder_.CreateStore(value, slot);
         declare(slot, decl.isConst, type);
+    }
+
+    // A local's attributes, or a constant's of the top level: C23 lets a declarator have them, and FMinus gives them
+    // to a module's fields and parameters only, for the host (checkAttributes). The first is the error, in clang's
+    // words for an attribute on what it does not apply to.
+    void Lowering::refuseAttributes(const ast::DeclStmt& decl)
+    {
+        if (!decl.attributes.empty())
+            error(decl.attributes.front().location,
+                  quoted(decl.attributes.front().name) + " attribute only applies to a module's fields and parameters");
     }
 
     // `name`, declared at `location` as an enumeration constant or a variable, where `previous` already has it in the

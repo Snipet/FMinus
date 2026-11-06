@@ -1,0 +1,45 @@
+// Attributes on a module's fields (extending.md, recipe 35): C23's, after a field's name and before its sizes, with
+// numbers and strings for arguments (C's string literals: escapes resolved, adjacent ones joined), kept in the tree as
+// written. FMinus's own are checked; any other is the host's (Program::Attribute), and none of them is in the IR: the
+// module's struct and its method are the same as without them. In an #if's skipped group a string is a string, so a
+// /* in one opens no comment.
+// RUN: fminus %s --emit ast | FileCheck %s --check-prefix=AST
+// RUN: fminus %s -O0 | FileCheck %s --implicit-check-not=dB --implicit-check-not=ui:: --implicit-check-not=Hold
+// RUN: fminus %s -O2 --bounds-check --loop-budget 0 | FileCheck %s --check-prefix=OPT --implicit-check-not=dB
+
+#if 0
+module Skipped { float x [[ui::label("/* not a comment")]]; };
+#endif
+
+module Meter
+{
+    param float gain [[fminus::range(-24, 12)]] [[fminus::default(0)]] [[ui::unit("dB")]];
+    float level [[ui::unit("dB"), ui::label("Out" "put")]] [[fminus::range(-60, 0)]];
+    float history [[ui::hidden]] [2][4];
+    double time [[ui::unit("µs"), ui::format("%.1f\t\"s\"")]];
+    enum Mode { PEAK, HOLD } mode [[ui::labels("Peak", "Hold")]];
+    float4 lanes [[fminus::range(-1, 1)]], spare;
+
+    float tick(float x)
+    {
+        level = x * gain[0];
+        history[1][3] = level;
+        return level;
+    }
+};
+
+// AST:      (module Meter
+// AST-NEXT:   (param float gain {{\[\[}}fminus::range(-24, 12){{\]\]}} {{\[\[}}fminus::default(0){{\]\]}} {{\[\[}}ui::unit("dB"){{\]\]}})
+// AST-NEXT:   (field float level {{\[\[}}ui::unit("dB"){{\]\]}} {{\[\[}}ui::label("Output"){{\]\]}} {{\[\[}}fminus::range(-60, 0){{\]\]}})
+// AST-NEXT:   (field float[2][4] history {{\[\[}}ui::hidden{{\]\]}})
+// AST-NEXT:   (field double time {{\[\[}}ui::unit("µs"){{\]\]}} {{\[\[}}ui::format("%.1f\t\"s\""){{\]\]}})
+// AST-NEXT:   (enum Mode (PEAK) (HOLD))
+// AST-NEXT:   (field int mode {{\[\[}}ui::labels("Peak", "Hold"){{\]\]}})
+// AST-NEXT:   (field float4 lanes {{\[\[}}fminus::range(-1, 1){{\]\]}})
+// AST-NEXT:   (field float4 spare))
+// AST-NOT:  Skipped
+
+// CHECK: %Meter = type { { ptr, float }, float, [2 x [4 x float]], double, i32, <4 x float>, <4 x float> }
+// CHECK: define {{.*}}float @"Meter::tick"(ptr
+
+// OPT: define {{.*}}float @"Meter::tick"(ptr

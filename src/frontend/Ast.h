@@ -587,6 +587,26 @@ namespace fminus::ast
         int depth = 1;
     };
 
+    // An attribute's argument as written: a number ("-60", "1e3", "0x10"), or a string literal's characters, its
+    // escapes resolved and adjacent literals joined, as C joins them ("dB" for `"dB"`).
+    struct AttributeArg
+    {
+        std::string text;
+        bool isString = false;
+    };
+
+    // `[[clang::nonblocking]]` after a function's parameters, `[[fminus::range(20, 20000)]]` after a parameter's name,
+    // `[[ui::unit("dB")]]` after a field's: C23's attribute syntax, with clang's names for a function's. The tree keeps
+    // an attribute as written; the code generator gives it its meaning (ir/Effects.cpp, ir/Modules.cpp). A field's or
+    // a parameter's may take arguments, numbers and strings, and one FMinus has no meaning for is the host's
+    // (fminus::Program::Attribute).
+    struct Attribute
+    {
+        SourceLocation location;
+        std::string name;                   // "clang::nonblocking", or a name without its namespace
+        std::vector<AttributeArg> args;     // between its parentheses, in order
+    };
+
     // `[const] float name = init;`: a variable of the enclosing block, from its declaration to the block's end. One per
     // declarator: `float a = 1, b;` is two, and `float *p, x;` a pointer and a float, as in C. Without an initialiser
     // the variable starts at 0, and a pointer at null (C leaves them indeterminate, and reading them undefined). An
@@ -605,6 +625,7 @@ namespace fminus::ast
         ExprPtr size;              // an array's size as written; null for `[]`, which its list sizes
         ExprPtr rowSize = nullptr;          // a 2-D array's rows' size as written, `[16]` in `float g[4][16]`
         std::vector<Brace> braces = {};     // the braces inside the list, in the order their `{`s are
+        std::vector<Attribute> attributes = {};   // C23's, after the name: a field's (Field), refused elsewhere
     };
 
     // `expr;`: evaluated for its effect (an assignment, a call).
@@ -775,16 +796,6 @@ namespace fminus::ast
     // A definition, or a prototype (`float f(float x);`, no body). As in C, a prototype declares a function defined
     // later or elsewhere: one with no definition in the program is external, resolved when the code is linked (the
     // JIT looks in the process, so `float atanf(float x);` calls libm's).
-    // `[[clang::nonblocking]]` after a function's parameters: C23's attribute syntax, with clang's names. The tree
-    // keeps an attribute as written; the code generator gives it its meaning (ir/Effects.cpp). A parameter's take
-    // arguments, numbers: `[[fminus::range(20, 20000), fminus::default(1000)]]`.
-    struct Attribute
-    {
-        SourceLocation location;
-        std::string name;                 // "clang::nonblocking", or a name without its namespace
-        std::vector<std::string> args;    // the numbers between its parentheses, as written ("-60", "1e3")
-    };
-
     // A method is a function too: named `OnePole::tick`, with `module` set, and a first parameter the parser adds,
     // `this`, a pointer to the module (what C++ passes, and what a C++ host passes when it calls the method).
     struct Function
@@ -806,6 +817,7 @@ namespace fminus::ast
     // sample i of the call. How it gets there is the host's choice when it compiles the program (ir::Options): a
     // stream (a buffer of samples, set before each call), a knob (one value, which may change between any two calls,
     // read once a call), or frozen (a constant, compiled in). Its attributes give the host a range and a default.
+    // Any field may carry attributes for the host, a range, a unit or a label (Program::Module::Field::attributes).
     struct Field
     {
         SourceLocation location;
@@ -814,7 +826,7 @@ namespace fminus::ast
         bool isConst = false;
         bool hasInitializer = false;
         bool isParam = false;
-        std::vector<Attribute> attributes;   // a parameter's
+        std::vector<Attribute> attributes;   // after its name: `float level [[ui::unit("dB")]];`
         ExprPtr size;                        // an array's size as written, as DeclStmt's
         std::size_t enums = 0;               // how many of the module's enumerations come before it, which it sees
         ExprPtr rowSize = nullptr;           // a 2-D array's rows' size as written, as DeclStmt's
@@ -873,6 +885,12 @@ namespace fminus::ast
     // An attribute's argument as a number, as C writes one: an integer (0x1F, 010, 12, -3) or a floating constant
     // (1e3, 0.5f). Nothing for anything else.
     std::optional<double> attributeNumber(std::string spelling);
+
+    // An attribute's argument as a number: nothing for a string, even "12".
+    inline std::optional<double> attributeNumber(const AttributeArg& arg)
+    {
+        return arg.isString ? std::nullopt : attributeNumber(arg.text);
+    }
 
     // The tree as s-expressions, one function after another, for `fminus --emit ast` and tests:
     //     (function float gain ((float x) (const float g))

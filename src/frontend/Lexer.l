@@ -2,9 +2,11 @@
  * memory). It returns Bison's symbols (Parser.y) with their locations, which it keeps in the scanner's state
  * (Scanner.h).
  *
- * Comments are C's: // to the end of the line, and block comments, which do not nest. Constants are C's: floating
- * ones (1.5, 1., .5, 2e3, 1.5e-3f, hex floats such as 0x1.8p1 and 0x1p-3f) and integer ones (2, 010 in octal, 0x1F in
- * hex), one token whose spelling tells the code generator which. The f or F suffix is allowed only where C allows it
+ * Comments are C's: // to the end of the line, and block comments, which do not nest. String literals are C's, with
+ * C's escapes, and FMinus has them only as an attribute's arguments (Parser.y): the token's value is the string's
+ * characters, its escapes resolved (stringValue). Constants are C's: floating ones (1.5, 1., .5, 2e3, 1.5e-3f, hex
+ * floats such as 0x1.8p1 and 0x1p-3f) and integer ones (2, 010 in octal, 0x1F in hex), one token whose spelling tells
+ * the code generator which. The f or F suffix is allowed only where C allows it
  * (not on 2; in 0x1F the F is a digit), and is kept in the spelling. A floating constant without one is a float or a
  * double by where it is used, which the code generator decides (ir/Expressions.cpp, lowerAs).
  * To add a token: a rule here, its %token in Parser.y. Keywords come before {IDENTIFIER}: with equal lengths, Flex
@@ -19,11 +21,11 @@
  * the Diagnostics names it in the messages.
  * The conditionals are C's: #if, #ifdef, #ifndef, #elif, #else and #endif, and C23's #elifdef and #elifndef, on
  * macros that #define and #undef define and the host gives (Frontend.h's Defines). A group that is skipped is the
- * start condition SKIPPED, in which the scanner reads only comments, line ends and the conditionals' lines: its text
- * is never scanned, so it need not be FMinus. A macro is read only in conditions (Preprocessor.h): its name in code is
- * an error. A directive is one line, which its # begins (after spaces): a # after a comment that begins its line is
- * an error, where C reads a directive (ScannerState::lineStart), and a block comment in a directive's line, in any
- * group, must end on it.
+ * start condition SKIPPED, in which the scanner reads only comments, string literals (whose text is no comment), line
+ * ends and the conditionals' lines: its text is never scanned, so it need not be FMinus. A macro is read only in
+ * conditions (Preprocessor.h): its name in code is an error. A directive is one line, which its # begins (after
+ * spaces): a # after a comment that begins its line is an error, where C reads a directive (ScannerState::lineStart),
+ * and a block comment in a directive's line, in any group, must end on it.
  */
 %option reentrant noyywrap nounput noinput nounistd never-interactive batch
 %option prefix="fminus"
@@ -39,6 +41,7 @@
 %{
 #include <algorithm>
 #include <climits>
+#include <cstdint>
 #include <memory>
 #include <new>
 #include <optional>
@@ -59,6 +62,10 @@ namespace
 
     // The error of a macro's name in code.
     std::string macroInCode(const std::string& name);
+
+    // A string literal's characters, `literal` its token at `where`, quotes and all: C's escapes resolved. Throws an
+    // escape's error.
+    std::string stringValue(const fminus::frontend::location& where, std::string_view literal);
 
     // The error of a # after a comment that begins its line, where C reads a directive.
     constexpr const char* kCommentBeforeDirective = "a comment before a directive's '#' is not supported: a directive "
@@ -115,7 +122,8 @@ IDENTIFIER  [A-Za-z_][A-Za-z0-9_]*
                             }
 
 <SKIPPED>[ \t\r\f\v]+        { yyextra->where.step(); }
-<SKIPPED>[^\n/# \t\r\f\v][^\n/#]*  { yyextra->lineStart = false; yyextra->where.step(); }
+<SKIPPED>[^\n/#" \t\r\f\v][^\n/#"]*  { yyextra->lineStart = false; yyextra->where.step(); }
+<SKIPPED>\"([^"\\\n]|\\.)*\"?  { yyextra->lineStart = false; yyextra->where.step(); }
 <SKIPPED>"/"                { yyextra->lineStart = false; yyextra->where.step(); }
 <SKIPPED>"#"                {
                                 // Not at a line's start: text, unless only comments come before it, where C reads
@@ -182,6 +190,16 @@ IDENTIFIER  [A-Za-z_][A-Za-z0-9_]*
                                 const std::string suffix(1, yytext[yyleng - 1]);
                                 throw Parser::syntax_error(yyextra->where,
                                                            "invalid suffix '" + suffix + "' on integer constant");
+                            }
+\"([^"\\\n]|\\.)*\"         {
+                                const std::string_view literal(yytext, static_cast<std::size_t>(yyleng));
+                                return Parser::make_STRING(stringValue(yyextra->where, literal), yyextra->where);
+                            }
+\"([^"\\\n]|\\.)*\\?        {
+                                fminus::frontend::location at = yyextra->where;
+                                at.end = at.begin;
+                                at.end.column += 1;
+                                throw Parser::syntax_error(at, "missing terminating '\"' character");
                             }
 {IDENTIFIER}                {
                                 std::string name(yytext, yyleng);
@@ -438,6 +456,115 @@ namespace
     {
         return "macro expansion is not supported: '" + name + "' is a macro, which FMinus reads only in #if, #elif, "
                "#ifdef and #ifndef (for a constant, declare an enum or a const)";
+    }
+
+    bool isHexDigit(char c)
+    {
+        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+    }
+
+    unsigned hexValue(char c)
+    {
+        return c <= '9' ? static_cast<unsigned>(c - '0') : static_cast<unsigned>((c | 0x20) - 'a' + 10);
+    }
+
+    // `code`, a Unicode scalar value, in UTF-8: what clang makes of a universal character name in a string literal.
+    void appendUtf8(std::string& text, std::uint32_t code)
+    {
+        const auto byte = [&](std::uint32_t value) { text += static_cast<char>(static_cast<unsigned char>(value)); };
+        if (code < 0x80)
+            byte(code);
+        else if (code < 0x800)
+        {
+            byte(0xC0 | (code >> 6));
+            byte(0x80 | (code & 0x3F));
+        }
+        else if (code < 0x10000)
+        {
+            byte(0xE0 | (code >> 12));
+            byte(0x80 | ((code >> 6) & 0x3F));
+            byte(0x80 | (code & 0x3F));
+        }
+        else
+        {
+            byte(0xF0 | (code >> 18));
+            byte(0x80 | ((code >> 12) & 0x3F));
+            byte(0x80 | ((code >> 6) & 0x3F));
+            byte(0x80 | (code & 0x3F));
+        }
+    }
+
+    // C's escapes (C23 6.4.4.4): the simple ones, octal (one to three digits) and hex (any number of digits) ones of
+    // a byte each, and universal character names, \u and four hex digits or \U and eight, a character in UTF-8. Any
+    // other is an error, in clang's words, where clang only warns of an unknown one; a byte's value past 255 too.
+    std::string stringValue(const location& where, std::string_view literal)
+    {
+        const std::string_view body = literal.substr(1, literal.size() - 2);   // the quotes
+        std::string text;
+        for (std::size_t i = 0; i < body.size(); ++i)
+        {
+            if (body[i] != '\\')
+            {
+                text += body[i];
+                continue;
+            }
+            const std::size_t start = i;   // the backslash's
+            const auto fail = [&](std::size_t length, const std::string& message) {
+                return Parser::syntax_error(within(where, 1 + start, length), message);
+            };
+            const char c = body[++i];   // the lexer's pattern puts a character after every backslash
+            constexpr std::string_view kSimple = "'\"?\\abfnrtv";
+            constexpr std::string_view kSimpleValues = "'\"?\\\a\b\f\n\r\t\v";
+            if (const std::size_t simple = kSimple.find(c); simple != std::string_view::npos)
+                text += kSimpleValues[simple];
+            else if (c >= '0' && c <= '7')
+            {
+                unsigned value = 0;
+                std::size_t digits = 0;
+                for (; digits < 3 && i < body.size() && body[i] >= '0' && body[i] <= '7'; ++digits, ++i)
+                    value = value * 8 + static_cast<unsigned>(body[i] - '0');
+                --i;
+                if (value > 0xFF)
+                    throw fail(1 + digits, "octal escape sequence out of range");
+                text += static_cast<char>(static_cast<unsigned char>(value));
+            }
+            else if (c == 'x')
+            {
+                std::uint64_t value = 0;
+                std::size_t end = i + 1;
+                for (; end < body.size() && isHexDigit(body[end]); ++end)
+                    value = std::min<std::uint64_t>(value * 16 + hexValue(body[end]), 0x100);
+                if (end == i + 1)
+                    throw fail(2, "\\x used with no following hex digits");
+                if (value > 0xFF)
+                    throw fail(end - start, "hex escape sequence out of range");
+                text += static_cast<char>(static_cast<unsigned char>(value));
+                i = end - 1;
+            }
+            else if (c == 'u' || c == 'U')
+            {
+                const std::size_t digits = c == 'u' ? 4 : 8;
+                std::uint32_t code = 0;
+                std::size_t read = 0;
+                for (; read < digits && i + 1 + read < body.size() && isHexDigit(body[i + 1 + read]); ++read)
+                    code = code * 16 + hexValue(body[i + 1 + read]);
+                if (read < digits)
+                    throw fail(2 + read, "incomplete universal character name");
+                if (code > 0x10FFFF || (code >= 0xD800 && code <= 0xDFFF))
+                    throw fail(2 + digits, "invalid universal character");
+                appendUtf8(text, code);
+                i += digits;
+            }
+            else
+            {
+                // A byte of a character past ASCII is shown with the rest of it, as clang shows the character.
+                std::size_t length = 1;
+                while (i + length < body.size() && (static_cast<unsigned char>(body[i + length]) & 0xC0) == 0x80)
+                    ++length;
+                throw fail(1 + length, "unknown escape sequence '\\" + std::string(body.substr(i, length)) + "'");
+            }
+        }
+        return text;
     }
 
     std::optional<fminus::frontend::IncludedFile> directive(fminus::frontend::ScannerState& state,

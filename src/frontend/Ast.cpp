@@ -214,13 +214,48 @@ namespace fminus::ast
             return typeName(type) + (isConst ? " const" : "") + (isRestrict ? " restrict" : "");
         }
 
-        // [[fminus::range(20, 20000)]], [[clang::nonblocking]]
+        // A string as a C string literal: "dB", a quote, a backslash and a control character escaped ("a\"b",
+        // "\n", "\001"), any other byte as it is (UTF-8's too).
+        std::string stringLiteral(const std::string& text)
+        {
+            std::string literal = "\"";
+            for (const char c : text)
+            {
+                const auto byte = static_cast<unsigned char>(c);
+                if (c == '"' || c == '\\')
+                    literal += std::string("\\") + c;
+                else if (c == '\n')
+                    literal += "\\n";
+                else if (c == '\t')
+                    literal += "\\t";
+                else if (byte < 0x20 || byte == 0x7f)
+                {
+                    literal += '\\';
+                    literal += static_cast<char>('0' + (byte >> 6));
+                    literal += static_cast<char>('0' + ((byte >> 3) & 7));
+                    literal += static_cast<char>('0' + (byte & 7));
+                }
+                else
+                    literal += c;
+            }
+            return literal + "\"";
+        }
+
+        // [[fminus::range(20, 20000)]], [[clang::nonblocking]], [[ui::unit("dB")]]
         std::string attributeText(const Attribute& attribute)
         {
             std::string args;
-            for (const std::string& arg : attribute.args)
-                args += (args.empty() ? "" : ", ") + arg;
+            for (const AttributeArg& arg : attribute.args)
+                args += (args.empty() ? "" : ", ") + (arg.isString ? stringLiteral(arg.text) : arg.text);
             return "[[" + attribute.name + (attribute.args.empty() ? "" : "(" + args + ")") + "]]";
+        }
+
+        std::string attributesText(const std::vector<Attribute>& attributes)
+        {
+            std::string text;
+            for (const Attribute& attribute : attributes)
+                text += " " + attributeText(attribute);
+            return text;
         }
 
         // The values of an initialiser list from `first` to `end`, the braces in them that are `depth` + 1 deep each
@@ -270,7 +305,7 @@ namespace fminus::ast
         {
             return indent + "(decl "
                    + declared(decl.type, decl.isConst, decl.isRestrict, decl.size.get(), decl.rowSize.get()) + " "
-                   + decl.name + (decl.init ? " " + dump(*decl.init) : "")
+                   + decl.name + attributesText(decl.attributes) + (decl.init ? " " + dump(*decl.init) : "")
                    + (decl.hasList ? " " + list(decl.list, decl.braces) : "") + ")";
         }
 
@@ -348,7 +383,9 @@ namespace fminus::ast
     std::optional<double> attributeNumber(std::string spelling)
     {
         const bool hex = spelling.find("0x") != std::string::npos || spelling.find("0X") != std::string::npos;
-        if (!hex && !spelling.empty() && (spelling.back() == 'f' || spelling.back() == 'F'))
+        // An f suffix: a hex float's follows its exponent, whose digits are decimal (0x1p-3f); in 0x1F, F is a digit.
+        if ((!hex || spelling.find_first_of("pP") != std::string::npos) && !spelling.empty()
+            && (spelling.back() == 'f' || spelling.back() == 'F'))
             spelling.pop_back();
         const bool floating = spelling.find_first_of(hex ? ".pP" : ".eE") != std::string::npos;
         char* end = nullptr;
@@ -452,10 +489,7 @@ namespace fminus::ast
                         text += "\n  " + dump(*enums[shown]);
                     text += std::string(field.isParam ? "\n  (param " : "\n  (field ")
                             + declared(field.type, field.isConst, false, field.size.get(), field.rowSize.get()) + " "
-                            + field.name;
-                    for (const Attribute& attribute : field.attributes)
-                        text += " " + attributeText(attribute);
-                    text += ")";
+                            + field.name + attributesText(field.attributes) + ")";
                 }
                 for (; shown < enums.size(); ++shown)
                     text += "\n  " + dump(*enums[shown]);
@@ -479,9 +513,7 @@ namespace fminus::ast
                 text += std::string(i == first ? "(" : " (") + declared(param.type, param.isConst, param.isRestrict)
                         + (param.name.empty() ? "" : " " + param.name) + ")";
             }
-            text += ")";
-            for (const Attribute& attribute : function.attributes)
-                text += " " + attributeText(attribute);
+            text += ")" + attributesText(function.attributes);
             for (const Stmt& stmt : function.body)
                 text += "\n" + dump(stmt, "  ");
             text += ")\n";

@@ -87,13 +87,28 @@ namespace fminus
             return {kind, binding.value};
         }
 
+        // A field's attributes as the host sees them, its numbers' values worked out (the code generator has checked
+        // that each is one).
+        std::vector<Program::Attribute> attributesOf(const ast::Field& field)
+        {
+            std::vector<Program::Attribute> attributes;
+            for (const ast::Attribute& written : field.attributes)
+            {
+                Program::Attribute& attribute = attributes.emplace_back();
+                attribute.name = written.name;
+                for (const ast::AttributeArg& arg : written.args)
+                    attribute.arguments.push_back({arg.isString, ast::attributeNumber(arg).value_or(0.0), arg.text});
+            }
+            return attributes;
+        }
+
         // A parameter's range and default, from its attributes (the code generator has checked them).
         void describe(const ast::Field& field, Program::Parameter& parameter)
         {
             for (const ast::Attribute& attribute : field.attributes)
             {
                 std::vector<double> numbers;
-                for (const std::string& arg : attribute.args)
+                for (const ast::AttributeArg& arg : attribute.args)
                     numbers.push_back(ast::attributeNumber(arg).value_or(0.0));
                 if (attribute.name == "fminus::range" && numbers.size() == 2)
                 {
@@ -263,7 +278,7 @@ namespace fminus
                 info.fields.push_back({field.name, (field.isParam ? "param " : "") + ast::typeName(fieldType), offset,
                                        layout.getTypeAllocSize(element).getFixedValue(),
                                        ast::isArray(fieldType) ? ast::typeName(ast::elementOf(fieldType)) : "",
-                                       std::move(extents)});
+                                       std::move(extents), attributesOf(field)});
                 if (!field.isParam)
                     continue;
                 // The slot, { const float* stream; T value; }.
@@ -277,6 +292,7 @@ namespace fminus
                 parameter.streamOffset = offset + slot->getElementOffset(0).getFixedValue();
                 parameter.valueOffset = offset + slot->getElementOffset(1).getFixedValue();
                 describe(field, parameter);
+                parameter.attributes = info.fields.back().attributes;
             }
             for (const std::string& method : declared->methods)
                 info.methods.push_back(declared->name + "::" + method);
@@ -432,6 +448,17 @@ namespace fminus
                     && name.substr(module.name.size(), 2) == "::" && name.ends_with(parameter.name))
                     return &parameter;
             }
+        }
+        return nullptr;
+    }
+
+    const Program::Attribute* Program::findAttribute(const std::vector<Attribute>& attributes,
+                                                     std::string_view name) noexcept
+    {
+        for (auto attribute = attributes.rbegin(); attribute != attributes.rend(); ++attribute)
+        {
+            if (attribute->name == name)
+                return &*attribute;
         }
         return nullptr;
     }

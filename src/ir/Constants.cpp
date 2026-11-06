@@ -347,6 +347,7 @@ namespace fminus::ir::detail
     {
         const ast::DeclStmt& decl = constant.declaration;
         const SourceLocation location = constant.location;
+        refuseAttributes(decl);
         if (!decl.isConst)
             error(location, "FMinus has no variables at the top level: declare " + quoted(decl.name)
                                 + " const, a constant of the program, or keep it in a module");

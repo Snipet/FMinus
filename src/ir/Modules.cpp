@@ -152,6 +152,7 @@ namespace fminus::ir::detail
             ast::Type type = field.type;
             if (!names.insert(field.name).second)
                 error(field.location, "duplicate member " + quoted(field.name));
+            checkAttributes(field);
             if (field.isParam)
             {
                 checkParameter(module, field);
@@ -211,8 +212,8 @@ namespace fminus::ir::detail
         return found != fieldTypes_.end() ? found->second : field.type;
     }
 
-    // A parameter's type (a float, an int or a bool), its binding (only a float can be a stream), and its attributes:
-    // fminus::range(minimum, maximum) and fminus::default(value), numbers, the default within the range.
+    // A parameter's type (a float, an int or a bool) and its binding (only a float can be a stream); checkAttributes
+    // checks its attributes.
     void Lowering::checkParameter(const ast::Module& module, const ast::Field& field)
     {
         const ast::Type type = field.type;
@@ -224,36 +225,74 @@ namespace fminus::ir::detail
             error(field.location,
                   "parameter " + quoted(field.name) + " is " + what + ": only a float parameter can be a stream");
         }
+    }
+
+    // A field's attributes, a parameter's among them. FMinus's own: fminus::range(minimum, maximum), two numbers in
+    // order, a parameter's or a field's of numbers (what the host's control or display spans), and
+    // fminus::default(value), one number, a parameter's, within its range; another of its namespace is unknown.
+    // Clang's are a function's (Effects.cpp). Any other is the host's, a unit, a label or a hint, which FMinus passes
+    // on as written (Program::Attribute), its numbers checked as numbers C writes: C23 ignores an attribute it does
+    // not know, and the host may know it.
+    void Lowering::checkAttributes(const ast::Field& field)
+    {
+        const ast::Type element = ast::isArray(field.type) ? ast::elementOf(field.type) : field.type;
+        const bool numeric = ast::isArithmetic(element) && element != ast::Type::Bool && !ast::isMask(element);
         std::optional<double> minimum, maximum, initial;
         for (const ast::Attribute& attribute : field.attributes)
         {
             std::vector<double> numbers;
-            for (const std::string& arg : attribute.args)
+            bool valid = true;
+            for (const ast::AttributeArg& arg : attribute.args)
             {
+                if (arg.isString)
+                    continue;
                 if (const std::optional<double> number = ast::attributeNumber(arg))
                     numbers.push_back(*number);
                 else
-                    error(attribute.location, "invalid number " + quoted(arg) + " in " + quoted(attribute.name));
+                {
+                    error(attribute.location, "invalid number " + quoted(arg.text) + " in " + quoted(attribute.name));
+                    valid = false;
+                }
             }
-            if (numbers.size() != attribute.args.size())
+            if (!valid)
                 continue;
-            if (attribute.name == "fminus::range" && numbers.size() == 2)
+            const bool onlyNumbers = numbers.size() == attribute.args.size();
+            if (attribute.name == "fminus::range")
             {
-                minimum = numbers[0];
-                maximum = numbers[1];
-                if (*minimum >= *maximum)
-                    error(attribute.location, "fminus::range's minimum must be below its maximum");
+                if (!onlyNumbers || numbers.size() != 2)
+                    error(attribute.location, "'fminus::range' takes two numbers, a minimum and a maximum");
+                else if (!field.isParam && !numeric)
+                    error(attribute.location, "'fminus::range' attribute only applies to fields of numbers (float, "
+                                              "double, int, a float vector and arrays of them), not "
+                                                  + quoted(ast::typeName(field.type)));
+                else
+                {
+                    minimum = numbers[0];
+                    maximum = numbers[1];
+                    if (*minimum >= *maximum)
+                        error(attribute.location, "fminus::range's minimum must be below its maximum");
+                }
             }
-            else if (attribute.name == "fminus::default" && numbers.size() == 1)
-                initial = numbers[0];
-            else if (attribute.name == "fminus::range")
-                error(attribute.location, "'fminus::range' takes two numbers, a minimum and a maximum");
             else if (attribute.name == "fminus::default")
-                error(attribute.location, "'fminus::default' takes one number");
-            else
+            {
+                if (!field.isParam)
+                    error(attribute.location, "'fminus::default' attribute only applies to parameters: a field starts "
+                                              "at 0, and a method such as init sets it");
+                else if (!onlyNumbers || numbers.size() != 1)
+                    error(attribute.location, "'fminus::default' takes one number");
+                else
+                    initial = numbers[0];
+            }
+            else if (attribute.name.starts_with("fminus::"))
                 error(attribute.location,
                       "unknown attribute " + quoted(attribute.name)
-                          + ": a parameter takes fminus::range(min, max) and fminus::default(value)");
+                          + (field.isParam ? ": a parameter takes fminus::range(min, max) and fminus::default(value)"
+                                           : ": a field takes fminus::range(min, max)"));
+            else if (attribute.name == "clang::nonblocking" || attribute.name == "clang::nonallocating")
+                error(attribute.location, quoted(attribute.name) + " attribute only applies to functions");
+            else if (attribute.name.starts_with("clang::"))
+                error(attribute.location, "unknown attribute " + quoted(attribute.name)
+                                              + ": FMinus has clang::nonallocating and clang::nonblocking");
         }
         if (minimum && maximum && initial && (*initial < *minimum || *initial > *maximum))
             error(field.location, std::format("the default of {}, {}, is outside its fminus::range({}, {})",
