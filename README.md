@@ -25,9 +25,10 @@ builds into an executable. Its compiler has optimisations of its own, from `-O1`
 each value of a knob that steers its loop, and a local's zeroing (an array's, or a module's overwritten whole) is
 removed where nothing reads the zeros. It tells LLVM C's strict-aliasing rule, that a loop whose condition is not a
 constant may be assumed to end, and what the runtime's functions do. Its math builtins give a float one result wherever
-it is computed, and a host may have subnormals flushed to zero, and give a program a loop budget, so that a call that
-would loop for ever returns early instead of holding the audio thread. `examples/plugin/` is a JUCE plugin whose DSP is an
-FMinus program. The build, the dependencies and the toolchain's smoke tests are in place around it.
+it is computed, and a host may have subnormals flushed to zero, give a program a loop budget, so that a call that
+would loop for ever returns early instead of holding the audio thread, and compile it with bounds checks while it is
+written, so that an index outside its array stops the call and says where. `examples/plugin/` is a JUCE plugin whose DSP
+is an FMinus program. The build, the dependencies and the toolchain's smoke tests are in place around it.
 
 Documentation: [docs/](docs/README.md). It covers the architecture, writing a program with `main`, a guide to
 extending the compiler with worked recipes, SIMD (vector types, a vector math library, and vectors as wide as the
@@ -83,12 +84,13 @@ src/                    the fminus library: every .cpp is a source, every gramma
                         and its parts' map), CodeGen.cpp (the passes), Types, Functions, Statements, Expressions,
                         Constants (integer constant expressions, array sizes, enumerations, the top level's
                         constants), Calls, Math (the math modes), Hash
-                        (hash and randf), Vectors, Memory, Modules, Effects, Tbaa (strict aliasing's tags) and
-                        Denormals (flush-to-zero; with Denormals.h) .cpp
+                        (hash and randf), Vectors, Memory, Modules, Effects, Tbaa (strict aliasing's tags),
+                        Denormals (flush-to-zero; with Denormals.h) and Bounds (bounds checks) .cpp
   jit/                  Jit: LLJIT for FMinus modules (host CPU, pipeline, runtime)
   opt/                  FMinus's own LLVM passes: KnobVersioning (a method's copies for its knobs' values),
-                        ZeroInitElision (a local's zeroing, removed where nothing reads it) and MathKernels (the
-                        math builtins' kernels, inline)
+                        ZeroInitElision (a local's zeroing, removed where nothing reads it), MathKernels (the
+                        math builtins' kernels, inline), BoundsCheck (a failed bounds check made a return) and
+                        LoopBudget (runaway-loop protection), with EarlyReturn, what the last two share
   circuit/              the circuit compiler: its own library, libfminus_circuit.a, with no LLVM in it (Netlist,
                         Plan, Dc (the DC operating point), Mna, Laws, Linear (matched designs, the method check),
                         Emit, Halfbands, Generate; Reference and Analysis, the double reference and the measurements
@@ -382,6 +384,12 @@ unused, while `while (1)` and `for (;;)` may run for ever. A function as a whole
 C++ one is. A host that would rather a loop did not run for ever compiles with a loop budget
 (`Program::Options::loopBudget`, `fminus --loop-budget n`): no change to the language, a limit on what a call takes.
 
+An index outside its array is undefined, as in C. A host that would rather it stopped the call compiles with bounds
+checks (`Program::Options::boundsCheck`, `fminus --bounds-check`), for a development build: every access whose array
+the compiler sees (`a[i]`, `m.taps[i]`, `voices[v]`, `a + i`) is checked against the array's extent, and a call whose
+check fails returns early, with where it failed recorded for the host. No change to the language either: a program
+within its arrays computes the same with the checks and without.
+
 A v0 program with `f` suffixes, with prototypes for calls ahead of a definition, with vectors only in C's form (braces,
 given clang's `ext_vector_type`), and without `%` on floats, `poly`, modules, `parallel`, `main`, FMinus's own builtins
 (`hash`, `randf`, the FFT), a shift that C leaves undefined or a negative value in a variable of an enumeration with no
@@ -419,6 +427,8 @@ build-dev/bin/fminus synth.fm -I lib               # #include "name": beside the
 build-dev/bin/fminus voices.fm --threads 4         # a parallel region on 4 threads at most (0: every core; 1: alone)
 build-dev/bin/fminus osc.fm --run f 1 --loop-budget 1000000   # the loop budget: a call that would loop for ever
                                                    # returns early (status 3); stderr says what it took
+build-dev/bin/fminus taps.fm --run tap 20 --bounds-check   # bounds checks: an index outside its array stops the
+                                                   # call (status 4); stderr says where, the array and the index
 build-dev/bin/fminus pedal.cir --emit fm           # the FMinus module a circuit netlist generates (docs/circuits.md)
 build-dev/bin/fminus pedal.cir --self-test --emit fm   # the self-test chooses the netlist's open configuration first
                                                    # (--threads its threads), and prints a line of directives to paste
@@ -503,8 +513,9 @@ gain(in, out, n, 0.5f);                                       // one call a bloc
   `knobVersions` how many copies of a method knob versioning may make (8; 0 turns it off), `denormals` whether
   subnormals are kept or flushed to zero (`Denormals::Preserve` or `Flush`), `threads` the most threads a parallel
   region runs on (0, the default, is every core; 1 runs each on the calling thread alone), `keepIr` which of the
-  program's LLVM IR to keep as text (below), and `loopBudget` whether its loops count against a budget (`false`;
-  below). The header says what each costs.
+  program's LLVM IR to keep as text (below), `loopBudget` whether its loops count against a budget (`false`;
+  below), and `boundsCheck` whether its accesses are checked against their arrays (`false`; below). The header says
+  what each costs.
 - **Threads.** `compile()` and the first look-up of each function run LLVM's optimiser and code generator on the
   calling thread: they take milliseconds and allocate. Different programs may compile on different threads at once.
   In a plugin, compile off the audio thread and hand the pointer over (below). A program's `parallel for` and
@@ -542,6 +553,16 @@ gain(in, out, n, 0.5f);                                       // one call a bloc
   ([docs/extending.md](docs/extending.md), recipe 29, has the measurements). A call that ran out leaves the instance
   as its optimised code had it, which need not be any point of the source: re-initialise the instance (or discard it)
   before running the program again. Off by default; unlimited until the host sets it.
+- **Bounds checks.** A program compiled with `Options::boundsCheck`, a development build, checks every access whose
+  array the compiler sees against the array's extent (an element must be one of its own, a pointer formed from it may
+  also point one past its end), and a call whose check fails returns early, 0, with every function of the program that
+  called it, before the access: `boundsViolation()` is the first such check since `clearBoundsViolation()`, a
+  `BoundsViolation` with the file, line and column, the array as the source names it, its type and extent, and the
+  index (`message()`: `echo.fm:14:33: index -188 out of bounds for 'line' of type 'float[512]'`). A pointer the
+  program keeps (a variable's, a parameter's: a heap block, a host's buffer) is not checked. Within its arrays a call
+  computes what it would without the checks, bit for bit; a check costs a compare and a branch where the optimiser
+  cannot prove it, and a loop that updates a field may then store it every iteration (the measured ones a third to
+  two fifths slower: recipe 30). Off by default, and without it the code is the same, byte for byte.
 - **Lifetime.** A function pointer is valid while its `Program` lives.
 
 `include/fminus/Circuit.h` is the circuit compiler's: `fminus::circuit::generate(netlist, "pedal.cir")` turns a
@@ -587,6 +608,7 @@ the result ([docs/programs.md](docs/programs.md)):
 build-dev/bin/fminus note.fm --emit exe -o note             # then ./note 69
 build-dev/bin/fminus note.fm --entry                        # the IR with that C main (--emit asm, obj too)
 build-dev/bin/fminus osc.fm --emit exe --loop-budget 1000000 -o osc   # main stops past the budget, and exits with 3
+build-dev/bin/fminus taps.fm --emit exe --bounds-check -o taps         # main stops at a failed check, exits with 4
 ```
 
 `fminus-build` builds LLVM IR written by hand, which brings its own C `main`:
@@ -691,6 +713,11 @@ These are constraints a plugin runs into. `examples/plugin/`, a JUCE plugin, mee
   after it check `loopBudgetExceeded()`: the call returned early, and the plugin can silence the program, report it,
   and re-initialise the instance (or discard it) before the next call. The budget is a count of iterations, not a clock
   ([docs/extending.md](docs/extending.md), recipe 29).
+- **An index outside its array.** While a program is written, compile it with `Program::Options::boundsCheck`, and
+  after each call check `boundsViolation()`: the call returned early, before the access, and the plugin can silence
+  the program, show `message()` (off the audio thread: it allocates), and re-initialise the instance (or discard it)
+  and `clearBoundsViolation()` before the next call. Compile the build that plays without it, which is as fast as
+  ever ([docs/extending.md](docs/extending.md), recipe 30).
 - **Size and symbols.** Static LLVM adds tens of megabytes. Export only the plugin's entry points (an
   exported-symbols list), so LLVM's symbols cannot clash with another copy of LLVM in the host process.
 - **Bit-exactness across machines.** FMinus fuses and reassociates nothing, and in its default math mode a float's

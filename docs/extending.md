@@ -1,7 +1,7 @@
 # Extending the compiler
 
 How to add to FMinus. First, how a change moves through the compiler, and the few rules that keep that easy. Then
-twenty-six worked recipes. Eleven grow the C subset from a one-line builtin to C's control flow, a custom LLVM pass,
+twenty-seven worked recipes. Eleven grow the C subset from a one-line builtin to C's control flow, a custom LLVM pass,
 `int`, `void` and pointers, the heap with the attributes that keep it off the audio thread, arrays and modules, FMinus's
 classes, an FFT from a C library built into the runtime, and parameters, the values a plugin's host sets. Six more are
 about the compiler rather than the language: math that gives a float one result wherever it is computed, knob versioning
@@ -10,9 +10,10 @@ subnormals flushed for the audio thread. Two more grow the language again: `#inc
 files, and `parallel for` and `parallel { }`, a program's own threads. Two return to the math: kernels of FMinus's
 own, the same in every lane and on every target, and those kernels inline. The last four are for DSP's everyday code:
 C's bitwise operators with a hash and white noise from a counter, constant tables stored once, `switch` and
-enumerations, and constants at the top level with arrays sized by constant expressions. The last is for the host: a
-loop budget, which stops a program that would loop for ever before it holds the audio thread. Then the pitfalls those
-recipes ran into, and design notes for what comes next. [simd.md](simd.md) has recipes 7 to 9, for vectors.
+enumerations, and constants at the top level with arrays sized by constant expressions. The last two are for the host:
+a loop budget, which stops a program that would loop for ever before it holds the audio thread, and bounds checks for
+development builds, which stop a call before an index leaves its array. Then the pitfalls those recipes ran into, and
+design notes for what comes next. [simd.md](simd.md) has recipes 7 to 9, for vectors.
 
 Recipes 1 to 4 are in the compiler now (`tanhf` and `%`; `bool` and its operators; `if`, `while` and `for`), and so are
 simd.md's 7 to 9, recipe 10 (`int`, `void` and pointers), recipe 11 (the heap), recipe 12 (arrays and modules), recipe
@@ -20,8 +21,8 @@ simd.md's 7 to 9, recipe 10 (`int`, `void` and pointers), recipe 11 (the heap), 
 runtime's attributes and loop progress, denormal control), recipe 21 (`#include`), recipe 22 (`parallel for` and
 `parallel { }`), recipes 23 and 24 (math kernels of FMinus's own, and inline), recipe 25 (the bitwise operators,
 `hash` and `randf`), recipe 26 (constant tables), recipe 27 (`switch` and `enum`), recipe 28 (constants at the top
-level, and sizes of constant expressions) and recipe 29 (the loop budget), so their sections describe how the code you
-have got there: read a section beside the files it names.
+level, and sizes of constant expressions), recipe 29 (the loop budget) and recipe 30 (bounds checks), so their sections
+describe how the code you have got there: read a section beside the files it names.
 Recipes 5 and 6, a runtime function and a pass, are not part of the language; they live in [recipes/](recipes/) as a
 patch, so you can apply them to see them work. None of these are sketches: each was applied to this repository, built
 with `-Werror`, and tested in the dev and asan presets, every test passing. [architecture.md](architecture.md) describes
@@ -5167,16 +5168,16 @@ budget.unwind:
   ret i32 0
 ```
 
-So no caller goes on with a value that was never computed. But what the program leaves in memory, its modules' state
-and what it wrote of the output, is whichever of the optimised code's stores had run, and that need not be any point of
-the source. The oscillator above, at `-O2`, keeps `phase` in a register through the block's loop (LICM promotes it,
+So no caller goes on with a value that was never computed. But what the program leaves in memory, its modules' state and
+what it wrote of the output, is whichever of the optimised code's stores had run, and that need not be any point of the
+source. The oscillator above, at `-O2`, keeps `phase` in a register through the block's loop (LICM promotes it,
 `%phase.promoted`) and stores it after the loop: stopped in the wrap of a sample, it has written the samples before and
 left `phase` as it was before the call. The optimiser sinks and merges stores too, so some of a stopped call's writes
 may be missing, out of order with the source, or out of step with each other. A ring buffer that writes `buf[w]`,
 advances `w`, loops, then wraps `w` at `size` may be left with `w == size`, and the next call would write past the
-buffer (FMinus checks no bounds). So a host that runs the program again first re-initialises the instance as it made it
-(zeroes it, then `setDefaults` and its own parameters), or throws it away; `LoopBudgetTest.cpp` shows the oscillator's
-case.
+buffer (unless the program is compiled with bounds checks, recipe 30, which stop the call there). So a host that runs
+the program again first re-initialises the instance as it made it (zeroes it, then `setDefaults` and its own
+parameters), or throws it away; `LoopBudgetTest.cpp` shows the oscillator's case.
 
 A stop writes -1, not its count, which a charge may have taken far below zero. `left` is then never below -1: the
 host sets it to -1 or more (`setLoopBudget` makes a negative budget -1), a stop writes -1, and every other write is of
@@ -5330,6 +5331,284 @@ analyses, and the code it adds): the saturator 58 ms to 63, the convolver 98 to 
 these kernels has a parallel region: a function a region's threads run writes its count back with an atomic min
 (`LDSMIN` on arm64) at each call and return instead of a store, which these numbers do not measure.
 
+## Recipe 30: bounds checks, for development builds
+
+*In the compiler. Code: `src/ir/Bounds.cpp` (the checks, and the extents values carry; `Lowering::Extent` in
+`src/ir/Lowering.h`), with the accesses in `src/ir/Memory.cpp` (`read`, `element`, `lvalue`, `lowerAddressOf`,
+`pointerArithmetic`), `src/ir/Vectors.cpp` (a module's field) and `src/ir/Calls.cpp` (`poly_load`, `poly_store`);
+`src/opt/BoundsCheck.h` and `.cpp` (`BoundsCheckPass`, the record's global, the checks' descriptions and their
+messages); `src/opt/EarlyReturn.h` and `.cpp`, what it shares with the loop budget's pass; `ir::Options::boundsCheck`
+and its module flag in `src/ir/CodeGen.h` and `.cpp`; the pass in `src/support/HostTarget.cpp`;
+`Program::Options::boundsCheck`, `boundsViolation`, `clearBoundsViolation` and `BoundsViolation` in
+`include/fminus/FMinus.h` and `src/api/FMinus.cpp`; `fminus --bounds-check` in `tools/fminus/main.cpp`; an
+executable's in `addEntryPoint` (`src/support/Aot.cpp`), with `fminus_rt_bounds_state` and `fminus_rt_main_bounds` in
+`src/runtime/`. Tests: `tests/unit/BoundsCheckTest.cpp` (`[bounds]`), `tests/library/BoundsCheckTest.cpp` and
+`tests/lit/fminus/bounds-check.fm`.*
+
+An index past an array's end, or before its start, reads or writes whatever lies beside the array: another field of
+the module, the stack, the host's memory. C calls it undefined, and in a plugin it corrupts the host or crashes it,
+often much later and somewhere else. It takes one ordinary bug. This echo's delay is a parameter, and its read position
+wraps once, so a delay longer than the line reads before it:
+
+```c
+module Echo
+{
+    param int delay [[fminus::range(1, 512)]] [[fminus::default(100)]];
+    float line[512];
+    int at;
+
+    void process(const float* restrict in, float* restrict out, int n) [[clang::nonblocking]]
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            int back = at - delay[i];
+            if (back < 0)
+                back += 512;
+            const float y = line[back];           // a delay of 700: line[-188]
+            line[at] = in[i] + 0.5f * y;
+            out[i] = in[i] + y;
+            at = at == 511 ? 0 : at + 1;
+        }
+    }
+};
+```
+
+Compiled with bounds checks, every access whose array the compiler can see is checked against the array's extent, and
+a call whose check fails returns early, with the check recorded for the host:
+
+```cpp
+fminus::Program::Options options;
+options.boundsCheck = true;                                   // off by default; a development build's
+auto program = fminus::Program::compile(source, errors, options);
+...
+process(instance, in, out, n);
+if (auto failed = program->boundsViolation())                 // it returned early: silence it, and, off the audio
+    report(failed->message());                                // thread, "echo.fm:14:33: index -188 out of bounds for
+                                                              // 'line' of type 'float[512]'"; clearBoundsViolation()
+```
+
+The checks are for a program while it is written: a host compiles with them while its author tries the program out,
+and without them for the build that plays, which is the code it was, byte for byte (Measurements, below).
+
+### What is checked
+
+The code generator checks where it can see the array: an array's name stands for a pointer to its first element
+(recipe 12), and that pointer carries the array's extent, its element count, its name as the source writes it and its
+type (`Lowering::Extent`, created in `read` where the array decays). What is made from it carries the extent on:
+
+- **an element**, `a[i]`, `*p`, `p->y`: one of the array's own, its index from 0 to the count less one (width 1);
+- **a pointer formed**, `a + i`, `p - i`, `&a[i]`: any element or one past the last, as C allows (C11 6.5.6p8), so
+  `a + 4` and `&a[4]` of a `float a[4]` are fine, an end to compare against, and `a + 5` and `a - 1` fail (width 0);
+- **a `poly_load` or `poly_store`** through one: every lane it reaches, the poly width from the index (width: the
+  lanes), or, with a mask, each lane the mask takes, the first outside reported (`checkLanes`).
+
+The arrays are every array the program declares: a local, a module's field (`taps[k]` in a method, `m.taps[k]`,
+`p->taps[k]`), an array of modules and an element's field (`voices[v].render()`, `voices[v].taps[k]`), a constant
+table (recipe 26, and the top level's, recipe 28), an array a parallel region uses of the function around it. The
+index is the element's from the array's first: `(a + 3)[i]` checks `3 + i`.
+
+What carries no extent is not checked: a pointer a variable, a field or a parameter holds (`float* p = buf;`, then
+`p[i]`), what a function returns, what `?:` chooses, a `void*`. So the heap's blocks and a host's buffers, which only
+reach a program through such pointers, are not checked: their extents are known only at run time, and keeping them
+would change the module's layout or a pointer's size. A constant of the top level runs nowhere (its initialiser is
+lowered into a function that is deleted, recipe 28), so `const float* const p = &table[6];` is no check either.
+
+### Where the checks go: first
+
+The loop budget's checks go in last, after every decision, because they must not change one (recipe 29). These go in
+first, where the access is, as clang's `-fsanitize=array-bounds` with `-fsanitize-trap` puts them, because the
+optimiser must know of them: a failed check is the end of the call, and nothing after it may run, or be moved before
+it. The check is an unsigned comparison of the element's index, widened to an `i64` (a negative one is a huge unsigned
+number), against the extent, and a branch, likely in bounds, past a call of `fminus.bounds.stop` that never returns:
+
+```llvm
+  %idxprom = sext i32 %1 to i64
+  %bounds.in = icmp ult i64 %idxprom, 512
+  br i1 %bounds.in, label %bounds.ok, label %bounds.fail, !prof !13   ; likely
+
+bounds.ok:
+  %arrayidx = getelementptr inbounds float, ptr %arraydecay, i64 %idxprom
+  ...
+bounds.fail:
+  call void @fminus.bounds.stop(i32 1, i64 %idxprom)
+  unreachable
+```
+
+`fminus.bounds.stop` is `noreturn nounwind cold`, and writes only memory the program cannot reach (`memory
+(inaccessiblemem: write)`): to the optimiser a trap that loads of the program's own memory may move across, so a loop's
+loads of a module's fields still leave the loop. Its arguments are the check's number, from 1, and the index. The
+optimiser then does what it does with any trap: it removes a check it can prove (in a `for` over the array whose own
+condition is the extent, `i <u 16` folds away from `-O1`), keeps the others, and moves no store past one, so the access
+a failed check guards never happens, and nor does anything after it. A check of an index that is a constant within the
+array is no check at all (`a[3]` costs nothing); one that is a constant outside it fails whenever it runs, and is a
+branch too (on `false`), so that what follows stays reachable to the code generator's own rules: a non-void function
+that can reach its end is the same error with the checks as without.
+
+A trap can bound a loop: in `while (s < n) { s += 1.0f + a[i & 7]; i = i + 1; }` over a `float a[4]`, `i` cannot reach
+4, so the optimiser unrolls the loop into four iterations, with no loop left for the loop budget to count. And a loop
+whose check the optimiser turns into a trip count, `out[i] = table[i + offset]` with `offset` a field, still vectorises:
+its vector loop runs to the earlier of `n` and `1024 - offset`, and the remainder checks. What a check does cost is the
+loop's freedom with a field it updates: `at` in the echo above is stored each iteration, where without the check LICM
+keeps `at` in a register and stores it after the loop. Sinking the store to the loop's exits would add a store on the
+failed check's path, where the iteration that failed had stored nothing, which LLVM may not do to memory another thread
+could see. A loop like the echo's is then a third slower (the comb in Measurements).
+
+Each check's description goes into the module's named metadata, `!fminus.bounds.sites`, in the order of the numbers:
+its file (an `#include`'d file's name, as errors give it), line and column (a subscript's `[`, a pointer's `+` or `-`,
+a dereference's `*`, a `poly_load`'s name), the array as written, its type, its extent and the access's width:
+
+```llvm
+!fminus.bounds.sites = !{!3, !4}
+!3 = !{!"echo.fm", i32 14, i32 33, !"line", !"float[512]", i64 512, i32 1}
+!4 = !{!"echo.fm", i32 15, i32 17, !"line", !"float[512]", i64 512, i32 1}
+```
+
+The array as written is a variable's name, a field's (`m.taps`, `p->taps`, `this->taps`, or `taps` in a method), an
+element's index when it is a name or a number (`voices[v].taps`; `voices[...]` otherwise), and empty when there is
+none. A copy of a function, knob versioning's (recipe 16) or the inliner's, keeps its checks' numbers, so a check means
+the same wherever it runs.
+
+### Stopping, and returning
+
+`BoundsCheckPass` is a module pass, registered at `OptimizerLast` after the math kernels and before the loop budget
+(`HostTarget.cpp`), and runs at every level (`isRequired`), for a module whose flag `fminus.bounds-check` is 1. It
+makes each stop a branch to its function's one stop block, which records the check, unless the record holds one
+already, and returns, a zero of its type, null or nothing (the echo's `process` at `-O2`, its two checks' stops):
+
+```llvm
+bounds.stop:
+  %bounds.site = phi i32 [ 1, %bounds.fail ], [ 2, %bounds.fail23 ]
+  %bounds.index = phi i64 [ %idxprom, %bounds.fail ], [ %idxprom20, %bounds.fail23 ]
+  %bounds.first = cmpxchg ptr @fminus_rt_bounds, i32 0, i32 %bounds.site monotonic monotonic, align 8
+  %bounds.won = extractvalue { i32, i1 } %bounds.first, 1
+  br i1 %bounds.won, label %bounds.record, label %bounds.return
+bounds.record:
+  store atomic i64 %bounds.index, ptr getelementptr inbounds ({ i32, i32, i64 }, ptr @fminus_rt_bounds, i32 0, i32 2) monotonic, align 8
+  br label %bounds.return
+bounds.return:
+  ret void
+```
+
+and every function of the program that called it returns too: after each call of a function that may stop (one that
+has a check, or calls one that may, or hands one to a runtime function, a parallel region's body), it reads the record,
+and returns at once if it holds a check:
+
+```llvm
+  %0 = call float @pick(float %i1)
+  %bounds.recorded = load atomic i32, ptr @fminus_rt_bounds monotonic, align 8
+  %1 = icmp ne i32 %bounds.recorded, 0
+  br i1 %1, label %bounds.unwind, label %entry.bounds, !prof !12   ; unlikely
+bounds.unwind:
+  ret float 0.000000e+00
+```
+
+After inlining few calls are left (at `-O2` a module's `process` is usually one function), and each costs a load and a
+branch. A callee that always failed a check was `noreturn` to the optimiser, which left `unreachable` after its calls;
+the record is always set when such a callee returns, so the read after the call always unwinds into the return. The
+functions it changes, and the calls of them, get their attributes adjusted to what is now true of them (they return,
+their result may be 0 or null, they write memory that is no argument's: `mayReturnEarly`, `src/opt/EarlyReturn.h`,
+which the loop budget's pass uses too, with `reachedFunctions`, which calls run which functions), and carry
+`"fminus-bounds-check"`, so that a second run leaves them alone. The pass runs before the loop budget's, so that the
+budget's count is written back on these returns too (`BoundsCheckTest.cpp` has both in one program).
+
+The first failure is kept: the site is a compare-and-swap from 0, and the index is written only by the call that won
+it, so a parallel region's threads may fail at once and the record still holds one check and its own index. While the
+record holds a check, a call returns at its first call of a function that may stop, however it got there: the host
+clears the record before the program runs again. What the call leaves in the instance and the output is whichever of
+the optimised code's stores had run, as with the loop budget: everything the source did before the failed access may
+not have been stored yet (a field kept in a register), and nothing after it was. A host re-initialises the instance, or
+throws it away.
+
+### The record, the program's own
+
+The record is a global of the program, `fminus_rt_bounds`, the `{ int32_t site; int32_t reserved; int64_t index; }` of
+`runtime/Runtime.h`'s `fminus_rt_bounds_state`, defined empty:
+
+```llvm
+@fminus_rt_bounds = dso_local global { i32, i32, i64 } zeroinitializer, align 8
+```
+
+for the loop budget's reasons (recipe 29): each `Program` has its own, it lives beside the code that writes it, and an
+object `fminus --emit obj` writes defines it for its host. `ir::lower` defines it, with the module flag, before any
+function, since LLJIT learns a module's symbols when it is added; `Program::compile` looks it up, which compiles the
+module, and reads the checks' descriptions from the module's metadata before the JIT takes it. A program that declares
+a function of its name is an error while the checks are on ("the bounds checks reserve 'fminus_rt_bounds' for their
+record, and this program declares a function of that name: rename it"), and nothing without. The site 0 is no check,
+so a record of zeros is empty.
+
+### The host's side
+
+- `boundsViolation()` is the first check that failed since `clearBoundsViolation()` (or since the program compiled), or
+  nothing: a `BoundsViolation` with the file, line and column, the array, its type and extent, the index and the
+  access's width, its strings the `Program`'s own (`std::string_view`s, valid while it lives). It allocates nothing, and
+  its loads are relaxed atomics: the audio thread may call it. `message()` words it, as UBSan words its own with the
+  array's name and where it is: `index 16 out of bounds for 'line' of type 'float[16]'`, `pointer offset 17 out of
+  bounds ...`, `4 elements from index 14 out of bounds ...`; it allocates, so a host calls it off the audio thread.
+- `clearBoundsViolation()` empties the record, a relaxed store: before the next call, after the host has silenced the
+  program and re-initialised the instance (or thrown it away).
+- A program compiled without the checks never has a violation.
+- `fminus --run f ... --bounds-check` says where on stderr when a check fails (`fminus: --run: 'f' stopped: ...`), with
+  status 4, and what it printed is what the call returned early. `fminus --emit exe --bounds-check` gives the C main
+  the checks' messages as two tables of strings, the text before the index and the text after it, by number; after
+  `main` it reads the record, and when it holds a check prints the message (`fminus_rt_main_bounds`) and exits with 4.
+  It calls `main` through its laundered address, as with the loop budget (recipe 29): a `main` that always fails a
+  check is `noreturn` until the pass, which would delete what follows a direct call.
+
+### What it changes for programs and hosts
+
+- **Off, the default**, nothing: no extent is made, no check, no record, no metadata and no flag, and the IR is the
+  same, byte for byte, as before the option existed (every example and every lit test's program, at `-O0`, `-O2` and
+  `-O3`; `BoundsCheckTest.cpp` checks that the module has none of them).
+- **On**, a call within its arrays computes what it does without the checks, bit for bit (`BoundsCheckTest.cpp` and
+  `tests/library/BoundsCheckTest.cpp` compare a comb filter and the echo above); a program cannot name a function
+  `fminus_rt_bounds`; compile() generates the machine code. A call whose check fails returns early, its instance as the
+  optimised code had it, which the host re-initialises.
+- **What it does not catch**: an access through a pointer the program keeps (above), a heap block's or a host
+  buffer's; a stream parameter's `cutoff[i]` past the samples the host gave; and an array of arrays, which FMinus does
+  not have.
+
+### Tests
+
+- `tests/unit/BoundsCheckTest.cpp`, in the JIT at each level: an index outside its array stops the call and records the
+  check and the index (8, -1, 10^9); each check described where it is, the array as written (`taps`, `voices`,
+  `voices[v].taps`, `p->taps`, a `float4[2]`'s `w`, a pointer's `+`, a dereference's `*`); a pointer formed one past the
+  end and no further, and the element it reaches; a stop returning through every caller (`-O0`, where the calls stay)
+  with no write after the calls; the first failure kept, and while it is, a call stopping at its first call of a
+  function with checks; a module's ring buffer, an array of modules, what lies past a field's array untouched; a
+  `poly_load`'s and a `poly_store`'s lanes, a masked one's only those taken; a parallel region's part failing, the code
+  after the region not run; a loop the optimiser proves within its array with no check; a comb filter bit for bit with
+  and without; the loop budget and the checks together, the budget's count written back on a check's return; nothing of
+  the checks without the option; a constant index outside its array, and the same errors with and without; the
+  reserved name.
+- `tests/library/BoundsCheckTest.cpp`, through `Program`: the echo above, its long delay stopped and reported (file,
+  line, column, array, type, extent, index, width, message), the first failure kept, cleared and run again; an
+  `#include`'d file's check named by that file; bit for bit, the instance too; a program without the checks, and the
+  checks in `optimisedIr()`; an entry point under `Denormals::Flush` that stops and hands the host's mode back.
+- `tests/lit/fminus/bounds-check.fm`: the IR at `-O0` (the record, a check, the stop block, a call's read of the record
+  and the unwind, the attribute, the descriptions) and at `-O2` (a loop with no check left), nothing without the option;
+  `--run`'s messages for an element, an index below 0, a call, a pointer formed; an executable's main, its C main's
+  read of the record, a `main` that always fails built at `-O2`; the reserved name.
+
+### Measurements
+
+On the same M5, blocks of 256 samples, the best of 40 runs of 65536 samples each, the two alternating, with the machine
+busy with other builds (ns a sample):
+
+| Kernel | Off | On | Change | Output |
+|---|---|---|---|---|
+| a gain over the host's buffers (no array: no check) | 0.061 | 0.061 | 0% | identical |
+| a comb on a ring buffer in a field, `line[at]`, `at` a field | 0.70 | 0.93 | +32% | identical |
+| a wavetable, `table[(int)phase]` | 3.16 | 3.16 | 0% | identical |
+| `out[i] = in[i] + 0.5f * table[i + offset]`, vectorised either way | 0.059 | 0.060 | +2% | identical |
+| a 32-tap FIR, its history `history[at]` and `history[(at - k) & 31]` | 8.25 | 11.6 | +40% (at `-O3`: -7%) | identical |
+| eight voices of an array of modules, each a wavetable | 12.08 | 11.73 | -3% | identical |
+
+The same at `-O1` and `-O3`, within a few percent, but for the FIR, which `-O3` unrolls whole either way and runs at 4.7
+and 4.4. The comb and the FIR pay for the field each updates every sample, a store each iteration instead of one after
+the loop (Where the checks go, above); the wavetable's and the voices' checks hide in their loops' latency, and the gain
+has none. Compiling takes as long, within the noise: `examples/voices/`, whose program has seven checks, 11.4 ms without
+them and 11.7 with. These are development builds; without the option nothing is checked, and nothing costs anything.
+
 ## Pitfalls
 
 Each of these was hit while writing the language or its recipes. [simd.md](simd.md) has the vector ones.
@@ -5413,6 +5692,14 @@ Each of these was hit while writing the language or its recipes. [simd.md](simd.
 | A parallel region whose chunks spin takes many budgets before it stops | each chunk reads `left` where it starts; one that read it before another ran out stored its positive count over the -1, and the chunks after it started afresh | write the count back with `atomicrmw min` in every function a region's threads run, so `left` never goes up during a call (recipe 29) |
 | A budget that ran out stops nothing after a few calls the host did not set it for | a stop wrote its own count, and charges near 2^62 took `left` past `INT64_MIN`, where the next subtraction wrapped it positive | a stop writes -1, `setLoopBudget` makes a negative budget -1, and no count that may exceed `INT64_MAX` is charged (recipe 29) |
 | A branch on `(a \| b)` comes out as two branches | SelectionDAG splits an `and` or `or` of conditions into branches where jumps are cheap (AArch64) | mark the branch `!unpredictable`, which keeps one (recipe 29 tried it), or give the `or` a second use |
+| A test of a loop that both the loop budget and a bounds check stop expects the budget to count its iterations, and it counts none from `-O1` | a failed check is a trap to the optimiser, which may bound the loop by it: in `while (s < n) { s += 1.0f + a[i & 7]; i = i + 1; }` over a `float a[4]`, `i` cannot reach 4, so LLVM unrolls the loop whole | index by what the optimiser cannot bound (recipe 30's test indexes by `(int)s`) |
+| A bounds check's loop stores a field every iteration, a third slower, where without the check it stores it once after the loop | sinking the store to the loop's exits would add one on the failed check's path, where the failed iteration had stored nothing, which LLVM may not do to memory another thread could see | none needed for a development build; recipe 30's Measurements has the cost |
+| A constant index outside its array makes the statements after it unreachable, and a non-void function's missing `return` is no longer an error | an unconditional branch to the check's failure leaves the code after it with no predecessor, and `reachable()` follows the CFG | keep it a conditional branch, on `false`, as for any check |
+| A bounds check in a constant of the top level's initialiser crashes the code generator, or leaves a declaration that is then deleted | the initialiser is lowered into a scratch function that is erased afterwards, with every declaration only it used (recipe 28) | no checks at the top level (`atTopLevel()`), where nothing runs |
+| `FileCheck --check-prefix=PICK` fails on a line of another prefix | a variable `[[PICK:[0-9]+]]` on an `O0:` line contains `PICK:`, which FileCheck reads as a check of that prefix | name variables apart from every prefix (`S_PICK`) |
+| `CHECK-NOT: bounds` fails on IR with no bounds checks | `getelementptr inbounds` | match a name of the feature's own (`fminus_rt_bounds`, `fminus.bounds`) |
+| A library test's `CHECK(view == "line")` does not link: undefined `Catch::StringMaker<std::string_view>` | the library tests are C++17 against a Catch2 built as the build tree's C++23, which compiled no `string_view` support into it | compare `std::string(view)` |
+| "'BranchInst' is deprecated: Use UncondBrInst/CondBrInst/Instruction instead" | LLVM 23 split the branch instruction | `llvm::UncondBrInst::Create`, or an `IRBuilder` |
 
 ## Where to go next
 

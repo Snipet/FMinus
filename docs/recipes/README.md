@@ -26,7 +26,9 @@ Most of the recipes in [../extending.md](../extending.md) and [../simd.md](../si
 - recipe 27 (`switch`, with C23's labels, and C's enumerations);
 - recipe 28 (constants at the top level, C's file-scope const objects, and arrays sized by integer constant
   expressions);
-- recipe 29 (the loop budget: runaway-loop protection, a pass of FMinus's own at the end of the pipeline).
+- recipe 29 (the loop budget: runaway-loop protection, a pass of FMinus's own at the end of the pipeline);
+- recipe 30 (bounds checks, for development builds: checks where the code generator sees the array, a pass that
+  makes a failed one a return).
 
 Their code is in `src/`, and their tests in `tests/`.
 

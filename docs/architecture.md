@@ -212,10 +212,12 @@ on it without the code generator.
 the host's choices too: `math`, how the transcendental builtins compute; `strictAliasing`, whether loads and stores
 carry TBAA tags; `knobVersions`, knob versioning's budget; `denormals`, subnormals kept or flushed to zero, and
 `targetTriple`, which says what register an entry point sets then; `threads`, the most threads a parallel region runs
-on; `loopBudget`, runaway-loop protection. `ir::lower` writes two module flags, `fminus.math` (the mode) and
-`fminus.knob-versions` (the budget), for the optimiser, where only the module arrives, and with `loopBudget` a third,
-`fminus.loop-budget`, and the budget's global, `fminus_rt_loop_budget`, which the JIT must see when the module is added
-(extending.md, recipe 29). A `Lowering` object then runs two passes over the program, the second through
+on; `loopBudget`, runaway-loop protection; `boundsCheck`, bounds checks for development builds. `ir::lower` writes two
+module flags, `fminus.math` (the mode) and `fminus.knob-versions` (the budget), for the optimiser, where only the module
+arrives, and with `loopBudget` a third, `fminus.loop-budget`, and the budget's global, `fminus_rt_loop_budget`, which
+the JIT must see when the module is added (extending.md, recipe 29); with `boundsCheck` likewise `fminus.bounds-check`
+and the record's global, `fminus_rt_bounds`, and the description of each check in the named metadata
+`fminus.bounds.sites` (recipe 30). A `Lowering` object then runs two passes over the program, the second through
 the file in source order, and checks the functions' effects after them; under `Denormals::Flush` it then marks every
 definition flushing and wraps the entry points (`flushDenormals`), which needs every call known. `Lowering` is one class
 (`Lowering.h`, internal to `src/ir/`, in `fminus::ir::detail`), but its members are defined across the directory by what
@@ -239,6 +241,7 @@ they lower:
 | `Parallel.cpp` | `parallel for` and `parallel { }`: what would race refused (`Walker`, `checkParallelFor`, `checkParallelBlock`, and whether a method changes its module, `changesModule`), each region's body a function of the runtime's task type (`beginRegion`, `endRegion`), and what the body uses of the function around it captured into a context, by value or by reference (`capture`, `captured`, `capturedParameter`, `outerValue`; a const table, a constant of the module, is read where it is) |
 | `Tbaa.cpp` | C's strict aliasing, told to LLVM: FMinus's tree of four types and each access's tag (`accessTag`, `tag`), which every load and store calls |
 | `Denormals.cpp` | `Denormals::Flush`: `DenormalFolder` (`Denormals.h`, the builder's constant folder, which flushes as the mode does), every definition marked `denormal_fpenv(preservesign)`, and each entry point wrapped to set the mode and call its body through an address LLVM cannot see into (`flushDenormals`, `wrapEntry`) |
+| `Bounds.cpp` | `Options::boundsCheck`: the extent a pointer into an array carries (`Extent`, made where an array decays, `arrayExtent`, and moved by pointer arithmetic and `&p[i]`, `movedExtent`), each check of an element, a pointer formed or a `poly_load`'s lanes against it (`checkBounds`, `checkLanes`, `failBounds`: a compare, a branch, and a call of `fminus.bounds.stop` that never returns, with the check's number, its description in the module's metadata), and how the source names the array (`spelled`) |
 
 The header declares every member under the name of its file, so it doubles as the map. A new node goes in the file its
 kind belongs to, and the compiler finds the rest: `lower`'s `std::visit` in `Expressions.cpp` and the statement visit in
@@ -426,7 +429,15 @@ to `bool` and to the same pointer with `const` added (`convertPointer`).
     `preserve_allcc` wrapper (`fminus.large.sin`) so that the loop around it spills nothing. On x86-64 with AVX the
     wrapper takes the machine's features less `vzeroupper`, and clears the upper halves itself before its call:
     LLVM's own `vzeroupper` before its return zeroed the halves it had just restored (extending.md, recipe 24).
-  - **The loop budget** (`LoopBudgetPass`, `src/opt/LoopBudget.h`, extending.md recipe 29), after the math kernels, at
+  - **Bounds checks** (`BoundsCheckPass`, `src/opt/BoundsCheck.h`, extending.md recipe 30), after the math kernels, at
+    every level, for a module whose flag `fminus.bounds-check` is 1: each failed check, a trap to the optimiser until
+    now (a call of `fminus.bounds.stop`, which never returns), becomes a branch to its function's stop block, which
+    records the check's number and the index in the program's record, `fminus_rt_bounds`, unless it holds one
+    already, and returns; and each function that called one that may stop reads the record after the call and returns
+    if it is set. A function it changed carries the attribute `fminus-bounds-check`. Before the loop budget, so that
+    the budget's count is written back on these returns too; both share `src/opt/EarlyReturn.h` (which calls run which
+    functions, and what a function that may now return early no longer promises).
+  - **The loop budget** (`LoopBudgetPass`, `src/opt/LoopBudget.h`, extending.md recipe 29), after the bounds checks, at
     every level, for a module whose flag `fminus.loop-budget` is 1: each function that loops, or can call itself
     again, counts down the program's budget, a loop whose count ScalarEvolution knows charged it in its preheader and
     any other cycle (`CycleInfo`'s, irreducible ones too) one at each branch back; when the count goes below zero the
@@ -493,7 +504,9 @@ The same module can be written to disk instead, for development:
   the result through `fminus_rt_main_result` (or `fminus_rt_main_bool_result`, as `true` or `false`); a program with a
   parallel region gets the runtime's pool around the call (`fminus_rt_parallel_start`, `_stop`). With a loop budget
   (`fminus --emit exe --loop-budget n`, for a module compiled with it) the C main is the host: it sets the program's
-  budget before the call and, when main runs out of it, says so (`fminus_rt_main_loop_budget`) and exits with 3. It
+  budget before the call and, when main runs out of it, says so (`fminus_rt_main_loop_budget`) and exits with 3. With
+  bounds checks (a module compiled with them, its flag) it reads the program's record after the call and, when main
+  failed a check, says where (`fminus_rt_main_bounds`, from two tables of the checks' messages) and exits with 4. It
   runs before `prepareModule` and `optimiseModule`, so the entry is optimised with the rest. [programs.md](programs.md)
   shows the IR.
 
@@ -506,27 +519,29 @@ The runtime is a separate static library, `libfminus_runtime.a` (`FMinus::Runtim
 generated code calls. It contains no LLVM, and it holds the FFT: PFFFT's objects (`cmake/FMinusFft.cmake`) are in it.
 
 - `Runtime.h` declares the functions as `extern "C"`: a placeholder ABI version, the command line and result of an
-  executable (`fminus_rt_main_args`, `fminus_rt_main_result`, and `fminus_rt_main_loop_budget` for one that ran past
-  its loop budget), and the heap that `malloc`, `calloc` and `free` call
-  (`fminus_rt_malloc`, `fminus_rt_calloc`, `fminus_rt_free`: 64-byte aligned, zeroed, on C's `aligned_alloc`, or on
-  Windows, which has none, `_aligned_malloc`), the FFT behind the `fft_*` builtins (`fminus_rt_fft_create`, ...,
-  `Fft.cpp`: a plan holds PFFFT's setup and buffers of its own, so a transform never allocates), and the math
-  builtins' functions (`Math.cpp`). Those are the vector mode's `fminus_rt_sinf` ... `fminus_rt_logf` and their four
-  lanes, `fminus_rt_sin_f4` ... `fminus_rt_log_f4`, whose lanes are each the scalar function of that lane: FMinus's
-  own kernels (`MathKernels.h`, extending.md recipe 23), one sequence of IEEE operations each, written once as a
-  template that the scalar and the four-lane function both instantiate and `MathKernelsPass` builds as IR, the same on
-  every target (a program calls the functions at `-O0`, and for sin, cos or tan past 2^16); and the libm mode's
-  `fminus_rt_libm_sinf` and its kin. `fminus::math` in the public header calls the vector mode's. And the
-  pool behind `parallel for` and `parallel { }` (`Parallel.cpp`): `fminus_rt_parallel_for` runs a region's body over
-  its iterations on the pool's threads and the caller's, one region at a time (a region that finds the pool held, or
-  that a chunk of another starts, runs on its caller's thread alone), in the caller's floating-point mode, allocating
-  nothing and taking no lock; `fminus_rt_parallel_start` and `fminus_rt_parallel_stop` count its users, the first
-  making a thread for each core but one, the last joining them.
+  executable (`fminus_rt_main_args`, `fminus_rt_main_result`, `fminus_rt_main_loop_budget` for one that ran past its
+  loop budget, and `fminus_rt_main_bounds` for one that failed a bounds check), and the heap that `malloc`, `calloc` and
+  `free` call (`fminus_rt_malloc`, `fminus_rt_calloc`, `fminus_rt_free`: 64-byte aligned, zeroed, on C's
+  `aligned_alloc`, or on Windows, which has none, `_aligned_malloc`), the FFT behind the `fft_*` builtins
+  (`fminus_rt_fft_create`, ..., `Fft.cpp`: a plan holds PFFFT's setup and buffers of its own, so a transform never
+  allocates), and the math builtins' functions (`Math.cpp`). Those are the vector mode's `fminus_rt_sinf` ...
+  `fminus_rt_logf` and their four lanes, `fminus_rt_sin_f4` ... `fminus_rt_log_f4`, whose lanes are each the scalar
+  function of that lane: FMinus's own kernels (`MathKernels.h`, extending.md recipe 23), one sequence of IEEE operations
+  each, written once as a template that the scalar and the four-lane function both instantiate and `MathKernelsPass`
+  builds as IR, the same on every target (a program calls the functions at `-O0`, and for sin, cos or tan past 2^16);
+  and the libm mode's `fminus_rt_libm_sinf` and its kin. `fminus::math` in the public header calls the vector mode's.
+  And the pool behind `parallel for` and `parallel { }` (`Parallel.cpp`): `fminus_rt_parallel_for` runs a region's body
+  over its iterations on the pool's threads and the caller's, one region at a time (a region that finds the pool held,
+  or that a chunk of another starts, runs on its caller's thread alone), in the caller's floating-point mode, allocating
+  nothing and taking no lock; `fminus_rt_parallel_start` and `fminus_rt_parallel_stop` count its users, the first making
+  a thread for each core but one, the last joining them.
 - `RuntimeSymbols.def` lists them, one `FMINUS_RUNTIME_SYMBOL(name)` each.
 - It also declares `fminus_rt_loop_budget_state`, the layout of a program's loop budget, `{ int64_t left; int32_t
   stopped; }`: not the runtime's, but the global a program compiled with the budget defines, `fminus_rt_loop_budget`,
   which its host reads and writes (`left` -1 or more, which keeps the program's counts from wrapping; extending.md,
-  recipe 29).
+  recipe 29); and `fminus_rt_bounds_state`, `{ int32_t site; int32_t reserved; int64_t index; }`, the record of a
+  failed bounds check that a program compiled with the checks defines, `fminus_rt_bounds`, which its host reads and
+  clears (recipe 30).
 - `support/JitRuntime.cpp` expands that list into absolute symbols in a JIT (`defineRuntimeSymbols`).
 - An executable gets the same functions by linking the archive.
 
@@ -619,10 +634,13 @@ pivots, so the float code computes what the reference computes, operation for op
   instead of crashing in a later pass.
 - **Modules are prepared before they are optimised.** The pipeline's decisions depend on the triple and the data
   layout, and on the module flags the code generator writes (`fminus.math`, `fminus.knob-versions`,
-  `fminus.loop-budget`).
+  `fminus.loop-budget`, `fminus.bounds-check`).
 - **The loop budget's pass is the pipeline's last.** It sees the loops the machine code will run, and nothing the
   optimiser decides may depend on it; a pass added after it would run on code that counts and returns early, and see
   the attributes it changed (extending.md, recipe 29).
+- **Bounds checks go in first and become returns last.** The code generator puts each where its access is, as a trap
+  the optimiser must respect (nothing after it runs); the pass before the loop budget's makes each a return. A pass
+  in between sees `fminus.bounds.stop`, a `noreturn` call of memory the program cannot reach (recipe 30).
 - **Every load and store of a value is tagged with its type** (`tag`, `Tbaa.cpp`), unless strict aliasing is off. An
   untagged access is safe, since it may alias anything, but a lowering that forgets the tag slows the loops around it;
   `TbaaTest.cpp` walks a program that makes every kind of access and fails on one untagged. A tag that is wrong is a

@@ -93,11 +93,17 @@ build-dev/bin/fminus prog.fm --entry --emit asm -o -    # its assembly
 build-dev/bin/fminus prog.fm --entry --emit obj -o prog.o
 build-dev/bin/fminus prog.fm --run main 3 4             # no executable: the JIT calls main
 build-dev/bin/fminus prog.fm --emit exe --loop-budget 1000000 -o prog   # main may take a million branches back
+build-dev/bin/fminus prog.fm --emit exe --bounds-check -o prog          # main's arrays' indexes checked
 ```
 
 With `--loop-budget n` the program counts its loops against a budget (extending.md, recipe 29), and the entry sets it
 to n before it calls `main`: a `main` that runs past it returns early, and the executable says so on stderr (`'main'
 ran past its loop budget of 1000000 and returned early`) and exits with 3 instead of printing a result.
+
+With `--bounds-check` each access whose array the compiler sees is checked against the array's extent (extending.md,
+recipe 30): when one fails, `main` returns early, before the access, and the executable says where on stderr
+(`prog.fm:4:13: index 7 out of bounds for 'a' of type 'float[4]': 'main' returned early`) and exits with 4 instead of
+printing a result.
 
 `--entry` adds the entry point to whatever `--emit` writes, so an object file can be linked by hand
 (`c++ prog.o build-dev/lib/libfminus_runtime.a -o prog`; on Windows,
