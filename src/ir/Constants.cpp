@@ -175,21 +175,36 @@ namespace fminus::ir::detail
     // C does not let `[]` leave out; its list then reaches as many rows as it starts, and its elements, rows times
     // their size, are 2^30 at most. Clang's errors, and FMinus's where C would allow more: a size of 0 (a GNU
     // extension), one over 2^30, a size no constant (C's variable length array). After an error the array has as many
-    // elements as its list reaches, or one without a list (a row of one, a 2-D array's), so neither the list nor the
-    // array's uses report more.
+    // elements as its list reaches, or one without a list, so neither the list nor the array's uses report more. A
+    // row whose size is in error, or missing, is as wide as the list's widest braced row (one element without one),
+    // and the array has as many rows as written, or as its list reaches with them when that is more: the row's error
+    // is the declaration's only one, as clang's type is invalid after it, and nothing measured against a row the array
+    // does not have (a list's excess, the size a list gives) is reported.
     ast::Type Lowering::sized(SourceLocation location, const std::string& name, ast::Type type, const ast::Expr* size,
                               const ast::Expr* rowSize, const ast::DeclStmt* listed)
     {
         constexpr std::int64_t kMost = std::int64_t{1} << 30;
         const bool rows = ast::hasRows(type);
+        bool rowFailed = false;
         if (rows)
         {
-            type.rowCount = 1;
+            std::optional<std::int32_t> row;
             if (rowSize == nullptr)
                 error(location,
                       "array has incomplete element type " + quoted(ast::typeName(ast::elementOf(type)) + "[]"));
-            else if (const std::optional<std::int32_t> count = arraySize(name, *rowSize))
-                type.rowCount = *count;
+            else
+                row = arraySize(name, *rowSize);
+            rowFailed = !row;
+            type.rowCount = row.value_or(1);
+            if (rowFailed && listed != nullptr)
+            {
+                for (const ast::Brace& brace : listed->braces)
+                {
+                    if (brace.depth == 1)   // a row's, `{1, 2}`
+                        type.rowCount = static_cast<int>(
+                            std::clamp<std::uint64_t>(brace.count, static_cast<std::uint64_t>(type.rowCount), kMost));
+                }
+            }
         }
         const std::uint64_t width = rows ? static_cast<std::uint64_t>(type.rowCount) : 1;   // elements an entry has
         // How many entries (elements, or rows) the list reaches, placed as C places it (its errors are reported
@@ -206,6 +221,13 @@ namespace fminus::ir::detail
         }
         const bool fits = reach > 0 && reach * width <= static_cast<std::uint64_t>(kMost);
         type.count = fits ? static_cast<int>(reach) : 1;
+        if (rowFailed)
+        {
+            if (const std::optional<std::int32_t> count = size != nullptr ? arraySize(name, *size) : std::nullopt)
+                type.count = static_cast<int>(std::min(std::max(static_cast<std::uint64_t>(*count), fits ? reach : 0),
+                                                       static_cast<std::uint64_t>(kMost) / width));
+            return type;
+        }
         if (size == nullptr)
         {
             if (listed == nullptr)

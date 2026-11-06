@@ -1,19 +1,27 @@
 // 2-D arrays' errors, one each, in clang's words where clang has them: a list's excess values and braces around one
-// element (where C only warns), a row without its size, an array of bool, a 2-D array's name where a float* goes (it
-// stands for a pointer to its first row), a row assigned, a const table's element assigned, a row's address (FMinus has
-// no pointers to arrays), sizeof of an incomplete array type; and the parser's: a third dimension and a parameter of a
-// 2-D array (a pointer to rows, which FMinus has no parameter of).
+// element (where C only warns), a row without its size (a local's, a field's and a constant's, whose lists then report
+// nothing more), an array of bool, a 2-D array's name where a float* goes (it stands for a pointer to its first row), a
+// row assigned, a const table's element assigned, a row's address (FMinus has no pointers to arrays), sizeof of an
+// incomplete array type; and the parser's: a third dimension and a parameter of a 2-D array (a pointer to rows, which
+// FMinus has no parameter of).
 // RUN: not fminus %s 2>&1 | FileCheck %s --implicit-check-not=error:
 // RUN: echo 'float a[2][3][4];' | not fminus - 2>&1 | FileCheck %s --check-prefix=THREE
 // RUN: echo 'void f(float g[2][3]) { }' | not fminus - 2>&1 | FileCheck %s --check-prefix=PARAM
 
 const float kTable[2][2] = {{1, 2}, {3, 4}};
+const float kRow[2][] = {{1, 2}, {3, 4, 5}};
+
+module Rows
+{
+    float d[][];
+};
 
 float f(float* out)
 {
     float a[2][3] = {{1, 2, 3, 4}};
     float b[2][3] = {1, {2}};
-    float c[2][] = {1};
+    float c[2][] = {{1, 2}};
+    float e[][] = {{1, 2}, 3, 4, 5};
     bool flags[2][2];
     float g[2][3];
     out = g;
@@ -23,15 +31,18 @@ float f(float* out)
     return sizeof(float[][3]);
 }
 
-// CHECK: array2d-errors.fm:14:32: error: excess elements in array initializer
-// CHECK: array2d-errors.fm:15:25: error: braces around scalar initializer
+// CHECK: array2d-errors.fm:12:13: error: array has incomplete element type 'float[]'
 // CHECK: array2d-errors.fm:16:11: error: array has incomplete element type 'float[]'
-// CHECK: array2d-errors.fm:17:10: error: FMinus has arrays of float, double, int, float2, float4, float8 and modules, not of 'bool'
-// CHECK: array2d-errors.fm:19:9: error: incompatible pointer types assigning to 'float *' from 'float (*)[3]'
-// CHECK: array2d-errors.fm:20:10: error: array type 'float[3]' is not assignable
-// CHECK: array2d-errors.fm:21:18: error: cannot assign to variable 'kTable' with const-qualified type 'const float[2][2]'
-// CHECK: array2d-errors.fm:22:18: error: FMinus has pointers to float, double, int, float2, float4, float8, void and modules, not to 'float[3]'
-// CHECK: array2d-errors.fm:23:12: error: invalid application of 'sizeof' to an incomplete type 'float[][3]'
+// CHECK: array2d-errors.fm:21:32: error: excess elements in array initializer
+// CHECK: array2d-errors.fm:22:25: error: braces around scalar initializer
+// CHECK: array2d-errors.fm:23:11: error: array has incomplete element type 'float[]'
+// CHECK: array2d-errors.fm:24:11: error: array has incomplete element type 'float[]'
+// CHECK: array2d-errors.fm:25:10: error: FMinus has arrays of float, double, int, float2, float4, float8 and modules, not of 'bool'
+// CHECK: array2d-errors.fm:27:9: error: incompatible pointer types assigning to 'float *' from 'float (*)[3]'
+// CHECK: array2d-errors.fm:28:10: error: array type 'float[3]' is not assignable
+// CHECK: array2d-errors.fm:29:18: error: cannot assign to variable 'kTable' with const-qualified type 'const float[2][2]'
+// CHECK: array2d-errors.fm:30:18: error: FMinus has pointers to float, double, int, float2, float4, float8, void and modules, not to 'float[3]'
+// CHECK: array2d-errors.fm:31:12: error: invalid application of 'sizeof' to an incomplete type 'float[][3]'
 
 // THREE: <stdin>:1:14: error: FMinus's arrays have at most two dimensions
 // PARAM: <stdin>:1:14: error: FMinus has no parameters of 2-D arrays, which would be pointers to rows: pass a row (a float*), or the module that holds the array

@@ -1,9 +1,9 @@
 // tests/library/Array2DTest.cpp: 2-D arrays as a host meets them (C++17, FMinus::FMinus alone): a module's 2-D fields
 // as module() describes them (the type "float[4][16]", the element type and the extents, outermost first, at an offset,
-// row by row), which the host reads and writes as C++'s float[4][16]; a module shared by several (one bank of
-// wavetables that every voice reads, as a host's shared state is); and 2-D arrays in a program compiled with the loop
-// budget, with bounds checks (each dimension checked, the message naming which: 'gain' or 'gain[v]') and around #if, as
-// the safety options and the conditionals meet them.
+// row by row; a 1-D field's and an array of modules' too), which the host reads and writes as C++'s float[4][16]; a
+// module shared by several (one bank of wavetables that every voice reads, as a host's shared state is); and 2-D arrays
+// in a program compiled with the loop budget, with bounds checks (each dimension checked, the message naming which:
+// 'gain' or 'gain[v]') and around #if, as the safety options and the conditionals meet them.
 #include "fminus/FMinus.h"
 
 #include <catch2/catch_test_macros.hpp>
@@ -95,6 +95,12 @@ namespace
                               "            phase -= 1;\n"
                               "        return lookup(shared->tables[table], phase);\n"
                               "    }\n"
+                              "};\n"
+                              "module Choir\n"
+                              "{\n"
+                              "    float taps[16];\n"
+                              "    Voice voices[2][3];\n"
+                              "    Voice solo[2];\n"
                               "};\n";
 } // namespace
 
@@ -136,7 +142,30 @@ TEST_CASE("a module's 2-D fields are described by their shape, and read and writ
     const auto* pointer = fieldNamed(*voice, "shared");
     REQUIRE(pointer != nullptr);
     CHECK(pointer->type == "Shared *");
+    CHECK(pointer->element.empty());
     CHECK(pointer->extents.empty());
+    // A 1-D field's shape, and arrays of modules: their element the module's name.
+    const fminus::Program::Module* choir = program->module("Choir");
+    REQUIRE(choir != nullptr);
+    const auto* taps = fieldNamed(*choir, "taps");
+    const auto* voices = fieldNamed(*choir, "voices");
+    const auto* solo = fieldNamed(*choir, "solo");
+    REQUIRE(taps != nullptr);
+    REQUIRE(voices != nullptr);
+    REQUIRE(solo != nullptr);
+    CHECK(taps->type == "float[16]");
+    CHECK(taps->element == "float");
+    CHECK(taps->extents == std::vector<std::size_t>{16});
+    CHECK(taps->size == 16 * sizeof(float));
+    CHECK(voices->type == "Voice[2][3]");
+    CHECK(voices->element == "Voice");
+    CHECK(voices->extents == std::vector<std::size_t>{2, 3});
+    CHECK(voices->offset == 64);
+    CHECK(voices->size == 6 * voice->size);
+    CHECK(solo->type == "Voice[2]");
+    CHECK(solo->element == "Voice");
+    CHECK(solo->extents == std::vector<std::size_t>{2});
+    CHECK(solo->offset == voices->offset + voices->size);
 
     Instance bank(*shared);
     auto* init = program->function<void(void*)>("Shared::init", errors);

@@ -320,7 +320,7 @@ TEST_CASE("a parallel for gives each iteration its rows, and a switch's jump zer
 TEST_CASE("2-D arrays' errors are clang's", "[codegen][array2d]")
 {
     CHECK(errorsOf("const float t[2][3] = {{1, 2}, {3}};\n"
-                   "module M { float g[][4]; float h[2][]; };\n"
+                   "module M { float g[][4]; float h[2][]; float d[][]; float e[][-1]; };\n"
                    "float s() { return sizeof(float[][3]) + sizeof(float[2][]) + sizeof(bool[2][2])"
                    " + sizeof(float[-1]); }\n"
                    "float w()\n"
@@ -336,6 +336,8 @@ TEST_CASE("2-D arrays' errors are clang's", "[codegen][array2d]")
                    "}\n")
           == "test.fm:2:18: error: field has incomplete type 'float[][4]'\n"
              "test.fm:2:32: error: array has incomplete element type 'float[]'\n"
+             "test.fm:2:46: error: array has incomplete element type 'float[]'\n"
+             "test.fm:2:63: error: 'e' declared as an array with a negative size\n"
              "test.fm:3:20: error: invalid application of 'sizeof' to an incomplete type 'float[][3]'\n"
              "test.fm:3:41: error: array has incomplete element type 'float[]'\n"
              "test.fm:3:62: error: FMinus has arrays of float, double, int, float2, float4, float8 and modules, not of "
@@ -351,7 +353,8 @@ TEST_CASE("2-D arrays' errors are clang's", "[codegen][array2d]")
              "of 'bool'\n"
              "test.fm:12:17: error: array is too large: FMinus's arrays have at most 2^30 elements, and this one has "
              "2147483648\n");
-    // An initialiser list's errors, where the excess value or the brace is.
+    // An initialiser list's errors, where the excess value or the brace is; after a row's size's own error, the list
+    // reports nothing more (it is measured against no row the array has).
     CHECK(errorsOf("float f()\n"
                    "{\n"
                    "    float a[2][3] = {{1, 2, 3, 4}};\n"
@@ -361,12 +364,16 @@ TEST_CASE("2-D arrays' errors are clang's", "[codegen][array2d]")
                    "    float e[3] = {{1}, 2};\n"
                    "    float g[2][3] = {1, 2, 3, 4, 5, 6, 7};\n"
                    "    float h[2][] = {1};\n"
+                   "    float m[2][] = {{1, 2}, {3}, 4, 5};\n"
+                   "    float p[][] = {{1, 2}, {3, 4}};\n"
+                   "    float q[2][0] = {{1, 2}};\n"
                    "    float k[][3] = {};\n"
                    "    float n[2][3] = 5;\n"
                    "    const float t[2][2] = {{1, 2}, {3, 4}, {5}};\n"
                    "    return 0;\n"
                    "}\n"
-                   "const float top[1][2] = {{1}, 2};\n")
+                   "const float top[1][2] = {{1}, 2};\n"
+                   "const float wide[2][] = {{1, 2}};\n")
           == "test.fm:3:32: error: excess elements in array initializer\n"
              "test.fm:4:32: error: excess elements in array initializer\n"
              "test.fm:5:25: error: braces around scalar initializer\n"
@@ -374,8 +381,12 @@ TEST_CASE("2-D arrays' errors are clang's", "[codegen][array2d]")
              "test.fm:7:19: error: braces around scalar initializer\n"
              "test.fm:8:40: error: excess elements in array initializer\n"
              "test.fm:9:11: error: array has incomplete element type 'float[]'\n"
-             "test.fm:10:11: error: zero size arrays are not allowed\n"
-             "test.fm:11:11: error: array initializer must be an initializer list\n"
-             "test.fm:12:44: error: excess elements in array initializer\n"
-             "test.fm:15:31: error: excess elements in array initializer\n");
+             "test.fm:10:11: error: array has incomplete element type 'float[]'\n"
+             "test.fm:11:11: error: array has incomplete element type 'float[]'\n"
+             "test.fm:12:16: error: zero size arrays are not allowed\n"
+             "test.fm:13:11: error: zero size arrays are not allowed\n"
+             "test.fm:14:11: error: array initializer must be an initializer list\n"
+             "test.fm:15:44: error: excess elements in array initializer\n"
+             "test.fm:18:31: error: excess elements in array initializer\n"
+             "test.fm:19:13: error: array has incomplete element type 'float[]'\n");
 }

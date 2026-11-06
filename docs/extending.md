@@ -6370,7 +6370,12 @@ A declarator takes one or two sizes (`array_sizes`): `[4][16]`, the rows' last, 
 `Field::rowSize`), as written. A third is "FMinus's arrays have at most two dimensions". `sized` (Constants.cpp) works
 the row's size out first (`arraySize`, the integer constant expression's rules), since C does not let `[]` leave it out
 ("array has incomplete element type 'float[]'"), and then the count of rows: written, or as many as the list starts.
-The elements in all, rows times their size, are at most 2^30, as a 1-D array's are.
+The elements in all, rows times their size, are at most 2^30, as a 1-D array's are. A row whose size is in error, or
+missing, makes the declaration's one error, as it makes clang's type invalid: the row is then as wide as the list's
+widest braced row, and the array has its rows as written, or as many as the list reaches with that row when it reaches
+more, so neither the list (its excess) nor the count (the size a list gives) reports more, as a 1-D array whose size is
+in error takes its list's length. A field without either size, `float d[][]`, is the same error, not "field has
+incomplete type".
 
 `sizeof` takes an array type now, C's abstract declarator: `sizeof(float[4][16])` is 256, `sizeof(int[N])` four times
 N. Its sizes are expressions too (`SizeofExpr::size` and `rowSize`), so `lowerSizeof` sizes the type as a declaration's.
@@ -6461,10 +6466,13 @@ brackets counts 64, and reads them in order, rows one after another.
 - `FrontendTest.cpp`: the dumps of 2-D declarations, fields, braced lists and `sizeof(float[4][16])`; a third dimension,
   a 2-D parameter and `sizeof(float*[2])` refused.
 - `tests/library/Array2DTest.cpp`: `module()`'s shape of 2-D fields (type, element, extents, offset, size) and of the
-  others, the host reading and writing rows, voices sharing one bank of tables; 2-D arrays under the loop budget,
-  bounds checks (`BoundsViolation`'s array, type and extent for each dimension) and `#if`.
-- `tests/lit/fminus/array2d.fm`: the IR of a 2-D local, its list and a table, the vectorised loop, `--run` and
-  `--bounds-check`'s messages for each dimension, the dump; `array2d-errors.fm`: each error once, and the parser's.
+  others (a 1-D field, arrays of modules of one and two dimensions, a scalar, a pointer), the host reading and writing
+  rows, voices sharing one bank of tables; 2-D arrays under the loop budget, bounds checks (`BoundsViolation`'s array,
+  type and extent for each dimension) and `#if`.
+- `tests/lit/fminus/array2d.fm`: the IR of a 2-D local, its list and a table, the vectorised loop (with
+  `--bounds-check` too, which leaves it no check), `--run` and `--bounds-check`'s messages for each dimension, the
+  dump; `array2d-errors.fm`: each error once (a row without its size, whose list then reports nothing more), and the
+  parser's.
 
 ## Pitfalls
 

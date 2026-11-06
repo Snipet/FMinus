@@ -166,15 +166,16 @@ namespace fminus::ir::detail
                 error(field.location, "a module's fields cannot be const: they start at 0, and a method sets them");
             if (ast::isArray(type) && field.size == nullptr)
             {
-                std::string rows;   // a 2-D array's: float[][16]
-                if (ast::hasRows(type))
-                {
-                    const std::optional<std::int32_t> count =
-                        field.rowSize != nullptr ? arraySize(field.name, *field.rowSize) : std::nullopt;
-                    rows = "[" + (count ? std::to_string(*count) : std::string()) + "]";
-                }
-                error(field.location,
-                      "field has incomplete type " + quoted(ast::typeName(ast::elementOf(type)) + "[]" + rows));
+                // A 2-D array's row is sized first, as clang builds the type: `float d[][]` is an array of an
+                // incomplete element type, and after a row size's own error the field reports nothing more.
+                const std::string element = ast::typeName(ast::elementOf(type));
+                if (!ast::hasRows(type))
+                    error(field.location, "field has incomplete type " + quoted(element + "[]"));
+                else if (field.rowSize == nullptr)
+                    error(field.location, "array has incomplete element type " + quoted(element + "[]"));
+                else if (const std::optional<std::int32_t> row = arraySize(field.name, *field.rowSize))
+                    error(field.location,
+                          "field has incomplete type " + quoted(element + "[][" + std::to_string(*row) + "]"));
                 type = ast::Type::Float;
             }
             else if (ast::isArray(type))

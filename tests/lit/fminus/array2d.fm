@@ -2,9 +2,11 @@
 // from their list as C places its values (a braced row, or row by row); the name stands for a pointer to the first
 // row, which an index takes to a row, whose name stands for a pointer to its first float in turn. A const table of
 // constants is a constant of the module, its rows nested. Loops over both dimensions vectorise, and --bounds-check
-// checks each dimension against its own extent, naming which in the message.
+// checks each dimension against its own extent, naming which in the message; a loop whose conditions keep both
+// indexes in bounds keeps no check, and vectorises as it does without them.
 // RUN: fminus %s -O0 | FileCheck %s
 // RUN: fminus %s -O2 | FileCheck %s --check-prefix=OPT
+// RUN: fminus %s -O2 --bounds-check | FileCheck %s --check-prefix=OPT
 // RUN: fminus %s --run at 1 0 | FileCheck %s --check-prefix=AT
 // RUN: fminus %s --bounds-check --run at 0 2 | FileCheck %s --check-prefix=EDGE
 // RUN: not fminus %s --bounds-check --run at 2 0 2>&1 | FileCheck %s --check-prefix=ROWS
@@ -54,13 +56,16 @@ float sized()
 // CHECK:         %arrayidx12 = getelementptr inbounds [3 x float], ptr @kGrid, i64 %idxprom11
 
 // OPT-LABEL: define void @"Bank::scale"
+// OPT-NOT:     %bounds.
 // OPT:         load <{{[0-9]+}} x float>
 // OPT:         fmul <{{[0-9]+}} x float>
+// OPT-NOT:     %bounds.
+// OPT:       {{^}$}}
 
 // AT: 7
 // EDGE: 3
-// ROWS: fminus: --run: 'at' stopped: {{.*}}array2d.fm:20:13: index 2 out of bounds for 'g' of type 'float[2][3]'
-// ROW: fminus: --run: 'at' stopped: {{.*}}array2d.fm:20:21: index 3 out of bounds for 'g[...]' of type 'float[3]'
+// ROWS: fminus: --run: 'at' stopped: {{.*}}array2d.fm:22:13: index 2 out of bounds for 'g' of type 'float[2][3]'
+// ROW: fminus: --run: 'at' stopped: {{.*}}array2d.fm:22:21: index 3 out of bounds for 'g[...]' of type 'float[3]'
 // SIZED: 512
 
 // AST: (decl const float[2][3] kGrid {{[{][{]}}1 2 3} {4}})
