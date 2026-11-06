@@ -289,23 +289,6 @@ namespace fminus
             return (value.readOnly ? "const " : "") + pointee + " *";
         }
 
-        // Whether two modules are laid out alike: the same fields, of the same types, at the same offsets.
-        bool sameLayout(const Program::Module& a, const Program::Module& b)
-        {
-            if (&a == &b)
-                return true;
-            if (a.name != b.name || a.size != b.size || a.alignment != b.alignment
-                || a.fields.size() != b.fields.size())
-                return false;
-            for (std::size_t i = 0; i < a.fields.size(); ++i)
-            {
-                if (a.fields[i].name != b.fields[i].name || a.fields[i].type != b.fields[i].type
-                    || a.fields[i].offset != b.fields[i].offset)
-                    return false;
-            }
-            return true;
-        }
-
         // Why `argument` is no argument for parameter `index` of `function`, or nothing when it is one.
         std::optional<std::string> mismatch(const Program::Callable& function, std::size_t index,
                                             const Program::Value& argument)
@@ -330,9 +313,11 @@ namespace fminus
                 if (param.module == nullptr ? argument.module != nullptr || argument.element != param.element
                                             : argument.module == nullptr || argument.module->name != param.module->name)
                     return is();
-                if (param.module != nullptr && !sameLayout(*argument.module, *param.module))
-                    return wrong("is an instance of a module " + quoted(param.module->name)
-                                 + " laid out differently from this program's (another program's)");
+                // The module is the host's word for the memory's layout, which nothing here can see: this program's
+                // own, then, as another program's of the name may lay out otherwise a module it holds (by value, in an
+                // array, through a pointer) though its own fields are alike.
+                if (param.module != nullptr && argument.module != param.module)
+                    return wrong("is an instance of another program's module " + quoted(param.module->name));
             }
             if (argument.pointer == nullptr && index == 0 && function.module != nullptr)
                 return wrong("is a null " + quoted(param.type) + ": a method runs on an instance");
@@ -902,7 +887,8 @@ namespace fminus
 
     // The arguments go in slots on the stack (on the heap past 16), the thunk calls the function, and the program's
     // record and flag say whether it stopped early: the bounds checks' first, as a failed check is the reason a call
-    // that also ran out of its budget stopped where it did.
+    // that also ran out of its budget stopped where it did. A stopped call allocates nothing (message() words it), as
+    // it may be the audio thread's. `function` is the Program's own, as a Callable cannot be copied: owner_ says whose.
     Program::CallResult Program::call(const Callable& function, const Value* arguments, std::size_t count)
     {
         using Status = CallResult::Status;
@@ -932,17 +918,24 @@ namespace fminus
         reinterpret_cast<jit::Thunk>(function.thunk_)(slots, &out);
         CallResult result;
         result.value = resultOf(function.result, out);
-        if (const std::optional<BoundsViolation> violation = boundsViolation())
-        {
+        result.function_ = &function;
+        result.violation = boundsViolation();
+        if (result.violation)
             result.status = Status::OutOfBounds;
-            result.error = quoted(function.name) + " stopped: " + violation->message();
-        }
         else if (loopBudgetExceeded())
-        {
             result.status = Status::OutOfBudget;
-            result.error = quoted(function.name) + " ran past its loop budget and returned early";
-        }
         return result;
+    }
+
+    std::string Program::CallResult::message() const
+    {
+        if (!error.empty() || function_ == nullptr)
+            return error;
+        if (status == Status::OutOfBounds)
+            return quoted(function_->name) + " stopped" + (violation ? ": " + violation->message() : std::string());
+        if (status == Status::OutOfBudget)
+            return quoted(function_->name) + " ran past its loop budget and returned early";
+        return error;
     }
 
     Program::CallResult Program::call(const Callable& function, const std::vector<Value>& arguments)
@@ -950,19 +943,22 @@ namespace fminus
         return call(function, arguments.data(), arguments.size());
     }
 
+    // Why callable() gave no Callable is the entry's to say, not the error's: a name the program does not define (or
+    // only declares), a type call() does not pass, or else a definition whose code, or thunk, did not link.
     Program::CallResult Program::call(std::string_view name, const std::vector<Value>& arguments)
     {
         std::string errors;
         const Callable* function = callable(name, errors);
         if (function == nullptr)
         {
+            using Status = CallResult::Status;
             const auto found = impl_->callables.find(name);
-            const bool unsupported = found != impl_->callables.end() && found->second.defined
-                                     && !found->second.unsupported.empty();
+            Status status = Status::NoFunction;
+            if (found != impl_->callables.end() && found->second.defined)
+                status = found->second.unsupported.empty() ? Status::LinkError : Status::Unsupported;
             if (!errors.empty() && errors.back() == '\n')
                 errors.pop_back();
-            return failure(unsupported ? CallResult::Status::Unsupported : CallResult::Status::NoFunction,
-                           std::move(errors));
+            return failure(status, std::move(errors));
         }
         return call(*function, arguments.data(), arguments.size());
     }

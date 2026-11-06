@@ -18,6 +18,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 #if defined(_WIN32)
@@ -294,18 +295,24 @@ TEST_CASE("call: a method runs on the host's instance, which keeps what it chang
     CHECK(null.error == "argument 1 of 'Osc::tick' is a null 'Osc *': a method runs on an instance (its parameter "
                         "'this')");
 
-    // Another program's instance of the same layout is one; of another layout, or another module, it is not.
+    // The module is the host's word for the memory's layout: this program's own. Another program's Osc is refused,
+    // of the same source or not; the host that knows its layout is the same passes it with this program's Module.
     auto same = compiled(kSource);
     Instance theirs(*same->module("Osc"));
-    CHECK(program->call(*tick, {Value::instance(theirs.memory, *same->module("Osc")), Value::of(1.0f)}).ok());
+    const Program::CallResult sameSource =
+        program->call(*tick, {Value::instance(theirs.memory, *same->module("Osc")), Value::of(1.0f)});
+    CHECK(sameSource.status == Status::Mismatch);
+    CHECK(sameSource.error
+          == "argument 1 of 'Osc::tick' is an instance of another program's module 'Osc' (its parameter 'this')");
+    CHECK(program->call(*tick, {Value::instance(theirs.memory, module), Value::of(1.0f)}).ok());
     auto other = compiled("module Osc { float phase; float extra; float tick(float rate) { return phase; } };\n"
                           "module Lfo { float phase; };\n");
     Instance wider(*other->module("Osc"));
     const Program::CallResult laidOut =
         program->call(*tick, {Value::instance(wider.memory, *other->module("Osc")), Value::of(1.0f)});
     CHECK(laidOut.status == Status::Mismatch);
-    CHECK(laidOut.error == "argument 1 of 'Osc::tick' is an instance of a module 'Osc' laid out differently from this "
-                           "program's (another program's) (its parameter 'this')");
+    CHECK(laidOut.error
+          == "argument 1 of 'Osc::tick' is an instance of another program's module 'Osc' (its parameter 'this')");
     Instance lfo(*other->module("Lfo"));
     const Program::CallResult lfoTick =
         program->call(*tick, {Value::instance(lfo.memory, *other->module("Lfo")), Value::of(1.0f)});
@@ -313,6 +320,57 @@ TEST_CASE("call: a method runs on the host's instance, which keeps what it chang
     CHECK(lfoTick.error == "argument 1 of 'Osc::tick' is 'Lfo *', not 'Osc *' (its parameter 'this')");
     CHECK(program->call(*tick, {Value::array(static_cast<float*>(osc.memory)), Value::of(1.0f)}).status
           == Status::Mismatch);
+}
+
+TEST_CASE("call: another program's module is refused, though its own fields are alike and a module it holds is not",
+          "[call]")
+{
+    // Delay's one field is a Line of the same size in both, but the second program swapped Line's fields: an instance
+    // of its Delay, run as the first program's, would read its length as the first's buffer.
+    const char* const delay = "module Delay\n"
+                              "{\n"
+                              "    Line line;\n"
+                              "    float tick(float x) { return line.length > 0 ? line.buffer[0] : x; }\n"
+                              "};\n";
+    auto program = compiled((std::string("module Line { float* buffer; int length; };\n") + delay).c_str());
+    auto swapped = compiled((std::string("module Line { int length; float* buffer; };\n") + delay).c_str());
+    REQUIRE(program->module("Delay")->size == swapped->module("Delay")->size);
+    std::string errors;
+    const Program::Callable* tick = program->callable("Delay::tick", errors);
+    REQUIRE(tick != nullptr);
+
+    // Each instance's Line set as its own program lays it out: the line field's offset, then Line's fields'.
+    std::vector<float> samples = {0.25f};
+    const int length = 1;
+    float* const buffer = samples.data();
+    const auto fill = [&](const Program& owner, void* memory)
+    {
+        char* const line = static_cast<char*>(memory) + owner.module("Delay")->fields[0].offset;
+        for (const Program::Module::Field& field : owner.module("Line")->fields)
+        {
+            if (field.name == "length")
+                std::memcpy(line + field.offset, &length, sizeof length);
+            else
+                std::memcpy(line + field.offset, &buffer, sizeof buffer);
+        }
+    };
+    Instance theirs(*swapped->module("Delay"));
+    fill(*swapped, theirs.memory);
+    const Program::CallResult foreign =
+        program->call(*tick, {Value::instance(theirs.memory, *swapped->module("Delay")), Value::of(1.0f)});
+    CHECK(foreign.status == Status::Mismatch);
+    CHECK(foreign.error
+          == "argument 1 of 'Delay::tick' is an instance of another program's module 'Delay' (its parameter 'this')");
+    CHECK(swapped->call("Delay::tick", {Value::instance(theirs.memory, *swapped->module("Delay")), Value::of(1.0f)})
+              .value.number
+          == 0.25);   // its own program's
+
+    Instance mine(*program->module("Delay"));
+    fill(*program, mine.memory);
+    const Program::CallResult own =
+        program->call(*tick, {Value::instance(mine.memory, *program->module("Delay")), Value::of(1.0f)});
+    REQUIRE(own.ok());
+    CHECK(own.value.number == 0.25);
 }
 
 TEST_CASE("call: a Callable is the function's signature, as values", "[call]")
@@ -434,6 +492,37 @@ TEST_CASE("call: what goes wrong is a value, never a crash", "[call]")
     CHECK(foreign.status == Status::Mismatch);
     CHECK(foreign.error == "'softclip' is not a Callable of this program's: callable() gives them");
     CHECK(other->call(*theirs, {Value::of(1.0f), Value::of(2.0f)}).value.number == 1.0);
+
+    // A Callable is the Program's own, which cannot be copied, so call() checks against the signature callable()
+    // described, not a host's edit of it; one the host makes is no Program's.
+    static_assert(!std::is_copy_constructible_v<Program::Callable>);
+    static_assert(!std::is_copy_assignable_v<Program::Callable>);
+    static_assert(!std::is_move_constructible_v<Program::Callable>);
+    static_assert(!std::is_move_assignable_v<Program::Callable>);
+    Program::Callable made;
+    made.name = "softclip";
+    made.result = Kind::Float;
+    made.parameters.resize(2);
+    const Program::CallResult unmade = program->call(made, {Value::of(1.0f), Value::of(2.0f)});
+    CHECK(unmade.status == Status::Mismatch);
+    CHECK(unmade.error == "'softclip' is not a Callable of this program's: callable() gives them");
+}
+
+TEST_CASE("call: a function the program defines whose code does not link is a LinkError, not NoFunction", "[call]")
+{
+    // compile() succeeds, as nothing is linked until a function is looked up; the look-up then finds no `nowhere`.
+    auto program = compiled("float nowhere(float x);\n"
+                            "float g(float x) { return nowhere(x); }\n");
+    std::string errors;
+    CHECK(program->callable("g", errors) == nullptr);
+    CHECK(errors.find("'g' cannot be called: ") == 0);   // LLVM's words: "Failed to materialize symbols: ..."
+    const Program::CallResult unlinked = program->call("g", {Value::of(1.0f)});
+    CHECK(unlinked.status == Status::LinkError);
+    CHECK(unlinked.error.find("'g' cannot be called: ") == 0);
+    CHECK(unlinked.message() == unlinked.error);
+    CHECK(unlinked.value.kind == Kind::Void);
+    CHECK(program->call("nowhere", {Value::of(1.0f)}).status == Status::NoFunction);   // a prototype alone
+    CHECK(program->call("elsewhere", {Value::of(1.0f)}).status == Status::NoFunction);
 }
 
 TEST_CASE("call: Value::scalar converts a number as setValue converts a parameter's", "[call]")
@@ -497,7 +586,9 @@ TEST_CASE("call: the loop budget and bounds checks stop a call, which says so", 
     program->setLoopBudget(1000);
     const Program::CallResult stopped = program->call(*spin, {Value::of(1.0f)});
     CHECK(stopped.status == Status::OutOfBudget);
-    CHECK(stopped.error == "'spin' ran past its loop budget and returned early");
+    CHECK(stopped.error.empty());   // nothing allocated: the call may be the audio thread's
+    CHECK(stopped.message() == "'spin' ran past its loop budget and returned early");
+    CHECK_FALSE(stopped.violation);
     CHECK(stopped.value.kind == Kind::Float);
     CHECK(stopped.value.number == 0.0);
     CHECK(program->loopBudgetExceeded());
@@ -506,6 +597,7 @@ TEST_CASE("call: the loop budget and bounds checks stop a call, which says so", 
     const Program::CallResult done = program->call(*spin, {Value::of(-1.0f)});
     CHECK(done.ok());
     CHECK(done.value.number == -1.0);
+    CHECK(done.message().empty());
 
     program->setLoopBudget(1000);   // a double in a budgeted loop
     CHECK(program->call("accumulate", {Value::of(100)}).value.number == 50.0);
@@ -519,18 +611,23 @@ TEST_CASE("call: the loop budget and bounds checks stop a call, which says so", 
     CHECK(program->call("tap", {Value::of(3)}).value.number == 4.0);
     const Program::CallResult past = program->call("tap", {Value::of(4)});
     CHECK(past.status == Status::OutOfBounds);
+    CHECK(past.error.empty());
     REQUIRE(program->boundsViolation());
-    CHECK(past.error == "'tap' stopped: " + program->boundsViolation()->message());
-    CHECK(past.error == "'tap' stopped: program.fm:17:16: index 4 out of bounds for 'taps' of type 'float[4]'");
+    REQUIRE(past.violation);
+    CHECK(past.violation->index == 4);
+    CHECK(std::string(past.violation->array) == "taps");
+    CHECK(past.message() == "'tap' stopped: " + program->boundsViolation()->message());
     CHECK(past.value.number == 0.0);
     program->clearBoundsViolation();
+    // The result keeps the check it met, worded once the record is cleared, off the call's thread.
+    CHECK(past.message() == "'tap' stopped: program.fm:17:16: index 4 out of bounds for 'taps' of type 'float[4]'");
     CHECK(program->call("tap", {Value::of(0)}).ok());
 
     // A 2-D array's index is checked in each dimension.
     CHECK(program->call("grid", {Value::of(1), Value::of(2)}).value.number == 6.0);
     const Program::CallResult row = program->call("grid", {Value::of(0), Value::of(3)});
     CHECK(row.status == Status::OutOfBounds);
-    CHECK(row.error == "'grid' stopped: program.fm:22:16: index 3 out of bounds for 'g[r]' of type 'float[3]'");
+    CHECK(row.message() == "'grid' stopped: program.fm:22:16: index 3 out of bounds for 'g[r]' of type 'float[3]'");
     program->clearBoundsViolation();
 }
 

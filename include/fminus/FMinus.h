@@ -555,7 +555,7 @@ namespace fminus
         //   if (result.ok())
         //       show(result.value.number);              // the float it returned, as a double
         //   else                                        // with Value::of(2): "argument 2 of 'softclip' is 'int', not
-        //       show(result.error);                     // 'float' (its parameter 'drive')"
+        //       show(result.message());                 // 'float' (its parameter 'drive')"
         //
         // What call() passes: C's scalars, bool, int, float and double (an enumerated type's as its int or bool), and
         // pointers to int, float, double or a module, or void*, which point to the host's memory (Value::array,
@@ -563,32 +563,45 @@ namespace fminus
         // a poly float, a pointer to a vector, a pointer as its result) has no Callable: callable() says which of its
         // types call() does not pass. Each argument's type must be its parameter's, as call() converts nothing (a host
         // whose numbers are all doubles converts each with Value::scalar). A pointer must also not drop a const (a
-        // const float* to a float*), must be aligned to its elements' type, and a module's instance must be one of a
-        // module laid out as the parameter's. A pointer's extent is the host's to know: C passes none, and FMinus
-        // checks no access through one, bounds checks or not (a parameter written `float x[16]` is a float*, as C has
-        // it). A function that is passed a buffer is passed its length too, as C's are, and must not read past it.
+        // const float* to a float*), must be aligned to its elements' type, and a module's instance must be one of
+        // this Program's Module (below). A pointer's extent is the host's to know: C passes none, and FMinus checks no
+        // access through one, bounds checks or not (a parameter written `float x[16]` is a float*, as C has it). A
+        // function that is passed a buffer is passed its length too, as C's are, and must not read past it.
         //
         // The instance: a method runs on one, its first parameter, `this`, which is Value::instance(memory, module), an
         // instance the host made as Module says (zeroed, aligned, its parameters set), never null. What the method
         // changes stays in it for the next call, by name or through a pointer. A function that is no method runs on its
-        // arguments and what they point to, as FMinus has no variables outside functions but its constants.
+        // arguments and what they point to, as FMinus has no variables outside functions but its constants. The module
+        // is the host's word for how the memory is laid out, which call() cannot see, so it must be this Program's own
+        // (module() gives it): another Program's, of the same name, is refused even when it was compiled from the same
+        // source. A host that keeps an instance across a recompile, knowing its layout is the same, passes it with the
+        // new Program's Module.
         //
         // Threads: callable() compiles, on the calling thread, the code that calls the function, the first time it is
         // asked for it: a thunk of a few instructions, which loads each argument as the function's parameter type and
         // calls it as C does, through the target's calling convention. That takes a millisecond or so, allocates and
         // takes the Program's lock (and compiles the program's code, if no function was looked up yet), so it runs off
-        // the audio thread. Its Callable is the Program's, the same one each time, valid while the Program lives.
-        // call() through a Callable runs the function on the calling thread, any thread, on several at once (each with
-        // an instance of its own: a method's changes are as atomic as its C++ call's), and adds no lock and no
-        // allocation to what the function does, unless it fails (its message allocates) or the function takes more
-        // than 16 arguments. call(name, ...) looks the Callable up first, as callable() does.
+        // the audio thread. Its Callable is the Program's, the same one each time, valid while the Program lives: a
+        // host keeps the pointer, as it keeps a function's, and asks a recompiled Program for its own. A Callable
+        // cannot be copied, so the one call() is given is the one callable() described. call() through a Callable runs
+        // the function on the calling thread, any thread, on several at once (each with an instance of its own: a
+        // method's changes are as atomic as its C++ call's), and adds no lock and no allocation to what the function
+        // does, unless the host's call is wrong (Mismatch: its message allocates) or the function takes more than 16
+        // arguments. A call the loop budget or a bounds check stops allocates nothing: its error is empty, and
+        // CallResult::message() words it, off the audio thread. call(name, ...) looks the Callable up first, as
+        // callable() does.
         //
         // The safety options apply as they do to a call through a pointer: in a program compiled with the loop budget
         // the call counts against it, and one that runs out returns early, Status::OutOfBudget, with
         // loopBudgetExceeded() set; with bounds checks, a check that fails stops the call, Status::OutOfBounds, with
         // boundsViolation() set. Each status is the Program's state after the call, so set the budget (setLoopBudget)
         // and clear the record (clearBoundsViolation) before each call, and re-initialise an instance a stopped call
-        // ran on (the loop budget's paragraph, above).
+        // ran on (the loop budget's paragraph, above). The budget and the record are the Program's, one of each, which
+        // every thread's calls share: a status is the call's own only when no other call of the Program overlaps it.
+        // With several threads calling at once, one call's failure is every overlapping call's status (and a call that
+        // returns after another's failed check returns early too, as the bounds checks' paragraph says), and one
+        // thread's setLoopBudget or clearBoundsViolation is the others' too. A host that calls a program compiled with
+        // either option from several threads serialises those calls, or reads the statuses as the program's.
 
         // A value call() passes to a function, or one it returns: a scalar, or a pointer to the host's memory.
         struct Value
@@ -702,7 +715,9 @@ namespace fminus
             }
         };
 
-        // A function as call() calls it: its name and its signature, as values.
+        // A function as call() calls it: its name and its signature, as values. The Program's own, which callable()
+        // gives as a pointer: it cannot be copied or moved, so the Callable call() is given is the one callable()
+        // described, and what call() checks is the function's signature. A host copies the fields it shows.
         struct Callable
         {
             // One of its parameters, which call() checks an argument against (not a module's Parameter, above).
@@ -723,6 +738,13 @@ namespace fminus
             std::string resultType;                   // as FMinus writes it: "float", "void"
             std::vector<Param> parameters;            // in order, a method's `this` first
 
+            Callable() = default;   // none of a Program's, which call() refuses
+            Callable(const Callable&) = delete;
+            Callable& operator=(const Callable&) = delete;
+            Callable(Callable&&) = delete;
+            Callable& operator=(Callable&&) = delete;
+            ~Callable() = default;
+
         private:
             friend class Program;
             const void* owner_ = nullptr;   // the Program's
@@ -735,10 +757,13 @@ namespace fminus
             enum class Status : std::uint8_t
             {
                 Ok,            // the function ran and returned: `value` is its result
-                NoFunction,    // the program defines no function of the name
+                NoFunction,    // the program defines no function of the name (it may declare one: a prototype alone)
                 Unsupported,   // the function takes or returns a type call() does not pass (above)
+                LinkError,     // the function is the program's, but its code did not link (a function it calls is
+                               // declared and defined nowhere), or the code that calls it did not compile: LLVM's
+                               // words, "'g' cannot be called: Failed to materialize symbols: ..."
                 Mismatch,      // the arguments are not the function's: their number, a type, a null instance, a pointer
-                               // not aligned, a Callable of another Program's
+                               // not aligned, an instance of another Program's module, a Callable of another Program's
                 OutOfBudget,   // it ran out of the loop budget and returned early (loopBudgetExceeded)
                 OutOfBounds,   // a bounds check failed, and it returned early (boundsViolation)
             };
@@ -747,21 +772,34 @@ namespace fminus
             // The function's result, of its result type (Void for a void function); after OutOfBudget or OutOfBounds,
             // what it returned early, 0, false or nothing; Void when it did not run.
             Value value;
-            // What went wrong, one line, as FMinus words its errors: "'softclip' takes 2 arguments, not 3",
-            // "'spin' ran past its loop budget and returned early", "'tap' stopped: taps.fm:3:16: index 20 out of
-            // bounds for 'taps' of type 'float[16]'". Empty when it is Ok.
+            // Why it did not run, one line, as FMinus words its errors: "'softclip' takes 2 arguments, not 3", "the
+            // program has no function 'softclp'". Empty when it is Ok, and after OutOfBudget or OutOfBounds, which a
+            // call on the audio thread meets, and so allocate nothing: message() words them.
             std::string error;
+            // After OutOfBounds, the check that failed, as boundsViolation() had it when the call returned (its strings
+            // are the Program's, valid while it lives); nothing otherwise.
+            std::optional<BoundsViolation> violation;
 
             bool ok() const noexcept
             {
                 return status == Status::Ok;
             }
+
+            // What went wrong, one line: `error`, or what stopped the call, "'spin' ran past its loop budget and
+            // returned early", "'tap' stopped: taps.fm:3:16: index 20 out of bounds for 'taps' of type 'float[16]'";
+            // empty when it is Ok. It allocates, so a host on the audio thread keeps the CallResult and words it
+            // elsewhere, while the Program lives.
+            std::string message() const;
+
+        private:
+            friend class Program;
+            const Callable* function_ = nullptr;   // the Callable that ran, for message()
         };
 
         // The function `name` (a method as "Osc::tick") as call() calls it, its thunk compiled now, on this thread, if
-        // it has not been yet; nullptr, with `errors` set, when the program defines no such function or call() cannot
-        // pass one of its types. A function the program only declares (`float atanf(float x);`, the C library's) is
-        // none of its own, and has no Callable.
+        // it has not been yet; nullptr, with `errors` set, when the program defines no such function, call() cannot
+        // pass one of its types, or its code does not link (CallResult::Status, above). A function the program only
+        // declares (`float atanf(float x);`, the C library's) is none of its own, and has no Callable.
         const Callable* callable(std::string_view name, std::string& errors);
 
         // Calls `function`, one of this Program's Callables, with `count` arguments, checked against its parameters.
