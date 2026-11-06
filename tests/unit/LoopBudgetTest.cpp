@@ -1,10 +1,14 @@
 // tests/unit/LoopBudgetTest.cpp: the loop budget (ir::Options::loopBudget, opt/LoopBudget.h), in the JIT at each level:
 // a call that runs out returns early with the flag set, and so does every caller; what a loop without a count, a loop
-// with one and a recursion take of it; what the program wrote, kept as it was where it stopped; and a call within its
-// budget computing what it would without the budget, bit for bit.
+// with one and a recursion take of it; what a stopped call leaves in memory (its loop's stores to the output, and a
+// module's field the optimiser kept in a register, not stored at all); -1 left after a stop, so that no count wraps
+// however many calls run out; and a call within its budget computing what it would without the budget, bit for bit.
 #include "Compile.h"
 #include "opt/LoopBudget.h"
 #include "runtime/Runtime.h"
+
+#include <llvm/AsmParser/Parser.h>
+#include <llvm/Support/SourceMgr.h>
 
 #include <algorithm>
 #include <array>
@@ -171,14 +175,109 @@ TEST_CASE("a loop with a count is charged it before it starts: it runs whole or 
         arm(budget, taken - 1);
         f(out.data(), 1024);
         CHECK(budget.stopped == 1);
+        CHECK(budget.left == -1);
         CHECK(std::all_of(out.begin(), out.end(), [](float x) { return x == 0.0f; }));
     }
 }
 
-TEST_CASE("a call that stops leaves what it wrote as it was at that branch back", "[budget]")
+TEST_CASE("a stop leaves -1, so that no charge wraps however many calls run out", "[budget]")
+{
+    // A pointer loop over an empty range written one short, e below a: it never ends, and its count, (e - a - 4) / 4
+    // unsigned, is 2^62 - 2, charged in its preheader when optimised. Were a stop to leave its own count, `left` would
+    // be near -2^62 after one call, near INT64_MIN after two, and the third's charge would wrap it positive and let the
+    // loop write through memory. Each call stops before the loop, writing nothing, and leaves -1.
+    const char* const ramp = "void ramp(float* a, float* e)\n"
+                             "{\n"
+                             "    float x = 1.0f;\n"
+                             "    for (float* p = a; p != e; ++p)\n"
+                             "    {\n"
+                             "        *p = x;\n"
+                             "        x = x + 1.0f;\n"
+                             "    }\n"
+                             "}\n";
+    for (int level = 1; level <= 3; ++level)
+    {
+        INFO("-O" << level);
+        auto jit = compileAt(ramp, level);
+        REQUIRE(jit);
+        auto* f = lookup<void(float*, float*)>(*jit, "ramp");
+        fminus_rt_loop_budget_state& budget = budgetOf(*jit);
+        std::vector<float> memory(64, 0.0f);
+        float* const a = memory.data() + 32;
+        arm(budget, 1000);
+        f(a, a - 1);
+        CHECK(budget.stopped == 1);
+        REQUIRE(budget.left == -1);   // charged, not run: no more calls if it is not
+        for (int call = 0; call < 4; ++call)
+        {
+            INFO("call " << call);
+            f(a, a - 1);
+            CHECK(budget.stopped == 1);
+            CHECK(budget.left == -1);
+        }
+        CHECK(std::all_of(memory.begin(), memory.end(), [](float x) { return x == 0.0f; }));
+    }
+}
+
+TEST_CASE("a loop whose count may not fit an int64_t counts a branch back at a time", "[budget]")
+{
+    // IR written by hand (FMinus's pointers are to 4 bytes or more): a loop over bytes, `p != e` with e one below p,
+    // whose count is 2^64 - 2, kept scalar. Charged it, the subtraction would add 2 to the budget and the loop would
+    // write through memory; it counts its branches back instead, and stops after the budget's, at each level.
+    constexpr std::array<llvm::OptimizationLevel, 3> levels{llvm::OptimizationLevel::O1, llvm::OptimizationLevel::O2,
+                                                            llvm::OptimizationLevel::O3};
+    for (std::size_t level = 0; level < levels.size(); ++level)
+    {
+        INFO("-O" << level + 1);
+        auto context = std::make_unique<llvm::LLVMContext>();
+        llvm::SMDiagnostic diagnostic;
+        std::unique_ptr<llvm::Module> module = llvm::parseAssemblyString(
+            "@fminus_rt_loop_budget = global { i64, i32 } { i64 9223372036854775807, i32 0 }, align 8\n"
+            "define void @bytes(ptr %a, ptr %e) {\n"
+            "entry:\n"
+            "  %empty = icmp eq ptr %a, %e\n"
+            "  br i1 %empty, label %done, label %loop\n"
+            "loop:\n"
+            "  %p = phi ptr [ %a, %entry ], [ %next, %loop ]\n"
+            "  %v = phi i8 [ 1, %entry ], [ %v.next, %loop ]\n"
+            "  store i8 %v, ptr %p, align 1\n"
+            "  %v.next = add i8 %v, 1\n"
+            "  %next = getelementptr inbounds i8, ptr %p, i64 1\n"
+            "  %more = icmp ne ptr %next, %e\n"
+            "  br i1 %more, label %loop, label %done, !llvm.loop !1\n"
+            "done:\n"
+            "  ret void\n"
+            "}\n"
+            "!llvm.module.flags = !{!0}\n"
+            "!0 = !{i32 7, !\"fminus.loop-budget\", i32 1}\n"
+            "!1 = distinct !{!1, !2, !3}\n"
+            "!2 = !{!\"llvm.loop.vectorize.enable\", i1 false}\n"
+            "!3 = !{!\"llvm.loop.unroll.disable\"}\n",
+            diagnostic, *context);
+        REQUIRE(module);
+        auto jit = llvm::cantFail(fminus::jit::Jit::create(levels[level]));
+        llvm::cantFail(jit->add(std::move(module), std::move(context)));
+        auto* bytes = lookup<void(std::uint8_t*, std::uint8_t*)>(*jit, "bytes");
+        fminus_rt_loop_budget_state& budget = budgetOf(*jit);
+        std::vector<std::uint8_t> memory(256, 0);
+        std::uint8_t* const a = memory.data() + 16;
+        arm(budget, 10);
+        bytes(a, a - 1);
+        CHECK(budget.stopped == 1);
+        CHECK(budget.left == -1);
+        for (std::size_t i = 0; i < memory.size(); ++i)
+        {
+            INFO("byte " << i);
+            const std::size_t at = i - 16;   // eleven bytes from a: ten branches back, and the one that ran out
+            CHECK(memory[i] == (i >= 16 && at <= 10 ? static_cast<std::uint8_t>(at + 1) : 0));
+        }
+    }
+}
+
+TEST_CASE("a loop's stores to its output are there up to the branch back where it stopped", "[budget]")
 {
     // A loop with no count (a float's condition), so it stops at a branch back: as many iterations run as the budget
-    // allows branches back, and one more.
+    // allows branches back, and one more. Its stores go through its argument, in the loop, so each that ran is there.
     const char* const ramp = "void ramp(float* restrict out, float x)\n"
                              "{\n"
                              "    int i = 0;\n"
@@ -205,6 +304,52 @@ TEST_CASE("a call that stops leaves what it wrote as it was at that branch back"
             INFO("out[" << i << "]");
             CHECK(out[i] == (i <= 10 ? 100.0f - static_cast<float>(i) : 0.0f));
         }
+    }
+}
+
+TEST_CASE("a stopped call may leave its instance at no point of the source", "[budget]")
+{
+    // The oscillator's phase wrap of extending.md, recipe 29. Optimised, `phase` lives in a register through the block's
+    // loop and is stored after it (LICM), so a call that stops in the wrap of its fifth sample has written four samples
+    // and left `phase` as it was before the call: a state the source never passes through, which is why a host
+    // re-initialises an instance after a stop. (Should the optimiser stop keeping the field in a register, this test
+    // needs another example; the docs' warning stands.)
+    const char* const wrap = "module Wrap\n"
+                             "{\n"
+                             "    float phase;\n"
+                             "\n"
+                             "    void process(const float* restrict in, float* restrict out, int n)\n"
+                             "    {\n"
+                             "        for (int i = 0; i < n; ++i)\n"
+                             "        {\n"
+                             "            phase = phase + in[i];\n"
+                             "            while (phase >= 1.0f)\n"
+                             "                phase = phase - 1.0f;\n"
+                             "            out[i] = phase;\n"
+                             "        }\n"
+                             "    }\n"
+                             "};\n";
+    struct Wrap
+    {
+        float phase = 0.0f;
+    };
+    std::vector<float> in(8, 0.125f);
+    in[4] = std::numeric_limits<float>::infinity();   // infinity less one is infinity: the wrap never ends
+    for (int level = 1; level <= 3; ++level)
+    {
+        INFO("-O" << level);
+        auto jit = compileAt(wrap, level);
+        REQUIRE(jit);
+        auto* process = lookup<void(Wrap*, const float*, float*, int)>(*jit, "Wrap::process");
+        fminus_rt_loop_budget_state& budget = budgetOf(*jit);
+        Wrap instance;
+        std::vector<float> out(8, -1.0f);
+        arm(budget, 1000);
+        process(&instance, in.data(), out.data(), 8);
+        CHECK(budget.stopped == 1);
+        CHECK(out[3] == 0.5f);    // four samples written
+        CHECK(out[4] == -1.0f);   // and no more
+        CHECK(instance.phase == 0.0f);   // but the phase they advanced, never
     }
 }
 

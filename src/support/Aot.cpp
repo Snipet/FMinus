@@ -7,6 +7,7 @@
 #include <llvm/ADT/SmallString.h>
 #include <llvm/IR/GlobalVariable.h>
 #include <llvm/IR/IRBuilder.h>
+#include <llvm/IR/InlineAsm.h>
 #include <llvm/IR/LegacyPassManager.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Verifier.h>
@@ -16,9 +17,11 @@
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Target/TargetMachine.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <optional>
+#include <vector>
 
 namespace fminus::aot
 {
@@ -160,21 +163,47 @@ namespace fminus::aot
         const bool parallel = module.getFunction("fminus_rt_parallel_for") != nullptr;
         if (parallel)
             builder.CreateCall(module.getOrInsertFunction("fminus_rt_parallel_start", intType));
-        // The loop budget, set for the call and read after it. The accesses are volatile: until the pass at the end of
-        // the pipeline puts the program's checks in, nothing in main touches the budget, and the optimiser would
-        // fold the read of the flag to the 0 written before the call.
+        // The loop budget, set for the call and read after it (-1 or more, as Program::setLoopBudget sets it).
+        //
+        // Until the pass at the end of the pipeline puts the program's checks in, main is a function that may never
+        // return, and touches no budget: FunctionAttrs would mark it noreturn, and SimplifyCFG would delete what
+        // follows its call here, the flag's check and the message, for an `unreachable` that the stopped call then
+        // returns into (a trap on arm64); or fold the flag's read to the 0 written before the call. So with a budget
+        // the C main calls main through its address passed through an empty inline asm, as Denormals::Flush's
+        // wrapper calls its body (ir/Denormals.cpp): a call of a function LLVM cannot see, which may return, and read
+        // and write any memory, and which no inliner inlines. The accesses are volatile besides.
         llvm::GlobalVariable* budget = nullptr;
+        llvm::Value* callee = program;
         if (loopBudget)
         {
             budget = opt::loopBudgetGlobal(module);
             entry->addFnAttr(opt::kLoopBudgetHostAttribute);
-            program->addFnAttr(llvm::Attribute::NoInline);
-            builder.CreateAlignedStore(builder.getInt64(static_cast<std::uint64_t>(*loopBudget)), budget,
-                                       llvm::Align(8), /*isVolatile=*/true);
+            const std::int64_t left = std::max<std::int64_t>(*loopBudget, -1);
+            builder.CreateAlignedStore(builder.getInt64(static_cast<std::uint64_t>(left)), budget, llvm::Align(8),
+                                       /*isVolatile=*/true);
             builder.CreateAlignedStore(builder.getInt32(0), builder.CreateStructGEP(budget->getValueType(), budget, 1),
                                        llvm::Align(4), /*isVolatile=*/true);
+            llvm::InlineAsm* launder = llvm::InlineAsm::get(llvm::FunctionType::get(pointerType, {pointerType}, false),
+                                                            "", "=r,0", /*hasSideEffects=*/false);
+            llvm::CallInst* address = builder.CreateCall(launder, {program}, "main.address");
+            address->setDoesNotAccessMemory();
+            address->setDoesNotThrow();
+            address->addFnAttr(llvm::Attribute::WillReturn);
+            callee = address;
         }
-        llvm::Value* result = builder.CreateCall(program, values, "result");
+        llvm::CallInst* result = builder.CreateCall(program->getFunctionType(), callee, values, "result");
+        if (callee != program)
+        {
+            // An indirect call has no callee to read the C ABI's attributes from: it carries main's own (a bool's
+            // zeroext), and none of its function attributes.
+            const llvm::AttributeList attributes = program->getAttributes();
+            std::vector<llvm::AttributeSet> parameters;
+            for (unsigned i = 0; i < program->arg_size(); ++i)
+                parameters.push_back(attributes.getParamAttrs(i));
+            result->setCallingConv(program->getCallingConv());
+            result->setAttributes(
+                llvm::AttributeList::get(context, llvm::AttributeSet(), attributes.getRetAttrs(), parameters));
+        }
         if (parallel)
             builder.CreateCall(module.getOrInsertFunction("fminus_rt_parallel_stop", builder.getVoidTy()));
         if (budget != nullptr)

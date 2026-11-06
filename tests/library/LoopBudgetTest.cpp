@@ -1,9 +1,9 @@
 // tests/library/LoopBudgetTest.cpp: Program::Options::loopBudget, runaway-loop protection, as a plugin host uses it
 // (C++17, FMinus::FMinus alone): the host sets the budget before each call (setLoopBudget), and a process() that would
 // never end returns early, with loopBudgetExceeded() set, on the calling thread, in a parallel region's threads, and from
-// an entry point that flushes subnormals, which hands the host's floating-point mode back as it was. Within its budget a
-// call computes what it would without it, bit for bit; a program compiled without it reads and writes a budget nothing
-// counts down.
+// an entry point that flushes subnormals, which hands the host's floating-point mode back as it was; -1 is left after a
+// stop, and a negative budget is -1. Within its budget a call computes what it would without it, bit for bit; a program
+// compiled without it reads and writes a budget nothing counts down.
 #include "fminus/FMinus.h"
 
 #include <catch2/catch_test_macros.hpp>
@@ -113,16 +113,23 @@ TEST_CASE("Options::loopBudget: a process() that never ends returns early, and t
     CHECK(out[255] > 0.0f);
     CHECK(out[255] < 1.0f);
 
-    // The bug: an infinite frequency. The call returns, early, with the flag set; what it wrote before it stopped stays.
+    // The bug: an infinite frequency. The call returns, early, with the flag set, and -1 left.
     fminus::Program::setValue(instance.memory, *frequency, std::numeric_limits<double>::infinity());
     std::fill(out.begin(), out.end(), -1.0f);
     program->setLoopBudget(1'000'000);
     process(instance.memory, out.data(), 256);
     CHECK(program->loopBudgetExceeded());
-    CHECK(program->loopBudgetLeft() < 0);
+    CHECK(program->loopBudgetLeft() == -1);
     CHECK(out[255] == -1.0f);
 
-    // The host silences it, fixes it (or keeps the program it had), and runs it again.
+    // Not set again, the next call stops at its first check, and -1 is still left.
+    process(instance.memory, out.data(), 256);
+    CHECK(program->loopBudgetExceeded());
+    CHECK(program->loopBudgetLeft() == -1);
+
+    // The host silences it, fixes it (or keeps the program it had), and runs it again on an instance it made again: the
+    // stopped call left this one as its optimised code had it, which need not be any point of the source (`phase` is
+    // kept in a register through the block's loop, and stored after it).
     fminus::Program::setValue(instance.memory, *frequency, 440.0);
     std::memset(instance.memory, 0, instance.size);
     fminus::Program::setDefaults(instance.memory, *osc);
@@ -131,6 +138,42 @@ TEST_CASE("Options::loopBudget: a process() that never ends returns early, and t
     process(instance.memory, out.data(), 256);
     CHECK_FALSE(program->loopBudgetExceeded());
     CHECK(out[255] > 0.0f);
+}
+
+TEST_CASE("Options::loopBudget: a negative budget is -1, and stops a call at its first check", "[library][budget]")
+{
+    std::string errors;
+    fminus::Program::Options options;
+    options.loopBudget = true;
+    auto program = fminus::Program::compile("float halvings(float x)\n"
+                                            "{\n"
+                                            "    float n = 0;\n"
+                                            "    while (x > 1)\n"
+                                            "    {\n"
+                                            "        x = x * 0.5f;\n"
+                                            "        n = n + 1;\n"
+                                            "    }\n"
+                                            "    return n;\n"
+                                            "}\n",
+                                            errors, options);
+    INFO(errors);
+    REQUIRE(program);
+    auto* halvings = program->function<float(float)>("halvings", errors);
+    REQUIRE(halvings != nullptr);
+    // INT64_MIN less a branch back would wrap to INT64_MAX, a budget that never runs out.
+    for (const std::int64_t budget : {std::numeric_limits<std::int64_t>::min(), std::int64_t{-1000}, std::int64_t{-1}})
+    {
+        INFO("budget " << budget);
+        program->setLoopBudget(budget);
+        CHECK(program->loopBudgetLeft() == -1);
+        CHECK_FALSE(program->loopBudgetExceeded());
+        CHECK(halvings(1024.0f) == 0.0f);
+        CHECK(program->loopBudgetExceeded());
+        CHECK(program->loopBudgetLeft() == -1);
+    }
+    program->setLoopBudget(100);
+    CHECK(halvings(1024.0f) == 10.0f);
+    CHECK_FALSE(program->loopBudgetExceeded());
 }
 
 TEST_CASE("Options::loopBudget: within its budget a call computes what it would without it, bit for bit",

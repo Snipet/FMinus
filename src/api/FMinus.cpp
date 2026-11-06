@@ -438,11 +438,12 @@ namespace fminus
     }
 
     // The program's own accesses are relaxed (monotonic) atomics too (opt/LoopBudget.h). The flag is cleared first:
-    // a call that starts after both stores sees both.
+    // a call that starts after both stores sees both. `left` is never below -1, which keeps the program's counts from
+    // wrapping (opt/LoopBudget.cpp): any negative budget is -1, a call that stops at its first check.
     void Program::setLoopBudget(std::int64_t backEdges) noexcept
     {
         std::atomic_ref(impl_->budget->stopped).store(0, std::memory_order_relaxed);
-        std::atomic_ref(impl_->budget->left).store(backEdges, std::memory_order_relaxed);
+        std::atomic_ref(impl_->budget->left).store(std::max<std::int64_t>(backEdges, -1), std::memory_order_relaxed);
     }
 
     std::int64_t Program::loopBudgetLeft() const noexcept

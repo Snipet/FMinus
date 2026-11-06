@@ -1,0 +1,45 @@
+// The loop budget in a parallel region (loop-budget.fm runs it, at -O0, where each function keeps its own code). The
+// region's body runs on the pool's threads, and so does every function it calls: each writes its count back with an
+// atomic min, so that what is left never goes up while the program runs, and a part that read it before another ran
+// out cannot write a positive count over that one's -1. A function only the calling thread runs stores it.
+
+float settle(float y)
+{
+    while (y > 0)
+        y = y * 1.0f;
+    return y;
+}
+
+void spin_all(float* restrict out, int n, float x) [[clang::nonblocking]]
+{
+    parallel for (int i = 0; i < n; ++i)
+        out[i] = settle(x + (float)i);
+}
+
+float halve(float x)
+{
+    while (x > 1)
+        x = x * 0.5f;
+    return x;
+}
+
+// REGION-LABEL: define float @settle(float %y)
+// REGION:         atomicrmw min ptr @fminus_rt_loop_budget, i64 %budget.slot.0 monotonic, align 8
+// REGION-NEXT:    ret float
+// REGION:       budget.stop:
+// REGION-NEXT:    store atomic i64 -1, ptr @fminus_rt_loop_budget monotonic, align 8
+// REGION-LABEL: define void @spin_all(
+// REGION-NOT:     {{atomicrmw|store atomic i64}}
+// REGION:         call void @fminus_rt_parallel_for(
+// REGION-LABEL: define float @halve(float %x)
+// REGION-NOT:     atomicrmw
+// REGION:         store atomic i64 %budget.slot.0, ptr @fminus_rt_loop_budget monotonic, align 8
+// REGION-NEXT:    ret float
+// REGION-LABEL: define internal void @spin_all.parallel.1(
+// REGION:         atomicrmw min ptr @fminus_rt_loop_budget, i64 %budget.slot.0 monotonic, align 8
+// REGION-NEXT:    call float @settle(
+// REGION:       parallel.end:
+// REGION-NEXT:    atomicrmw min ptr @fminus_rt_loop_budget, i64 %budget.slot.0 monotonic, align 8
+// REGION-NEXT:    ret void
+// REGION:       budget.stop:
+// REGION-NEXT:    store atomic i64 -1, ptr @fminus_rt_loop_budget monotonic, align 8

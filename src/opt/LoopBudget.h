@@ -16,11 +16,15 @@
 // The budget is the symbol fminus_rt_loop_budget, a { i64 left; i32 stopped } (runtime/Runtime.h), which the module
 // defines (ir::lower, loopBudgetGlobal below), unlimited until the host sets it: in the JIT, each program's own. A
 // function that counts reads `left` once where it starts and keeps it in a register, writes it back before each call
-// that counts too and before it returns, and reads it again after such a call. When it runs out it writes `left`, sets
-// `stopped` and returns zero, null or nothing, and each function that called it, seeing `stopped` after the call,
-// returns at once too, so the state the program leaves is the one it had where it stopped: as if it had been paused
-// there. Every access to the symbol is a relaxed (monotonic) atomic, so a parallel region's threads may share it (each
-// counts its own copy of `left` from where its part starts, and `stopped` is shared).
+// that counts too and before it returns, and reads it again after such a call. When it runs out it writes -1 to
+// `left`, sets `stopped` and returns zero, null or nothing, and each function that called it, seeing `stopped` after
+// the call, returns at once too: no caller goes on with a value that was never computed. What the program leaves in
+// memory is whichever of the optimised code's stores had run, which need not be a state the source ever passes
+// through (a module's field kept in a register through a loop is stored after it), so a host re-initialises the
+// instance, or discards it, before running it again. `left` is never below -1, so no count wraps. Every access to the
+// symbol is a relaxed (monotonic) atomic, so a parallel region's threads may share it: each counts its own copy of
+// `left` from where its part starts, and writes it back with an atomic min, so that `left` never goes up while the
+// program runs; `stopped` is shared.
 #pragma once
 
 #include <llvm/IR/PassManager.h>
@@ -48,7 +52,8 @@ namespace fminus::opt
     // flag (an executable's C main, support/Aot.h). A call of it is no call of the program's.
     inline constexpr const char* kLoopBudgetHostAttribute = "fminus-loop-budget-host";
 
-    // The budget in `module`: a global of the type { i64, i32 }, defined there with an unlimited budget
+    // The budget in `module`: a global of the type { i64, i32 } (a host that writes `left` writes -1 or more), defined
+    // there with an unlimited budget
     // ({ INT64_MAX, 0 }), and made if it is not there yet.
     llvm::GlobalVariable* loopBudgetGlobal(llvm::Module& module);
 

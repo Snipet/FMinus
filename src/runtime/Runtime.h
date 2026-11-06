@@ -19,14 +19,15 @@ typedef void (*fminus_rt_task)(void* context, std::int32_t begin, std::int32_t e
 
 // A program's loop budget, fminus_rt_loop_budget, which a program compiled with it defines (ir::Options::loopBudget,
 // opt/LoopBudget.h) and its code counts down: one at each branch back to the start of a loop, and one at each call of a
-// function that can call itself again. When `left` goes below zero, the function that took it there sets `stopped`
-// and returns early, and so does each function of the program that called it, back to the host. It starts unlimited
-// (INT64_MAX, and 0); the host sets `left` and clears `stopped` before a call, and reads them after it, with relaxed
-// atomics (Program::setLoopBudget, include/fminus/FMinus.h; an executable's C main, support/Aot.h). Every access the
-// program makes is a relaxed atomic too, so a parallel region's threads may share it.
+// function that can call itself again. When `left` would go below zero, the function that took it there writes -1 to
+// it, sets `stopped` and returns early, and so does each function of the program that called it, back to the host.
+// It starts unlimited (INT64_MAX, and 0); the host sets `left` (to -1 or more: the program's counts rely on it never
+// holding less, and -1 stops a call at its first check) and clears `stopped` before a call, and reads them after it,
+// with relaxed atomics (Program::setLoopBudget, include/fminus/FMinus.h; an executable's C main, support/Aot.h). Every
+// access the program makes is a relaxed atomic too, so a parallel region's threads may share it.
 struct fminus_rt_loop_budget_state
 {
-    std::int64_t left;      // what the program may still take: below zero once it has run out
+    std::int64_t left;      // what the program may still take: -1 once it has run out, never less
     std::int32_t stopped;   // nonzero once a call has run out and returned early
 };
 

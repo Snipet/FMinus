@@ -32,9 +32,8 @@
 //     %budget.out4 = icmp slt i64 %budget.left3, 0
 //     br i1 %budget.out4, label %budget.stop, label %while.body, !prof !unlikely
 //   ...
-//   budget.stop:                                     ; ran out: the count back, the flag set, and return
-//     %budget.slot.2 = phi i64 [ %budget.left, %vector.ph ], [ %budget.left3, %while.body.budget ]
-//     store atomic i64 %budget.slot.2, ptr @fminus_rt_loop_budget monotonic, align 8
+//   budget.stop:                                     ; ran out: -1 for what is left, the flag set, and return
+//     store atomic i64 -1, ptr @fminus_rt_loop_budget monotonic, align 8
 //     store atomic i32 1, ptr getelementptr inbounds ({ i64, i32 }, ptr @fminus_rt_loop_budget, i32 0, i32 1)
 //         monotonic, align 4
 //     ret float 0.000000e+00
@@ -55,8 +54,28 @@
 //
 // The branch to the stop is marked unlikely, so the code generator puts it out of the loop's way: on arm64 a loop's
 // charge is a SUBS and a B.MI where it starts, and a branch back's a SUB and a TBZ. What runs out is reported once,
-// by the function where the count went below zero; the functions that return after it write nothing, so what `left`
-// holds is what that function wrote.
+// by the function where the count went below zero; the functions that return after it write nothing, so `left` holds
+// the -1 that function wrote.
+//
+// The count never wraps. `left` is never below -1: the host sets it to -1 or more (Program::setLoopBudget clamps it),
+// a stop writes -1, and every other write is of a count that passed its check, 0 or more, or of what was read. So a
+// function's count starts at -1 or more, a charge takes at most INT64_MAX (countOf charges no count that may be
+// larger), and no subtraction goes below INT64_MIN: a negative `left` stays negative, however many calls a host makes
+// without setting it again. (Were a stop to write its own count, two calls that ran out on a charge near 2^62 would
+// take `left` near INT64_MIN, and a third's charge would wrap it positive and let its loop run.)
+//
+// A parallel region's threads share `left`, each part counting from what it read where it started. A function that
+// may run on them (one handed to a runtime function, a region's body, and every function it reaches) writes its count
+// back with an atomicrmw min, not a store, so that `left` never goes up while the program runs: a part that read it
+// before another ran out cannot write a positive count over the -1, and every part that starts after a stop stops at
+// its first check. Each thread then takes at most the budget, and the region its thread count times it. Elsewhere the
+// write is a store, since no other thread writes `left` meanwhile, and the min would cost an atomic read-modify-write
+// at each call and return (a compare-and-swap loop on x86-64).
+//
+// What a stopped call leaves in memory is whichever of the optimised code's stores had run. The optimiser keeps a
+// module's field in a register through a loop and stores it after the loop (LICM), sinks and merges stores, so some of
+// the call's writes may be missing, out of order with the source, or out of step with each other: the instance may be
+// in a state the source never passes through. A host re-initialises it, or discards it, before running it again.
 //
 // The functions it changes get their attributes adjusted to what is now true of them: they read and write memory
 // that is no argument's (the budget), they return (noreturn goes: a loop that never ended returns now), and their
@@ -115,9 +134,11 @@ namespace fminus::opt
         };
 
         // The program's functions that `call` runs: its callee, when the module defines it, or the functions the
-        // module defines that it hands a declared function (a parallel region's body, to fminus_rt_parallel_for).
-        // Inline asm runs nothing, and an indirect call is not followed (the top of this file).
-        void reached(llvm::CallBase& call, llvm::SmallVectorImpl<llvm::Function*>& functions)
+        // module defines that it hands a declared function (a parallel region's body, to fminus_rt_parallel_for),
+        // which go in `handed` too when it is given. Inline asm runs nothing, and an indirect call is not followed
+        // (the top of this file).
+        void reached(llvm::CallBase& call, llvm::SmallVectorImpl<llvm::Function*>& functions,
+                     llvm::SmallVectorImpl<llvm::Function*>* handed = nullptr)
         {
             if (call.isInlineAsm())
                 return;
@@ -132,18 +153,24 @@ namespace fminus::opt
             for (llvm::Use& arg : call.args())
             {
                 auto* function = llvm::dyn_cast<llvm::Function>(arg->stripPointerCasts());
-                if (function != nullptr && !function->isDeclaration())
-                    functions.push_back(function);
+                if (function == nullptr || function->isDeclaration())
+                    continue;
+                functions.push_back(function);
+                if (handed != nullptr)
+                    handed->push_back(function);
             }
         }
 
         struct Facts
         {
-            bool done = false;        // changed already, by an earlier run of the pass (kLoopBudgetAttribute)
-            bool cycles = false;      // has a cycle
-            bool recursive = false;   // can call itself again
-            bool mayStop = false;     // counts, or calls a function that may stop
+            bool done = false;         // changed already, by an earlier run of the pass (kLoopBudgetAttribute)
+            bool cycles = false;       // has a cycle
+            bool recursive = false;    // can call itself again
+            bool mayStop = false;      // counts, or calls a function that may stop
+            bool concurrent = false;   // may run on a parallel region's threads: handed to a runtime function, or
+                                       // reached from one that is
             llvm::SmallVector<llvm::Function*, 8> reaches;   // the functions its calls run, with repeats
+            llvm::SmallVector<llvm::Function*, 2> hands;     // the functions it hands a runtime function
         };
 
         // The longest count, in ScalarEvolution's terms, that a loop is charged before it starts: longer ones count a
@@ -324,10 +351,18 @@ namespace fminus::opt
                 });
             }
 
-            // Writes the count back to the budget, at `at`.
+            // Writes the count back to the budget, at `at`: a store, or in a function a parallel region's threads may
+            // run, an atomicrmw min, so that `left` never goes up while the program runs (the top of this file).
             void publish(llvm::IRBuilder<>& at)
             {
-                llvm::StoreInst* store = at.CreateAlignedStore(at.CreateLoad(i64_, slot_), left_, llvm::Align(8));
+                llvm::Value* count = at.CreateLoad(i64_, slot_);
+                if (facts_.concurrent)
+                {
+                    at.CreateAtomicRMW(llvm::AtomicRMWInst::Min, left_, count, llvm::MaybeAlign(8),
+                                       llvm::AtomicOrdering::Monotonic);
+                    return;
+                }
+                llvm::StoreInst* store = at.CreateAlignedStore(count, left_, llvm::Align(8));
                 store->setAtomic(llvm::AtomicOrdering::Monotonic);
             }
 
@@ -402,6 +437,11 @@ namespace fminus::opt
                            return llvm::isa<llvm::SCEVAddRecExpr>(part);
                        }))
                     return nullptr;
+                // A count that may not fit an int64_t would be a negative charge, which adds to the budget: a loop
+                // over bytes, `p != e` with e below p, takes 2^64 - 1 less what lies between. FMinus's pointers are
+                // to 4 bytes or more, whose loops' counts fit; IR written by hand may have such a loop.
+                if (evolution.getUnsignedRangeMax(taken).ugt(std::numeric_limits<std::int64_t>::max()))
+                    return nullptr;
                 const llvm::SCEV* count = evolution.getNoopOrZeroExtend(taken, i64_);
                 llvm::Instruction* at = preheader->getTerminator();
                 if (!expander.isSafeToExpandAt(count, at))
@@ -431,14 +471,18 @@ namespace fminus::opt
                     at.CreateRet(llvm::Constant::getNullValue(result));
             }
 
-            // Where the count goes below zero: the count back to the budget, the flag, and return.
+            // Where the count goes below zero: -1 for what is left, the flag, and return. -1, not the count, which a
+            // charge may have taken far below zero: `left` stays where no later subtraction can wrap it (the top of
+            // this file). It is the least `left` can hold, so a store is a min here too.
             llvm::BasicBlock* stopBlock()
             {
                 if (stop_ != nullptr)
                     return stop_;
                 stop_ = llvm::BasicBlock::Create(context_, "budget.stop", &function_);
                 llvm::IRBuilder<> at(stop_);
-                publish(at);
+                llvm::StoreInst* out =
+                    at.CreateAlignedStore(llvm::ConstantInt::getSigned(i64_, -1), left_, llvm::Align(8));
+                out->setAtomic(llvm::AtomicOrdering::Monotonic);
                 llvm::StoreInst* raise =
                     at.CreateAlignedStore(llvm::ConstantInt::get(i32_, 1), stopped_, llvm::Align(4));
                 raise->setAtomic(llvm::AtomicOrdering::Monotonic);
@@ -531,7 +575,7 @@ namespace fminus::opt
                 for (llvm::Instruction& instruction : block)
                 {
                     if (auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction))
-                        reached(*call, these.reaches);
+                        reached(*call, these.reaches, &these.hands);
                 }
             }
         }
@@ -542,6 +586,22 @@ namespace fminus::opt
                 continue;
             these.recursive = recursive(function, facts);
             these.mayStop = counts(these);
+        }
+        // The functions a parallel region's threads may run: those handed to a runtime function, and every function
+        // they reach.
+        llvm::SmallVector<llvm::Function*, 8> work;
+        for (llvm::Function* function : order)
+        {
+            for (llvm::Function* handed : facts[function].hands)
+                work.push_back(handed);
+        }
+        while (!work.empty())
+        {
+            const auto found = facts.find(work.pop_back_val());
+            if (found == facts.end() || found->second.concurrent)
+                continue;
+            found->second.concurrent = true;
+            work.append(found->second.reaches.begin(), found->second.reaches.end());
         }
         for (bool grew = true; grew;)
         {

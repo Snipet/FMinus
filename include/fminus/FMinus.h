@@ -345,15 +345,22 @@ namespace fminus
         // for far longer than a block may take, on the audio thread. Its code counts down the budget: a loop whose
         // count the optimiser knows when it starts (a for over a block, a vectorised loop) is charged that count there,
         // before it runs; any other loop (a while on the data) one at each branch back to its start; and a function
-        // that can call itself again one at each call. When the count goes below zero, the function sets the flag and
-        // returns at once, 0, null or nothing, and so does each of the program's functions that called it, back to the
-        // host: what the program has written stays as it was where it stopped, as if it had paused there (before such
-        // a loop, or at a branch back). Before then, a call computes what it would without the budget, bit for bit: the
-        // checks go in after the optimiser has made every decision, and only count and branch. A loop with a count
-        // costs a subtraction and a branch where it starts, any other a subtraction and a branch an iteration, in
-        // registers, and a call a load and a store of the budget (docs/extending.md, recipe 29, has the measurements).
-        // What a call takes depends on the optimised code: a vectorised loop counts once a vector of samples, and a
-        // loop the optimiser unrolled or removed counts what it became.
+        // that can call itself again one at each call. When the count would go below zero, the function sets the flag
+        // and returns at once, 0, null or nothing, and so does each of the program's functions that called it, back to
+        // the host: no caller goes on with a value that was never computed. Before then, a call computes what it would
+        // without the budget, bit for bit: the checks go in after the optimiser has made every decision, and only count
+        // and branch. A loop with a count costs a subtraction and a branch where it starts, any other a subtraction and
+        // a branch an iteration, in registers, and a call a load and a store of the budget (an atomic min, below, in
+        // what a parallel region's threads run; docs/extending.md, recipe 29, has the measurements). What a call takes
+        // depends on the optimised code: a vectorised loop counts once a vector of samples, and a loop the optimiser
+        // unrolled or removed counts what it became.
+        //
+        // A call that ran out leaves the instance and what it wrote of the output as the optimised code had them when
+        // it stopped, which need not be any point of the source: the optimiser keeps a module's field in a register
+        // through a loop and stores it after the loop, sinks and merges stores, so some of the call's writes may be
+        // missing, out of order with the source, or out of step with each other (a write index advanced past its wrap,
+        // say). A host that runs the program again first re-initialises the instance as it made it (zeroes it, then
+        // setDefaults() and its own parameter values and streams), or discards it.
         //
         //   Program::Options options;
         //   options.loopBudget = true;
@@ -361,26 +368,28 @@ namespace fminus
         //   ...
         //   program->setLoopBudget(10'000'000);           // on the audio thread, before each call
         //   process(instance, in, out, n);
-        //   if (program->loopBudgetExceeded())            // it returned early: silence it, report it
-        //       ...
+        //   if (program->loopBudgetExceeded())            // it returned early: silence it, report it, and
+        //       ...                                       // re-initialise the instance before the next call
         //
-        // One budget a Program, which every thread that runs it shares: a parallel region's threads each count from
-        // where their part starts, so the program as a whole may take up to that many times the budget before each
-        // stops, and what is left after a region is what the last part to finish wrote (the flag is what says one ran
-        // out). A loop that runs for ever only through undefined behaviour (an int that overflows past its end, which
-        // C lets the optimiser assume never happens) is charged the count the optimiser assumed. The program compiles
-        // with its machine code, as compile() returns (the first look-up of a function only finds it). Unlimited until
-        // the host sets it. Each of these is a relaxed atomic load or store, no allocation and no lock: the audio
-        // thread may call them. In a program compiled without the budget they read and write a budget nothing counts
-        // down, and loopBudgetExceeded() is false.
+        // One budget a Program, which every thread that runs it shares. A parallel region's threads each count from
+        // where their part starts, and write back what they have left as a minimum, so that what is left never goes up
+        // during a call: each thread takes at most the budget, the region at most its thread count times it, and a
+        // part that starts after one ran out stops at its first check. What is left after a region is the least any
+        // part left (the flag is what says one ran out). A loop that runs for ever only through undefined behaviour (an
+        // int that overflows past its end, which C lets the optimiser assume never happens) is charged the count the
+        // optimiser assumed. The program compiles with its machine code, as compile() returns (the first look-up of a
+        // function only finds it). Unlimited until the host sets it. Each of these is a relaxed atomic load or store,
+        // no allocation and no lock: the audio thread may call them. In a program compiled without the budget they
+        // read and write a budget nothing counts down, and loopBudgetExceeded() is false.
 
         // Sets the budget for the next call, `backEdges` branches back (a loop with a count is charged them all as it
-        // starts; at 0 the first branch back stops the call), and clears the flag. The host sets it before each call
-        // it limits; otherwise what is left carries over to the next call.
+        // starts; at 0 the first branch back stops the call; a negative budget is -1, which stops the call at its
+        // first check), and clears the flag. The host sets it before each call it limits; otherwise what is left
+        // carries over to the next call.
         void setLoopBudget(std::int64_t backEdges) noexcept;
 
-        // What is left of the budget: what was set less what the calls since have taken; below zero once a call has
-        // run out.
+        // What is left of the budget: what was set less what the calls since have taken; -1 once a call has run out
+        // (never less, so that however many calls follow without setLoopBudget, none of the program's counts wraps).
         std::int64_t loopBudgetLeft() const noexcept;
 
         // Whether a call since setLoopBudget ran out of the budget and returned early.

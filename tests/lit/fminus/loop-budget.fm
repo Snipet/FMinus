@@ -21,6 +21,12 @@
 // RUN: fminus %s --emit exe --loop-budget 1000 -o %t
 // RUN: %t -1 | FileCheck %s --check-prefix=MAIN
 // RUN: not %t 1 2>&1 | FileCheck %s --check-prefix=MAINOUT
+// RUN: fminus %s --entry --loop-budget 1000 | FileCheck %s --check-prefix=ENTRY
+// RUN: echo 'float main(float x) { while (1) x = x * 1.0f; return x; }' > %t.never.fm
+// RUN: fminus %t.never.fm -O2 --emit exe --loop-budget 1000 -o %t.never
+// RUN: not %t.never 1 2>&1 | FileCheck %s --check-prefix=MAINOUT
+// RUN: fminus %S/Inputs/loop-budget/region.fm -O0 --loop-budget 0 | FileCheck %S/Inputs/loop-budget/region.fm \
+// RUN:   --check-prefix=REGION
 // RUN: echo 'float fminus_rt_loop_budget(float x) { return x; }' | not fminus - --loop-budget 0 2>&1 \
 // RUN:   | FileCheck %s --check-prefix=RESERVED
 // RUN: echo 'float fminus_rt_loop_budget(float x) { return x; }' | fminus - --run fminus_rt_loop_budget 2 \
@@ -86,7 +92,7 @@ float main(float x)
 // O0:         store atomic i64 %budget.slot.0, ptr @fminus_rt_loop_budget monotonic, align 8
 // O0-NEXT:    ret float
 // O0:       budget.stop:
-// O0-NEXT:    store atomic i64 %budget.left, ptr @fminus_rt_loop_budget monotonic, align 8
+// O0-NEXT:    store atomic i64 -1, ptr @fminus_rt_loop_budget monotonic, align 8
 // O0-NEXT:    store atomic i32 1, ptr getelementptr inbounds ({ i64, i32 }, ptr @fminus_rt_loop_budget, i32 0, i32 1) monotonic, align 4
 // O0-NEXT:    ret float 0.000000e+00
 // O0-LABEL: define i32 @calls(i32 %n, float %x)
@@ -147,5 +153,16 @@ float main(float x)
 // CALLS: fminus: --run: 'tree' ran past its loop budget of 1000 and returned early
 // MAIN: -1
 // MAINOUT: 'main' ran past its loop budget of 1000 and returned early
+
+// An executable's C main calls main through its address passed through an empty inline asm, so that nothing the
+// optimiser finds of main before the checks go in (a main whose loop never ends never returns) changes what follows the
+// call: the flag's check, the message, the status 3 (a `while (1)` main above).
+// ENTRY-LABEL: define i32 @main(i32 %argc, ptr %argv)
+// ENTRY:         store volatile i64 1000, ptr @fminus_rt_loop_budget, align 8
+// ENTRY:         %main.address = call ptr asm "", "=r,0"(ptr {{.*}}@fminus.main)
+// ENTRY-NEXT:    %result = call float %main.address(float
+// ENTRY-NEXT:    %stopped = load volatile i32
+// ENTRY:       ran.out:
+// ENTRY-NEXT:    call void @fminus_rt_main_loop_budget(i32 %argc, ptr %argv, i64 1000)
 // RESERVED: <stdin>:1:7: error: the loop budget reserves 'fminus_rt_loop_budget' for its counter, and this program declares a function of that name: rename it
 // FREE: 2
