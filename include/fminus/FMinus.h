@@ -196,6 +196,13 @@ namespace fminus
             // where the files are, a directory of its own or files it keeps in memory, as fminus reads them from disk
             // (beside the including file, then -I's directories).
             IncludeResolver include;
+            // Macros defined before the program's first line, as C's -D defines them (fminus -D NAME[=value]): each
+            // name's value, "1" for a flag as -D NAME gives it, or "" for none. A program reads them in #if, #elif,
+            // #ifdef and #ifndef, as it reads its own #define's: `#ifdef DEBUG` ... `#endif` around instrumentation
+            // compiles it in when the host defines DEBUG, and skips its lines unread when it doesn't. FMinus never
+            // substitutes a macro in code: its name there is an error. A name that is no identifier, `defined` or a
+            // keyword fails compile.
+            std::map<std::string, std::string> defines;
             // Each parameter's binding, by its qualified name ("Lowpass::cutoff"); one not named is a knob. A name
             // that is no parameter of the program, or a stream that is not a float, is a compile error.
             std::map<std::string, Binding> parameters;

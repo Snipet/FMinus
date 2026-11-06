@@ -175,6 +175,13 @@ namespace fminus
             return nullptr;
         }
 
+        for (const auto& [name, value] : options.defines)
+            if (const std::optional<std::string> wrong = frontend::macroNameError(name))
+            {
+                errors = "fminus::Program: defines: '" + name + "': " + *wrong + "\n";
+                return nullptr;
+            }
+
         Diagnostics diagnostics(options.fileName);
         frontend::IncludeResolver include;
         if (options.include)
@@ -185,7 +192,7 @@ namespace fminus
                     return std::nullopt;
                 return frontend::IncludedFile{std::move(file->fileName), std::move(file->source)};
             };
-        const std::optional<ast::Program> program = frontend::parse(source, diagnostics, include);
+        const std::optional<ast::Program> program = frontend::parse(source, diagnostics, include, options.defines);
         if (!program)
         {
             errors = diagnostics.format();

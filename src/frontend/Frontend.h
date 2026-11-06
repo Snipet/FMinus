@@ -5,6 +5,7 @@
 #include "frontend/Diagnostics.h"
 
 #include <functional>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -24,9 +25,18 @@ namespace fminus::frontend
     // is none ("'name' file not found").
     using IncludeResolver = std::function<std::optional<IncludedFile>(std::string_view name, std::string_view from)>;
 
+    // Macros defined before the program's first line, C's -D: each name's value ("" for none). Each name passes
+    // macroNameError.
+    using Defines = std::map<std::string, std::string>;
+
     // Lexes and parses `source` (the grammar is Parser.y), reading its #includes through `include` (without one, no
-    // #include finds its file). Returns the program, or nothing when it reported errors into `diagnostics` (it stops at
-    // the first syntax error, and at an #include that finds no file).
+    // #include finds its file), with `defines` defined. Returns the program, or nothing when it reported errors into
+    // `diagnostics` (it stops at the first syntax error, and at an #include that finds no file).
     std::optional<ast::Program> parse(std::string_view source, Diagnostics& diagnostics,
-                                      const IncludeResolver& include = {});
+                                      const IncludeResolver& include = {}, const Defines& defines = {});
+
+    // Why `name` cannot name a macro, in clang's words, or nothing: it must be an identifier, not `defined` (C's rule),
+    // and not one of FMinus's keywords, which a macro would hide in C (FMinus substitutes none in code). In Lexer.l,
+    // beside the keywords' rules.
+    std::optional<std::string> macroNameError(std::string_view name);
 } // namespace fminus::frontend

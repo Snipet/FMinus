@@ -15,6 +15,7 @@
 //     fminus synth.fm --math libm           sinf, cosf, ... as libm's (--math vector, the default: the same result
 //                                           wherever computed; --math fast: LLVM's intrinsics, as clang's)
 //     fminus synth.fm -I lib                #include "name" looks beside the including file, then in lib/
+//     fminus synth.fm -D DEBUG -D LEVEL=2   macros for #if, #ifdef and #ifndef, as clang's -D (DEBUG is 1)
 //     fminus voices.fm --threads 4          a parallel for or parallel { } on 4 threads at most (0, the default:
 //                                           one for each core; 1: each region on the calling thread alone)
 //     fminus spin.fm --run spin 3 --loop-budget 1000000
@@ -409,6 +410,7 @@ int main(int argc, char** argv)
     std::string denormals = "preserve";
     std::string math = "vector";
     std::vector<std::string> includeDirectories;
+    std::vector<std::string> defineSpecs;
     unsigned threads = 0;
     std::optional<std::int64_t> loopBudget;
     bool boundsCheck = false;
@@ -451,6 +453,9 @@ int main(int argc, char** argv)
         ->capture_default_str();
     app.add_option("-I", includeDirectories,
                    "Where #include \"name\" looks after the including file's directory, in order (clang's -I)")
+        ->allow_extra_args(false);
+    app.add_option("-D", defineSpecs,
+                   "Define a macro for #if, #ifdef and #ifndef: NAME (its value 1) or NAME=value, as clang's -D")
         ->allow_extra_args(false);
     app.add_option("--threads", threads,
                    "The most threads a parallel for or parallel { } runs on, the calling thread's among them (0: one "
@@ -504,9 +509,19 @@ int main(int argc, char** argv)
     }
     else if (emit == "fm")
         return fail("--emit fm: " + input + " is not a circuit netlist (.cir)");
+    fminus::frontend::Defines defines;
+    for (const std::string& spec : defineSpecs)
+    {
+        const std::size_t equals = spec.find('=');
+        const std::string name = spec.substr(0, equals);
+        if (const std::optional<std::string> wrong = fminus::frontend::macroNameError(name))
+            return fail("-D " + spec + ": " + *wrong);
+        defines[name] = equals == std::string::npos ? "1" : spec.substr(equals + 1);
+    }
     fminus::Diagnostics diagnostics(sourceName);
     std::optional<fminus::ast::Program> program = fminus::frontend::parse(
-        text, diagnostics, DiskIncludes(includeDirectories, diagnostics.fileName(), &circuits, circuitSettings));
+        text, diagnostics, DiskIncludes(includeDirectories, diagnostics.fileName(), &circuits, circuitSettings),
+        defines);
     llvm::errs() << circuits.messages;
     if (circuits.failed)
         return 1;
