@@ -6650,8 +6650,8 @@ budget or bounds checks has the same, and a field in an `#ifdef DEBUG` group has
 ## Recipe 36: calling a function by name, for the host
 
 *In the compiler. Code: `CallType`, `CallSlot`, `Thunk`, `thunkName`, `callThunk` and `callType` (`src/jit/Call.h`,
-`Call.cpp`); `Program::Value`, `Program::Callable`, `Program::CallResult`, `callable` and `call`
-(`include/fminus/FMinus.h`), with `kindOf`, `describeCall`, `mismatch`, `sameLayout`, `slotOf` and `resultOf`
+`Call.cpp`); `Program::Value`, `Program::Callable`, `Program::CallResult` (and its `message`), `callable` and `call`
+(`include/fminus/FMinus.h`), with `kindOf`, `describeCall`, `mismatch`, `slotOf` and `resultOf`
 (`src/api/FMinus.cpp`); `--run`'s `RunArgument`, `readScalar` and `runPasses` (`tools/fminus/main.cpp`). Tests:
 `tests/library/CallTest.cpp` and `tests/unit/CallThunkTest.cpp` (`[call]`), and `tests/lit/fminus/run.fm`.*
 
@@ -6674,7 +6674,7 @@ fminus::Program::CallResult result = program->call(*softclip, {Value::of(0.5f), 
 if (result.ok())
     show(result.value.number);   // 0.6666667, the float it returned, as a double
 else
-    show(result.error);          // with Value::of(4): "argument 2 of 'softclip' is 'int', not 'float' (its
+    show(result.message());      // with Value::of(4): "argument 2 of 'softclip' is 'int', not 'float' (its
                                  // parameter 'drive')"
 ```
 
@@ -6734,16 +6734,28 @@ to a bool.
 `callable(name, errors)` gives the function as a `Callable`: its `name`, its module if it is a method, its `result` and
 `resultType`, and each parameter's `name`, `type` as FMinus writes it (`"const float *"`), `kind`, and for a pointer its
 `element`, `module` and `readOnly`. `compile()` describes every function the program declares (`describeCall`), and
-`callable()` compiles the thunk the first time it is asked for one. A function that takes or returns a type no thunk
-passes, or a pointer to a vector or to rows, or that returns a pointer, has no `Callable`, and the error says which type
-("'broadcast' returns 'float4'; call() returns nothing, or a bool, an int, a float or a double"). Nor does a function
-the program only declares, `float atanf(float x);`: it is the C library's, not the program's, and LLJIT's `lookup`
-looks in the program's own `JITDylib`, not in the process its prototypes link to.
+`callable()` compiles the thunk the first time it is asked for one. The `Callable` is the Program's own, in its map, and
+`callable()` gives a pointer to it: it cannot be copied or moved, so the one `call()` is given is the one `callable()`
+described, not a copy whose `parameters` a host edited (a method's `this` dropped, say, which the thunk would still load
+from the first slot), nor a copy kept past its Program, which a new Program whose `Impl` took the old one's address
+would take for its own. A host keeps the pointer while the Program lives, as it keeps a function's (one kept longer
+dangles, as a function's does), and copies the fields it shows. One it makes itself is no Program's, and `call()`
+refuses it. A function that takes or returns a type no thunk passes, or a pointer to a vector or to rows, or that
+returns a pointer, has no `Callable`, and the error says which type ("'broadcast' returns 'float4'; call() returns
+nothing, or a bool, an int, a float or a double"). Nor does a function the program only declares,
+`float atanf(float x);`: it is the C library's, not the program's, and LLJIT's `lookup` looks in the program's own
+`JITDylib`, not in the process its prototypes link to. A function the program defines whose code does not link has
+none either: `compile()` links nothing unless a safety option needs its code, so
+`float g(float x) { return nowhere(x); }`, beside a prototype of `nowhere` that nothing defines, compiles, and its
+look-up fails ("'g' cannot be called: Failed to materialize symbols: ..."). `call(name, ...)` tells these apart by the
+function, not by the message: `NoFunction` for a name the program does not define, `Unsupported` for a type,
+`LinkError` for a definition that did not link.
 
 `call(callable, arguments)` checks the arguments (`mismatch`), packs them into slots (`slotOf`: on the stack, past 16 on
-the heap), calls the thunk, and returns a `CallResult`: its `status`, the `value` the function returned, and the
-`error`, one line in FMinus's words, empty when the status is `Ok`. `call(name, arguments)` looks the `Callable` up
-first.
+the heap), calls the thunk, and returns a `CallResult`: its `status`, the `value` the function returned, the `error`,
+one line in FMinus's words of why it did not run, and after a failed bounds check the `violation` it met. `message()`
+words any status, the `error` or what stopped the call, and is empty when the status is `Ok`. `call(name, arguments)`
+looks the `Callable` up first.
 
 ### What `call()` checks
 
@@ -6754,11 +6766,11 @@ first.
 | `array(const float*)` | `float *` | `Mismatch`: "is 'const float *', not 'float *'", C's "discards qualifiers". A `float*` for a `const float *` is fine |
 | `array(int*)` | `float *` | `Mismatch`: "is 'int *', not 'float *'" |
 | any pointer | `void *`, `const void *` | taken, as C converts it (a `const` one only for a `const void *`) |
-| `instance(memory, module)` of a module laid out alike (`sameLayout`: its name, size, alignment, and fields' names, types and offsets) | `Osc *` | taken, though `module` is another Program's (a host that compiled the same source twice) |
-| an instance of another `Osc`, laid out differently (another program's, or an `#ifdef DEBUG` field) | `Osc *` | `Mismatch`: "is an instance of a module 'Osc' laid out differently from this program's (another program's)" |
+| `instance(memory, module)`, `module` this Program's `Osc` (`program->module("Osc")`) | `Osc *` | taken: the module is the host's word for how the memory is laid out, which `call()` cannot see |
+| an instance of another Program's `Osc`, of the same source or not | `Osc *` | `Mismatch`: "is an instance of another program's module 'Osc'". Its own fields may match this one's while a module it holds by value, in an array or through a pointer does not (two `Line`s of one size, their fields swapped), and comparing layouts deeply would be a second definition of a module's type; a host that keeps an instance across a recompile, knowing its layout is the same, passes it with the new Program's `Module` |
 | a null instance | a method's `this` | `Mismatch`: "is a null 'Osc *': a method runs on an instance". Another pointer may be null, as in C |
 | a pointer not aligned to its elements (4 bytes for an `int` or a `float`, 8 for a `double`, the module's alignment for an instance) | | `Mismatch`: "is not aligned to 4 bytes, as a 'float *' must be". The function's loads assume the alignment, as C's do |
-| a `Callable` of another Program's | | `Mismatch`: "'softclip' is not a Callable of this program's: callable() gives them" |
+| a `Callable` of another Program's, or one the host made | | `Mismatch`: "'softclip' is not a Callable of this program's: callable() gives them". A copy does not compile |
 
 An extent is not checked, nor passed: C passes none, a parameter written `float x[16]` is a `float*` whose size C
 checks and then ignores, and bounds checks see no host's buffer (recipe 30). A function that is passed a buffer is
@@ -6770,10 +6782,12 @@ passed its length, as C's are; the host makes the buffer that long.
 plain call, and what `call()` adds is a compare for each argument, the slots, and two loads after the call (the bounds
 record and the loop budget's flag). On an M5, with other builds running, a call of `softclip` through its `Callable`
 took about 15 ns, against 1 ns through its pointer, and `call(name, ...)`, which finds the `Callable` in a map each
-time, about 28 ns. It
-allocates only when it fails (the message) or for more than 16 arguments, and takes no lock; `callable()` takes the
-Program's lock and allocates, and compiles the thunk the first time, so it runs off the audio thread, as a function's
-first look-up does.
+time, about 28 ns. It takes no lock, and allocates only for more than 16 arguments, or when the host's call is wrong
+(a `Mismatch`'s message; `call(name, ...)`'s failures too, as `callable()` allocates). A call the loop budget or a
+bounds check stops allocates nothing, as it may be the audio thread's: its `error` is empty, the result keeps the
+`violation` (whose strings are the Program's), and `message()` words it later, on another thread. `callable()` takes
+the Program's lock and allocates, and compiles the thunk the first time, so it runs off the audio thread, as a
+function's first look-up does.
 
 A method runs on an instance, its `this`: an instance the host made as `Module` says (zeroed, aligned, its parameters
 set with `setDefaults` and `setValue`), and what the method changes stays in it for the next call, by name or through
@@ -6784,11 +6798,19 @@ no method runs on its arguments and what they point to: FMinus has no variables 
 
 A call by name is a call: in a program compiled with the loop budget it counts against the budget, and one that runs
 out returns early, `Status::OutOfBudget`, with `loopBudgetExceeded()` set and the value it returned early (0); with
-bounds checks, a check that fails stops it, `Status::OutOfBounds`, and the error is the record's message
-("'tap' stopped: program.fm:17:16: index 4 out of bounds for 'taps' of type 'float[4]'"), a 2-D array's dimension by
-dimension. The bounds record is read first, since a check that failed is why a call that also ran out stopped where it
-did. Each status is the Program's state after the call, so a host sets the budget and clears the record before each
-call, as for a call through a pointer, and re-initialises an instance a stopped call ran on.
+bounds checks, a check that fails stops it, `Status::OutOfBounds`, with the record's check as the result's `violation`,
+which `message()` words ("'tap' stopped: program.fm:17:16: index 4 out of bounds for 'taps' of type 'float[4]'"), a 2-D
+array's dimension by dimension. The bounds record is read first, since a check that failed is why a call that also ran
+out stopped where it did. Each status is the Program's state after the call, so a host sets the budget and clears the
+record before each call, as for a call through a pointer, and re-initialises an instance a stopped call ran on.
+
+The budget and the record are the Program's, one of each, which every thread's calls share, so a status is the call's
+own only when no other call of the Program overlaps it. Two threads calling at once share one failure: the call that
+ran whole returns the other's `OutOfBounds` (and a call that returns after another's failed check returns early too,
+the bounds checks' rule), and one thread's `setLoopBudget` or `clearBoundsViolation` is the other's too, which may
+clear a record before the call that set it reads it. A host that calls a program compiled with either option from
+several threads serialises those calls, or reads the statuses as the program's; without the options there is no
+shared state, and calls overlap freely.
 
 ### `--run`
 
@@ -6821,14 +6843,16 @@ reads back as it.
 
 - `tests/library/CallTest.cpp`: each scalar type and a mix, bit for bit as the function's own pointer computes them;
   twenty arguments of the four types (on the stack, and in heap slots); arrays written and read, `void*` taking any
-  pointer, and a `const` array, another element type and a misaligned pointer refused; a method on the host's
-  instance, which keeps its state and reads a knob the host sets, through a function's `Osc *` too, a null instance,
-  another program's of the same layout taken, of another layout or module refused; the `Callable`s' descriptions; each
-  error as a status and a message (no function, a builtin, a prototype alone, a vector, a pointer result, a pointer to a
-  vector, the count, a type, a `Callable` of another program's); `Value::scalar`'s conversions; the loop budget and
-  bounds checks stopping a call (a double in a budgeted loop, a 2-D array's dimension), and a call after the record
-  is cleared; four threads calling one `Callable` on instances of their own, and asking `callable()` for it at once;
-  the IR kept as text unchanged by a call, and an `#ifdef`'s function.
+  pointer, and a `const` array, another element type and a misaligned pointer refused; a method on the host's instance,
+  which keeps its state and reads a knob the host sets, through a function's `Osc *` too, a null instance, another
+  program's refused, of the same source too, and taken with this program's `Module`; another program's `Delay` whose
+  fields match but whose `Line` has its fields swapped, refused; the `Callable`s' descriptions; each error as a status
+  and a message (no function, a builtin, a prototype alone, a definition that does not link, a vector, a pointer result,
+  a pointer to a vector, the count, a type, a `Callable` of another program's or the host's own, and none copied, at
+  compile time); `Value::scalar`'s conversions; the loop budget and bounds checks stopping a call, with no message until
+  `message()` words it (a double in a budgeted loop, a 2-D array's dimension), and a call after the record is cleared;
+  four threads calling one `Callable` on instances of their own, and asking `callable()` for it at once; the IR kept as
+  text unchanged by a call, and an `#ifdef`'s function.
 - `tests/unit/CallThunkTest.cpp`: each type in its slot and back, a bool's byte read as C++ reads one whatever its
   other bytes hold, a bool result as 0 or 1, twelve arguments past the vector registers, a second thunk's error, and
   `callType`'s map.

@@ -667,17 +667,20 @@ gain(in, out, n, 0.5f);                                       // one call a bloc
   gives a `Callable`, its parameters and result as values (each parameter's name, its type as FMinus writes it, its
   `kind`, and for a pointer what it points to), and `call(callable, {Value::of(0.5f), Value::of(3)})` checks the
   arguments against them and calls the function on the calling thread, returning a `CallResult`: a `status`, the
-  `value` it returned, and the `error`, one line in FMinus's words. A wrong name, a type `call()` does not pass, the
-  wrong number of arguments, an argument of another type (it converts nothing: `Value::scalar(kind, number)` does, as
-  `setValue` would), a `const` array for a pointer the function writes through, a null or misaligned instance: each
-  is a status and a message, never undefined behaviour. It passes `bool`, `int`, `float` and `double`, and pointers to
-  the host's memory (`Value::array(buffer)`, `Value::instance(memory, module)` for a method's `this` or an `Osc*`), and
-  returns a scalar or nothing. The first `callable()` of a function compiles a thunk, a few instructions that load
-  each argument as its parameter's type and call the function as C does (about 2 ms; it allocates, so off the audio
+  `value` it returned, and `message()`, one line in FMinus's words. A wrong name, a type `call()` does not pass, a
+  function whose code does not link, the wrong number of arguments, an argument of another type (it converts nothing:
+  `Value::scalar(kind, number)` does, as `setValue` would), a `const` array for a pointer the function writes
+  through, a null or misaligned instance, or another program's: each is a status and a message, never undefined
+  behaviour. It passes `bool`, `int`, `float` and `double`, and pointers to the host's memory (`Value::array(buffer)`,
+  `Value::instance(memory, module)` for a method's `this` or an `Osc*`, with the program's own `Module`), and returns
+  a scalar or nothing. The first `callable()` of a function compiles a thunk, a few instructions that load each
+  argument as its parameter's type and call the function as C does (about 2 ms; it allocates, so off the audio
   thread); a `call()` then adds about 15 ns to the function, and no lock. The loop budget and bounds checks stop a
-  call as any, and say so (`OutOfBudget`, `OutOfBounds`): set the budget and clear the record before each call
-  ([docs/extending.md](docs/extending.md), recipe 36).
-- **Lifetime.** A function pointer, and a `Callable`, is valid while its `Program` lives.
+  call as any, and say so (`OutOfBudget`, `OutOfBounds`) without allocating, so on the audio thread too: set the
+  budget and clear the record before each call, and serialise calls from several threads, as the budget and the
+  record are the program's ([docs/extending.md](docs/extending.md), recipe 36).
+- **Lifetime.** A function pointer, and a `Callable`, is valid while its `Program` lives. A `Callable` is the
+  program's own: the host keeps the pointer `callable()` gives, as it keeps a function's, never a copy.
 
 `include/fminus/Circuit.h` is the circuit compiler's: `fminus::circuit::generate(netlist, "pedal.cir")` turns a
 SPICE-style netlist into the text of one FMinus module, which `Program::compile` compiles like any other source, its
