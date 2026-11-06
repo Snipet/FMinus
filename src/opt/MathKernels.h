@@ -17,6 +17,11 @@
 #include <string>
 #include <string_view>
 
+namespace llvm
+{
+    class TargetMachine;
+} // namespace llvm
+
 namespace fminus::opt
 {
     // A math intrinsic's name: fminus.<stem>.f32 for a float (lanes 0), fminus.<stem>.v<lanes>f32 for a vector. The
@@ -28,10 +33,11 @@ namespace fminus::opt
 
     // Replaces every call of a math intrinsic in the module (above): inline (from -O1), or by a call of the runtime
     // (-O0). Registered at the end of the pipeline (support/HostTarget.cpp), after the vectorisers have widened the
-    // calls they could.
+    // calls they could. `machine` is the target the module is compiled for: on x86-64 with AVX, a large argument's
+    // wrapper takes its features, less one (MathKernels.cpp, largeFunction, says why).
     struct MathKernelsPass : llvm::PassInfoMixin<MathKernelsPass>
     {
-        explicit MathKernelsPass(bool inlineKernels) : inlineKernels_(inlineKernels) {}
+        MathKernelsPass(bool inlineKernels, const llvm::TargetMachine& machine);
 
         llvm::PreservedAnalyses run(llvm::Module& module, llvm::ModuleAnalysisManager& analyses);
 
@@ -42,5 +48,6 @@ namespace fminus::opt
 
     private:
         bool inlineKernels_;
+        std::string largeFeatures_;   // fminus.large.<stem>'s target-features; empty (none) but on x86-64 with AVX
     };
 } // namespace fminus::opt

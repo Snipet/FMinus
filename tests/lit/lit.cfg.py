@@ -4,10 +4,12 @@
 # A test is a file with RUN lines (lit's internal shell: pipes, `not`, `env`; FileCheck checks the output). FMinus's
 # tools, then LLVM's (FileCheck, not, count, opt, llc, llvm-mca, ...), come first on PATH. Substitutions: %host_triple.
 # Features for REQUIRES/UNSUPPORTED: asserts, asan, ubsan, tsan, the host's architecture (arm64 or x86_64; Windows
-# spells them ARM64 and AMD64) and its system (system-darwin, system-linux, system-windows).
+# spells them ARM64 and AMD64), its system (system-darwin, system-linux, system-windows) and avx (an x86-64 host whose
+# JIT targets AVX, as fminus-hostinfo --features lists it).
 import os
 import platform
 import shutil
+import subprocess
 
 import lit.formats
 import lit.util
@@ -76,3 +78,19 @@ for sanitizer, feature in (("address", "asan"), ("undefined", "ubsan"), ("thread
         config.available_features.add(feature)
 config.available_features.add(platform.machine())
 config.available_features.add("system-" + platform.system().lower())   # system-darwin, system-linux, system-windows
+
+
+# avx: the features the JIT enables on this machine, which fminus-hostinfo lists one a line, include AVX.
+def jit_targets_avx():
+    if platform.machine().lower() not in ("x86_64", "amd64"):
+        return False
+    try:
+        listing = subprocess.run([os.path.join(config.fminus_tools_dir, "fminus-hostinfo"), "--features"],
+                                 capture_output=True, text=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return False
+    return "avx" in listing.split()
+
+
+if jit_targets_avx():
+    config.available_features.add("avx")

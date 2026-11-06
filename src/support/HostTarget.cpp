@@ -146,10 +146,11 @@ namespace fminus
         // vectorises as it would llvm.sin's but cannot evaluate. Last, after the vectorisers, every call becomes the
         // kernel itself, inline, from the template the runtime's functions instantiate (runtime/MathKernels.h): the
         // backend schedules it with the code around it, and keeps its constants out of loops. At -O0 it becomes a call
-        // of the runtime's function instead. Nothing defines the intrinsics, so this runs at every level.
+        // of the runtime's function instead. Nothing defines the intrinsics, so this runs at every level. The machine
+        // says what a large argument's wrapper needs on x86-64 (MathKernels.cpp, largeFunction).
         passes.registerOptimizerLastEPCallback(
-            [](llvm::ModulePassManager& modulePasses, llvm::OptimizationLevel level, llvm::ThinOrFullLTOPhase) {
-                modulePasses.addPass(opt::MathKernelsPass(level != llvm::OptimizationLevel::O0));
+            [&machine](llvm::ModulePassManager& modulePasses, llvm::OptimizationLevel level, llvm::ThinOrFullLTOPhase) {
+                modulePasses.addPass(opt::MathKernelsPass(level != llvm::OptimizationLevel::O0, machine));
             });
         // ---- end of math kernels ------------------------------------------------------------------------------------
 
