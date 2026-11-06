@@ -166,12 +166,20 @@ namespace fminus::ir::detail
                 error(field.location, "a module's fields cannot be const: they start at 0, and a method sets them");
             if (ast::isArray(type) && field.size == nullptr)
             {
-                error(field.location, "field has incomplete type " + quoted(ast::typeName(ast::pointee(type)) + "[]"));
+                std::string rows;   // a 2-D array's: float[][16]
+                if (ast::hasRows(type))
+                {
+                    const std::optional<std::int32_t> count =
+                        field.rowSize != nullptr ? arraySize(field.name, *field.rowSize) : std::nullopt;
+                    rows = "[" + (count ? std::to_string(*count) : std::string()) + "]";
+                }
+                error(field.location,
+                      "field has incomplete type " + quoted(ast::typeName(ast::elementOf(type)) + "[]" + rows));
                 type = ast::Type::Float;
             }
             else if (ast::isArray(type))
-                type = sized(field.location, field.name, type, field.size.get(), nullptr);
-            const bool byValue = ast::isModule(type) || (ast::isArray(type) && type.pointee == ast::Kind::Module);
+                type = sized(field.location, field.name, type, field.size.get(), field.rowSize.get(), nullptr);
+            const bool byValue = ast::isModule(ast::isArray(type) ? ast::elementOf(type) : type);
             if (type == ast::Type::Void)
             {
                 error(field.location, "field has incomplete type 'void'");

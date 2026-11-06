@@ -523,11 +523,11 @@ namespace fminus::ir::detail
         {
             // Two pointers to one type, or one a void*, which the other converts to (C's); const if either is.
             const bool both = ast::isPointer(thenValue.type) && ast::isPointer(elseValue.type);
-            const bool same = both && thenValue.type.pointee == elseValue.type.pointee;
+            const bool same = both && ast::samePointee(thenValue.type, elseValue.type);
             meet = same || (both && (thenValue.type.pointee == ast::Kind::Void
                                      || elseValue.type.pointee == ast::Kind::Void));
             if (meet)
-                type = ast::Type::pointerTo(same ? thenValue.type.pointee : ast::Kind::Void,
+                type = ast::Type::pointerTo(same ? ast::pointee(thenValue.type) : ast::Type::Void,
                                             thenValue.type.pointeeConst || elseValue.type.pointeeConst);
             else
                 error(location, "incompatible operand types (" + quoted(ast::typeName(thenValue.type)) + " and "
@@ -611,27 +611,52 @@ namespace fminus::ir::detail
     }
 
     // sizeof(type): the type's size in bytes (Types.cpp), an int constant; a module's, padding included, is what to
-    // allocate for one. C's sizeof is a size_t, and FMinus's an int: a size past the greatest int (a module of an array
-    // of 2^30 floats, 4 GB) is an error, not a wrapped or negative int.
+    // allocate for one, and an array's, sizeof(float[4][16]), its elements' (its sizes worked out as a declaration's:
+    // sized, Constants.cpp; `[]` has none). C's sizeof is a size_t, and FMinus's an int: a size past the greatest int (a
+    // module of an array of 2^30 floats, 4 GB) is an error, not a wrapped or negative int.
     Lowering::Value Lowering::lowerSizeof(SourceLocation location, const ast::SizeofExpr& size)
     {
-        if (size.type == ast::Type::Void)
+        ast::Type type = size.type;
+        if (type == ast::Type::Void)
         {
             error(location, "invalid application of 'sizeof' to an incomplete type 'void'");
             return poison(ast::Type::Int);
         }
-        if (!checkType(location, size.type))
-            return poison(ast::Type::Int);
-        if (ast::isModule(size.type) && structs_.at(size.type.module)->isOpaque())   // in its own fields' sizes
+        if (ast::hasRows(type) && size.rowSize == nullptr)   // C has no array of float[] (sized's error)
         {
-            error(location,
-                  "invalid application of 'sizeof' to an incomplete type " + quoted(ast::typeName(size.type)));
+            error(location, "array has incomplete element type " + quoted(ast::typeName(ast::elementOf(type)) + "[]"));
             return poison(ast::Type::Int);
         }
-        const std::uint64_t bytes = *sizeOf(size.type);
+        if (ast::isArray(type) && size.size == nullptr)   // float[], float[][16]
+        {
+            std::string rows;
+            if (ast::hasRows(type))
+            {
+                const std::optional<std::int32_t> count = arraySize("", *size.rowSize);
+                if (!count)
+                    return poison(ast::Type::Int);
+                rows = "[" + std::to_string(*count) + "]";
+            }
+            error(location, "invalid application of 'sizeof' to an incomplete type "
+                                + quoted(ast::typeName(ast::elementOf(type)) + "[]" + rows));
+            return poison(ast::Type::Int);
+        }
+        const std::size_t reported = diagnostics_.errors().size();
+        if (ast::isArray(type))
+            type = sized(location, "", type, size.size.get(), size.rowSize.get(), nullptr);
+        if (diagnostics_.errors().size() != reported || !checkType(location, type))
+            return poison(ast::Type::Int);
+        const ast::Type module = ast::isArray(type) ? ast::elementOf(type) : type;
+        if (ast::isModule(module) && structs_.at(module.module)->isOpaque())   // in its own fields' sizes
+        {
+            error(location,
+                  "invalid application of 'sizeof' to an incomplete type " + quoted(ast::typeName(type)));
+            return poison(ast::Type::Int);
+        }
+        const std::uint64_t bytes = *sizeOf(type);
         if (bytes > static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max()))
         {
-            error(location, quoted(ast::typeName(size.type)) + " is too large for sizeof: " + std::to_string(bytes)
+            error(location, quoted(ast::typeName(type)) + " is too large for sizeof: " + std::to_string(bytes)
                                 + " bytes, and FMinus's sizeof is an 'int'");
             return poison(ast::Type::Int);
         }

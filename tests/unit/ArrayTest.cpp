@@ -85,7 +85,7 @@ TEST_CASE("array errors are reported as clang reports them", "[codegen][array]")
                    "    return a;\n"
                    "}\n")
           == "test.fm:4:11: error: array initializer must be an initializer list\n"
-             "test.fm:5:11: error: excess elements in array initializer\n"
+             "test.fm:5:25: error: excess elements in array initializer\n"
              "test.fm:6:7: error: array type 'float[4]' is not assignable\n"
              "test.fm:7:7: error: array type 'float[4]' is not assignable\n"
              "test.fm:8:6: error: array type 'float[4]' is not assignable\n"

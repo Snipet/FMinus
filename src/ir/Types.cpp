@@ -170,14 +170,15 @@ namespace fminus::ir::detail
     }
 
     // Whether a variable, a parameter, a result or a field may have `type`: a pointer to what FMinus cannot point to
-    // may not, nor an array of what it cannot (an array's name stands for a pointer to its first element). Reports
-    // the error when not.
+    // may not, nor an array of what it cannot (an array's name stands for a pointer to its first element), nor a 2-D
+    // array of it (a row's name stands for a pointer to the row's first element). Reports the error when not.
     bool Lowering::checkType(SourceLocation location, ast::Type type)
     {
-        if (ast::isArray(type) && (!ast::canPointTo(type.pointee) || type.pointee == ast::Kind::Void))
+        const ast::Type element = ast::elementOf(type);
+        if (ast::isArray(type) && (!ast::canPointTo(element.kind) || element == ast::Type::Void))
         {
             error(location, "FMinus has arrays of float, double, int, float2, float4, float8 and modules, not of "
-                                + quoted(ast::typeName(ast::pointee(type))));
+                                + quoted(ast::typeName(element)));
             return false;
         }
         if (!ast::isPointer(type) || ast::canPointTo(type.pointee))

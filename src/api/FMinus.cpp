@@ -249,10 +249,21 @@ namespace fminus
                 const std::size_t offset = fields->getElementOffset(index).getFixedValue();
                 llvm::Type* element = type->getElementType(index);
                 ast::Type fieldType = field.type;
-                if (ast::isArray(fieldType))   // its size as the code generator worked it out (the tree's is 0)
+                std::vector<std::size_t> extents;
+                if (ast::isArray(fieldType) && element->isArrayTy())   // its sizes as the code generator worked them
+                {                                                       // out (the tree's are 0)
                     fieldType.count = static_cast<int>(element->getArrayNumElements());
+                    extents.push_back(element->getArrayNumElements());
+                    if (ast::hasRows(fieldType) && element->getArrayElementType()->isArrayTy())
+                    {
+                        fieldType.rowCount = static_cast<int>(element->getArrayElementType()->getArrayNumElements());
+                        extents.push_back(element->getArrayElementType()->getArrayNumElements());
+                    }
+                }
                 info.fields.push_back({field.name, (field.isParam ? "param " : "") + ast::typeName(fieldType), offset,
-                                       layout.getTypeAllocSize(element).getFixedValue()});
+                                       layout.getTypeAllocSize(element).getFixedValue(),
+                                       ast::isArray(fieldType) ? ast::typeName(ast::elementOf(fieldType)) : "",
+                                       std::move(extents)});
                 if (!field.isParam)
                     continue;
                 // The slot, { const float* stream; T value; }.

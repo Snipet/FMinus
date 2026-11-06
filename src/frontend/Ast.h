@@ -55,6 +55,13 @@ namespace fminus::ast
     // code generator works out where the array is declared (the declaration keeps it as written, and the parser's
     // type has a count of 0); `float t[] = {1, 2, 3}` takes its size from its list.
     //
+    // An array may be of arrays, two dimensions deep: `float grid[4][16];` is C's array of 4 rows, each a float[16],
+    // side by side (64 floats, row by row). Its name stands for a pointer to its first row, a `float (*)[16]`, which
+    // grid[i] indexes: the row, an array, which stands for a pointer to its first float in turn, so grid[i][j] is C's
+    // element, and grid[i] goes wherever a float* does. A pointer to a row is a type of its own (pointee Kind::Array,
+    // with the row's elements and count beside it), which a program reaches only through such an array's name: no
+    // variable, parameter or field is one, and none converts to or from any other pointer.
+    //
     // A type is a kind, and for a pointer what it points to, for an array its elements and how many, for a module
     // which; two types are the same when each of those is. Type::Float and the rest name the types that are only a
     // kind, and a kind converts to its type, so `type == Type::Float` reads as it says. A switch over a type is a
@@ -92,16 +99,21 @@ namespace fminus::ast
     {
         Kind kind = Kind::Float;
         Kind pointee = Kind::Void;        // a pointer's: what it points to; an array's: what its elements are
+                                          // (Kind::Array for rows: rowKind and rowCount say what they are)
         bool pointeeConst = false;        // a pointer's: what it points to is read-only through it (const float*)
-        const Module* module = nullptr;   // a module type's, and a pointer's or an array's whose pointee is one
-        int count = 0;   // an array's: how many elements (0 in the syntax tree, where its size is an expression)
+        const Module* module = nullptr;   // a module type's, and a pointer's or an array's whose pointee (or whose
+                                          // rows' elements) is one
+        int count = 0;   // an array's: how many elements, or rows (0 in the syntax tree, where its size is an expression)
         int enumeration = 0;   // an enumerated type's Enum::id, or a pointer's or an array's whose pointee is one; 0
                                // for none (above: not part of the type's identity)
+        Kind rowKind = Kind::Void;   // when the pointee is a row (Kind::Array): what the row's elements are
+        int rowCount = 0;            // and how many it has (0 in the syntax tree, as `count`)
 
         constexpr Type() = default;
         constexpr Type(Kind kind) : kind(kind) {}   // implicit: Kind::Float is the type float
 
-        // A pointer to `pointee`, which is a kind or a module type (FMinus has no pointers to pointers or arrays).
+        // A pointer to `pointee`, which is a kind or a module type, or a row: a one-dimensional array, what a 2-D
+        // array's name stands for a pointer to (FMinus has no pointers to pointers).
         static constexpr Type pointerTo(Type pointee, bool isConst)
         {
             Type type(Kind::Pointer);
@@ -109,6 +121,11 @@ namespace fminus::ast
             type.module = pointee.module;
             type.pointeeConst = isConst;
             type.enumeration = pointee.enumeration;
+            if (pointee.kind == Kind::Array)
+            {
+                type.rowKind = pointee.pointee;
+                type.rowCount = pointee.count;
+            }
             return type;
         }
 
@@ -126,7 +143,8 @@ namespace fminus::ast
             return type;
         }
 
-        // An array of `count` elements of `element`, a kind or a module type.
+        // An array of `count` elements of `element`, a kind or a module type, or a one-dimensional array (rows: a
+        // 2-D array, `float[4][16]` an array of 4 of float[16]).
         static constexpr Type arrayOf(Type element, int count)
         {
             Type type(Kind::Array);
@@ -134,6 +152,11 @@ namespace fminus::ast
             type.module = element.module;
             type.count = count;
             type.enumeration = element.enumeration;
+            if (element.kind == Kind::Array)
+            {
+                type.rowKind = element.pointee;
+                type.rowCount = element.count;
+            }
             return type;
         }
 
@@ -141,7 +164,8 @@ namespace fminus::ast
         friend constexpr bool operator==(Type a, Type b)
         {
             return a.kind == b.kind && a.pointee == b.pointee && a.pointeeConst == b.pointeeConst
-                   && a.module == b.module && a.count == b.count;
+                   && a.module == b.module && a.count == b.count && a.rowKind == b.rowKind
+                   && a.rowCount == b.rowCount;
         }
 
         static const Type Void, Float, Double, Bool, Int, Float2, Float4, Float8, Bool2, Bool4, Bool8, PolyFloat,
@@ -218,14 +242,37 @@ namespace fminus::ast
         return type.kind == Kind::Array;
     }
 
-    // What a pointer of `type` points to, or what the elements of an array of `type` are.
+    // What a pointer of `type` points to, or what the elements of an array of `type` are: a row, for a 2-D array's.
     inline Type pointee(Type type)
     {
+        if (type.pointee == Kind::Array)
+        {
+            Type row(Kind::Array);
+            row.pointee = type.rowKind;
+            row.count = type.rowCount;
+            row.module = type.module;
+            row.enumeration = type.enumeration;
+            return row;
+        }
         Type element(type.pointee);
         if (type.pointee == Kind::Module)
             element.module = type.module;
         element.enumeration = type.enumeration;
         return element;
+    }
+
+    // Whether the elements of an array of `type`, or what a pointer of it points to, are rows: a 2-D array, and the
+    // pointer its name stands for.
+    inline bool hasRows(Type type)
+    {
+        return (type.kind == Kind::Array || type.kind == Kind::Pointer) && type.pointee == Kind::Array;
+    }
+
+    // What an array of `type` holds, a row's elements for a 2-D array: float for float[16] and for float[4][16].
+    inline Type elementOf(Type type)
+    {
+        const Type element = pointee(type);
+        return hasRows(type) ? pointee(element) : element;
     }
 
     // Whether FMinus has pointers to `kind`: to float, double, int, float2, float4, float8, void and modules.
@@ -242,10 +289,11 @@ namespace fminus::ast
         return type == Type::Float || type == Type::Double;
     }
 
-    // Whether two pointers point to the same type (const aside): the same kind, and the same module for modules.
+    // Whether two pointers point to the same type (const aside): the same kind, the same module for modules, and the
+    // same row for rows.
     inline bool samePointee(Type a, Type b)
     {
-        return a.pointee == b.pointee && a.module == b.module;
+        return a.pointee == b.pointee && a.module == b.module && a.rowKind == b.rowKind && a.rowCount == b.rowCount;
     }
 
     // Whether a value of `type` takes part in arithmetic: every type's but void's, a pointer's (whose arithmetic is
@@ -493,11 +541,14 @@ namespace fminus::ast
         ExprPtr index;
     };
 
-    // `sizeof(float)`, `sizeof(float4*)`: a type's size in bytes, an int (C's is a size_t). FMinus has no sizeof of an
-    // expression.
+    // `sizeof(float)`, `sizeof(float4*)`, `sizeof(float[4][16])`: a type's size in bytes, an int (C's is a size_t).
+    // FMinus has no sizeof of an expression. An array's sizes are expressions, as a declaration's (DeclStmt), which
+    // the code generator works out.
     struct SizeofExpr
     {
-        Type type = Type::Float;
+        Type type = Type::Float;   // an array's counts are 0 here: `size` and `rowSize` give them
+        ExprPtr size;
+        ExprPtr rowSize;
     };
 
     // `(int)x`, `(float)x`, `(double)x`, `(bool)x`: C's casts between scalar types, the implicit conversions written
@@ -524,21 +575,36 @@ namespace fminus::ast
 
     struct Stmt;
 
+    // A braced list inside an initialiser list: `{1, 2}` in `float g[2][2] = {{1, 2}, {3, 4}};`, a row's. The list
+    // keeps its values in order, braced or not (DeclStmt::list); a Brace says which of them it holds, `count` from
+    // `first`, where its `{` is, and how deep (1 in the outer list, 2 in one of those). C's rules then place each
+    // value in the array (ir/Memory.cpp, placeList).
+    struct Brace
+    {
+        SourceLocation location;
+        std::size_t first = 0;
+        std::size_t count = 0;
+        int depth = 1;
+    };
+
     // `[const] float name = init;`: a variable of the enclosing block, from its declaration to the block's end. One per
     // declarator: `float a = 1, b;` is two, and `float *p, x;` a pointer and a float, as in C. Without an initialiser
     // the variable starts at 0, and a pointer at null (C leaves them indeterminate, and reading them undefined). An
-    // array's initialiser is a list, `float c[4] = {1, 2};`, whose missing elements are 0; a module is initialised
-    // from another of its type, or starts at 0.
+    // array's initialiser is a list, `float c[4] = {1, 2};`, whose missing elements are 0, and a 2-D array's may brace
+    // its rows, `float g[2][3] = {{1, 2}, {3}};`, as C's does; a module is initialised from another of its type, or
+    // starts at 0.
     struct DeclStmt
     {
         bool isConst = false;      // the variable's: `const float x`, or `float* const p` (`const float* p` is not)
-        Type type = Type::Float;   // an array's count is 0 here: `size` gives it
+        Type type = Type::Float;   // an array's count is 0 here: `size` gives it (and a 2-D one's rowCount `rowSize`)
         std::string name;
         ExprPtr init;              // null without an initialiser
         bool isRestrict = false;   // `float* restrict p`: accepted, and changes nothing for a local
         bool hasList = false;      // `= {...}`
-        std::vector<ExprPtr> list;
+        std::vector<ExprPtr> list;   // its values, in order, braced or not
         ExprPtr size;              // an array's size as written; null for `[]`, which its list sizes
+        ExprPtr rowSize = nullptr;          // a 2-D array's rows' size as written, `[16]` in `float g[4][16]`
+        std::vector<Brace> braces = {};     // the braces inside the list, in the order their `{`s are
     };
 
     // `expr;`: evaluated for its effect (an assignment, a call).
@@ -751,6 +817,7 @@ namespace fminus::ast
         std::vector<Attribute> attributes;   // a parameter's
         ExprPtr size;                        // an array's size as written, as DeclStmt's
         std::size_t enums = 0;               // how many of the module's enumerations come before it, which it sees
+        ExprPtr rowSize = nullptr;           // a 2-D array's rows' size as written, as DeclStmt's
     };
 
     // `module OnePole { float y; float k; void init(float cutoff, float rate) { ... } float tick(float x) { ... } };`:

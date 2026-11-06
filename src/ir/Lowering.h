@@ -256,6 +256,17 @@ namespace fminus::ir::detail
             std::optional<SourceLocation> floating;
         };
 
+        // An initialiser list's values placed in an array (Memory.cpp, placeList), as C places them: each value and the
+        // element it initialises, from the array's first (a 2-D array's row by row), in the list's order; one past the
+        // last element it reaches (a braced row reaches its row's end), what sizes an array declared `[]`; and whether
+        // it had no error.
+        struct Placed
+        {
+            std::vector<std::pair<std::uint64_t, const ast::Expr*>> values;
+            std::uint64_t reach = 0;
+            bool ok = true;
+        };
+
         // What a method's reads of one stream use, computed where it starts (Modules.cpp, atEntry): whether it is
         // flat, the slot's value, and where sample i is, base + i * stride: the stream's pointer and 1, or, when the
         // stream is flat, the slot's value field and 0.
@@ -375,7 +386,10 @@ namespace fminus::ir::detail
         void declareEnum(const ast::Enum& enumeration);
         void fileNameClash(SourceLocation location, const std::string& name, std::size_t position, bool enumerator);
         ast::Type sized(SourceLocation location, const std::string& name, ast::Type type, const ast::Expr* size,
-                        const std::vector<ast::ExprPtr>* list);
+                        const ast::Expr* rowSize, const ast::DeclStmt* listed);
+        ast::Type declaredArray(SourceLocation location, const ast::DeclStmt& decl, ast::Type type);
+        static ast::Type floatsLike(ast::Type array);
+        std::optional<std::int32_t> arraySize(const std::string& name, const ast::Expr& size);
         void checkSizes(const ast::Function& function);
         void defineConstant(const ast::Constant& constant);
         bool atTopLevel() const;
@@ -430,10 +444,12 @@ namespace fminus::ir::detail
         Value lowerAddressOf(SourceLocation location, const ast::Expr& operand);
         Value pointerArithmetic(SourceLocation location, ast::BinaryOp op, Value lhs, Value rhs);
         void zero(llvm::Value* address, ast::Type type);
-        void initializeArray(SourceLocation location, llvm::Value* address, ast::Type type,
-                             const std::vector<ast::ExprPtr>& list);
-        llvm::Value* declareConstArray(SourceLocation location, const ast::DeclStmt& decl, ast::Type type);
+        Placed placeList(ast::Type type, const ast::DeclStmt& decl, bool report);
+        llvm::Value* elementAt(ast::Type array, llvm::Value* address, std::uint64_t at, const char* name);
+        void initializeArray(SourceLocation location, llvm::Value* address, ast::Type type, const ast::DeclStmt& decl);
+        llvm::Value* declareConstArray(const ast::DeclStmt& decl, ast::Type type);
         llvm::Constant* tableContents(llvm::ArrayType* type, std::vector<llvm::Constant*> given);
+        llvm::Constant* tableOf(ast::Type type, const std::vector<std::pair<std::uint64_t, llvm::Constant*>>& given);
 
         // ---- Calls.cpp ----------------------------------------------------------------------------------------------
         Value lowerCall(SourceLocation location, const ast::CallExpr& call);

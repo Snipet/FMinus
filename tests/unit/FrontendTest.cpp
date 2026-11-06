@@ -374,6 +374,32 @@ TEST_CASE("arrays parse as C's: a size after the name, a list, and a parameter t
              "  (decl float[] n))\n");
 }
 
+TEST_CASE("2-D arrays parse as C's: two sizes, rows braced in a list, and sizeof of an array type", "[frontend]")
+{
+    // Each size as written; a braced list's values in their braces, as written (C's rules place them later).
+    CHECK(parsed("enum { ROWS = 4 };\n"
+                 "const float table[2][3] = {{1, 2}, {}, 3,};\n"
+                 "module Bank { float gain[ROWS][ROWS * 4]; };\n"
+                 "int f() { int g[][2] = {{1, {2}}, 3}; float h[2][2]; h[1][0] = g[0][1];"
+                 " return sizeof(float[4][16]) + sizeof(int[ROWS]); }")
+          == "(enum (ROWS 4))\n"
+             "(decl const float[2][3] table {{1 2} {} 3})\n"
+             "(module Bank\n"
+             "  (field float[ROWS][(* ROWS 4)] gain))\n"
+             "(function int f ()\n"
+             "  (decl int[][2] g {{1 {2}} 3})\n"
+             "  (decl float[2][2] h)\n"
+             "  (= ([] ([] h 1) 0) ([] ([] g 0) 1))\n"
+             "  (return (+ (sizeof float[4][16]) (sizeof int[ROWS]))))\n");
+    // A third dimension, a parameter of a 2-D array (a pointer to rows, which FMinus has no parameter of), and an
+    // array of pointers in sizeof, at their places.
+    CHECK(parsed("float a[2][3][4];\nvoid f(float g[2][3]) { }\nint s() { return sizeof(float*[2]); }")
+          == "test.fm:1:14: error: FMinus's arrays have at most two dimensions\n"
+             "test.fm:2:14: error: FMinus has no parameters of 2-D arrays, which would be pointers to rows: pass a row "
+             "(a float*), or the module that holds the array\n"
+             "test.fm:3:30: error: FMinus has no arrays of pointers\n");
+}
+
 TEST_CASE("top-level constants parse as C's file-scope declarations, where they are among the others", "[frontend]")
 {
     // Before and after functions, modules and enumerations, each where it is; and a declaration of several names.

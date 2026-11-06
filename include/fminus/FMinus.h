@@ -321,12 +321,18 @@ namespace fminus
             {
                 std::string name;
                 std::string type;          // as FMinus writes it: "float", "double", "float4", "float[16]",
-                                           // "double[8]", "Osc", "Osc *"; a parameter's "param float" (its slot).
-                                           // A "double" is 8 bytes, C++'s double, aligned to 8: a host that reads
-                                           // fields by type reads one as a double, not as a float
+                                           // "double[8]", "float[4][16]", "Osc", "Osc *"; a parameter's "param float"
+                                           // (its slot). A "double" is 8 bytes, C++'s double, aligned to 8: a host
+                                           // that reads fields by type reads one as a double, not as a float
                                            // (docs/extending.md, recipe 33)
                 std::size_t offset = 0;    // in bytes, from the instance's address
                 std::size_t size = 0;
+                std::string element = {};   // an array's elements' type ("float", "Osc"); empty for no array
+                // An array's shape: how many elements each dimension holds, outermost first: {16} for "float[16]",
+                // {4, 16} for "float[4][16]", whose 4 rows of 16 lie side by side, size / 4 bytes each (C's layout:
+                // element [i][j] is at offset + (i * 16 + j) * sizeof(float)). Empty for a field that is no array
+                // (docs/extending.md, recipe 34).
+                std::vector<std::size_t> extents = {};
             };
 
             std::string name;

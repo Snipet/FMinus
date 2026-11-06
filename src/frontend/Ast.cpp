@@ -121,6 +121,9 @@ namespace fminus::ast
             return "?";
         }
 
+        std::string declared(Type type, bool isConst, bool isRestrict, const Expr* size = nullptr,
+                             const Expr* rowSize = nullptr);
+
         std::string dump(const Expr& expr)
         {
             return std::visit(Overloaded{
@@ -179,7 +182,11 @@ namespace fminus::ast
                                       return std::string("(") + opName(increment.op) + " " + dump(*increment.target)
                                              + ")";
                                   },
-                                  [](const SizeofExpr& size) {   // (sizeof float *)
+                                  [](const SizeofExpr& size) {   // (sizeof float *), (sizeof float[4][(* 2 N)])
+                                      if (isArray(size.type))
+                                          return "(sizeof " + declared(size.type, false, false, size.size.get(),
+                                                                       size.rowSize.get())
+                                                 + ")";
                                       return "(sizeof " + typeName(size.type) + ")";
                                   },
                                   [](const IndexExpr& index) {   // ([] p i)
@@ -194,12 +201,14 @@ namespace fminus::ast
         }
 
         // A declared name's type, as C spells it: `const float`, `const float * restrict`, `float * const`,
-        // `const float[16]`. An array's size is as written, `float[(* ROWS COLS)]`, or nothing for `float[]`.
-        std::string declared(Type type, bool isConst, bool isRestrict, const Expr* size = nullptr)
+        // `const float[16]`. An array's size is as written, `float[(* ROWS COLS)]`, or nothing for `float[]`, and a
+        // 2-D array's rows' after it, `float[4][16]`.
+        std::string declared(Type type, bool isConst, bool isRestrict, const Expr* size, const Expr* rowSize)
         {
             if (isArray(type))
-                return (isConst ? "const " : "") + typeName(pointee(type)) + "["
-                       + (size != nullptr ? dump(*size) : "") + "]";
+                return (isConst ? "const " : "") + typeName(elementOf(type)) + "["
+                       + (size != nullptr ? dump(*size) : "") + "]"
+                       + (hasRows(type) ? "[" + (rowSize != nullptr ? dump(*rowSize) : "") + "]" : "");
             if (!isPointer(type))
                 return (isConst ? "const " : "") + typeName(type);
             return typeName(type) + (isConst ? " const" : "") + (isRestrict ? " restrict" : "");
@@ -214,13 +223,34 @@ namespace fminus::ast
             return "[[" + attribute.name + (attribute.args.empty() ? "" : "(" + args + ")") + "]]";
         }
 
-        // An array's initialiser list: {1 2}.
-        std::string list(const std::vector<ExprPtr>& elements)
+        // The values of an initialiser list from `first` to `end`, the braces in them that are `depth` + 1 deep each
+        // in its own, from `brace` on (the braces are in the order their `{`s are, so a brace's own come after it).
+        std::string listed(const std::vector<ExprPtr>& elements, const std::vector<Brace>& braces, std::size_t first,
+                           std::size_t end, int depth, std::size_t& brace)
         {
             std::string text;
-            for (const ExprPtr& element : elements)
-                text += (text.empty() ? "" : " ") + dump(*element);
-            return "{" + text + "}";
+            const auto add = [&](const std::string& piece) { text += (text.empty() ? "" : " ") + piece; };
+            for (std::size_t i = first;;)
+            {
+                if (brace < braces.size() && braces[brace].depth == depth + 1 && braces[brace].first == i
+                    && i + braces[brace].count <= end)
+                {
+                    const Brace& inner = braces[brace++];
+                    add("{" + listed(elements, braces, i, i + inner.count, depth + 1, brace) + "}");
+                    i += inner.count;
+                    continue;
+                }
+                if (i >= end)
+                    return text;
+                add(dump(*elements[i++]));
+            }
+        }
+
+        // An array's initialiser list: {1 2}, and a 2-D array's rows braced, {{1 2} {3}}.
+        std::string list(const std::vector<ExprPtr>& elements, const std::vector<Brace>& braces)
+        {
+            std::size_t brace = 0;
+            return "{" + listed(elements, braces, 0, elements.size(), 0, brace) + "}";
         }
 
         // (enum Mode (SAW) (SQUARE 4) (TRIANGLE)): each constant, with its value as written if it has one; C23's fixed
@@ -238,9 +268,10 @@ namespace fminus::ast
         // (decl const float[4] t {1 2}), a block's or the top level's.
         std::string dump(const DeclStmt& decl, const std::string& indent)
         {
-            return indent + "(decl " + declared(decl.type, decl.isConst, decl.isRestrict, decl.size.get()) + " "
-                   + decl.name + (decl.init ? " " + dump(*decl.init) : "") + (decl.hasList ? " " + list(decl.list) : "")
-                   + ")";
+            return indent + "(decl "
+                   + declared(decl.type, decl.isConst, decl.isRestrict, decl.size.get(), decl.rowSize.get()) + " "
+                   + decl.name + (decl.init ? " " + dump(*decl.init) : "")
+                   + (decl.hasList ? " " + list(decl.list, decl.braces) : "") + ")";
         }
 
         // One statement per line, `indent` spaces in; a block's items one level further in.
@@ -358,11 +389,17 @@ namespace fminus::ast
             return "poly float";
         case Kind::PolyBool:
             return "poly bool";
-        case Kind::Pointer:
+        case Kind::Pointer:   // a pointer to a row in clang's spelling: float (*)[16]
+            if (hasRows(type))
+                return (type.pointeeConst ? "const " : "") + typeName(elementOf(type)) + " (*)["
+                       + std::to_string(type.rowCount) + "]";
             return (type.pointeeConst ? "const " : "") + typeName(pointee(type)) + " *";
         case Kind::Module:
             return type.module != nullptr ? type.module->name : "?";
-        case Kind::Array:   // clang's spelling: float[16]
+        case Kind::Array:   // clang's spelling: float[16], float[4][16]
+            if (hasRows(type))
+                return typeName(elementOf(type)) + "[" + std::to_string(type.count) + "]["
+                       + std::to_string(type.rowCount) + "]";
             return typeName(pointee(type)) + "[" + std::to_string(type.count) + "]";
         }
         return "?";
@@ -414,7 +451,8 @@ namespace fminus::ast
                     for (; shown < field.enums && shown < enums.size(); ++shown)
                         text += "\n  " + dump(*enums[shown]);
                     text += std::string(field.isParam ? "\n  (param " : "\n  (field ")
-                            + declared(field.type, field.isConst, false, field.size.get()) + " " + field.name;
+                            + declared(field.type, field.isConst, false, field.size.get(), field.rowSize.get()) + " "
+                            + field.name;
                     for (const Attribute& attribute : field.attributes)
                         text += " " + attributeText(attribute);
                     text += ")";

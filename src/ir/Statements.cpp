@@ -588,22 +588,19 @@ namespace fminus::ir::detail
                 redefinition(location, decl.name, false, scopes_.back().at(decl.name));
         };
         ast::Type type = decl.type;
-        if (ast::isArray(type) && decl.size == nullptr && decl.init)
-            type.count = 1;   // its initialiser's error says why
-        else if (ast::isArray(type))
-            type = sized(location, decl.name, type, decl.size.get(), decl.hasList ? &decl.list : nullptr);
+        if (ast::isArray(type))
+            type = declaredArray(location, decl, type);   // its initialiser's error says why when it has `= expr`
         if (type == ast::Type::Void)
         {
             error(location, "variable has incomplete type 'void'");
             type = ast::Type::Float;   // so its uses report no more errors
         }
         if (!checkType(location, type))   // likewise
-            type = ast::isArray(type) ? ast::Type::arrayOf(ast::Type::Float, type.count)
-                                      : ast::Type::pointerTo(ast::Kind::Float, type.pointeeConst);
-        if (decl.isConst && ast::isArray(type) && !decl.init && !ast::isModule(ast::pointee(type)))
+            type = ast::isArray(type) ? floatsLike(type) : ast::Type::pointerTo(ast::Kind::Float, type.pointeeConst);
+        if (decl.isConst && ast::isArray(type) && !decl.init && !ast::isModule(ast::elementOf(type)))
         {
             // A table: a constant of the module when its list is constants, a local otherwise (Memory.cpp).
-            declare(declareConstArray(location, decl, type), true, type);
+            declare(declareConstArray(decl, type), true, type);
             return;
         }
         if (ast::isArray(type) || ast::isModule(type))
@@ -621,7 +618,7 @@ namespace fminus::ir::detail
                     incompatible(location, Use::Initializing, value.type, type);
             }
             if (decl.hasList && ast::isArray(type))
-                initializeArray(location, slot, type, decl.list);
+                initializeArray(location, slot, type, decl);
             else if (decl.hasList)
                 error(location, "a module takes no initializer list: its fields start at 0 (set them in a method, "
                                 "such as init)");

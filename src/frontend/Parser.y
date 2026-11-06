@@ -10,7 +10,7 @@
 //     attributes   : ("[" "[" attribute ("," attribute)* "]" "]")*
 //     attribute    : IDENTIFIER ("::" (IDENTIFIER | "default"))? ("(" "-"? NUMBER ("," "-"? NUMBER)* ")")?
 //     params       : (param ("," param)*)? | "void"                                  (void) is none, as in C
-//     param        : "const"? type pointer IDENTIFIER? | "const"? type IDENTIFIER array_size        a pointer
+//     param        : "const"? type pointer IDENTIFIER? | "const"? type IDENTIFIER array_sizes       a pointer
 //     type         : "float" | "double" | "bool" | "int" | "void" | VECTOR_TYPE | "poly" ("float" | "bool")
 //                  | MODULE_NAME
 //                  | "enum" IDENTIFIER                  int (or its fixed type), the name a tag declared before
@@ -23,8 +23,11 @@
 //     enumerator   : IDENTIFIER ("=" expr)?                                  the expr an integer constant expression
 //     declaration  : "const"? type declarator ("," declarator)* ";"
 //     declarator   : pointer IDENTIFIER ("=" expr)?                                  as in C, `float *p, x;`
-//                  | IDENTIFIER array_size ("=" "{" (expr ("," expr)* ","?)? "}")?          an array
-//                  | pointer IDENTIFIER "=" "{" (expr ("," expr)*)? "}"     parsed, for its error: only arrays
+//                  | IDENTIFIER array_sizes ("=" initializer_list)?                   an array
+//                  | pointer IDENTIFIER "=" initializer_list        parsed, for its error: only arrays
+//     initializer_list : "{" (initializer ("," initializer)* ","?)? "}"              C's, C23's {} too
+//     initializer  : expr | initializer_list                         a braced list, a 2-D array's row
+//     array_sizes  : array_size array_size?                         FMinus's arrays are one or two dimensions deep
 //     array_size   : "[" expr? "]"              an integer constant expression, or none: the list's length
 //     statement    : label statement | unlabeled
 //     unlabeled    : block | expr ";" | "return" expr? ";" | ";"
@@ -36,7 +39,7 @@
 //     label        : "case" expr ":" | "default" ":"                         the expr an integer constant expression
 //     expr         : NUMBER | "true" | "false" | IDENTIFIER | IDENTIFIER "(" (expr ("," expr)*)? ")" | "(" expr ")"
 //                  | ("-" | "+" | "!" | "~" | "*" | "&") expr | expr "[" expr "]"   *p, &x, p[i]
-//                  | "sizeof" "(" "const"? type pointer ")"                          a type's size, an int
+//                  | "sizeof" "(" "const"? type pointer array_sizes? ")"             a type's size, an int
 //                  | expr ("*" | "/" | "%") expr | expr ("+" | "-") expr | expr ("<<" | ">>") expr
 //                  | expr ("<" | "<=" | ">" | ">=") expr | expr ("==" | "!=") expr
 //                  | expr "&" expr | expr "^" expr | expr "|" expr                   an int's bits
@@ -131,6 +134,24 @@
             ast::ExprPtr size = nullptr;   // an array's, as written; null for `[]`
             bool hasList = false;          // `= {...}`
             std::vector<ast::ExprPtr> list = {};
+            bool rows = false;                // `name[size][rowSize]`: a 2-D array
+            ast::ExprPtr rowSize = nullptr;   // its rows' size, as written; null for `[]`, which C refuses
+            std::vector<ast::Brace> braces = {};
+        };
+
+        // An array's sizes as written: `[size]`, or a 2-D array's `[size][rowSize]` (`rows`). Null for `[]`.
+        struct ArraySizes
+        {
+            ast::ExprPtr size = nullptr;
+            bool rows = false;
+            ast::ExprPtr rowSize = nullptr;
+        };
+
+        // An initialiser list as written, `{1, {2, 3}}`: its values in order, and the braces among them (ast::Brace).
+        struct InitList
+        {
+            std::vector<ast::ExprPtr> items;
+            std::vector<ast::Brace> braces;
         };
 
         // C23's fixed underlying type of an enumeration as written, `: int`: the type and where; or none.
@@ -361,8 +382,9 @@
         }
 
         // The name declared with its pointer, and, for an array, the array of what the rest declares: `float x[4]`
-        // is a float[4], and `const float c[2]` a const float[2], whose elements are read-only. The array's count is
-        // the code generator's to work out, from the declaration's size (DeclStmt::size).
+        // is a float[4], `float g[4][16]` a float[4][16] (an array of rows), and `const float c[2]` a const float[2],
+        // whose elements are read-only. The array's counts are the code generator's to work out, from the
+        // declaration's sizes (DeclStmt::size and rowSize).
         fminus::frontend::Declared declaredName(bool isConst, fminus::ast::Type type,
                                                 fminus::frontend::Declarator& d,
                                                 fminus::frontend::ParseContext& context)
@@ -373,8 +395,37 @@
             if (d.pointer.isPointer)
                 context.diagnostics.error(d.location, "FMinus has no arrays of pointers");
             else
-                name.type = fminus::ast::Type::arrayOf(type, 0);
+                name.type = fminus::ast::Type::arrayOf(d.rows ? fminus::ast::Type::arrayOf(type, 0) : type, 0);
             return name;
+        }
+
+        // A declarator's array sizes, `[4][16]`.
+        void setSizes(fminus::frontend::Declarator& d, fminus::frontend::ArraySizes sizes)
+        {
+            d.isArray = true;
+            d.size = std::move(sizes.size);
+            d.rows = sizes.rows;
+            d.rowSize = std::move(sizes.rowSize);
+        }
+
+        // A declarator's initialiser list, `= {...}`.
+        void setList(fminus::frontend::Declarator& d, fminus::frontend::InitList list)
+        {
+            d.hasList = true;
+            d.list = std::move(list.items);
+            d.braces = std::move(list.braces);
+        }
+
+        // `items` appended to `list`: their values after its, and their braces after its, moved along.
+        void append(fminus::frontend::InitList& list, fminus::frontend::InitList items)
+        {
+            for (fminus::ast::Brace brace : items.braces)
+            {
+                brace.first += list.items.size();
+                list.braces.push_back(brace);
+            }
+            for (fminus::ast::ExprPtr& item : items.items)
+                list.items.push_back(std::move(item));
         }
 
         // A declaration's statements, one DeclStmt for each declarator: `const float a = 1, *p;`.
@@ -389,7 +440,8 @@
                 statements.push_back(fminus::ast::Stmt{
                     d.location, fminus::ast::DeclStmt{name.isConst, name.type, std::move(d.name), std::move(d.init),
                                                       name.isRestrict, d.hasList, std::move(d.list),
-                                                      std::move(d.size)}});
+                                                      std::move(d.size), std::move(d.rowSize),
+                                                      std::move(d.braces)}});
             }
             return statements;
         }
@@ -402,7 +454,7 @@
                 auto& decl = std::get<fminus::ast::DeclStmt>(stmt.node);
                 fields.push_back(fminus::ast::Field{stmt.location, std::move(decl.name), decl.type, decl.isConst,
                                                    decl.init != nullptr || decl.hasList, false, {},
-                                                   std::move(decl.size), 0});
+                                                   std::move(decl.size), 0, std::move(decl.rowSize)});
             }
         }
 
@@ -450,6 +502,8 @@
 %nterm <ast::Enumerator> enumerator
 %nterm <ModuleBody> module_body module_member
 %nterm <ast::ExprPtr> array_size
+%nterm <ArraySizes> array_sizes
+%nterm <InitList> initializer_list initializers initializer
 %nterm <std::vector<ast::Attribute>> attributes attribute_list
 %nterm <ast::Attribute> attribute
 %nterm <std::vector<std::string>> attribute_args
@@ -684,16 +738,23 @@ param
                                                 const Declared d = declared($1, $2, $3);
                                                 $$ = ast::Param{at(@2), "", d.type, d.isConst, d.isRestrict, nullptr};
                                             }
-    | qualifier type pointer IDENTIFIER array_size
+    | qualifier type pointer IDENTIFIER array_sizes
                                             {
                                                 // C's: a parameter declared as an array is a pointer to its first
-                                                // element, and the size, checked, says nothing.
+                                                // element, and the size, checked, says nothing. A 2-D one's would be
+                                                // a pointer to its first row, which FMinus has no parameter of.
                                                 const Pointer pointer = $3;
+                                                ArraySizes sizes = $5;
                                                 if (pointer.isPointer)
                                                     parseContext.diagnostics.error(at(@4),
                                                                                    "FMinus has no arrays of pointers");
+                                                else if (sizes.rows)
+                                                    parseContext.diagnostics.error(
+                                                        at(@4), "FMinus has no parameters of 2-D arrays, which would "
+                                                                "be pointers to rows: pass a row (a float*), or the "
+                                                                "module that holds the array");
                                                 $$ = ast::Param{at(@4), $4, ast::Type::pointerTo($2, $1), false, false,
-                                                                $5};
+                                                                std::move(sizes.size)};
                                             }
     ;
 
@@ -839,14 +900,59 @@ declarators
 declarator
     : pointer IDENTIFIER                    { $$ = Declarator{at(@2), $1, $2, nullptr}; }
     | pointer IDENTIFIER "=" expr           { $$ = Declarator{at(@2), $1, $2, $4}; }
-    | pointer IDENTIFIER "=" "{" args "}"   { $$ = Declarator{at(@2), $1, $2, nullptr, false, nullptr, true, $5}; }
-    | pointer IDENTIFIER array_size         { $$ = Declarator{at(@2), $1, $2, nullptr, true, $3}; }
-    | pointer IDENTIFIER array_size "=" expr
-                                            { $$ = Declarator{at(@2), $1, $2, $5, true, $3}; }
-    | pointer IDENTIFIER array_size "=" "{" args "}"
-                                            { $$ = Declarator{at(@2), $1, $2, nullptr, true, $3, true, $6}; }
-    | pointer IDENTIFIER array_size "=" "{" arg_list "," "}"
-                                            { $$ = Declarator{at(@2), $1, $2, nullptr, true, $3, true, $6}; }
+    | pointer IDENTIFIER "=" initializer_list
+                                            { $$ = Declarator{at(@2), $1, $2, nullptr}; setList($$, $4); }
+    | pointer IDENTIFIER array_sizes        { $$ = Declarator{at(@2), $1, $2, nullptr}; setSizes($$, $3); }
+    | pointer IDENTIFIER array_sizes "=" expr
+                                            { $$ = Declarator{at(@2), $1, $2, $5}; setSizes($$, $3); }
+    | pointer IDENTIFIER array_sizes "=" initializer_list
+                                            {
+                                                $$ = Declarator{at(@2), $1, $2, nullptr};
+                                                setSizes($$, $3);
+                                                setList($$, $5);
+                                            }
+    ;
+
+// An initialiser list: its values, and the braces of the lists inside it, a 2-D array's rows (ast::Brace). C23's
+// `{}` is an empty one, and a comma may end one.
+initializer_list
+    : "{" "}"                               {}
+    | "{" initializers "}"                  { $$ = $2; }
+    | "{" initializers "," "}"              { $$ = $2; }
+    ;
+
+initializers
+    : initializer                           { $$ = $1; }
+    | initializers "," initializer          { $$ = $1; append($$, $3); }
+    ;
+
+// A value, or a braced list: its values, inside a brace that holds them all, one level deeper than its own.
+initializer
+    : expr                                  { $$.items.push_back($1); }
+    | initializer_list                      {
+                                                InitList list = $1;
+                                                $$.braces.push_back(ast::Brace{at(@1), 0, list.items.size(), 1});
+                                                for (ast::Brace& brace : list.braces)
+                                                    ++brace.depth;
+                                                append($$, std::move(list));
+                                            }
+    ;
+
+// An array's sizes as written: one, or a 2-D array's two, the rows' last. A third is FMinus's error (C would have an
+// array of arrays of arrays), which keeps the first two.
+array_sizes
+    : array_size                            { $$.size = $1; }
+    | array_sizes array_size                {
+                                                $$ = $1;
+                                                if ($$.rows)
+                                                    parseContext.diagnostics.error(at(@2), "FMinus's arrays have at "
+                                                                                           "most two dimensions");
+                                                else
+                                                {
+                                                    $$.rows = true;
+                                                    $$.rowSize = $2;
+                                                }
+                                            }
     ;
 
 // An array's size as written: an expression (the code generator checks that it is an integer constant expression,
@@ -931,7 +1037,23 @@ expr
     | expr "[" expr "]"                     { $$ = ast::makeExpr(at(@2), ast::IndexExpr{$1, $3}); }
     | "sizeof" "(" qualifier type pointer ")"
                                             {
-                                                $$ = ast::makeExpr(at(@1), ast::SizeofExpr{declared($3, $4, $5).type});
+                                                $$ = ast::makeExpr(at(@1), ast::SizeofExpr{declared($3, $4, $5).type,
+                                                                                           nullptr, nullptr});
+                                            }
+    | "sizeof" "(" qualifier type pointer array_sizes ")"
+                                            {
+                                                // An array type's name, C's abstract declarator: `float[4][16]`.
+                                                const Pointer pointer = $5;
+                                                ArraySizes sizes = $6;
+                                                ast::Type type = declared($3, $4, pointer).type;
+                                                if (pointer.isPointer)
+                                                    parseContext.diagnostics.error(at(@5), "FMinus has no arrays of "
+                                                                                           "pointers");
+                                                else
+                                                    type = ast::Type::arrayOf(
+                                                        sizes.rows ? ast::Type::arrayOf(type, 0) : type, 0);
+                                                $$ = ast::makeExpr(at(@1), ast::SizeofExpr{type, std::move(sizes.size),
+                                                                                           std::move(sizes.rowSize)});
                                             }
     | "++" expr %prec UNARY                 { $$ = increment(@1, ast::IncrementOp::PreIncrement, $2); }
     | "--" expr %prec UNARY                 { $$ = increment(@1, ast::IncrementOp::PreDecrement, $2); }
