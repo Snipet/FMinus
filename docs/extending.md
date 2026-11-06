@@ -6865,8 +6865,9 @@ reads back as it.
 
 ## Recipe 37: where the code is, for a sampling profiler
 
-*In the compiler. Code: `Jit::Code`, `code`, `Calls`, `directCalls`, `inlinedCalls`, `recordInlining` and `Linker`,
-with `CodeLog`, `keepNamesOfKeptCode`, `LinkedCode` and `LoadedCode` (`src/jit/Jit.h`, `Jit.cpp`);
+*In the compiler. Code: `Jit::Code`, `code`, `Calls`, `directCalls`, `Inlined`, `inlinedCalls`, `recordInlining` and
+`Linker`, with `CodeLog`, `keepNamesOfKeptCode`, `LinkedCode`, `LoadedCode` and `callersFirst` (`src/jit/Jit.h`,
+`Jit.cpp`);
 `Program::CodeRange`, `codeRanges` and `codeRangeAt` (`include/fminus/FMinus.h`), with `attributed`
 (`src/api/FMinus.cpp`). Tests:
 `tests/unit/CodeRangesTest.cpp` and `tests/library/ProfileTest.cpp` (`[profile]`).*
@@ -6913,13 +6914,17 @@ The object's names are the linker's, with the target's global prefix (macOS's `_
 module's, without it, and drops the symbols that are no function of the module: the assembler's labels (macOS's
 `ltmp0` at the start of each section, which has no prefix), ELF's local labels (`.L`) and AArch64 ELF's mapping
 symbols (`$x`). The sizes are the object's: an ELF object gives each function's (`st_size`), and a Mach-O or COFF object
-none, so each runs to the next symbol, the padding before it included (functions start on 64 bytes on an M5). No
-program counter lands in padding, so a sample finds its function either way.
+none, so each runs to the next symbol, the padding before it included (what the next function's alignment leaves, if
+anything). No program counter lands in padding, so a sample finds its function either way.
 
 The tests check both linkers on every system: `Jit::create` takes a `Linker`, and `Linker::RuntimeDyld` gives the JIT
 RuntimeDyld wherever it runs, made as LLJIT makes Windows' (its `createObjectLinkingLayer`, with COFF's two flags when
-the target is COFF), so the path Windows takes runs on macOS and Linux too. On an M5 the two lists name the same
-functions with the same sizes, but the last, which RuntimeDyld runs to the end of its section.
+the target is COFF), so the path Windows takes runs on macOS and Linux too. The two do not link quite the same code:
+LLJIT gives JITLink the small code model, and leaves RuntimeDyld the target's for a JIT, the large one on x86-64 and on
+AArch64 but Windows', in which code that names an address (a global's, a constant's, a function's) is not the same. On
+an M5, `run`, which passes its parallel region's address to the pool, is 8 bytes longer. Where the code is the same, the
+two lists give each function the same place and size, but the last, which RuntimeDyld runs to the end of its section;
+the tests check that with functions that name no address.
 
 ### What the optimiser did: `inlined`
 
@@ -6927,14 +6932,20 @@ A range is the machine code's, not the source's. From `-O1` the optimiser inline
 `Osc::tick` into `Osc::process`'s loop, so the samples of tick's work fall in process's code. FMinus emits no debug
 information, which would say of each instruction which inlined call it came from (a `DILocation`'s `inlinedAt`); a
 profile by source line waits for it. What can be said cheaply is which functions a range holds. `Jit::directCalls`
-lists, for each function a module defines, the functions of the module it calls by name. The JIT reads them before the
-optimiser and after (its IR transform, around `optimiseModule`), and `inlinedCalls` compares the two: a function G that
-F called before and does not after is inlined into F, and so, through G, is each function G called that F does not call
-after either. A callee that F still calls keeps its code, and the walk stops there. A call the optimiser deleted as dead
-(behind a frozen `bool`, say) looks the same as one it inlined, and is listed too. A program compiled with `keepIr`
-is optimised by `Program::compile` itself, which reads the calls around its own `optimiseModule` and hands the JIT
-their `inlinedCalls` (`recordInlining`). On an M5 the two reads take 0.12 ms for a circuit's module of 3,300
-instructions, against 63 ms of `-O2`'s pipeline.
+lists, for each function a module defines, the functions of the module it calls by name, and how many calls of each it
+makes. The JIT reads them before the optimiser and after (its IR transform, around `optimiseModule`), and `inlinedCalls`
+compares the two. Had the optimiser inlined nothing, F would call G after as often as before, and as often again as each
+function inlined into F called G; each of those calls missing after is inlined into F, and brings G's own calls with it.
+So G is listed when F calls it fewer times than that, even if F still calls it at another call:
+`out[i] = g(out[i], 0) + g(out[i], mode)` inlines g where its mode is 0, whose path is short, and calls it where the
+mode is the caller's. The walk takes each function after all that call it on the way from F (a reverse post-order, which
+a recursion's call back up does not wait for), so its count is whole when it is read. A callee each of whose calls F
+still makes keeps its code, and the walk goes no further through it. A call the optimiser deleted as dead (behind a
+frozen `bool`, say), or merged with another, looks the same as one it inlined, and is listed too; one it copied,
+unrolling a loop, can hide one it inlined. A program compiled with `keepIr` is optimised by `Program::compile` itself,
+which reads the calls around its own `optimiseModule` and hands the JIT their `inlinedCalls` (`recordInlining`). On an
+M5 the two reads and the walk take under 0.1 ms for a circuit's module of 3,300 instructions
+(`examples/circuits/screamer.cir`), against 30 to 50 ms of `-O2`'s pipeline.
 
 An inlined function keeps its own code too, as every function of the program is external (the host may call it), so
 `Osc::tick`'s range is still there; it takes samples only when something calls it, and nothing in the program then
@@ -7007,10 +7018,13 @@ the calling thread sees its share of the region only.
 
 - `tests/unit/CodeRangesTest.cpp`: through JITLink and RuntimeDyld, with and without `Denormals::Flush`, each function's
   code at the address its look-up gives, sized, sorted and apart, nothing before a look-up, no global prefix and no
-  assembler's label, an entry point and its body, a parallel region's body and FMinus's own `fminus.large.sin`; what
-  `-O2` inlined (tick into process, both into run, `shape` into the parallel region) and `-O0` nothing;
-  `inlinedCalls`'s walk (through a callee, stopping at a kept one, recursion, a function the optimiser removed); a
-  thunk's code once it is made.
+  assembler's label, an entry point and its body, a parallel region's body and FMinus's own `fminus.large.sin`;
+  functions that name no address, placed and sized alike by both linkers, the last at least as large through
+  RuntimeDyld; what `-O2` inlined (tick into process, both into run, `shape` into the parallel region) and `-O0`
+  nothing; a method inlined at one call and called at another, listed in its caller's code; `inlinedCalls`'s walk
+  (through a callee, stopping at a kept one, recursion, a function the optimiser removed) and its counts (a callee
+  inlined at one of two calls, a call copied, a diamond, counts past a `size_t`'s range); a thunk's code once it is
+  made.
 - `tests/library/ProfileTest.cpp`: each range's kind, function and module, at the address `address()` gives, the list
   whole after `compile()` with no look-up, `codeRangeAt` inside, at the edges and outside every range, the same ranges
   again with a thunk's added after `callable()`; the same inlining when `compile()` optimises (`keepIr`), and none at

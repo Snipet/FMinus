@@ -540,7 +540,7 @@ keeps them when the link is emitted (before the graph is pruned, it keeps the na
 ELF object's calls of local functions, through their section's symbol, would lose); under RuntimeDyld, a
 `JITEventListener` (`LoadedCode`) reads the loaded object's symbol table, sized by `object::computeSymbolSizes`, at each
 section's load address. Names lose the target's global prefix (macOS's `_`), and the assembler's labels are dropped. The
-transform layer also reads each module's direct calls before and after `optimiseModule` (`directCalls`), and
+transform layer also reads each module's direct calls before and after `optimiseModule` (`directCalls`, counted), and
 `inlinedCalls` works out from the two which functions each function now holds. `Program::codeRanges` adds which of the
 program's functions each symbol is the code of: a function's, an entry point's and its body (`f.body`), a parallel
 region's (`f.parallel.n`), a thunk (`fminus.call.f`), or FMinus's own ([extending.md](extending.md), recipe 37).

@@ -94,7 +94,7 @@ namespace fminus::jit
         std::vector<Code> code() const;
 
         // The direct calls between a module's functions: for each function the module defines, each function it calls
-        // by name that the module defines too, itself not among them, with the number of its calls of it (call sites).
+        // by name that the module defines too, itself not among them, with how many calls of it it makes (call sites).
         using Calls = std::map<std::string, std::map<std::string, std::size_t, std::less<>>, std::less<>>;
         static Calls directCalls(const llvm::Module& module);
 
