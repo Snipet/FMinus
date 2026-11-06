@@ -10,10 +10,10 @@
 //     loop runs out too (and one that would run out of stack first, if the budget is the smaller).
 // A function may stop when it counts, or calls a function that may stop (directly, or by handing it to a runtime
 // function). Each one that may stop checks the flag after such a call, and returns at once if it is set. An indirect
-// call is not followed: FMinus has no function pointers, and the only indirect call it makes is an entry point's call
-// of its body under Denormals::Flush (ir/Denormals.cpp), whose wrapper restores the floating-point mode and returns
-// what the body returned, which is what a stopped body's wrapper should do. A function marked kLoopBudgetHostAttribute
-// is the host's and is left alone.
+// call is not followed (opt/EarlyReturn.h, reachedFunctions): FMinus has no function pointers, and the only indirect
+// call it makes in the program is an entry point's call of its body under Denormals::Flush (ir/Denormals.cpp), whose
+// wrapper restores the floating-point mode and returns what the body returned, which is what a stopped body's wrapper
+// should do. A function marked kLoopBudgetHostAttribute is the host's and is left alone.
 //
 // In a function that counts, the count is a stack slot that mem2reg (PromoteMemToReg) makes a register once the code
 // is in place, as the code generator's own variables become registers:
@@ -80,8 +80,10 @@
 // The functions it changes get their attributes adjusted to what is now true of them: they read and write memory
 // that is no argument's (the budget), they return (noreturn goes: a loop that never ended returns now), and their
 // result may be 0 or null, so no attribute that says otherwise (nonnull, dereferenceable, a range, nofpclass, an
-// argument it returns) stays on it or on a call of it.
+// argument it returns) stays on it or on a call of it (opt/EarlyReturn.h, mayReturnEarly).
 #include "opt/LoopBudget.h"
+
+#include "opt/EarlyReturn.h"
 
 #include <llvm/ADT/DenseMap.h>
 #include <llvm/ADT/STLExtras.h>
@@ -102,7 +104,6 @@
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/MDBuilder.h>
 #include <llvm/IR/Module.h>
-#include <llvm/Support/ModRef.h>
 #include <llvm/Transforms/Utils/BasicBlockUtils.h>
 #include <llvm/Transforms/Utils/LoopUtils.h>
 #include <llvm/Transforms/Utils/PromoteMemToReg.h>
@@ -122,43 +123,6 @@ namespace fminus::opt
         llvm::StructType* budgetType(llvm::LLVMContext& context)
         {
             return llvm::StructType::get(llvm::Type::getInt64Ty(context), llvm::Type::getInt32Ty(context));
-        }
-
-        // What a function that may stop no longer promises of its result, which may be 0 or null: these go from the
-        // function and from its calls, and so does `returned` from its parameters.
-        constexpr llvm::Attribute::AttrKind kResultPromises[] = {
-            llvm::Attribute::NonNull,
-            llvm::Attribute::Dereferenceable,
-            llvm::Attribute::Range,
-            llvm::Attribute::NoFPClass,
-        };
-
-        // The program's functions that `call` runs: its callee, when the module defines it, or the functions the
-        // module defines that it hands a declared function (a parallel region's body, to fminus_rt_parallel_for),
-        // which go in `handed` too when it is given. Inline asm runs nothing, and an indirect call is not followed
-        // (the top of this file).
-        void reached(llvm::CallBase& call, llvm::SmallVectorImpl<llvm::Function*>& functions,
-                     llvm::SmallVectorImpl<llvm::Function*>* handed = nullptr)
-        {
-            if (call.isInlineAsm())
-                return;
-            llvm::Function* callee = call.getCalledFunction();
-            if (callee == nullptr)
-                return;
-            if (!callee->isDeclaration())
-            {
-                functions.push_back(callee);
-                return;
-            }
-            for (llvm::Use& arg : call.args())
-            {
-                auto* function = llvm::dyn_cast<llvm::Function>(arg->stripPointerCasts());
-                if (function == nullptr || function->isDeclaration())
-                    continue;
-                functions.push_back(function);
-                if (handed != nullptr)
-                    handed->push_back(function);
-            }
         }
 
         struct Facts
@@ -326,16 +290,7 @@ namespace fminus::opt
                     llvm::PromoteMemToReg({slot_}, tree);
                 }
 
-                const llvm::MemoryEffects memory = function_.getMemoryEffects();
-                const llvm::MemoryEffects budgeted =
-                    memory | llvm::MemoryEffects(llvm::IRMemLocation::Other, llvm::ModRefInfo::ModRef);
-                if (budgeted != memory)
-                    function_.setMemoryEffects(budgeted);
-                for (const llvm::Attribute::AttrKind kind : kResultPromises)
-                    function_.removeRetAttr(kind);
-                for (unsigned i = 0; i < function_.arg_size(); ++i)
-                    function_.removeParamAttr(i, llvm::Attribute::Returned);
-                function_.removeFnAttr(llvm::Attribute::NoReturn);   // a loop that never ended returns now
+                mayReturnEarly(function_);   // a loop that never ended returns now (opt/EarlyReturn.h)
                 function_.addFnAttr(kLoopBudgetAttribute, counting ? "counts" : "returns");
             }
 
@@ -344,7 +299,7 @@ namespace fminus::opt
             bool stops(llvm::CallInst& call) const
             {
                 llvm::SmallVector<llvm::Function*, 2> functions;
-                reached(call, functions);
+                reachedFunctions(call, functions);
                 return llvm::any_of(functions, [&](llvm::Function* function) {
                     const auto found = all_.find(function);
                     return found != all_.end() && found->second.mayStop;
@@ -461,16 +416,6 @@ namespace fminus::opt
                 branch->eraseFromParent();
             }
 
-            // Returns what the function returns when it stops: nothing, zero or null.
-            void returnEarly(llvm::IRBuilder<>& at)
-            {
-                llvm::Type* result = function_.getReturnType();
-                if (result->isVoidTy())
-                    at.CreateRetVoid();
-                else
-                    at.CreateRet(llvm::Constant::getNullValue(result));
-            }
-
             // Where the count goes below zero: -1 for what is left, the flag, and return. -1, not the count, which a
             // charge may have taken far below zero: `left` stays where no later subtraction can wrap it (the top of
             // this file). It is the least `left` can hold, so a store is a min here too.
@@ -486,7 +431,7 @@ namespace fminus::opt
                 llvm::StoreInst* raise =
                     at.CreateAlignedStore(llvm::ConstantInt::get(i32_, 1), stopped_, llvm::Align(4));
                 raise->setAtomic(llvm::AtomicOrdering::Monotonic);
-                returnEarly(at);
+                returnEarly(at, function_);
                 return stop_;
             }
 
@@ -497,7 +442,7 @@ namespace fminus::opt
                     return unwind_;
                 unwind_ = llvm::BasicBlock::Create(context_, "budget.unwind", &function_);
                 llvm::IRBuilder<> at(unwind_);
-                returnEarly(at);
+                returnEarly(at, function_);
                 return unwind_;
             }
 
@@ -575,7 +520,7 @@ namespace fminus::opt
                 for (llvm::Instruction& instruction : block)
                 {
                     if (auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction))
-                        reached(*call, these.reaches, &these.hands);
+                        reachedFunctions(*call, these.reaches, &these.hands);
                 }
             }
         }
@@ -632,16 +577,7 @@ namespace fminus::opt
                     const auto found = callee != nullptr ? facts.find(callee) : facts.end();
                     if (found == facts.end() || !found->second.mayStop)
                         continue;
-                    for (const llvm::Attribute::AttrKind kind : kResultPromises)
-                        call->removeRetAttr(kind);
-                    for (unsigned i = 0; i < call->arg_size(); ++i)
-                        call->removeParamAttr(i, llvm::Attribute::Returned);
-                    call->removeFnAttr(llvm::Attribute::NoReturn);
-                    const llvm::AttributeList attributes = call->getAttributes();
-                    if (attributes.hasFnAttr(llvm::Attribute::Memory))   // the call's own, not its callee's
-                        call->setMemoryEffects(attributes.getMemoryEffects()
-                                               | llvm::MemoryEffects(llvm::IRMemLocation::Other,
-                                                                     llvm::ModRefInfo::ModRef));
+                    mayReturnEarly(*call);
                     changed = true;
                 }
             }
