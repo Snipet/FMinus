@@ -5757,7 +5757,8 @@ unary operators by recursive descent, computing as it goes:
 - **Arithmetic is defined for every operand**, as FMinus's code is: `+ - *` and unary `-` wrap, the least integer
   divided by -1 is itself (its remainder 0), and a shift takes its count's low six bits (OpenCL C's rule for a 64-bit
   integer, as FMinus shifts an `int` by its count's low five), the right one arithmetic. clang warns of an overflow
-  there; FMinus does not (its one warning is `-Wswitch`, recipe 32), and the result is defined.
+  there; FMinus does not (its warnings are `-Wswitch`, recipe 32, and `-Wunknown-attributes`, recipe 35), and the
+  result is defined.
 - **Limits**, so that a program cannot hang the compiler or exhaust its stack: 256 levels of parentheses, unary
   operators and `?:` (clang's bracket depth), 256 macros expanding inside one another, 65536 tokens after expansion
   (`#define B A A` doubles a line's tokens with each such macro), and the work of expanding, counted across all of a
@@ -6479,11 +6480,12 @@ brackets counts 64, and reads them in order, rows one after another.
 ## Recipe 35: attributes on fields, for the host
 
 *In the compiler. Code: `AttributeArg`, `Attribute`, `DeclStmt::attributes` and `Field::attributes`
-(`src/frontend/Ast.h`); `stringLiteral`, `attributeText` and `attributeNumber` (`Ast.cpp`); the `STRING` token, its
-rules and `stringValue`, and the skipped groups' string rule (`Lexer.l`); `attributes`, `attribute_specifiers`,
-`attribute_specifier`, `attribute_arg`, `string_literal`, `declarator`, `declarator_sizes`, `named`, `setSizes` and
-`addFields` (`Parser.y`); `checkAttributes` (`src/ir/Modules.cpp`) and `refuseAttributes` (`Statements.cpp`, from
-`declareVariable` and `defineConstant`); `Program::Attribute`, `findAttribute`, `Module::Field::attributes` and
+(`src/frontend/Ast.h`); `stringLiteral`, `attributeText`, `attributeNumber` and `isIgnoredAttribute` (`Ast.cpp`); the
+`STRING` token, its rules and `stringValue`, and the skipped groups' string rule (`Lexer.l`); `attributes`,
+`attribute_specifiers`, `attribute_specifier`, `attribute_word`, `attribute_arg`, `string_literal`, `declarator`,
+`declarator_sizes`, `named`, `setSizes` and `addFields` (`Parser.y`); `checkAttributes` (`src/ir/Modules.cpp`) and
+`refuseAttributes` (`Statements.cpp`, from `declareVariable` and `defineConstant`, and `Parallel.cpp`, from
+`lowerParallelFor`); `Program::Attribute`, `findAttribute`, `Module::Field::attributes` and
 `Parameter::attributes` (`include/fminus/FMinus.h`, `src/api/FMinus.cpp`); the meter example's labels
 (`examples/meter/`); the VS Code grammar's `strings`. Tests: `tests/unit/FieldAttributeTest.cpp` (`[fieldattr]`),
 `FrontendTest.cpp`, `tests/library/FieldAttributeTest.cpp`, and `tests/lit/fminus/field-attributes.fm` and
@@ -6524,6 +6526,13 @@ anything else a size's). `attributes` may be empty, and its empty list is reduce
 the sizes, though, a `[` may be a third size's, so `declarator_sizes` reads attributes there as
 `attribute_specifiers`, one or more, for `setSizes` to report.
 
+An attribute's namespace and its name are identifiers, and C23 reads a keyword there as one (`[[ui::enum("a", "b")]]`,
+`fminus::default`), so each is an `attribute_word`: `IDENTIFIER`, `MODULE_NAME` (the scanner makes a module's name a
+type, so `[[meter::label("Peak")]]` in a program with a module `meter` is that module's name) or any keyword, spelt
+out one by one, a vector type's too. A namespace is any of these, and the host's to choose, so a program's own names
+must not take it from the host. A new keyword goes in `attribute_word` too: `FrontendTest.cpp` reads each of the
+parser's tokens spelt as an identifier from its table (`Parser::symbol_name`) and checks it there.
+
 ### Strings
 
 C23's attribute arguments are balanced tokens, anything at all. FMinus took numbers, and now takes strings too: C's
@@ -6550,18 +6559,31 @@ escaped), so `--emit ast` reads as the source does.
 | `fminus::default(value)` | a parameter | one number, inside the range: what `setDefaults` sets. On a field it is an error: a field starts at 0, and a method such as `init` sets it |
 | another `fminus::` name | | "unknown attribute": the namespace is FMinus's |
 | `clang::nonblocking`, `clang::nonallocating` | | "only applies to functions"; another `clang::` name is unknown, as it is on a function |
-| any other | | the host's, kept as written. Its numbers must be numbers C writes ("invalid number '08'") |
+| a name without a namespace that is none of C23's standard attributes | | ignored, with clang's warning: "unknown attribute 'range' ignored [-Wunknown-attributes]", and a note, "did you mean 'fminus::range'?", for `range` (and `default` on a parameter). The host never sees it |
+| any other | | the host's, kept as written. Its numbers must be numbers C writes ("invalid number '08'"; an integer too large for `unsigned long long`, which clang refuses, is none) |
 
 The last row is C23's rule with one change: an implementation ignores an attribute it does not know, and FMinus,
 which does not know `ui::unit`, passes it on to the host, which may. On a parameter, such an attribute was an error
 before this recipe; now only an unknown name in FMinus's namespace is. C's standard attributes, `[[deprecated]]` and
-the rest, go to the host too, as FMinus gives them no meaning; a host names its own in a namespace (`ui::`), since C
-keeps the names without one for its standard. `attributeNumber` reads a number as C writes it, and learned a hex
-float's `f` suffix here (`0x1p-3f`, which it refused before; in `0x1F` the `F` is a digit).
+the rest (`isIgnoredAttribute` has their names, `__deprecated__` too), go to the host as well, as FMinus gives them no
+meaning; a host names its own in a namespace (`ui::`), since C keeps the names without one for its standard. Any other
+name without a namespace is no one's, so FMinus warns of it as clang does and drops it (`attributesOf` in
+`src/api/FMinus.cpp` asks `isIgnoredAttribute` too): `[[range(20, 20000)]]` is far more likely `fminus::range` without
+its namespace than anything a host reads, and passed on quietly, it would leave the parameter with no range and no
+message saying why. `attributeNumber` reads a number as C writes it, and learned a hex float's `f` suffix here
+(`0x1p-3f`, which it refused before; in `0x1F` the `F` is a digit). An integer's digits must fit `unsigned long long`,
+C's widest integer type: `strtoull` would saturate `99999999999999999999` and hand the host 2^64 - 1 beside its
+spelling, so `errno`'s `ERANGE` makes it no number.
+
+`checkAttributes` runs on a field once `layOut` has worked out its type: `fminus::range` then names the type as
+declared (`'Osc[4]'`, not the tree's unsized `'Osc[0]'`), and on a field whose type was an error of its own (`void`,
+an array of `bool`, `float x[]`) it reports nothing more, as recipe 32's rule has it. A parameter's runs first, as
+its type needs no working out.
 
 A local's attributes, and a constant's at the top level, have no host to go to: `refuseAttributes` reports the first,
-"'ui::unit' attribute only applies to a module's fields and parameters". A function's are as recipe 11 made them:
-`clang::nonblocking` and `clang::nonallocating`, any other an error.
+"'ui::unit' attribute only applies to a module's fields and parameters". A `parallel for`'s counter is a local too,
+which `lowerParallelFor` binds itself rather than through `declareVariable`, so it calls `refuseAttributes` as well. A
+function's are as recipe 11 made them: `clang::nonblocking` and `clang::nonallocating`, any other an error.
 
 The attributes change no code: the module's layout, its methods and its IR are the same as without them
 (`FieldAttributeTest.cpp` compares the IR).
@@ -6593,10 +6615,11 @@ budget or bounds checks has the same, and a field in an `#ifdef DEBUG` group has
 
 ### What it changes for programs and hosts
 
-- **Programs** without attributes on fields compile to the same IR. A parameter's attribute outside FMinus's and
-  clang's namespaces, an error before, is the host's. A `"` in code was an unexpected character, and now begins a
-  string; in a skipped group, a `/*` inside a string no longer opens a comment.
-- **Messages** are the ones above, in clang's words.
+- **Programs** without attributes on fields compile to the same IR. A parameter's attribute outside FMinus's and clang's
+  namespaces, an error before, is the host's, or, without a namespace and none of C's standard ones, a warning. A `"` in
+  code was an unexpected character, and now begins a string; in a skipped group, a `/*` inside a string no longer opens
+  a comment.
+- **Messages** are the ones above, in clang's words, and FMinus has a second warning, `-Wunknown-attributes`.
 - **Hosts** get `Program::Attribute`, `findAttribute`, `Module::Field::attributes` and `Parameter::attributes`, all
   additions: every member that was there is as it was. The VS Code grammar (0.15.0) colours any namespace's attribute
   names, and strings with their escapes, an unknown one marked.
@@ -6604,18 +6627,22 @@ budget or bounds checks has the same, and a field in an `#ifdef DEBUG` group has
 ### Tests
 
 - `tests/unit/FieldAttributeTest.cpp`: a module's IR the same with and without attributes, and its method's results;
-  each error above, in clang's words; the numbers C writes, a hex float with its suffix among them, and
-  `fminus::range` on each type of numbers; a string that is no number, even `"12"`; strings in an `#if`'s skipped
-  group and in its kept one.
+  each error above, in clang's words, a `parallel for`'s counter's among them, and one error for a field whose type
+  is its own error; the warning and its notes, and C's standard attributes with none; the numbers C writes, a hex
+  float with its suffix and the widest integers among them, and those too large; `fminus::range` on each type of
+  numbers; a string that is no number, even `"12"`; strings in an `#if`'s skipped group and in its kept one.
 - `FrontendTest.cpp`: the dumps of fields' attributes (in each declarator, before the sizes, after an enumeration's
-  list, a parameter's strings, adjacent literals), a local's and a constant's, and C's escapes written back; the
-  scanner's errors for strings, and the parser's for an attribute after a size and a string where an expression or
-  an attribute's name goes.
+  list, a parameter's strings, adjacent literals), a local's and a constant's, and C's escapes written back; every
+  keyword of the parser's, a vector type and a module's name as an attribute's namespace and name; the scanner's errors
+  for strings, and the parser's for an attribute after a size and a string where an expression or an attribute's name
+  goes.
 - `tests/library/FieldAttributeTest.cpp`: `Module::Field::attributes` and `Parameter::attributes` as a host reads them
   (names, numbers with their values and spellings, strings with their escapes resolved and their UTF-8, two in one
-  `[[ ]]`, none), `findAttribute`'s last and null, and the same under the loop budget, bounds checks and `#ifdef`.
+  `[[ ]]`, none), `findAttribute`'s last and null, an ignored attribute in `warnings()` and in no list, and the same
+  under the loop budget, bounds checks and `#ifdef`.
 - `tests/lit/fminus/field-attributes.fm`: the dump, and the IR (at `-O0`, and at `-O2` with bounds checks and the loop
-  budget) with no trace of them; `field-attributes-errors.fm`: each error once, and the scanner's and the parser's.
+  budget) with no trace of them; `field-attributes-errors.fm`: each error once, the scanner's and the parser's, and
+  the warning of a program that compiles.
 - `example.meter` (`examples/meter/bench.cpp --check`): the readings' labels and scales, read as a host reads them.
 
 ## Pitfalls

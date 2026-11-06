@@ -227,7 +227,7 @@ float half(float x) { x /= 2; return x; }
 | statements | `{ ... }`, `e;`, `return e;` and `return;`, `;`, `if (c) s else s` (an `else` closes the nearest `if`), `while (c) s`, `for (init; c; step) s` (its declarations are the loop's), `break;`, `continue;`, `switch (v) { case 1: s ... default: s }` (C's: an `int` or `bool` value, its cases integer constant expressions, which fall through to the next until a `break`; `case` and `default` are C23's labels, so a declaration may follow one); a `while` or `for` whose condition is not a constant expression may be assumed to end, as in C11 (6.8.5p6), and `while (1)` and `for (;;)` may run for ever; FMinus's `parallel for (int i = first; i < end; ++i) s`, its iterations at once over the machine's cores, and `parallel { s1 s2 ... }`, its statements at once, each finished, all of it, where it ends (below) |
 | expressions | constants, names, calls, `( )`, unary `-` `+` `!` `~`, `++` and `--` (before or after), casts `(int)x` `(float)x` `(double)x` `(bool)x`, `* / %`, `+ -`, `<< >>`, `< <= > >=`, `== !=`, `&`, `^`, `\|` (the bitwise ones on `int`s), `&&`, `\|\|` (both short-circuit), `?:` (only the branch taken runs), and `= += -= *= /= %= &= \|= ^= <<= >>=` (right to left; an assignment's value is the one stored), with C's precedence; pointers' `p[i]`, `*p`, `&x`, `p + i`, `p - q` and comparisons; an array's `a[i]` (its name stands for a pointer to its first element), and a 2-D array's `g[i][j]` and its rows, `g[i]`, each a 1-D array, a `float*` wherever one goes; a module's fields `m.y` and `p->y`, its methods `m.tick(x)` and `p->tick(x)`, and `this`; `sizeof(type)`, an `int` (a type past the greatest `int`, a module over 2 GB, is an error), arrays' types too, `sizeof(float[4][16])`; vector literals, OpenCL C's `(float4)(a, b, c, d)` and C's `(float4){a, b}` (the lanes left out are 0), and swizzles `v.wzyx`, `v.s0` |
 | constants | C's: floating ones are floats (`1.5`, `1.`, `.5`, `2e3`, `1.5e-3f`, hex floats `0x1.8p1`, `0x1p-3f`), or, without the `f`, doubles in arithmetic that has a double (below), integer ones ints (`2`, `010` in octal, `0x1F` in hex); `true` and `false`; enumeration constants, ints; integer constant expressions (a case's value, an enumerator's, an array's size) are C's, folded as FMinus computes |
-| attributes | C23's `[[...]]`: after a function's parameters, clang's (above); after a parameter's or a field's name, before an array's sizes, FMinus's `fminus::range(min, max)` (a parameter's, or a field's of numbers: what a host's control or display spans) and `fminus::default(value)` (a parameter's), and any other, the host's, which FMinus passes on as written: `float level [[ui::unit("dB")]] [[fminus::range(-60, 0)]];`, `float taps [[ui::hidden]] [16];`; their arguments numbers and C's string literals (C's escapes; adjacent literals are one), FMinus's only strings |
+| attributes | C23's `[[...]]`: after a function's parameters, clang's (above); after a parameter's or a field's name, before an array's sizes, FMinus's `fminus::range(min, max)` (a parameter's, or a field's of numbers: what a host's control or display spans) and `fminus::default(value)` (a parameter's), and any other, the host's, which FMinus passes on as written: `float level [[ui::unit("dB")]] [[fminus::range(-60, 0)]];`, `float taps [[ui::hidden]] [16];` (but a name without a namespace that C23 does not have, `[[range(0, 1)]]`, is clang's warning, and ignored); their names identifiers, keywords and modules' names among them, as C23 reads them; their arguments numbers and C's string literals (C's escapes; adjacent literals are one), FMinus's only strings |
 | comments | `// ...` and `/* ... */` |
 | directives | `#include "file"`, the file read where the line is, as in C, and once only (as if every file began with `#pragma once`), found where the host says: `fminus` looks beside the including file, then in `-I`'s directories; C's conditionals, `#if`, `#ifdef`, `#ifndef`, `#elif`, `#else` and `#endif` (and C23's `#elifdef` and `#elifndef`), whose skipped groups are never scanned, on macros that `#define NAME value` and `#undef` make, or the host (`fminus -D NAME[=value]`), read in their conditions only; `#pragma`, ignored |
 | types | `float` (IEEE single precision), `double` (IEEE double precision: for accumulators and slow state), `int` (32 bits, signed: C's `/` and `%`, overflow undefined) and `bool` (C23's: 0 or 1, computed as an int; a number is `x != 0` as a bool); `void`, a function's result; pointers to `float`, `double`, `int`, `float2`, `float4`, `float8` and modules, `const` (`const float*`, read-only through it) and `restrict` (C99's promise that nothing else reaches it), and `void*` (an address with no type, which converts to and from any pointer); arrays of `float`, `double`, `int`, the float vectors and modules, one or two dimensions deep; modules, by name (`OnePole`), from their declaration on; `enum Wave`, an `int`, after its enumeration; `float2`, `float4`, `float8` (OpenCL C's vectors, lane by lane, scalars broadcast); `poly float` and `poly bool`, as many lanes as the machine's vectors ([docs/simd.md](docs/simd.md)) |
@@ -296,9 +296,11 @@ Where FMinus differs from C, it is on purpose:
   field's or a parameter's on to the host as written (`Module::Field::attributes`), checking only that its numbers
   are numbers, for the host to decide what `[[ui::unit("dB")]]` means. Its own namespace, `fminus::`, is checked (an
   unknown name is an error), and so is clang's, whose attributes are a function's; a function's unknown attribute, a
-  local's and a constant's, and one after an array's size (C23's, for the array's type) are errors too. A string
-  literal is C's, and only an attribute's argument: FMinus has no `char`, and no strings anywhere else
-  ([docs/extending.md](docs/extending.md), recipe 35).
+  local's and a constant's, and one after an array's size (C23's, for the array's type) are errors too. A name
+  without a namespace is C's: one of C23's standard attributes goes to the host, and any other, `[[range(0, 1)]]`,
+  is clang's warning (`unknown attribute 'range' ignored [-Wunknown-attributes]`, with a note, "did you mean
+  'fminus::range'?"), and goes nowhere. A string literal is C's, and only an attribute's argument: FMinus has no
+  `char`, and no strings anywhere else ([docs/extending.md](docs/extending.md), recipe 35).
 - **The heap's memory is aligned to 64 bytes and zeroed**, `malloc`'s too, as everything FMinus declares starts at 0;
   sizes are `int`s (C's are `size_t`s), so one block holds at most 2 GB, and `sizeof` of a larger type (a module of
   big arrays) is an error. A call that breaks a function's `[[clang::nonallocating]]` or `[[clang::nonblocking]]` is
@@ -460,11 +462,13 @@ block of samples in one call. A method is one too, named `OnePole::tick`, whose 
 reports every error it finds, in source order and in clang's words, as `file:line:column: error: message`, and each
 once: an operand with an error of its own (an undeclared name) is no operand for an operator, a subscript, `*`, `&`, a
 call or a conversion to complain about, as clang's recovery has it, so `*(p + y)` is the one error about `y`. The parser
-stops at the first syntax error. FMinus's one warning is clang's `-Wswitch`: a `switch` without a `default` on a value
-of an enumerated type, whose cases miss some of its constants (`warning: enumeration value 'NOISE' not handled in switch
-[-Wswitch]`). A value that folds to a constant (a constant of the top level) gets none, as in clang, which says "no case
-matching constant switch condition" there instead; FMinus does not. The program still compiles; `fminus` prints the
-warnings with the errors, in source order, as clang does.
+stops at the first syntax error. FMinus has two of clang's warnings. `-Wswitch`: a `switch` without a `default` on a
+value of an enumerated type, whose cases miss some of its constants (`warning: enumeration value 'NOISE' not handled in
+switch [-Wswitch]`). A value that folds to a constant (a constant of the top level) gets none, as in clang, which says
+"no case matching constant switch condition" there instead; FMinus does not. And `-Wunknown-attributes`: a field's or a
+parameter's attribute without a namespace that C23 does not have, which FMinus ignores (`warning: unknown attribute
+'range' ignored [-Wunknown-attributes]`). The program still compiles; `fminus` prints the warnings with the errors, in
+source order, as clang does.
 
 ```bash
 build-dev/bin/fminus chain.fm                      # the optimised IR (-O2)
@@ -583,7 +587,8 @@ gain(in, out, n, 0.5f);                                       // one call a bloc
   program works on each region too.
 - **Warnings.** `warnings()` is a compiled program's warnings, as clang prints them, one a line with their notes
   (empty when it has none): clang's `-Wswitch`, a `switch` on a value of an enumerated type that misses some of its
-  constants. A program that does not compile has its warnings among its `errors`, where they are.
+  constants, and `-Wunknown-attributes`, an attribute FMinus ignores (below). A program that does not compile has its
+  warnings among its `errors`, where they are.
 - **Effects.** `nonBlocking(name)` and `nonAllocating(name)` say whether a function is marked
   `[[clang::nonblocking]]` or `[[clang::nonallocating]]`, which FMinus has then checked, so a host can refuse to run
   anything else on its audio thread.
@@ -610,7 +615,8 @@ gain(in, out, n, 0.5f);                                       // one call a bloc
   last of a name, or null. FMinus gives meaning to its own, `fminus::range` (a parameter's or a field's of numbers) and
   `fminus::default` (a parameter's), and passes every other on unread: a unit, a label, a display hint, whatever the
   host defines. Name a host's in a namespace of its own (`ui::`), as C23 keeps names without one for its standard
-  attributes. `examples/meter/` labels its readings so ([docs/extending.md](docs/extending.md), recipe 35).
+  attributes: one without a namespace that is none of those (`[[range(0, 1)]]`) is a warning in `warnings()`, and in
+  no `attributes` list. `examples/meter/` labels its readings so ([docs/extending.md](docs/extending.md), recipe 35).
 - **Math.** `fminus::math::sin`, `cos`, `exp`, `tanh` and `log` compute what a program in the default math mode does,
   bit for bit, so a C++ reference that calls them agrees with the program at any block size, level and width. They
   are `[[gnu::const]]` for GCC and clang (`FMINUS_MATH_CONST`), so two calls of one argument are one.
