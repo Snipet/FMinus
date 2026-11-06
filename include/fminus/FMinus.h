@@ -225,6 +225,10 @@ namespace fminus
             // against a budget the host sets before each call (setLoopBudget, below), and a call that runs out returns
             // early, with a flag the host reads (loopBudgetExceeded). Off, the default, the code is as it was.
             bool loopBudget = false;
+            // Bounds checks, for development builds: every access whose array the compiler can see is checked against
+            // the array's extent, and a call whose check fails returns early, with the check recorded for the host
+            // (boundsViolation, below). Off, the default, the code is as it was, and as fast.
+            bool boundsCheck = false;
         };
 
         // Compiles `source`. Returns nullptr when it does not compile, with `errors` holding FMinus's messages, one a
@@ -394,6 +398,73 @@ namespace fminus
 
         // Whether a call since setLoopBudget ran out of the budget and returned early.
         bool loopBudgetExceeded() const noexcept;
+
+        // Bounds checks (Options::boundsCheck), for development builds: an index outside its array reads or writes
+        // whatever lies beside it (another field, the host's memory), which corrupts the host or crashes it, perhaps
+        // much later. Compiled with the checks, every access whose array the compiler can see is checked against the
+        // array's extent: a[i], m.taps[i], p->taps[i] and voices[v] (an array of modules), *(a + i), a pointer formed
+        // from one (a + i, &a[i], which may point one past its end, as C allows), and a poly_load or poly_store through
+        // one (each lane it reaches, or with a mask each lane the mask takes): of a local array, a module's field, a
+        // constant table. A pointer the program keeps has no extent the compiler knows, and its accesses are not
+        // checked: one a variable, a field or a parameter holds (`float* p = buf;`, then p[i]), what a function
+        // returns, a heap block (malloc's), a host's buffer.
+        //
+        // When a check fails, the function records it, unless the record holds one already (the first is kept), and
+        // returns at once, 0, null or nothing, and so does each of the program's functions that called it, back to the
+        // host, as with the loop budget: no caller goes on with a value that was never computed, and the access never
+        // happens. What the call leaves in the instance and the output is whichever of the optimised code's stores had
+        // run, which need not be any point of the source (the loop budget's paragraph, above): a host that runs the
+        // program again first re-initialises the instance, or discards it.
+        //
+        //   Program::Options options;
+        //   options.boundsCheck = true;                   // while developing; the build that plays has none
+        //   auto program = Program::compile(source, errors, options);
+        //   ...
+        //   process(instance, in, out, n);
+        //   if (auto failed = program->boundsViolation()) // it returned early: silence it, and off the audio thread
+        //       report(failed->message());                // "synth.fm:12:9: index 16 out of bounds for 'line' of
+        //                                                 // type 'float[16]'"; then clearBoundsViolation()
+        //
+        // A check costs a compare and a branch where the optimiser cannot prove the access within the array (a ring
+        // buffer's index; a loop over the array that its own condition keeps within it has none), and a load and a
+        // branch after each call of a function with checks that inlining leaves; a loop with a check may not vectorise.
+        // The optimiser treats a failed check as a trap until the last pass makes it a return, so a build without the
+        // checks is as fast as before, and one with them computes what it would without them until a check fails.
+        //
+        // One record a Program, which every thread that runs it shares: in a parallel region, the first part to fail
+        // is recorded, and the others stop at their next call of a function with checks. While the record holds a
+        // check, a call returns early at its first call of such a function, however it got there: clear it before the
+        // program runs again (re-initialising the instance included). Each of these is a relaxed atomic load or
+        // store, no allocation and no lock: the audio thread may call them. In a program compiled without the checks
+        // there is never a violation.
+
+        // A bounds check that failed: where in the source the access is, which array, and the element it reached.
+        // The strings are the Program's, valid while it lives.
+        struct BoundsViolation
+        {
+            std::string_view file;     // the source file, as errors name it (Options::fileName, or an #include's)
+            int line = 0;
+            int column = 0;
+            std::string_view array;    // the array as the source names it ("buf", "m.taps", "voices[v].line"), or
+                                       // empty when it has no name
+            std::string_view type;     // its type, as FMinus writes it: "float[16]"
+            std::int64_t extent = 0;   // its elements
+            std::int64_t index = 0;    // the element the access reached, from the array's first
+            // How many elements from `index` the access reaches: 1 for an element (a[i], *p, p->y), a poly_load's or
+            // poly_store's lanes, and 0 for a pointer formed (a + i, &a[i]), which may also be one past the end.
+            int width = 1;
+
+            // What it says, in UBSan's words with the array's name and where it is: "synth.fm:12:9: index 16 out of
+            // bounds for 'line' of type 'float[16]'", "pointer offset 17 ...", "4 elements from index 14 ...". It
+            // allocates: off the audio thread.
+            std::string message() const;
+        };
+
+        // The first check that failed since clearBoundsViolation (or since the program compiled), or nothing.
+        std::optional<BoundsViolation> boundsViolation() const noexcept;
+
+        // Clears the record, so that the next call runs again.
+        void clearBoundsViolation() noexcept;
 
     private:
         struct Impl;

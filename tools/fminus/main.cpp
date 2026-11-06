@@ -21,6 +21,9 @@
 //                                           the loop budget: the call may take a million iterations of its loops,
 //                                           and stops early past them (also for --emit: the IR's checks, an
 //                                           executable's main)
+//     fminus taps.fm --run tap 20 --bounds-check
+//                                           bounds checks: an index outside its array stops the call, which says
+//                                           where (also for --emit, as the loop budget)
 //     fminus diodetone.cir --emit fm        the FMinus module a circuit netlist generates (fminus::circuit,
 //                                           docs/circuits.md); a .cir compiles and runs as that text would
 //     fminus play.fm --run dc 1             play.fm's #include "diodetone.cir" reads the module it generates
@@ -33,6 +36,7 @@
 #include "frontend/Frontend.h"
 #include "ir/CodeGen.h"
 #include "jit/Jit.h"
+#include "opt/BoundsCheck.h"
 #include "opt/LoopBudget.h"
 #include "runtime/Runtime.h"
 #include "support/Aot.h"
@@ -407,6 +411,7 @@ int main(int argc, char** argv)
     std::vector<std::string> includeDirectories;
     unsigned threads = 0;
     std::optional<std::int64_t> loopBudget;
+    bool boundsCheck = false;
     CircuitSettings circuitSettings;
     app.add_option("input", input, "FMinus source file ('-' for stdin)")->required();
     app.add_option("args", runArgs, "The arguments of --run's function");
@@ -456,6 +461,10 @@ int main(int argc, char** argv)
                    "for a loop whose count is known), and each call of a recursive function, and a call that takes more "
                    "than this many returns early (--run's call, an executable's main; --emit ll and asm show the checks)")
         ->check(CLI::NonNegativeNumber);
+    app.add_flag("--bounds-check", boundsCheck,
+                 "Compile with bounds checks, for development: an access outside an array the compiler can see (a[i], "
+                 "m.taps[i], a + i, &a[i]) stops the call, which says where, the array and the index (--run's call, "
+                 "an executable's main; --emit ll and asm show the checks)");
     app.add_flag("--self-test", circuitSettings.selfTest,
                  "Run the self-test of each circuit netlist (.cir) the program reads and generate it with the answer: "
                  "it chooses the configuration the netlist leaves open (seconds; docs/circuits.md)");
@@ -535,6 +544,7 @@ int main(int argc, char** argv)
     options.targetTriple = (*machine)->getTargetTriple().str();   // which register an entry point sets
     options.threads = threads;
     options.loopBudget = loopBudget.has_value();
+    options.boundsCheck = boundsCheck;
 
     // Syntax tree -> LLVM IR.
     auto context = std::make_unique<llvm::LLVMContext>();
@@ -568,6 +578,8 @@ int main(int argc, char** argv)
                                         fminus::ast::typeName(param.type)));
         }
 
+        // What each bounds check's number means (opt/BoundsCheck.h), read before the JIT takes the module.
+        const std::vector<fminus::opt::BoundsSite> sites = fminus::opt::boundsSites(*module);
         // A program with a parallel region runs it on the runtime's pool, started for the call (runtime/Runtime.h).
         const RuntimePool pool(module->getFunction("fminus_rt_parallel_for") != nullptr && threads != 1);
         auto jit = fminus::jit::Jit::create(optimisation);
@@ -588,6 +600,15 @@ int main(int argc, char** argv)
             budget = found->toPtr<fminus_rt_loop_budget_state*>();
             budget->left = *loopBudget;
             budget->stopped = 0;
+        }
+        // The program's bounds checks' record, read after the call, as a host reads it.
+        const fminus_rt_bounds_state* record = nullptr;
+        if (boundsCheck)
+        {
+            auto found = (*jit)->lookup(fminus::opt::kBoundsSymbol);
+            if (!found)
+                return fail(found.takeError());
+            record = found->toPtr<const fminus_rt_bounds_state*>();
         }
         // Through a pointer of the function's own type: a bool or an int comes back in a general register (a bool
         // zero-extended), a float in a vector register. std::format prints a bool as true or false.
@@ -617,6 +638,14 @@ int main(int argc, char** argv)
         case fminus::ast::Kind::Array:
             return fail(std::format("--run: '{}' returns '{}'; --run prints floats, bools and ints only", run,
                                     fminus::ast::typeName(function->returnType)));
+        }
+        // A check that failed, on stderr: what the call printed is what it returned early, and the status is 4.
+        if (record != nullptr && record->site > 0 && static_cast<std::size_t>(record->site) <= sites.size())
+        {
+            llvm::errs() << std::format("fminus: --run: '{}' stopped: {}\n", run,
+                                        fminus::opt::boundsMessage(sites[static_cast<std::size_t>(record->site) - 1],
+                                                                   record->index));
+            return 4;
         }
         // What the call took of its budget, on stderr; when it ran out, what it printed is what it returned early,
         // and the status is 3.

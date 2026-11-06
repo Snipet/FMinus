@@ -59,8 +59,10 @@ namespace fminus::aot
     // main sets the program's budget to it before the call, and when main runs past it says so on stderr
     // (fminus_rt_main_loop_budget) and exits with 3 instead of printing what main returned (a negative budget is -1,
     // which stops main at its first check). The C main is then a host's code, which the pass leaves alone
-    // (kLoopBudgetHostAttribute), and it calls main through its address passed through an empty inline asm: an
-    // indirect call, so main is never inlined into it, and nothing the optimiser finds of main before the pass (that
-    // it never returns, say) changes the code after the call.
+    // (kLoopBudgetHostAttribute). For a module compiled with bounds checks (ir::Options::boundsCheck, its flag) that
+    // has any, the C main reads the program's record after the call, and when main failed one says where on stderr
+    // (opt::boundsMessage's words, fminus_rt_main_bounds) and exits with 4 instead. With either, it calls main through
+    // its address passed through an empty inline asm: an indirect call, so main is never inlined into it, and nothing
+    // the optimiser finds of main before the passes (that it never returns, say) changes the code after the call.
     llvm::Error addEntryPoint(llvm::Module& module, std::optional<std::int64_t> loopBudget = std::nullopt);
 } // namespace fminus::aot

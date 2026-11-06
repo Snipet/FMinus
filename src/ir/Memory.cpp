@@ -7,7 +7,8 @@
 //
 // An element's address is a getelementptr, as clang's: inbounds (it stays within the object the pointer points
 // into, or one past its end, as C requires), on an index widened to 64 bits with sext, since the index is a signed
-// int.
+// int. Under Options::boundsCheck, an access through a pointer into an array the code generator can see is checked
+// against the array's extent first (Bounds.cpp).
 #include "ir/Lowering.h"
 
 #include <llvm/IR/Constants.h>
@@ -36,8 +37,9 @@ namespace fminus::ir::detail
     }
 
     // The lvalue `expr` names (isLValue said it names one), or nothing after an error. Errors about components are
-    // reported at `location`, the operator that stores (clang's place for them).
-    std::optional<Lowering::LValue> Lowering::lvalue(const ast::Expr& expr, SourceLocation location)
+    // reported at `location`, the operator that stores (clang's place for them). `address` is &'s: what is wanted of
+    // p[i] or *p is where it is, a pointer formed, which may be one past an array's end (Bounds.cpp).
+    std::optional<Lowering::LValue> Lowering::lvalue(const ast::Expr& expr, SourceLocation location, bool address)
     {
         if (const auto* variable = std::get_if<ast::VariableExpr>(&expr.node))
         {
@@ -87,7 +89,7 @@ namespace fminus::ir::detail
                 error(expr.location, "array subscript is not an integer");
                 return std::nullopt;
             }
-            std::optional<LValue> target = element(expr.location, base, offset);
+            std::optional<LValue> target = element(expr.location, base, offset, address);
             // An element of a const array its variable names, t[i]: clang names the variable when it is assigned.
             const auto* array = std::get_if<ast::VariableExpr>(&(swapped ? *index->index : *index->base).node);
             const Binding* binding = array != nullptr ? named(array->name) : nullptr;
@@ -107,7 +109,7 @@ namespace fminus::ir::detail
                       "indirection requires pointer operand (" + quoted(ast::typeName(pointer.type)) + " invalid)");
                 return std::nullopt;
             }
-            return element(expr.location, pointer, std::nullopt);
+            return element(expr.location, pointer, std::nullopt, address);
         }
 
         // p->y, a field through a pointer to a module.
@@ -128,6 +130,8 @@ namespace fminus::ir::detail
                                          + " is not a structure or union");
                 return std::nullopt;
             }
+            if (pointer.extent != nullptr)   // (voices + v)->y: one of the array's modules
+                checkBounds(expr.location, *pointer.extent, elementOf(*pointer.extent, nullptr), 1);
             return field(expr.location, pointer.ir, *pointer.type.module, member.name, pointer.type.pointeeConst);
         }
         // m.y, a module's field; or components of an lvalue: of a variable, or of components of one (v.xy.x is v's
@@ -161,9 +165,11 @@ namespace fminus::ir::detail
 
     // The element `pointer` points to (*p), or the index-th from it (p[i]): its address, and its type, const when
     // the pointer's is a const T*. Nothing for a pointer to what FMinus cannot point to (its declaration reported
-    // that).
+    // that). A pointer into an array the code generator can see is checked first (Bounds.cpp): the element must be
+    // one of the array's, or, for its `address` (&p[i]), at most one past the last; the element carries the extent on,
+    // for &.
     std::optional<Lowering::LValue> Lowering::element(SourceLocation location, Value pointer,
-                                                      std::optional<Value> index)
+                                                      std::optional<Value> index, bool address)
     {
         const ast::Type type = ast::pointee(pointer.type);
         if (type == ast::Type::Void)   // an address with no type: it has no elements
@@ -174,14 +180,24 @@ namespace fminus::ir::detail
         }
         if (!ast::canPointTo(type.kind))
             return std::nullopt;
-        llvm::Value* address = pointer.ir;
+        llvm::Value* at = pointer.ir;
+        llvm::Value* offset = nullptr;
         if (index)
         {
-            llvm::Value* offset = convert(*index, ast::Type::Int, location, Use::Initializing);   // a bool: 0 or 1
+            offset = convert(*index, ast::Type::Int, location, Use::Initializing);   // a bool: 0 or 1
             offset = builder_.CreateSExt(offset, builder_.getInt64Ty(), "idxprom");
-            address = builder_.CreateInBoundsGEP(typeOf(type), pointer.ir, offset, "arrayidx");
         }
-        return LValue{address, type, pointer.type.pointeeConst, "", type, {}};
+        const Extent* extent = nullptr;
+        if (pointer.extent != nullptr)
+        {
+            extent = movedExtent(*pointer.extent, offset);
+            checkBounds(location, *extent, elementOf(*extent, nullptr), address ? 0 : 1);
+        }
+        if (offset != nullptr)
+            at = builder_.CreateInBoundsGEP(typeOf(type), pointer.ir, offset, "arrayidx");
+        LValue target{at, type, pointer.type.pointeeConst, "", type, {}};
+        target.extent = extent;
+        return target;
     }
 
     // Whether `target` may be stored to: not an array, not const, and with no component twice (`v.xx = e` would write
@@ -229,13 +245,15 @@ namespace fminus::ir::detail
 
     // A load; for components, a load of the vector and the lanes taken out of it (an extractelement for one, a
     // shufflevector for several). An array is no load: its name stands for a pointer to its first element, const
-    // when the array is (C's decay). Nor is a module, whose value is its address. The load carries its type's TBAA
-    // tag (Tbaa.cpp), as every load and store of a value does.
-    Lowering::Value Lowering::read(const LValue& source)
+    // when the array is (C's decay), which carries the array's extent under Options::boundsCheck, the array `named`
+    // so in a failed check's message (Bounds.cpp). Nor is a module, whose value is its address. The load carries its
+    // type's TBAA tag (Tbaa.cpp), as every load and store of a value does.
+    Lowering::Value Lowering::read(const LValue& source, std::string named)
     {
         if (ast::isArray(source.type))
             return {builder_.CreateConstInBoundsGEP2_64(typeOf(source.type), source.address, 0, 0, "arraydecay"),
-                    ast::Type::pointerTo(ast::pointee(source.type), source.isConst)};
+                    ast::Type::pointerTo(ast::pointee(source.type), source.isConst),
+                    arrayExtent(source.type, std::move(named))};
         if (ast::isModule(source.type))
             return {source.address, source.type};
         llvm::LoadInst* loaded = builder_.CreateLoad(typeOf(source.whole), source.address, source.name);
@@ -252,7 +270,9 @@ namespace fminus::ir::detail
     Lowering::Value Lowering::readLValue(const ast::Expr& expr)
     {
         const std::optional<LValue> source = lvalue(expr, expr.location);
-        return source ? read(*source) : poison(ast::Type::Float);
+        if (!source)
+            return poison(ast::Type::Float);
+        return read(*source, boundsCheck_ && ast::isArray(source->type) ? spelled(expr) : std::string());
     }
 
     // `value` converted to the target's type and stored: for components, the vector is loaded, the lanes inserted
@@ -296,7 +316,7 @@ namespace fminus::ir::detail
             error(location, "cannot take the address of an rvalue of type " + quoted(ast::typeName(type)));
             return failed;
         }
-        const std::optional<LValue> target = lvalue(operand, location);
+        const std::optional<LValue> target = lvalue(operand, location, true);
         if (!target)
             return failed;
         if (!target->components.empty())
@@ -309,7 +329,7 @@ namespace fminus::ir::detail
             noPointerTo(location, target->type);
             return failed;
         }
-        return {target->address, ast::Type::pointerTo(target->type, target->isConst)};
+        return {target->address, ast::Type::pointerTo(target->type, target->isConst), target->extent};
     }
 
     // Every byte of what is at `address` 0, as a declaration of an array or a module starts.
@@ -418,7 +438,8 @@ namespace fminus::ir::detail
     // C's arithmetic on pointers. p + i and i + p are the element i after p (i may be negative), and p - i the one i
     // before; p - q is how many elements apart two pointers of one type are, an int (C's is a ptrdiff_t, which
     // FMinus does not have); and two pointers of one type compare as addresses. const does not matter to any of
-    // them. Nothing else takes a pointer.
+    // them. Nothing else takes a pointer. Under Options::boundsCheck, p + i and p - i into an array the code
+    // generator can see are checked to point within it, or one past its end, and carry its extent on (Bounds.cpp).
     Lowering::Value Lowering::pointerArithmetic(SourceLocation location, ast::BinaryOp op, Value lhs, Value rhs)
     {
         const std::string operands =
@@ -490,7 +511,13 @@ namespace fminus::ir::detail
                                                  builder_.getInt64Ty(), "idx.ext");
         if (op == ast::BinaryOp::Subtract)
             index = builder_.CreateNeg(index, "idx.neg");
+        const Extent* extent = nullptr;
+        if (pointer.extent != nullptr)
+        {
+            extent = movedExtent(*pointer.extent, index);
+            checkBounds(location, *extent, elementOf(*extent, nullptr), 0);
+        }
         return {builder_.CreateInBoundsGEP(typeOf(ast::pointee(pointer.type)), pointer.ir, index, "add.ptr"),
-                pointer.type};
+                pointer.type, extent};
     }
 } // namespace fminus::ir::detail

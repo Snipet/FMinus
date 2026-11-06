@@ -22,6 +22,7 @@
 //     Tbaa.cpp          C's strict aliasing, told to LLVM: the type tag (!tbaa) on every load and store of memory
 //     Denormals.cpp     Denormals::Flush: constants folded as flushing hardware computes them (Denormals.h), every
 //                       function marked so for LLVM, and each entry point setting the mode around its body
+//     Bounds.cpp        Options::boundsCheck: the arrays an access reaches, and the checks of its index against them
 // A new node is lowered in the file its kind belongs to. The build says which members still need it: a std::visit
 // without its lambda fails to compile, and a switch without its enumerator trips -Wswitch.
 #pragma once
@@ -36,6 +37,7 @@
 #include <llvm/IR/Module.h>
 
 #include <cstdint>
+#include <deque>
 #include <map>
 #include <optional>
 #include <string>
@@ -123,13 +125,27 @@ namespace fminus::ir::detail
         void lower(const ast::Program& program);
 
     private:
+        // Under Options::boundsCheck, the array a pointer points into, where the code generator can see it
+        // (Bounds.cpp): the pointer an array's name stands for, and what p + i, p - i and &p[i] make of one. Where in
+        // it the pointer is, its element from the array's first, an i64 (null for the first itself); how many elements
+        // it has; and how the source names it and its type, for the message when a check fails.
+        struct Extent
+        {
+            llvm::Value* offset = nullptr;
+            std::int64_t count = 0;
+            std::string name;
+            ast::Type type;
+        };
+
         // A lowered expression: its IR and its FMinus type. The rules read the FMinus type, never the IR's, since
         // two FMinus types may share an LLVM type: one whose width the target decides would be <4 x float> on
         // NEON, as float4 is. A module's value is its address (a ptr): it is copied from there, never loaded whole.
+        // A pointer into an array the code generator can see carries its extent, under Options::boundsCheck (above).
         struct Value
         {
             llvm::Value* ir = nullptr;
             ast::Type type = ast::Type::Float;
+            const Extent* extent = nullptr;
         };
 
         // A variable in scope: where it is (its stack slot; in a parallel region, the region's own slot for a copy of
@@ -170,6 +186,7 @@ namespace fminus::ir::detail
             std::vector<int> components;      // for components, the lanes of `whole` they are
             std::string array = {};           // an element of a const array a variable names (t[i]): the variable's,
             ast::Type arrayType = {};         // and its type, for clang's message when it is assigned
+            const Extent* extent = nullptr;   // an element's array, where it is in it (Options::boundsCheck)
         };
 
         // A call a function's body makes, for Effects.cpp: where, and of what (a builtin, or a function by name).
@@ -377,10 +394,11 @@ namespace fminus::ir::detail
 
         // ---- Memory.cpp ---------------------------------------------------------------------------------------------
         bool isLValue(const ast::Expr& expr) const;
-        std::optional<LValue> lvalue(const ast::Expr& expr, SourceLocation location);
-        std::optional<LValue> element(SourceLocation location, Value pointer, std::optional<Value> index);
+        std::optional<LValue> lvalue(const ast::Expr& expr, SourceLocation location, bool address = false);
+        std::optional<LValue> element(SourceLocation location, Value pointer, std::optional<Value> index,
+                                      bool address = false);
         bool writable(SourceLocation location, const LValue& target);
-        Value read(const LValue& source);
+        Value read(const LValue& source, std::string named = {});
         Value readLValue(const ast::Expr& expr);
         llvm::Value* write(SourceLocation location, const LValue& target, Value value, Use use);
         Value lowerAddressOf(SourceLocation location, const ast::Expr& operand);
@@ -458,6 +476,16 @@ namespace fminus::ir::detail
         void flushDenormals(const ast::Program& program);
         void wrapEntry(llvm::Function& function, SourceLocation location, bool arm);
 
+        // ---- Bounds.cpp ---------------------------------------------------------------------------------------------
+        const Extent* arrayExtent(ast::Type array, std::string name);
+        const Extent* movedExtent(const Extent& extent, llvm::Value* index);
+        llvm::Value* elementOf(const Extent& extent, llvm::Value* index);
+        void checkBounds(SourceLocation location, const Extent& extent, llvm::Value* index, unsigned width);
+        void checkLanes(SourceLocation location, const Extent& extent, llvm::Value* mask);
+        void failBounds(SourceLocation location, const Extent& extent, unsigned width, llvm::Value* inBounds,
+                        llvm::Value* index);
+        static std::string spelled(const ast::Expr& expr);
+
         // ---- the state of one lowering ----------------------------------------------------------------------------
         llvm::Module& module_;
         Diagnostics& diagnostics_;
@@ -488,5 +516,7 @@ namespace fminus::ir::detail
         std::vector<llvm::Function*> outlined_;                            // every region's function
         std::unordered_map<std::string, unsigned> regionCount_;            // each function's regions so far
         std::optional<std::unordered_map<std::string, bool>> changes_;     // whether each method changes its module
+        bool boundsCheck_;                                                 // whether accesses are checked (Bounds.cpp)
+        std::deque<Extent> extents_;                                       // the arrays' extents values carry
     };
 } // namespace fminus::ir::detail

@@ -58,6 +58,14 @@ extern "C" void fminus_rt_main_loop_budget(std::int32_t argc, char** argv, std::
                  static_cast<long long>(budget));
 }
 
+extern "C" void fminus_rt_main_bounds(std::int32_t argc, char** argv, const char* before, std::int64_t index,
+                                      const char* after) noexcept
+{
+    const char* program = argc > 0 ? argv[0] : "fminus";
+    std::fprintf(stderr, "%s: %s%lld%s: 'main' returned early\n", program, before, static_cast<long long>(index),
+                 after);
+}
+
 namespace
 {
     constexpr std::int64_t kAlignment = 64;

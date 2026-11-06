@@ -190,7 +190,12 @@ namespace fminus::ir::detail
         if (ast::isModule(base.type))
         {
             const std::optional<LValue> field = this->field(location, base.ir, *base.type.module, swizzle.name, false);
-            return field ? read(*field) : poison(ast::Type::Float);
+            if (!field)
+                return poison(ast::Type::Float);
+            if (!boundsCheck_ || !ast::isArray(field->type))
+                return read(*field);
+            const std::string named = spelled(*swizzle.base);   // m.taps, voices[v].taps: for a failed check's message
+            return read(*field, named.empty() ? swizzle.name : named + "." + swizzle.name);
         }
         if (ast::isPointer(base.type) && base.type.pointee == ast::Kind::Module)
         {

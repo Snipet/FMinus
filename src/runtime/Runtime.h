@@ -31,6 +31,20 @@ struct fminus_rt_loop_budget_state
     std::int32_t stopped;   // nonzero once a call has run out and returned early
 };
 
+// A program's record of a failed bounds check, fminus_rt_bounds, which a program compiled with the checks defines
+// (ir::Options::boundsCheck, opt/BoundsCheck.h) and its code writes: when an access is outside its array, the function
+// that makes it records the check's number and the index, unless `site` holds one already (the first is kept), and
+// returns early, and so does each function of the program that called it, back to the host. It starts empty (0, 0, 0);
+// the host reads it after a call, clears `site` before the next, and finds what the number means in the program's
+// description of its checks (Program::boundsViolation, include/fminus/FMinus.h; an executable's C main, support/Aot.h),
+// with relaxed atomics, as the program's own accesses are, so a parallel region's threads may share it.
+struct fminus_rt_bounds_state
+{
+    std::int32_t site;       // the failed check's number, from 1, or 0 for none
+    std::int32_t reserved;   // 0
+    std::int64_t index;      // the element the access reached, from the array's first
+};
+
 extern "C"
 {
     // The runtime's ABI version, for generated code to check against the one it was compiled for.
@@ -51,6 +65,12 @@ extern "C"
     // An executable compiled with the loop budget (fminus --emit exe --loop-budget n), when main ran past it: tells
     // stderr that main returned early, before the executable exits with 3.
     void fminus_rt_main_loop_budget(std::int32_t argc, char** argv, std::int64_t budget) noexcept;
+
+    // An executable compiled with bounds checks (fminus --emit exe --bounds-check), when main failed one: tells stderr
+    // where, `before`, the index and `after` (opt::boundsMessage's parts), and that main returned early, before the
+    // executable exits with 4.
+    void fminus_rt_main_bounds(std::int32_t argc, char** argv, const char* before, std::int64_t index,
+                               const char* after) noexcept;
 
     // The heap, for FMinus's malloc, calloc and free: count * size bytes (malloc: 1 * size), aligned to 64 bytes (a
     // cache line, and the alignment of the widest vector, AVX-512's) and zeroed, as every variable FMinus declares

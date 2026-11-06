@@ -2,9 +2,11 @@
 // path of libfminus_runtime.a) and FMINUS_AOT_SANITIZE (this tree's -fsanitize= list, or empty): src/CMakeLists.txt.
 #include "support/Aot.h"
 
+#include "opt/BoundsCheck.h"
 #include "opt/LoopBudget.h"
 
 #include <llvm/ADT/SmallString.h>
+#include <llvm/IR/Constants.h>
 #include <llvm/IR/GlobalVariable.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/InlineAsm.h>
@@ -107,6 +109,52 @@ namespace fminus::aot
         return linkExecutable(options);
     }
 
+    namespace
+    {
+        // After main's call, in the C main of a program compiled with bounds checks: when its record holds a failed
+        // check, the message (fminus_rt_main_bounds) and exit status 4, else on at `builder`. The message's parts
+        // are constant strings, in two tables indexed by the check's number less one.
+        void failedCheck(llvm::Module& module, llvm::IRBuilder<>& builder, const std::vector<opt::BoundsSite>& sites,
+                         llvm::Value* argc, llvm::Value* argv)
+        {
+            llvm::LLVMContext& context = module.getContext();
+            llvm::GlobalVariable* record = opt::boundsGlobal(module);
+            llvm::ArrayType* table = llvm::ArrayType::get(builder.getPtrTy(), sites.size());
+            const auto strings = [&](const char* name, auto part) {
+                std::vector<llvm::Constant*> parts;
+                for (const opt::BoundsSite& site : sites)
+                    parts.push_back(builder.CreateGlobalString(part(site), "bounds.message", 0, &module));
+                return new llvm::GlobalVariable(module, table, true, llvm::GlobalValue::PrivateLinkage,
+                                                llvm::ConstantArray::get(table, parts), name);
+            };
+            llvm::GlobalVariable* before = strings("fminus.bounds.before", opt::boundsMessageBefore);
+            llvm::GlobalVariable* after = strings("fminus.bounds.after", opt::boundsMessageAfter);
+
+            llvm::Function* entry = builder.GetInsertBlock()->getParent();
+            llvm::Value* site = builder.CreateAlignedLoad(builder.getInt32Ty(), record, llvm::Align(8),
+                                                          /*isVolatile=*/true, "site");
+            llvm::BasicBlock* failed = llvm::BasicBlock::Create(context, "check.failed", entry);
+            llvm::BasicBlock* passed = llvm::BasicBlock::Create(context, "checks.passed", entry);
+            builder.CreateCondBr(builder.CreateICmpNE(site, builder.getInt32(0)), failed, passed);
+            builder.SetInsertPoint(failed);
+            llvm::Value* recorded = builder.CreateStructGEP(record->getValueType(), record, 2);
+            llvm::Value* index =
+                builder.CreateAlignedLoad(builder.getInt64Ty(), recorded, llvm::Align(8), /*isVolatile=*/true, "index");
+            llvm::Value* number =
+                builder.CreateZExt(builder.CreateSub(site, builder.getInt32(1)), builder.getInt64Ty());
+            const auto pick = [&](llvm::GlobalVariable* parts) {
+                llvm::Value* at = builder.CreateInBoundsGEP(table, parts, {builder.getInt64(0), number});
+                return builder.CreateLoad(builder.getPtrTy(), at);
+            };
+            builder.CreateCall(module.getOrInsertFunction("fminus_rt_main_bounds", builder.getVoidTy(),
+                                                          builder.getInt32Ty(), builder.getPtrTy(), builder.getPtrTy(),
+                                                          builder.getInt64Ty(), builder.getPtrTy()),
+                               {argc, argv, pick(before), index, pick(after)});
+            builder.CreateRet(builder.getInt32(4));
+            builder.SetInsertPoint(passed);
+        }
+    } // namespace
+
     llvm::Error addEntryPoint(llvm::Module& module, std::optional<std::int64_t> loopBudget)
     {
         llvm::Function* program = module.getFunction("main");
@@ -163,15 +211,19 @@ namespace fminus::aot
         const bool parallel = module.getFunction("fminus_rt_parallel_for") != nullptr;
         if (parallel)
             builder.CreateCall(module.getOrInsertFunction("fminus_rt_parallel_start", intType));
-        // The loop budget, set for the call and read after it (-1 or more, as Program::setLoopBudget sets it).
+        // The loop budget, set for the call and read after it (-1 or more, as Program::setLoopBudget sets it); and the
+        // bounds checks' record, read after it, in a module compiled with them (its flag) that has any.
         //
-        // Until the pass at the end of the pipeline puts the program's checks in, main is a function that may never
-        // return, and touches no budget: FunctionAttrs would mark it noreturn, and SimplifyCFG would delete what
-        // follows its call here, the flag's check and the message, for an `unreachable` that the stopped call then
-        // returns into (a trap on arm64); or fold the flag's read to the 0 written before the call. So with a budget
-        // the C main calls main through its address passed through an empty inline asm, as Denormals::Flush's
-        // wrapper calls its body (ir/Denormals.cpp): a call of a function LLVM cannot see, which may return, and read
-        // and write any memory, and which no inliner inlines. The accesses are volatile besides.
+        // Until the passes at the end of the pipeline put the program's checks in, main is a function that may never
+        // return (a loop, or a check that always fails, a trap until then), and touches neither: FunctionAttrs would
+        // mark it noreturn, and SimplifyCFG would delete what follows its call here, the flag's check and the message,
+        // for an `unreachable` that the stopped call then returns into (a trap on arm64); or fold the flag's read to
+        // the 0 written before the call. So the C main then calls main through its address passed through an empty
+        // inline asm, as Denormals::Flush's wrapper calls its body (ir/Denormals.cpp): a call of a function LLVM
+        // cannot see, which may return, and read and write any memory, and which no inliner inlines. The accesses are
+        // volatile besides.
+        const bool checked = module.getModuleFlag(opt::kBoundsCheckFlag) != nullptr;
+        const std::vector<opt::BoundsSite> sites = checked ? opt::boundsSites(module) : std::vector<opt::BoundsSite>{};
         llvm::GlobalVariable* budget = nullptr;
         llvm::Value* callee = program;
         if (loopBudget)
@@ -183,6 +235,9 @@ namespace fminus::aot
                                        /*isVolatile=*/true);
             builder.CreateAlignedStore(builder.getInt32(0), builder.CreateStructGEP(budget->getValueType(), budget, 1),
                                        llvm::Align(4), /*isVolatile=*/true);
+        }
+        if (loopBudget || !sites.empty())
+        {
             llvm::InlineAsm* launder = llvm::InlineAsm::get(llvm::FunctionType::get(pointerType, {pointerType}, false),
                                                             "", "=r,0", /*hasSideEffects=*/false);
             llvm::CallInst* address = builder.CreateCall(launder, {program}, "main.address");
@@ -206,6 +261,8 @@ namespace fminus::aot
         }
         if (parallel)
             builder.CreateCall(module.getOrInsertFunction("fminus_rt_parallel_stop", builder.getVoidTy()));
+        if (!sites.empty())
+            failedCheck(module, builder, sites, argc, argv);
         if (budget != nullptr)
         {
             llvm::Value* stopped =

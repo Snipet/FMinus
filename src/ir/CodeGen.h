@@ -122,6 +122,15 @@ namespace fminus::ir
         // "fminus.loop-budget", for the pass at the end of the pipeline, wherever the module is optimised. A program
         // that declares a function of the budget's name is then an error. Off by default: the code is as it was.
         bool loopBudget = false;
+
+        // Bounds checks, for development builds (Bounds.cpp, opt/BoundsCheck.h): every access whose array the code
+        // generator can see (a[i], m.taps[i], voices[v], *(a + i), a pointer formed from one, a poly_load through one)
+        // is checked against the array's extent, and a call whose check fails returns early, with the check recorded
+        // in the program's record, fminus_rt_bounds (runtime/Runtime.h). The module defines the record, describes
+        // each check in its named metadata "fminus.bounds.sites", and records the option as the module flag
+        // "fminus.bounds-check", for the pass at the end of the pipeline, wherever the module is optimised. A program
+        // that declares a function of the record's name is then an error. Off by default: the code is as it was.
+        bool boundsCheck = false;
     };
 
     // Lowers `program` into a new module in `context`, named after the diagnostics' file. Every FMinus function becomes

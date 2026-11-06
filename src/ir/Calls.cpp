@@ -363,6 +363,10 @@ namespace fminus::ir::detail
         llvm::Value* value = load ? nullptr : convert(args[1], ast::Type::PolyFloat, location, Use::Passing);
         llvm::Value* mask =
             args.size() > arity ? convert(args[arity], ast::Type::PolyBool, location, Use::Passing) : nullptr;
+        if (args[0].extent != nullptr && mask == nullptr)   // every lane, of an array the code generator sees
+            checkBounds(location, *args[0].extent, elementOf(*args[0].extent, nullptr), polyLanes_);
+        else if (args[0].extent != nullptr)   // each lane the mask takes (Bounds.cpp)
+            checkLanes(location, *args[0].extent, mask);
         llvm::Type* vector = typeOf(ast::Type::PolyFloat);
         llvm::Instruction* access = nullptr;   // tagged as floats (Tbaa.cpp): a poly float is its lanes' type
         if (load && mask == nullptr)
