@@ -536,13 +536,14 @@ with no `default:`. `Program::callable` and `call` (the public API, below) and `
 
 **Where the code is** (`Jit::code`). As each object links, the JIT writes down its functions: a JITLink plugin
 (`LinkedCode`) reads each named symbol of an executable section from the link graph once its fix-ups are applied, and
-keeps them when the link is emitted; under RuntimeDyld, a `JITEventListener` (`LoadedCode`) reads the loaded object's
-symbol table, sized by `object::computeSymbolSizes`, at each section's load address. Names lose the target's global
-prefix (macOS's `_`), and the assembler's labels are dropped. The transform layer also reads each module's direct calls
-before and after `optimiseModule` (`directCalls`), and `inlinedCalls` works out from the two which functions each
-function now holds. `Program::codeRanges` adds which of the program's functions each symbol is the code of: a
-function's, an entry point's and its body (`f.body`), a parallel region's (`f.parallel.n`), a thunk
-(`fminus.call.f`), or FMinus's own ([extending.md](extending.md), recipe 37).
+keeps them when the link is emitted (before the graph is pruned, it keeps the names of the code the link keeps, which an
+ELF object's calls of local functions, through their section's symbol, would lose); under RuntimeDyld, a
+`JITEventListener` (`LoadedCode`) reads the loaded object's symbol table, sized by `object::computeSymbolSizes`, at each
+section's load address. Names lose the target's global prefix (macOS's `_`), and the assembler's labels are dropped. The
+transform layer also reads each module's direct calls before and after `optimiseModule` (`directCalls`), and
+`inlinedCalls` works out from the two which functions each function now holds. `Program::codeRanges` adds which of the
+program's functions each symbol is the code of: a function's, an entry point's and its body (`f.body`), a parallel
+region's (`f.parallel.n`), a thunk (`fminus.call.f`), or FMinus's own ([extending.md](extending.md), recipe 37).
 
 **The IR as text** (`Program::Options::keepIr`). A host that shows what FMinus made of a program asks `Program::compile`
 to keep its IR, printed as LLVM prints a module: as `ir::lower` wrote it, after `prepareModule` (`loweredIr()`), and
@@ -551,10 +552,10 @@ optimised (`optimisedIr()`). To print the optimised module, `compile` makes the 
 `Modules::Optimised`: the text is the module the JIT generates code from, and the same as `fminus --emit ll` prints for
 the same source, options and file name (`tests/unit/KeepIrTest.cpp` runs the driver and compares). The optimiser then
 runs in `compile`, which reads the module's calls around it and hands the JIT what was inlined (`recordInlining`), as
-the transform layer would have, and the first look-up runs only the code generator. Off, the default, nothing is printed and the
-module goes to the JIT unoptimised, as before. The lowered IR is not what `fminus -O0` prints: `-O0`'s pipeline still
-makes the vector math mode's intrinsics (`fminus.exp.f32`) calls of the runtime's functions (`fminus_rt_expf`), and in
-the fast mode, on Apple systems, a `float4`'s `llvm.sin.v4f32` a call of the vector library's `_simd_sin_f4`.
+the transform layer would have, and the first look-up runs only the code generator. Off, the default, nothing is printed
+and the module goes to the JIT unoptimised, as before. The lowered IR is not what `fminus -O0` prints: `-O0`'s pipeline
+still makes the vector math mode's intrinsics (`fminus.exp.f32`) calls of the runtime's functions (`fminus_rt_expf`),
+and in the fast mode, on Apple systems, a `float4`'s `llvm.sin.v4f32` a call of the vector library's `_simd_sin_f4`.
 
 ## Ahead of time: `support/Aot.h`
 

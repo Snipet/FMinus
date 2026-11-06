@@ -6866,8 +6866,9 @@ reads back as it.
 ## Recipe 37: where the code is, for a sampling profiler
 
 *In the compiler. Code: `Jit::Code`, `code`, `Calls`, `directCalls`, `inlinedCalls`, `recordInlining` and `Linker`,
-with `CodeLog`, `LinkedCode` and `LoadedCode` (`src/jit/Jit.h`, `Jit.cpp`); `Program::CodeRange`, `codeRanges` and
-`codeRangeAt` (`include/fminus/FMinus.h`), with `attributed` (`src/api/FMinus.cpp`). Tests:
+with `CodeLog`, `keepNamesOfKeptCode`, `LinkedCode` and `LoadedCode` (`src/jit/Jit.h`, `Jit.cpp`);
+`Program::CodeRange`, `codeRanges` and `codeRangeAt` (`include/fminus/FMinus.h`), with `attributed`
+(`src/api/FMinus.cpp`). Tests:
 `tests/unit/CodeRangesTest.cpp` and `tests/library/ProfileTest.cpp` (`[profile]`).*
 
 A program that takes too long on the audio thread does not say where the time goes. A host can find out without
@@ -6893,7 +6894,14 @@ LLJIT compiles a module to an object file in memory, then links it into memory o
 which it picks by the target (`LLJITBuilderState::prepareForConstruction`). JITLink, on macOS and Linux, turns the
 object into a graph of blocks and symbols, gives them addresses, applies the fix-ups, and runs the passes a plugin
 adds at each step. `LinkedCode` is such a plugin: its pass runs after the fix-ups, when every symbol has its final
-address, and writes down each symbol with a name in an executable section, its address and its size. The link can
+address, and writes down each symbol with a name in an executable section, its address and its size. It adds a pass
+before the graph is pruned too. Pruning removes each symbol that is not live and keeps each block a live symbol
+reaches, and an ELF object's call of a local function (a parallel region's body, an entry point's) names its section's
+symbol and an offset, `.text + 0x1c0`, not the function's: the function's code stays, in the section's block, but its
+name would go (on Linux the first run of the tests found `run`, and not `run.parallel.1` or `fminus.large.sin`).
+`keepNamesOfKeptCode` walks the blocks the live symbols reach, as the pruning does, and marks live each named symbol of
+an executable section in one of them, so nothing is linked that would not be; a Mach-O object's calls name their
+functions, and there it changes nothing. The link can
 still fail after that pass (finalising the memory), so its list waits, keyed by the link's
 `MaterializationResponsibility`, until the plugin hears that the link was emitted (`notifyEmitted`), and is dropped if
 it failed. RuntimeDyld, Windows' (LLJIT picks it for COFF), runs no passes; it tells a `JITEventListener` of each object
