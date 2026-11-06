@@ -223,10 +223,13 @@ namespace fminus::ast
             return "{" + text + "}";
         }
 
-        // (enum Mode (SAW) (SQUARE 4) (TRIANGLE)): each constant, with its value as written if it has one.
+        // (enum Mode (SAW) (SQUARE 4) (TRIANGLE)): each constant, with its value as written if it has one; C23's fixed
+        // underlying type after the tag, (enum Mode : int (SAW)).
         std::string dump(const Enum& enumeration)
         {
             std::string text = "(enum" + (enumeration.tag.empty() ? "" : " " + enumeration.tag);
+            if (enumeration.fixed)
+                text += " : " + typeName(enumeration.underlying);
             for (const Enumerator& enumerator : enumeration.enumerators)
                 text += " (" + enumerator.name + (enumerator.value ? " " + dump(*enumerator.value) : "") + ")";
             return text + ")";
