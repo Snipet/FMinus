@@ -366,7 +366,8 @@ namespace fminus
         //
         // One budget a Program, which every thread that runs it shares: a parallel region's threads each count from
         // where their part starts, so the program as a whole may take up to that many times the budget before each
-        // stops. A loop that runs for ever only through undefined behaviour (an int that overflows past its end, which
+        // stops, and what is left after a region is what the last part to finish wrote (the flag is what says one ran
+        // out). A loop that runs for ever only through undefined behaviour (an int that overflows past its end, which
         // C lets the optimiser assume never happens) is charged the count the optimiser assumed. The program compiles
         // with its machine code, as compile() returns (the first look-up of a function only finds it). Unlimited until
         // the host sets it. Each of these is a relaxed atomic load or store, no allocation and no lock: the audio

@@ -18,8 +18,9 @@
 //     fminus voices.fm --threads 4          a parallel for or parallel { } on 4 threads at most (0, the default:
 //                                           one for each core; 1: each region on the calling thread alone)
 //     fminus spin.fm --run spin 3 --loop-budget 1000000
-//                                           the loop budget: the call may take a million branches back, and stops
-//                                           early past them (also for --emit: the IR's checks, an executable's main)
+//                                           the loop budget: the call may take a million iterations of its loops,
+//                                           and stops early past them (also for --emit: the IR's checks, an
+//                                           executable's main)
 //     fminus diodetone.cir --emit fm        the FMinus module a circuit netlist generates (fminus::circuit,
 //                                           docs/circuits.md); a .cir compiles and runs as that text would
 //     fminus play.fm --run dc 1             play.fm's #include "diodetone.cir" reads the module it generates
@@ -451,9 +452,9 @@ int main(int argc, char** argv)
                    "for each core; 1: each region on the calling thread alone); and --self-test's threads")
         ->capture_default_str();
     app.add_option("--loop-budget", loopBudget,
-                   "Compile with the loop budget, runaway-loop protection: each branch back to a loop's start, and each "
-                   "call of a recursive function, counts one, and a call that takes more than this many returns early "
-                   "(--run's call, an executable's main; --emit ll and asm show the checks)")
+                   "Compile with the loop budget, runaway-loop protection: a loop's iterations count (as it starts, "
+                   "for a loop whose count is known), and each call of a recursive function, and a call that takes more "
+                   "than this many returns early (--run's call, an executable's main; --emit ll and asm show the checks)")
         ->check(CLI::NonNegativeNumber);
     app.add_flag("--self-test", circuitSettings.selfTest,
                  "Run the self-test of each circuit netlist (.cir) the program reads and generate it with the answer: "

@@ -120,7 +120,7 @@ float main(float x)
 // O2-LABEL: define float @spin(float %x)
 // O2:         br i1 %budget.out, label %budget.stop, label %while.cond
 // O2-LABEL: define float @sum(float %n)
-// O2:         %budget.left{{[0-9]*}} = sub i64 %budget.{{start|slot\.[0-9]+}}, %{{[0-9]+}}
+// O2:         %budget.left{{[0-9]*}} = sub i64 %budget.{{start|slot\.[0-9]+}}, %{{[-a-z.0-9]+}}
 // O2-NEXT:    %budget.out{{[0-9]*}} = icmp slt i64 %budget.left{{[0-9]*}}, 0
 // O2-NEXT:    br i1 %budget.out{{[0-9]*}}, label %budget.stop, label %{{.*}}, !prof
 // O2-LABEL: define {{.*}}i32 @calls(i32 %n, float %x)

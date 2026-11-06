@@ -54,7 +54,7 @@
 //     ret i32 0
 //
 // The branch to the stop is marked unlikely, so the code generator puts it out of the loop's way: on arm64 a loop's
-// charge is a SUBS and a B.MI where it starts, and a branch back's a SUB and a TBNZ. What runs out is reported once,
+// charge is a SUBS and a B.MI where it starts, and a branch back's a SUB and a TBZ. What runs out is reported once,
 // by the function where the count went below zero; the functions that return after it write nothing, so what `left`
 // holds is what that function wrote.
 //

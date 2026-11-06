@@ -5104,7 +5104,7 @@ while.body.budget:                                ; on the branch back
   br i1 %budget.out, label %budget.stop, label %while.body, !prof !5   ; unlikely
 ```
 
-On arm64 that is a `SUB` and a `TBNZ` on its way back, beside the loop's own test. A loop with a count gets nothing in
+On arm64 that is a `SUB` and a `TBZ` on its way back, beside the loop's own test. A loop with a count gets nothing in
 it: ScalarEvolution's count of its branches back (`getBackedgeTakenCount`), expanded in its preheader, is charged
 there, and a vectorised loop's is a shift (`plan` and `countOf`):
 
