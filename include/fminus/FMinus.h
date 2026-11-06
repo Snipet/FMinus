@@ -9,7 +9,8 @@
 //
 // A function's C++ type is its FMinus declaration's C type, and FMinus checks nothing at this boundary: a Signature
 // that does not match the declaration is undefined behaviour. Every function has C's calling convention and its own
-// name, unmangled.
+// name, unmangled. A host that learns a function's signature only as it runs calls it by name instead, through call(),
+// which checks the arguments against the declaration (Callable, below).
 //
 //   FMinus                         C++
 //   float, double, int, bool, void float, double, int, bool, void
@@ -538,6 +539,237 @@ namespace fminus
 
         // Clears the record, so that the next call runs whole: before any call of the program, init's included.
         void clearBoundsViolation() noexcept;
+
+        // Calling a function by name, for a host that learns a function's signature as it runs rather than when it is
+        // built (function<Signature>, above, is for one it knows): a console that calls the function its user names, a
+        // test runner, a tool that tries one of a program's functions on values it chooses. callable() describes the
+        // function, its parameters and its result, as values; call() checks the host's arguments against them, calls
+        // the function with them on the calling thread, and returns its result. What goes wrong is a value too, a
+        // CallResult with a status and a message: a name that is no function, a type call() does not pass, an argument
+        // of the wrong type, the wrong number of them, never undefined behaviour.
+        //
+        //   using Value = fminus::Program::Value;
+        //   std::string errors;
+        //   const Program::Callable* softclip = program->callable("softclip", errors);   // nullptr: errors says why
+        //   Program::CallResult result = program->call(*softclip, {Value::of(0.5f), Value::of(2.0f)});
+        //   if (result.ok())
+        //       show(result.value.number);              // the float it returned, as a double
+        //   else                                        // with Value::of(2): "argument 2 of 'softclip' is 'int', not
+        //       show(result.error);                     // 'float' (its parameter 'drive')"
+        //
+        // What call() passes: C's scalars, bool, int, float and double (an enumerated type's as its int or bool), and
+        // pointers to int, float, double or a module, or void*, which point to the host's memory (Value::array,
+        // Value::instance); it returns a scalar or nothing. A function that takes or returns anything else (a vector,
+        // a poly float, a pointer to a vector, a pointer as its result) has no Callable: callable() says which of its
+        // types call() does not pass. Each argument's type must be its parameter's, as call() converts nothing (a host
+        // whose numbers are all doubles converts each with Value::scalar). A pointer must also not drop a const (a
+        // const float* to a float*), must be aligned to its elements' type, and a module's instance must be one of a
+        // module laid out as the parameter's. A pointer's extent is the host's to know: C passes none, and FMinus
+        // checks no access through one, bounds checks or not (a parameter written `float x[16]` is a float*, as C has
+        // it). A function that is passed a buffer is passed its length too, as C's are, and must not read past it.
+        //
+        // The instance: a method runs on one, its first parameter, `this`, which is Value::instance(memory, module), an
+        // instance the host made as Module says (zeroed, aligned, its parameters set), never null. What the method
+        // changes stays in it for the next call, by name or through a pointer. A function that is no method runs on its
+        // arguments and what they point to, as FMinus has no variables outside functions but its constants.
+        //
+        // Threads: callable() compiles, on the calling thread, the code that calls the function, the first time it is
+        // asked for it: a thunk of a few instructions, which loads each argument as the function's parameter type and
+        // calls it as C does, through the target's calling convention. That takes a millisecond or so, allocates and
+        // takes the Program's lock (and compiles the program's code, if no function was looked up yet), so it runs off
+        // the audio thread. Its Callable is the Program's, the same one each time, valid while the Program lives.
+        // call() through a Callable runs the function on the calling thread, any thread, on several at once (each with
+        // an instance of its own: a method's changes are as atomic as its C++ call's), and adds no lock and no
+        // allocation to what the function does, unless it fails (its message allocates) or the function takes more
+        // than 16 arguments. call(name, ...) looks the Callable up first, as callable() does.
+        //
+        // The safety options apply as they do to a call through a pointer: in a program compiled with the loop budget
+        // the call counts against it, and one that runs out returns early, Status::OutOfBudget, with
+        // loopBudgetExceeded() set; with bounds checks, a check that fails stops the call, Status::OutOfBounds, with
+        // boundsViolation() set. Each status is the Program's state after the call, so set the budget (setLoopBudget)
+        // and clear the record (clearBoundsViolation) before each call, and re-initialise an instance a stopped call
+        // ran on (the loop budget's paragraph, above).
+
+        // A value call() passes to a function, or one it returns: a scalar, or a pointer to the host's memory.
+        struct Value
+        {
+            enum class Kind : std::uint8_t
+            {
+                Void,   // none: a void function's result, or a call that did not run
+                Bool,
+                Int,
+                Float,
+                Double,
+                Pointer,
+            };
+
+            Kind kind = Kind::Void;
+            double number = 0;          // a Bool's (0 or 1), an Int's, a Float's or a Double's value: a double holds
+                                        // each exactly
+            void* pointer = nullptr;    // a Pointer's: the host's first element, or its instance
+            Kind element = Kind::Void;  // a Pointer's elements: Int, Float or Double, or Void for a module's instances
+            const Module* module = nullptr;   // a Pointer to a module's instances: the module
+            bool readOnly = false;      // a Pointer through which the function may only read: a const float* takes it,
+                                        // a float* does not
+
+            static Value of(bool value) noexcept
+            {
+                return scalarOf(Kind::Bool, value ? 1.0 : 0.0);
+            }
+
+            static Value of(int value) noexcept
+            {
+                return scalarOf(Kind::Int, static_cast<double>(value));
+            }
+
+            static Value of(float value) noexcept
+            {
+                return scalarOf(Kind::Float, static_cast<double>(value));
+            }
+
+            static Value of(double value) noexcept
+            {
+                return scalarOf(Kind::Double, value);
+            }
+
+            // Not a pointer, which would convert to a bool: Value::array or Value::instance says what it points to.
+            template <typename T>
+            static Value of(T* value) = delete;
+
+            // A scalar of `kind` (Bool, Int, Float or Double) from a number, converted as setValue converts a
+            // parameter's value: a float's rounded, an int's truncated toward 0 (and clamped to an int's range, NaN 0),
+            // a bool's true unless 0. Any other kind gives a Void value, which no parameter takes.
+            static Value scalar(Kind kind, double number) noexcept;
+
+            // The host's elements, as a function's `int*`, `float*` or `double*` takes them (or its `const` one, or
+            // `void*`), from the first; a const one only as its `const float*` or `const void*` does.
+            static Value array(int* elements) noexcept
+            {
+                return pointerTo(Kind::Int, elements, false);
+            }
+
+            static Value array(const int* elements) noexcept
+            {
+                return pointerTo(Kind::Int, const_cast<int*>(elements), true);
+            }
+
+            static Value array(float* elements) noexcept
+            {
+                return pointerTo(Kind::Float, elements, false);
+            }
+
+            static Value array(const float* elements) noexcept
+            {
+                return pointerTo(Kind::Float, const_cast<float*>(elements), true);
+            }
+
+            static Value array(double* elements) noexcept
+            {
+                return pointerTo(Kind::Double, elements, false);
+            }
+
+            static Value array(const double* elements) noexcept
+            {
+                return pointerTo(Kind::Double, const_cast<double*>(elements), true);
+            }
+
+            // An instance of `module` the host made (Module, above), or the first of an array of them: a method's
+            // `this`, or a function's `Osc*` (or `const Osc*`, or `void*`).
+            static Value instance(void* memory, const Module& module) noexcept
+            {
+                Value value = pointerTo(Kind::Void, memory, false);
+                value.module = &module;
+                return value;
+            }
+
+        private:
+            static Value scalarOf(Kind kind, double number) noexcept
+            {
+                Value value;
+                value.kind = kind;
+                value.number = number;
+                return value;
+            }
+
+            static Value pointerTo(Kind element, void* pointer, bool readOnly) noexcept
+            {
+                Value value;
+                value.kind = Kind::Pointer;
+                value.pointer = pointer;
+                value.element = element;
+                value.readOnly = readOnly;
+                return value;
+            }
+        };
+
+        // A function as call() calls it: its name and its signature, as values.
+        struct Callable
+        {
+            // One of its parameters, which call() checks an argument against (not a module's Parameter, above).
+            struct Param
+            {
+                std::string name;   // as declared: "x"; "this" for a method's instance; empty for one with no name
+                std::string type;   // as FMinus writes it: "float", "const float *", "Osc *", "void *"
+                Value::Kind kind = Value::Kind::Float;     // Bool, Int, Float, Double or Pointer
+                Value::Kind element = Value::Kind::Void;   // a Pointer's elements: Int, Float or Double; Void for a
+                                                           // module's instances, or for void*, which takes any
+                const Module* module = nullptr;            // a Pointer to a module's instances: the module
+                bool readOnly = false;                     // a Pointer to const: it takes a const Value::array too
+            };
+
+            std::string name;                         // as callable() takes it: "softclip", "Osc::tick"
+            const Module* module = nullptr;           // a method's module: its `this` is parameters[0]
+            Value::Kind result = Value::Kind::Void;   // Void, Bool, Int, Float or Double
+            std::string resultType;                   // as FMinus writes it: "float", "void"
+            std::vector<Param> parameters;            // in order, a method's `this` first
+
+        private:
+            friend class Program;
+            const void* owner_ = nullptr;   // the Program's
+            std::uintptr_t thunk_ = 0;      // the code that calls it (src/jit/Call.h)
+        };
+
+        // What a call by name did: whether it ran, and its result, or why not.
+        struct CallResult
+        {
+            enum class Status : std::uint8_t
+            {
+                Ok,            // the function ran and returned: `value` is its result
+                NoFunction,    // the program defines no function of the name
+                Unsupported,   // the function takes or returns a type call() does not pass (above)
+                Mismatch,      // the arguments are not the function's: their number, a type, a null instance, a pointer
+                               // not aligned, a Callable of another Program's
+                OutOfBudget,   // it ran out of the loop budget and returned early (loopBudgetExceeded)
+                OutOfBounds,   // a bounds check failed, and it returned early (boundsViolation)
+            };
+
+            Status status = Status::Ok;
+            // The function's result, of its result type (Void for a void function); after OutOfBudget or OutOfBounds,
+            // what it returned early, 0, false or nothing; Void when it did not run.
+            Value value;
+            // What went wrong, one line, as FMinus words its errors: "'softclip' takes 2 arguments, not 3",
+            // "'spin' ran past its loop budget and returned early", "'tap' stopped: taps.fm:3:16: index 20 out of
+            // bounds for 'taps' of type 'float[16]'". Empty when it is Ok.
+            std::string error;
+
+            bool ok() const noexcept
+            {
+                return status == Status::Ok;
+            }
+        };
+
+        // The function `name` (a method as "Osc::tick") as call() calls it, its thunk compiled now, on this thread, if
+        // it has not been yet; nullptr, with `errors` set, when the program defines no such function or call() cannot
+        // pass one of its types. A function the program only declares (`float atanf(float x);`, the C library's) is
+        // none of its own, and has no Callable.
+        const Callable* callable(std::string_view name, std::string& errors);
+
+        // Calls `function`, one of this Program's Callables, with `count` arguments, checked against its parameters.
+        CallResult call(const Callable& function, const Value* arguments, std::size_t count);
+        CallResult call(const Callable& function, const std::vector<Value>& arguments);
+
+        // Looks the function up (callable(), which compiles its thunk the first time), then calls it.
+        CallResult call(std::string_view name, const std::vector<Value>& arguments);
 
     private:
         struct Impl;

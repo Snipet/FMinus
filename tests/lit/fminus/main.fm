@@ -16,7 +16,7 @@
 // RUN: %t.bool 2 2 | FileCheck %s --check-prefix=TRUE
 // RUN: %t.bool 2 3 | FileCheck %s --check-prefix=FALSE
 // RUN: fminus %S/../../../examples/comparison/comparison.fm --run main 2 2 | FileCheck %s --check-prefix=TRUE
-// RUN: echo 'float f(bool b) { return b; }' | not fminus - --run f 1 2>&1 | FileCheck %s --check-prefix=BOOLARG
+// RUN: echo 'float f(bool b) { return b; }' | fminus - --run f true | FileCheck %s --check-prefix=BOOLARG
 
 float hypotenuse(float a, float b)
 {
@@ -37,7 +37,7 @@ float main(float a, float b)
 // NOTE: 440
 // TRUE: true
 // FALSE: false
-// BOOLARG: fminus: --run: 'f' takes a parameter of type 'bool'; --run passes floats and doubles only
+// BOOLARG: 1
 
 // The program's main becomes internal fminus.main; the C main reads the arguments, calls it and prints the result.
 // IR:       define internal float @fminus.main(float %a, float %b)

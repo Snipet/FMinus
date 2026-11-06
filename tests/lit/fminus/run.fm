@@ -1,7 +1,23 @@
-// The driver JIT-compiles the program and calls a function.
+// The driver JIT-compiles the program and calls a function, through the thunk Program::call uses (jit/Call.h): bools,
+// ints, floats and doubles in any mix and number, and arrays for pointers, their elements separated by commas, printed
+// after the call when the function may have written to them.
 // RUN: fminus %s --run chain 1 | FileCheck %s --check-prefix=CHAIN
 // RUN: fminus %s --run softclip -2 1 | FileCheck %s --check-prefix=CLIP
 // RUN: not fminus %s --run softclip 1 2>&1 | FileCheck %s --check-prefix=ARITY
+// RUN: fminus %s --run blend 0.25 3 true | FileCheck %s --check-prefix=BLEND
+// RUN: fminus %s --run blend 0.25 3 0 | FileCheck %s --check-prefix=PLAIN
+// RUN: fminus %s --run scale 1,-2,0.5 3 2 | FileCheck %s --check-prefix=SCALE
+// RUN: fminus %s --run scale -1,2 2 0.5 | FileCheck %s --check-prefix=NEGATIVE
+// RUN: fminus %s --run total 0.1,0.2,0.3 3 | FileCheck %s --check-prefix=TOTAL --implicit-check-not={
+// RUN: fminus %s --run squares 9,9,9,9 4 | FileCheck %s --check-prefix=SQUARES
+// RUN: fminus %s --run weighted 1 2 3 4 5 6 7 8 9 10 11 12 | FileCheck %s --check-prefix=WEIGHTED
+// RUN: fminus %s --run scale 1,2,3,4 4 2 --bounds-check --loop-budget 100 2>%t.err | FileCheck %s --check-prefix=SAFE
+// RUN: FileCheck %s --check-prefix=TOOK < %t.err
+// RUN: not fminus %s --run scale 1,x 2 1 2>&1 | FileCheck %s --check-prefix=ELEMENT
+// RUN: not fminus %s --run blend 0.25 2.5 true 2>&1 | FileCheck %s --check-prefix=NOTINT
+// RUN: not fminus %s --run blend 0.25 2 perhaps 2>&1 | FileCheck %s --check-prefix=NOTBOOL
+// RUN: not fminus %s --run Osc::tick 0 1 2>&1 | FileCheck %s --check-prefix=INSTANCE
+// RUN: not fminus %s --run address 1,2 2>&1 | FileCheck %s --check-prefix=POINTER
 
 float softclip(float x, float drive)
 {
@@ -15,6 +31,71 @@ float chain(float x)
     return softclip(x, 4.0f);
 }
 
+float blend(float x, int times, bool clip)
+{
+    const float y = x * times;
+    return clip ? softclip(y, 1.0f) : y;
+}
+
+void scale(float* x, int n, float gain)
+{
+    for (int i = 0; i < n; ++i)
+        x[i] *= gain;
+}
+
+double total(const double* x, int n)
+{
+    double sum = 0.0;
+    for (int i = 0; i < n; ++i)
+        sum += x[i];
+    return sum;
+}
+
+void squares(int* out, int n)
+{
+    for (int i = 0; i < n; ++i)
+        out[i] = i * i;
+}
+
+// Twelve arguments: nine doubles fill the eight registers for floating-point arguments, and one goes on the stack.
+double weighted(double a, double b, double c, double d, double e, double f, double g, double h, double i, int j, int k,
+                double l)
+{
+    return a + 2.0 * b + 3.0 * c + 4.0 * d + 5.0 * e + 6.0 * f + 7.0 * g + 8.0 * h + 9.0 * i + 10.0 * j + 11.0 * k
+         + 12.0 * l;
+}
+
+module Osc
+{
+    float phase;
+
+    float tick(float step)
+    {
+        return phase += step;
+    }
+};
+
+float* address(float* x)
+{
+    return x;
+}
+
 // CHAIN: 0.6666667
 // CLIP: -0.6666667
 // ARITY: fminus: --run: 'softclip' takes 2 arguments, not 1
+// BLEND: 0.42857143
+// PLAIN: 0.75
+// SCALE: x = {2, -4, 1}
+// NEGATIVE: x = {-0.5, 1}
+// TOTAL: 0.6000000000000001
+// SQUARES-NOT: {{.}}
+// SQUARES: out = {0, 1, 4, 9}
+// WEIGHTED: 650
+// SAFE: x = {2, 4, 6, 8}
+// TOOK: fminus: --run: 'scale' took {{[0-9]+}} of its loop budget of 100
+// ELEMENT: fminus: --run: 'x' is not a float, an element of the array '1,x'
+// NOTINT: fminus: --run: '2.5' is not an int
+// NOTBOOL: fminus: --run: 'perhaps' is not a bool
+// INSTANCE: fminus: --run: 'Osc::tick' takes a parameter of type 'Osc *'; --run passes bools, ints, floats, doubles and
+// INSTANCE-SAME: arrays of ints, floats and doubles only
+// POINTER: fminus: --run: 'address' returns 'float *'; --run prints bools, ints, floats and doubles only
