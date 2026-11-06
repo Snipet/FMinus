@@ -136,8 +136,10 @@ TEST_CASE("functions compute what they say", "[codegen]")
   LLVM's version. A test of an exact count compiles at `-O0`, where each `while` and `for` branches back once an
   iteration and each call of a recursive function counts one (`fib(10)` takes 177); at `-O1` and up a test checks what
   holds everywhere: a loop that never ends stops, a counted loop runs whole or not at all, a caller returns after a
-  callee that ran out, and the output is the same bit for bit within the budget. The budget is the program's global,
-  `fminus_rt_loop_budget`: `lookup<fminus_rt_loop_budget_state>(*jit, ...)` reads and writes it as a host does.
+  callee that ran out, and the output is the same bit for bit within the budget. One test pins an optimiser choice on
+  purpose: a stopped oscillator whose `phase` LICM kept in a register, never stored, which is the case the docs warn a
+  host of. The budget is the program's global, `fminus_rt_loop_budget`: `lookup<fminus_rt_loop_budget_state>(*jit,
+  ...)` reads and writes it as a host does (`left` -1 or more, as `setLoopBudget` keeps it).
 
 ## lit and FileCheck
 

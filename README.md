@@ -536,10 +536,12 @@ gain(in, out, n, 0.5f);                                       // one call a bloc
 - **Loop budget.** A program compiled with `Options::loopBudget` counts its loops' iterations and its recursive calls
   against a budget the host sets before each call, `setLoopBudget(n)`, and a call that would loop for ever, or far
   longer than it should, returns early, 0, with every function of the program that called it: `loopBudgetExceeded()`
-  says so, and `loopBudgetLeft()` what is left. A loop whose count is known as it starts is charged it there, any other
-  one an iteration. The checks go in after the optimiser, so within its budget a call computes what it would without
-  it, bit for bit, and at the same speed ([docs/extending.md](docs/extending.md), recipe 29, has the measurements). Off
-  by default; unlimited until the host sets it.
+  says so, and `loopBudgetLeft()` what is left (-1 after a call that ran out; a negative budget is -1). A loop whose
+  count is known as it starts is charged it there, any other one an iteration. The checks go in after the optimiser, so
+  within its budget a call computes what it would without it, bit for bit, and at the same speed
+  ([docs/extending.md](docs/extending.md), recipe 29, has the measurements). A call that ran out leaves the instance
+  as its optimised code had it, which need not be any point of the source: re-initialise the instance (or discard it)
+  before running the program again. Off by default; unlimited until the host sets it.
 - **Lifetime.** A function pointer is valid while its `Program` lives.
 
 `include/fminus/Circuit.h` is the circuit compiler's: `fminus::circuit::generate(netlist, "pedal.cir")` turns a
@@ -686,8 +688,9 @@ These are constraints a plugin runs into. `examples/plugin/`, a JUCE plugin, mee
   on the pool at a time; the others run on their own threads. `Program::Options::threads` limits or turns them off.
 - **Loops that never end.** A program stuck in a loop holds the audio thread, and the host with it. Compile with
   `Program::Options::loopBudget`, set the budget before each call (a generous one: many times what a block takes), and
-  after it check `loopBudgetExceeded()`: the call returned early, and the plugin can silence the program and report it.
-  The budget is a count of iterations, not a clock ([docs/extending.md](docs/extending.md), recipe 29).
+  after it check `loopBudgetExceeded()`: the call returned early, and the plugin can silence the program, report it,
+  and re-initialise the instance (or discard it) before the next call. The budget is a count of iterations, not a clock
+  ([docs/extending.md](docs/extending.md), recipe 29).
 - **Size and symbols.** Static LLVM adds tens of megabytes. Export only the plugin's entry points (an
   exported-symbols list), so LLVM's symbols cannot clash with another copy of LLVM in the host process.
 - **Bit-exactness across machines.** FMinus fuses and reassociates nothing, and in its default math mode a float's

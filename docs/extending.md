@@ -5143,13 +5143,12 @@ exit test follow the same count.
 
 ### Stopping, and returning
 
-When the count goes below zero the function writes it back, sets the flag and returns at once, a zero of its type,
-null or nothing:
+When the count would go below zero the function writes -1 for what is left, sets the flag and returns at once, a zero
+of its type, null or nothing:
 
 ```llvm
 budget.stop:
-  %budget.slot.2 = phi i64 [ %budget.left16, %for.body.preheader13 ], [ %budget.left, %vector.ph ]
-  store atomic i64 %budget.slot.2, ptr @fminus_rt_loop_budget monotonic, align 8
+  store atomic i64 -1, ptr @fminus_rt_loop_budget monotonic, align 8
   store atomic i32 1, ptr getelementptr inbounds ({ i64, i32 }, ptr @fminus_rt_loop_budget, i32 0, i32 1) monotonic, align 4
   ret float 0.000000e+00
 ```
@@ -5168,13 +5167,31 @@ budget.unwind:
   ret i32 0
 ```
 
-So what the program leaves in memory, its modules' state and what it wrote of the output, is what it had at that point,
-before a loop it was charged for or at a branch back, as if it had paused there: no caller goes on with a value that
-was never computed, and the host can keep the instance or throw it away. The calls checked are direct calls of the
-program's functions that may stop, and calls of a runtime function handed one (a parallel region's body: the region's
-threads each count, and the caller checks after the region). Inline asm is no call, and FMinus has no function
-pointers: its only indirect call is an entry point's call of its body under `Denormals::Flush` (recipe 20), whose
-wrapper restores the host's floating-point mode and returns what the body returned, which is right as it is.
+So no caller goes on with a value that was never computed. But what the program leaves in memory, its modules' state
+and what it wrote of the output, is whichever of the optimised code's stores had run, and that need not be any point of
+the source. The oscillator above, at `-O2`, keeps `phase` in a register through the block's loop (LICM promotes it,
+`%phase.promoted`) and stores it after the loop: stopped in the wrap of a sample, it has written the samples before and
+left `phase` as it was before the call. The optimiser sinks and merges stores too, so some of a stopped call's writes
+may be missing, out of order with the source, or out of step with each other. A ring buffer that writes `buf[w]`,
+advances `w`, loops, then wraps `w` at `size` may be left with `w == size`, and the next call would write past the
+buffer (FMinus checks no bounds). So a host that runs the program again first re-initialises the instance as it made it
+(zeroes it, then `setDefaults` and its own parameters), or throws it away; `LoopBudgetTest.cpp` shows the oscillator's
+case.
+
+A stop writes -1, not its count, which a charge may have taken far below zero. `left` is then never below -1: the
+host sets it to -1 or more (`setLoopBudget` makes a negative budget -1), a stop writes -1, and every other write is of
+a count that passed its check or of what was read. So a function's count starts at -1 or more, a charge takes at most
+`INT64_MAX` (`countOf` charges no count that may be larger: a loop over bytes, written by hand, could take 2^64 - 1),
+and no subtraction wraps, however many calls run out without the host setting the budget again. The first version
+wrote its count: a loop `for (float* p = a; p != e; ++p)` over a range written one short, `e` one below `a`, is
+charged (e - a - 4) / 4 unsigned, 2^62 - 2; two calls took `left` near `INT64_MIN`, and the third's charge wrapped it
+positive and let the loop write through memory.
+
+The calls checked are direct calls of the program's functions that may stop, and calls of a runtime function handed
+one (a parallel region's body: the region's threads each count, and the caller checks after the region). Inline asm is
+no call, and FMinus has no function pointers: its only indirect call is an entry point's call of its body under
+`Denormals::Flush` (recipe 20), whose wrapper restores the host's floating-point mode and returns what the body
+returned, which is right as it is.
 
 A function that may stop no longer promises what it did, and the pass says so: it reads and writes memory that is no
 argument's (the budget: `memory(readwrite, argmem: none, ...)` from `memory(none)`), it returns (`noreturn` goes, as
@@ -5205,32 +5222,56 @@ declares a function of its name is an error while the budget is on ("the loop bu
 for its counter, and this program declares a function of that name: rename it"), and nothing to it without.
 
 Every access the program makes is a relaxed (monotonic) atomic, as are the host's (`std::atomic_ref`), so a parallel
-region's threads may share it without a data race. Each thread's part counts from what `left` held where it started,
-and writes back what it has left: the region as a whole may take up to its thread count times the budget before every
-thread has stopped, which is what a safety net needs. The flag is shared, and the caller sees it after the region.
+region's threads may share it without a data race. Each part of a region (a chunk of a `parallel for`, which the pool
+hands out as threads come free) counts from what `left` held where it started. A function a region's threads may run,
+the region's body and every function it reaches, writes its count back with an `atomicrmw min` rather than a store,
+so `left` never goes up while the program runs:
+
+```llvm
+parallel.end:
+  %4 = atomicrmw min ptr @fminus_rt_loop_budget, i64 %budget.slot.0 monotonic, align 8
+  ret void
+```
+
+With a store, a part that read `left` before another ran out could store its own positive count over that one's -1
+when it returned (a quick chunk on a thread the system had paused, say), and every part after it would start with a
+fresh budget: a region's spinning chunks could each take a whole budget. With the min, a part that starts after a stop
+reads -1 and stops at its first check, and each thread takes at most the budget, so the region takes at most its
+thread count times it, which is what a safety net needs. What is left after the region is the least any part left. The
+flag is shared, and the caller sees it after the region. Every other function stores: no other thread writes `left`
+while it runs, and the min would cost an atomic read-modify-write at each call and return (`LDSMIN` on arm64, a
+compare-and-swap loop on x86-64).
 
 ### The host's side
 
-- `setLoopBudget(n)` sets `left` to n and clears the flag; the host calls it before each call it limits. What is left
-  carries over otherwise: after a call that ran out, the next stops at its first loop.
+- `setLoopBudget(n)` sets `left` to n (a negative n to -1, which stops a call at its first check) and clears the flag;
+  the host calls it before each call it limits. What is left carries over otherwise: after a call that ran out, the
+  next stops at its first check.
 - `loopBudgetExceeded()` reads the flag, `loopBudgetLeft()` what is left (what was set less what the calls since took,
-  below zero once one ran out), each a relaxed load: the audio thread may call them.
+  -1 once one ran out), each a relaxed load: the audio thread may call them.
+- After a call that ran out, the host silences the program and re-initialises the instance before it runs it again, or
+  throws it away (Stopping, and returning, above).
 - A program compiled without the option reads and writes a budget nothing counts down: `loopBudgetExceeded()` is
   false.
 - `fminus --run f ... --loop-budget n` sets it for the call and says on stderr what the call took, or that it ran past
   it (status 3, and what it printed is what it returned early). `fminus --emit exe --loop-budget n` makes the C main a
   host: it sets the budget before main and, when main runs out, says so on stderr (`fminus_rt_main_loop_budget`) and
-  exits with 3. That main is the host's, so the pass leaves it alone (`kLoopBudgetHostAttribute`), the program's `main`
-  is never inlined into it, and its accesses are volatile: until the pass puts the program's checks in, nothing in the
-  program writes the budget, and the optimiser would have folded the flag's read after the call to the 0 written
-  before it.
+  exits with 3. That main is the host's, so the pass leaves it alone (`kLoopBudgetHostAttribute`), and it calls the
+  program's `main` through its address passed through an empty inline asm (`call ptr asm "", "=r,0"(ptr
+  @fminus.main)`, as `Denormals::Flush`'s wrapper calls its body, recipe 20). Until the pass puts the program's checks
+  in, a `main` whose loop never ends never returns, and touches no budget: called directly, FunctionAttrs marked it
+  `noreturn`, and SimplifyCFG deleted everything after its call, the flag's check, the message and the `ret 3`, for an
+  `unreachable`; the stopped call returned into it and trapped (status 133 on arm64) from `-O1` up. An indirect call
+  carries none of `main`'s attributes, and no inliner inlines it. The C main's own accesses of the budget are volatile
+  besides.
 
 ### What it changes for programs and hosts
 
 - **Off, the default**, nothing: the module has no flag, no global and no check (`loop-budget.fm`'s `OFF`).
 - **On**, a call within its budget computes what it does without it, bit for bit, at every level (`LoopBudgetTest.cpp`
   compares kernels of each kind, and the measurements below every example's); a program cannot name a function
-  `fminus_rt_loop_budget`; compile() generates the machine code; the IR shows the checks and the attributes above.
+  `fminus_rt_loop_budget`; compile() generates the machine code; the IR shows the checks and the attributes above. A
+  call that runs out leaves its instance as the optimised code had it, which the host re-initialises.
 - **What it does not catch**: a loop charged a count it will not keep (undefined behaviour, above); a recursion deeper
   than the stack, which overflows it before a larger budget runs out; time spent outside the program, in an external
   function it calls; and a loop whose iterations are each slow, which a count of iterations does not see as time. A
@@ -5240,18 +5281,22 @@ thread has stopped, which is what a safety net needs. The flag is shared, and th
 
 - `tests/unit/LoopBudgetTest.cpp`, in the JIT at each level: a loop that never ends returns early with the flag, and
   `left` at -1; unlimited until set, what is left carried to the next call, and a `while`'s exact count at `-O0`; a
-  counted (vectorised) loop charged before it starts, all of it or none, its charge exactly what it takes; what a
-  stopped call wrote kept, at the branch back where it stopped; a recursion's calls counted (`fib(10)`'s 177 at
-  `-O0`), and every caller returning 0 when the deepest runs out; kernels of each kind (a vectorised loop of `tanhf`
-  and `sinf`, a recurrence of a `float4`'s coefficients, nested loops, `while` loops in a `for`) bit for bit with and
-  without the budget; the reserved name.
+  counted (vectorised) loop charged before it starts, all of it or none, its charge exactly what it takes; -1 left
+  after a stop, so that a pointer loop charged 2^62 - 2 stops however many calls run out; a loop over bytes (IR by
+  hand), whose count may not fit an `int64_t`, counted a branch back at a time; a loop's stores to its output there up
+  to the branch back where it stopped; a stopped oscillator's `phase` not stored at all, at no point of the source; a
+  recursion's calls counted (`fib(10)`'s 177 at `-O0`), and every caller returning 0 when the deepest runs out; kernels
+  of each kind (a vectorised loop of `tanhf` and `sinf`, a recurrence of a `float4`'s coefficients, nested loops,
+  `while` loops in a `for`) bit for bit with and without the budget; the reserved name.
 - `tests/library/LoopBudgetTest.cpp`, through `Program`: the oscillator above, its infinite frequency stopped, the flag
-  and what is left, and run again; bit for bit; a program without the budget; a `parallel for` whose iterations spin,
-  on the pool and on one thread; an entry point under `Denormals::Flush` that stops and hands the host's mode back; the
-  checks in `optimisedIr()`.
+  and -1 left, the next call stopped too, and run again on an instance made again; a negative budget is -1; bit for
+  bit; a program without the budget; a `parallel for` whose iterations spin, on the pool and on one thread; an entry
+  point under `Denormals::Flush` that stops and hands the host's mode back; the checks in `optimisedIr()`.
 - `tests/lit/fminus/loop-budget.fm`: the IR at `-O0` (the global, a branch back's check, the stop, a recursion's entry,
   a call's flag and the unwind, the attributes, the flag) and at `-O2` (a counted loop's charge), nothing without the
-  option; `--run`'s counts and messages, an executable's main, the reserved name.
+  option; `--run`'s counts and messages, an executable's main and its call through the laundered address, a `while
+  (1)` main built at `-O2` that exits with 3, the reserved name; and `Inputs/loop-budget/region.fm`, a region's body
+  and what it calls writing back with `atomicrmw min`, a function only the caller runs with a store.
 
 ### Measurements
 
@@ -5281,7 +5326,9 @@ echo in blocks of 16 samples, 0.1% and 0.9%. Counting every loop at its branches
 voices 9% and the `tanhf` loop 9% (above). At `-O0`, where every loop counts a branch at a time and every value between
 blocks is in memory, a loop of a few instructions takes up to twice as long (the gain 2.2 ns a sample to 4.5, the FIR
 82 to 128, the convolver 130 to 171); `-O0` is for reading the IR. Compiling takes a few percent longer (the pass's
-analyses, and the code it adds): the saturator 58 ms to 63, the convolver 98 to 114, under the same load.
+analyses, and the code it adds): the saturator 58 ms to 63, the convolver 98 to 114, under the same load. None of
+these kernels has a parallel region: a function a region's threads run writes its count back with an atomic min
+(`LDSMIN` on arm64) at each call and return instead of a store, which these numbers do not measure.
 
 ## Pitfalls
 
@@ -5362,6 +5409,9 @@ Each of these was hit while writing the language or its recipes. [simd.md](simd.
 | A capture's binding goes stale, or a region captures a variable twice | a reference into `regions_` kept across the body's lowering, whose own regions push onto it | take what a region needs (its function) before lowering its body; `endRegion` takes the region off the stack |
 | "JIT session error: Unexpected definitions in module ...: [ _fminus_rt_loop_budget ]", then "Failed to materialize symbols", for an external symbol a pass in the pipeline defines | LLJIT takes a module's symbols when it is added, before its IR transform layer optimises it, and refuses an object that defines more | define it in the code generator, as `ir::lower` defines the loop budget's global (recipe 29); an internal function a pass adds (`fminus.large.sin`) is no symbol of the module's |
 | A vectorised loop runs slower after a branch that is never taken is added to its branch back | the loop is now two machine blocks, which the code generator schedules and allocates as it would any code, not as a loop of one block | keep the loop one block: put the work before it (recipe 29 charges a counted loop in its preheader) |
+| An executable built with `--loop-budget` dies of SIGTRAP (status 133) when its `main` runs out, from `-O1` up | the C main called `main` directly; FunctionAttrs marked a `main` whose loop never ends `noreturn` before the budget's pass, and SimplifyCFG put `unreachable` in place of the flag's check after the call | call `main` through its address passed through an empty inline asm, so that no attribute of it reaches the caller (`addEntryPoint`, recipe 29) |
+| A parallel region whose chunks spin takes many budgets before it stops | each chunk reads `left` where it starts; one that read it before another ran out stored its positive count over the -1, and the chunks after it started afresh | write the count back with `atomicrmw min` in every function a region's threads run, so `left` never goes up during a call (recipe 29) |
+| A budget that ran out stops nothing after a few calls the host did not set it for | a stop wrote its own count, and charges near 2^62 took `left` past `INT64_MIN`, where the next subtraction wrapped it positive | a stop writes -1, `setLoopBudget` makes a negative budget -1, and no count that may exceed `INT64_MAX` is charged (recipe 29) |
 | A branch on `(a \| b)` comes out as two branches | SelectionDAG splits an `and` or `or` of conditions into branches where jumps are cheap (AArch64) | mark the branch `!unpredictable`, which keeps one (recipe 29 tried it), or give the `or` a second use |
 
 ## Where to go next

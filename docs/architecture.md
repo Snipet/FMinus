@@ -430,10 +430,13 @@ to `bool` and to the same pointer with `const` added (`convertPointer`).
     every level, for a module whose flag `fminus.loop-budget` is 1: each function that loops, or can call itself
     again, counts down the program's budget, a loop whose count ScalarEvolution knows charged it in its preheader and
     any other cycle (`CycleInfo`'s, irreducible ones too) one at each branch back; when the count goes below zero the
-    function sets the flag and returns, and each function that called it returns after the call. Last, so it changes
-    no decision the pipeline makes: within its budget a call computes what it did, bit for bit. A function it changed
-    carries the attribute `fminus-loop-budget` (`"counts"` or `"returns"`), and the pass leaves it alone when it runs
-    again; an executable's C main, the host there, carries `fminus-loop-budget-host`, and is never changed.
+    function writes -1 to it, sets the flag and returns, and each function that called it returns after the call (a
+    function a parallel region's threads run writes its count back with an atomic min, so it never goes up during a
+    call). Last, so it changes no decision the pipeline makes: within its budget a call computes what it did, bit for
+    bit. A function it changed carries the attribute `fminus-loop-budget` (`"counts"` or `"returns"`), and the pass
+    leaves it alone when it runs again; an executable's C main, the host there, carries `fminus-loop-budget-host`, is
+    never changed, and calls the program's `main` through a laundered address, so that nothing the optimiser finds of
+    `main` before the pass changes the code after the call.
 
   The flags travel with the module, so the JIT, `fminus` and executables get them without a new argument. Recipe 6
   adds a pass the same way.
@@ -522,7 +525,8 @@ generated code calls. It contains no LLVM, and it holds the FFT: PFFFT's objects
 - `RuntimeSymbols.def` lists them, one `FMINUS_RUNTIME_SYMBOL(name)` each.
 - It also declares `fminus_rt_loop_budget_state`, the layout of a program's loop budget, `{ int64_t left; int32_t
   stopped; }`: not the runtime's, but the global a program compiled with the budget defines, `fminus_rt_loop_budget`,
-  which its host reads and writes (extending.md, recipe 29).
+  which its host reads and writes (`left` -1 or more, which keeps the program's counts from wrapping; extending.md,
+  recipe 29).
 - `support/JitRuntime.cpp` expands that list into absolute symbols in a JIT (`defineRuntimeSymbols`).
 - An executable gets the same functions by linking the archive.
 
