@@ -1,7 +1,7 @@
 # Extending the compiler
 
 How to add to FMinus. First, how a change moves through the compiler, and the few rules that keep that easy. Then
-thirty-one worked recipes. Eleven grow the C subset from a one-line builtin to C's control flow, a custom LLVM pass,
+thirty-two worked recipes. Eleven grow the C subset from a one-line builtin to C's control flow, a custom LLVM pass,
 `int`, `void` and pointers, the heap with the attributes that keep it off the audio thread, arrays and modules, FMinus's
 classes, an FFT from a C library built into the runtime, and parameters, the values a plugin's host sets. Six more are
 about the compiler rather than the language: math that gives a float one result wherever it is computed, knob versioning
@@ -16,9 +16,10 @@ builds, which stop a call before an index leaves its array. Then one returns to 
 `#if` and `#ifdef`, which compile a program's instrumentation in or out. Then one is for whoever reads the errors: one
 error for each mistake, enumerated types as C has them, and FMinus's first warning, clang's `-Wswitch`. The next adds
 C's `double`, for accumulators and slow state, and decides what an unsuffixed floating constant is when FMinus has two
-floating types. The last adds C's arrays of arrays, 2-D arrays, with C's initialiser lists for them and a bounds check
-for each dimension. Then the pitfalls those recipes ran into, and design notes for what comes next. [simd.md](simd.md)
-has recipes 7 to 9, for vectors.
+floating types. Then one adds C's arrays of arrays, 2-D arrays, with C's initialiser lists for them and a bounds check
+for each dimension. The last is for the host again: attributes on a module's fields, a unit, a label or a range, which
+FMinus passes on to the host, with C's string literals for their arguments. Then the pitfalls those recipes ran into,
+and design notes for what comes next. [simd.md](simd.md) has recipes 7 to 9, for vectors.
 
 Recipes 1 to 4 are in the compiler now (`tanhf` and `%`; `bool` and its operators; `if`, `while` and `for`), and so are
 simd.md's 7 to 9, recipe 10 (`int`, `void` and pointers), recipe 11 (the heap), recipe 12 (arrays and modules), recipe
@@ -27,12 +28,12 @@ runtime's attributes and loop progress, denormal control), recipe 21 (`#include`
 `parallel { }`), recipes 23 and 24 (math kernels of FMinus's own, and inline), recipe 25 (the bitwise operators,
 `hash` and `randf`), recipe 26 (constant tables), recipe 27 (`switch` and `enum`), recipe 28 (constants at the top
 level, and sizes of constant expressions), recipe 29 (the loop budget), recipe 30 (bounds checks), recipe 31 (`#if`
-and `#ifdef`), recipe 32 (one error a mistake, enumerated types, `-Wswitch`), recipe 33 (`double`) and recipe 34 (2-D
-arrays), so their sections describe how the code you have got there: read a section beside the files it names.
-Recipes 5 and 6, a runtime function and a pass, are not part of the language; they live in [recipes/](recipes/) as a
-patch, so you can apply them to see them work. None of these are sketches: each was applied to this repository, built
-with `-Werror`, and tested in the dev and asan presets, every test passing. [architecture.md](architecture.md) describes
-the stages they touch.
+and `#ifdef`), recipe 32 (one error a mistake, enumerated types, `-Wswitch`), recipe 33 (`double`), recipe 34 (2-D
+arrays) and recipe 35 (field attributes), so their sections describe how the code you have got there: read a section
+beside the files it names. Recipes 5 and 6, a runtime function and a pass, are not part of the language; they live
+in [recipes/](recipes/) as a patch, so you can apply them to see them work. None of these are sketches: each was
+applied to this repository, built with `-Werror`, and tested in the dev and asan presets, every test passing.
+[architecture.md](architecture.md) describes the stages they touch.
 
 FMinus follows C. When a recipe has a semantic choice to make, it makes C's: conversions, short-circuiting, which
 `if` an `else` belongs to, what `continue` does in a `for`. And it reports errors in clang's words. The README lists
@@ -51,7 +52,7 @@ Most language features touch the same places, in this order:
 | 5 | `src/ir/` | its conversions and checks, and its lowering to LLVM IR, in the file its kind belongs to (`Lowering.h` lists them: types, functions, statements, expressions, calls, the math modes, vectors, memory, modules, effects, parallel regions, TBAA, denormals); a load or store of memory gets its type's tag (`tag`, recipe 17); a statement that holds code walks it in `Parallel.cpp`'s `Walker` too |
 | 6 | `src/runtime/` | if it needs C++ at run time, a runtime function (recipe 5); if a builtin calls it, its facts: in `kRuntimeFacts`, through `callRuntime` (recipe 19), or for a math builtin's, in `mathFunction` (`Math.cpp`, recipe 15) |
 | 7 | `tools/fminus/main.cpp`, `src/support/Aot.cpp` | for a new type: whether `--run` can pass and print it (its `switch` over the result type), and whether an executable's `main` may take or return it (`addEntryPoint`) |
-| 8 | `tests/` | a dump in `FrontendTest.cpp`; results in `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `SwitchTest.cpp`, `EnumTest.cpp`, `IntTest.cpp`, `BitwiseTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `TableTest.cpp`, `TopLevelTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `HashTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`, `ParallelTest.cpp`, `DoubleTest.cpp` or `Array2DTest.cpp` (their helpers are in `Compile.h`); IR or errors in `tests/lit/fminus/` |
+| 8 | `tests/` | a dump in `FrontendTest.cpp`; results in `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `SwitchTest.cpp`, `EnumTest.cpp`, `IntTest.cpp`, `BitwiseTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `TableTest.cpp`, `TopLevelTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `HashTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`, `ParallelTest.cpp`, `DoubleTest.cpp`, `Array2DTest.cpp` or `FieldAttributeTest.cpp` (their helpers are in `Compile.h`); IR or errors in `tests/lit/fminus/` |
 | 9 | `examples/` | a program that uses it, and a line in `tests/lit/fminus/examples.test` that runs it |
 | 10 | `editors/vscode/syntaxes/fminus.tmLanguage.json` | a new keyword, type or builtin, so VSCode highlights it (its README says where) |
 | 11 | `README.md` | the language table, and the deviations from C if any |
@@ -2052,7 +2053,7 @@ module_member
 A parameter is a `Field` with `isParam` set and its attributes, so it is laid out, copied and zeroed as a field is.
 Attributes gain arguments: `attribute_args` is a list of numbers, each with a leading `-` if it has one, kept as
 written (`"-60"`, `"2e4"`) so the tree's dump shows them as the source does; `ast::attributeNumber` reads one, as C
-reads a constant.
+reads a constant. (Recipe 35 adds strings, and attributes on every field.)
 
 ### One slot for every binding
 
@@ -2074,10 +2075,11 @@ compiles a new program, then swaps the function pointers, and the instance's sta
 line) carries on; a host that compiles a program with a stream and one without can run either on the same instance.
 A stream is a `float` only: a gate or a mode a sample is something else (events, below).
 
-`checkParameter` checks the rest: the type, the binding (an `int` stream is "parameter 'mode' is an int: only a
-float parameter can be a stream"), and the attributes. `fminus::range(minimum, maximum)` takes two numbers in order,
-`fminus::default(value)` one, inside the range if there is one, and any other attribute is unknown. A binding that
-names no parameter of the program is an error too, at 1:1, as an option that names nothing would be. The range and the
+`checkParameter` checks the rest: the type and the binding (an `int` stream is "parameter 'mode' is an int: only a
+float parameter can be a stream"); `checkAttributes`, the attributes. `fminus::range(minimum, maximum)` takes two
+numbers in order, `fminus::default(value)` one, inside the range if there is one, and another name of FMinus's
+namespace is unknown; any other attribute is the host's, which FMinus passes on (recipe 35). A binding that names no
+parameter of the program is an error too, at 1:1, as an option that names nothing would be. The range and the
 default are for the host: FMinus checks them against each other, and neither clamps to them nor checks a value the
 host sets.
 
@@ -6474,6 +6476,148 @@ brackets counts 64, and reads them in order, rows one after another.
   dump; `array2d-errors.fm`: each error once (a row without its size, whose list then reports nothing more), and the
   parser's.
 
+## Recipe 35: attributes on fields, for the host
+
+*In the compiler. Code: `AttributeArg`, `Attribute`, `DeclStmt::attributes` and `Field::attributes`
+(`src/frontend/Ast.h`); `stringLiteral`, `attributeText` and `attributeNumber` (`Ast.cpp`); the `STRING` token, its
+rules and `stringValue`, and the skipped groups' string rule (`Lexer.l`); `attributes`, `attribute_specifiers`,
+`attribute_specifier`, `attribute_arg`, `string_literal`, `declarator`, `declarator_sizes`, `named`, `setSizes` and
+`addFields` (`Parser.y`); `checkAttributes` (`src/ir/Modules.cpp`) and `refuseAttributes` (`Statements.cpp`, from
+`declareVariable` and `defineConstant`); `Program::Attribute`, `findAttribute`, `Module::Field::attributes` and
+`Parameter::attributes` (`include/fminus/FMinus.h`, `src/api/FMinus.cpp`); the meter example's labels
+(`examples/meter/`); the VS Code grammar's `strings`. Tests: `tests/unit/FieldAttributeTest.cpp` (`[fieldattr]`),
+`FrontendTest.cpp`, `tests/library/FieldAttributeTest.cpp`, and `tests/lit/fminus/field-attributes.fm` and
+`field-attributes-errors.fm`.*
+
+A host shows a program's state: a meter's level, an engine's speed, a filter's cutoff. Recipe 14 gave a parameter what
+a host's control needs, a range and a default; a field, which a host reads for a display, a trace or an inspector, had
+nothing, so a host that wanted a field's unit or label kept a table of its own beside the program, or read its
+comments. C23 has a place for such things: an attribute after a declarator's name appertains to what it declares, and
+an implementation ignores one it does not know. This recipe lets a field carry attributes, takes C's string literals
+as their arguments, and passes the ones FMinus does not know to the host, which decides what they mean:
+
+```c
+module Meter
+{
+    param float decay [[fminus::range(0, 1)]] [[fminus::default(0.9)]] [[ui::label("Decay")]];
+    float level [[ui::unit("dB"), ui::label("Level")]] [[fminus::range(-60, 0)]];
+    float taps [[ui::hidden]] [16];
+};
+```
+
+### Where they go: after the name
+
+C23 has attribute specifiers in several places, and the place says what one appertains to: after a declarator's name,
+the entity it declares; after an array's size, the array's type; at the start of a declaration, every entity it
+declares. FMinus takes the first, where a parameter's have always been. So `float taps [[ui::hidden]] [16];` is the
+field's, and `float taps[16] [[ui::hidden]]` is clang's error, "'ui::hidden' attribute cannot be applied to types",
+with where the attribute goes; the start of a declaration is a syntax error. Each declarator has its own (`float a
+[[x]], b;` gives `a` one and `b` none), and so do the names an enumeration declares after its list.
+
+The declarator is a rule that locals, fields and constants share, and the attributes come in there. After the name, a
+`[` may begin an attribute or an array's size, and Bison must decide at that token whether a rule ends. With a rule of
+its own, `declared_name: pointer IDENTIFIER attributes`, and `declarator: declared_name array_sizes`, it must choose at
+the `[` after an attribute between ending `declared_name` (a size follows) and reading another attribute: a
+shift/reduce conflict. So each alternative of `declarator` spells out `pointer IDENTIFIER attributes` (`named` builds
+the `Declarator`), and the two `[`s are shifts in one state, which the next token tells apart (`[[` is an attribute's,
+anything else a size's). `attributes` may be empty, and its empty list is reduced before any `[`, on every path. After
+the sizes, though, a `[` may be a third size's, so `declarator_sizes` reads attributes there as
+`attribute_specifiers`, one or more, for `setSizes` to report.
+
+### Strings
+
+C23's attribute arguments are balanced tokens, anything at all. FMinus took numbers, and now takes strings too: C's
+string literals, with C's escapes (the simple ones, `\n`, `\"`, `\\`; octal and hex bytes, `\101` and `\x41`; universal
+character names, `µ`, in UTF-8), adjacent literals joined, `"Out" "put"` (`string_literal`). A literal is one
+token, `STRING`, whose value is its characters: the scanner's `stringValue` resolves the escapes, and an escape that
+is wrong is clang's error at the escape, "unknown escape sequence '\q'" (which clang only warns of), "hex escape
+sequence out of range", "\x used with no following hex digits", "incomplete universal character name"; a line that
+ends inside one is "missing terminating '"' character". FMinus has no `char` and no string type, so a string where an
+expression goes is a syntax error, "unexpected string literal". A skipped group of an `#if` reads strings as strings,
+as C does: a `/*` inside one opens no comment, which would swallow the `#endif`.
+
+The tree keeps each argument as written, an `AttributeArg`: a number's spelling, or a string's characters with
+`isString`. The dump writes a string back as a C literal (`stringLiteral`: a quote, a backslash and a control character
+escaped), so `--emit ast` reads as the source does.
+
+### What FMinus checks, and what it passes on
+
+`checkAttributes` runs on each field as its module is laid out (`layOut`), a parameter's too:
+
+| Attribute | Where | What FMinus does |
+|---|---|---|
+| `fminus::range(min, max)` | a parameter, or a field of numbers: `float`, `double`, `int`, a float vector, or an array of them | two numbers, the minimum below the maximum: what a host's control or display spans. FMinus neither clamps to it nor checks it |
+| `fminus::default(value)` | a parameter | one number, inside the range: what `setDefaults` sets. On a field it is an error: a field starts at 0, and a method such as `init` sets it |
+| another `fminus::` name | | "unknown attribute": the namespace is FMinus's |
+| `clang::nonblocking`, `clang::nonallocating` | | "only applies to functions"; another `clang::` name is unknown, as it is on a function |
+| any other | | the host's, kept as written. Its numbers must be numbers C writes ("invalid number '08'") |
+
+The last row is C23's rule with one change: an implementation ignores an attribute it does not know, and FMinus,
+which does not know `ui::unit`, passes it on to the host, which may. On a parameter, such an attribute was an error
+before this recipe; now only an unknown name in FMinus's namespace is. C's standard attributes, `[[deprecated]]` and
+the rest, go to the host too, as FMinus gives them no meaning; a host names its own in a namespace (`ui::`), since C
+keeps the names without one for its standard. `attributeNumber` reads a number as C writes it, and learned a hex
+float's `f` suffix here (`0x1p-3f`, which it refused before; in `0x1F` the `F` is a digit).
+
+A local's attributes, and a constant's at the top level, have no host to go to: `refuseAttributes` reports the first,
+"'ui::unit' attribute only applies to a module's fields and parameters". A function's are as recipe 11 made them:
+`clang::nonblocking` and `clang::nonallocating`, any other an error.
+
+The attributes change no code: the module's layout, its methods and its IR are the same as without them
+(`FieldAttributeTest.cpp` compares the IR).
+
+### The host's side
+
+`Program::Module::Field::attributes` lists a field's in order, each a `Program::Attribute`: its `name` as written,
+namespace and all (`"ui::unit"`), and its `arguments`, each an `Argument` with `isString`, `number` (a number's value,
+0 for a string) and `text` (a string's bytes, UTF-8 as the source has them, or a number's spelling, `"-60"`). Two in
+one `[[ ]]` are two entries, as two `[[ ]]`s are. A parameter's are its field's, and its `Parameter::attributes` too,
+so a host that builds its dials from `parameters` finds a dial's unit beside its range.
+`Program::findAttribute(attributes, name)` gives the last of a name, or null: the one that counts when a field says it
+twice, as the last `fminus::range` does.
+
+```cpp
+using fminus::Program;
+for (const Program::Module::Field& field : program->module("Meter")->fields)
+{
+    if (const Program::Attribute* unit = Program::findAttribute(field.attributes, "ui::unit"))
+        show(field.name, unit->arguments.at(0).text);   // "level", "dB"
+}
+```
+
+The meter example (`examples/meter/`) labels its two readings, `[[meter::label("Peak")]]`, and gives them a scale,
+`[[fminus::range(0, 1)]]`; its harness reads both as a host would, and names the readings by their labels in its
+report. The safety options and the conditionals leave a field's attributes alone: a program compiled with the loop
+budget or bounds checks has the same, and a field in an `#ifdef DEBUG` group has its own when the host defines
+`DEBUG`.
+
+### What it changes for programs and hosts
+
+- **Programs** without attributes on fields compile to the same IR. A parameter's attribute outside FMinus's and
+  clang's namespaces, an error before, is the host's. A `"` in code was an unexpected character, and now begins a
+  string; in a skipped group, a `/*` inside a string no longer opens a comment.
+- **Messages** are the ones above, in clang's words.
+- **Hosts** get `Program::Attribute`, `findAttribute`, `Module::Field::attributes` and `Parameter::attributes`, all
+  additions: every member that was there is as it was. The VS Code grammar (0.15.0) colours any namespace's attribute
+  names, and strings with their escapes, an unknown one marked.
+
+### Tests
+
+- `tests/unit/FieldAttributeTest.cpp`: a module's IR the same with and without attributes, and its method's results;
+  each error above, in clang's words; the numbers C writes, a hex float with its suffix among them, and
+  `fminus::range` on each type of numbers; a string that is no number, even `"12"`; strings in an `#if`'s skipped
+  group and in its kept one.
+- `FrontendTest.cpp`: the dumps of fields' attributes (in each declarator, before the sizes, after an enumeration's
+  list, a parameter's strings, adjacent literals), a local's and a constant's, and C's escapes written back; the
+  scanner's errors for strings, and the parser's for an attribute after a size and a string where an expression or
+  an attribute's name goes.
+- `tests/library/FieldAttributeTest.cpp`: `Module::Field::attributes` and `Parameter::attributes` as a host reads them
+  (names, numbers with their values and spellings, strings with their escapes resolved and their UTF-8, two in one
+  `[[ ]]`, none), `findAttribute`'s last and null, and the same under the loop budget, bounds checks and `#ifdef`.
+- `tests/lit/fminus/field-attributes.fm`: the dump, and the IR (at `-O0`, and at `-O2` with bounds checks and the loop
+  budget) with no trace of them; `field-attributes-errors.fm`: each error once, and the scanner's and the parser's.
+- `example.meter` (`examples/meter/bench.cpp --check`): the readings' labels and scales, read as a host reads them.
+
 ## Pitfalls
 
 Each of these was hit while writing the language or its recipes. [simd.md](simd.md) has the vector ones.
@@ -6483,6 +6627,7 @@ Each of these was hit while writing the language or its recipes. [simd.md](simd.
 | Code lands in a dead block, or the verifier reports a block without a terminator, wherever you ask whether the current block is finished | LLVM 23's `BasicBlock::getTerminator()` assumes a finished block; on an unfinished one it returns `&InstList.back()`, a bogus non-null pointer (the assert is compiled out under `NDEBUG`) | `hasTerminator()`, or `getTerminatorOrNull()` |
 | A syntax-error test changes text after you add an unrelated token | Bison's `parse.error detailed` lists the expected tokens only when there are at most four, and a new token that can start a construct joins the list (or pushes it past four) | update the test; or `%define parse.error custom` and write `Parser::report_syntax_error` |
 | Bison: "shift/reduce conflict on token "else"" | the dangling else (recipe 4) | `%precedence THEN` below `%precedence "else"`, and `%prec THEN` on the if without an else |
+| Bison: "shift/reduce conflict on token "["" after a declarator's attributes, and only a warning, so the build goes on | a rule that ends after the attributes (`declared_name`), before sizes that also begin with `[`: Bison must choose at the `[` whether to end it, and keeps the shift | no rule ending between the two: each alternative spells out `pointer IDENTIFIER attributes` (recipe 35); read `Parser.output` for "conflicts" after a grammar change |
 | The build fails in `Ast.cpp` and `src/ir/` after you add a node or an enumerator | `std::visit` needs every alternative; `-Wswitch` every enumerator | handle each one: this is the checklist working |
 | An IR test fails after an unrelated change | an exact match on a line that gained an attribute, a name or a flag | match loosely: `{{.*}}`, `[[NAME:%.*]]`, `CHECK-LABEL`, `CHECK-DAG` |
 | The verifier: "PHINode should have one entry for each predecessor" | the phi names the block a branch started in, but lowering it (a nested `&&` or `?:`) moved the builder on | take `builder_.GetInsertBlock()` after lowering each operand or branch |
@@ -6764,8 +6909,9 @@ The recipes in the compiler are their own reference: their code is in `src/`, an
 `BitwiseTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `TableTest.cpp`,
 `TopLevelTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `HashTest.cpp`, `ParamTest.cpp`, `VectorTest.cpp` and
 `PolyTest.cpp` for the code generator; `MathTest.cpp`, `VersionTest.cpp`, `TbaaTest.cpp`, `ZeroInitTest.cpp`,
-`AttributeTest.cpp` and `DenormalTest.cpp` for recipes 15 to 20; `RecoveryTest.cpp` for recipe 32), `tests/library/`
-(`ProgramTest.cpp`, `StrictAliasingTest.cpp`, `DenormalsTest.cpp`) and `tests/lit/fminus/`. [recipes/](recipes/) holds
+`AttributeTest.cpp` and `DenormalTest.cpp` for recipes 15 to 20; `RecoveryTest.cpp` for recipe 32;
+`FieldAttributeTest.cpp` for recipe 35), `tests/library/` (`ProgramTest.cpp`, `StrictAliasingTest.cpp`,
+`DenormalsTest.cpp`, `FieldAttributeTest.cpp`) and `tests/lit/fminus/`. [recipes/](recipes/) holds
 the two that aren't, 5 and 6, as one patch against the compiler as it is ([recipes/README.md](recipes/README.md)):
 
 ```bash

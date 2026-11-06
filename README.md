@@ -227,6 +227,7 @@ float half(float x) { x /= 2; return x; }
 | statements | `{ ... }`, `e;`, `return e;` and `return;`, `;`, `if (c) s else s` (an `else` closes the nearest `if`), `while (c) s`, `for (init; c; step) s` (its declarations are the loop's), `break;`, `continue;`, `switch (v) { case 1: s ... default: s }` (C's: an `int` or `bool` value, its cases integer constant expressions, which fall through to the next until a `break`; `case` and `default` are C23's labels, so a declaration may follow one); a `while` or `for` whose condition is not a constant expression may be assumed to end, as in C11 (6.8.5p6), and `while (1)` and `for (;;)` may run for ever; FMinus's `parallel for (int i = first; i < end; ++i) s`, its iterations at once over the machine's cores, and `parallel { s1 s2 ... }`, its statements at once, each finished, all of it, where it ends (below) |
 | expressions | constants, names, calls, `( )`, unary `-` `+` `!` `~`, `++` and `--` (before or after), casts `(int)x` `(float)x` `(double)x` `(bool)x`, `* / %`, `+ -`, `<< >>`, `< <= > >=`, `== !=`, `&`, `^`, `\|` (the bitwise ones on `int`s), `&&`, `\|\|` (both short-circuit), `?:` (only the branch taken runs), and `= += -= *= /= %= &= \|= ^= <<= >>=` (right to left; an assignment's value is the one stored), with C's precedence; pointers' `p[i]`, `*p`, `&x`, `p + i`, `p - q` and comparisons; an array's `a[i]` (its name stands for a pointer to its first element), and a 2-D array's `g[i][j]` and its rows, `g[i]`, each a 1-D array, a `float*` wherever one goes; a module's fields `m.y` and `p->y`, its methods `m.tick(x)` and `p->tick(x)`, and `this`; `sizeof(type)`, an `int` (a type past the greatest `int`, a module over 2 GB, is an error), arrays' types too, `sizeof(float[4][16])`; vector literals, OpenCL C's `(float4)(a, b, c, d)` and C's `(float4){a, b}` (the lanes left out are 0), and swizzles `v.wzyx`, `v.s0` |
 | constants | C's: floating ones are floats (`1.5`, `1.`, `.5`, `2e3`, `1.5e-3f`, hex floats `0x1.8p1`, `0x1p-3f`), or, without the `f`, doubles in arithmetic that has a double (below), integer ones ints (`2`, `010` in octal, `0x1F` in hex); `true` and `false`; enumeration constants, ints; integer constant expressions (a case's value, an enumerator's, an array's size) are C's, folded as FMinus computes |
+| attributes | C23's `[[...]]`: after a function's parameters, clang's (above); after a parameter's or a field's name, before an array's sizes, FMinus's `fminus::range(min, max)` (a parameter's, or a field's of numbers: what a host's control or display spans) and `fminus::default(value)` (a parameter's), and any other, the host's, which FMinus passes on as written: `float level [[ui::unit("dB")]] [[fminus::range(-60, 0)]];`, `float taps [[ui::hidden]] [16];`; their arguments numbers and C's string literals (C's escapes; adjacent literals are one), FMinus's only strings |
 | comments | `// ...` and `/* ... */` |
 | directives | `#include "file"`, the file read where the line is, as in C, and once only (as if every file began with `#pragma once`), found where the host says: `fminus` looks beside the including file, then in `-I`'s directories; C's conditionals, `#if`, `#ifdef`, `#ifndef`, `#elif`, `#else` and `#endif` (and C23's `#elifdef` and `#elifndef`), whose skipped groups are never scanned, on macros that `#define NAME value` and `#undef` make, or the host (`fminus -D NAME[=value]`), read in their conditions only; `#pragma`, ignored |
 | types | `float` (IEEE single precision), `double` (IEEE double precision: for accumulators and slow state), `int` (32 bits, signed: C's `/` and `%`, overflow undefined) and `bool` (C23's: 0 or 1, computed as an int; a number is `x != 0` as a bool); `void`, a function's result; pointers to `float`, `double`, `int`, `float2`, `float4`, `float8` and modules, `const` (`const float*`, read-only through it) and `restrict` (C99's promise that nothing else reaches it), and `void*` (an address with no type, which converts to and from any pointer); arrays of `float`, `double`, `int`, the float vectors and modules, one or two dimensions deep; modules, by name (`OnePole`), from their declaration on; `enum Wave`, an `int`, after its enumeration; `float2`, `float4`, `float8` (OpenCL C's vectors, lane by lane, scalars broadcast); `poly float` and `poly bool`, as many lanes as the machine's vectors ([docs/simd.md](docs/simd.md)) |
@@ -284,12 +285,20 @@ Where FMinus differs from C, it is on purpose:
   methods only read, as `cutoff[i]`. How one reads is the host's choice at compile time: a knob (its value, loaded
   atomically once when the method starts), a stream (a `float` a sample, from a buffer the host points it at, which
   nothing the method writes may overlap, as with `restrict`, or, when the pointer is null, the slot's value, for the
-  whole call) or frozen (a constant). `fminus::range` and `fminus::default` are for the host; FMinus checks them
-  against each other only. From `-O1`, a method whose loop branches on a `bool` knob or an `int` knob whose range
-  holds at most 8 values, or whose loop reads a stream, gets a copy of its code for each value (for a stream, null or
-  not), which computes what the method does ([docs/extending.md](docs/extending.md), recipe 16). A stream that gets no
-  copies (a method's fourth stream, under the default budget of 8 copies) still reads with no branch: its loop
-  vectorises when the stream has samples, and runs a sample at a time when it is flat.
+  whole call) or frozen (a constant). `fminus::range` and `fminus::default` are for the host; FMinus checks them against
+  each other only, and passes on any other attribute, as a field's (below). From `-O1`, a method whose loop branches on
+  a `bool` knob or an `int` knob whose range holds at most 8 values, or whose loop reads a stream, gets a copy of its
+  code for each value (for a stream, null or not), which computes what the method does
+  ([docs/extending.md](docs/extending.md), recipe 16). A stream that gets no copies (a method's fourth stream, under the
+  default budget of 8 copies) still reads with no branch: its loop vectorises when the stream has samples, and runs a
+  sample at a time when it is flat.
+- **A field's attributes are the host's**: C23 ignores an attribute it does not know, and clang warns; FMinus passes a
+  field's or a parameter's on to the host as written (`Module::Field::attributes`), checking only that its numbers
+  are numbers, for the host to decide what `[[ui::unit("dB")]]` means. Its own namespace, `fminus::`, is checked (an
+  unknown name is an error), and so is clang's, whose attributes are a function's; a function's unknown attribute, a
+  local's and a constant's, and one after an array's size (C23's, for the array's type) are errors too. A string
+  literal is C's, and only an attribute's argument: FMinus has no `char`, and no strings anywhere else
+  ([docs/extending.md](docs/extending.md), recipe 35).
 - **The heap's memory is aligned to 64 bytes and zeroed**, `malloc`'s too, as everything FMinus declares starts at 0;
   sizes are `int`s (C's are `size_t`s), so one block holds at most 2 GB, and `sizeof` of a larger type (a module of
   big arrays) is an error. A call that breaks a function's `[[clang::nonallocating]]` or `[[clang::nonblocking]]` is
@@ -507,8 +516,8 @@ types:
    `ControlFlowTest.cpp`, `SwitchTest.cpp`, `EnumTest.cpp`, `IntTest.cpp`, `BitwiseTest.cpp`, `PointerTest.cpp`,
    `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `TableTest.cpp`, `TopLevelTest.cpp`, `ModuleTest.cpp`,
    `FftTest.cpp`, `HashTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`, `ParallelTest.cpp`, `DoubleTest.cpp`,
-   `Array2DTest.cpp`, which share `Compile.h`), IR or errors in `tests/lit/fminus/*.fm` (`// RUN:` lines, checked by
-   FileCheck).
+   `Array2DTest.cpp`, `FieldAttributeTest.cpp`, which share `Compile.h`), IR or errors in `tests/lit/fminus/*.fm`
+   (`// RUN:` lines, checked by FileCheck).
 
 `examples/biquad/` is a kernel to grow the language around. It is a biquad low-pass module with coefficients recomputed
 every sample, its cutoff a stream, which filters a block a call, with a harness that calls it once, compares it with C++
@@ -583,15 +592,25 @@ gain(in, out, n, 0.5f);                                       // one call a bloc
   same fields in the same order shares. A field's type is FMinus's spelling of it: `"double"` and `"double[8]"` are 8
   bytes an element, C++'s `double`, so a host that reads fields (a trace, an inspector) reads one as a double, never as
   a float. An array's shape is spelled out too: its `element` type and its `extents`, outermost first, `{4, 16}` for a
-  `"float[4][16]"`, whose rows lie side by side (C++'s `float[4][16]` at the field's offset). A method is a function
-  whose first parameter is the instance: `function<float(void*, float)>("OnePole::tick", errors)`, and
-  `function<double(double)>("seconds", errors)` for one of doubles. `examples/voices/` is such a host.
+  `"float[4][16]"`, whose rows lie side by side (C++'s `float[4][16]` at the field's offset), and its `attributes`
+  (below). A method is a function whose first parameter is the instance:
+  `function<float(void*, float)>("OnePole::tick", errors)`, and `function<double(double)>("seconds", errors)` for one of
+  doubles. `examples/voices/` is such a host.
 - **Parameters.** `Options::parameters` binds each parameter by name, `"Lowpass::cutoff"`: `Binding::knob()` (the
   default), `stream()` or `frozen(value)`. `parameter(name)` and `Module::parameters` describe each: its type, binding,
   range and default, and where its slot is in an instance. `setValue` sets a knob from any thread (a relaxed atomic
   store, which a method reads when it next starts), `setStream` points a stream at the call's samples (or, null, makes
   the call flat: every sample is then the value `setValue` set), and `setDefaults` sets each parameter's default.
   `examples/parameters/` is such a host.
+- **Attributes.** A field says how a host shows it with attributes after its name, C23's way:
+  `float level [[ui::unit("dB"), ui::label("Level")]] [[fminus::range(-60, 0)]];`. `Module::Field::attributes` lists
+  them in order, a parameter's too (and its `Parameter::attributes`), each a `Program::Attribute`: its `name` as written
+  (`"ui::unit"`) and its `arguments`, each a number (`number`, and `text` as written, `"-60"`) or a string (`isString`,
+  `text` its bytes, C's escapes resolved, UTF-8 as the source has it). `findAttribute(attributes, "ui::unit")` is the
+  last of a name, or null. FMinus gives meaning to its own, `fminus::range` (a parameter's or a field's of numbers) and
+  `fminus::default` (a parameter's), and passes every other on unread: a unit, a label, a display hint, whatever the
+  host defines. Name a host's in a namespace of its own (`ui::`), as C23 keeps names without one for its standard
+  attributes. `examples/meter/` labels its readings so ([docs/extending.md](docs/extending.md), recipe 35).
 - **Math.** `fminus::math::sin`, `cos`, `exp`, `tanh` and `log` compute what a program in the default math mode does,
   bit for bit, so a C++ reference that calls them agrees with the program at any block size, level and width. They
   are `[[gnu::const]]` for GCC and clang (`FMINUS_MATH_CONST`), so two calls of one argument are one.
@@ -739,7 +758,7 @@ preset has a workflow (`cmake --workflow --preset <name>`) except `xcode`, which
 ## Handy
 
 - `build-dev/bin/fminus-hostinfo [--features]`: the triple, CPU, features and data layout the JIT targets here.
-- VSCode: `python3 editors/vscode/package.py`, then `code --install-extension build-vscode/fminus-0.14.0.vsix`, for
+- VSCode: `python3 editors/vscode/package.py`, then `code --install-extension build-vscode/fminus-0.15.0.vsix`, for
   FMinus syntax highlighting, lit's `RUN:` and `CHECK:` lines included
   ([editors/vscode/README.md](editors/vscode/README.md)).
 - `build-dev/bin/fminus`: FMinus source to its tree, IR, assembly or an object, or run in the JIT (above).

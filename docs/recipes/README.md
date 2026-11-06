@@ -35,7 +35,9 @@ Most of the recipes in [../extending.md](../extending.md) and [../simd.md](../si
 - recipe 33 (`double`, for accumulators and slow state: floating constants floats first, and C's doubles in arithmetic
   that has one);
 - recipe 34 (2-D arrays, C's arrays of arrays: rows that decay in turn, C's initialiser lists, a bounds check for each
-  dimension).
+  dimension);
+- recipe 35 (attributes on a module's fields, for the host: C23's after the name, C's string literals as their
+  arguments, FMinus's own checked and any other passed on).
 
 Their code is in `src/`, and their tests in `tests/`.
 
@@ -45,7 +47,7 @@ One patch is left, for the two recipes that aren't part of the language:
 |---|---|---|
 | `5-runtime-function-and-pass.patch` | 5, 6 | a runtime function (`db_to_gain`, by prototype or builtin); an LLVM pass (`CountFlopsPass`, which records each function's floating-point operations as an attribute) |
 
-It applies, with no whitespace errors, to the compiler as it is, with all of the above. The suite then has 399 tests,
+It applies, with no whitespace errors, to the compiler as it is, with all of the above. The suite then has 407 tests,
 which pass in the dev and asan presets.
 
 ```bash

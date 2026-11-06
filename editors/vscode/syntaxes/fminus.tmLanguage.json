@@ -144,17 +144,30 @@
             ]
         },
         "attributes": {
-            "comment": "C23's attributes, as FMinus has them: [[clang::nonblocking]], [[clang::nonallocating]], and a parameter's [[fminus::range(20, 20000)]] and [[fminus::default(-6)]].",
+            "comment": "C23's attributes, as FMinus has them: a function's [[clang::nonblocking]] and [[clang::nonallocating]], a parameter's [[fminus::range(20, 20000)]] and [[fminus::default(-6)]], and a field's, FMinus's or the host's, in any namespace, with numbers and strings: [[ui::unit(\"dB\")]].",
             "begin": "\\[\\[",
             "end": "\\]\\]",
             "beginCaptures": { "0": { "name": "punctuation.definition.attribute.begin.fminus" } },
             "endCaptures": { "0": { "name": "punctuation.definition.attribute.end.fminus" } },
             "patterns": [
-                { "name": "entity.other.attribute-name.fminus", "match": "\\b(?:(?:clang|fminus)::)?[A-Za-z_][A-Za-z0-9_]*\\b" },
+                { "name": "entity.other.attribute-name.fminus", "match": "\\b(?:[A-Za-z_][A-Za-z0-9_]*::)?[A-Za-z_][A-Za-z0-9_]*\\b" },
+                { "include": "#strings" },
                 { "include": "#numbers" },
                 { "name": "keyword.operator.arithmetic.fminus", "match": "-" },
                 { "name": "punctuation.separator.delimiter.fminus", "match": "," },
                 { "name": "punctuation.section.parens.fminus", "match": "[()]" }
+            ]
+        },
+        "strings": {
+            "comment": "Lexer.l's string literals, C's, which FMinus has as an attribute's arguments: C's escapes (simple, octal, hex, and universal character names); another escape is an error, and so is a string a line ends inside.",
+            "name": "string.quoted.double.fminus",
+            "begin": "\"",
+            "end": "(\")|$",
+            "beginCaptures": { "0": { "name": "punctuation.definition.string.begin.fminus" } },
+            "endCaptures": { "1": { "name": "punctuation.definition.string.end.fminus" } },
+            "patterns": [
+                { "name": "constant.character.escape.fminus", "match": "\\\\(?:['\"?\\\\abfnrtv]|[0-7]{1,3}|x[0-9A-Fa-f]+|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8})" },
+                { "name": "invalid.illegal.unknown-escape.fminus", "match": "\\\\." }
             ]
         },
         "modules": {

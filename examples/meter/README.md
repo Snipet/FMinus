@@ -63,8 +63,8 @@ The meter a host shows is a module, its readings its fields, and how fast its pe
 module Meter
 {
     param float decay [[fminus::range(0, 1)]] [[fminus::default(0.9)]];   // what is left of the held peak a block on
-    float held;    // the peak, held
-    float level;   // the last block's RMS
+    float held [[meter::label("Peak")]] [[fminus::range(0, 1)]];   // the peak, held
+    float level [[meter::label("RMS")]] [[fminus::range(0, 1)]];   // the last block's RMS
 
     void measure(const float* restrict input, int n) [[clang::nonblocking]]
     {
@@ -76,7 +76,9 @@ module Meter
 
 Each reading comes from its faster loop (below): the plain `peak`, which LLVM vectorises itself, and `rms_poly`. The
 decay is a knob, which the host sets with `setValue` and `measure` reads once a call; the host reads `held` and
-`level` after the call (`Module::fields` gives their offsets). `--check` runs it over noise that fades out, so the
+`level` after the call (`Module::fields` gives their offsets, and their attributes how to show them: `meter::label`,
+an attribute of the harness's own that FMinus passes on as written, names each reading in the report, and
+`fminus::range` gives its scale; recipe 35). `--check` runs it over noise that fades out, so the
 held peak falls, at every width, and compares its fields after every block with a C++ meter's, bit for bit. It also
 plays it an impulse and then silence, after which the held peak must be `--decay` itself, then its square: the knob
 reaching the module, at a decay (0.8 by default) other than the program's own default (0.9).

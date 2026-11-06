@@ -5,13 +5,14 @@ Syntax highlighting for FMinus (`.fm`): keywords (`switch`, `case`, `default` an
 `restrict`, `poly`, `param`), modules (`module OnePole`, with the name it declares, and `this`), enumerations
 (`enum Mode`, with its tag), `true` and `false`, C's constants including hex floats and hex integers (and `2f` marked as
 the error it is), operators (`++`, `&`, `[]`, `->`, `sizeof` too, and the bitwise `|`, `^`, `~`, `<<`, `>>` and their
-assignments), attributes (`[[clang::nonblocking]]`, and a parameter's `[[fminus::range(20, 20000)]]` with its numbers),
+assignments), attributes (`[[clang::nonblocking]]`, a parameter's `[[fminus::range(20, 20000)]]` with its numbers, and
+a field's in any namespace, `[[ui::unit("dB")]]`, with its strings and their escapes, an unknown escape marked),
 builtins (`sinf`, `tanhf`, the double `sqrt` and `fma`, `malloc`, `fft_forward`, `hash`, `randf`, `reduce_add`, ...),
 function and method names, and swizzles and fields (`v.wzyx`, `p->y`), and the directives: `#include "file"`, `#pragma`,
 the conditionals (`#if`, `#ifdef`, `#ifndef`, `#elif`, `#elifdef`, `#elifndef`, `#else`, `#endif`, with `defined` and
 the macros' names in their conditions) and `#define` and `#undef` (any other is marked as the error it is). In lit
 tests, `RUN:`, `REQUIRES:`, `CHECK:` and the other check prefixes stand out inside their comments. `//` and `/* */`
-toggle as comments, and brackets match and close.
+toggle as comments, brackets match and close, and so do a string's quotes.
 
 It is declarative: three JSON files, no code, nothing that runs on your files.
 
@@ -25,8 +26,8 @@ It is declarative: three JSON files, no code, nothing that runs on your files.
 ## Installing
 
 ```bash
-python3 editors/vscode/package.py                               # build-vscode/fminus-0.14.0.vsix
-code --install-extension build-vscode/fminus-0.14.0.vsix
+python3 editors/vscode/package.py                               # build-vscode/fminus-0.15.0.vsix
+code --install-extension build-vscode/fminus-0.15.0.vsix
 ```
 
 Then reload the window (Developer: Reload Window). `code` comes with VSCode; if it isn't on PATH, run "Shell Command:
