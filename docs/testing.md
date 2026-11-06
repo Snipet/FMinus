@@ -95,7 +95,9 @@ TEST_CASE("functions compute what they say", "[codegen]")
   progress), `[denormals]`, `[parallel]` (parallel regions, and `[runtime]` among them for the pool on its own),
   `[ir]` (`Program::Options::keepIr`'s texts), `[budget]` (the loop budget: `LoopBudgetTest.cpp`, in the unit tests and
   the library's), `[bounds]` (bounds checks: `BoundsCheckTest.cpp`, in both too), `[call]` (calls by name:
-  `CallThunkTest.cpp`'s thunks in the unit tests, and `CallTest.cpp`'s `Program::call` in the library's), `[include]`
+  `CallThunkTest.cpp`'s thunks in the unit tests, and `CallTest.cpp`'s `Program::call` in the library's), `[profile]`
+  (where the machine code is, for a sampling profiler: `CodeRangesTest.cpp`'s `Jit::code` through both linkers in the
+  unit tests, and `ProfileTest.cpp`'s `Program::codeRanges` and a reference sampler in the library's), `[include]`
   (`#include`: `IncludeTest.cpp`, in both), `[conditional]` (`#if`, `#ifdef` and macros, with a host's defines:
   `ConditionalTest.cpp`, in both, whose `parsed` takes the defines and `condition` an `#if`'s expression),
   `[circuit]` (the circuit compiler: `CircuitTest.cpp` its netlists,

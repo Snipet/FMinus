@@ -28,7 +28,8 @@ the runtime's functions do. Its math builtins give a float one result wherever i
 subnormals flushed to zero, give a program a loop budget, so that a call that would loop for ever returns early instead
 of holding the audio thread, and compile it with bounds checks while it is written, so that an index outside its array
 stops the call and says where. A program's instrumentation can sit in C's conditionals, `#ifdef DEBUG` ... `#endif`,
-compiled in when the host defines `DEBUG` and skipped, unread, when not. `examples/plugin/` is a JUCE plugin whose DSP
+compiled in when the host defines `DEBUG` and skipped, unread, when not. A host's sampling profiler can map each sample
+to the function, method and module whose machine code it fell in. `examples/plugin/` is a JUCE plugin whose DSP
 is an FMinus program. The build, the dependencies and the toolchain's smoke tests are in place around it.
 
 Documentation: [docs/](docs/README.md). It covers the architecture, writing a program with `main`, a guide to
@@ -679,8 +680,19 @@ gain(in, out, n, 0.5f);                                       // one call a bloc
   call as any, and say so (`OutOfBudget`, `OutOfBounds`) without allocating, so on the audio thread too: set the
   budget and clear the record before each call, and serialise calls from several threads, as the budget and the
   record are the program's ([docs/extending.md](docs/extending.md), recipe 36).
-- **Lifetime.** A function pointer, and a `Callable`, is valid while its `Program` lives. A `Callable` is the
-  program's own: the host keeps the pointer `callable()` gives, as it keeps a function's, never a copy.
+- **Profiling.** A host's sampling profiler, which interrupts the thread that runs the program now and then and reads
+  its program counter, maps each sample to a function with `codeRanges(errors)`: every range of the program's machine
+  code, sorted by address, each a `CodeRange` with its `address` and `size`, the `symbol` it has in the object, the
+  program's `function` it is the code of (`"Osc::tick"`) and that function's `module` (`"Osc"`), its `kind` (a
+  function's code, an entry point's or a parallel region's, a thunk, or FMinus's own), and the functions the optimiser
+  inlined into it (`inlined`), whose samples are its. `codeRangeAt(ranges, pc)` finds a sample's range (a binary
+  search: no allocation, no lock). `codeRanges` links the program if no function has been looked up yet, so after
+  `compile()` the list is whole, and the code stays where it says while the program lives: take it once, off the audio
+  thread. Code that is not the program's, the runtime's, the C library's or the host's, is in no range
+  ([docs/extending.md](docs/extending.md), recipe 37, and a reference sampler in `tests/library/ProfileTest.cpp`).
+- **Lifetime.** A function pointer, and a `Callable`, is valid while its `Program` lives, and the code stays where
+  `codeRanges()` says. A `Callable` is the program's own: the host keeps the pointer `callable()` gives, as it keeps a
+  function's, never a copy.
 
 `include/fminus/Circuit.h` is the circuit compiler's: `fminus::circuit::generate(netlist, "pedal.cir")` turns a
 SPICE-style netlist into the text of one FMinus module, which `Program::compile` compiles like any other source, its

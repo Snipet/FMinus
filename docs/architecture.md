@@ -503,10 +503,11 @@ C keeps the enumerated type, and `lowerSwitch` reads it for clang's `-Wswitch`, 
 
 `jit::Jit` wraps ORC's `LLJIT`:
 
-- **`create(level, modules)`** builds an LLJIT for the host CPU, defines the FMinus runtime in it, and installs an IR
-  transform layer that runs `optimiseModule` on each module before code generation. LLJIT optimises nothing by
+- **`create(level, modules, linker)`** builds an LLJIT for the host CPU, defines the FMinus runtime in it, and installs
+  an IR transform layer that runs `optimiseModule` on each module before code generation. LLJIT optimises nothing by
   itself. With `Modules::Optimised` it installs none, and generates code from each module as it comes: one optimised
-  already, at the JIT's level (below, "The IR as text").
+  already, at the JIT's level (below, "The IR as text"). The linker is LLJIT's for the target (JITLink on macOS and
+  Linux, RuntimeDyld on Windows), or with `Linker::RuntimeDyld` RuntimeDyld on any, for the tests of `code()`.
 - **`add(module, context)`** sets the module up for the JIT's target and hands it over, with the `LLVMContext` it
   lives in, as a `ThreadSafeModule`. Nothing is compiled yet.
 - **`lookup(name)`** compiles what the symbol needs, on the calling thread, and returns its address. The caller casts
@@ -515,8 +516,11 @@ C keeps the enumerated type, and `lowerSwitch` reads it for clang's `-Wswitch`, 
   math builtins' among them in the vector and libm modes, and process symbols through LLJIT's default process-symbol
   link order. These include libm's `sinf` and libsystem_m's `_simd_sin_f4` behind the `sinf` builtin in the fast mode,
   and any external function a prototype declares (`float atanf(float x);`).
+- **`code()`** is where each function's machine code is, for a host's sampling profiler: its name as the module has
+  it, its address and size, and the module's functions the optimiser inlined into it, sorted by address (below,
+  "Where the code is").
 - **Lifetimes.** The `Jit` owns its `TargetMachine` and `LLJIT` (destroyed in reverse order), and the `LLJIT` owns
-  every module added. Function pointers stay valid as long as the `Jit` lives.
+  every module added. Function pointers stay valid as long as the `Jit` lives, and the code stays where it was linked.
 
 Compilation is lazy: it runs the first time a symbol is looked up. In a plugin, look up on a background thread and
 hand the pointer to the audio thread.
@@ -530,13 +534,24 @@ program's module is untouched. `callType` maps FMinus's types to what a thunk pa
 with no `default:`. `Program::callable` and `call` (the public API, below) and `fminus --run` call through thunks
 ([extending.md](extending.md), recipe 36).
 
+**Where the code is** (`Jit::code`). As each object links, the JIT writes down its functions: a JITLink plugin
+(`LinkedCode`) reads each named symbol of an executable section from the link graph once its fix-ups are applied, and
+keeps them when the link is emitted; under RuntimeDyld, a `JITEventListener` (`LoadedCode`) reads the loaded object's
+symbol table, sized by `object::computeSymbolSizes`, at each section's load address. Names lose the target's global
+prefix (macOS's `_`), and the assembler's labels are dropped. The transform layer also reads each module's direct calls
+before and after `optimiseModule` (`directCalls`), and `inlinedCalls` works out from the two which functions each
+function now holds. `Program::codeRanges` adds which of the program's functions each symbol is the code of: a
+function's, an entry point's and its body (`f.body`), a parallel region's (`f.parallel.n`), a thunk
+(`fminus.call.f`), or FMinus's own ([extending.md](extending.md), recipe 37).
+
 **The IR as text** (`Program::Options::keepIr`). A host that shows what FMinus made of a program asks `Program::compile`
 to keep its IR, printed as LLVM prints a module: as `ir::lower` wrote it, after `prepareModule` (`loweredIr()`), and
 optimised (`optimisedIr()`). To print the optimised module, `compile` makes the calls `fminus --emit ll` makes,
 `prepareModule` and `optimiseModule`, on a machine made as the JIT's is, and creates its `Jit` with
 `Modules::Optimised`: the text is the module the JIT generates code from, and the same as `fminus --emit ll` prints for
 the same source, options and file name (`tests/unit/KeepIrTest.cpp` runs the driver and compares). The optimiser then
-runs in `compile`, and the first look-up runs only the code generator. Off, the default, nothing is printed and the
+runs in `compile`, which reads the module's calls around it and hands the JIT what was inlined (`recordInlining`), as
+the transform layer would have, and the first look-up runs only the code generator. Off, the default, nothing is printed and the
 module goes to the JIT unoptimised, as before. The lowered IR is not what `fminus -O0` prints: `-O0`'s pipeline still
 makes the vector math mode's intrinsics (`fminus.exp.f32`) calls of the runtime's functions (`fminus_rt_expf`), and in
 the fast mode, on Apple systems, a `float4`'s `llvm.sin.v4f32` a call of the vector library's `_simd_sin_f4`.
@@ -634,7 +649,8 @@ Because the JIT and executables share one runtime, the two compile the same prog
 `include/fminus/FMinus.h` is the public API: `fminus::Program` compiles a source (parse, lower for the machine's
 `poly float` width, add the module to a `jit::Jit`), looks its functions up as C function pointers, and says which are
 marked `nonblocking` or `nonallocating`; it calls a function by name, its signature as values, its arguments checked
-and its errors values (`callable`, `call`: a thunk from `jit/Call.h`); it describes each module, its fields'
+and its errors values (`callable`, `call`: a thunk from `jit/Call.h`); it lists where its machine code is, for a host's
+sampling profiler (`codeRanges`, `codeRangeAt`: from `Jit::code`); it describes each module, its fields'
 attributes among them, and its parameters, sets a parameter's value or stream in an instance, and keeps the program's
 IR as text when the host asks (`Options::keepIr`). `fminus::math`
 gives C++ the math builtins as the default math mode computes them. It has no LLVM in it and needs C++17, so

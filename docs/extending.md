@@ -18,10 +18,11 @@ error for each mistake, enumerated types as C has them, and FMinus's first warni
 C's `double`, for accumulators and slow state, and decides what an unsuffixed floating constant is when FMinus has two
 floating types. Then one adds C's arrays of arrays, 2-D arrays, with C's initialiser lists for them and a bounds check
 for each dimension. The next is for the host again: attributes on a module's fields, a unit, a label or a range, which
-FMinus passes on to the host, with C's string literals for their arguments. The last is for the host too: calling a
-function by name, its signature learnt as the host runs, through a thunk the JIT compiles for it, its arguments checked
-and its errors values. Then the pitfalls those recipes ran into, and design notes for what comes next.
-[simd.md](simd.md) has recipes 7 to 9, for vectors.
+FMinus passes on to the host, with C's string literals for their arguments. The last two are for the host too:
+calling a function by name, its signature learnt as the host runs, through a thunk the JIT compiles for it, its
+arguments checked and its errors values; and where the JIT put each function's machine code, which a sampling profiler
+maps its samples to, with what the optimiser inlined into it. Then the pitfalls those recipes ran into, and design notes
+for what comes next. [simd.md](simd.md) has recipes 7 to 9, for vectors.
 
 Recipes 1 to 4 are in the compiler now (`tanhf` and `%`; `bool` and its operators; `if`, `while` and `for`), and so are
 simd.md's 7 to 9, recipe 10 (`int`, `void` and pointers), recipe 11 (the heap), recipe 12 (arrays and modules), recipe
@@ -31,10 +32,11 @@ runtime's attributes and loop progress, denormal control), recipe 21 (`#include`
 and `randf`), recipe 26 (constant tables), recipe 27 (`switch` and `enum`), recipe 28 (constants at the top level, and
 sizes of constant expressions), recipe 29 (the loop budget), recipe 30 (bounds checks), recipe 31 (`#if` and `#ifdef`),
 recipe 32 (one error a mistake, enumerated types, `-Wswitch`), recipe 33 (`double`), recipe 34 (2-D arrays), recipe 35
-(field attributes) and recipe 36 (calls by name), so their sections describe how the code you have got there: read a
-section beside the files it names. Recipes 5 and 6, a runtime function and a pass, are not part of the language; they
-live in [recipes/](recipes/) as a patch, so you can apply them to see them work. None of these are sketches: each was
-applied to this repository, built with `-Werror`, and tested in the dev and asan presets, every test passing.
+(field attributes), recipe 36 (calls by name) and recipe 37 (code ranges, for a profiler), so their sections describe
+how the code you have got there: read a section beside the files it names. Recipes 5 and 6, a runtime function and a
+pass, are not part of the language; they live in [recipes/](recipes/) as a patch, so you can apply them to see them
+work. None of these are sketches: each was applied to this repository, built with `-Werror`, and tested in the dev and
+asan presets, every test passing.
 [architecture.md](architecture.md) describes the stages they touch.
 
 FMinus follows C. When a recipe has a semantic choice to make, it makes C's: conversions, short-circuiting, which
@@ -6860,6 +6862,151 @@ reads back as it.
   printed), of a function of no result, of twelve arguments, with bounds checks and the loop budget, and its refusals;
   `int.fm`, `double.fm` and `main.fm`: `--run` of ints, of a double beside a float, and of a bool, which it refused
   before; `simd.fm` and `poly.fm`: its refusals of vectors, reworded.
+
+## Recipe 37: where the code is, for a sampling profiler
+
+*In the compiler. Code: `Jit::Code`, `code`, `Calls`, `directCalls`, `inlinedCalls`, `recordInlining` and `Linker`,
+with `CodeLog`, `LinkedCode` and `LoadedCode` (`src/jit/Jit.h`, `Jit.cpp`); `Program::CodeRange`, `codeRanges` and
+`codeRangeAt` (`include/fminus/FMinus.h`), with `attributed` (`src/api/FMinus.cpp`). Tests:
+`tests/unit/CodeRangesTest.cpp` and `tests/library/ProfileTest.cpp` (`[profile]`).*
+
+A program that takes too long on the audio thread does not say where the time goes. A host can find out without
+changing the program: a sampling profiler interrupts the thread that runs it a few thousand times a second, reads
+where it was, its program counter, and counts the samples that fall in each function. The program runs as it always
+does, with nothing added to its code, and the counts are the share of its time each function takes. What such a
+profiler lacks for JIT'd code is the map from an address to a function: the code has no file on disk and no symbol
+table the system's tools read (`dladdr` finds nothing in it), and its addresses change each time the program compiles.
+This recipe writes the map down as the JIT links each object, and gives it to the host with each function's module and
+what the optimiser inlined into it:
+
+```cpp
+std::string errors;
+std::vector<fminus::Program::CodeRange> ranges = program->codeRanges(errors);   // after compile(), off the audio thread
+...
+if (const fminus::Program::CodeRange* range = fminus::Program::codeRangeAt(ranges, pc))   // each sample, on the
+    ++samples[range->function];                                                         // sampler's thread
+```
+
+### Where the linker puts the code
+
+LLJIT compiles a module to an object file in memory, then links it into memory of its own with one of two linkers,
+which it picks by the target (`LLJITBuilderState::prepareForConstruction`). JITLink, on macOS and Linux, turns the
+object into a graph of blocks and symbols, gives them addresses, applies the fix-ups, and runs the passes a plugin
+adds at each step. `LinkedCode` is such a plugin: its pass runs after the fix-ups, when every symbol has its final
+address, and writes down each symbol with a name in an executable section, its address and its size. The link can
+still fail after that pass (finalising the memory), so its list waits, keyed by the link's
+`MaterializationResponsibility`, until the plugin hears that the link was emitted (`notifyEmitted`), and is dropped if
+it failed. RuntimeDyld, Windows' (LLJIT picks it for COFF), runs no passes; it tells a `JITEventListener` of each object
+it has loaded, with the object and where it put each section. `LoadedCode` reads the object's symbol table, its
+functions, sizes them with `object::computeSymbolSizes`, and places each at its section's load address plus its offset
+in the section. Both write into a `CodeLog` the `Jit` shares with them, and `Jit::code()` copies it, sorted by address.
+
+The object's names are the linker's, with the target's global prefix (macOS's `_`: `_Osc::tick`). `code()` gives the
+module's, without it, and drops the symbols that are no function of the module: the assembler's labels (macOS's
+`ltmp0` at the start of each section, which has no prefix), ELF's local labels (`.L`) and AArch64 ELF's mapping
+symbols (`$x`). The sizes are the object's: an ELF object gives each function's (`st_size`), and a Mach-O or COFF object
+none, so each runs to the next symbol, the padding before it included (functions start on 64 bytes on an M5). No
+program counter lands in padding, so a sample finds its function either way.
+
+The tests check both linkers on every system: `Jit::create` takes a `Linker`, and `Linker::RuntimeDyld` gives the JIT
+RuntimeDyld wherever it runs, made as LLJIT makes Windows' (its `createObjectLinkingLayer`, with COFF's two flags when
+the target is COFF), so the path Windows takes runs on macOS and Linux too. On an M5 the two lists name the same
+functions with the same sizes, but the last, which RuntimeDyld runs to the end of its section.
+
+### What the optimiser did: `inlined`
+
+A range is the machine code's, not the source's. From `-O1` the optimiser inlines a small function into its caller,
+`Osc::tick` into `Osc::process`'s loop, so the samples of tick's work fall in process's code. FMinus emits no debug
+information, which would say of each instruction which inlined call it came from (a `DILocation`'s `inlinedAt`); a
+profile by source line waits for it. What can be said cheaply is which functions a range holds. `Jit::directCalls`
+lists, for each function a module defines, the functions of the module it calls by name. The JIT reads them before the
+optimiser and after (its IR transform, around `optimiseModule`), and `inlinedCalls` compares the two: a function G that
+F called before and does not after is inlined into F, and so, through G, is each function G called that F does not call
+after either. A callee that F still calls keeps its code, and the walk stops there. A call the optimiser deleted as dead
+(behind a frozen `bool`, say) looks the same as one it inlined, and is listed too. A program compiled with `keepIr`
+is optimised by `Program::compile` itself, which reads the calls around its own `optimiseModule` and hands the JIT
+their `inlinedCalls` (`recordInlining`). On an M5 the two reads take 0.12 ms for a circuit's module of 3,300
+instructions, against 63 ms of `-O2`'s pipeline.
+
+An inlined function keeps its own code too, as every function of the program is external (the host may call it), so
+`Osc::tick`'s range is still there; it takes samples only when something calls it, and nothing in the program then
+does. At `-O0` nothing is inlined, and each function's samples are its own: a host that wants to see the time a
+function's own work takes profiles a build at `-O0` beside the one that plays (the shares differ from it, as `-O0`'s
+code is slower in its own ways).
+
+### Which function a symbol is
+
+The code generator and the JIT name what they make after the function it belongs to, with a `.`, which no FMinus name
+has, before what it is:
+
+| Symbol | `kind` | `function` |
+|---|---|---|
+| `Osc::tick` | `Function` | `Osc::tick`, and `module` `Osc` |
+| `process`, when there is a `process.body` | `EntryPoint`: under `Denormals::Flush`, an entry point is a few instructions that set the mode around a call of its body and hand the caller's back (recipe 20) | `process` |
+| `process.body` | `Function` | `process` |
+| `run.parallel.1` | `Parallel`: a region's body, which the pool's threads and the caller run (recipe 22) | `run` |
+| `fminus.call.softclip` | `Thunk`: what `call()` calls the function through (recipe 36) | `softclip` |
+| `fminus.large.sin` | `Support`: FMinus's own, a math kernel's path for an argument past its range (recipe 23) | none |
+
+`attributed` reads a symbol so; `codeRanges` adds a method's `module` (from its `Callable`), and reads each name of
+`inlined` the same way, listing each of the program's functions once, never the range's own.
+
+### What a host does with it
+
+`codeRanges(errors)` links the program first, if no function has been looked up yet (a look-up of one of its functions
+links its whole module, so it looks up the first the program defines), so the list after `compile()` is whole; a thunk
+joins it when `callable()` makes it. A program whose code does not link has none, and `errors` says why (LLVM's
+words, as for `call()`'s `LinkError`). The list is the host's copy, sorted by address, the ranges apart. The JIT neither
+moves nor frees what it has linked, so the code stays where the list says while the Program lives: the host takes the
+list once, off the audio thread, and its sampler reads it on its own thread with `codeRangeAt`, a binary search with no
+allocation and no lock.
+
+Sampling is the host's: FMinus takes no samples itself. `tests/library/ProfileTest.cpp` has a reference sampler for
+macOS and Linux. A thread sends the thread that runs the program `SIGPROF` every 200 µs (`pthread_kill`), and the
+handler stores the program counter the kernel saved in its context (`uc_mcontext`: on macOS
+`__darwin_arm_thread_state64_get_pc`, which also undoes arm64e's pointer authentication, or `__rip`; on Linux
+`gregs[REG_RIP]` or `pc`) into memory set aside before, as a signal handler may neither allocate nor lock. When it has
+400, it stops, and the samples are mapped and counted. On Windows a sampler suspends the thread instead
+(`SuspendThread`, then `GetThreadContext`'s `Rip`), as macOS's `thread_get_state` can, and the test does not run there.
+ThreadSanitizer holds a signal back until the thread next runs instrumented code, which the JIT's never is, so the test
+does not run under it either. What it found on an M5, in six runs of 400 samples, for `spin`, which calls `Work::slow`
+(a loop of 3n iterations) and `Work::fast` (the same loop, n), each call longer than the time between two samples, so
+that the samples do not fall in step with the calls:
+
+| | `-O0` | `-O2` |
+|---|---|---|
+| `Work::slow` | 72–75% | 0 |
+| `Work::fast` | 25–28% | 0 |
+| `spin` | 0 | 99.75–100%, its range's `inlined` `Work::fast` and `Work::slow` |
+
+All but one sample fell in the program's code (the one, at `-O2`, in the test's own loop around `spin`). Code that is
+not the program's has no range, and `codeRangeAt` gives null for it: the runtime's (the pool, an FFT, `fminus_rt_sinf`
+where a math kernel is called rather than inlined), the C library's (`Math::Libm`'s `sinf`, a prototype's function)
+and the host's own. A host names those from its own symbols (`dladdr`), or charges them to the program's function that
+called them by walking the stack. A parallel region runs on the pool's threads as well as the caller's, so a sampler of
+the calling thread sees its share of the region only.
+
+### What it changes for programs and hosts
+
+- **Programs** compile to the same code. The JIT writes down each function's name, address and size as it links, and
+  reads a module's calls twice around the optimiser.
+- **Hosts** get `Program::CodeRange`, `codeRanges()` and `codeRangeAt()`, all additions: every member that was there is
+  as it was.
+- **The JIT** (`jit/Jit.h`) gets `code()`, `directCalls`, `inlinedCalls`, `recordInlining`, and a `Linker` for
+  `create`, whose default is LLJIT's choice, as before.
+
+### Tests
+
+- `tests/unit/CodeRangesTest.cpp`: through JITLink and RuntimeDyld, with and without `Denormals::Flush`, each function's
+  code at the address its look-up gives, sized, sorted and apart, nothing before a look-up, no global prefix and no
+  assembler's label, an entry point and its body, a parallel region's body and FMinus's own `fminus.large.sin`; what
+  `-O2` inlined (tick into process, both into run, `shape` into the parallel region) and `-O0` nothing;
+  `inlinedCalls`'s walk (through a callee, stopping at a kept one, recursion, a function the optimiser removed); a
+  thunk's code once it is made.
+- `tests/library/ProfileTest.cpp`: each range's kind, function and module, at the address `address()` gives, the list
+  whole after `compile()` with no look-up, `codeRangeAt` inside, at the edges and outside every range, the same ranges
+  again with a thunk's added after `callable()`; the same inlining when `compile()` optimises (`keepIr`), and none at
+  `-O0`; a program whose code does not link, and one with no function; and the reference sampler at `-O0` and `-O2`.
 
 ## Pitfalls
 

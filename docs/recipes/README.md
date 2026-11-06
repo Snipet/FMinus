@@ -39,7 +39,9 @@ Most of the recipes in [../extending.md](../extending.md) and [../simd.md](../si
 - recipe 35 (attributes on a module's fields, for the host: C23's after the name, C's string literals as their
   arguments, FMinus's own checked and any other passed on);
 - recipe 36 (calling a function by name, for the host: a thunk of each signature, compiled in the JIT, the arguments
-  checked against it and the errors values; `fminus --run` through it).
+  checked against it and the errors values; `fminus --run` through it);
+- recipe 37 (where the code is, for a host's sampling profiler: each function's machine code as the JIT links it,
+  through JITLink's plugin or RuntimeDyld's listener, and what the optimiser inlined into it).
 
 Their code is in `src/`, and their tests in `tests/`.
 
