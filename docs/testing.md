@@ -49,8 +49,9 @@ Each file states what it tests in its first line, then has a few helpers and the
   `FftTest.cpp`, `HashTest.cpp`, `ParamTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`, `ParallelTest.cpp`,
   `RecoveryTest.cpp`, `DoubleTest.cpp`, `Array2DTest.cpp`, `FieldAttributeTest.cpp`, and the
   compiler's own: `VersionTest.cpp`, `TbaaTest.cpp`, `ZeroInitTest.cpp`, `AttributeTest.cpp`, `DenormalTest.cpp`,
-  `LoopBudgetTest.cpp`, whose `compileAt` compiles at any level with the budget on or off, and `BoundsCheckTest.cpp`,
-  whose `compileAt` does the same with the bounds checks and keeps the checks' descriptions)
+  `LoopBudgetTest.cpp`, whose `compileAt` compiles at any level with the budget on or off, `BoundsCheckTest.cpp`,
+  whose `compileAt` does the same with the bounds checks and keeps the checks' descriptions, and `CallThunkTest.cpp`,
+  which makes thunks for its functions with `jit::callThunk`)
   parses, lowers and JIT-compiles at -O2, and returns the `Jit`, or null with the formatted errors; a program that
   compiles with warnings (`-Wswitch`) has them in `errors`, which a test of one compares as a whole.
   `lookup<float(float)>(*jit, "f")` gives a callable function, and `lookup<void(const float*, float*, int)>(*jit, "g")`
@@ -93,8 +94,9 @@ TEST_CASE("functions compute what they say", "[codegen]")
   flat streams), `[tbaa]`, `[zeroinit]`, `[attributes]` and `[progress]` (the runtime's and libm's attributes, and loop
   progress), `[denormals]`, `[parallel]` (parallel regions, and `[runtime]` among them for the pool on its own),
   `[ir]` (`Program::Options::keepIr`'s texts), `[budget]` (the loop budget: `LoopBudgetTest.cpp`, in the unit tests and
-  the library's), `[bounds]` (bounds checks: `BoundsCheckTest.cpp`, in both too), `[include]` (`#include`:
-  `IncludeTest.cpp`, in both), `[conditional]` (`#if`, `#ifdef` and macros, with a host's defines:
+  the library's), `[bounds]` (bounds checks: `BoundsCheckTest.cpp`, in both too), `[call]` (calls by name:
+  `CallThunkTest.cpp`'s thunks in the unit tests, and `CallTest.cpp`'s `Program::call` in the library's), `[include]`
+  (`#include`: `IncludeTest.cpp`, in both), `[conditional]` (`#if`, `#ifdef` and macros, with a host's defines:
   `ConditionalTest.cpp`, in both, whose `parsed` takes the defines and `condition` an `#if`'s expression),
   `[circuit]` (the circuit compiler: `CircuitTest.cpp` its netlists,
   plans, equations (an OTA's against report §7.2's hand derivation; an inductor's, an E's and a G's stamps by hand, and

@@ -78,8 +78,10 @@ them ("Where to go next").
 `main` is otherwise an ordinary function:
 
 - other functions may call it;
-- `fminus --run main ...` calls it in the JIT, as any function. `--run` takes numbers on its command line, so it calls
-  functions whose parameters are all `float` or all `double`, and prints a `float`, `double`, `bool` or `int` result;
+- `fminus --run main ...` calls it in the JIT, as any function. `--run` reads each argument as its parameter's type,
+  a `bool`, `int`, `float` or `double` in any mix (or an array, `1,2,3`, for a pointer), and prints a `float`,
+  `double`, `bool` or `int` result, through the thunk a host's `Program::call` uses
+  ([extending.md](extending.md), recipe 36);
 - a host program finds it with `jit->lookup("main")`, as `float (*)(float)` or `bool (*)(float, float)`;
 - a program without one compiles, runs in the JIT, and emits IR, assembly and objects as before. Only an executable
   needs it.
@@ -88,8 +90,8 @@ them ("Where to go next").
 |---|---|
 | `--emit exe` and no `main` (or only a prototype) | fminus: an executable needs a main function, such as float main(float x) |
 | a `main` with another type, such as `float main(bool b)` or `float main(float4 v)` | fminus: 'main' must return float, double or bool and take only float and double parameters |
-| `--run` of a function with a `bool` parameter | fminus: --run: 'f' takes a parameter of type 'bool'; --run passes floats and doubles only |
-| `--run` of a function of a `float` and a `double` | fminus: --run: 'f' takes floats and doubles; --run passes every argument as one type |
+| `--run` of a function with a `float4` parameter | fminus: --run: 'f' takes a parameter of type 'float4'; --run passes bools, ints, floats, doubles and arrays of ints, floats and doubles only |
+| `--run f 1.5` of `float f(int n)` | fminus: --run: '1.5' is not an int |
 | `--emit exe` without `-o` | fminus: --emit exe: an executable needs a file name (-o) |
 
 ## The commands

@@ -37,7 +37,9 @@ Most of the recipes in [../extending.md](../extending.md) and [../simd.md](../si
 - recipe 34 (2-D arrays, C's arrays of arrays: rows that decay in turn, C's initialiser lists, a bounds check for each
   dimension);
 - recipe 35 (attributes on a module's fields, for the host: C23's after the name, C's string literals as their
-  arguments, FMinus's own checked and any other passed on).
+  arguments, FMinus's own checked and any other passed on);
+- recipe 36 (calling a function by name, for the host: a thunk of each signature, compiled in the JIT, the arguments
+  checked against it and the errors values; `fminus --run` through it).
 
 Their code is in `src/`, and their tests in `tests/`.
 

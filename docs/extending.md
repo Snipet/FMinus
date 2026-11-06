@@ -17,21 +17,23 @@ builds, which stop a call before an index leaves its array. Then one returns to 
 error for each mistake, enumerated types as C has them, and FMinus's first warning, clang's `-Wswitch`. The next adds
 C's `double`, for accumulators and slow state, and decides what an unsuffixed floating constant is when FMinus has two
 floating types. Then one adds C's arrays of arrays, 2-D arrays, with C's initialiser lists for them and a bounds check
-for each dimension. The last is for the host again: attributes on a module's fields, a unit, a label or a range, which
-FMinus passes on to the host, with C's string literals for their arguments. Then the pitfalls those recipes ran into,
-and design notes for what comes next. [simd.md](simd.md) has recipes 7 to 9, for vectors.
+for each dimension. The next is for the host again: attributes on a module's fields, a unit, a label or a range, which
+FMinus passes on to the host, with C's string literals for their arguments. The last is for the host too: calling a
+function by name, its signature learnt as the host runs, through a thunk the JIT compiles for it, its arguments checked
+and its errors values. Then the pitfalls those recipes ran into, and design notes for what comes next.
+[simd.md](simd.md) has recipes 7 to 9, for vectors.
 
 Recipes 1 to 4 are in the compiler now (`tanhf` and `%`; `bool` and its operators; `if`, `while` and `for`), and so are
 simd.md's 7 to 9, recipe 10 (`int`, `void` and pointers), recipe 11 (the heap), recipe 12 (arrays and modules), recipe
 13 (the FFT), recipe 14 (parameters), recipes 15 to 20 (the math modes, knob versioning, TBAA, zero-init elision, the
 runtime's attributes and loop progress, denormal control), recipe 21 (`#include`), recipe 22 (`parallel for` and
-`parallel { }`), recipes 23 and 24 (math kernels of FMinus's own, and inline), recipe 25 (the bitwise operators,
-`hash` and `randf`), recipe 26 (constant tables), recipe 27 (`switch` and `enum`), recipe 28 (constants at the top
-level, and sizes of constant expressions), recipe 29 (the loop budget), recipe 30 (bounds checks), recipe 31 (`#if`
-and `#ifdef`), recipe 32 (one error a mistake, enumerated types, `-Wswitch`), recipe 33 (`double`), recipe 34 (2-D
-arrays) and recipe 35 (field attributes), so their sections describe how the code you have got there: read a section
-beside the files it names. Recipes 5 and 6, a runtime function and a pass, are not part of the language; they live
-in [recipes/](recipes/) as a patch, so you can apply them to see them work. None of these are sketches: each was
+`parallel { }`), recipes 23 and 24 (math kernels of FMinus's own, and inline), recipe 25 (the bitwise operators, `hash`
+and `randf`), recipe 26 (constant tables), recipe 27 (`switch` and `enum`), recipe 28 (constants at the top level, and
+sizes of constant expressions), recipe 29 (the loop budget), recipe 30 (bounds checks), recipe 31 (`#if` and `#ifdef`),
+recipe 32 (one error a mistake, enumerated types, `-Wswitch`), recipe 33 (`double`), recipe 34 (2-D arrays), recipe 35
+(field attributes) and recipe 36 (calls by name), so their sections describe how the code you have got there: read a
+section beside the files it names. Recipes 5 and 6, a runtime function and a pass, are not part of the language; they
+live in [recipes/](recipes/) as a patch, so you can apply them to see them work. None of these are sketches: each was
 applied to this repository, built with `-Werror`, and tested in the dev and asan presets, every test passing.
 [architecture.md](architecture.md) describes the stages they touch.
 
@@ -51,7 +53,7 @@ Most language features touch the same places, in this order:
 | 4 | `src/frontend/Ast.cpp` | its `dump` |
 | 5 | `src/ir/` | its conversions and checks, and its lowering to LLVM IR, in the file its kind belongs to (`Lowering.h` lists them: types, functions, statements, expressions, calls, the math modes, vectors, memory, modules, effects, parallel regions, TBAA, denormals); a load or store of memory gets its type's tag (`tag`, recipe 17); a statement that holds code walks it in `Parallel.cpp`'s `Walker` too |
 | 6 | `src/runtime/` | if it needs C++ at run time, a runtime function (recipe 5); if a builtin calls it, its facts: in `kRuntimeFacts`, through `callRuntime` (recipe 19), or for a math builtin's, in `mathFunction` (`Math.cpp`, recipe 15) |
-| 7 | `tools/fminus/main.cpp`, `src/support/Aot.cpp` | for a new type: whether `--run` can pass and print it (its `switch` over the result type), and whether an executable's `main` may take or return it (`addEntryPoint`) |
+| 7 | `src/jit/Call.cpp`, `src/support/Aot.cpp` | for a new type: whether a call by name, `Program::call` and `--run`, passes and returns it (`callType`'s `switch`, recipe 36), and whether an executable's `main` may take or return it (`addEntryPoint`) |
 | 8 | `tests/` | a dump in `FrontendTest.cpp`; results in `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `SwitchTest.cpp`, `EnumTest.cpp`, `IntTest.cpp`, `BitwiseTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `TableTest.cpp`, `TopLevelTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `HashTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`, `ParallelTest.cpp`, `DoubleTest.cpp`, `Array2DTest.cpp` or `FieldAttributeTest.cpp` (their helpers are in `Compile.h`); IR or errors in `tests/lit/fminus/` |
 | 9 | `examples/` | a program that uses it, and a line in `tests/lit/fminus/examples.test` that runs it |
 | 10 | `editors/vscode/syntaxes/fminus.tmLanguage.json` | a new keyword, type or builtin, so VSCode highlights it (its README says where) |
@@ -61,9 +63,9 @@ Steps 3 to 5 need no searching. Once the node exists, the build fails at every w
 `std::visit` without a matching lambda fails to compile, and a `switch` without the new enumerator trips `-Wswitch`,
 an error under `-Werror`. Fix the errors in order and the feature is wired through. `std::visit` names only the
 first alternative it can't handle, so after you fix one, the next appears. The same goes for step 7's `switch`: when
-recipe 7 added `Float2` to `Bool8`, the build stopped in the driver until `--run` said what to do with a vector, and
-when recipe 10 added `Kind::Pointer`, it stopped in `typeOf`, `typeName` and the driver. Steps 9 and 10 are the ones
-nothing reminds you of.
+recipe 7 added `Float2` to `Bool8`, the build stopped in the driver until `--run` said what to do with a vector (that
+`switch` is `jit::callType`'s now, recipe 36), and when recipe 10 added `Kind::Pointer`, it stopped in `typeOf`,
+`typeName` and the driver. Steps 9 and 10 are the ones nothing reminds you of.
 
 Each feature has an example to read beside its recipe: `examples/comparison/` for `bool` (recipe 3),
 `examples/waveforms/` for every statement (recipes 4 and 27) and a constant of the top level (recipe 28),
@@ -1377,9 +1379,9 @@ they overlap; `pointers.fm` checks both. A `restrict` on a local pointer is acce
 
 **At the C boundary** a pointer is an address in a general register (`x0` to `x7` on AArch64), and an `int` the low
 half of one (`w0` to `w7`), with no attributes needed; floats travel separately, in `s0` to `s7`. So the C++
-function pointer type only has to name the same parameters in the same order. `--run` passes floats (and, since recipe
-33, doubles) only, and refuses an `int` or pointer parameter ("takes a parameter of type 'int'"); it prints an `int`
-result.
+function pointer type only has to name the same parameters in the same order. `--run` passed floats only then, and
+refused an `int` or pointer parameter; it printed an `int` result. Since recipe 36 it passes ints, and arrays for
+pointers, through a thunk of the function's signature.
 
 ### Tests
 
@@ -6231,9 +6233,9 @@ audio thread, or compute them in float.
 A function of doubles is C's to a host: `program->function<double(double)>("seconds", errors)`. A module's double field
 is `"double"` (or `"double[8]"`) in `Module::Field::type`, 8 bytes an element at its offset, and a host that reads
 fields by their type (a trace, an inspector) reads it as C++'s `double`; one that knew only `"float"`, `"int"` and
-`"bool"` finds no match for it, and so never reads it as a float. `fminus --run` passes every argument as a float or
-every one as a double, as the function's parameters are (`--run: 'f' takes floats and doubles; --run passes every
-argument as one type` otherwise), and prints a double as the shortest decimal that reads back as it. An executable's
+`"bool"` finds no match for it, and so never reads it as a float. `fminus --run` passed every argument as a float or
+every one as a double, as the function's parameters were, and refused a mix (recipe 36's thunk passes each as its own
+type), and prints a double as the shortest decimal that reads back as it. An executable's
 `main` may return a double and take doubles beside floats: its C `main` reads them through `fminus_rt_main_double_args`,
 each as its kind says (`strtod` or `strtof`, whose float the double holds exactly), and prints through
 `fminus_rt_main_double_result`; a `main` of floats keeps the functions and the code it had. Both are new runtime
@@ -6644,6 +6646,196 @@ budget or bounds checks has the same, and a field in an `#ifdef DEBUG` group has
   budget) with no trace of them; `field-attributes-errors.fm`: each error once, the scanner's and the parser's, and
   the warning of a program that compiles.
 - `example.meter` (`examples/meter/bench.cpp --check`): the readings' labels and scales, read as a host reads them.
+
+## Recipe 36: calling a function by name, for the host
+
+*In the compiler. Code: `CallType`, `CallSlot`, `Thunk`, `thunkName`, `callThunk` and `callType` (`src/jit/Call.h`,
+`Call.cpp`); `Program::Value`, `Program::Callable`, `Program::CallResult`, `callable` and `call`
+(`include/fminus/FMinus.h`), with `kindOf`, `describeCall`, `mismatch`, `sameLayout`, `slotOf` and `resultOf`
+(`src/api/FMinus.cpp`); `--run`'s `RunArgument`, `readScalar` and `runPasses` (`tools/fminus/main.cpp`). Tests:
+`tests/library/CallTest.cpp` and `tests/unit/CallThunkTest.cpp` (`[call]`), and `tests/lit/fminus/run.fm`.*
+
+A host calls a JIT'd function through a C++ pointer of its type, `function<float(float, float)>("softclip", errors)`,
+a type its own code names when it is built. Some hosts learn the type only as they run: a console that calls the
+function its user names, with the arguments the user typed; a test runner that reads its cases from a file; a tool
+that tries one of a program's functions on values it chooses, as a chat's assistant might. C++ calls a pointer only
+through a type it compiled, so such a host has nothing to call it with, and a pointer of a guessed type that does not
+match the declaration is undefined behaviour. `fminus --run` met the same problem and answered it with templates: one
+instantiation of the call for each count of arguments up to 8, of floats or of doubles. That cannot grow to four
+scalar types and pointers in any order (five types in each of 8 places is 390,625 parameter lists). This recipe compiles
+the call instead, one small function for each function a host calls, and gives the host an API that checks its arguments
+against the declaration and returns the result, or what went wrong, as a value:
+
+```cpp
+using Value = fminus::Program::Value;
+std::string errors;
+const fminus::Program::Callable* softclip = program->callable("softclip", errors);   // nullptr: errors says why
+fminus::Program::CallResult result = program->call(*softclip, {Value::of(0.5f), Value::of(4.0f)});
+if (result.ok())
+    show(result.value.number);   // 0.6666667, the float it returned, as a double
+else
+    show(result.error);          // with Value::of(4): "argument 2 of 'softclip' is 'int', not 'float' (its
+                                 // parameter 'drive')"
+```
+
+### The thunk: one C++ type for every signature
+
+`jit::callThunk` compiles, for a function such as `float softclip(float x, float drive)`, a function of one C++ type,
+`void(const CallSlot* arguments, CallSlot* result)`. A `CallSlot` is 8 bytes aligned to 8, with the value at its start
+in its own type: a bool a byte, an int 4 bytes, a float 4, a double and a pointer 8. The thunk loads each argument from
+its slot as the function's parameter type, calls the function, and stores the result in the result's slot. In outline,
+in LLVM IR:
+
+```llvm
+define void @"fminus.call.softclip"(ptr noalias %arguments, ptr noalias %result) {
+entry:
+  %slot = getelementptr inbounds i8, ptr %arguments, i64 0
+  %arg = load float, ptr %slot, align 8
+  %slot1 = getelementptr inbounds i8, ptr %arguments, i64 8
+  %arg2 = load float, ptr %slot1, align 8
+  %0 = call float @softclip(float %arg, float %arg2)
+  store float %0, ptr %result, align 8
+  ret void
+}
+declare float @softclip(float, float)
+```
+
+The call is LLVM's to lower, so the target's calling convention is LLVM's to get right: AAPCS64 and Apple's variant of
+it on arm64, System V's and Windows' on x86-64, which register each argument takes (System V and AAPCS64 count general
+and vector registers apart, Windows by position), and which go on the stack once those run out (Apple's packs them by
+size). A bool is the one type whose declaration says more than its IR type: the code generator declares one `zeroext`
+(recipe 3), as clang does, so the thunk declares and calls the function the same way, and reads the byte in its slot as
+`!= 0`, as C++ reads a bool, so a slot whose other bytes hold anything still passes 0 or 1. A bool result goes back as a
+byte, 0 or 1.
+
+The thunk is a module of its own (`thunkName`'s `fminus.call.` and the function's name, which no FMinus name can be),
+added to the program's JIT beside the program's module, rather than a function in that module. So the program's code and
+its IR are what they were: `optimisedIr()` is still the text `fminus --emit ll` prints, a host that never calls by name
+compiles no thunk, and a host that calls one function pays for one thunk, the first time (1.5 to 2.5 ms on an M5, LLVM's
+pipeline and code generator on a module of one function). `callThunk` looks nothing up itself: its callers look the
+function up first, so that the function's own module is compiled and found, and the thunk's reference to it resolves
+when the thunk links. A second thunk of one function in one JIT is LLVM's duplicate definition, which
+`Program::callable` avoids by compiling each once, under the Program's lock, and keeping it.
+
+`jit::callType` says how a thunk passes each of FMinus's types: `Void` (a result only), `Bool`, `Int`, `Float`,
+`Double` and `Pointer`, an enumerated type's as its `int` or `bool`, and nothing for a vector, a `poly` type, a module
+or an array. Its `switch` has no `default:`, so a new `Kind` stops the build there until it says how it crosses, the
+role the driver's `switch` over `--run`'s result type had (step 7 of the table above).
+
+### What a host sees: `Value`, `Callable`, `CallResult`
+
+A `Program::Value` is an argument or a result: a `kind` (`Void`, `Bool`, `Int`, `Float`, `Double` or `Pointer`), a
+`number` for a scalar (a double holds each of the four exactly), and for a pointer its address, its elements' kind, the
+module whose instances it points to, and whether the function may only read through it. The host makes one with
+`Value::of(0.5f)`, `of(2)`, `of(true)` or `of(0.5)`, `Value::array(buffer)` (an `int*`, `float*` or `double*`, or its
+`const` one) and `Value::instance(memory, module)`; `of` of a pointer is deleted, since C++ would otherwise convert it
+to a bool.
+
+`callable(name, errors)` gives the function as a `Callable`: its `name`, its module if it is a method, its `result` and
+`resultType`, and each parameter's `name`, `type` as FMinus writes it (`"const float *"`), `kind`, and for a pointer its
+`element`, `module` and `readOnly`. `compile()` describes every function the program declares (`describeCall`), and
+`callable()` compiles the thunk the first time it is asked for one. A function that takes or returns a type no thunk
+passes, or a pointer to a vector or to rows, or that returns a pointer, has no `Callable`, and the error says which type
+("'broadcast' returns 'float4'; call() returns nothing, or a bool, an int, a float or a double"). Nor does a function
+the program only declares, `float atanf(float x);`: it is the C library's, not the program's, and LLJIT's `lookup`
+looks in the program's own `JITDylib`, not in the process its prototypes link to.
+
+`call(callable, arguments)` checks the arguments (`mismatch`), packs them into slots (`slotOf`: on the stack, past 16 on
+the heap), calls the thunk, and returns a `CallResult`: its `status`, the `value` the function returned, and the
+`error`, one line in FMinus's words, empty when the status is `Ok`. `call(name, arguments)` looks the `Callable` up
+first.
+
+### What `call()` checks
+
+| The host passes | For a parameter of type | What `call()` does |
+|---|---|---|
+| the wrong number of arguments | | `Mismatch`: "'softclip' takes 2 arguments, not 1" |
+| a `Value` of another kind: `of(2)` | `float` | `Mismatch`: "argument 2 of 'softclip' is 'int', not 'float' (its parameter 'drive')". `call()` converts nothing: a host whose numbers are all doubles (a JSON tool's) converts each with `Value::scalar(param.kind, number)`, as `setValue` converts a parameter's value |
+| `array(const float*)` | `float *` | `Mismatch`: "is 'const float *', not 'float *'", C's "discards qualifiers". A `float*` for a `const float *` is fine |
+| `array(int*)` | `float *` | `Mismatch`: "is 'int *', not 'float *'" |
+| any pointer | `void *`, `const void *` | taken, as C converts it (a `const` one only for a `const void *`) |
+| `instance(memory, module)` of a module laid out alike (`sameLayout`: its name, size, alignment, and fields' names, types and offsets) | `Osc *` | taken, though `module` is another Program's (a host that compiled the same source twice) |
+| an instance of another `Osc`, laid out differently (another program's, or an `#ifdef DEBUG` field) | `Osc *` | `Mismatch`: "is an instance of a module 'Osc' laid out differently from this program's (another program's)" |
+| a null instance | a method's `this` | `Mismatch`: "is a null 'Osc *': a method runs on an instance". Another pointer may be null, as in C |
+| a pointer not aligned to its elements (4 bytes for an `int` or a `float`, 8 for a `double`, the module's alignment for an instance) | | `Mismatch`: "is not aligned to 4 bytes, as a 'float *' must be". The function's loads assume the alignment, as C's do |
+| a `Callable` of another Program's | | `Mismatch`: "'softclip' is not a Callable of this program's: callable() gives them" |
+
+An extent is not checked, nor passed: C passes none, a parameter written `float x[16]` is a `float*` whose size C
+checks and then ignores, and bounds checks see no host's buffer (recipe 30). A function that is passed a buffer is
+passed its length, as C's are; the host makes the buffer that long.
+
+### Where the call runs
+
+`call()` runs the function on the calling thread, any thread, and several threads may call at once: the thunk is a
+plain call, and what `call()` adds is a compare for each argument, the slots, and two loads after the call (the bounds
+record and the loop budget's flag). On an M5, with other builds running, a call of `softclip` through its `Callable`
+took about 15 ns, against 1 ns through its pointer, and `call(name, ...)`, which finds the `Callable` in a map each
+time, about 28 ns. It
+allocates only when it fails (the message) or for more than 16 arguments, and takes no lock; `callable()` takes the
+Program's lock and allocates, and compiles the thunk the first time, so it runs off the audio thread, as a function's
+first look-up does.
+
+A method runs on an instance, its `this`: an instance the host made as `Module` says (zeroed, aligned, its parameters
+set with `setDefaults` and `setValue`), and what the method changes stays in it for the next call, by name or through
+a pointer. Two threads that call methods at once give each its own instance, as with any C++ call. A function that is
+no method runs on its arguments and what they point to: FMinus has no variables outside functions but its constants.
+
+### The safety options
+
+A call by name is a call: in a program compiled with the loop budget it counts against the budget, and one that runs
+out returns early, `Status::OutOfBudget`, with `loopBudgetExceeded()` set and the value it returned early (0); with
+bounds checks, a check that fails stops it, `Status::OutOfBounds`, and the error is the record's message
+("'tap' stopped: program.fm:17:16: index 4 out of bounds for 'taps' of type 'float[4]'"), a 2-D array's dimension by
+dimension. The bounds record is read first, since a check that failed is why a call that also ran out stopped where it
+did. Each status is the Program's state after the call, so a host sets the budget and clears the record before each
+call, as for a call through a pointer, and re-initialises an instance a stopped call ran on.
+
+### `--run`
+
+`fminus --run` calls through the same thunk (`callThunk`, after its own look-up of the function), so it passes what
+`call()` passes from a command line: each argument read as its parameter's type, as CLI11 reads one (`true`, `0`, `-3`,
+`0.5`), in any mix and number, and for a pointer to an int, a float or a double an array, its elements separated by
+commas (`1,-2,0.5`), which it prints after the call when the function may have written to it:
+
+```bash
+$ fminus run.fm --run scale 1,-2,0.5 3 2
+x = {2, -4, 1}
+```
+
+A function of no result runs and prints its arrays. A module's instance is a host's to make, so `--run` refuses an
+`Osc *` parameter, and a method; "--run: '1.5' is not an int" and "'x' is not a float, an element of the array '1,x'"
+say which argument it could not read. What it prints for a float or a double is as before, the shortest decimal that
+reads back as it.
+
+### What it changes for programs and hosts
+
+- **Programs** compile to the same IR and the same code. The thunks are modules of their own, made only when a host
+  calls by name.
+- **Messages**: `--run` passes ints, bools, mixed types, more than 8 arguments and arrays, so its refusals of them are
+  gone; its refusals of the types it does not pass name the ones it does ("--run passes bools, ints, floats, doubles
+  and arrays of ints, floats and doubles only"; "--run prints bools, ints, floats and doubles only").
+- **Hosts** get `Program::Value`, `Callable`, `CallResult`, `callable()` and `call()`, all additions: every member that
+  was there is as it was.
+
+### Tests
+
+- `tests/library/CallTest.cpp`: each scalar type and a mix, bit for bit as the function's own pointer computes them;
+  twenty arguments of the four types (on the stack, and in heap slots); arrays written and read, `void*` taking any
+  pointer, and a `const` array, another element type and a misaligned pointer refused; a method on the host's
+  instance, which keeps its state and reads a knob the host sets, through a function's `Osc *` too, a null instance,
+  another program's of the same layout taken, of another layout or module refused; the `Callable`s' descriptions; each
+  error as a status and a message (no function, a builtin, a prototype alone, a vector, a pointer result, a pointer to a
+  vector, the count, a type, a `Callable` of another program's); `Value::scalar`'s conversions; the loop budget and
+  bounds checks stopping a call (a double in a budgeted loop, a 2-D array's dimension), and a call after the record
+  is cleared; four threads calling one `Callable` on instances of their own, and asking `callable()` for it at once;
+  the IR kept as text unchanged by a call, and an `#ifdef`'s function.
+- `tests/unit/CallThunkTest.cpp`: each type in its slot and back, a bool's byte read as C++ reads one whatever its
+  other bytes hold, a bool result as 0 or 1, twelve arguments past the vector registers, a second thunk's error, and
+  `callType`'s map.
+- `tests/lit/fminus/run.fm`: `--run` of a mix of a float, an int and a bool, of arrays written (printed) and read (not
+  printed), of a function of no result, of twelve arguments, with bounds checks and the loop budget, and its refusals;
+  `int.fm`, `double.fm` and `main.fm`: `--run` of ints, of a double beside a float, and of a bool, which it refused
+  before; `simd.fm` and `poly.fm`: its refusals of vectors, reworded.
 
 ## Pitfalls
 

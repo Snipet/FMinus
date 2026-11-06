@@ -88,7 +88,8 @@ src/                    the fminus library: every .cpp is a source, every gramma
                         constants), Calls, Math (the math modes), Hash
                         (hash and randf), Vectors, Memory, Modules, Effects, Tbaa (strict aliasing's tags),
                         Denormals (flush-to-zero; with Denormals.h) and Bounds (bounds checks) .cpp
-  jit/                  Jit: LLJIT for FMinus modules (host CPU, pipeline, runtime)
+  jit/                  Jit: LLJIT for FMinus modules (host CPU, pipeline, runtime); Call: the thunks that call a
+                        function by its signature (Program::call, fminus --run)
   opt/                  FMinus's own LLVM passes: KnobVersioning (a method's copies for its knobs' values),
                         ZeroInitElision (a local's zeroing, removed where nothing reads it), MathKernels (the
                         math builtins' kernels, inline), BoundsCheck (a failed bounds check made a return) and
@@ -477,6 +478,8 @@ build-dev/bin/fminus chain.fm --emit ast           # the syntax tree, as s-expre
 build-dev/bin/fminus chain.fm --emit asm -o -      # this machine's assembly (--emit obj: an object file)
 build-dev/bin/fminus chain.fm --run chain 1        # JIT-compiles, calls chain(1), prints 0.33333334
 build-dev/bin/fminus clock.fm --run seconds 48000  # a function of doubles: --run passes and prints them
+build-dev/bin/fminus mix.fm --run blend 0.5 3 true # bools, ints, floats and doubles, in any mix and number
+build-dev/bin/fminus dsp.fm --run scale 1,-2,0.5 3 2   # an array for a pointer, printed after the call: x = {2, -4, 1}
 build-dev/bin/fminus note.fm --emit exe -o note    # an executable that runs main: ./note 69 prints 440
 build-dev/bin/fminus unison.fm --poly-lanes 16     # compile as for a machine with 16-float vectors (AVX-512)
 build-dev/bin/fminus lp.fm --stream Lowpass::cutoff --freeze Lowpass::mode=2   # parameters: a stream, a constant
@@ -566,7 +569,8 @@ gain(in, out, n, 0.5f);                                       // one call a bloc
 - **Types.** A function's C++ type is its FMinus declaration's C type: `float`, `int`, `bool`, `void`, pointers, and
   `float2` and `float4` as clang's `ext_vector_type`. The C ABI passes a `float8`, and a `poly float` of 8 lanes or
   more, through memory, and FMinus in registers, so keep those inside FMinus. Nothing is checked at the boundary: a
-  signature that does not match the declaration is undefined behaviour. The header has the table.
+  signature that does not match the declaration is undefined behaviour (a host that learns a signature only as it
+  runs calls by name instead, below). The header has the table.
 - **Options.** `Program::Options` sets the optimisation level (`-O2` by default, as for `fminus`), a `poly float`'s
   lanes (this machine's by default, which `polyLanes()` reports), and the file name the errors give. `include` is
   where `#include "name"` finds its file: a function from the name and the including file's name to the file's name
@@ -658,7 +662,22 @@ gain(in, out, n, 0.5f);                                       // one call a bloc
   language service, or its own `#pragma` lines) sees every directive as a line that starts with `#`, and the lines of
   the groups FMinus skips too: it reads both branches, or skips the groups its own defines skip
   ([docs/extending.md](docs/extending.md), recipe 31).
-- **Lifetime.** A function pointer is valid while its `Program` lives.
+- **Calls by name.** A host that learns a function's signature only as it runs (a console that calls the function
+  its user names, a test runner, a tool that tries a program's function) calls it by name: `callable(name, errors)`
+  gives a `Callable`, its parameters and result as values (each parameter's name, its type as FMinus writes it, its
+  `kind`, and for a pointer what it points to), and `call(callable, {Value::of(0.5f), Value::of(3)})` checks the
+  arguments against them and calls the function on the calling thread, returning a `CallResult`: a `status`, the
+  `value` it returned, and the `error`, one line in FMinus's words. A wrong name, a type `call()` does not pass, the
+  wrong number of arguments, an argument of another type (it converts nothing: `Value::scalar(kind, number)` does, as
+  `setValue` would), a `const` array for a pointer the function writes through, a null or misaligned instance: each
+  is a status and a message, never undefined behaviour. It passes `bool`, `int`, `float` and `double`, and pointers to
+  the host's memory (`Value::array(buffer)`, `Value::instance(memory, module)` for a method's `this` or an `Osc*`), and
+  returns a scalar or nothing. The first `callable()` of a function compiles a thunk, a few instructions that load
+  each argument as its parameter's type and call the function as C does (about 2 ms; it allocates, so off the audio
+  thread); a `call()` then adds about 15 ns to the function, and no lock. The loop budget and bounds checks stop a
+  call as any, and say so (`OutOfBudget`, `OutOfBounds`): set the budget and clear the record before each call
+  ([docs/extending.md](docs/extending.md), recipe 36).
+- **Lifetime.** A function pointer, and a `Callable`, is valid while its `Program` lives.
 
 `include/fminus/Circuit.h` is the circuit compiler's: `fminus::circuit::generate(netlist, "pedal.cir")` turns a
 SPICE-style netlist into the text of one FMinus module, which `Program::compile` compiles like any other source, its

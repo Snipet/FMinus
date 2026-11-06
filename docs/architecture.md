@@ -521,6 +521,15 @@ C keeps the enumerated type, and `lowerSwitch` reads it for clang's `-Wswitch`, 
 Compilation is lazy: it runs the first time a symbol is looked up. In a plugin, look up on a background thread and
 hand the pointer to the audio thread.
 
+**Calls by signature** (`jit/Call.h`). A function whose signature the caller learns only as it runs is called through
+a thunk: `callThunk(jit, name, result, parameters)` adds a module of one function, `fminus.call.<name>`, of the C++
+type `void(const CallSlot* arguments, CallSlot* result)`, which loads each argument from its 8-byte slot as the
+function's parameter type (a `CallType`: bool, int, float, double or pointer), calls the function as C does, and
+stores the result. LLVM lowers the call, so every target's calling convention is its own to get right, and the
+program's module is untouched. `callType` maps FMinus's types to what a thunk passes, its `switch` over every `Kind`
+with no `default:`. `Program::callable` and `call` (the public API, below) and `fminus --run` call through thunks
+([extending.md](extending.md), recipe 36).
+
 **The IR as text** (`Program::Options::keepIr`). A host that shows what FMinus made of a program asks `Program::compile`
 to keep its IR, printed as LLVM prints a module: as `ir::lower` wrote it, after `prepareModule` (`loweredIr()`), and
 optimised (`optimisedIr()`). To print the optimised module, `compile` makes the calls `fminus --emit ll` makes,
@@ -595,7 +604,7 @@ Because the JIT and executables share one runtime, the two compile the same prog
 
 | Target | Source | Uses |
 |---|---|---|
-| `fminus` | `tools/fminus/main.cpp` | parse, lower, then `--emit ast/ll/asm/obj/exe` or `--run` in the JIT; a `.cir` input, or an `#include` of one, is the text `fminus::circuit::generate` writes (`--emit fm` prints it; `--self-test` runs `fminus::circuit::selfTest` first, on `--threads` threads); FMinus's messages on that text are re-cited at the netlist's lines |
+| `fminus` | `tools/fminus/main.cpp` | parse, lower, then `--emit ast/ll/asm/obj/exe` or `--run` in the JIT (through a thunk of the function's signature, `jit/Call.h`); a `.cir` input, or an `#include` of one, is the text `fminus::circuit::generate` writes (`--emit fm` prints it; `--self-test` runs `fminus::circuit::selfTest` first, on `--threads` threads); FMinus's messages on that text are re-cited at the netlist's lines |
 | `fminus-build` | `tools/fminus-build/main.cpp` | LLVM IR to exe/obj/asm/ll (HostTarget + Aot) |
 | `fminus-hostinfo` | `tools/fminus-hostinfo/main.cpp` | the triple, CPU, features and data layout the JIT targets |
 | `example-biquad` | `examples/biquad/bench.cpp` | biquad.fm's module, its cutoff a stream, against C++, compared and timed, through `fminus::Program` |
@@ -624,9 +633,10 @@ Because the JIT and executables share one runtime, the two compile the same prog
 
 `include/fminus/FMinus.h` is the public API: `fminus::Program` compiles a source (parse, lower for the machine's
 `poly float` width, add the module to a `jit::Jit`), looks its functions up as C function pointers, and says which are
-marked `nonblocking` or `nonallocating`; it describes each module, its fields' attributes among them, and its
-parameters, sets a parameter's value or
-stream in an instance, and keeps the program's IR as text when the host asks (`Options::keepIr`). `fminus::math`
+marked `nonblocking` or `nonallocating`; it calls a function by name, its signature as values, its arguments checked
+and its errors values (`callable`, `call`: a thunk from `jit/Call.h`); it describes each module, its fields'
+attributes among them, and its parameters, sets a parameter's value or stream in an instance, and keeps the program's
+IR as text when the host asks (`Options::keepIr`). `fminus::math`
 gives C++ the math builtins as the default math mode computes them. It has no LLVM in it and needs C++17, so
 `FMinus::FMinus` gives its users neither LLVM's include directories and definitions nor FMinus's C++23
 (`fminus_target_defaults` makes a target's standard its own), only the libraries to link. The tree's tools, examples
