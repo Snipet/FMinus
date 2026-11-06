@@ -1,11 +1,13 @@
 // tests/library/FieldAttributeTest.cpp: a field's attributes as a host reads them (C++17, FMinus::FMinus alone):
 // Module::Field::attributes and Parameter::attributes, in order, each with its name as written and its arguments,
-// numbers (their values, and their spellings) and strings (their escapes resolved, UTF-8 kept); findAttribute, the
-// last of a name; the same under the loop budget, bounds checks and #if, which leave a field's attributes alone.
+// numbers (their values, and their spellings) and strings (their escapes resolved, UTF-8 kept), and none FMinus
+// ignored with a warning; findAttribute, the last of a name; the same under the loop budget, bounds checks and #if,
+// which leave a field's attributes alone.
 #include "fminus/FMinus.h"
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <cmath>
 #include <map>
 #include <memory>
 #include <string>
@@ -133,6 +135,26 @@ namespace
 TEST_CASE("a host reads a field's attributes: names, numbers and strings, in order", "[library][fieldattr]")
 {
     checkMeter({}, false);
+
+    // A name without a namespace that C23 does not have, FMinus ignores with clang's warning, and the host never sees:
+    // `range` here gives the parameter no range. C's standard attributes, and every namespace's, are passed on.
+    std::string errors;
+    const std::unique_ptr<Program> program = Program::compile(
+        "module M { param float cutoff [[range(20, 20000)]] [[ui::unit(\"Hz\")]] [[deprecated]] [[ui::step(-0)]]; };",
+        errors);
+    REQUIRE(program);
+    CHECK(errors.empty());
+    CHECK(program->warnings()
+          == "program.fm:1:33: warning: unknown attribute 'range' ignored [-Wunknown-attributes]\n"
+             "program.fm:1:33: note: did you mean 'fminus::range'?\n");
+    const Program::Parameter* cutoff = program->parameter("M::cutoff");
+    REQUIRE(cutoff != nullptr);
+    CHECK(namesOf(cutoff->attributes) == std::vector<std::string>{"ui::unit", "deprecated", "ui::step"});
+    CHECK(namesOf(program->module("M")->fields.at(0).attributes) == namesOf(cutoff->attributes));
+    CHECK(!cutoff->minimum);
+    CHECK(!cutoff->maximum);
+    // -0 is the integer 0, as C reads it, with no sign.
+    CHECK(!std::signbit(Program::findAttribute(cutoff->attributes, "ui::step")->arguments.at(0).number));
 }
 
 TEST_CASE("the loop budget, bounds checks and #if leave a field's attributes as written", "[library][fieldattr]")

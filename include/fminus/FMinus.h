@@ -272,8 +272,9 @@ namespace fminus
         // The program's warnings, one a line as clang prints them, each naming its flag, notes included
         // (`program.fm:7:13: warning: enumeration value 'TRIANGLE' not handled in switch [-Wswitch]`); empty when it
         // has none. A warning is about a program that compiles, and runs as written: a host may show it beside the
-        // program. FMinus's one warning is clang's -Wswitch, a switch without a default on a value of an enumerated
-        // type that misses some of its constants.
+        // program. FMinus's warnings are clang's -Wswitch, a switch without a default on a value of an enumerated
+        // type that misses some of its constants, and -Wunknown-attributes, a field's or a parameter's attribute
+        // without a namespace that C23 does not have, which FMinus ignores (Attribute, below).
         const std::string& warnings() const;
 
         // The program's LLVM IR as the code generator wrote it, as text, when Options::keepIr kept it (Lowered or
@@ -298,7 +299,9 @@ namespace fminus
         // fminus::range (a parameter's, or a field's of numbers) and fminus::default (a parameter's), and a clang::
         // one, a function's, is refused on a field. Every other is the host's, passed on as written for the host to
         // decide what it means, a unit, a label or a display hint: FMinus checks only that its numbers are numbers
-        // (docs/extending.md, recipe 35).
+        // (docs/extending.md, recipe 35). One exception: a name without a namespace that is none of C23's standard
+        // attributes (deprecated, maybe_unused and the rest), `[[range(0, 1)]]`, is ignored with clang's warning
+        // (warnings()), and is in no list a host reads. Name a host's attributes in a namespace of its own.
         struct Attribute
         {
             // An argument: a number, or a string literal (C's, its escapes resolved, adjacent ones joined).
@@ -332,6 +335,7 @@ namespace fminus
             std::optional<double> maximum;        // FMinus neither clamps to it nor checks it
             std::optional<double> defaultValue;   // fminus::default(value): what setDefaults sets
             std::vector<Attribute> attributes = {};   // all of them, in order, these two too: `[[ui::unit("Hz")]]`
+                                                      // (but none FMinus ignored: Attribute)
         };
 
         // A module of the program (FMinus's class), as a host sees it. An instance is `size` bytes, aligned to
@@ -359,7 +363,7 @@ namespace fminus
                 // (docs/extending.md, recipe 34).
                 std::vector<std::size_t> extents = {};
                 // Its attributes, in order: `float level [[ui::unit("dB")]];`'s, a parameter's (its Parameter has them
-                // too). Empty for a field that has none.
+                // too), but none FMinus ignored (Attribute). Empty for a field that has none.
                 std::vector<Attribute> attributes = {};
             };
 

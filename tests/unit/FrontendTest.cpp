@@ -1,8 +1,11 @@
 // tests/unit/FrontendTest.cpp: FMinus v0's scanner and parser (src/frontend/), through the syntax tree's dump.
 #include "frontend/Frontend.h"
+#include "frontend/Parser.tab.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
+#include <cctype>
 #include <string>
 #include <string_view>
 
@@ -514,6 +517,24 @@ TEST_CASE("attributes follow a field's name, as C23 writes them, and take number
     CHECK(parsed(R"fm(module M { float x [[ui::text("q\"b\\s\n\t\x41\101\u00B5\U0001F600\1\a\?\'")]]; };)fm")
           == "(module M\n"
              "  (field float x [[ui::text(\"q\\\"b\\\\s\\n\\tAA\xC2\xB5\xF0\x9F\x98\x80\\001\\007?'\")]]))\n");
+
+    // An attribute's namespace and name are identifiers, and C23 reads a keyword there as one: each of the parser's
+    // tokens that is spelt as an identifier (its keywords, a new one's too), then a vector type and a module's name,
+    // which the scanner makes types.
+    using fminus::frontend::Parser;
+    for (int kind = 0; kind < Parser::YYNTOKENS; ++kind)
+    {
+        const std::string word = Parser::symbol_name(static_cast<Parser::symbol_kind_type>(kind));
+        const auto wordChar = [](char c) { return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_'; };
+        if (std::isalpha(static_cast<unsigned char>(word.front())) == 0 || !std::ranges::all_of(word, wordChar))
+            continue;
+        const std::string attributes = "[[" + word + "::" + word + "(1)]] [[ui::" + word + "]] [[" + word + "]]";
+        CHECK(parsed("module M { float x " + attributes + "; };")
+              == "(module M\n  (field float x " + attributes + "))\n");
+    }
+    CHECK(parsed("module meter { float v; };\nmodule M { float x [[meter::label(\"x\")]] [[float4::meter]]; };\n")
+          == "(module meter\n  (field float v))\n"
+             "(module M\n  (field float x [[meter::label(\"x\")]] [[float4::meter]]))\n");
 }
 
 TEST_CASE("errors print in source order, each with its notes after it", "[frontend]")
@@ -555,7 +576,7 @@ TEST_CASE("syntax and scanner errors carry their locations", "[frontend]")
           == "test.fm:1:29: error: 'ui::label' attribute cannot be applied to types: the attributes of 'taps' go after "
              "its name, before its size\n");
     CHECK(parsed("module M { float x [[\"dB\"]]; };")
-          == "test.fm:1:22: error: syntax error, unexpected string literal, expecting identifier\n");
+          == "test.fm:1:22: error: syntax error, unexpected string literal\n");
     // Bison lists what it expected only when that is at most four tokens, and a function can start in eight ways.
     CHECK(parsed("fn f(x: float) -> float { return x; }")
           == "test.fm:1:1: error: syntax error, unexpected identifier\n");

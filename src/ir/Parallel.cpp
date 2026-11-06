@@ -679,6 +679,8 @@ namespace fminus::ir::detail
         const ast::DeclStmt* counter =
             loop.init.size() == 1 ? std::get_if<ast::DeclStmt>(&loop.init[0].node) : nullptr;
         const std::string name = counter != nullptr ? counter->name : "";
+        if (counter != nullptr)
+            refuseAttributes(*counter);   // a local's, bound here rather than by declareVariable
         if (counter == nullptr || counter->init == nullptr || counter->hasList)
             error(location, std::string("a parallel for declares the int it counts with, and where it starts: ") + form);
         else if (counter->type != ast::Type::Int)

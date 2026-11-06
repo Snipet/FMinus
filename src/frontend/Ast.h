@@ -12,6 +12,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <variant>
 #include <vector>
 
@@ -883,7 +884,7 @@ namespace fminus::ast
     std::string typeName(Type type);
 
     // An attribute's argument as a number, as C writes one: an integer (0x1F, 010, 12, -3) or a floating constant
-    // (1e3, 0.5f). Nothing for anything else.
+    // (1e3, 0.5f). Nothing for anything else, an integer too large for any of C's integer types among it.
     std::optional<double> attributeNumber(std::string spelling);
 
     // An attribute's argument as a number: nothing for a string, even "12".
@@ -891,6 +892,13 @@ namespace fminus::ast
     {
         return arg.isString ? std::nullopt : attributeNumber(arg.text);
     }
+
+    // Whether an attribute is one FMinus ignores, as clang ignores one it does not know: a name without a namespace
+    // that is none of C23's standard attributes (deprecated, fallthrough, maybe_unused, nodiscard, noreturn,
+    // reproducible and unsequenced, each also written __name__). C keeps the names without a namespace for its
+    // standard, so none is a host's: the code generator warns of one, clang's -Wunknown-attributes, and the host never
+    // sees it (fminus::Program::Attribute).
+    bool isIgnoredAttribute(std::string_view name);
 
     // The tree as s-expressions, one function after another, for `fminus --emit ast` and tests:
     //     (function float gain ((float x) (const float g))

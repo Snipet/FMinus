@@ -476,7 +476,7 @@ namespace fminus::ir::detail
         void layOut(const ast::Module& module, std::size_t& enums);
         ast::Type fieldType(const ast::Field& field) const;
         void checkParameter(const ast::Module& module, const ast::Field& field);
-        void checkAttributes(const ast::Field& field);
+        void checkAttributes(const ast::Field& field, ast::Type type, bool refused);
         llvm::Type* slotTypeOf(ast::Type type);
         ParamBinding bindingOf(const ast::Module& module, const ast::Field& field) const;
         std::optional<unsigned> parameterOf(const ast::Expr& base) const;

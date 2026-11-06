@@ -8,7 +8,8 @@
 //     parameter    : "param" type IDENTIFIER attributes ";"                     a field the host sets
 //     method       : "const"? type pointer IDENTIFIER "(" params ")" attributes block
 //     attributes   : ("[" "[" attribute ("," attribute)* "]" "]")*
-//     attribute    : IDENTIFIER ("::" (IDENTIFIER | "default"))? ("(" attribute_arg ("," attribute_arg)* ")")?
+//     attribute    : attribute_word ("::" attribute_word)? ("(" attribute_arg ("," attribute_arg)* ")")?
+//     attribute_word: IDENTIFIER | MODULE_NAME | a keyword                  C23 reads a keyword there as a name
 //     attribute_arg: "-"? NUMBER | STRING+                 a number, or a string (C's adjacent literals are one)
 //     params       : (param ("," param)*)? | "void"                                  (void) is none, as in C
 //     param        : "const"? type pointer IDENTIFIER? | "const"? type IDENTIFIER array_sizes       a pointer
@@ -726,17 +727,47 @@ attribute_list
     ;
 
 attribute
-    : IDENTIFIER "::" attribute_word        { $$ = ast::Attribute{at(@1), $1 + "::" + $3, {}}; }
-    | IDENTIFIER                            { $$ = ast::Attribute{at(@1), $1, {}}; }
-    | IDENTIFIER "::" attribute_word "(" attribute_args ")"
+    : attribute_word "::" attribute_word    { $$ = ast::Attribute{at(@1), $1 + "::" + $3, {}}; }
+    | attribute_word                        { $$ = ast::Attribute{at(@1), $1, {}}; }
+    | attribute_word "::" attribute_word "(" attribute_args ")"
                                             { $$ = ast::Attribute{at(@1), $1 + "::" + $3, $5}; }
-    | IDENTIFIER "(" attribute_args ")"     { $$ = ast::Attribute{at(@1), $1, $3}; }
+    | attribute_word "(" attribute_args ")" { $$ = ast::Attribute{at(@1), $1, $3}; }
     ;
 
-// A keyword in an attribute is an identifier, as C23 and C++ read one there ([[gnu::const]]): fminus::default.
+// An attribute's namespace and its name: an identifier, which may be a module's name, as `[[meter::label("Peak")]]`'s
+// is in a program with a module meter, or a keyword, which C23 reads there as an identifier: `fminus::default`,
+// `[[ui::enum("a", "b")]]`, `[[gnu::const]]`. Every token the scanner makes of an identifier's spelling is here
+// (FrontendTest checks each keyword of the parser's tokens): the type words, the statements' and FMinus's own.
 attribute_word
     : IDENTIFIER                            { $$ = $1; }
+    | MODULE_NAME                           { const ast::Type type = $1; $$ = type.module->name; }
+    | VECTOR_TYPE                           { $$ = ast::typeName($1); }
+    | "float"                               { $$ = "float"; }
+    | "double"                              { $$ = "double"; }
+    | "bool"                                { $$ = "bool"; }
+    | "int"                                 { $$ = "int"; }
+    | "void"                                { $$ = "void"; }
+    | "const"                               { $$ = "const"; }
+    | "restrict"                            { $$ = "restrict"; }
+    | "sizeof"                              { $$ = "sizeof"; }
+    | "true"                                { $$ = "true"; }
+    | "false"                               { $$ = "false"; }
+    | "return"                              { $$ = "return"; }
+    | "if"                                  { $$ = "if"; }
+    | "else"                                { $$ = "else"; }
+    | "while"                               { $$ = "while"; }
+    | "for"                                 { $$ = "for"; }
+    | "break"                               { $$ = "break"; }
+    | "continue"                            { $$ = "continue"; }
+    | "switch"                              { $$ = "switch"; }
+    | "case"                                { $$ = "case"; }
     | "default"                             { $$ = "default"; }
+    | "enum"                                { $$ = "enum"; }
+    | "parallel"                            { $$ = "parallel"; }
+    | "poly"                                { $$ = "poly"; }
+    | "module"                              { $$ = "module"; }
+    | "this"                                { $$ = "this"; }
+    | "param"                               { $$ = "param"; }
     ;
 
 // An attribute's arguments: numbers, a minus before any of them, and strings (C23's balanced tokens, of which FMinus

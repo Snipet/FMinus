@@ -88,12 +88,14 @@ namespace fminus
         }
 
         // A field's attributes as the host sees them, its numbers' values worked out (the code generator has checked
-        // that each is one).
+        // that each is one), without those FMinus ignored with a warning (`[[range(0, 1)]]`, no namespace's).
         std::vector<Program::Attribute> attributesOf(const ast::Field& field)
         {
             std::vector<Program::Attribute> attributes;
             for (const ast::Attribute& written : field.attributes)
             {
+                if (ast::isIgnoredAttribute(written.name))
+                    continue;
                 Program::Attribute& attribute = attributes.emplace_back();
                 attribute.name = written.name;
                 for (const ast::AttributeArg& arg : written.args)

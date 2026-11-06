@@ -152,9 +152,9 @@ namespace fminus::ir::detail
             ast::Type type = field.type;
             if (!names.insert(field.name).second)
                 error(field.location, "duplicate member " + quoted(field.name));
-            checkAttributes(field);
             if (field.isParam)
             {
+                checkAttributes(field, type, false);
                 checkParameter(module, field);
                 elements.push_back(
                     llvm::StructType::get(module_.getContext(), {builder_.getPtrTy(), slotTypeOf(type)}));
@@ -165,6 +165,7 @@ namespace fminus::ir::detail
                                           + quoted(field.name) + " in a method, such as init");
             if (field.isConst)
                 error(field.location, "a module's fields cannot be const: they start at 0, and a method sets them");
+            const std::size_t reported = diagnostics_.errors().size();   // what follows reports the type's
             if (ast::isArray(type) && field.size == nullptr)
             {
                 // A 2-D array's row is sized first, as clang builds the type: `float d[][]` is an array of an
@@ -197,6 +198,7 @@ namespace fminus::ir::detail
             {
                 type = ast::Type::Float;
             }
+            checkAttributes(field, type, diagnostics_.errors().size() != reported);
             fieldTypes_.insert_or_assign(&field, type);
             elements.push_back(typeOf(type));
         }
@@ -227,19 +229,33 @@ namespace fminus::ir::detail
         }
     }
 
-    // A field's attributes, a parameter's among them. FMinus's own: fminus::range(minimum, maximum), two numbers in
-    // order, a parameter's or a field's of numbers (what the host's control or display spans), and
-    // fminus::default(value), one number, a parameter's, within its range; another of its namespace is unknown.
-    // Clang's are a function's (Effects.cpp). Any other is the host's, a unit, a label or a hint, which FMinus passes
-    // on as written (Program::Attribute), its numbers checked as numbers C writes: C23 ignores an attribute it does
-    // not know, and the host may know it.
-    void Lowering::checkAttributes(const ast::Field& field)
+    // A field's attributes, a parameter's among them, where `type` is the field's as layOut worked it out (an array's
+    // with its sizes), or, with `refused`, what layOut put in place of a type it reported an error for, which is then
+    // the declaration's one error. FMinus's own: fminus::range(minimum, maximum), two numbers in order, a parameter's
+    // or a field's of numbers (what the host's control or display spans), and fminus::default(value), one number, a
+    // parameter's, within its range; another of its namespace is unknown. Clang's are a function's (Effects.cpp). A
+    // name without a namespace that is none of C23's standard attributes is ignored, with clang's warning: C keeps
+    // those names for its standard, and `range` is more likely fminus::range misspelt than anything a host reads.
+    // Any other is the host's, a unit, a label or a hint, which FMinus passes on as written (Program::Attribute), its
+    // numbers checked as numbers C writes: C23 ignores an attribute it does not know, and the host may know it.
+    void Lowering::checkAttributes(const ast::Field& field, ast::Type type, bool refused)
     {
-        const ast::Type element = ast::isArray(field.type) ? ast::elementOf(field.type) : field.type;
+        const ast::Type element = ast::isArray(type) ? ast::elementOf(type) : type;
         const bool numeric = ast::isArithmetic(element) && element != ast::Type::Bool && !ast::isMask(element);
         std::optional<double> minimum, maximum, initial;
         for (const ast::Attribute& attribute : field.attributes)
         {
+            if (ast::isIgnoredAttribute(attribute.name))
+            {
+                std::vector<Diagnostic> notes;
+                if (attribute.name == "range" || (attribute.name == "default" && field.isParam))
+                    notes.push_back(
+                        {attribute.location, "did you mean " + quoted("fminus::" + attribute.name) + "?", {}});
+                diagnostics_.warning(attribute.location,
+                                     "unknown attribute " + quoted(attribute.name) + " ignored [-Wunknown-attributes]",
+                                     std::move(notes));
+                continue;
+            }
             std::vector<double> numbers;
             bool valid = true;
             for (const ast::AttributeArg& arg : attribute.args)
@@ -261,10 +277,10 @@ namespace fminus::ir::detail
             {
                 if (!onlyNumbers || numbers.size() != 2)
                     error(attribute.location, "'fminus::range' takes two numbers, a minimum and a maximum");
-                else if (!field.isParam && !numeric)
+                else if (!field.isParam && !numeric && !refused)
                     error(attribute.location, "'fminus::range' attribute only applies to fields of numbers (float, "
                                               "double, int, a float vector and arrays of them), not "
-                                                  + quoted(ast::typeName(field.type)));
+                                                  + quoted(ast::typeName(type)));
                 else
                 {
                     minimum = numbers[0];

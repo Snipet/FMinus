@@ -2,6 +2,8 @@
 #include "frontend/Ast.h"
 
 #include <algorithm>
+#include <array>
+#include <cerrno>
 #include <cstdlib>
 #include <utility>
 
@@ -388,12 +390,38 @@ namespace fminus::ast
             && (spelling.back() == 'f' || spelling.back() == 'F'))
             spelling.pop_back();
         const bool floating = spelling.find_first_of(hex ? ".pP" : ".eE") != std::string::npos;
+        const bool negative = spelling.starts_with('-');
+        const char* text = spelling.c_str();
+        if (spelling.size() == (negative ? 1u : 0u))
+            return std::nullopt;
         char* end = nullptr;
-        const double value = floating ? std::strtod(spelling.c_str(), &end)
-                                      : static_cast<double>(std::strtoll(spelling.c_str(), &end, 0));
-        if (spelling.empty() || end != spelling.c_str() + spelling.size())
+        double value = 0;
+        if (floating)
+            value = std::strtod(text, &end);
+        else
+        {
+            // An integer's digits, its minus apart, fit C's widest type, unsigned long long, or it is none: clang
+            // refuses "integer literal is too large to be represented in any integer type", where strtoull saturates.
+            errno = 0;
+            const unsigned long long magnitude = std::strtoull(text + (negative ? 1 : 0), &end, 0);
+            if (errno == ERANGE)
+                return std::nullopt;
+            value = negative ? 0.0 - static_cast<double>(magnitude) : static_cast<double>(magnitude);   // -0 is 0
+        }
+        if (end != text + spelling.size())
             return std::nullopt;
         return value;
+    }
+
+    bool isIgnoredAttribute(std::string_view name)
+    {
+        if (name.find("::") != std::string_view::npos)
+            return false;
+        if (name.size() > 4 && name.starts_with("__") && name.ends_with("__"))
+            name = name.substr(2, name.size() - 4);   // [[__deprecated__]] is [[deprecated]]
+        constexpr std::array<std::string_view, 7> kStandard{"deprecated", "fallthrough",  "maybe_unused", "nodiscard",
+                                                            "noreturn",   "reproducible", "unsequenced"};
+        return std::ranges::find(kStandard, name) == kStandard.end();
     }
 
     std::string typeName(Type type)
