@@ -569,6 +569,7 @@ int main(int argc, char** argv)
         llvm::errs() << recited(diagnostics.format(), circuits);
         return 1;
     }
+    llvm::errs() << recited(diagnostics.format(), circuits);   // its warnings, as clang prints them, if any
 
     // LLVM IR -> JIT -> a call.
     if (!run.empty())

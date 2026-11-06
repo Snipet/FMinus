@@ -16,6 +16,11 @@ namespace fminus
         errors_.push_back({location, std::move(message), std::move(notes)});
     }
 
+    void Diagnostics::warning(SourceLocation location, std::string message, std::vector<Diagnostic> notes)
+    {
+        warnings_.push_back({location, std::move(message), std::move(notes)});
+    }
+
     int Diagnostics::addFile(std::string name, SourceLocation includedFrom)
     {
         files_.push_back({std::move(name), includedFrom});
@@ -37,9 +42,14 @@ namespace fminus
             std::ranges::reverse(order);
             return order;
         };
-        std::vector<Diagnostic> sorted = errors_;
-        std::ranges::stable_sort(sorted, [&](const Diagnostic& a, const Diagnostic& b) {
-            return readOrder(a.location) < readOrder(b.location);
+        // Each with its severity; at one place, the errors first.
+        std::vector<std::pair<const Diagnostic*, const char*>> sorted;
+        for (const Diagnostic& error : errors_)
+            sorted.emplace_back(&error, "error");
+        for (const Diagnostic& warning : warnings_)
+            sorted.emplace_back(&warning, "warning");
+        std::ranges::stable_sort(sorted, [&](const auto& a, const auto& b) {
+            return readOrder(a.first->location) < readOrder(b.first->location);
         });
 
         // clang's include stack: the #includes that read `file`, the program's own file's first.
@@ -63,10 +73,10 @@ namespace fminus
             text += files_[static_cast<std::size_t>(file)].name + ":" + std::to_string(diagnostic.location.line) + ":"
                     + std::to_string(diagnostic.location.column) + ": " + severity + ": " + diagnostic.message + "\n";
         };
-        for (const Diagnostic& diagnostic : sorted)
+        for (const auto& [diagnostic, severity] : sorted)
         {
-            line(diagnostic, "error");
-            for (const Diagnostic& note : diagnostic.notes)
+            line(*diagnostic, severity);
+            for (const Diagnostic& note : diagnostic->notes)
                 line(note, "note");
         }
         return text;

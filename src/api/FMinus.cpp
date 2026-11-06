@@ -130,6 +130,7 @@ namespace fminus
         bool pool = false;   // a user of the runtime's pool, for its parallel regions (runtime/Parallel.cpp)
         std::string loweredIr;     // Options::keepIr's texts, or empty
         std::string optimisedIr;
+        std::string warnings;      // as Diagnostics::format() prints them, or empty
         // The program's loop budget (Options::loopBudget), in the JIT's memory; without the option, one nothing reads.
         fminus_rt_loop_budget_state unbudgeted{std::numeric_limits<std::int64_t>::max(), 0};
         fminus_rt_loop_budget_state* budget = &unbudgeted;
@@ -340,6 +341,7 @@ namespace fminus
         impl->modules = std::move(modules);
         impl->loweredIr = std::move(loweredIr);
         impl->optimisedIr = std::move(optimisedIr);
+        impl->warnings = diagnostics.format();   // no errors: only warnings, if any
         for (const ast::Function& function : program->functions)
         {
             const Effect effect = declaredEffect(function);
@@ -376,6 +378,11 @@ namespace fminus
     const std::string& Program::optimisedIr() const
     {
         return impl_->optimisedIr;
+    }
+
+    const std::string& Program::warnings() const
+    {
+        return impl_->warnings;
     }
 
     bool Program::nonBlocking(std::string_view name) const

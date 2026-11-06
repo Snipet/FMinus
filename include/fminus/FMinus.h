@@ -239,8 +239,9 @@ namespace fminus
         };
 
         // Compiles `source`. Returns nullptr when it does not compile, with `errors` holding FMinus's messages, one a
-        // line, as clang words them (`program.fm:3:12: error: use of undeclared identifier 'x'`), notes included.
-        // `errors` is empty on success.
+        // line, as clang words them (`program.fm:3:12: error: use of undeclared identifier 'x'`), notes included, and
+        // any warnings among them where they are, as clang prints both. `errors` is empty on success, and a program
+        // that compiles with warnings has them in warnings().
         static std::unique_ptr<Program> compile(std::string_view source, std::string& errors, const Options& options);
         static std::unique_ptr<Program> compile(std::string_view source, std::string& errors);
 
@@ -264,6 +265,13 @@ namespace fminus
         // How many lanes a poly float has in this program: Options::polyLanes, or this machine's vector width in
         // floats (4 with NEON or SSE, 8 with AVX2).
         unsigned polyLanes() const;
+
+        // The program's warnings, one a line as clang prints them, each naming its flag, notes included
+        // (`program.fm:7:13: warning: enumeration value 'TRIANGLE' not handled in switch [-Wswitch]`); empty when it
+        // has none. A warning is about a program that compiles, and runs as written: a host may show it beside the
+        // program. FMinus's one warning is clang's -Wswitch, a switch without a default on a value of an enumerated
+        // type that misses some of its constants.
+        const std::string& warnings() const;
 
         // The program's LLVM IR as the code generator wrote it, as text, when Options::keepIr kept it (Lowered or
         // Both); empty otherwise.
