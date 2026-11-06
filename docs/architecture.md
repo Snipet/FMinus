@@ -421,7 +421,9 @@ to `bool` and to the same pointer with `const` added (`convertPointer`).
     function. Then EarlyCSE, InstSimplify and SimplifyCFG tidy the functions it changed: sine and cosine of one angle
     share their reduction, and a constant's kernel folds, flushing as the function does (`DenormalFolder`). An
     argument of sin, cos or tan past 2^16 takes an unlikely branch to the runtime's function, through a
-    `preserve_allcc` wrapper (`fminus.large.sin`) so that the loop around it spills nothing.
+    `preserve_allcc` wrapper (`fminus.large.sin`) so that the loop around it spills nothing. On x86-64 with AVX the
+    wrapper takes the machine's features less `vzeroupper`, and clears the upper halves itself before its call:
+    LLVM's own `vzeroupper` before its return zeroed the halves it had just restored (extending.md, recipe 24).
 
   The flags travel with the module, so the JIT, `fminus` and executables get them without a new argument. Recipe 6
   adds a pass the same way.

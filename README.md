@@ -607,8 +607,9 @@ build-dev/bin/fminus-lit -v tests/lit               # lit directly; a source pat
   Catch2's `BENCHMARK` is there for timing JIT'd kernels.
 - **lit** (`tests/lit/`): a file with `RUN:` lines, checked by FileCheck. `tests/lit/fminus/` drives `fminus`. FMinus's
   tools and LLVM's are on PATH; `%host_triple` is substituted; the features for `REQUIRES:` are `asserts`, `asan`,
-  `ubsan`, `tsan`, `arm64`, `x86_64`, `system-darwin`, `system-linux`, `system-windows`. `.fm` is a placeholder
-  extension for FMinus sources: change it in `tests/lit/lit.cfg.py`.
+  `ubsan`, `tsan`, `arm64`, `x86_64`, `avx` (an x86-64 host whose JIT targets AVX), `system-darwin`,
+  `system-linux`, `system-windows`. `.fm` is a placeholder extension for FMinus sources: change it in
+  `tests/lit/lit.cfg.py`.
 
 ## Presets
 

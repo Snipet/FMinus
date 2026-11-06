@@ -183,6 +183,7 @@ float gain(float x, float g)
 | `REQUIRES: asan`, `ubsan`, `tsan` | the sanitizer build |
 | `REQUIRES: system-darwin` (or `system-linux`) | the host's system (`veclib.fm`, which runs `--math fast`, needs Apple's vector math library) |
 | `%if arm64 %{ ... %}` | a RUN line only on arm64, so the rest of the file still runs elsewhere (`simd.fm`, `poly.fm`); `%if system-darwin && arm64 %{ ... %}` for Apple's assembly (`math.fm`) |
+| `%if avx %{ ... %}` | an x86-64 host whose JIT targets AVX, as `fminus-hostinfo --features` lists it (`lit.cfg.py` asks it): x86-64's vector machine code (`math-large.fm`) |
 
 On PATH: `fminus`, `fminus-build`, `fminus-hostinfo`, then `FileCheck`, `not`, `count`, `opt`, `llc`, `llvm-mca`,
 `llvm-objdump`, ... from the LLVM flavor. To check an error, send stderr to FileCheck and expect failure:

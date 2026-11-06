@@ -4224,6 +4224,29 @@ Four details carry it:
   them every iteration: tremolo's `process` had 72 loads from the stack, most of them in its loops, and has 13 with the
   wrapper. Neither function is speculatable, so no pass hoists the call out of its branch. The branch costs a compare
   and a branch never taken.
+
+  On x86-64 with AVX the wrapper saves `ymm1`-`ymm15` and restores them before it returns, and LLVM's vzeroupper
+  insertion (`X86InsertVZeroUpper.cpp`) then put a `vzeroupper` between the restores and the `ret`, zeroing the upper
+  halves it had just restored. The caller of an 8-lane kernel keeps the 256-bit vector in a register across the
+  calls, so when any lane was past 2^16, an infinity or a NaN, the upper four lanes of each vector came out as the
+  kernel's result for 0: `cosf` gave 1 there (on arm64, and at 4 lanes, nothing changed). So there the wrapper's
+  `target-features` are the machine's and `-vzeroupper` (a function's features replace the machine's, so it names
+  them all), and LLVM puts no `vzeroupper` in it; the one LLVM put before the runtime's call is right, since it lets
+  the runtime's SSE code run without the cost of upper halves in use, so the wrapper calls `llvm.x86.avx.vzeroupper`
+  there itself:
+
+  ```llvm
+  define internal preserve_allcc float @fminus.large.sin(float %0) #4 {
+  entry:
+    call void @llvm.x86.avx.vzeroupper()
+    %1 = call float @fminus_rt_sinf(float %0)
+    ret float %1
+  }
+  attributes #4 = { cold ... memory(none) "target-features"="+avx,+avx2,...,-vzeroupper" }
+  ```
+
+  `MathKernelsPass` takes the target machine for this (`HostTarget.cpp` passes it). `preserve_all` is FMinus's only
+  convention other than C's, and `fminus.large.<sin|cos|tan>` the only functions that have it.
 - **Folding.** The builder is the code generator's `DenormalFolder` (recipe 20), flushing as the function computes,
   and after the pass EarlyCSE, InstSimplify and SimplifyCFG run on the functions it changed. A constant's kernel folds
   to a constant: `sinf(0.5f)` is `ret float f0x3EF57744`, the runtime's result, and a frozen parameter's `sinf` leaves
@@ -4306,6 +4329,11 @@ rewritten where that shortens the chain and leaves every result as it was (check
   `poly float` kernels; a drive's two channels' `tanhf` paired into one two-lane kernel; a constant folded to
   `0x3EF57744`; the frozen parameter's sine gone from its loop; `-O0`'s runtime calls; no intrinsic left at either
   level.
+- `tests/lit/fminus/math-large.fm`: `sinf`, `cosf` and `tanf` of 4-, 8- and 16-lane `poly float`s with a lane past
+  2^16, an infinity or a NaN, each lane against the scalar function, JIT'd at `-O1` to `-O3` and as an executable; the
+  wrappers' IR; and on x86-64 with AVX (the lit feature `avx`) their features and their machine code: one
+  `vzeroupper`, before the runtime's call, and none between the restores and the `ret`. On such a machine the
+  `MathTest.cpp` matrix's 8-lane `poly float` runs fail without the fix too.
 - `versions.fm` and `examples.test` check the kernels where they checked the runtime's calls.
 
 ### Measurements
@@ -5010,6 +5038,7 @@ Each of these was hit while writing the language or its recipes. [simd.md](simd.
 | A four-lane runtime function's fast path calls libsystem_m and returns, with a stack frame, rather than branching to it | from a `noexcept` function, a call of a function not known not to throw is inside a `std::terminate` landing pad | declare the C functions it calls `noexcept` (`runtime/Math.cpp`) |
 | A C++ reference that calls `fminus::math` runs six times slower than with `std::sin` | an opaque function is called every time; clang merged `std::sin`'s repeated calls | `[[gnu::const]]` on the declarations (`FMINUS_MATH_CONST`) |
 | C++'s `std::sin(x)` differs from libm's `sinf(x)` by an ulp, in a function that also takes `std::cos(x)`, and only in an optimised build | clang pairs the two into `__sincosf_stret` from `-O1` on Apple systems; a debug build calls the two | compare with `fminus::math` (recipe 15); against libm, call through pointers clang can't see through (`ProgramTest.cpp`) |
+| On x86-64 with AVX, a `poly float`'s `sinf` of 8 lanes or more gives its upper four lanes `sinf(0)` when any lane is past 2^16, an infinity or a NaN; arm64, and 4 lanes, are right | the `preserve_all` wrapper `fminus.large.sin` restores `ymm1`-`ymm15`, and LLVM's vzeroupper insertion then puts a `vzeroupper` before its `ret`, zeroing the upper halves it has just restored | compile the wrapper without the tuning feature (`target-features`: the machine's and `-vzeroupper`), and call `llvm.x86.avx.vzeroupper` before the runtime's function by hand (`largeFunction`, recipe 24; `math-large.fm`) |
 | A lane's `_simd_sin_f4` changes when its neighbour is 2e6, an infinity or a NaN | libsystem_m takes another path for all four lanes when any is past 1e6 or not finite | the runtime's guard: such vectors lane by lane (`kSinCosLimit`) |
 | LLVM asserts on a loop of `sinf`, or removes a call of a program's `fminus_rt_sinf` that may loop forever | the program declared a function of a runtime math name: the four-lane one became the scalar function's vector variant, the scalar one took the runtime's attributes | refuse the names of a called builtin's runtime functions, in every mode (`checkMathNames`, recipe 15) |
 | `BranchInst` is deprecated | LLVM 23 splits it into `CondBrInst` and `UncondBrInst` | `llvm::dyn_cast<llvm::CondBrInst>`, and its `getCondition()` |
