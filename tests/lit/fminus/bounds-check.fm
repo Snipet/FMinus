@@ -1,0 +1,143 @@
+// Bounds checks (--bounds-check; ir/Bounds.cpp, opt/BoundsCheck.h), for development builds. Each access whose array
+// the compiler sees is checked against the array's extent: an element (a[i], *(a + i)) must be one of its own, and a
+// pointer formed (a + i) may also point one past the end. A failed check records its number and the index in the
+// program's record, fminus_rt_bounds, and the call returns early, 0, and so does every function of the program that
+// called it. --run says where (exit status 4); so does an executable's main. Without the option the code is as it was.
+// RUN: fminus %s -O0 --bounds-check | FileCheck %s --check-prefix=O0
+// RUN: fminus %s -O2 --bounds-check | FileCheck %s --check-prefix=O2
+// RUN: fminus %s -O2 | FileCheck %s --check-prefix=OFF
+// RUN: fminus %s --bounds-check --run pick 3 | FileCheck %s --check-prefix=PICK
+// RUN: not fminus %s --bounds-check --run pick 4 2>&1 | FileCheck %s --check-prefix=PAST
+// RUN: not fminus %s -O0 --bounds-check --run twice 4 2>&1 | FileCheck %s --check-prefix=TWICE
+// RUN: not fminus %s --bounds-check --run pick -1 2>&1 | FileCheck %s --check-prefix=BEFORE
+// RUN: fminus %s --bounds-check --run formed 4 | FileCheck %s --check-prefix=PICK
+// RUN: not fminus %s --bounds-check --run formed 5 2>&1 | FileCheck %s --check-prefix=FORMED
+// RUN: not fminus %s --bounds-check --run formed 0 2>&1 | FileCheck %s --check-prefix=FORMED0
+// RUN: fminus %s --run pick 3 | FileCheck %s --check-prefix=PICK
+// RUN: fminus %s --emit exe --bounds-check -o %t
+// RUN: %t 1 | FileCheck %s --check-prefix=MAIN
+// RUN: not %t 4 2>&1 | FileCheck %s --check-prefix=MAINOUT
+// RUN: fminus %s --entry --bounds-check | FileCheck %s --check-prefix=ENTRY
+// RUN: echo 'float main(float x) { float a[2]; return a[2] + x; }' > %t.always.fm
+// RUN: fminus %t.always.fm -O2 --emit exe --bounds-check -o %t.always
+// RUN: not %t.always 1 2>&1 | FileCheck %s --check-prefix=ALWAYS
+// RUN: echo 'float fminus_rt_bounds(float x) { return x; }' | not fminus - --bounds-check 2>&1 \
+// RUN:   | FileCheck %s --check-prefix=RESERVED
+// RUN: echo 'float fminus_rt_bounds(float x) { return x; }' | fminus - --run fminus_rt_bounds 2 \
+// RUN:   | FileCheck %s --check-prefix=FREE
+
+// A table of the top level: every function reads the same four floats.
+const float kTable[4] = {1, 2, 3, 4};
+
+// An element: index (int)i, checked against the table's 4.
+float pick(float i)
+{
+    return kTable[(int)i];
+}
+
+// A call of a function with checks: at -O0 it stays a call, and twice reads the record after it.
+float twice(float i)
+{
+    return pick(i) * 2.0f;
+}
+
+// A pointer formed, a + i, may point one past the end, and so may what - 1 makes of it; the element it then reaches
+// must be one of a's.
+float formed(float i)
+{
+    float a[4] = {1, 2, 3, 4};
+    return *(a + (int)i - 1);
+}
+
+// A loop whose own condition keeps it within the table: from -O1 it has no check, and folds to a constant.
+float total(void)
+{
+    float s = 0;
+    for (int i = 0; i < 4; ++i)
+        s += kTable[i];
+    return s;
+}
+
+float main(float x)
+{
+    return twice(x);
+}
+
+// O0: @fminus_rt_bounds = dso_local global { i32, i32, i64 } zeroinitializer, align 8
+// O0-LABEL: define float @pick(float %i)
+// O0-SAME:    #[[CHECKED:[0-9]+]]
+// O0:         %idxprom = sext i32 %conv to i64
+// O0-NEXT:    %bounds.in = icmp ult i64 %idxprom, 4
+// O0-NEXT:    br i1 %bounds.in, label %bounds.ok, label %bounds.fail, !prof [[LIKELY:![0-9]+]]
+// O0:       bounds.ok:
+// O0-NEXT:    %arrayidx = getelementptr inbounds float, ptr @kTable, i64 %idxprom
+// O0:       bounds.fail:
+// O0-NEXT:    br label %bounds.stop
+// O0:       bounds.stop:
+// O0-NEXT:    %bounds.site = phi i32 [ 1, %bounds.fail ]
+// O0-NEXT:    %bounds.index = phi i64 [ %idxprom, %bounds.fail ]
+// O0-NEXT:    %bounds.first = cmpxchg ptr @fminus_rt_bounds, i32 0, i32 %bounds.site monotonic monotonic, align 8
+// O0-NEXT:    %bounds.won = extractvalue { i32, i1 } %bounds.first, 1
+// O0-NEXT:    br i1 %bounds.won, label %bounds.record, label %bounds.return
+// O0:       bounds.record:
+// O0-NEXT:    store atomic i64 %bounds.index, ptr getelementptr inbounds ({ i32, i32, i64 }, ptr @fminus_rt_bounds, i32 0, i32 2) monotonic, align 8
+// O0:       bounds.return:
+// O0-NEXT:    ret float 0.000000e+00
+// O0-LABEL: define float @twice(float %i)
+// O0:         %0 = call float @pick(float %i1)
+// O0-NEXT:    %bounds.recorded = load atomic i32, ptr @fminus_rt_bounds monotonic, align 8
+// O0-NEXT:    %1 = icmp ne i32 %bounds.recorded, 0
+// O0-NEXT:    br i1 %1, label %bounds.unwind, label %entry.bounds, !prof [[UNLIKELY:![0-9]+]]
+// O0:       bounds.unwind:
+// O0-NEXT:    ret float 0.000000e+00
+// O0-LABEL: define float @formed(float %i)
+// O0:         %bounds.in = icmp ule i64 %idx.ext, 4
+// O0:         %bounds.in{{[0-9]+}} = icmp ule i64 %bounds.element, 4
+// O0:         %bounds.in{{[0-9]+}} = icmp ult i64 %bounds.element, 4
+// O0-NOT:   fminus.bounds.stop
+// O0:       attributes #[[CHECKED]] = { {{.*}}"fminus-bounds-check"{{.*}} }
+// O0:       !fminus.bounds.sites = !{![[S_PICK:[0-9]+]], ![[S_FORMED:[0-9]+]], ![[S_MINUS:[0-9]+]], ![[S_ELEMENT:[0-9]+]], ![[S_TOTAL:[0-9]+]]}
+// O0-DAG:   ![[S_PICK]] = !{!"{{.*}}bounds-check.fm", i32 35, i32 18, !"kTable", !"float[4]", i64 4, i32 1}
+// O0-DAG:   ![[S_FORMED]] = !{!"{{.*}}bounds-check.fm", i32 49, i32 16, !"a", !"float[4]", i64 4, i32 0}
+// O0-DAG:   ![[S_MINUS]] = !{!"{{.*}}bounds-check.fm", i32 49, i32 25, !"a", !"float[4]", i64 4, i32 0}
+// O0-DAG:   ![[S_ELEMENT]] = !{!"{{.*}}bounds-check.fm", i32 49, i32 12, !"a", !"float[4]", i64 4, i32 1}
+// O0-DAG:   ![[S_TOTAL]] = !{!"{{.*}}bounds-check.fm", i32 57, i32 20, !"kTable", !"float[4]", i64 4, i32 1}
+// O0-DAG:   [[LIKELY]] = !{!"branch_weights", i32 {{[0-9]+}}, i32 1}
+// O0-DAG:   [[UNLIKELY]] = !{!"branch_weights", i32 1, i32 {{[0-9]+}}}
+
+// O2-LABEL: define float @pick(float %i)
+// O2:         %bounds.in = icmp ult i32 %conv, 4
+// O2-LABEL: define noundef float @total()
+// O2-NEXT:  entry:
+// O2-NEXT:    ret float 1.000000e+01
+// O2-NEXT:  }
+
+// OFF-NOT:  fminus_rt_bounds
+// OFF-NOT:  fminus.bounds
+// OFF:      define float @pick(float %i)
+// OFF-NOT:  fminus_rt_bounds
+// OFF-NOT:  fminus.bounds
+// OFF-NOT:  fminus-bounds-check
+
+// PICK: 4
+// PAST: fminus: --run: 'pick' stopped: {{.*}}bounds-check.fm:35:18: index 4 out of bounds for 'kTable' of type 'float[4]'
+// PAST-NEXT: 0
+// TWICE: fminus: --run: 'twice' stopped: {{.*}}bounds-check.fm:35:18: index 4 out of bounds for 'kTable' of type 'float[4]'
+// BEFORE: index -1 out of bounds for 'kTable'
+// FORMED: fminus: --run: 'formed' stopped: {{.*}}bounds-check.fm:49:16: pointer offset 5 out of bounds for 'a' of type 'float[4]'
+// FORMED0: bounds-check.fm:49:25: pointer offset -1 out of bounds for 'a' of type 'float[4]'
+
+// MAIN: 4
+// MAINOUT: {{.*}}: {{.*}}bounds-check.fm:35:18: index 4 out of bounds for 'kTable' of type 'float[4]': 'main' returned early
+
+// ENTRY-LABEL: define i32 @main(i32 %argc, ptr %argv)
+// ENTRY:         %main.address = call ptr asm "", "=r,0"(ptr {{.*}}@fminus.main)
+// ENTRY-NEXT:    %result = call float %main.address(float %{{[0-9]+}})
+// ENTRY-NEXT:    %site = load volatile i32, ptr @fminus_rt_bounds, align 8
+// ENTRY:       check.failed:
+// ENTRY:         call void @fminus_rt_main_bounds(i32 %argc, ptr %argv, ptr %{{[0-9]+}}, i64 %index, ptr %{{[0-9]+}})
+
+// ALWAYS: always.fm:1:43: index 2 out of bounds for 'a' of type 'float[2]': 'main' returned early
+
+// RESERVED: <stdin>:1:7: error: the bounds checks reserve 'fminus_rt_bounds' for their record, and this program declares a function of that name: rename it
+// FREE: 2
