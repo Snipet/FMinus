@@ -212,8 +212,10 @@ on it without the code generator.
 the host's choices too: `math`, how the transcendental builtins compute; `strictAliasing`, whether loads and stores
 carry TBAA tags; `knobVersions`, knob versioning's budget; `denormals`, subnormals kept or flushed to zero, and
 `targetTriple`, which says what register an entry point sets then; `threads`, the most threads a parallel region runs
-on. `ir::lower` writes two module flags, `fminus.math` (the mode) and `fminus.knob-versions` (the budget), for the
-optimiser, where only the module arrives. A `Lowering` object then runs two passes over the program, the second through
+on; `loopBudget`, runaway-loop protection. `ir::lower` writes two module flags, `fminus.math` (the mode) and
+`fminus.knob-versions` (the budget), for the optimiser, where only the module arrives, and with `loopBudget` a third,
+`fminus.loop-budget`, and the budget's global, `fminus_rt_loop_budget`, which the JIT must see when the module is added
+(extending.md, recipe 29). A `Lowering` object then runs two passes over the program, the second through
 the file in source order, and checks the functions' effects after them; under `Denormals::Flush` it then marks every
 definition flushing and wraps the entry points (`flushDenormals`), which needs every call known. `Lowering` is one class
 (`Lowering.h`, internal to `src/ir/`, in `fminus::ir::detail`), but its members are defined across the directory by what
@@ -424,6 +426,14 @@ to `bool` and to the same pointer with `const` added (`convertPointer`).
     `preserve_allcc` wrapper (`fminus.large.sin`) so that the loop around it spills nothing. On x86-64 with AVX the
     wrapper takes the machine's features less `vzeroupper`, and clears the upper halves itself before its call:
     LLVM's own `vzeroupper` before its return zeroed the halves it had just restored (extending.md, recipe 24).
+  - **The loop budget** (`LoopBudgetPass`, `src/opt/LoopBudget.h`, extending.md recipe 29), after the math kernels, at
+    every level, for a module whose flag `fminus.loop-budget` is 1: each function that loops, or can call itself
+    again, counts down the program's budget, a loop whose count ScalarEvolution knows charged it in its preheader and
+    any other cycle (`CycleInfo`'s, irreducible ones too) one at each branch back; when the count goes below zero the
+    function sets the flag and returns, and each function that called it returns after the call. Last, so it changes
+    no decision the pipeline makes: within its budget a call computes what it did, bit for bit. A function it changed
+    carries the attribute `fminus-loop-budget` (`"counts"` or `"returns"`), and the pass leaves it alone when it runs
+    again; an executable's C main, the host there, carries `fminus-loop-budget-host`, and is never changed.
 
   The flags travel with the module, so the JIT, `fminus` and executables get them without a new argument. Recipe 6
   adds a pass the same way.
@@ -478,9 +488,11 @@ The same module can be written to disk instead, for development:
   entry. C's entry is `int main(int, char**)`, so it renames the program's `main` to `fminus.main` (internal, so the
   inliner can fold it) and adds a C `main` that reads the arguments through `fminus_rt_main_args`, calls it, and prints
   the result through `fminus_rt_main_result` (or `fminus_rt_main_bool_result`, as `true` or `false`); a program with a
-  parallel region gets the runtime's pool around the call (`fminus_rt_parallel_start`, `_stop`). It runs before
-  `prepareModule` and `optimiseModule`, so the entry is optimised with the rest. [programs.md](programs.md) shows the
-  IR.
+  parallel region gets the runtime's pool around the call (`fminus_rt_parallel_start`, `_stop`). With a loop budget
+  (`fminus --emit exe --loop-budget n`, for a module compiled with it) the C main is the host: it sets the program's
+  budget before the call and, when main runs out of it, says so (`fminus_rt_main_loop_budget`) and exits with 3. It
+  runs before `prepareModule` and `optimiseModule`, so the entry is optimised with the rest. [programs.md](programs.md)
+  shows the IR.
 
 The `fminus` driver emits objects, assembly and executables (`--emit exe`, which adds the entry; `--entry` adds it to
 the other outputs). `fminus-build` takes hand-written LLVM IR, which brings its own `main`, to an executable.
@@ -491,7 +503,8 @@ The runtime is a separate static library, `libfminus_runtime.a` (`FMinus::Runtim
 generated code calls. It contains no LLVM, and it holds the FFT: PFFFT's objects (`cmake/FMinusFft.cmake`) are in it.
 
 - `Runtime.h` declares the functions as `extern "C"`: a placeholder ABI version, the command line and result of an
-  executable (`fminus_rt_main_args`, `fminus_rt_main_result`), and the heap that `malloc`, `calloc` and `free` call
+  executable (`fminus_rt_main_args`, `fminus_rt_main_result`, and `fminus_rt_main_loop_budget` for one that ran past
+  its loop budget), and the heap that `malloc`, `calloc` and `free` call
   (`fminus_rt_malloc`, `fminus_rt_calloc`, `fminus_rt_free`: 64-byte aligned, zeroed, on C's `aligned_alloc`, or on
   Windows, which has none, `_aligned_malloc`), the FFT behind the `fft_*` builtins (`fminus_rt_fft_create`, ...,
   `Fft.cpp`: a plan holds PFFFT's setup and buffers of its own, so a transform never allocates), and the math
@@ -507,6 +520,9 @@ generated code calls. It contains no LLVM, and it holds the FFT: PFFFT's objects
   nothing and taking no lock; `fminus_rt_parallel_start` and `fminus_rt_parallel_stop` count its users, the first
   making a thread for each core but one, the last joining them.
 - `RuntimeSymbols.def` lists them, one `FMINUS_RUNTIME_SYMBOL(name)` each.
+- It also declares `fminus_rt_loop_budget_state`, the layout of a program's loop budget, `{ int64_t left; int32_t
+  stopped; }`: not the runtime's, but the global a program compiled with the budget defines, `fminus_rt_loop_budget`,
+  which its host reads and writes (extending.md, recipe 29).
 - `support/JitRuntime.cpp` expands that list into absolute symbols in a JIT (`defineRuntimeSymbols`).
 - An executable gets the same functions by linking the archive.
 
@@ -598,7 +614,11 @@ pivots, so the float code computes what the reference computes, operation for op
 - **Every function is verified.** An invalid function is the compiler's bug: it is reported as an internal error
   instead of crashing in a later pass.
 - **Modules are prepared before they are optimised.** The pipeline's decisions depend on the triple and the data
-  layout, and on the module flags the code generator writes (`fminus.math`, `fminus.knob-versions`).
+  layout, and on the module flags the code generator writes (`fminus.math`, `fminus.knob-versions`,
+  `fminus.loop-budget`).
+- **The loop budget's pass is the pipeline's last.** It sees the loops the machine code will run, and nothing the
+  optimiser decides may depend on it; a pass added after it would run on code that counts and returns early, and see
+  the attributes it changed (extending.md, recipe 29).
 - **Every load and store of a value is tagged with its type** (`tag`, `Tbaa.cpp`), unless strict aliasing is off. An
   untagged access is safe, since it may alias anything, but a lowering that forgets the tag slows the loops around it;
   `TbaaTest.cpp` walks a program that makes every kind of access and fails on one untagged. A tag that is wrong is a

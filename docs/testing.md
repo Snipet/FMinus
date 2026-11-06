@@ -47,7 +47,8 @@ Each file states what it tests in its first line, then has a few helpers and the
   `ControlFlowTest.cpp`, `SwitchTest.cpp`, `EnumTest.cpp`, `IntTest.cpp`, `BitwiseTest.cpp`, `PointerTest.cpp`,
   `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `TableTest.cpp`, `TopLevelTest.cpp`, `ModuleTest.cpp`,
   `FftTest.cpp`, `HashTest.cpp`, `ParamTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`, `ParallelTest.cpp`, and the
-  compiler's own: `VersionTest.cpp`, `TbaaTest.cpp`, `ZeroInitTest.cpp`, `AttributeTest.cpp`, `DenormalTest.cpp`)
+  compiler's own: `VersionTest.cpp`, `TbaaTest.cpp`, `ZeroInitTest.cpp`, `AttributeTest.cpp`, `DenormalTest.cpp`, and
+  `LoopBudgetTest.cpp`, whose `compileAt` compiles at any level with the budget on or off)
   parses, lowers and JIT-compiles at -O2, and returns the `Jit`, or null with the formatted errors.
   `lookup<float(float)>(*jit, "f")` gives a callable function, and `lookup<void(const float*, float*, int)>(*jit, "g")`
   one that takes a test's buffers (`std::array::data()`). A third parameter, the `ir::Options`, compiles at a chosen
@@ -88,7 +89,8 @@ TEST_CASE("functions compute what they say", "[codegen]")
   `[pointer]`, `[heap]`, `[effects]`, `[math]` (the math modes and their kernels), `[versions]` (knob versioning and
   flat streams), `[tbaa]`, `[zeroinit]`, `[attributes]` and `[progress]` (the runtime's and libm's attributes, and loop
   progress), `[denormals]`, `[parallel]` (parallel regions, and `[runtime]` among them for the pool on its own),
-  `[ir]` (`Program::Options::keepIr`'s texts), `[circuit]` (the circuit compiler: `CircuitTest.cpp` its netlists,
+  `[ir]` (`Program::Options::keepIr`'s texts), `[budget]` (the loop budget: `LoopBudgetTest.cpp`, in the unit tests and
+  the library's), `[circuit]` (the circuit compiler: `CircuitTest.cpp` its netlists,
   plans, equations (an OTA's against report §7.2's hand derivation; an inductor's, an E's and a G's stamps by hand, and
   RL and RLC responses as the bilinear map), the DC operating point by hand and its errors, the offset form (a biased
   netlist's module the unbiased one's), the diode forms (a string as one diode of n N, an asymmetric pair's K and law,
@@ -130,6 +132,12 @@ TEST_CASE("functions compute what they say", "[codegen]")
   cost is their CPU time, which POSIX's clocks give whatever else the machine runs (the process's less the caller's:
   `CLOCK_PROCESS_CPUTIME_ID`, `CLOCK_THREAD_CPUTIME_ID`), where wall time would not. Run them under `tsan` too: the
   pool is what it checks.
+- **The loop budget** counts the optimised code's loops, which change with the level, the target's vector width and
+  LLVM's version. A test of an exact count compiles at `-O0`, where each `while` and `for` branches back once an
+  iteration and each call of a recursive function counts one (`fib(10)` takes 177); at `-O1` and up a test checks what
+  holds everywhere: a loop that never ends stops, a counted loop runs whole or not at all, a caller returns after a
+  callee that ran out, and the output is the same bit for bit within the budget. The budget is the program's global,
+  `fminus_rt_loop_budget`: `lookup<fminus_rt_loop_budget_state>(*jit, ...)` reads and writes it as a host does.
 
 ## lit and FileCheck
 

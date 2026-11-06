@@ -1,7 +1,7 @@
 # Extending the compiler
 
 How to add to FMinus. First, how a change moves through the compiler, and the few rules that keep that easy. Then
-twenty-five worked recipes. Eleven grow the C subset from a one-line builtin to C's control flow, a custom LLVM pass,
+twenty-six worked recipes. Eleven grow the C subset from a one-line builtin to C's control flow, a custom LLVM pass,
 `int`, `void` and pointers, the heap with the attributes that keep it off the audio thread, arrays and modules, FMinus's
 classes, an FFT from a C library built into the runtime, and parameters, the values a plugin's host sets. Six more are
 about the compiler rather than the language: math that gives a float one result wherever it is computed, knob versioning
@@ -10,17 +10,18 @@ subnormals flushed for the audio thread. Two more grow the language again: `#inc
 files, and `parallel for` and `parallel { }`, a program's own threads. Two return to the math: kernels of FMinus's
 own, the same in every lane and on every target, and those kernels inline. The last four are for DSP's everyday code:
 C's bitwise operators with a hash and white noise from a counter, constant tables stored once, `switch` and
-enumerations, and constants at the top level with arrays sized by constant expressions. Then the pitfalls
-those recipes ran into, and design notes for what comes next. [simd.md](simd.md) has recipes 7 to 9, for vectors.
+enumerations, and constants at the top level with arrays sized by constant expressions. The last is for the host: a
+loop budget, which stops a program that would loop for ever before it holds the audio thread. Then the pitfalls those
+recipes ran into, and design notes for what comes next. [simd.md](simd.md) has recipes 7 to 9, for vectors.
 
 Recipes 1 to 4 are in the compiler now (`tanhf` and `%`; `bool` and its operators; `if`, `while` and `for`), and so are
 simd.md's 7 to 9, recipe 10 (`int`, `void` and pointers), recipe 11 (the heap), recipe 12 (arrays and modules), recipe
 13 (the FFT), recipe 14 (parameters), recipes 15 to 20 (the math modes, knob versioning, TBAA, zero-init elision, the
 runtime's attributes and loop progress, denormal control), recipe 21 (`#include`), recipe 22 (`parallel for` and
 `parallel { }`), recipes 23 and 24 (math kernels of FMinus's own, and inline), recipe 25 (the bitwise operators,
-`hash` and `randf`), recipe 26 (constant tables), recipe 27 (`switch` and `enum`) and recipe 28 (constants at the top
-level, and sizes of constant expressions), so their sections describe how the code you have got there: read a section
-beside the files it names.
+`hash` and `randf`), recipe 26 (constant tables), recipe 27 (`switch` and `enum`), recipe 28 (constants at the top
+level, and sizes of constant expressions) and recipe 29 (the loop budget), so their sections describe how the code you
+have got there: read a section beside the files it names.
 Recipes 5 and 6, a runtime function and a pass, are not part of the language; they live in [recipes/](recipes/) as a
 patch, so you can apply them to see them work. None of these are sketches: each was applied to this repository, built
 with `-Werror`, and tested in the dev and asan presets, every test passing. [architecture.md](architecture.md) describes
@@ -4992,6 +4993,296 @@ through a `const float*`).
   alloca, memset or store for them, a scalar read as its value, `-O2`'s loads and folded reads (and the tables only
   those read gone), `--run`, the dump; `toplevel-errors.fm`, the errors from the command line.
 
+## Recipe 29: the loop budget, runaway-loop protection
+
+*In the compiler. Code: `src/opt/LoopBudget.h` and `.cpp` (`LoopBudgetPass`, and the budget's global,
+`loopBudgetGlobal`); `ir::Options::loopBudget` and its module flag in `src/ir/CodeGen.h` and `.cpp`; the pipeline's last
+pass in `src/support/HostTarget.cpp`; `Program::Options::loopBudget`, `setLoopBudget`, `loopBudgetLeft` and
+`loopBudgetExceeded` in `include/fminus/FMinus.h` and `src/api/FMinus.cpp`; `fminus --loop-budget n` in
+`tools/fminus/main.cpp`; an executable's in `addEntryPoint` (`src/support/Aot.cpp`), with
+`fminus_rt_loop_budget_state` and `fminus_rt_main_loop_budget` in `src/runtime/`. Tests:
+`tests/unit/LoopBudgetTest.cpp` (`[budget]`), `tests/library/LoopBudgetTest.cpp` and
+`tests/lit/fminus/loop-budget.fm`.*
+
+A program that never stops holds the thread that called it. In a plugin that is the audio thread, and the host waits
+for its block: the whole session freezes, and the only way out is to kill the host. It takes one ordinary bug. This
+oscillator wraps its phase in a loop, and an infinite frequency (a knob read as a division by zero upstream, say) makes
+the phase infinite, and infinity less one is infinity:
+
+```c
+module Osc
+{
+    param float frequency [[fminus::default(440)]];
+    float phase;
+
+    void process(float* restrict out, int n) [[clang::nonblocking]]
+    {
+        const float step = frequency[0] / 48000.0f;
+        for (int i = 0; i < n; ++i)
+        {
+            phase = phase + step;
+            while (phase >= 1.0f)
+                phase = phase - 1.0f;
+            out[i] = phase;
+        }
+    }
+};
+```
+
+C has no answer, and a host has no safe one: a thread cannot be stopped from outside without leaving whatever it held.
+So the program stops itself. Compiled with the loop budget, it counts its own work against a budget the host sets
+before each call, and a call that runs out returns early, with a flag the host reads:
+
+```cpp
+fminus::Program::Options options;
+options.loopBudget = true;                                    // off by default
+auto program = fminus::Program::compile(source, errors, options);
+...
+program->setLoopBudget(10'000'000);                           // on the audio thread, before each call
+process(instance, out, n);
+if (program->loopBudgetExceeded())                            // it returned early: silence it, report it
+    ...
+```
+
+The counting is a pass of FMinus's own, the last of the pipeline, so nothing the optimiser decides depends on it: a call
+that stays within its budget computes what it would without it, bit for bit, and runs at the same speed (Measurements,
+below).
+
+### What counts
+
+- **A loop whose count is known where it starts** is charged it there, before it runs. That is most of a DSP program's
+  loops: a `for` over a block, a vectorised loop and its remainder, a loop over a module's voices or a filter's taps.
+- **Any other cycle** counts one at each branch back to its start: a `while` on the data, a loop that leaves through a
+  `break`, the phase wrap above.
+- **A function that can call itself again** counts one each time it starts, so a recursion that runs long without a
+  loop runs out too.
+
+The count is the optimised code's, not the source's. A rotated loop branches back once less than it iterates, a
+vectorised loop once a vector of samples, an unrolled loop once a group of iterations, and a loop the optimiser
+removed not at all. `halvings(1024)`, a `while` that halves its argument, takes 10 at `-O0` and 9 at `-O2`;
+`sum(100)`, a `for` of a float sum, 100 at `-O0` and 24 at `-O2` on arm64, where LLVM interleaves it by four
+(`loop-budget.fm`). The budget is a safety net, not a meter: set it to many times what a block should take (a block of
+a thousand samples whose voices loop over a hundred partials takes a few hundred thousand at most).
+
+### Where the checks go: last
+
+`LoopBudgetPass` is a module pass, registered at `OptimizerLast` after the math kernels (`HostTarget.cpp`), and runs at
+every level (`isRequired`). It acts on a module whose flag `fminus.loop-budget` is 1, which `ir::lower` writes when
+`ir::Options::loopBudget` is set, so the option travels with the module to wherever it is optimised, as the math mode
+does (recipe 15).
+
+Why last. The code generator could have put a check in every loop it lowers, but LLVM's loop vectoriser leaves alone a
+loop that can leave from its middle on a condition it computes (a `for` over a block with a `break` on the data stays
+scalar at `-O2`), so the check would have cost every vectorised loop its vectorisation, and a math builtin's loop most
+of its speed. After the pipeline,
+every decision has been made: the loops that vectorise have, the copies knob versioning makes are made, the kernels are
+inline. The pass adds a counter and branches, and no floating-point operation moves.
+
+Which functions it changes, from the module's call graph:
+
+- a function **counts** when it has a cycle, or can call itself again: through its own calls, or through a function it
+  hands a runtime function (a parallel region's body, which `fminus_rt_parallel_for` runs). Its cycles are
+  `CycleInfo`'s rather than `LoopInfo`'s, irreducible ones included: FMinus's structured code makes none, but a pass
+  might, and every closed path through a function passes through some cycle's header from inside that cycle, so
+  instrumenting each header's branches back leaves no path that can go round uncounted;
+- a function **may stop** when it counts, or calls one that may stop. Each such call is followed by a check of the flag.
+
+In a function that counts, the count is a stack slot, written as the code generator writes a variable, and
+`PromoteMemToReg` makes it a register once every check is in place: the function reads the budget once where it starts,
+and writes it back before it returns and before each call that may stop (and reads it again after). A loop without a
+count:
+
+```llvm
+while.body:
+  %0 = fmul nnan float %x.addr.08, 5.000000e-01
+  ...
+  br i1 %cmp, label %while.body.budget, label %while.end
+
+while.body.budget:                                ; on the branch back
+  %budget.left = sub i64 %budget.slot.0, 1
+  %budget.out = icmp slt i64 %budget.left, 0
+  br i1 %budget.out, label %budget.stop, label %while.body, !prof !5   ; unlikely
+```
+
+On arm64 that is a `SUB` and a `TBNZ` on its way back, beside the loop's own test. A loop with a count gets nothing in
+it: ScalarEvolution's count of its branches back (`getBackedgeTakenCount`), expanded in its preheader, is charged
+there, and a vectorised loop's is a shift (`plan` and `countOf`):
+
+```llvm
+vector.ph:
+  %n.vec = and i32 %conv, 2147483644
+  %0 = add nsw i32 %n.vec, -4
+  %1 = zext i32 %0 to i64
+  %2 = lshr i64 %1, 2
+  %budget.left = sub i64 %budget.start, %2
+  %budget.out = icmp slt i64 %budget.left, 0
+  br i1 %budget.out, label %budget.stop, label %vector.body, !prof !5
+```
+
+A loop gets a count when ScalarEvolution knows an exact one for all its exits (a `break` on the data has none), loop
+invariant, of at most 64 bits and 12 terms, with no recurrence of an outer loop in it (a triangle's inner loop, `for (j
+= 0; j < i; ++j)`, whose count changes every outer iteration, would make the expander add an induction variable to the
+outer loop), and safe to compute where the loop starts (no division by what may be zero). Any other counts a branch
+back at a time, and so does every loop at `-O0`, whose counters live in memory where ScalarEvolution cannot follow
+them. A loop the pass charged runs all of its iterations or none: the charge fails before the first.
+
+Why charge it rather than count. The first version counted every loop at its branches back, and paid for it where it
+hurts, in the inner loops: a synth's loop over its eight voices, a sample at a time (`examples/voices/`), took 9% longer
+at `-O2`, since its body is two dozen instructions and the check added two, an iteration. And a vectorised loop of
+`tanhf` (`examples/saturator/`), one block with its own branch back, became two blocks with a branch each; the code
+generator scheduled and allocated the two differently (spilling less, interleaving less), and the loop took 9% longer,
+with almost no more work in it. Folding the check into the loop's own branch (`br (%done | %out)`, kept one branch by
+`!unpredictable`, without which SelectionDAG splits an `or` of conditions into two branches) got the `tanhf` loop to 4%
+and made the voices' 14%. Charged before it starts, a counted loop is the code it was.
+
+The price is one assumption. ScalarEvolution's count may rest on what C leaves undefined: `for (int i = 0; i != n; i +=
+2)` with an odd `n` never ends, through an `int` that overflows, and C lets the optimiser assume it does not (the loop
+is marked `llvm.loop.mustprogress`, recipe 19, and the `add` is `nsw`). Such a loop is charged the count the optimiser
+assumed, and runs as the machine code runs it. Most do end: the vectoriser's trip count and IndVarSimplify's rewritten
+exit test follow the same count.
+
+### Stopping, and returning
+
+When the count goes below zero the function writes it back, sets the flag and returns at once, a zero of its type,
+null or nothing:
+
+```llvm
+budget.stop:
+  %budget.slot.2 = phi i64 [ %budget.left16, %for.body.preheader13 ], [ %budget.left, %vector.ph ]
+  store atomic i64 %budget.slot.2, ptr @fminus_rt_loop_budget monotonic, align 8
+  store atomic i32 1, ptr getelementptr inbounds ({ i64, i32 }, ptr @fminus_rt_loop_budget, i32 0, i32 1) monotonic, align 4
+  ret float 0.000000e+00
+```
+
+and every function of the program that called it returns too, at once, with nothing written: after each call of a
+function that may stop, the flag decides.
+
+```llvm
+  store atomic i64 %budget.left, ptr @fminus_rt_loop_budget monotonic, align 8
+  %5 = call i32 @calls(i32 %4, float %x)
+  %budget.stopped5 = load atomic i32, ptr getelementptr inbounds (...) monotonic, align 4
+  %6 = icmp ne i32 %budget.stopped5, 0
+  br i1 %6, label %budget.unwind, label %if.end.budget, !prof !6
+...
+budget.unwind:
+  ret i32 0
+```
+
+So what the program leaves in memory, its modules' state and what it wrote of the output, is what it had at that point,
+before a loop it was charged for or at a branch back, as if it had paused there: no caller goes on with a value that
+was never computed, and the host can keep the instance or throw it away. The calls checked are direct calls of the
+program's functions that may stop, and calls of a runtime function handed one (a parallel region's body: the region's
+threads each count, and the caller checks after the region). Inline asm is no call, and FMinus has no function
+pointers: its only indirect call is an entry point's call of its body under `Denormals::Flush` (recipe 20), whose
+wrapper restores the host's floating-point mode and returns what the body returned, which is right as it is.
+
+A function that may stop no longer promises what it did, and the pass says so: it reads and writes memory that is no
+argument's (the budget: `memory(readwrite, argmem: none, ...)` from `memory(none)`), it returns (`noreturn` goes, as
+a loop that never ended was what made it), and its result may be 0 or null (`nonnull`, `dereferenceable`, `range`,
+`nofpclass` and a parameter's `returned` go, from it and from its calls). No pass of the optimiser runs after it, but
+the code generator reads some of these, and an attribute that is false is undefined behaviour waiting.
+
+### The budget, the program's own
+
+The budget is a global of the program, `fminus_rt_loop_budget`, the `{ int64_t left; int32_t stopped; }` of
+`runtime/Runtime.h`'s `fminus_rt_loop_budget_state`, defined unlimited until the host sets it:
+
+```llvm
+@fminus_rt_loop_budget = dso_local global { i64, i32 } { i64 9223372036854775807, i32 0 }, align 8
+```
+
+Three reasons for a global of the module rather than one of the runtime's or the host's. Each `Program` has its own, so
+two programs count apart. It lives in the JIT's own memory, beside the code that reads it, as a constant table does, so
+the code reaches it as it reaches its own data, with nothing in the host's address space to resolve. And an object
+`fminus --emit obj` writes defines it too, for its host to declare (`extern "C" fminus_rt_loop_budget_state
+fminus_rt_loop_budget;`) and set.
+
+`ir::lower` defines it, not the pass: LLJIT takes a module's symbols when it is added, before its IR transform layer
+optimises it, and a symbol a pass at the end of the pipeline made would be one the JIT does not know (the pass makes
+it only for IR written by hand, for `fminus-build`). `Program::compile` then looks it up, which compiles the module, so
+with the budget, compile() generates the machine code and the first look-up of a function only finds it. A program that
+declares a function of its name is an error while the budget is on ("the loop budget reserves 'fminus_rt_loop_budget'
+for its counter, and this program declares a function of that name: rename it"), and nothing to it without.
+
+Every access the program makes is a relaxed (monotonic) atomic, as are the host's (`std::atomic_ref`), so a parallel
+region's threads may share it without a data race. Each thread's part counts from what `left` held where it started,
+and writes back what it has left: the region as a whole may take up to its thread count times the budget before every
+thread has stopped, which is what a safety net needs. The flag is shared, and the caller sees it after the region.
+
+### The host's side
+
+- `setLoopBudget(n)` sets `left` to n and clears the flag; the host calls it before each call it limits. What is left
+  carries over otherwise: after a call that ran out, the next stops at its first loop.
+- `loopBudgetExceeded()` reads the flag, `loopBudgetLeft()` what is left (what was set less what the calls since took,
+  below zero once one ran out), each a relaxed load: the audio thread may call them.
+- A program compiled without the option reads and writes a budget nothing counts down: `loopBudgetExceeded()` is
+  false.
+- `fminus --run f ... --loop-budget n` sets it for the call and says on stderr what the call took, or that it ran past
+  it (status 3, and what it printed is what it returned early). `fminus --emit exe --loop-budget n` makes the C main a
+  host: it sets the budget before main and, when main runs out, says so on stderr (`fminus_rt_main_loop_budget`) and
+  exits with 3. That main is the host's, so the pass leaves it alone (`kLoopBudgetHostAttribute`), the program's `main`
+  is never inlined into it, and its accesses are volatile: until the pass puts the program's checks in, nothing in the
+  program writes the budget, and the optimiser would have folded the flag's read after the call to the 0 written
+  before it.
+
+### What it changes for programs and hosts
+
+- **Off, the default**, nothing: the module has no flag, no global and no check (`loop-budget.fm`'s `OFF`).
+- **On**, a call within its budget computes what it does without it, bit for bit, at every level (`LoopBudgetTest.cpp`
+  compares kernels of each kind, and the measurements below every example's); a program cannot name a function
+  `fminus_rt_loop_budget`; compile() generates the machine code; the IR shows the checks and the attributes above.
+- **What it does not catch**: a loop charged a count it will not keep (undefined behaviour, above); a recursion deeper
+  than the stack, which overflows it before a larger budget runs out; time spent outside the program, in an external
+  function it calls; and a loop whose iterations are each slow, which a count of iterations does not see as time. A
+  budget of iterations is no clock, and a host that wants one sets the budget from what its blocks take.
+
+### Tests
+
+- `tests/unit/LoopBudgetTest.cpp`, in the JIT at each level: a loop that never ends returns early with the flag, and
+  `left` at -1; unlimited until set, what is left carried to the next call, and a `while`'s exact count at `-O0`; a
+  counted (vectorised) loop charged before it starts, all of it or none, its charge exactly what it takes; what a
+  stopped call wrote kept, at the branch back where it stopped; a recursion's calls counted (`fib(10)`'s 177 at
+  `-O0`), and every caller returning 0 when the deepest runs out; kernels of each kind (a vectorised loop of `tanhf`
+  and `sinf`, a recurrence of a `float4`'s coefficients, nested loops, `while` loops in a `for`) bit for bit with and
+  without the budget; the reserved name.
+- `tests/library/LoopBudgetTest.cpp`, through `Program`: the oscillator above, its infinite frequency stopped, the flag
+  and what is left, and run again; bit for bit; a program without the budget; a `parallel for` whose iterations spin,
+  on the pool and on one thread; an entry point under `Denormals::Flush` that stops and hands the host's mode back; the
+  checks in `optimisedIr()`.
+- `tests/lit/fminus/loop-budget.fm`: the IR at `-O0` (the global, a branch back's check, the stop, a recursion's entry,
+  a call's flag and the unwind, the attributes, the flag) and at `-O2` (a counted loop's charge), nothing without the
+  option; `--run`'s counts and messages, an executable's main, the reserved name.
+
+### Measurements
+
+On an M5, at `-O2`, blocks of 256 samples, the host setting the budget before each call, the best of 300 runs of 65536
+samples each, the two alternating, with the machine busy with other builds (its noise is about a percent):
+
+| Kernel | Off (ns a sample) | On | Change | Output |
+|---|---|---|---|---|
+| a gain, vectorised | 0.170 | 0.171 | +0.7% | identical |
+| `examples/saturator/` `process_tanhf` (a vectorised loop of the kernel) | 1.463 | 1.464 | 0.0% | identical |
+| `process` (a rational tanh) | 1.173 | 1.173 | 0.0% | identical |
+| `process_poly` | 1.203 | 1.202 | -0.1% | identical |
+| `examples/biquad/` (a recurrence, its cutoff a stream) | 11.227 | 11.243 | +0.1% | identical |
+| `examples/voices/` (eight voices a sample) | 16.098 | 16.069 | -0.2% | identical |
+| `examples/convolver/` (2048 taps by FFT) | 30.143 | 30.204 | +0.2% | identical |
+| `examples/delay/` (an echo) | 1.300 | 1.301 | 0.0% | identical |
+| a phase wrap, two `while` loops a sample | 44.365 | 43.865 | -1.1% | identical |
+| a 32-tap FIR, nested loops | 13.500 | 13.500 | 0.0% | identical |
+
+At `-O1` and `-O3` the same, within a percent, but for the gain, the cheapest kernel there is, a load, a multiply and a
+store a sample: with the budget it ran at 0.17 ns a sample in every measure, without it at 0.17 or at 0.15 by level
+and block size, so in two of them the budget was 13% slower (`-O1` in blocks of 256, 0.148 to 0.167) and 14% (`-O2` in
+blocks of 1024, 0.145 to 0.166). Its vectorised loop is the same ten instructions either way, 24 bytes further on for
+the charge ahead of it: this is where the loop lands, which a loop running at well under a cycle a sample feels. A call
+itself costs about a nanosecond more (the budget's load through the GOT, the charges, the store): the biquad and the
+echo in blocks of 16 samples, 0.1% and 0.9%. Counting every loop at its branches back, the first version, cost the
+voices 9% and the `tanhf` loop 9% (above). At `-O0`, where every loop counts a branch at a time and every value between
+blocks is in memory, a loop of a few instructions takes up to twice as long (the gain 2.2 ns a sample to 4.5, the FIR
+82 to 128, the convolver 130 to 171); `-O0` is for reading the IR. Compiling takes a few percent longer (the pass's
+analyses, and the code it adds): the saturator 58 ms to 63, the convolver 98 to 114, under the same load.
+
 ## Pitfalls
 
 Each of these was hit while writing the language or its recipes. [simd.md](simd.md) has the vector ones.
@@ -5069,6 +5360,9 @@ Each of these was hit while writing the language or its recipes. [simd.md](simd.
 | `fminus_rt_parallel_stop` waits for ever on a pool thread asleep in `std::atomic::wait`, now and then, under load | the system ran the thread for the first time after the stop had bumped `signal`, and the thread took the bumped value for where it started | hand a thread `signal` as it was when it was made, and look at `stopping` before sleeping (`runtime/Parallel.cpp`'s `work`) |
 | A test that a region ran on two threads or more fails now and then, on a busy machine | the pool's threads may not run before the caller has taken every chunk itself | a few tries, and check that one of them ran on two (`ParallelTest.cpp`) |
 | A capture's binding goes stale, or a region captures a variable twice | a reference into `regions_` kept across the body's lowering, whose own regions push onto it | take what a region needs (its function) before lowering its body; `endRegion` takes the region off the stack |
+| "JIT session error: Unexpected definitions in module ...: [ _fminus_rt_loop_budget ]", then "Failed to materialize symbols", for an external symbol a pass in the pipeline defines | LLJIT takes a module's symbols when it is added, before its IR transform layer optimises it, and refuses an object that defines more | define it in the code generator, as `ir::lower` defines the loop budget's global (recipe 29); an internal function a pass adds (`fminus.large.sin`) is no symbol of the module's |
+| A vectorised loop runs slower after a branch that is never taken is added to its branch back | the loop is now two machine blocks, which the code generator schedules and allocates as it would any code, not as a loop of one block | keep the loop one block: put the work before it (recipe 29 charges a counted loop in its preheader) |
+| A branch on `(a \| b)` comes out as two branches | SelectionDAG splits an `and` or `or` of conditions into branches where jumps are cheap (AArch64) | mark the branch `!unpredictable`, which keeps one (recipe 29 tried it), or give the `or` a second use |
 
 ## Where to go next
 

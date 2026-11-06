@@ -25,7 +25,8 @@ Most of the recipes in [../extending.md](../extending.md) and [../simd.md](../si
 - recipe 26 (constant tables: a const array of constants, stored once);
 - recipe 27 (`switch`, with C23's labels, and C's enumerations);
 - recipe 28 (constants at the top level, C's file-scope const objects, and arrays sized by integer constant
-  expressions).
+  expressions);
+- recipe 29 (the loop budget: runaway-loop protection, a pass of FMinus's own at the end of the pipeline).
 
 Their code is in `src/`, and their tests in `tests/`.
 

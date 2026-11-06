@@ -25,7 +25,8 @@ builds into an executable. Its compiler has optimisations of its own, from `-O1`
 each value of a knob that steers its loop, and a local's zeroing (an array's, or a module's overwritten whole) is
 removed where nothing reads the zeros. It tells LLVM C's strict-aliasing rule, that a loop whose condition is not a
 constant may be assumed to end, and what the runtime's functions do. Its math builtins give a float one result wherever
-it is computed, and a host may have subnormals flushed to zero. `examples/plugin/` is a JUCE plugin whose DSP is an
+it is computed, and a host may have subnormals flushed to zero, and give a program a loop budget, so that a call that
+would loop for ever returns early instead of holding the audio thread. `examples/plugin/` is a JUCE plugin whose DSP is an
 FMinus program. The build, the dependencies and the toolchain's smoke tests are in place around it.
 
 Documentation: [docs/](docs/README.md). It covers the architecture, writing a program with `main`, a guide to
@@ -378,7 +379,8 @@ Where FMinus differs from C, it is on purpose:
 Loops make progress as C11 says (6.8.5p6), not as C++ does: a `while` or `for` whose condition is not a constant
 expression and which runs for ever without effects is undefined, so LLVM may delete such a loop whose results go
 unused, while `while (1)` and `for (;;)` may run for ever. A function as a whole is not assumed to make progress, as a
-C++ one is.
+C++ one is. A host that would rather a loop did not run for ever compiles with a loop budget
+(`Program::Options::loopBudget`, `fminus --loop-budget n`): no change to the language, a limit on what a call takes.
 
 A v0 program with `f` suffixes, with prototypes for calls ahead of a definition, with vectors only in C's form (braces,
 given clang's `ext_vector_type`), and without `%` on floats, `poly`, modules, `parallel`, `main`, FMinus's own builtins
@@ -415,6 +417,8 @@ build-dev/bin/fminus lp.fm --denormals=flush       # subnormals flushed to zero:
 build-dev/bin/fminus lp.fm --no-strict-aliasing    # no TBAA: for a program that reads memory as another type
 build-dev/bin/fminus synth.fm -I lib               # #include "name": beside the including file, then in lib/
 build-dev/bin/fminus voices.fm --threads 4         # a parallel region on 4 threads at most (0: every core; 1: alone)
+build-dev/bin/fminus osc.fm --run f 1 --loop-budget 1000000   # the loop budget: a call that would loop for ever
+                                                   # returns early (status 3); stderr says what it took
 build-dev/bin/fminus pedal.cir --emit fm           # the FMinus module a circuit netlist generates (docs/circuits.md)
 build-dev/bin/fminus pedal.cir --self-test --emit fm   # the self-test chooses the netlist's open configuration first
                                                    # (--threads its threads), and prints a line of directives to paste
@@ -498,8 +502,9 @@ gain(in, out, n, 0.5f);                                       // one call a bloc
   `Libm` or `Fast`), `strictAliasing` whether the optimiser relies on C's strict-aliasing rule (`true`),
   `knobVersions` how many copies of a method knob versioning may make (8; 0 turns it off), `denormals` whether
   subnormals are kept or flushed to zero (`Denormals::Preserve` or `Flush`), `threads` the most threads a parallel
-  region runs on (0, the default, is every core; 1 runs each on the calling thread alone), and `keepIr` which of the
-  program's LLVM IR to keep as text (below). The header says what each costs.
+  region runs on (0, the default, is every core; 1 runs each on the calling thread alone), `keepIr` which of the
+  program's LLVM IR to keep as text (below), and `loopBudget` whether its loops count against a budget (`false`;
+  below). The header says what each costs.
 - **Threads.** `compile()` and the first look-up of each function run LLVM's optimiser and code generator on the
   calling thread: they take milliseconds and allocate. Different programs may compile on different threads at once.
   In a plugin, compile off the audio thread and hand the pointer over (below). A program's `parallel for` and
@@ -528,6 +533,13 @@ gain(in, out, n, 0.5f);                                       // one call a bloc
   machine code from, after the pipeline at `optimisation`, and the same text as `fminus --emit ll` prints for the same
   source and options, the file named as `fileName`. Each is empty when not kept. To print the optimised IR,
   `compile()` runs the optimiser itself, and the first look-up then only the code generator.
+- **Loop budget.** A program compiled with `Options::loopBudget` counts its loops' iterations and its recursive calls
+  against a budget the host sets before each call, `setLoopBudget(n)`, and a call that would loop for ever, or far
+  longer than it should, returns early, 0, with every function of the program that called it: `loopBudgetExceeded()`
+  says so, and `loopBudgetLeft()` what is left. A loop whose count is known as it starts is charged it there, any other
+  one an iteration. The checks go in after the optimiser, so within its budget a call computes what it would without
+  it, bit for bit, and at the same speed ([docs/extending.md](docs/extending.md), recipe 29, has the measurements). Off
+  by default; unlimited until the host sets it.
 - **Lifetime.** A function pointer is valid while its `Program` lives.
 
 `include/fminus/Circuit.h` is the circuit compiler's: `fminus::circuit::generate(netlist, "pedal.cir")` turns a
@@ -572,6 +584,7 @@ the result ([docs/programs.md](docs/programs.md)):
 ```bash
 build-dev/bin/fminus note.fm --emit exe -o note             # then ./note 69
 build-dev/bin/fminus note.fm --entry                        # the IR with that C main (--emit asm, obj too)
+build-dev/bin/fminus osc.fm --emit exe --loop-budget 1000000 -o osc   # main stops past the budget, and exits with 3
 ```
 
 `fminus-build` builds LLVM IR written by hand, which brings its own C `main`:
@@ -671,6 +684,10 @@ These are constraints a plugin runs into. `examples/plugin/`, a JUCE plugin, mee
   with every core (under 2 µs on two) against a plain call: worth it when its iterations take tens of microseconds
   together, a synth's voices, not a block's samples. A host whose other audio threads run regions too gets one region
   on the pool at a time; the others run on their own threads. `Program::Options::threads` limits or turns them off.
+- **Loops that never end.** A program stuck in a loop holds the audio thread, and the host with it. Compile with
+  `Program::Options::loopBudget`, set the budget before each call (a generous one: many times what a block takes), and
+  after it check `loopBudgetExceeded()`: the call returned early, and the plugin can silence the program and report it.
+  The budget is a count of iterations, not a clock ([docs/extending.md](docs/extending.md), recipe 29).
 - **Size and symbols.** Static LLVM adds tens of megabytes. Export only the plugin's entry points (an
   exported-symbols list), so LLVM's symbols cannot clash with another copy of LLVM in the host process.
 - **Bit-exactness across machines.** FMinus fuses and reassociates nothing, and in its default math mode a float's

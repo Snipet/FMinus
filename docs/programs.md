@@ -92,7 +92,12 @@ build-dev/bin/fminus prog.fm --entry                    # the IR, with the entry
 build-dev/bin/fminus prog.fm --entry --emit asm -o -    # its assembly
 build-dev/bin/fminus prog.fm --entry --emit obj -o prog.o
 build-dev/bin/fminus prog.fm --run main 3 4             # no executable: the JIT calls main
+build-dev/bin/fminus prog.fm --emit exe --loop-budget 1000000 -o prog   # main may take a million branches back
 ```
+
+With `--loop-budget n` the program counts its loops against a budget (extending.md, recipe 29), and the entry sets it
+to n before it calls `main`: a `main` that runs past it returns early, and the executable says so on stderr (`'main'
+ran past its loop budget of 1000000 and returned early`) and exits with 3 instead of printing a result.
 
 `--entry` adds the entry point to whatever `--emit` writes, so an object file can be linked by hand
 (`c++ prog.o build-dev/lib/libfminus_runtime.a -o prog`; on Windows,
