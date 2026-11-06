@@ -854,9 +854,10 @@ namespace fminus
                                           // "Osc::tick", "run" for "run.parallel.1"; empty for Support
             std::string module;           // the function's module, for a method: "Osc"; empty otherwise
             // The program's functions the optimiser inlined into this code, whose samples are this range's: "Osc::tick"
-            // in "Osc::process". Read from the calls, before the optimiser and after: a function called before and not
-            // after is inlined, and so is each function it called, through it, that this code no longer calls (a call
-            // the optimiser deleted as dead looks the same). Sorted; empty when there are none.
+            // in "Osc::process". Read from the calls, counted, before the optimiser and after: a function is inlined
+            // when this code calls it fewer times after than it did before, with the calls each function inlined into
+            // it brought, even if it still calls it at another call. A call the optimiser deleted as dead, or merged
+            // with another, looks the same as one it inlined. Sorted; empty when there are none.
             std::vector<std::string> inlined = {};
         };
 

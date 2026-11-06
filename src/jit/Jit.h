@@ -14,6 +14,7 @@
 #include <llvm/Passes/OptimizationLevel.h>
 #include <llvm/Support/Error.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -92,20 +93,25 @@ namespace fminus::jit
         // linked, and stays there while the Jit lives: the JIT neither moves nor frees it. Any thread may call this.
         std::vector<Code> code() const;
 
-        // The direct calls between a module's functions: for each function the module defines, the functions it calls
-        // by name that the module defines too, itself not among them, sorted.
-        using Calls = std::map<std::string, std::vector<std::string>, std::less<>>;
+        // The direct calls between a module's functions: for each function the module defines, each function it calls
+        // by name that the module defines too, itself not among them, with the number of its calls of it (call sites).
+        using Calls = std::map<std::string, std::map<std::string, std::size_t, std::less<>>, std::less<>>;
         static Calls directCalls(const llvm::Module& module);
 
-        // The calls the optimiser inlined, from a module's direct calls before and after it optimised the module: G
-        // is inlined into F when F called G before and does not after, and so, through G, is each function G called
-        // that F does not call after either. A call the optimiser deleted as dead looks the same. Each function of
-        // `after` that inlined any, with what it inlined, sorted.
-        static Calls inlinedCalls(const Calls& before, const Calls& after);
+        // For each function, the module's functions whose code it holds, inlined, sorted.
+        using Inlined = std::map<std::string, std::vector<std::string>, std::less<>>;
+
+        // The calls the optimiser inlined, from a module's direct calls before and after it optimised the module. Had
+        // it inlined nothing, F would call G after as often as before, and as often again as each function F inlined
+        // called G; each of those calls missing after is inlined into F, and brings G's own calls with it. So G is
+        // inlined into F when F calls it fewer times after than that, even if F still calls it at another call site.
+        // A call the optimiser deleted as dead, or merged with another, looks the same as one it inlined; one it
+        // copied (unrolling a loop) can hide one. Each function of `after` that inlined any, with what it inlined.
+        static Inlined inlinedCalls(const Calls& before, const Calls& after);
 
         // Writes down a module's inlinedCalls(), for code(). The JIT does this for each module it optimises
         // (Modules::Unoptimised); for one that comes optimised, its optimiser's caller does.
-        void recordInlining(const Calls& inlined);
+        void recordInlining(const Inlined& inlined);
 
     private:
         Jit() = default;

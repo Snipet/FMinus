@@ -21,9 +21,11 @@
 #include <llvm/Target/TargetMachine.h>
 
 #include <algorithm>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <set>
+#include <string_view>
 #include <utility>
 
 namespace fminus::jit
@@ -36,7 +38,7 @@ namespace fminus::jit
         mutable std::mutex mutex;
         std::vector<Jit::Code> linked;
         std::map<const void*, std::vector<Jit::Code>> pending;   // a JITLink link's, until it is emitted (or fails)
-        Jit::Calls inlined;                                      // by function (Jit::recordInlining)
+        Jit::Inlined inlined;                                    // by function (Jit::recordInlining)
 
         // A symbol's name as its module has it, or nothing for one that is none of the module's: a name without the
         // prefix (an assembler's label, macOS's ltmp0), an ELF object's local label (.L) or mapping symbol ($x).
@@ -316,7 +318,7 @@ namespace fminus::jit
         {
             if (function.isDeclaration())
                 continue;
-            std::vector<std::string>& callees = calls[function.getName().str()];
+            auto& callees = calls[function.getName().str()];
             for (const llvm::BasicBlock& block : function)
             {
                 for (const llvm::Instruction& instruction : block)
@@ -324,44 +326,101 @@ namespace fminus::jit
                     const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
                     const llvm::Function* callee = call != nullptr ? call->getCalledFunction() : nullptr;
                     if (callee != nullptr && callee != &function && !callee->isDeclaration())
-                        callees.push_back(callee->getName().str());
+                        ++callees[callee->getName().str()];
                 }
             }
-            std::sort(callees.begin(), callees.end());
-            callees.erase(std::unique(callees.begin(), callees.end()), callees.end());
         }
         return calls;
     }
 
-    // A walk of `before`'s calls from each function, which stops at a callee it still calls (whose code is its own).
-    Jit::Calls Jit::inlinedCalls(const Calls& before, const Calls& after)
+    namespace
     {
-        Calls inlined;
-        for (const auto& [function, kept] : after)
+        // The functions `before`'s calls reach from `function`, each after every function that calls it on the way
+        // (a reverse post-order: a call back up the way, recursion, is the one it does not wait for), `function` first.
+        std::vector<std::string_view> callersFirst(const Jit::Calls& before, std::string_view function)
         {
-            const auto calls = before.find(function);
-            if (calls == before.end())
-                continue;
-            std::set<std::string, std::less<>> seen{function};
-            std::set<std::string> found;
-            std::vector<std::string> pending = calls->second;
-            while (!pending.empty())
+            struct Visit
             {
-                std::string callee = std::move(pending.back());
-                pending.pop_back();
-                if (!seen.insert(callee).second || std::binary_search(kept.begin(), kept.end(), callee))
+                std::string_view function;
+                Jit::Calls::mapped_type::const_iterator next;
+                Jit::Calls::mapped_type::const_iterator end;
+            };
+            std::vector<std::string_view> after;   // each function once all it calls are done
+            std::set<std::string_view> seen{function};
+            std::vector<Visit> visits;
+            const auto visit = [&](std::string_view caller) {
+                if (const auto calls = before.find(caller); calls != before.end())
+                    visits.push_back({caller, calls->second.begin(), calls->second.end()});
+                else
+                    after.push_back(caller);
+            };
+            visit(function);
+            while (!visits.empty())
+            {
+                Visit& top = visits.back();
+                if (top.next == top.end)
+                {
+                    after.push_back(top.function);
+                    visits.pop_back();
                     continue;
+                }
+                const std::string_view callee = (top.next++)->first;
+                if (seen.insert(callee).second)
+                    visit(callee);
+            }
+            std::reverse(after.begin(), after.end());
+            return after;
+        }
+
+        // count + calls * sites, held at the largest size_t past it (a chain of inlined calls multiplies them).
+        std::size_t plusCalls(std::size_t count, std::size_t calls, std::size_t sites)
+        {
+            constexpr std::size_t most = std::numeric_limits<std::size_t>::max();
+            return sites != 0 && calls > (most - count) / sites ? most : count + calls * sites;
+        }
+    } // namespace
+
+    // For each function F, a walk of `before`'s calls from it, each function after every one that calls it on the way,
+    // counting the calls of each that F would make had nothing been inlined.
+    Jit::Inlined Jit::inlinedCalls(const Calls& before, const Calls& after)
+    {
+        Inlined inlined;
+        for (const auto& [function, calls] : after)
+        {
+            const auto was = before.find(function);
+            const auto fewer = [&calls](const auto& callee) {
+                const auto still = calls.find(callee.first);
+                return still == calls.end() || still->second < callee.second;
+            };
+            if (was == before.end() || std::none_of(was->second.begin(), was->second.end(), fewer))
+                continue;   // F makes each call it made: nothing was inlined into it, nor through what it calls
+            std::map<std::string_view, std::size_t> expected(was->second.begin(), was->second.end());
+            std::vector<std::string> found;
+            for (const std::string_view callee : callersFirst(before, function))
+            {
+                const auto still = calls.find(callee);
+                const std::size_t kept = still != calls.end() ? still->second : 0;
+                const auto wanted = expected.find(callee);
+                if (callee == function || wanted == expected.end() || wanted->second <= kept)
+                    continue;
+                const std::size_t sites = wanted->second - kept;
+                found.emplace_back(callee);
                 if (const auto further = before.find(callee); further != before.end())
-                    pending.insert(pending.end(), further->second.begin(), further->second.end());
-                found.insert(std::move(callee));
+                {
+                    for (const auto& [next, count] : further->second)
+                        expected[next] = plusCalls(expected[next], count, sites);
+                }
             }
             if (!found.empty())
-                inlined[function].assign(found.begin(), found.end());
+            {
+                std::sort(found.begin(), found.end());
+                inlined.emplace(function, std::move(found));
+            }
         }
         return inlined;
     }
 
-    void Jit::recordInlining(const Calls& inlined)
+    void Jit::recordInlining(const Inlined& inlined)
     {
         const std::lock_guard<std::mutex> lock(log_->mutex);
         for (const auto& [function, callees] : inlined)
