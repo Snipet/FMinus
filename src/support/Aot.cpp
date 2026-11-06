@@ -2,7 +2,10 @@
 // path of libfminus_runtime.a) and FMINUS_AOT_SANITIZE (this tree's -fsanitize= list, or empty): src/CMakeLists.txt.
 #include "support/Aot.h"
 
+#include "opt/LoopBudget.h"
+
 #include <llvm/ADT/SmallString.h>
+#include <llvm/IR/GlobalVariable.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/LegacyPassManager.h>
 #include <llvm/IR/Module.h>
@@ -13,6 +16,7 @@
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Target/TargetMachine.h>
 
+#include <cstdint>
 #include <cstdlib>
 #include <optional>
 
@@ -100,7 +104,7 @@ namespace fminus::aot
         return linkExecutable(options);
     }
 
-    llvm::Error addEntryPoint(llvm::Module& module)
+    llvm::Error addEntryPoint(llvm::Module& module, std::optional<std::int64_t> loopBudget)
     {
         llvm::Function* program = module.getFunction("main");
         if (program == nullptr || program->isDeclaration())
@@ -156,9 +160,38 @@ namespace fminus::aot
         const bool parallel = module.getFunction("fminus_rt_parallel_for") != nullptr;
         if (parallel)
             builder.CreateCall(module.getOrInsertFunction("fminus_rt_parallel_start", intType));
+        // The loop budget, set for the call and read after it. The accesses are volatile: until the pass at the end of
+        // the pipeline puts the program's checks in, nothing in main touches the budget, and the optimiser would
+        // fold the read of the flag to the 0 written before the call.
+        llvm::GlobalVariable* budget = nullptr;
+        if (loopBudget)
+        {
+            budget = opt::loopBudgetGlobal(module);
+            entry->addFnAttr(opt::kLoopBudgetHostAttribute);
+            program->addFnAttr(llvm::Attribute::NoInline);
+            builder.CreateAlignedStore(builder.getInt64(static_cast<std::uint64_t>(*loopBudget)), budget,
+                                       llvm::Align(8), /*isVolatile=*/true);
+            builder.CreateAlignedStore(builder.getInt32(0), builder.CreateStructGEP(budget->getValueType(), budget, 1),
+                                       llvm::Align(4), /*isVolatile=*/true);
+        }
         llvm::Value* result = builder.CreateCall(program, values, "result");
         if (parallel)
             builder.CreateCall(module.getOrInsertFunction("fminus_rt_parallel_stop", builder.getVoidTy()));
+        if (budget != nullptr)
+        {
+            llvm::Value* stopped =
+                builder.CreateAlignedLoad(builder.getInt32Ty(), builder.CreateStructGEP(budget->getValueType(), budget, 1),
+                                          llvm::Align(4), /*isVolatile=*/true, "stopped");
+            llvm::BasicBlock* ranOut = llvm::BasicBlock::Create(context, "ran.out", entry);
+            llvm::BasicBlock* within = llvm::BasicBlock::Create(context, "within", entry);
+            builder.CreateCondBr(builder.CreateICmpNE(stopped, builder.getInt32(0)), ranOut, within);
+            builder.SetInsertPoint(ranOut);
+            builder.CreateCall(module.getOrInsertFunction("fminus_rt_main_loop_budget", builder.getVoidTy(), intType,
+                                                          pointerType, builder.getInt64Ty()),
+                               {argc, argv, builder.getInt64(static_cast<std::uint64_t>(*loopBudget))});
+            builder.CreateRet(builder.getInt32(3));
+            builder.SetInsertPoint(within);
+        }
         llvm::CallInst* print = builder.CreateCall(printResult, {result});
         if (printsBool)
             print->addParamAttr(0, llvm::Attribute::ZExt);

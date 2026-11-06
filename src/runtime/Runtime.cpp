@@ -51,6 +51,13 @@ extern "C" void fminus_rt_main_bool_result(bool result) noexcept
     std::fputs(result ? "true\n" : "false\n", stdout);
 }
 
+extern "C" void fminus_rt_main_loop_budget(std::int32_t argc, char** argv, std::int64_t budget) noexcept
+{
+    const char* program = argc > 0 ? argv[0] : "fminus";
+    std::fprintf(stderr, "%s: 'main' ran past its loop budget of %lld and returned early\n", program,
+                 static_cast<long long>(budget));
+}
+
 namespace
 {
     constexpr std::int64_t kAlignment = 64;

@@ -1,0 +1,151 @@
+// The loop budget (--loop-budget n; opt/LoopBudget.h): runaway-loop protection. Each branch back to a loop's start, and
+// each call of a function that can call itself again, counts down the program's budget, fminus_rt_loop_budget; a loop
+// whose count the optimiser knows is charged it before it starts. A call that runs out returns early, 0, with the flag
+// set, and so does every function of the program that called it. --run prints what the call took, or that it ran out
+// (exit status 3); an executable's main does the same.
+// RUN: fminus %s -O0 --loop-budget 0 | FileCheck %s --check-prefix=O0
+// RUN: fminus %s -O2 --loop-budget 0 | FileCheck %s --check-prefix=O2
+// RUN: fminus %s -O2 | FileCheck %s --check-prefix=OFF
+// RUN: fminus %s -O0 --run halvings 1024 --loop-budget 10 2>&1 | FileCheck %s --check-prefix=TOOK0
+// RUN: not fminus %s -O0 --run halvings 1024 --loop-budget 9 2>&1 | FileCheck %s --check-prefix=SHORT0
+// RUN: fminus %s -O2 --run halvings 1024 --loop-budget 9 2>&1 | FileCheck %s --check-prefix=TOOK2
+// RUN: fminus %s -O0 --run sum 100 --loop-budget 100 2>&1 | FileCheck %s --check-prefix=SUM
+// RUN: not fminus %s -O2 --run sum 100000 --loop-budget 1000 2>&1 | FileCheck %s --check-prefix=CHARGED
+// RUN: not fminus %s --run spin 1 --loop-budget 1000000 2>&1 | FileCheck %s --check-prefix=SPIN
+// RUN: not fminus %s -O0 --run spin 1 --loop-budget 1000 2>&1 | FileCheck %s --check-prefix=SPIN
+// RUN: fminus %s --run spin -1 2>&1 | FileCheck %s --check-prefix=UNBUDGETED
+// RUN: fminus %s -O0 --run tree 4 0 --loop-budget 1000 2>&1 | FileCheck %s --check-prefix=TREE
+// RUN: not fminus %s --run tree 4 1 --loop-budget 1000 2>&1 | FileCheck %s --check-prefix=UNWOUND
+// RUN: not fminus %s -O0 --run tree 4 1 --loop-budget 1000 2>&1 | FileCheck %s --check-prefix=UNWOUND
+// RUN: not fminus %s -O0 --run tree 30 0 --loop-budget 1000 2>&1 | FileCheck %s --check-prefix=CALLS
+// RUN: fminus %s --emit exe --loop-budget 1000 -o %t
+// RUN: %t -1 | FileCheck %s --check-prefix=MAIN
+// RUN: not %t 1 2>&1 | FileCheck %s --check-prefix=MAINOUT
+// RUN: echo 'float fminus_rt_loop_budget(float x) { return x; }' | not fminus - --loop-budget 0 2>&1 \
+// RUN:   | FileCheck %s --check-prefix=RESERVED
+// RUN: echo 'float fminus_rt_loop_budget(float x) { return x; }' | fminus - --run fminus_rt_loop_budget 2 \
+// RUN:   | FileCheck %s --check-prefix=FREE
+
+// Never ends for x > 0, and nothing in it can tell: a float's condition has no count.
+float spin(float x)
+{
+    while (x > 0)
+        x = x * 1.0f;
+    return x;
+}
+
+// A while loop with no count: one a branch back (log2 x of them, less one where the optimiser rotated it).
+int halvings(float x)
+{
+    int n = 0;
+    while (x > 1)
+    {
+        x = x * 0.5f;
+        n = n + 1;
+    }
+    return n;
+}
+
+// A for over a range: at -O2 charged its count before it starts.
+float sum(float n)
+{
+    float s = 0;
+    for (int i = 0; i < (int)n; ++i)
+        s = s + (float)i;
+    return s;
+}
+
+// A recursion that is no loop: each call counts one where it starts. For x > 0 the deepest call spins, runs out, and
+// every call above it returns 0 at once, without adding its 1.
+int calls(int n, float x)
+{
+    if (n == 0)
+        return (int)spin(x);
+    return calls(n - 1, x) + calls(n - 1, x) + 1;
+}
+
+float tree(float n, float x)
+{
+    return (float)calls((int)n, x);
+}
+
+float main(float x)
+{
+    return spin(x);
+}
+
+// O0: @fminus_rt_loop_budget = dso_local global { i64, i32 } { i64 9223372036854775807, i32 0 }, align 8
+// O0-LABEL: define float @spin(float %x)
+// O0:         %budget.start = load atomic i64, ptr @fminus_rt_loop_budget monotonic, align 8
+// O0:       while.body:
+// O0:         %budget.left = sub i64 %budget.slot.0, 1
+// O0-NEXT:    %budget.out = icmp slt i64 %budget.left, 0
+// O0-NEXT:    br i1 %budget.out, label %budget.stop, label %while.cond, !prof [[UNLIKELY:![0-9]+]]
+// O0:       while.end:
+// O0:         store atomic i64 %budget.slot.0, ptr @fminus_rt_loop_budget monotonic, align 8
+// O0-NEXT:    ret float
+// O0:       budget.stop:
+// O0-NEXT:    store atomic i64 %budget.left, ptr @fminus_rt_loop_budget monotonic, align 8
+// O0-NEXT:    store atomic i32 1, ptr getelementptr inbounds ({ i64, i32 }, ptr @fminus_rt_loop_budget, i32 0, i32 1) monotonic, align 4
+// O0-NEXT:    ret float 0.000000e+00
+// O0-LABEL: define i32 @calls(i32 %n, float %x)
+// O0:         %budget.start = load atomic i64, ptr @fminus_rt_loop_budget monotonic, align 8
+// O0-NEXT:    %budget.left = sub i64 %budget.start, 1
+// O0-NEXT:    %budget.out = icmp slt i64 %budget.left, 0
+// O0-NEXT:    br i1 %budget.out, label %budget.stop, label %budget.entered, !prof [[UNLIKELY]]
+// O0:         store atomic i64 %budget.left, ptr @fminus_rt_loop_budget monotonic, align 8
+// O0-NEXT:    %{{[0-9]+}} = call float @spin(float %{{.*}})
+// O0-NEXT:    %budget.stopped = load atomic i32, ptr getelementptr inbounds ({ i64, i32 }, ptr @fminus_rt_loop_budget, i32 0, i32 1) monotonic, align 4
+// O0-NEXT:    %[[STOPPED:[0-9]+]] = icmp ne i32 %budget.stopped, 0
+// O0-NEXT:    br i1 %[[STOPPED]], label %budget.unwind, label %[[NEXT:.*]], !prof [[UNLIKELY]]
+// O0:       [[NEXT]]:
+// O0-NEXT:    %budget.now = load atomic i64, ptr @fminus_rt_loop_budget monotonic, align 8
+// O0:       budget.unwind:
+// O0-NEXT:    ret i32 0
+// O0-LABEL: define float @tree(float %n, float %x)
+// O0-SAME:    #[[RETURNS:[0-9]+]]
+// O0:         call i32 @calls(
+// O0-NEXT:    %budget.stopped = load atomic i32
+// O0:       budget.unwind:
+// O0-NEXT:    ret float 0.000000e+00
+// O0-LABEL: define float @main(float %x)
+// O0-SAME:    #[[RETURNS]]
+// O0: attributes #{{[0-9]+}} = { "fminus-loop-budget"="counts" }
+// O0: attributes #[[RETURNS]] = { "fminus-loop-budget"="returns" }
+// O0: !{i32 7, !"fminus.loop-budget", i32 1}
+// O0: [[UNLIKELY]] = !{!"branch_weights", i32 1, i32 {{[0-9]+}}}
+
+// At -O2 too, and a loop with a count is charged it in its preheader.
+// O2: @fminus_rt_loop_budget = dso_local {{.*}}global { i64, i32 } { i64 9223372036854775807, i32 0 }, align 8
+// O2-LABEL: define float @spin(float %x)
+// O2:         br i1 %budget.out, label %budget.stop, label %while.cond
+// O2-LABEL: define float @sum(float %n)
+// O2:         %budget.left{{[0-9]*}} = sub i64 %budget.{{start|slot\.[0-9]+}}, %{{[0-9]+}}
+// O2-NEXT:    %budget.out{{[0-9]*}} = icmp slt i64 %budget.left{{[0-9]*}}, 0
+// O2-NEXT:    br i1 %budget.out{{[0-9]*}}, label %budget.stop, label %{{.*}}, !prof
+// O2-LABEL: define {{.*}}i32 @calls(i32 %n, float %x)
+// O2:         %budget.stopped = load atomic i32
+// O2: "fminus-loop-budget"="counts"
+
+// Without the option: nothing of it.
+// OFF-NOT: {{fminus_rt_loop_budget|fminus\.loop-budget|%budget}}
+
+// TOOK0: fminus: --run: 'halvings' took 10 of its loop budget of 10
+// TOOK0: 10
+// SHORT0: fminus: --run: 'halvings' ran past its loop budget of 9 and returned early
+// TOOK2: fminus: --run: 'halvings' took 9 of its loop budget of 9
+// TOOK2: 10
+// SUM: fminus: --run: 'sum' took 100 of its loop budget of 100
+// SUM: 4950
+// CHARGED: fminus: --run: 'sum' ran past its loop budget of 1000 and returned early
+// SPIN: fminus: --run: 'spin' ran past its loop budget of {{[0-9]+}} and returned early
+// UNBUDGETED: -1
+// TREE: fminus: --run: 'tree' took 31 of its loop budget of 1000
+// TREE: 15
+// UNWOUND: fminus: --run: 'tree' ran past its loop budget of 1000 and returned early
+// UNWOUND: 0
+// CALLS: fminus: --run: 'tree' ran past its loop budget of 1000 and returned early
+// MAIN: -1
+// MAINOUT: 'main' ran past its loop budget of 1000 and returned early
+// RESERVED: <stdin>:1:7: error: the loop budget reserves 'fminus_rt_loop_budget' for its counter, and this program declares a function of that name: rename it
+// FREE: 2

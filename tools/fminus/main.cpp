@@ -17,6 +17,9 @@
 //     fminus synth.fm -I lib                #include "name" looks beside the including file, then in lib/
 //     fminus voices.fm --threads 4          a parallel for or parallel { } on 4 threads at most (0, the default:
 //                                           one for each core; 1: each region on the calling thread alone)
+//     fminus spin.fm --run spin 3 --loop-budget 1000000
+//                                           the loop budget: the call may take a million branches back, and stops
+//                                           early past them (also for --emit: the IR's checks, an executable's main)
 //     fminus diodetone.cir --emit fm        the FMinus module a circuit netlist generates (fminus::circuit,
 //                                           docs/circuits.md); a .cir compiles and runs as that text would
 //     fminus play.fm --run dc 1             play.fm's #include "diodetone.cir" reads the module it generates
@@ -29,6 +32,7 @@
 #include "frontend/Frontend.h"
 #include "ir/CodeGen.h"
 #include "jit/Jit.h"
+#include "opt/LoopBudget.h"
 #include "runtime/Runtime.h"
 #include "support/Aot.h"
 #include "support/HostTarget.h"
@@ -48,6 +52,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdint>
 #include <cstdlib>
 #include <exception>
 #include <format>
@@ -400,6 +405,7 @@ int main(int argc, char** argv)
     std::string math = "vector";
     std::vector<std::string> includeDirectories;
     unsigned threads = 0;
+    std::optional<std::int64_t> loopBudget;
     CircuitSettings circuitSettings;
     app.add_option("input", input, "FMinus source file ('-' for stdin)")->required();
     app.add_option("args", runArgs, "The arguments of --run's function");
@@ -444,6 +450,11 @@ int main(int argc, char** argv)
                    "The most threads a parallel for or parallel { } runs on, the calling thread's among them (0: one "
                    "for each core; 1: each region on the calling thread alone); and --self-test's threads")
         ->capture_default_str();
+    app.add_option("--loop-budget", loopBudget,
+                   "Compile with the loop budget, runaway-loop protection: each branch back to a loop's start, and each "
+                   "call of a recursive function, counts one, and a call that takes more than this many returns early "
+                   "(--run's call, an executable's main; --emit ll and asm show the checks)")
+        ->check(CLI::NonNegativeNumber);
     app.add_flag("--self-test", circuitSettings.selfTest,
                  "Run the self-test of each circuit netlist (.cir) the program reads and generate it with the answer: "
                  "it chooses the configuration the netlist leaves open (seconds; docs/circuits.md)");
@@ -522,6 +533,7 @@ int main(int argc, char** argv)
     options.denormals = denormals == "flush" ? fminus::ir::Denormals::Flush : fminus::ir::Denormals::Preserve;
     options.targetTriple = (*machine)->getTargetTriple().str();   // which register an entry point sets
     options.threads = threads;
+    options.loopBudget = loopBudget.has_value();
 
     // Syntax tree -> LLVM IR.
     auto context = std::make_unique<llvm::LLVMContext>();
@@ -565,6 +577,17 @@ int main(int argc, char** argv)
         auto address = (*jit)->lookup(run);
         if (!address)
             return fail(address.takeError());
+        // The program's loop budget (opt/LoopBudget.h), set for the call, as a host sets it.
+        fminus_rt_loop_budget_state* budget = nullptr;
+        if (loopBudget)
+        {
+            auto found = (*jit)->lookup(fminus::opt::kLoopBudgetSymbol);
+            if (!found)
+                return fail(found.takeError());
+            budget = found->toPtr<fminus_rt_loop_budget_state*>();
+            budget->left = *loopBudget;
+            budget->stopped = 0;
+        }
         // Through a pointer of the function's own type: a bool or an int comes back in a general register (a bool
         // zero-extended), a float in a vector register. std::format prints a bool as true or false.
         constexpr auto counts = std::make_index_sequence<kMaxRunArgs + 1>{};
@@ -594,13 +617,26 @@ int main(int argc, char** argv)
             return fail(std::format("--run: '{}' returns '{}'; --run prints floats, bools and ints only", run,
                                     fminus::ast::typeName(function->returnType)));
         }
+        // What the call took of its budget, on stderr; when it ran out, what it printed is what it returned early,
+        // and the status is 3.
+        if (budget != nullptr)
+        {
+            if (budget->stopped != 0)
+            {
+                llvm::errs() << std::format("fminus: --run: '{}' ran past its loop budget of {} and returned early\n",
+                                            run, *loopBudget);
+                return 3;
+            }
+            llvm::errs() << std::format("fminus: --run: '{}' took {} of its loop budget of {}\n", run,
+                                        *loopBudget - budget->left, *loopBudget);
+        }
         return 0;
     }
 
     // LLVM IR -> optimised for this machine -> IR, assembly, an object file or an executable.
     if (entry || emit == "exe")
     {
-        if (llvm::Error error = fminus::aot::addEntryPoint(*module))
+        if (llvm::Error error = fminus::aot::addEntryPoint(*module, loopBudget))
             return fail(std::move(error));
     }
     fminus::prepareModule(*module, **machine);

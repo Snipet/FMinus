@@ -8,6 +8,7 @@
 #include "frontend/Frontend.h"
 #include "ir/CodeGen.h"
 #include "jit/Jit.h"
+#include "opt/LoopBudget.h"
 #include "runtime/Runtime.h"
 #include "support/HostTarget.h"
 
@@ -24,6 +25,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <limits>
 #include <map>
@@ -127,6 +129,9 @@ namespace fminus
         bool pool = false;   // a user of the runtime's pool, for its parallel regions (runtime/Parallel.cpp)
         std::string loweredIr;     // Options::keepIr's texts, or empty
         std::string optimisedIr;
+        // The program's loop budget (Options::loopBudget), in the JIT's memory; without the option, one nothing reads.
+        fminus_rt_loop_budget_state unbudgeted{std::numeric_limits<std::int64_t>::max(), 0};
+        fminus_rt_loop_budget_state* budget = &unbudgeted;
 
         Impl() = default;
         Impl(const Impl&) = delete;
@@ -202,6 +207,7 @@ namespace fminus
         lowering.denormals = options.denormals == Denormals::Flush ? ir::Denormals::Flush : ir::Denormals::Preserve;
         lowering.targetTriple = (*machine)->getTargetTriple().str();   // which register an entry point sets
         lowering.threads = options.threads;
+        lowering.loopBudget = options.loopBudget;
 
         auto context = std::make_unique<llvm::LLVMContext>();
         std::unique_ptr<llvm::Module> module = ir::lower(*program, *context, diagnostics, lowering);
@@ -285,6 +291,18 @@ namespace fminus
 
         auto impl = std::make_unique<Impl>();
         impl->jit = std::move(*created);
+        // The budget the program defines (opt/LoopBudget.h). Finding it compiles the module, here rather than at the
+        // first look-up of a function.
+        if (options.loopBudget)
+        {
+            auto budget = impl->jit->lookup(opt::kLoopBudgetSymbol);
+            if (!budget)
+            {
+                errors = llvm::toString(budget.takeError()) + "\n";
+                return nullptr;
+            }
+            impl->budget = budget->toPtr<fminus_rt_loop_budget_state*>();
+        }
         if (parallel)
         {
             fminus_rt_parallel_start();
@@ -417,6 +435,24 @@ namespace fminus
             if (parameter.defaultValue)
                 setValue(instance, parameter, *parameter.defaultValue);
         }
+    }
+
+    // The program's own accesses are relaxed (monotonic) atomics too (opt/LoopBudget.h). The flag is cleared first:
+    // a call that starts after both stores sees both.
+    void Program::setLoopBudget(std::int64_t backEdges) noexcept
+    {
+        std::atomic_ref(impl_->budget->stopped).store(0, std::memory_order_relaxed);
+        std::atomic_ref(impl_->budget->left).store(backEdges, std::memory_order_relaxed);
+    }
+
+    std::int64_t Program::loopBudgetLeft() const noexcept
+    {
+        return std::atomic_ref(impl_->budget->left).load(std::memory_order_relaxed);
+    }
+
+    bool Program::loopBudgetExceeded() const noexcept
+    {
+        return std::atomic_ref(impl_->budget->stopped).load(std::memory_order_relaxed) != 0;
     }
 } // namespace fminus
 

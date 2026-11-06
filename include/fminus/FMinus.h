@@ -221,6 +221,10 @@ namespace fminus
             // Which of the program's LLVM IR to keep as text, for loweredIr() and optimisedIr() (KeepIr, above). None,
             // the default, prints nothing and holds nothing.
             KeepIr keepIr = KeepIr::None;
+            // The loop budget, runaway-loop protection: the code counts its loops' iterations and its recursive calls
+            // against a budget the host sets before each call (setLoopBudget, below), and a call that runs out returns
+            // early, with a flag the host reads (loopBudgetExceeded). Off, the default, the code is as it was.
+            bool loopBudget = false;
         };
 
         // Compiles `source`. Returns nullptr when it does not compile, with `errors` holding FMinus's messages, one a
@@ -336,6 +340,50 @@ namespace fminus
 
         // Sets each of the module's parameters that has an fminus::default to it (setValue), in `instance`.
         static void setDefaults(void* instance, const Module& module) noexcept;
+
+        // The loop budget (Options::loopBudget): runaway-loop protection, for a program that might loop for ever, or
+        // for far longer than a block may take, on the audio thread. Its code counts down the budget: a loop whose
+        // count the optimiser knows when it starts (a for over a block, a vectorised loop) is charged that count there,
+        // before it runs; any other loop (a while on the data) one at each branch back to its start; and a function
+        // that can call itself again one at each call. When the count goes below zero, the function sets the flag and
+        // returns at once, 0, null or nothing, and so does each of the program's functions that called it, back to the
+        // host: what the program has written stays as it was where it stopped, as if it had paused there (before such
+        // a loop, or at a branch back). Before then, a call computes what it would without the budget, bit for bit: the
+        // checks go in after the optimiser has made every decision, and only count and branch. A loop with a count
+        // costs a subtraction and a branch where it starts, any other a subtraction and a branch an iteration, in
+        // registers, and a call a load and a store of the budget (docs/extending.md, recipe 29, has the measurements).
+        // What a call takes depends on the optimised code: a vectorised loop counts once a vector of samples, and a
+        // loop the optimiser unrolled or removed counts what it became.
+        //
+        //   Program::Options options;
+        //   options.loopBudget = true;
+        //   auto program = Program::compile(source, errors, options);
+        //   ...
+        //   program->setLoopBudget(10'000'000);           // on the audio thread, before each call
+        //   process(instance, in, out, n);
+        //   if (program->loopBudgetExceeded())            // it returned early: silence it, report it
+        //       ...
+        //
+        // One budget a Program, which every thread that runs it shares: a parallel region's threads each count from
+        // where their part starts, so the program as a whole may take up to that many times the budget before each
+        // stops. A loop that runs for ever only through undefined behaviour (an int that overflows past its end, which
+        // C lets the optimiser assume never happens) is charged the count the optimiser assumed. The program compiles
+        // with its machine code, as compile() returns (the first look-up of a function only finds it). Unlimited until
+        // the host sets it. Each of these is a relaxed atomic load or store, no allocation and no lock: the audio
+        // thread may call them. In a program compiled without the budget they read and write a budget nothing counts
+        // down, and loopBudgetExceeded() is false.
+
+        // Sets the budget for the next call, `backEdges` branches back (a loop with a count is charged them all as it
+        // starts; at 0 the first branch back stops the call), and clears the flag. The host sets it before each call
+        // it limits; otherwise what is left carries over to the next call.
+        void setLoopBudget(std::int64_t backEdges) noexcept;
+
+        // What is left of the budget: what was set less what the calls since have taken; below zero once a call has
+        // run out.
+        std::int64_t loopBudgetLeft() const noexcept;
+
+        // Whether a call since setLoopBudget ran out of the budget and returned early.
+        bool loopBudgetExceeded() const noexcept;
 
     private:
         struct Impl;

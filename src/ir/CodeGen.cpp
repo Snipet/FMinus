@@ -19,6 +19,7 @@
 
 #include "ir/Lowering.h"
 #include "opt/KnobVersioning.h"
+#include "opt/LoopBudget.h"
 #include "support/HostTarget.h"
 
 #include <llvm/IR/LLVMContext.h>
@@ -26,6 +27,7 @@
 #include <llvm/IR/Module.h>
 
 #include <memory>
+#include <string>
 
 namespace fminus::ir
 {
@@ -128,6 +130,29 @@ namespace fminus::ir
         // linked into one.
         const char* math = options.math == Math::Vector ? "vector" : options.math == Math::Libm ? "libm" : "fast";
         module->addModuleFlag(llvm::Module::Error, kMathFlag, llvm::MDString::get(context, math));
+        // The loop budget's flag, for the pass at the end of the pipeline, and the budget itself, defined before any
+        // function. The JIT learns a module's symbols when it is added, before it is optimised, so the budget is
+        // there from the start. A function of its name would be a second symbol of that name: an error, and then no
+        // budget, so that the rest lowers as it would and reports what else is wrong.
+        if (options.loopBudget)
+        {
+            module->addModuleFlag(llvm::Module::Max, opt::kLoopBudgetFlag, 1);
+            const ast::Function* taken = nullptr;
+            for (const ast::Function& function : program.functions)
+            {
+                if (function.module == nullptr && function.name == opt::kLoopBudgetSymbol)
+                {
+                    taken = &function;
+                    break;
+                }
+            }
+            if (taken != nullptr)
+                diagnostics.error(taken->location, std::string("the loop budget reserves '") + opt::kLoopBudgetSymbol
+                                                       + "' for its counter, and this program declares a function "
+                                                         "of that name: rename it");
+            else
+                opt::loopBudgetGlobal(*module);
+        }
         detail::Lowering(*module, diagnostics, options).lower(program);
         if (diagnostics.hasErrors())
             return nullptr;

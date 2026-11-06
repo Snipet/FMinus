@@ -10,6 +10,8 @@
 
 #include <llvm/Support/Error.h>
 
+#include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -52,5 +54,10 @@ namespace fminus::aot
     // with a parallel region gets the runtime's pool around the call (fminus_rt_parallel_start and _stop). Call it
     // before prepareModule and optimising. Fails when the module defines no main, or a main that takes anything but
     // floats or returns anything but a float or a bool.
-    llvm::Error addEntryPoint(llvm::Module& module);
+    //
+    // With `loopBudget`, for a module compiled with the loop budget (ir::Options::loopBudget, opt/LoopBudget.h), the C
+    // main sets the program's budget to it before the call, and when main runs past it says so on stderr
+    // (fminus_rt_main_loop_budget) and exits with 3 instead of printing what main returned. main is then never
+    // inlined into the C main, which the pass leaves alone (kLoopBudgetHostAttribute), as a host's code.
+    llvm::Error addEntryPoint(llvm::Module& module, std::optional<std::int64_t> loopBudget = std::nullopt);
 } // namespace fminus::aot

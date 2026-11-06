@@ -114,6 +114,14 @@ namespace fminus::ir
         // 0 is as many as the runtime's pool has, 1 runs each region on the calling thread alone. Each region hands
         // it to fminus_rt_parallel_for (runtime/Runtime.h), which also runs every region alone until the pool starts.
         unsigned threads = 0;
+
+        // The loop budget, runaway-loop protection (opt/LoopBudget.h): every branch back to the start of a loop, and
+        // every call of a function that can call itself again, counts down the program's budget,
+        // fminus_rt_loop_budget (runtime/Runtime.h), and a call that runs out returns early with its flag set. The
+        // module defines the budget, unlimited until its host sets it, and records the option as the module flag
+        // "fminus.loop-budget", for the pass at the end of the pipeline, wherever the module is optimised. A program
+        // that declares a function of the budget's name is then an error. Off by default: the code is as it was.
+        bool loopBudget = false;
     };
 
     // Lowers `program` into a new module in `context`, named after the diagnostics' file. Every FMinus function becomes

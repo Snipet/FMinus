@@ -17,6 +17,19 @@ typedef float fminus_rt_float4 __attribute__((vector_size(16)));
 // context holds.
 typedef void (*fminus_rt_task)(void* context, std::int32_t begin, std::int32_t end);
 
+// A program's loop budget, fminus_rt_loop_budget, which a program compiled with it defines (ir::Options::loopBudget,
+// opt/LoopBudget.h) and its code counts down: one at each branch back to the start of a loop, and one at each call of a
+// function that can call itself again. When `left` goes below zero, the function that took it there sets `stopped`
+// and returns early, and so does each function of the program that called it, back to the host. It starts unlimited
+// (INT64_MAX, and 0); the host sets `left` and clears `stopped` before a call, and reads them after it, with relaxed
+// atomics (Program::setLoopBudget, include/fminus/FMinus.h; an executable's C main, support/Aot.h). Every access the
+// program makes is a relaxed atomic too, so a parallel region's threads may share it.
+struct fminus_rt_loop_budget_state
+{
+    std::int64_t left;      // what the program may still take: below zero once it has run out
+    std::int32_t stopped;   // nonzero once a call has run out and returned early
+};
+
 extern "C"
 {
     // The runtime's ABI version, for generated code to check against the one it was compiled for.
@@ -33,6 +46,10 @@ extern "C"
 
     // The same for a main that returns bool: prints true or false.
     void fminus_rt_main_bool_result(bool result) noexcept;
+
+    // An executable compiled with the loop budget (fminus --emit exe --loop-budget n), when main ran past it: tells
+    // stderr that main returned early, before the executable exits with 3.
+    void fminus_rt_main_loop_budget(std::int32_t argc, char** argv, std::int64_t budget) noexcept;
 
     // The heap, for FMinus's malloc, calloc and free: count * size bytes (malloc: 1 * size), aligned to 64 bytes (a
     // cache line, and the alignment of the widest vector, AVX-512's) and zeroed, as every variable FMinus declares

@@ -2,6 +2,7 @@
 #include "support/HostTarget.h"
 
 #include "opt/KnobVersioning.h"
+#include "opt/LoopBudget.h"
 #include "opt/MathKernels.h"
 #include "opt/ZeroInitElision.h"
 #include "support/LLVMInit.h"
@@ -153,6 +154,14 @@ namespace fminus
                 modulePasses.addPass(opt::MathKernelsPass(level != llvm::OptimizationLevel::O0, machine));
             });
         // ---- end of math kernels ------------------------------------------------------------------------------------
+        // ---- The loop budget (opt/LoopBudget.h), at every level, for a module whose flag asks for it ----------------
+        // Last of all, after the math kernels: the loops it counts are the ones the machine code will run, and nothing
+        // the optimiser decides can depend on it.
+        passes.registerOptimizerLastEPCallback(
+            [](llvm::ModulePassManager& modulePasses, llvm::OptimizationLevel, llvm::ThinOrFullLTOPhase) {
+                modulePasses.addPass(opt::LoopBudgetPass());
+            });
+        // ---- end of the loop budget ---------------------------------------------------------------------------------
 
         passes.registerModuleAnalyses(modules);
         passes.registerCGSCCAnalyses(cgsccs);
