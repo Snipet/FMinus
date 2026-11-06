@@ -1,7 +1,7 @@
 # Extending the compiler
 
 How to add to FMinus. First, how a change moves through the compiler, and the few rules that keep that easy. Then
-twenty-eight worked recipes. Eleven grow the C subset from a one-line builtin to C's control flow, a custom LLVM pass,
+twenty-nine worked recipes. Eleven grow the C subset from a one-line builtin to C's control flow, a custom LLVM pass,
 `int`, `void` and pointers, the heap with the attributes that keep it off the audio thread, arrays and modules, FMinus's
 classes, an FFT from a C library built into the runtime, and parameters, the values a plugin's host sets. Six more are
 about the compiler rather than the language: math that gives a float one result wherever it is computed, knob versioning
@@ -12,9 +12,11 @@ own, the same in every lane and on every target, and those kernels inline. The l
 C's bitwise operators with a hash and white noise from a counter, constant tables stored once, `switch` and
 enumerations, and constants at the top level with arrays sized by constant expressions. The last two are for the host:
 a loop budget, which stops a program that would loop for ever before it holds the audio thread, and bounds checks for
-development builds, which stop a call before an index leaves its array. The last returns to C's preprocessor: its
-conditionals, `#if` and `#ifdef`, which compile a program's instrumentation in or out. Then the pitfalls those recipes
-ran into, and design notes for what comes next. [simd.md](simd.md) has recipes 7 to 9, for vectors.
+development builds, which stop a call before an index leaves its array. Then one returns to C's preprocessor: its
+conditionals, `#if` and `#ifdef`, which compile a program's instrumentation in or out. The last is for whoever reads the
+errors: one error for each mistake, enumerated types as C has them, and FMinus's first warning, clang's `-Wswitch`.
+Then the pitfalls those recipes ran into, and design notes for what comes next. [simd.md](simd.md) has recipes 7 to 9,
+for vectors.
 
 Recipes 1 to 4 are in the compiler now (`tanhf` and `%`; `bool` and its operators; `if`, `while` and `for`), and so are
 simd.md's 7 to 9, recipe 10 (`int`, `void` and pointers), recipe 11 (the heap), recipe 12 (arrays and modules), recipe
@@ -22,8 +24,9 @@ simd.md's 7 to 9, recipe 10 (`int`, `void` and pointers), recipe 11 (the heap), 
 runtime's attributes and loop progress, denormal control), recipe 21 (`#include`), recipe 22 (`parallel for` and
 `parallel { }`), recipes 23 and 24 (math kernels of FMinus's own, and inline), recipe 25 (the bitwise operators,
 `hash` and `randf`), recipe 26 (constant tables), recipe 27 (`switch` and `enum`), recipe 28 (constants at the top
-level, and sizes of constant expressions), recipe 29 (the loop budget), recipe 30 (bounds checks) and recipe 31 (`#if`
-and `#ifdef`), so their sections describe how the code you have got there: read a section beside the files it names.
+level, and sizes of constant expressions), recipe 29 (the loop budget), recipe 30 (bounds checks), recipe 31 (`#if`
+and `#ifdef`) and recipe 32 (one error a mistake, enumerated types, `-Wswitch`), so their sections describe how the
+code you have got there: read a section beside the files it names.
 Recipes 5 and 6, a runtime function and a pass, are not part of the language; they live in [recipes/](recipes/) as a
 patch, so you can apply them to see them work. None of these are sketches: each was applied to this repository, built
 with `-Werror`, and tested in the dev and asan presets, every test passing. [architecture.md](architecture.md) describes
@@ -79,7 +82,8 @@ over a module's fields (recipe 17), and `examples/ensemble/` for `parallel for` 
   read alike.
 - **Report and continue.** In the code generator, `error(location, message)` records an error, in clang's wording.
   Then return a poison value of the expected type (`poison(ast::Type::Float)`), never a null pointer, so lowering
-  goes on and finds the next error. `lower` throws the module away at the end.
+  goes on and finds the next error. `lower` throws the module away at the end. A check of an operand's type tests the
+  operand's `failed` first (recipe 32): an operand with an error of its own gets no second one.
 - **Leave the IR valid.** Every block ends in exactly one terminator (`ret`, `br`). A phi lists every predecessor
   exactly once. Allocas belong in the entry block (`allocate()`). `verifyFunction` runs on every function and reports
   a violation as an internal error.
@@ -718,6 +722,7 @@ second terminator after its `ret`.
 **`if`**: if.then and if.else (when there is an else) join at if.end. When both branches return, if.end has no
 predecessors. The statements after it then lower into dead code. The function's end is unreachable too, so no
 "does not return a value" error is reported. `reachable()`, a depth-first walk from the entry, already handles that.
+(Recipe 32 branches on a constant condition one way, so the end after `while (1)` is unreachable too.)
 
 ```cpp
             void lowerIf(const ast::IfStmt& branch)
@@ -4454,7 +4459,8 @@ operator's error and stores nothing (`lowerAssign`): storing the poison `int` in
 clang does not give. An operand that reported an error of its own, the undeclared `y` of `a & y`, lowers to a poison
 `float`, which would draw the message too, about a float the program does not have; so the binary case of `lower`,
 `~`'s and `lowerAssign` note the error count before they lower their operands, and when it has grown they give a
-poison `int` and say nothing more. A poison value is no test for this: `(int)3e10f` folds to one with no error, and
+poison `int` and say nothing more. (Recipe 32 gives every expression that count, `Value::failed`, and every operator
+the rule.) A poison value is no test for this: `(int)3e10f` folds to one with no error, and
 `(float)((int)3e10f) | 1` is still refused (bitwise-errors.fm).
 
 ### Shifts defined for every count
@@ -4670,7 +4676,8 @@ An enumeration is declared on its own, at the top level, in a module or in a blo
 `qualifier "enum" enum_tag "{" enumerators ","? "}" ";"`. It starts with `qualifier`, as a declaration and a function
 do, so the three share their first reduction and `enum Mode {` against `enum Mode m;` is the next token's choice, `{`
 or not. `enum Mode`, without the braces, is a type in `type` and in `cast_type`: the type `int`, once a tag of the name
-is visible. C's `enum Mode { A } m;`, a variable declared with its enumeration, is a syntax error here.
+is visible. C's `enum Mode { A } m;`, a variable declared with its enumeration, is a syntax error here (recipe 32 takes
+it, and C23's fixed underlying type).
 
 ### `switch`
 
@@ -4771,7 +4778,7 @@ parser's, since `enum Mode` must name a declared one: `ParseContext::tags` is a 
 rule `block` opens one at its `{` and closes it at its `}`), and the file's, where a module's tags go too. A second
 `enum Mode { }` in one scope is "redefinition of 'Mode'"; `enum Mode` without a visible tag is clang's "ISO C forbids
 forward references to 'enum' types", as FMinus declares no enumeration ahead of its constants (C23 does, with a fixed
-underlying type).
+underlying type, and since recipe 32 so does FMinus).
 
 A constant reads as an `i32` constant (`lower`), so a const table of constants is stored once (recipe 26), a case
 label takes one, and a loop whose condition is one (`while (RUNNING)`) is a constant expression, which may run for ever
@@ -4781,7 +4788,7 @@ capturing nothing, and the race walker takes an outer constant for no variable. 
 enumerated type is compatible with an integer type of the compiler's choosing (GCC's and clang's is `unsigned int` when
 no constant is negative, `int` otherwise): a local, a parameter, a result, a module's
 `param enum Mode mode [[fminus::range(0, 2)]]`, `sizeof(enum Mode)` (4) and `(enum Mode)x` all mean `int`, and messages
-say `'int'`.
+say `'int'`. (Recipe 32's `int` carries which enumeration it is, for `-Wswitch`, and is still `int` to every rule.)
 
 ### What it changes for programs and hosts
 
@@ -5743,7 +5750,7 @@ unary operators by recursive descent, computing as it goes:
 - **Arithmetic is defined for every operand**, as FMinus's code is: `+ - *` and unary `-` wrap, the least integer
   divided by -1 is itself (its remainder 0), and a shift takes its count's low six bits (OpenCL C's rule for a 64-bit
   integer, as FMinus shifts an `int` by its count's low five), the right one arithmetic. clang warns of an overflow
-  there; FMinus has no warnings, and a defined result.
+  there; FMinus does not (its one warning is `-Wswitch`, recipe 32), and the result is defined.
 - **Limits**, so that a program cannot hang the compiler or exhaust its stack: 256 levels of parentheses, unary
   operators and `?:` (clang's bracket depth), 256 macros expanding inside one another, 65536 tokens after expansion
   (`#define B A A` doubles a line's tokens with each such macro), and the work of expanding, counted across all of a
@@ -5850,6 +5857,202 @@ does well enough, or skips the groups that `#ifdef`, `#ifndef` and `defined` on 
   syntax tree with and without the field, a skipped group of prose, an error inside a group read only with `-D
   BROKEN`, a `-D` whose name the code uses, and a bad name.
 
+## Recipe 32: one error a mistake, enumerated types, and the first warning
+
+*In the compiler. Code: `Lowering::Value::failed` (`src/ir/Lowering.h`), set in `lower` and read by `binary`,
+`recovered`, the unary operators and `lowerConditional` (`Expressions.cpp`), `lvalue` and `lowerAddressOf`
+(`Memory.cpp`), `lowerMember` and `lowerSelect` (`Vectors.cpp`), `lowerMethodCall` and `lowerParameter` (`Modules.cpp`)
+and `convert` and `poison` (`Types.cpp`); `branchOn` (`Statements.cpp`); `sizeOf` (`Types.cpp`) and `lowerSizeof`
+(`Expressions.cpp`); `declareEnum` (`Constants.cpp`); the enumerations' rules in `Parser.y` (`enumeration`,
+`enum_head`, `enum_base`, `enum_declarators`, and `underlyingType`, `sameTag`, `declaredEnum`, `forwardEnum`,
+`enumType`, `declarationsOf`, `addFields` and `addConstants`), `Tag` in `ParseContext.h`, `Type::enumeration` and
+`Enum`'s `id`, `fixed` and `underlying` in `Ast.h`; `lowerSwitch`, `unhandled` and `begin` (`Statements.cpp`);
+`Diagnostics::warning` (`src/frontend/Diagnostics.h`), `Program::warnings` (`include/fminus/FMinus.h`), and the
+warnings `fminus` prints (`tools/fminus/main.cpp`). Tests: `tests/unit/RecoveryTest.cpp` (`[recovery]`),
+`EnumTest.cpp`, `SwitchTest.cpp`, `FrontendTest.cpp`, `tests/library/ProgramTest.cpp`, and
+`tests/lit/fminus/recovery-errors.fm`, `enum-switch.fm` and `large-modules.fm`.*
+
+Whoever reads FMinus's errors (a person at an editor, a plugin's status line, a model fixing its own program) reads the
+first one and acts on it, and an error that only follows from it sends them looking for a second mistake that isn't
+there. This recipe makes each mistake one error, as clang's recovery does; it takes back three errors that C would not
+give and one wrapped number; it gives enumerations what C gives them and recipe 27 left out; and it adds FMinus's first
+warning, clang's `-Wswitch`, which finds the case a switch over an enumeration forgot.
+
+### An expression with an error of its own
+
+An undeclared name lowers to a poison float, so that the lowering goes on and finds the program's other errors. A
+float is a fine operand for most operators, but not for all: `*(p + y)` with no `y` was three errors, the name, `+`'s
+"invalid operands to binary expression ('float *' and 'float')" and `*`'s "indirection requires pointer operand",
+where clang gives one. Recipe 25 stopped the cascade for the bitwise operators by counting errors around their
+operands; this recipe gives the count to every expression. `lower` counts the errors its expression reports, and the
+`Value` it returns says whether there were any:
+
+```cpp
+    Lowering::Value Lowering::lower(const ast::Expr& expr)
+    {
+        const std::size_t reported = diagnostics_.errors().size();
+        Value value = std::visit(/* ... each node ... */, expr.node);
+        value.failed = value.failed || diagnostics_.errors().size() != reported;
+        return value;
+    }
+```
+
+`failed` is clang's "contains errors": the expression, or a part of it, reported an error. `poison()`, the stand-in
+for a value an error kept from being computed, is failed too. What takes a failed value says nothing more about it:
+
+- **An operator** (`binary`) gives a poison of the type it would likely have had (`recovered`): an `int` for a bitwise
+  one, a `bool` for a comparison (a vector operand's lane mask), otherwise the other operand's type as it computes, a
+  pointer staying one, so that `p + y` is a `float*` and what uses it reports nothing either. The unary operators
+  likewise.
+- **A subscript, `*`, `->` and `&`** (`lvalue`, `lowerAddressOf`): a base or an operand that failed is no "subscripted
+  value is not a pointer", no "indirection requires pointer operand" and no "cannot take the address of an rvalue". A
+  pointer whose index failed still gives its element, of its type.
+- **A conversion** (`convert`): a failed value converts to any type, silently, as a poison of it. So initialising,
+  assigning, passing, returning and testing one report nothing more: `float* q = y;` is the one error about `y`.
+- **`?:`, a member, a method, a builtin's argument**: the same.
+
+An operator whose operands are fine but which is in error itself, `p + q` of two pointers, reports its error, and its
+result is failed in turn: `*(p + q)` is one error. The rule needs the count, not the IR: `(int)3e10f` folds to a poison
+with no error, and `(float)((int)3e10f) | 1` is still refused (recipe 25).
+
+### A constant condition takes one branch
+
+A non-void function that can reach its end is an error (recipe 4), and `reachable()` follows the CFG from the entry.
+`while (1)` branched on `i1 true` to its body or its end, so its end looked reachable, and a function that ended in
+one needed a `return` that could never run, where clang's check, which folds constant conditions, asks for none.
+`branchOn` is clang's: a condition that is a constant once lowered (the IR folds a constant expression's test against
+0) branches to the one block it picks, so `while (1)`, `while (1.5f)`, `for (; RUNNING;)` with an enumeration constant
+and `if (1)` reach what follows only through a `break`, or the other branch. The branch not taken is still lowered,
+for its errors, and the optimiser deletes it. `&&`, `||` and `?:` branch even on constants (recipe 3), so `while (1 &&
+1)` still asks for a return. A check that may fail (Bounds.cpp) keeps its conditional branch, on `false` for a
+constant index: the code after it must stay reachable (Pitfalls).
+
+### `sizeof` past an `int`, and an enumeration constant named as a builtin
+
+`sizeOf` gave an `unsigned`, the data layout's 64-bit size truncated: a module of `float4 lanes[1073741824]`, 16 GiB,
+was 0 to `sizeof`, and a copy of one was a `memcpy` of nothing. It gives a `std::uint64_t` now, C's `size_t`, which a
+copy's `memcpy`, a declaration's `memset` and a method's `dereferenceable` take whole. FMinus's `sizeof` is an `int`,
+so a size past the greatest one is an error, `'Huge' is too large for sizeof: 17179869200 bytes, and FMinus's sizeof
+is an 'int'`, not a negative or wrapped `int`.
+
+C's file scope has `<math.h>`'s functions in it, and clang refuses `enum { sinf };` after its `#include`:
+"redefinition of 'sinf'" (an enumeration constant after a function is a plain redefinition to clang, recipe 27).
+`declareEnum` says so of a constant of the file named as one of FMinus's builtins, as recipe 28 refuses a constant of
+the top level. In a block, the constant is the block's own, as a variable of the name is.
+
+### Enumerations: names of their type, and C23's fixed underlying type
+
+C declares variables with an enumeration, `enum Mode { SAW, SQUARE } mode;`, and recipe 27 refused it. `enumeration`
+now ends with `enum_declarators`, a declaration's declarators or none, and gives an `EnumDeclaration`: the enumeration,
+then the names, as `declaration`'s DeclStmts of its type (`declarationsOf`). Each place takes them as it takes a
+declaration: a block's statements after the `EnumStmt`, a module's fields (`addFields`) after the module's enumeration,
+so a field's array may be sized by its own enumeration's constant (`enum { LEN = 4 } count, buf[LEN];`), and the top
+level's constants (`addConstants`), which must be `const`, as every constant there. The tag is a type from the closing
+brace on, as in C, so the names may use it: `enum_head`, the enumeration up to its brace, reduces there and declares
+the tag before the declarators are read.
+
+C23 gives an enumeration a fixed underlying type, `enum Mode : int { ... }`, which its constants must fit and which is
+the type `enum Mode` names, and which lets a tag be declared ahead of its constants, `enum Mode : int;` (a type from
+there on, complete). FMinus's integer types are `int` and `bool`, and `enum_base` takes either; another type is clang's
+"non-integral type 'float' is an invalid underlying type". `ParseContext`'s tags are `Tag`s now: where, the
+enumeration's id, the fixed type if any, and whether the constants are defined. A declaration ahead, `forwardEnum`,
+declares a tag in the innermost scope; the definition after it, `declaredEnum`, finds it there and takes its id. Two
+declarations of a tag in one scope must agree, in clang's words with a note at the first ("enumeration redeclared with
+different underlying type 'bool' (was 'int')", "enumeration previously declared with fixed underlying type"); a second
+definition is the "redefinition of 'Mode'" it was; `enum : int;` is "unnamed enumeration must be a definition", and
+`enum Mode;` without a fixed type C's forward reference, unless the tag is already defined, which it then names, as C
+allows. `declareEnum` checks the values against the fixed type, as clang does: an implicit one past it,
+"enumerator value 2 is not representable in the underlying type 'bool'", an explicit one, "enumerator value is not
+representable in the underlying type 'bool'". `--emit ast` shows the type after the tag, `(enum Mode : int (SAW))`.
+
+### The enumerated type
+
+`-Wswitch` (below) needs to know that a switch's value is of an enumerated type, and recipe 27 made `enum Mode` the
+type `int`. Recipe 27's Where to go next proposed a `Kind` of its own, which every switch over a type's kind would then
+list, and every rule for an `int` would have to take. This recipe keeps `enum Mode` an `int` (or a `bool`), and gives
+`ast::Type` which enumeration it is beside it, `enumeration`, the `Enum`'s id, which the parser numbers:
+
+```cpp
+        int enumeration = 0;   // an enumerated type's Enum::id, or a pointer's or an array's whose pointee is one
+
+        friend constexpr bool operator==(Type a, Type b)   // every field but `enumeration`
+        {
+            return a.kind == b.kind && a.pointee == b.pointee && a.pointeeConst == b.pointeeConst
+                   && a.module == b.module && a.count == b.count;
+        }
+```
+
+`==` ignores it, so every rule that asks whether a type is an `int` still says yes, every message still says `'int'`,
+and nothing else in the compiler changes. A value keeps it where it keeps its type and C keeps the enumerated type: a
+variable, a parameter, a field, a result, a cast, an assignment, `++`, an element, `*p` (`pointerTo`, `arrayOf` and
+`pointee` carry it). It goes where C promotes: `arithmeticOf` gives a plain `int`, so `mode + 1`, `-mode` and
+`c ? a : b` have none, and an enumeration constant is an `int`, as in C before C23.
+
+### `-Wswitch`, and FMinus's warnings
+
+clang warns of a switch without a `default` on a value of an enumerated type whose cases miss some of its constants:
+
+```
+waves.fm:14:13: warning: enumeration values 'TRIANGLE' and 'NOISE' not handled in switch [-Wswitch]
+waves.fm:14:13: note: add missing switch cases
+```
+
+`declareEnum` keeps each enumeration's constants by its id (`enumerations_`), and `lowerSwitch`, after the body, hands
+`unhandled` the value's enumeration and the switch's cases. It says nothing when the switch has a `default`, when a case
+was in error (no constant, or a duplicate: `Switch::erroneous`), when the value is a constant, or when the enumeration
+has no constants yet (one declared ahead, whose list comes after the switch, as clang finds it incomplete). Otherwise
+it lists the values no case has, by each value's first constant and in order of value, as clang does (`enum { B = 1, A
+= 0, A2 = 0 }` misses `'A'` and `'B'`), in clang's four forms: one, two, three, and "4 enumeration values not handled in
+switch: 'B', 'C', 'D'...". The warning is at where the value begins (`begin`: `m->mode` at `m`), as clang places it,
+with clang's note.
+
+A warning is a `Diagnostic` too, in `Diagnostics::warnings()`, apart from the errors, so that `errors().size()`, which
+the code generator's counts read, counts errors only. `format()` prints both in source order, each with its severity,
+as clang prints them. `fminus` prints a compiled program's warnings to stderr and goes on; `Program::warnings()` holds
+them for a host, and a program that does not compile has them among its `errors`. clang's other `-Wswitch`, "case value
+not in enumerated type", is not FMinus's (Where to go next), and there is no flag to turn a warning off or into an
+error.
+
+### What it changes for programs and hosts
+
+- **Programs** that FMinus refused and C accepts now compile: an enumeration with names after its list, C23's fixed
+  type and a tag declared ahead, a non-void function ending in a loop only a `break` leaves, or in `if (1) return`. Two
+  it took are refused: `sizeof` of a type past 2 GB, and an enumeration constant of the file named as a builtin.
+- **Error messages** are fewer: a program with an undeclared name, say, gets one error where it got two or three. A
+  host that counts a program's errors counts fewer; one that matches them by text finds the first unchanged.
+- **Warnings** are new: `Program::warnings()`, empty for a program with none, and lines that begin `warning:` among a
+  failed program's `errors`. A host that shows `errors` shows them as clang does; one that reads it line by line takes
+  `warning:` and `note:` lines beside `error:` ones. The header's API is otherwise unchanged.
+- **IR** changes only where a condition is a constant, `while (1)`'s `br label %while.body` where it had
+  `br i1 true, ...` (the same code at `-O1` and up), and where a module is past 4 GB: its copies and zeroing were
+  `memcpy`s and `memset`s of the size's low 32 bits.
+
+### Tests
+
+- `tests/unit/RecoveryTest.cpp`: an undeclared name, or a call of no function, under every construct above, one error
+  each, at clang's column; an operator's own error still reported, and its result taking nothing more; functions that
+  end after `while (1)`, `for (;;)`, `while (RUNNING)`, `while (1.5f)`, `if (1)`, `if (0) else` and nested ones, run,
+  and those whose end is reached (a `break`, `while (n)`, `if (0)`, `for (; 0;)`) still refused, with a dead branch's
+  error; `sizeof` past the greatest `int` (2 GiB + 4, 16 GiB) and of 2^31 - 4 bytes; builtins' names as the file's
+  enumeration constants, and one in a block.
+- `EnumTest.cpp`: names declared after a list, run: a local, a pointer to it, an array of the type, a module's field
+  and a field sized by its own enumeration's constant, a const table and a constant at the top level; C23's fixed
+  types, run: `int` declared ahead and used before its list, `bool` taking any number as a bool, `sizeof` of each, one
+  declared ahead in a block; the values' errors against `bool` and `int`.
+- `SwitchTest.cpp`: `-Wswitch`'s four forms and their notes from a program that runs; values by their first name in
+  order of value; every source of an enumerated value (a variable, a field in a method and through a pointer, a host's
+  parameter, a result, a cast, an assignment, an element, `*p`, C23's `bool`, an enumeration without a tag), each at its
+  column; and none for a default, every constant, an `int`'s cast, arithmetic, `-e`, `?:`, a constant, an `int`, an
+  enumeration declared ahead whose list comes later, and a case in error.
+- `FrontendTest.cpp`: the trees of names after a list at the top level, in a module and in a block; fixed types and
+  a tag declared ahead; each tag error, with its note.
+- `tests/library/ProgramTest.cpp`: `Program::warnings()` of a program that runs, empty for one with none, and a failed
+  program's `errors` with its warning first, in source order.
+- `tests/lit/fminus/recovery-errors.fm`: every cascade above in one function, one error each;
+  `enum-switch.fm`: `fminus` printing the warning and its note, a field's switch at its column, and running the
+  program; `large-modules.fm`: a 16 GiB module's `memcpy`, `memset` and `dereferenceable` at 64 bits, and its `sizeof`
+  refused (`-D SIZEOF`). `enum.fm`'s constant loop branches to its body alone.
+
 ## Pitfalls
 
 Each of these was hit while writing the language or its recipes. [simd.md](simd.md) has the vector ones.
@@ -5950,6 +6153,10 @@ Each of these was hit while writing the language or its recipes. [simd.md](simd.
 | `CHECK-NOT: bounds` fails on IR with no bounds checks | `getelementptr inbounds` | match a name of the feature's own (`fminus_rt_bounds`, `fminus.bounds`) |
 | A library test's `CHECK(view == "line")` does not link: undefined `Catch::StringMaker<std::string_view>` | the library tests are C++17 against a Catch2 built as the build tree's C++23, which compiled no `string_view` support into it | compare `std::string(view)` |
 | "'BranchInst' is deprecated: Use UncondBrInst/CondBrInst/Instruction instead" | LLVM 23 split the branch instruction | `llvm::UncondBrInst::Create`, or an `IRBuilder` |
+| A new check of an operand's type adds a second error after an undeclared name | the name's stand-in is a poison float, which the check refuses | test `failed` first (`Lowering::Value`), and give a poison of the type the result would have had |
+| `-Wswitch` warns on `switch (mode + 0)`, or on a `?:` of two enumerated values, where clang does not | a result type copied from an operand keeps `Type::enumeration`, which `==` ignores | give a promoted result a fresh type (`arithmeticOf` does), or clear `enumeration` |
+| A test passes under `fminus-tests` and fails under ctest with "Unrecognised token" | ctest runs each Catch2 test case by its name, and Catch2 reads a name that starts with `-` (`-Wswitch: ...`) as an option | start the name with a word (`clang's -Wswitch: ...`) |
+| The names after an enumeration's list cannot use its tag (`enum E { A } e = (enum E)0;` is a forward reference) | the rule that declares the tag reduces after the declarators | reduce the enumeration at its closing brace (`enum_head`), and the declarators after it |
 
 ## Where to go next
 
@@ -6083,13 +6290,15 @@ memory the host gives it, as `examples/biquad/`'s filter and `examples/voices/`'
 allocates off the audio thread, as `examples/delay/` does (recipe 11). Nothing then allocates on the audio thread, and
 every instance has its own copy.
 
-**More of `switch` and enumerations.** Recipe 27 leaves four things. *clang's `-Wswitch`*, a switch over an enumerated
-value that misses one of its constants, needs `enum Mode` to be a type of its own rather than `int`: a `Kind` with the
-enumeration's constants, which every `switch` over `type.kind` would then list. *An enumeration's values as a knob's
-domain* (recipe 16's list, for that reason): a `param enum Mode` could be versioned on its constants with no
-`fminus::range`. *C's declarations with an enumeration*, `enum Mode { A } m;`, and C23's fixed underlying type,
-`enum Mode : int`, which would allow a forward declaration. *A `case` range*, GCC's `case 1 ... 4:`, which clang
-lowers to its cases one by one when the range is small, and to a comparison when not.
+**More of `switch` and enumerations.** Recipe 32 built `-Wswitch`, names declared with an enumeration and C23's fixed
+underlying type; four things remain. *clang's other `-Wswitch`*, "case value not in enumerated type 'enum Mode'", a
+case for a value none of the enumeration's constants has: `unhandled` has both lists, and the message names the type
+as clang does, `'enum Mode'` (an enumeration without a tag is clang's `'enum (unnamed at file:line:column)'`), which
+needs the tag kept by id beside the constants. *Warnings a host controls*: a `-Wno-switch`, or `-Werror`, as
+`Program::Options` and `fminus` flags. *An enumeration's values as a knob's domain* (recipe 16's list, for that
+reason): a `param enum Mode` could be versioned on its constants, which its `Type::enumeration` now names, with no
+`fminus::range`. *A `case` range*, GCC's `case 1 ... 4:`, which clang lowers to its cases one by one when the range is
+small, and to a comparison when not.
 
 **Macro substitution, if it is ever wanted.** Recipe 31's macros are conditions only. Substituting an object-like
 macro in code would happen in the scanner: `{IDENTIFIER}` finds the macro, lexes its value into a queue of tokens
@@ -6125,9 +6334,9 @@ The recipes in the compiler are their own reference: their code is in `src/`, an
 `BitwiseTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `TableTest.cpp`,
 `TopLevelTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `HashTest.cpp`, `ParamTest.cpp`, `VectorTest.cpp` and
 `PolyTest.cpp` for the code generator; `MathTest.cpp`, `VersionTest.cpp`, `TbaaTest.cpp`, `ZeroInitTest.cpp`,
-`AttributeTest.cpp` and `DenormalTest.cpp` for recipes 15 to 20), `tests/library/` (`ProgramTest.cpp`,
-`StrictAliasingTest.cpp`, `DenormalsTest.cpp`) and `tests/lit/fminus/`. [recipes/](recipes/) holds the two that aren't,
-5 and 6, as one patch against the compiler as it is ([recipes/README.md](recipes/README.md)):
+`AttributeTest.cpp` and `DenormalTest.cpp` for recipes 15 to 20; `RecoveryTest.cpp` for recipe 32), `tests/library/`
+(`ProgramTest.cpp`, `StrictAliasingTest.cpp`, `DenormalsTest.cpp`) and `tests/lit/fminus/`. [recipes/](recipes/) holds
+the two that aren't, 5 and 6, as one patch against the compiler as it is ([recipes/README.md](recipes/README.md)):
 
 ```bash
 git switch -c try-recipes

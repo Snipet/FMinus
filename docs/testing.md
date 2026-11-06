@@ -46,11 +46,13 @@ Each file states what it tests in its first line, then has a few helpers and the
 - `compile(source, &errors)` (`Compile.h`, which the code generator's tests share: `CodeGenTest.cpp`,
   `ControlFlowTest.cpp`, `SwitchTest.cpp`, `EnumTest.cpp`, `IntTest.cpp`, `BitwiseTest.cpp`, `PointerTest.cpp`,
   `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `TableTest.cpp`, `TopLevelTest.cpp`, `ModuleTest.cpp`,
-  `FftTest.cpp`, `HashTest.cpp`, `ParamTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`, `ParallelTest.cpp`, and the
+  `FftTest.cpp`, `HashTest.cpp`, `ParamTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`, `ParallelTest.cpp`,
+  `RecoveryTest.cpp`, and the
   compiler's own: `VersionTest.cpp`, `TbaaTest.cpp`, `ZeroInitTest.cpp`, `AttributeTest.cpp`, `DenormalTest.cpp`,
   `LoopBudgetTest.cpp`, whose `compileAt` compiles at any level with the budget on or off, and `BoundsCheckTest.cpp`,
   whose `compileAt` does the same with the bounds checks and keeps the checks' descriptions)
-  parses, lowers and JIT-compiles at -O2, and returns the `Jit`, or null with the formatted errors.
+  parses, lowers and JIT-compiles at -O2, and returns the `Jit`, or null with the formatted errors; a program that
+  compiles with warnings (`-Wswitch`) has them in `errors`, which a test of one compares as a whole.
   `lookup<float(float)>(*jit, "f")` gives a callable function, and `lookup<void(const float*, float*, int)>(*jit, "g")`
   one that takes a test's buffers (`std::array::data()`). A third parameter, the `ir::Options`, compiles at a chosen
   `poly float` width, `compile(source, &errors, {.polyLanes = 16})`, in another math mode

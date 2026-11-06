@@ -47,8 +47,10 @@ see the whole flow. For a host, the public API strings parse, lower and the JIT 
 - `Diagnostics` belongs to one compilation: the program's file, and the files its `#include`s read, each added by
   the scanner (`addFile(name, includedFrom)`) with the location of the `#include` that read it. `error(location,
   message, notes)` records an error, with the notes that explain it (clang's: `[[clang::nonblocking]]`'s errors have
-  one for each call down to the `malloc`). `hasErrors()` tells a stage whether to hand over a result. `format()`
-  renders `file:line:column: error: message` lines, sorted into source order, each followed by its
+  one for each call down to the `malloc`), and `warning(location, message, notes)` a warning, whose message ends with
+  its flag (`[-Wswitch]`, the one FMinus has), kept apart so that `errors()` counts errors only. `hasErrors()` tells a
+  stage whether to hand over a result: a warning does not stop one. `format()` renders `file:line:column: error:
+  message` and `...: warning: message` lines together, sorted into source order, each followed by its
   `file:line:column: note: message` lines, wherever they point. A line in an included file comes after clang's include
   stack, `In file included from main.fm:2:` for each `#include` on the way to it, when the line before it was in
   another file.
@@ -58,7 +60,8 @@ see the whole flow. For a host, the public API strings parse, lower and the JIT 
 
 Errors are values, not exceptions. The parser stops at the first syntax error (Bison has no error recovery rules
 yet), but the code generator carries on after each error with a placeholder value (below). So one run of `fminus`
-lists everything wrong with a program that parses.
+lists everything wrong with a program that parses, each mistake once. `fminus` prints a compiled program's warnings
+and goes on; `Program::warnings()` gives them to a host, and a failed compile's `errors` has them among its errors.
 
 ## Scanning: `frontend/Lexer.l`
 
@@ -147,10 +150,14 @@ subset of C's, is written out as EBNF in the file's header comment.
   declares constants, `Program::constants`, each with how many functions, modules and enumerations come before it.
 - **Labels and enumerations.** `case 1:` and `default:` are C23's labels: a block item of their own (so a declaration
   may follow one), or, where a statement is expected, the start of a labelled statement (`statement: label statement
-  | unlabeled`). An enumeration is declared on its own, at the top level, in a module or in a block; it starts with
-  `qualifier`, as a declaration does, so `enum Mode {` and `enum Mode m;` part at the next token. Its tag goes into
-  `ParseContext::tags`, a scope for each block being parsed (the rule `block` opens one at its `{`), where `enum Mode`
-  names `int`; its constants stay identifiers, for the code generator's scopes.
+  | unlabeled`). An enumeration is declared at the top level, in a module or in a block, with the names of its type
+  after its list, as C's (`enum Mode { A } m;`: the declaration's DeclStmts after it, fields in a module, constants at
+  the top level); it starts with `qualifier`, as a declaration does, so `enum Mode {` and `enum Mode m;` part at the
+  next token. Its tag goes into `ParseContext::tags` at its closing brace, a scope for each block being parsed (the
+  rule `block` opens one at its `{`), where `enum Mode` names its enumerated type: `int`, with the enumeration's id
+  (`Type::enumeration`), or C23's fixed underlying type, `enum Mode : bool`, which declares a tag ahead of its list
+  too (`enum Mode : int;`, a `Tag` with no constants yet). Its constants stay identifiers, for the code generator's
+  scopes.
 - **Functions** are a definition (`type name(params) { ... }`) or a prototype (`type name(params);`, in which
   parameter names may be omitted). Both build an `ast::Function`, with `isDefinition` telling them apart. A result or
   a parameter may be a pointer, and `(void)` is C's empty parameter list: the `params` rule turns a single unnamed
@@ -332,7 +339,9 @@ flushing hardware computes them:
 - **The function's end.** A `void` function that reaches its end returns there (`ret void`), as `return;` does. In any
   other, if the last block can still be reached from the entry (`reachable`, a depth-first walk: having predecessors
   isn't enough, because dead code can branch), the function falls off its end. That is "non-void function 'g' does
-  not return a value", an error as in C++. Otherwise the block gets an `unreachable` terminator.
+  not return a value", an error as in C++. Otherwise the block gets an `unreachable` terminator. A statement's
+  constant condition branches one way (`branchOn`), as clang's does, so the end after `while (1)` without a `break`, or
+  after `if (1) return x;`, is not reached.
 - **Verification.** `llvm::verifyFunction` checks each function, and anything it rejects is reported as an internal
   error, because the IR is wrong rather than the program.
 
@@ -343,6 +352,12 @@ OpenCL C's (a scalar broadcasts to a vector), and reports clang's message for th
 (`Use`: initialising, assigning, returning, passing, a condition, a logical operand, a cast). Between scalars they are
 C's: `sitofp` and `fptosi` between `int` and `float`, `zext` from `bool`, `!= 0` to `bool`. A pointer converts only
 to `bool` and to the same pointer with `const` added (`convertPointer`).
+
+A `Value` also says whether its expression reported an error (`failed`, which `lower` sets by counting the errors, as
+clang's "contains errors"): an operator, a subscript, `*`, `&`, `->` and a conversion given a failed value say nothing
+more, and give a poison of the type they would have had, so each mistake is one error. An enumerated type is the type
+`int` (or `bool`) with its enumeration's id beside it (`Type::enumeration`, which `==` ignores): a value keeps it where
+C keeps the enumerated type, and `lowerSwitch` reads it for clang's `-Wswitch`, FMinus's one warning.
 
 - **Constants**: an integer constant is an `i32`, read in its base (`010` is octal) and refused when it doesn't fit
   in an `int`. A floating one goes through `llvm::APFloat::convertFromString`, after the `f` suffix is dropped,
@@ -637,7 +652,8 @@ pivots, so the float code computes what the reference computes, operation for op
 - **Walks stay exhaustive.** Never add a `default:` or a catch-all lambda to a walk over the tree: they turn "the
   compiler lists what to update" into silent bugs.
 - **Lowering reports and continues.** Return a poison value of the expected type, never a null pointer, and let
-  `lower` discard the module at the end.
+  `lower` discard the module at the end. A check of an operand tests `failed` first: an operand with an error of its
+  own gets no second one.
 - **Every variable lives in an entry-block `alloca`.** Allocate through `allocate()`, whatever block the builder is
   in, and let mem2reg do the SSA construction.
 - **Every function is verified.** An invalid function is the compiler's bug: it is reported as an internal error
@@ -674,7 +690,7 @@ pivots, so the float code computes what the reference computes, operation for op
 - **Semantics follow C unless a deviation is documented.** The README lists the deviations: `float` and `int` are the
   only arithmetic types, an unsuffixed `1.5` is a `float`, pointers point to six types and convert only through `void*`
   or by adding `const`, the heap's memory is aligned and zeroed, `%` works on floats, calls may precede definitions,
-  uninitialised variables are 0 (one a switch's jump passes too), an enumeration is declared on its own and is `int`,
+  uninitialised variables are 0 (one a switch's jump passes too), an enumerated type is `int` (or its fixed type),
   the top level holds constants and no variables, falling off a non-void function's end is an error, a broken function
   effect is an error, C's strict aliasing is a little stricter (allocated memory keeps one type, there is no character
   type, a vector is its elements' type), the math builtins' results are their math mode's (by default one result for a

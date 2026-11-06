@@ -223,9 +223,9 @@ float half(float x) { x /= 2; return x; }
 | | |
 |---|---|
 | program | function definitions, `float name(float a, const float b) { ... }` or `void name(...)`, and prototypes, `float name(float);`; `f(void)` is C's empty list; after the parameters, clang's `[[clang::nonallocating]]` or `[[clang::nonblocking]]`, checked: the function may not reach the heap (nor, nonblocking, an external function not marked so); modules, `module OnePole { float y; float tick(float x) { return y += x; } };`, whose fields are declarations without initialisers and whose methods are functions that see the fields by name (`this` is the module's address); a module's parameters, `param float cutoff [[fminus::range(20, 20000)]] [[fminus::default(1000)]];` (a `float`, `int` or `bool`), which the host sets and a method reads as `cutoff[i]`, its value at sample i of the call; enumerations and constants (below) |
-| declarations | `float x = e;`, `const float k = e;`, `float* p = out;`, several at once (`float a = 1, b;`; in `float *p, x;` only `p` is a pointer, as in C); arrays, `float h[16];` and `int k[3] = {1, 2, 3};` (the elements left out are 0), `float buf[ROWS * COLS];` (a size is C's integer constant expression: an enumeration constant names one, a `const int` does not) and `float t[] = {1, 2, 3};` (its list's length), and a `const` one of constants, `const float t[4] = {1, 2, 3, 4};`, stored once (up to 1 MiB), a constant of the program that no call fills; at the top level, constants, C's file-scope const objects: `const float table[ROWS * COLS] = {...};` and `const float gain = 0.5f;`, their initialisers constants (numbers, enumeration constants, `sizeof`, other constant scalars of the top level, `hash` and `randf` of them, an element's address, operators, casts, `?:`, `&&` and `\|\|`), each stored once (up to 1 MiB), which every function and method declared after it reads (an `#include`d file's after the `#include`); modules, `OnePole lp;` and `OnePole b = a;` (a copy); block-scoped, shadowing allowed in an inner block; C's enumerations, `enum Wave { SAW, SQUARE = 4, TRIANGLE };` (`SAW` is 0, `TRIANGLE` 5, each an `int` constant), declared on their own at the top level (the functions and modules after it see its constants), in a module (its methods too) or in a block, a name each in the scope a variable would have |
+| declarations | `float x = e;`, `const float k = e;`, `float* p = out;`, several at once (`float a = 1, b;`; in `float *p, x;` only `p` is a pointer, as in C); arrays, `float h[16];` and `int k[3] = {1, 2, 3};` (the elements left out are 0), `float buf[ROWS * COLS];` (a size is C's integer constant expression: an enumeration constant names one, a `const int` does not) and `float t[] = {1, 2, 3};` (its list's length), and a `const` one of constants, `const float t[4] = {1, 2, 3, 4};`, stored once (up to 1 MiB), a constant of the program that no call fills; at the top level, constants, C's file-scope const objects: `const float table[ROWS * COLS] = {...};` and `const float gain = 0.5f;`, their initialisers constants (numbers, enumeration constants, `sizeof`, other constant scalars of the top level, `hash` and `randf` of them, an element's address, operators, casts, `?:`, `&&` and `\|\|`), each stored once (up to 1 MiB), which every function and method declared after it reads (an `#include`d file's after the `#include`); modules, `OnePole lp;` and `OnePole b = a;` (a copy); block-scoped, shadowing allowed in an inner block; C's enumerations, `enum Wave { SAW, SQUARE = 4, TRIANGLE };` (`SAW` is 0, `TRIANGLE` 5, each an `int` constant), declared at the top level (the functions and modules after it see its constants), in a module (its methods too) or in a block, a name each in the scope a variable would have, and the names of its type after its list, as C declares them (`enum Wave { SAW, SQUARE } wave;`: a local, a field, or a constant at the top level); C23's fixed underlying type, `enum Wave : int { ... }` or `: bool`, whose constants must fit it, and which declares the tag ahead of its constants too (`enum Wave : int;`) |
 | statements | `{ ... }`, `e;`, `return e;` and `return;`, `;`, `if (c) s else s` (an `else` closes the nearest `if`), `while (c) s`, `for (init; c; step) s` (its declarations are the loop's), `break;`, `continue;`, `switch (v) { case 1: s ... default: s }` (C's: an `int` or `bool` value, its cases integer constant expressions, which fall through to the next until a `break`; `case` and `default` are C23's labels, so a declaration may follow one); a `while` or `for` whose condition is not a constant expression may be assumed to end, as in C11 (6.8.5p6), and `while (1)` and `for (;;)` may run for ever; FMinus's `parallel for (int i = first; i < end; ++i) s`, its iterations at once over the machine's cores, and `parallel { s1 s2 ... }`, its statements at once, each finished, all of it, where it ends (below) |
-| expressions | constants, names, calls, `( )`, unary `-` `+` `!` `~`, `++` and `--` (before or after), casts `(int)x` `(float)x` `(bool)x`, `* / %`, `+ -`, `<< >>`, `< <= > >=`, `== !=`, `&`, `^`, `\|` (the bitwise ones on `int`s), `&&`, `\|\|` (both short-circuit), `?:` (only the branch taken runs), and `= += -= *= /= %= &= \|= ^= <<= >>=` (right to left; an assignment's value is the one stored), with C's precedence; pointers' `p[i]`, `*p`, `&x`, `p + i`, `p - q` and comparisons; an array's `a[i]` (its name stands for a pointer to its first element); a module's fields `m.y` and `p->y`, its methods `m.tick(x)` and `p->tick(x)`, and `this`; `sizeof(type)`, an `int`; vector literals, OpenCL C's `(float4)(a, b, c, d)` and C's `(float4){a, b}` (the lanes left out are 0), and swizzles `v.wzyx`, `v.s0` |
+| expressions | constants, names, calls, `( )`, unary `-` `+` `!` `~`, `++` and `--` (before or after), casts `(int)x` `(float)x` `(bool)x`, `* / %`, `+ -`, `<< >>`, `< <= > >=`, `== !=`, `&`, `^`, `\|` (the bitwise ones on `int`s), `&&`, `\|\|` (both short-circuit), `?:` (only the branch taken runs), and `= += -= *= /= %= &= \|= ^= <<= >>=` (right to left; an assignment's value is the one stored), with C's precedence; pointers' `p[i]`, `*p`, `&x`, `p + i`, `p - q` and comparisons; an array's `a[i]` (its name stands for a pointer to its first element); a module's fields `m.y` and `p->y`, its methods `m.tick(x)` and `p->tick(x)`, and `this`; `sizeof(type)`, an `int` (a type past the greatest `int`, a module over 2 GB, is an error); vector literals, OpenCL C's `(float4)(a, b, c, d)` and C's `(float4){a, b}` (the lanes left out are 0), and swizzles `v.wzyx`, `v.s0` |
 | constants | C's: floating ones are floats (`1.5`, `1.`, `.5`, `2e3`, `1.5e-3f`, hex floats `0x1.8p1`, `0x1p-3f`), integer ones ints (`2`, `010` in octal, `0x1F` in hex); `true` and `false`; enumeration constants, ints; integer constant expressions (a case's value, an enumerator's, an array's size) are C's, folded as FMinus computes |
 | comments | `// ...` and `/* ... */` |
 | directives | `#include "file"`, the file read where the line is, as in C, and once only (as if every file began with `#pragma once`), found where the host says: `fminus` looks beside the including file, then in `-I`'s directories; C's conditionals, `#if`, `#ifdef`, `#ifndef`, `#elif`, `#else` and `#endif` (and C23's `#elifdef` and `#elifndef`), whose skipped groups are never scanned, on macros that `#define NAME value` and `#undef` make, or the host (`fminus -D NAME[=value]`), read in their conditions only; `#pragma`, ignored |
@@ -277,10 +277,10 @@ Where FMinus differs from C, it is on purpose:
   copies (a method's fourth stream, under the default budget of 8 copies) still reads with no branch: its loop
   vectorises when the stream has samples, and runs a sample at a time when it is flat.
 - **The heap's memory is aligned to 64 bytes and zeroed**, `malloc`'s too, as everything FMinus declares starts at 0;
-  sizes are `int`s (C's are `size_t`s), so one block holds at most 2 GB. A call that breaks a function's
-  `[[clang::nonallocating]]` or `[[clang::nonblocking]]` is an error, where clang only warns
-  (`-Wfunction-effects`). As with clang's `malloc`, LLVM may remove a block the program never uses, and a removed
-  block does not fail: a test of it against null is then false.
+  sizes are `int`s (C's are `size_t`s), so one block holds at most 2 GB, and `sizeof` of a larger type (a module of
+  big arrays) is an error. A call that breaks a function's `[[clang::nonallocating]]` or `[[clang::nonblocking]]` is
+  an error, where clang only warns (`-Wfunction-effects`). As with clang's `malloc`, LLVM may remove a block the
+  program never uses, and a removed block does not fail: a test of it against null is then false.
 - **The FFT is FMinus's own**, as C has none: builtins on PFFFT, which take sizes of 2, 3 and 5 only, multiples of 32
   points for a real plan and of 16 for a complex one (`fft_create` is null for any other). A plan is made and freed off
   the audio thread (the effects count `fft_create`, `fft_create_complex` and `fft_destroy` as allocations), and a
@@ -357,17 +357,20 @@ Where FMinus differs from C, it is on purpose:
   whose libm sets no `errno`, a prototype of libm's function says it writes no memory, as clang's `<math.h>` says
   there, so a call on a loop's invariants is made once, before the loop ([docs/extending.md](docs/extending.md),
   recipe 19).
-- **Enumerations are C's, a little smaller**: one is declared on its own (C's `enum Wave { SAW } w;` also declares `w`),
-  never ahead of its constants, and `enum Wave` is `int` whatever its constants are, where GCC and clang make it an
-  `unsigned int` when none is negative. A case's value or an enumerator's that overflows an `int` is an error, where
-  clang warns ([docs/extending.md](docs/extending.md), recipe 27).
+- **Enumerations are C's, a little smaller**: `enum Wave` is `int` whatever its constants are (or C23's fixed type,
+  `int` or `bool`), where GCC and clang make it an `unsigned int` when none is negative, and its constants are `int`s
+  in an `int`'s range, where C23 lets a constant past it give the enumeration a wider type. A case's value or an
+  enumerator's that overflows an `int` is an error, where clang warns. Messages name the type `'int'`, where clang
+  names it `'enum Wave'` ([docs/extending.md](docs/extending.md), recipes 27 and 32).
 - **A declaration without an initialiser starts at 0**, and a pointer at null, and so does a variable whose
   declaration a switch's jump to a label passes (`case 1:` after `case 0: float t = x;`). C leaves the variable
   indeterminate.
   From `-O1`, the optimiser removes a local's zeroing where nothing reads the zeros: an array's that loops overwrite,
   and a module's that a copy of another overwrites. `-O0` keeps every one ([docs/extending.md](docs/extending.md),
   recipe 18).
-- **A non-void function that can reach its end is an error**, as in C++. Clang only warns in C.
+- **A non-void function that can reach its end is an error**, as in C++. Clang only warns in C. As in clang's check,
+  a constant condition takes one branch: the end after a `while (1)` or `for (;;)` that only a `break` would leave, or
+  after `if (1) return x;`, is not reached, and needs no return.
 - **The preprocessor is `#include "file"`, the conditionals and macros that only they read.** A macro, the program's
   (`#define LEVEL 2`) or the host's, is read where C reads it as a condition, in `#if`'s and `#elif`'s expressions and
   by `#ifdef`, `#ifndef` and `defined`: its name in code is an error, never a substitution (for a constant, an `enum`
@@ -417,8 +420,13 @@ LLVM's `float`, an `int` an `i32`, a pointer a `ptr`), so C++ calls JIT'd code t
 `float(float, ...)`, or `void(const float*, float*, int)` for a function that processes a block of samples in one
 call. A method is one too, named `OnePole::tick`, whose first parameter is the module's address: `float(void*,
 float)`. A module is an LLVM struct of its fields, laid out as C lays out a struct. The code generator reports every
-error it finds, in source order and in clang's words, as `file:line:column: error: message`. The parser stops at the
-first syntax error.
+error it finds, in source order and in clang's words, as `file:line:column: error: message`, and each once: an
+operand with an error of its own (an undeclared name) is no operand for an operator, a subscript, `*`, `&`, a call or
+a conversion to complain about, as clang's recovery has it, so `*(p + y)` is the one error about `y`. The parser stops
+at the first syntax error. FMinus's one warning is clang's `-Wswitch`: a `switch` without a `default` on a value of an
+enumerated type, whose cases miss some of its constants (`warning: enumeration value 'NOISE' not handled in switch
+[-Wswitch]`). The program still compiles; `fminus` prints the warnings with the errors, in source order, as clang
+does.
 
 ```bash
 build-dev/bin/fminus chain.fm                      # the optimised IR (-O2)
@@ -533,6 +541,9 @@ gain(in, out, n, 0.5f);                                       // one call a bloc
   `parallel { }` run on FMinus's pool, shared by every `Program` in the process: the first with a region starts it
   when it compiles (a thread for each core but one) and the last one's destructor stops it. The thread that calls the
   program works on each region too.
+- **Warnings.** `warnings()` is a compiled program's warnings, as clang prints them, one a line with their notes
+  (empty when it has none): clang's `-Wswitch`, a `switch` on a value of an enumerated type that misses some of its
+  constants. A program that does not compile has its warnings among its `errors`, where they are.
 - **Effects.** `nonBlocking(name)` and `nonAllocating(name)` say whether a function is marked
   `[[clang::nonblocking]]` or `[[clang::nonallocating]]`, which FMinus has then checked, so a host can refuse to run
   anything else on its audio thread.
@@ -692,7 +703,7 @@ preset has a workflow (`cmake --workflow --preset <name>`) except `xcode`, which
 ## Handy
 
 - `build-dev/bin/fminus-hostinfo [--features]`: the triple, CPU, features and data layout the JIT targets here.
-- VSCode: `python3 editors/vscode/package.py`, then `code --install-extension build-vscode/fminus-0.12.0.vsix`, for
+- VSCode: `python3 editors/vscode/package.py`, then `code --install-extension build-vscode/fminus-0.13.0.vsix`, for
   FMinus syntax highlighting, lit's `RUN:` and `CHECK:` lines included
   ([editors/vscode/README.md](editors/vscode/README.md)).
 - `build-dev/bin/fminus`: FMinus source to its tree, IR, assembly or an object, or run in the JIT (above).
