@@ -179,22 +179,30 @@ namespace fminus
             return "void";
         }
 
-        // A scalar's Kind, or nothing for a type call() does not pass as a scalar.
-        std::optional<Kind> scalarKind(ast::Kind kind)
+        // How call() passes a value of `type`, as a thunk does (jit::callType, whose switch over FMinus's types makes
+        // a new type say how it crosses): Void for void, a scalar as itself, a pointer as a Pointer; nothing for a
+        // type no thunk passes.
+        std::optional<Kind> kindOf(const ast::Type& type)
         {
-            switch (kind)
-            {
-            case ast::Kind::Bool:
-                return Kind::Bool;
-            case ast::Kind::Int:
-                return Kind::Int;
-            case ast::Kind::Float:
-                return Kind::Float;
-            case ast::Kind::Double:
-                return Kind::Double;
-            default:
+            const std::optional<jit::CallType> passed = jit::callType(type);
+            if (!passed)
                 return std::nullopt;
+            switch (*passed)
+            {
+            case jit::CallType::Void:
+                return Kind::Void;
+            case jit::CallType::Bool:
+                return Kind::Bool;
+            case jit::CallType::Int:
+                return Kind::Int;
+            case jit::CallType::Float:
+                return Kind::Float;
+            case jit::CallType::Double:
+                return Kind::Double;
+            case jit::CallType::Pointer:
+                return Kind::Pointer;
             }
+            return std::nullopt;
         }
 
         const Program::Module* moduleNamed(const std::vector<Program::Module>& modules, std::string_view name)
@@ -216,9 +224,8 @@ namespace fminus
             callable.resultType = ast::typeName(function.returnType);
             callable.parameters.clear();
             std::string unsupported;
-            if (function.returnType.kind == ast::Kind::Void)
-                callable.result = Kind::Void;
-            else if (const std::optional<Kind> result = scalarKind(function.returnType.kind))
+            const std::optional<Kind> result = kindOf(function.returnType);
+            if (result && *result != Kind::Pointer)
                 callable.result = *result;
             else
                 unsupported = quoted(function.name) + " returns " + quoted(callable.resultType)
@@ -228,23 +235,23 @@ namespace fminus
                 Program::Callable::Param& param = callable.parameters.emplace_back();
                 param.name = declared.name;
                 param.type = ast::typeName(declared.type);
-                bool passes = true;
-                if (const std::optional<Kind> scalar = scalarKind(declared.type.kind))
-                    param.kind = *scalar;
-                else if (ast::isPointer(declared.type) && !ast::hasRows(declared.type))
+                const std::optional<Kind> kind = kindOf(declared.type);
+                bool passes = kind.has_value() && *kind != Kind::Void;
+                if (passes)
+                    param.kind = *kind;
+                if (passes && *kind == Kind::Pointer)
                 {
+                    // To an int, a float, a double, a module or void (any): not to a vector, nor to a row.
                     const ast::Type pointee = ast::pointee(declared.type);
-                    param.kind = Kind::Pointer;
+                    const std::optional<Kind> element = kindOf(pointee);
                     param.readOnly = declared.type.pointeeConst;
-                    if (const std::optional<Kind> element = scalarKind(pointee.kind))
-                        param.element = *element;
-                    else if (pointee.kind == ast::Kind::Module && pointee.module != nullptr)
+                    if (ast::isModule(pointee) && pointee.module != nullptr)
                         param.module = moduleNamed(modules, pointee.module->name);
+                    else if (element && *element != Kind::Pointer && *element != Kind::Bool)
+                        param.element = *element;
                     else
-                        passes = pointee.kind == ast::Kind::Void;
+                        passes = false;
                 }
-                else
-                    passes = false;
                 if (!passes && unsupported.empty())
                     unsupported = quoted(function.name) + " takes a parameter of type " + quoted(param.type)
                                 + "; call() passes bools, ints, floats, doubles and pointers to ints, floats, doubles, "

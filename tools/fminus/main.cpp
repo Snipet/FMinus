@@ -164,19 +164,19 @@ namespace
         }
     }
 
-    // What --run passes `type` as: bool, int, float and double, and pointers to int, float and double (an array).
+    // Whether --run passes `type`: a bool, an int, a float or a double, or a pointer to an int, a float or a double (an
+    // array), as a thunk passes them (jit::callType, whose switch over FMinus's types makes a new type say how it
+    // crosses).
     bool runPasses(const fminus::ast::Type& type)
     {
-        using fminus::ast::Kind;
-        if (type.kind == Kind::Pointer)
-        {
-            if (fminus::ast::hasRows(type))
-                return false;
-            const Kind element = fminus::ast::pointee(type).kind;
-            return element == Kind::Int || element == Kind::Float || element == Kind::Double;
-        }
-        return type.kind == Kind::Bool || type.kind == Kind::Int || type.kind == Kind::Float
-               || type.kind == Kind::Double;
+        using fminus::jit::CallType;
+        const std::optional<CallType> passed = fminus::jit::callType(type);
+        if (!passed || *passed == CallType::Void)
+            return false;
+        if (*passed != CallType::Pointer)
+            return true;
+        const std::optional<CallType> element = fminus::jit::callType(fminus::ast::pointee(type));
+        return element == CallType::Int || element == CallType::Float || element == CallType::Double;
     }
 
     const char* withArticle(fminus::ast::Kind kind)
