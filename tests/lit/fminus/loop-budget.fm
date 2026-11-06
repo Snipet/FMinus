@@ -76,6 +76,7 @@ float main(float x)
 
 // O0: @fminus_rt_loop_budget = dso_local global { i64, i32 } { i64 9223372036854775807, i32 0 }, align 8
 // O0-LABEL: define float @spin(float %x)
+// O0-SAME:    #[[COUNTS:[0-9]+]]
 // O0:         %budget.start = load atomic i64, ptr @fminus_rt_loop_budget monotonic, align 8
 // O0:       while.body:
 // O0:         %budget.left = sub i64 %budget.slot.0, 1
@@ -109,9 +110,8 @@ float main(float x)
 // O0:       budget.unwind:
 // O0-NEXT:    ret float 0.000000e+00
 // O0-LABEL: define float @main(float %x)
-// O0-SAME:    #[[RETURNS]]
-// O0: attributes #{{[0-9]+}} = { "fminus-loop-budget"="counts" }
-// O0: attributes #[[RETURNS]] = { "fminus-loop-budget"="returns" }
+// O0-DAG: attributes #[[COUNTS]] = { {{.*}}"fminus-loop-budget"="counts"{{.*}} }
+// O0-DAG: attributes #[[RETURNS]] = { {{.*}}"fminus-loop-budget"="returns"{{.*}} }
 // O0: !{i32 7, !"fminus.loop-budget", i32 1}
 // O0: [[UNLIKELY]] = !{!"branch_weights", i32 1, i32 {{[0-9]+}}}
 
