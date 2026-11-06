@@ -385,7 +385,7 @@ namespace fminus
         // function only finds it). Unlimited until the host sets it. Each of these is a relaxed atomic load or store,
         // no allocation and no lock: the audio thread may call them. In a program compiled without the budget they
         // read and write a budget nothing counts down, and loopBudgetExceeded() is false.
-
+        //
         // Sets the budget for the next call, `backEdges` branches back (a loop with a count is charged them all as it
         // starts; at 0 the first branch back stops the call; a negative budget is -1, which stops the call at its
         // first check), and clears the flag. The host sets it before each call it limits; otherwise what is left
@@ -451,14 +451,14 @@ namespace fminus
         // before the program runs again, re-initialising the instance included. Each of these is a relaxed atomic
         // load or store, no allocation and no lock: the audio thread may call them. In a program compiled without the
         // checks there is never a violation.
-
+        //
         // A bounds check that failed: where in the source the access is, which array, and the element it reached.
         // The strings are the Program's, valid while it lives.
         struct BoundsViolation
         {
             std::string_view file;     // the source file, as errors name it (Options::fileName, or an #include's)
-            int line = 0;
-            int column = 0;
+            int line = 0;              // the access's line in that file, from 1
+            int column = 0;            // and its column, from 1, in bytes, as the errors count it
             std::string_view array;    // the array as the source names it ("buf", "m.taps", "voices[v].line"), or
                                        // empty when it has no name
             std::string_view type;     // its type, as FMinus writes it: "float[16]"
