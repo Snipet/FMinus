@@ -6097,9 +6097,9 @@ refused); `typeOf`, `convert`, `commonType`, `sizeOf` and `checkType` (`src/ir/T
 
 A float has 24 bits, and some of a program's state needs more. An engine's coolant warms by a millionth of a degree a
 block: at 90 degrees, half a float's ulp is 3.8e-6, so `t += 1e-6f` rounds back to 90 every time and the temperature
-never moves. A clock counted in seconds a sample at a time drifts by a sample in a few minutes. A one-pole's
-coefficient a hair below 1 is a different filter rounded to a float. C's answer is `double`, and this recipe adds it:
-C's IEEE double precision, for accumulators, clocks and slow state, beside the floats that a block's audio is.
+never moves. A clock counted in seconds a sample at a time, at 48 kHz, reads 57.8 after a minute, two seconds behind. A
+one-pole's coefficient a hair below 1 is a different filter rounded to a float. C's answer is `double`, and this recipe
+adds it: C's IEEE double precision, for accumulators, clocks and slow state, beside the floats that a block's audio is.
 
 ### The type
 
