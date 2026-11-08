@@ -91,10 +91,12 @@ float main(float big)
 // AVX:      attributes #[[LARGE]] = { cold nofree noinline nosync nounwind willreturn memory(none) "target-features"="{{.*}}+avx,{{(.*,)?}}-vzeroupper" }
 
 // In the machine code, the wrapper's one vzeroupper comes before the runtime's call (the JIT's code model calls it
-// through a register), and none after it: the restores of ymm1-ymm15 are the last thing before the return.
+// through a register), and none after it: the restores of ymm1-ymm15 are the last thing before the return. The load
+// of the function's address may come before vzeroupper or after it, by the host CPU (with AVX-512 the argument waits
+// in xmm16, which vzeroupper leaves alone): either order passes, both before the call.
 // AVXASM-LABEL: fminus.large.sin:
-// AVXASM:         vzeroupper
-// AVXASM:         fminus_rt_sinf
+// AVXASM-DAG:     vzeroupper
+// AVXASM-DAG:     fminus_rt_sinf
 // AVXASM:         call
 // AVXASM-NOT:     vzeroupper
 // AVXASM:         , %ymm{{[0-9]+}}
