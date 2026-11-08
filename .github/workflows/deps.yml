@@ -1,0 +1,139 @@
+# FMinus's built dependencies, prebuilt once per platform, so a build elsewhere can unpack them instead of building
+# LLVM (10-30 minutes on a fast machine, hours on a hosted runner).
+#
+# Each build job configures the release preset, which builds the pinned LLVM (Release, without assertions: the release
+# preset's flavor), Bison and Flex (WinFlexBison on Windows) into the deps cache (.deps/). It then builds FMinus and
+# runs its tests against them, and packs the cache's installs (.deps/install/<name>/) as one archive per platform:
+# fminus-deps-llvm-<version>-<platform>.tar.gz, beside its SHA-256. Unpacked into another checkout's .deps/install/,
+# the release preset finds its flavor there and builds nothing; so do projects that read FMinus's deps cache.
+#
+# Run by hand (Actions > Deps > Run workflow). On main, with "publish" ticked (the default), the publish job puts the
+# three archives on the pre-release deps-llvm-<version>, never marked as the latest release, replacing any archives of
+# the same name. A run on another branch only keeps them as the run's artifacts (7 days).
+# Linux builds in an Arch Linux container (archlinux:base-devel); its static libraries suit a machine with the same
+# or a newer toolchain.
+#
+# Each action is pinned to its release's full commit SHA, with the tag in a comment (as in pages.yml).
+name: Deps
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish the archives on the release deps-llvm-<version> (on main only)"
+        type: boolean
+        default: true
+
+# nothing by default; each job asks for what it needs
+permissions: {}
+
+concurrency:
+  group: deps-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+    timeout-minutes: 360
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: macos-arm64, os: macos-latest }
+          - { platform: windows-x64, os: windows-latest }
+          - { platform: linux-x64, os: ubuntu-latest, container: "archlinux:base-devel" }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Packages (Arch Linux)
+        if: runner.os == 'Linux'
+        run: pacman -Syu --noconfirm --needed git clang lld cmake ninja python m4
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Configure (builds LLVM, Bison and Flex into .deps)
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            git config --global --add safe.directory "$GITHUB_WORKSPACE"   # the container runs as root
+            export CC=clang CXX=clang++
+          fi
+          cmake --preset release
+
+      - name: Build
+        run: cmake --build --preset release
+
+      - name: Test
+        run: ctest --preset release --output-on-failure
+
+      - name: Pack
+        id: pack
+        run: |
+          version=$(sed -nE 's/^set\(FMINUS_LLVM_VERSION "([^"]+)"\).*/\1/p' cmake/FMinusPins.cmake)
+          [ -n "$version" ] || { echo "no FMINUS_LLVM_VERSION in cmake/FMinusPins.cmake"; exit 1; }
+          name="fminus-deps-llvm-${version}-${{ matrix.platform }}"
+          cd .deps/install
+          dirs=()
+          for d in */; do dirs+=("${d%/}"); done
+          printf 'packing %s\n' "${dirs[@]}"
+          ls -d llvm-"$version"-Release-* >/dev/null   # the release preset's flavor must be among them
+          for d in llvm-*; do
+            [ -d "$d" ] || continue
+            [ -f "$d/fminus-flavor.cmake" ] || { echo "$d is not whole (no fminus-flavor.cmake)"; exit 1; }
+          done
+          export COPYFILE_DISABLE=1                     # macOS: no ._ files for extended attributes
+          tar -czf "../../$name.tar.gz" "${dirs[@]}"   # relative: Git Bash's tar takes D:\... for a remote host
+          cd ../..
+          if command -v sha256sum >/dev/null; then sha256sum "$name.tar.gz"; else shasum -a 256 "$name.tar.gz"; fi \
+            > "$name.tar.gz.sha256"
+          ls -l "$name.tar.gz"; cat "$name.tar.gz.sha256"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.pack.outputs.name }}
+          path: |
+            ${{ steps.pack.outputs.name }}.tar.gz
+            ${{ steps.pack.outputs.name }}.tar.gz.sha256
+          retention-days: 7
+          compression-level: 0   # already gzipped
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: inputs.publish && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # the release and its assets
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: fminus-deps-*
+          merge-multiple: true
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          ls -l
+          files=(fminus-deps-llvm-*.tar.gz)
+          [ ${#files[@]} -eq 3 ] || { echo "want 3 archives, have ${#files[@]}"; exit 1; }
+          version=$(echo "${files[0]}" | sed -nE 's/^fminus-deps-llvm-([0-9.]+)-.*/\1/p')
+          tag="deps-llvm-${version}"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            notes="FMinus's built dependencies for LLVM ${version}: LLVM (Release, without assertions: the release"
+            notes+=" preset's flavor), Bison and Flex (WinFlexBison on Windows), one archive per platform, each with"
+            notes+=" its SHA-256. Unpack one into a checkout's .deps/install/ to skip building them."
+            notes+=" Made by .github/workflows/deps.yml."
+            gh release create "$tag" --target "$GITHUB_SHA" --prerelease --latest=false \
+              --title "Prebuilt dependencies: LLVM ${version}" --notes "$notes"
+          fi
+          gh release upload "$tag" fminus-deps-llvm-*.tar.gz fminus-deps-llvm-*.tar.gz.sha256 --clobber
+          gh release view "$tag" --json assets --jq '.assets[] | "\(.name) \(.size)"'
