@@ -7,9 +7,12 @@
 # fminus-deps-llvm-<version>-<platform>.tar.gz, beside its SHA-256. Unpacked into another checkout's .deps/install/,
 # the release preset finds its flavor there and builds nothing; so do projects that read FMinus's deps cache.
 #
-# Run by hand (Actions > Deps > Run workflow). On main, with "publish" ticked (the default), the publish job puts the
-# three archives on the pre-release deps-llvm-<version>, never marked as the latest release, replacing any archives of
-# the same name. A run on another branch only keeps them as the run's artifacts (7 days).
+# Run by hand (Actions > Deps > Run workflow), for every platform or the ones named in "platforms". On main, with
+# "publish" ticked (the default), the publish job puts the run's archives on the pre-release deps-llvm-<version>, never
+# marked as the latest release, replacing any archives of the same name (the other platforms' stay). A run on another
+# branch only keeps them as the run's artifacts (7 days).
+# On Windows the jobs run in Visual Studio's developer environment, as FMinus's build is meant to (an "x64 Native Tools"
+# prompt): LLVM's BLAKE3 assembles with ml64, which only that environment puts on the PATH.
 # Linux builds in an Arch Linux container (archlinux:base-devel); its static libraries suit a machine with the same
 # or a newer toolchain.
 #
@@ -23,16 +26,41 @@ on:
         description: "Publish the archives on the release deps-llvm-<version> (on main only)"
         type: boolean
         default: true
+      platforms:
+        description: "Build only these (space-separated: macos-arm64 windows-x64 linux-x64); empty: all"
+        type: string
+        default: ""
 
 # nothing by default; each job asks for what it needs
 permissions: {}
 
+# one run at a time per branch and choice of platforms
 concurrency:
-  group: deps-${{ github.ref }}
+  group: deps-${{ github.ref }}-${{ inputs.platforms }}
   cancel-in-progress: false
 
 jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - id: plan
+        env:
+          PLATFORMS: ${{ inputs.platforms }}
+        run: |
+          all='[{"platform": "macos-arm64", "os": "macos-latest"},
+                {"platform": "windows-x64", "os": "windows-latest"},
+                {"platform": "linux-x64", "os": "ubuntu-latest", "container": "archlinux:base-devel"}]'
+          matrix=$(jq -c --arg p "$PLATFORMS" \
+            '[.[] | select(.platform as $x | ($p | split(" ") | map(select(. != ""))) as $want
+                             | ($want | length) == 0 or ($want | index($x)) != null)]' <<< "$all")
+          [ "$matrix" != "[]" ] || { echo "no platform named '$PLATFORMS'"; exit 1; }
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "$matrix"
+
   build:
+    needs: plan
     name: ${{ matrix.platform }}
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.container }}
@@ -42,10 +70,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { platform: macos-arm64, os: macos-latest }
-          - { platform: windows-x64, os: windows-latest }
-          - { platform: linux-x64, os: ubuntu-latest, container: "archlinux:base-devel" }
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
     defaults:
       run:
         shell: bash
@@ -57,6 +82,20 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Visual Studio's developer environment (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $clang = 'Microsoft.VisualStudio.Component.VC.Llvm.Clang'
+          $vs = & $vswhere -latest -products * -requires $clang -property installationPath
+          if (-not $vs) { throw "no Visual Studio with its C++ Clang tools" }
+          cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && set" | ForEach-Object {
+            if ($_ -match '^([^=]+)=(.*)$') {
+              "$($matches[1])=$($matches[2])" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+            }
+          }
 
       - name: Configure (builds LLVM, Bison and Flex into .deps)
         run: |
@@ -123,8 +162,9 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           ls -l
+          shopt -s nullglob
           files=(fminus-deps-llvm-*.tar.gz)
-          [ ${#files[@]} -eq 3 ] || { echo "want 3 archives, have ${#files[@]}"; exit 1; }
+          [ ${#files[@]} -gt 0 ] || { echo "no archives"; exit 1; }
           version=$(echo "${files[0]}" | sed -nE 's/^fminus-deps-llvm-([0-9.]+)-.*/\1/p')
           tag="deps-llvm-${version}"
           if ! gh release view "$tag" >/dev/null 2>&1; then
@@ -133,7 +173,8 @@ jobs:
             notes+=" its SHA-256. Unpack one into a checkout's .deps/install/ to skip building them."
             notes+=" Made by .github/workflows/deps.yml."
             gh release create "$tag" --target "$GITHUB_SHA" --prerelease --latest=false \
-              --title "Prebuilt dependencies: LLVM ${version}" --notes "$notes"
+              --title "Prebuilt dependencies: LLVM ${version}" --notes "$notes" \
+              || gh release view "$tag" >/dev/null   # another run made it meanwhile
           fi
           gh release upload "$tag" fminus-deps-llvm-*.tar.gz fminus-deps-llvm-*.tar.gz.sha256 --clobber
           gh release view "$tag" --json assets --jq '.assets[] | "\(.name) \(.size)"'
