@@ -69,10 +69,12 @@ bool gate(bool on, float x) [[clang::nonblocking]]
 
 // From -O1 the same shape at every level: the body's address (from the GOT, as the driver's target machine addresses
 // it), the test, the tail call through it when the caller flushes already, and otherwise the call between the writes.
+// The FZ bit's orr and the address's load are independent, so the scheduler orders them by the host CPU (a GitHub
+// runner's puts the address's adrp between mrs and orr): either order passes, both before the test.
 // ASM-LABEL: OnePole::process{{"?}}:
 // ASM:         mrs [[SAVED:x[0-9]+]], FPCR
-// ASM-NEXT:    orr [[FZ:x[0-9]+]], [[SAVED]], #0x1000000
-// ASM:         {{ldr|add}} [[BODY:x[0-9]+]], {{.*}}OnePole::process.body{{"?}}@{{(GOT)?}}PAGEOFF
+// ASM-DAG:     orr [[FZ:x[0-9]+]], [[SAVED]], #0x1000000
+// ASM-DAG:     {{ldr|add}} [[BODY:x[0-9]+]], {{.*}}OnePole::process.body{{"?}}@{{(GOT)?}}PAGEOFF
 // ASM:         cmp [[SAVED]], [[FZ]]
 // ASM-NEXT:    b.ne [[SET:[A-Za-z0-9_]+]]
 // ASM-NOT:     msr
@@ -83,8 +85,8 @@ bool gate(bool on, float x) [[clang::nonblocking]]
 // ASM-NEXT:    msr FPCR, [[SAVED]]
 // ASM-LABEL: gate:
 // ASM:         mrs [[SAVED:x[0-9]+]], FPCR
-// ASM-NEXT:    orr [[FZ:x[0-9]+]], [[SAVED]], #0x1000000
-// ASM:         {{ldr|add}} [[BODY:x[0-9]+]], {{.*}}gate.body@{{(GOT)?}}PAGEOFF
+// ASM-DAG:     orr [[FZ:x[0-9]+]], [[SAVED]], #0x1000000
+// ASM-DAG:     {{ldr|add}} [[BODY:x[0-9]+]], {{.*}}gate.body@{{(GOT)?}}PAGEOFF
 // ASM:         cmp [[SAVED]], [[FZ]]
 // ASM-NEXT:    b.ne [[SET:[A-Za-z0-9_]+]]
 // ASM-NOT:     msr
