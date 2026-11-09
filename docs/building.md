@@ -36,6 +36,7 @@ ctest --preset dev                   # test
 | `asan` | Debug | Release + assertions | address, undefined | memory errors in FMinus's code |
 | `tsan` | RelWithDebInfo | Release + assertions | thread | compiling on another thread |
 | `inline` | RelWithDebInfo | built inside the tree, -O2 -g | none | stepping into LLVM itself |
+| `python` | RelWithDebInfo | Release + assertions | none | the Python package: `dev` with `FMINUS_BUILD_PYTHON=ON` ([python.md](python.md)) |
 | `xcode` | (multi-config) | Release + assertions | none | Xcode's debugger and Instruments |
 
 Each preset builds in `build-<preset>/`, exports `compile_commands.json` (`.clangd` reads `build-dev`'s), and has a
@@ -134,6 +135,7 @@ Every source list is a glob, so adding a file never edits CMake. Configure picks
 | a circuit-compiler source | `src/circuit/` | part of `libfminus_circuit.a` (no LLVM, no grammar: a `*.y` or `*.l` there would be generated into `libfminus.a`) |
 | a public header | `include/fminus/` | `"fminus/..."`, for code embedding FMinus (FMinus.h: C++17, no LLVM) |
 | a test of the public API | `tests/library/*.cpp` | part of `fminus-library-tests` (C++17, `FMinus::FMinus` alone) |
+| a source, a Python file or a test of the Python package | `python/src/*.cpp`, `python/fminus/*.py`, `python/tests/test_*.py` | part of the extension module, the package, or the ctest test `python` (with `FMINUS_BUILD_PYTHON=ON`; [python.md](python.md)) |
 
 A grammar outside `src/` (a test's, say) uses the helper directly, as `tests/CMakeLists.txt` does for the
 calculator:

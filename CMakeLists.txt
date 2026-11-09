@@ -7,12 +7,14 @@
 #   PFFFT         cmake/FMinusFft.cmake          two C files, into the runtime     -> fminus_pffft
 #   CLI11         cmake/FMinusCLI11.cmake        tools only                         -> CLI11::CLI11
 #   Catch2, lit   cmake/FMinusTesting.cmake      tests only
+#   pybind11      cmake/FMinusPython.cmake       the Python package only (FMINUS_BUILD_PYTHON)
 # Built dependencies are kept in the deps cache (FMINUS_DEPS_DIR, default .deps/), shared by every build tree.
 #
 # Layout (README.md): src/ is the fminus library: every .cpp under it is a source, and each Bison grammar there,
 # with the Flex scanners beside it, is generated into the library. include/fminus/ is its public API. tools/<name>/
 # holds one executable each, examples/<name>/ one example each (a program and its harness). tests/ holds unit/
 # (Catch2), smoke/ (the toolchain's own checks) and lit/ (lit and FileCheck). Adding a file edits no CMake.
+# python/ is the Python package, `import fminus` (docs/python.md), built when FMINUS_BUILD_PYTHON is ON.
 #
 # Use the presets: `cmake --workflow --preset dev` configures, builds and tests (CMakePresets.json lists the others).
 
@@ -74,6 +76,11 @@ endif()
 if(FMINUS_BUILD_TESTS)
   include(FMinusTesting)
   add_subdirectory(tests)
+endif()
+
+if(FMINUS_BUILD_PYTHON)
+  include(FMinusPython)         # the Python it is built for, and pybind11
+  add_subdirectory(python)      # after the tests: its own run under ctest too
 endif()
 
 message(STATUS "FMinus ${PROJECT_VERSION}: ${CMAKE_BUILD_TYPE}, C++${FMINUS_CXX_STANDARD}, "

@@ -59,6 +59,12 @@
       }
     },
     {
+      "name": "python",
+      "inherits": "dev",
+      "displayName": "python: dev, with the Python package (python/; needs Python's development headers)",
+      "cacheVariables": { "FMINUS_BUILD_PYTHON": "ON" }
+    },
+    {
       "name": "xcode",
       "displayName": "xcode: an Xcode project (multi-config; LLVM from the deps cache)",
       "generator": "Xcode",
@@ -73,6 +79,7 @@
     { "name": "asan", "configurePreset": "asan" },
     { "name": "tsan", "configurePreset": "tsan" },
     { "name": "inline", "configurePreset": "inline" },
+    { "name": "python", "configurePreset": "python" },
     { "name": "xcode", "configurePreset": "xcode", "configuration": "Debug" }
   ],
   "testPresets": [
@@ -101,6 +108,7 @@
       "environment": { "TSAN_OPTIONS": "halt_on_error=1" }
     },
     { "name": "inline", "inherits": "base", "configurePreset": "inline" },
+    { "name": "python", "inherits": "base", "configurePreset": "python" },
     { "name": "xcode", "inherits": "base", "configurePreset": "xcode", "configuration": "Debug" }
   ],
   "workflowPresets": [
@@ -150,6 +158,14 @@
         { "type": "configure", "name": "inline" },
         { "type": "build", "name": "inline" },
         { "type": "test", "name": "inline" }
+      ]
+    },
+    {
+      "name": "python",
+      "steps": [
+        { "type": "configure", "name": "python" },
+        { "type": "build", "name": "python" },
+        { "type": "test", "name": "python" }
       ]
     }
   ]

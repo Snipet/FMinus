@@ -30,11 +30,12 @@ of holding the audio thread, and compile it with bounds checks while it is writt
 stops the call and says where. A program's instrumentation can sit in C's conditionals, `#ifdef DEBUG` ... `#endif`,
 compiled in when the host defines `DEBUG` and skipped, unread, when not. A host's sampling profiler can map each sample
 to the function, method and module whose machine code it fell in. `examples/plugin/` is a JUCE plugin whose DSP
-is an FMinus program. The build, the dependencies and the toolchain's smoke tests are in place around it.
+is an FMinus program, and `import fminus` is the library as a Python package, which compiles programs and calls them
+with Python's numbers and buffers. The build, the dependencies and the toolchain's smoke tests are in place around it.
 
 Documentation: [docs/](docs/README.md). It covers the architecture, writing a program with `main`, a guide to
 extending the compiler with worked recipes, SIMD (vector types, a vector math library, and vectors as wide as the
-machine's), the build, and testing and debugging.
+machine's), the Python package, the build, and testing and debugging.
 
 ## Quick start
 
@@ -55,7 +56,8 @@ Windows, in place of their `./configure && make` ([docs/building.md](docs/buildi
 
 ```
 CMakeLists.txt          the project; cmake/ holds the parts
-CMakePresets.json       dev, debug, release, asan, tsan, inline, xcode
+CMakePresets.json       dev, debug, release, asan, tsan, inline, python, xcode
+pyproject.toml          pip install .: the Python package, built by this CMake build
 cmake/
   FMinusPins.cmake        every dependency: version, URL, SHA-256
   FMinusClangCl.cmake     Windows: clang-cl, found before project() (Visual Studio's, PATH's, LLVM's)
@@ -64,6 +66,7 @@ cmake/
   FMinusParserTools.cmake Bison and Flex (fetch | system; WinFlexBison on Windows) -> fminus_add_grammar()
   FMinusCLI11.cmake       CLI11 -> CLI11::CLI11, linked into every tool
   FMinusTesting.cmake     Catch2 and lit
+  FMinusPython.cmake      Python and pybind11, for the Python package (FMINUS_BUILD_PYTHON)
   templates/Config.h.in   -> <build>/include/fminus/Config.h
 include/fminus/         the library's public API ("fminus/..."): FMinus.h, fminus::Program (below); Circuit.h,
                         fminus::circuit::generate (SPICE-style netlists to FMinus source) and its self-test,
@@ -129,6 +132,9 @@ examples/<name>/        one example per directory: an FMinus program, and a harn
   circuits/             the circuit compiler's netlists (.cir): the research's examples and Phase 1's (switches,
                         matched linear blocks, a linear-only region, a block that rings), checked against their
                         targets, the accuracy tables and the costs reprinted from emitted code (--check, --tables)
+python/                 the Python package, `import fminus` (FMINUS_BUILD_PYTHON; docs/python.md): src/, its
+                        extension module, on the public API alone (pybind11, C++17); fminus/, the Python around it
+                        (compile, load); tests/ (unittest) and examples/
 tests/
   unit/                 your Catch2 tests
   library/              the public API as a host uses it: in C++17, against FMinus::FMinus alone
@@ -155,6 +161,7 @@ Nothing is taken from the system unless an option asks for it.
 | PFFFT | marton78's fork, commit aa16fd3 (2026-09-29) | source archive of a commit; two C files compiled into `libfminus_runtime.a` | `.deps/src/pffft-<commit>` |
 | CLI11 | 2.7.2 | release source package, header-only, inside each build tree | the build tree |
 | Catch2 | 3.16.1 | source archive, built inside each build tree | the build tree |
+| pybind11 (the Python package only, `FMINUS_BUILD_PYTHON`) | 3.1.0 | PyPI's source distribution, header-only, inside each build tree | the build tree |
 | JUCE (`examples/plugin/` only) | 8.0.4, commit 51d11a2 | git clone of the pinned commit, by the plugin's own build | the plugin's build tree |
 
 `.deps/` holds `src/` (extracted sources), `build/` (dependency build trees) and `install/`. FetchContent keeps each
@@ -724,6 +731,40 @@ deps cache. To reuse one an FMinus checkout has built, set `FMINUS_LLVM_MODE` to
 Bison and Flex) before `FetchContent_MakeAvailable`. Calling into FMinus's internals instead (`"frontend/Frontend.h"`,
 `"jit/Jit.h"`, ...) takes `FMinus::Internal`, which adds `src/`, LLVM's headers and C++23.
 
+## Using FMinus from Python
+
+`import fminus` is the same library as a Python package ([docs/python.md](docs/python.md) is its manual). It is off by
+default: the `python` preset builds and tests it (it is `dev` with `FMINUS_BUILD_PYTHON=ON`, and needs Python 3.9 or
+later with its development headers), and `pip install .` installs it.
+
+```bash
+cmake --workflow --preset python                                    # build-python/python/fminus/
+PYTHONPATH=build-python/python python3 python/examples/sweep.py
+CC=clang CXX=clang++ pip install .                                  # or: into this Python
+```
+
+```python
+import array
+import fminus
+
+program = fminus.load("examples/parameters/parameters.fm")         # or fminus.compile(source)
+filter_ = program.module("Filter").instance()                      # zeroed, its parameters at their defaults
+filter_["cutoff"] = 440                                            # a knob
+samples = array.array("f", [1.0] * 256)                            # or a NumPy float32 array
+out = array.array("f", bytes(4 * 256))
+filter_.process(samples, out, len(samples))                        # one call a block: the loop is FMinus's
+```
+
+A program that does not compile raises `fminus.CompileError`, with FMinus's errors as clang words them. A program's
+functions are its attributes and a module's methods its instances', each called through `Program::call()`, so every
+argument is checked against the declaration, and a wrong one is a `TypeError`: numbers convert to the parameter's type,
+and a pointer takes a buffer of its element type (an `array.array`, a NumPy array, a `memoryview`), lent for the call
+and never copied. `Program::Options` are `compile()`'s and `load()`'s keyword arguments (`optimisation=3`,
+`parameters={"Filter::cutoff": "stream"}`, `defines={"DEBUG": True}`, `bounds_check=True`, ...), and a call that the
+loop budget or a bounds check stops raises `fminus.LoopBudgetError` or `fminus.BoundsError`. The GIL is released while
+a function runs. A pointer has no extent, as in C: a length longer than its buffer reads or writes past it. The circuit
+compiler and vectors at the boundary are not bound yet (the manual lists what is not there).
+
 ## Executables (ahead of time)
 
 For development, a module can also be compiled ahead of time for this machine, into a native executable you can run
@@ -789,6 +830,7 @@ build-dev/bin/fminus-lit -v tests/lit               # lit directly; a source pat
 | `asan` | Debug + ASan + UBSan | Release + assertions | memory errors in FMinus's code |
 | `tsan` | RelWithDebInfo + TSan | Release + assertions | compiling on a background thread, the parallel regions' pool |
 | `inline` | RelWithDebInfo | in-tree, -O2 -g, assertions | stepping into LLVM |
+| `python` | RelWithDebInfo | Release + assertions | the Python package (`dev` with `FMINUS_BUILD_PYTHON=ON`) |
 | `xcode` | Xcode project | Release + assertions | Xcode's debugger and Instruments |
 
 Every preset builds in `build-<preset>/` and exports `compile_commands.json`; `.clangd` reads `build-dev`'s. Each
@@ -863,8 +905,8 @@ These are constraints a plugin runs into. `examples/plugin/`, a JUCE plugin, mee
 FMinus is free software under the GNU General Public License, version 3 (`LICENSE`). Its dependencies keep their own
 licenses: LLVM (Apache 2.0 with LLVM exceptions), PFFFT (FFTPACKv5's BSD-style license: a binary that includes it, as
 anything linking FMinus's runtime does, reproduces its copyright notice, conditions and disclaimer, from its
-`LICENSE.txt`, in its documentation), Catch2 (BSL-1.0) and CLI11 (BSD-3-Clause). JUCE, which only `examples/plugin/`
-uses, is under the AGPLv3 or JUCE's commercial license; that example's README says what that means for a plugin built
-from it. Bison and Flex run only at build time; the code they generate is covered by Bison's skeleton exception and
+`LICENSE.txt`, in its documentation), Catch2 (BSL-1.0), CLI11 (BSD-3-Clause) and pybind11 (BSD-3-Clause; the Python
+package only). JUCE, which only `examples/plugin/` uses, is under the AGPLv3 or JUCE's commercial license; that
+example's README says what that means for a plugin built from it. Bison and Flex run only at build time; the code they generate is covered by Bison's skeleton exception and
 Flex's permissive license. On Windows they are WinFlexBison's ports, under the same licenses (its build scripts are
 GPL-3.0-or-later).

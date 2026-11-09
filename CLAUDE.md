@@ -26,6 +26,10 @@ asks for that specific change, and ask before restructuring anything.
   same on every machine; `fminus_lib` links it. A name its emitted module uses goes in `isModuleWord` (Plan.cpp). Its
   self-test, `selfTest()`, needs the JIT, so it lives in `fminus_lib` (`src/api/CircuitSelfTest.cpp`, which compiles
   candidates through `fminus::Program`); its arithmetic stays in `src/circuit/Search.*`, which stays LLVM-free.
+- `python/` is the Python package, `import fminus` (the user asked for it, 2026-11-09; `docs/python.md`): an extension
+  module on the public API alone (`python/src/`, pybind11, C++17) and the Python around it (`python/fminus/`), built
+  only with `FMINUS_BUILD_PYTHON=ON` (the `python` preset; `pyproject.toml` for pip), tested by `python/tests/`
+  (unittest; the ctest test `python`). It binds `FMinus.h` only: `docs/python.md` ends with what it leaves out.
 - The smoke tests (`tests/smoke/`, `tests/lit/smoke/`) prove the toolchain. Keep them passing until the user retires
   them.
 - `docs/` is the manual (architecture, extending, building, testing; `docs/recipes/` patches). Keep it in step with
