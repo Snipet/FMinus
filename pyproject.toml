@@ -1,0 +1,51 @@
+# FMinus as a Python package: `pip install .` builds and installs it (docs/python.md). The build is FMinus's own CMake
+# build, run by scikit-build-core with FMINUS_BUILD_PYTHON on and the tests, tools and examples off: python/ holds the
+# package, and its install rules put the extension module and its Python files into the wheel.
+#
+# It needs what FMinus's build needs (docs/building.md: clang, Ninja, CMake 3.30 or later, which pip fetches when the
+# system's is older), and LLVM comes as it does for every build: from the deps cache, .deps/ here or FMINUS_DEPS_DIR,
+# built on the first configure (10-30 minutes). CMAKE_ARGS passes more settings to CMake (CMAKE_ARGS="-DFMINUS_...").
+
+[build-system]
+requires = ["scikit-build-core>=0.10"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "fminus"
+dynamic = ["version"]   # CMakeLists.txt's, below
+description = "FMinus, a JIT compiler for audio DSP: compile FMinus programs and call them from Python"
+readme = "README.md"
+license = { file = "LICENSE" }   # the GNU General Public License, version 3
+requires-python = ">=3.9"
+classifiers = [
+  "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+  "Programming Language :: C++",
+  "Programming Language :: Python :: 3",
+  "Topic :: Multimedia :: Sound/Audio",
+  "Topic :: Software Development :: Compilers",
+]
+
+[project.urls]
+Repository = "https://github.com/Snipet/FMinus"
+
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+cmake.version = ">=3.30"
+cmake.build-type = "Release"
+ninja.make-fallback = false
+build.targets = ["fminus-python"]
+install.components = ["python"]
+wheel.packages = []             # the package is what CMake installs (python/CMakeLists.txt)
+
+[tool.scikit-build.cmake.define]
+FMINUS_BUILD_PYTHON = "ON"
+FMINUS_BUILD_TESTS = "OFF"
+FMINUS_BUILD_TOOLS = "OFF"
+FMINUS_BUILD_EXAMPLES = "OFF"
+FMINUS_WERROR = "OFF"           # a newer compiler's new warning does not stop an install
+
+# The version is the project's, read from CMakeLists.txt: project(FMinus VERSION 0.1.0 ...).
+[tool.scikit-build.metadata.version]
+provider = "scikit_build_core.metadata.regex"
+input = "CMakeLists.txt"
+regex = 'project\(FMinus\s+VERSION\s+(?P<value>[0-9.]+)'

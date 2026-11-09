@@ -5,6 +5,7 @@
 option(FMINUS_BUILD_TESTS "Build the Catch2 and lit tests" ${PROJECT_IS_TOP_LEVEL})
 option(FMINUS_BUILD_TOOLS "Build the executables under tools/" ${PROJECT_IS_TOP_LEVEL})
 option(FMINUS_BUILD_EXAMPLES "Build the examples under examples/" ${PROJECT_IS_TOP_LEVEL})
+option(FMINUS_BUILD_PYTHON "Build the Python package, python/ (needs Python's development headers)" OFF)
 option(FMINUS_WERROR "Treat warnings in FMinus's own sources as errors" ON)
 set(FMINUS_CXX_STANDARD 23 CACHE STRING "C++ standard of FMinus's own targets")
 set(FMINUS_SANITIZERS "" CACHE STRING "Sanitizers for FMinus's own targets: a list of address, undefined, thread")
@@ -107,6 +108,17 @@ if(_fminus_sanitizers AND FMINUS_MSVC_FRONTEND)
   message(FATAL_ERROR "FMinus: FMINUS_SANITIZERS: the sanitizers are not set up for clang-cl (Windows)")
 endif()
 list(JOIN _fminus_sanitizers "," FMINUS_SANITIZE_ARG)
+
+# The Python package's extension module (python/) is a shared library that holds FMinus, its runtime and LLVM, so the
+# static libraries it links are compiled as position-independent code. (LLVM's are, by its own default.)
+if(FMINUS_BUILD_PYTHON)
+  if(_fminus_sanitizers)
+    message(FATAL_ERROR "FMinus: FMINUS_BUILD_PYTHON: the Python package is not set up for the sanitizers "
+                        "(FMINUS_SANITIZERS='${FMINUS_SANITIZERS}'): an instrumented extension module needs the "
+                        "sanitizer's runtime loaded before Python's own. Build it in a tree without them.")
+  endif()
+  set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+endif()
 
 # The defaults of an FMinus target: C++${FMINUS_CXX_STANDARD} without extensions, the warnings (as errors with
 # FMINUS_WERROR), the sanitizers. LLVM, Catch2 and the generated scanners' and parsers' own needs are handled elsewhere.

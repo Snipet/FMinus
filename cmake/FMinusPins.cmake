@@ -52,6 +52,14 @@ set(FMINUS_PFFFT_COMMIT "aa16fd3db58de4ba5dae8b0438440bb9da46b6fa")   # 2026-09-
 set(FMINUS_PFFFT_URL "https://github.com/marton78/pffft/archive/${FMINUS_PFFFT_COMMIT}.tar.gz")
 set(FMINUS_PFFFT_SHA256 "5379901efa11e889379b1f647ba69911c564a86b20fd1f93d156343d0ba9bfcb")   # 184,640 bytes
 
+# pybind11: the Python package's extension module is written with it (python/, cmake/FMinusPython.cmake; header-only).
+# Fetched only when FMINUS_BUILD_PYTHON is ON. The release's source distribution on PyPI, whose index publishes this
+# SHA-256 beside it (https://pypi.org/project/pybind11/<version>/#files).
+set(FMINUS_PYBIND11_VERSION "3.1.0")
+set(FMINUS_PYBIND11_URL
+    "https://files.pythonhosted.org/packages/source/p/pybind11/pybind11-${FMINUS_PYBIND11_VERSION}.tar.gz")
+set(FMINUS_PYBIND11_SHA256 "a1cc06b524ab3edca51f8ad3895f9c4fa20b8b19283173dff4ae781449dc9639")   # 603,746 bytes
+
 # JUCE: only the plugin example uses it (examples/plugin/, a CMake project of its own; FMinus's build never fetches it).
 # Pinned by its git commit, not by an archive's SHA-256: FetchContent clones the repository and checks the commit out,
 # and git names a commit by the hash of its contents, so the clone is verified as it is made. The same pin also checks
