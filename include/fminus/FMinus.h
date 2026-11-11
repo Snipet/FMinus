@@ -603,21 +603,22 @@ namespace fminus
         // returns after another's failed check returns early too, as the bounds checks' paragraph says), and one
         // thread's setLoopBudget or clearBoundsViolation is the others' too. A host that calls a program compiled with
         // either option from several threads serialises those calls, or reads the statuses as the program's.
-
+        //
         // A value call() passes to a function, or one it returns: a scalar, or a pointer to the host's memory.
         struct Value
         {
+            // What a value is: nothing, one of C's scalars, or a pointer.
             enum class Kind : std::uint8_t
             {
-                Void,   // none: a void function's result, or a call that did not run
-                Bool,
-                Int,
-                Float,
-                Double,
-                Pointer,
+                Void,      // none: a void function's result, or a call that did not run
+                Bool,      // a bool
+                Int,       // an int
+                Float,     // a float
+                Double,    // a double
+                Pointer,   // a pointer to the host's memory: `element` says to what
             };
 
-            Kind kind = Kind::Void;
+            Kind kind = Kind::Void;     // what it is, which says which of the fields below hold it
             double number = 0;          // a Bool's (0 or 1), an Int's, a Float's or a Double's value: a double holds
                                         // each exactly
             void* pointer = nullptr;    // a Pointer's: the host's first element, or its instance
@@ -626,27 +627,26 @@ namespace fminus
             bool readOnly = false;      // a Pointer through which the function may only read: a const float* takes it,
                                         // a float* does not
 
+            // A scalar of its argument's C++ type: a Bool, an Int, a Float or a Double. call() converts nothing, so the
+            // type is the parameter's: of(2) is an Int, which a float parameter does not take (of(2.0f) is a Float).
+            // Not a pointer, which would convert to a bool (that overload is deleted): Value::array or Value::instance
+            // says what it points to.
             static Value of(bool value) noexcept
             {
                 return scalarOf(Kind::Bool, value ? 1.0 : 0.0);
             }
-
             static Value of(int value) noexcept
             {
                 return scalarOf(Kind::Int, static_cast<double>(value));
             }
-
             static Value of(float value) noexcept
             {
                 return scalarOf(Kind::Float, static_cast<double>(value));
             }
-
             static Value of(double value) noexcept
             {
                 return scalarOf(Kind::Double, value);
             }
-
-            // Not a pointer, which would convert to a bool: Value::array or Value::instance says what it points to.
             template <typename T>
             static Value of(T* value) = delete;
 
@@ -661,27 +661,22 @@ namespace fminus
             {
                 return pointerTo(Kind::Int, elements, false);
             }
-
             static Value array(const int* elements) noexcept
             {
                 return pointerTo(Kind::Int, const_cast<int*>(elements), true);
             }
-
             static Value array(float* elements) noexcept
             {
                 return pointerTo(Kind::Float, elements, false);
             }
-
             static Value array(const float* elements) noexcept
             {
                 return pointerTo(Kind::Float, const_cast<float*>(elements), true);
             }
-
             static Value array(double* elements) noexcept
             {
                 return pointerTo(Kind::Double, elements, false);
             }
-
             static Value array(const double* elements) noexcept
             {
                 return pointerTo(Kind::Double, const_cast<double*>(elements), true);
@@ -755,6 +750,7 @@ namespace fminus
         // What a call by name did: whether it ran, and its result, or why not.
         struct CallResult
         {
+            // How a call went: Ok, or why the function did not run, or did not run to its end.
             enum class Status : std::uint8_t
             {
                 Ok,            // the function ran and returned: `value` is its result
@@ -769,6 +765,7 @@ namespace fminus
                 OutOfBounds,   // a bounds check failed, and it returned early (boundsViolation)
             };
 
+            // How the call went, which says what the fields below hold.
             Status status = Status::Ok;
             // The function's result, of its result type (Void for a void function); after OutOfBudget or OutOfBounds,
             // what it returned early, 0, false or nothing; Void when it did not run.
@@ -781,6 +778,7 @@ namespace fminus
             // are the Program's, valid while it lives); nothing otherwise.
             std::optional<BoundsViolation> violation;
 
+            // Whether the function ran and returned: its status is Ok.
             bool ok() const noexcept
             {
                 return status == Status::Ok;
@@ -804,10 +802,10 @@ namespace fminus
         const Callable* callable(std::string_view name, std::string& errors);
 
         // Calls `function`, one of this Program's Callables, with `count` arguments, checked against its parameters.
+        // Given a name instead, it looks the function up (callable(), which compiles its thunk the first time), then
+        // calls it.
         CallResult call(const Callable& function, const Value* arguments, std::size_t count);
         CallResult call(const Callable& function, const std::vector<Value>& arguments);
-
-        // Looks the function up (callable(), which compiles its thunk the first time), then calls it.
         CallResult call(std::string_view name, const std::vector<Value>& arguments);
 
         // Profiling: where the program's machine code is, for a sampling profiler in the host, which interrupts a
@@ -842,14 +840,13 @@ namespace fminus
                               // mode around its body and hand the caller's back: "process"
                 Parallel,     // a parallel for's or a parallel { }'s body: "run.parallel.1"
                 Thunk,        // the code call() calls the function through: "fminus.call.softclip"
-                Support,      // FMinus's own, no function's: a math kernel's path for large arguments,
-                              // "fminus.large.sin"
+                Support,      // FMinus's own, no function's: a math kernel's large-argument path, "fminus.large.sin"
             };
 
             std::uintptr_t address = 0;   // its first byte, in this process
             std::size_t size = 0;         // its bytes from there; on macOS and Windows, whose objects give no
                                           // sizes, to the next range's start, its padding included
-            Kind kind = Kind::Function;
+            Kind kind = Kind::Function;   // what the code is: a function's, or another of the kinds above
             std::string symbol;           // the code's name in the program's object: "Osc::tick", "run.parallel.1"
             std::string function;         // the program's function it is the code of, as function() names it:
                                           // "Osc::tick", "run" for "run.parallel.1"; empty for Support

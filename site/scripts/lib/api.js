@@ -15,7 +15,8 @@
 //     type's comment today. A new member without a comment of its own stops the build;
 //   - by its members, when it is a type and every one of them has a comment of its own (Options);
 //   - by the header's opening comment, when it is the first declaration in namespace fminus (Program);
-//   - by being what it is: a destructor, or a deleted copy.
+//   - by being what it is: a destructor, or a deleted copy (a deleted member whose name has an entry already, a
+//     deleted move after the copy and its assignment, is one more signature of that entry).
 // Program's own members are never documented by Program, since the header's introduction is not about each of them.
 import { parseHeader } from './cxx-header.js';
 import { GenerateError, githubLine, githubUrl, read, route } from './repo.js';
@@ -130,7 +131,14 @@ export function generateApi({ highlightBlock, highlightInline }) {
 		} else if (node.sharedWith) {
 			node.docFrom = 'shared';
 		} else if (node.special === 'destructor' || node.deleted) {
-			node.docFrom = 'special';
+			// a deleted member whose name the scope has documented already (a deleted move, after the deleted copy and
+			// its assignment) is one more signature of that entry: each name has one
+			const first = node.deleted &&
+				scope.children.find((m) => m !== node && isPublic(m) && m.name === node.name && m.docFrom && m.docFrom !== 'overload');
+			if (first) {
+				node.docFrom = 'overload';
+				node.overloadOf = first;
+			} else node.docFrom = 'special';
 		} else if (coveredBy(node, scope, cover)) {
 			node.docFrom = 'parent';
 			node.docOwner = cover.owner;
