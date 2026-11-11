@@ -64,8 +64,10 @@ namespace fminus
     namespace circuit
     {
         // The self-test's version: part of every key (selfTestKey), so an answer stored by another version of the
-        // gates, the candidates or the emitted arithmetic is never taken for this one's.
-        inline constexpr int kSelfTestVersion = 1;
+        // gates, the candidates or the emitted arithmetic is never taken for this one's. 2: the emitted arithmetic of
+        // docs/research/analog-circuits/notes/optimization-as-built.md's §2.1, 2.2, 2.4, 2.6 and 5, and §2.7's Halley
+        // candidates (2026-11-10; one version for both, unreleased between them).
+        inline constexpr int kSelfTestVersion = 2;
 
         // The node voltages a module with probes (Options::probes) watches at once: its slots, 0 to 3.
         inline constexpr int kProbeSlots = 4;
@@ -103,8 +105,8 @@ namespace fminus
         };
 
         // How a nonlinear port's equation (v + 2 Is K sinh(v / N Vt) = p for a diode pair, v + kd g tanh(v / 2 Vt) = p
-        // for an OTA) is solved each step: a first guess, then a fixed number of Newton steps, each kept in the
-        // bracket [min(0, p), max(0, p)].
+        // for an OTA) is solved each step: a first guess, then a fixed number of Newton (or Halley) steps, each kept
+        // in the bracket [min(0, p), max(0, p)].
         //   Omega     the closed form of the conducting diode alone (D'Angelo et al.'s omega3): .solver omega(K); a
         //             diode's only
         //   Previous  the previous step's solution: .solver newton(K) (an OTA's; a diode's fails at hard drive)
@@ -119,8 +121,22 @@ namespace fminus
                 Previous,
             };
 
-            Guess guess = Guess::Omega;   // where Newton starts
-            int steps = 1;                // Newton steps after the guess: 0 to 8 (Previous: 1 to 8)
+            // What a step is.
+            //   Newton  v - f / f': .solver omega(K) and newton(K)
+            //   Halley  v - 2 f f' / (2 f'^2 - f f''), from the same exponentials and with one divide: .solver
+            //           halley(K), from omega3 (`guess` Omega; Previous is an error). A diode pair's port takes it,
+            //           and a region without one refuses it; beside a pair, one diode's and an asymmetric pair's ports
+            //           keep K Newton steps, since their Halley denominator (and an OTA's) can vanish inside the
+            //           bracket (docs/circuits.md, "Halley")
+            enum class Shape
+            {
+                Newton,
+                Halley,
+            };
+
+            Guess guess = Guess::Omega;    // where Newton starts
+            int steps = 1;                 // steps after the guess: 0 to 8 (Previous, Halley: 1 to 8)
+            Shape shape = Shape::Newton;   // what each step is
         };
 
         // The oversampler's 2x halfband stages, designed for a 48 kHz host (passband to 20 kHz).

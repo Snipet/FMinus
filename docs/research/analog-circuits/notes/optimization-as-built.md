@@ -5,6 +5,21 @@ compiler as [circuits.md](../../../circuits.md) describes it (Phase 1). It is a 
 [optimization.md](optimization.md) is the survey written before the compiler existed; this note looks at the code the
 compiler emits today.*
 
+**Implemented, 2026-11-10** (`kSelfTestVersion` 2; [circuits.md](../../../circuits.md) describes them as built): §2.1
+(`expf(-x)` for `1 / e`, in the pair's step, its ADAA tail and the carry), §2.2 (`1 / dp` at the top of the step, and an
+OTA's `1 / kd` a coefficient), §2.4 (ADAA's exponentials by the series, the exact `expf` from `|dl| = 0.25` on) and §2.6
+(one `tanhf` a step: the start is the previous v with its stored tanh where it is nearer `p` than 0 is, else 0, since
+the unclamped start measured worse where `p` crosses 0 or falls below half the previous v; circuits.md, "The Newton
+start"), and §5's three items (`set()` skips a block whose controls hold; the code builder's reciprocals, for every
+divisor, and `(x / c) c`). §2.7 too, in the same version: `.solver halley(K)`, a step shape beside Newton's and a
+self-test candidate (`halley(1)`, 80 model cycles a step and 4 for omega3's guess clamped into the bracket, where the
+step starts), for a diode pair only: one diode's, an asymmetric pair's and an OTA's Halley denominator can vanish from
+a point in the bracket (circuits.md, "Halley"), so beside a pair's port they keep Newton steps under it, and a
+region without one refuses it. diodetone.cir now ships 4x
+`halley(1)`, the self-test's answer (T1 -85.4, T2 -79.0, T3 0.10 dB here; omega(2) -93.4, -79.0, 0.10), and so does
+switch.cir (4x, ADAA, omega(1) before); clipper.cir's answer is 4x `halley(1)` too. The rest (§2.3, §2.5, §3, §4) is
+not built, and the body below is as written.
+
 ## 0. Summary
 
 **One fact sets the cost of every shipped module: the nonlinear step is a single serial dependency chain, and the CPU

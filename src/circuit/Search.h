@@ -288,16 +288,19 @@ namespace fminus::circuit
 
     // The report's §3.2 model, in cycles a host sample: each region block times its rate (a port block: p, 10 + 2 a
     // state (a capacitor's or an inductor's); the guess, omega 65 or the previous 5; each Newton step, 70 for a diode
-    // pair or one diode, 110 for an asymmetric pair (two exponentials), 60 for an OTA's tanh; ADAA's tail, 57 for an
-    // exp-affine law, 100 for tanh's log cosh; the state update, 5. A linear block: 5 + 3 a state; with BDF2, a region
-    // block's 2 a state more, its second history), each block outside the region at 1x, and 12 for each sample a
-    // halfband stage runs at its high rate, up and down together.
+    // pair or one diode, 110 for an asymmetric pair (two exponentials), 60 for an OTA's tanh; each Halley step of a
+    // diode pair 80 (one kernel and one divide, as Newton's, and a subtract, a multiply and a subtract more on the
+    // chain), and 4 for its start, omega3's guess clamped into the bracket; ADAA's tail, 57 for an exp-affine law, 100
+    // for tanh's log cosh; the state update, 5. A linear block: 5 + 3 a state; with BDF2, a region block's 2 a state
+    // more, its second history), each block outside the region at 1x, and 12 for each sample a halfband stage runs at
+    // its high rate, up and down together.
     double modelCost(const Plan& plan, int oversample, bool adaa, const Solver& solver, Method method = Method::Tr);
 
     // The candidates of the plan's open dimensions (report §6.2: an exp-affine port's 1, 2, 4 and 8x, ADAA off and on,
-    // omega3 + 1 or 2 Newton steps; a smooth-monotone port's (an OTA's) 1, 2 and 4x, ADAA off and on, the previous
-    // step's v + 1, 2 or 3), the pinned ones at the plan's values, cheapest first by modelCost; candidates within 5 %
-    // of the cheapest of their group go ADAA first, then fewer steps.
+    // omega3 + 1 or 2 Newton steps, and omega3 + 1 Halley step where a port takes it (a diode pair's); a
+    // smooth-monotone port's (an OTA's) 1, 2 and 4x, ADAA off and on, the previous step's v + 1, 2 or 3), the pinned
+    // ones at the plan's values, cheapest first by modelCost; candidates within 5 % of the cheapest of their group go
+    // ADAA first, then fewer steps.
     std::vector<Candidate> candidates(const Plan& plan);
 
     // candidates()'s order on any list: by cost, then within 5 % of the cheapest of a group, ADAA first, then fewer

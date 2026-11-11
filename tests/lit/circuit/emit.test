@@ -14,16 +14,19 @@
 # DT:      // DiodeTone: generated from diodetone.cir by fminus::circuit. Do not edit: edit diodetone.cir.
 # DT-NEXT: //   1 block, 2 states (C1, C2), 1 nonlinear port (D1|D2: 2 Is sinh(v / N Vt), Is 2.52 nA, N Vt 45.315 mV at 27 C), 1 pot (tone)
 # DT-NEXT: //   block 1 (R1, C1, D1, D2, R2, Ptone, C2): in -> b; port D1|D2 at V(a); at 4 rate
-# DT-NEXT: //   solver: omega3 + 2 Newton steps in [min(0, p), max(0, p)]
-# DT-NEXT: //   configuration: .oversample 4 iir blocks=auto, .adaa off, .solver omega(2) (the netlist); .method tr (default)
+# DT-NEXT: //   solver: omega3 + 1 Halley step in [min(0, p), max(0, p)]
+# DT-NEXT: //   configuration: .oversample 4 iir blocks=auto, .adaa off, .solver halley(1) (the netlist); .method tr (default)
 # DT-NEXT: //   .target: solver -60 dB, alias -60 dB at 4.5 V, 3 kHz (checked by examples/circuits --check, not here)
 # DT-NEXT: //   latency: about 3.5 host samples at 1 kHz (IIR halfbands, phase not linear)
 # DT-NEXT: module DiodeTone
 
-# Fields named after the parts.
+# Fields named after the parts; set()'s memory of each b<N>_set's last arguments (it skips a block whose pots and
+# switches' ramps hold).
 # DT:      float x_C1;
 # DT-NEXT: float x_C2;
 # DT-NEXT: float v_D1;
+# DT-NEXT: int lsok_;
+# DT-NEXT: float ls_b1[1];
 # DT-NEXT: float gc_C1;
 # DT:      float p_D1_by_u;
 # DT:      float ka_D1;
@@ -40,22 +43,31 @@
 # DT-NEXT:  gc_C2 = 1.76e-07f * rate;
 # DT-NEXT:  g2_C1 = 2 * gc_C1;
 # DT:       clear();
+# DT-NEXT:  lsok_ = 0;
 # DT-NEXT:  set(0.5f);
 # DT-LABEL: void clear()
 # DT-NEXT:  {
 # DT-NEXT:  ck_ = 0;
 # DT-NEXT:  fd_ = 1;
 
-# The pot, clamped, then the block's coefficients.
+# The pot, clamped, then the block's coefficients, unless the pot is where it was at the last call (or init ran).
 # DT-LABEL: void set(float tone)
-# DT:       b1_set(fminf(fmaxf(tone, 0), 1));
+# DT-NEXT:  {
+# DT-NEXT:  if (lsok_ == 0 || fminf(fmaxf(tone, 0), 1) != ls_b1[0])
+# DT-NEXT:  {
+# DT-NEXT:  ls_b1[0] = fminf(fmaxf(tone, 0), 1);
+# DT-NEXT:  b1_set(fminf(fmaxf(tone, 0), 1));
+# DT-NEXT:  }
+# DT-NEXT:  lsok_ = 1;
+# DT-NEXT:  }
 # DT-LABEL: void b1_set(float tone)
 # DT:       const float r_Ptone = 25000.0f * fminf(fmaxf(1.0f - tone, 0), 1);
 # DT:       = -1 / t{{[0-9]+}};{{ *}}// K, the port's self-impedance
 # DT:       kb_D1 = 22.067577f * ka_D1;
 # DT-NEXT:  lna_D1 = logf(kb_D1);
 
-# The step: p, omega3, exactly two Newton steps in the bracket, then the output and the states.
+# The step: p, omega3 in the bracket, exactly one Halley step (e^(v / N Vt) and e^(-v / N Vt) side by side, f'' from
+# them, and one divide), then the output and the states.
 # DT-LABEL: float b1(float u)
 # DT-NEXT:  {
 # DT-NEXT:  const float p = p_D1_by_u * u + p_D1_by_x_C1 * x_C1 + p_D1_by_x_C2 * x_C2;
@@ -68,7 +80,16 @@
 # DT-NEXT:  v = p < 0 ? -v : v;
 # DT-NEXT:  const float lo = fminf(p, 0);
 # DT-NEXT:  const float hi = fmaxf(p, 0);
-# DT-COUNT-2: const float f = v - p + ka_D1 * (e - ei);
+# DT-NEXT:  v = fminf(fmaxf(v, lo), hi);
+# DT-NEXT:  {
+# DT-NEXT:  const float e = expf(v * 22.067577f);
+# DT-NEXT:  const float ei = expf(v * -22.067577f);
+# DT-NEXT:  const float sh = e - ei;
+# DT-NEXT:  const float f = v - p + ka_D1 * sh;
+# DT-NEXT:  const float d = 1 + kb_D1 * (e + ei);
+# DT-NEXT:  const float f2 = (kb_D1 * 22.067577f) * sh;
+# DT-NEXT:  v = fminf(fmaxf(v - (2 * f * d) / (2 * d * d - f * f2), lo), hi);
+# DT-NEXT:  }
 # DT-NOT:   const float f =
 # DT:       const float n_b = n_b_by_x_C2 * x_C2 + n_b_by_v_D1 * v;
 # DT-NEXT:  x_C1 = g2_C1 * v - x_C1;
@@ -123,31 +144,63 @@
 # TS:       float s1_b3;               // block 3's matched design: its transposed direct form II's states
 # TS-NEXT:  float s2_b3;
 # TS:       float w3_0;                // block 3's rate-only terms (init's; b3_set reads them: Woodbury)
+# What b3_set divides by, init's: a reciprocal of each divisor, which b3_set multiplies by.
 # TS:       {                          // block 3's rate-only part (the Woodbury form): b3_set does the rest
-# TS-NEXT:  w3_0 = gc_C5 + 0.0011f;
+# TS-NEXT:  const float t0 = gc_C5 + 0.0011f;
+# TS-NEXT:  const float t1 = gc_C6 + 0.0045454544f;
+# TS-NEXT:  w3_0 = 1 / t1;
 # TS-LABEL: void set(float drive, float tone, float level)
-# TS:       b2_set(fminf(fmaxf(drive, 0), 1));
+# TS-NEXT:  {
+# TS-NEXT:  if (lsok_ == 0 || fminf(fmaxf(drive, 0), 1) != ls_b2[0])
+# TS-NEXT:  {
+# TS-NEXT:  ls_b2[0] = fminf(fmaxf(drive, 0), 1);
+# TS-NEXT:  b2_set(fminf(fmaxf(drive, 0), 1));
+# TS-NEXT:  }
+# TS-NEXT:  if (lsok_ == 0 || fminf(fmaxf(tone, 0), 1) != ls_b3[0])
+# TS-NEXT:  {
+# TS-NEXT:  ls_b3[0] = fminf(fmaxf(tone, 0), 1);
 # TS-NEXT:  b3_set(fminf(fmaxf(tone, 0), 1));
+# TS-NEXT:  }
+# TS-NEXT:  if (lsok_ == 0 || fminf(fmaxf(level, 0), 1) != ls_b4[0])
+# TS-NEXT:  {
+# TS-NEXT:  ls_b4[0] = fminf(fmaxf(level, 0), 1);
 # TS-NEXT:  b4_set(fminf(fmaxf(level, 0), 1));
+# TS-NEXT:  }
+# TS-NEXT:  lsok_ = 1;
+# TS-NEXT:  }
+# The elimination's (x / c) c, a row normalised by its pivot and multiplied back, is x: K's denominator reads 1 / t2.
 # TS-LABEL: void b2_set(float drive)
 # TS:       const float t_Pdrive = (expf(4.394449f * fminf(fmaxf(drive, 0), 1)) - 1) * 0.0125f;
+# TS-NEXT:  const float r_Pdrive = 5e+05f * t_Pdrive;
+# TS-NEXT:  const float t2 = r_Pdrive + 51000.0f;
+# TS-NEXT:  const float t10 = 1 / t2;
+# TS-NEXT:  const float t12 = t10 + gc_C4;
+# TS-NEXT:  const float t13 = 1 / t12;
+# The carry, e^(-v / N Vt) its own kernel.
+# TS:       p_D1 = p_D1 + (ka_D1 - kprev_D1) * (e - expf(v_D1 * -22.067577f));
 # TS-LABEL: void b3_set(float tone) {{.*}} // block 3's coefficients: what its pots move (Woodbury)
 # TS:       const float r_Ptone_a = 20000.0f * (1 - t_Ptone);
 # TS-NEXT:  const float r_Ptone_b = 20000.0f * t_Ptone;
-# TS-NEXT:  const float t7 = r_Ptone_b + w3_4;
+# TS-NEXT:  const float t7 = r_Ptone_b + w3_2;
 # TS:       mb0_b3 = 
 # TS-LABEL: float b1(float u)
 # Block 2: omega3, one Newton step, ADAA's mean in closed form, the averaged states; V(n1) = u and V(v2) = u - v exactly.
+# 1 / dp as soon as p is known; ADAA's 2 cosh from the Newton step's exponentials at its point v0 and a series in dl.
 # TS-LABEL: float b2(float u)
 # TS-NEXT:  {
 # TS-NEXT:  const float p = p_D1_by_n_p1 * u + p_D1_by_x_C3 * x_C3 + p_D1_by_x_C4 * x_C4;
+# TS-NEXT:  const float dp = p - p_D1;
+# TS-NEXT:  const float rdp = 1 / dp;
+# TS:       const float v0 = v;
 # TS-COUNT-1: const float f = v - p + ka_D1 * (e - ei);
 # TS-NOT:   const float f =
-# TS:       const float ec = expf(v * 22.067577f);
-# TS-NEXT:  const float c = ec + 1 / ec;
-# TS-NEXT:  const float dp = p - p_D1;
+# TS:       const float dl = (v - v0) * 22.067577f;
+# TS-NEXT:  const float dl2 = dl * dl;
+# TS-NEXT:  const float c = fabsf(dl) < 0.25f
+# TS-NEXT:  ? (e + ei) * (1 + dl2 * (0.5f + 0.041666668f * dl2)) + (e - ei) * (dl * (1 + 0.16666667f * dl2))
+# TS-NEXT:  : expf(v * 22.067577f) + expf(v * -22.067577f);
 # TS-NEXT:  const float vm = 0.5f * (v + v_D1);
-# TS-NEXT:  const float vb = fabsf(dp) > 1e-05f ? vm + ((v - v_D1) * (0.5f * (p + p_D1) - vm) - kc_D1 * (c - c_D1)) / dp : vm;
+# TS-NEXT:  const float vb = fabsf(dp) > 1e-05f ? vm + ((v - v_D1) * (0.5f * (p + p_D1) - vm) - kc_D1 * (c - c_D1)) * rdp : vm;
 # TS-NEXT:  const float xa_C3 = 0.5f * (x_C3 + xo_C3);
 # TS-NEXT:  const float xa_C4 = 0.5f * (x_C4 + xo_C4);
 # TS-NEXT:  const float ua = 0.5f * (u + uo_n_p1);
@@ -183,7 +236,9 @@
 
 # The synth path's: otalp.cir, two buffered OTA one-poles whose gain is the law input iabc. tick and step take it after
 # the signal, clamp it to its range (fmaxf first: a NaN is its low end) and hold the gains over the region's steps; each
-# block is the i-form (its readouts the states and the OTA's current, which its law gives at the solved v).
+# block is the i-form (its readouts the states and the OTA's current, which its law gives at the solved v). Its Newton
+# step starts from the previous v (or from 0, where p has moved further than |p|) with that point's tanh, the one the
+# last step stored in t_G1: one tanhf a step.
 # OTA:      // OtaLp: generated from otalp.cir by fminus::circuit. Do not edit: edit otalp.cir.
 # OTA-NEXT: //   2 blocks, 2 states (C1, C2), 2 nonlinear ports (G1: an OTA, g tanh(v / 2 Vt), 2 Vt 51.73 mV at 27 C, g = iabc; G2: an OTA, g tanh(v / 2 Vt), 2 Vt 51.73 mV at 27 C, g = iabc), 0 pots
 # OTA-NEXT: //   block 1 (R1, R2, R3, R4, G1, C1, R5, X1): in -> y1b; port G1 at V(a1) - V(m1), its current from 0 to y1; at 4 rate
@@ -191,6 +246,7 @@
 # OTA-NEXT: //   solver: the previous step's v + 1 Newton step in [min(0, p), max(0, p)]
 # OTA-NEXT: //   configuration: .oversample 4 iir blocks=auto, .adaa off, .solver newton(1) (the netlist); .method tr, .prewarp off (default)
 # OTA:      float v_G1;
+# OTA-NEXT: float t_G1;
 # OTA:      float g_G1;
 # OTA:      float kd_G1;
 # OTA-LABEL: float b1(float u)
@@ -200,9 +256,9 @@
 # OTA-NEXT:  const float kgs = kg * 19.331198f;
 # OTA-NEXT:  const float lo = fminf(p, 0);
 # OTA-NEXT:  const float hi = fmaxf(p, 0);
-# OTA-NEXT:  float v = fminf(fmaxf(v_G1, lo), hi);
+# OTA-NEXT:  float v = fabsf(v_G1 - p) < fabsf(p) ? v_G1 : 0;
 # OTA-NEXT:  {
-# OTA-NEXT:  const float tn = tanhf(v * 19.331198f);
+# OTA-NEXT:  const float tn = fabsf(v_G1 - p) < fabsf(p) ? t_G1 : 0;
 # OTA-NEXT:  const float f = v - p + kg * tn;
 # OTA-NEXT:  const float d = 1 + kgs * (1 - tn * tn);
 # OTA-NEXT:  v = fminf(fmaxf(v - f / d, lo), hi);
@@ -210,6 +266,8 @@
 # OTA-NEXT:  const float th = tanhf(v * 19.331198f);
 # OTA-NEXT:  const float ib = g_G1 * th;
 # OTA-NEXT:  const float n_y1b = n_y1b_by_x_C1 * x_C1 + n_y1b_by_i_G1 * ib;
+# OTA:       v_G1 = v;
+# OTA-NEXT:  t_G1 = th;
 # OTA-LABEL: float step(float u, float iabc)
 # OTA-NEXT:  {
 # OTA-NEXT:  const float l_iabc = fminf(fmaxf(iabc, 1e-05f), 0.002f);
@@ -233,7 +291,7 @@
 # RC:      //   block 1 (R1, C1): in -> a; linear; matched at 1x (0.32 dB off at 44.1 and 48 kHz; the trapezoidal rule's 12.79 at 44.1)
 # RC:      float s1_b1;               // block 1's matched design: its transposed direct form II's states
 # RC-NOT:  x_C1;
-# RC:      ma1_b1 = -t15;
+# RC:      ma1_b1 = -t16;
 # RC-LABEL: float b1(float u)
 # RC-NEXT:  {
 # RC-NEXT:  const float ym_ = mb0_b1 * u + s1_b1;
@@ -256,6 +314,7 @@
 # SW:      swstep_ = 800 / rate;
 # SW:      sw_S1 = 1;                                          // S1 at its switch's default position
 # SW-NEXT: clear();
+# SW-NEXT: lsok_ = 0;
 # SW-NEXT: set(0.5f, 1);                                       // .pot tone 0.5; .switch clip 1
 # SW-LABEL: void clear()
 # SW-NOT:  sw_S1
@@ -263,6 +322,13 @@
 # SW-NEXT:  {
 # SW-NEXT:  const float to_S1 = clip == 1 ? 1.0f : 0.0f;
 # SW-NEXT:  sw_S1 = fabsf(to_S1 - sw_S1) <= 1.001f * swstep_ ? to_S1 : sw_S1 + (to_S1 > sw_S1 ? swstep_ : -swstep_);
+# The block's coefficients again when its pot or the ramp moved (a ramp in progress moves every call).
+# SW-NEXT:  if (lsok_ == 0 || fminf(fmaxf(tone, 0), 1) != ls_b1[0] || sw_S1 != ls_b1[1])
+# SW-NEXT:  {
+# SW-NEXT:  ls_b1[0] = fminf(fmaxf(tone, 0), 1);
+# SW-NEXT:  ls_b1[1] = sw_S1;
 # SW-NEXT:  b1_set(fminf(fmaxf(tone, 0), 1));
+# SW-NEXT:  }
+# SW-NEXT:  lsok_ = 1;
 # SW-LABEL: void b1_set(float tone)
 # SW:       const float r_S1 = expf(16.118095f - 16.118095f * sw_S1);

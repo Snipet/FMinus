@@ -23,13 +23,56 @@ namespace fminus::circuit
         constexpr double kOmegaC = 3.631952663804445e-1;
         constexpr double kOmegaD = 6.313183464296682e-1;
         constexpr double kAdaaEpsilon = 1e-5;
+        // ADAA's series for the exponentials at the solved v, from the last Newton step's at its point v0: used while
+        // |dl| = |v - v0| / N Vt is below this, the exact expf beyond it.
+        constexpr double kSeriesBound = 0.25;
+
+        // Whether ADAA's tail takes its exponentials from the last Newton (or Halley) step's (an exp-affine law with a
+        // step).
+        bool seriesTail(const PortDef& port, const LawOperands& o)
+        {
+            return o.adaa && !port.smooth() && o.solver.steps >= 1;
+        }
+
+        // Newton (or Halley) step k of the solver's: its lines in braces, or for the last step of a series tail without
+        // them, after v0 = v, so that ADAA's tail reads its point and its exponentials.
+        void newtonStep(std::vector<LawLine>& out, const PortDef& port, const LawOperands& o, int k,
+                        const std::vector<LawLine>& body, const char* kind = "Newton")
+        {
+            const std::string what = std::format("{} step {} of {}, kept in the bracket", kind, k, o.solver.steps);
+            if (k == o.solver.steps && seriesTail(port, o))
+            {
+                out.push_back({"const " + o.type + " v0 = v;", what + "; ADAA's series reads its v0 and exponentials"});
+                for (const LawLine& l : body)
+                    out.push_back(l);
+                return;
+            }
+            out.push_back({"{", what});
+            for (const LawLine& l : body)
+                out.push_back({"    " + l.text, l.note});
+            out.push_back({"}", ""});
+        }
+
+        // e^dl to dl^4, as cosh(dl) + sinh(dl): its even part, its odd part
+        std::string seriesEven(const std::string& dl2)
+        {
+            return "1 + " + dl2 + " * (0.5f + " + literal(1.0 / 24) + " * " + dl2 + ")";
+        }
+
+        std::string seriesOdd(const std::string& dl, const std::string& dl2)
+        {
+            return dl + " * (1 + " + literal(1.0 / 6) + " * " + dl2 + ")";
+        }
 
         std::vector<LawLine> pairSolve(const PortDef& port, const LawOperands& o)
         {
             const std::string& T = o.type;
             const std::string ivt = literal(1 / port.nvt);
+            const std::string minusIvt = literal(-1 / port.nvt);
             const std::string nvt = literal(port.nvt);
             std::vector<LawLine> out;
+            if (o.adaa)
+                out = adaaHeadText(port, o);
             if (o.solver.guess == Solver::Guess::Omega)
             {
                 out.push_back(
@@ -54,16 +97,34 @@ namespace fminus::circuit
                 out.push_back({T + " v = fminf(fmaxf(v_" + o.port + ", lo), hi);",
                                "the previous step's solution, in the bracket"});
             }
-            for (int k = 1; k <= o.solver.steps; ++k)
+            if (o.solver.shape == Solver::Shape::Halley)
             {
-                out.push_back({"{", std::format("Newton step {} of {}, kept in the bracket", k, o.solver.steps)});
-                out.push_back({"    const " + T + " e = expf(v * " + ivt + ");", ""});
-                out.push_back({"    const " + T + " ei = 1 / e;", ""});
-                out.push_back({"    const " + T + " f = v - p + " + o.ka + " * (e - ei);", ""});
-                out.push_back({"    const " + T + " d = 1 + " + o.kb + " * (e + ei);", ""});
-                out.push_back({"    v = fminf(fmaxf(v - f / d, lo), hi);", ""});
-                out.push_back({"}", ""});
+                // Halley's steps (takesHalley's comment below), from the guess in the bracket, where their denominator
+                // is bounded: the same exponentials as a Newton step's, and f'' = kb (e - ei) / N Vt from them
+                if (o.solver.guess == Solver::Guess::Omega)
+                    out.push_back({"v = fminf(fmaxf(v, lo), hi);", "the guess, in the bracket: Halley's start"});
+                for (int k = 1; k <= o.solver.steps; ++k)
+                    newtonStep(out, port, o, k,
+                               {{"const " + T + " e = expf(v * " + ivt + ");", ""},
+                                {"const " + T + " ei = expf(v * " + minusIvt + ");",
+                                 k == 1 ? "its own kernel beside e's (1 / e would wait on e)" : ""},
+                                {"const " + T + " sh = e - ei;", ""},
+                                {"const " + T + " f = v - p + " + o.ka + " * sh;", ""},
+                                {"const " + T + " d = 1 + " + o.kb + " * (e + ei);", "f'"},
+                                {"const " + T + " f2 = (" + o.kb + " * " + ivt + ") * sh;", "f''"},
+                                {"v = fminf(fmaxf(v - (2 * f * d) / (2 * d * d - f * f2), lo), hi);",
+                                 k == 1 ? "one divide, its denominator above d * d" : ""}},
+                               "Halley");
+                return out;
             }
+            for (int k = 1; k <= o.solver.steps; ++k)
+                newtonStep(out, port, o, k,
+                           {{"const " + T + " e = expf(v * " + ivt + ");", ""},
+                            {"const " + T + " ei = expf(v * " + minusIvt + ");",
+                             k == 1 ? "its own kernel beside e's (1 / e would wait on e)" : ""},
+                            {"const " + T + " f = v - p + " + o.ka + " * (e - ei);", ""},
+                            {"const " + T + " d = 1 + " + o.kb + " * (e + ei);", ""},
+                            {"v = fminf(fmaxf(v - f / d, lo), hi);", ""}});
             return out;
         }
 
@@ -84,6 +145,8 @@ namespace fminus::circuit
             const std::string& T = o.type;
             const std::string ivt = literal(1 / port.nvt);
             std::vector<LawLine> out;
+            if (o.adaa)
+                out = adaaHeadText(port, o);
             if (o.solver.guess == Solver::Guess::Omega)
             {
                 out.push_back({"const " + T + " q = fmaxf(p, 0);",
@@ -105,14 +168,11 @@ namespace fminus::circuit
                                "the previous step's solution, in the bracket"});
             }
             for (int k = 1; k <= o.solver.steps; ++k)
-            {
-                out.push_back({"{", std::format("Newton step {} of {}, kept in the bracket", k, o.solver.steps)});
-                out.push_back({"    const " + T + " e = expf(v * " + ivt + ");", ""});
-                out.push_back({"    const " + T + " f = v - p + " + o.ka + " * (e - 1);", ""});
-                out.push_back({"    const " + T + " d = 1 + " + o.kb + " * e;", ""});
-                out.push_back({"    v = fminf(fmaxf(v - f / d, lo), hi);", ""});
-                out.push_back({"}", ""});
-            }
+                newtonStep(out, port, o, k,
+                           {{"const " + T + " e = expf(v * " + ivt + ");", ""},
+                            {"const " + T + " f = v - p + " + o.ka + " * (e - 1);", ""},
+                            {"const " + T + " d = 1 + " + o.kb + " * e;", ""},
+                            {"v = fminf(fmaxf(v - f / d, lo), hi);", ""}});
             return out;
         }
 
@@ -125,6 +185,8 @@ namespace fminus::circuit
             const std::string ivr = literal(1 / port.nvt2);
             const std::string minusIvr = literal(-1 / port.nvt2);
             std::vector<LawLine> out;
+            if (o.adaa)
+                out = adaaHeadText(port, o);
             if (o.solver.guess == Solver::Guess::Omega)
             {
                 out.push_back({"const " + T + " q = fabsf(p);",
@@ -151,16 +213,12 @@ namespace fminus::circuit
                                "the previous step's solution, in the bracket"});
             }
             for (int k = 1; k <= o.solver.steps; ++k)
-            {
-                out.push_back({"{", std::format("Newton step {} of {}, kept in the bracket", k, o.solver.steps)});
-                out.push_back({"    const " + T + " ef = expf(v * " + ivt + ");", ""});
-                out.push_back({"    const " + T + " er = expf(v * " + minusIvr + ");", ""});
-                out.push_back(
-                    {"    const " + T + " f = v - p + " + o.ka + " * (ef - 1) - " + o.kr + " * (er - 1);", ""});
-                out.push_back({"    const " + T + " d = 1 + " + o.kb + " * ef + " + o.ks + " * er;", ""});
-                out.push_back({"    v = fminf(fmaxf(v - f / d, lo), hi);", ""});
-                out.push_back({"}", ""});
-            }
+                newtonStep(out, port, o, k,
+                           {{"const " + T + " ef = expf(v * " + ivt + ");", ""},
+                            {"const " + T + " er = expf(v * " + minusIvr + ");", ""},
+                            {"const " + T + " f = v - p + " + o.ka + " * (ef - 1) - " + o.kr + " * (er - 1);", ""},
+                            {"const " + T + " d = 1 + " + o.kb + " * ef + " + o.ks + " * er;", ""},
+                            {"v = fminf(fmaxf(v - f / d, lo), hi);", ""}});
             return out;
         }
 
@@ -173,15 +231,42 @@ namespace fminus::circuit
                            "kd g: this step's law, v + kg tanh(v / 2 Vt) = p"});
             out.push_back({"const float kgs = kg * " + ivt + ";", "its slope at v = 0, kg / 2 Vt"});
             if (o.adaa)
+            {
                 out.push_back({"const float kgv = kg * " + literal(port.nvt) + ";", "ADAA: kg 2 Vt"});
+                for (LawLine& l : adaaHeadText(port, o))
+                    out.push_back(std::move(l));
+            }
             out.push_back({"const " + T + " lo = fminf(p, 0);", ""});
             out.push_back({"const " + T + " hi = fmaxf(p, 0);", ""});
-            out.push_back({T + " v = fminf(fmaxf(v_" + o.port + ", lo), hi);",
-                           "the previous step's solution, in the bracket"});
+            // The first Newton step starts from one of the two points whose tanh the step already has: the previous
+            // step's v, whose tanh that step stored (t_P), where it is nearer p than 0 is, else 0 (tanh 0 = 0). So
+            // newton(K) evaluates K tanhf, not K + 1, and the start is not clamped into the bracket, which would
+            // need tanhf at the bracket's end. The rule takes the previous v wherever it is within |p| of p (the
+            // usual case: the previous v is about p), and 0 where p has crossed 0 or fallen below half the previous
+            // v: starting there from the previous v, on tanh's flat part far from the root,
+            // Newton overshoots (an OTA driven past its linear range, v_P = -0.89 V, p = +0.097 V, kg = 0.078: 1.4e-3
+            // V of residual after newton(3), the output 3e-4 V off the converged reference, against 4e-6 V from 0;
+            // examples/circuits --check's gain step, 1 uA to 200 uA under newton(2): 2.2e-5 of the signal against
+            // 9.6e-6). Only the step's result is clamped to the bracket, and that keeps v finite for any input: a
+            // NaN or infinite v_P fails the test and starts from 0, with tanh 0, so the start is finite; |tn| <= 1
+            // and kgs >= 0 make d = 1 + kgs (1 - tn^2) at least 1, so f / d is no larger than f; and a NaN from
+            // anywhere else (t_P, p) reaches fmaxf, which turns it into the bracket's end. Without a Newton step the
+            // guess is the clamped previous v.
+            const std::string nearer = "fabsf(v_" + o.port + " - p) < fabsf(p)";
+            if (o.solver.steps == 0)
+                out.push_back({T + " v = fminf(fmaxf(v_" + o.port + ", lo), hi);",
+                               "the previous step's solution, in the bracket"});
+            else
+                out.push_back({T + " v = " + nearer + " ? v_" + o.port + " : 0;",
+                               "the previous step's solution where it is nearer p than 0 is, else 0"});
             for (int k = 1; k <= o.solver.steps; ++k)
             {
                 out.push_back({"{", std::format("Newton step {} of {}, kept in the bracket", k, o.solver.steps)});
-                out.push_back({"    const " + T + " tn = tanhf(v * " + ivt + ");", ""});
+                if (k == 1)
+                    out.push_back({"    const " + T + " tn = " + nearer + " ? t_" + o.port + " : 0;",
+                                   "tanh(v / 2 Vt): the one stored, or tanh 0"});
+                else
+                    out.push_back({"    const " + T + " tn = tanhf(v * " + ivt + ");", ""});
                 out.push_back({"    const " + T + " f = v - p + kg * tn;", ""});
                 out.push_back({"    const " + T + " d = 1 + kgs * (1 - tn * tn);", "at least 1"});
                 out.push_back({"    v = fminf(fmaxf(v - f / d, lo), hi);", ""});
@@ -197,6 +282,42 @@ namespace fminus::circuit
         }
     } // namespace
 
+    // A Halley step, v - 2 f f' / (2 f'^2 - f f''), f = v - p + g(v), takes the exponentials (or the tanh) a Newton
+    // step evaluates and one divide. It is a step only where its denominator cannot vanish, which each law's f'' = g''
+    // decides, from a point v in the bracket [min(0, p), max(0, p)] (v and p of one sign, |v| <= |p|):
+    // - a diode pair, g = ka (e - ei), e = e^(v / N Vt), ei = 1 / e: f' = d = 1 + kb (e + ei), f'' = h = kb (e - ei) /
+    //   N Vt, of v's sign (kb = ka / N Vt). f h > 0 only where f has v's sign too, and there v - p, of the other sign
+    //   or 0, leaves |f| <= ka |e - ei|: f h <= ka kb (e - ei)^2 / N Vt = kb^2 (e - ei)^2 < kb^2 (e + ei)^2 < d^2. So
+    //   2 d^2 - f h > d^2 >= 1 (the step is at most 2 |f| / d) from any point of the bracket: a pair takes it;
+    // - one diode, g = ka (e - 1): f' = 1 + kb e, f'' = kb e / N Vt > 0 everywhere. For p < 0 the bracket is [p, 0],
+    //   and at v = 0, f = -p and d = 1 + kb: 2 d^2 - f h = 2 (1 + kb)^2 + p kb / N Vt, 0 at p = -2 (1 + kb)^2 N Vt / kb
+    //   (some hundreds of volts at a 1N914's Is and 2.2k, fewer as Is K grows): it keeps Newton's;
+    // - an asymmetric pair, g = ka (ef - 1) - kr (er - 1), er = e^(-v / N2 Vt): f' = 1 + kb ef + ks er, f'' = kb ef /
+    //   N Vt - ks er / N2 Vt, whose sign is not v's. At v = 0, f = -p and f'' = kb / N Vt - ks / N2 Vt: where p's sign
+    //   is the other one (p < 0 when the forward diode's kb / N Vt is the larger), 2 d^2 - f h = 2 (1 + kb + ks)^2 -
+    //   |p f''| vanishes at a large enough |p|: it keeps Newton's;
+    // - an OTA, g = kg t, t = tanh(v / 2 Vt): f' = 1 + kgs (1 - t^2), f'' = -2 kgs t (1 - t^2) / 2 Vt, of -v's sign.
+    //   f h > 0 where 0 < v < the root (p > 0; and mirrored), and there |f| reaches p: at p = 1 V, kgs = 1, v = 34 mV
+    //   (t = 0.58), f = -0.94, f'' = -14.9 and 2 d^2 - f h = 5.6 - 13.9 < 0. The start reaches it (the previous v of a
+    //   quiet signal, which a step to 1 V leaves within |p| of p): it keeps Newton's.
+    bool takesHalley(PortDef::Law law)
+    {
+        return law == PortDef::Law::Pair;
+    }
+
+    std::string stepsText(const Solver& solver, PortDef::Law law)
+    {
+        const bool halley = solver.shape == Solver::Shape::Halley && takesHalley(law);
+        std::string text =
+            std::to_string(solver.steps) + (halley ? " Halley" : " Newton") + (solver.steps == 1 ? " step" : " steps");
+        if (solver.shape == Solver::Shape::Halley && !halley)
+            text += std::format(" (halley({}): {}'s law keeps Newton steps)", solver.steps,
+                                law == PortDef::Law::Single ? "one diode"
+                                : law == PortDef::Law::Asym ? "an asymmetric pair"
+                                                            : "an OTA");
+        return text;
+    }
+
     std::vector<LawLine> solveText(const PortDef& port, const LawOperands& o)
     {
         switch (port.law)
@@ -211,6 +332,20 @@ namespace fminus::circuit
             break;
         }
         return pairSolve(port, o);
+    }
+
+    std::vector<LawLine> adaaHeadText(const PortDef& port, const LawOperands& o)
+    {
+        const std::string& T = o.type;
+        const std::string& P = o.port;
+        std::vector<LawLine> out;
+        if (port.smooth())
+            out.push_back({"p_" + P + " = p_" + P + " + (kg - kgo_" + P + ") * t_" + P + ";",
+                           "ADAA: the last point onto this step's curve (kd g moved), its residual kept"});
+        out.push_back(
+            {"const " + T + " dp = p - p_" + P + ";", "ADAA: the step in p, and its reciprocal, which the mean"});
+        out.push_back({"const " + T + " rdp = 1 / dp;", "multiplies by: a divide beside the solve, not after it"});
+        return out;
     }
 
     std::vector<LawLine> adaaText(const PortDef& port, const LawOperands& o)
@@ -234,8 +369,6 @@ namespace fminus::circuit
             // - from 1 on, the stored log cosh values' difference, lc - lc_P, lc = |x| - log(1 + |tanh x|) (log cosh
             //   in the form that cannot overflow): a step that large has no cancellation to fear, where z cancels to
             //   1 + z <= 0 once t_P has rounded to -+1 and the step runs back toward 0 (|x_P| > 9, |h| > 4).
-            out.push_back({"p_" + P + " = p_" + P + " + (kg - kgo_" + P + ") * t_" + P + ";",
-                           "ADAA: the last point onto this step's curve (kd g moved), its residual kept"});
             out.push_back({"const " + T + " th = tanhf(v * " + ivt + ");",
                            "ADAA: the mean of the current over [p(n-1), p(n)], closed form"});
             out.push_back({"const " + T + " lc = fabsf(v * " + ivt + ") - logf(1 + fabsf(th));",
@@ -253,11 +386,10 @@ namespace fminus::circuit
             out.push_back({"const " + T + " dl = fabsf(hh) < 0.5f ? (zu == 1 ? z : logf(zu) * z / (zu - 1)) : lc - " +
                                "lc_" + P + ";",
                            "log cosh x - log cosh x_P: log1p(z), or from |x - x_P| = 1 on the difference"});
-            out.push_back({"const " + T + " dp = p - p_" + P + ";", ""});
             out.push_back({"const " + T + " wm = 0.5f * kg * (th + t_" + P + ");",
                            "p - v at the midpoint, from the law: kd times its current"});
             out.push_back({"const " + T + " ib = (fabsf(dp) > " + literal(kAdaaEpsilon) +
-                               " ? wm + (kgv * dl - wm * (v - v_" + P + ")) / dp : wm) / " + o.kd + ";",
+                               " ? wm + (kgv * dl - wm * (v - v_" + P + ")) * rdp : wm) * " + o.rkd + ";",
                            "the mean current, (p - G(p)) / kd over [p_P, p]: the midpoint's and a correction"});
             return out;
         }
@@ -266,28 +398,69 @@ namespace fminus::circuit
             // vb = vm + ((v - v_P) (pm - vm) - K (Phi(v) - Phi(v_P))) / dp, with K Phi = kc e - ka v (one diode), and
             // the other diode's kcr er + kr v (an asymmetric pair): the ka v and kr v terms join (v - v_P)'s factor
             const bool asym = port.law == PortDef::Law::Asym;
-            out.push_back({"const " + T + " c = expf(v * " + ivt + ");",
-                           "ADAA: the mean of G over [p(n-1), p(n)], closed form"});
-            if (asym)
-                out.push_back({"const " + T + " cr = expf(v * " + literal(-1 / port.nvt2) + ");", ""});
-            out.push_back({"const " + T + " dp = p - p_" + P + ";", ""});
+            const std::string minusIvr = asym ? literal(-1 / port.nvt2) : std::string();
+            if (seriesTail(port, o))
+            {
+                // e^(v / N Vt) = e^(v0 / N Vt) e^dl, dl = (v - v0) / N Vt, from the last Newton step's exponential at
+                // its point v0 (an asymmetric pair's other diode's likewise, its dl in -1 / N2 Vt)
+                const std::string e0 = asym ? "ef" : "e";
+                out.push_back({"const " + T + " dl = (v - v0) * " + ivt + ";",
+                               "ADAA: the mean of G over [p(n-1), p(n)], closed form"});
+                out.push_back({"const " + T + " dl2 = dl * dl;", "e^(v / N Vt) = e^(v0 / N Vt) e^dl, a series in dl"});
+                out.push_back({"const " + T + " c = fabsf(dl) < " + literal(kSeriesBound), ""});
+                out.push_back(
+                    {"          ? " + e0 + " * (" + seriesEven("dl2") + " + " + seriesOdd("dl", "dl2") + ")", ""});
+                out.push_back({"          : expf(v * " + ivt + ");", "rarely: the exact form where dl is not small"});
+                if (asym)
+                {
+                    out.push_back({"const " + T + " dr = (v - v0) * " + minusIvr + ";", "and e^(-v / N2 Vt), from er"});
+                    out.push_back({"const " + T + " dr2 = dr * dr;", ""});
+                    out.push_back({"const " + T + " cr = fabsf(dr) < " + literal(kSeriesBound), ""});
+                    out.push_back(
+                        {"           ? er * (" + seriesEven("dr2") + " + " + seriesOdd("dr", "dr2") + ")", ""});
+                    out.push_back({"           : expf(v * " + minusIvr + ");", ""});
+                }
+            }
+            else
+            {
+                out.push_back({"const " + T + " c = expf(v * " + ivt + ");",
+                               "ADAA: the mean of G over [p(n-1), p(n)], closed form"});
+                if (asym)
+                    out.push_back({"const " + T + " cr = expf(v * " + minusIvr + ");", ""});
+            }
             out.push_back({"const " + T + " vm = 0.5f * (v + v_" + P + ");", ""});
             const std::string factor = "0.5f * (p + p_" + P + ") - vm + " + o.ka + (asym ? " - " + o.kr : "");
             const std::string phi =
                 o.kc + " * (c - c_" + P + ")" + (asym ? " - " + o.kcr + " * (cr - cr_" + P + ")" : "");
             out.push_back({"const " + T + " vb = fabsf(dp) > " + literal(kAdaaEpsilon) + " ? vm + ((v - v_" + P +
-                               ") * (" + factor + ") - " + phi + ") / dp : vm;",
+                               ") * (" + factor + ") - " + phi + ") * rdp : vm;",
                            ""});
             return out;
         }
-        out.push_back({"const " + T + " ec = expf(v * " + ivt + ");",
-                       "ADAA: the mean of G over [p(n-1), p(n)], closed form"});
-        out.push_back({"const " + T + " c = ec + 1 / ec;", ""});
+        if (seriesTail(port, o))
+        {
+            // 2 cosh(x0 + dl) = (e + ei) cosh(dl) + (e - ei) sinh(dl), x0 = v0 / N Vt and dl = (v - v0) / N Vt, from
+            // the last Newton step's exponentials at its point v0 (the addition theorem; no kernel on the chain)
+            out.push_back({"const " + T + " dl = (v - v0) * " + ivt + ";",
+                           "ADAA: the mean of G over [p(n-1), p(n)], closed form"});
+            out.push_back({"const " + T + " dl2 = dl * dl;", "2 cosh(v / N Vt) from e and ei, a series in dl"});
+            out.push_back({"const " + T + " c = fabsf(dl) < " + literal(kSeriesBound), ""});
+            out.push_back(
+                {"          ? (e + ei) * (" + seriesEven("dl2") + ") + (e - ei) * (" + seriesOdd("dl", "dl2") + ")",
+                 ""});
+            out.push_back({"          : expf(v * " + ivt + ") + expf(v * " + literal(-1 / port.nvt) + ");",
+                           "rarely: the exact form where dl is not small"});
+        }
+        else
+        {
+            out.push_back({"const " + T + " ec = expf(v * " + ivt + ");",
+                           "ADAA: the mean of G over [p(n-1), p(n)], closed form"});
+            out.push_back({"const " + T + " c = ec + expf(v * " + literal(-1 / port.nvt) + ");", ""});
+        }
         const std::string phi = o.kc + " * (c - c_" + P + ")";
-        out.push_back({"const " + T + " dp = p - p_" + P + ";", ""});
         out.push_back({"const " + T + " vm = 0.5f * (v + v_" + P + ");", ""});
         out.push_back({"const " + T + " vb = fabsf(dp) > " + literal(kAdaaEpsilon) + " ? vm + ((v - v_" + P +
-                           ") * (0.5f * (p + p_" + P + ") - vm) - " + phi + ") / dp : vm;",
+                           ") * (0.5f * (p + p_" + P + ") - vm) - " + phi + ") * rdp : vm;",
                        ""});
         return out;
     }
@@ -296,12 +469,13 @@ namespace fminus::circuit
     {
         const std::string& P = o.port;
         std::vector<LawLine> out;
+        if (port.smooth())
+            out.push_back({"t_" + P + " = th;", ""});
         if (!o.adaa)
             return out;
         out.push_back({"p_" + P + " = p;", ""});
         if (port.smooth())
         {
-            out.push_back({"t_" + P + " = th;", ""});
             out.push_back({"lc_" + P + " = lc;", ""});
             out.push_back({"kgo_" + P + " = kg;", ""});
         }
@@ -321,7 +495,9 @@ namespace fminus::circuit
         case PortDef::Law::Pair:
             out.push_back({"{", "ADAA: the last point onto the new curve"});
             out.push_back({"    const " + o.type + " e = expf(v_" + P + " * " + literal(1 / port.nvt) + ");", ""});
-            out.push_back({"    p_" + P + " = p_" + P + " + (ka_" + P + " - kprev_" + P + ") * (e - 1 / e);", ""});
+            out.push_back({"    p_" + P + " = p_" + P + " + (ka_" + P + " - kprev_" + P + ") * (e - expf(v_" + P +
+                               " * " + literal(-1 / port.nvt) + "));",
+                           ""});
             out.push_back({"}", ""});
             break;
         case PortDef::Law::Single:
@@ -349,9 +525,18 @@ namespace fminus::circuit
         if (port.law == PortDef::Law::Asym)
             return {{"c_" + P, true, "ADAA: e^(v_" + P + " / N Vt)", "1"},
                     {"cr_" + P, true, "ADAA: e^(-v_" + P + " / N2 Vt), the other diode's", "1"}};
-        return {{"t_" + P, true, "ADAA: tanh(v_" + P + " / 2 Vt), for the carry and the mean", "0"},
-                {"lc_" + P, true, "ADAA: log cosh(v_" + P + " / 2 Vt), for the mean of a long step", "0"},
+        return {{"lc_" + P, true, "ADAA: log cosh(v_" + P + " / 2 Vt), for the mean of a long step", "0"},
                 {"kgo_" + P, false, "ADAA: kd g at the last step", "0"}};
+    }
+
+    std::vector<LawField> portFields(const PortDef& port)
+    {
+        if (port.law == PortDef::Law::Tanh)
+            return {
+                {"t_" + port.name, true,
+                 "tanh(v_" + port.name + " / 2 Vt): the next step's first Newton step's (and ADAA's carry and mean)",
+                 "0"}};
+        return {};
     }
 
     // ---- the double twin ------------------------------------------------------------------------------------------
@@ -387,7 +572,8 @@ namespace fminus::circuit
         return law == PortDef::Law::Tanh ? s * logCosh(v / s) : s * std::cosh(v / s);
     }
 
-    double lawSteps(PortDef::Law law, double p, double k, double s, Solver::Guess guess, double previous, int steps)
+    double lawSteps(PortDef::Law law, double p, double k, double s, Solver::Guess guess, double previous, int steps,
+                    double* start, Solver::Shape shape)
     {
         const double lo = std::fmin(0.0, p);
         const double hi = std::fmax(0.0, p);
@@ -397,19 +583,34 @@ namespace fminus::circuit
             double v = std::fmin(std::fmax(g, lo), hi);
             for (int i = 0; i < steps; ++i)
             {
+                if (start != nullptr)
+                    *start = v;
                 const double e = std::exp(v / s);
-                const double ei = 1 / e;
+                const double ei = std::exp(-v / s);
                 const double f = v - p + k * 0.5 * (e - ei);
                 const double d = 1 + (k / s) * 0.5 * (e + ei);
-                v = std::fmin(std::fmax(v - f / d, lo), hi);
+                if (shape == Solver::Shape::Halley)
+                {
+                    // as the text: f'' = kb (e - ei) / N Vt, kb = k / 2 N Vt
+                    const double h = (k / s) * 0.5 / s * (e - ei);
+                    v = std::fmin(std::fmax(v - (2 * f * d) / (2 * d * d - f * h), lo), hi);
+                }
+                else
+                    v = std::fmin(std::fmax(v - f / d, lo), hi);
             }
             return v;
         }
+        // as the text: the first step from the previous v where it is nearer p than 0 is (its tanh the one the last
+        // step stored), else from 0; the previous v clamped to the bracket only when there is no step
         const double ivt = 1 / s;
         const double ks = k * ivt;
-        double v = std::fmin(std::fmax(previous, lo), hi);
+        double v = steps == 0                               ? std::fmin(std::fmax(previous, lo), hi)
+                   : std::fabs(previous - p) < std::fabs(p) ? previous
+                                                            : 0.0;
         for (int i = 0; i < steps; ++i)
         {
+            if (start != nullptr)
+                *start = v;
             const double t = std::tanh(v * ivt);
             const double f = v - p + k * t;
             const double d = 1 + ks * (1 - t * t);
@@ -536,16 +737,73 @@ namespace fminus::circuit
         return 0;
     }
 
-    double lawStepsOf(const LawShape& l, double p, Solver::Guess guess, double previous, int steps)
+    double lawStepsOf(const LawShape& l, double p, Solver::Guess guess, double previous, int steps, double* start,
+                      Solver::Shape shape)
     {
         if (l.law == PortDef::Law::Pair || l.law == PortDef::Law::Tanh)
-            return lawSteps(l.law, p, l.k, l.s, guess, previous, steps);
+            return lawSteps(l.law, p, l.k, l.s, guess, previous, steps, start, shape);
         const double lo = std::fmin(0.0, p);
         const double hi = std::fmax(0.0, p);
         double v = std::fmin(std::fmax(guess == Solver::Guess::Omega ? lawGuess(l, p) : previous, lo), hi);
         for (int i = 0; i < steps; ++i)
+        {
+            if (start != nullptr)
+                *start = v;
             v = std::fmin(std::fmax(v - (v - p + lawValue(l, v)) / (1 + lawDerivative(l, v)), lo), hi);
+        }
         return v;
+    }
+
+    namespace
+    {
+        // e^dl's series as the text's: cosh(dl) to dl^4 and sinh(dl) to dl^3
+        double seriesEvenOf(double dl)
+        {
+            const double dl2 = dl * dl;
+            return 1 + dl2 * (0.5 + dl2 / 24);
+        }
+
+        double seriesOddOf(double dl)
+        {
+            return dl * (1 + dl * dl / 6);
+        }
+
+        // e^(v / s) as ADAA's tail computes it from e^(v0 / s): by the series while |dl| < the bound, else exactly
+        double seriesExpOf(double v0, double v, double s)
+        {
+            const double dl = (v - v0) / s;
+            if (std::fabs(dl) < kSeriesBound)
+                return std::exp(v0 / s) * (seriesEvenOf(dl) + seriesOddOf(dl));
+            return std::exp(v / s);
+        }
+    } // namespace
+
+    double lawCoshSeries(double v0, double v, double s)
+    {
+        const double dl = (v - v0) / s;
+        if (std::fabs(dl) < kSeriesBound)
+        {
+            const double e = std::exp(v0 / s);
+            const double ei = std::exp(-v0 / s);
+            return 0.5 * ((e + ei) * seriesEvenOf(dl) + (e - ei) * seriesOddOf(dl));
+        }
+        return 0.5 * (std::exp(v / s) + std::exp(-v / s));
+    }
+
+    double lawAntiderivativeSeries(const LawShape& l, double v0, double v)
+    {
+        switch (l.law)
+        {
+        case PortDef::Law::Single:
+            return l.k * (l.s * seriesExpOf(v0, v, l.s) - v);
+        case PortDef::Law::Asym:
+            return l.k * (l.s * seriesExpOf(v0, v, l.s) - v) + l.k2 * (l.s2 * seriesExpOf(v0, v, -l.s2) + v);
+        case PortDef::Law::Pair:
+            return l.k * l.s * lawCoshSeries(v0, v, l.s);
+        case PortDef::Law::Tanh:
+            break;
+        }
+        return lawAntiderivative(l, v);
     }
 
     double lawConvergedOf(const LawShape& l, double p, double previous, long* unconverged, int* iterations)

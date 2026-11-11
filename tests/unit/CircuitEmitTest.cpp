@@ -23,6 +23,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <format>
+#include <limits>
 #include <locale>
 #include <map>
 #include <memory>
@@ -601,14 +602,15 @@ TEST_CASE("a pot's move keeps ADAA's last point on the port's curve", "[circuit]
 TEST_CASE("a BDF2 module is the double BDF2 reference's, nonblocking in both channel counts", "[circuit]")
 {
     // .method bdf2: the emitted step (its companions, its second histories) against the double reference running
-    // the block's BDF2 Holters form with the module's guess and Newton steps, in band: a diode pair across C1 (and a
-    // pot into C2), an OTA stage in its i-form, one diode
+    // the block's BDF2 Holters form with the module's guess and steps, in band: a diode pair across C1 (and a pot into
+    // C2) under its shipped halley(1) and under omega(2), an OTA stage in its i-form, one diode
     struct Case
     {
         std::string text;
         std::vector<double> laws;   // the law inputs, held
     };
     const Case cases[] = {{withLine(fc::test::kDiodeTone, ".adaa off", ".method bdf2"), {}},
+                          {withLine(fc::test::kDiodeToneOmega2, ".adaa off", ".method bdf2"), {}},
                           {fc::test::otaStage(".oversample 2\n.adaa off\n.solver newton(2)\n.method bdf2\n"), {1e-4}},
                           {withLine(kSinglePot0, ".adaa on", ".method bdf2"), {}}};
     for (const Case& c : cases)
@@ -649,6 +651,7 @@ TEST_CASE("a BDF2 module is the double BDF2 reference's, nonblocking in both cha
         fc::RefOptions o;
         o.steps = plan.config.solver.steps;
         o.guess = plan.config.solver.guess;
+        o.shape = plan.config.solver.shape;
         const std::size_t n = static_cast<std::size_t>(os) * (1024 + 4096 + 64);
         const std::vector<double> u = fc::sine(plan.netlist.target.level.value_or(1), 85, 4096, os, n);
         const std::vector<double> ref = fc::simulate(h, u, o);
@@ -674,6 +677,314 @@ TEST_CASE("a BDF2 module is the double BDF2 reference's, nonblocking in both cha
         const double error = fc::bandErrorDb(yd, rd);
         INFO(r.module << ": " << error << " dB");
         CHECK(error <= -100);
+    }
+}
+
+TEST_CASE("ADAA's tail after Newton steps is the double reference's, its exponentials by the series", "[circuit]")
+{
+    // An exp-affine law's ADAA tail reads the last Newton step's exponentials, at its point v0, and takes the solved
+    // v's by the addition theorem and e^dl's series (Laws.cpp's adaaText; the exact expf from |dl| = 0.25 on). The
+    // emitted step against the double reference running the same guess, steps and series (Laws.h's lawCoshSeries and
+    // lawAntiderivativeSeries), in band, 996 Hz: a pair, one diode and an asymmetric pair, after omega3 + 1 step
+    // (dl small) and after one step from the previous v (the exact arm on a fifth of the steps at 0.5 V). Measured
+    // -103.9 and -118.0 dB (the pair), -108.5 and -116.2 (one diode), -91.7 and -116.2 (the asymmetric pair at 4.5 V
+    // and 0.5 V): float's rounding, the same within 0.01 dB against a reference with the exact exponentials.
+    struct Case
+    {
+        std::string text;
+        fc::Solver solver;
+        double level;
+    };
+    const fc::Solver omega{fc::Solver::Guess::Omega, 1};
+    const fc::Solver previous{fc::Solver::Guess::Previous, 1};
+    const std::string pair = withLine(fc::test::kDiodeTone, ".adaa off", ".adaa on");
+    const Case cases[] = {
+        {pair, omega, 4.5},           {pair, previous, 0.5},         {kSinglePot0, omega, 4.5},
+        {kSinglePot0, previous, 0.5}, {fc::test::kAsym, omega, 4.5}, {fc::test::kAsym, previous, 0.5}};
+    for (const Case& c : cases)
+    {
+        fc::Options options;
+        options.solver = c.solver;
+        const fc::Result r = fc::generate(c.text, "t.cir", options);
+        INFO(r.errors << r.warnings);
+        REQUIRE(r.errors.empty());
+        CHECK(r.source.find("const float v0 = v;") != std::string::npos);
+        auto program = compiled(r);
+        const fc::Plan plan = planned(c.text, options);
+        REQUIRE(plan.regionFirst == 0);
+        REQUIRE(plan.regionFirst == plan.regionLast);
+        const Program::Module* m = program->module(r.module);
+        REQUIRE(m);
+        std::string errors;
+        auto* init = program->function<void(void*, float)>(r.module + "::init", errors);
+        auto* step = program->function<float(void*, float)>(r.module + "::step", errors);
+        REQUIRE(init);
+        REQUIRE(step);
+        const int os = plan.config.oversample;
+        std::vector<double> pots;
+        for (const fc::PotInfo& pot : plan.pots)
+            pots.push_back(pot.defaultValue);
+        const fc::Holters h = fc::holters(plan, 0, 48000.0 * os * 2 / 3, pots, {});
+        fc::RefOptions o;
+        o.adaa = true;
+        o.steps = c.solver.steps;
+        o.guess = c.solver.guess;
+        const std::size_t n = static_cast<std::size_t>(os) * (1024 + 4096 + 64);
+        const std::vector<double> u = fc::sine(c.level, 85, 4096, os, n);
+        std::vector<double> uf(n);
+        for (std::size_t i = 0; i < n; ++i)
+            uf[i] = static_cast<double>(static_cast<float>(u[i]));
+        const std::vector<double> ref = fc::simulate(h, uf, o);
+        auto self = instance(*m);
+        init(self.get(), 48000);
+        std::vector<double> y(n);
+        for (std::size_t i = 0; i < n; ++i)
+            y[i] = static_cast<double>(step(self.get(), static_cast<float>(uf[i])));
+        const double error =
+            fc::bandErrorDb(fc::decimateWindow(y, os, 1024, 4096), fc::decimateWindow(ref, os, 1024, 4096));
+        INFO(r.module << (c.solver.guess == fc::Solver::Guess::Omega ? " omega(1)" : " newton(1)") << ": " << error
+                      << " dB");
+        CHECK(error <= -90);
+    }
+}
+
+TEST_CASE("a Halley step is the double reference's, nonblocking in both channel counts, and finite from a NaN state",
+          "[circuit]")
+{
+    // .solver halley(K) (Laws.cpp's pairSolve): the emitted step against the double reference running the same
+    // omega3 guess in the bracket and K Halley steps (lawSteps; ADAA's tail by the series from the last step's
+    // exponentials), in band, 996 Hz at 4.5 V: diodetone.cir as shipped (halley(1)), with halley(2), and with ADAA.
+    // Measured -117.2, -116.8 and -103.2 dB: float's rounding (the gates are the BDF2 and series checks' own)
+    std::string errors;
+    struct Case
+    {
+        std::string text;
+        int steps;
+        bool adaa;
+        double gate;
+    };
+    const Case cases[] = {{fc::test::kDiodeTone, 1, false, -100},
+                          {fc::test::kDiodeTone, 2, false, -100},
+                          {withLine(fc::test::kDiodeTone, ".adaa off", ".adaa on"), 1, true, -90}};
+    for (const Case& c : cases)
+    {
+        fc::Options options;
+        options.solver = fc::Solver{fc::Solver::Guess::Omega, c.steps, fc::Solver::Shape::Halley};
+        const fc::Result r = fc::generate(c.text, "t.cir", options);
+        INFO(r.errors << r.warnings);
+        REQUIRE(r.errors.empty());
+        CHECK(r.source.find(std::format("Halley step {} of {}", c.steps, c.steps)) != std::string::npos);
+        auto program = compiled(r);
+        const fc::Plan plan = planned(c.text, options);
+        const Program::Module* m = program->module(r.module);
+        REQUIRE(m);
+        auto* init = program->function<void(void*, float)>(r.module + "::init", errors);
+        auto* step = program->function<float(void*, float)>(r.module + "::step", errors);
+        REQUIRE(init);
+        REQUIRE(step);
+        const int os = plan.config.oversample;
+        std::vector<double> pots;
+        for (const fc::PotInfo& pot : plan.pots)
+            pots.push_back(pot.defaultValue);
+        const fc::Holters h = fc::holters(plan, 0, 48000.0 * os * (c.adaa ? 2.0 / 3 : 1.0), pots, {});
+        fc::RefOptions o;
+        o.adaa = c.adaa;
+        o.steps = c.steps;
+        o.guess = fc::Solver::Guess::Omega;
+        o.shape = fc::Solver::Shape::Halley;
+        const std::size_t n = static_cast<std::size_t>(os) * (1024 + 4096 + 64);
+        const std::vector<double> u = fc::sine(4.5, 85, 4096, os, n);
+        std::vector<double> uf(n);
+        for (std::size_t i = 0; i < n; ++i)
+            uf[i] = static_cast<double>(static_cast<float>(u[i]));
+        const std::vector<double> ref = fc::simulate(h, uf, o);
+        auto self = instance(*m);
+        init(self.get(), 48000);
+        std::vector<double> y(n);
+        for (std::size_t i = 0; i < n; ++i)
+            y[i] = static_cast<double>(step(self.get(), static_cast<float>(uf[i])));
+        const double error =
+            fc::bandErrorDb(fc::decimateWindow(y, os, 1024, 4096), fc::decimateWindow(ref, os, 1024, 4096));
+        INFO(r.module << " halley(" << c.steps << ")" << (c.adaa ? " ADAA" : "") << ": " << error << " dB");
+        CHECK(error <= c.gate);
+    }
+
+    // halley(1) and (2), plain and ADAA, one and two channels: init, set, tick, step and clear nonblocking (a pair's
+    // Halley steps; beside it one diode's Newton steps, kPairThenDiode)
+    int count = 0;
+    for (const std::string& text : {fc::test::kDiodeTone, fc::test::kScreamer, fc::test::kPairThenDiode})
+    {
+        for (int channels : {1, 2})
+        {
+            for (bool adaa : {false, true})
+            {
+                fc::Options o;
+                o.channels = channels;
+                o.adaa = adaa;
+                o.oversample = 2;
+                o.solver = fc::Solver{fc::Solver::Guess::Omega, adaa ? 1 : 2, fc::Solver::Shape::Halley};
+                const fc::Result result = fc::generate(text, "t.cir", o);
+                INFO(result.errors << result.source);
+                auto program = compiled(result);
+                for (const char* method : {"init", "set", "tick", "step", "clear"})
+                {
+                    const std::string name = result.module + "::" + method;
+                    const auto& methods = program->module(result.module)->methods;
+                    if (std::find(methods.begin(), methods.end(), name) == methods.end())
+                        continue;
+                    INFO(name);
+                    CHECK(program->nonBlocking(name));
+                }
+                ++count;
+            }
+        }
+    }
+    CHECK(count == 12);
+
+    // a NaN in a state, through the JIT: at 2x, one step from rest with a field the step reads written NaN (the guard
+    // runs in tick, not here). A NaN state (x_C1) makes p NaN, whose bracket is [0, 0], and v 0; a NaN previous v
+    // starts a pair's Halley step from omega3 as ever (the previous v is not read): v finite and in the bracket of the
+    // input's p, 0 V to 1e6 V either way
+    struct Law
+    {
+        std::string text;
+        std::string port;
+    };
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    for (const Law& l : {Law{fc::test::kDiodeTone, "D1"}})
+    {
+        for (int steps : {1, 2})
+        {
+            fc::Options o;
+            o.oversample = 2;
+            o.adaa = false;
+            o.solver = fc::Solver{fc::Solver::Guess::Omega, steps, fc::Solver::Shape::Halley};
+            const fc::Result r = fc::generate(l.text, "t.cir", o);
+            auto program = compiled(r);
+            const Program::Module& m = *program->module(r.module);
+            auto* init = program->function<void(void*, float)>(r.module + "::init", errors);
+            auto writeFloat = [&](void* base, const std::string& name, float value)
+            {
+                for (const Program::Module::Field& f : m.fields)
+                {
+                    if (f.name == name)
+                    {
+                        std::memcpy(static_cast<char*>(base) + f.offset, &value, sizeof value);
+                        return;
+                    }
+                }
+                FAIL("no field " << name);
+            };
+            for (const char* poisoned : {"x_C1", "previous"})
+            {
+                for (double mag : {0.0, 1e-30, 1e-6, 1.0, 1e3, 1e6})
+                {
+                    for (double sign : {1.0, -1.0})
+                    {
+                        auto self = instance(m);
+                        init(self.get(), 48000);
+                        if (!r.pots.empty())
+                            callSet(*program, r.module, self.get(), {1.0f});
+                        const bool state = std::string(poisoned) == "x_C1";
+                        if (state)
+                            writeFloat(self.get(), "x_C1", nan);
+                        else
+                            writeFloat(self.get(), "v_" + l.port, nan);
+                        const float k = readFloat(self.get(), m, "p_" + l.port + "_by_u");
+                        const float u = static_cast<float>(sign * mag) / k;
+                        program->function<float(void*, float)>(r.module + "::step", errors)(self.get(), u);
+                        const float v = readFloat(self.get(), m, "v_" + l.port);
+                        const float p = state ? 0.0f : k * u;
+                        INFO(l.port << " halley(" << steps << "), " << poisoned << " NaN, p " << p);
+                        CHECK(std::isfinite(v));
+                        CHECK(v >= std::fmin(0.0f, p));
+                        CHECK(v <= std::fmax(0.0f, p));
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("set() skips a block whose controls hold, and the module is the one that recomputes every call", "[circuit]")
+{
+    // set() calls b<N>_set only when the block's pots (clamped) or its switches' ramps moved since the last call, or
+    // init ran (lsok_ 0): two instances through the same calls and ticks, one of them with lsok_ written 0 before every
+    // set() (every block recomputed, as before), are the same bytes after every call. The calls hold the pots, move
+    // one, throw a switch (its ramp 60 calls at 48 kHz, then held) and init again at another rate with the pots held;
+    // a diode pair's K moves under ADAA (b1_set's carry), and the Tube Screamer's three blocks each take their own pot.
+    struct Call
+    {
+        std::vector<float> pots;
+        std::vector<int> switches;
+        float rate = 0;   // > 0: init at this rate first
+    };
+    const std::string swClip = ".title SwClip\n.input u in\n.output y a\n.switch hard 2\n.oversample 4\n.adaa on\n"
+                               ".solver omega(1)\n.pot drive\nR1 in a {1k + 9k * drive}\nS1 in a hard 1 ron=100\n"
+                               "C1 a 0 10n\nD1 a 0 1N914\nD2 0 a 1N914\n";
+    std::vector<Call> clip;
+    for (int k = 0; k < 3; ++k)
+        clip.push_back({{0.5f}, {1}});
+    clip.push_back({{0.7f}, {1}});
+    for (int k = 0; k < 70; ++k)
+        clip.push_back({{0.7f}, {0}});
+    clip.push_back({{0.7f}, {0}, 96000});
+    clip.push_back({{0.7f}, {0}});
+    clip.push_back({{-1.0f}, {0}});
+    clip.push_back({{0.0f}, {0}});
+    std::vector<Call> screamer;
+    for (const std::vector<float>& pots : std::vector<std::vector<float>>{
+             {0.5f, 0.5f, 0.7f}, {0.5f, 0.5f, 0.7f}, {0.6f, 0.5f, 0.7f}, {0.6f, 0.2f, 0.7f}, {0.6f, 0.2f, 0.9f}})
+        screamer.push_back({pots, {}});
+    screamer.push_back({{0.6f, 0.2f, 0.9f}, {}, 44100});
+    screamer.push_back({{0.6f, 0.2f, 0.9f}, {}});
+    CHECK(fc::isModuleWord("lsok_"));
+    for (const auto& [text, calls] : {std::pair{swClip, clip}, std::pair{fc::test::kScreamer, screamer}})
+    {
+        const fc::Result r = fc::generate(text, "t.cir");
+        INFO(r.errors << r.warnings);
+        REQUIRE(r.errors.empty());
+        CHECK(r.source.find("lsok_ == 0 ||") != std::string::npos);
+        auto program = compiled(r);
+        const Program::Module& m = *program->module(r.module);
+        std::string errors;
+        auto* init = program->function<void(void*, float)>(r.module + "::init", errors);
+        auto* tick = program->function<float(void*, float)>(r.module + "::tick", errors);
+        REQUIRE(init);
+        REQUIRE(tick);
+        std::size_t lsok = m.size;
+        for (const Program::Module::Field& f : m.fields)
+        {
+            if (f.name == "lsok_")
+                lsok = f.offset;
+        }
+        REQUIRE(lsok < m.size);
+        auto skips = instance(m);
+        auto every = instance(m);
+        init(skips.get(), 48000);
+        init(every.get(), 48000);
+        float phase = 0;
+        for (std::size_t c = 0; c < calls.size(); ++c)
+        {
+            if (calls[c].rate > 0)
+            {
+                init(skips.get(), calls[c].rate);
+                init(every.get(), calls[c].rate);
+            }
+            const int zero = 0;
+            std::memcpy(static_cast<char*>(every.get()) + lsok, &zero, sizeof zero);
+            callSet(*program, r.module, skips.get(), calls[c].pots, calls[c].switches);
+            callSet(*program, r.module, every.get(), calls[c].pots, calls[c].switches);
+            for (int i = 0; i < 16; ++i)
+            {
+                const float u = 0.5f * std::sin(phase);
+                phase += 0.13f;
+                tick(skips.get(), u);
+                tick(every.get(), u);
+            }
+            INFO(r.module << ", call " << c);
+            CHECK(std::memcmp(skips.get(), every.get(), m.size) == 0);
+        }
     }
 }
 
@@ -1232,27 +1543,33 @@ TEST_CASE("the bracket keeps every law's iterates finite in float, through the J
 
 TEST_CASE("an OTA's ADAA mean is the double one wherever its control voltage goes, through the JIT", "[circuit]")
 {
-    // The emitted tail (Laws.cpp's text: the carry, the mean, what the step stores) in a module of its own, kd = 1 (the
-    // mean of the current is then kg tanh's): a step from a point (p_P, v_P) to (p, v) on the curve p = v + kg tanh(x),
-    // x = v / 2 Vt, with x_P and x over [-40, 40] (a 5 V control voltage is x = 97; tanhf is +-1 from |x| = 9), on a
-    // grid and from 1e-4 to 5 either way from each x_P. The mean is finite and within 1e-5 kg of the double one
-    // (Reference.cpp's, log cosh differenced in double; measured 2.9e-6 kg, float's rounding of x near 33). The log1p
-    // form alone gave NaN, or 0 for -39 in log cosh's difference, on a long step back from saturation.
+    // The emitted tail (Laws.cpp's text: the carry, dp and its reciprocal, the mean, what the step stores) in a module
+    // of its own, kd = 1 (the mean of the current is then kg tanh's): a step from a point (p_P, v_P) to (p, v) on the
+    // curve p = v + kg tanh(x), x = v / 2 Vt, with x_P and x over [-40, 40] (a 5 V control voltage is x = 97; tanhf is
+    // +-1 from |x| = 9), on a grid and from 1e-4 to 5 either way from each x_P. The mean is finite and within 1e-5 kg
+    // of the double one (Reference.cpp's, log cosh differenced in double; measured 2.9e-6 kg, float's rounding of x
+    // near 33). The log1p form alone gave NaN, or 0 for -39 in log cosh's difference, on a long step back from
+    // saturation.
     const fc::Plan plan = planned(fc::test::otaStage("", "1m"));
     const fc::PortDef& port = *plan.blocks.front().port;
     fc::LawOperands o;
     o.type = "float";
     o.port = port.name;
     o.kd = "1";
+    o.rkd = "1";
     o.g = "1";
     o.solver = fc::Solver{fc::Solver::Guess::Previous, 1};
     o.adaa = true;
     const std::string& P = port.name;
     std::string text = "module Tail\n{\n    float v_" + P + ";\n    float p_" + P + ";\n";
+    for (const fc::LawField& f : fc::portFields(port))
+        text += "    float " + f.name + ";\n";
     for (const fc::LawField& f : fc::adaaFields(port))
         text += "    float " + f.name + ";\n";
     text += "    float mean(float p, float v, float kg) [[clang::nonblocking]]\n    {\n";
     text += "        const float kgv = kg * " + fc::literal(port.nvt) + ";\n";
+    for (const fc::LawLine& l : fc::adaaHeadText(port, o))
+        text += "        " + l.text + "\n";
     for (const fc::LawLine& l : fc::adaaText(port, o))
         text += "        " + l.text + "\n";
     text += "        v_" + P + " = v;\n";
@@ -1815,6 +2132,7 @@ TEST_CASE("probes armed on every node leave the output's bits in every configura
     const std::vector<Config> configs{
         {&fc::test::kDiodeTone, 4, fc::Halfband::Iir, fc::Region::Auto, false, fc::Method::Bdf2, 1},
         {&fc::test::kDiodeTone, 2, fc::Halfband::Fir, fc::Region::Auto, true, std::nullopt, 2},
+        {&fc::test::kDiodeToneOmega2, 4, fc::Halfband::Iir, fc::Region::Auto, false, std::nullopt, 2},
         {&fc::test::kScreamer, 8, fc::Halfband::Fir, fc::Region::All, true, std::nullopt, 1},
         {&fc::test::kScreamer, 2, fc::Halfband::Iir, fc::Region::Nonlinear, false, fc::Method::Bdf2, 2},
         {&kSinglePot, 1, fc::Halfband::Iir, fc::Region::Auto, true, std::nullopt, 1},

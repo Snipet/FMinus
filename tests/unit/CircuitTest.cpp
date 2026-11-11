@@ -22,6 +22,8 @@
 #include <algorithm>
 #include <cmath>
 #include <complex>
+#include <format>
+#include <limits>
 #include <map>
 #include <cstddef>
 #include <numbers>
@@ -242,7 +244,8 @@ TEST_CASE("the netlist subset parses", "[circuit]")
     CHECK(n.adaa.value == false);
     REQUIRE(n.solver.value);
     CHECK(n.solver.value->guess == fc::Solver::Guess::Omega);
-    CHECK(n.solver.value->steps == 2);
+    CHECK(n.solver.value->steps == 1);
+    CHECK(n.solver.value->shape == fc::Solver::Shape::Halley);
     CHECK(n.target.solver == -60);
     CHECK(n.target.alias == -60);
     CHECK(n.target.level == 4.5);
@@ -1324,6 +1327,259 @@ TEST_CASE("the carry keeps the stored point's Newton residual, in double", "[cir
     }
 }
 
+TEST_CASE("'.solver halley(K)' and Options::solver's Halley shape, and their errors", "[circuit]")
+{
+    // kDiodeTone ships halley(1): the shape, from omega3 (a diode's guess), K steps from 1 to 8
+    auto withSolver = [](const std::string& text, const std::string& line)
+    {
+        std::string out = text;
+        const std::string from = ".solver halley(1)\n";
+        out.replace(out.find(from), from.size(), line);
+        return out;
+    };
+    for (int k : {1, 2, 8})
+    {
+        const fc::Plan p = planned(withSolver(fc::test::kDiodeTone, std::format(".solver halley({})\n", k)));
+        CHECK(p.config.solver.shape == fc::Solver::Shape::Halley);
+        CHECK(p.config.solver.guess == fc::Solver::Guess::Omega);
+        CHECK(p.config.solver.steps == k);
+    }
+    const fc::Result shipped = fc::generate(fc::test::kDiodeTone, "t.cir");
+    INFO(shipped.errors);
+    REQUIRE(shipped.errors.empty());
+    CHECK(shipped.configuration.find(".solver halley(1) (the netlist)") != std::string::npos);
+    CHECK(shipped.source.find("//   solver: omega3 + 1 Halley step in [min(0, p), max(0, p)]\n") != std::string::npos);
+    CHECK(shipped.notes.find("port D1|D2, at 4 rate, omega3 + 1 Halley step\n") != std::string::npos);
+    CHECK(shipped.source.find("Halley step 1 of 1, kept in the bracket") != std::string::npos);
+    // the directive's errors, at its argument
+    struct Case
+    {
+        std::string line;
+        std::string error;
+    };
+    for (const Case& c :
+         {Case{".solver halley(0)\n", "t.cir:8:9: error: '.solver halley(0)': halley(K) takes 1 to 8 "
+                                      "Halley steps\n"},
+          Case{".solver halley(9)\n", "t.cir:8:9: error: '.solver halley(9)': halley(K) takes 1 to 8 "
+                                      "Halley steps\n"},
+          Case{".solver halley(x)\n", "t.cir:8:9: error: '.solver halley(x)': halley(K) takes 1 to 8 "
+                                      "Halley steps\n"},
+          Case{".solver halley\n", "t.cir:8:9: error: '.solver halley': halley takes its step count, "
+                                   "halley(K)\n"},
+          Case{".solver newton(0)\n", "t.cir:8:9: error: '.solver newton(0)': newton(K) takes 1 to 8 "
+                                      "Newton steps\n"},
+          Case{".solver brent(1)\n", "t.cir:8:9: error: '.solver brent(1)': omega, omega(K), newton(K), "
+                                     "halley(K) or auto\n"}})
+    {
+        const fc::Result r = fc::generate(withSolver(fc::test::kDiodeTone, c.line), "t.cir");
+        CHECK(r.errors == c.error);
+        CHECK(r.source.empty());
+    }
+    // Options::solver: Halley's steps from 1, from omega3 (a Halley step from the previous v is an error), and an
+    // Options::chosen answer's the same
+    fc::Options zero;
+    zero.solver = fc::Solver{fc::Solver::Guess::Omega, 0, fc::Solver::Shape::Halley};
+    CHECK(fc::generate(fc::test::kDiodeTone, "t.cir", zero).errors ==
+          "t.cir:1:1: error: Options::solver's steps are 0; they are 1 to 8\n");
+    fc::Options previous;
+    previous.solver = fc::Solver{fc::Solver::Guess::Previous, 2, fc::Solver::Shape::Halley};
+    CHECK(fc::generate(fc::test::kDiodeTone, "t.cir", previous).errors ==
+          "t.cir:1:1: error: Options::solver is a Halley step from the previous v; halley(K) starts from omega3 "
+          "(Guess::Omega)\n");
+    fc::Options previousChosen;
+    previousChosen.chosen = fc::Choice{};
+    previousChosen.chosen->key = "0123456789abcdef";
+    previousChosen.chosen->solver = fc::Solver{fc::Solver::Guess::Previous, 1, fc::Solver::Shape::Halley};
+    CHECK(fc::generate(fc::test::kDiodeTone, "t.cir", previousChosen).errors ==
+          "t.cir:1:1: error: Options::chosen's solver is a Halley step from the previous v; halley(K) starts from "
+          "omega3 (Guess::Omega)\n");
+    fc::Options omega;
+    omega.solver = fc::Solver{fc::Solver::Guess::Omega, 2, fc::Solver::Shape::Halley};
+    const fc::Plan fromOptions = planned(fc::test::kDiodeTone, omega);
+    CHECK(fromOptions.config.solver.shape == fc::Solver::Shape::Halley);
+    CHECK(fromOptions.config.solver.steps == 2);
+    CHECK(fromOptions.config.solverFrom == "Options");
+    // the laws whose Halley denominator can vanish inside the bracket (Laws.cpp's takesHalley): a region whose ports
+    // are all of them refuses halley(K), from the netlist or the Options, as an OTA's refuses omega(K)
+    CHECK(fc::takesHalley(fc::PortDef::Law::Pair));
+    for (fc::PortDef::Law law : {fc::PortDef::Law::Single, fc::PortDef::Law::Asym, fc::PortDef::Law::Tanh})
+        CHECK(!fc::takesHalley(law));
+    struct Refused
+    {
+        std::string text;
+        std::string from;
+        std::string error;
+    };
+    for (const Refused& k :
+         {Refused{fc::test::kHalfWave, ".solver omega(1)\n",
+                  "error: '.solver halley(1)': only a diode pair's port takes a Halley step, and this region has "
+                  "none: .solver omega(K)\n"},
+          Refused{fc::test::kAsym, ".solver omega(1)\n",
+                  "error: '.solver halley(1)': only a diode pair's port takes a Halley step, and this region has "
+                  "none: .solver omega(K)\n"},
+          Refused{fc::test::otaStage(".oversample 2\n.adaa off\n.solver newton(1)\n"), ".solver newton(1)\n",
+                  "error: '.solver halley(1)': only a diode pair's port takes a Halley step, and this region has "
+                  "none: .solver newton(K)\n"}})
+    {
+        std::string text = k.text;
+        text.replace(text.find(k.from), k.from.size(), ".solver halley(1)\n");
+        const fc::Result r = fc::generate(text, "t.cir");
+        INFO(r.errors);
+        CHECK(r.errors.ends_with(k.error));
+        CHECK(r.errors.find('\n') == r.errors.size() - 1);
+        CHECK(r.source.empty());
+        fc::Options o;
+        o.solver = fc::Solver{fc::Solver::Guess::Omega, 1, fc::Solver::Shape::Halley};
+        const fc::Result options = fc::generate(k.text, "t.cir", o);
+        CHECK(options.errors.find("error: 'Options::solver halley(1)': only a diode pair's port takes a Halley "
+                                  "step, and this region has none") != std::string::npos);
+        CHECK(options.source.empty());
+    }
+    // beside a pair's port, one diode's keeps Newton's steps under halley(K), and the header and the notes say so
+    const fc::Result mix = fc::generate(fc::test::kPairThenDiode, "t.cir");
+    INFO(mix.errors);
+    REQUIRE(mix.errors.empty());
+    CHECK(mix.source.find("//   solver: omega3 + 2 Halley steps at a diode pair, 2 Newton steps at the other ports in "
+                          "[min(0, p), max(0, p)]\n") != std::string::npos);
+    CHECK(mix.notes.find("port D1|D2, at 2 rate, omega3 + 2 Halley steps\n") != std::string::npos);
+    CHECK(mix.notes.find("port D3, at 2 rate, omega3 + 2 Newton steps (halley(2): one diode's law keeps Newton "
+                         "steps)\n") != std::string::npos);
+    CHECK(mix.source.find("Halley step 2 of 2, kept in the bracket") != std::string::npos);
+    CHECK(mix.source.find("Newton step 2 of 2, kept in the bracket") != std::string::npos);
+    // an answer that names halley(K) for a region without a pair's port is ignored with a note, as an omega answer
+    // at an OTA's port is
+    {
+        std::string text = fc::test::kHalfWave;
+        text.replace(text.find(".solver omega(1)\n"), 17, "");
+        const fc::Plan open = planned(text);
+        fc::Options o;
+        o.chosen = fc::Choice{};
+        o.chosen->key = open.key;
+        o.chosen->oversample = 4;
+        o.chosen->solver = fc::Solver{fc::Solver::Guess::Omega, 1, fc::Solver::Shape::Halley};
+        const fc::Result r = fc::generate(text, "t.cir", o);
+        INFO(r.errors << r.notes);
+        REQUIRE(r.errors.empty());
+        CHECK(r.notes.find("its solver halley(1) is a diode pair's (no port here takes a Halley step): it is "
+                           "ignored") != std::string::npos);
+        CHECK(r.source.find("Halley step") == std::string::npos);
+    }
+    // the module's locals a Halley step adds are names no pot or input may take
+    CHECK(fc::isReservedName("sh"));
+    CHECK(fc::isReservedName("f2"));
+}
+
+TEST_CASE("a Halley step's denominator, its bracket and its finiteness, in double", "[circuit]")
+{
+    // A diode pair's Halley step, v - 2 f d / (2 d^2 - f f''), f'' = kb (e - ei) / N Vt: its denominator stays above
+    // d^2 from every point of the bracket [min(0, p), max(0, p)] (Laws.cpp's takesHalley), over p from 1e-9 V to
+    // 1e3 V either way and K from 1e-9 to 1e3 ohm-amps, wherever the exponentials are finite; to rounding, since
+    // where e is large f f'' comes within kb^2 (e - ei)^2 / (kb (e + ei))^2 of d^2, d^2's last bits
+    const double s = fc::thermalVoltage(1.752);
+    long points = 0;
+    for (double k : {1e-9, 1e-6, 1e-3, 1.0, 1e3})
+    {
+        for (double mag = 1e-9; mag <= 1e3; mag *= 10)
+        {
+            for (double p : {mag, -mag})
+            {
+                for (double t : {0.0, 1e-6, 0.01, 0.1, 0.3, 0.5, 0.7, 0.9, 0.99, 1.0})
+                {
+                    const double v = t * p;
+                    if (std::fabs(v / s) > 700)
+                        continue;
+                    const double e = std::exp(v / s);
+                    const double ei = std::exp(-v / s);
+                    const double f = v - p + k * 0.5 * (e - ei);
+                    const double d = 1 + (k / s) * 0.5 * (e + ei);
+                    const double h = (k / s) * 0.5 / s * (e - ei);
+                    if (!std::isfinite(f * h) || !std::isfinite(d * d))
+                        continue;
+                    INFO("k " << k << " p " << p << " v " << v);
+                    CHECK(2 * d * d - f * h >= d * d * (1 - 1e-12));
+                    ++points;
+                }
+            }
+        }
+    }
+    CHECK(points > 500);
+    // where the other laws' can vanish (their counterexamples in Laws.cpp): one diode at v = 0, p = -1000 V, kb = 1e-3
+    // (2 d^2 - f f'' = 2 (1 + kb)^2 + p kb / N Vt < 0); an OTA at p = 1 V, kgs = 1, v = 34 mV
+    {
+        const double kb = 1e-3;
+        const double p = -1000;
+        const double f = 0 - p;
+        const double d = 1 + kb;
+        CHECK(2 * d * d - f * (kb / s) < 0);
+        const double vt2 = 2 * fc::thermalVoltage(1);
+        const double kgs = 1;
+        const double v = 0.034;
+        const double th = std::tanh(v / vt2);
+        const double fo = v - 1 + kgs * vt2 * th;
+        const double dd = 1 + kgs * (1 - th * th);
+        const double ho = -2 * kgs * th * (1 - th * th) / vt2;
+        CHECK(2 * dd * dd - fo * ho < 0);
+    }
+    // every law's steps under halley(K) stay in the bracket and finite: p 0, tiny, huge, either sign, the previous v
+    // NaN or far off (a state the guard has not yet cleared), K from 1e-9 to 1e3; a NaN p puts the bracket at [0, 0]
+    const std::vector<double> ps{0.0, 1e-30, -1e-30, 1e-6, -1e-6, 1.0, -1.0, 1e6, -1e6, 1e30, -1e30};
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    for (fc::PortDef::Law law :
+         {fc::PortDef::Law::Pair, fc::PortDef::Law::Single, fc::PortDef::Law::Asym, fc::PortDef::Law::Tanh})
+    {
+        for (double k : {1e-9, 1e-3, 1.0, 1e3})
+        {
+            const fc::LawShape shape{law, k, law == fc::PortDef::Law::Tanh ? 2 * fc::thermalVoltage(1) : s, k / 2,
+                                     fc::thermalVoltage(2 * 1.752)};
+            const fc::Solver::Guess guess =
+                law == fc::PortDef::Law::Tanh ? fc::Solver::Guess::Previous : fc::Solver::Guess::Omega;
+            for (int steps = 1; steps <= 3; ++steps)
+            {
+                for (double p : ps)
+                {
+                    for (double previous : {0.0, p, -p, 1e30, nan})
+                    {
+                        const double v =
+                            fc::lawStepsOf(shape, p, guess, previous, steps, nullptr, fc::Solver::Shape::Halley);
+                        INFO(static_cast<int>(law)
+                             << " k " << k << " steps " << steps << " p " << p << " previous " << previous);
+                        CHECK(std::isfinite(v));
+                        CHECK(v >= std::fmin(0.0, p));
+                        CHECK(v <= std::fmax(0.0, p));
+                    }
+                }
+                CHECK(fc::lawStepsOf(shape, nan, guess, 0.0, steps, nullptr, fc::Solver::Shape::Halley) == 0);
+            }
+        }
+    }
+    // one Halley step from omega3 against one and two Newton steps, over the pair's p (diodetone's K, 0.1 mV to
+    // 20 V): the worst error to the converged root, measured 3.6e-5 V, against 1.2e-3 (one Newton step) and 1.4e-5
+    // (two): between them, as the self-test finds it (diodetone.cir at 4x: T1 -54.2, -85.4 and -93.4 dB)
+    double halley = 0;
+    double newton1 = 0;
+    double newton2 = 0;
+    const double k = 2 * 2.52e-9 * 2200;
+    for (double mag = 1e-4; mag <= 20; mag *= 1.1)
+    {
+        for (double p : {mag, -mag})
+        {
+            const double root = fc::converged(p, k, s);
+            const auto err = [&](fc::Solver::Shape shape, int steps)
+            {
+                return std::fabs(
+                    fc::lawSteps(fc::PortDef::Law::Pair, p, k, s, fc::Solver::Guess::Omega, 0, steps, nullptr, shape) -
+                    root);
+            };
+            halley = std::max(halley, err(fc::Solver::Shape::Halley, 1));
+            newton1 = std::max(newton1, err(fc::Solver::Shape::Newton, 1));
+            newton2 = std::max(newton2, err(fc::Solver::Shape::Newton, 2));
+        }
+    }
+    INFO("Halley " << halley << ", Newton " << newton1 << " and " << newton2);
+    CHECK(halley < newton1 / 10);
+    CHECK(newton2 < halley);
+}
+
 TEST_CASE("prewarp applies to a one-state OTA block, and warns elsewhere", "[circuit]")
 {
     // off by default (the user's ruling): the module's cutoff law is the circuit's
@@ -2237,8 +2493,9 @@ TEST_CASE("each diode law's F is its antiderivative, and its bracket holds, in d
 
 TEST_CASE("the diode forms' and the new elements' emitted names are refused as names", "[circuit]")
 {
-    // an asymmetric pair's step locals, and its ADAA's second exponential
-    for (const char* name : {"sa", "si", "sl", "sn", "ef", "er", "cr"})
+    // an asymmetric pair's step locals, and its ADAA's second exponential; ADAA's 1 / dp, the last Newton step's
+    // point and its series' steps from it
+    for (const char* name : {"sa", "si", "sl", "sn", "ef", "er", "cr", "rdp", "v0", "dl2", "dr", "dr2"})
     {
         INFO(name);
         CHECK(fc::isReservedName(name));

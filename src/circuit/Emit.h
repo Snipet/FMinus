@@ -16,8 +16,10 @@ namespace fminus::circuit
     class Code;
 
     // Zero, a constant (folded in double), or a named float (a field, a parameter or a temporary), maybe negated.
-    // Arithmetic on Vals folds 0 x = 0, x +- 0 = x, +-1 x = +-x, constants with constants, and x - x = 0; every other
-    // operation prints `const float t<N> = a op b;` into the Code of its operands and gives t<N>. A negation is carried
+    // Arithmetic on Vals folds 0 x = 0, x +- 0 = x, +-1 x = +-x, constants with constants, x - x = 0 and (x / c) c = x;
+    // it divides by a constant as a multiply by its reciprocal, and x / y as x (1 / y), the reciprocal y's one
+    // temporary however many quotients share it; every other operation prints `const float t<N> = a op b;` into the
+    // Code of its operands and gives t<N>. A negation is carried
     // in the Val (and absorbed by the operation that uses it), not printed. A Var's deps say what it depends on: the
     // rate (a capacitor's gc, an inductor's rl), the pots (a variable resistance, a gain of pots, a switch's), both or
     // neither; an operation's are its operands', so a block's derivation splits into what init computes once and what
@@ -40,6 +42,12 @@ namespace fminus::circuit
         bool negated = false;   // a Var's sign
         Code* code = nullptr;   // where a Var's operations print
         int deps = 0;           // a Var's: kRate, kPots, both or neither
+        // a Var that is x / c, c a constant (printed as (1 / c) x): x (its name and sign) and c, so that (x / c) c
+        // folds to x; quotientNegated is the Var's own sign when it was made
+        std::string dividend;
+        bool dividendNegated = false;
+        bool quotientNegated = false;
+        double divisor = 0;
 
         Val() = default;
         explicit Val(double value);
@@ -67,7 +75,8 @@ namespace fminus::circuit
     bool isUnit(const Val& v);
 
     // A method body being written: statements, each `const float t<N> = ...;`, `field = ...;` or text. lines() gives
-    // them with each temporary used once, by the field assignment that follows it, merged into that assignment.
+    // them with each temporary used once, by the field assignment that follows it, merged into that assignment, and
+    // without the temporaries nothing reads (a quotient whose (x / c) c folded away).
     class Code
     {
     public:
@@ -96,7 +105,7 @@ namespace fminus::circuit
 
         std::vector<std::string> lines() const;
 
-        // The operations it prints: one a temporary.
+        // The operations it prints: one a temporary that something reads.
         int operations() const;
 
         // The statements split by what they depend on (the Woodbury form): those of the rate alone (or of nothing) for
@@ -135,6 +144,8 @@ namespace fminus::circuit
         };
 
         static std::vector<std::string> merged(const std::vector<Stmt>& stmts);
+        // The statements without the temporaries nothing reads (each one's removal counted again, so a chain goes).
+        static std::vector<Stmt> live(const std::vector<Stmt>& stmts);
 
         std::set<std::string> reserved_;
         std::map<std::string, std::string> seen_;   // an expression's text, and its temporary
