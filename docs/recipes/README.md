@@ -50,7 +50,10 @@ Most of the recipes in [../extending.md](../extending.md) and [../simd.md](../si
   by fast_float);
 - recipe 40 (the XML parser, pugixml in the runtime behind `FMINUS_XML`, made as the JSON one is: its builtins read an
   attribute or an element's text by a small part of XPath the compiler prepares, its indices from 0, a document's
-  entities inert).
+  entities inert);
+- recipe 41 (the web library, `fminus_web` on libcurl and Mbed TLS behind `FMINUS_WEB`, off by default: the `http_`
+  builtins, a URL literal checked where it is written, the program's web context a global its host sets, the host's
+  policy over what it may reach, and every URL listed before anything runs).
 
 Their code is in `src/`, and their tests in `tests/`.
 

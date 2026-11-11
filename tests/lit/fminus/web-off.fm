@@ -1,0 +1,34 @@
+// In a build without the web library (FMINUS_WEB=OFF, the default), each http_ builtin and each status code's name is
+// still a name FMinus knows: its use is an error that names the option, not an undeclared function or identifier;
+// __FMINUS_WEB__ is not defined; and the driver's --web-allow says the build has no web library.
+// UNSUPPORTED: web
+// RUN: not fminus %s 2>&1 | FileCheck %s --implicit-check-not=error:
+// RUN: not fminus %s --run load --web-allow 'https://example.com/*' 2>&1 | FileCheck %s --check-prefix=ALLOW
+
+#ifdef __FMINUS_WEB__
+#error __FMINUS_WEB__ is defined
+#endif
+
+int load(const void* data)
+{
+    void* r = http_get("https://example.com/%d.json", 1);
+    void* p = http_post("https://example.com/", data, 4, "text/plain");
+    int s = http_wait(r, 100) + http_status(r) + http_size(r) + http_progress(r);
+    const void* b = http_body(r);
+    http_cancel(p);
+    http_close(r);
+    return s + HTTP_REFUSED;
+}
+
+// CHECK: web-off.fm:14:15: error: 'http_get' needs the web library, which this build of FMinus leaves out (FMINUS_WEB=OFF)
+// CHECK: web-off.fm:15:15: error: 'http_post' needs the web library, which this build of FMinus leaves out (FMINUS_WEB=OFF)
+// CHECK: web-off.fm:16:13: error: 'http_wait' needs the web library, which this build of FMinus leaves out (FMINUS_WEB=OFF)
+// CHECK: web-off.fm:16:33: error: 'http_status' needs the web library, which this build of FMinus leaves out (FMINUS_WEB=OFF)
+// CHECK: web-off.fm:16:50: error: 'http_size' needs the web library, which this build of FMinus leaves out (FMINUS_WEB=OFF)
+// CHECK: web-off.fm:16:65: error: 'http_progress' needs the web library, which this build of FMinus leaves out (FMINUS_WEB=OFF)
+// CHECK: web-off.fm:17:21: error: 'http_body' needs the web library, which this build of FMinus leaves out (FMINUS_WEB=OFF)
+// CHECK: web-off.fm:18:5: error: 'http_cancel' needs the web library, which this build of FMinus leaves out (FMINUS_WEB=OFF)
+// CHECK: web-off.fm:19:5: error: 'http_close' needs the web library, which this build of FMinus leaves out (FMINUS_WEB=OFF)
+// CHECK: web-off.fm:20:16: error: 'HTTP_REFUSED' needs the web library, which this build of FMinus leaves out (FMINUS_WEB=OFF)
+
+// ALLOW: fminus: --web-allow: this build of FMinus leaves out the web library (FMINUS_WEB=OFF)

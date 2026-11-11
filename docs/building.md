@@ -37,6 +37,7 @@ ctest --preset dev                   # test
 | `tsan` | RelWithDebInfo | Release + assertions | thread | compiling on another thread |
 | `inline` | RelWithDebInfo | built inside the tree, -O2 -g | none | stepping into LLVM itself |
 | `python` | RelWithDebInfo | Release + assertions | none | the Python package: `dev` with `FMINUS_BUILD_PYTHON=ON` ([python.md](python.md)) |
+| `web` | RelWithDebInfo | Release + assertions | none | the web library: `dev` with `FMINUS_WEB=ON` ([web.md](web.md)) |
 | `xcode` | (multi-config) | Release + assertions | none | Xcode's debugger and Instruments |
 
 Each preset builds in `build-<preset>/`, exports `compile_commands.json` (`.clangd` reads `build-dev`'s), and has a
@@ -46,13 +47,15 @@ instrument FMinus's own code only; LLVM stays uninstrumented, which is why the `
 
 ## What programs' builtins a build has
 
-Two options decide what part of the runtime a build has, and so which builtins its programs may call. Both are on by
-default, in every preset; pass `-DFMINUS_JSON=OFF` or `-DFMINUS_XML=OFF` to a configure to leave one out.
+Three options decide which builtins a build's programs may call. The parsers' two are on by default, in every preset;
+pass `-DFMINUS_JSON=OFF` or `-DFMINUS_XML=OFF` to a configure to leave one out. The web library's is off by default,
+in every preset but `web`; pass `-DFMINUS_WEB=ON` to have it.
 
 | Option | Default | What it has | Fetches |
 |---|---|---|---|
 | `FMINUS_JSON` | ON | the JSON parser and the `json_*` builtins (`json_parse`, `json_float`, ...: [extending.md](extending.md), recipe 39) | fast_float, yyjson |
 | `FMINUS_XML` | ON | the XML parser and the `xml_*` builtins (`xml_parse`, `xml_float`, ...: [extending.md](extending.md), recipe 40) | fast_float, pugixml |
+| `FMINUS_WEB` | OFF | the web library, `fminus_web`, and the `http_*` builtins (`http_get`, `http_wait`, ...: [web.md](web.md), [extending.md](extending.md), recipe 41) | libcurl, Mbed TLS (not on Windows), built at configure time |
 
 fast_float (`cmake/FMinusFastFloat.cmake`) is fetched when either is on, and is nothing with both off; yyjson
 (`cmake/FMinusJson.cmake`), the JSON parser, when `FMINUS_JSON` is on: with it off, nothing of yyjson is fetched or
@@ -70,6 +73,16 @@ feature still knows by name, so that a call of one is an error that names the op
 parser, which this build of FMinus leaves out (FMINUS_JSON=OFF)`), not an undeclared function. Changing either option
 reconfigures the build tree; it rebuilds the runtime and the compiler, never LLVM.
 
+`FMINUS_WEB` says the same three ways (`FMINUS_HAS_WEB`, `__FMINUS_WEB__`, and `'http_get' needs the web library, which
+this build of FMinus leaves out (FMINUS_WEB=OFF)`, for each `http_` builtin and each status code's name, `HTTP_REFUSED`
+and the rest). With it on, the first configure downloads libcurl 8.23.0 and, on macOS and Linux, Mbed TLS 4.1.1 (about
+3 MB and 7 MB, pinned in `cmake/FMinusPins.cmake`), and builds each with its own CMake, as Release, static, hidden and
+position-independent, into the deps cache (`cmake/FMinusWeb.cmake`): Mbed TLS with threading on, libcurl with HTTP and
+HTTPS only and every other protocol and feature off (web.md lists them). It takes a minute or two, once for each C
+compiler and set of options (the install's name holds a hash of them, its *flavor*); every later configure of any
+tree finds them. Windows uses Schannel, and downloads no TLS library. With it on and both parsers off, configure says
+that is probably not what was meant. With it off, nothing is downloaded or built for it, and no target exists.
+
 ## The dependency cache
 
 Everything built from a dependency lives in `.deps/` (or wherever `FMINUS_DEPS_DIR` points, as a CMake or
@@ -83,6 +96,9 @@ environment variable), shared by every build tree of the checkout:
   src/fast_float-<version>/    fast_float's source, whose headers the runtime includes (FMINUS_JSON or FMINUS_XML)
   src/yyjson-<version>/        yyjson's source, of which the runtime library compiles one file (FMINUS_JSON)
   src/pugixml-<version>/       pugixml's source, of which the runtime library compiles one file (FMINUS_XML)
+  src/curl-<version>/  src/mbedtls-<version>/        libcurl's and Mbed TLS's sources (FMINUS_WEB)
+  build/curl-<version>-<flavor>/  install/curl-<version>-<flavor>/          libcurl, static (FMINUS_WEB)
+  build/mbedtls-<version>-<flavor>/  install/mbedtls-<version>-<flavor>/    Mbed TLS, static (FMINUS_WEB)
   build/<flavor>/              LLVM's build tree: about 1 GB, safe to delete once installed
   install/<flavor>/            LLVM: headers, static libraries, CMake package, tools, lit
   install/bison-3.8.2/  install/flex-2.6.4/

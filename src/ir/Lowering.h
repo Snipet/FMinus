@@ -18,6 +18,8 @@
 //     Math.cpp          sinf, cosf, tanf, expf, tanhf and logf in the vector and libm math modes: the runtime's
 //                       functions
 //     Hash.cpp          hash and randf: an int's bits mixed, and a float uniform in [-1, 1) from them, inline
+//     Web.cpp           the web library's builtins' own part: a URL literal checked and recorded for the host
+//                       (webRequests), the program's web context, and the status codes' names (HTTP_REFUSED, ...)
 //     Vectors.cpp       vector literals, swizzles, and ?: lane by lane
 //     Memory.cpp        lvalues (variables, p[i], *p, components) read and written, arrays, &x, pointer arithmetic
 //     Modules.cpp       modules: their layout, fields, methods and calls of them, `this`, copies
@@ -99,8 +101,8 @@ namespace fminus::ir::detail
         bool allocates;
     };
 
-    // A build option a builtin needs (cmake/FMinusOptions.cmake, fminus/Config.h): none, the JSON parser (FMINUS_JSON)
-    // or the XML parser (FMINUS_XML). A builtin of an option this build was configured without is still a known name:
+    // A build option a builtin needs (cmake/FMinusOptions.cmake, fminus/Config.h): none, the JSON parser (FMINUS_JSON),
+    // the XML parser (FMINUS_XML) or the web library (FMINUS_WEB). A builtin of an option this build was configured without is still a known name:
     // a call of it is an error that names the option (notBuilt), not an undeclared function, and a definition of one
     // is refused, as any builtin's is (Functions.cpp).
     enum class Feature
@@ -108,6 +110,7 @@ namespace fminus::ir::detail
         None,
         Json,
         Xml,
+        Web,
     };
     bool isBuilt(Feature feature);                                 // whether this build has it (Calls.cpp)
     std::string notBuilt(std::string_view name, Feature feature);   // the error of a call of `name`, which needs it
@@ -134,6 +137,10 @@ namespace fminus::ir::detail
     // count, as a format's; and choices, every argument after the path's ints, string literals (at least one),
     // prepared into one table, passed as its address. The XML parser's take the same, but for its path: an XML path, a
     // format that is a small part of XPath (child steps by name, [n], a last @attribute), prepared as a JSON one is.
+    // The web library's take a URL, a format whose ints are the call's last arguments, after every other parameter
+    // (as printf's are), checked further (Web.cpp: no byte a URL cannot hold, http or https, no credentials) and
+    // recorded for the host, passed after the program's web context as a format is; and a content type, a string of
+    // printable ASCII.
     enum class Param
     {
         Int,
@@ -149,10 +156,12 @@ namespace fminus::ir::detail
         Path,
         Choices,
         XmlPath,
+        Url,
+        ContentType,
     };
 
-    // What a builtin of the runtime gives: an int, a float, a double, a bool (an int from the runtime, 0 or 1), a void*
-    // or nothing.
+    // What a builtin of the runtime gives: an int, a float, a double, a bool (an int from the runtime, 0 or 1), a void*,
+    // a const void* (bytes the program may only read: http_body's) or nothing.
     enum class Result
     {
         Int,
@@ -160,6 +169,7 @@ namespace fminus::ir::detail
         Double,
         Bool,
         Pointer,
+        Bytes,
         Void,
     };
 
@@ -221,7 +231,7 @@ namespace fminus::ir::detail
     const Fft* findFft(std::string_view name);           // fft_create, fft_forward, ..., or nullptr
     const RuntimeBuiltin* findRuntimeBuiltin(std::string_view name);   // bytes_floats, ..., or nullptr
     bool allocates(std::string_view name);               // a builtin that allocates or frees: the heap's, a plan's
-    bool blocks(std::string_view name);                  // a builtin that may wait: none yet (http_wait will)
+    bool blocks(std::string_view name);                  // a builtin that may wait: http_wait
     bool isReduction(std::string_view name);             // reduce_add, reduce_min, reduce_max
     bool isPolyQuery(std::string_view name);             // poly_lanes, poly_index
     bool isPolyMemory(std::string_view name);            // poly_load, poly_store
@@ -597,6 +607,14 @@ namespace fminus::ir::detail
         Value refuseString(const ast::Expr& expr, std::optional<ast::Type> type, Use use, SourceLocation where);
         Value notAValue(const ast::Expr& expr);
 
+        // ---- Web.cpp ------------------------------------------------------------------------------------------------
+        bool checkUrl(const ast::StringExpr& literal, SourceLocation where);
+        bool checkContentType(const ast::StringExpr& literal, SourceLocation where);
+        void recordWebRequest(SourceLocation location, std::string_view method, const ast::StringExpr& literal);
+        llvm::Value* webContext(SourceLocation location);
+        const Binding* webStatus(const std::string& name) const;
+        bool unbuiltWebStatus(SourceLocation location, const std::string& name);
+
         // ---- Paths.cpp ----------------------------------------------------------------------------------------------
         llvm::Value* preparedPath(const ast::StringExpr& literal);
         llvm::Value* preparedXmlPath(const ast::StringExpr& literal, SourceLocation where);
@@ -708,5 +726,6 @@ namespace fminus::ir::detail
         // constants are then doubles (Expressions.cpp, lowerAs). None at the top of an arithmetic.
         std::optional<bool> doubleArithmetic_;
         std::deque<Extent> extents_;                                       // the arrays' extents values carry
+        bool webContextClash_ = false;   // a function of the web context's name was reported (Web.cpp)
     };
 } // namespace fminus::ir::detail

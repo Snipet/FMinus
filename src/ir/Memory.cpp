@@ -59,7 +59,8 @@ namespace fminus::ir::detail
             }
             if (binding == nullptr)
             {
-                error(expr.location, "use of undeclared identifier " + quoted(variable->name));
+                if (!unbuiltWebStatus(expr.location, variable->name))   // HTTP_REFUSED without the web library
+                    error(expr.location, "use of undeclared identifier " + quoted(variable->name));
                 return std::nullopt;
             }
             return LValue{binding->slot, binding->type, binding->isConst, variable->name, binding->type, {}};

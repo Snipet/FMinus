@@ -497,6 +497,7 @@ namespace fminus::frontend
         static constexpr std::array kPredefined{
             PredefinedMacro{"__FMINUS_JSON__", "the JSON parser", "FMINUS_JSON", FMINUS_HAS_JSON != 0},
             PredefinedMacro{"__FMINUS_XML__", "the XML parser", "FMINUS_XML", FMINUS_HAS_XML != 0},
+            PredefinedMacro{"__FMINUS_WEB__", "the web library", "FMINUS_WEB", FMINUS_HAS_WEB != 0},
         };
         return kPredefined;
     }

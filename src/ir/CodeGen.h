@@ -149,4 +149,26 @@ namespace fminus::ir
         unsigned arity;
     };
     std::vector<BuiltinInfo> builtins();
+
+    // The web library's builtins (Calls.cpp, Web.cpp; a build with FMINUS_WEB). A module that calls http_get or
+    // http_post defines the program's web context, this global, a pointer, null until its host sets it (a null context
+    // reaches nothing: src/web/Web.h), and every such call passes it to the library. A program that declares a function
+    // of the name is an error then.
+    inline constexpr const char* kWebContextSymbol = "fminus_web_context";
+    // What every name of the web library's begins with (its C functions, web/WebSymbols.def, and the context's
+    // global): in every build, a function of a program cannot be named so (Functions.cpp).
+    inline constexpr std::string_view kWebPrefix = "fminus_web_";
+
+    // One call of http_get or http_post, as the code generator recorded it in the module's named metadata
+    // "fminus.web.requests", in the order it lowered them: its method, "GET" or "POST"; its URL literal as a pattern,
+    // each %d a "*" and %% a "%"; and where the call is (its file as the errors name it, its line and column).
+    struct WebRequest
+    {
+        std::string method;
+        std::string pattern;
+        std::string file;
+        int line = 0;
+        int column = 0;
+    };
+    std::vector<WebRequest> webRequests(const llvm::Module& module);
 } // namespace fminus::ir

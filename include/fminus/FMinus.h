@@ -191,6 +191,31 @@ namespace fminus
             Both,
         };
 
+        // What a program may reach of the network (Options::web), in a build with the web library (FMINUS_WEB,
+        // fminus/Config.h's FMINUS_HAS_WEB; docs/web.md): the policy the library holds the program's http_get and
+        // http_post to, checked before each request is sent, at each redirect, and on each connection's address. The
+        // default reaches nothing, and nothing a program asks of the library can widen it (the library's policy, not
+        // a sandbox: a program's own external functions are not its business; docs/web.md). In a build without the
+        // library it is not read: no program there can call http_get.
+        struct WebPolicy
+        {
+            // The URLs a program may reach, as patterns: "https://example.com/presets/*", "https://*.example.com",
+            // "http://127.0.0.1:8080/*" (docs/web.md, "The pattern language": a scheme, a host or *.host, a port or *,
+            // a path, exact or a prefix ending in *). Empty, the default: no network, every request HTTP_REFUSED.
+            std::vector<std::string> allow;
+            std::int32_t maxBodyBytes = 16 << 20;   // a response's body at most (and a POST's): past it, HTTP_LIMIT
+            std::int32_t timeoutMs = 30000;         // a request, its redirects included: past it, HTTP_TIMEOUT
+            std::int32_t maxRedirects = 5;          // redirects a request follows, each checked again (0: none)
+            std::int32_t maxRequests = 16;          // requests the program has in flight at once
+            std::string caFile;                     // PEM roots to trust instead of the system's; empty: the system's
+            // Whether a pattern by name may reach a loopback, private or link-local address (a name that resolves to
+            // one is refused otherwise; an address pattern reaches its own address whatever this says).
+            bool privateAddresses = false;
+            // Names the host resolves itself, "name:port:address", for the program's requests alone (libcurl's
+            // CURLOPT_RESOLVE): split DNS, tests.
+            std::vector<std::string> resolve;
+        };
+
         struct Options
         {
             int optimisation = 2;                  // -O0 to -O3: LLVM's pipeline at that level, as fminus -O<n>
@@ -241,6 +266,8 @@ namespace fminus
             // the array's extent, and a call whose check fails returns early, with the check recorded for the host
             // (boundsViolation, below). Off, the default, the code is as it was, and as fast.
             bool boundsCheck = false;
+            // The network the program may reach through http_get and http_post (WebPolicy, above): none by default.
+            WebPolicy web;
         };
 
         // Compiles `source`. Returns nullptr when it does not compile, with `errors` holding FMinus's messages, one a
@@ -540,6 +567,45 @@ namespace fminus
 
         // Clears the record, so that the next call runs whole: before any call of the program, init's included.
         void clearBoundsViolation() noexcept;
+
+        // The web (a build with FMINUS_WEB; docs/web.md). A program reaches the network only through http_get and
+        // http_post, whose URLs are string literals, so the host knows every one before it runs anything: it may show
+        // them, ask its user, or refuse to run a program that names a host it does not allow. Each request is held to
+        // Options::web when it is made (its %d filled in), at each redirect, and on each connection's address.
+        //
+        //   options.web.allow = {"https://example.com/presets/*"};
+        //   auto program = Program::compile(source, errors, options);
+        //   for (const Program::WebRequest& request : program->webRequests())
+        //       show(request.method, request.pattern, request.line);       // "GET https://example.com/presets/*.json"
+        //
+        // The program's requests are its context's, which the Program holds: one I/O thread for the process drives
+        // every request, started by the first and joined when the last context goes. Destroying the Program stops its
+        // context (below) and frees every request it made, closed or not; so does a program that never closes what
+        // it opens leak nothing past the Program.
+        //
+        // One call of http_get or http_post in the program's source: its method ("GET" or "POST"), its URL as a
+        // pattern (each %d a "*", each %% a "%"), and where the call is, in every call site's order of lowering.
+        struct WebRequest
+        {
+            std::string method;
+            std::string pattern;
+            std::string file;   // as errors name it (Options::fileName, or an #include's)
+            int line = 0;
+            int column = 0;
+        };
+
+        // Every call of http_get and http_post the program makes, or none (and none in a build without the web
+        // library, where a program cannot make one).
+        const std::vector<WebRequest>& webRequests() const;
+
+        // Stops the program's network for good: every request in flight ends as HTTP_CANCELLED before this returns,
+        // waking every thread in http_wait, and every request the program starts from then on ends so at once. What
+        // completed stays readable until it is closed or the Program destroyed. A host that shuts a program down while
+        // a thread of its own is in the program (a loader in http_wait) calls this, joins that thread, then destroys
+        // the Program: destroying a Program while a thread still runs its code is undefined, as ever. Any thread may
+        // call it, any number of times; it waits for the I/O thread (briefly): not on the audio thread. The
+        // destructor calls it.
+        void stopWeb() noexcept;
 
         // Calling a function by name, for a host that learns a function's signature as it runs rather than when it is
         // built (function<Signature>, above, is for one it knows): a console that calls the function its user names, a

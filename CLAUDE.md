@@ -30,6 +30,17 @@ asks for that specific change, and ask before restructuring anything.
   module on the public API alone (`python/src/`, pybind11, C++17) and the Python around it (`python/fminus/`), built
   only with `FMINUS_BUILD_PYTHON=ON` (the `python` preset; `pyproject.toml` for pip), tested by `python/tests/`
   (unittest; the ctest test `python`). It binds `FMinus.h` only: `docs/python.md` ends with what it leaves out.
+- A string literal exists only as a builtin's argument (the user asked for the web research's findings to be built,
+  2026-11-11; `docs/research/web/`): a format, a JSON Pointer, an XML path or a URL, checked and prepared when the
+  program is compiled (`src/ir/Strings.cpp`, `Paths.cpp`, `Web.cpp`). The JSON and XML parsers (`FMINUS_JSON`,
+  `FMINUS_XML`, both ON; yyjson, pugixml, fast_float) are compiled into the runtime. A feature a build leaves out keeps
+  its builtins as known names, with a "this build leaves out" error, and its macro (`__FMINUS_JSON__`, ...) undefined.
+- `src/web/` is its own library too, `fminus_web` (no LLVM), built only with `FMINUS_WEB=ON` (OFF by default; the `web`
+  preset; `docs/web.md`): the HTTP(S) client behind the `http_*` builtins, on libcurl and Mbed TLS (Schannel on
+  Windows), which `cmake/FMinusWeb.cmake` builds at configure time into the deps cache. Every function generated code
+  calls goes in `WebSymbols.def`. A program's requests reach only what `Program::Options::web` allows (none by
+  default), and no test may leave loopback. Its macOS and Windows code has never been built or run: say so before
+  relying on it, and `docs/web.md` ("What is verified where") lists what has.
 - The smoke tests (`tests/smoke/`, `tests/lit/smoke/`) prove the toolchain. Keep them passing until the user retires
   them.
 - `docs/` is the manual (architecture, extending, building, testing; `docs/recipes/` patches). Keep it in step with

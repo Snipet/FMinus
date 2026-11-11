@@ -58,6 +58,10 @@ namespace fminus::ir::detail
         constexpr std::string_view kRuntimeNames[] = {
 #define FMINUS_RUNTIME_SYMBOL(name) #name,
 #include "runtime/RuntimeSymbols.def"
+#if FMINUS_HAS_WEB
+#define FMINUS_WEB_MAIN_SYMBOL(name) #name,
+#include "web/WebSymbols.def"   // the web library's, which a program's http_ builtins and an executable's main call
+#endif
 #undef FMINUS_RUNTIME_SYMBOL
         };
 
@@ -542,7 +546,8 @@ namespace fminus::ir::detail
                             && (findField(*module, variable.name, nullptr) != nullptr
                                 || std::ranges::find(module->methods, variable.name) != module->methods.end())))
                         return notConstant(expr.location);
-                    error(expr.location, "use of undeclared identifier " + quoted(variable.name));
+                    if (!unbuiltWebStatus(expr.location, variable.name))
+                        error(expr.location, "use of undeclared identifier " + quoted(variable.name));
                     return std::nullopt;
                 },
                 [&](const ast::UnaryExpr& unary) -> std::optional<Folded> {

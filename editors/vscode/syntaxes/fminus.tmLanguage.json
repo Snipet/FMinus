@@ -203,12 +203,15 @@
             ]
         },
         "constants": {
-            "name": "constant.language.boolean.fminus",
-            "match": "\\b(?:true|false)\\b"
+            "comment": "true and false; and the web library's status codes, names a program uses without declaring them (src/ir/Web.cpp).",
+            "patterns": [
+                { "name": "constant.language.boolean.fminus", "match": "\\b(?:true|false)\\b" },
+                { "name": "constant.language.fminus", "match": "\\bHTTP_(?:PENDING|TRANSPORT|TIMEOUT|CANCELLED|REFUSED|LIMIT|CERTIFICATE|INVALID|FAILED)\\b" }
+            ]
         },
         "builtins": {
             "comment": "The builtins: <math.h>'s float functions and its exact double ones, <stdlib.h>'s heap, the FFT, hash and randf, bytes to numbers, and the recipes' reductions, poly queries, poly loads and stores, and runtime function.",
-            "match": "\\b(fabsf|sqrtf|sinf|cosf|tanf|expf|logf|floorf|fminf|fmaxf|tanhf|sqrt|fabs|floor|fmin|fmax|fma|malloc|calloc|free|fft_create|fft_create_complex|fft_forward|fft_inverse|fft_destroy|hash|randf|bytes_floats|bytes_pcm16|json_parse|json_free|json_float|json_double|json_int|json_bool|json_count|json_floats|json_choice|json_base64_floats|xml_parse|xml_free|xml_float|xml_double|xml_int|xml_bool|xml_count|xml_floats|xml_choice|reduce_add|reduce_min|reduce_max|poly_lanes|poly_index|poly_load|poly_store|db_to_gain)\\s*(?=\\()",
+            "match": "\\b(fabsf|sqrtf|sinf|cosf|tanf|expf|logf|floorf|fminf|fmaxf|tanhf|sqrt|fabs|floor|fmin|fmax|fma|malloc|calloc|free|fft_create|fft_create_complex|fft_forward|fft_inverse|fft_destroy|hash|randf|bytes_floats|bytes_pcm16|json_parse|json_free|json_float|json_double|json_int|json_bool|json_count|json_floats|json_choice|json_base64_floats|xml_parse|xml_free|xml_float|xml_double|xml_int|xml_bool|xml_count|xml_floats|xml_choice|http_get|http_post|http_wait|http_status|http_size|http_body|http_progress|http_cancel|http_close|reduce_add|reduce_min|reduce_max|poly_lanes|poly_index|poly_load|poly_store|db_to_gain)\\s*(?=\\()",
             "captures": { "1": { "name": "support.function.builtin.fminus" } }
         },
         "functions": {

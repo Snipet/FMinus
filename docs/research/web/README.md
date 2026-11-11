@@ -5,6 +5,13 @@ web library that FMinus programs call (HTTP and the like, as they call the FFT),
 give FMinus built-in, optimized JSON and XML parsers. They are one subject, because FMinus has no strings: a program
 can do nothing with a response until something turns its bytes into numbers.*
 
+*Since then (2026-11-11), the first two items of the summary and the HTTP(S) client of the third are built: string
+literals as builtins' arguments and both parsers as [extending.md](../../extending.md), recipes 38 to 40, describe
+them, and the client as [web.md](../../web.md) and recipe 41 do. Those pages say where what was built differs from
+this report (one failure code per kind of failure, a check of each connection's address, the parsers' limits as build
+constants, a URL's ints after every other argument, Mbed TLS 4.1 of the two LTS branches). WebSockets, a server, the
+disk cache and the `offline` policy are not built. The report is left as it was written.*
+
 ## 0. Summary
 
 **What I would build, in this order:**

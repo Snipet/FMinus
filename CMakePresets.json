@@ -65,6 +65,12 @@
       "cacheVariables": { "FMINUS_BUILD_PYTHON": "ON" }
     },
     {
+      "name": "web",
+      "inherits": "dev",
+      "displayName": "web: dev, with the web library (fminus_web; builds libcurl and Mbed TLS into the deps cache)",
+      "cacheVariables": { "FMINUS_WEB": "ON" }
+    },
+    {
       "name": "xcode",
       "displayName": "xcode: an Xcode project (multi-config; LLVM from the deps cache)",
       "generator": "Xcode",
@@ -80,6 +86,7 @@
     { "name": "tsan", "configurePreset": "tsan" },
     { "name": "inline", "configurePreset": "inline" },
     { "name": "python", "configurePreset": "python" },
+    { "name": "web", "configurePreset": "web" },
     { "name": "xcode", "configurePreset": "xcode", "configuration": "Debug" }
   ],
   "testPresets": [
@@ -109,6 +116,7 @@
     },
     { "name": "inline", "inherits": "base", "configurePreset": "inline" },
     { "name": "python", "inherits": "base", "configurePreset": "python" },
+    { "name": "web", "inherits": "base", "configurePreset": "web" },
     { "name": "xcode", "inherits": "base", "configurePreset": "xcode", "configuration": "Debug" }
   ],
   "workflowPresets": [
@@ -166,6 +174,14 @@
         { "type": "configure", "name": "python" },
         { "type": "build", "name": "python" },
         { "type": "test", "name": "python" }
+      ]
+    },
+    {
+      "name": "web",
+      "steps": [
+        { "type": "configure", "name": "web" },
+        { "type": "build", "name": "web" },
+        { "type": "test", "name": "web" }
       ]
     }
   ]

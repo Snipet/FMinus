@@ -76,6 +76,26 @@ set(FMINUS_PUGIXML_VERSION "1.16")
 set(FMINUS_PUGIXML_URL "https://github.com/zeux/pugixml/archive/refs/tags/v${FMINUS_PUGIXML_VERSION}.tar.gz")
 set(FMINUS_PUGIXML_SHA256 "357bcab8877dc9943f355d3a72daba1b053238ba955f50fa81586afb65090219")   # 588,574 bytes
 
+# libcurl: the HTTP(S) client of the web library, fminus_web (cmake/FMinusWeb.cmake: built at configure time into the
+# deps cache, HTTP and HTTPS only, static). Fetched only when FMINUS_WEB is ON. The release's tarball from curl.se (the
+# same bytes are the release's asset on GitHub, curl/curl, whose tag is the version with underscores, curl-8_23_0: both
+# were downloaded and hashed). Scripts/pin-web.sh prints the version and digest lines.
+set(FMINUS_CURL_VERSION "8.23.0")
+string(REPLACE "." "_" FMINUS_CURL_TAG "curl-${FMINUS_CURL_VERSION}")
+set(FMINUS_CURL_URLS
+    "https://curl.se/download/curl-${FMINUS_CURL_VERSION}.tar.xz"
+    "https://github.com/curl/curl/releases/download/${FMINUS_CURL_TAG}/curl-${FMINUS_CURL_VERSION}.tar.xz")
+set(FMINUS_CURL_SHA256 "8dadd7d2536a314f982ad05a651b713f426bf7d02cc2c76cffb9796f2218e6c5")   # 2,990,916 bytes
+
+# Mbed TLS: libcurl's TLS on macOS and Linux (cmake/FMinusWeb.cmake; Windows uses its own, Schannel, and fetches none).
+# The 4.1 long-term-support branch (supported to at least March 2029), with TF-PSA-Crypto inside its tarball. Fetched
+# only when FMINUS_WEB is ON, on macOS and Linux. The release's own archive, a GitHub release asset; its SHA-256 is
+# the one the release's notes give ("The SHA256 hashes for the archives are"), and the downloaded archive's.
+set(FMINUS_MBEDTLS_VERSION "4.1.1")
+set(FMINUS_MBEDTLS_URL
+    "https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-${FMINUS_MBEDTLS_VERSION}/mbedtls-${FMINUS_MBEDTLS_VERSION}.tar.bz2")
+set(FMINUS_MBEDTLS_SHA256 "3359a349e23db3d5536fcee032ae7b2ecbfc08972fab643089b5cbf2a375c98c")   # 7,099,934 bytes
+
 # pybind11: the Python package's extension module is written with it (python/, cmake/FMinusPython.cmake; header-only).
 # Fetched only when FMINUS_BUILD_PYTHON is ON. The release's source distribution on PyPI, whose index publishes this
 # SHA-256 beside it (https://pypi.org/project/pybind11/<version>/#files).

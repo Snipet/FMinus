@@ -4,7 +4,8 @@
 // error at it in clang's words; the effects' third class, a builtin that blocks; and the builtins of a build option
 // this build leaves out, still known names. The builtins that take a literal here are scaffolding,
 // __fminus_string_hash and __fminus_string_hash_blocking (ir/Calls.cpp): the hash of the text a format and its ints
-// make, which this file computes again in C++.
+// make, which this file computes again in C++. They stay while the real ones are each a build option's (http_wait, the
+// one real builtin that blocks, is FMINUS_WEB's, off by default): these test both in every build (Calls.cpp says so).
 #include "Compile.h"
 #include "fminus/Config.h"
 #include "frontend/Preprocessor.h"
@@ -224,7 +225,7 @@ TEST_CASE("a string literal anywhere but a builtin's string parameter is an erro
 TEST_CASE("a builtin that blocks is refused in a nonblocking function, and allowed in a nonallocating one",
           "[codegen][strings][effects]")
 {
-    // The effects' three classes: a builtin allocates (fft_create), blocks (only scaffolding yet), or is wait-free.
+    // The effects' three classes: a builtin allocates (fft_create), blocks (http_wait, and the scaffolding), or is wait-free.
     using namespace fminus::ir::detail;
     CHECK(allocates("fft_create"));
     CHECK(!blocks("fft_create"));
@@ -255,8 +256,8 @@ TEST_CASE("a builtin that blocks is refused in a nonblocking function, and allow
 
 TEST_CASE("a builtin of a build option left out is a known name, and its call names the option", "[strings]")
 {
-    // The json_ builtins need FMINUS_JSON (JsonTest.cpp), and xml_ ones will need FMINUS_XML: the message, and what
-    // this build has, as fminus/Config.h says.
+    // The json_ builtins need FMINUS_JSON (JsonTest.cpp), the xml_ ones FMINUS_XML (XmlTest.cpp) and the http_ ones
+    // FMINUS_WEB (HttpTest.cpp): the message, and what this build has, as fminus/Config.h says.
     using namespace fminus::ir::detail;
     CHECK(notBuilt("json_float", Feature::Json)
           == "'json_float' needs the JSON parser, which this build of FMinus leaves out (FMINUS_JSON=OFF)");
@@ -265,14 +266,19 @@ TEST_CASE("a builtin of a build option left out is a known name, and its call na
     CHECK(isBuilt(Feature::None));
     CHECK(isBuilt(Feature::Json) == (FMINUS_HAS_JSON != 0));
     CHECK(isBuilt(Feature::Xml) == (FMINUS_HAS_XML != 0));
+    CHECK(notBuilt("http_get", Feature::Web)
+          == "'http_get' needs the web library, which this build of FMinus leaves out (FMINUS_WEB=OFF)");
+    CHECK(isBuilt(Feature::Web) == (FMINUS_HAS_WEB != 0));
 
     // A program's macros for them say the same: defined, to 1, where the feature is built in.
     const auto predefined = fminus::frontend::predefinedMacros();
-    REQUIRE(predefined.size() == 2);
+    REQUIRE(predefined.size() == 3);
     CHECK(predefined[0].name == "__FMINUS_JSON__");
     CHECK(predefined[0].defined == (FMINUS_HAS_JSON != 0));
     CHECK(predefined[1].name == "__FMINUS_XML__");
     CHECK(predefined[1].defined == (FMINUS_HAS_XML != 0));
+    CHECK(predefined[2].name == "__FMINUS_WEB__");
+    CHECK(predefined[2].defined == (FMINUS_HAS_WEB != 0));
 }
 
 TEST_CASE("a prototype of a runtime builtin declares nothing new, and a definition is refused", "[codegen][strings]")

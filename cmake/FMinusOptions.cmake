@@ -12,6 +12,11 @@ option(FMINUS_BUILD_PYTHON "Build the Python package, python/ (needs Python's de
 # (cmake/FMinusJson.cmake), XML pugixml (cmake/FMinusXml.cmake).
 option(FMINUS_JSON "The JSON parser and the json_* builtins (fetches yyjson and fast_float)" ON)
 option(FMINUS_XML "The XML parser and the xml_* builtins (fetches pugixml and fast_float)" ON)
+# The web library, fminus_web (src/web/: an HTTP(S) client and the host's policy over what a program may reach), which
+# fminus_lib links only with this on. Off by default: with it off nothing is fetched or built for it. On, it fetches
+# libcurl and, on macOS and Linux, Mbed TLS (Windows uses Schannel), and builds both at configure time into the deps
+# cache (cmake/FMinusWeb.cmake).
+option(FMINUS_WEB "The web library: an HTTP(S) client under the host's policy (fetches libcurl, Mbed TLS)" OFF)
 # The JSON parser's limits on a document (src/runtime/Json.cpp): its size in bytes, and how deeply its arrays and
 # objects may nest. json_parse of a document past either is null, as of one that is not JSON. fminus/Config.h has both.
 set(FMINUS_JSON_MAX_BYTES 67108864)   # 64 MiB

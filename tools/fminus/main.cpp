@@ -29,6 +29,10 @@
 //     fminus taps.fm --run tap 20 --bounds-check
 //                                           bounds checks: an index outside its array stops the call, which says
 //                                           where (also for --emit, as the loop budget)
+//     fminus load.fm --run load --web-allow 'https://example.com/presets/*'
+//                                           --run's program may reach the URLs the patterns allow (none by default:
+//                                           every http_get refused); --web-ca-file trusts a PEM file's roots instead
+//                                           of the system's. An executable reads FMINUS_WEB_ALLOW when it runs instead
 //     fminus diodetone.cir --emit fm        the FMinus module a circuit netlist generates (fminus::circuit,
 //                                           docs/circuits.md); a .cir compiles and runs as that text would
 //     fminus play.fm --run dc 1             play.fm's #include "diodetone.cir" reads the module it generates
@@ -47,6 +51,9 @@
 #include "runtime/Runtime.h"
 #include "support/Aot.h"
 #include "support/HostTarget.h"
+#if FMINUS_HAS_WEB
+#include "web/Web.h"
+#endif
 
 #include <CLI/CLI.hpp>
 
@@ -509,6 +516,8 @@ int main(int argc, char** argv)
     unsigned threads = 0;
     std::optional<std::int64_t> loopBudget;
     bool boundsCheck = false;
+    std::vector<std::string> webAllow;
+    std::string webCaFile;
     CircuitSettings circuitSettings;
     app.add_option("input", input, "FMinus source file ('-' for stdin)")->required();
     app.add_option("args", runArgs,
@@ -567,6 +576,13 @@ int main(int argc, char** argv)
                  "Compile with bounds checks, for development: an access outside an array the compiler can see (a[i], "
                  "m.taps[i], a + i, &a[i]) stops the call, which says where, the array and the index (--run's call, "
                  "an executable's main; --emit ll and asm show the checks)");
+    app.add_option("--web-allow", webAllow,
+                   "Let --run's program reach the URLs this pattern allows (https://example.com/presets/*; repeat it "
+                   "for more): with none, every http_get and http_post is refused. Needs the web library (FMINUS_WEB); "
+                   "an executable reads FMINUS_WEB_ALLOW when it runs instead")
+        ->allow_extra_args(false);
+    app.add_option("--web-ca-file", webCaFile,
+                   "With --web-allow: trust the root certificates in this PEM file instead of the system's");
     app.add_flag("--self-test", circuitSettings.selfTest,
                  "Run the self-test of each circuit netlist (.cir) the program reads and generate it with the answer: "
                  "it chooses the configuration the netlist leaves open (seconds; docs/circuits.md)");
@@ -580,6 +596,18 @@ int main(int argc, char** argv)
     circuitSettings.threads = threads;
     if (emit == "exe" && run.empty() && output == "-")
         return fail("--emit exe: an executable needs a file name (-o)");
+    if ((!webAllow.empty() || !webCaFile.empty()) && FMINUS_HAS_WEB == 0)
+        return fail("--web-allow: this build of FMinus leaves out the web library (FMINUS_WEB=OFF)");
+    if ((!webAllow.empty() || !webCaFile.empty()) && run.empty())
+        return fail("--web-allow: for --run's call only; an executable reads FMINUS_WEB_ALLOW (and FMINUS_WEB_CA_FILE) "
+                    "when it runs");
+#if FMINUS_HAS_WEB
+    fminus::web::Policy webPolicy;
+    webPolicy.allow = webAllow;
+    webPolicy.caFile = webCaFile;
+    if (const std::string wrong = fminus::web::checkPolicy(webPolicy); !wrong.empty())
+        return fail("--web-allow: " + wrong);
+#endif
 
     const std::array<llvm::OptimizationLevel, 4> levels{llvm::OptimizationLevel::O0, llvm::OptimizationLevel::O1,
                                                         llvm::OptimizationLevel::O2, llvm::OptimizationLevel::O3};
@@ -730,8 +758,10 @@ int main(int argc, char** argv)
             argument.slot = fminus::jit::CallSlot::of(static_cast<void*>(argument.storage.data()));
         }
 
-        // What each bounds check's number means (opt/BoundsCheck.h), read before the JIT takes the module.
+        // What each bounds check's number means (opt/BoundsCheck.h), read before the JIT takes the module; and
+        // whether it has a web context to set (ir/Web.cpp).
         const std::vector<fminus::opt::BoundsSite> sites = fminus::opt::boundsSites(*module);
+        [[maybe_unused]] const bool usesWeb = module->getNamedGlobal(fminus::ir::kWebContextSymbol) != nullptr;
         // A program with a parallel region runs it on the runtime's pool, started for the call (runtime/Runtime.h).
         const RuntimePool pool(module->getFunction("fminus_rt_parallel_for") != nullptr && threads != 1);
         auto jit = fminus::jit::Jit::create(optimisation);
@@ -741,6 +771,22 @@ int main(int argc, char** argv)
             return fail(std::move(error));
         if (auto address = (*jit)->lookup(run); !address)
             return fail(address.takeError());
+#if FMINUS_HAS_WEB
+        // The program's web context, from --web-allow, as a host's Program sets it (src/web/Web.h): its handle in the
+        // module's global. Declared after the JIT, so destroyed before it: its requests cancelled and freed first.
+        std::unique_ptr<fminus::web::Context> web;
+        if (usesWeb && !webAllow.empty())
+        {
+            std::string wrong;
+            web = fminus::web::Context::create(webPolicy, wrong);
+            if (web == nullptr)
+                return fail("--web-allow: " + wrong);
+            auto global = (*jit)->lookup(fminus::ir::kWebContextSymbol);
+            if (!global)
+                return fail(global.takeError());
+            *global->toPtr<void**>() = web->handle();
+        }
+#endif
         // The thunk that calls it by its signature (jit/Call.h), as Program::call does.
         auto thunk = fminus::jit::callThunk(**jit, run, *result, parameters);
         if (!thunk)

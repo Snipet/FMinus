@@ -315,5 +315,9 @@ To bind something more of the header: add the method to its class in `Module.cpp
 - **A list of a program's functions.** The library lists a module's methods (`module.methods`) but not the functions
   outside modules, so `dir(program)` does not show them.
 - **`fminus::math`** (the kernels as C++ functions), and executables (`fminus-build`'s side, `support/Aot.h`).
+- **The web library's host API** (`Options::web`, `webRequests()`, `stopWeb()`: [web.md](web.md)): a program compiled
+  from Python in a build with `FMINUS_WEB` has the default policy, no network, and every request it makes is
+  `HTTP_REFUSED`. The package builds and works unchanged in such a build (not tried here: the two options together
+  were never built).
 - **Wheels.** There is no binary distribution: pip builds from the checkout. Built and tested on Linux (x86-64,
   CPython 3.13, clang 18); macOS and Windows build the same sources, and have not been tried.

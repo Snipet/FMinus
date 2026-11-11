@@ -24,8 +24,9 @@ and its errors values; and where the JIT put each function's machine code, which
 to, with what the optimiser inlined into it. Recipe 38 is the first step towards a web library and parsers of JSON and
 XML: C's string literals as builtins' arguments, formats with places for ints, checked as clang checks `printf`'s, bytes
 decoded into floats, a builtin that blocks, and the build options a builtin can need; recipe 39 is the JSON parser
-on it, a document read by paths the compiler prepares, each number correctly rounded; and recipe 40 is the XML parser,
-made the same way. Then the pitfalls those recipes
+on it, a document read by paths the compiler prepares, each number correctly rounded; recipe 40 is the XML parser,
+made the same way; and recipe 41 is the web library, an HTTP(S) client a program reaches only under its host's policy.
+Then the pitfalls those recipes
 ran into, and design notes for what comes next. [simd.md](simd.md) has recipes 7 to 9, for vectors.
 
 Recipes 1 to 4 are in the compiler now (`tanhf` and `%`; `bool` and its operators; `if`, `while` and `for`), and so are
@@ -38,7 +39,7 @@ sizes of constant expressions), recipe 29 (the loop budget), recipe 30 (bounds c
 recipe 32 (one error a mistake, enumerated types, `-Wswitch`), recipe 33 (`double`), recipe 34 (2-D arrays), recipe 35
 (field attributes), recipe 36 (calls by name), recipe 37 (code ranges, for a profiler), recipe 38 (string literals as
 builtins' arguments, bytes to numbers, and the build options of builtins), recipe 39 (the JSON parser, and paths
-the compiler prepares) and recipe 40 (the XML parser), so their sections describe
+the compiler prepares), recipe 40 (the XML parser) and recipe 41 (the web library), so their sections describe
 how the code you have got there: read a section beside the files it names. Recipes 5 and 6, a runtime function and a
 pass, are not part of the language; they live in [recipes/](recipes/) as a patch, so you can apply them to see them
 work. None of these are sketches: each was applied to this repository, built with `-Werror`, and tested in the dev and
@@ -7186,8 +7187,9 @@ and so in a nonblocking one) and every other, trusted, as clang trusts its own. 
 waits for a response, which a nonblocking function may not do, and allocates nothing, which a nonallocating one may.
 Each runtime builtin now names its class, `RuntimeEffect::WaitFree`, `Blocks` or `Allocates`, and `unsafe` asks
 `blocks(name)` after `allocates(name)`: a call of one that blocks is an error in a nonblocking function, in clang's
-words, with the notes down to it, and fine in a nonallocating one. Nothing in the language blocks yet;
-`__fminus_string_hash_blocking`, the scaffolding's second name, is classed so for the tests.
+words, with the notes down to it, and fine in a nonallocating one. Nothing in the language blocked yet;
+`__fminus_string_hash_blocking`, the scaffolding's second name, is classed so for the tests. (Recipe 41's `http_wait`
+is the first real one; the scaffolding stays, for builds without the web library: recipe 41 says why.)
 
 ### The build options a builtin can need
 
@@ -7712,6 +7714,206 @@ were built and their whole suites run; `nm` on each one's `libfminus_runtime.a` 
 - `examples/wavetable/`: `initXml` loads the same pack from XML (three tables as text, one as an attribute's list),
   and `--check` compares its output with the JSON loader's and C++'s, bit for bit, and refuses five broken XML
   documents.
+
+## Recipe 41: the web library, an HTTP(S) client under the host's policy
+
+*In the compiler. Code: `src/web/` (the library, `fminus_web`: `Web.h` and `Web.cpp`, the C functions and the I/O
+thread, and `Context::stop`; `Policy.h` and `Policy.cpp`, the pattern language, the URL rules and the address check;
+`Roots*.cpp`; `Main.cpp`, an executable's context; `WebSymbols.def`); the `http_` entries of `kRuntimeBuiltins`,
+`Feature::Web`, `Param::Url`, `Param::ContentType`, `Result::Bytes` and their lines in `lowerRuntimeBuiltin`, and the
+`fminus_web_` facts (`src/ir/Lowering.h`, `Calls.cpp`); `src/ir/Web.cpp` (a URL's checks, the requests' metadata, the
+context global, the status codes' names) and its hooks in `named` (`Functions.cpp`) and the undeclared-identifier
+errors (`Memory.cpp`, `Constants.cpp`); `__FMINUS_WEB__` (`Preprocessor.cpp`); `Program::Options::web`,
+`webRequests()` and `stopWeb()` (`include/fminus/FMinus.h`, `src/api/FMinus.cpp`); the JIT's symbols
+(`support/JitRuntime.cpp`), an executable's context and libraries (`support/Aot.cpp`, `Aot.h`); the driver's
+`--web-allow` and `--web-ca-file` (`tools/fminus/main.cpp`); `cmake/FMinusWeb.cmake`, the curl and Mbed TLS pins,
+`FMINUS_WEB` and `FMINUS_HAS_WEB`, the `web` preset, the library's and the link list's lines in `src/CMakeLists.txt`;
+`Scripts/pin-web.sh`, the pins' lines for the next releases (its libcurl half run here; GitHub's API, which its Mbed TLS
+half reads, refuses this machine).
+Tests: `tests/unit/WebTest.cpp` (`[web]`: the library against a loopback server, and programs through the JIT and as
+executables), `tests/unit/HttpTest.cpp` (the builtins, in every build), `tests/lit/fminus/web.fm`, `web-errors.fm` and
+`web-off.fm` (lit's new `web` feature); the example, `examples/fetch/`. Built with `-Werror` and tested in the
+`release` preset on Linux x86-64 only, in a tree with `-DFMINUS_WEB=ON` and in the default tree without it, every test
+passing but the one this machine cannot run (the smoke test of LLVM's own `opt`, as for recipes 38 to 40); the
+library's own tests under GCC's ThreadSanitizer and AddressSanitizer, outside the presets, and `stop()` racing
+`close`, waits and new requests under both, in a harness of its own (libcurl and Mbed TLS uninstrumented); not yet in
+`dev`, `web` or `asan`, nor on macOS or Windows. [web.md](web.md) is its manual.*
+
+The third family of recipe 38's kind, and the one the strings were for. A program fetches what it plays, off the audio
+thread, from a URL its host allows:
+
+```c
+void* r = http_get("https://example.com/presets/%d.json", k);   // a request, at once; refused unless allowed
+if (http_wait(r, 10000) == 200)                                 // blocks: not in a nonblocking function
+{
+    void* doc = json_parse(http_body(r), http_size(r));
+    gain = json_float(doc, "/gain", 1.0f);
+    json_free(doc);
+}
+http_close(r);
+```
+
+It is the report's recommendation, [research/web/README.md](research/web/README.md) §4.1, §4.4, §5, §7 and §8, with
+its §10's answers as it gives them: literals only for strings (B), HTTP(S) GET and POST first with no WebSocket and no
+server, libcurl with Mbed TLS (Schannel on Windows) bundled and pinned, `FMINUS_WEB` off by default, and the name
+"web".
+
+### The library: its own, beside the runtime
+
+`fminus_web` is a static library of its own (`src/web/`, globbed as `src/circuit/` is), never part of
+`fminus_runtime`: the runtime is what every host and every executable links, and networking brings a thread that must
+be joined before a plugin unloads, system libraries and a TLS stack, which a host that wants none of them should not
+have in its binary at all. `fminus_lib` links it only with the option on. libcurl and Mbed TLS are built at configure
+time into the deps cache, as Bison and Flex are (`cmake/FMinusWeb.cmake`): fetched once, configured, built and
+installed with their own CMake into `install/<name>-<version>-<flavor>`, the flavor a hash of the compiler and the
+arguments, then found there with `find_package` (each `<name>_DIR` cleared first, so a tree never keeps an install of
+another flavor that an earlier configure cached). libcurl is HTTP and HTTPS only; both are hidden and
+position-independent. [web.md](web.md) has the rest: one I/O thread on libcurl's multi interface, a context a host's
+policy, the checks at start, at each redirect and on each connection.
+
+`Context::stop()` is this recipe's addition to the library: the flag first, under the context's mutex, so a request
+started after it is cancelled where it starts (and one queued before it, where its hop begins, on the I/O thread);
+then a cancel of each request still pending, queued under the mutex and waited for. `http_close` now waits for every
+command queued before it is freed (`Engine::posted`, a barrier): a cancel `stop()` queued for a request that ended
+first would otherwise reach the I/O thread after the request was freed.
+
+### The builtins
+
+| Builtin | Parameters | Result | Effect |
+|---|---|---|---|
+| `http_get` | `Url` | `Pointer` | allocates |
+| `http_post` | `Url`, `Bytes`, `Int`, `ContentType` | `Pointer` | allocates |
+| `http_wait` | `Handle`, `Int` | `Int` | blocks |
+| `http_status`, `http_size`, `http_progress` | `Handle` | `Int` | wait-free |
+| `http_body` | `Handle` | `Bytes`, a `const void*` | wait-free |
+| `http_cancel`, `http_close` | `Handle` | `Void` | allocates |
+
+Their entries in `kRuntimeBuiltins` name `Feature::Web`, so a build without the library knows every name and refuses
+a call of one with `notBuilt`'s error, and their effect class, which `Effects.cpp` reads with no change: recipe 38
+built the third class, `Blocks`, for `http_wait`, which is the first real builtin in it. Two new parameter kinds:
+
+- **`Param::Url`** is a format whose ints come **last**, after every other argument, as `printf`'s do
+  (`http_post(url, data, bytes, type, k)`), where a path's follow it (`json_float(doc, path, k, fallback)`).
+  `lowerRuntimeBuiltin` computes where the ints start (`intsAt`) and does not shift the other parameters past them
+  when the format is a URL (`trailing`). Before its text, a URL passes the program's web context, loaded from the
+  module's global (`webContext`), so `http_get(url, ...)` calls `fminus_web_http_get(context, text, length, ints,
+  count)` with no hidden parameter in the table. Then `checkUrl`: no byte a URL cannot hold (a control byte, CR and
+  LF among them, a space, a backslash, anything not ASCII), a scheme of `http` or `https`, and no `@` before the path.
+  Each is an error at its byte, of a request the library would refuse anyway: what the compiler can see, it says
+  where it is written.
+- **`Param::ContentType`** is a string: its text and length, no ints, checked by `checkContentType` (printable ASCII,
+  at most 255 bytes).
+
+And a result, **`Result::Bytes`**, a `const void*`: `http_body`'s, which the program may only read.
+
+A null handle is the library's to handle: every function takes null and does nothing (`http_status` gives
+`HTTP_INVALID`). There is no null pointer constant in FMinus, but a `void*` parameter or field may be one.
+
+### What the library's functions touch, told to LLVM
+
+`kRuntimeFacts` gives each of them a kind (recipe 19), and each kind attributes that are true of `Web.cpp`:
+
+| Kind | Functions | Attributes |
+|---|---|---|
+| `WebStart` | `get`, `post` | `nounwind`, `willreturn`; `memory(argmem: readwrite, inaccessiblemem: readwrite, errnomem: write)`; the URL, the ints, the body and the type `readonly captures(none)` (the context's pointer is captured: the request keeps it); `noundef` result, not `noalias` (a refused request with no context is one shared request) |
+| `WebWait`, `WebEnd` | `wait`; `cancel`, `close` | `nounwind`, `memory(argmem: readwrite, inaccessiblemem: readwrite)`, the request `captures(none)`; no `willreturn`, as each waits for another thread |
+| `WebRead` | `status`, `size`, `body`, `progress` | `nounwind`, `willreturn`, `nofree`, `memory(argmem: readwrite, inaccessiblemem: readwrite)`, `captures(none)` |
+
+The reads are the case to get right. Each is an acquire load of what the I/O thread publishes, so it is **not**
+`readonly`, nor `nosync` (an acquire load synchronises with the store that published): were LLVM told a read only
+reads, it could merge two calls in a polling loop, or move one out of the loop, and a `process` that polls for a late
+table would never see it arrive. Saying they may write the request's memory (opaque to the program, as an FFT plan's
+is) keeps every call where the program wrote it, and still tells LLVM that none of them touches a module's fields.
+
+### The program's context, and what the host sees
+
+**The context** is a global of the module, `fminus_web_context` (`ir::kWebContextSymbol`), a pointer, null until the
+host sets it, defined at the first request a program starts (`webContext`), exactly as the loop budget's
+`fminus_rt_loop_budget` is (recipe 29). `Program::compile` creates the program's `web::Context` from `Options::web`
+when the program has the global and the host allowed something, looks the global up (which compiles the module, as
+the budget's look-up does) and stores the context's handle in it. A null context reaches nothing, in the library, so
+the default policy costs no context at all. The program cannot name the global (a function of its name is an error),
+nor the library's functions: nothing it asks of the library can widen the policy. (A program's own external
+functions are another matter, and not the library's: [web.md](web.md), "The policy is the library's, not a sandbox".)
+
+**The URLs** are literals, so the code generator records each call's in the module's named metadata,
+`fminus.web.requests`: its method, its pattern (each `%d` a `*`, each `%%` a `%`), its file, line and column
+(`recordWebRequest`), as the bounds checks record their sites (recipe 30). `ir::webRequests` reads them back, and
+`Program::webRequests()` returns them, before any of the program's code has run.
+
+**The status codes** are names a program uses without declaring them: `named()`, C++'s lookup in a method, falls back
+past the file's scope to `webStatus`, a static binding for each name with an enumeration constant's value, so
+`HTTP_REFUSED` folds, labels a `case` and sizes an array as an enumerator does, and a program's own declaration of
+the name, in a block or at the file's scope, is found first. In a build without the library `webStatus` finds
+nothing, and the two places that report an undeclared identifier (`lvalue`, `fold`) ask `unbuiltWebStatus` first, so
+`HTTP_REFUSED` is the error that names the option. *Why not macros:* FMinus substitutes none in code (recipe 31). *Why
+not an enumeration of a type of its own:* a program could not name the type.
+
+### Lifetime
+
+`~Program` (its `Impl`'s destructor) stops the context, then destroys it, before the JIT goes: every request
+cancelled and freed, every thread in the library's `http_wait` woken and out of it, the I/O thread joined if it was the
+last context. A thread still inside the program's code is the host's to stop first: `Program::stopWeb()` wakes one in
+`http_wait` with `HTTP_CANCELLED`, the host joins it, and only then destroys the `Program`, as it must for any thread
+running a program's code.
+
+### The driver and executables
+
+Neither has a host, so each takes its policy from the person who runs it, default-deny: `fminus --run` from
+`--web-allow PATTERN` (repeatable) and `--web-ca-file`, checked by `web::checkPolicy` before anything compiles, and an
+executable from its environment, `FMINUS_WEB_ALLOW` and `FMINUS_WEB_CA_FILE`, when it starts. `addEntryPoint` gives
+the C `main` of a module with the context global a call of `fminus_web_main_start(&fminus_web_context, argv[0])`
+before the program's `main` (a non-zero result, a refused policy, is the exit status, 2, its message already on
+stderr), and `fminus_web_main_stop` after it. Those two make a context from the environment, so no program may reach
+them: `WebSymbols.def` lists them under `FMINUS_WEB_MAIN_SYMBOL`, which `Constants.cpp` reads (the names stay reserved)
+and `JitRuntime.cpp` does not (a JIT never defines them), and `declare` (`Functions.cpp`) refuses a function of a
+program, a prototype or a definition, whose name begins `fminus_web_` (`ir::kWebPrefix`), in every build, so that a
+program cannot call the library past its literals and `webRequests()`. `emitExecutable` links the web library's archives only when the module
+declares a `fminus_web_` function: `src/CMakeLists.txt` writes the list (`libfminus_web.a`, then `FMINUS_WEB_LINK`
+from `FMinusWeb.cmake`: libcurl's and Mbed TLS's archives and the system libraries libcurl's own CMake links on the
+platform) into `generated/support/WebLink.inc`, which `linkExecutable` includes. An executable that makes no request
+is linked as before.
+
+### The scaffolding stays
+
+Recipe 38 made `__fminus_string_hash` and `__fminus_string_hash_blocking` to prove a literal's way to the runtime and
+the blocking class before any real builtin needed them, and said they would go when builtins of their own came. They
+stay: the default build has no web library, so `http_wait` cannot carry a blocking call through the effects there,
+and a build with both parsers off has no other format. `StringTest.cpp` and `strings*.fm` keep testing both in every
+build; `HttpTest.cpp` and `web*.fm` test the real ones where the library is.
+
+### What it changes for programs and hosts
+
+- **Programs** that use none of it compile to the same IR. `http_get` and its kin are new builtins in every build, so a
+  program's function of one of those names is an error; a program's own `HTTP_REFUSED` hides FMinus's. `__FMINUS_WEB__`
+  cannot be defined.
+- **Hosts** get `Program::Options::web` (default: no network), `webRequests()` and `stopWeb()`, in every build (the
+  policy is not read without the library), and `FMINUS_HAS_WEB` in `fminus/Config.h`. A host linking `FMinus::FMinus`
+  in a build with the library links `fminus_web`, and through it libcurl and Mbed TLS.
+- **The build** is unchanged by default: nothing is fetched or built with the option off. On, a first configure
+  downloads and builds libcurl and Mbed TLS (a minute or two).
+- **The VS Code grammar** (0.17.0) colours the `http_` builtins and the status codes' names.
+
+### Tests
+
+- `tests/unit/WebTest.cpp`: the library at its own level (patterns, the address check, every
+  status against a loopback server it starts, redirects, limits, HTTPS with its own certificate authority, contexts
+  destroyed with requests in flight and threads waiting); then programs, against the same server: one fetches a JSON
+  body through the JIT under `Options::web` and reads its numbers, and the same as an executable, run with
+  `FMINUS_WEB_ALLOW`, without it, with a pattern that does not match and with one the library refuses (exit 2); the
+  policy refusing through `http_status` (a URL, and a redirect, not allowed, and nothing sent); a `Program` destroyed
+  with requests in flight, and stopped with a thread in `http_wait` inside the program's code.
+- `tests/unit/HttpTest.cpp`, in every build: the effects of each builtin, through the table and through the effects'
+  errors; each builtin and status name known, with the option's error in a build without it; then, with it, the
+  status codes' values against `Web.h`'s, a URL's errors at their columns, `webRequests()` for four call sites in two
+  files, `Options::web` checked by `compile()`, and the default policy refusing, and a null handle, through the JIT.
+- `tests/lit/fminus/web.fm`: the calls and the declarations' attributes at `-O0`, the metadata, `--run` with no
+  pattern and with one that does not match (refused, no request made), a bad pattern, `--web-allow` with `--emit`, an
+  executable with and without `FMINUS_WEB_ALLOW`; `web-errors.fm`: each error once; `web-off.fm`: each name's error
+  and `--web-allow`'s in a build without the library.
+- `examples/fetch/`: `--check` serves the wavetable example's pack on 127.0.0.1, fetches it through the program, plays
+  it, compares the samples with the same pack loaded directly (identical), and checks a missing pack (404) and the
+  default policy (refused, no request).
 
 ## Pitfalls
 

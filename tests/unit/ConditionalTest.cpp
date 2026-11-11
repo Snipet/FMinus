@@ -270,12 +270,14 @@ TEST_CASE("FMinus predefines a macro for each feature of its build, which no one
     // Defined, to 1, where the build has the feature (fminus/Config.h), and not where it was configured without it.
     CHECK(condition("defined(__FMINUS_JSON__)") == (FMINUS_HAS_JSON ? "yes" : "no"));
     CHECK(condition("defined(__FMINUS_XML__)") == (FMINUS_HAS_XML ? "yes" : "no"));
+    CHECK(condition("defined(__FMINUS_WEB__)") == (FMINUS_HAS_WEB ? "yes" : "no"));
     CHECK(condition("__FMINUS_JSON__ + __FMINUS_XML__ == " + std::to_string(FMINUS_HAS_JSON + FMINUS_HAS_XML))
           == "yes");
     // Names C reserves for the implementation: a program's #define and #undef of one, and a host's, in a build with
     // the feature or without it.
     for (const auto& [name, what] : {std::pair{"__FMINUS_JSON__", "the JSON parser (FMINUS_JSON)"},
-                                     std::pair{"__FMINUS_XML__", "the XML parser (FMINUS_XML)"}})
+                                     std::pair{"__FMINUS_XML__", "the XML parser (FMINUS_XML)"},
+                                     std::pair{"__FMINUS_WEB__", "the web library (FMINUS_WEB)"}})
     {
         INFO(name);
         const std::string error = "'" + std::string(name) + "' cannot be used as a macro name: FMinus defines it in a "
@@ -288,7 +290,7 @@ TEST_CASE("FMinus predefines a macro for each feature of its build, which no one
     }
     // A skipped group's #define is text, as any of its lines is.
     CHECK(parsed("#if 0\n#define __FMINUS_JSON__ 2\n#endif\nfloat f() { return 1; }\n") == kOne);
-    CHECK(fminus::frontend::macroNameError("__FMINUS_WEB__") == std::nullopt);   // no such feature yet
+    CHECK(fminus::frontend::macroNameError("__FMINUS_NET__") == std::nullopt);   // no such feature
 }
 
 TEST_CASE("a macro is read only in conditions: its name in code is an error", "[frontend][conditional]")

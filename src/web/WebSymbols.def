@@ -1,0 +1,24 @@
+// src/web/WebSymbols.def: every function of the web library (Web.h) generated code may call, one
+// FMINUS_RUNTIME_SYMBOL(name) each, as runtime/RuntimeSymbols.def lists the runtime's. Only a build with FMINUS_WEB
+// has them (fminus/Config.h's FMINUS_HAS_WEB): a file that reads this one includes fminus/Config.h and reads it under
+// #if FMINUS_HAS_WEB. Add a line whenever Web.h gains a C function.
+//
+// An executable's C main calls the last two (support/Aot.cpp), a program never: they make a context from the
+// environment, so a JIT must not define them, and the list names them through FMINUS_WEB_MAIN_SYMBOL(name), which a
+// reader that reserves the names defines (ir/Constants.cpp) and support/JitRuntime.cpp does not. (A program cannot
+// declare any fminus_web_ name either: ir/Functions.cpp.)
+#ifndef FMINUS_WEB_MAIN_SYMBOL
+#define FMINUS_WEB_MAIN_SYMBOL(name)
+#endif
+FMINUS_RUNTIME_SYMBOL(fminus_web_http_get)
+FMINUS_RUNTIME_SYMBOL(fminus_web_http_post)
+FMINUS_RUNTIME_SYMBOL(fminus_web_http_wait)
+FMINUS_RUNTIME_SYMBOL(fminus_web_http_status)
+FMINUS_RUNTIME_SYMBOL(fminus_web_http_size)
+FMINUS_RUNTIME_SYMBOL(fminus_web_http_body)
+FMINUS_RUNTIME_SYMBOL(fminus_web_http_progress)
+FMINUS_RUNTIME_SYMBOL(fminus_web_http_cancel)
+FMINUS_RUNTIME_SYMBOL(fminus_web_http_close)
+FMINUS_WEB_MAIN_SYMBOL(fminus_web_main_start)
+FMINUS_WEB_MAIN_SYMBOL(fminus_web_main_stop)
+#undef FMINUS_WEB_MAIN_SYMBOL

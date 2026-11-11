@@ -113,7 +113,12 @@ TEST_CASE("functions compute what they say", "[codegen]")
   <dir>/de_DE.UTF-8` and `LOCPATH=<dir>` make one without root), `[xml]` (the XML parser and its builtins:
   `XmlTest.cpp`, made as `JsonTest.cpp` is, in both builds the same way, with its heap count, its strict-mode child and
   its locale test; and its proof that a document's entities are inert, which parses them in a child under a seccomp
-  filter that kills it if it opens a file or a socket, on Linux),
+  filter that kills it if it opens a file or a socket, on Linux), `[web]` (the web library, docs/web.md: `HttpTest.cpp`,
+  in every build, its builtins' effects, names and errors, and with `FMINUS_WEB` the status codes, `webRequests()` and
+  `Options::web` through `fminus::Program`; and `WebTest.cpp`, compiled only with `FMINUS_WEB`, the library against a
+  loopback HTTP and HTTPS server the test starts on an ephemeral port, then programs fetching from it through the JIT
+  and as executables. No test makes a request or a DNS lookup beyond the loopback interface, ever; their network part
+  is not compiled on Windows),
   `[circuit]` (the circuit compiler: `CircuitTest.cpp` its netlists,
   plans, equations (an OTA's against report §7.2's hand derivation; an inductor's, an E's and a G's stamps by hand, and
   RL and RLC responses as the bilinear map), the DC operating point by hand and its errors, the offset form (a biased
@@ -229,6 +234,7 @@ float gain(float x, float g)
 | `REQUIRES: system-darwin` (or `system-linux`) | the host's system (`veclib.fm`, which runs `--math fast`, needs Apple's vector math library) |
 | `REQUIRES: json` (or `UNSUPPORTED: json`) | a build with the JSON parser, `FMINUS_JSON`, as the build tree's `fminus/Config.h` says (`json.fm`, `json-errors.fm`; `json-off.fm` runs only without it) |
 | `REQUIRES: xml` (or `UNSUPPORTED: xml`) | a build with the XML parser, `FMINUS_XML`, the same way (`xml.fm`, `xml-errors.fm`; `xml-off.fm` runs only without it) |
+| `REQUIRES: web` (or `UNSUPPORTED: web`) | a build with the web library, `FMINUS_WEB`, the same way (`web.fm`, `web-errors.fm`, which make no request; `web-off.fm` runs only without it) |
 | `%if arm64 %{ ... %}` | a RUN line only on arm64, so the rest of the file still runs elsewhere (`simd.fm`, `poly.fm`); `%if system-darwin && arm64 %{ ... %}` for Apple's assembly (`math.fm`) |
 | `%if avx %{ ... %}` | an x86-64 host whose JIT targets AVX, as `fminus-hostinfo --features` lists it (`lit.cfg.py` asks it): x86-64's vector machine code (`math-large.fm`) |
 

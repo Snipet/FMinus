@@ -2,6 +2,8 @@
 // path of libfminus_runtime.a) and FMINUS_AOT_SANITIZE (this tree's -fsanitize= list, or empty): src/CMakeLists.txt.
 #include "support/Aot.h"
 
+#include "fminus/Config.h"   // FMINUS_HAS_WEB
+#include "ir/CodeGen.h"       // ir::kWebContextSymbol
 #include "opt/BoundsCheck.h"
 #include "opt/LoopBudget.h"
 
@@ -79,6 +81,15 @@ namespace fminus::aot
             if (const std::string sanitize = FMINUS_AOT_SANITIZE; !sanitize.empty())
                 args.push_back("-fsanitize=" + sanitize);
         }
+#if FMINUS_HAS_WEB
+        if (options.linkWeb)
+        {
+            static constexpr const char* kWebLink[] = {
+#include "support/WebLink.inc"
+            };
+            args.insert(args.end(), std::begin(kWebLink), std::end(kWebLink));
+        }
+#endif
         args.insert(args.end(), options.driverArgs.begin(), options.driverArgs.end());
         args.emplace_back("-o");
         args.push_back(options.output);
@@ -106,6 +117,8 @@ namespace fminus::aot
         if (llvm::Error error = emitFile(module, machine, std::string(object), FileKind::Object))
             return error;
         options.objects.insert(options.objects.begin(), std::string(object));
+        for (const llvm::Function& function : module.functions())
+            options.linkWeb = options.linkWeb || (function.isDeclaration() && function.getName().starts_with("fminus_web_"));
         return linkExecutable(options);
     }
 
@@ -235,6 +248,22 @@ namespace fminus::aot
                 value = builder.CreateFPTrunc(value, floatType);   // exact: it was a float, widened
             values.push_back(value);
         }
+        // A program that calls the web library gets its context from the environment, there while main runs (Web.h,
+        // fminus_web_main_start), or exits with 2 when the library refuses what the environment allows.
+        llvm::GlobalVariable* web = module.getNamedGlobal(ir::kWebContextSymbol);
+        if (web != nullptr)
+        {
+            llvm::Value* name = builder.CreateLoad(pointerType, argv, "program");
+            llvm::Value* started = builder.CreateCall(
+                module.getOrInsertFunction("fminus_web_main_start", intType, pointerType, pointerType), {web, name},
+                "web");
+            llvm::BasicBlock* refused = llvm::BasicBlock::Create(context, "web.refused", entry);
+            llvm::BasicBlock* allowed = llvm::BasicBlock::Create(context, "web.ready", entry);
+            builder.CreateCondBr(builder.CreateICmpEQ(started, builder.getInt32(0)), allowed, refused);
+            builder.SetInsertPoint(refused);
+            builder.CreateRet(started);
+            builder.SetInsertPoint(allowed);
+        }
         // A program with a parallel region runs it on the runtime's pool, there while main runs.
         const bool parallel = module.getFunction("fminus_rt_parallel_for") != nullptr;
         if (parallel)
@@ -289,6 +318,9 @@ namespace fminus::aot
         }
         if (parallel)
             builder.CreateCall(module.getOrInsertFunction("fminus_rt_parallel_stop", builder.getVoidTy()));
+        if (web != nullptr)
+            builder.CreateCall(module.getOrInsertFunction("fminus_web_main_stop", builder.getVoidTy(), pointerType),
+                               {builder.CreateAlignedLoad(pointerType, web, llvm::Align(8), /*isVolatile=*/true)});
         if (!sites.empty())
             failedCheck(module, builder, sites, argc, argv);
         if (budget != nullptr)

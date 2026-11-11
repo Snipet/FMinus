@@ -43,6 +43,16 @@ namespace fminus::ir::detail
             error(function.location, quoted(function.name) + " is a builtin and cannot be redefined");
             return;
         }
+        // The web library's names (web/WebSymbols.def, the context's global, an executable's start and stop), in every
+        // build: a prototype of one would call the library itself, past the URL literal, its checks and
+        // webRequests(), and a definition would take its symbol. A program reaches the library through the http_
+        // builtins only (docs/web.md).
+        if (function.name.starts_with(kWebPrefix))
+        {
+            error(function.location, quoted(function.name) + " is a name of the web library, which the code FMinus "
+                                     "generates calls: a program cannot declare it");
+            return;
+        }
         if (const RuntimeBuiltin* runtime = findRuntimeBuiltin(function.name))
         {
             // A prototype with the builtin's own types, `int bytes_floats(const void* data, int bytes, float* out,
@@ -316,8 +326,9 @@ namespace fminus::ir::detail
 
     // What `name` names where it is used, as C++ looks a name up in a method: a block's variable or enumeration
     // constant; else, in a method, nothing if the module has a field or a method of the name (this's, which
-    // lvalue() and the calls find); else the file's enumeration constant or constant (Constants.cpp). Captures
-    // nothing; nullptr for a name none of them has.
+    // lvalue() and the calls find); else the file's enumeration constant or constant (Constants.cpp); else, in a build
+    // with the web library, a status code's name (HTTP_REFUSED: Web.cpp). Captures nothing; nullptr for a name none of
+    // them has.
     const Lowering::Binding* Lowering::named(const std::string& name) const
     {
         if (const Binding* binding = lookup(name))
@@ -328,6 +339,6 @@ namespace fminus::ir::detail
                 || std::ranges::find(module->methods, name) != module->methods.end()))
             return nullptr;
         const auto found = fileScope_.find(name);
-        return found != fileScope_.end() ? &found->second : nullptr;
+        return found != fileScope_.end() ? &found->second : webStatus(name);
     }
 } // namespace fminus::ir::detail

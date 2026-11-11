@@ -13,6 +13,9 @@
 #include "opt/LoopBudget.h"
 #include "runtime/Runtime.h"
 #include "support/HostTarget.h"
+#if FMINUS_HAS_WEB
+#include "web/Web.h"
+#endif
 
 #include <llvm/IR/DataLayout.h>
 #include <llvm/IR/DerivedTypes.h>
@@ -412,12 +415,25 @@ namespace fminus
         std::mutex calls;
         // A function the program defines, whose look-up links the program's code (codeRanges); empty when it has none.
         std::string linkName;
+        std::vector<WebRequest> webRequests;   // every http_get's and http_post's URL (ir/Web.cpp)
+#if FMINUS_HAS_WEB
+        // The program's web context (src/web/Web.h), whose handle the module's global holds; none when the program
+        // makes no request or the host allows nothing (a null context reaches nothing).
+        std::unique_ptr<web::Context> web;
+#endif
 
         Impl() = default;
         Impl(const Impl&) = delete;
         Impl& operator=(const Impl&) = delete;
         ~Impl()
         {
+#if FMINUS_HAS_WEB
+            // Before the code goes: every request cancelled and freed, every thread in http_wait woken and out of the
+            // library, and the I/O thread joined if this was its last context.
+            if (web != nullptr)
+                web->stop();
+            web.reset();
+#endif
             jit.reset();
             if (pool)
                 fminus_rt_parallel_stop();
@@ -448,6 +464,23 @@ namespace fminus
                    + " is not 0 (this machine's) or a power of two from 1 to 64\n";
             return nullptr;
         }
+
+#if FMINUS_HAS_WEB
+        web::Policy policy;
+        policy.allow = options.web.allow;
+        policy.maxBodyBytes = options.web.maxBodyBytes;
+        policy.timeoutMs = options.web.timeoutMs;
+        policy.maxRedirects = options.web.maxRedirects;
+        policy.maxRequests = options.web.maxRequests;
+        policy.caFile = options.web.caFile;
+        policy.privateAddresses = options.web.privateAddresses;
+        policy.resolve = options.web.resolve;
+        if (const std::string wrong = web::checkPolicy(policy); !wrong.empty())
+        {
+            errors = "fminus::Program: web: " + wrong + "\n";
+            return nullptr;
+        }
+#endif
 
         for (const auto& [name, value] : options.defines)
             if (const std::optional<std::string> wrong = frontend::macroNameError(name))
@@ -558,6 +591,12 @@ namespace fminus
 
         // What each bounds check's number means, for boundsViolation().
         std::vector<opt::BoundsSite> boundsSites = opt::boundsSites(*module);
+        // Every URL the program names, and whether it has a web context to set (ir/Web.cpp).
+        std::vector<WebRequest> webRequests;
+        for (ir::WebRequest& request : ir::webRequests(*module))
+            webRequests.push_back({std::move(request.method), std::move(request.pattern), std::move(request.file),
+                                   request.line, request.column});
+        [[maybe_unused]] const bool usesWeb = module->getNamedGlobal(ir::kWebContextSymbol) != nullptr;
 
         // A program with a parallel region runs it on the runtime's pool, from now until it is destroyed.
         const bool parallel = module->getFunction("fminus_rt_parallel_for") != nullptr && options.threads != 1;
@@ -623,6 +662,28 @@ namespace fminus
             impl->bounds = record->toPtr<fminus_rt_bounds_state*>();
             impl->boundsSites = std::move(boundsSites);
         }
+#if FMINUS_HAS_WEB
+        // The program's context, its handle in the module's global, which every request passes the library. Without
+        // a pattern to allow, none: the global stays null, and every request is refused.
+        if (usesWeb && !policy.allow.empty())
+        {
+            std::string wrong;
+            impl->web = web::Context::create(policy, wrong);
+            if (impl->web == nullptr)
+            {
+                errors = "fminus::Program: web: " + wrong + "\n";
+                return nullptr;
+            }
+            auto global = impl->jit->lookup(ir::kWebContextSymbol);
+            if (!global)
+            {
+                errors = llvm::toString(global.takeError()) + "\n";
+                return nullptr;
+            }
+            *global->toPtr<void**>() = impl->web->handle();
+        }
+#endif
+        impl->webRequests = std::move(webRequests);
         if (parallel)
         {
             fminus_rt_parallel_start();
@@ -817,6 +878,19 @@ namespace fminus
         violation.index = std::atomic_ref(impl_->bounds->index).load(std::memory_order_relaxed);
         violation.width = check.width;
         return violation;
+    }
+
+    const std::vector<Program::WebRequest>& Program::webRequests() const
+    {
+        return impl_->webRequests;
+    }
+
+    void Program::stopWeb() noexcept
+    {
+#if FMINUS_HAS_WEB
+        if (impl_->web != nullptr)
+            impl_->web->stop();
+#endif
     }
 
     void Program::clearBoundsViolation() noexcept
