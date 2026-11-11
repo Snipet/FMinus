@@ -20,6 +20,8 @@
 //     Hash.cpp          hash and randf: an int's bits mixed, and a float uniform in [-1, 1) from them, inline
 //     Web.cpp           the web library's builtins' own part: a URL literal checked and recorded for the host
 //                       (webRequests), the program's web context, and the status codes' names (HTTP_REFUSED, ...)
+//     WebServer.cpp     the web server's builtins' own part: a route literal checked and recorded for the host
+//                       (webRoutes), the route table http_listen hands the library, a query's name, a reply's format
 //     Vectors.cpp       vector literals, swizzles, and ?: lane by lane
 //     Memory.cpp        lvalues (variables, p[i], *p, components) read and written, arrays, &x, pointer arithmetic
 //     Modules.cpp       modules: their layout, fields, methods and calls of them, `this`, copies
@@ -102,7 +104,8 @@ namespace fminus::ir::detail
     };
 
     // A build option a builtin needs (cmake/FMinusOptions.cmake, fminus/Config.h): none, the JSON parser (FMINUS_JSON),
-    // the XML parser (FMINUS_XML) or the web library (FMINUS_WEB). A builtin of an option this build was configured without is still a known name:
+    // the XML parser (FMINUS_XML), the web library (FMINUS_WEB) or its server (FMINUS_WEB_SERVER, which needs
+    // FMINUS_WEB). A builtin of an option this build was configured without is still a known name:
     // a call of it is an error that names the option (notBuilt), not an undeclared function, and a definition of one
     // is refused, as any builtin's is (Functions.cpp).
     enum class Feature
@@ -111,6 +114,7 @@ namespace fminus::ir::detail
         Json,
         Xml,
         Web,
+        WebServer,
     };
     bool isBuilt(Feature feature);                                 // whether this build has it (Calls.cpp)
     std::string notBuilt(std::string_view name, Feature feature);   // the error of a call of `name`, which needs it
@@ -140,7 +144,12 @@ namespace fminus::ir::detail
     // The web library's take a URL, a format whose ints are the call's last arguments, after every other parameter
     // (as printf's are), checked further (Web.cpp: no byte a URL cannot hold, http or https, no credentials) and
     // recorded for the host, passed after the program's web context as a format is; and a content type, a string of
-    // printable ASCII.
+    // printable ASCII. The web server's take a route, a string that is a method and a path with places for numbers
+    // the request's path holds ("PUT /osc/%d/gain"), checked (WebServer.cpp) and recorded for the host and for the
+    // route table, passed as a string is; a query's name, a string of letters, digits, '_', '-' and '.'; and a reply's
+    // format, a format whose places are C's printf's %d (an int or a bool) and %g or %.Ng (a float or a double),
+    // checked as clang checks printf's, after which the call gives a double for each place, passed as their address and
+    // their count.
     enum class Param
     {
         Int,
@@ -158,6 +167,9 @@ namespace fminus::ir::detail
         XmlPath,
         Url,
         ContentType,
+        Route,
+        QueryName,
+        ReplyFormat,
     };
 
     // What a builtin of the runtime gives: an int, a float, a double, a bool (an int from the runtime, 0 or 1), a void*,
@@ -207,6 +219,26 @@ namespace fminus::ir::detail
         std::vector<Error> errors;
     };
     FormatScan scanFormat(std::string_view text);
+
+    // A reply's format (WebServer.cpp, scanReplyFormat): C's printf's %d, %g, %.Ng (N from 1 to 17) and %%. Each place,
+    // in order, the offset of its '%' and whether it takes a double (%g, %.Ng) or an int (%d); and its errors, each at
+    // the offset of the byte it is about, in clang's words for printf's where clang has words for it.
+    struct ReplyFormatScan
+    {
+        struct Place
+        {
+            std::size_t offset;
+            bool real;
+        };
+        std::vector<Place> places;
+        std::vector<FormatScan::Error> errors;
+    };
+    ReplyFormatScan scanReplyFormat(std::string_view text);
+
+    // A route literal's errors (WebServer.cpp, scanRoute): a method of GET, POST, PUT, PATCH or DELETE, one space, and a
+    // path of "/" and segments of letters, digits, '-', '.', '_', '~' and %d, none empty, "." or "..", with at most 8
+    // %d and never two together; each at the offset of the byte it is about. Empty: the route is good.
+    std::vector<FormatScan::Error> scanRoute(std::string_view text);
 
     // A JSON Pointer (RFC 6901) with a format's places (%d, %%), prepared (Paths.cpp, scanPath): its reference tokens
     // as the runtime's table holds them (runtime/Runtime.h), each its count of pieces and then a pair a piece, (offset,
@@ -615,6 +647,16 @@ namespace fminus::ir::detail
         const Binding* webStatus(const std::string& name) const;
         bool unbuiltWebStatus(SourceLocation location, const std::string& name);
 
+        // ---- WebServer.cpp ------------------------------------------------------------------------------------------
+        bool checkRoute(const ast::StringExpr& literal, SourceLocation where);
+        bool checkQueryName(const ast::StringExpr& literal, SourceLocation where);
+        std::optional<std::vector<llvm::Value*>> replyArguments(const ast::StringExpr& literal,
+                                                                const std::vector<const ast::Expr*>& values);
+        llvm::Value* replyValues(const std::vector<llvm::Value*>& values);
+        void recordWebRoute(SourceLocation location, const ast::StringExpr& literal);
+        std::vector<llvm::Value*> listenArguments(SourceLocation location);
+        void finishWebRoutes();
+
         // ---- Paths.cpp ----------------------------------------------------------------------------------------------
         llvm::Value* preparedPath(const ast::StringExpr& literal);
         llvm::Value* preparedXmlPath(const ast::StringExpr& literal, SourceLocation where);
@@ -727,5 +769,9 @@ namespace fminus::ir::detail
         std::optional<bool> doubleArithmetic_;
         std::deque<Extent> extents_;                                       // the arrays' extents values carry
         bool webContextClash_ = false;   // a function of the web context's name was reported (Web.cpp)
+        // The route literals of the program's http_is calls, each once, in the order they were lowered, and the calls
+        // of http_listen, which hand the library their table, made once all are known (WebServer.cpp).
+        std::vector<std::string> webRoutes_;
+        std::vector<llvm::CallInst*> webListens_;
     };
 } // namespace fminus::ir::detail

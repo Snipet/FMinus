@@ -6,7 +6,7 @@
 // count's low five), the right one arithmetic.
 #include "frontend/Preprocessor.h"
 
-#include "fminus/Config.h"   // FMINUS_HAS_JSON, FMINUS_HAS_XML
+#include "fminus/Config.h"   // FMINUS_HAS_JSON, FMINUS_HAS_XML, FMINUS_HAS_WEB, FMINUS_HAS_WEB_SERVER
 
 #include <algorithm>
 #include <array>
@@ -498,6 +498,7 @@ namespace fminus::frontend
             PredefinedMacro{"__FMINUS_JSON__", "the JSON parser", "FMINUS_JSON", FMINUS_HAS_JSON != 0},
             PredefinedMacro{"__FMINUS_XML__", "the XML parser", "FMINUS_XML", FMINUS_HAS_XML != 0},
             PredefinedMacro{"__FMINUS_WEB__", "the web library", "FMINUS_WEB", FMINUS_HAS_WEB != 0},
+            PredefinedMacro{"__FMINUS_WEB_SERVER__", "the web server", "FMINUS_WEB_SERVER", FMINUS_HAS_WEB_SERVER != 0},
         };
         return kPredefined;
     }

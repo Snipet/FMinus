@@ -269,16 +269,21 @@ TEST_CASE("a builtin of a build option left out is a known name, and its call na
     CHECK(notBuilt("http_get", Feature::Web)
           == "'http_get' needs the web library, which this build of FMinus leaves out (FMINUS_WEB=OFF)");
     CHECK(isBuilt(Feature::Web) == (FMINUS_HAS_WEB != 0));
+    CHECK(notBuilt("http_listen", Feature::WebServer)
+          == "'http_listen' needs the web server, which this build of FMinus leaves out (FMINUS_WEB_SERVER=OFF)");
+    CHECK(isBuilt(Feature::WebServer) == (FMINUS_HAS_WEB_SERVER != 0));
 
     // A program's macros for them say the same: defined, to 1, where the feature is built in.
     const auto predefined = fminus::frontend::predefinedMacros();
-    REQUIRE(predefined.size() == 3);
+    REQUIRE(predefined.size() == 4);
     CHECK(predefined[0].name == "__FMINUS_JSON__");
     CHECK(predefined[0].defined == (FMINUS_HAS_JSON != 0));
     CHECK(predefined[1].name == "__FMINUS_XML__");
     CHECK(predefined[1].defined == (FMINUS_HAS_XML != 0));
     CHECK(predefined[2].name == "__FMINUS_WEB__");
     CHECK(predefined[2].defined == (FMINUS_HAS_WEB != 0));
+    CHECK(predefined[3].name == "__FMINUS_WEB_SERVER__");
+    CHECK(predefined[3].defined == (FMINUS_HAS_WEB_SERVER != 0));
 }
 
 TEST_CASE("a prototype of a runtime builtin declares nothing new, and a definition is refused", "[codegen][strings]")

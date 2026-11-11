@@ -41,6 +41,13 @@ asks for that specific change, and ask before restructuring anything.
   calls goes in `WebSymbols.def`. A program's requests reach only what `Program::Options::web` allows (none by
   default), and no test may leave loopback. Its macOS and Windows code has never been built or run: say so before
   relying on it, and `docs/web.md` ("What is verified where") lists what has.
+- The web library's server (the user asked for it, 2026-11-11; `docs/research/web/server.md`) is `FMINUS_WEB_SERVER`
+  (OFF by default, needs `FMINUS_WEB`; the `web` preset turns it on): llhttp, pinned, compiled into `fminus_web`, and
+  FMinus's own sockets (`src/web/Server.cpp`, `Sockets*.cpp`). A program listens only where
+  `Program::Options::web.server` says (nowhere by default), and no test may bind anything but a loopback address. What
+  a `[[clang::nonblocking]]` server builtin calls stays wait-free in the library's code, proved by `HeapCalls` and
+  seccomp's strict mode (`tests/unit/WebServerTest.cpp`, and through the JIT in `WebServeTest.cpp`). Its sockets on
+  macOS and Windows have never been built.
 - The smoke tests (`tests/smoke/`, `tests/lit/smoke/`) prove the toolchain. Keep them passing until the user retires
   them.
 - `docs/` is the manual (architecture, extending, building, testing; `docs/recipes/` patches). Keep it in step with

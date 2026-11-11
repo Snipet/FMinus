@@ -5,8 +5,9 @@
 # tools, then LLVM's (FileCheck, not, count, opt, llc, llvm-mca, ...), come first on PATH. Substitutions: %host_triple.
 # Features for REQUIRES/UNSUPPORTED: asserts, asan, ubsan, tsan, the host's architecture (arm64 or x86_64; Windows
 # spells them ARM64 and AMD64), its system (system-darwin, system-linux, system-windows), avx (an x86-64 host whose
-# JIT targets AVX, as fminus-hostinfo --features lists it), json, xml and web (a build with the JSON parser, FMINUS_JSON,
-# the XML parser, FMINUS_XML, or the web library, FMINUS_WEB, as the build tree's fminus/Config.h says).
+# JIT targets AVX, as fminus-hostinfo --features lists it), json, xml, web and web-server (a build with the JSON parser,
+# FMINUS_JSON, the XML parser, FMINUS_XML, the web library, FMINUS_WEB, or its server, FMINUS_WEB_SERVER, as the build
+# tree's fminus/Config.h says).
 import os
 import platform
 import shutil
@@ -97,8 +98,9 @@ if jit_targets_avx():
     config.available_features.add("avx")
 
 
-# json, xml, web: this build has the JSON parser and its builtins (FMINUS_HAS_JSON 1 in fminus/Config.h), the XML
-# parser and its (FMINUS_HAS_XML 1), or the web library and the http_ builtins (FMINUS_HAS_WEB 1).
+# json, xml, web, web-server: this build has the JSON parser and its builtins (FMINUS_HAS_JSON 1 in fminus/Config.h),
+# the XML parser and its (FMINUS_HAS_XML 1), the web library and the http_ builtins (FMINUS_HAS_WEB 1), or its server
+# and http_listen, http_next, ... (FMINUS_HAS_WEB_SERVER 1).
 def has_feature(macro):
     try:
         with open(os.path.join(config.fminus_obj_root, "include", "fminus", "Config.h")) as header:
@@ -113,3 +115,5 @@ if has_feature("FMINUS_HAS_XML"):
     config.available_features.add("xml")
 if has_feature("FMINUS_HAS_WEB"):
     config.available_features.add("web")
+if has_feature("FMINUS_HAS_WEB_SERVER"):
+    config.available_features.add("web-server")

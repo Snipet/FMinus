@@ -21,7 +21,9 @@ and an XML parser (yyjson and pugixml, compiled in too): a program parses a docu
 wavetable pack, off the audio thread, and reads its numbers by path, each correctly rounded, on it or off it. Built
 with `FMINUS_WEB` (off by default), it has an HTTP(S) client too, on libcurl: a program fetches a preset or a table from
 a URL its host allows, and the client reaches no other, every URL a literal the host can list before anything runs
-([docs/web.md](docs/web.md)). It has
+([docs/web.md](docs/web.md)); and with `FMINUS_WEB_SERVER` too (also off by default), a server: a program listens where
+its host says, nowhere by default, and its audio thread takes requests and answers them between blocks, wait-free, for
+a page with knobs and meters, its routes literals the host can list and the library refusing what none names. It has
 SIMD: OpenCL C's `float2`, `float4` and `float8`, and `poly float`, a vector as wide as the machine's. It has threads of
 its own, structured: `parallel for` spreads a loop's iterations over the machine's cores and `parallel { }` runs a
 block's statements at once, each finished where it ends, with the races the compiler can see refused, on a pool of
@@ -69,11 +71,14 @@ cmake/
   FMinusOptions.cmake     options, the deps cache, ccache, fminus_target_defaults()
   FMinusLLVM.cmake        LLVM (cache | inline | system) -> FMinus::LLVM
   FMinusParserTools.cmake Bison and Flex (fetch | system; WinFlexBison on Windows) -> fminus_add_grammar()
-  FMinusFastFloat.cmake   fast_float, the runtime's parsers' numbers (FMINUS_JSON or FMINUS_XML) -> fminus_fast_float
+  FMinusFastFloat.cmake   fast_float, the parsers' numbers and the web server's (FMINUS_JSON, FMINUS_XML or
+                          FMINUS_WEB_SERVER) -> fminus_fast_float
   FMinusJson.cmake        yyjson, the JSON parser, compiled into the runtime (FMINUS_JSON) -> fminus_yyjson
   FMinusXml.cmake         pugixml, the XML parser, compiled into the runtime (FMINUS_XML) -> fminus_pugixml
   FMinusWeb.cmake         libcurl and Mbed TLS, built at configure time into the deps cache, for the web library
                           (FMINUS_WEB) -> fminus_web_curl, fminus_web_mbedtls
+  FMinusLlhttp.cmake      llhttp, the web server's request parser, compiled into fminus_web (FMINUS_WEB_SERVER)
+                          -> fminus_llhttp
   FMinusCLI11.cmake       CLI11 -> CLI11::CLI11, linked into every tool
   FMinusTesting.cmake     Catch2 and lit
   FMinusPython.cmake      Python and pybind11, for the Python package (FMINUS_BUILD_PYTHON)
@@ -104,7 +109,8 @@ src/                    the fminus library: every .cpp is a source, every gramma
                         Constants (integer constant expressions, array sizes, enumerations, the top level's
                         constants), Calls, Strings (string literals as builtins' arguments, and formats), Paths
                         (JSON Pointers and XML paths, prepared into tables of steps), Web (a URL literal's checks,
-                        the program's web context, the status codes' names), Math
+                        the program's web context, the status codes' names), WebServer (a route literal's checks,
+                        the route table, a reply's format), Math
                         (the math modes), Hash (hash and randf), Vectors, Memory, Modules, Effects, Tbaa (strict aliasing's tags),
                         Denormals (flush-to-zero; with Denormals.h) and Bounds (bounds checks) .cpp
   jit/                  Jit: LLJIT for FMinus modules (host CPU, pipeline, runtime); Call: the thunks that call a
@@ -116,7 +122,10 @@ src/                    the fminus library: every .cpp is a source, every gramma
   web/                  the web library (FMINUS_WEB; docs/web.md): its own library, libfminus_web.a, with no LLVM in
                         it: the C functions the http_ builtins call (Web.h, WebSymbols.def), one I/O thread on
                         libcurl's multi interface, the host's policy (Policy.cpp: the patterns, the URL rules, the
-                        address check), the system's root certificates (Roots*.cpp), an executable's context (Main.cpp)
+                        address check), the system's root certificates (Roots*.cpp), an executable's context (Main.cpp);
+                        and its server (FMINUS_WEB_SERVER): Server.cpp (the slots, the connections on llhttp, the
+                        rules a request meets), ServerPolicy.cpp, ServerRoot.cpp (a directory as static files),
+                        Sockets*.cpp (a file a system), Handle.h (the kind every handle carries)
   circuit/              the circuit compiler: its own library, libfminus_circuit.a, with no LLVM in it (Netlist,
                         Plan, Dc (the DC operating point), Mna, Laws, Linear (matched designs, the method check),
                         Emit, Halfbands, Generate; Reference and Analysis, the double reference and the measurements
@@ -150,6 +159,10 @@ examples/<name>/        one example per directory: an FMinus program, and a harn
                         against C++
   fetch/                the wavetable's pack fetched from a loopback server its host allows (http_get, http_wait,
                         Options::web; a build with FMINUS_WEB)
+  remote/               a synthesiser a browser controls: its gain, pitch and meter served from its nonblocking
+                        process (http_listen, http_next, http_is, the replies), its page static content the host
+                        hands over; driven over loopback by the library's own client (a build with
+                        FMINUS_WEB_SERVER)
   hello/                FMinus as a library at its smallest: a main that JIT-compiles a program from a string
   plugin/               FMinus Filter, a JUCE plugin (AU, VST3, Standalone) whose DSP is an FMinus program: its
                         own CMake project, built apart from FMinus's (cmake -S examples/plugin -B build-plugin)
@@ -166,7 +179,7 @@ tests/
   lit/                  lit + FileCheck tests (*.test, *.fm, *.ll); lit/circuit/ the circuit compiler's
 editors/vscode/         a VSCode extension: syntax highlighting for .fm files (its README installs it)
 Scripts/pin-llvm.sh     the pin lines for another LLVM release
-Scripts/pin-web.sh      the pin lines for other libcurl and Mbed TLS releases (the web library's)
+Scripts/pin-web.sh      the pin lines for other libcurl, Mbed TLS and llhttp releases (the web library's)
 docs/                   the manual: architecture, programs, extending, SIMD, building, testing; recipes/ as patches
 ```
 
@@ -184,11 +197,12 @@ Nothing is taken from the system unless an option asks for it.
 | Flex | 2.6.4 | source tarball, `./configure && make` at configure time | `.deps/install/flex-2.6.4` |
 | WinFlexBison (Windows, in place of the two above) | 2.5.25 and fixes: Bison 3.8.2, Flex 2.6.4 | source archive of a commit, built with CMake at configure time | `.deps/install/winflexbison-2.5.25-a243a1c` |
 | PFFFT | marton78's fork, commit aa16fd3 (2026-09-29) | source archive of a commit; two C files compiled into `libfminus_runtime.a` | `.deps/src/pffft-<commit>` |
-| fast_float (`FMINUS_JSON` or `FMINUS_XML`, both on by default) | 8.3.3 (2026-10-31) | source archive of the release's tag; headers, compiled into `libfminus_runtime.a` | `.deps/src/fast_float-<version>` |
+| fast_float (`FMINUS_JSON` or `FMINUS_XML`, both on by default, or `FMINUS_WEB_SERVER`) | 8.3.3 (2026-10-31) | source archive of the release's tag; headers, compiled into `libfminus_runtime.a` (and `libfminus_web.a`, for the server's query numbers) | `.deps/src/fast_float-<version>` |
 | yyjson (`FMINUS_JSON`, on by default) | 0.13.0 (2026-09-08) | source archive of the release's tag; its reader, one C file, compiled into `libfminus_runtime.a` | `.deps/src/yyjson-<version>` |
 | pugixml (`FMINUS_XML`, on by default) | 1.16 (2026-06-16) | source archive of the release's tag; one C++ file, without XPath, exceptions or the STL, compiled into `libfminus_runtime.a` | `.deps/src/pugixml-<version>` |
 | libcurl (`FMINUS_WEB`, off by default) | 8.23.0 (2026-10-14) | the release's tarball from curl.se; built with its own CMake at configure time, static, HTTP and HTTPS only, into `libfminus_web.a`'s dependencies | `.deps/install/curl-<version>-<flavor>` |
 | Mbed TLS (`FMINUS_WEB`, macOS and Linux) | 4.1.1, the 4.1 LTS branch | the release's tarball (a GitHub release asset); built with its own CMake at configure time, static, threading on | `.deps/install/mbedtls-<version>-<flavor>` |
+| llhttp (`FMINUS_WEB_SERVER`, off by default) | 9.4.3 (2026-07-30) | source archive of the release's tag, `release/v9.4.3` (it holds the generated C); three C files compiled into `libfminus_web.a`, hidden, every lenient flag off | `.deps/src/llhttp-<version>` |
 | CLI11 | 2.7.2 | release source package, header-only, inside each build tree | the build tree |
 | Catch2 | 3.16.1 | source archive, built inside each build tree | the build tree |
 | pybind11 (the Python package only, `FMINUS_BUILD_PYTHON`) | 3.1.0 | PyPI's source distribution, header-only, inside each build tree | the build tree |
@@ -268,9 +282,9 @@ float half(float x) { x /= 2; return x; }
 | constants | C's: floating ones are floats (`1.5`, `1.`, `.5`, `2e3`, `1.5e-3f`, hex floats `0x1.8p1`, `0x1p-3f`), or, without the `f`, doubles in arithmetic that has a double (below), integer ones ints (`2`, `010` in octal, `0x1F` in hex); `true` and `false`; enumeration constants, ints; integer constant expressions (a case's value, an enumerator's, an array's size) are C's, folded as FMinus computes |
 | attributes | C23's `[[...]]`: after a function's parameters, clang's (above); after a parameter's or a field's name, before an array's sizes, FMinus's `fminus::range(min, max)` (a parameter's, or a field's of numbers: what a host's control or display spans) and `fminus::default(value)` (a parameter's), and any other, the host's, which FMinus passes on as written: `float level [[ui::unit("dB")]] [[fminus::range(-60, 0)]];`, `float taps [[ui::hidden]] [16];` (but a name without a namespace that C23 does not have, `[[range(0, 1)]]`, is clang's warning, and ignored); their names identifiers, keywords and modules' names among them, as C23 reads them; their arguments numbers and C's string literals (C's escapes; adjacent literals are one) |
 | comments | `// ...` and `/* ... */` |
-| directives | `#include "file"`, the file read where the line is, as in C, and once only (as if every file began with `#pragma once`), found where the host says: `fminus` looks beside the including file, then in `-I`'s directories; C's conditionals, `#if`, `#ifdef`, `#ifndef`, `#elif`, `#else` and `#endif` (and C23's `#elifdef` and `#elifndef`), whose skipped groups are never scanned, on macros that `#define NAME value` and `#undef` make, or the host (`fminus -D NAME[=value]`), read in their conditions only, and FMinus's own, `__FMINUS_JSON__`, `__FMINUS_XML__` and `__FMINUS_WEB__`, defined (to 1) when the build has the JSON parser, the XML parser or the web library (`FMINUS_JSON`, `FMINUS_XML`, `FMINUS_WEB`), which neither a program nor the host may define or undefine; `#pragma`, ignored |
+| directives | `#include "file"`, the file read where the line is, as in C, and once only (as if every file began with `#pragma once`), found where the host says: `fminus` looks beside the including file, then in `-I`'s directories; C's conditionals, `#if`, `#ifdef`, `#ifndef`, `#elif`, `#else` and `#endif` (and C23's `#elifdef` and `#elifndef`), whose skipped groups are never scanned, on macros that `#define NAME value` and `#undef` make, or the host (`fminus -D NAME[=value]`), read in their conditions only, and FMinus's own, `__FMINUS_JSON__`, `__FMINUS_XML__`, `__FMINUS_WEB__` and `__FMINUS_WEB_SERVER__`, defined (to 1) when the build has the JSON parser, the XML parser, the web library or its server (`FMINUS_JSON`, `FMINUS_XML`, `FMINUS_WEB`, `FMINUS_WEB_SERVER`), which neither a program nor the host may define or undefine; `#pragma`, ignored |
 | types | `float` (IEEE single precision), `double` (IEEE double precision: for accumulators and slow state), `int` (32 bits, signed: C's `/` and `%`, overflow undefined) and `bool` (C23's: 0 or 1, computed as an int; a number is `x != 0` as a bool); `void`, a function's result; pointers to `float`, `double`, `int`, `float2`, `float4`, `float8` and modules, `const` (`const float*`, read-only through it) and `restrict` (C99's promise that nothing else reaches it), and `void*` (an address with no type, which converts to and from any pointer); arrays of `float`, `double`, `int`, the float vectors and modules, one or two dimensions deep; modules, by name (`OnePole`), from their declaration on; `enum Wave`, an `int`, after its enumeration; `float2`, `float4`, `float8` (OpenCL C's vectors, lane by lane, scalars broadcast); `poly float` and `poly bool`, as many lanes as the machine's vectors ([docs/simd.md](docs/simd.md)) |
-| builtins | `fabsf sqrtf floorf fminf fmaxf` (LLVM intrinsics, exact) and `sinf cosf tanf expf logf tanhf` (by the math mode: the runtime's, with one result for a float wherever it is computed, by default), on floats and vectors (a double argument rounds to a float, as C's prototype converts it); `sqrt fabs floor fmin fmax fma` (C's double functions, exact, on doubles only; `fma` rounds once); `malloc calloc free` (C's, with `int` sizes); `reduce_add reduce_min reduce_max` (a vector to a float); `poly_lanes` (an int) and `poly_index`; `poly_load poly_store` (a poly float from or to a `float*`, with an optional mask); the FFT: `fft_create(n)` and `fft_create_complex(n)` (a plan, a `void*`; they allocate), `fft_forward(plan, in, out)` and `fft_inverse(plan, in, out)` (real when one side is floats, complex when both are `float2`s; unnormalised), `fft_destroy(plan)`; `hash(n)` (an `int` mixed into a well-spread one) and `randf(n)` (a float uniform in [-1, 1) from it: white noise, `out[i] = randf(start + i)`); bytes to numbers, `bytes_floats(data, bytes, out, cap)` (raw little-endian float32s, as a program's own server sends them) and `bytes_pcm16(data, bytes, out, cap)` (little-endian 16-bit PCM, scaled to [-1, 1)), into floats: how many values the `bytes` bytes at `data` hold, the first `cap` of them written (a null `data` or a negative size is none), wait-free, so a nonblocking function may call them; JSON (`FMINUS_JSON`, below): `json_parse(data, bytes)` (a document, a `void*`, null for a text that is no JSON, over 64 MiB or nested deeper than 1024) and `json_free(doc)`, which allocate, and the reads, wait-free, at a path, a JSON Pointer literal with places for ints (`"/osc/%d/detune", k`): `json_float`, `json_double`, `json_int` and `json_bool` (the value, or their last argument when there is none of that kind), `json_count` (an array's or an object's size), `json_floats(doc, path, out, cap)` (an array of numbers, or of rows of them: how many, the first `cap` written), `json_choice(doc, path, "a", "b", ...)` (which literal a string equals, or -1) and `json_base64_floats(doc, path, out, cap)` (a base64 string's float32s); XML (`FMINUS_XML`, below), the same way: `xml_parse(data, bytes)` (null for a text that is no XML document, over 64 MiB or nested deeper than 1024) and `xml_free(doc)`, which allocate, and the reads, wait-free, at a path, a small part of XPath with places for ints (`"/preset/osc[%d]/@detune", k`: child steps by name, an index **from 0**, a last `@attribute`), of an attribute's value or an element's text: `xml_float`, `xml_double`, `xml_int` and `xml_bool` (the value, or their fallback), `xml_count` (how many elements the last step matches), `xml_floats(doc, path, out, cap)` (a list of numbers, separated by white space or commas) and `xml_choice(doc, path, "a", "b", ...)`; the web (`FMINUS_WEB`, below; [docs/web.md](docs/web.md)): `http_get(url, ...)` and `http_post(url, data, bytes, content_type, ...)` (a request, a `void*`, at once; the URL a literal whose `%d`s are the ints after every other argument, the content type a literal) and `http_cancel(r)` and `http_close(r)`, which allocate, `http_wait(r, timeout_ms)` (the status, once done or the time is up), which blocks (refused in a nonblocking function, allowed in a nonallocating one), and the reads, wait-free: `http_status(r)` (0 while pending, the HTTP status, or a failure, `HTTP_TRANSPORT`, `HTTP_TIMEOUT`, `HTTP_CANCELLED`, `HTTP_REFUSED`, `HTTP_LIMIT`, `HTTP_CERTIFICATE`, `HTTP_INVALID`, `HTTP_FAILED`, names a program uses without declaring them), `http_size(r)` and `http_body(r)` (a `const void*`, until `http_close`), `http_progress(r)`; a null handle does nothing and reads as a failed request |
+| builtins | `fabsf sqrtf floorf fminf fmaxf` (LLVM intrinsics, exact) and `sinf cosf tanf expf logf tanhf` (by the math mode: the runtime's, with one result for a float wherever it is computed, by default), on floats and vectors (a double argument rounds to a float, as C's prototype converts it); `sqrt fabs floor fmin fmax fma` (C's double functions, exact, on doubles only; `fma` rounds once); `malloc calloc free` (C's, with `int` sizes); `reduce_add reduce_min reduce_max` (a vector to a float); `poly_lanes` (an int) and `poly_index`; `poly_load poly_store` (a poly float from or to a `float*`, with an optional mask); the FFT: `fft_create(n)` and `fft_create_complex(n)` (a plan, a `void*`; they allocate), `fft_forward(plan, in, out)` and `fft_inverse(plan, in, out)` (real when one side is floats, complex when both are `float2`s; unnormalised), `fft_destroy(plan)`; `hash(n)` (an `int` mixed into a well-spread one) and `randf(n)` (a float uniform in [-1, 1) from it: white noise, `out[i] = randf(start + i)`); bytes to numbers, `bytes_floats(data, bytes, out, cap)` (raw little-endian float32s, as a program's own server sends them) and `bytes_pcm16(data, bytes, out, cap)` (little-endian 16-bit PCM, scaled to [-1, 1)), into floats: how many values the `bytes` bytes at `data` hold, the first `cap` of them written (a null `data` or a negative size is none), wait-free, so a nonblocking function may call them; JSON (`FMINUS_JSON`, below): `json_parse(data, bytes)` (a document, a `void*`, null for a text that is no JSON, over 64 MiB or nested deeper than 1024) and `json_free(doc)`, which allocate, and the reads, wait-free, at a path, a JSON Pointer literal with places for ints (`"/osc/%d/detune", k`): `json_float`, `json_double`, `json_int` and `json_bool` (the value, or their last argument when there is none of that kind), `json_count` (an array's or an object's size), `json_floats(doc, path, out, cap)` (an array of numbers, or of rows of them: how many, the first `cap` written), `json_choice(doc, path, "a", "b", ...)` (which literal a string equals, or -1) and `json_base64_floats(doc, path, out, cap)` (a base64 string's float32s); XML (`FMINUS_XML`, below), the same way: `xml_parse(data, bytes)` (null for a text that is no XML document, over 64 MiB or nested deeper than 1024) and `xml_free(doc)`, which allocate, and the reads, wait-free, at a path, a small part of XPath with places for ints (`"/preset/osc[%d]/@detune", k`: child steps by name, an index **from 0**, a last `@attribute`), of an attribute's value or an element's text: `xml_float`, `xml_double`, `xml_int` and `xml_bool` (the value, or their fallback), `xml_count` (how many elements the last step matches), `xml_floats(doc, path, out, cap)` (a list of numbers, separated by white space or commas) and `xml_choice(doc, path, "a", "b", ...)`; the web (`FMINUS_WEB`, below; [docs/web.md](docs/web.md)): `http_get(url, ...)` and `http_post(url, data, bytes, content_type, ...)` (a request, a `void*`, at once; the URL a literal whose `%d`s are the ints after every other argument, the content type a literal) and `http_cancel(r)` and `http_close(r)`, which allocate, `http_wait(r, timeout_ms)` (the status, once done or the time is up), which blocks (refused in a nonblocking function, allowed in a nonallocating one), and the reads, wait-free: `http_status(r)` (0 while pending, the HTTP status, or a failure, `HTTP_TRANSPORT`, `HTTP_TIMEOUT`, `HTTP_CANCELLED`, `HTTP_REFUSED`, `HTTP_LIMIT`, `HTTP_CERTIFICATE`, `HTTP_INVALID`, `HTTP_FAILED`, names a program uses without declaring them), `http_size(r)` and `http_body(r)` (a `const void*`, until `http_close`), `http_progress(r)`; a null handle does nothing and reads as a failed request; the web server (`FMINUS_WEB_SERVER`, below; [docs/web.md](docs/web.md), "The server"): `http_listen()` (the program's server, a `void*`, where its host's policy says: nowhere by default) and `http_close(server)`, which allocate, `http_accept(server, timeout_ms)` (a request, waiting for one), which blocks, and, wait-free, `http_port(server)` (its port, or `HTTP_REFUSED`, `HTTP_TRANSPORT`, `HTTP_CANCELLED`), `http_next(server)` (the oldest request waiting, or null), `http_is(r, "PUT /osc/%d/gain")` (whether the request is the route, a literal checked when compiled), `http_arg(r, i)` (a number its `%d` took), `http_query_float(r, "name", fallback)` and `http_query_int`, `http_size(r)` and `http_body(r)` (its body), and the replies, `http_reply(r, status)`, `http_reply_bytes(r, status, data, bytes, "type")` and `http_reply_text(r, status, "type", "format", ...)` (C's `printf` of `%d`, `%g`, `%.Ng` and `%%`) |
 
 Where FMinus differs from C, it is on purpose:
 
@@ -386,9 +400,19 @@ Where FMinus differs from C, it is on purpose:
   (`Program::Options::web`: none by default), and the host can list every URL before anything runs
   (`Program::webRequests()`); the library checks each request, each redirect and each connection's address. A request
   is a `void*` that comes back at once; failures are statuses (`HTTP_REFUSED`, `HTTP_TIMEOUT`, ...), never traps.
-  `http_wait` is FMinus's one builtin that blocks: refused in a `[[clang::nonblocking]]` function, allowed in a
+  `http_wait` is a builtin that blocks: refused in a `[[clang::nonblocking]]` function, allowed in a
   `[[clang::nonallocating]]` one. A program that uses a table on the block it arrived in gives up determinism: fetch in
   `init`, then play.
+- **So is its server**, in a build with `FMINUS_WEB_SERVER` too ([docs/web.md](docs/web.md), "The server", and
+  [docs/extending.md](docs/extending.md), recipe 42). C has no callbacks a program could be handed a request through,
+  nor do FMinus programs, so a program **takes** its requests (`http_next`, wait-free, on the audio thread between
+  blocks; `http_accept`, which blocks, on a thread of its host's) and answers each with a reply builtin. A route is a
+  string literal, a method and a path whose `%d`s are numbers of the request's path, checked where it is written and
+  listed for the host (`Program::webRoutes()`); a reply's text is a format of C's `printf`, `%d`, `%g`, `%.Ng` and `%%`,
+  checked as clang checks `printf`'s and written the same in every locale. Where it listens is the host's
+  (`Program::Options::web.server`: nowhere by default), never the program's: `http_listen()` takes no argument. The
+  library answers 404 and 405 for what no route names, and checks `Host`, `Origin`, `Sec-Fetch-Site`, the token and
+  every limit before a request reaches the program. A program never sees a request's path as text, nor a header.
 - **The heap's memory is aligned to 64 bytes and zeroed**, `malloc`'s too, as everything FMinus declares starts at 0;
   sizes are `int`s (C's are `size_t`s), so one block holds at most 2 GB, and `sizeof` of a larger type (a module of
   big arrays) is an error. A call that breaks a function's `[[clang::nonallocating]]` or `[[clang::nonblocking]]` is
@@ -783,7 +807,11 @@ gain(in, out, n, 0.5f);                                       // one call a bloc
   `http_post`: URL patterns, a body limit, a timeout, a redirect limit, a CA file; none by default, so every request is
   `HTTP_REFUSED`. `webRequests()` lists every URL the program names, with its method and where it is, before anything
   runs; `stopWeb()` cancels what is in flight and wakes a thread in `http_wait`; the destructor frees every request
-  ([docs/web.md](docs/web.md)).
+  ([docs/web.md](docs/web.md)). With `FMINUS_WEB_SERVER` too, `Options::web.server` is where the program's
+  `http_listen` may listen (`"localhost:0"`, ...; nowhere by default), with a token, the names a `Host` may say, the
+  static files the library serves for it (a page), and its limits; `webRoutes()` lists every route the program names,
+  before anything runs; `webPort()` is the port it listens on; and `stopWeb()` and the destructor close its server,
+  waking a thread in `http_accept`.
 - **Lifetime.** A function pointer, and a `Callable`, is valid while its `Program` lives, and the code stays where
   `codeRanges()` says. A `Callable` is the program's own: the host keeps the pointer `callable()` gives, as it keeps a
   function's, never a copy.
@@ -884,7 +912,9 @@ overrides it), which brings the SDK, libSystem and the ad-hoc signature arm64 ne
 names an executable `note.exe` when asked for `note`. It links this tree's `libfminus_runtime.a`, so JIT'd and
 ahead-of-time code call the same runtime. An executable whose program calls the web library links `libfminus_web.a`,
 libcurl, Mbed TLS and the system libraries they need too (and one that does not, none of them), and reads the URLs it
-may reach from `FMINUS_WEB_ALLOW` when it starts: none by default ([docs/web.md](docs/web.md)). In the JIT,
+may reach from `FMINUS_WEB_ALLOW` when it starts: none by default ([docs/web.md](docs/web.md)); one that calls
+`http_listen` reads where it may listen from `FMINUS_WEB_LISTEN` (and with it `FMINUS_WEB_TOKEN`, `FMINUS_WEB_HOSTS`,
+`FMINUS_WEB_ROOT`, a directory of static files, and `FMINUS_WEB_OPEN`): nowhere by default. In the JIT,
 `fminus::defineRuntimeSymbols` defines every function listed in `src/runtime/RuntimeSymbols.def` by its address (and,
 with the web library, `src/web/WebSymbols.def`'s). Under the `asan` and `tsan` presets, the sanitizer runtimes are linked
 too. This is a development feature: inside a plugin, FMinus only ever JITs.
@@ -906,8 +936,8 @@ build-dev/bin/fminus-lit -v tests/lit               # lit directly; a source pat
 - **lit** (`tests/lit/`): a file with `RUN:` lines, checked by FileCheck. `tests/lit/fminus/` drives `fminus`. FMinus's
   tools and LLVM's are on PATH; `%host_triple` is substituted; the features for `REQUIRES:` are `asserts`, `asan`,
   `ubsan`, `tsan`, `arm64`, `x86_64`, `avx` (an x86-64 host whose JIT targets AVX), `system-darwin`,
-  `system-linux`, `system-windows`, and `json`, `xml` and `web` (a build with `FMINUS_JSON`, `FMINUS_XML` or
-  `FMINUS_WEB`). `.fm` is a placeholder extension for FMinus sources: change it in
+  `system-linux`, `system-windows`, and `json`, `xml`, `web` and `web-server` (a build with `FMINUS_JSON`,
+  `FMINUS_XML`, `FMINUS_WEB` or `FMINUS_WEB_SERVER`). `.fm` is a placeholder extension for FMinus sources: change it in
   `tests/lit/lit.cfg.py`.
 
 ## Presets
@@ -921,7 +951,7 @@ build-dev/bin/fminus-lit -v tests/lit               # lit directly; a source pat
 | `tsan` | RelWithDebInfo + TSan | Release + assertions | compiling on a background thread, the parallel regions' pool |
 | `inline` | RelWithDebInfo | in-tree, -O2 -g, assertions | stepping into LLVM |
 | `python` | RelWithDebInfo | Release + assertions | the Python package (`dev` with `FMINUS_BUILD_PYTHON=ON`) |
-| `web` | RelWithDebInfo | Release + assertions | the web library (`dev` with `FMINUS_WEB=ON`; builds libcurl and Mbed TLS into the deps cache) |
+| `web` | RelWithDebInfo | Release + assertions | the web library and its server (`dev` with `FMINUS_WEB=ON` and `FMINUS_WEB_SERVER=ON`; builds libcurl and Mbed TLS into the deps cache, and fetches llhttp) |
 | `xcode` | Xcode project | Release + assertions | Xcode's debugger and Instruments |
 
 Every preset builds in `build-<preset>/` and exports `compile_commands.json`; `.clangd` reads `build-dev`'s. Each
@@ -986,7 +1016,12 @@ These are constraints a plugin runs into. `examples/plugin/`, a JUCE plugin, mee
   ([docs/extending.md](docs/extending.md), recipe 30).
 - **The network.** In a build with `FMINUS_WEB`, a program's requests reach only what `Program::Options::web` allows:
   none by default (the library's policy, not a sandbox: [docs/web.md](docs/web.md)). A sandboxed host needs the
-  network client entitlement itself; the library opens no listening socket, so there is no firewall prompt; destroy
+  network client entitlement itself; the library opens no listening socket unless the host gives the program's server
+  a listen (`Options::web.server`), so by default there is no firewall prompt. A plugin that serves listens inside its
+  host application's sandbox and under its firewall rules: macOS's App Sandbox wants the network server entitlement
+  even for loopback, which an Audio Unit may not have, so a failed listen is an ordinary outcome (`http_port` says
+  `HTTP_TRANSPORT`, and the program carries on without its page), and a listen that is not loopback asks the user
+  (from the research's sources: not tried); destroy
   every `Program` with a web context before the plugin is unloaded, which joins the library's I/O thread (and can wait
   for a DNS lookup in flight, up to the system resolver's timeout: not on the UI thread); and a loader thread in
   `http_wait` is woken by `Program::stopWeb()` ([docs/web.md](docs/web.md)).
@@ -1011,7 +1046,9 @@ anything linking FMinus's runtime built with `FMINUS_JSON` or `FMINUS_XML` does,
 license, MIT-like: a binary that includes it, as anything linking FMinus built with `FMINUS_WEB` does, carries its
 copyright notice and permission notice, from its `COPYING`), Mbed TLS (Apache-2.0 or GPL-2.0-or-later, at the user's
 choice; under Apache-2.0, a binary that includes it, as anything linking FMinus built with `FMINUS_WEB` does on macOS
-and Linux, carries a copy of the license, from its `LICENSE`), Catch2 (BSL-1.0),
+and Linux, carries a copy of the license, from its `LICENSE`), llhttp (MIT: a binary that includes it, as anything
+linking FMinus built with `FMINUS_WEB_SERVER` does, carries its copyright notice and permission notice, from its
+`LICENSE`), Catch2 (BSL-1.0),
 CLI11 (BSD-3-Clause) and pybind11 (BSD-3-Clause; the Python package only). JUCE, which only `examples/plugin/` uses, is
 under the AGPLv3 or JUCE's commercial license; that example's README says what that means for a plugin built from it.
 Bison and Flex run only at build time; the code they generate is covered by Bison's skeleton exception and Flex's

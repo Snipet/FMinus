@@ -97,6 +97,15 @@ set(FMINUS_MBEDTLS_URL
     "https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-${FMINUS_MBEDTLS_VERSION}/mbedtls-${FMINUS_MBEDTLS_VERSION}.tar.bz2")
 set(FMINUS_MBEDTLS_SHA256 "3359a349e23db3d5536fcee032ae7b2ecbfc08972fab643089b5cbf2a375c98c")   # 7,099,934 bytes
 
+# llhttp: the request parser of the web library's server (cmake/FMinusLlhttp.cmake: its three generated C files compiled
+# into fminus_web). Fetched only when FMINUS_WEB_SERVER is ON. GitHub's archive of the release's tag, release/v<version>
+# (the tag holds the generated C, which the repository's main branch does not); its hash is that of the archive GitHub
+# serves, downloaded and hashed (2026-11-11), and the same bytes `git archive --prefix=llhttp-release-v9.4.3/
+# release/v9.4.3 | gzip -n` makes of the tag. llhttp moves when Node.js finds something: bump it with libcurl and Mbed TLS.
+set(FMINUS_LLHTTP_VERSION "9.4.3")
+set(FMINUS_LLHTTP_URL "https://github.com/nodejs/llhttp/archive/refs/tags/release/v${FMINUS_LLHTTP_VERSION}.tar.gz")
+set(FMINUS_LLHTTP_SHA256 "1eb813c7437b31a87496a1cd3ed79f00746720f5e7e29c79b42c02cb69f36c39")   # 40,403 bytes
+
 # pybind11: the Python package's extension module is written with it (python/, cmake/FMinusPython.cmake; header-only).
 # Fetched only when FMINUS_BUILD_PYTHON is ON. The release's source distribution on PyPI, whose index publishes this
 # SHA-256 beside it (https://pypi.org/project/pybind11/<version>/#files).

@@ -18,7 +18,9 @@
 # the process, and the host's policy over what a program may reach), built only when FMINUS_WEB is on, and linked by
 # fminus_lib only then. No LLVM in it, as the runtime has none; libcurl and its TLS library are linked privately
 # (cmake/FMinusWeb.cmake), and only fminus_web's own C functions and its C++ API are what FMinus calls. With the option
-# off its sources are no one's: nothing under src/web/ is compiled.
+# off its sources are no one's: nothing under src/web/ is compiled. Its server (web/Server.h) is part of it with
+# FMINUS_WEB_SERVER on, llhttp's objects inside it and fast_float's headers read by one file; with that option off the
+# server's sources compile to nothing (each is guarded by fminus/Config.h's FMINUS_HAS_WEB_SERVER).
 #
 # fminus_lib: every other .cpp under src/ (globbed: adding a file edits no CMake). Every directory holding a Bison
 # grammar (*.y) is a grammar: that .y, with every Flex scanner (*.l) beside it, is generated into the library through
@@ -109,6 +111,13 @@ if(FMINUS_WEB)
   if(APPLE)
     # web/RootsMac.cpp: the Keychain's roots, through Security.framework.
     target_link_libraries(fminus_web PRIVATE "-framework Security" "-framework CoreFoundation")
+  endif()
+  # The server (FMINUS_WEB_SERVER): llhttp's objects (cmake/FMinusLlhttp.cmake) go into this library, and fast_float
+  # (cmake/FMinusFastFloat.cmake) reads a query's numbers.
+  if(TARGET fminus_llhttp)
+    target_sources(fminus_web PRIVATE $<TARGET_OBJECTS:fminus_llhttp>)
+    target_include_directories(fminus_web SYSTEM PRIVATE "${FMINUS_LLHTTP_INCLUDE_DIR}")
+    target_link_libraries(fminus_web PRIVATE fminus_fast_float)
   endif()
 endif()
 

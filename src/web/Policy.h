@@ -48,10 +48,24 @@ namespace fminus::web
         bool prefix = true;
     };
 
+    // The server's part of a policy, compiled (ServerPolicy::listen read into addresses, a port and whether they are
+    // loopback; the hosts in lower case; the files by path). Only a build with FMINUS_WEB_SERVER fills it in.
+    struct ServerSetup
+    {
+        bool listens = false;             // the policy has a listen
+        std::vector<Address> addresses;   // what to bind, in order: one, or two (localhost, *)
+        bool localhost = false;           // "localhost": ::1 may be left out on a machine without IPv6
+        bool any = false;                 // "*": :: may be left out likewise
+        bool loopback = false;            // every address is loopback
+        int port = 0;                     // 0: the system picks
+        std::vector<std::string> hosts;   // lower case
+    };
+
     struct CompiledPolicy
     {
         Policy policy;
         std::vector<Pattern> patterns;
+        ServerSetup server;
     };
 
     // Compiles `policy` into `out`; an empty string, or what is wrong.
@@ -80,4 +94,32 @@ namespace fminus::web
     // Reads an IPv4 address in dotted decimal (four numbers of 0 to 255, no leading zeros) or an IPv6 address, into
     // `out`; false when `text` is neither.
     bool parseAddress(std::string_view text, int family, Address& out);
+
+    // Whether `name` (lower case, without a trailing dot) is a name a pattern may hold (Web.h): letters, digits and "-"
+    // in labels of 1 to 63 bytes, at most 253 bytes, its last label not all digits nor starting with 0x.
+    bool validName(std::string_view name);
+
+#if FMINUS_HAS_WEB_SERVER
+    // The server's part of the policy (ServerPolicy.cpp): compiled into `out`, or what is wrong with it.
+    std::string compileServerPolicy(const ServerPolicy& policy, ServerSetup& out);
+
+    // Whether `address` is a loopback one: 127.0.0.0/8 or ::1.
+    bool loopbackAddress(const Address& address);
+
+    // Whether browsers refuse to reach `port` (the Fetch standard's bad ports; 0 among them).
+    bool badPort(int port);
+
+    // Whether `path` is one rule 2 allows (Web.h): "/", or "/" and segments of letters, digits, "-", ".", "_" and "~",
+    // none of them empty, "." or "..".
+    bool servablePath(std::string_view path);
+
+    // Rule 3: whether a request's Host, `host`, names the server, on a connection that arrived at `local`, port
+    // `port`: the address itself (an IPv6 one in brackets), "localhost" when `local` is loopback, or one of the
+    // setup's hosts; each with ":" and the port, which may be left out only when it is 80. Letter case is ignored.
+    bool hostAllowed(const ServerSetup& setup, std::string_view host, const Address& local, int port);
+
+    // Rule 5: whether a request's Origin, `origin`, is the server's own: "http://" and the Host already allowed,
+    // letter case aside. "null" never is.
+    bool originAllowed(std::string_view origin, std::string_view host);
+#endif
 } // namespace fminus::web

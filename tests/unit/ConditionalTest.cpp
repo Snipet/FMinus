@@ -271,13 +271,15 @@ TEST_CASE("FMinus predefines a macro for each feature of its build, which no one
     CHECK(condition("defined(__FMINUS_JSON__)") == (FMINUS_HAS_JSON ? "yes" : "no"));
     CHECK(condition("defined(__FMINUS_XML__)") == (FMINUS_HAS_XML ? "yes" : "no"));
     CHECK(condition("defined(__FMINUS_WEB__)") == (FMINUS_HAS_WEB ? "yes" : "no"));
+    CHECK(condition("defined(__FMINUS_WEB_SERVER__)") == (FMINUS_HAS_WEB_SERVER ? "yes" : "no"));
     CHECK(condition("__FMINUS_JSON__ + __FMINUS_XML__ == " + std::to_string(FMINUS_HAS_JSON + FMINUS_HAS_XML))
           == "yes");
     // Names C reserves for the implementation: a program's #define and #undef of one, and a host's, in a build with
     // the feature or without it.
     for (const auto& [name, what] : {std::pair{"__FMINUS_JSON__", "the JSON parser (FMINUS_JSON)"},
                                      std::pair{"__FMINUS_XML__", "the XML parser (FMINUS_XML)"},
-                                     std::pair{"__FMINUS_WEB__", "the web library (FMINUS_WEB)"}})
+                                     std::pair{"__FMINUS_WEB__", "the web library (FMINUS_WEB)"},
+                                     std::pair{"__FMINUS_WEB_SERVER__", "the web server (FMINUS_WEB_SERVER)"}})
     {
         INFO(name);
         const std::string error = "'" + std::string(name) + "' cannot be used as a macro name: FMinus defines it in a "

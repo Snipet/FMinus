@@ -25,8 +25,9 @@ to, with what the optimiser inlined into it. Recipe 38 is the first step towards
 XML: C's string literals as builtins' arguments, formats with places for ints, checked as clang checks `printf`'s, bytes
 decoded into floats, a builtin that blocks, and the build options a builtin can need; recipe 39 is the JSON parser
 on it, a document read by paths the compiler prepares, each number correctly rounded; recipe 40 is the XML parser,
-made the same way; and recipe 41 is the web library, an HTTP(S) client a program reaches only under its host's policy.
-Then the pitfalls those recipes
+made the same way; recipe 41 is the web library, an HTTP(S) client a program reaches only under its host's policy;
+and recipe 42 is its server, a program's requests taken on the audio thread, wait-free, its routes literals the host
+lists before anything runs. Then the pitfalls those recipes
 ran into, and design notes for what comes next. [simd.md](simd.md) has recipes 7 to 9, for vectors.
 
 Recipes 1 to 4 are in the compiler now (`tanhf` and `%`; `bool` and its operators; `if`, `while` and `for`), and so are
@@ -39,11 +40,11 @@ sizes of constant expressions), recipe 29 (the loop budget), recipe 30 (bounds c
 recipe 32 (one error a mistake, enumerated types, `-Wswitch`), recipe 33 (`double`), recipe 34 (2-D arrays), recipe 35
 (field attributes), recipe 36 (calls by name), recipe 37 (code ranges, for a profiler), recipe 38 (string literals as
 builtins' arguments, bytes to numbers, and the build options of builtins), recipe 39 (the JSON parser, and paths
-the compiler prepares), recipe 40 (the XML parser) and recipe 41 (the web library), so their sections describe
-how the code you have got there: read a section beside the files it names. Recipes 5 and 6, a runtime function and a
-pass, are not part of the language; they live in [recipes/](recipes/) as a patch, so you can apply them to see them
-work. None of these are sketches: each was applied to this repository, built with `-Werror`, and tested in the dev and
-asan presets, every test passing.
+the compiler prepares), recipe 40 (the XML parser), recipe 41 (the web library) and recipe 42 (its server), so their
+sections describe how the code you have got there: read a section beside the files it names. Recipes 5 and 6, a
+runtime function and a pass, are not part of the language; they live in [recipes/](recipes/) as a patch, so you can
+apply them to see them work. None of these are sketches: each was applied to this repository, built with `-Werror`, and
+tested in the dev and asan presets, every test passing (recipes 38 to 42 in the release preset only: each says where).
 [architecture.md](architecture.md) describes the stages they touch.
 
 FMinus follows C. When a recipe has a semantic choice to make, it makes C's: conversions, short-circuiting, which
@@ -83,7 +84,8 @@ Each feature has an example to read beside its recipe: `examples/comparison/` fo
 on the heap and a kernel that can't allocate (recipe 11), `examples/saturator/` and `examples/meter/` for `poly float`
 through a buffer, against plain loops (recipes 9 and 10), `examples/convolver/` and `examples/delay/echo.fm` for loops
 over a module's fields (recipe 17), `examples/ensemble/` for `parallel for` and `parallel { }` (recipe 22), and
-`examples/wavetable/` for a document a host hands a program, read by path (recipes 39 and 40).
+`examples/wavetable/` for a document a host hands a program, read by path (recipes 39 and 40), `examples/fetch/` for
+a request a program makes (recipe 41), and `examples/remote/` for the requests a program answers (recipe 42).
 
 ## Ground rules
 
@@ -7914,6 +7916,263 @@ build; `HttpTest.cpp` and `web*.fm` test the real ones where the library is.
 - `examples/fetch/`: `--check` serves the wavetable example's pack on 127.0.0.1, fetches it through the program, plays
   it, compares the samples with the same pack loaded directly (identical), and checks a missing pack (404) and the
   default policy (refused, no request).
+
+## Recipe 42: the web server, a program's requests taken on the audio thread
+
+*In the compiler. Code: the server in `src/web/` (`Server.h` and `Server.cpp`, the slots, the connections and the
+rules; `ServerPolicy.cpp`, the server's policy and its classifiers; `ServerRoot.cpp`, a directory as static files;
+`Sockets.h`, `SocketsPosix.cpp` and `SocketsWindows.cpp`; `Handle.h`, the kind every handle carries; and in `Web.h`,
+`Web.cpp`, `Policy.*`, `Main.cpp` and `WebSymbols.def`, their hooks); the server's entries of `kRuntimeBuiltins`,
+`Feature::WebServer`, `Param::Route`, `Param::QueryName`, `Param::ReplyFormat`, the `Server*` kinds of
+`kRuntimeFacts` and their lines in `lowerRuntimeBuiltin` (`src/ir/Lowering.h`, `Calls.cpp`); `src/ir/WebServer.cpp` (a
+route's check, its metadata and the route table, a query's name, a reply's format) and `finishWebRoutes`'s call in
+`CodeGen.cpp`; `__FMINUS_WEB_SERVER__` (`Preprocessor.cpp`); `Program::WebServerPolicy`, `webRoutes()` and
+`webPort()` (`include/fminus/FMinus.h`, `src/api/FMinus.cpp`); the driver's `--web-listen`, `--web-token`,
+`--web-host`, `--web-root` and `--web-open` (`tools/fminus/main.cpp`); `cmake/FMinusLlhttp.cmake`, llhttp's pin,
+`FMINUS_WEB_SERVER` and `FMINUS_HAS_WEB_SERVER`, the `web` preset, the server's lines in `src/CMakeLists.txt` and
+`cmake/FMinusFastFloat.cmake`; llhttp's line in `Scripts/pin-web.sh`.
+Tests: `tests/unit/WebServerTest.cpp` (`[server]`: the engine from C++), `tests/unit/HttpServerTest.cpp` (the builtins,
+in every build), `tests/unit/WebServeTest.cpp` (programs that serve, through the JIT and as executables),
+`tests/library/WebPolicyTest.cpp`'s server case (the host API in C++17, in every build),
+`tests/lit/fminus/web-server.fm`, `web-server-errors.fm` and `web-server-off.fm` (lit's new `web-server` feature); the
+example, `examples/remote/`. Built with `-Werror` and tested in the `release` preset on Linux x86-64 only, in three
+trees: `-DFMINUS_WEB=ON -DFMINUS_WEB_SERVER=ON`, `-DFMINUS_WEB=ON` alone, and the default, every test passing but the
+one this machine cannot run (the smoke test of LLVM's own `opt`, as for recipes 38 to 41); the engine and its test under
+GCC's AddressSanitizer with UndefinedBehaviorSanitizer and under ThreadSanitizer, outside the presets, with a race
+harness and a mutation fuzzer; not yet in `dev`, `web` or `asan`, nor on macOS or Windows, nor with IPv6. [web.md](
+web.md), "The server", is its manual, and [research/web/server.md](research/web/server.md) the report it builds.*
+
+The reverse of recipe 41: a request comes in, and the program answers it. FMinus has no callbacks, so the program
+**takes** its requests, and since taking, reading and answering one are wait-free, its audio thread may do it between
+two blocks:
+
+```c
+void process(float* out, int n) [[clang::nonblocking]]
+{
+    for (void* r = http_next(server); r; r = http_next(server))    // the requests waiting, or none
+    {
+        if (http_is(r, "POST /osc/%d/gain"))                         // a route literal, checked here
+        {
+            gain[http_arg(r, 0) & 7] = http_query_float(r, "value", 1.0f);
+            http_reply(r, 204);
+        }
+        else if (http_is(r, "GET /state"))
+            http_reply_text(r, 200, "application/json", "{\"level\":%g}", level);
+    }
+    // ... the block
+}
+```
+
+It is the report's recommendation as its section 0 chose it: the program serves, by builtins (its shape A), llhttp for
+the request's head and FMinus's own code for everything else, the LAN only with a token or the host's `open`, static
+content the host's, a reply's text C's `printf` in part, no CORS ever, no TLS yet, and an option of its own,
+`FMINUS_WEB_SERVER`, off by default.
+
+### The engine, in the library, behind its own option
+
+Nothing of the language is in the engine, and it was built first, tested from C++ before any builtin existed
+(`WebServerTest.cpp`). It lives in `fminus_web`, beside the client, for one reason: **the I/O thread**. A plugin
+should start as few threads as it can and join each before it unloads, and `fminus_web` has one already, waiting in
+`curl_multi_poll`, which takes descriptors beside libcurl's own. So a server's listening sockets and its connections
+are more descriptors in the same wait: two new commands on the same queue (`Serve`, `Unserve`), and after libcurl's
+transfers each turn, `Servers::turn()` accepts, reads, parses, writes and frees, then `descriptors()` rebuilds the
+array the next wait takes. A socket is closed only in a turn or a detach, and the array is rebuilt after each, so a
+closed descriptor never reaches curl, which would not report it.
+
+**llhttp** (9.4.3, pinned; `cmake/FMinusLlhttp.cmake`) is built as yyjson is (recipe 39): fetched once into the deps
+cache, its three generated C files an object library whose objects `src/CMakeLists.txt` puts into `fminus_web`, its
+own flags kept, its symbols hidden, its CMake never added. Every lenient flag stays off, and every limit is the
+server's own, counted in its callbacks: the head is fed at most what is left of its 16 KiB, fields are counted as they
+come, the parser is paused at the end of each message so one request at a time is read, and what FMinus does not serve
+is refused at the first callback that shows it (another version, a method outside the seven, any
+`Transfer-Encoding`, so llhttp's chunked machinery is never entered). fast_float reads a query's numbers, in
+`Server.cpp` alone, hidden as `Numbers.cpp` hides it (`cmake/FMinusFastFloat.cmake` now fetches it for the server too).
+
+**The option** is `FMINUS_WEB_SERVER` (`cmake/FMinusOptions.cmake`), which configure refuses without `FMINUS_WEB`,
+and `fminus/Config.h`'s `FMINUS_HAS_WEB_SERVER`. With it off, each of the server's sources is guarded by that macro
+and compiles to nothing, nothing is fetched, and `libfminus_web.a` has no llhttp, listen or root symbols.
+
+**The slots** are §4.3 of the report: a fixed table, `maxPending` of them, each with a reply buffer of
+`maxReplyBytes`, all made when the server starts. A slot's state is one atomic 64-bit word, a sequence number above 8
+bits of phase (free, published, claimed, answered, abandoned, done, closed): the I/O thread publishes with a store,
+`http_next` claims the oldest published slot with a compare-and-swap (at most twice the slots' number of tries, so it
+stays wait-free), a reply publishes with another, and the I/O thread sends and frees. A request the library gives up on
+while the program holds it (its client left, its reply timed out) goes to abandoned, which the program's reply turns to
+done, returning `HTTP_CANCELLED`, so a request never changes under the thread that holds it; until that reply the slot
+stays the program's, so a request never answered holds its slot until the server closes (and `maxPending` of them
+leave every later request a 503). While any slot is out the
+I/O thread turns once a millisecond instead of being woken, since waking it is a system call.
+
+**Handles that know their kind** (`Handle.h`). A request made, a request received and a server are all `void*` to a
+program, and recipe 41's functions took any pointer as a request. Each kind now begins with a 32-bit word of its own,
+which every C function reads first (`as<T>`): `http_status` of a server is `HTTP_INVALID`, `http_size` and `http_body`
+of a received request read its body, `http_close` of a server closes it. The client's request derives from `Handle`
+and nothing else of it changed: its tests pass as they were.
+
+### The builtins' table rows
+
+| Builtin | Parameters | Result | Effect |
+|---|---|---|---|
+| `http_listen` | none | `Pointer` | allocates |
+| `http_port` | `Handle` | `Int` | wait-free |
+| `http_next` | `Handle` | `Pointer` | wait-free |
+| `http_accept` | `Handle`, `Int` | `Pointer` | blocks |
+| `http_is` | `Handle`, `Route` | `Bool` | wait-free |
+| `http_arg` | `Handle`, `Int` | `Int` | wait-free |
+| `http_query_float`, `http_query_int` | `Handle`, `QueryName`, `Float` or `Int` | `Float` or `Int` | wait-free |
+| `http_reply` | `Handle`, `Int` | `Int` | wait-free |
+| `http_reply_bytes` | `Handle`, `Int`, `Bytes`, `Int`, `ContentType` | `Int` | wait-free |
+| `http_reply_text` | `Handle`, `Int`, `ContentType`, `ReplyFormat` | `Int` | wait-free |
+
+Their entries name `Feature::WebServer`, so `isBuilt` asks `FMINUS_HAS_WEB_SERVER` and `notBuilt` says `'http_listen'
+needs the web server, which this build of FMinus leaves out (FMINUS_WEB_SERVER=OFF)` in a build without it.
+`http_size`, `http_body` and `http_close` keep their recipe 41 rows (`Feature::Web`): they now take the server's
+handles too, which is the library's business, not the table's. `Effects.cpp` needs nothing: the three classes are
+recipe 38's, and `http_accept` is the second real builtin in `Blocks`. `http_is` returns the library's 0 or 1 as an
+`i32`, as `Result::Bool` already did for the parsers' `json_bool`.
+
+`http_listen()` takes no argument in the language, and three in the library: `lowerRuntimeBuiltin` replaces its
+arguments with `listenArguments()`, the program's web context (recipe 41's global, which `http_listen` now defines
+too) and two nulls and a zero for the route table, which is not known yet (below).
+
+Three new parameter kinds, each a string literal (`isString`, as recipe 38 made them):
+
+- **`Param::Route`**: checked by `checkRoute`, recorded by `recordWebRoute`, passed as a string is (its text and
+  length).
+- **`Param::QueryName`**: checked by `checkQueryName` (letters, digits, `_`, `-` and `.`, 1 to 64 bytes), passed as a
+  string.
+- **`Param::ReplyFormat`**: a format, like `Param::Format`, whose values follow it, but whose places are `printf`'s
+  `%d`, `%g` and `%.Ng` rather than ints alone: so it has its own scan (`scanReplyFormat`) and its own arguments
+  (`replyArguments`, `replyValues`), below.
+
+### The route literal: its check, its record and the table
+
+`scanRoute` reads a literal as the library will match it: a method of `GET`, `POST`, `PUT`, `PATCH` or `DELETE`, one
+space, and a path of `/` and segments of the characters rule 2 lets a request's path hold, with `%d` its only
+conversion. It refuses, each at its byte, what could never match a request, since a route that silently never matches
+is a bug the compiler can see: `HEAD` and `OPTIONS` (a `GET` route answers `HEAD`, and the library answers `OPTIONS`),
+an empty, `.` or `..` segment (a request's path never has one), `?` (a route is a path alone), `%%` (no request's path
+holds a `%`), more than 8 `%d` (the library keeps 8), two `%d` together or one before a digit (each takes all the
+digits there are, so the second could never have any). `checkRoute` reports the first, with the note `a route takes
+%d, a decimal number of the path` for an unknown conversion, as recipe 38's format does.
+
+**The record** is recipe 41's again: `recordWebRoute` adds the call's method, its path as a pattern (each `%d` a `*`),
+its file, line and column to the module's named metadata `fminus.web.routes`, which `ir::webRoutes` reads back and
+`Program::webRoutes()` returns.
+
+**The table** is what makes the library answer 404 and 405 itself: every route literal of the program, each once,
+handed to the library by `http_listen`, so that only a request some route names reaches the program's code. It cannot
+be made where `http_listen` is lowered, since an `http_is` may come after it (in a later function, or later in the
+same one). So `lowerRuntimeBuiltin` keeps each listen call (`webListens_`) and each route's text (`webRoutes_`), and
+`finishWebRoutes()`, which `lower` calls once every function is lowered and before the effects are checked, makes two
+private constants, `fminus.web.routes` (`[N x ptr]`, each a private constant of the literal's bytes) and
+`fminus.web.route.lengths` (`[N x i32]`), and patches every listen call's last three arguments. A program with no route
+passes null, null and 0, and its server answers 404 to everything that is not a file. The library trusts no byte of the
+table: a literal that is not a route there never matches.
+
+### The reply's format
+
+`printf` is the format a person reading a reply expects, and the one clang already has words for. `scanReplyFormat`
+reads `%d`, `%g`, `%.Ng` (N from 1 to 17: `%.9g` reads back as the same float, `%.17g` as the same double) and `%%`, and
+calls anything else clang's `invalid conversion specifier`, plus one message of its own, for a precision out of range.
+`replyArguments` then checks each value against its place, in clang's words (`format specifies type 'double' but the
+argument has type 'int'`, `more '%' conversions than data arguments`, `data argument not used by format string`), and
+converts it as C passes `printf`'s arguments: an `int` or a `bool` to a double exactly (`sitofp`), a float widened
+(`fpext`), a double as it is. A `%g`'s argument is lowered as a double parameter's is (`lowerAs`), so `0.1` is C's
+double `0.1`. `replyValues` stores them into an array of doubles in the function's frame, and the call passes its
+address and count after the format's text and length.
+
+*Why doubles, and not the ints and floats apart:* one array of one type is one parameter, and every value an `int`, a
+`float` or a `double` can hold is a double exactly, so nothing is lost; the library reads `%d`'s back as C converts a
+double to an int (saturated, NaN 0, which the compiler's check makes unreachable). It writes the text with
+`std::to_chars` into the slot's buffer: the same in every locale, and no allocation.
+
+### What the library's functions touch, told to LLVM
+
+| Kind | Functions | Attributes |
+|---|---|---|
+| `ServerListen` | `listen` | `nounwind`, `willreturn`; argument and inaccessible memory read and written, other memory read (the literals the table points to), errno read and written; both table pointers `readonly captures(none)`; `noundef` result, not `noalias` (the shared refused server, or the context's server again) |
+| `WebRead` | `port`, `arg` | recipe 41's reads: `nofree`, argument and inaccessible memory, `captures(none)`; not `readonly` |
+| `ServerTake` | `next` | `nofree`, `willreturn`, argument and inaccessible memory read and written, `noundef` result: two calls are two requests |
+| `ServerWait` | `accept` | the same, without `willreturn`: `http_accept(server, -1)` may wait for ever |
+| `ServerMatch` | `is` | as a take, and the route `readonly captures(none)`: it writes the numbers it took into the request, which `http_arg` reads |
+| `ServerQuery` | `query_float`, `query_int` | as a read, and the name `readonly captures(none)` |
+| `ServerReply` | `reply`, `reply_bytes`, `reply_text` | `nofree`, `willreturn`, the request `captures(none)`, every other pointer `readonly captures(none)`; memory left as it is: any |
+
+The replies are the case to get right this time. A reply hands the request back: the I/O thread sends it and reuses the
+slot's memory, the request's body among it, which the program reads through `http_body`'s pointer. LLVM must not move
+a load of that body past the reply, and the only way to tell it so is a call that may write any memory. So a reply's
+declaration leaves its memory effects alone; what it costs is a little optimisation around a reply, and the narrower
+attributes would be a miscompile. The lit test checks both ways: `http_next` and `http_port` stay inside a polling loop
+at `-O2`, and a body's load after a reply is a second load. A JIT test checks the polling loop too, with a request that
+arrives 50 ms into a loop of two billion looks.
+
+### The host's side
+
+`Program::Options::web.server` is a `WebServerPolicy` (`FMinus.h`, C++17, in every build), which `compile()` copies
+into `web::ServerPolicy` only under `FMINUS_HAS_WEB_SERVER` and checks with recipe 41's `web::checkPolicy`, whose
+server part (`compileServerPolicy`, `ServerPolicy.cpp`) refuses the first mistake (`fminus::Program: web:
+server.listen '0.0.0.0:8080': 0.0.0.0 is the unspecified address: write '*' for every interface`). A program now gets
+a context when its host allowed a pattern **or** gave a listen, so one may listen and reach nothing. `webRoutes()`
+returns the metadata as `webRequests()` does. `webPort()` asks the context (`Context::port()`, new, under its lock),
+and is 0 whenever the port is not positive. `stopWeb()` and `~Program` needed nothing new: `Context::stop()` and the
+context's destructor close the server (detached from the I/O thread, its sockets closed, every thread in `http_accept`
+woken and waited for).
+
+### The driver and executables
+
+Recipe 41's way, again: the driver's options (`--web-listen ADDR`, and with it `--web-token`, `--web-host`,
+`--web-root`, `--web-open`), for `--run` only, each refused without `--web-listen`, a policy mistake named by the
+option it is in; and an executable's environment, read by `fminus_web_main_start` (`Main.cpp`): `FMINUS_WEB_LISTEN`,
+and with it `FMINUS_WEB_TOKEN`, `FMINUS_WEB_HOSTS`, `FMINUS_WEB_ROOT` and `FMINUS_WEB_OPEN`, a mistake the exit status
+2 with the variable named. `main_start` now makes a context when either `FMINUS_WEB_ALLOW` or `FMINUS_WEB_LISTEN` says
+something, and `addEntryPoint` needed nothing new: `http_listen` defines the context global, which is what it looks
+for. A root directory is read by the library's `readServerRoot` (`ServerRoot.cpp`), once, for both: regular files only,
+no link followed (on POSIX each directory and file is opened beneath the directory that listed it, with `openat` and
+`O_NOFOLLOW`, so a directory swapped for a link mid-walk cannot lead out of the root), hidden names and unservable paths
+skipped with a note, an `index.html` at its directory's path too,
+the type from a table of thirteen extensions, and limits (256 files, 16 MiB, 4096 entries).
+
+### What it changes for programs and hosts
+
+- **Programs** that use none of it compile to the same IR. The eleven names are builtins in every build (a program's
+  function of one of them is an error); `__FMINUS_WEB_SERVER__` cannot be defined.
+- **Hosts** get `Options::web.server` (default: nowhere), `webRoutes()` and `webPort()`, in every build, and
+  `FMINUS_HAS_WEB_SERVER` in `fminus/Config.h`. Nothing listens unless a host gives an address.
+- **The build** is unchanged by default; `FMINUS_WEB=ON` alone is the client of recipe 41, fetching nothing more. With
+  the server on, a first configure fetches llhttp's 40 KB archive.
+- **The VS Code grammar** (0.18.0) colours the server's builtins and a reply format's `%g` and `%.Ng`.
+
+### Tests
+
+- `tests/unit/WebServerTest.cpp` (`[server]`), compiled only with the option: the policy (every refusal, every form
+  accepted) and its classifiers (loopback, the bad ports, a servable path, `Host` and `Origin`, the LAN and IPv6 cases
+  among them, judged and never bound); handle kinds crossed with every function; the route matcher; `%g` against
+  `snprintf` over 20 values and 4 formats; then the engine over loopback, from a raw socket and from the library's own
+  client: each rule and its status, a request a byte at a time, two in one write, keep-alive (with `Connection:
+  close`, HTTP/1.0 and the idle limit), connections dropped mid-request and mid-reply, a reply over the limit, two
+  clients and four takers, closing with idle connections, a held request and threads in `http_accept(-1)`; and the
+  proof that the wait-free functions are: `HeapCalls` counts no allocation, and children under seccomp's strict mode
+  make the same calls and exit with the expected sums.
+- `tests/unit/HttpServerTest.cpp`, in every build: each builtin's effect through the table and through the effects'
+  errors; each name's error in a build without the server; then, with it, the route errors at their columns, the reply
+  format's and the query name's, the route table (each literal once, a route lowered after the listen), the
+  declarations' attributes, `webRoutes()` over five call sites and an `#include`, and `Options::web.server` checked by
+  `compile()`.
+- `tests/unit/WebServeTest.cpp`: a module served through the JIT, its `process` taking requests a host thread drives
+  every millisecond while another `Program`'s client posts and gets (a gain set and read back as JSON, a table posted
+  as bytes and read back, 404 and 405 from the library, the host's file); a polling loop that sees a late request; a
+  loader in `http_accept` woken by `stopWeb()`; a `Program` destroyed with its server open; an executable started with
+  `FMINUS_WEB_LISTEN`, `FMINUS_WEB_ROOT` and `FMINUS_WEB_TOKEN` and driven over loopback, and refused without them;
+  `readServerRoot`, and a directory exchanged with a link to elsewhere, over and over, while it reads; and the
+  wait-free proof again, of a `[[clang::nonblocking]]` handler the JIT compiled (`HeapCalls`, seccomp's strict mode).
+- `tests/lit/fminus/web-server.fm`: the calls, the table and the declarations' attributes at `-O0`, the polling loops
+  and the body's reload at `-O2`, `--run` without a listen (`HTTP_REFUSED`), with one (the program asks itself and
+  answers on the same thread), with a token (401), and an executable with and without `FMINUS_WEB_LISTEN`;
+  `web-server-errors.fm`: each error once, and the driver's; `web-server-off.fm`: each name's error and the driver's
+  options in a build without the server.
+- `examples/remote/`: `--check` listens on 127.0.0.1, drives the program with the library's client, and checks that a
+  gain and a note sent over HTTP are heard in the output, and that the default policy listens nowhere.
 
 ## Pitfalls
 

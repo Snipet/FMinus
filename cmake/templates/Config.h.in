@@ -20,6 +20,7 @@
 #define FMINUS_HAS_JSON @FMINUS_HAS_JSON@   // FMINUS_JSON: the JSON parser and the json_* builtins
 #define FMINUS_HAS_XML @FMINUS_HAS_XML@     // FMINUS_XML: the XML parser and the xml_* builtins
 #define FMINUS_HAS_WEB @FMINUS_HAS_WEB@     // FMINUS_WEB: the web library, fminus_web (an HTTP(S) client)
+#define FMINUS_HAS_WEB_SERVER @FMINUS_HAS_WEB_SERVER@   // FMINUS_WEB_SERVER: the web library's server (needs FMINUS_WEB)
 
 // The JSON parser's limits (cmake/FMinusOptions.cmake), in a build with it: json_parse gives no document for a text of
 // more than FMINUS_JSON_MAX_BYTES bytes, or one whose arrays and objects nest deeper than FMINUS_JSON_MAX_DEPTH.

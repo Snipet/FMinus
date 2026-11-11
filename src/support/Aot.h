@@ -72,9 +72,11 @@ namespace fminus::aot
     // its address passed through an empty inline asm: an indirect call, so main is never inlined into it, and nothing
     // the optimiser finds of main before the passes (that it never returns, say) changes the code after the call.
     //
-    // For a module that calls http_get or http_post (its web context, ir::kWebContextSymbol), the C main makes the
-    // program's context from its environment before the call (fminus_web_main_start, src/web/Web.h: FMINUS_WEB_ALLOW,
-    // FMINUS_WEB_CA_FILE; none set, no network), exiting with 2 when the library refuses the policy, and destroys it
-    // after the call (fminus_web_main_stop), so that no request outlives main.
+    // For a module that calls http_get, http_post or http_listen (its web context, ir::kWebContextSymbol), the C main
+    // makes the program's context from its environment before the call (fminus_web_main_start, src/web/Web.h:
+    // FMINUS_WEB_ALLOW, FMINUS_WEB_CA_FILE, and with the server FMINUS_WEB_LISTEN, FMINUS_WEB_TOKEN, FMINUS_WEB_HOSTS,
+    // FMINUS_WEB_ROOT, FMINUS_WEB_OPEN; none set, no network and no server), exiting with 2 when the library refuses
+    // the policy, and destroys it after the call (fminus_web_main_stop), so that no request, and no listening socket,
+    // outlives main.
     llvm::Error addEntryPoint(llvm::Module& module, std::optional<std::int64_t> loopBudget = std::nullopt);
 } // namespace fminus::aot

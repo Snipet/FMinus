@@ -53,7 +53,11 @@ Most of the recipes in [../extending.md](../extending.md) and [../simd.md](../si
   entities inert);
 - recipe 41 (the web library, `fminus_web` on libcurl and Mbed TLS behind `FMINUS_WEB`, off by default: the `http_`
   builtins, a URL literal checked where it is written, the program's web context a global its host sets, the host's
-  policy over what it may reach, and every URL listed before anything runs).
+  policy over what it may reach, and every URL listed before anything runs);
+- recipe 42 (the web library's server, behind `FMINUS_WEB_SERVER`, off by default, on llhttp: a program's requests
+  taken on the audio thread, wait-free, from a fixed table of slots, its routes literals checked where they are written
+  and handed to the library as a table, a reply's text C's `printf` in part, handles that know their kind, and the
+  host's policy over where it may listen).
 
 Their code is in `src/`, and their tests in `tests/`.
 

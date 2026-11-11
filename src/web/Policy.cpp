@@ -1,6 +1,8 @@
 // src/web/Policy.cpp
 #include "web/Policy.h"
 
+#include "fminus/Config.h"
+
 #include <algorithm>
 #include <cstring>
 #include <curl/curl.h>
@@ -38,37 +40,40 @@ namespace fminus::web
         {
             return c >= '0' && c <= '9';
         }
+    } // namespace
 
-        // A name of letters, digits and '-' (not first or last) in labels of 1 to 63 bytes separated by '.', at most
-        // 253 bytes, already lower case and without its trailing dot; one whose last label is all digits, or starts
-        // with 0x, reads as a number to some resolvers, and is not one.
-        bool validName(std::string_view name)
+    // A name of letters, digits and '-' (not first or last) in labels of 1 to 63 bytes separated by '.', at most
+    // 253 bytes, already lower case and without its trailing dot; one whose last label is all digits, or starts
+    // with 0x, reads as a number to some resolvers, and is not one.
+    bool validName(std::string_view name)
+    {
+        if (name.empty() || name.size() > 253)
+            return false;
+        std::size_t start = 0;
+        for (;;)
         {
-            if (name.empty() || name.size() > 253)
+            const std::size_t dot = name.find('.', start);
+            const std::string_view label =
+                name.substr(start, dot == std::string_view::npos ? std::string_view::npos : dot - start);
+            if (label.empty() || label.size() > 63 || label.front() == '-' || label.back() == '-')
                 return false;
-            std::size_t start = 0;
-            for (;;)
+            for (char c : label)
             {
-                const std::size_t dot = name.find('.', start);
-                const std::string_view label =
-                    name.substr(start, dot == std::string_view::npos ? std::string_view::npos : dot - start);
-                if (label.empty() || label.size() > 63 || label.front() == '-' || label.back() == '-')
+                if (!(isDigit(c) || (c >= 'a' && c <= 'z') || c == '-'))
                     return false;
-                for (char c : label)
-                {
-                    if (!(isDigit(c) || (c >= 'a' && c <= 'z') || c == '-'))
-                        return false;
-                }
-                if (dot == std::string_view::npos)
-                {
-                    if (std::all_of(label.begin(), label.end(), isDigit) || label.starts_with("0x"))
-                        return false;
-                    return true;
-                }
-                start = dot + 1;
             }
+            if (dot == std::string_view::npos)
+            {
+                if (std::all_of(label.begin(), label.end(), isDigit) || label.starts_with("0x"))
+                    return false;
+                return true;
+            }
+            start = dot + 1;
         }
+    }
 
+    namespace
+    {
         // Strips one trailing dot: "example.com." is "example.com".
         std::string_view withoutTrailingDot(std::string_view host)
         {
@@ -420,6 +425,10 @@ namespace fminus::web
                 return error;
             compiled.patterns.push_back(std::move(pattern));
         }
+#if FMINUS_HAS_WEB_SERVER
+        if (std::string error = compileServerPolicy(policy.server, compiled.server); !error.empty())
+            return error;
+#endif
         out = std::move(compiled);
         return {};
     }

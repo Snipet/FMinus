@@ -7,6 +7,9 @@
 // environment, so a JIT must not define them, and the list names them through FMINUS_WEB_MAIN_SYMBOL(name), which a
 // reader that reserves the names defines (ir/Constants.cpp) and support/JitRuntime.cpp does not. (A program cannot
 // declare any fminus_web_ name either: ir/Functions.cpp.)
+//
+// The server's functions (Web.h) only in a build with FMINUS_WEB_SERVER too, under fminus/Config.h's
+// FMINUS_HAS_WEB_SERVER, which a reader has included.
 #ifndef FMINUS_WEB_MAIN_SYMBOL
 #define FMINUS_WEB_MAIN_SYMBOL(name)
 #endif
@@ -19,6 +22,19 @@ FMINUS_RUNTIME_SYMBOL(fminus_web_http_body)
 FMINUS_RUNTIME_SYMBOL(fminus_web_http_progress)
 FMINUS_RUNTIME_SYMBOL(fminus_web_http_cancel)
 FMINUS_RUNTIME_SYMBOL(fminus_web_http_close)
+#if FMINUS_HAS_WEB_SERVER
+FMINUS_RUNTIME_SYMBOL(fminus_web_http_listen)
+FMINUS_RUNTIME_SYMBOL(fminus_web_http_port)
+FMINUS_RUNTIME_SYMBOL(fminus_web_http_next)
+FMINUS_RUNTIME_SYMBOL(fminus_web_http_accept)
+FMINUS_RUNTIME_SYMBOL(fminus_web_http_is)
+FMINUS_RUNTIME_SYMBOL(fminus_web_http_arg)
+FMINUS_RUNTIME_SYMBOL(fminus_web_http_query_float)
+FMINUS_RUNTIME_SYMBOL(fminus_web_http_query_int)
+FMINUS_RUNTIME_SYMBOL(fminus_web_http_reply)
+FMINUS_RUNTIME_SYMBOL(fminus_web_http_reply_bytes)
+FMINUS_RUNTIME_SYMBOL(fminus_web_http_reply_text)
+#endif
 FMINUS_WEB_MAIN_SYMBOL(fminus_web_main_start)
 FMINUS_WEB_MAIN_SYMBOL(fminus_web_main_stop)
 #undef FMINUS_WEB_MAIN_SYMBOL

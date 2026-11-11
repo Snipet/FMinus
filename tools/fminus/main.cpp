@@ -33,6 +33,11 @@
 //                                           --run's program may reach the URLs the patterns allow (none by default:
 //                                           every http_get refused); --web-ca-file trusts a PEM file's roots instead
 //                                           of the system's. An executable reads FMINUS_WEB_ALLOW when it runs instead
+//     fminus serve.fm --run serve --web-listen localhost:8080 --web-root page
+//                                           --run's program may listen there (nowhere by default: http_listen's
+//                                           server never listens), and serves page/'s files; --web-token T,
+//                                           --web-host NAME and --web-open as Options::web.server's. An executable
+//                                           reads FMINUS_WEB_LISTEN (and _TOKEN, _HOSTS, _ROOT, _OPEN) instead
 //     fminus diodetone.cir --emit fm        the FMinus module a circuit netlist generates (fminus::circuit,
 //                                           docs/circuits.md); a .cir compiles and runs as that text would
 //     fminus play.fm --run dc 1             play.fm's #include "diodetone.cir" reads the module it generates
@@ -518,6 +523,11 @@ int main(int argc, char** argv)
     bool boundsCheck = false;
     std::vector<std::string> webAllow;
     std::string webCaFile;
+    std::string webListen;
+    std::string webToken;
+    std::vector<std::string> webHosts;
+    std::string webRoot;
+    bool webOpen = false;
     CircuitSettings circuitSettings;
     app.add_option("input", input, "FMinus source file ('-' for stdin)")->required();
     app.add_option("args", runArgs,
@@ -583,6 +593,26 @@ int main(int argc, char** argv)
         ->allow_extra_args(false);
     app.add_option("--web-ca-file", webCaFile,
                    "With --web-allow: trust the root certificates in this PEM file instead of the system's");
+    app.add_option("--web-listen", webListen,
+                   "Let --run's program listen here, when it calls http_listen: 127.0.0.1:8080, [::1]:8080, "
+                   "localhost:8080 (both loopback addresses), localhost:0 (a port the system picks), an address of the "
+                   "machine or *:8080 (every interface: needs --web-token or --web-open). Without it, it listens "
+                   "nowhere. Needs the web server (FMINUS_WEB_SERVER); an executable reads FMINUS_WEB_LISTEN when it "
+                   "runs instead");
+    app.add_option("--web-token", webToken,
+                   "With --web-listen: a secret every request to a route must carry, as 'Authorization: Bearer "
+                   "<token>' (16 to 256 characters of A-Z, a-z, 0-9, '-' and '_')");
+    app.add_option("--web-host", webHosts,
+                   "With --web-listen: a name a request's Host may say besides the address (studio.local; repeat it "
+                   "for more)")
+        ->allow_extra_args(false);
+    app.add_option("--web-root", webRoot,
+                   "With --web-listen: serve this directory's files, read once as the program starts (regular files "
+                   "only, no link followed, each name letters, digits, '-', '.', '_' and '~'; at most 256 files and "
+                   "16 MiB; an index.html also at its directory's path)");
+    app.add_flag("--web-open", webOpen,
+                 "With --web-listen: a listen that is not loopback with no --web-token is meant (anyone who can reach "
+                 "the port may send it requests)");
     app.add_flag("--self-test", circuitSettings.selfTest,
                  "Run the self-test of each circuit netlist (.cir) the program reads and generate it with the answer: "
                  "it chooses the configuration the netlist leaves open (seconds; docs/circuits.md)");
@@ -601,12 +631,52 @@ int main(int argc, char** argv)
     if ((!webAllow.empty() || !webCaFile.empty()) && run.empty())
         return fail("--web-allow: for --run's call only; an executable reads FMINUS_WEB_ALLOW (and FMINUS_WEB_CA_FILE) "
                     "when it runs");
+    // The server's options: the first given, for the messages.
+    const char* serverOption = !webListen.empty()  ? "--web-listen"
+                               : !webToken.empty() ? "--web-token"
+                               : !webHosts.empty() ? "--web-host"
+                               : !webRoot.empty()  ? "--web-root"
+                               : webOpen           ? "--web-open"
+                                                   : nullptr;
+    if (serverOption != nullptr && FMINUS_HAS_WEB_SERVER == 0)
+        return fail(std::string(serverOption) + ": this build of FMinus leaves out the web server "
+                                                "(FMINUS_WEB_SERVER=OFF)");
+    if (serverOption != nullptr && run.empty())
+        return fail(std::string(serverOption) + ": for --run's call only; an executable reads FMINUS_WEB_LISTEN (and "
+                                                "FMINUS_WEB_TOKEN, FMINUS_WEB_HOSTS, FMINUS_WEB_ROOT, FMINUS_WEB_OPEN) "
+                                                "when it runs");
+    if (serverOption != nullptr && webListen.empty())
+        return fail(std::string(serverOption) + ": needs --web-listen, where the program may listen");
 #if FMINUS_HAS_WEB
     fminus::web::Policy webPolicy;
     webPolicy.allow = webAllow;
     webPolicy.caFile = webCaFile;
+#if FMINUS_HAS_WEB_SERVER
+    webPolicy.server.listen = webListen;
+    webPolicy.server.token = webToken;
+    webPolicy.server.hosts = webHosts;
+    webPolicy.server.open = webOpen;
+    if (!webRoot.empty())
+    {
+        std::vector<std::string> skipped;
+        if (const std::string wrong = fminus::web::readServerRoot(webRoot, webPolicy.server.files, skipped);
+            !wrong.empty())
+            return fail("--web-root: " + wrong);
+        for (const std::string& note : skipped)
+            llvm::errs() << "fminus: --web-root: skipped " << note << "\n";
+    }
+#endif
     if (const std::string wrong = fminus::web::checkPolicy(webPolicy); !wrong.empty())
-        return fail("--web-allow: " + wrong);
+    {
+        // The option the mistake is in, as checkPolicy names its field ("server.token has ...").
+        const std::string_view field(wrong);
+        const char* option = field.starts_with("server.token")   ? "--web-token"
+                             : field.starts_with("server.hosts") ? "--web-host"
+                             : field.starts_with("server.files") ? "--web-root"
+                             : field.starts_with("server.")      ? "--web-listen"
+                                                                 : "--web-allow";
+        return fail(std::string(option) + ": " + wrong);
+    }
 #endif
 
     const std::array<llvm::OptimizationLevel, 4> levels{llvm::OptimizationLevel::O0, llvm::OptimizationLevel::O1,
@@ -772,10 +842,11 @@ int main(int argc, char** argv)
         if (auto address = (*jit)->lookup(run); !address)
             return fail(address.takeError());
 #if FMINUS_HAS_WEB
-        // The program's web context, from --web-allow, as a host's Program sets it (src/web/Web.h): its handle in the
-        // module's global. Declared after the JIT, so destroyed before it: its requests cancelled and freed first.
+        // The program's web context, from --web-allow and --web-listen, as a host's Program sets it (src/web/Web.h):
+        // its handle in the module's global. Declared after the JIT, so destroyed before it: its requests cancelled
+        // and freed first, its server closed.
         std::unique_ptr<fminus::web::Context> web;
-        if (usesWeb && !webAllow.empty())
+        if (usesWeb && (!webAllow.empty() || !webListen.empty()))
         {
             std::string wrong;
             web = fminus::web::Context::create(webPolicy, wrong);

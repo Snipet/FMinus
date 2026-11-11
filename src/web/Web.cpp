@@ -17,12 +17,22 @@
 //   of it.
 // - The I/O thread is started under the engine's lifecycle mutex when its first user (a context) arrives, and joined
 //   under it when its last user goes; a context arriving meanwhile waits for the join and starts a new one.
+// - Every handle a program is given begins with its kind (Handle.h), and each C function here reads it first: a
+//   request made is a Request; a server and a request it received are Server.cpp's, whose functions these call.
+// - With the server (FMINUS_WEB_SERVER), a context has at most one, made by its first fminus_web_http_listen under its
+//   mutex, attached to the I/O thread by a command (Serve) queued under that mutex, and detached by another (Unserve)
+//   when it is closed, the context stopped or destroyed (stopServer), before it is marked closed. The I/O thread turns
+//   its servers after libcurl's transfers, and waits on their sockets in the same curl_multi_poll (Server.h).
 #include "web/Web.h"
 
 #include "fminus/Config.h"
 #include "runtime/Format.h"
+#include "web/Handle.h"
 #include "web/Policy.h"
 #include "web/Roots.h"
+#if FMINUS_HAS_WEB_SERVER
+#include "web/Server.h"
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -68,12 +78,22 @@ namespace fminus::web
         bool usesEngine = false;   // set by the thread that starts requests, read by ~Context
 
         CURLSH* share = nullptr;   // the I/O thread's
+
+#if FMINUS_HAS_WEB_SERVER
+        Server* server = nullptr;   // its first listen's, under the mutex; freed by ~Context
+#endif
     };
 
     namespace
     {
-        struct Request
+        struct Request : Handle
         {
+            static constexpr Kind kKind = Kind::Made;
+            Request()
+                : Handle(Kind::Made)
+            {
+            }
+
             // Published (Web.h): the status last.
             std::atomic<std::int32_t> status{FMINUS_WEB_PENDING};
             std::atomic<std::int32_t> received{0};
@@ -132,10 +152,17 @@ namespace fminus::web
                 Start,
                 Cancel,
                 Forget,
+#if FMINUS_HAS_WEB_SERVER
+                Serve,     // the I/O thread starts driving `server`
+                Unserve,   // and stops: its sockets closed, its requests given up
+#endif
             } kind;
             Request* request = nullptr;
             Context::State* context = nullptr;
             std::uint64_t sequence = 0;
+#if FMINUS_HAS_WEB_SERVER
+            Server* server = nullptr;
+#endif
         };
 
         class Engine
@@ -259,6 +286,12 @@ namespace fminus::web
             std::uint64_t handled_ = 0;
             bool stopping_ = false;
             CURLM* multi_ = nullptr;
+
+#if FMINUS_HAS_WEB_SERVER
+            // The I/O thread's.
+            Servers servers_;
+            std::vector<curl_waitfd> descriptors_;
+#endif
         };
 
         // Never destroyed: a host that exits with a context alive (and the I/O thread running) must not have the
@@ -364,7 +397,14 @@ namespace fminus::web
                     const CURLcode result = message->data.result;
                     done(request, result);
                 }
+#if FMINUS_HAS_WEB_SERVER
+                servers_.turn();
+                servers_.descriptors(descriptors_);
+                curl_multi_poll(multi_, descriptors_.empty() ? nullptr : descriptors_.data(),
+                                static_cast<unsigned>(descriptors_.size()), servers_.timeoutMs(1000), nullptr);
+#else
                 curl_multi_poll(multi_, nullptr, 0, 1000, nullptr);
+#endif
             }
         }
 
@@ -386,6 +426,14 @@ namespace fminus::web
                     command.context->share = nullptr;
                 }
                 break;
+#if FMINUS_HAS_WEB_SERVER
+            case Command::Serve:
+                servers_.attach(command.server);
+                break;
+            case Command::Unserve:
+                servers_.detach(command.server);
+                break;
+#endif
             }
         }
 
@@ -712,6 +760,31 @@ namespace fminus::web
             runtime::expandFormat(text, length, ints, count, [&](char c) { out.push_back(c); });
             return out;
         }
+
+        // Closes the context's server, if it has one: the I/O thread lets go of it (its sockets closed, its requests
+        // given up), then it is marked closed (its port FMINUS_WEB_CANCELLED, every thread in accept woken). Waits for
+        // the I/O thread: not under the context's mutex, which the I/O thread takes.
+        void stopServer([[maybe_unused]] Context::State& state)
+        {
+#if FMINUS_HAS_WEB_SERVER
+            Server* server = nullptr;
+            bool usesEngine = false;
+            {
+                std::lock_guard lock(state.mutex);
+                server = state.server;
+                usesEngine = state.usesEngine;
+            }
+            if (server == nullptr)
+                return;
+            if (usesEngine)
+            {
+                Command command{Command::Unserve, nullptr, &state, 0};
+                command.server = server;
+                engine().wait(engine().postSurely(command));
+            }
+            closeServer(*server);
+#endif
+        }
     } // namespace
 
     std::string checkPolicy(const Policy& policy)
@@ -744,6 +817,7 @@ namespace fminus::web
     Context::~Context()
     {
         State& state = *state_;
+        stopServer(state);
         if (state.usesEngine)
         {
             // Cancels what is in flight; the Forget, handled after those, frees the share.
@@ -770,9 +844,30 @@ namespace fminus::web
         for (Request* request : state.requests)
             freeRequest(request);
         state.requests.clear();
+#if FMINUS_HAS_WEB_SERVER
+        freeServer(state.server);   // its threads in accept, woken above, gone first
+        state.server = nullptr;
+#endif
         if (state.usesEngine)
             engine().release();
         curl_global_cleanup();
+    }
+
+    std::int32_t Context::port() const noexcept
+    {
+#if FMINUS_HAS_WEB_SERVER
+        Server* server = nullptr;
+        {
+            std::lock_guard lock(state_->mutex);
+            server = state_->server;   // freed only by ~Context
+        }
+        if (server == nullptr)
+            return 0;
+        const std::int32_t port = fminus_web_http_port(serverHandle(server));
+        return port > 0 ? port : 0;
+#else
+        return 0;
+#endif
     }
 
     // The flag first, under the mutex: a start that takes the mutex after it is cancelled there, one before it is in
@@ -783,12 +878,15 @@ namespace fminus::web
     void Context::stop() noexcept
     {
         State& state = *state_;
+        bool usesEngine = false;
         {
             std::lock_guard lock(state.mutex);
             state.stopped.store(true, std::memory_order_release);
-            if (!state.usesEngine)
-                return;
+            usesEngine = state.usesEngine;
         }
+        stopServer(state);
+        if (!usesEngine)
+            return;
         for (;;)
         {
             std::uint64_t sequence = 0;
@@ -831,17 +929,37 @@ namespace fminus::web
 
 using fminus::web::Context;
 
+namespace
+{
+    // A request made, as its handle (null stays null).
+    void* madeHandle(fminus::web::Request* request) noexcept
+    {
+        return request == nullptr ? nullptr : fminus::web::toHandle(request);
+    }
+
+    fminus::web::Request* made(void* handle) noexcept
+    {
+        return fminus::web::as<fminus::web::Request>(handle);
+    }
+
+    const fminus::web::Request* made(const void* handle) noexcept
+    {
+        return fminus::web::as<fminus::web::Request>(handle);
+    }
+} // namespace
+
 extern "C"
 {
     void* fminus_web_http_get(void* context, const char* url, std::int32_t length, const std::int32_t* ints,
                               std::int32_t count) noexcept
     {
         if (context == nullptr)
-            return &fminus::web::refused();
+            return madeHandle(&fminus::web::refused());
         try
         {
-            return fminus::web::start(static_cast<Context::State*>(context),
-                                      fminus::web::expand(url, length, ints, count), false, nullptr, 0, {});
+            return madeHandle(fminus::web::start(static_cast<Context::State*>(context),
+                                                 fminus::web::expand(url, length, ints, count), false, nullptr, 0,
+                                                 {}));
         }
         catch (const std::bad_alloc&)
         {
@@ -854,14 +972,15 @@ extern "C"
                                std::int32_t typeLength) noexcept
     {
         if (context == nullptr)
-            return &fminus::web::refused();
+            return madeHandle(&fminus::web::refused());
         try
         {
             const std::string_view contentType = type == nullptr || typeLength <= 0
                                                      ? std::string_view()
                                                      : std::string_view(type, static_cast<std::size_t>(typeLength));
-            return fminus::web::start(static_cast<Context::State*>(context),
-                                      fminus::web::expand(url, length, ints, count), true, data, bytes, contentType);
+            return madeHandle(fminus::web::start(static_cast<Context::State*>(context),
+                                                 fminus::web::expand(url, length, ints, count), true, data, bytes,
+                                                 contentType));
         }
         catch (const std::bad_alloc&)
         {
@@ -871,7 +990,7 @@ extern "C"
 
     std::int32_t fminus_web_http_wait(void* handle, std::int32_t timeoutMs) noexcept
     {
-        auto* request = static_cast<fminus::web::Request*>(handle);
+        fminus::web::Request* request = made(handle);
         if (request == nullptr)
             return FMINUS_WEB_INVALID;
         const std::int32_t now = request->status.load(std::memory_order_acquire);
@@ -896,13 +1015,17 @@ extern "C"
 
     std::int32_t fminus_web_http_status(const void* handle) noexcept
     {
-        const auto* request = static_cast<const fminus::web::Request*>(handle);
+        const fminus::web::Request* request = made(handle);
         return request == nullptr ? FMINUS_WEB_INVALID : request->status.load(std::memory_order_acquire);
     }
 
     std::int32_t fminus_web_http_size(const void* handle) noexcept
     {
-        const auto* request = static_cast<const fminus::web::Request*>(handle);
+        const fminus::web::Request* request = made(handle);
+#if FMINUS_HAS_WEB_SERVER
+        if (request == nullptr)
+            return fminus::web::receivedSize(handle);
+#endif
         if (request == nullptr || request->status.load(std::memory_order_acquire) <= 0)
             return 0;
         return request->size;
@@ -910,7 +1033,11 @@ extern "C"
 
     const void* fminus_web_http_body(const void* handle) noexcept
     {
-        const auto* request = static_cast<const fminus::web::Request*>(handle);
+        const fminus::web::Request* request = made(handle);
+#if FMINUS_HAS_WEB_SERVER
+        if (request == nullptr)
+            return fminus::web::receivedBody(handle);
+#endif
         if (request == nullptr || request->status.load(std::memory_order_acquire) <= 0)
             return nullptr;
         return request->body;
@@ -918,13 +1045,13 @@ extern "C"
 
     std::int32_t fminus_web_http_progress(const void* handle) noexcept
     {
-        const auto* request = static_cast<const fminus::web::Request*>(handle);
+        const fminus::web::Request* request = made(handle);
         return request == nullptr ? 0 : request->received.load(std::memory_order_relaxed);
     }
 
     void fminus_web_http_cancel(void* handle) noexcept
     {
-        auto* request = static_cast<fminus::web::Request*>(handle);
+        fminus::web::Request* request = made(handle);
         if (request == nullptr || request->context == nullptr ||
             request->status.load(std::memory_order_acquire) != FMINUS_WEB_PENDING)
             return;
@@ -936,7 +1063,15 @@ extern "C"
 
     void fminus_web_http_close(void* handle) noexcept
     {
-        auto* request = static_cast<fminus::web::Request*>(handle);
+#if FMINUS_HAS_WEB_SERVER
+        if (fminus::web::Server* server = fminus::web::asServer(handle))
+        {
+            if (Context::State* context = fminus::web::serverContext(*server))
+                fminus::web::stopServer(*context);
+            return;
+        }
+#endif
+        fminus::web::Request* request = made(handle);
         if (request == nullptr || request->context == nullptr)
             return;
         fminus_web_http_cancel(handle);
@@ -954,4 +1089,58 @@ extern "C"
             fminus::web::engine().wait(fminus::web::engine().posted());
         fminus::web::freeRequest(request);
     }
+
+#if FMINUS_HAS_WEB_SERVER
+    // Web.h. The server is made, and its sockets bound, under the context's mutex, so a context listens once and a
+    // stop() either comes first (the server never listens) or finds it (and detaches it after its Serve, which is
+    // queued under the same mutex).
+    void* fminus_web_http_listen(void* context, const char* const* routes, const std::int32_t* lengths,
+                                 std::int32_t count) noexcept
+    {
+        if (context == nullptr)
+            return fminus::web::serverHandle(fminus::web::refusedServer());
+        Context::State& state = *static_cast<Context::State*>(context);
+        try
+        {
+            std::lock_guard lock(state.mutex);
+            if (state.server != nullptr)
+                return fminus::web::serverHandle(state.server);
+            if (!state.policy.server.listens)
+                return fminus::web::serverHandle(fminus::web::refusedServer());
+            fminus::web::Server* server =
+                fminus::web::makeServer(&state, state.policy, routes, lengths, count,
+                                        state.stopped.load(std::memory_order_relaxed));
+            state.server = server;
+            if (fminus::web::serverListens(*server))
+            {
+                if (!state.usesEngine)
+                {
+                    if (fminus::web::engine().acquire())   // the context's mutex, then the engine's lifecycle mutex
+                        state.usesEngine = true;
+                }
+                bool attached = false;
+                if (state.usesEngine)
+                {
+                    fminus::web::Command command{fminus::web::Command::Serve, nullptr, &state, 0};
+                    command.server = server;
+                    try
+                    {
+                        fminus::web::engine().post(command);
+                        attached = true;
+                    }
+                    catch (const std::bad_alloc&)
+                    {
+                    }
+                }
+                if (!attached)
+                    fminus::web::failServer(*server);
+            }
+            return fminus::web::serverHandle(server);
+        }
+        catch (const std::bad_alloc&)
+        {
+            return nullptr;
+        }
+    }
+#endif
 }

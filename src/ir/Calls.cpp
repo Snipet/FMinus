@@ -5,13 +5,15 @@
 // calloc and free) and the FFT (fft_create, fft_forward, ...), both on the runtime's functions, and hash and randf
 // (inline: Hash.cpp); then the program's own functions. The runtime's other builtins (bytes_floats, bytes_pcm16, the
 // JSON parser's json_parse, json_float, ..., the XML parser's xml_parse, xml_float, ..., the web library's http_get,
-// http_wait, ..., and those that take string literals: Strings.cpp, Paths.cpp, Web.cpp) come before the rest, as a method of the module does, since their arguments are
+// http_wait, ..., its server's http_listen, http_next, ..., and those that take string literals: Strings.cpp,
+// Paths.cpp, Web.cpp, WebServer.cpp) come before the rest, as a method of the module does, since their arguments are
 // lowered as their parameters say (a literal is one only there). The runtime's functions are declared
 // with what they do (describeRuntime), so LLVM does not take one for an unknown function that may read and write all
 // memory.
 #include "ir/Lowering.h"
 
-#include "fminus/Config.h"   // FMINUS_HAS_JSON, FMINUS_HAS_XML, FMINUS_HAS_WEB: which build options this build has
+#include "fminus/Config.h"   // FMINUS_HAS_JSON, FMINUS_HAS_XML, FMINUS_HAS_WEB, FMINUS_HAS_WEB_SERVER: which build
+                             // options this build has
 
 #include <llvm/IR/Attributes.h>
 #include <llvm/IR/Constants.h>
@@ -168,6 +170,42 @@ namespace fminus::ir::detail
                        Feature::Web, Result::Void},
         RuntimeBuiltin{"http_close", "fminus_web_http_close", {Param::Handle}, 1, RuntimeEffect::Allocates,
                        Feature::Web, Result::Void},
+        // The web library's server (src/web/Web.h), in a build with FMINUS_WEB_SERVER too. http_listen() starts the
+        // program's server where its host's policy says, with the table of every route literal the program has
+        // (WebServer.cpp), and gives it, a void*, at once: it allocates, as http_close of it does (the client's, above,
+        // which closes a server too). http_port(server) is its port or why it has none, http_next(server) the oldest
+        // request waiting or null, and http_accept(server, timeout_ms) the same after waiting for one: it blocks. On a
+        // request: http_is(r, "METHOD /path/%d") whether it is the route, a literal, which keeps the numbers its %d
+        // took for http_arg(r, i); http_query_float(r, "name", fallback) and http_query_int a number of its query, the
+        // name a literal; http_size and http_body (the client's, above) its body; and the replies, http_reply(r,
+        // status), http_reply_bytes(r, status, data, bytes, "content/type") and http_reply_text(r, status,
+        // "content/type", "format", ...), whose format's values follow it. Everything on a request, and http_port and
+        // http_next, is wait-free.
+        RuntimeBuiltin{"http_listen", "fminus_web_http_listen", {}, 0, RuntimeEffect::Allocates, Feature::WebServer,
+                       Result::Pointer},
+        RuntimeBuiltin{"http_port", "fminus_web_http_port", {Param::Handle}, 1, RuntimeEffect::WaitFree,
+                       Feature::WebServer, Result::Int},
+        RuntimeBuiltin{"http_next", "fminus_web_http_next", {Param::Handle}, 1, RuntimeEffect::WaitFree,
+                       Feature::WebServer, Result::Pointer},
+        RuntimeBuiltin{"http_accept", "fminus_web_http_accept", {Param::Handle, Param::Int}, 2, RuntimeEffect::Blocks,
+                       Feature::WebServer, Result::Pointer},
+        RuntimeBuiltin{"http_is", "fminus_web_http_is", {Param::Handle, Param::Route}, 2, RuntimeEffect::WaitFree,
+                       Feature::WebServer, Result::Bool},
+        RuntimeBuiltin{"http_arg", "fminus_web_http_arg", {Param::Handle, Param::Int}, 2, RuntimeEffect::WaitFree,
+                       Feature::WebServer, Result::Int},
+        RuntimeBuiltin{"http_query_float", "fminus_web_http_query_float",
+                       {Param::Handle, Param::QueryName, Param::Float}, 3, RuntimeEffect::WaitFree, Feature::WebServer,
+                       Result::Float},
+        RuntimeBuiltin{"http_query_int", "fminus_web_http_query_int", {Param::Handle, Param::QueryName, Param::Int}, 3,
+                       RuntimeEffect::WaitFree, Feature::WebServer, Result::Int},
+        RuntimeBuiltin{"http_reply", "fminus_web_http_reply", {Param::Handle, Param::Int}, 2, RuntimeEffect::WaitFree,
+                       Feature::WebServer, Result::Int},
+        RuntimeBuiltin{"http_reply_bytes", "fminus_web_http_reply_bytes",
+                       {Param::Handle, Param::Int, Param::Bytes, Param::Int, Param::ContentType}, 5,
+                       RuntimeEffect::WaitFree, Feature::WebServer, Result::Int},
+        RuntimeBuiltin{"http_reply_text", "fminus_web_http_reply_text",
+                       {Param::Handle, Param::Int, Param::ContentType, Param::ReplyFormat}, 4, RuntimeEffect::WaitFree,
+                       Feature::WebServer, Result::Int},
     };
 
     std::optional<ast::Type> paramType(Param param)
@@ -196,6 +234,9 @@ namespace fminus::ir::detail
         case Param::XmlPath:
         case Param::Url:
         case Param::ContentType:
+        case Param::Route:
+        case Param::QueryName:
+        case Param::ReplyFormat:
             break;
         }
         return std::nullopt;
@@ -235,18 +276,22 @@ namespace fminus::ir::detail
             return FMINUS_HAS_XML != 0;
         case Feature::Web:
             return FMINUS_HAS_WEB != 0;
+        case Feature::WebServer:
+            return FMINUS_HAS_WEB_SERVER != 0;
         }
         return false;
     }
 
     std::string notBuilt(std::string_view name, Feature feature)
     {
-        const char* what = feature == Feature::Json  ? "the JSON parser"
-                           : feature == Feature::Xml ? "the XML parser"
-                                                     : "the web library";
-        const char* option = feature == Feature::Json  ? "FMINUS_JSON"
-                             : feature == Feature::Xml ? "FMINUS_XML"
-                                                       : "FMINUS_WEB";
+        const char* what = feature == Feature::Json        ? "the JSON parser"
+                           : feature == Feature::Xml       ? "the XML parser"
+                           : feature == Feature::WebServer ? "the web server"
+                                                           : "the web library";
+        const char* option = feature == Feature::Json        ? "FMINUS_JSON"
+                             : feature == Feature::Xml       ? "FMINUS_XML"
+                             : feature == Feature::WebServer ? "FMINUS_WEB_SERVER"
+                                                             : "FMINUS_WEB";
         return quoted(name) + " needs " + what + ", which this build of FMinus leaves out (" + option + "=OFF)";
     }
 
@@ -277,6 +322,12 @@ namespace fminus::ir::detail
             WebWait,       // fminus_web_http_wait: waits on a request
             WebRead,       // fminus_web_http_status, _size, _body, _progress: a request's atomics, wait-free
             WebEnd,        // fminus_web_http_cancel, fminus_web_http_close: stops a request (and frees it)
+            ServerListen,  // fminus_web_http_listen: reads the route table, gives the context's server
+            ServerTake,    // fminus_web_http_next: claims a request of the server's, wait-free
+            ServerWait,    // fminus_web_http_accept: waits for one
+            ServerMatch,   // fminus_web_http_is: reads a route literal, keeps the numbers it took in the request
+            ServerQuery,   // fminus_web_http_query_float, _int: reads a name literal and the request
+            ServerReply,   // fminus_web_http_reply, _reply_bytes, _reply_text: answers, and hands the request back
         };
 
         struct RuntimeFacts
@@ -328,6 +379,17 @@ namespace fminus::ir::detail
             RuntimeFacts{"fminus_web_http_progress", RuntimeKind::WebRead},
             RuntimeFacts{"fminus_web_http_cancel", RuntimeKind::WebEnd},
             RuntimeFacts{"fminus_web_http_close", RuntimeKind::WebEnd},
+            RuntimeFacts{"fminus_web_http_listen", RuntimeKind::ServerListen},
+            RuntimeFacts{"fminus_web_http_port", RuntimeKind::WebRead},
+            RuntimeFacts{"fminus_web_http_next", RuntimeKind::ServerTake},
+            RuntimeFacts{"fminus_web_http_accept", RuntimeKind::ServerWait},
+            RuntimeFacts{"fminus_web_http_is", RuntimeKind::ServerMatch},
+            RuntimeFacts{"fminus_web_http_arg", RuntimeKind::WebRead},
+            RuntimeFacts{"fminus_web_http_query_float", RuntimeKind::ServerQuery},
+            RuntimeFacts{"fminus_web_http_query_int", RuntimeKind::ServerQuery},
+            RuntimeFacts{"fminus_web_http_reply", RuntimeKind::ServerReply},
+            RuntimeFacts{"fminus_web_http_reply_bytes", RuntimeKind::ServerReply},
+            RuntimeFacts{"fminus_web_http_reply_text", RuntimeKind::ServerReply},
         };
 
         // The heap's allocator family, named after its first function as LangRef asks: LLVM pairs an allocation with
@@ -337,11 +399,11 @@ namespace fminus::ir::detail
         // Gives the runtime's function `function` (kRuntimeFacts) the attributes that are true of its code, so LLVM
         // knows a call of it touches only what it touches: a call of fft_forward then changes no module's fields, and
         // memory from calloc is fresh and zeroed. Each one must stay true of runtime/Runtime.cpp, runtime/Fft.cpp,
-        // runtime/Bytes.cpp, runtime/Json.cpp, runtime/Xml.cpp and web/Web.cpp:
+        // runtime/Bytes.cpp, runtime/Json.cpp, runtime/Xml.cpp, web/Web.cpp and web/Server.cpp:
         // an attribute that is not is a miscompile. Every one of them is noexcept (nounwind), and all but
-        // fminus_rt_parallel_for and the web library's that wait for another thread (http_wait, http_cancel and
-        // http_close) come back (willreturn): it runs a region's body, which may loop for ever, as a loop with a
-        // constant condition may. None takes nonnull: a null plan is a plan that does nothing, and the heap's
+        // fminus_rt_parallel_for and the web library's that wait for another thread (http_wait, http_cancel,
+        // http_close and http_accept) come back (willreturn): it runs a region's body, which may loop for ever, as a
+        // loop with a constant condition may, and http_accept(server, -1) waits for a request that may never come. None takes nonnull: a null plan is a plan that does nothing, and the heap's
         // results may be null. Nor does an FFT buffer take noalias, though `out` must not overlap `in`: a program that
         // transforms in place gets what PFFFT gives it, as before.
         void describeRuntime(llvm::Function& function)
@@ -358,7 +420,7 @@ namespace fminus::ir::detail
             const llvm::Attribute keepsNone = llvm::Attribute::getWithCaptureInfo(context, llvm::CaptureInfo::none());
             function.setDoesNotThrow();
             if (facts->kind != RuntimeKind::Parallel && facts->kind != RuntimeKind::WebWait
-                && facts->kind != RuntimeKind::WebEnd)
+                && facts->kind != RuntimeKind::WebEnd && facts->kind != RuntimeKind::ServerWait)
                 function.setWillReturn();
             switch (facts->kind)
             {
@@ -525,6 +587,74 @@ namespace fminus::ir::detail
                 function.setMemoryEffects(llvm::MemoryEffects::inaccessibleOrArgMemOnly());
                 function.setDoesNotFreeMemory();
                 function.addParamAttr(0, keepsNone);
+                break;
+            case RuntimeKind::ServerListen:
+                // Binds and listens under the context's mutex, makes the server (the library's memory, which only the
+                // context's pointer reaches, as WebStart's request) and copies the route table: it reads the table and
+                // the lengths, keeping no pointer to either, and the literals the table points to, which no argument
+                // points to (other memory, read only: the program's constants). Beyond them, the system allocator's
+                // state, the sockets, and errno, which it reads after a failed bind (web/SocketsPosix.cpp). Its result
+                // may be the library's one shared refused server, or the context's server again: no noalias.
+                function.setMemoryEffects(llvm::MemoryEffects::inaccessibleOrArgMemOnly()
+                                          | llvm::MemoryEffects::errnoMemOnly(llvm::ModRefInfo::ModRef)
+                                          | llvm::MemoryEffects::otherMemOnly(llvm::ModRefInfo::Ref));
+                for (unsigned arg : {1u, 2u})
+                {
+                    function.addParamAttr(arg, llvm::Attribute::ReadOnly);
+                    function.addParamAttr(arg, keepsNone);
+                }
+                function.addRetAttr(llvm::Attribute::NoUndef);
+                break;
+            case RuntimeKind::ServerTake:
+                // Acquire loads of the server's slots and a compare-and-swap of one, which the I/O thread and every
+                // other taker race with: it changes what the next call reads (two calls are two requests, and a
+                // polling loop must call it each time round), so it writes. The slots are the library's memory. It
+                // frees nothing, and gives a request, never the server's own pointer.
+                function.setMemoryEffects(llvm::MemoryEffects::inaccessibleOrArgMemOnly());
+                function.setDoesNotFreeMemory();
+                function.addRetAttr(llvm::Attribute::NoUndef);
+                break;
+            case RuntimeKind::ServerWait:
+                // The same, and the server's lock and condition variable, waited on.
+                function.setMemoryEffects(llvm::MemoryEffects::inaccessibleOrArgMemOnly());
+                function.setDoesNotFreeMemory();
+                function.addRetAttr(llvm::Attribute::NoUndef);
+                break;
+            case RuntimeKind::ServerMatch:
+                // Reads the request (an acquire load of its phase, which the I/O thread writes, then its method and
+                // path) and the route literal, and, when it matches, writes the numbers it took into the request, which
+                // http_arg reads: so it writes, and an http_arg after it reads again. Keeps no pointer to either.
+                function.setMemoryEffects(llvm::MemoryEffects::inaccessibleOrArgMemOnly());
+                function.setDoesNotFreeMemory();
+                function.addParamAttr(0, keepsNone);
+                function.addParamAttr(1, llvm::Attribute::ReadOnly);
+                function.addParamAttr(1, keepsNone);
+                break;
+            case RuntimeKind::ServerQuery:
+                // As WebRead (an acquire load of the request's phase, then its query), and the name literal, which it
+                // only reads.
+                function.setMemoryEffects(llvm::MemoryEffects::inaccessibleOrArgMemOnly());
+                function.setDoesNotFreeMemory();
+                function.addParamAttr(0, keepsNone);
+                function.addParamAttr(1, llvm::Attribute::ReadOnly);
+                function.addParamAttr(1, keepsNone);
+                break;
+            case RuntimeKind::ServerReply:
+                // Writes the reply into the request's own buffer and publishes it with a compare-and-swap, which hands
+                // the request back: the I/O thread then sends it and reuses the request's memory, its body among it,
+                // which the program reads through http_body's pointer. So a load of that body must not move after the
+                // call, which LLVM knows only of a call that may write any memory: its memory is left as it is (any).
+                // It reads the data, the content type, the format and the values, keeping no pointer to any, frees
+                // nothing and keeps no pointer to the request.
+                function.setDoesNotFreeMemory();
+                function.addParamAttr(0, keepsNone);
+                for (unsigned arg = 2; arg < function.arg_size(); ++arg)
+                {
+                    if (!function.getArg(arg)->getType()->isPointerTy())
+                        continue;
+                    function.addParamAttr(arg, llvm::Attribute::ReadOnly);
+                    function.addParamAttr(arg, keepsNone);
+                }
                 break;
             }
         }
@@ -889,8 +1019,10 @@ namespace fminus::ir::detail
 
     // A builtin of the runtime's (kRuntimeBuiltins): each argument as its parameter says (Param), into a call of the
     // runtime's function, whose result is the builtin's (Result). A format's or a path's ints, after it, go to the
-    // runtime in an array of the function's stack frame, with their count; choices, the string literals after them,
-    // in one table. One of a build option this build was configured without is an error that names the option.
+    // runtime in an array of the function's stack frame, with their count, and a reply's format's values in an array
+    // of doubles; choices, the string literals after them, in one table. http_listen takes no argument, and passes the
+    // program's web context and its route table (WebServer.cpp). One of a build option this build was configured
+    // without is an error that names the option.
     Lowering::Value Lowering::lowerRuntimeBuiltin(SourceLocation location, const RuntimeBuiltin& builtin,
                                                   const ast::CallExpr& call)
     {
@@ -904,7 +1036,8 @@ namespace fminus::ir::detail
             calls_[function_->name].push_back({location, call.callee});   // what Effects.cpp checks
         const std::span<const Param> params(builtin.params.data(), builtin.arity);
         const auto format = std::ranges::find_if(params, [](Param param) {
-            return param == Param::Format || param == Param::Path || param == Param::XmlPath || param == Param::Url;
+            return param == Param::Format || param == Param::Path || param == Param::XmlPath || param == Param::Url
+                   || param == Param::ReplyFormat;
         });
         // A URL's ints are the call's last arguments, after every other parameter's, as printf's are; any other
         // format's follow it.
@@ -964,7 +1097,8 @@ namespace fminus::ir::detail
                 continue;
             }
             if (param == Param::String || param == Param::Format || param == Param::Path || param == Param::XmlPath
-                || param == Param::Url || param == Param::ContentType)
+                || param == Param::Url || param == Param::ContentType || param == Param::Route
+                || param == Param::QueryName || param == Param::ReplyFormat)
             {
                 if (!isString(arg))
                 {
@@ -974,7 +1108,9 @@ namespace fminus::ir::detail
                 }
                 const auto& literal = std::get<ast::StringExpr>(arg.node);
                 if ((param == Param::Url && !checkUrl(literal, begin(arg)))
-                    || (param == Param::ContentType && !checkContentType(literal, begin(arg))))
+                    || (param == Param::ContentType && !checkContentType(literal, begin(arg)))
+                    || (param == Param::Route && !checkRoute(literal, begin(arg)))
+                    || (param == Param::QueryName && !checkQueryName(literal, begin(arg))))
                 {
                     fine = false;
                     continue;
@@ -993,11 +1129,26 @@ namespace fminus::ir::detail
                     irArgs.push_back(stringConstant(literal));
                     irArgs.push_back(builder_.getInt32(static_cast<std::uint32_t>(literal.value.size())));
                 }
-                if (param == Param::String || param == Param::ContentType)
+                if (param == Param::Route)   // what Program::webRoutes() lists, and the route table
+                    recordWebRoute(location, literal);
+                if (param == Param::String || param == Param::ContentType || param == Param::Route
+                    || param == Param::QueryName)
                     continue;
                 std::vector<const ast::Expr*> given;
                 for (std::size_t k = 0; k < ints; ++k)
                     given.push_back(call.args[intsAt + k].get());
+                if (param == Param::ReplyFormat)   // its values, doubles (WebServer.cpp)
+                {
+                    const std::optional<std::vector<llvm::Value*>> values = replyArguments(literal, given);
+                    if (!values)
+                    {
+                        fine = false;
+                        continue;
+                    }
+                    irArgs.push_back(replyValues(*values));
+                    irArgs.push_back(builder_.getInt32(static_cast<std::uint32_t>(values->size())));
+                    continue;
+                }
                 const std::optional<std::vector<llvm::Value*>> values = formatArguments(literal, given);
                 if (!values)
                 {
@@ -1020,8 +1171,13 @@ namespace fminus::ir::detail
         }
         if (!fine)
             return recovery(type);
+        const bool listen = builtin.symbol == "fminus_web_http_listen";
+        if (listen)
+            irArgs = listenArguments(location);
         llvm::Type* returned = builtin.result == Result::Bool ? builder_.getInt32Ty() : typeOf(type);
         llvm::CallInst* result = callRuntime(std::string(builtin.symbol), returned, irArgs);
+        if (listen)
+            webListens_.push_back(result);   // its route table, once every route is known (finishWebRoutes)
         if (builtin.result == Result::Void)
             return {result, type};
         result->setName(builtin.name);

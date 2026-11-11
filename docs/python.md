@@ -319,5 +319,8 @@ To bind something more of the header: add the method to its class in `Module.cpp
   from Python in a build with `FMINUS_WEB` has the default policy, no network, and every request it makes is
   `HTTP_REFUSED`. The package builds and works unchanged in such a build (not tried here: the two options together
   were never built).
+- **The web server's host API** (`Options::web.server`, `webRoutes()`, `webPort()`: [web.md](web.md), "The server"):
+  a program compiled from Python in a build with `FMINUS_WEB_SERVER` listens nowhere, and its `http_port` is
+  `HTTP_REFUSED`. (Not tried here either: the package was not built with the server.)
 - **Wheels.** There is no binary distribution: pip builds from the checkout. Built and tested on Linux (x86-64,
   CPython 3.13, clang 18); macOS and Windows build the same sources, and have not been tried.

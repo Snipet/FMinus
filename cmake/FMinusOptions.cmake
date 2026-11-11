@@ -17,6 +17,15 @@ option(FMINUS_XML "The XML parser and the xml_* builtins (fetches pugixml and fa
 # libcurl and, on macOS and Linux, Mbed TLS (Windows uses Schannel), and builds both at configure time into the deps
 # cache (cmake/FMinusWeb.cmake).
 option(FMINUS_WEB "The web library: an HTTP(S) client under the host's policy (fetches libcurl, Mbed TLS)" OFF)
+# The web library's server (src/web/Server.cpp: a program listens where its host allows, and answers requests on its own
+# threads, the audio thread among them, wait-free), part of fminus_web. Off by default, and it needs FMINUS_WEB: with
+# it off nothing more is fetched or built, and the server's sources under src/web/ compile to nothing. On, it fetches
+# llhttp, the request parser (cmake/FMinusLlhttp.cmake), and fast_float when the parsers have not (a query's numbers).
+option(FMINUS_WEB_SERVER "The web library's server: a program answers HTTP requests under the host's policy (fetches llhttp)" OFF)
+if(FMINUS_WEB_SERVER AND NOT FMINUS_WEB)
+  message(FATAL_ERROR "FMinus: FMINUS_WEB_SERVER is ON and FMINUS_WEB is OFF: the server is part of the web library. "
+                      "Configure with -DFMINUS_WEB=ON as well, or turn FMINUS_WEB_SERVER off.")
+endif()
 # The JSON parser's limits on a document (src/runtime/Json.cpp): its size in bytes, and how deeply its arrays and
 # objects may nest. json_parse of a document past either is null, as of one that is not JSON. fminus/Config.h has both.
 set(FMINUS_JSON_MAX_BYTES 67108864)   # 64 MiB

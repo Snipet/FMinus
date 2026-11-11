@@ -5,6 +5,22 @@ built the same day) and [the report before it](README.md), which put a server "l
 how would FMinus do a web server? Nothing under `src/`, `include/` or `cmake/` changed for this note. §11 says what
 was measured, what was read at its source, and what was neither.*
 
+*As built, 2026-11-11: §10's first version is in the tree, as section 0 chose it, behind `FMINUS_WEB_SERVER`;
+[web.md](../../web.md), "The server", is its manual, recipe 42 of [extending.md](../../extending.md) its walk through
+the compiler, and `examples/remote/` its example. Where it differs from this report: a route literal names `GET`,
+`POST`, `PUT`, `PATCH` or `DELETE` only (`HEAD` comes with `GET`, and `OPTIONS` is the library's: 405), and a `%d`
+followed by a digit, or by another `%d`, is an error; a reply's `%.Ng` takes any N from 1 to 17; every refusal of rules
+2 to 8 closes the connection, `Expect` is 417, `Upgrade` 400, and a version llhttp cannot parse (1.2) 400, not 505;
+the policy has ranges the report left open (a token of 16 to 256 characters, 1 to 1024 connections and slots, a reply
+buffer of at most 16 MiB), refuses `0.0.0.0` and `::` in favour of `*`, and allows port 0 in every form; the driver and
+executables also take the names a `Host` may say (`--web-host`, `FMINUS_WEB_HOSTS`), and a root directory is read with
+limits of 256 files, 16 MiB and 4096 entries; `http_next` gives up after twice the slots' number of tries, so under
+contention it can say null while a request waits; the example sends `POST`, not `PUT`, since the library's own client,
+which drives its check, has only `http_get` and `http_post`. Measured again on what was built (web.md has the table):
+an empty `http_next` over 16 slots is still about 10 ns, but a request handled as §11 describes takes 0.65 to 0.95 µs,
+not 180 ns, a reply reaching its client about 1.2 ms after it is written. Not run: IPv6 (the machine had none), any
+listen beyond loopback, macOS, Windows and a browser. The rest of this report is left as it was written.*
+
 ## 0. Summary
 
 **What I would build:**

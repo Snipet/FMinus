@@ -1,16 +1,18 @@
 # cmake/FMinusFastFloat.cmake: fast_float, the reader of numbers behind the runtime's parsers (src/runtime/Numbers.cpp):
 # text to a float correctly rounded, straight from its digits and never through a double, and the same in every
-# locale, where C's strtof reads a "0,5" in a German one. Only when FMINUS_JSON or FMINUS_XML is on: with both off,
-# nothing is fetched, and there is no target.
+# locale, where C's strtof reads a "0,5" in a German one; and behind the web server's query numbers
+# (src/web/Server.cpp). Only when FMINUS_JSON, FMINUS_XML or FMINUS_WEB_SERVER is on: with all three off, nothing is
+# fetched, and there is no target.
 #
 # It is headers only. The release's tag is fetched once (pinned in cmake/FMinusPins.cmake) into
 # ${FMINUS_DEPS_DIR}/src/fast_float-<version>, marked with its hash, and every later configure of any build tree uses
 # it there. Its own CMakeLists.txt (its tests, benchmarks and install rules) is never added: the interface library
 # fminus_fast_float gives its include/ directory, as a system one, so FMinus's warnings stay out of it. Its code is
-# compiled where the runtime includes it, in one file (Numbers.cpp), which hides its symbols.
+# compiled where the runtime includes it, in one file (Numbers.cpp), which hides its symbols, and where the web library
+# does, in one file of its own too (web/Server.cpp).
 #
 # Gives fminus_fast_float (#include <fast_float/fast_float.h>).
-if(NOT FMINUS_JSON AND NOT FMINUS_XML)
+if(NOT FMINUS_JSON AND NOT FMINUS_XML AND NOT FMINUS_WEB_SERVER)
   return()
 endif()
 

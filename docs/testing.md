@@ -118,7 +118,18 @@ TEST_CASE("functions compute what they say", "[codegen]")
   `Options::web` through `fminus::Program`; and `WebTest.cpp`, compiled only with `FMINUS_WEB`, the library against a
   loopback HTTP and HTTPS server the test starts on an ephemeral port, then programs fetching from it through the JIT
   and as executables. No test makes a request or a DNS lookup beyond the loopback interface, ever; their network part
-  is not compiled on Windows),
+  is not compiled on Windows), `[server]` (the web library's server, docs/web.md, "The server": `HttpServerTest.cpp`,
+  in every build, its builtins' effects, the off build's errors, the route, format and name checks at their columns,
+  the route table and the declarations' attributes, `webRoutes()` and `Options::web.server` through `fminus::Program`;
+  `WebServerTest.cpp`, compiled only with `FMINUS_WEB_SERVER`, the engine from C++ before any builtin, against raw
+  sockets and the library's own client: the policy and its classifiers (what a listen that is not loopback would do
+  is judged by them, never bound), each of the nine rules, keep-alive, the limits and timeouts, dropped clients,
+  threads taking at once, closing with threads waiting, and the wait-free proof, `HeapCalls` and a child under
+  seccomp's strict mode; and `WebServeTest.cpp`, programs that serve through the JIT and as an executable, and
+  `readServerRoot`, a directory swapped for a link to elsewhere while it reads (Linux, `renameat2`) among them, and
+  the wait-free proof of a JIT'd `[[clang::nonblocking]]` handler. Every socket they bind is on 127.0.0.1, and every connection they make is to it; this machine's
+  kernel has no IPv6, so the `localhost` and `[::1]` cases take their no-IPv6 branch. Their timeouts make them
+  timing-sensitive: run them when nothing else is building),
   `[circuit]` (the circuit compiler: `CircuitTest.cpp` its netlists,
   plans, equations (an OTA's against report §7.2's hand derivation; an inductor's, an E's and a G's stamps by hand, and
   RL and RLC responses as the bilinear map), the DC operating point by hand and its errors, the offset form (a biased
@@ -235,6 +246,7 @@ float gain(float x, float g)
 | `REQUIRES: json` (or `UNSUPPORTED: json`) | a build with the JSON parser, `FMINUS_JSON`, as the build tree's `fminus/Config.h` says (`json.fm`, `json-errors.fm`; `json-off.fm` runs only without it) |
 | `REQUIRES: xml` (or `UNSUPPORTED: xml`) | a build with the XML parser, `FMINUS_XML`, the same way (`xml.fm`, `xml-errors.fm`; `xml-off.fm` runs only without it) |
 | `REQUIRES: web` (or `UNSUPPORTED: web`) | a build with the web library, `FMINUS_WEB`, the same way (`web.fm`, `web-errors.fm`, which make no request; `web-off.fm` runs only without it) |
+| `REQUIRES: web-server` (or `UNSUPPORTED: web-server`) | a build with its server, `FMINUS_WEB_SERVER`, the same way (`web-server.fm`, which listens on 127.0.0.1 and asks itself, and `web-server-errors.fm`; `web-server-off.fm` runs only without it) |
 | `%if arm64 %{ ... %}` | a RUN line only on arm64, so the rest of the file still runs elsewhere (`simd.fm`, `poly.fm`); `%if system-darwin && arm64 %{ ... %}` for Apple's assembly (`math.fm`) |
 | `%if avx %{ ... %}` | an x86-64 host whose JIT targets AVX, as `fminus-hostinfo --features` lists it (`lit.cfg.py` asks it): x86-64's vector machine code (`math-large.fm`) |
 

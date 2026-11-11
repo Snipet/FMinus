@@ -197,6 +197,50 @@ namespace fminus
         // default reaches nothing, and nothing a program asks of the library can widen it (the library's policy, not
         // a sandbox: a program's own external functions are not its business; docs/web.md). In a build without the
         // library it is not read: no program there can call http_get.
+        //
+        // Its server part (WebServerPolicy, `server`), in a build with the web server too (FMINUS_WEB_SERVER,
+        // fminus/Config.h's FMINUS_HAS_WEB_SERVER; docs/research/web/server.md): where the program's http_listen may
+        // listen, and how. Its default listens nowhere. In a build without the server it is not read.
+        //
+        // What a listen may be (each with a port of 0 to 65535; 0: the system picks one, which webPort() then says):
+        //   "127.0.0.1:8080", "[::1]:8080"   that loopback address (any of 127.0.0.0/8)
+        //   "localhost:8080"                 both loopback addresses, one port (::1 left out without IPv6)
+        //   "192.168.1.20:8080"              one address of the machine: not loopback, so a token or open is needed
+        //   "*:8080"                         every interface: likewise
+        // A port browsers refuse (the Fetch standard's bad ports), the unspecified addresses themselves (write "*"),
+        // multicast, broadcast, IPv4 inside IPv6 and IPv6 link-local addresses are refused.
+        //
+        // What reaches the program: the library answers everything else itself, before the program sees it (src/web/
+        // Web.h has the nine rules): the request's head within limits; Host the address it arrived on (or localhost on
+        // loopback, or one of `hosts`), so a rebound name is refused; Origin and Sec-Fetch-Site, when present, the
+        // server's own; no form's content type; a path and a method some route of the program's names (404, 405
+        // otherwise); the token, when there is one; a body within maxRequestBytes. No CORS header is ever sent.
+        struct WebServerPolicy
+        {
+            std::string listen;                // where the program may listen (above); empty, the default: nowhere
+            std::vector<std::string> hosts;    // names a request's Host may say besides the address ("studio.local"),
+                                               // without a port
+            // A secret every request to a route must carry, as "Authorization: Bearer <token>": 16 to 256 characters
+            // of A-Z, a-z, 0-9, '-' and '_', from the system's random source. Static files are served without it.
+            std::string token;
+            bool open = false;                 // a listen that is not loopback with no token: the host means it
+            struct File
+            {
+                std::string path;    // "/" or "/app.js": a path a route could name, without a query, each once
+                std::string type;    // its Content-Type: printable ASCII with a '/', at most 255 bytes
+                std::string bytes;   // its body
+            };
+            std::vector<File> files;               // static content the library serves itself, to GET and HEAD
+            std::int32_t maxConnections = 16;      // open at once (1 to 1024)
+            std::int32_t maxPending = 16;          // requests the program has not answered yet (1 to 1024)
+            std::int32_t maxRequestBytes = 1 << 20;   // a request's body (0 to 2^30): past it, 413
+            std::int32_t maxReplyBytes = 64 << 10;    // a reply's body (0 to 2^24; all slots' at most 2^28 bytes):
+                                                      // past it, the reply is HTTP_LIMIT
+            std::int32_t requestTimeoutMs = 10000;    // to send a whole request (408 past it), and to take a reply
+            std::int32_t replyTimeoutMs = 2000;       // for the program to answer one, before the library answers 503
+            std::int32_t idleTimeoutMs = 15000;       // a connection kept alive with nothing on it (each 1 to 86400000)
+        };
+
         struct WebPolicy
         {
             // The URLs a program may reach, as patterns: "https://example.com/presets/*", "https://*.example.com",
@@ -214,6 +258,8 @@ namespace fminus
             // Names the host resolves itself, "name:port:address", for the program's requests alone (libcurl's
             // CURLOPT_RESOLVE): split DNS, tests.
             std::vector<std::string> resolve;
+            // Where the program's server may listen, and how (WebServerPolicy, above): nowhere by default.
+            WebServerPolicy server;
         };
 
         struct Options
@@ -266,7 +312,8 @@ namespace fminus
             // the array's extent, and a call whose check fails returns early, with the check recorded for the host
             // (boundsViolation, below). Off, the default, the code is as it was, and as fast.
             bool boundsCheck = false;
-            // The network the program may reach through http_get and http_post (WebPolicy, above): none by default.
+            // The network the program may reach through http_get and http_post, and where its http_listen may listen
+            // (WebPolicy, above): none, and nowhere, by default.
             WebPolicy web;
         };
 
@@ -598,13 +645,49 @@ namespace fminus
         // library, where a program cannot make one).
         const std::vector<WebRequest>& webRequests() const;
 
+        // The web server (a build with FMINUS_WEB_SERVER). A program listens with http_listen(), which takes no
+        // argument: where is Options::web.server's, never the program's. It takes the requests that reach it with
+        // http_next (wait-free: on the audio thread, between blocks) or http_accept (which blocks), tells them apart
+        // with route literals, http_is(r, "PUT /osc/%d/gain"), and answers each once. Every route is a literal, so the
+        // host knows them all before anything runs, and the library answers 404 and 405 itself for a path or a method
+        // no route names: only a request the program declared reaches its code.
+        //
+        //   options.web.server.listen = "localhost:0";
+        //   auto program = Program::compile(source, errors, options);
+        //   for (const Program::WebRoute& route : program->webRoutes())
+        //       show(route.method, route.pattern, route.line);              // "PUT /osc/*/gain"
+        //   program->function<void()>("init", errors)();                    // which calls http_listen()
+        //   open("http://localhost:" + std::to_string(program->webPort()) + "/");
+        //
+        // One call of http_is in the program's source: its route's method ("GET", "POST", "PUT", "PATCH" or "DELETE";
+        // a GET route answers HEAD too), its path as a pattern (each %d a "*"), and where the call is, in every call
+        // site's order of lowering.
+        struct WebRoute
+        {
+            std::string method;
+            std::string pattern;
+            std::string file;   // as errors name it (Options::fileName, or an #include's)
+            int line = 0;
+            int column = 0;
+        };
+
+        // Every call of http_is the program makes, or none (and none in a build without the web server).
+        const std::vector<WebRoute>& webRoutes() const;
+
+        // The port the program's server listens on (1 to 65535) once the program has called http_listen; 0 before,
+        // when its policy has no listen or the address could not be bound, once stopWeb() has closed it, and in a
+        // build without the web server. Takes a lock: not for the audio thread.
+        int webPort() const noexcept;
+
         // Stops the program's network for good: every request in flight ends as HTTP_CANCELLED before this returns,
         // waking every thread in http_wait, and every request the program starts from then on ends so at once. What
         // completed stays readable until it is closed or the Program destroyed. A host that shuts a program down while
         // a thread of its own is in the program (a loader in http_wait) calls this, joins that thread, then destroys
         // the Program: destroying a Program while a thread still runs its code is undefined, as ever. Any thread may
         // call it, any number of times; it waits for the I/O thread (briefly): not on the audio thread. The
-        // destructor calls it.
+        // destructor calls it. It closes the program's server too: its sockets and every connection, every request
+        // the program has not answered given up (its reply HTTP_CANCELLED), every thread in http_accept woken (null),
+        // and http_port HTTP_CANCELLED from then on; an http_listen after it never listens.
         void stopWeb() noexcept;
 
         // Calling a function by name, for a host that learns a function's signature as it runs rather than when it is

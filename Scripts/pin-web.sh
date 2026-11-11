@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
-# Scripts/pin-web.sh <curl-version> <mbedtls-version>: prints the cmake/FMinusPins.cmake lines for a libcurl release
-# (e.g. 8.23.0) and a Mbed TLS release (e.g. 4.1.1), the web library's dependencies (cmake/FMinusWeb.cmake). libcurl's
-# tarball is downloaded from curl.se into a temporary directory and hashed (its release page on GitHub shows the same
-# digest); Mbed TLS's digest is read from its GitHub release's asset list, as Scripts/pin-llvm.sh reads LLVM's (nothing
-# of it is downloaded). Bump both on their security releases. Needs curl, python3, and sha256sum or shasum.
+# Scripts/pin-web.sh <curl-version> <mbedtls-version> [<llhttp-version>]: prints the cmake/FMinusPins.cmake lines for a
+# libcurl release (e.g. 8.23.0) and a Mbed TLS release (e.g. 4.1.1), the web library's dependencies
+# (cmake/FMinusWeb.cmake), and, given a third version, for an llhttp release (e.g. 9.4.3), the web server's request
+# parser (cmake/FMinusLlhttp.cmake). libcurl's tarball is downloaded from curl.se into a temporary directory and hashed
+# (its release page on GitHub shows the same digest); Mbed TLS's digest is read from its GitHub release's asset list, as
+# Scripts/pin-llvm.sh reads LLVM's (nothing of it is downloaded); llhttp's pin is GitHub's archive of its release tag,
+# release/v<version> (the tag holds the generated C), downloaded and hashed. Bump them on their security releases.
+# Needs curl, python3, and sha256sum or shasum.
 set -euo pipefail
-curl_version="${1:?usage: Scripts/pin-web.sh <curl-version> <mbedtls-version>, e.g. 8.23.0 4.1.1}"
-mbedtls_version="${2:?usage: Scripts/pin-web.sh <curl-version> <mbedtls-version>, e.g. 8.23.0 4.1.1}"
+usage="usage: Scripts/pin-web.sh <curl-version> <mbedtls-version> [<llhttp-version>], e.g. 8.23.0 4.1.1 9.4.3"
+curl_version="${1:?${usage}}"
+mbedtls_version="${2:?${usage}}"
+llhttp_version="${3:-}"
 
 hash() {
   if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi
@@ -38,3 +43,11 @@ for a in release.get("assets", []):
 else:
     sys.exit(f"{asset}: not in the release")
 ' "${asset}" "${mbedtls_version}"
+
+if [[ -n "${llhttp_version}" ]]; then
+  archive="${work}/llhttp-release-v${llhttp_version}.tar.gz"
+  curl -fsSL -o "${archive}" "https://github.com/nodejs/llhttp/archive/refs/tags/release/v${llhttp_version}.tar.gz"
+  size="$(wc -c < "${archive}" | tr -d ' ')"
+  echo "set(FMINUS_LLHTTP_VERSION \"${llhttp_version}\")"
+  echo "set(FMINUS_LLHTTP_SHA256 \"$(hash "${archive}")\")   # $(python3 -c "print(f'{${size}:,}')") bytes"
+fi

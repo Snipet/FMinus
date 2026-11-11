@@ -150,10 +150,10 @@ namespace fminus::ir
     };
     std::vector<BuiltinInfo> builtins();
 
-    // The web library's builtins (Calls.cpp, Web.cpp; a build with FMINUS_WEB). A module that calls http_get or
-    // http_post defines the program's web context, this global, a pointer, null until its host sets it (a null context
-    // reaches nothing: src/web/Web.h), and every such call passes it to the library. A program that declares a function
-    // of the name is an error then.
+    // The web library's builtins (Calls.cpp, Web.cpp; a build with FMINUS_WEB). A module that calls http_get,
+    // http_post or http_listen defines the program's web context, this global, a pointer, null until its host sets it
+    // (a null context reaches nothing and listens nowhere: src/web/Web.h), and every such call passes it to the library.
+    // A program that declares a function of the name is an error then.
     inline constexpr const char* kWebContextSymbol = "fminus_web_context";
     // What every name of the web library's begins with (its C functions, web/WebSymbols.def, and the context's
     // global): in every build, a function of a program cannot be named so (Functions.cpp).
@@ -171,4 +171,18 @@ namespace fminus::ir
         int column = 0;
     };
     std::vector<WebRequest> webRequests(const llvm::Module& module);
+
+    // One call of http_is, as the code generator recorded it in the module's named metadata "fminus.web.routes", in
+    // the order it lowered them (WebServer.cpp; a build with FMINUS_WEB_SERVER): its route literal's method ("GET",
+    // "POST", "PUT", "PATCH" or "DELETE") and its path as a pattern, each %d a "*"; and where the call is (its file as
+    // the errors name it, its line and column).
+    struct WebRoute
+    {
+        std::string method;
+        std::string pattern;
+        std::string file;
+        int line = 0;
+        int column = 0;
+    };
+    std::vector<WebRoute> webRoutes(const llvm::Module& module);
 } // namespace fminus::ir

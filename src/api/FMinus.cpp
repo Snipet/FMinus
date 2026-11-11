@@ -416,9 +416,11 @@ namespace fminus
         // A function the program defines, whose look-up links the program's code (codeRanges); empty when it has none.
         std::string linkName;
         std::vector<WebRequest> webRequests;   // every http_get's and http_post's URL (ir/Web.cpp)
+        std::vector<WebRoute> webRoutes;       // every http_is's route (ir/WebServer.cpp)
 #if FMINUS_HAS_WEB
         // The program's web context (src/web/Web.h), whose handle the module's global holds; none when the program
-        // makes no request or the host allows nothing (a null context reaches nothing).
+        // makes no request and has no server, or the host allows nothing and gives no listen (a null context reaches
+        // nothing and listens nowhere). Its server is its own: stopped and destroyed with it, before the code goes.
         std::unique_ptr<web::Context> web;
 #endif
 
@@ -429,7 +431,8 @@ namespace fminus
         {
 #if FMINUS_HAS_WEB
             // Before the code goes: every request cancelled and freed, every thread in http_wait woken and out of the
-            // library, and the I/O thread joined if this was its last context.
+            // library, the server closed (every connection, every thread in http_accept woken and out of it) and
+            // freed, and the I/O thread joined if this was its last context.
             if (web != nullptr)
                 web->stop();
             web.reset();
@@ -475,6 +478,23 @@ namespace fminus
         policy.caFile = options.web.caFile;
         policy.privateAddresses = options.web.privateAddresses;
         policy.resolve = options.web.resolve;
+#if FMINUS_HAS_WEB_SERVER
+        // The server's part, read only where there is a server (a build without one has nothing to listen with).
+        const WebServerPolicy& server = options.web.server;
+        policy.server.listen = server.listen;
+        policy.server.hosts = server.hosts;
+        policy.server.token = server.token;
+        policy.server.open = server.open;
+        for (const WebServerPolicy::File& file : server.files)
+            policy.server.files.push_back({file.path, file.type, file.bytes});
+        policy.server.maxConnections = server.maxConnections;
+        policy.server.maxPending = server.maxPending;
+        policy.server.maxRequestBytes = server.maxRequestBytes;
+        policy.server.maxReplyBytes = server.maxReplyBytes;
+        policy.server.requestTimeoutMs = server.requestTimeoutMs;
+        policy.server.replyTimeoutMs = server.replyTimeoutMs;
+        policy.server.idleTimeoutMs = server.idleTimeoutMs;
+#endif
         if (const std::string wrong = web::checkPolicy(policy); !wrong.empty())
         {
             errors = "fminus::Program: web: " + wrong + "\n";
@@ -596,6 +616,11 @@ namespace fminus
         for (ir::WebRequest& request : ir::webRequests(*module))
             webRequests.push_back({std::move(request.method), std::move(request.pattern), std::move(request.file),
                                    request.line, request.column});
+        // Every route the program names (ir/WebServer.cpp).
+        std::vector<WebRoute> webRoutes;
+        for (ir::WebRoute& route : ir::webRoutes(*module))
+            webRoutes.push_back({std::move(route.method), std::move(route.pattern), std::move(route.file), route.line,
+                                 route.column});
         [[maybe_unused]] const bool usesWeb = module->getNamedGlobal(ir::kWebContextSymbol) != nullptr;
 
         // A program with a parallel region runs it on the runtime's pool, from now until it is destroyed.
@@ -663,9 +688,10 @@ namespace fminus
             impl->boundsSites = std::move(boundsSites);
         }
 #if FMINUS_HAS_WEB
-        // The program's context, its handle in the module's global, which every request passes the library. Without
-        // a pattern to allow, none: the global stays null, and every request is refused.
-        if (usesWeb && !policy.allow.empty())
+        // The program's context, its handle in the module's global, which every request and http_listen passes the
+        // library. Without a pattern to allow and a listen, none: the global stays null, every request is refused, and
+        // http_listen's server never listens (HTTP_REFUSED). With a listen alone, one: it may listen and reach nothing.
+        if (usesWeb && (!policy.allow.empty() || !policy.server.listen.empty()))
         {
             std::string wrong;
             impl->web = web::Context::create(policy, wrong);
@@ -684,6 +710,7 @@ namespace fminus
         }
 #endif
         impl->webRequests = std::move(webRequests);
+        impl->webRoutes = std::move(webRoutes);
         if (parallel)
         {
             fminus_rt_parallel_start();
@@ -883,6 +910,20 @@ namespace fminus
     const std::vector<Program::WebRequest>& Program::webRequests() const
     {
         return impl_->webRequests;
+    }
+
+    const std::vector<Program::WebRoute>& Program::webRoutes() const
+    {
+        return impl_->webRoutes;
+    }
+
+    int Program::webPort() const noexcept
+    {
+#if FMINUS_HAS_WEB
+        if (impl_->web != nullptr)
+            return impl_->web->port();
+#endif
+        return 0;
     }
 
     void Program::stopWeb() noexcept

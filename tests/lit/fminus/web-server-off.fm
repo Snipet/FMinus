@@ -1,0 +1,37 @@
+// In a build without the web server (FMINUS_WEB_SERVER=OFF, the default, with or without FMINUS_WEB), each of its
+// builtins is still a name FMinus knows: its call is an error that names the option, not an undeclared function;
+// __FMINUS_WEB_SERVER__ is not defined; and the driver's server options say the build has no server.
+// UNSUPPORTED: web-server
+// RUN: not fminus %s 2>&1 | FileCheck %s --implicit-check-not=error:
+// RUN: not fminus %s --run serve --web-listen 127.0.0.1:0 2>&1 | FileCheck %s --check-prefix=LISTEN
+// RUN: not fminus %s --run serve --web-root %S 2>&1 | FileCheck %s --check-prefix=ROOT
+
+#ifdef __FMINUS_WEB_SERVER__
+#error __FMINUS_WEB_SERVER__ is defined
+#endif
+
+int serve(const float* data)
+{
+    void* s = http_listen();
+    void* r = http_next(s);
+    void* a = http_accept(s, 100);
+    int n = http_port(s) + http_arg(r, 0) + http_query_int(r, "n", 0) + (http_is(r, "GET /") ? 1 : 0);
+    float g = http_query_float(r, "g", 0.0f);
+    n = n + http_reply(r, 204) + http_reply_bytes(a, 200, data, 4, "") + http_reply_text(a, 200, "", "%g", g);
+    return n;
+}
+
+// CHECK: web-server-off.fm:15:15: error: 'http_listen' needs the web server, which this build of FMinus leaves out (FMINUS_WEB_SERVER=OFF)
+// CHECK: web-server-off.fm:16:15: error: 'http_next' needs the web server, which this build of FMinus leaves out (FMINUS_WEB_SERVER=OFF)
+// CHECK: web-server-off.fm:17:15: error: 'http_accept' needs the web server, which this build of FMinus leaves out (FMINUS_WEB_SERVER=OFF)
+// CHECK: web-server-off.fm:18:13: error: 'http_port' needs the web server, which this build of FMinus leaves out (FMINUS_WEB_SERVER=OFF)
+// CHECK: web-server-off.fm:18:28: error: 'http_arg' needs the web server, which this build of FMinus leaves out (FMINUS_WEB_SERVER=OFF)
+// CHECK: web-server-off.fm:18:45: error: 'http_query_int' needs the web server, which this build of FMinus leaves out (FMINUS_WEB_SERVER=OFF)
+// CHECK: web-server-off.fm:18:74: error: 'http_is' needs the web server, which this build of FMinus leaves out (FMINUS_WEB_SERVER=OFF)
+// CHECK: web-server-off.fm:19:15: error: 'http_query_float' needs the web server, which this build of FMinus leaves out (FMINUS_WEB_SERVER=OFF)
+// CHECK: web-server-off.fm:20:13: error: 'http_reply' needs the web server, which this build of FMinus leaves out (FMINUS_WEB_SERVER=OFF)
+// CHECK: web-server-off.fm:20:34: error: 'http_reply_bytes' needs the web server, which this build of FMinus leaves out (FMINUS_WEB_SERVER=OFF)
+// CHECK: web-server-off.fm:20:74: error: 'http_reply_text' needs the web server, which this build of FMinus leaves out (FMINUS_WEB_SERVER=OFF)
+
+// LISTEN: fminus: --web-listen: this build of FMinus leaves out the web server (FMINUS_WEB_SERVER=OFF)
+// ROOT: fminus: --web-root: this build of FMinus leaves out the web server (FMINUS_WEB_SERVER=OFF)

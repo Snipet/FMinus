@@ -67,8 +67,8 @@
     {
       "name": "web",
       "inherits": "dev",
-      "displayName": "web: dev, with the web library (fminus_web; builds libcurl and Mbed TLS into the deps cache)",
-      "cacheVariables": { "FMINUS_WEB": "ON" }
+      "displayName": "web: dev, with the web library and its server (fminus_web; builds libcurl and Mbed TLS into the deps cache)",
+      "cacheVariables": { "FMINUS_WEB": "ON", "FMINUS_WEB_SERVER": "ON" }
     },
     {
       "name": "xcode",
