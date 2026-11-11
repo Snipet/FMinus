@@ -56,7 +56,8 @@ set(FMINUS_PFFFT_SHA256 "5379901efa11e889379b1f647ba69911c564a86b20fd1f93d156343
 # parsers (cmake/FMinusFastFloat.cmake; header-only). Fetched only when FMINUS_JSON or FMINUS_XML is ON. GitHub's
 # archive of the release's tag (the release's single fast_float.h is an asset whose bytes no checkout reproduces); its
 # hash is that of the archive rebuilt from the tag, `git archive --prefix=fast_float-8.3.3/ v8.3.3 | gzip -n`, as the
-# WinFlexBison pin's is.
+# WinFlexBison pin's is; and of the archive GitHub serves, downloaded and hashed since (2026-11-11), as yyjson's and
+# pugixml's below were: all three match, digest and size.
 set(FMINUS_FAST_FLOAT_VERSION "8.3.3")
 set(FMINUS_FAST_FLOAT_URL "https://github.com/fastfloat/fast_float/archive/refs/tags/v${FMINUS_FAST_FLOAT_VERSION}.tar.gz")
 set(FMINUS_FAST_FLOAT_SHA256 "4dd695f051893c8218faf2ed9871fa4a4990aa6aee2d3190ed7bfa2e83092245")   # 156,846 bytes

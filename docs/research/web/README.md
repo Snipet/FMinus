@@ -10,7 +10,9 @@ literals as builtins' arguments and both parsers as [extending.md](../../extendi
 them, and the client as [web.md](../../web.md) and recipe 41 do. Those pages say where what was built differs from
 this report (one failure code per kind of failure, a check of each connection's address, the parsers' limits as build
 constants, a URL's ints after every other argument, Mbed TLS 4.1 of the two LTS branches). WebSockets, a server, the
-disk cache and the `offline` policy are not built. The report is left as it was written.*
+disk cache and the `offline` policy are not built. The report is left as it was written. A server has its own
+report since, [server.md](server.md), which reverses this one's §5 on one point: cpp-httplib is not the fallback for
+it.*
 
 ## 0. Summary
 
