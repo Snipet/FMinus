@@ -364,7 +364,14 @@ an input cannot take (R11).
   it on up to 15 % of the steps at 4 V (`|dl|` at most 0.264); after one step from the previous v diodetone.cir,
   halfwave.cir and asym.cir took it on a fifth to two fifths of the steps at 0.5 V (2026-11-11, the module as C++ on
   x86-64, an instrumented count). The double reference runs the same series (`lawCoshSeries`,
-  `lawAntiderivativeSeries`), and after no Newton step the tail keeps its `expf`.
+  `lawAntiderivativeSeries`), and after no Newton step the tail keeps its `expf`. ringing.cir's answer (2x, ADAA,
+  omega(1)) measures T1 -78.2 dB with the series, -91.0 without; T1 is its worst unit, and under ADAA a unit's error is
+  a few samples where `|dp|` is just over 1e-5 V and `(c - c_P) / dp` magnifies `c`'s last bits, which any 1-ulp change
+  moves by up to 15 dB. Taking `dl` as `v / N Vt - v0 / N Vt` (the step's own product) with the series to `dl^6` gave
+  T1 -91.1 again, but no better module: against a converged solve over 60 signals (a sine of 20 Hz-5 kHz and noise,
+  0.3 to 20 V) its mean error was -107.0 dB, against -109.6 with the series as built and -107.1 before it (asym.cir
+  -101.1 all three, screamer-clip.cir -100.1 against -102.2, diodetone.cir with ADAA and `halley(1)` -106.6 against
+  -106.8; 2026-11-11, the module as C++ on x86-64), so it is not built.
 - **The carry.** ADAA's mean pairs the stored point (`v_P`, `p_P`) with this step's on one curve, `p = v + k phi(v)`.
   When `k` moves (a pot or a switch's ramp moving a diode's K, an OTA's law input or a pot moving `kd g`), the point
   moves onto the new curve with `v_P` held, keeping its Newton residual (the lead's ruling): a diode's in `b<N>_set`,
