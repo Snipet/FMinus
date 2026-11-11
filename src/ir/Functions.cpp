@@ -43,6 +43,24 @@ namespace fminus::ir::detail
             error(function.location, quoted(function.name) + " is a builtin and cannot be redefined");
             return;
         }
+        if (const RuntimeBuiltin* runtime = findRuntimeBuiltin(function.name))
+        {
+            // A prototype with the builtin's own types, `int bytes_floats(const void* data, int bytes, float* out,
+            // int cap);` or `void json_free(void* doc);`, declares nothing new, as <math.h>'s do; one of a builtin that
+            // takes a string cannot be written, since FMinus has no char.
+            bool conflicts = function.returnType != resultType(runtime->result)
+                             || function.params.size() != runtime->arity;
+            for (std::size_t i = 0; !conflicts && i < function.params.size(); ++i)
+            {
+                const std::optional<ast::Type> type = paramType(runtime->params[i]);
+                conflicts = !type || function.params[i].type != *type;
+            }
+            if (function.isDefinition)
+                error(function.location, quoted(function.name) + " is a builtin and cannot be redefined");
+            else if (conflicts)
+                error(function.location, "conflicting types for " + quoted(function.name));
+            return;
+        }
         const Builtin* builtin = findBuiltin(function.name);
         const Allocation* allocation = findAllocation(function.name);
         const Fft* fft = findFft(function.name);

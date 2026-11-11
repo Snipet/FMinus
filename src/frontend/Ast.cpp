@@ -125,6 +125,7 @@ namespace fminus::ast
 
         std::string declared(Type type, bool isConst, bool isRestrict, const Expr* size = nullptr,
                              const Expr* rowSize = nullptr);
+        std::string stringLiteral(const std::string& text);
 
         std::string dump(const Expr& expr)
         {
@@ -197,6 +198,9 @@ namespace fminus::ast
                                   [](const CastExpr& cast) {   // (cast int x)
                                       return std::string("(cast ") + typeName(cast.type) + " " + dump(*cast.operand)
                                              + ")";
+                                  },
+                                  [](const StringExpr& string) {   // "a\0b", one literal however written
+                                      return stringLiteral(string.value);
                                   },
                               },
                               expr.node);

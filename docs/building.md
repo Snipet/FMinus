@@ -44,6 +44,32 @@ workflow, except `xcode`: run `cmake --preset xcode`, then `open build-xcode/FMi
 instrument FMinus's own code only; LLVM stays uninstrumented, which is why the `asan` test preset sets
 `detect_container_overflow=0`.
 
+## What programs' builtins a build has
+
+Two options decide what part of the runtime a build has, and so which builtins its programs may call. Both are on by
+default, in every preset; pass `-DFMINUS_JSON=OFF` or `-DFMINUS_XML=OFF` to a configure to leave one out.
+
+| Option | Default | What it has | Fetches |
+|---|---|---|---|
+| `FMINUS_JSON` | ON | the JSON parser and the `json_*` builtins (`json_parse`, `json_float`, ...: [extending.md](extending.md), recipe 39) | fast_float, yyjson |
+| `FMINUS_XML` | ON | the XML parser and the `xml_*` builtins (`xml_parse`, `xml_float`, ...: [extending.md](extending.md), recipe 40) | fast_float, pugixml |
+
+fast_float (`cmake/FMinusFastFloat.cmake`) is fetched when either is on, and is nothing with both off; yyjson
+(`cmake/FMinusJson.cmake`), the JSON parser, when `FMINUS_JSON` is on: with it off, nothing of yyjson is fetched or
+compiled, and the runtime library has no JSON functions. The JSON parser's limits on a document, 64 MiB and arrays and
+objects nested 1024 deep, are `FMINUS_JSON_MAX_BYTES` and `FMINUS_JSON_MAX_DEPTH` in `cmake/FMinusOptions.cmake`,
+which `fminus/Config.h` repeats for a host; the depth is compiled into yyjson. pugixml (`cmake/FMinusXml.cmake`), the
+XML parser, is fetched when `FMINUS_XML` is on, the same way: with it off, nothing of pugixml is fetched or compiled,
+and the runtime library has no XML functions. Its limits, the same 64 MiB and elements nested 1024 deep, are
+`FMINUS_XML_MAX_BYTES` and `FMINUS_XML_MAX_DEPTH`, which `src/runtime/Xml.cpp` checks (pugixml has none of its own):
+the size before parsing, the depth after, on the parsed tree, without recursion. What a build
+has, it says three ways: `FMINUS_HAS_JSON` and `FMINUS_HAS_XML`, 1 or 0, in the generated `fminus/Config.h`, for a
+host to `#if`; `__FMINUS_JSON__` and `__FMINUS_XML__`, macros FMinus defines (to 1) before a program's first line only
+when the feature is built in, for a program to `#ifdef`; and the builtins themselves, which a build without the
+feature still knows by name, so that a call of one is an error that names the option (`'json_float' needs the JSON
+parser, which this build of FMinus leaves out (FMINUS_JSON=OFF)`), not an undeclared function. Changing either option
+reconfigures the build tree; it rebuilds the runtime and the compiler, never LLVM.
+
 ## The dependency cache
 
 Everything built from a dependency lives in `.deps/` (or wherever `FMINUS_DEPS_DIR` points, as a CMake or
@@ -54,6 +80,9 @@ environment variable), shared by every build tree of the checkout:
   src/llvm-project-23.1.3/     extracted, then pruned to what llvm/ builds from (about 300 MB)
   src/bison-3.8.2/  src/flex-2.6.4/
   src/pffft-<commit>/          PFFFT's source, of which the runtime library compiles two files
+  src/fast_float-<version>/    fast_float's source, whose headers the runtime includes (FMINUS_JSON or FMINUS_XML)
+  src/yyjson-<version>/        yyjson's source, of which the runtime library compiles one file (FMINUS_JSON)
+  src/pugixml-<version>/       pugixml's source, of which the runtime library compiles one file (FMINUS_XML)
   build/<flavor>/              LLVM's build tree: about 1 GB, safe to delete once installed
   install/<flavor>/            LLVM: headers, static libraries, CMake package, tools, lit
   install/bison-3.8.2/  install/flex-2.6.4/
@@ -180,7 +209,10 @@ clones it, and git names a commit by the hash of its contents ([below](#the-plug
    `_fminus_build_winflexbison`, beside it. A C library that goes into FMinus's own libraries is compiled from its
    sources instead, its project never added: `cmake/FMinusFft.cmake` fetches PFFFT once into the deps cache
    (`SOURCE_SUBDIR` naming no directory: populated, nothing added) and builds two of its files as an object library,
-   whose objects the runtime library takes.
+   whose objects the runtime library takes. A library of headers goes the same way, as an interface library of its
+   include directory, a system one: `cmake/FMinusFastFloat.cmake`, whose fast_float only one file of the runtime
+   includes, `src/runtime/Numbers.cpp`, which hides its symbols. A dependency of an option is fetched only when the
+   option is on: the module returns before anything else when it is off.
 3. **Include the module** from `CMakeLists.txt`, under the option that needs it, and link its target where it's used.
 4. **Note it** in README.md's dependency table and its License section.
 

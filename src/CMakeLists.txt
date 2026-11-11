@@ -2,9 +2,10 @@
 # (FMinus::Runtime), and FMinus::Internal for this tree's tools and tests. (The library's target is fminus_lib so the
 # driver, tools/fminus/, can be the target fminus.)
 #
-# fminus_runtime: every .cpp under src/runtime/, and PFFFT's objects (the FFT). It holds the C functions generated code
-# calls, with no LLVM in it. A process that JITs links it (through fminus), and executables from support/Aot.h link
-# libfminus_runtime.a itself.
+# fminus_runtime: every .cpp under src/runtime/, PFFFT's objects (the FFT), yyjson's (the JSON parser) when
+# FMINUS_JSON is on, and pugixml's (the XML parser) when FMINUS_XML is on. It holds the C functions generated code calls, with no LLVM in it. It reads the generated
+# fminus/Config.h (which build options it has), and fast_float's headers when FMINUS_JSON or FMINUS_XML is on. A process that JITs links it (through fminus), and executables from
+# support/Aot.h link libfminus_runtime.a itself.
 #
 # fminus_circuit: every .cpp under src/circuit/, the circuit compiler (include/fminus/Circuit.h: SPICE-style netlists to
 # FMinus source). It has no LLVM in it, as the runtime has none, and no grammar (src/circuit/ holds no *.y or *.l: a
@@ -42,7 +43,7 @@ file(GLOB_RECURSE _fminus_public_headers CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR
 add_library(fminus_runtime STATIC ${_fminus_runtime_sources})
 add_library(FMinus::Runtime ALIAS fminus_runtime)
 fminus_target_defaults(fminus_runtime)
-target_include_directories(fminus_runtime PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_include_directories(fminus_runtime PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${PROJECT_BINARY_DIR}/include")
 # The math kernels (runtime/MathKernels.h) fuse a multiply and an add only where they say so, as FMinus's IR does, so
 # they compute the same operations on every target. (clang-cl takes clang's spelling through /clang:.)
 if(FMINUS_MSVC_FRONTEND)
@@ -54,6 +55,23 @@ endif()
 target_sources(fminus_runtime PRIVATE $<TARGET_OBJECTS:fminus_pffft>)
 target_include_directories(fminus_runtime SYSTEM PRIVATE "${FMINUS_PFFFT_INCLUDE_DIR}")
 target_compile_definitions(fminus_runtime PRIVATE PFFFT_STATIC_DEFINE)
+# fast_float (cmake/FMinusFastFloat.cmake), the parsers' numbers (runtime/Numbers.cpp), when FMINUS_JSON or FMINUS_XML.
+if(TARGET fminus_fast_float)
+  target_link_libraries(fminus_runtime PRIVATE fminus_fast_float)
+endif()
+# The JSON parser, yyjson (cmake/FMinusJson.cmake), when FMINUS_JSON: its objects go into this library, and
+# runtime/Json.cpp reads its header with the definitions it was compiled with.
+if(TARGET fminus_yyjson)
+  target_sources(fminus_runtime PRIVATE $<TARGET_OBJECTS:fminus_yyjson>)
+  target_include_directories(fminus_runtime SYSTEM PRIVATE "${FMINUS_YYJSON_INCLUDE_DIR}")
+  target_compile_definitions(fminus_runtime PRIVATE ${FMINUS_YYJSON_DEFINITIONS})
+endif()
+# The XML parser, pugixml (cmake/FMinusXml.cmake), when FMINUS_XML: the same.
+if(TARGET fminus_pugixml)
+  target_sources(fminus_runtime PRIVATE $<TARGET_OBJECTS:fminus_pugixml>)
+  target_include_directories(fminus_runtime SYSTEM PRIVATE "${FMINUS_PUGIXML_INCLUDE_DIR}")
+  target_compile_definitions(fminus_runtime PRIVATE ${FMINUS_PUGIXML_DEFINITIONS})
+endif()
 # The pool behind parallel for and parallel { } (runtime/Parallel.cpp) makes threads: the system's thread library, on a
 # system where it is one of its own.
 find_package(Threads REQUIRED)

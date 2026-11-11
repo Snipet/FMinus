@@ -1,0 +1,35 @@
+// The XML parser's errors, one each, from the command line: a path that does not begin with '/', at its first byte; a
+// step that is no name, an index that is no index, what XPath has and an XML path does not, each at its byte; a
+// path's places, as a format's (Strings.cpp); a path or a choice that is no literal; and the effects: xml_parse and
+// xml_free refused in a nonblocking function, and in a nonallocating one.
+// REQUIRES: xml
+// RUN: not fminus %s 2>&1 | FileCheck %s --implicit-check-not=error:
+
+float paths(const void* doc, int k)
+{
+    return xml_float(doc, "preset", 0.0f) + xml_float(doc, "/osc//x", 0.0f) + xml_float(doc, "/osc[k]", 0.0f)
+           + xml_float(doc, "/osc/@x/y", 0.0f) + xml_float(doc, "/osc/*", 0.0f) + xml_float(doc, "/osc[%d]", 0.0f)
+           + xml_count(doc, k) + xml_choice(doc, "/wave", "sine", k);
+}
+
+float process(const void* data, int bytes) [[clang::nonblocking]]
+{
+    void* doc = xml_parse(data, bytes);
+    const float x = xml_float(doc, "/x", 0.0f);
+    xml_free(doc);
+    return x;
+}
+
+void end(void* doc) [[clang::nonallocating]] { xml_free(doc); }
+
+// CHECK: xml-errors.fm:10:28: error: an XML path must begin with '/' and the root element's name
+// CHECK: xml-errors.fm:10:66: error: expected an element's name after '/' in an XML path
+// CHECK: xml-errors.fm:10:100: error: expected an index in '[ ]' in an XML path: digits, from 0, or %d
+// CHECK: xml-errors.fm:11:37: error: an attribute must be the last step of an XML path
+// CHECK: xml-errors.fm:11:71: error: unexpected '*' in an XML path: a step is a name, an index '[n]' after it, or a last '@' and an attribute's name
+// CHECK: xml-errors.fm:11:105: error: more '%' conversions than data arguments
+// CHECK: xml-errors.fm:12:29: error: argument to 'xml_count' must be a string literal
+// CHECK: xml-errors.fm:12:67: error: argument to 'xml_choice' must be a string literal
+// CHECK: xml-errors.fm:17:17: error: function with 'nonblocking' attribute must not call non-'nonblocking' function 'xml_parse'
+// CHECK: xml-errors.fm:19:5: error: function with 'nonblocking' attribute must not call non-'nonblocking' function 'xml_free'
+// CHECK: xml-errors.fm:23:48: error: function with 'nonallocating' attribute must not call non-'nonallocating' function 'xml_free'

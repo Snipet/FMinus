@@ -41,7 +41,16 @@ Most of the recipes in [../extending.md](../extending.md) and [../simd.md](../si
 - recipe 36 (calling a function by name, for the host: a thunk of each signature, compiled in the JIT, the arguments
   checked against it and the errors values; `fminus --run` through it);
 - recipe 37 (where the code is, for a host's sampling profiler: each function's machine code as the JIT links it,
-  through JITLink's plugin or RuntimeDyld's listener, and what the optimiser inlined into it).
+  through JITLink's plugin or RuntimeDyld's listener, and what the optimiser inlined into it);
+- recipe 38 (C's string literals as builtins' arguments, formats with places for ints checked as clang checks
+  `printf`'s, `bytes_floats` and `bytes_pcm16`, a builtin that blocks, and the build options a builtin can need, with
+  fast_float for the parsers to come);
+- recipe 39 (the JSON parser, yyjson's reader in the runtime behind `FMINUS_JSON`, and its builtins: a document parsed
+  off the audio thread, read on it by JSON Pointers the compiler prepares into tables, each number correctly rounded
+  by fast_float);
+- recipe 40 (the XML parser, pugixml in the runtime behind `FMINUS_XML`, made as the JSON one is: its builtins read an
+  attribute or an element's text by a small part of XPath the compiler prepares, its indices from 0, a document's
+  entities inert).
 
 Their code is in `src/`, and their tests in `tests/`.
 

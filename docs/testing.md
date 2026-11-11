@@ -47,7 +47,8 @@ Each file states what it tests in its first line, then has a few helpers and the
   `ControlFlowTest.cpp`, `SwitchTest.cpp`, `EnumTest.cpp`, `IntTest.cpp`, `BitwiseTest.cpp`, `PointerTest.cpp`,
   `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `TableTest.cpp`, `TopLevelTest.cpp`, `ModuleTest.cpp`,
   `FftTest.cpp`, `HashTest.cpp`, `ParamTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`, `ParallelTest.cpp`,
-  `RecoveryTest.cpp`, `DoubleTest.cpp`, `Array2DTest.cpp`, `FieldAttributeTest.cpp`, and the
+  `RecoveryTest.cpp`, `DoubleTest.cpp`, `Array2DTest.cpp`, `FieldAttributeTest.cpp`, `StringTest.cpp`, `BytesTest.cpp`,
+  `JsonTest.cpp` and `XmlTest.cpp` (with `HeapCalls.h`, which counts a thread's calls of the C heap), and the
   compiler's own: `VersionTest.cpp`, `TbaaTest.cpp`, `ZeroInitTest.cpp`, `AttributeTest.cpp`, `DenormalTest.cpp`,
   `LoopBudgetTest.cpp`, whose `compileAt` compiles at any level with the budget on or off, `BoundsCheckTest.cpp`,
   whose `compileAt` does the same with the bounds checks and keeps the checks' descriptions, and `CallThunkTest.cpp`,
@@ -99,7 +100,20 @@ TEST_CASE("functions compute what they say", "[codegen]")
   (where the machine code is, for a sampling profiler: `CodeRangesTest.cpp`'s `Jit::code` through both linkers in the
   unit tests, and `ProfileTest.cpp`'s `Program::codeRanges` and a reference sampler in the library's), `[include]`
   (`#include`: `IncludeTest.cpp`, in both), `[conditional]` (`#if`, `#ifdef` and macros, with a host's defines:
-  `ConditionalTest.cpp`, in both, whose `parsed` takes the defines and `condition` an `#if`'s expression),
+  `ConditionalTest.cpp`, in both, whose `parsed` takes the defines and `condition` an `#if`'s expression), `[strings]`
+  (string literals as builtins' arguments, formats, the effects' blocking class and the build options of builtins:
+  `StringTest.cpp`), `[bytes]` (`bytes_floats` and `bytes_pcm16`: `BytesTest.cpp`), `[numbers]` (the runtime's reader
+  of numbers on fast_float: `NumbersTest.cpp`, compiled only with `FMINUS_JSON` or `FMINUS_XML`, whose tests a build
+  without both lacks; a test of what a build has compares with `fminus/Config.h`, so it passes either way), `[json]`
+  (the JSON parser and its builtins: `JsonTest.cpp`, whose tests of the parser itself only a build with `FMINUS_JSON`
+  has, and whose test of the builtins' names passes in both: each call compiles, or is the error that names the
+  option; its proof that a read allocates nothing counts the C heap's calls through `HeapCalls.h`, on Linux with glibc
+  and no sanitizer only, and that it makes no system call runs the reads in a child under seccomp's strict mode, on
+  Linux; its locale test needs a German or French locale and skips without one: `localedef -i de_DE -f UTF-8
+  <dir>/de_DE.UTF-8` and `LOCPATH=<dir>` make one without root), `[xml]` (the XML parser and its builtins:
+  `XmlTest.cpp`, made as `JsonTest.cpp` is, in both builds the same way, with its heap count, its strict-mode child and
+  its locale test; and its proof that a document's entities are inert, which parses them in a child under a seccomp
+  filter that kills it if it opens a file or a socket, on Linux),
   `[circuit]` (the circuit compiler: `CircuitTest.cpp` its netlists,
   plans, equations (an OTA's against report §7.2's hand derivation; an inductor's, an E's and a G's stamps by hand, and
   RL and RLC responses as the bilinear map), the DC operating point by hand and its errors, the offset form (a biased
@@ -213,6 +227,8 @@ float gain(float x, float g)
 | `REQUIRES: asserts` | LLVM built with assertions |
 | `REQUIRES: asan`, `ubsan`, `tsan` | the sanitizer build |
 | `REQUIRES: system-darwin` (or `system-linux`) | the host's system (`veclib.fm`, which runs `--math fast`, needs Apple's vector math library) |
+| `REQUIRES: json` (or `UNSUPPORTED: json`) | a build with the JSON parser, `FMINUS_JSON`, as the build tree's `fminus/Config.h` says (`json.fm`, `json-errors.fm`; `json-off.fm` runs only without it) |
+| `REQUIRES: xml` (or `UNSUPPORTED: xml`) | a build with the XML parser, `FMINUS_XML`, the same way (`xml.fm`, `xml-errors.fm`; `xml-off.fm` runs only without it) |
 | `%if arm64 %{ ... %}` | a RUN line only on arm64, so the rest of the file still runs elsewhere (`simd.fm`, `poly.fm`); `%if system-darwin && arm64 %{ ... %}` for Apple's assembly (`math.fm`) |
 | `%if avx %{ ... %}` | an x86-64 host whose JIT targets AVX, as `fminus-hostinfo --features` lists it (`lit.cfg.py` asks it): x86-64's vector machine code (`math-large.fm`) |
 

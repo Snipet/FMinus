@@ -8,6 +8,9 @@
 #include <cctype>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <variant>
+#include <vector>
 
 namespace
 {
@@ -537,6 +540,37 @@ TEST_CASE("attributes follow a field's name, as C23 writes them, and take number
              "(module M\n  (field float x [[meter::label(\"x\")]] [[float4::meter]]))\n");
 }
 
+TEST_CASE("a string literal is an expression to the parser, which knows where each of its bytes is spelt",
+          "[frontend]")
+{
+    // C's adjacent literals are one, written back as one; the code generator decides where a literal may be
+    // (StringTest.cpp), so a literal anywhere an expression goes parses.
+    CHECK(parsed("int f(int k) { return __fminus_string_hash(\"/osc/\" \"%d\\n\", k); }\n"
+                 "float g() { return \"x\" * 2; }\n")
+          == "(function int f ((int k))\n"
+             "  (return (call __fminus_string_hash \"/osc/%d\\n\" k)))\n"
+             "(function float g ()\n"
+             "  (return (* \"x\" 2)))\n");
+
+    // Each byte's place: its character's, or its escape's backslash, in the literal that holds it.
+    fminus::Diagnostics diagnostics("test.fm");
+    const auto program =
+        fminus::frontend::parse("int f() { return h(\"a\\x41\\u00B5\"\n             \"\\0z\"); }\n", diagnostics);
+    REQUIRE(program);
+    const auto& ret = std::get<fminus::ast::ReturnStmt>(program->functions.at(0).body.at(0).node);
+    const auto& call = std::get<fminus::ast::CallExpr>(ret.value->node);
+    const auto& literal = std::get<fminus::ast::StringExpr>(call.args.at(0)->node);
+    CHECK(literal.value == std::string("aA\xC2\xB5\0z", 6));
+    REQUIRE(literal.at.size() == 6);
+    const std::vector<std::pair<int, int>> places{{1, 21}, {1, 22}, {1, 26}, {1, 26}, {2, 15}, {2, 17}};
+    for (std::size_t i = 0; i < places.size(); ++i)
+    {
+        INFO(i);
+        CHECK(literal.at[i].line == places[i].first);
+        CHECK(literal.at[i].column == places[i].second);
+    }
+}
+
 TEST_CASE("errors print in source order, each with its notes after it", "[frontend]")
 {
     fminus::Diagnostics diagnostics("x.fm");
@@ -555,7 +589,8 @@ TEST_CASE("syntax and scanner errors carry their locations", "[frontend]")
     CHECK(parsed("float f(float x) { return 1f; }") == "test.fm:1:27: error: invalid suffix 'f' on integer constant\n");
     CHECK(parsed("float f(float x) /* never\nclosed { return x; }")
           == "test.fm:1:18: error: unterminated /* comment\n");
-    // A string literal is C's, and an attribute's argument only.
+    // A string literal is C's: an attribute's argument, and an expression to the parser, which the code generator takes
+    // only as a builtin's argument (StringTest.cpp).
     CHECK(parsed("module M { float x [[ui::label(\"never closed)]]; };")
           == "test.fm:1:32: error: missing terminating '\"' character\n");
     CHECK(parsed(R"fm(module M { float x [[ui::label("a\qb")]]; };)fm")
@@ -570,7 +605,6 @@ TEST_CASE("syntax and scanner errors carry their locations", "[frontend]")
           == "test.fm:1:33: error: incomplete universal character name\n");
     CHECK(parsed(R"fm(module M { float x [[ui::label("\uD800")]]; };)fm")
           == "test.fm:1:33: error: invalid universal character\n");
-    CHECK(parsed("float f() { return \"x\"; }") == "test.fm:1:20: error: syntax error, unexpected string literal\n");
     // An attribute after an array's size would be its type's (C23), and a string is no attribute's name.
     CHECK(parsed("module M { float taps[16] [[ui::label(\"Taps\")]] [[ui::hidden]]; };")
           == "test.fm:1:29: error: 'ui::label' attribute cannot be applied to types: the attributes of 'taps' go after "

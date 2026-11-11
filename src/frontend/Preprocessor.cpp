@@ -6,7 +6,10 @@
 // count's low five), the right one arithmetic.
 #include "frontend/Preprocessor.h"
 
+#include "fminus/Config.h"   // FMINUS_HAS_JSON, FMINUS_HAS_XML
+
 #include <algorithm>
+#include <array>
 #include <limits>
 #include <optional>
 #include <utility>
@@ -487,6 +490,26 @@ namespace fminus::frontend
         std::vector<std::string> expanding;
         expand(tokens, macros, expanding, expanded, out);
         return Evaluator(std::move(out), line.size(), macros).run();
+    }
+
+    std::span<const PredefinedMacro> predefinedMacros()
+    {
+        static constexpr std::array kPredefined{
+            PredefinedMacro{"__FMINUS_JSON__", "the JSON parser", "FMINUS_JSON", FMINUS_HAS_JSON != 0},
+            PredefinedMacro{"__FMINUS_XML__", "the XML parser", "FMINUS_XML", FMINUS_HAS_XML != 0},
+        };
+        return kPredefined;
+    }
+
+    std::optional<std::string> predefinedMacroError(std::string_view name)
+    {
+        for (const PredefinedMacro& macro : predefinedMacros())
+        {
+            if (macro.name == name)
+                return "'" + std::string(name) + "' cannot be used as a macro name: FMinus defines it in a build with "
+                       + std::string(macro.feature) + " (" + std::string(macro.option) + ")";
+        }
+        return std::nullopt;
     }
 
     std::string normalisedValue(std::string_view value)

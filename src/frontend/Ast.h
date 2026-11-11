@@ -423,6 +423,17 @@ namespace fminus::ast
         std::string spelling;
     };
 
+    // A string literal, C's adjacent ones joined (`"Cut" "off"` is "Cutoff"): its bytes, C's escapes resolved (a NUL
+    // among them, `"a\0b"`, is a byte like any other), and where each byte is spelt, at its character or at its
+    // escape's backslash, for an error about a place inside it (a format's '%': ir/Strings.cpp). FMinus has no string
+    // type: a literal is only the argument of a builtin's string parameter, which the code generator checks
+    // (ir/Calls.cpp); anywhere else it is an error.
+    struct StringExpr
+    {
+        std::string value;
+        std::vector<SourceLocation> at;   // one for each byte of `value`
+    };
+
     // `true` or `false`.
     struct BoolExpr
     {
@@ -569,7 +580,7 @@ namespace fminus::ast
         SourceLocation location;
         std::variant<NumberExpr, VariableExpr, BoolExpr, UnaryExpr, BinaryExpr, LogicalExpr, CallExpr, AssignExpr,
                      ConditionalExpr, ConstructExpr, MemberExpr, MethodCallExpr, ThisExpr, IncrementExpr, CastExpr,
-                     IndexExpr, SizeofExpr>
+                     IndexExpr, SizeofExpr, StringExpr>
             node;
         std::optional<SourceLocation> opening = std::nullopt;
     };

@@ -1,0 +1,39 @@
+// bytes_floats and bytes_pcm16: calls of the runtime's functions (runtime/Bytes.cpp), declared with what they do: read
+// the data, write the output, touch nothing else (recipe 19). Wait-free, so a nonblocking function calls them. A
+// program decodes a float32 and two PCM samples through the JIT and as an executable, which links libfminus_runtime.a.
+// RUN: fminus %s -O0 | FileCheck %s
+// RUN: fminus %s --run main 2 | FileCheck %s --check-prefix=RESULT
+// RUN: fminus %s --emit exe -o %t.bytes
+// RUN: %t.bytes 2 | FileCheck %s --check-prefix=RESULT
+
+int floats(const void* data, int bytes, float* out, int cap) [[clang::nonblocking]]
+{
+    return bytes_floats(data, bytes, out, cap);
+}
+
+int pcm16(const void* data, int bytes, float* out, int cap) [[clang::nonblocking]]
+{
+    return bytes_pcm16(data, bytes, out, cap);
+}
+
+// x times the float whose bits are 0x40490FDB (pi), plus the samples 0x4000 (0.5) and 0x8000 (-1), plus the counts.
+float main(float x)
+{
+    int words[2] = {1078530011, -2147467264};   // 0x40490FDB, then 0x80004000: the samples 0x4000 and 0x8000
+    float out[2];
+    const int n = floats(words, 4, out, 1);
+    const float pi = out[0];
+    const int m = pcm16(&words[1], 4, out, 2);
+    return x * pi + out[0] + out[1] + n + 10 * m;
+}
+
+// CHECK-LABEL: define i32 @floats(
+// CHECK:         %bytes_floats = call i32 @fminus_rt_bytes_floats(ptr {{%.*}}, i32 {{%.*}}, ptr {{%.*}}, i32 {{%.*}})
+// CHECK-LABEL: define i32 @pcm16(
+// CHECK:         %bytes_pcm16 = call i32 @fminus_rt_bytes_pcm16(ptr {{%.*}}, i32 {{%.*}}, ptr {{%.*}}, i32 {{%.*}})
+// CHECK: declare i32 @fminus_rt_bytes_floats(ptr readonly captures(none), i32, ptr writeonly captures(none), i32) [[DECODE:#[0-9]+]]
+// CHECK: declare i32 @fminus_rt_bytes_pcm16(ptr readonly captures(none), i32, ptr writeonly captures(none), i32) [[DECODE]]
+// CHECK: attributes [[DECODE]] = { nofree nosync nounwind willreturn memory(argmem: readwrite) }
+
+// 2 pi + 0.5 - 1 + 1 + 20
+// RESULT: {{^}}26.783186{{$}}

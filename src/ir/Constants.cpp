@@ -26,6 +26,8 @@
 // constant 0, as in C (6.6p3), and so is the arm of a ?: not taken. What is no constant is reported wherever it is.
 #include "ir/Lowering.h"
 
+#include "fminus/Config.h"   // which build options runtime/RuntimeSymbols.def lists the functions of
+
 #include <llvm/ADT/APFloat.h>
 #include <llvm/ADT/APSInt.h>
 #include <llvm/IR/Constants.h>
@@ -64,7 +66,8 @@ namespace fminus::ir::detail
         bool isBuiltinName(std::string_view name)
         {
             return findBuiltin(name) != nullptr || findAllocation(name) != nullptr || findFft(name) != nullptr
-                   || isReduction(name) || isPolyQuery(name) || isPolyMemory(name) || isHash(name);
+                   || findRuntimeBuiltin(name) != nullptr || isReduction(name) || isPolyQuery(name)
+                   || isPolyMemory(name) || isHash(name);
         }
 
         // Whether `constant` is poison or undef, or holds one: what LLVM folds an operation C leaves undefined to, a
@@ -670,6 +673,7 @@ namespace fminus::ir::detail
                 [&](const ast::MethodCallExpr&) { return notConstant(expr.location); },
                 [&](const ast::ThisExpr&) { return notConstant(expr.location); },
                 [&](const ast::ConstructExpr&) { return notConstant(expr.location); },
+                [&](const ast::StringExpr&) { return notConstant(expr.location); },
             },
             expr.node);
     }

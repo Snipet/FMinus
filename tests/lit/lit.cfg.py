@@ -4,8 +4,9 @@
 # A test is a file with RUN lines (lit's internal shell: pipes, `not`, `env`; FileCheck checks the output). FMinus's
 # tools, then LLVM's (FileCheck, not, count, opt, llc, llvm-mca, ...), come first on PATH. Substitutions: %host_triple.
 # Features for REQUIRES/UNSUPPORTED: asserts, asan, ubsan, tsan, the host's architecture (arm64 or x86_64; Windows
-# spells them ARM64 and AMD64), its system (system-darwin, system-linux, system-windows) and avx (an x86-64 host whose
-# JIT targets AVX, as fminus-hostinfo --features lists it).
+# spells them ARM64 and AMD64), its system (system-darwin, system-linux, system-windows), avx (an x86-64 host whose
+# JIT targets AVX, as fminus-hostinfo --features lists it), json and xml (a build with the JSON parser, FMINUS_JSON, or
+# the XML parser, FMINUS_XML, as the build tree's fminus/Config.h says).
 import os
 import platform
 import shutil
@@ -94,3 +95,19 @@ def jit_targets_avx():
 
 if jit_targets_avx():
     config.available_features.add("avx")
+
+
+# json, xml: this build has the JSON parser and its builtins (FMINUS_HAS_JSON 1 in fminus/Config.h), or the XML
+# parser and its (FMINUS_HAS_XML 1).
+def has_feature(macro):
+    try:
+        with open(os.path.join(config.fminus_obj_root, "include", "fminus", "Config.h")) as header:
+            return any(line.split()[:3] == ["#define", macro, "1"] for line in header)
+    except OSError:
+        return False
+
+
+if has_feature("FMINUS_HAS_JSON"):
+    config.available_features.add("json")
+if has_feature("FMINUS_HAS_XML"):
+    config.available_features.add("xml")

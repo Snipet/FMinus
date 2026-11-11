@@ -86,10 +86,12 @@ Flex generates `Lexer.yy.cpp` and `Lexer.yy.hpp` into `build-*/src/generated/fro
   `+=` and `++` beat `+`, `&&` beat `&`, and `/*` beat `/`, so `i+++j` is `i++ + j`, as in C. Keywords (`float`,
   `int`, `if`, `restrict`, ...) therefore come before `{IDENTIFIER}`: `float` is a keyword and `floaty` an
   identifier.
-- **Strings.** A string literal is C's, one `STRING` token whose value is its characters: `stringValue` resolves C's
-  escapes (simple, octal and hex bytes, and universal character names, in UTF-8), and an unknown escape, a byte past
-  255 or a line that ends inside one is clang's error, at the escape. FMinus has strings only as an attribute's
-  arguments (the parser's), and in a skipped group they are read as strings, so a `/*` in one opens no comment.
+- **Strings.** A string literal is C's, one `STRING` token whose value is its characters and where in the token each
+  is spelt: `stringValue` resolves C's escapes (simple, octal and hex bytes, and universal character names, in UTF-8),
+  and an unknown escape, a byte past 255 or a line that ends inside one is clang's error, at the escape. The parser
+  takes a literal, adjacent ones joined, as an attribute's argument and as an expression (`ast::StringExpr`, its bytes
+  and each byte's location), which the code generator takes only as a builtin's argument (`Strings.cpp`). In a skipped
+  group literals are read as strings, so a `/*` in one opens no comment.
 - **Errors.** An unexpected character throws `Parser::syntax_error`. The parser catches it and reports it through
   `Parser::error`, like any syntax error.
 - **Directives.** A line whose first character after spaces is `#` is one rule, `^[ \t]*"#"[^\n]*`, which
@@ -263,8 +265,10 @@ they lower:
 | `Statements.cpp` | blocks, declarations, `return`, `if`, `while`, `for`, `switch` and its labels (`lowerSwitch`, `lowerLabel`; a jump past a declaration zeroes it, `bypass`), `break` and `continue` (`Breakable`: loops, switches and parallel regions, none of which a jump leaves or enters); a loop's `llvm.loop.mustprogress` when its condition is not a constant expression (`isConstant`, `mustProgress`); a condition that folds to a constant branches one way (`folds`, `branchOn`); a redefinition's error by the kinds of the two names (`redefinition`); a local's or a constant's attributes refused (`refuseAttributes`) |
 | `Constants.cpp` | C's integer constant expressions, folded over the tree as FMinus computes (`integerConstant`, `fold`): a case's value, an enumerator's, an array's size (`sized`; a parameter's, `checkSizes`); enumerations (`declareEnum`), their constants bound in the block's scope or the file's (`fileScope_`), and a name's lookup as one (`enumerator`); the top level's constants (`defineConstant`), constant globals of the file's scope, their initialisers lowered as a function's would be (`atTopLevel`); a name of the file's that is a function's or a module's too (`fileNameClash`) |
 | `Expressions.cpp` | the expression `std::visit` (`lower`), constants, operators (`binary`, `arithmetic`; the bitwise ones on ints, `isBitwise`), `&&` and `\|\|`, `?:`, casts, assignment, `++` and `--` |
-| `Calls.cpp` | the builtin tables, calls, reductions, `poly_lanes` and `poly_index`, `poly_load` and `poly_store`, the heap's `malloc`, `calloc` and `free`, the FFT's `fft_*` (`lowerFft`, on the runtime's), `hash` and `randf` (to `Hash.cpp`), and `ir::builtins()`; the heap's and the FFT's runtime calls through `callRuntime`, whose declaration says what the function does (`kRuntimeFacts`, `describeRuntime`) |
+| `Calls.cpp` | the builtin tables, calls, the runtime's other builtins (`kRuntimeBuiltins`, `lowerRuntimeBuiltin`: `bytes_floats`, `bytes_pcm16`, those that take strings, a build option's), reductions, `poly_lanes` and `poly_index`, `poly_load` and `poly_store`, the heap's `malloc`, `calloc` and `free`, the FFT's `fft_*` (`lowerFft`, on the runtime's), `hash` and `randf` (to `Hash.cpp`), and `ir::builtins()`; the heap's and the FFT's runtime calls through `callRuntime`, whose declaration says what the function does (`kRuntimeFacts`, `describeRuntime`) |
 | `Math.cpp` | `sinf`, `cosf`, `tanf`, `expf`, `tanhf` and `logf` in the vector and libm math modes: calls of the vector mode's math intrinsics (`fminus.sin.f32`, `fminus.sin.v2f32`, `fminus.sin.v4f32`) or the libm mode's runtime function, a float's or four lanes' (`lowerMath`), declared with their attributes and vector variant (`mathFunction`), and the names the runtime keeps for them, which a program that calls one may not declare (`checkMathNames`) |
+| `Strings.cpp` | string literals: a builtin's argument, a private constant passed as its address and length (`stringConstant`); a format's places for ints, checked as clang checks `printf`'s (`scanFormat`, `formatArguments`); a literal anywhere else, an error at it (`refuseString`, `notAValue`) |
+| `Paths.cpp` | a JSON Pointer literal, a path into a document (`json_float`'s and the others'), prepared into a private constant table of its steps, each a key's bytes and the places of its ints (`scanPath`, `preparedPath`), so the runtime never reads a path's text; an XML path (`xml_float`'s and the others': child steps by name, an index from 0, a last attribute) into a table of the same layout (`scanXmlPath`, `preparedXmlPath`); json_choice's and xml_choice's literals into another table (`preparedChoices`) |
 | `Hash.cpp` | `hash` and `randf`: lowbias32's integer instructions inline (`mixBits`), and the hash's top 24 bits over 2^23 (`lowerHash`) |
 | `Vectors.cpp` | vector literals in both forms, swizzles, `?:` with a vector condition |
 | `Memory.cpp` | lvalues (`lvalue`, `read`, `write`): variables (a top-level constant too), elements (`p[i]`, `*p`; a 2-D array's row, which decays in turn), fields, components of any of them; arrays (a name that stands for a pointer, a list placed as C places it, `placeList`; a `const` one of constants a private constant global, `declareConstArray`, its contents in clang's shapes, `tableContents` and, row by row, `tableOf`); `&x`; pointer arithmetic |
@@ -394,7 +398,12 @@ C keeps the enumerated type, and `lowerSwitch` reads it for clang's `-Wswitch`, 
   With a pointer, it is pointer arithmetic (`pointerArithmetic`): `p + i` is a `getelementptr`, `p - q` LLVM's
   `CreatePtrDiff` (the addresses' difference divided by the element's size), and comparisons are unsigned `icmp`s of
   the addresses.
-- **Calls** first try the reductions (`reduce_add`, `reduce_min`, `reduce_max`), `poly_lanes` and `poly_index`, and
+- **Calls** first try a method of the module, then the runtime's other builtins (`kRuntimeBuiltins`: `bytes_floats`,
+  `bytes_pcm16`, and those that take a string literal, a parameter of their own kind, `Param::String` or
+  `Param::Format`), whose arguments are lowered as their parameters say: a literal is a private constant, passed as
+  its address and length, and a format's ints go in an array of the frame; a builtin of a build option this build
+  leaves out is an error that names the option. Then the reductions (`reduce_add`, `reduce_min`, `reduce_max`),
+  `poly_lanes` and `poly_index`, and
   `poly_load` and `poly_store` (vector loads and stores at a float's alignment, masked with a `poly bool`), then
   `kBuiltins`, a table from `<math.h>`'s float names to LLVM intrinsics (`fabsf` to `llvm.fabs`, `sinf` to
   `llvm.sin`, ...), declared with `Intrinsic::getOrInsertDeclaration` at the arguments' type, so `sinf` of a `float4`
@@ -416,7 +425,9 @@ C keeps the enumerated type, and `lowerSwitch` reads it for clang's `-Wswitch`, 
 - **Effects** (`Effects.cpp`) run after every body: a function marked `[[clang::nonallocating]]` or
   `[[clang::nonblocking]]` (C23's syntax, after its parameters) is checked call by call, as clang's
   `-Wfunction-effects` checks it, down through the program's unmarked functions; a call that could reach the heap
-  (or, nonblocking, an unmarked external function) is an error, with a note for each step down.
+  (or, nonblocking, an unmarked external function, or a builtin that blocks) is an error, with a note for each step
+  down. A builtin of the runtime is in one of three classes (`RuntimeEffect`): it allocates (refused in both), blocks
+  (refused in a nonblocking function), or is wait-free.
 - **Parallel regions** (`Parallel.cpp`) are checked, then lowered into a function of their own each,
   `<function>.parallel.<n>`, `void(ptr context, i32 begin, i32 end)`, which runs a loop's iterations or a block's
   statements from `begin` to `end - 1`. Where the statement was, the function fills the context, a frame of its own,
@@ -603,7 +614,23 @@ generated code calls. It contains no LLVM, and it holds the FFT: PFFFT's objects
   over its iterations on the pool's threads and the caller's, one region at a time (a region that finds the pool held,
   or that a chunk of another starts, runs on its caller's thread alone), in the caller's floating-point mode, allocating
   nothing and taking no lock; `fminus_rt_parallel_start` and `fminus_rt_parallel_stop` count its users, the first making
-  a thread for each core but one, the last joining them.
+  a thread for each core but one, the last joining them. And bytes to numbers (`Bytes.cpp`): `fminus_rt_bytes_floats`
+  and `fminus_rt_bytes_pcm16`, raw little-endian float32 or 16-bit PCM into floats, wait-free; and the scaffolding of
+  string literals as builtins' arguments, `fminus_rt_string_hash`, on `Format.h`, which makes a format's text from its
+  ints for any function that takes one.
+  And the JSON parser (`Json.cpp`, on yyjson's objects, `cmake/FMinusJson.cmake`; only in a build with `FMINUS_JSON`,
+  and so are its lines in `RuntimeSymbols.def`): `fminus_rt_json_parse` and `fminus_rt_json_free`, which allocate,
+  and the reads, `fminus_rt_json_float` and its kin, wait-free, which take a document, a path the code generator
+  prepared (`ir/Paths.cpp`: a private constant of its steps, whose layout `Runtime.h` gives) and its ints. yyjson is
+  known to that file alone: it leaves every number as its text, and the reads convert it with `Numbers.h`.
+  And the XML parser, made the same way (`Xml.cpp`, on pugixml's objects, `cmake/FMinusXml.cmake`; only in a build
+  with `FMINUS_XML`): `fminus_rt_xml_parse` and `fminus_rt_xml_free`, which allocate, and the reads,
+  `fminus_rt_xml_float` and its kin, wait-free, which take a document, an XML path the code generator prepared into a
+  table of the same layout, and its ints. pugixml is known to that file alone; the reads give an attribute's value or an element's text
+  to `Numbers.h`. Both read the prepared tables through `Tables.h`.
+- `Numbers.h` is no C function of generated code's: the parsers' reader of numbers, `readFloat`, `readDouble` and
+  `readInt`, on fast_float (`cmake/FMinusFastFloat.cmake`), compiled only into a build with `FMINUS_JSON` or
+  `FMINUS_XML`.
 - `RuntimeSymbols.def` lists them, one `FMINUS_RUNTIME_SYMBOL(name)` each.
 - It also declares `fminus_rt_loop_budget_state`, the layout of a program's loop budget, `{ int64_t left; int32_t
   stopped; }`: not the runtime's, but the global a program compiled with the budget defines, `fminus_rt_loop_budget`,
@@ -641,7 +668,7 @@ Because the JIT and executables share one runtime, the two compile the same prog
 
 | Target | What | Include roots it gives |
 |---|---|---|
-| `fminus_runtime` (`FMinus::Runtime`) | `src/runtime/**`, and PFFFT's objects (`fminus_pffft`) | none (generated code calls it by name) |
+| `fminus_runtime` (`FMinus::Runtime`) | `src/runtime/**`, and PFFFT's objects (`fminus_pffft`); yyjson's objects (`fminus_yyjson`) with `FMINUS_JSON`; pugixml's objects (`fminus_pugixml`) with `FMINUS_XML`; fast_float's headers (`fminus_fast_float`) with `FMINUS_JSON` or `FMINUS_XML` | none (generated code calls it by name) |
 | `fminus_circuit` (`FMinus::Circuit`, `libfminus_circuit.a`) | `src/circuit/**`: the circuit compiler | `include/` (`"fminus/Circuit.h"`); C++17; no LLVM; `-ffp-contract=off`, so its double folding prints the same text on every target; `fminus_lib` links it publicly |
 | `fminus_lib` (`FMinus::FMinus`, `libfminus.a`) | every other `.cpp` under `src/`, and the generated scanner and parser; among them `src/api/CircuitSelfTest.cpp`, the circuit compiler's self-test, which compiles its candidates through `fminus::Program` | `include/` (`"fminus/FMinus.h"`), `<build>/include` (`fminus/Config.h`); C++17; LLVM linked, not included |
 | `FMinus::Internal` | `fminus_lib` for this tree's tools, examples and tests | also `src/` (`"frontend/Ast.h"`, ...), `<build>/src/generated/` (`"frontend/Parser.tab.hpp"`), LLVM's headers; C++23 |
@@ -720,8 +747,8 @@ pivots, so the float code computes what the reference computes, operation for op
   `TbaaTest.cpp` walks a program that makes every kind of access and fails on one untagged. A tag that is wrong is a
   miscompile.
 - **The runtime's declarations say only what is true of its code.** A runtime function that a builtin calls goes in
-  `RuntimeSymbols.def`, and its facts in `kRuntimeFacts` (`Calls.cpp`, through `callRuntime`: the heap's and the
-  FFT's) or in `mathFunction` (`Math.cpp`: the math builtins'). They change with its code: an attribute that is not
+  `RuntimeSymbols.def`, and its facts in `kRuntimeFacts` (`Calls.cpp`, through `callRuntime`: the heap's, the
+  FFT's and the bytes') or in `mathFunction` (`Math.cpp`: the math builtins'). They change with its code: an attribute that is not
   true is a miscompile (extending.md, recipes 15 and 19).
 - **Generated functions have the C calling convention, C names and external linkage.** That is the contract with C++
   callers, the JIT's `lookup` and the linker. A method's name is C++'s qualified one, `OnePole::tick`, with `this` as

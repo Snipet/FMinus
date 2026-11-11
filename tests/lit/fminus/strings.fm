@@ -1,0 +1,36 @@
+// String literals as builtins' arguments: each a private constant of the program, its bytes and no NUL after them
+// (C's adjacent literals one, a NUL inside one a byte), passed to the runtime as its address and its length; a
+// format's ints after it, in an array of the frame, with their count. The builtin here is scaffolding,
+// __fminus_string_hash (ir/Calls.cpp), the FNV-1a hash of the text a format and its ints make. A program runs it in
+// the JIT and as an executable, which links libfminus_runtime.a.
+// RUN: fminus %s -O0 | FileCheck %s
+// RUN: fminus %s --emit ast | FileCheck %s --check-prefix=AST
+// RUN: fminus %s --run main 7 | FileCheck %s --check-prefix=RESULT
+// RUN: fminus %s --emit exe -o %t.strings
+// RUN: %t.strings 7 | FileCheck %s --check-prefix=RESULT
+
+int path(int k) { return __fminus_string_hash("/osc/" "%d/detune", k); }
+int nul() [[clang::nonblocking]] { return __fminus_string_hash("a\0b"); }
+
+// True when the program's hashes are those of the texts it names: "/osc/7/detune" and the three bytes a, NUL, b.
+bool main(float k)
+{
+    return path((int)k) == 439940165 && nul() == 284404690;
+}
+
+// CHECK: @.str = private unnamed_addr constant [14 x i8] c"/osc/%d/detune", align 1
+// CHECK: @.str.1 = private unnamed_addr constant [3 x i8] c"a\00b", align 1
+// CHECK-LABEL: define i32 @path(
+// CHECK:         %format.ints = alloca [1 x i32]
+// CHECK:         store i32 {{%.*}}, ptr {{%.*}}, align 4, !tbaa
+// CHECK:         %__fminus_string_hash = call i32 @fminus_rt_string_hash(ptr @.str, i32 14, ptr %format.ints, i32 1)
+// CHECK-LABEL: define i32 @nul(
+// CHECK:         call i32 @fminus_rt_string_hash(ptr @.str.1, i32 3, ptr null, i32 0)
+// CHECK: declare i32 @fminus_rt_string_hash(ptr readonly captures(none), i32, ptr readonly captures(none), i32) [[TEXT:#[0-9]+]]
+// CHECK: attributes [[TEXT]] = { nofree nosync nounwind willreturn memory(argmem: read) }
+
+// AST: (function int path ((int k))
+// AST-NEXT:   (return (call __fminus_string_hash "/osc/%d/detune" k)))
+// AST: (return (call __fminus_string_hash "a\000b"))
+
+// RESULT: {{^}}true

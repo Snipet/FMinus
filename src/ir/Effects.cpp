@@ -3,9 +3,14 @@
 // what keeps the heap off the audio thread: a kernel marked nonblocking can call no malloc, however far down.
 //
 //   nonallocating   the function allocates and frees nothing: it calls no malloc, calloc or free, and makes and
-//                   frees no FFT plan (fft_create, fft_create_complex, fft_destroy; a transform is fine).
-//   nonblocking     and nothing else that might wait: no external function (a prototype the program does not
+//                   frees no FFT plan (fft_create, fft_create_complex, fft_destroy; a transform is fine), nor any
+//                   other builtin of the runtime that allocates (RuntimeEffect::Allocates, Calls.cpp).
+//   nonblocking     and nothing else that might wait: no builtin that blocks (RuntimeEffect::Blocks, which a
+//                   nonallocating function may call), and no external function (a prototype the program does not
 //                   define) unless its own prototype is marked nonblocking too.
+//
+// So a builtin of the runtime is in one of three classes: it allocates (refused in both), it blocks (refused in a
+// nonblocking function only), or it is wait-free (bytes_floats, fft_forward: allowed in both).
 //
 // A call is fine when it goes to a builtin of <math.h> (as clang trusts its own), to a function marked with the effect
 // (or the stronger one: nonblocking includes nonallocating), or to a function of the program, unmarked, whose body is
@@ -58,6 +63,8 @@ namespace fminus::ir::detail
     {
         if (allocates(callee))
             return std::vector<Diagnostic>{};
+        if (blocks(callee))
+            return required == Effect::NonBlocking ? std::optional(std::vector<Diagnostic>{}) : std::nullopt;
         const auto found = functions_.find(callee);
         if (found == functions_.end() || effectOf(callee) >= required)
             return std::nullopt;   // undeclared (an error of its own), or marked: its own definition is checked

@@ -1,0 +1,124 @@
+// examples/wavetable/wavetable.fm: a wavetable oscillator whose tables come in a JSON or an XML document its host
+// hands it (docs/extending.md, recipes 39 and 40), as a preset or a wavetable pack a user loads. init reads a JSON
+// document, initXml the same pack as XML, off the audio thread: how long a table is, the tables themselves (in JSON
+// each an array of numbers, or base64 of little-endian float32s, as a program's own server or an editor that saves
+// floats would write them; in XML each a list of numbers, an element's text or an attribute's value), the gain and the
+// interpolation, by name. Each copies them to the heap and frees the document. Each is there only in a build with its
+// parser (#ifdef __FMINUS_JSON__, __FMINUS_XML__), so the module compiles in every build. process plays the tables on
+// the audio thread, and is [[clang::nonblocking]]: FMinus refuses it if it could reach json_parse, xml_parse, a free
+// of either, calloc or free.
+//
+// The documents, as bench.cpp writes them:
+//
+//     {"name": "basic shapes", "size": 2048, "gain": 0.5, "interpolation": "linear",
+//      "tables": [{"name": "sine", "samples": [0, 0.0030679568, ...]},
+//                 {"name": "saw", "base64": "AAAAAFts1TZn..."}, ...]}
+//
+//     <pack name="basic shapes" size="2048" gain="0.5" interpolation="linear">
+//         <table name="sine">0 0.0030679568 ...</table>
+//         <table name="saw" samples="0, 0.0018276..."/> ...
+//     </pack>
+
+enum Interpolation { Nearest, Linear };
+
+module Wavetable
+{
+    param float frequency [[fminus::range(1, 20000)]] [[fminus::default(220)]];   // Hz
+    param float position [[fminus::range(0, 1)]];                                 // from the first table to the last
+    float* tables;   // `count` tables of `size` samples, one after another
+    int count;
+    int size;
+    float gain;
+    enum Interpolation interpolation;
+    float rate;      // samples a second
+    float phase;     // in samples, from 0 to size
+
+#ifdef __FMINUS_JSON__
+    // Off the audio thread, as a plugin's prepare() or its preset loader: the tables of the JSON document `bytes` long
+    // at `data`, at `sampleRate`. False when it is no JSON, when a table is not `size` numbers, or when the memory
+    // isn't there; the document says how many tables there are (1 to 256) and how long each is (2 to 65536 samples).
+    bool init(const void* data, int bytes, float sampleRate)
+    {
+        void* doc = json_parse(data, bytes);
+        count = json_count(doc, "/tables");
+        size = json_int(doc, "/size", 0);
+        gain = json_float(doc, "/gain", 1.0f);
+        interpolation = json_choice(doc, "/interpolation", "nearest", "linear") == 0 ? Nearest : Linear;
+        rate = sampleRate;
+        bool fine = count >= 1 && count <= 256 && size >= 2 && size <= 65536;
+        if (fine)
+            tables = calloc(count * size, sizeof(float));
+        fine = fine && tables;
+        for (int t = 0; fine && t < count; ++t)
+        {
+            float* table = &tables[t * size];
+            int n = json_floats(doc, "/tables/%d/samples", t, table, size);
+            if (n == 0)
+                n = json_base64_floats(doc, "/tables/%d/base64", t, table, size);
+            fine = n == size;
+        }
+        json_free(doc);
+        return fine;
+    }
+#endif
+
+#ifdef __FMINUS_XML__
+    // The same, from the pack as XML: its attributes say how long a table is, the gain and the interpolation, and
+    // each <table> holds its samples, as its text or in its samples attribute. An index counts from 0, as JSON
+    // Pointer's does (XPath's would count from 1): "/pack/table[0]" is the first table.
+    bool initXml(const void* data, int bytes, float sampleRate)
+    {
+        void* doc = xml_parse(data, bytes);
+        count = xml_count(doc, "/pack/table");
+        size = xml_int(doc, "/pack/@size", 0);
+        gain = xml_float(doc, "/pack/@gain", 1.0f);
+        interpolation = xml_choice(doc, "/pack/@interpolation", "nearest", "linear") == 0 ? Nearest : Linear;
+        rate = sampleRate;
+        bool fine = count >= 1 && count <= 256 && size >= 2 && size <= 65536;
+        if (fine)
+            tables = calloc(count * size, sizeof(float));
+        fine = fine && tables;
+        for (int t = 0; fine && t < count; ++t)
+        {
+            float* table = &tables[t * size];
+            int n = xml_floats(doc, "/pack/table[%d]", t, table, size);
+            if (n == 0)
+                n = xml_floats(doc, "/pack/table[%d]/@samples", t, table, size);
+            fine = n == size;
+        }
+        xml_free(doc);
+        return fine;
+    }
+#endif
+
+    // n samples of the tables at `frequency`, `position` choosing between them: between two tables, both, in the
+    // proportion it says; within a table, the sample at the phase or the line between the two either side of it.
+    void process(float* restrict output, int n) [[clang::nonblocking]]
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            const float where = position[i] * (count - 1);
+            int t = (int)where;
+            if (t > count - 2)
+                t = count > 1 ? count - 2 : 0;
+            const float between = count > 1 ? where - t : 0;
+            const int k = (int)phase;
+            const int next = k + 1 == size ? 0 : k + 1;
+            const float within = interpolation == Linear ? phase - k : 0;
+            const float* a = &tables[t * size];
+            const float* b = count > 1 ? &tables[(t + 1) * size] : a;
+            const float x = a[k] + within * (a[next] - a[k]);
+            const float y = b[k] + within * (b[next] - b[k]);
+            output[i] = gain * (x + between * (y - x));
+            phase += frequency[i] * size / rate;
+            if (phase >= size)
+                phase -= size;
+        }
+    }
+
+    // Off the audio thread, at the end.
+    void end()
+    {
+        free(tables);
+    }
+};

@@ -8,8 +8,13 @@
 //     Constants.cpp     C's integer constant expressions, worked out where they are written (a case label's value,
 //                       an enumerator's, an array's size), enumerations: their constants, in a block's scope or the
 //                       file's, and the top level's constants, the file's const objects
-//     Calls.cpp         calls: the builtins (math functions, reductions, poly queries and memory, the heap, the FFT)
-//                       and the program's
+//     Calls.cpp         calls: the builtins (math functions, reductions, poly queries and memory, the heap, the FFT,
+//                       the runtime's others: bytes_floats, ...) and the program's
+//     Strings.cpp       string literals: a builtin's argument, a private constant passed as its address and length;
+//                       a format's places for ints, checked; the errors of a literal anywhere else
+//     Paths.cpp         a JSON Pointer literal, json_float's and the others', or an XML path, xml_float's and the
+//                       others', prepared into a private table of steps the runtime walks; json_choice's and
+//                       xml_choice's literals into another
 //     Math.cpp          sinf, cosf, tanf, expf, tanhf and logf in the vector and libm math modes: the runtime's
 //                       functions
 //     Hash.cpp          hash and randf: an int's bits mixed, and a float uniform in [-1, 1) from them, inline
@@ -36,6 +41,8 @@
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/Module.h>
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <map>
@@ -92,10 +99,129 @@ namespace fminus::ir::detail
         bool allocates;
     };
 
+    // A build option a builtin needs (cmake/FMinusOptions.cmake, fminus/Config.h): none, the JSON parser (FMINUS_JSON)
+    // or the XML parser (FMINUS_XML). A builtin of an option this build was configured without is still a known name:
+    // a call of it is an error that names the option (notBuilt), not an undeclared function, and a definition of one
+    // is refused, as any builtin's is (Functions.cpp).
+    enum class Feature
+    {
+        None,
+        Json,
+        Xml,
+    };
+    bool isBuilt(Feature feature);                                 // whether this build has it (Calls.cpp)
+    std::string notBuilt(std::string_view name, Feature feature);   // the error of a call of `name`, which needs it
+
+    // What a builtin of the runtime may do, for the effects (Effects.cpp): allocate or free, which a nonallocating
+    // function may not (and so neither may a nonblocking one); block, waiting for something (a request, a thread),
+    // which a nonblocking function may not, and a nonallocating one may; or neither: it is wait-free, and the audio
+    // thread may call it. The runtime's code must keep the promise (Runtime.h says it of each function).
+    enum class RuntimeEffect
+    {
+        WaitFree,
+        Blocks,
+        Allocates,
+    };
+
+    // A parameter of a builtin of the runtime (RuntimeBuiltin): an int; bytes, a const void* (any pointer converts, as
+    // to C's); floats it writes, a float*; a string, which must be a string literal, passed as its address and its
+    // length in bytes (Strings.cpp: no NUL ends it, and it may hold one); or a format, a string literal with places for
+    // ints (%d, and %% for a percent sign), checked when the program is compiled (formatArguments), after which the
+    // call gives an int for each place, passed as their address and their count. Then the JSON parser's: a document,
+    // a const void* (json_parse's, read); a handle, a void* (json_free's); a float, a double or a bool (a read's
+    // fallback; a bool goes to the runtime as an int, 0 or 1); a path, a format that is a JSON Pointer, prepared when
+    // the program is compiled into a table of steps (Paths.cpp), passed as its address and then its ints' address and
+    // count, as a format's; and choices, every argument after the path's ints, string literals (at least one),
+    // prepared into one table, passed as its address. The XML parser's take the same, but for its path: an XML path, a
+    // format that is a small part of XPath (child steps by name, [n], a last @attribute), prepared as a JSON one is.
+    enum class Param
+    {
+        Int,
+        Bytes,
+        Floats,
+        String,
+        Format,
+        Document,
+        Handle,
+        Float,
+        Double,
+        Bool,
+        Path,
+        Choices,
+        XmlPath,
+    };
+
+    // What a builtin of the runtime gives: an int, a float, a double, a bool (an int from the runtime, 0 or 1), a void*
+    // or nothing.
+    enum class Result
+    {
+        Int,
+        Float,
+        Double,
+        Bool,
+        Pointer,
+        Void,
+    };
+
+    // A builtin that calls a function of the runtime with its arguments, as Param says to pass each (Calls.cpp,
+    // kRuntimeBuiltins): its name, the runtime's function, its parameters (the first `arity` of `params`; a format's or
+    // a path's ints are not among them), what it may do on the audio thread, the build option it needs, and its
+    // result.
+    struct RuntimeBuiltin
+    {
+        std::string_view name;
+        std::string_view symbol;
+        std::array<Param, 6> params;
+        unsigned arity;
+        RuntimeEffect effect;
+        Feature feature = Feature::None;
+        Result result = Result::Int;
+    };
+
+    // The C type of a runtime builtin's parameter or result, as its prototype would write it (Calls.cpp): what a
+    // prototype of the builtin must say (Functions.cpp), and what an argument converts to. A string, a format, a path
+    // and choices have none (std::nullopt): FMinus has no char.
+    std::optional<ast::Type> paramType(Param param);
+    ast::Type resultType(Result result);
+
+    // A format's places for ints (Strings.cpp, scanFormat): the offset in the literal's bytes of each %d's '%', in
+    // order, and its errors, each at the offset of the byte it is about, in clang's words for printf's.
+    struct FormatScan
+    {
+        struct Error
+        {
+            std::size_t offset;
+            std::string message;
+        };
+        std::vector<std::size_t> places;
+        std::vector<Error> errors;
+    };
+    FormatScan scanFormat(std::string_view text);
+
+    // A JSON Pointer (RFC 6901) with a format's places (%d, %%), prepared (Paths.cpp, scanPath): its reference tokens
+    // as the runtime's table holds them (runtime/Runtime.h), each its count of pieces and then a pair a piece, (offset,
+    // length) of a literal's bytes in `bytes`, or (place, -1) for the place-th %d; and its errors, each at the offset
+    // in the literal's bytes of the byte it is about. A format's own errors (a % before anything but d or %) are
+    // scanFormat's, and not here again: such a % is a byte of its token.
+    struct PathScan
+    {
+        std::vector<std::int32_t> code;
+        std::string bytes;
+        std::vector<FormatScan::Error> errors;
+    };
+    PathScan scanPath(std::string_view text);
+
+    // An XML path with a format's places (%d, %%), prepared (Paths.cpp, scanXmlPath): its steps as the runtime's table
+    // holds them (runtime/Runtime.h), each its kind, its name's pieces as a JSON Pointer's token's, and its index; and
+    // its errors, as scanPath's. A format's own errors are scanFormat's, and not here again.
+    PathScan scanXmlPath(std::string_view text);
+
     const Builtin* findBuiltin(std::string_view name);   // <math.h>'s float functions, or nullptr
     const Allocation* findAllocation(std::string_view name);   // malloc, calloc, free, or nullptr
     const Fft* findFft(std::string_view name);           // fft_create, fft_forward, ..., or nullptr
+    const RuntimeBuiltin* findRuntimeBuiltin(std::string_view name);   // bytes_floats, ..., or nullptr
     bool allocates(std::string_view name);               // a builtin that allocates or frees: the heap's, a plan's
+    bool blocks(std::string_view name);                  // a builtin that may wait: none yet (http_wait will)
     bool isReduction(std::string_view name);             // reduce_add, reduce_min, reduce_max
     bool isPolyQuery(std::string_view name);             // poly_lanes, poly_index
     bool isPolyMemory(std::string_view name);            // poly_load, poly_store
@@ -459,7 +585,22 @@ namespace fminus::ir::detail
         Value wrongArity(SourceLocation location, std::size_t have, std::size_t expected);
         Value lowerAllocation(SourceLocation location, const Allocation& allocation, const std::vector<Value>& args);
         Value lowerFft(SourceLocation location, const Fft& fft, const std::vector<Value>& args);
+        Value lowerRuntimeBuiltin(SourceLocation location, const RuntimeBuiltin& builtin, const ast::CallExpr& call);
+        llvm::Value* formatInts(const std::vector<llvm::Value*>& values);
         llvm::CallInst* callRuntime(const std::string& name, llvm::Type* result, const std::vector<llvm::Value*>& args);
+
+        // ---- Strings.cpp --------------------------------------------------------------------------------------------
+        static bool isString(const ast::Expr& expr);
+        llvm::Value* stringConstant(const ast::StringExpr& literal);
+        std::optional<std::vector<llvm::Value*>> formatArguments(const ast::StringExpr& literal,
+                                                                 const std::vector<const ast::Expr*>& ints);
+        Value refuseString(const ast::Expr& expr, std::optional<ast::Type> type, Use use, SourceLocation where);
+        Value notAValue(const ast::Expr& expr);
+
+        // ---- Paths.cpp ----------------------------------------------------------------------------------------------
+        llvm::Value* preparedPath(const ast::StringExpr& literal);
+        llvm::Value* preparedXmlPath(const ast::StringExpr& literal, SourceLocation where);
+        llvm::Value* preparedChoices(const std::vector<const ast::StringExpr*>& literals);
 
         // ---- Math.cpp -----------------------------------------------------------------------------------------------
         llvm::Value* lowerMath(const Builtin& builtin, ast::Type type, llvm::Value* x);

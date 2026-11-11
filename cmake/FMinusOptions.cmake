@@ -6,6 +6,20 @@ option(FMINUS_BUILD_TESTS "Build the Catch2 and lit tests" ${PROJECT_IS_TOP_LEVE
 option(FMINUS_BUILD_TOOLS "Build the executables under tools/" ${PROJECT_IS_TOP_LEVEL})
 option(FMINUS_BUILD_EXAMPLES "Build the examples under examples/" ${PROJECT_IS_TOP_LEVEL})
 option(FMINUS_BUILD_PYTHON "Build the Python package, python/ (needs Python's development headers)" OFF)
+# What programs' builtins this build has. Each is a part of the runtime and the builtins that call it; a builtin of
+# one left out is still a name the compiler knows, and a call of it is an error that names the option. Either one on
+# fetches fast_float (cmake/FMinusFastFloat.cmake), the parsers' reader of numbers; JSON fetches yyjson
+# (cmake/FMinusJson.cmake), XML pugixml (cmake/FMinusXml.cmake).
+option(FMINUS_JSON "The JSON parser and the json_* builtins (fetches yyjson and fast_float)" ON)
+option(FMINUS_XML "The XML parser and the xml_* builtins (fetches pugixml and fast_float)" ON)
+# The JSON parser's limits on a document (src/runtime/Json.cpp): its size in bytes, and how deeply its arrays and
+# objects may nest. json_parse of a document past either is null, as of one that is not JSON. fminus/Config.h has both.
+set(FMINUS_JSON_MAX_BYTES 67108864)   # 64 MiB
+set(FMINUS_JSON_MAX_DEPTH 1024)
+# The XML parser's (src/runtime/Xml.cpp), the same: a document's size in bytes, and how deeply its elements may nest,
+# the root element at depth 1. xml_parse of a document past either is null, as of one that is not XML.
+set(FMINUS_XML_MAX_BYTES 67108864)   # 64 MiB
+set(FMINUS_XML_MAX_DEPTH 1024)
 option(FMINUS_WERROR "Treat warnings in FMinus's own sources as errors" ON)
 set(FMINUS_CXX_STANDARD 23 CACHE STRING "C++ standard of FMinus's own targets")
 set(FMINUS_SANITIZERS "" CACHE STRING "Sanitizers for FMinus's own targets: a list of address, undefined, thread")

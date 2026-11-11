@@ -3,9 +3,15 @@
 // poly_lanes and poly_index, poly_load and poly_store, <math.h>'s float functions (LLVM intrinsics, overloaded on
 // vectors; the transcendental ones the runtime's functions, by the math mode: Math.cpp), <stdlib.h>'s heap (malloc,
 // calloc and free) and the FFT (fft_create, fft_forward, ...), both on the runtime's functions, and hash and randf
-// (inline: Hash.cpp); then the program's own functions. The runtime's functions are declared with what they do
-// (describeRuntime), so LLVM does not take one for an unknown function that may read and write all memory.
+// (inline: Hash.cpp); then the program's own functions. The runtime's other builtins (bytes_floats, bytes_pcm16, the
+// JSON parser's json_parse, json_float, ..., the XML parser's xml_parse, xml_float, ..., and those that take string
+// literals: Strings.cpp, Paths.cpp) come before the rest, as a method of the module does, since their arguments are
+// lowered as their parameters say (a literal is one only there). The runtime's functions are declared
+// with what they do (describeRuntime), so LLVM does not take one for an unknown function that may read and write all
+// memory.
 #include "ir/Lowering.h"
+
+#include "fminus/Config.h"   // FMINUS_HAS_JSON, FMINUS_HAS_XML: which build options this build has
 
 #include <llvm/IR/Attributes.h>
 #include <llvm/IR/Constants.h>
@@ -14,6 +20,7 @@
 #include <algorithm>
 #include <array>
 #include <optional>
+#include <span>
 
 namespace fminus::ir::detail
 {
@@ -61,6 +68,152 @@ namespace fminus::ir::detail
         Fft{"fft_forward", 3, false}, Fft{"fft_inverse", 3, false},
     };
 
+    // The runtime's other builtins (runtime/Bytes.cpp), each a function of the runtime with parameters as Param says
+    // and an int result, and the build option it needs. bytes_floats(data, bytes, out, cap) and bytes_pcm16 decode
+    // little-endian float32, or 16-bit PCM scaled to [-1, 1), into floats: how many values the data holds, at most cap
+    // of them written; wait-free, so a nonblocking function may call them. __fminus_string_hash(format, ...) and
+    // __fminus_string_hash_blocking are scaffolding, names C reserves for the implementation: the hash of the text a
+    // format and its ints make, which proves a literal's way from the source to the runtime
+    // (tests/unit/StringTest.cpp), the second classed as blocking, which nothing else is yet (http_wait will be). They
+    // go when the first builtins that take strings (json_float, http_get) and block (http_wait) come with tests of
+    // their own; so do the scaffolding tests that the effects refuse the second (tests/unit/StringTest.cpp).
+    constexpr std::array kRuntimeBuiltins{
+        RuntimeBuiltin{"bytes_floats", "fminus_rt_bytes_floats", {Param::Bytes, Param::Int, Param::Floats, Param::Int},
+                       4, RuntimeEffect::WaitFree},
+        RuntimeBuiltin{"bytes_pcm16", "fminus_rt_bytes_pcm16", {Param::Bytes, Param::Int, Param::Floats, Param::Int},
+                       4, RuntimeEffect::WaitFree},
+        RuntimeBuiltin{"__fminus_string_hash", "fminus_rt_string_hash", {Param::Format}, 1, RuntimeEffect::WaitFree},
+        RuntimeBuiltin{"__fminus_string_hash_blocking", "fminus_rt_string_hash", {Param::Format}, 1,
+                       RuntimeEffect::Blocks},
+        // The JSON parser (runtime/Json.cpp), in a build with FMINUS_JSON. json_parse(data, bytes) gives a document, a
+        // void* (null for a text that is no JSON, too large or nested too deeply), and json_free(doc) frees it: both
+        // allocate. The reads take the document, a JSON Pointer with places for ints (a path, Paths.cpp) and its
+        // ints, and give what is there: json_float, json_double, json_int and json_bool the value, or their last
+        // argument, the fallback, when there is none of that kind; json_count an array's or an object's size;
+        // json_floats(doc, path, out, cap) an array of numbers, or of rows of them; json_choice(doc, path, "a", "b",
+        // ...) the index of the literal a string equals, or -1; json_base64_floats(doc, path, out, cap) a base64
+        // string's float32s. A null document is an empty one. Every read is wait-free.
+        RuntimeBuiltin{"json_parse", "fminus_rt_json_parse", {Param::Bytes, Param::Int}, 2, RuntimeEffect::Allocates,
+                       Feature::Json, Result::Pointer},
+        RuntimeBuiltin{"json_free", "fminus_rt_json_free", {Param::Handle}, 1, RuntimeEffect::Allocates, Feature::Json,
+                       Result::Void},
+        RuntimeBuiltin{"json_float", "fminus_rt_json_float", {Param::Document, Param::Path, Param::Float}, 3,
+                       RuntimeEffect::WaitFree, Feature::Json, Result::Float},
+        RuntimeBuiltin{"json_double", "fminus_rt_json_double", {Param::Document, Param::Path, Param::Double}, 3,
+                       RuntimeEffect::WaitFree, Feature::Json, Result::Double},
+        RuntimeBuiltin{"json_int", "fminus_rt_json_int", {Param::Document, Param::Path, Param::Int}, 3,
+                       RuntimeEffect::WaitFree, Feature::Json, Result::Int},
+        RuntimeBuiltin{"json_bool", "fminus_rt_json_bool", {Param::Document, Param::Path, Param::Bool}, 3,
+                       RuntimeEffect::WaitFree, Feature::Json, Result::Bool},
+        RuntimeBuiltin{"json_count", "fminus_rt_json_count", {Param::Document, Param::Path}, 2, RuntimeEffect::WaitFree,
+                       Feature::Json, Result::Int},
+        RuntimeBuiltin{"json_floats", "fminus_rt_json_floats",
+                       {Param::Document, Param::Path, Param::Floats, Param::Int}, 4, RuntimeEffect::WaitFree,
+                       Feature::Json, Result::Int},
+        RuntimeBuiltin{"json_choice", "fminus_rt_json_choice", {Param::Document, Param::Path, Param::Choices}, 3,
+                       RuntimeEffect::WaitFree, Feature::Json, Result::Int},
+        RuntimeBuiltin{"json_base64_floats", "fminus_rt_json_base64_floats",
+                       {Param::Document, Param::Path, Param::Floats, Param::Int}, 4, RuntimeEffect::WaitFree,
+                       Feature::Json, Result::Int},
+        // The XML parser (runtime/Xml.cpp), in a build with FMINUS_XML, made as the JSON parser's are. xml_parse(data,
+        // bytes) gives a document, a void* (null for a text that is no XML, too large or nested too deeply), and
+        // xml_free(doc) frees it: both allocate. The reads take the document, an XML path with places for ints
+        // (Paths.cpp: "/preset/osc[%d]/@detune", an index from 0) and its ints, and read the attribute's value or the
+        // element's text: xml_float, xml_double, xml_int and xml_bool the value, or their fallback; xml_count how many
+        // elements the last step matches; xml_floats(doc, path, out, cap) a list of numbers; xml_choice(doc, path,
+        // "a", "b", ...) the index of the literal it equals, or -1. A null document is an empty one. Every read is
+        // wait-free.
+        RuntimeBuiltin{"xml_parse", "fminus_rt_xml_parse", {Param::Bytes, Param::Int}, 2, RuntimeEffect::Allocates,
+                       Feature::Xml, Result::Pointer},
+        RuntimeBuiltin{"xml_free", "fminus_rt_xml_free", {Param::Handle}, 1, RuntimeEffect::Allocates, Feature::Xml,
+                       Result::Void},
+        RuntimeBuiltin{"xml_float", "fminus_rt_xml_float", {Param::Document, Param::XmlPath, Param::Float}, 3,
+                       RuntimeEffect::WaitFree, Feature::Xml, Result::Float},
+        RuntimeBuiltin{"xml_double", "fminus_rt_xml_double", {Param::Document, Param::XmlPath, Param::Double}, 3,
+                       RuntimeEffect::WaitFree, Feature::Xml, Result::Double},
+        RuntimeBuiltin{"xml_int", "fminus_rt_xml_int", {Param::Document, Param::XmlPath, Param::Int}, 3,
+                       RuntimeEffect::WaitFree, Feature::Xml, Result::Int},
+        RuntimeBuiltin{"xml_bool", "fminus_rt_xml_bool", {Param::Document, Param::XmlPath, Param::Bool}, 3,
+                       RuntimeEffect::WaitFree, Feature::Xml, Result::Bool},
+        RuntimeBuiltin{"xml_count", "fminus_rt_xml_count", {Param::Document, Param::XmlPath}, 2,
+                       RuntimeEffect::WaitFree, Feature::Xml, Result::Int},
+        RuntimeBuiltin{"xml_floats", "fminus_rt_xml_floats",
+                       {Param::Document, Param::XmlPath, Param::Floats, Param::Int}, 4, RuntimeEffect::WaitFree,
+                       Feature::Xml, Result::Int},
+        RuntimeBuiltin{"xml_choice", "fminus_rt_xml_choice", {Param::Document, Param::XmlPath, Param::Choices}, 3,
+                       RuntimeEffect::WaitFree, Feature::Xml, Result::Int},
+    };
+
+    std::optional<ast::Type> paramType(Param param)
+    {
+        switch (param)
+        {
+        case Param::Int:
+            return ast::Type::Int;
+        case Param::Bytes:
+        case Param::Document:
+            return ast::Type::pointerTo(ast::Kind::Void, true);
+        case Param::Handle:
+            return ast::Type::pointerTo(ast::Kind::Void, false);
+        case Param::Floats:
+            return ast::Type::pointerTo(ast::Kind::Float, false);
+        case Param::Float:
+            return ast::Type::Float;
+        case Param::Double:
+            return ast::Type::Double;
+        case Param::Bool:
+            return ast::Type::Bool;
+        case Param::String:
+        case Param::Format:
+        case Param::Path:
+        case Param::Choices:
+        case Param::XmlPath:
+            break;
+        }
+        return std::nullopt;
+    }
+
+    ast::Type resultType(Result result)
+    {
+        switch (result)
+        {
+        case Result::Int:
+            return ast::Type::Int;
+        case Result::Float:
+            return ast::Type::Float;
+        case Result::Double:
+            return ast::Type::Double;
+        case Result::Bool:
+            return ast::Type::Bool;
+        case Result::Pointer:
+            return ast::Type::pointerTo(ast::Kind::Void, false);
+        case Result::Void:
+            break;
+        }
+        return ast::Type::Void;
+    }
+
+    bool isBuilt(Feature feature)
+    {
+        switch (feature)
+        {
+        case Feature::None:
+            return true;
+        case Feature::Json:
+            return FMINUS_HAS_JSON != 0;
+        case Feature::Xml:
+            return FMINUS_HAS_XML != 0;
+        }
+        return false;
+    }
+
+    std::string notBuilt(std::string_view name, Feature feature)
+    {
+        const char* what = feature == Feature::Json ? "the JSON parser" : "the XML parser";
+        const char* option = feature == Feature::Json ? "FMINUS_JSON" : "FMINUS_XML";
+        return quoted(name) + " needs " + what + ", which this build of FMinus leaves out (" + option + "=OFF)";
+    }
+
     namespace
     {
         // What a runtime function the builtins call does with memory (describeRuntime gives its declaration the
@@ -73,6 +226,16 @@ namespace fminus::ir::detail
             PlanRelease,   // fminus_rt_fft_destroy
             Transform,     // fminus_rt_fft_forward_real and the others: reads one buffer, writes another
             Parallel,      // fminus_rt_parallel_for (runtime/Parallel.cpp): runs a region's body, which does anything
+            Decode,        // fminus_rt_bytes_floats, fminus_rt_bytes_pcm16 (runtime/Bytes.cpp): reads one, writes one
+            ReadText,      // fminus_rt_string_hash: reads a literal and its ints
+            Document,      // fminus_rt_json_parse, fminus_rt_xml_parse (runtime/Json.cpp, Xml.cpp): reads a text, gives
+                           // a new document, or null
+            DocumentRelease,   // fminus_rt_json_free, fminus_rt_xml_free
+            Read,          // fminus_rt_json_float, fminus_rt_xml_float and the other reads: a document, a path and its
+                           // ints
+            ReadChoice,    // fminus_rt_json_choice, fminus_rt_xml_choice: and the literals' table
+            ReadInto,      // fminus_rt_json_floats, fminus_rt_json_base64_floats, fminus_rt_xml_floats: and writes
+                           // floats
         };
 
         struct RuntimeFacts
@@ -93,6 +256,28 @@ namespace fminus::ir::detail
             RuntimeFacts{"fminus_rt_fft_forward_complex", RuntimeKind::Transform},
             RuntimeFacts{"fminus_rt_fft_inverse_complex", RuntimeKind::Transform},
             RuntimeFacts{"fminus_rt_parallel_for", RuntimeKind::Parallel},
+            RuntimeFacts{"fminus_rt_bytes_floats", RuntimeKind::Decode},
+            RuntimeFacts{"fminus_rt_bytes_pcm16", RuntimeKind::Decode},
+            RuntimeFacts{"fminus_rt_string_hash", RuntimeKind::ReadText},
+            RuntimeFacts{"fminus_rt_json_parse", RuntimeKind::Document},
+            RuntimeFacts{"fminus_rt_json_free", RuntimeKind::DocumentRelease},
+            RuntimeFacts{"fminus_rt_json_float", RuntimeKind::Read},
+            RuntimeFacts{"fminus_rt_json_double", RuntimeKind::Read},
+            RuntimeFacts{"fminus_rt_json_int", RuntimeKind::Read},
+            RuntimeFacts{"fminus_rt_json_bool", RuntimeKind::Read},
+            RuntimeFacts{"fminus_rt_json_count", RuntimeKind::Read},
+            RuntimeFacts{"fminus_rt_json_choice", RuntimeKind::ReadChoice},
+            RuntimeFacts{"fminus_rt_json_floats", RuntimeKind::ReadInto},
+            RuntimeFacts{"fminus_rt_json_base64_floats", RuntimeKind::ReadInto},
+            RuntimeFacts{"fminus_rt_xml_parse", RuntimeKind::Document},
+            RuntimeFacts{"fminus_rt_xml_free", RuntimeKind::DocumentRelease},
+            RuntimeFacts{"fminus_rt_xml_float", RuntimeKind::Read},
+            RuntimeFacts{"fminus_rt_xml_double", RuntimeKind::Read},
+            RuntimeFacts{"fminus_rt_xml_int", RuntimeKind::Read},
+            RuntimeFacts{"fminus_rt_xml_bool", RuntimeKind::Read},
+            RuntimeFacts{"fminus_rt_xml_count", RuntimeKind::Read},
+            RuntimeFacts{"fminus_rt_xml_choice", RuntimeKind::ReadChoice},
+            RuntimeFacts{"fminus_rt_xml_floats", RuntimeKind::ReadInto},
         };
 
         // The heap's allocator family, named after its first function as LangRef asks: LLVM pairs an allocation with
@@ -101,7 +286,8 @@ namespace fminus::ir::detail
 
         // Gives the runtime's function `function` (kRuntimeFacts) the attributes that are true of its code, so LLVM
         // knows a call of it touches only what it touches: a call of fft_forward then changes no module's fields, and
-        // memory from calloc is fresh and zeroed. Each one must stay true of runtime/Runtime.cpp and runtime/Fft.cpp:
+        // memory from calloc is fresh and zeroed. Each one must stay true of runtime/Runtime.cpp, runtime/Fft.cpp,
+        // runtime/Bytes.cpp, runtime/Json.cpp and runtime/Xml.cpp:
         // an attribute that is not is a miscompile. Every one of them is noexcept (nounwind), and all but
         // fminus_rt_parallel_for come back (willreturn): it runs a region's body, which may loop for ever, as a loop
         // with a constant condition may. None takes nonnull: a null plan is a plan that does nothing, and the heap's
@@ -185,6 +371,75 @@ namespace fminus::ir::detail
                 // The body reads and writes what its context reaches, and calls what it calls: LLVM's default, any
                 // memory, is what is true of it.
                 break;
+            case RuntimeKind::Decode:
+                // Reads `data` and writes `out` (no more than `cap` floats of it), keeping no pointer to either, and
+                // touches nothing else: no memory of its own, no allocation, no lock. `data` may be null and `out`
+                // too, so neither is nonnull; and the two may overlap (a program may decode in place), so neither is
+                // noalias. readonly and writeonly stay true even then.
+                function.setMemoryEffects(llvm::MemoryEffects::argMemOnly());
+                function.setDoesNotFreeMemory();
+                function.setNoSync();
+                function.addParamAttr(0, llvm::Attribute::ReadOnly);
+                function.addParamAttr(0, keepsNone);
+                function.addParamAttr(2, llvm::Attribute::WriteOnly);
+                function.addParamAttr(2, keepsNone);
+                break;
+            case RuntimeKind::ReadText:
+                // Reads the literal and the ints, keeping no pointer to either, and nothing else.
+                function.setMemoryEffects(llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref));
+                function.setDoesNotFreeMemory();
+                function.setNoSync();
+                for (unsigned arg : {0u, 2u})
+                {
+                    function.addParamAttr(arg, llvm::Attribute::ReadOnly);
+                    function.addParamAttr(arg, keepsNone);
+                }
+                break;
+            case RuntimeKind::Document:
+                // Reads the text, keeping no pointer to it (the document holds a copy), and gives a new document, or
+                // null, as fminus_rt_fft_create gives a plan: no allocator LLVM may remove, since its null says the
+                // text is no JSON (or no XML). Beyond the text and the new document, it changes the system
+                // allocator's state and errno.
+                function.setMemoryEffects(
+                    llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref)
+                    | llvm::MemoryEffects::inaccessibleOrErrnoMemOnly(llvm::ModRefInfo::ModRef, llvm::ModRefInfo::Mod));
+                function.addParamAttr(0, llvm::Attribute::ReadOnly);
+                function.addParamAttr(0, keepsNone);
+                function.addRetAttr(llvm::Attribute::NoAlias);
+                function.addRetAttr(llvm::Attribute::NoUndef);
+                break;
+            case RuntimeKind::DocumentRelease:
+                // Frees the document and the memory only it points to. It keeps no pointer.
+                function.setMemoryEffects(llvm::MemoryEffects::inaccessibleOrArgMemOnly());
+                function.addParamAttr(0, keepsNone);
+                break;
+            case RuntimeKind::Read:
+            case RuntimeKind::ReadChoice:
+            case RuntimeKind::ReadInto:
+                // Reads the document, the path's table (a constant of the program's, one block: Paths.cpp), the ints
+                // and json_choice's or xml_choice's table, keeping no pointer to any of them, and writes only
+                // json_floats', json_base64_floats' and xml_floats' `out` (no more than `cap` floats of it).
+                // A document is opaque, as an FFT plan is: what it points to, its values and its copy of the text, only
+                // it points to, so a read touches inaccessible memory there, and writes none. It allocates, frees and
+                // waits for nothing (the effects let it run on the audio thread): nofree and nosync too.
+                function.setMemoryEffects(
+                    llvm::MemoryEffects::argMemOnly(facts->kind == RuntimeKind::ReadInto ? llvm::ModRefInfo::ModRef
+                                                                                         : llvm::ModRefInfo::Ref)
+                    | llvm::MemoryEffects::inaccessibleMemOnly(llvm::ModRefInfo::Ref));
+                function.setDoesNotFreeMemory();
+                function.setNoSync();
+                for (unsigned arg : {0u, 1u, 2u})
+                {
+                    function.addParamAttr(arg, llvm::Attribute::ReadOnly);
+                    function.addParamAttr(arg, keepsNone);
+                }
+                if (facts->kind != RuntimeKind::Read)
+                {
+                    function.addParamAttr(4, facts->kind == RuntimeKind::ReadInto ? llvm::Attribute::WriteOnly
+                                                                                   : llvm::Attribute::ReadOnly);
+                    function.addParamAttr(4, keepsNone);
+                }
+                break;
             }
         }
     } // namespace
@@ -238,11 +493,30 @@ namespace fminus::ir::detail
         return nullptr;
     }
 
+    const RuntimeBuiltin* findRuntimeBuiltin(std::string_view name)
+    {
+        for (const RuntimeBuiltin& builtin : kRuntimeBuiltins)
+        {
+            if (builtin.name == name)
+                return &builtin;
+        }
+        return nullptr;
+    }
+
     // What the effects refuse a nonallocating function (Effects.cpp): a builtin that allocates or frees.
     bool allocates(std::string_view name)
     {
         const Fft* fft = findFft(name);
-        return findAllocation(name) != nullptr || (fft != nullptr && fft->allocates);
+        const RuntimeBuiltin* runtime = findRuntimeBuiltin(name);
+        return findAllocation(name) != nullptr || (fft != nullptr && fft->allocates)
+               || (runtime != nullptr && runtime->effect == RuntimeEffect::Allocates);
+    }
+
+    // What the effects refuse a nonblocking function besides (Effects.cpp): a builtin that may wait.
+    bool blocks(std::string_view name)
+    {
+        const RuntimeBuiltin* runtime = findRuntimeBuiltin(name);
+        return runtime != nullptr && runtime->effect == RuntimeEffect::Blocks;
     }
 
     const Builtin* findBuiltin(std::string_view name)
@@ -276,11 +550,34 @@ namespace fminus::ir::detail
             for (const ast::Param& param : function->second->params)
                 passedAs.push_back(param.type);
         }
+        const bool isMethod = module != nullptr && functions_.contains(module->name + "::" + call.callee);
+        if (const RuntimeBuiltin* runtime = findRuntimeBuiltin(call.callee); runtime != nullptr && !isMethod)
+            return lowerRuntimeBuiltin(location, *runtime, call);
         std::vector<Value> args;
         for (std::size_t i = 0; i < call.args.size(); ++i)
-            args.push_back(i < passedAs.size() ? lowerAs(*call.args[i], passedAs[i]) : lower(*call.args[i]));
+        {
+            const std::optional<ast::Type> type = i < passedAs.size() ? std::optional(passedAs[i]) : std::nullopt;
+            if (isString(*call.args[i]))
+            {
+                // A math builtin's parameters are floats (or doubles), as its prototype in <math.h> says, and a size's,
+                // a plan's length and hash's and randf's ints.
+                const ast::Type scalar = builtin != nullptr && builtin->type == ast::Kind::Double ? ast::Type::Double
+                                                                                                  : ast::Type::Float;
+                const bool sized = (findAllocation(call.callee) != nullptr && call.callee != "free")
+                                   || call.callee == "fft_create" || call.callee == "fft_create_complex"
+                                   || isHash(call.callee);
+                std::optional<ast::Type> to = type;
+                if (!to && builtin != nullptr)
+                    to = scalar;
+                else if (!to && sized)
+                    to = ast::Type::Int;
+                args.push_back(refuseString(*call.args[i], to, Use::Passing, call.args[i]->location));
+            }
+            else
+                args.push_back(type ? lowerAs(*call.args[i], *type) : lower(*call.args[i]));
+        }
 
-        if (module != nullptr && functions_.contains(module->name + "::" + call.callee))
+        if (isMethod)
             return callMethod(location, *module, self(), false, call.callee, args);
         if (isReduction(call.callee))
             return lowerReduction(location, call, args);
@@ -375,6 +672,8 @@ namespace fminus::ir::detail
         if (args.size() != 1)
             return wrongArity(location, args.size(), 1);
         const Value& vector = args[0];
+        if (vector.failed && (!ast::isVector(vector.type) || ast::isMask(vector.type)))
+            return recovery(ast::Type::Float);   // its own error says why (Value)
         if (!ast::isVector(vector.type) || ast::isMask(vector.type))
         {
             error(location, "the argument of " + quoted(call.callee) + " must be a float vector, not "
@@ -482,6 +781,8 @@ namespace fminus::ir::detail
         };
         const Value& decides = forward ? args[1] : args[2];   // the floats' side
         const bool real = pointsTo(decides, ast::Kind::Float);
+        if (!real && !pointsTo(decides, ast::Kind::Float2) && decides.failed)
+            return recovery(ast::Type::Void);   // its own error says why (Value)
         if (!real && !pointsTo(decides, ast::Kind::Float2))
         {
             error(location, "no matching function for call to " + quoted(fft.name) + ": it takes "
@@ -498,6 +799,147 @@ namespace fminus::ir::detail
         const std::string runtime = std::string("fminus_rt_fft_") + (forward ? "forward" : "inverse")
                                     + (real ? "_real" : "_complex");
         return {callRuntime(runtime, builder_.getVoidTy(), {setup, input, output}), ast::Type::Void};
+    }
+
+    // A builtin of the runtime's (kRuntimeBuiltins): each argument as its parameter says (Param), into a call of the
+    // runtime's function, whose result is the builtin's (Result). A format's or a path's ints, after it, go to the
+    // runtime in an array of the function's stack frame, with their count; choices, the string literals after them,
+    // in one table. One of a build option this build was configured without is an error that names the option.
+    Lowering::Value Lowering::lowerRuntimeBuiltin(SourceLocation location, const RuntimeBuiltin& builtin,
+                                                  const ast::CallExpr& call)
+    {
+        const ast::Type type = resultType(builtin.result);
+        if (!isBuilt(builtin.feature))
+        {
+            error(location, notBuilt(builtin.name, builtin.feature));
+            return recovery(type);
+        }
+        if (builtin.effect != RuntimeEffect::WaitFree)
+            calls_[function_->name].push_back({location, call.callee});   // what Effects.cpp checks
+        const std::span<const Param> params(builtin.params.data(), builtin.arity);
+        const auto format = std::ranges::find_if(params, [](Param param) {
+            return param == Param::Format || param == Param::Path || param == Param::XmlPath;
+        });
+        const bool choices = !params.empty() && params.back() == Param::Choices;
+        const std::size_t have = call.args.size();
+        if (format == params.end() && !choices && have != params.size())
+        {
+            wrongArity(location, have, params.size());
+            return recovery(type);
+        }
+        if (have < params.size())
+        {
+            error(location, "too few arguments to function call, expected at least " + std::to_string(params.size())
+                                + ", have " + std::to_string(have));
+            return recovery(type);
+        }
+        // A format's ints follow it: every argument the other parameters leave, or, before choices, every one up to
+        // the first string literal.
+        const std::size_t formatAt = static_cast<std::size_t>(format - params.begin());
+        std::size_t ints = have - params.size();
+        if (choices)
+        {
+            ints = 0;
+            while (formatAt + 1 + ints < have && !isString(*call.args[formatAt + 1 + ints]))
+                ++ints;
+            if (formatAt + 1 + ints == have)
+            {
+                error(location, "too few arguments to function call, expected at least "
+                                    + std::to_string(params.size() + ints) + ", have " + std::to_string(have));
+                return recovery(type);
+            }
+        }
+        std::vector<llvm::Value*> irArgs;
+        bool fine = true;
+        for (std::size_t i = 0; i < params.size(); ++i)
+        {
+            const std::size_t at = i > formatAt ? i + ints : i;
+            const ast::Expr& arg = *call.args[at];
+            const Param param = params[i];
+            if (param == Param::Choices)
+            {
+                std::vector<const ast::StringExpr*> literals;
+                for (std::size_t k = at; k < have; ++k)
+                {
+                    if (!isString(*call.args[k]))
+                    {
+                        error(begin(*call.args[k]),
+                              "argument to " + quoted(builtin.name) + " must be a string literal");
+                        fine = false;
+                        continue;
+                    }
+                    literals.push_back(&std::get<ast::StringExpr>(call.args[k]->node));
+                }
+                irArgs.push_back(preparedChoices(literals));
+                continue;
+            }
+            if (param == Param::String || param == Param::Format || param == Param::Path || param == Param::XmlPath)
+            {
+                if (!isString(arg))
+                {
+                    error(begin(arg), "argument to " + quoted(builtin.name) + " must be a string literal");
+                    fine = false;
+                    continue;
+                }
+                const auto& literal = std::get<ast::StringExpr>(arg.node);
+                if (param == Param::Path || param == Param::XmlPath)
+                {
+                    llvm::Value* path =
+                        param == Param::Path ? preparedPath(literal) : preparedXmlPath(literal, begin(arg));
+                    fine = fine && path != nullptr;
+                    irArgs.push_back(path);
+                }
+                else
+                {
+                    irArgs.push_back(stringConstant(literal));
+                    irArgs.push_back(builder_.getInt32(static_cast<std::uint32_t>(literal.value.size())));
+                }
+                if (param == Param::String)
+                    continue;
+                std::vector<const ast::Expr*> given;
+                for (std::size_t k = 0; k < ints; ++k)
+                    given.push_back(call.args[i + 1 + k].get());
+                const std::optional<std::vector<llvm::Value*>> values = formatArguments(literal, given);
+                if (!values)
+                {
+                    fine = false;
+                    continue;
+                }
+                irArgs.push_back(formatInts(*values));
+                irArgs.push_back(builder_.getInt32(static_cast<std::uint32_t>(values->size())));
+                continue;
+            }
+            const ast::Type to = *paramType(param);
+            const Value value = isString(arg) ? refuseString(arg, to, Use::Passing, arg.location) : lowerAs(arg, to);
+            fine = fine && !value.failed;
+            llvm::Value* converted = convert(value, to, location, Use::Passing);
+            if (param == Param::Bool)   // to the runtime as an int, 0 or 1
+                converted = builder_.CreateZExt(converted, builder_.getInt32Ty());
+            irArgs.push_back(converted);
+        }
+        if (!fine)
+            return recovery(type);
+        llvm::Type* returned = builtin.result == Result::Bool ? builder_.getInt32Ty() : typeOf(type);
+        llvm::CallInst* result = callRuntime(std::string(builtin.symbol), returned, irArgs);
+        if (builtin.result == Result::Void)
+            return {result, type};
+        result->setName(builtin.name);
+        if (builtin.result == Result::Bool)
+            return {builder_.CreateICmpNE(result, builder_.getInt32(0), "tobool"), type};
+        return {result, type};
+    }
+
+    // A format's ints, in an array of the function's stack frame: its address, or null for none.
+    llvm::Value* Lowering::formatInts(const std::vector<llvm::Value*>& values)
+    {
+        if (values.empty())
+            return llvm::ConstantPointerNull::get(builder_.getPtrTy());
+        llvm::AllocaInst* array = allocate(llvm::ArrayType::get(builder_.getInt32Ty(), values.size()), "format.ints");
+        for (std::size_t k = 0; k < values.size(); ++k)
+            tag(builder_.CreateStore(values[k], builder_.CreateConstInBoundsGEP2_32(array->getAllocatedType(), array, 0,
+                                                                                   static_cast<unsigned>(k))),
+                ast::Type::Int);
+        return array;
     }
 
     // A call of the runtime's function `name` (runtime/Runtime.h), declared from the arguments' IR types, with the

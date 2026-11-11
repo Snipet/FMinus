@@ -1,0 +1,20 @@
+// In a build without the XML parser (FMINUS_XML=OFF), an xml_ builtin is still a name FMinus knows: its call is an
+// error that names the option, not a call of an undeclared function, and __FMINUS_XML__ is not defined.
+// UNSUPPORTED: xml
+// RUN: not fminus %s 2>&1 | FileCheck %s --implicit-check-not=error:
+
+#ifdef __FMINUS_XML__
+#error __FMINUS_XML__ is defined
+#endif
+
+float load(const void* data, int bytes)
+{
+    void* doc = xml_parse(data, bytes);
+    const float x = xml_float(doc, "/x", 0.0f);
+    xml_free(doc);
+    return x;
+}
+
+// CHECK: xml-off.fm:12:17: error: 'xml_parse' needs the XML parser, which this build of FMinus leaves out (FMINUS_XML=OFF)
+// CHECK: xml-off.fm:13:21: error: 'xml_float' needs the XML parser, which this build of FMinus leaves out (FMINUS_XML=OFF)
+// CHECK: xml-off.fm:14:5: error: 'xml_free' needs the XML parser, which this build of FMinus leaves out (FMINUS_XML=OFF)

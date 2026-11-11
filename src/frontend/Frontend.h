@@ -30,13 +30,15 @@ namespace fminus::frontend
     using Defines = std::map<std::string, std::string>;
 
     // Lexes and parses `source` (the grammar is Parser.y), reading its #includes through `include` (without one, no
-    // #include finds its file), with `defines` defined. Returns the program, or nothing when it reported errors into
-    // `diagnostics` (it stops at the first syntax error, and at an #include that finds no file).
+    // #include finds its file), with `defines` defined, and the macros FMinus predefines (predefinedMacros). Returns
+    // the program, or nothing when it reported errors into `diagnostics` (it stops at the first syntax error, and at an
+    // #include that finds no file).
     std::optional<ast::Program> parse(std::string_view source, Diagnostics& diagnostics,
                                       const IncludeResolver& include = {}, const Defines& defines = {});
 
     // Why `name` cannot name a macro, in clang's words, or nothing: it must be an identifier, not `defined` (C's rule),
-    // and not one of FMinus's keywords, which a macro would hide in C (FMinus substitutes none in code). In Lexer.l,
-    // beside the keywords' rules.
+    // not a macro FMinus predefines (__FMINUS_JSON__, __FMINUS_XML__: Preprocessor.h), and not one of FMinus's
+    // keywords, which a macro would hide in C (FMinus substitutes none in code). In Lexer.l, beside the keywords'
+    // rules.
     std::optional<std::string> macroNameError(std::string_view name);
 } // namespace fminus::frontend

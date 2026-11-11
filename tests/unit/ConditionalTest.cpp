@@ -2,6 +2,7 @@
 // #ifndef, #elif, #else and #endif choose the groups the scanner reads, on macros that #define, #undef and the host's
 // defines make; a skipped group is never scanned; an #if's expression is C's; a macro's name in code is an error; and
 // every directive's error is clang's, at its place.
+#include "fminus/Config.h"
 #include "frontend/Frontend.h"
 
 #include <catch2/catch_test_macros.hpp>
@@ -10,6 +11,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace
@@ -260,6 +262,33 @@ TEST_CASE("the host's defines are macros from before the first line", "[frontend
         INFO(name);
         CHECK(fminus::frontend::macroNameError(name) == std::nullopt);
     }
+}
+
+TEST_CASE("FMinus predefines a macro for each feature of its build, which no one may define or undefine",
+          "[frontend][conditional]")
+{
+    // Defined, to 1, where the build has the feature (fminus/Config.h), and not where it was configured without it.
+    CHECK(condition("defined(__FMINUS_JSON__)") == (FMINUS_HAS_JSON ? "yes" : "no"));
+    CHECK(condition("defined(__FMINUS_XML__)") == (FMINUS_HAS_XML ? "yes" : "no"));
+    CHECK(condition("__FMINUS_JSON__ + __FMINUS_XML__ == " + std::to_string(FMINUS_HAS_JSON + FMINUS_HAS_XML))
+          == "yes");
+    // Names C reserves for the implementation: a program's #define and #undef of one, and a host's, in a build with
+    // the feature or without it.
+    for (const auto& [name, what] : {std::pair{"__FMINUS_JSON__", "the JSON parser (FMINUS_JSON)"},
+                                     std::pair{"__FMINUS_XML__", "the XML parser (FMINUS_XML)"}})
+    {
+        INFO(name);
+        const std::string error = "'" + std::string(name) + "' cannot be used as a macro name: FMinus defines it in a "
+                                  "build with " + what;
+        CHECK(fminus::frontend::macroNameError(name) == error);
+        CHECK(parsed("#define " + std::string(name) + " 1\n") == "test.fm:1:9: error: " + error + "\n");
+        CHECK(parsed("#undef " + std::string(name) + "\n") == "test.fm:1:8: error: " + error + "\n");
+        CHECK(parsed("float f() { return 1; }\n", {{name, "0"}})
+              == "test.fm:1:1: error: invalid macro definition '" + std::string(name) + "': " + error + "\n");
+    }
+    // A skipped group's #define is text, as any of its lines is.
+    CHECK(parsed("#if 0\n#define __FMINUS_JSON__ 2\n#endif\nfloat f() { return 1; }\n") == kOne);
+    CHECK(fminus::frontend::macroNameError("__FMINUS_WEB__") == std::nullopt);   // no such feature yet
 }
 
 TEST_CASE("a macro is read only in conditions: its name in code is an error", "[frontend][conditional]")

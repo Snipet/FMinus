@@ -13,3 +13,19 @@
 #define FMINUS_LLVM_ASSERTIONS @FMINUS_LLVM_ASSERTIONS_01@
 
 #define FMINUS_BUILD_TYPE "@CMAKE_BUILD_TYPE@"
+
+// The build options of programs' builtins (cmake/FMinusOptions.cmake): 1 when this build has the feature, 0 when it was
+// configured without it. A program tests the same with #ifdef __FMINUS_JSON__ and #ifdef __FMINUS_XML__, which FMinus
+// predefines only when the feature is built in.
+#define FMINUS_HAS_JSON @FMINUS_HAS_JSON@   // FMINUS_JSON: the JSON parser and the json_* builtins
+#define FMINUS_HAS_XML @FMINUS_HAS_XML@     // FMINUS_XML: the XML parser and the xml_* builtins
+
+// The JSON parser's limits (cmake/FMinusOptions.cmake), in a build with it: json_parse gives no document for a text of
+// more than FMINUS_JSON_MAX_BYTES bytes, or one whose arrays and objects nest deeper than FMINUS_JSON_MAX_DEPTH.
+#define FMINUS_JSON_MAX_BYTES @FMINUS_JSON_MAX_BYTES@
+#define FMINUS_JSON_MAX_DEPTH @FMINUS_JSON_MAX_DEPTH@
+
+// The XML parser's limits (cmake/FMinusOptions.cmake), in a build with it: xml_parse gives no document for a text of
+// more than FMINUS_XML_MAX_BYTES bytes, or one whose elements nest deeper than FMINUS_XML_MAX_DEPTH.
+#define FMINUS_XML_MAX_BYTES @FMINUS_XML_MAX_BYTES@
+#define FMINUS_XML_MAX_DEPTH @FMINUS_XML_MAX_DEPTH@

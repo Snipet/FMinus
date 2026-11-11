@@ -52,6 +52,30 @@ set(FMINUS_PFFFT_COMMIT "aa16fd3db58de4ba5dae8b0438440bb9da46b6fa")   # 2026-09-
 set(FMINUS_PFFFT_URL "https://github.com/marton78/pffft/archive/${FMINUS_PFFFT_COMMIT}.tar.gz")
 set(FMINUS_PFFFT_SHA256 "5379901efa11e889379b1f647ba69911c564a86b20fd1f93d156343d0ba9bfcb")   # 184,640 bytes
 
+# fast_float: numbers read from text, correctly rounded to float and the same in every locale, for the runtime's
+# parsers (cmake/FMinusFastFloat.cmake; header-only). Fetched only when FMINUS_JSON or FMINUS_XML is ON. GitHub's
+# archive of the release's tag (the release's single fast_float.h is an asset whose bytes no checkout reproduces); its
+# hash is that of the archive rebuilt from the tag, `git archive --prefix=fast_float-8.3.3/ v8.3.3 | gzip -n`, as the
+# WinFlexBison pin's is.
+set(FMINUS_FAST_FLOAT_VERSION "8.3.3")
+set(FMINUS_FAST_FLOAT_URL "https://github.com/fastfloat/fast_float/archive/refs/tags/v${FMINUS_FAST_FLOAT_VERSION}.tar.gz")
+set(FMINUS_FAST_FLOAT_SHA256 "4dd695f051893c8218faf2ed9871fa4a4990aa6aee2d3190ed7bfa2e83092245")   # 156,846 bytes
+
+# yyjson: the JSON parser behind json_parse and the other json_* builtins (cmake/FMinusJson.cmake), its reader compiled
+# into the runtime library. Fetched only when FMINUS_JSON is ON. GitHub's archive of the release's tag (the release has
+# no files of its own); its hash is that of the archive rebuilt from the tag, `git archive --prefix=yyjson-0.13.0/
+# 0.13.0 | gzip -n`, as fast_float's is.
+set(FMINUS_YYJSON_VERSION "0.13.0")
+set(FMINUS_YYJSON_URL "https://github.com/ibireme/yyjson/archive/refs/tags/${FMINUS_YYJSON_VERSION}.tar.gz")
+set(FMINUS_YYJSON_SHA256 "34e0f62a2bc11ab20d601e8ca1cc2b2079503aa45119a19133d89d19b94a0fae")   # 1,641,525 bytes
+
+# pugixml: the XML parser behind xml_parse and the other xml_* builtins (cmake/FMinusXml.cmake), compiled into the
+# runtime library. Fetched only when FMINUS_XML is ON. GitHub's archive of the release's tag; its hash is that of the
+# archive rebuilt from the tag, `git archive --prefix=pugixml-1.16/ v1.16 | gzip -n`, as fast_float's and yyjson's are.
+set(FMINUS_PUGIXML_VERSION "1.16")
+set(FMINUS_PUGIXML_URL "https://github.com/zeux/pugixml/archive/refs/tags/v${FMINUS_PUGIXML_VERSION}.tar.gz")
+set(FMINUS_PUGIXML_SHA256 "357bcab8877dc9943f355d3a72daba1b053238ba955f50fa81586afb65090219")   # 588,574 bytes
+
 # pybind11: the Python package's extension module is written with it (python/, cmake/FMinusPython.cmake; header-only).
 # Fetched only when FMINUS_BUILD_PYTHON is ON. The release's source distribution on PyPI, whose index publishes this
 # SHA-256 beside it (https://pypi.org/project/pybind11/<version>/#files).
