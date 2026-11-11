@@ -51,7 +51,8 @@ only the search box, the rule filter and SvelteKit's navigation.
   do, or parallel fields of one type, `streamOffset` and `valueOffset`); by its type's or namespace's comment when
   that comment names it (in a `code` span, as a term of an indented list, or as a name that can't be a word, such as
   `valueOffset`); by its members when every one of them has one (`Options`); or, for `Program`, by the header's
-  opening comment. A destructor and a deleted copy need none. A macro defined in an `#if` block is documented by the
+  opening comment. A destructor and a deleted copy need none (a deleted move after them joins the copy's entry, as
+  each name has one). A macro defined in an `#if` block is documented by the
   comment above the block when that names it. The members the header leaves to their type's comment without naming
   them today are listed in `api.js` (`COVERED`); any other declaration without a comment stops the build, naming it.
 - **The grammar.** `bison.js` reads the declarations and the rules (each alternative's symbols, `%empty`, `%prec`, a
