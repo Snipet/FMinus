@@ -14,9 +14,11 @@
 # version (CMakeLists.txt's project(FMinus VERSION ...)) before each upload there.
 #
 # LLVM comes from the deps cache, as for every build (FMINUS_DEPS_DIR), kept between runs by actions/cache under a key
-# of the pins. When the key misses:
+# of the pins and the modules that build the dependencies. A change to one of those starts from the platform's last
+# cache all the same (restore-keys): the build takes the LLVM in it if it is still the flavor it asks for, and the
+# cache is saved again under the new key. With no LLVM of the pinned version in the cache:
 #   Linux           builds LLVM, Bison and Flex in cibuildwheel's manylinux container, with the image's own clang
-#                   (FMinus's runtime needs clang; GCC is the image's compiler): about half an hour on four cores,
+#                   (FMinus's runtime needs clang; GCC is the image's compiler): about 40 minutes on GitHub's runner,
 #                   once per pin. The Deps workflow's linux-x64 archive does not do here: it is built on Arch Linux,
 #                   against a newer C library than manylinux allows a wheel.
 #   macOS, Windows  unpacks the Deps workflow's archive for the platform (the release deps-llvm-<version>), whose
@@ -127,6 +129,7 @@ jobs:
         with:
           path: ${{ steps.deps.outputs.dir }}/install
           key: wheels-deps-${{ matrix.platform }}-${{ hashFiles('cmake/FMinusPins.cmake', 'cmake/FMinusLLVM.cmake', 'cmake/FMinusParserTools.cmake') }}
+          restore-keys: wheels-deps-${{ matrix.platform }}-
 
       - name: Prebuilt dependencies (macOS, Windows; the Deps workflow's)
         if: steps.cache.outputs.cache-hit != 'true' && runner.os != 'Linux'
@@ -137,6 +140,9 @@ jobs:
         working-directory: ${{ steps.deps.outputs.dir }}
         run: |
           version=$(sed -nE 's/^set\(FMINUS_LLVM_VERSION "([^"]+)"\).*/\1/p' "$GITHUB_WORKSPACE/cmake/FMinusPins.cmake")
+          if ls install/llvm-"$version"-*/fminus-flavor.cmake >/dev/null 2>&1; then
+            echo "the cache restored has an LLVM $version:"; ls install; exit 0
+          fi
           name="fminus-deps-llvm-${version}-${{ matrix.platform }}"
           gh release download "deps-llvm-${version}" --pattern "$name.tar.gz" --pattern "$name.tar.gz.sha256"
           if command -v sha256sum >/dev/null; then sha256sum -c "$name.tar.gz.sha256"; else shasum -a 256 -c "$name.tar.gz.sha256"; fi

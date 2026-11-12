@@ -163,7 +163,10 @@ if(FMINUS_LLVM_MODE STREQUAL "cache")
   if(CMAKE_OSX_DEPLOYMENT_TARGET)
     _fminus_llvm_set(CMAKE_OSX_DEPLOYMENT_TARGET "${CMAKE_OSX_DEPLOYMENT_TARGET}")
   endif()
-  if(CMAKE_OSX_ARCHITECTURES)
+  # Only when it asks for other than this machine's own architecture, which is what LLVM builds for without it: the
+  # same libraries are then one flavor, whether or not a build names the architecture (pip's does on macOS, and so
+  # finds the flavor the presets built).
+  if(CMAKE_OSX_ARCHITECTURES AND NOT CMAKE_OSX_ARCHITECTURES STREQUAL CMAKE_HOST_SYSTEM_PROCESSOR)
     _fminus_llvm_set(CMAKE_OSX_ARCHITECTURES "${CMAKE_OSX_ARCHITECTURES}")
   endif()
   if(FMINUS_MSVC_FRONTEND)
