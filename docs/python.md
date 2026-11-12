@@ -27,7 +27,7 @@ program = fminus.load("examples/parameters/parameters.fm")
 Contents: [building it](#building-it), [compiling](#compiling), [calling functions](#calling-functions),
 [modules](#modules-and-instances), [parameters](#parameters), [the safety options](#the-safety-options),
 [threads](#threads), [what else a Program has](#what-else-a-program-has), [how it is built](#how-it-is-built),
-[what is not there](#what-is-not-there).
+[wheels and PyPI](#wheels-and-pypi), [what is not there](#what-is-not-there).
 
 ## Building it
 
@@ -67,7 +67,8 @@ minutes; `pip install -v .` shows it building). `CMAKE_ARGS` passes more setting
 
 Either way the package is two files, `fminus/__init__.py` and the extension module beside it
 (`_fminus.cpython-<version>-<platform>.so`, or `.pyd` on Windows), which holds FMinus, its runtime and LLVM, linked
-statically: about 120 MB with the `python` preset's debug information, 60 MB without (pip's Release build).
+statically: about 120 MB with the `python` preset's debug information, 60 MB without (pip's Release build; 24 MB as
+a wheel, which is compressed).
 
 ## Compiling
 
@@ -290,7 +291,8 @@ are the program's, one of each, so calls that use them are serialised. Compiling
 | `python/examples/sweep.py` | an example, which the tests run |
 | `python/CMakeLists.txt` | builds the module and copies the package into `<build>/python/fminus/`; its install rules are what pip installs |
 | `cmake/FMinusPython.cmake` | finds Python and fetches pybind11 (pinned in `cmake/FMinusPins.cmake`) |
-| `pyproject.toml` | `pip install .`: the CMake build, run by scikit-build-core |
+| `pyproject.toml` | `pip install .`: the CMake build, run by scikit-build-core; and cibuildwheel's settings, for the wheels |
+| `.github/workflows/wheels.yml` | builds the wheels and the source distribution, and uploads them to PyPI ([below](#wheels-and-pypi)) |
 
 Adding a source, a Python file or a test edits no CMake, as elsewhere. With the option on, every FMinus library is
 compiled as position-independent code, since the module is a shared library that holds them. On Linux the module
@@ -305,6 +307,52 @@ aligned) and the buffers its streams point into. The module's records (a field, 
 To bind something more of the header: add the method to its class in `Module.cpp` (a `.def(...)`), a keyword to
 `compile()` in `__init__.py` if it is an option (and its place in `_compile`'s arguments), a test, and a line here.
 
+## Wheels and PyPI
+
+A wheel is the package built: `pip install fminus` unpacks one in seconds, where the source distribution compiles
+FMinus, and LLVM first, on the machine that installs it. The Wheels workflow (`.github/workflows/wheels.yml`) builds
+both, and uploads them.
+
+**What it builds.** cibuildwheel, configured in `pyproject.toml` (`[tool.cibuildwheel]`), builds a wheel for each
+CPython from `requires-python` up (not the free-threaded ones, as the module asks for the GIL) on each platform, and
+runs `python/tests/` against each as it is installed, with NumPy where it has a wheel:
+
+| Platform | Runner | Wheel | LLVM |
+|---|---|---|---|
+| `linux-x64` | `ubuntu-latest` | `manylinux_2_28_x86_64` (glibc 2.28 or later: RHEL 8, Ubuntu 20.04, Debian 10) | built in the container, then cached |
+| `linux-arm64` | `ubuntu-24.04-arm` | `manylinux_2_28_aarch64` | the same; only when named, as FMinus had not been built there |
+| `macos-arm64` | `macos-latest` | `macosx_14_0_arm64` | the Deps workflow's archive |
+| `windows-x64` | `windows-latest` | `win_amd64` | the Deps workflow's archive |
+
+Each wheel is a whole build of FMinus, pip's own (`pyproject.toml`), so a platform's job compiles FMinus once for each
+CPython, seven times today (about two minutes each on four cores, and 24 MB a wheel on Linux). LLVM comes from the deps
+cache as for any build, which the job keeps between runs (`actions/cache`, under a key of `cmake/FMinusPins.cmake` and
+the two modules that build the dependencies). On Linux the wheels are built in manylinux's container, so that they run
+on any distribution of its C library or later, and LLVM, Bison and Flex are built there too, the first time (about half
+an hour on four cores). The image's compiler is GCC, and FMinus's runtime needs clang (its vector types and builtins),
+so the build installs the image's own clang (`manylinux-install-clang`), which uses GCC's C++ library. The Deps
+workflow's Linux archive does not do: it is built on Arch Linux, against a newer C library than a wheel may ask for.
+musllinux (Alpine) has no wheel: it would be another LLVM, built against musl.
+
+**Running it.** Actions > Wheels > Run workflow, on any branch. `platforms` names the ones to build (empty: all but
+`linux-arm64`), `pythons` narrows the CPythons (`cp312-*` builds one a platform, to try a change), and `publish` says
+where the files go: `nowhere` (the default: they are the run's artifacts, for 7 days), `testpypi` or `pypi`, both
+from `main` only. To build this machine's wheels by hand, `pipx run cibuildwheel` in the checkout (on Linux it needs
+Docker, and `FMINUS_DEPS_DIR=/host/<an absolute path>` keeps LLVM for the next run).
+
+**Setting up PyPI**, once. The upload uses Trusted Publishing: PyPI takes GitHub's word for which workflow is
+uploading, and no token is stored anywhere. On pypi.org, under Your account > Publishing, add a pending publisher (the
+project does not exist until its first upload): project `fminus`, owner `Snipet`, repository `FMinus`, workflow
+`wheels.yml`, environment `pypi`. The same on test.pypi.org, a separate site with its own account, with the
+environment `testpypi`. GitHub makes the two environments the first time the workflow names them; a required reviewer
+on `pypi` (the repository's Settings > Environments) makes each upload wait for an approval.
+
+**A release.** Raise the version, `project(FMinus VERSION ...)` in `CMakeLists.txt`, which is the package's: PyPI keeps
+a version's files for good, and takes no second file of a name, even after a deletion. Run the workflow to
+`testpypi` first and install from there
+(`pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ fminus`), then run
+it to `pypi`.
+
 ## What is not there
 
 - **The circuit compiler** (`fminus/Circuit.h`): `fminus.circuit.generate` and the self-test are not bound, and
@@ -315,5 +363,11 @@ To bind something more of the header: add the method to its class in `Module.cpp
 - **A list of a program's functions.** The library lists a module's methods (`module.methods`) but not the functions
   outside modules, so `dir(program)` does not show them.
 - **`fminus::math`** (the kernels as C++ functions), and executables (`fminus-build`'s side, `support/Aot.h`).
-- **Wheels.** There is no binary distribution: pip builds from the checkout. Built and tested on Linux (x86-64,
-  CPython 3.13, clang 18); macOS and Windows build the same sources, and have not been tried.
+- **Some wheels.** None for musllinux (Alpine), Intel Macs, 32-bit systems or free-threaded CPython: pip builds the
+  source distribution there, LLVM and all.
+- **Its dependencies' licence texts in a wheel.** A wheel holds LLVM and PFFFT, linked in, and was compiled with
+  pybind11's headers, and carries FMinus's `LICENSE` alone. Their licences ask a binary for their notices (README.md,
+  "License"): add the three texts to the package (`license-files` in `pyproject.toml`) before the first upload.
+- **Runs elsewhere.** Built and tested on Linux (x86-64, CPython 3.13, clang 18). The Wheels workflow's Linux x86-64
+  build has been run in its container for one CPython, and that wheel tried on Debian 13 too. Its macOS, Windows and
+  Linux arm64 jobs build the same sources and have not run, nor has the workflow itself on GitHub.

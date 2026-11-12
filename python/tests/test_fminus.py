@@ -478,9 +478,11 @@ class Includes(unittest.TestCase):
             fminus.load(os.path.join(directory, "main.fm"))
 
     def test_load_an_example(self):
-        examples = os.environ.get("FMINUS_EXAMPLES_DIR")
-        if not examples:
-            self.skipTest("FMINUS_EXAMPLES_DIR is not set (ctest sets it)")
+        # FMINUS_EXAMPLES_DIR (ctest sets it), or the checkout's examples/ beside python/
+        examples = os.environ.get("FMINUS_EXAMPLES_DIR") or os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), os.pardir, os.pardir, "examples")
+        if not os.path.isdir(examples):
+            self.skipTest("no examples/ directory (FMINUS_EXAMPLES_DIR names it)")
         program = fminus.load(os.path.join(examples, "parameters", "parameters.fm"))
         lfo, filter_ = program.module("Lfo").instance(), program.module("Filter").instance()
         self.assertTrue(lfo.process.nonblocking)
