@@ -1,0 +1,29 @@
+// In a build without absolute names (FMINUS_FILES_ANYWHERE=OFF, the default), a name that begins with '/' (or a drive
+// letter, ':' and '/') is a compile error, whatever a host would allow; the driver's --files-anywhere says the build has
+// none, and an executable's FMINUS_FILES_ANYWHERE=1 is a mistake it names.
+// REQUIRES: files
+// UNSUPPORTED: files-anywhere
+// RUN: not fminus %s 2>&1 | FileCheck %s --implicit-check-not=error:
+// RUN: not fminus %s -D FOLDERS_ONLY --run main 0 --files-anywhere 2>&1 | FileCheck %s --check-prefix=DRIVER
+// RUN: rm -rf %t && mkdir -p %t/tmp
+// RUN: env TMPDIR=%t/tmp fminus %s -D FOLDERS_ONLY --emit exe -o %t/reads
+// RUN: env FMINUS_FILES_ANYWHERE=1 not %t/reads 0 2>&1 | FileCheck %s --check-prefix=EXE
+// RUN: env FMINUS_FILES_ANYWHERE=0 %t/reads 0 | FileCheck %s --check-prefix=NONE
+// RUN: rm -rf %t
+
+float main(float k)
+{
+    void* f = file_read("kit/%d.f32", (int)k);
+#ifndef FOLDERS_ONLY
+    void* g = file_read("/home/me/kick.wav");
+    void* h = file_list("C:/Samples/*.wav");
+#endif
+    return (float)file_status(f);
+}
+
+// CHECK: files-anywhere-off.fm:18:26: error: an absolute name needs names outside folders, which this build of FMinus leaves out (FMINUS_FILES_ANYWHERE=OFF): a name begins with a folder its host maps, as "presets/7.json"
+// CHECK: files-anywhere-off.fm:19:26: error: an absolute name needs names outside folders, which this build of FMinus leaves out (FMINUS_FILES_ANYWHERE=OFF): a name begins with a folder its host maps, as "kit/*.f32"
+
+// DRIVER: fminus: --files-anywhere: this build of FMinus leaves out absolute names (FMINUS_FILES_ANYWHERE=OFF)
+// EXE: FMINUS_FILES_ANYWHERE: anywhere is set, and this build of FMinus leaves out absolute names (FMINUS_FILES_ANYWHERE=OFF)
+// NONE: -2

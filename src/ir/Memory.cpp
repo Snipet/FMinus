@@ -59,7 +59,10 @@ namespace fminus::ir::detail
             }
             if (binding == nullptr)
             {
-                error(expr.location, "use of undeclared identifier " + quoted(variable->name));
+                // HTTP_REFUSED without the web library, FILE_REFUSED without the file interface
+                if (!unbuiltWebStatus(expr.location, variable->name)
+                    && !unbuiltFileStatus(expr.location, variable->name))
+                    error(expr.location, "use of undeclared identifier " + quoted(variable->name));
                 return std::nullopt;
             }
             return LValue{binding->slot, binding->type, binding->isConst, variable->name, binding->type, {}};
@@ -74,6 +77,13 @@ namespace fminus::ir::detail
                 return std::nullopt;
             }
             Value base = lower(*index->base);
+            if (isString(*index->index) && ast::isPointer(base.type))
+            {
+                // C's char array, which is no integer: clang's words (a literal's own error would say less)
+                if (!base.failed)
+                    error(expr.location, "array subscript is not an integer");
+                return std::nullopt;
+            }
             Value offset = lower(*index->index);
             const bool swapped = !ast::isPointer(base.type) && ast::isPointer(offset.type);
             if (swapped)

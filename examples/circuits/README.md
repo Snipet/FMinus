@@ -7,10 +7,10 @@ accuracy and cost tables from emitted code.
 
 | Netlist | What | Configuration |
 |---|---|---|
-| `diodetone.cir` | example 1: a diode clipper, then a tone pot into a low-pass | 4x IIR, plain omega3 + 2 Newton steps |
+| `diodetone.cir` | example 1: a diode clipper, then a tone pot into a low-pass | 4x IIR, plain omega3 + 1 Halley step: the self-test's answer, pinned (omega3 + 2 Newton steps before the Halley step, 2026-11-10) |
 | `screamer.cir` | example 2: the Tube Screamer's clipping stage, tone control and level, with the report's §9.1 tone-pot line | 4x IIR, ADAA, omega3 + 1 step; the tone block a matched design at 1x (blocks=auto) |
 | `screamer-clip.cir` | example 2's clipping stage alone | 4x IIR, ADAA, omega3 + 1 step |
-| `clipper.cir` | Yeh's RC diode clipper, the circuit of fminus.md's Tables 1 to 3 | none: the self-test's (4x IIR, ADAA, omega3 + 1 step); provisional, 8x IIR, plain omega3 + 2 steps |
+| `clipper.cir` | Yeh's RC diode clipper, the circuit of fminus.md's Tables 1 to 3 | none: the self-test's (4x IIR, plain omega3 + 1 Halley step); provisional, 8x IIR, plain omega3 + 2 steps |
 | `otalp.cir` | the synth path: two buffered OTA one-poles (LM13700-style), the cutoff set by `iabc`, a per-sample law input (`.input iabc - kind=current range=10u:2m`) | 4x IIR, the previous step's v + 1 Newton step: the self-test's answer, pinned |
 | `screamer-biased.cir` | `screamer.cir` with its 4.5 V reference drawn (V1, and R1 and R8 to it): the module runs in offsets from its DC point, and is screamer.cir's but for its comments (`.op` prints the point) | screamer.cir's |
 | `halfwave.cir` | a half-wave clipper: one diode (the built-in 1N4148, no `.model` card) across C1 | 4x IIR, omega3 + 1 step: the self-test's answer, pinned |
@@ -20,7 +20,7 @@ accuracy and cost tables from emitted code.
 | `sallen-key.cir` | a unity-gain Sallen-Key low-pass at 2.1 kHz, Q 0.74, a linear block of two states | linear: a matched biquad at 1x (0.45 dB; trapezoidal, 26.8 dB) |
 | `lowpass-sweep.cir` | a unity-gain Sallen-Key low-pass, Q 1.6, its cutoff swept by a pot from 10 kHz down to 99 Hz, where its poles sit near z = 1 | linear: a matched biquad at 1x (0.44 dB; trapezoidal, 28.6 dB), its float design held to the gate at every host rate to 192 kHz |
 | `tonestack.cir` | the Fender Bassman's tone stack (treble, bass and mid pots), a linear block of three states | linear: a matched design is of order 1 or 2, so a 4x region of its own, the smallest at which its trapezoidal response passes the 1x check |
-| `switch.cir` | example 1 with a clipping switch: S1 in series with the diodes, closed at `.switch clip` position 1 | 4x IIR, ADAA, omega3 + 1 step; S1 ramped over 20 ms of set() calls |
+| `switch.cir` | example 1 with a clipping switch: S1 in series with the diodes, closed at `.switch clip` position 1 | 4x IIR, plain omega3 + 1 Halley step: the self-test's answer, pinned (4x, ADAA, omega3 + 1 before the Halley step, 2026-11-10); S1 ramped over 20 ms of set() calls |
 | `ringing.cir` | an inductive kick: R1 100 into 1 mH, a diode to ground at its far end with 1 nF across it, which rings at 159 kHz when the diode turns off | 2x IIR, ADAA, omega3 + 1 step: the self-test's answer, pinned; at 1x the self-test measures it ringing at Nyquist, warns, and tries BDF2 twins |
 
 ```bash

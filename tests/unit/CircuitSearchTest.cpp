@@ -54,7 +54,7 @@ namespace
     std::string open(std::string text)
     {
         for (const char* line : {".oversample 4 iir blocks=auto\n", ".adaa off\n", ".adaa on\n", ".solver omega(2)\n",
-                                 ".solver omega(1)\n"})
+                                 ".solver omega(1)\n", ".solver halley(1)\n"})
         {
             const std::size_t at = text.find(line);
             if (at != std::string::npos)
@@ -160,7 +160,8 @@ namespace
 
 TEST_CASE("the self-test's candidates, cheapest first", "[circuit]")
 {
-    // diodetone.cir's one EA port block, every dimension open: report §6.2's 16, in §3.2's model order
+    // diodetone.cir's one EA port block, every dimension open: report §6.2's 16 and the 8 of a Halley step (a diode
+    // pair's), in §3.2's model order
     const fc::Plan p = planned(open(fc::test::kDiodeTone));
     REQUIRE(p.config.oversampleOpen);
     REQUIRE(p.config.adaaOpen);
@@ -168,39 +169,61 @@ TEST_CASE("the self-test's candidates, cheapest first", "[circuit]")
     std::vector<std::string> got;
     for (const fc::Candidate& c : fc::candidates(p))
         got.push_back(std::format("{} {:g}", c.text(), c.cost));
+    // (a Halley step costs 80, and 4 for its start in the bracket: omega(1)'s cost + 14 a step; within 5 % of the
+    // cheapest of a group, ADAA goes first: 4x ADAA halley(1), 972, before 4x omega(2), 968)
     const std::vector<std::string> expected{
-        "1x, omega(1) 154",  "1x, ADAA, omega(1) 211",  "1x, omega(2) 224",  "1x, ADAA, omega(2) 281",
-        "2x, omega(1) 332",  "2x, ADAA, omega(1) 446",  "2x, omega(2) 472",  "2x, ADAA, omega(2) 586",
-        "4x, omega(1) 688",  "4x, ADAA, omega(1) 916",  "4x, omega(2) 968",  "4x, ADAA, omega(2) 1196",
-        "8x, omega(1) 1400", "8x, ADAA, omega(1) 1856", "8x, omega(2) 1960", "8x, ADAA, omega(2) 2416",
+        "1x, omega(1) 154",        "1x, halley(1) 168",        "1x, ADAA, omega(1) 211", "1x, ADAA, halley(1) 225",
+        "1x, omega(2) 224",        "1x, ADAA, omega(2) 281",   "2x, omega(1) 332",       "2x, halley(1) 360",
+        "2x, ADAA, omega(1) 446",  "2x, ADAA, halley(1) 474",  "2x, omega(2) 472",       "2x, ADAA, omega(2) 586",
+        "4x, omega(1) 688",        "4x, halley(1) 744",        "4x, ADAA, omega(1) 916", "4x, ADAA, halley(1) 972",
+        "4x, omega(2) 968",        "4x, ADAA, omega(2) 1196",  "8x, omega(1) 1400",      "8x, halley(1) 1512",
+        "8x, ADAA, omega(1) 1856", "8x, ADAA, halley(1) 1968", "8x, omega(2) 1960",      "8x, ADAA, omega(2) 2416",
     };
     CHECK(got == expected);
-    // a pinned dimension leaves the others: .oversample 4 gives the four 4x candidates
+    // a pinned dimension leaves the others: .oversample 4 gives the six 4x candidates
     const fc::Plan four = planned(replaced(open(fc::test::kDiodeTone), ".target", ".oversample 4\n.target"));
     CHECK(!four.config.oversampleOpen);
-    REQUIRE(fc::candidates(four).size() == 4);
-    CHECK(fc::candidates(four)[1].text() == "4x, ADAA, omega(1)");
+    REQUIRE(fc::candidates(four).size() == 6);
+    CHECK(fc::candidates(four)[1].text() == "4x, halley(1)");
+    CHECK(fc::candidates(four)[2].text() == "4x, ADAA, omega(1)");
+    // a Halley step is a diode pair's: one diode's, an asymmetric pair's and an OTA's rows have none
+    for (const std::string& text : {fc::test::kHalfWave, fc::test::kAsym, fc::test::kOtaLp})
+    {
+        fc::Messages messages;
+        fc::Netlist netlist = fc::parse(text, messages);
+        netlist.oversample = {};
+        netlist.adaa = {};
+        netlist.solver = {};
+        const std::optional<fc::Plan> other = fc::plan(netlist, {}, "t.cir", messages);
+        REQUIRE(other);
+        REQUIRE(other->config.solverOpen);
+        for (const fc::Candidate& c : fc::candidates(*other))
+            CHECK(c.solver.shape == fc::Solver::Shape::Newton);
+    }
     // and a netlist that names its whole configuration has none
     CHECK(fc::candidates(planned(fc::test::kDiodeTone)).empty());
 
-    // within 5 % of the cheapest of a group, ADAA goes first, then fewer steps
-    std::vector<fc::Candidate> list{{4, false, {fc::Solver::Guess::Omega, 2}, fc::Method::Tr, 1000},
-                                    {4, false, {fc::Solver::Guess::Omega, 1}, fc::Method::Tr, 1040},
-                                    {4, true, {fc::Solver::Guess::Omega, 2}, fc::Method::Tr, 1049},
-                                    {8, false, {fc::Solver::Guess::Omega, 1}, fc::Method::Tr, 1051},
-                                    {2, true, {fc::Solver::Guess::Omega, 1}, fc::Method::Tr, 900}};
+    // within 5 % of the cheapest of a group, ADAA goes first, then fewer steps (a Halley step one of them; at the
+    // same count, the cheaper first: the sort is stable)
+    std::vector<fc::Candidate> list{
+        {4, false, {fc::Solver::Guess::Omega, 2}, fc::Method::Tr, 1000},
+        {4, false, {fc::Solver::Guess::Omega, 1}, fc::Method::Tr, 1040},
+        {4, true, {fc::Solver::Guess::Omega, 2}, fc::Method::Tr, 1049},
+        {8, false, {fc::Solver::Guess::Omega, 1}, fc::Method::Tr, 1051},
+        {2, true, {fc::Solver::Guess::Omega, 1}, fc::Method::Tr, 900},
+        {4, false, {fc::Solver::Guess::Omega, 1, fc::Solver::Shape::Halley}, fc::Method::Tr, 1045}};
     fc::orderCandidates(list);
     std::vector<std::string> order;
     for (const fc::Candidate& c : list)
         order.push_back(std::format("{} {:g}", c.text(), c.cost));
     CHECK(order == std::vector<std::string>{"2x, ADAA, omega(1) 900", "4x, ADAA, omega(2) 1049", "4x, omega(1) 1040",
-                                            "4x, omega(2) 1000", "8x, omega(1) 1051"});
+                                            "4x, halley(1) 1045", "4x, omega(2) 1000", "8x, omega(1) 1051"});
 }
 
 TEST_CASE("the ordered search stops at the first that passes", "[circuit]")
 {
     const std::vector<fc::Candidate> list = fc::candidates(planned(open(fc::test::kDiodeTone)));
-    REQUIRE(list.size() == 16);
+    REQUIRE(list.size() == 24);
     int measured = 0;
     auto stub = [&](const fc::Candidate& c) -> std::optional<fc::Verdict>
     {
@@ -216,7 +239,7 @@ TEST_CASE("the ordered search stops at the first that passes", "[circuit]")
     // every candidate, for tables: the answer is still the first that passes
     measured = 0;
     const fc::SearchOutcome every = fc::search(list, stub, {}, true);
-    CHECK(measured == 16);
+    CHECK(measured == 24);
     CHECK(every.chosen == 3);
     // a measure that stops (cancelled, over budget) stops the search, with no answer
     const fc::SearchOutcome stopped = fc::search(
@@ -237,20 +260,20 @@ TEST_CASE("no configuration: the most accurate under the cap", "[circuit]")
     // nothing passes; each misses by less as the candidates cost more, until the cap (3,500 model cycles)
     std::vector<fc::Tried> tried;
     for (std::size_t i = 0; i < list.size(); ++i)
-        tried.push_back({list[i], verdict(false, 10 - static_cast<double>(i) * 0.5)});
+        tried.push_back({list[i], verdict(false, 10 - static_cast<double>(i) * 0.3)});
     const int best = fc::noConfig(tried);
-    REQUIRE(best == 15);   // 8x ADAA omega(2), 2416 cycles: the least excess, and under the cap
+    REQUIRE(best == 23);   // 8x ADAA omega(2), 2416 cycles: the least excess, and under the cap
     CHECK(tried[static_cast<std::size_t>(best)].candidate.cost < fc::kCostCap);
     // over the cap is never chosen
-    tried[15].candidate.cost = 3600;
-    CHECK(fc::noConfig(tried) == 14);
+    tried[23].candidate.cost = 3600;
+    CHECK(fc::noConfig(tried) == 22);
     // a candidate that is not finite somewhere is never chosen, however close
-    tried[14].verdict.finite = false;
-    CHECK(fc::noConfig(tried) == 13);
+    tried[22].verdict.finite = false;
+    CHECK(fc::noConfig(tried) == 21);
     // ties go to the higher oversampling
-    tried[1].verdict = tried[13].verdict;
-    CHECK(fc::noConfig(tried) == 13);
-    tried[13].verdict.unconverged = 4;   // and an unconverged reference is not a measurement
+    tried[1].verdict = tried[21].verdict;
+    CHECK(fc::noConfig(tried) == 21);
+    tried[21].verdict.unconverged = 4;   // and an unconverged reference is not a measurement
     CHECK(fc::noConfig(tried) == 1);
     // the search falls back to it, met false (with the candidates' own costs, 8x ADAA omega(2) is under the cap)
     const fc::SearchOutcome found = fc::search(
@@ -258,8 +281,8 @@ TEST_CASE("no configuration: the most accurate under the cap", "[circuit]")
         { return tried[static_cast<std::size_t>(&c - list.data())].verdict; },
         {}, false);
     CHECK(!found.met);
-    CHECK(found.tried.size() == 16);
-    CHECK(found.chosen == 15);
+    CHECK(found.tried.size() == 24);
+    CHECK(found.chosen == 23);
 }
 
 TEST_CASE("the self-test's key", "[circuit]")
@@ -343,6 +366,7 @@ TEST_CASE("a Choice's text, and what generate makes of one", "[circuit]")
             CHECK(back->oversample == c.oversample);
             CHECK(back->adaa == c.adaa);
             CHECK(back->solver.steps == c.solver.steps);
+            CHECK(back->solver.shape == c.solver.shape);
             CHECK(back->met == met);
             CHECK(back->t1 == v.t1.value);
             CHECK(back->t3 == v.t3.value);
@@ -357,19 +381,29 @@ TEST_CASE("a Choice's text, and what generate makes of one", "[circuit]")
     four.t1 = -78.7;
     four.t2 = -73.5;
     four.t3 = 0.14;
-    CHECK(four.text() == "fminus-circuit-choice 1 key=" + p.key +
+    CHECK(four.text() == "fminus-circuit-choice 2 key=" + p.key +
                              " oversample=4 adaa=on solver=omega(1) method=tr met=yes t1=-78.7 t2=-73.5 t3=0.14");
     // another version's, or not one at all, is read as nothing, with why
     std::string why;
     std::string text = four.text();
-    CHECK(!fc::Choice::parse(replaced(text, "choice 1 ", "choice 2 "), &why));
-    CHECK(why == "it is self-test version 2's; this one's is 1");
-    CHECK(!fc::Choice::parse("fminus-circuit-choice 1 key=" + p.key + " oversample=3", &why));
+    CHECK(!fc::Choice::parse(replaced(text, "choice 2 ", "choice 1 "), &why));
+    CHECK(why == "it is self-test version 1's; this one's is 2");
+    CHECK(!fc::Choice::parse("fminus-circuit-choice 2 key=" + p.key + " oversample=3", &why));
     CHECK(why == "'oversample=3' is not a valid oversample (1, 2, 4 or 8)");
     CHECK(!fc::Choice::parse(replaced(text, " t3=0.14", ""), &why));
     CHECK(why == "it has no t3=");
     CHECK(!fc::Choice::parse("oversample=4", &why));
     CHECK(why == "not a self-test's answer (it begins 'fminus-circuit-choice')");
+    // halley(K): one Halley step and more, read back as the shape, from omega3 (a diode pair's)
+    const std::optional<fc::Choice> halley = fc::Choice::parse(replaced(text, "solver=omega(1)", "solver=halley(1)"));
+    REQUIRE(halley);
+    CHECK(halley->solver.shape == fc::Solver::Shape::Halley);
+    CHECK(halley->solver.guess == fc::Solver::Guess::Omega);
+    CHECK(halley->solver.steps == 1);
+    CHECK(halley->text() == replaced(text, "solver=omega(1)", "solver=halley(1)"));
+    CHECK(!fc::Choice::parse(replaced(text, "solver=omega(1)", "solver=halley(0)"), &why));
+    CHECK(why == "'solver=halley(0)' is not a valid solver (omega(K), newton(K) or halley(K))");
+    CHECK(!fc::Choice::parse(replaced(text, "solver=omega(1)", "solver=halley(9)"), &why));
 
     // generate with a matching answer: not provisional, the configuration from the self-test
     fc::Options options;
@@ -488,7 +522,7 @@ TEST_CASE("an answer that meets nothing warns at the region's first port", "[cir
 TEST_CASE("the self-test runs the same on any number of threads", "[circuit]")
 {
     fc::Options options;
-    options.oversample = 4;   // four candidates
+    options.oversample = 4;   // six candidates
     fc::SelfTestOptions serial;
     const fc::SelfTestResult a = fc::selfTestWith(kPotClipper, "clip.cir", options, serial, small());
     INFO(a.errors);
@@ -503,7 +537,7 @@ TEST_CASE("the self-test runs the same on any number of threads", "[circuit]")
     CHECK(a.candidates == b.candidates);
     CHECK(a.key == fc::selfTestKey(kPotClipper, "clip.cir", options));
     CHECK(a.notes.find("clip.cir: note: self-test " + a.key + ": .adaa, .solver, .method open; 3 points x 17 "
-                       "signals = 51 units, L = 4.5 V (.target level); 4 candidates, cheapest first\n") == 0);
+                       "signals = 51 units, L = 4.5 V (.target level); 6 candidates, cheapest first\n") == 0);
     CHECK(a.notes.find("clip.cir: note: the self-test chose .adaa ") != std::string::npos);
     // the answer generates a module that is not provisional
     options.chosen = a.choice;
@@ -592,8 +626,8 @@ TEST_CASE("T1 runs the region on what the blocks before it give it", "[circuit]"
     INFO(a.errors << a.notes << b.errors << b.notes);
     const std::vector<double> ta = t1Figures(a.notes);
     const std::vector<double> tb = t1Figures(b.notes);
-    REQUIRE(ta.size() == 4);
-    REQUIRE(tb.size() == 4);
+    REQUIRE(ta.size() == 6);
+    REQUIRE(tb.size() == 6);
     for (std::size_t i = 0; i < ta.size(); ++i)
         CHECK(std::fabs(ta[i] - tb[i]) <= 0.15);
     REQUIRE(a.choice);

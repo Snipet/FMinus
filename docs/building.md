@@ -37,12 +37,88 @@ ctest --preset dev                   # test
 | `tsan` | RelWithDebInfo | Release + assertions | thread | compiling on another thread |
 | `inline` | RelWithDebInfo | built inside the tree, -O2 -g | none | stepping into LLVM itself |
 | `python` | RelWithDebInfo | Release + assertions | none | the Python package: `dev` with `FMINUS_BUILD_PYTHON=ON` ([python.md](python.md)) |
+| `web` | RelWithDebInfo | Release + assertions | none | the web library and its server: `dev` with `FMINUS_WEB=ON` and `FMINUS_WEB_SERVER=ON` ([web.md](web.md)) |
+| `files` | RelWithDebInfo | Release + assertions | none | the whole file interface: `dev` with `FMINUS_FILES_WRITE=ON` and `FMINUS_FILES_ANYWHERE=ON` ([files.md](files.md)) |
 | `xcode` | (multi-config) | Release + assertions | none | Xcode's debugger and Instruments |
 
 Each preset builds in `build-<preset>/`, exports `compile_commands.json` (`.clangd` reads `build-dev`'s), and has a
 workflow, except `xcode`: run `cmake --preset xcode`, then `open build-xcode/FMinus.xcodeproj`. Sanitizers
 instrument FMinus's own code only; LLVM stays uninstrumented, which is why the `asan` test preset sets
 `detect_container_overflow=0`.
+
+## What programs' builtins a build has
+
+Seven options decide which builtins a build's programs may call, and two more set ceilings on the files they may
+touch. The parsers' two are on by default, in every preset; pass `-DFMINUS_JSON=OFF` or `-DFMINUS_XML=OFF` to a
+configure to leave one out. The web library's two are off by default, in every preset but `web`; pass
+`-DFMINUS_WEB=ON` to have the client, and `-DFMINUS_WEB_SERVER=ON` as well for its server. The file interface is on by
+default and its writing and absolute names off, in every preset but `files`; pass `-DFMINUS_FILES=OFF` to leave it
+out, and `-DFMINUS_FILES_WRITE=ON` or `-DFMINUS_FILES_ANYWHERE=ON` to have either.
+
+| Option | Default | What it has | Fetches |
+|---|---|---|---|
+| `FMINUS_JSON` | ON | the JSON parser and the `json_*` builtins (`json_parse`, `json_float`, ...: [extending.md](extending.md), recipe 39) | fast_float, yyjson |
+| `FMINUS_XML` | ON | the XML parser and the `xml_*` builtins (`xml_parse`, `xml_float`, ...: [extending.md](extending.md), recipe 40) | fast_float, pugixml |
+| `FMINUS_WEB` | OFF | the web library, `fminus_web`, and the `http_*` builtins (`http_get`, `http_wait`, ...: [web.md](web.md), [extending.md](extending.md), recipe 41) | libcurl, Mbed TLS (not on Windows), built at configure time |
+| `FMINUS_WEB_SERVER` | OFF | the web library's server, and its builtins (`http_listen`, `http_next`, `http_is`, `http_reply`, ...: [web.md](web.md), "The server", [extending.md](extending.md), recipe 42); needs `FMINUS_WEB` | llhttp; fast_float, if the parsers have not |
+| `FMINUS_FILES` | ON | the file interface, in the runtime, and the `file_*` builtins that read (`file_read`, `file_list`, `file_read_nth`, `file_close` and the reads: [files.md](files.md), [extending.md](extending.md), recipe 43) | nothing |
+| `FMINUS_FILES_WRITE` | OFF | `file_write` and `file_append`, and every line of the file interface that creates, writes, renames or removes a file; needs `FMINUS_FILES` | nothing |
+| `FMINUS_FILES_ANYWHERE` | OFF | absolute names (`"/Users/me/kit/a.f32"`), where a host's policy says `anywhere`; needs `FMINUS_FILES` | nothing |
+
+| Ceiling | Default | What a build without it lacks |
+|---|---|---|
+| `FMINUS_FILES_TYPES` | empty: any | files of any type not in the list (`-DFMINUS_FILES_TYPES='wav;f32;json'`): a name with another extension is a compile error, and a policy that allows one is refused |
+| `FMINUS_FILES_MAX_BYTES` | 1073741824 (1 GiB) | files larger than it (1 to 2147483646), whatever a host's `maxFileBytes` says |
+
+fast_float (`cmake/FMinusFastFloat.cmake`) is fetched when either is on, and is nothing with both off; yyjson
+(`cmake/FMinusJson.cmake`), the JSON parser, when `FMINUS_JSON` is on: with it off, nothing of yyjson is fetched or
+compiled, and the runtime library has no JSON functions. The JSON parser's limits on a document, 64 MiB and arrays and
+objects nested 1024 deep, are `FMINUS_JSON_MAX_BYTES` and `FMINUS_JSON_MAX_DEPTH` in `cmake/FMinusOptions.cmake`,
+which `fminus/Config.h` repeats for a host; the depth is compiled into yyjson. pugixml (`cmake/FMinusXml.cmake`), the
+XML parser, is fetched when `FMINUS_XML` is on, the same way: with it off, nothing of pugixml is fetched or compiled,
+and the runtime library has no XML functions. Its limits, the same 64 MiB and elements nested 1024 deep, are
+`FMINUS_XML_MAX_BYTES` and `FMINUS_XML_MAX_DEPTH`, which `src/runtime/Xml.cpp` checks (pugixml has none of its own):
+the size before parsing, the depth after, on the parsed tree, without recursion. What a build
+has, it says three ways: `FMINUS_HAS_JSON` and `FMINUS_HAS_XML`, 1 or 0, in the generated `fminus/Config.h`, for a
+host to `#if`; `__FMINUS_JSON__` and `__FMINUS_XML__`, macros FMinus defines (to 1) before a program's first line only
+when the feature is built in, for a program to `#ifdef`; and the builtins themselves, which a build without the
+feature still knows by name, so that a call of one is an error that names the option (`'json_float' needs the JSON
+parser, which this build of FMinus leaves out (FMINUS_JSON=OFF)`), not an undeclared function. Changing either option
+reconfigures the build tree; it rebuilds the runtime and the compiler, never LLVM.
+
+`FMINUS_WEB` says the same three ways (`FMINUS_HAS_WEB`, `__FMINUS_WEB__`, and `'http_get' needs the web library, which
+this build of FMinus leaves out (FMINUS_WEB=OFF)`, for each `http_` builtin and each status code's name, `HTTP_REFUSED`
+and the rest). With it on, the first configure downloads libcurl 8.23.0 and, on macOS and Linux, Mbed TLS 4.1.1 (about
+3 MB and 7 MB, pinned in `cmake/FMinusPins.cmake`), and builds each with its own CMake, as Release, static, hidden and
+position-independent, into the deps cache (`cmake/FMinusWeb.cmake`): Mbed TLS with threading on, libcurl with HTTP and
+HTTPS only and every other protocol and feature off (web.md lists them). It takes a minute or two, once for each C
+compiler and set of options (the install's name holds a hash of them, its *flavor*); every later configure of any
+tree finds them. Windows uses Schannel, and downloads no TLS library. With it on and both parsers off, configure says
+that is probably not what was meant. With it off, nothing is downloaded or built for it, and no target exists.
+
+`FMINUS_WEB_SERVER` says the same three ways (`FMINUS_HAS_WEB_SERVER`, `__FMINUS_WEB_SERVER__`, and `'http_listen'
+needs the web server, which this build of FMinus leaves out (FMINUS_WEB_SERVER=OFF)` for each of its builtins), and is
+refused without `FMINUS_WEB` ("FMinus: FMINUS_WEB_SERVER is ON and FMINUS_WEB is OFF: the server is part of the web
+library. ..."). With it on, the first configure fetches llhttp 9.4.3 (GitHub's 40 KB archive of its release tag,
+pinned in `cmake/FMinusPins.cmake`) into the deps cache, and `fminus_web` compiles its three C files itself, with
+their own flags and hidden symbols (`cmake/FMinusLlhttp.cmake`); and fast_float, which the server's query numbers
+read, if neither parser fetched it. Nothing is built at configure time for it. With it off, nothing more is fetched,
+and the server's sources compile to nothing.
+
+`FMINUS_FILES` says the same three ways (`FMINUS_HAS_FILES`, `__FMINUS_FILES__`, and `'file_read' needs the file
+interface, which this build of FMinus leaves out (FMINUS_FILES=OFF)` for each `file_` builtin and each status code's
+name, `FILE_REFUSED` and the rest), and so does `FMINUS_FILES_WRITE` (`FMINUS_HAS_FILES_WRITE`,
+`__FMINUS_FILES_WRITE__`, `'file_write' needs file writing, ...`); `FMINUS_FILES_ANYWHERE` has
+`FMINUS_HAS_FILES_ANYWHERE` and the compile error of an absolute name, but no macro. Nothing is fetched or built for any
+of them: the file interface is FMinus's own code in the runtime library, and a build without an option compiles none of
+the file interface's code it gates (the runtime then has no `fminus_rt_file` symbol, or its file sources import no
+`write`, `renameat` or `unlinkat`, or no `realpath`). That is the file interface's code only: with `FMINUS_XML`, the
+runtime library also holds pugixml's own `load_file` and `save_file` (through `fopen`), which no builtin and no function
+the JIT defines reaches. Configure refuses `FMINUS_FILES_WRITE` or `FMINUS_FILES_ANYWHERE` without `FMINUS_FILES`, a
+type that is not 1 to 16 ASCII letters and digits (without the dot), and a byte ceiling that is not a number from 1 to
+2147483646; it stores the types in lower case, without duplicates, as `FMINUS_FILES_TYPES` in `fminus/Config.h`, beside
+`FMINUS_FILES_MAX_BYTES`. A host's policy can narrow every one of these, and raise none ([files.md](files.md), "Building
+it").
 
 ## The dependency cache
 
@@ -54,6 +130,14 @@ environment variable), shared by every build tree of the checkout:
   src/llvm-project-23.1.3/     extracted, then pruned to what llvm/ builds from (about 300 MB)
   src/bison-3.8.2/  src/flex-2.6.4/
   src/pffft-<commit>/          PFFFT's source, of which the runtime library compiles two files
+  src/fast_float-<version>/    fast_float's source, whose headers the runtime includes (FMINUS_JSON or FMINUS_XML),
+                               and the web server (FMINUS_WEB_SERVER)
+  src/yyjson-<version>/        yyjson's source, of which the runtime library compiles one file (FMINUS_JSON)
+  src/pugixml-<version>/       pugixml's source, of which the runtime library compiles one file (FMINUS_XML)
+  src/curl-<version>/  src/mbedtls-<version>/        libcurl's and Mbed TLS's sources (FMINUS_WEB)
+  build/curl-<version>-<flavor>/  install/curl-<version>-<flavor>/          libcurl, static (FMINUS_WEB)
+  build/mbedtls-<version>-<flavor>/  install/mbedtls-<version>-<flavor>/    Mbed TLS, static (FMINUS_WEB)
+  src/llhttp-<version>/        llhttp's source, of which fminus_web compiles three files (FMINUS_WEB_SERVER)
   build/<flavor>/              LLVM's build tree: about 1 GB, safe to delete once installed
   install/<flavor>/            LLVM: headers, static libraries, CMake package, tools, lit
   install/bison-3.8.2/  install/flex-2.6.4/
@@ -180,7 +264,10 @@ clones it, and git names a commit by the hash of its contents ([below](#the-plug
    `_fminus_build_winflexbison`, beside it. A C library that goes into FMinus's own libraries is compiled from its
    sources instead, its project never added: `cmake/FMinusFft.cmake` fetches PFFFT once into the deps cache
    (`SOURCE_SUBDIR` naming no directory: populated, nothing added) and builds two of its files as an object library,
-   whose objects the runtime library takes.
+   whose objects the runtime library takes. A library of headers goes the same way, as an interface library of its
+   include directory, a system one: `cmake/FMinusFastFloat.cmake`, whose fast_float only one file of the runtime
+   includes, `src/runtime/Numbers.cpp`, which hides its symbols. A dependency of an option is fetched only when the
+   option is on: the module returns before anything else when it is off.
 3. **Include the module** from `CMakeLists.txt`, under the option that needs it, and link its target where it's used.
 4. **Note it** in README.md's dependency table and its License section.
 

@@ -13,3 +13,30 @@
 #define FMINUS_LLVM_ASSERTIONS @FMINUS_LLVM_ASSERTIONS_01@
 
 #define FMINUS_BUILD_TYPE "@CMAKE_BUILD_TYPE@"
+
+// The build options of programs' builtins (cmake/FMinusOptions.cmake): 1 when this build has the feature, 0 when it was
+// configured without it. A program tests the same with #ifdef __FMINUS_JSON__ and #ifdef __FMINUS_XML__, which FMinus
+// predefines only when the feature is built in.
+#define FMINUS_HAS_JSON @FMINUS_HAS_JSON@   // FMINUS_JSON: the JSON parser and the json_* builtins
+#define FMINUS_HAS_XML @FMINUS_HAS_XML@     // FMINUS_XML: the XML parser and the xml_* builtins
+#define FMINUS_HAS_WEB @FMINUS_HAS_WEB@     // FMINUS_WEB: the web library, fminus_web (an HTTP(S) client)
+#define FMINUS_HAS_WEB_SERVER @FMINUS_HAS_WEB_SERVER@   // FMINUS_WEB_SERVER: the web library's server (needs FMINUS_WEB)
+#define FMINUS_HAS_FILES @FMINUS_HAS_FILES@   // FMINUS_FILES: the file interface, reading (src/runtime/Files.h)
+#define FMINUS_HAS_FILES_WRITE @FMINUS_HAS_FILES_WRITE@   // FMINUS_FILES_WRITE: its writing (needs FMINUS_FILES)
+#define FMINUS_HAS_FILES_ANYWHERE @FMINUS_HAS_FILES_ANYWHERE@   // FMINUS_FILES_ANYWHERE: absolute names (the same need)
+
+// The file interface's ceilings (cmake/FMinusOptions.cmake), which no host's policy can raise: the types of file a
+// build can touch, its extensions in lower case separated by ';' ("wav;f32;json"; empty: any), and its largest file in
+// bytes (1 to 2^31 - 2).
+#define FMINUS_FILES_TYPES "@FMINUS_FILES_TYPES_LOWER@"
+#define FMINUS_FILES_MAX_BYTES @FMINUS_FILES_MAX_BYTES_VALUE@
+
+// The JSON parser's limits (cmake/FMinusOptions.cmake), in a build with it: json_parse gives no document for a text of
+// more than FMINUS_JSON_MAX_BYTES bytes, or one whose arrays and objects nest deeper than FMINUS_JSON_MAX_DEPTH.
+#define FMINUS_JSON_MAX_BYTES @FMINUS_JSON_MAX_BYTES@
+#define FMINUS_JSON_MAX_DEPTH @FMINUS_JSON_MAX_DEPTH@
+
+// The XML parser's limits (cmake/FMinusOptions.cmake), in a build with it: xml_parse gives no document for a text of
+// more than FMINUS_XML_MAX_BYTES bytes, or one whose elements nest deeper than FMINUS_XML_MAX_DEPTH.
+#define FMINUS_XML_MAX_BYTES @FMINUS_XML_MAX_BYTES@
+#define FMINUS_XML_MAX_DEPTH @FMINUS_XML_MAX_DEPTH@

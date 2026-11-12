@@ -5,7 +5,7 @@
 * The pole is a + b Iabc, a = -1 / (10 MEG 1 nF) = -100 rad/s and b = -att / (2 Vt 1 nF), att = 220 / 100220: 83 Hz
 * at 10 uA to 13.5 kHz at 2 mA. No resonance (a Phase 2 SVF's), no rails (the macro model has none).
 * The configuration is the self-test's answer, pinned (fminus otalp.cir --self-test without these three lines: 4x,
-* newton(1), candidate 10 of 18; T1 -89.0, T2 -73.2, T3 0.13 dB). 1x and 2x fail T3: the trapezoidal rule's warp of
+* newton(1), candidate 10 of 18; T1 -88.4, T2 -73.8, T3 0.14 dB). 1x and 2x fail T3: the trapezoidal rule's warp of
 * H3 at 9 kHz, 2.3 and 0.53 dB through the two poles; newton(1) at 1x fails T1 at 2 mA.
 .title OtaLp
 .input  u    in   scale=1          ; 1.0 = 1 V

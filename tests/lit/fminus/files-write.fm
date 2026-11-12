@@ -1,0 +1,48 @@
+// Writing files (FMINUS_FILES_WRITE): --files-write grants a folder for writing, as an executable's FMINUS_FILES_WRITE
+// does; file_write replaces a file whole, file_append adds to one, each giving a status; a folder granted for reading
+// only refuses both. The program writes a table, reads it back, and appends to a log, in a directory the test makes.
+// REQUIRES: files-write
+// RUN: rm -rf %t && mkdir -p %t/user %t/tmp
+// RUN: fminus %s --run main 3 --files-write user=%t/user | FileCheck %s --check-prefix=THREE
+// RUN: fminus %s --run main 3 --files-read user=%t/user | FileCheck %s --check-prefix=REFUSED
+// RUN: fminus %s --run main 3 | FileCheck %s --check-prefix=REFUSED
+// RUN: env TMPDIR=%t/tmp fminus %s --emit exe -o %t/save
+// RUN: env FMINUS_FILES_WRITE=user=%t/user %t/save 4 | FileCheck %s --check-prefix=FOUR
+// RUN: env FMINUS_FILES_WRITE=user=%t/user %t/save 4 | FileCheck %s --check-prefix=FOUR-AGAIN
+// RUN: env -u FMINUS_FILES_WRITE %t/save 4 | FileCheck %s --check-prefix=REFUSED
+// RUN: env FMINUS_FILES_READ=user=%t/user %t/save 4 | FileCheck %s --check-prefix=REFUSED
+// RUN: rm -rf %t
+
+#if !defined(__FMINUS_FILES__) || !defined(__FMINUS_FILES_WRITE__)
+#error __FMINUS_FILES__ or __FMINUS_FILES_WRITE__ is not defined
+#endif
+
+// Writes k, 2k, 3k and 4k as table k, reads it back, and appends one float to log k: the table's sum, plus 1000 times
+// the log's size in bytes; or why not.
+float main(float k)
+{
+    float values[4];
+    for (int i = 0; i < 4; ++i)
+        values[i] = k * (float)(i + 1);
+    const int written = file_write("user/table%d.f32", values, 16, (int)k);
+    if (written != FILE_OK)
+        return (float)written;
+    const int appended = file_append("user/log%d.f32", values, 4, (int)k);
+    if (appended != FILE_OK)
+        return (float)appended;
+    void* table = file_read("user/table%d.f32", (int)k);
+    void* log = file_read("user/log%d.f32", (int)k);
+    float back[4];
+    const int n = bytes_floats(file_data(table), file_size(table), back, 4);
+    float sum = 1000.0f * (float)file_size(log);
+    for (int i = 0; i < n; ++i)
+        sum += back[i];
+    file_close(table);
+    file_close(log);
+    return sum;
+}
+
+// THREE: 4030
+// FOUR: 4040
+// FOUR-AGAIN: 8040
+// REFUSED: -2

@@ -1,0 +1,21 @@
+// A build whose FMINUS_FILES_TYPES lists the types it can touch (none does by default: configure a tree with
+// -DFMINUS_FILES_TYPES='wav;f32' to run this): a name of any other type is a compile error at its extension that names
+// the build's types, and so is a host's policy that allows one. The types are what lit's %files_types says (the build's
+// fminus/Config.h); "zzz" is assumed not among them.
+// REQUIRES: files-types
+// RUN: not fminus %s 2>&1 | FileCheck %s -DTYPES='%files_types' --implicit-check-not=error:
+// RUN: not fminus %s -D LISTED --run main --files-read kit=%S --files-types zzz 2>&1 | FileCheck %s -DTYPES='%files_types' --check-prefix=POLICY
+
+float main()
+{
+    void* f = file_read("kit/a.ZZZ");
+    void* l = file_list("kit/*.wav.zzz");
+#ifdef LISTED
+#error never reached: the policy is refused first
+#endif
+    return (float)(file_status(f) + file_status(l));
+}
+
+// CHECK: files-types.fm:11:32: error: 'ZZZ' is not a type this build of FMinus can touch (FMINUS_FILES_TYPES: [[TYPES]])
+// CHECK: files-types.fm:12:36: error: 'zzz' is not a type this build of FMinus can touch (FMINUS_FILES_TYPES: [[TYPES]])
+// POLICY: fminus: --files-types: types: 'zzz' is not a type this build of FMinus can touch (FMINUS_FILES_TYPES: [[TYPES]])

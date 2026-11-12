@@ -3,8 +3,8 @@
 // a string), one of its namespace it does not have, clang's (a function's) on a field, a number C does not write, and
 // a local's or a constant's (a module's fields and parameters take attributes, for the host). A host's attribute is no
 // error, and a name without a namespace that C23 does not have is clang's warning, which the program compiles with.
-// And the scanner's and the parser's: a string not closed, an unknown escape, a string where an expression goes
-// (FMinus's strings are an attribute's arguments only), and an attribute after an array's size (C23's for its type).
+// And the scanner's and the parser's: a string not closed, an unknown escape, an attribute after an array's size (C23's
+// for its type); and the code generator's, a string where a value goes (strings-errors.fm has the rest of those).
 // RUN: not fminus %s 2>&1 | FileCheck %s --implicit-check-not=error:
 // RUN: echo 'module M { float x [[ui::label("open)]]; };' | not fminus - 2>&1 | FileCheck %s --check-prefix=OPEN
 // RUN: echo 'module M { float x [[ui::label("\q")]]; };' | not fminus - 2>&1 | FileCheck %s --check-prefix=ESCAPE
@@ -45,7 +45,7 @@ const float k [[ui::unit("dB")]] = 1;
 
 // OPEN: <stdin>:1:32: error: missing terminating '"' character
 // ESCAPE: <stdin>:1:33: error: unknown escape sequence '\q'
-// STRING: <stdin>:1:20: error: syntax error, unexpected string literal
+// STRING: <stdin>:1:20: error: returning 'char[2]' from a function with incompatible result type 'float'
 // TYPE: <stdin>:1:29: error: 'ui::hidden' attribute cannot be applied to types: the attributes of 'taps' go after its name, before its size
 // WARN: <stdin>:1:28: warning: unknown attribute 'range' ignored [-Wunknown-attributes]
 // WARN-NEXT: <stdin>:1:28: note: did you mean 'fminus::range'?

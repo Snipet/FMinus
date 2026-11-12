@@ -32,6 +32,35 @@ asks for that specific change, and ask before restructuring anything.
   (unittest; the ctest test `python`). It binds `FMinus.h` only: `docs/python.md` ends with what it leaves out. Its
   wheels are `.github/workflows/wheels.yml`'s (cibuildwheel, set up in `pyproject.toml`; run by hand, and it uploads
   to PyPI only when its `publish` input says so).
+- A string literal exists only as a builtin's argument (the user asked for the web research's findings to be built,
+  2026-11-11; `docs/research/web/`): a format, a JSON Pointer, an XML path or a URL, checked and prepared when the
+  program is compiled (`src/ir/Strings.cpp`, `Paths.cpp`, `Web.cpp`). The JSON and XML parsers (`FMINUS_JSON`,
+  `FMINUS_XML`, both ON; yyjson, pugixml, fast_float) are compiled into the runtime. A feature a build leaves out keeps
+  its builtins as known names, with a "this build leaves out" error, and its macro (`__FMINUS_JSON__`, ...) undefined.
+- `src/web/` is its own library too, `fminus_web` (no LLVM), built only with `FMINUS_WEB=ON` (OFF by default; the `web`
+  preset; `docs/web.md`): the HTTP(S) client behind the `http_*` builtins, on libcurl and Mbed TLS (Schannel on
+  Windows), which `cmake/FMinusWeb.cmake` builds at configure time into the deps cache. Every function generated code
+  calls goes in `WebSymbols.def`. A program's requests reach only what `Program::Options::web` allows (none by
+  default), and no test may leave loopback. Its macOS and Windows code has never been built or run: say so before
+  relying on it, and `docs/web.md` ("What is verified where") lists what has.
+- The web library's server (the user asked for it, 2026-11-11; `docs/research/web/server.md`) is `FMINUS_WEB_SERVER`
+  (OFF by default, needs `FMINUS_WEB`; the `web` preset turns it on): llhttp, pinned, compiled into `fminus_web`, and
+  FMinus's own sockets (`src/web/Server.cpp`, `Sockets*.cpp`). A program listens only where
+  `Program::Options::web.server` says (nowhere by default), and no test may bind anything but a loopback address. What
+  a `[[clang::nonblocking]]` server builtin calls stays wait-free in the library's code, proved by `HeapCalls` and
+  seccomp's strict mode (`tests/unit/WebServerTest.cpp`, and through the JIT in `WebServeTest.cpp`). Its sockets on
+  macOS and Windows have never been built.
+- The file interface (the user asked for it, 2026-11-11; `docs/files.md`, the research in `docs/research/files/`) is
+  part of the runtime (`src/runtime/Files*.cpp`; `Files.h` is the host's half) and the compiler (`src/ir/Files.cpp`):
+  `FMINUS_FILES` (ON), `FMINUS_FILES_WRITE` and `FMINUS_FILES_ANYWHERE` (OFF, need `FMINUS_FILES`), and the ceilings
+  `FMINUS_FILES_TYPES` and `FMINUS_FILES_MAX_BYTES`, which no policy raises; the `files` preset turns writing and
+  anywhere on. A build without an option compiles none of the file interface's code it gates. A program reaches only
+  the folders `Program::Options::files` maps (none by default), every operation through one function
+  (`Context::State::reach`), which never trusts a path's text: it walks a segment at a time beneath the folder's
+  handle, follows no link, and compares each directory by identity with the denied ones. No test may touch anything
+  outside a directory it made (beside `bin/`, or lit's `%t`), except `/dev/null` and `/proc` named as what must be
+  refused. Its macOS and Windows code has never been built or run (`FilesWindows.cpp` was only type-checked against
+  stub headers): say so before relying on it.
 - The smoke tests (`tests/smoke/`, `tests/lit/smoke/`) prove the toolchain. Keep them passing until the user retires
   them.
 - `docs/` is the manual (architecture, extending, building, testing; `docs/recipes/` patches). Keep it in step with

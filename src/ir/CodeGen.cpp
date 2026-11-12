@@ -111,6 +111,7 @@ namespace fminus::ir
                     define(function);   // the accepted definition, not a rejected duplicate
             }
             declareBefore(program.functions.size());
+            finishWebRoutes();   // every route is known now: the table http_listen hands the library (WebServer.cpp)
             describeLibm();
             checkEffects(program);
             if (denormals_ == Denormals::Flush && !diagnostics_.hasErrors())

@@ -1,0 +1,133 @@
+// The web server's builtins (src/web/Web.h; docs/research/web/server.md): http_listen passes the program's web context
+// and its route table, every http_is literal once, made when every function is lowered; the routes are recorded for
+// the host (fminus.web.routes). The library's functions are declared with what they do (recipe 19): taking a request
+// (http_next, http_accept) and matching one (http_is) write, the reads are not readonly (the I/O thread writes what
+// they read), and a reply may write any memory, since it hands the request's body back: so a polling loop calls
+// http_port and http_next each time round, and a load of a body after the reply is not the one before it. Without
+// --web-listen nothing listens: http_port is HTTP_REFUSED. With it, the program listens on loopback, asks its own
+// server with http_get and answers itself on the same thread; with a token the client, which sends none, gets 401. An
+// executable reads FMINUS_WEB_LISTEN when it runs. Nothing here binds anything but 127.0.0.1, or connects anywhere
+// else.
+// REQUIRES: web-server
+// RUN: fminus %s -O0 | FileCheck %s
+// RUN: fminus %s | FileCheck %s --check-prefix=OPT
+// RUN: fminus %s --run main 3 | FileCheck %s --check-prefix=REFUSED
+// RUN: fminus %s --run main 3 --web-listen 127.0.0.1:0 --web-allow 'http://127.0.0.1:*/osc/*' | FileCheck %s --check-prefix=SERVED
+// RUN: fminus %s --run main 3 --web-listen 127.0.0.1:0 --web-allow 'http://127.0.0.1:*/osc/*' --web-token abcdefghijklmnop | FileCheck %s --check-prefix=TOKEN
+// RUN: fminus %s --run main 3 --web-listen 127.0.0.1:0 | FileCheck %s --check-prefix=NOREACH
+// RUN: fminus %s --emit exe -o %t.serve
+// RUN: env -u FMINUS_WEB_LISTEN %t.serve 3 | FileCheck %s --check-prefix=REFUSED
+// RUN: env FMINUS_WEB_LISTEN=127.0.0.1:0 FMINUS_WEB_ALLOW='http://127.0.0.1:*/osc/*' %t.serve 3 | FileCheck %s --check-prefix=SERVED
+// RUN: env FMINUS_WEB_LISTEN=0.0.0.0:0 not %t.serve 3 2>&1 | FileCheck %s --check-prefix=EXE
+
+#ifndef __FMINUS_WEB_SERVER__
+#error __FMINUS_WEB_SERVER__ is not defined
+#endif
+
+int spin(void* server, int n)
+{
+    int sum = 0;
+    for (int i = 0; i < n; ++i)
+        sum += http_port(server);
+    return sum;
+}
+
+int drain(void* server) [[clang::nonblocking]]
+{
+    int taken = 0;
+    for (void* r = http_next(server); r; r = http_next(server))
+        taken += http_reply(r, 204) == 0 ? 1 : 0;
+    return taken;
+}
+
+float twice(void* r)
+{
+    const float* b = http_body(r);
+    const float x = b[0];
+    http_reply(r, 204);
+    return x + b[0];
+}
+
+float main(float k)
+{
+    void* server = http_listen();
+    const int port = http_port(server);
+    if (port <= 0)
+        return (float)port;
+    void* c = http_get("http://127.0.0.1:%d/osc/%d/gain?value=0.25", port, (int)k);
+    float got = -1.0f;
+    for (int i = 0; i < 100000 && http_status(c) == 0; ++i)
+    {
+        for (void* r = http_next(server); r; r = http_next(server))
+        {
+            if (http_is(r, "GET /osc/%d/gain"))
+            {
+                got = http_query_float(r, "value", -2.0f);
+                http_reply_text(r, 200, "application/json", "{\"osc\":%d,\"gain\":%g}", http_arg(r, 0), got);
+            }
+            else if (http_is(r, "PUT /osc/%d/gain"))
+                http_reply_bytes(r, 200, &got, 4, "");
+            else
+                http_reply(r, 500);
+        }
+        http_wait(c, 1);
+    }
+    const int status = http_wait(c, 2000);
+    const int size = http_size(c);
+    http_close(c);
+    return (float)status * 1000.0f + (float)size + got;
+}
+
+// CHECK: @fminus_web_context = global ptr null, align 8
+// CHECK: @.route = private unnamed_addr constant [16 x i8] c"GET /osc/%d/gain", align 1
+// CHECK: @.route.{{[0-9]+}} = private unnamed_addr constant [16 x i8] c"PUT /osc/%d/gain", align 1
+// CHECK: @fminus.web.routes = private unnamed_addr constant [2 x ptr] [ptr @.route, ptr @.route.{{[0-9]+}}]
+// CHECK: @fminus.web.route.lengths = private unnamed_addr constant [2 x i32] [i32 16, i32 16]
+// CHECK-LABEL: define float @main(
+// CHECK:         %web.context = load ptr, ptr @fminus_web_context, align 8
+// CHECK:         %http_listen = call ptr @fminus_web_http_listen(ptr %web.context, ptr @fminus.web.routes, ptr @fminus.web.route.lengths, i32 2)
+// CHECK:         %http_port = call i32 @fminus_web_http_port(ptr %{{.*}})
+// CHECK:         %http_next = call ptr @fminus_web_http_next(ptr %{{.*}})
+// CHECK:         %http_is = call i32 @fminus_web_http_is(ptr %{{.*}}, ptr @.str{{.*}}, i32 16)
+// CHECK:         %http_query_float = call float @fminus_web_http_query_float(ptr %{{.*}}, ptr @.str{{.*}}, i32 5, float -2.000000e+00)
+// CHECK:         %http_arg = call i32 @fminus_web_http_arg(ptr %{{.*}}, i32 0)
+// CHECK:         %format.int = sitofp i32 %http_arg to double
+// CHECK:         %http_reply_text = call i32 @fminus_web_http_reply_text(ptr %{{.*}}, i32 200, ptr @.str{{.*}}, i32 16, ptr @.str{{.*}}, i32 20, ptr %format.values, i32 2)
+// CHECK:         %http_reply_bytes = call i32 @fminus_web_http_reply_bytes(ptr %{{.*}}, i32 200, ptr %got, i32 4, ptr @.str{{.*}}, i32 0)
+// CHECK: declare i32 @fminus_web_http_port(ptr captures(none)) [[READ:#[0-9]+]]
+// CHECK: declare noundef ptr @fminus_web_http_next(ptr) [[READ]]
+// CHECK: declare i32 @fminus_web_http_reply(ptr captures(none), i32) [[REPLY:#[0-9]+]]
+// CHECK: declare noundef ptr @fminus_web_http_listen(ptr, ptr readonly captures(none), ptr readonly captures(none), i32) [[LISTEN:#[0-9]+]]
+// CHECK: declare i32 @fminus_web_http_is(ptr captures(none), ptr readonly captures(none), i32) [[READ]]
+// CHECK: declare float @fminus_web_http_query_float(ptr captures(none), ptr readonly captures(none), i32, float) [[READ]]
+// CHECK: declare i32 @fminus_web_http_reply_text(ptr captures(none), i32, ptr readonly captures(none), i32, ptr readonly captures(none), i32, ptr readonly captures(none), i32) [[REPLY]]
+// CHECK: declare i32 @fminus_web_http_reply_bytes(ptr captures(none), i32, ptr readonly captures(none), i32, ptr readonly captures(none), i32) [[REPLY]]
+// CHECK: attributes [[READ]] = { nofree nounwind willreturn memory(argmem: readwrite, inaccessiblemem: readwrite) }
+// CHECK: attributes [[REPLY]] = { nofree nounwind willreturn }
+// CHECK: attributes [[LISTEN]] = { nounwind willreturn memory(read, argmem: readwrite, inaccessiblemem: readwrite, errnomem: readwrite, target_mem: none) }
+// CHECK: !fminus.web.routes = !{![[GET:[0-9]+]], ![[PUT:[0-9]+]]}
+// CHECK: ![[GET]] = !{!"GET", !"/osc/*/gain", !"{{.*}}web-server.fm", i32 63, i32 17}
+// CHECK: ![[PUT]] = !{!"PUT", !"/osc/*/gain", !"{{.*}}web-server.fm", i32 68, i32 22}
+
+// The polling loops keep their calls inside them; the body is read again after the reply.
+// OPT-LABEL: define i32 @spin(
+// OPT:       for.body:
+// OPT:         %http_port = tail call i32 @fminus_web_http_port(ptr %server)
+// OPT:         br i1 %{{.*}}, label %for.end, label %for.body
+// OPT-LABEL: define i32 @drain(
+// OPT:       for.body:
+// OPT:         %http_reply = tail call i32 @fminus_web_http_reply(
+// OPT:         %http_next{{[0-9]+}} = tail call ptr @fminus_web_http_next(ptr %server)
+// OPT:         br i1 %{{.*}}, label %for.end, label %for.body
+// OPT-LABEL: define float @twice(
+// OPT:         %http_body = tail call ptr @fminus_web_http_body(ptr %r)
+// OPT:         %[[BEFORE:[0-9]+]] = load float, ptr %http_body
+// OPT:         tail call i32 @fminus_web_http_reply(ptr %r, i32 204)
+// OPT:         %[[AFTER:[0-9]+]] = load float, ptr %http_body
+// OPT:         fadd float %[[BEFORE]], %[[AFTER]]
+
+// REFUSED: -4
+// SERVED: 200021.25
+// TOKEN: 400999
+// NOREACH: -4001
+// EXE: FMINUS_WEB_LISTEN: server.listen '0.0.0.0:0': 0.0.0.0 is the unspecified address: write '*' for every interface

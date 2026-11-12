@@ -8,11 +8,23 @@
 //     Constants.cpp     C's integer constant expressions, worked out where they are written (a case label's value,
 //                       an enumerator's, an array's size), enumerations: their constants, in a block's scope or the
 //                       file's, and the top level's constants, the file's const objects
-//     Calls.cpp         calls: the builtins (math functions, reductions, poly queries and memory, the heap, the FFT)
-//                       and the program's
+//     Calls.cpp         calls: the builtins (math functions, reductions, poly queries and memory, the heap, the FFT,
+//                       the runtime's others: bytes_floats, ...) and the program's
+//     Strings.cpp       string literals: a builtin's argument, a private constant passed as its address and length;
+//                       a format's places for ints, checked; the errors of a literal anywhere else
+//     Paths.cpp         a JSON Pointer literal, json_float's and the others', or an XML path, xml_float's and the
+//                       others', prepared into a private table of steps the runtime walks; json_choice's and
+//                       xml_choice's literals into another
 //     Math.cpp          sinf, cosf, tanf, expf, tanhf and logf in the vector and libm math modes: the runtime's
 //                       functions
 //     Hash.cpp          hash and randf: an int's bits mixed, and a float uniform in [-1, 1) from them, inline
+//     Web.cpp           the web library's builtins' own part: a URL literal checked and recorded for the host
+//                       (webRequests), the program's web context, and the status codes' names (HTTP_REFUSED, ...)
+//     WebServer.cpp     the web server's builtins' own part: a route literal checked and recorded for the host
+//                       (webRoutes), the route table http_listen hands the library, a query's name, a reply's format
+//     Files.cpp         the file interface's builtins' own part: a file's name checked against the rules and the
+//                       build's ceilings and recorded for the host (files), the program's file context, and the
+//                       status codes' names (FILE_REFUSED, ...)
 //     Vectors.cpp       vector literals, swizzles, and ?: lane by lane
 //     Memory.cpp        lvalues (variables, p[i], *p, components) read and written, arrays, &x, pointer arithmetic
 //     Modules.cpp       modules: their layout, fields, methods and calls of them, `this`, copies
@@ -36,6 +48,8 @@
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/Module.h>
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <map>
@@ -92,10 +106,193 @@ namespace fminus::ir::detail
         bool allocates;
     };
 
+    // A build option a builtin needs (cmake/FMinusOptions.cmake, fminus/Config.h): none, the JSON parser (FMINUS_JSON),
+    // the XML parser (FMINUS_XML), the web library (FMINUS_WEB) or its server (FMINUS_WEB_SERVER, which needs
+    // FMINUS_WEB), the file interface (FMINUS_FILES) or its writing (FMINUS_FILES_WRITE, which needs FMINUS_FILES). A
+    // builtin of an option this build was configured without is still a known name:
+    // a call of it is an error that names the option (notBuilt), not an undeclared function, and a definition of one
+    // is refused, as any builtin's is (Functions.cpp).
+    enum class Feature
+    {
+        None,
+        Json,
+        Xml,
+        Web,
+        WebServer,
+        Files,
+        FilesWrite,
+    };
+    bool isBuilt(Feature feature);                                 // whether this build has it (Calls.cpp)
+    std::string notBuilt(std::string_view name, Feature feature);   // the error of a call of `name`, which needs it
+
+    // What a builtin of the runtime may do, for the effects (Effects.cpp): allocate or free, which a nonallocating
+    // function may not (and so neither may a nonblocking one); block, waiting for something (a request, a thread),
+    // which a nonblocking function may not, and a nonallocating one may; or neither: it is wait-free, and the audio
+    // thread may call it. The runtime's code must keep the promise (Runtime.h says it of each function).
+    enum class RuntimeEffect
+    {
+        WaitFree,
+        Blocks,
+        Allocates,
+    };
+
+    // A parameter of a builtin of the runtime (RuntimeBuiltin): an int; bytes, a const void* (any pointer converts, as
+    // to C's); floats it writes, a float*; a string, which must be a string literal, passed as its address and its
+    // length in bytes (Strings.cpp: no NUL ends it, and it may hold one); or a format, a string literal with places for
+    // ints (%d, and %% for a percent sign), checked when the program is compiled (formatArguments), after which the
+    // call gives an int for each place, passed as their address and their count. Then the JSON parser's: a document,
+    // a const void* (json_parse's, read); a handle, a void* (json_free's); a float, a double or a bool (a read's
+    // fallback; a bool goes to the runtime as an int, 0 or 1); a path, a format that is a JSON Pointer, prepared when
+    // the program is compiled into a table of steps (Paths.cpp), passed as its address and then its ints' address and
+    // count, as a format's; and choices, every argument after the path's ints, string literals (at least one),
+    // prepared into one table, passed as its address. The XML parser's take the same, but for its path: an XML path, a
+    // format that is a small part of XPath (child steps by name, [n], a last @attribute), prepared as a JSON one is.
+    // The web library's take a URL, a format whose ints are the call's last arguments, after every other parameter
+    // (as printf's are), checked further (Web.cpp: no byte a URL cannot hold, http or https, no credentials) and
+    // recorded for the host, passed after the program's web context as a format is; and a content type, a string of
+    // printable ASCII. The web server's take a route, a string that is a method and a path with places for numbers
+    // the request's path holds ("PUT /osc/%d/gain"), checked (WebServer.cpp) and recorded for the host and for the
+    // route table, passed as a string is; a query's name, a string of letters, digits, '_', '-' and '.'; and a reply's
+    // format, a format whose places are C's printf's %d (an int or a bool) and %g or %.Ng (a float or a double),
+    // checked as clang checks printf's, after which the call gives a double for each place, passed as their address and
+    // their count. The file interface's take a file's name, a format whose ints are the call's last arguments, as a
+    // URL's are, checked further (Files.cpp: the rules a name keeps to, and the build's ceilings) and recorded for the
+    // host, passed after the program's file context as a format is; and a listing's pattern, the same with one '*' in
+    // its file part.
+    enum class Param
+    {
+        Int,
+        Bytes,
+        Floats,
+        String,
+        Format,
+        Document,
+        Handle,
+        Float,
+        Double,
+        Bool,
+        Path,
+        Choices,
+        XmlPath,
+        Url,
+        ContentType,
+        Route,
+        QueryName,
+        ReplyFormat,
+        FileName,
+        FilePattern,
+    };
+
+    // What a builtin of the runtime gives: an int, a float, a double, a bool (an int from the runtime, 0 or 1), a void*,
+    // a const void* (bytes the program may only read: http_body's) or nothing.
+    enum class Result
+    {
+        Int,
+        Float,
+        Double,
+        Bool,
+        Pointer,
+        Bytes,
+        Void,
+    };
+
+    // A builtin that calls a function of the runtime with its arguments, as Param says to pass each (Calls.cpp,
+    // kRuntimeBuiltins): its name, the runtime's function, its parameters (the first `arity` of `params`; a format's or
+    // a path's ints are not among them), what it may do on the audio thread, the build option it needs, and its
+    // result.
+    struct RuntimeBuiltin
+    {
+        std::string_view name;
+        std::string_view symbol;
+        std::array<Param, 6> params;
+        unsigned arity;
+        RuntimeEffect effect;
+        Feature feature = Feature::None;
+        Result result = Result::Int;
+    };
+
+    // The C type of a runtime builtin's parameter or result, as its prototype would write it (Calls.cpp): what a
+    // prototype of the builtin must say (Functions.cpp), and what an argument converts to. A string, a format, a path
+    // and choices have none (std::nullopt): FMinus has no char.
+    std::optional<ast::Type> paramType(Param param);
+    ast::Type resultType(Result result);
+
+    // A format's places for ints (Strings.cpp, scanFormat): the offset in the literal's bytes of each %d's '%', in
+    // order, and its errors, each at the offset of the byte it is about, in clang's words for printf's.
+    struct FormatScan
+    {
+        struct Error
+        {
+            std::size_t offset;
+            std::string message;
+        };
+        std::vector<std::size_t> places;
+        std::vector<Error> errors;
+    };
+    FormatScan scanFormat(std::string_view text);
+
+    // A reply's format (WebServer.cpp, scanReplyFormat): C's printf's %d, %g, %.Ng (N from 1 to 17) and %%. Each place,
+    // in order, the offset of its '%' and whether it takes a double (%g, %.Ng) or an int (%d); and its errors, each at
+    // the offset of the byte it is about, in clang's words for printf's where clang has words for it.
+    struct ReplyFormatScan
+    {
+        struct Place
+        {
+            std::size_t offset;
+            bool real;
+        };
+        std::vector<Place> places;
+        std::vector<FormatScan::Error> errors;
+    };
+    ReplyFormatScan scanReplyFormat(std::string_view text);
+
+    // A route literal's errors (WebServer.cpp, scanRoute): a method of GET, POST, PUT, PATCH or DELETE, one space, and a
+    // path of "/" and segments of letters, digits, '-', '.', '_', '~' and %d, none empty, "." or "..", with at most 8
+    // %d and never two together; each at the offset of the byte it is about. Empty: the route is good.
+    std::vector<FormatScan::Error> scanRoute(std::string_view text);
+
+    // A file's name, or with `pattern` a listing's (Files.cpp, scanFileName), against the rules of runtime/Files.h,
+    // each %d checked as a digit it may write: a folder's name and a path inside it, or with `anywhere` (a build with
+    // absolute names) an absolute name in the target's form ("/" on Linux and macOS; with `windows`, a drive letter,
+    // ":" and "/"); segments of UTF-8 without the bytes a file system reads as something else, none beginning with
+    // '.' or a space nor ending with either, none a device name of Windows; an extension the literal writes, of a type
+    // in `types` (FMINUS_FILES_TYPES's form: lower case, separated by ';'; empty: any); at most 16 segments. Each
+    // error at the offset of the byte it is about; empty: the name is good. `writes`: an absolute name is an error (a
+    // file is written only in a folder).
+    struct FileNameRules
+    {
+        bool pattern = false;
+        bool writes = false;
+        bool anywhere = false;           // the build has absolute names (FMINUS_FILES_ANYWHERE)
+        bool windows = false;            // the target's form of an absolute name is Windows'
+        std::string_view types = {};     // the build's types (FMINUS_FILES_TYPES)
+    };
+    std::vector<FormatScan::Error> scanFileName(std::string_view text, const FileNameRules& rules);
+
+    // A JSON Pointer (RFC 6901) with a format's places (%d, %%), prepared (Paths.cpp, scanPath): its reference tokens
+    // as the runtime's table holds them (runtime/Runtime.h), each its count of pieces and then a pair a piece, (offset,
+    // length) of a literal's bytes in `bytes`, or (place, -1) for the place-th %d; and its errors, each at the offset
+    // in the literal's bytes of the byte it is about. A format's own errors (a % before anything but d or %) are
+    // scanFormat's, and not here again: such a % is a byte of its token.
+    struct PathScan
+    {
+        std::vector<std::int32_t> code;
+        std::string bytes;
+        std::vector<FormatScan::Error> errors;
+    };
+    PathScan scanPath(std::string_view text);
+
+    // An XML path with a format's places (%d, %%), prepared (Paths.cpp, scanXmlPath): its steps as the runtime's table
+    // holds them (runtime/Runtime.h), each its kind, its name's pieces as a JSON Pointer's token's, and its index; and
+    // its errors, as scanPath's. A format's own errors are scanFormat's, and not here again.
+    PathScan scanXmlPath(std::string_view text);
+
     const Builtin* findBuiltin(std::string_view name);   // <math.h>'s float functions, or nullptr
     const Allocation* findAllocation(std::string_view name);   // malloc, calloc, free, or nullptr
     const Fft* findFft(std::string_view name);           // fft_create, fft_forward, ..., or nullptr
+    const RuntimeBuiltin* findRuntimeBuiltin(std::string_view name);   // bytes_floats, ..., or nullptr
     bool allocates(std::string_view name);               // a builtin that allocates or frees: the heap's, a plan's
+    bool blocks(std::string_view name);                  // a builtin that may wait: http_wait
     bool isReduction(std::string_view name);             // reduce_add, reduce_min, reduce_max
     bool isPolyQuery(std::string_view name);             // poly_lanes, poly_index
     bool isPolyMemory(std::string_view name);            // poly_load, poly_store
@@ -459,7 +656,47 @@ namespace fminus::ir::detail
         Value wrongArity(SourceLocation location, std::size_t have, std::size_t expected);
         Value lowerAllocation(SourceLocation location, const Allocation& allocation, const std::vector<Value>& args);
         Value lowerFft(SourceLocation location, const Fft& fft, const std::vector<Value>& args);
+        Value lowerRuntimeBuiltin(SourceLocation location, const RuntimeBuiltin& builtin, const ast::CallExpr& call);
+        llvm::Value* formatInts(const std::vector<llvm::Value*>& values);
         llvm::CallInst* callRuntime(const std::string& name, llvm::Type* result, const std::vector<llvm::Value*>& args);
+
+        // ---- Strings.cpp --------------------------------------------------------------------------------------------
+        static bool isString(const ast::Expr& expr);
+        llvm::Value* stringConstant(const ast::StringExpr& literal);
+        std::optional<std::vector<llvm::Value*>> formatArguments(const ast::StringExpr& literal,
+                                                                 const std::vector<const ast::Expr*>& ints);
+        Value refuseString(const ast::Expr& expr, std::optional<ast::Type> type, Use use, SourceLocation where);
+        Value notAValue(const ast::Expr& expr);
+
+        // ---- Web.cpp ------------------------------------------------------------------------------------------------
+        bool checkUrl(const ast::StringExpr& literal, SourceLocation where);
+        bool checkContentType(const ast::StringExpr& literal, SourceLocation where);
+        void recordWebRequest(SourceLocation location, std::string_view method, const ast::StringExpr& literal);
+        llvm::Value* webContext(SourceLocation location);
+        const Binding* webStatus(const std::string& name) const;
+        bool unbuiltWebStatus(SourceLocation location, const std::string& name);
+
+        // ---- WebServer.cpp ------------------------------------------------------------------------------------------
+        bool checkRoute(const ast::StringExpr& literal, SourceLocation where);
+        bool checkQueryName(const ast::StringExpr& literal, SourceLocation where);
+        std::optional<std::vector<llvm::Value*>> replyArguments(const ast::StringExpr& literal,
+                                                                const std::vector<const ast::Expr*>& values);
+        llvm::Value* replyValues(const std::vector<llvm::Value*>& values);
+        void recordWebRoute(SourceLocation location, const ast::StringExpr& literal);
+        std::vector<llvm::Value*> listenArguments(SourceLocation location);
+        void finishWebRoutes();
+
+        // ---- Files.cpp ----------------------------------------------------------------------------------------------
+        bool checkFileName(const ast::StringExpr& literal, SourceLocation where, std::string_view builtin);
+        void recordFileUse(SourceLocation location, std::string_view operation, const ast::StringExpr& literal);
+        llvm::Value* filesContext();
+        const Binding* fileStatus(const std::string& name) const;
+        bool unbuiltFileStatus(SourceLocation location, const std::string& name);
+
+        // ---- Paths.cpp ----------------------------------------------------------------------------------------------
+        llvm::Value* preparedPath(const ast::StringExpr& literal);
+        llvm::Value* preparedXmlPath(const ast::StringExpr& literal, SourceLocation where);
+        llvm::Value* preparedChoices(const std::vector<const ast::StringExpr*>& literals);
 
         // ---- Math.cpp -----------------------------------------------------------------------------------------------
         llvm::Value* lowerMath(const Builtin& builtin, ast::Type type, llvm::Value* x);
@@ -567,5 +804,10 @@ namespace fminus::ir::detail
         // constants are then doubles (Expressions.cpp, lowerAs). None at the top of an arithmetic.
         std::optional<bool> doubleArithmetic_;
         std::deque<Extent> extents_;                                       // the arrays' extents values carry
+        bool webContextClash_ = false;   // a function of the web context's name was reported (Web.cpp)
+        // The route literals of the program's http_is calls, each once, in the order they were lowered, and the calls
+        // of http_listen, which hand the library their table, made once all are known (WebServer.cpp).
+        std::vector<std::string> webRoutes_;
+        std::vector<llvm::CallInst*> webListens_;
     };
 } // namespace fminus::ir::detail

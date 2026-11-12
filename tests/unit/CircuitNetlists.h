@@ -19,7 +19,7 @@ namespace fminus::circuit::test
 .pot    tone 0.5 lin               ; 1: bright (0 ohm), 0: dark (25k)
 .oversample 4 iir blocks=auto
 .adaa off
-.solver omega(2)
+.solver halley(1)
 .target solver=-60dB alias=-60dB level=4.5V freq=3k
 R1     in a  2.2k
 C1     a  0  10n
@@ -28,6 +28,35 @@ D2     0  a  1N914
 R2     a  c  470
 Ptone  c  b  25k {1 - tone}        ; a rheostat
 C2     b  0  22n
+.model 1N914 D(IS=2.52n N=1.752)
+.end
+)";
+
+    // Example 1 with the solver diodetone.cir shipped until 2026-11-10 (the report's example-1 row): plain omega3 + 2
+    // Newton steps, for the tests that cover that step beside the shipped Halley one.
+    inline const std::string kDiodeToneOmega2 = []
+    {
+        std::string text = kDiodeTone;
+        const std::string from = ".solver halley(1)\n";
+        text.replace(text.find(from), from.size(), ".solver omega(2)\n");
+        return text;
+    }();
+
+    // A diode pair, a buffer, then one diode: halley(K) gives the pair's port Halley steps and the diode's Newton steps.
+    inline const std::string kPairThenDiode = R"(.title PairThenDiode
+.input  u    in   scale=1
+.output vout b
+.oversample 2 iir blocks=auto
+.adaa off
+.solver halley(2)
+R1     in a  2.2k
+C1     a  0  10n
+D1     a  0  1N914
+D2     0  a  1N914
+X1     a  ab ab opamp
+R2     ab b  2.2k
+C2     b  0  10n
+D3     b  0  1N914
 .model 1N914 D(IS=2.52n N=1.752)
 .end
 )";

@@ -364,8 +364,9 @@ namespace fminus::circuit
     // K, kb_P = ka / (N Vt), lna_P = log(kb), and kc_P = ka N Vt with ADAA (an asymmetric pair's other diode too:
     // kr_P = Is2 K, ks_P, lnr_P and kcr_P). With an OTA P (the i-form): from its
     // control voltage v = p - kd i, p_P_by_s = dv/ds for each source s but i, and kd_P = -dv/di (its gain g multiplies
-    // it in the step, where a law input may move it every sample). Then <readout>_by_<source> for the output and each
-    // capacitor's voltage, on every source (an OTA's i too). A zero coefficient is left out.
+    // it in the step, where a law input may move it every sample), and rkd_P = 1 / kd with ADAA. Then
+    // <readout>_by_<source> for the output and each capacitor's voltage, on every source (an OTA's i too). A zero
+    // coefficient is left out.
     template <typename T>
     Coefficients<T> derive(const System& system, const Linear<T>& linear, const Block& block, bool adaa)
     {
@@ -384,7 +385,10 @@ namespace fminus::circuit
                 const std::string name = "p_" + block.port->name + "_by_" + system.sources[s].name;
                 out.emplace_back(name, bindField(name, linear.coef[r][s]));
             }
-            out.emplace_back("kd_" + block.port->name, bindField("kd_" + block.port->name, kd));
+            const T kdField = bindField("kd_" + block.port->name, kd);
+            out.emplace_back("kd_" + block.port->name, kdField);
+            if (adaa)   // ADAA's mean current multiplies by it
+                out.emplace_back("rkd_" + block.port->name, bindField("rkd_" + block.port->name, T(1.0) / kdField));
         }
         else if (block.port)
         {

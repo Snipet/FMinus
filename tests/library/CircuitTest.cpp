@@ -217,7 +217,7 @@ TEST_CASE("a host runs the self-test and generates with its answer", "[circuit]"
     CHECK(tested.candidates > 0);
     // 4. the host stores the answer as text, under the key
     const std::string stored = tested.choice->text();
-    CHECK(stored.find("fminus-circuit-choice 1 key=" + first.selfTestKey + " ") == 0);
+    CHECK(stored.find("fminus-circuit-choice 2 key=" + first.selfTestKey + " ") == 0);
     // 5. reads it back, and generates with it: the self-test's configuration, no longer provisional
     std::string why;
     fminus::circuit::Options options;

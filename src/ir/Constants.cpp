@@ -26,6 +26,8 @@
 // constant 0, as in C (6.6p3), and so is the arm of a ?: not taken. What is no constant is reported wherever it is.
 #include "ir/Lowering.h"
 
+#include "fminus/Config.h"   // which build options runtime/RuntimeSymbols.def lists the functions of
+
 #include <llvm/ADT/APFloat.h>
 #include <llvm/ADT/APSInt.h>
 #include <llvm/IR/Constants.h>
@@ -55,7 +57,12 @@ namespace fminus::ir::detail
         // builtin calls one (fminus_rt_malloc for malloc, fminus_rt_sinf for sinf in the vector math mode).
         constexpr std::string_view kRuntimeNames[] = {
 #define FMINUS_RUNTIME_SYMBOL(name) #name,
+#define FMINUS_FILES_MAIN_SYMBOL(name) #name,   // an executable's, which its C main calls (the .def undefines it)
 #include "runtime/RuntimeSymbols.def"
+#if FMINUS_HAS_WEB
+#define FMINUS_WEB_MAIN_SYMBOL(name) #name,
+#include "web/WebSymbols.def"   // the web library's, which a program's http_ builtins and an executable's main call
+#endif
 #undef FMINUS_RUNTIME_SYMBOL
         };
 
@@ -64,7 +71,8 @@ namespace fminus::ir::detail
         bool isBuiltinName(std::string_view name)
         {
             return findBuiltin(name) != nullptr || findAllocation(name) != nullptr || findFft(name) != nullptr
-                   || isReduction(name) || isPolyQuery(name) || isPolyMemory(name) || isHash(name);
+                   || findRuntimeBuiltin(name) != nullptr || isReduction(name) || isPolyQuery(name)
+                   || isPolyMemory(name) || isHash(name);
         }
 
         // Whether `constant` is poison or undef, or holds one: what LLVM folds an operation C leaves undefined to, a
@@ -441,9 +449,17 @@ namespace fminus::ir::detail
         else
             contents = constants.empty() ? llvm::Constant::getNullValue(typeOf(type)) : constants.front();
         const bool builtin = isBuiltinName(decl.name);
-        const bool runtime = std::ranges::find(kRuntimeNames, decl.name) != std::end(kRuntimeNames);
+        // The file interface's names, in every build (the context's global among them: ir/CodeGen.h), as a function's
+        // are (Functions.cpp).
+        const bool files = std::ranges::any_of(kFilesPrefixes, [&](std::string_view prefix) {
+            return std::string_view(decl.name).starts_with(prefix);
+        });
+        const bool runtime = files || std::ranges::find(kRuntimeNames, decl.name) != std::end(kRuntimeNames);
         if (builtin)
             error(location, "redefinition of " + quoted(decl.name) + " as different kind of symbol");
+        else if (files)
+            error(location, quoted(decl.name) + " is a name of the file interface, which the code FMinus generates "
+                                                "calls: a program cannot declare it");
         else if (runtime)
             error(location, quoted(decl.name) + " is the name of a function of FMinus's runtime, which the code it "
                                                 "generates calls: rename the constant");
@@ -539,7 +555,9 @@ namespace fminus::ir::detail
                             && (findField(*module, variable.name, nullptr) != nullptr
                                 || std::ranges::find(module->methods, variable.name) != module->methods.end())))
                         return notConstant(expr.location);
-                    error(expr.location, "use of undeclared identifier " + quoted(variable.name));
+                    if (!unbuiltWebStatus(expr.location, variable.name)
+                        && !unbuiltFileStatus(expr.location, variable.name))
+                        error(expr.location, "use of undeclared identifier " + quoted(variable.name));
                     return std::nullopt;
                 },
                 [&](const ast::UnaryExpr& unary) -> std::optional<Folded> {
@@ -670,6 +688,7 @@ namespace fminus::ir::detail
                 [&](const ast::MethodCallExpr&) { return notConstant(expr.location); },
                 [&](const ast::ThisExpr&) { return notConstant(expr.location); },
                 [&](const ast::ConstructExpr&) { return notConstant(expr.location); },
+                [&](const ast::StringExpr&) { return notConstant(expr.location); },
             },
             expr.node);
     }

@@ -13,6 +13,12 @@
 #include "opt/LoopBudget.h"
 #include "runtime/Runtime.h"
 #include "support/HostTarget.h"
+#if FMINUS_HAS_WEB
+#include "web/Web.h"
+#endif
+#if FMINUS_HAS_FILES
+#include "runtime/Files.h"
+#endif
 
 #include <llvm/IR/DataLayout.h>
 #include <llvm/IR/DerivedTypes.h>
@@ -412,12 +418,38 @@ namespace fminus
         std::mutex calls;
         // A function the program defines, whose look-up links the program's code (codeRanges); empty when it has none.
         std::string linkName;
+        std::vector<WebRequest> webRequests;   // every http_get's and http_post's URL (ir/Web.cpp)
+        std::vector<WebRoute> webRoutes;       // every http_is's route (ir/WebServer.cpp)
+        std::vector<FileUse> files;            // every file_read's, file_list's, ... name (ir/Files.cpp)
+#if FMINUS_HAS_FILES
+        // The program's file context (runtime/Files.h), whose handle the module's global holds; none when the program
+        // names no file, or the host grants no folder and not anywhere (a null context reaches no file). Destroyed
+        // before the code goes: every file and listing the program still holds freed, the folders' directories closed.
+        std::unique_ptr<files::Context> fileContext;
+#endif
+#if FMINUS_HAS_WEB
+        // The program's web context (src/web/Web.h), whose handle the module's global holds; none when the program
+        // makes no request and has no server, or the host allows nothing and gives no listen (a null context reaches
+        // nothing and listens nowhere). Its server is its own: stopped and destroyed with it, before the code goes.
+        std::unique_ptr<web::Context> web;
+#endif
 
         Impl() = default;
         Impl(const Impl&) = delete;
         Impl& operator=(const Impl&) = delete;
         ~Impl()
         {
+#if FMINUS_HAS_WEB
+            // Before the code goes: every request cancelled and freed, every thread in http_wait woken and out of the
+            // library, the server closed (every connection, every thread in http_accept woken and out of it) and
+            // freed, and the I/O thread joined if this was its last context.
+            if (web != nullptr)
+                web->stop();
+            web.reset();
+#endif
+#if FMINUS_HAS_FILES
+            fileContext.reset();
+#endif
             jit.reset();
             if (pool)
                 fminus_rt_parallel_stop();
@@ -448,6 +480,62 @@ namespace fminus
                    + " is not 0 (this machine's) or a power of two from 1 to 64\n";
             return nullptr;
         }
+
+#if FMINUS_HAS_WEB
+        web::Policy policy;
+        policy.allow = options.web.allow;
+        policy.maxBodyBytes = options.web.maxBodyBytes;
+        policy.timeoutMs = options.web.timeoutMs;
+        policy.maxRedirects = options.web.maxRedirects;
+        policy.maxRequests = options.web.maxRequests;
+        policy.caFile = options.web.caFile;
+        policy.privateAddresses = options.web.privateAddresses;
+        policy.resolve = options.web.resolve;
+#if FMINUS_HAS_WEB_SERVER
+        // The server's part, read only where there is a server (a build without one has nothing to listen with).
+        const WebServerPolicy& server = options.web.server;
+        policy.server.listen = server.listen;
+        policy.server.hosts = server.hosts;
+        policy.server.token = server.token;
+        policy.server.open = server.open;
+        for (const WebServerPolicy::File& file : server.files)
+            policy.server.files.push_back({file.path, file.type, file.bytes});
+        policy.server.maxConnections = server.maxConnections;
+        policy.server.maxPending = server.maxPending;
+        policy.server.maxRequestBytes = server.maxRequestBytes;
+        policy.server.maxReplyBytes = server.maxReplyBytes;
+        policy.server.requestTimeoutMs = server.requestTimeoutMs;
+        policy.server.replyTimeoutMs = server.replyTimeoutMs;
+        policy.server.idleTimeoutMs = server.idleTimeoutMs;
+#endif
+        if (const std::string wrong = web::checkPolicy(policy); !wrong.empty())
+        {
+            errors = "fminus::Program: web: " + wrong + "\n";
+            return nullptr;
+        }
+#endif
+#if FMINUS_HAS_FILES
+        // The file policy, read only where there is a file interface, and checked against the build's ceilings here,
+        // whether or not the program names a file: a host learns at once of a policy this build cannot give.
+        files::Policy filePolicy;
+        for (const FilePolicy::Folder& folder : options.files.folders)
+            filePolicy.folders.push_back({folder.name, folder.directory, folder.write, folder.types});
+        filePolicy.deny = options.files.deny;
+        filePolicy.types = options.files.types;
+        filePolicy.anywhere = options.files.anywhere;
+        filePolicy.singleLink = options.files.singleLink;
+        filePolicy.maxFileBytes = options.files.maxFileBytes;
+        filePolicy.maxOpen = options.files.maxOpen;
+        filePolicy.maxHeldBytes = options.files.maxHeldBytes;
+        filePolicy.maxWrittenBytes = options.files.maxWrittenBytes;
+        filePolicy.maxFilesWritten = options.files.maxFilesWritten;
+        filePolicy.maxListed = options.files.maxListed;
+        if (const std::string wrong = files::checkPolicy(filePolicy); !wrong.empty())
+        {
+            errors = "fminus::Program: files: " + wrong + "\n";
+            return nullptr;
+        }
+#endif
 
         for (const auto& [name, value] : options.defines)
             if (const std::optional<std::string> wrong = frontend::macroNameError(name))
@@ -558,6 +646,23 @@ namespace fminus
 
         // What each bounds check's number means, for boundsViolation().
         std::vector<opt::BoundsSite> boundsSites = opt::boundsSites(*module);
+        // Every URL the program names, and whether it has a web context to set (ir/Web.cpp).
+        std::vector<WebRequest> webRequests;
+        for (ir::WebRequest& request : ir::webRequests(*module))
+            webRequests.push_back({std::move(request.method), std::move(request.pattern), std::move(request.file),
+                                   request.line, request.column});
+        // Every route the program names (ir/WebServer.cpp).
+        std::vector<WebRoute> webRoutes;
+        for (ir::WebRoute& route : ir::webRoutes(*module))
+            webRoutes.push_back({std::move(route.method), std::move(route.pattern), std::move(route.file), route.line,
+                                 route.column});
+        [[maybe_unused]] const bool usesWeb = module->getNamedGlobal(ir::kWebContextSymbol) != nullptr;
+        // Every file the program names, and whether it has a file context to set (ir/Files.cpp).
+        std::vector<FileUse> fileUses;
+        for (ir::FileUse& use : ir::files(*module))
+            fileUses.push_back({std::move(use.operation), std::move(use.pattern), std::move(use.file), use.line,
+                                use.column});
+        [[maybe_unused]] const bool usesFiles = module->getNamedGlobal(ir::kFilesContextSymbol) != nullptr;
 
         // A program with a parallel region runs it on the runtime's pool, from now until it is destroyed.
         const bool parallel = module->getFunction("fminus_rt_parallel_for") != nullptr && options.threads != 1;
@@ -623,6 +728,52 @@ namespace fminus
             impl->bounds = record->toPtr<fminus_rt_bounds_state*>();
             impl->boundsSites = std::move(boundsSites);
         }
+#if FMINUS_HAS_WEB
+        // The program's context, its handle in the module's global, which every request and http_listen passes the
+        // library. Without a pattern to allow and a listen, none: the global stays null, every request is refused, and
+        // http_listen's server never listens (HTTP_REFUSED). With a listen alone, one: it may listen and reach nothing.
+        if (usesWeb && (!policy.allow.empty() || !policy.server.listen.empty()))
+        {
+            std::string wrong;
+            impl->web = web::Context::create(policy, wrong);
+            if (impl->web == nullptr)
+            {
+                errors = "fminus::Program: web: " + wrong + "\n";
+                return nullptr;
+            }
+            auto global = impl->jit->lookup(ir::kWebContextSymbol);
+            if (!global)
+            {
+                errors = llvm::toString(global.takeError()) + "\n";
+                return nullptr;
+            }
+            *global->toPtr<void**>() = impl->web->handle();
+        }
+#endif
+#if FMINUS_HAS_FILES
+        // The program's file context, its handle in the module's global, which every call that names a file passes the
+        // runtime. Without a folder and anywhere, none: the global stays null, and every such call is FILE_REFUSED.
+        if (usesFiles && (!filePolicy.folders.empty() || filePolicy.anywhere))
+        {
+            std::string wrong;
+            impl->fileContext = files::Context::create(filePolicy, wrong);
+            if (impl->fileContext == nullptr)
+            {
+                errors = "fminus::Program: files: " + wrong + "\n";
+                return nullptr;
+            }
+            auto global = impl->jit->lookup(ir::kFilesContextSymbol);
+            if (!global)
+            {
+                errors = llvm::toString(global.takeError()) + "\n";
+                return nullptr;
+            }
+            *global->toPtr<void**>() = impl->fileContext->handle();
+        }
+#endif
+        impl->webRequests = std::move(webRequests);
+        impl->webRoutes = std::move(webRoutes);
+        impl->files = std::move(fileUses);
         if (parallel)
         {
             fminus_rt_parallel_start();
@@ -817,6 +968,38 @@ namespace fminus
         violation.index = std::atomic_ref(impl_->bounds->index).load(std::memory_order_relaxed);
         violation.width = check.width;
         return violation;
+    }
+
+    const std::vector<Program::WebRequest>& Program::webRequests() const
+    {
+        return impl_->webRequests;
+    }
+
+    const std::vector<Program::WebRoute>& Program::webRoutes() const
+    {
+        return impl_->webRoutes;
+    }
+
+    const std::vector<Program::FileUse>& Program::files() const
+    {
+        return impl_->files;
+    }
+
+    int Program::webPort() const noexcept
+    {
+#if FMINUS_HAS_WEB
+        if (impl_->web != nullptr)
+            return impl_->web->port();
+#endif
+        return 0;
+    }
+
+    void Program::stopWeb() noexcept
+    {
+#if FMINUS_HAS_WEB
+        if (impl_->web != nullptr)
+            impl_->web->stop();
+#endif
     }
 
     void Program::clearBoundsViolation() noexcept

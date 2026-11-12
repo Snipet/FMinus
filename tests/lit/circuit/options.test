@@ -14,15 +14,32 @@
 # RUN: fminus %S/Inputs/diodetone-stereo.cir -o %t.stereo.ll
 
 # .adaa on .solver omega(1): one Newton step, ADAA's mean (Holters 2020), the states averaged, designed at 4 rate 2/3.
+# The mean multiplies by 1 / dp, computed as soon as p is known; its 2 cosh(v / N Vt) comes from the last Newton step's
+# exponentials at its point v0, by the addition theorem and a series in dl (the exact form where |dl| >= 0.25).
 # ADAA:      configuration: .oversample 4 iir blocks=auto, .adaa on, .solver omega(1) (the netlist); .method tr (default)
 # ADAA:      float xo_C1;
 # ADAA:      float c_D1;
 # ADAA:      gc_C1 = 5.3333334e-08f * rate;
 # ADAA:      c_D1 = 2;
 # ADAA-LABEL: float b1(float u)
-# ADAA:      // Newton step 1 of 1
+# ADAA-NEXT: {
+# ADAA-NEXT: const float p = p_D1_by_u * u + p_D1_by_x_C1 * x_C1 + p_D1_by_x_C2 * x_C2;
+# ADAA-NEXT: const float dp = p - p_D1;
+# ADAA-NEXT: const float rdp = 1 / dp;
+# ADAA:      const float v0 = v; {{ *}}// Newton step 1 of 1
+# ADAA-NEXT: const float e = expf(v * 22.067577f);
+# ADAA-NEXT: const float ei = expf(v * -22.067577f);
+# ADAA-NEXT: const float f = v - p + ka_D1 * (e - ei);
+# ADAA-NEXT: const float d = 1 + kb_D1 * (e + ei);
+# ADAA-NEXT: v = fminf(fmaxf(v - f / d, lo), hi);
 # ADAA-NOT:  // Newton step
-# ADAA:      const float vb = fabsf(dp) > 1e-05f ? vm + ((v - v_D1) * (0.5f * (p + p_D1) - vm) - kc_D1 * (c - c_D1)) / dp : vm;
+# ADAA-NEXT: const float dl = (v - v0) * 22.067577f;
+# ADAA-NEXT: const float dl2 = dl * dl;
+# ADAA-NEXT: const float c = fabsf(dl) < 0.25f
+# ADAA-NEXT: ? (e + ei) * (1 + dl2 * (0.5f + 0.041666668f * dl2)) + (e - ei) * (dl * (1 + 0.16666667f * dl2))
+# ADAA-NEXT: : expf(v * 22.067577f) + expf(v * -22.067577f);
+# ADAA-NEXT: const float vm = 0.5f * (v + v_D1);
+# ADAA-NEXT: const float vb = fabsf(dp) > 1e-05f ? vm + ((v - v_D1) * (0.5f * (p + p_D1) - vm) - kc_D1 * (c - c_D1)) * rdp : vm;
 # ADAA:      const float n_b = n_b_by_x_C2 * xa_C2 + n_b_by_v_D1 * vb;
 # ADAA:      x_C1 = g2_C1 * vb - xa_C1;
 # ADAA-NEXT: x_C2 = g2_C2 * n_b - xa_C2;

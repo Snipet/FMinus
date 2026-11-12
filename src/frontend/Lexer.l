@@ -2,9 +2,10 @@
  * memory). It returns Bison's symbols (Parser.y) with their locations, which it keeps in the scanner's state
  * (Scanner.h).
  *
- * Comments are C's: // to the end of the line, and block comments, which do not nest. String literals are C's, with
- * C's escapes, and FMinus has them only as an attribute's arguments (Parser.y): the token's value is the string's
- * characters, its escapes resolved (stringValue). Constants are C's: floating ones (1.5, 1., .5, 2e3, 1.5e-3f, hex
+ * Comments are C's: // to the end of the line, and block comments, which do not nest. String literals are C's, with C's
+ * escapes, and FMinus has them as an attribute's arguments and a builtin's (Parser.y): the token's value is the
+ * string's characters, its escapes resolved, and where in the token each one is spelt (stringValue). Constants are C's:
+ * floating ones (1.5, 1., .5, 2e3, 1.5e-3f, hex
  * floats such as 0x1.8p1 and 0x1p-3f) and integer ones (2, 010 in octal, 0x1F in hex), one token whose spelling tells
  * the code generator which. The f or F suffix is allowed only where C allows it
  * (not on 2; in 0x1F the F is a digit), and is kept in the spelling. A floating constant without one is a float or a
@@ -63,9 +64,9 @@ namespace
     // The error of a macro's name in code.
     std::string macroInCode(const std::string& name);
 
-    // A string literal's characters, `literal` its token at `where`, quotes and all: C's escapes resolved. Throws an
-    // escape's error.
-    std::string stringValue(const fminus::frontend::location& where, std::string_view literal);
+    // A string literal's characters, `literal` its token at `where`, quotes and all: C's escapes resolved, and each
+    // byte's offset in the token (its character's, or its escape's backslash's). Throws an escape's error.
+    fminus::frontend::StringToken stringValue(const fminus::frontend::location& where, std::string_view literal);
 
     // The error of a # after a comment that begins its line, where C reads a directive.
     constexpr const char* kCommentBeforeDirective = "a comment before a directive's '#' is not supported: a directive "
@@ -437,6 +438,8 @@ namespace
         {
             if (macro == "defined")
                 throw PreprocessorError{start, macro.size(), "'defined' cannot be used as a macro name"};
+            if (const std::optional<std::string> predefined = fminus::frontend::predefinedMacroError(macro))
+                throw PreprocessorError{start, macro.size(), *predefined};
             endOfDirective(line, i, name);
             state.macros.erase(macro);
             return;
@@ -497,15 +500,17 @@ namespace
     // C's escapes (C23 6.4.4.4): the simple ones, octal (one to three digits) and hex (any number of digits) ones of
     // a byte each, and universal character names, \u and four hex digits or \U and eight, a character in UTF-8. Any
     // other is an error, in clang's words, where clang only warns of an unknown one; a byte's value past 255 too.
-    std::string stringValue(const location& where, std::string_view literal)
+    fminus::frontend::StringToken stringValue(const location& where, std::string_view literal)
     {
         const std::string_view body = literal.substr(1, literal.size() - 2);   // the quotes
-        std::string text;
+        fminus::frontend::StringToken token;
+        std::string& text = token.value;
         for (std::size_t i = 0; i < body.size(); ++i)
         {
             if (body[i] != '\\')
             {
                 text += body[i];
+                token.offsets.push_back(static_cast<int>(1 + i));
                 continue;
             }
             const std::size_t start = i;   // the backslash's
@@ -563,8 +568,9 @@ namespace
                     ++length;
                 throw fail(1 + length, "unknown escape sequence '\\" + std::string(body.substr(i, length)) + "'");
             }
+            token.offsets.resize(text.size(), static_cast<int>(1 + start));   // the escape's bytes, at its backslash
         }
-        return text;
+        return token;
     }
 
     std::optional<fminus::frontend::IncludedFile> directive(fminus::frontend::ScannerState& state,
@@ -687,6 +693,8 @@ std::optional<std::string> fminus::frontend::macroNameError(std::string_view nam
         return "macro name must be an identifier";
     if (name == "defined")
         return "'defined' cannot be used as a macro name";
+    if (std::optional<std::string> predefined = predefinedMacroError(name))
+        return predefined;
     if (isKeyword(name))
         return "'" + std::string(name) + "' cannot be used as a macro name: it is one of FMinus's keywords";
     return std::nullopt;

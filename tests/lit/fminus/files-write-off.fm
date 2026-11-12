@@ -1,0 +1,44 @@
+// In a build with the file interface and without its writing (FMINUS_FILES_WRITE=OFF, the default), file_write and
+// file_append are still names FMinus knows: a call of either is an error that names the option; the reads compile;
+// __FMINUS_FILES__ is defined and __FMINUS_FILES_WRITE__ is not; the driver's --files-write says the build has no
+// writing, and an executable's FMINUS_FILES_WRITE is a mistake it names.
+// REQUIRES: files
+// UNSUPPORTED: files-write
+// RUN: not fminus %s 2>&1 | FileCheck %s --implicit-check-not=error:
+// RUN: not fminus %s --run read --files-write user=%S 2>&1 | FileCheck %s --check-prefix=WRITE
+// RUN: rm -rf %t && mkdir -p %t/tmp
+// RUN: env TMPDIR=%t/tmp fminus %s -D READS_ONLY --emit exe -o %t/reads
+// RUN: env FMINUS_FILES_WRITE=user=%t not %t/reads 0 2>&1 | FileCheck %s --check-prefix=EXE
+// RUN: env FMINUS_FILES_READ=kit=%t %t/reads 0 | FileCheck %s --check-prefix=MISSING
+// RUN: rm -rf %t
+
+#if !defined(__FMINUS_FILES__) || defined(__FMINUS_FILES_WRITE__)
+#error __FMINUS_FILES__ is not defined, or __FMINUS_FILES_WRITE__ is
+#endif
+
+int read(int k)
+{
+    void* f = file_read("kit/%d.f32", k);
+    const int status = file_status(f);
+    file_close(f);
+    return status;
+}
+
+#ifndef READS_ONLY
+int save(const void* data, int k)
+{
+    return file_write("user/take%d.f32", data, 4, k) + file_append("user/log.txt", data, 4);
+}
+#endif
+
+float main(float k)
+{
+    return (float)read((int)k);
+}
+
+// CHECK: files-write-off.fm:30:12: error: 'file_write' needs file writing, which this build of FMinus leaves out (FMINUS_FILES_WRITE=OFF)
+// CHECK: files-write-off.fm:30:56: error: 'file_append' needs file writing, which this build of FMinus leaves out (FMINUS_FILES_WRITE=OFF)
+
+// WRITE: fminus: --files-write: this build of FMinus leaves out file writing (FMINUS_FILES_WRITE=OFF)
+// EXE: FMINUS_FILES_WRITE: folders: 'user': write is set, and this build of FMinus leaves out writing files (FMINUS_FILES_WRITE=OFF)
+// MISSING: -1

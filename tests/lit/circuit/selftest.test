@@ -9,22 +9,23 @@
 # RUN: diff %t.1.notes %t.4.notes
 # RUN: diff %t.1.fm %t.4.fm
 
-# NOTES:      clipper-pot.cir: note: self-test 087ad67714f6249a: .oversample, .adaa, .solver, .method open; 3 points x 17 signals = 51 units, L = 4.5 V (.target level); 16 candidates, cheapest first
+# NOTES:      clipper-pot.cir: note: self-test e5e90357bcd35f0d: .oversample, .adaa, .solver, .method open; 3 points x 17 signals = 51 units, L = 4.5 V (.target level); 24 candidates, cheapest first
 # The method check: at 1x, 2x and 4x the block's linearised A has an eigenvalue near -1, and the references measure no
 # ringing there (no BDF2 twins).
 # NOTES-NEXT: clipper-pot.cir: note: self-test: at 1x block 1's linearised trapezoidal A has an eigenvalue at {{.*}} (within 0.1 of -1): it may ring at Nyquist
 # NOTES-NEXT: clipper-pot.cir: note: self-test: at 1x block 1 puts {{.*}} dB more above 20 kHz than the 64x reference: no ringing (6 dB is the gate)
 # NOTES:      clipper-pot.cir: note: self-test: at 4x block 1 puts {{.*}}: no ringing (6 dB is the gate)
 # NOTES-NEXT: clipper-pot.cir: note: self-test candidate 1: 1x, omega(1), 152 model cycles: {{.*}}: fails (T2 {{.*}})
-# NOTES-NEXT: clipper-pot.cir: note: self-test candidate 2: 1x, ADAA, omega(1), 209 model cycles: {{.*}}: fails
-# NOTES:      clipper-pot.cir: note: self-test candidate 9: 4x, omega(1), 680 model cycles: {{.*}}: fails (T1 {{.*}})
-# NOTES-NEXT: clipper-pot.cir: note: self-test candidate 10: 4x, ADAA, omega(1), 908 model cycles: T1 {{.*}} dB, T2 {{.*}} dB, T3 {{.*}} dB: passes
-# NOTES-NEXT: clipper-pot.cir: note: self-test: the answer is candidate 10, 4x, ADAA, omega(1): the first that meets T1-T4
-# NOTES-NEXT: clipper-pot.cir: note: the self-test chose .oversample 4, .adaa on, .solver omega(1)
+# NOTES-NEXT: clipper-pot.cir: note: self-test candidate 2: 1x, halley(1), 166 model cycles: {{.*}}: fails
+# NOTES-NEXT: clipper-pot.cir: note: self-test candidate 3: 1x, ADAA, omega(1), 209 model cycles: {{.*}}: fails
+# NOTES:      clipper-pot.cir: note: self-test candidate 13: 4x, omega(1), 680 model cycles: {{.*}}: fails (T1 {{.*}})
+# NOTES-NEXT: clipper-pot.cir: note: self-test candidate 14: 4x, halley(1), 736 model cycles: T1 {{.*}} dB, T2 {{.*}} dB, T3 {{.*}} dB: passes
+# NOTES-NEXT: clipper-pot.cir: note: self-test: the answer is candidate 14, 4x, halley(1): the first that meets T1-T4
+# NOTES-NEXT: clipper-pot.cir: note: the self-test chose .oversample 4, .adaa off, .solver halley(1)
 # NOTES-NOT:  {{.}}
 
 # MODULE:      // PotClipper: generated from clipper-pot.cir by fminus::circuit. Do not edit: edit clipper-pot.cir.
-# MODULE:      //   configuration: .oversample 4, .adaa on, .solver omega(1), .method tr (the self-test 087ad67714f6249a); iir blocks=auto (default)
+# MODULE:      //   configuration: .oversample 4, .adaa off, .solver halley(1), .method tr (the self-test e5e90357bcd35f0d); iir blocks=auto (default)
 # MODULE:      void b1_set(float drive)
 
 # Without --self-test the same netlist plays its provisional configuration; --notes prints the plan, the provisional
@@ -38,10 +39,10 @@
 # A netlist that names its whole configuration has nothing to choose; its key (pinned here: it moves only with the
 # netlist's lines, the Options or kSelfTestVersion) is still printed.
 # RUN: fminus %S/../../../examples/circuits/diodetone.cir --self-test --emit fm -o %t.dt.fm 2>&1 | FileCheck %s --check-prefix=PINNED
-# PINNED: diodetone.cir: note: self-test 874a81249f5a77a4: the netlist names its whole configuration (or has no port): nothing to choose
+# PINNED: diodetone.cir: note: self-test 8ad76f408141b986: the netlist names its whole configuration (or has no port): nothing to choose
 
 # An #included netlist is tested too, and its module generated with the answer.
 # RUN: fminus %S/Inputs/play-pot.fm -I %S/Inputs --self-test --run peak 4.5 2> %t.inc.notes | FileCheck %s --check-prefix=PEAK
 # RUN: FileCheck %s --check-prefix=INCLUDED --input-file %t.inc.notes
-# INCLUDED: clipper-pot.cir: note: the self-test chose .oversample 4, .adaa on, .solver omega(1)
+# INCLUDED: clipper-pot.cir: note: the self-test chose .oversample 4, .adaa off, .solver halley(1)
 # PEAK: 0.{{[0-9]+$}}

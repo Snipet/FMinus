@@ -363,11 +363,23 @@ it to `pypi`.
 - **A list of a program's functions.** The library lists a module's methods (`module.methods`) but not the functions
   outside modules, so `dir(program)` does not show them.
 - **`fminus::math`** (the kernels as C++ functions), and executables (`fminus-build`'s side, `support/Aot.h`).
+- **The web library's host API** (`Options::web`, `webRequests()`, `stopWeb()`: [web.md](web.md)): a program compiled
+  from Python in a build with `FMINUS_WEB` has the default policy, no network, and every request it makes is
+  `HTTP_REFUSED`. The package builds and works unchanged in such a build (not tried here: the two options together
+  were never built).
+- **The web server's host API** (`Options::web.server`, `webRoutes()`, `webPort()`: [web.md](web.md), "The server"):
+  a program compiled from Python in a build with `FMINUS_WEB_SERVER` listens nowhere, and its `http_port` is
+  `HTTP_REFUSED`. (Not tried here either: the package was not built with the server.)
+- **The file interface's host API** (`Options::files`, `files()`: [files.md](files.md)): a program compiled from Python
+  has the default policy, no files, and every name it reads, lists or writes is `FILE_REFUSED`; it cannot be granted a
+  folder from Python. The interface is in every build by default (`FMINUS_FILES`), the `python` preset's among them,
+  and the binding needs nothing of it to build (the wheel's build has it, and the package's tests pass there).
 - **Some wheels.** None for musllinux (Alpine), Intel Macs, 32-bit systems or free-threaded CPython: pip builds the
   source distribution there, LLVM and all.
-- **Its dependencies' licence texts in a wheel.** A wheel holds LLVM and PFFFT, linked in, and was compiled with
-  pybind11's headers, and carries FMinus's `LICENSE` alone. Their licences ask a binary for their notices (README.md,
-  "License"): add the three texts to the package (`license-files` in `pyproject.toml`) before the first upload.
+- **Its dependencies' licence texts in a wheel.** A wheel holds LLVM, PFFFT, yyjson and pugixml, linked in, and was
+  compiled with pybind11's headers, and carries FMinus's `LICENSE` alone. Their licences ask a binary for their
+  notices (README.md, "License"): add the five texts to the package (`license-files` in `pyproject.toml`) before the
+  first upload.
 - **Runs elsewhere.** Built and tested on Linux (x86-64, CPython 3.13, clang 18). The Wheels workflow's Linux x86-64
   build has been run in its container for one CPython, and that wheel tried on Debian 13 too. Its macOS, Windows and
   Linux arm64 jobs build the same sources and have not run, nor has the workflow itself on GitHub.

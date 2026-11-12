@@ -3,6 +3,7 @@
 #include "circuit/Search.h"
 
 #include "circuit/Analysis.h"
+#include "circuit/Laws.h"
 #include "circuit/Linear.h"
 #include "circuit/Mna.h"
 #include "circuit/Reference.h"
@@ -69,7 +70,10 @@ namespace fminus::circuit
 
         std::string solverText(const Solver& s)
         {
-            return std::string(s.guess == Solver::Guess::Omega ? "omega(" : "newton(") + std::to_string(s.steps) + ")";
+            return std::string(s.shape == Solver::Shape::Halley  ? "halley("
+                               : s.guess == Solver::Guess::Omega ? "omega("
+                                                                 : "newton(") +
+                   std::to_string(s.steps) + ")";
         }
 
         std::optional<Solver> readSolver(std::string_view text)
@@ -86,12 +90,18 @@ namespace fminus::circuit
                 s.guess = Solver::Guess::Previous;
                 rest = text.substr(7);
             }
+            else if (text.starts_with("halley("))
+            {
+                // a diode pair's, from omega3
+                s.shape = Solver::Shape::Halley;
+                rest = text.substr(7);
+            }
             else
                 return std::nullopt;
             if (!rest.ends_with(")"))
                 return std::nullopt;
             const std::optional<int> k = readInt(rest.substr(0, rest.size() - 1));
-            const int lo = s.guess == Solver::Guess::Omega ? 0 : 1;
+            const int lo = s.guess == Solver::Guess::Omega && s.shape == Solver::Shape::Newton ? 0 : 1;
             if (!k || *k < lo || *k > 8)
                 return std::nullopt;
             s.steps = *k;
@@ -196,7 +206,7 @@ namespace fminus::circuit
             {
                 const std::optional<Solver> s = readSolver(value);
                 if (!s)
-                    return fail(bad + " (omega(K) or newton(K))");
+                    return fail(bad + " (omega(K), newton(K) or halley(K))");
                 c.solver = *s;
                 break;
             }
@@ -736,7 +746,8 @@ namespace fminus::circuit
             const bool seen = std::any_of(out.begin(), out.end(), [&](const Candidate& x)
                                           { return x.method == Method::Bdf2 && x.oversample == twin.oversample &&
                                                    x.solver.guess == twin.solver.guess &&
-                                                   x.solver.steps == twin.solver.steps; });
+                                                   x.solver.steps == twin.solver.steps &&
+                                                   x.solver.shape == twin.solver.shape; });
             if (!seen)
                 out.push_back(twin);
         }
@@ -882,6 +893,9 @@ namespace fminus::circuit
             double newtonPair = 70;   // a Newton step of a diode pair (2 Is sinh) or of one diode (an exp)
             double newtonAsym = 110;  // and of an asymmetric pair (two exps)
             double newtonTanh = 60;   // a Newton step of an OTA's tanh
+            double halleyPair = 80;   // a Halley step of a diode pair: a Newton step's kernel and divide, and on the
+                                      // chain e - ei, d d and the subtract before the divide
+            double bracket = 4;       // the guess clamped into the bracket (Halley's start from omega3)
             double adaaEa = 57;       // ADAA's tail on an exp-affine law
             double adaaSm = 100;      // and on tanh's (log cosh: an expf and a logf)
             double update = 5;        // the state update
@@ -911,11 +925,14 @@ namespace fminus::circuit
             if (b.port)
             {
                 const bool smooth = b.port->smooth();
-                const double newton = smooth                                  ? kCost.newtonTanh
+                const bool halley = solver.shape == Solver::Shape::Halley && takesHalley(b.port->law);
+                const double newton = halley                              ? kCost.halleyPair
+                                      : smooth                            ? kCost.newtonTanh
                                       : b.port->law == PortDef::Law::Asym ? kCost.newtonAsym
                                                                           : kCost.newtonPair;
                 step += kCost.p + kCost.perState * states +
-                        (solver.guess == Solver::Guess::Omega ? kCost.omega : kCost.previous) + newton * solver.steps +
+                        (solver.guess == Solver::Guess::Omega ? kCost.omega : kCost.previous) +
+                        (halley && solver.guess == Solver::Guess::Omega ? kCost.bracket : 0) + newton * solver.steps +
                         (adaa ? (smooth ? kCost.adaaSm : kCost.adaaEa) : 0) + kCost.update;
             }
             else
@@ -933,13 +950,18 @@ namespace fminus::circuit
         std::vector<Candidate> out;
         if (!c.anyOpen())
             return out;
-        // report §6.2's rows: exp-affine (a diode's), smooth monotone (an OTA's)
+        // report §6.2's rows: exp-affine (a diode's), smooth monotone (an OTA's); an exp-affine row's halley(1), one
+        // Halley step from omega3, where a port takes it (a diode pair's: takesHalley)
         const std::vector<int> row = plan.smooth ? std::vector<int>{1, 2, 4} : std::vector<int>{1, 2, 4, 8};
-        const std::vector<Solver> rowSolvers =
+        const bool halley = std::any_of(plan.blocks.begin(), plan.blocks.end(),
+                                        [](const Block& b) { return b.port && takesHalley(b.port->law); });
+        std::vector<Solver> rowSolvers =
             plan.smooth ? std::vector<Solver>{{Solver::Guess::Previous, 1},
                                               {Solver::Guess::Previous, 2},
                                               {Solver::Guess::Previous, 3}}
                         : std::vector<Solver>{{Solver::Guess::Omega, 1}, {Solver::Guess::Omega, 2}};
+        if (!plan.smooth && halley)
+            rowSolvers.push_back({Solver::Guess::Omega, 1, Solver::Shape::Halley});
         const std::vector<int> factors = c.oversampleOpen ? row : std::vector<int>{c.oversample};
         // ADAA is the trapezoidal rule's: a netlist that names BDF2 tries it off only. An open integrator's
         // candidates are the trapezoidal rule's, with BDF2 twins added where a block rings (ringingTwins)
