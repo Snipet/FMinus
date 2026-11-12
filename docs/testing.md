@@ -129,7 +129,29 @@ TEST_CASE("functions compute what they say", "[codegen]")
   `readServerRoot`, a directory swapped for a link to elsewhere while it reads (Linux, `renameat2`) among them, and
   the wait-free proof of a JIT'd `[[clang::nonblocking]]` handler. Every socket they bind is on 127.0.0.1, and every connection they make is to it; this machine's
   kernel has no IPv6, so the `localhost` and `[::1]` cases take their no-IPv6 branch. Their timeouts make them
-  timing-sensitive: run them when nothing else is building),
+  timing-sensitive: run them when nothing else is building), `[files]` (the file interface, docs/files.md:
+  `FileBuiltinsTest.cpp`, in every build, its builtins' effects (directly and through a called function), the off
+  builds' errors, the status codes against the runtime's values, a name's errors at their columns, `scanFileName` given
+  other builds' ceilings, `files()`, `Options::files` through `fminus::Program`, the reserved names and the JIT's
+  symbols, then programs that list, load, play and write tables through the JIT and as an executable, absolute names,
+  the wait-free proof through a JIT'd `[[clang::nonblocking]]` function, and a `Program`'s destructor; `FilesTest.cpp`
+  (`[runtime][files]`), compiled only with `FMINUS_FILES` and not on Windows, the runtime from C++ before any builtin,
+  every trap built for real: links of every kind and place, hard links, a FIFO (which must not hang), a file that grows
+  while it is read, a folder renamed, the deny-list reached by another spelling, through a link and made afterwards, a
+  directory made at a denied path afterwards and renamed, or exchanged in and out of it while names are walked, a
+  second name a file system answers to (checked on every name here through a test hook, since no FAT or NTFS volume can
+  be mounted), handles read and closed again after their close, writes failed at each step through a test hook (the
+  tests run as root, so permissions cannot fail them) and writers killed half way, whose temporary files the next
+  write sweeps once they are an hour old, two contexts writing one file, a directory swapped for a link while names are
+  walked (Linux, `renameat2`), `FILE_DENIED` from a forked child that gives up root, and the wait-free proof,
+  `HeapCalls` and a child under seccomp's strict mode; and `tests/library/FilesPolicyTest.cpp`, the host's API in
+  C++17. Each test makes its directory beside `bin/` (`files-test/` and `file-builtins-test/`, `t<pid>-<n>` each) and
+  removes it, and the shared parent with it when it is the last (a test that finds the parent gone between making it
+  and making its own makes it again: ctest runs the cases at once, each a process); nothing outside it is read or
+  written, but `/dev/null` and `/proc` named as what must be refused. An executable's temporary object goes where
+  `TMPDIR` says, which the tests point inside their directory too. In a build with `FMINUS_FILES_TYPES`, a case whose
+  files are of a type the build leaves out is skipped (`fixtures()`), and the library test names a type the build
+  has; the ceiling's own refusals are tested in every build),
   `[circuit]` (the circuit compiler: `CircuitTest.cpp` its netlists,
   plans, equations (an OTA's against report §7.2's hand derivation; an inductor's, an E's and a G's stamps by hand, and
   RL and RLC responses as the bilinear map), the DC operating point by hand and its errors, the offset form (a biased
@@ -247,6 +269,9 @@ float gain(float x, float g)
 | `REQUIRES: xml` (or `UNSUPPORTED: xml`) | a build with the XML parser, `FMINUS_XML`, the same way (`xml.fm`, `xml-errors.fm`; `xml-off.fm` runs only without it) |
 | `REQUIRES: web` (or `UNSUPPORTED: web`) | a build with the web library, `FMINUS_WEB`, the same way (`web.fm`, `web-errors.fm`, which make no request; `web-off.fm` runs only without it) |
 | `REQUIRES: web-server` (or `UNSUPPORTED: web-server`) | a build with its server, `FMINUS_WEB_SERVER`, the same way (`web-server.fm`, which listens on 127.0.0.1 and asks itself, and `web-server-errors.fm`; `web-server-off.fm` runs only without it) |
+| `REQUIRES: files` (or `UNSUPPORTED: files`) | a build with the file interface, `FMINUS_FILES`, the same way (`files.fm`, `files-errors.fm`, which read and write only in `%t`; `files-off.fm` runs only without it) |
+| `REQUIRES: files-write`, `files-anywhere` (or `UNSUPPORTED:`) | a build with its writing, `FMINUS_FILES_WRITE`, or its absolute names, `FMINUS_FILES_ANYWHERE` (`files-write.fm`, `files-anywhere.fm`; `files-write-off.fm` and `files-anywhere-off.fm` only without them) |
+| `REQUIRES: files-types` (or `UNSUPPORTED: files-types`) | a build whose `FMINUS_FILES_TYPES` lists the types it can touch, which `%files_types` substitutes (`files-types.fm`; `files.fm`, which reads a `.json`, only without it) |
 | `%if arm64 %{ ... %}` | a RUN line only on arm64, so the rest of the file still runs elsewhere (`simd.fm`, `poly.fm`); `%if system-darwin && arm64 %{ ... %}` for Apple's assembly (`math.fm`) |
 | `%if avx %{ ... %}` | an x86-64 host whose JIT targets AVX, as `fminus-hostinfo --features` lists it (`lit.cfg.py` asks it): x86-64's vector machine code (`math-large.fm`) |
 

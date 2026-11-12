@@ -185,4 +185,28 @@ namespace fminus::ir
         int column = 0;
     };
     std::vector<WebRoute> webRoutes(const llvm::Module& module);
+
+    // The file interface's builtins (Calls.cpp, Files.cpp; a build with FMINUS_FILES). A module that calls file_read,
+    // file_list, file_write or file_append defines the program's file context, this global, a pointer, null until its
+    // host sets it (a null context reaches no file: runtime/Files.h), and every such call passes it to the runtime. A
+    // program that declares something of the name is an error then.
+    inline constexpr const char* kFilesContextSymbol = "fminus_rt_files_context";
+    // What every name of the file interface's begins with (its C functions, runtime/RuntimeSymbols.def, an executable's
+    // start and stop, and the context's global): in every build, a function or a constant of a program cannot be named
+    // so (Functions.cpp, Constants.cpp).
+    inline constexpr std::string_view kFilesPrefixes[] = {"fminus_rt_file_", "fminus_rt_files_"};
+
+    // One call of file_read, file_list, file_write or file_append, as the code generator recorded it in the module's
+    // named metadata "fminus.files", in the order it lowered them (Files.cpp): its operation ("read", "list", "write"
+    // or "append"); its name as a pattern, each %d a "*" and %% a "%" (a listing's own "*" stays one); and where the
+    // call is (its file as the errors name it, its line and column).
+    struct FileUse
+    {
+        std::string operation;
+        std::string pattern;
+        std::string file;
+        int line = 0;
+        int column = 0;
+    };
+    std::vector<FileUse> files(const llvm::Module& module);
 } // namespace fminus::ir

@@ -71,6 +71,12 @@
       "cacheVariables": { "FMINUS_WEB": "ON", "FMINUS_WEB_SERVER": "ON" }
     },
     {
+      "name": "files",
+      "inherits": "dev",
+      "displayName": "files: dev, with the whole file interface (writing, and absolute names where a policy allows them)",
+      "cacheVariables": { "FMINUS_FILES": "ON", "FMINUS_FILES_WRITE": "ON", "FMINUS_FILES_ANYWHERE": "ON" }
+    },
+    {
       "name": "xcode",
       "displayName": "xcode: an Xcode project (multi-config; LLVM from the deps cache)",
       "generator": "Xcode",
@@ -87,6 +93,7 @@
     { "name": "inline", "configurePreset": "inline" },
     { "name": "python", "configurePreset": "python" },
     { "name": "web", "configurePreset": "web" },
+    { "name": "files", "configurePreset": "files" },
     { "name": "xcode", "configurePreset": "xcode", "configuration": "Debug" }
   ],
   "testPresets": [
@@ -117,6 +124,7 @@
     { "name": "inline", "inherits": "base", "configurePreset": "inline" },
     { "name": "python", "inherits": "base", "configurePreset": "python" },
     { "name": "web", "inherits": "base", "configurePreset": "web" },
+    { "name": "files", "inherits": "base", "configurePreset": "files" },
     { "name": "xcode", "inherits": "base", "configurePreset": "xcode", "configuration": "Debug" }
   ],
   "workflowPresets": [
@@ -182,6 +190,14 @@
         { "type": "configure", "name": "web" },
         { "type": "build", "name": "web" },
         { "type": "test", "name": "web" }
+      ]
+    },
+    {
+      "name": "files",
+      "steps": [
+        { "type": "configure", "name": "files" },
+        { "type": "build", "name": "files" },
+        { "type": "test", "name": "files" }
       ]
     }
   ]

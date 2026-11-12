@@ -38,6 +38,7 @@ ctest --preset dev                   # test
 | `inline` | RelWithDebInfo | built inside the tree, -O2 -g | none | stepping into LLVM itself |
 | `python` | RelWithDebInfo | Release + assertions | none | the Python package: `dev` with `FMINUS_BUILD_PYTHON=ON` ([python.md](python.md)) |
 | `web` | RelWithDebInfo | Release + assertions | none | the web library and its server: `dev` with `FMINUS_WEB=ON` and `FMINUS_WEB_SERVER=ON` ([web.md](web.md)) |
+| `files` | RelWithDebInfo | Release + assertions | none | the whole file interface: `dev` with `FMINUS_FILES_WRITE=ON` and `FMINUS_FILES_ANYWHERE=ON` ([files.md](files.md)) |
 | `xcode` | (multi-config) | Release + assertions | none | Xcode's debugger and Instruments |
 
 Each preset builds in `build-<preset>/`, exports `compile_commands.json` (`.clangd` reads `build-dev`'s), and has a
@@ -47,10 +48,12 @@ instrument FMinus's own code only; LLVM stays uninstrumented, which is why the `
 
 ## What programs' builtins a build has
 
-Four options decide which builtins a build's programs may call. The parsers' two are on by default, in every preset;
-pass `-DFMINUS_JSON=OFF` or `-DFMINUS_XML=OFF` to a configure to leave one out. The web library's two are off by
-default, in every preset but `web`; pass `-DFMINUS_WEB=ON` to have the client, and `-DFMINUS_WEB_SERVER=ON` as well for
-its server.
+Seven options decide which builtins a build's programs may call, and two more set ceilings on the files they may
+touch. The parsers' two are on by default, in every preset; pass `-DFMINUS_JSON=OFF` or `-DFMINUS_XML=OFF` to a
+configure to leave one out. The web library's two are off by default, in every preset but `web`; pass
+`-DFMINUS_WEB=ON` to have the client, and `-DFMINUS_WEB_SERVER=ON` as well for its server. The file interface is on by
+default and its writing and absolute names off, in every preset but `files`; pass `-DFMINUS_FILES=OFF` to leave it
+out, and `-DFMINUS_FILES_WRITE=ON` or `-DFMINUS_FILES_ANYWHERE=ON` to have either.
 
 | Option | Default | What it has | Fetches |
 |---|---|---|---|
@@ -58,6 +61,14 @@ its server.
 | `FMINUS_XML` | ON | the XML parser and the `xml_*` builtins (`xml_parse`, `xml_float`, ...: [extending.md](extending.md), recipe 40) | fast_float, pugixml |
 | `FMINUS_WEB` | OFF | the web library, `fminus_web`, and the `http_*` builtins (`http_get`, `http_wait`, ...: [web.md](web.md), [extending.md](extending.md), recipe 41) | libcurl, Mbed TLS (not on Windows), built at configure time |
 | `FMINUS_WEB_SERVER` | OFF | the web library's server, and its builtins (`http_listen`, `http_next`, `http_is`, `http_reply`, ...: [web.md](web.md), "The server", [extending.md](extending.md), recipe 42); needs `FMINUS_WEB` | llhttp; fast_float, if the parsers have not |
+| `FMINUS_FILES` | ON | the file interface, in the runtime, and the `file_*` builtins that read (`file_read`, `file_list`, `file_read_nth`, `file_close` and the reads: [files.md](files.md), [extending.md](extending.md), recipe 43) | nothing |
+| `FMINUS_FILES_WRITE` | OFF | `file_write` and `file_append`, and every line of the file interface that creates, writes, renames or removes a file; needs `FMINUS_FILES` | nothing |
+| `FMINUS_FILES_ANYWHERE` | OFF | absolute names (`"/Users/me/kit/a.f32"`), where a host's policy says `anywhere`; needs `FMINUS_FILES` | nothing |
+
+| Ceiling | Default | What a build without it lacks |
+|---|---|---|
+| `FMINUS_FILES_TYPES` | empty: any | files of any type not in the list (`-DFMINUS_FILES_TYPES='wav;f32;json'`): a name with another extension is a compile error, and a policy that allows one is refused |
+| `FMINUS_FILES_MAX_BYTES` | 1073741824 (1 GiB) | files larger than it (1 to 2147483646), whatever a host's `maxFileBytes` says |
 
 fast_float (`cmake/FMinusFastFloat.cmake`) is fetched when either is on, and is nothing with both off; yyjson
 (`cmake/FMinusJson.cmake`), the JSON parser, when `FMINUS_JSON` is on: with it off, nothing of yyjson is fetched or
@@ -93,6 +104,21 @@ pinned in `cmake/FMinusPins.cmake`) into the deps cache, and `fminus_web` compil
 their own flags and hidden symbols (`cmake/FMinusLlhttp.cmake`); and fast_float, which the server's query numbers
 read, if neither parser fetched it. Nothing is built at configure time for it. With it off, nothing more is fetched,
 and the server's sources compile to nothing.
+
+`FMINUS_FILES` says the same three ways (`FMINUS_HAS_FILES`, `__FMINUS_FILES__`, and `'file_read' needs the file
+interface, which this build of FMinus leaves out (FMINUS_FILES=OFF)` for each `file_` builtin and each status code's
+name, `FILE_REFUSED` and the rest), and so does `FMINUS_FILES_WRITE` (`FMINUS_HAS_FILES_WRITE`,
+`__FMINUS_FILES_WRITE__`, `'file_write' needs file writing, ...`); `FMINUS_FILES_ANYWHERE` has
+`FMINUS_HAS_FILES_ANYWHERE` and the compile error of an absolute name, but no macro. Nothing is fetched or built for any
+of them: the file interface is FMinus's own code in the runtime library, and a build without an option compiles none of
+the file interface's code it gates (the runtime then has no `fminus_rt_file` symbol, or its file sources import no
+`write`, `renameat` or `unlinkat`, or no `realpath`). That is the file interface's code only: with `FMINUS_XML`, the
+runtime library also holds pugixml's own `load_file` and `save_file` (through `fopen`), which no builtin and no function
+the JIT defines reaches. Configure refuses `FMINUS_FILES_WRITE` or `FMINUS_FILES_ANYWHERE` without `FMINUS_FILES`, a
+type that is not 1 to 16 ASCII letters and digits (without the dot), and a byte ceiling that is not a number from 1 to
+2147483646; it stores the types in lower case, without duplicates, as `FMINUS_FILES_TYPES` in `fminus/Config.h`, beside
+`FMINUS_FILES_MAX_BYTES`. A host's policy can narrow every one of these, and raise none ([files.md](files.md), "Building
+it").
 
 ## The dependency cache
 

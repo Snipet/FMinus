@@ -275,7 +275,7 @@ TEST_CASE("a builtin of a build option left out is a known name, and its call na
 
     // A program's macros for them say the same: defined, to 1, where the feature is built in.
     const auto predefined = fminus::frontend::predefinedMacros();
-    REQUIRE(predefined.size() == 4);
+    REQUIRE(predefined.size() == 6);
     CHECK(predefined[0].name == "__FMINUS_JSON__");
     CHECK(predefined[0].defined == (FMINUS_HAS_JSON != 0));
     CHECK(predefined[1].name == "__FMINUS_XML__");
@@ -284,6 +284,10 @@ TEST_CASE("a builtin of a build option left out is a known name, and its call na
     CHECK(predefined[2].defined == (FMINUS_HAS_WEB != 0));
     CHECK(predefined[3].name == "__FMINUS_WEB_SERVER__");
     CHECK(predefined[3].defined == (FMINUS_HAS_WEB_SERVER != 0));
+    CHECK(predefined[4].name == "__FMINUS_FILES__");
+    CHECK(predefined[4].defined == (FMINUS_HAS_FILES != 0));
+    CHECK(predefined[5].name == "__FMINUS_FILES_WRITE__");
+    CHECK(predefined[5].defined == (FMINUS_HAS_FILES_WRITE != 0));
 }
 
 TEST_CASE("a prototype of a runtime builtin declares nothing new, and a definition is refused", "[codegen][strings]")

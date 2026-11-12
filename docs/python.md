@@ -322,5 +322,9 @@ To bind something more of the header: add the method to its class in `Module.cpp
 - **The web server's host API** (`Options::web.server`, `webRoutes()`, `webPort()`: [web.md](web.md), "The server"):
   a program compiled from Python in a build with `FMINUS_WEB_SERVER` listens nowhere, and its `http_port` is
   `HTTP_REFUSED`. (Not tried here either: the package was not built with the server.)
+- **The file interface's host API** (`Options::files`, `files()`: [files.md](files.md)): a program compiled from Python
+  has the default policy, no files, and every name it reads, lists or writes is `FILE_REFUSED`; it cannot be granted a
+  folder from Python. The interface is in every build by default (`FMINUS_FILES`), the `python` preset's among them,
+  and the binding needs nothing of it to build (not tried here: the package was not built since the interface came).
 - **Wheels.** There is no binary distribution: pip builds from the checkout. Built and tested on Linux (x86-64,
   CPython 3.13, clang 18); macOS and Windows build the same sources, and have not been tried.

@@ -3,9 +3,11 @@
 # driver, tools/fminus/, can be the target fminus.)
 #
 # fminus_runtime: every .cpp under src/runtime/, PFFFT's objects (the FFT), yyjson's (the JSON parser) when
-# FMINUS_JSON is on, and pugixml's (the XML parser) when FMINUS_XML is on. It holds the C functions generated code calls, with no LLVM in it. It reads the generated
-# fminus/Config.h (which build options it has), and fast_float's headers when FMINUS_JSON or FMINUS_XML is on. A process that JITs links it (through fminus), and executables from
-# support/Aot.h link libfminus_runtime.a itself.
+# FMINUS_JSON is on, and pugixml's (the XML parser) when FMINUS_XML is on; the file interface's sources (Files*.cpp)
+# compile to nothing without FMINUS_FILES. It holds the C functions generated code calls, with no LLVM in it. It reads
+# the generated fminus/Config.h (which build options it has), and fast_float's headers when FMINUS_JSON or FMINUS_XML
+# is on. A process that JITs links it (through fminus), and executables from support/Aot.h link libfminus_runtime.a
+# itself.
 #
 # fminus_circuit: every .cpp under src/circuit/, the circuit compiler (include/fminus/Circuit.h: SPICE-style netlists to
 # FMinus source). It has no LLVM in it, as the runtime has none, and no grammar (src/circuit/ holds no *.y or *.l: a

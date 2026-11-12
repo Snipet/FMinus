@@ -38,6 +38,11 @@
 //                                           server never listens), and serves page/'s files; --web-token T,
 //                                           --web-host NAME and --web-open as Options::web.server's. An executable
 //                                           reads FMINUS_WEB_LISTEN (and _TOKEN, _HOSTS, _ROOT, _OPEN) instead
+//     fminus kit.fm --run load --files-read kit=./samples --files-write user=./takes --files-types f32,json
+//                                           --run's program may read the folder kit (./samples), and write in user
+//                                           (no files by default: every file_read refused); --files-deny DIR closes a
+//                                           directory, --files-anywhere allows absolute names. An executable reads
+//                                           FMINUS_FILES_READ (and _WRITE, _DENY, _TYPES, _ANYWHERE) instead
 //     fminus diodetone.cir --emit fm        the FMinus module a circuit netlist generates (fminus::circuit,
 //                                           docs/circuits.md); a .cir compiles and runs as that text would
 //     fminus play.fm --run dc 1             play.fm's #include "diodetone.cir" reads the module it generates
@@ -58,6 +63,9 @@
 #include "support/HostTarget.h"
 #if FMINUS_HAS_WEB
 #include "web/Web.h"
+#endif
+#if FMINUS_HAS_FILES
+#include "runtime/Files.h"
 #endif
 
 #include <CLI/CLI.hpp>
@@ -102,6 +110,48 @@ namespace
     {
         return fail(llvm::toString(std::move(error)));
     }
+
+#if FMINUS_HAS_FILES
+    // --files-read's and --files-write's NAME=DIR, or a DIR alone, named after its last segment (./samples/ is
+    // samples), as a policy's folder: false for one that is neither.
+    bool folderOf(const std::string& spec, bool write, fminus::files::Policy::Folder& folder)
+    {
+        folder.write = write;
+        if (const std::size_t equals = spec.find('='); equals != std::string::npos)
+        {
+            folder.name = spec.substr(0, equals);
+            folder.directory = spec.substr(equals + 1);
+            return equals != 0 && equals + 1 != spec.size();
+        }
+        folder.directory = spec;
+        std::string_view path(spec);
+        const auto separator = [](char c) { return c == '/' || llvm::sys::path::is_separator(c); };
+        while (path.size() > 1 && separator(path.back()))
+            path.remove_suffix(1);
+        std::size_t start = path.size();
+        while (start > 0 && !separator(path[start - 1]))
+            --start;
+        folder.name = std::string(path.substr(start));
+        return !spec.empty();
+    }
+
+    // The option a policy's mistake is in, as checkPolicy and Context::create name its field ("folders: 'kit': ...").
+    const char* filesOptionOf(const std::string& error, const fminus::files::Policy& policy)
+    {
+        if (error.starts_with("deny"))
+            return "--files-deny";
+        if (error.starts_with("types"))
+            return "--files-types";
+        if (error.starts_with("anywhere"))
+            return "--files-anywhere";
+        for (const fminus::files::Policy::Folder& folder : policy.folders)
+        {
+            if (error.starts_with("folders: '" + folder.name + "'"))
+                return folder.write ? "--files-write" : "--files-read";
+        }
+        return "--files-read";
+    }
+#endif
 
     // The runtime's pool (runtime/Parallel.cpp), for a program with a parallel region: started while it lives.
     struct RuntimePool
@@ -528,6 +578,11 @@ int main(int argc, char** argv)
     std::vector<std::string> webHosts;
     std::string webRoot;
     bool webOpen = false;
+    std::vector<std::string> filesRead;
+    std::vector<std::string> filesWrite;
+    std::vector<std::string> filesDeny;
+    std::vector<std::string> filesTypes;
+    bool filesAnywhere = false;
     CircuitSettings circuitSettings;
     app.add_option("input", input, "FMinus source file ('-' for stdin)")->required();
     app.add_option("args", runArgs,
@@ -613,6 +668,28 @@ int main(int argc, char** argv)
     app.add_flag("--web-open", webOpen,
                  "With --web-listen: a listen that is not loopback with no --web-token is meant (anyone who can reach "
                  "the port may send it requests)");
+    app.add_option("--files-read", filesRead,
+                   "Let --run's program read the folder NAME, this directory: NAME=DIR, or DIR alone, named after its "
+                   "last segment (kit=./samples; repeat it for more). A program's name begins with the folder's "
+                   "(\"kit/a.f32\"); without any, every file_read and file_list is refused. Needs the file interface "
+                   "(FMINUS_FILES); an executable reads FMINUS_FILES_READ when it runs instead")
+        ->allow_extra_args(false);
+    app.add_option("--files-write", filesWrite,
+                   "As --files-read, a folder the program may also write in, with file_write and file_append "
+                   "(user=./takes). Needs file writing (FMINUS_FILES_WRITE); an executable reads FMINUS_FILES_WRITE "
+                   "when it runs instead")
+        ->allow_extra_args(false);
+    app.add_option("--files-deny", filesDeny,
+                   "With --files-read, --files-write or --files-anywhere: a directory no name may lie in or pass "
+                   "through, however it is reached (repeat it for more)")
+        ->allow_extra_args(false);
+    app.add_option("--files-types", filesTypes,
+                   "With --files-read, --files-write or --files-anywhere: the types of file the program may touch, "
+                   "extensions separated by commas (f32,json); without it, any the build allows")
+        ->allow_extra_args(false);
+    app.add_flag("--files-anywhere", filesAnywhere,
+                 "Let --run's program read absolute names (/home/me/kit/a.f32), wherever --files-deny and "
+                 "--files-types allow. Needs absolute names (FMINUS_FILES_ANYWHERE)");
     app.add_flag("--self-test", circuitSettings.selfTest,
                  "Run the self-test of each circuit netlist (.cir) the program reads and generate it with the answer: "
                  "it chooses the configuration the netlist leaves open (seconds; docs/circuits.md)");
@@ -647,6 +724,54 @@ int main(int argc, char** argv)
                                                 "when it runs");
     if (serverOption != nullptr && webListen.empty())
         return fail(std::string(serverOption) + ": needs --web-listen, where the program may listen");
+    // The file options: the first given, for the messages.
+    const char* filesOption = !filesRead.empty()    ? "--files-read"
+                              : !filesWrite.empty() ? "--files-write"
+                              : filesAnywhere       ? "--files-anywhere"
+                              : !filesDeny.empty()  ? "--files-deny"
+                              : !filesTypes.empty() ? "--files-types"
+                                                    : nullptr;
+    if (filesOption != nullptr && FMINUS_HAS_FILES == 0)
+        return fail(std::string(filesOption)
+                    + ": this build of FMinus leaves out the file interface (FMINUS_FILES=OFF)");
+    if (!filesWrite.empty() && FMINUS_HAS_FILES_WRITE == 0)
+        return fail("--files-write: this build of FMinus leaves out file writing (FMINUS_FILES_WRITE=OFF)");
+    if (filesAnywhere && FMINUS_HAS_FILES_ANYWHERE == 0)
+        return fail("--files-anywhere: this build of FMinus leaves out absolute names (FMINUS_FILES_ANYWHERE=OFF)");
+    if (filesOption != nullptr && run.empty())
+        return fail(std::string(filesOption) + ": for --run's call only; an executable reads FMINUS_FILES_READ (and "
+                                               "FMINUS_FILES_WRITE, FMINUS_FILES_DENY, FMINUS_FILES_TYPES, "
+                                               "FMINUS_FILES_ANYWHERE) when it runs");
+    if (filesOption != nullptr && filesRead.empty() && filesWrite.empty() && !filesAnywhere)
+        return fail(std::string(filesOption) + ": needs --files-read, --files-write or --files-anywhere, which grant "
+                                               "what it narrows");
+#if FMINUS_HAS_FILES
+    fminus::files::Policy filesPolicy;
+    for (const auto& [specs, write] : {std::pair{&filesRead, false}, std::pair{&filesWrite, true}})
+    {
+        for (const std::string& spec : *specs)
+        {
+            fminus::files::Policy::Folder folder;
+            if (!folderOf(spec, write, folder))
+                return fail(std::string(write ? "--files-write" : "--files-read") + ": '" + spec
+                            + "' is NAME=DIR, or a DIR named after its last segment");
+            filesPolicy.folders.push_back(std::move(folder));
+        }
+    }
+    filesPolicy.deny = filesDeny;
+    for (const std::string& list : filesTypes)
+    {
+        for (std::size_t at = 0; at <= list.size();)
+        {
+            const std::size_t comma = std::min(list.find(',', at), list.size());
+            filesPolicy.types.push_back(list.substr(at, comma - at));
+            at = comma + 1;
+        }
+    }
+    filesPolicy.anywhere = filesAnywhere;
+    if (const std::string wrong = fminus::files::checkPolicy(filesPolicy); !wrong.empty())
+        return fail(std::string(filesOptionOf(wrong, filesPolicy)) + ": " + wrong);
+#endif
 #if FMINUS_HAS_WEB
     fminus::web::Policy webPolicy;
     webPolicy.allow = webAllow;
@@ -832,6 +957,7 @@ int main(int argc, char** argv)
         // whether it has a web context to set (ir/Web.cpp).
         const std::vector<fminus::opt::BoundsSite> sites = fminus::opt::boundsSites(*module);
         [[maybe_unused]] const bool usesWeb = module->getNamedGlobal(fminus::ir::kWebContextSymbol) != nullptr;
+        [[maybe_unused]] const bool usesFiles = module->getNamedGlobal(fminus::ir::kFilesContextSymbol) != nullptr;
         // A program with a parallel region runs it on the runtime's pool, started for the call (runtime/Runtime.h).
         const RuntimePool pool(module->getFunction("fminus_rt_parallel_for") != nullptr && threads != 1);
         auto jit = fminus::jit::Jit::create(optimisation);
@@ -856,6 +982,23 @@ int main(int argc, char** argv)
             if (!global)
                 return fail(global.takeError());
             *global->toPtr<void**>() = web->handle();
+        }
+#endif
+#if FMINUS_HAS_FILES
+        // The program's file context, from --files-read, --files-write and --files-anywhere, as a host's Program sets
+        // it (runtime/Files.h): its handle in the module's global. Declared after the JIT, so destroyed before it:
+        // every file and listing the program still holds freed, the folders closed.
+        std::unique_ptr<fminus::files::Context> files;
+        if (usesFiles && (!filesPolicy.folders.empty() || filesPolicy.anywhere))
+        {
+            std::string wrong;
+            files = fminus::files::Context::create(filesPolicy, wrong);
+            if (files == nullptr)
+                return fail(std::string(filesOptionOf(wrong, filesPolicy)) + ": " + wrong);
+            auto global = (*jit)->lookup(fminus::ir::kFilesContextSymbol);
+            if (!global)
+                return fail(global.takeError());
+            *global->toPtr<void**>() = files->handle();
         }
 #endif
         // The thunk that calls it by its signature (jit/Call.h), as Program::call does.

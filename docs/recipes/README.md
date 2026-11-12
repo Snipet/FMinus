@@ -57,7 +57,13 @@ Most of the recipes in [../extending.md](../extending.md) and [../simd.md](../si
 - recipe 42 (the web library's server, behind `FMINUS_WEB_SERVER`, off by default, on llhttp: a program's requests
   taken on the audio thread, wait-free, from a fixed table of slots, its routes literals checked where they are written
   and handed to the library as a table, a reply's text C's `printf` in part, handles that know their kind, and the
-  host's policy over where it may listen).
+  host's policy over where it may listen);
+- recipe 43 (the file interface, part of the runtime behind `FMINUS_FILES`, on by default, with writing
+  (`FMINUS_FILES_WRITE`) and absolute names (`FMINUS_FILES_ANYWHERE`) off and the types and the largest file ceilings
+  of the build: the `file_` builtins, a name a literal checked where it is written, a folder the host maps and a path
+  inside it, every operation through one function that walks a name a directory at a time beneath the folder's handle,
+  no link followed, each directory compared by identity with the denied ones, and every name listed before anything
+  runs).
 
 Their code is in `src/`, and their tests in `tests/`.
 
@@ -67,8 +73,11 @@ One patch is left, for the two recipes that aren't part of the language:
 |---|---|---|
 | `5-runtime-function-and-pass.patch` | 5, 6 | a runtime function (`db_to_gain`, by prototype or builtin); an LLVM pass (`CountFlopsPass`, which records each function's floating-point operations as an attribute) |
 
-It applies, with no whitespace errors, to the compiler as it is, with all of the above. The suite then has 432 tests,
-which pass in the dev and asan presets.
+It applies, with no whitespace errors, to the compiler as it is, with all of the above (made again on 2026-11-12, when
+it had stopped applying: the file interface's lines and the runtime builtins' table had moved its context). It was
+verified then in the release preset, the one that machine built: with it, the default tree's suite had 544 tests, its
+own unit case, `flops.fm` and `denormals.fm` among them, and all of them passed but lit's smoke test of LLVM's own
+`opt`, which that machine cannot run. Before, it passed in the dev and asan presets.
 
 ```bash
 git switch -c try-recipes

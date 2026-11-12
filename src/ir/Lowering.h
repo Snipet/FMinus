@@ -22,6 +22,9 @@
 //                       (webRequests), the program's web context, and the status codes' names (HTTP_REFUSED, ...)
 //     WebServer.cpp     the web server's builtins' own part: a route literal checked and recorded for the host
 //                       (webRoutes), the route table http_listen hands the library, a query's name, a reply's format
+//     Files.cpp         the file interface's builtins' own part: a file's name checked against the rules and the
+//                       build's ceilings and recorded for the host (files), the program's file context, and the
+//                       status codes' names (FILE_REFUSED, ...)
 //     Vectors.cpp       vector literals, swizzles, and ?: lane by lane
 //     Memory.cpp        lvalues (variables, p[i], *p, components) read and written, arrays, &x, pointer arithmetic
 //     Modules.cpp       modules: their layout, fields, methods and calls of them, `this`, copies
@@ -105,7 +108,8 @@ namespace fminus::ir::detail
 
     // A build option a builtin needs (cmake/FMinusOptions.cmake, fminus/Config.h): none, the JSON parser (FMINUS_JSON),
     // the XML parser (FMINUS_XML), the web library (FMINUS_WEB) or its server (FMINUS_WEB_SERVER, which needs
-    // FMINUS_WEB). A builtin of an option this build was configured without is still a known name:
+    // FMINUS_WEB), the file interface (FMINUS_FILES) or its writing (FMINUS_FILES_WRITE, which needs FMINUS_FILES). A
+    // builtin of an option this build was configured without is still a known name:
     // a call of it is an error that names the option (notBuilt), not an undeclared function, and a definition of one
     // is refused, as any builtin's is (Functions.cpp).
     enum class Feature
@@ -115,6 +119,8 @@ namespace fminus::ir::detail
         Xml,
         Web,
         WebServer,
+        Files,
+        FilesWrite,
     };
     bool isBuilt(Feature feature);                                 // whether this build has it (Calls.cpp)
     std::string notBuilt(std::string_view name, Feature feature);   // the error of a call of `name`, which needs it
@@ -149,7 +155,10 @@ namespace fminus::ir::detail
     // route table, passed as a string is; a query's name, a string of letters, digits, '_', '-' and '.'; and a reply's
     // format, a format whose places are C's printf's %d (an int or a bool) and %g or %.Ng (a float or a double),
     // checked as clang checks printf's, after which the call gives a double for each place, passed as their address and
-    // their count.
+    // their count. The file interface's take a file's name, a format whose ints are the call's last arguments, as a
+    // URL's are, checked further (Files.cpp: the rules a name keeps to, and the build's ceilings) and recorded for the
+    // host, passed after the program's file context as a format is; and a listing's pattern, the same with one '*' in
+    // its file part.
     enum class Param
     {
         Int,
@@ -170,6 +179,8 @@ namespace fminus::ir::detail
         Route,
         QueryName,
         ReplyFormat,
+        FileName,
+        FilePattern,
     };
 
     // What a builtin of the runtime gives: an int, a float, a double, a bool (an int from the runtime, 0 or 1), a void*,
@@ -239,6 +250,24 @@ namespace fminus::ir::detail
     // path of "/" and segments of letters, digits, '-', '.', '_', '~' and %d, none empty, "." or "..", with at most 8
     // %d and never two together; each at the offset of the byte it is about. Empty: the route is good.
     std::vector<FormatScan::Error> scanRoute(std::string_view text);
+
+    // A file's name, or with `pattern` a listing's (Files.cpp, scanFileName), against the rules of runtime/Files.h,
+    // each %d checked as a digit it may write: a folder's name and a path inside it, or with `anywhere` (a build with
+    // absolute names) an absolute name in the target's form ("/" on Linux and macOS; with `windows`, a drive letter,
+    // ":" and "/"); segments of UTF-8 without the bytes a file system reads as something else, none beginning with
+    // '.' or a space nor ending with either, none a device name of Windows; an extension the literal writes, of a type
+    // in `types` (FMINUS_FILES_TYPES's form: lower case, separated by ';'; empty: any); at most 16 segments. Each
+    // error at the offset of the byte it is about; empty: the name is good. `writes`: an absolute name is an error (a
+    // file is written only in a folder).
+    struct FileNameRules
+    {
+        bool pattern = false;
+        bool writes = false;
+        bool anywhere = false;           // the build has absolute names (FMINUS_FILES_ANYWHERE)
+        bool windows = false;            // the target's form of an absolute name is Windows'
+        std::string_view types = {};     // the build's types (FMINUS_FILES_TYPES)
+    };
+    std::vector<FormatScan::Error> scanFileName(std::string_view text, const FileNameRules& rules);
 
     // A JSON Pointer (RFC 6901) with a format's places (%d, %%), prepared (Paths.cpp, scanPath): its reference tokens
     // as the runtime's table holds them (runtime/Runtime.h), each its count of pieces and then a pair a piece, (offset,
@@ -656,6 +685,13 @@ namespace fminus::ir::detail
         void recordWebRoute(SourceLocation location, const ast::StringExpr& literal);
         std::vector<llvm::Value*> listenArguments(SourceLocation location);
         void finishWebRoutes();
+
+        // ---- Files.cpp ----------------------------------------------------------------------------------------------
+        bool checkFileName(const ast::StringExpr& literal, SourceLocation where, std::string_view builtin);
+        void recordFileUse(SourceLocation location, std::string_view operation, const ast::StringExpr& literal);
+        llvm::Value* filesContext();
+        const Binding* fileStatus(const std::string& name) const;
+        bool unbuiltFileStatus(SourceLocation location, const std::string& name);
 
         // ---- Paths.cpp ----------------------------------------------------------------------------------------------
         llvm::Value* preparedPath(const ast::StringExpr& literal);

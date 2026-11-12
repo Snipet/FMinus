@@ -16,6 +16,9 @@
 #if FMINUS_HAS_WEB
 #include "web/Web.h"
 #endif
+#if FMINUS_HAS_FILES
+#include "runtime/Files.h"
+#endif
 
 #include <llvm/IR/DataLayout.h>
 #include <llvm/IR/DerivedTypes.h>
@@ -417,6 +420,13 @@ namespace fminus
         std::string linkName;
         std::vector<WebRequest> webRequests;   // every http_get's and http_post's URL (ir/Web.cpp)
         std::vector<WebRoute> webRoutes;       // every http_is's route (ir/WebServer.cpp)
+        std::vector<FileUse> files;            // every file_read's, file_list's, ... name (ir/Files.cpp)
+#if FMINUS_HAS_FILES
+        // The program's file context (runtime/Files.h), whose handle the module's global holds; none when the program
+        // names no file, or the host grants no folder and not anywhere (a null context reaches no file). Destroyed
+        // before the code goes: every file and listing the program still holds freed, the folders' directories closed.
+        std::unique_ptr<files::Context> fileContext;
+#endif
 #if FMINUS_HAS_WEB
         // The program's web context (src/web/Web.h), whose handle the module's global holds; none when the program
         // makes no request and has no server, or the host allows nothing and gives no listen (a null context reaches
@@ -436,6 +446,9 @@ namespace fminus
             if (web != nullptr)
                 web->stop();
             web.reset();
+#endif
+#if FMINUS_HAS_FILES
+            fileContext.reset();
 #endif
             jit.reset();
             if (pool)
@@ -498,6 +511,28 @@ namespace fminus
         if (const std::string wrong = web::checkPolicy(policy); !wrong.empty())
         {
             errors = "fminus::Program: web: " + wrong + "\n";
+            return nullptr;
+        }
+#endif
+#if FMINUS_HAS_FILES
+        // The file policy, read only where there is a file interface, and checked against the build's ceilings here,
+        // whether or not the program names a file: a host learns at once of a policy this build cannot give.
+        files::Policy filePolicy;
+        for (const FilePolicy::Folder& folder : options.files.folders)
+            filePolicy.folders.push_back({folder.name, folder.directory, folder.write, folder.types});
+        filePolicy.deny = options.files.deny;
+        filePolicy.types = options.files.types;
+        filePolicy.anywhere = options.files.anywhere;
+        filePolicy.singleLink = options.files.singleLink;
+        filePolicy.maxFileBytes = options.files.maxFileBytes;
+        filePolicy.maxOpen = options.files.maxOpen;
+        filePolicy.maxHeldBytes = options.files.maxHeldBytes;
+        filePolicy.maxWrittenBytes = options.files.maxWrittenBytes;
+        filePolicy.maxFilesWritten = options.files.maxFilesWritten;
+        filePolicy.maxListed = options.files.maxListed;
+        if (const std::string wrong = files::checkPolicy(filePolicy); !wrong.empty())
+        {
+            errors = "fminus::Program: files: " + wrong + "\n";
             return nullptr;
         }
 #endif
@@ -622,6 +657,12 @@ namespace fminus
             webRoutes.push_back({std::move(route.method), std::move(route.pattern), std::move(route.file), route.line,
                                  route.column});
         [[maybe_unused]] const bool usesWeb = module->getNamedGlobal(ir::kWebContextSymbol) != nullptr;
+        // Every file the program names, and whether it has a file context to set (ir/Files.cpp).
+        std::vector<FileUse> fileUses;
+        for (ir::FileUse& use : ir::files(*module))
+            fileUses.push_back({std::move(use.operation), std::move(use.pattern), std::move(use.file), use.line,
+                                use.column});
+        [[maybe_unused]] const bool usesFiles = module->getNamedGlobal(ir::kFilesContextSymbol) != nullptr;
 
         // A program with a parallel region runs it on the runtime's pool, from now until it is destroyed.
         const bool parallel = module->getFunction("fminus_rt_parallel_for") != nullptr && options.threads != 1;
@@ -709,8 +750,30 @@ namespace fminus
             *global->toPtr<void**>() = impl->web->handle();
         }
 #endif
+#if FMINUS_HAS_FILES
+        // The program's file context, its handle in the module's global, which every call that names a file passes the
+        // runtime. Without a folder and anywhere, none: the global stays null, and every such call is FILE_REFUSED.
+        if (usesFiles && (!filePolicy.folders.empty() || filePolicy.anywhere))
+        {
+            std::string wrong;
+            impl->fileContext = files::Context::create(filePolicy, wrong);
+            if (impl->fileContext == nullptr)
+            {
+                errors = "fminus::Program: files: " + wrong + "\n";
+                return nullptr;
+            }
+            auto global = impl->jit->lookup(ir::kFilesContextSymbol);
+            if (!global)
+            {
+                errors = llvm::toString(global.takeError()) + "\n";
+                return nullptr;
+            }
+            *global->toPtr<void**>() = impl->fileContext->handle();
+        }
+#endif
         impl->webRequests = std::move(webRequests);
         impl->webRoutes = std::move(webRoutes);
+        impl->files = std::move(fileUses);
         if (parallel)
         {
             fminus_rt_parallel_start();
@@ -915,6 +978,11 @@ namespace fminus
     const std::vector<Program::WebRoute>& Program::webRoutes() const
     {
         return impl_->webRoutes;
+    }
+
+    const std::vector<Program::FileUse>& Program::files() const
+    {
+        return impl_->files;
     }
 
     int Program::webPort() const noexcept

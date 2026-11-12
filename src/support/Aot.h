@@ -77,6 +77,10 @@ namespace fminus::aot
     // FMINUS_WEB_ALLOW, FMINUS_WEB_CA_FILE, and with the server FMINUS_WEB_LISTEN, FMINUS_WEB_TOKEN, FMINUS_WEB_HOSTS,
     // FMINUS_WEB_ROOT, FMINUS_WEB_OPEN; none set, no network and no server), exiting with 2 when the library refuses
     // the policy, and destroys it after the call (fminus_web_main_stop), so that no request, and no listening socket,
-    // outlives main.
+    // outlives main. For a module that names a file (file_read, file_list, file_write or file_append: its file context,
+    // ir::kFilesContextSymbol), the same before the web's, from FMINUS_FILES_READ, FMINUS_FILES_WRITE,
+    // FMINUS_FILES_DENY, FMINUS_FILES_TYPES and FMINUS_FILES_ANYWHERE (fminus_rt_files_main_start, runtime/Runtime.h;
+    // neither a folder nor anywhere set, no files), and destroyed after it (fminus_rt_files_main_stop), every file the
+    // program holds freed.
     llvm::Error addEntryPoint(llvm::Module& module, std::optional<std::int64_t> loopBudget = std::nullopt);
 } // namespace fminus::aot

@@ -6,6 +6,26 @@ FMinus give its programs the file system, switchable when FMinus is built, with 
 folders, which types of file? Nothing under `src/`, `include/` or `cmake/` changed for this note. §11 says what was
 read at its source and what was not.*
 
+*Since then (2026-11-12), it is built as section 0 chose, all of it but what §10 leaves: [files.md](../../files.md) is
+its manual and [extending.md](../../extending.md), recipe 43, its walk through the code, and
+[examples/kit/](../../../examples/kit/README.md) the program of §4.1. Those pages say where what was built differs from
+this report, chiefly: a failure is a shared handle, so `file_read` never gives null, not even when memory runs out;
+`file_read_nth` past a listing is `FILE_INVALID`; a listing's pattern must write its extension (its `*` before the
+last `.`), and more files than `maxListed` is `FILE_LIMIT` with no listing at all; a folder's name is 1 to 64 ASCII
+letters, digits, `_` and `-`; the deny-list may name files, holds each denied path open as well as looking it up at
+every open, remembers whatever it ever found at a path, refuses an operation during which what is at one changed, and
+fails closed when a path cannot be looked up; a segment must be its directory's own name for an entry, not an 8.3
+short name (on any file system but Linux's and macOS's own, and always on Windows); a write's temporary file that a
+dead process left is removed by a later write once it is an hour old; a closed handle stays its context's memory, so
+closing it twice is harmless on any allocator; `anywhere` reads and lists but never writes, and an
+absolute name's real path must keep the segment rules; on Linux a file on one of the kernel's own file systems
+(`/proc`, `/sys`, ...) is refused; C1 control characters, `COM0` and `LPT0` are refused too; `maxFileBytes` defaults to
+256 MiB or the build's ceiling, whichever is less, and every limit has a range; a file is looked at before it is opened
+as well as after, so a device is never opened when it is there to be seen; `openat2` is not used, on any kernel; on
+Windows a file is replaced through `NtSetInformationFile`'s rename classes rather than `ReplaceFileW`; and there is no
+macro for absolute names. The macOS and Windows code has never been built (the Windows file was type-checked against
+stub headers only). The report is left as it was written.*
+
 ## 0. Summary
 
 **What I would build:**

@@ -5,15 +5,15 @@
 // calloc and free) and the FFT (fft_create, fft_forward, ...), both on the runtime's functions, and hash and randf
 // (inline: Hash.cpp); then the program's own functions. The runtime's other builtins (bytes_floats, bytes_pcm16, the
 // JSON parser's json_parse, json_float, ..., the XML parser's xml_parse, xml_float, ..., the web library's http_get,
-// http_wait, ..., its server's http_listen, http_next, ..., and those that take string literals: Strings.cpp,
-// Paths.cpp, Web.cpp, WebServer.cpp) come before the rest, as a method of the module does, since their arguments are
-// lowered as their parameters say (a literal is one only there). The runtime's functions are declared
-// with what they do (describeRuntime), so LLVM does not take one for an unknown function that may read and write all
-// memory.
+// http_wait, ..., its server's http_listen, http_next, ..., the file interface's file_read, file_list, ..., and those
+// that take string literals: Strings.cpp, Paths.cpp, Web.cpp, WebServer.cpp, Files.cpp) come before the rest, as a
+// method of the module does, since their arguments are lowered as their parameters say (a literal is one only there).
+// The runtime's functions are declared with what they do (describeRuntime), so LLVM does not take one for an unknown
+// function that may read and write all memory.
 #include "ir/Lowering.h"
 
-#include "fminus/Config.h"   // FMINUS_HAS_JSON, FMINUS_HAS_XML, FMINUS_HAS_WEB, FMINUS_HAS_WEB_SERVER: which build
-                             // options this build has
+#include "fminus/Config.h"   // FMINUS_HAS_JSON, FMINUS_HAS_XML, FMINUS_HAS_WEB, FMINUS_HAS_WEB_SERVER,
+                             // FMINUS_HAS_FILES, FMINUS_HAS_FILES_WRITE: which build options this build has
 
 #include <llvm/IR/Attributes.h>
 #include <llvm/IR/Constants.h>
@@ -206,6 +206,37 @@ namespace fminus::ir::detail
         RuntimeBuiltin{"http_reply_text", "fminus_web_http_reply_text",
                        {Param::Handle, Param::Int, Param::ContentType, Param::ReplyFormat}, 4, RuntimeEffect::WaitFree,
                        Feature::WebServer, Result::Int},
+        // The file interface (runtime/Files.h, Runtime.h's fminus_rt_file_*), in a build with FMINUS_FILES. file_read(
+        // "folder/name.ext", ...) opens the file the name says under the program's file context (Files.cpp) and reads
+        // it whole into memory, and gives a handle, a void*, which says why when it could not (a shared handle: never
+        // null); file_list("folder/*.ext", ...) gives a snapshot of a folder's files whose names fit, in their names'
+        // order, and file_read_nth(list, i) reads the i-th; file_close frees either. Each touches the disk, waits on
+        // it and allocates: never on the audio thread. The name a literal with places for the ints after every other
+        // argument, as a URL's. file_status, file_size, file_data (a const void*: the bytes, until the file is closed)
+        // and file_count read a handle's fields, which never change once it was given: wait-free.
+        RuntimeBuiltin{"file_read", "fminus_rt_file_read", {Param::FileName}, 1, RuntimeEffect::Allocates,
+                       Feature::Files, Result::Pointer},
+        RuntimeBuiltin{"file_status", "fminus_rt_file_status", {Param::Handle}, 1, RuntimeEffect::WaitFree,
+                       Feature::Files, Result::Int},
+        RuntimeBuiltin{"file_size", "fminus_rt_file_size", {Param::Handle}, 1, RuntimeEffect::WaitFree, Feature::Files,
+                       Result::Int},
+        RuntimeBuiltin{"file_data", "fminus_rt_file_data", {Param::Handle}, 1, RuntimeEffect::WaitFree, Feature::Files,
+                       Result::Bytes},
+        RuntimeBuiltin{"file_list", "fminus_rt_file_list", {Param::FilePattern}, 1, RuntimeEffect::Allocates,
+                       Feature::Files, Result::Pointer},
+        RuntimeBuiltin{"file_count", "fminus_rt_file_count", {Param::Handle}, 1, RuntimeEffect::WaitFree,
+                       Feature::Files, Result::Int},
+        RuntimeBuiltin{"file_read_nth", "fminus_rt_file_read_nth", {Param::Handle, Param::Int}, 2,
+                       RuntimeEffect::Allocates, Feature::Files, Result::Pointer},
+        RuntimeBuiltin{"file_close", "fminus_rt_file_close", {Param::Handle}, 1, RuntimeEffect::Allocates,
+                       Feature::Files, Result::Void},
+        // Its writing, in a build with FMINUS_FILES_WRITE too: file_write("folder/name.ext", data, bytes, ...) writes
+        // the bytes as the whole file, replacing it whole or not at all, and file_append adds them at its end; each
+        // gives a status (FILE_OK, or why not).
+        RuntimeBuiltin{"file_write", "fminus_rt_file_write", {Param::FileName, Param::Bytes, Param::Int}, 3,
+                       RuntimeEffect::Allocates, Feature::FilesWrite, Result::Int},
+        RuntimeBuiltin{"file_append", "fminus_rt_file_append", {Param::FileName, Param::Bytes, Param::Int}, 3,
+                       RuntimeEffect::Allocates, Feature::FilesWrite, Result::Int},
     };
 
     std::optional<ast::Type> paramType(Param param)
@@ -237,6 +268,8 @@ namespace fminus::ir::detail
         case Param::Route:
         case Param::QueryName:
         case Param::ReplyFormat:
+        case Param::FileName:
+        case Param::FilePattern:
             break;
         }
         return std::nullopt;
@@ -278,12 +311,21 @@ namespace fminus::ir::detail
             return FMINUS_HAS_WEB != 0;
         case Feature::WebServer:
             return FMINUS_HAS_WEB_SERVER != 0;
+        case Feature::Files:
+            return FMINUS_HAS_FILES != 0;
+        case Feature::FilesWrite:
+            return FMINUS_HAS_FILES_WRITE != 0;
         }
         return false;
     }
 
     std::string notBuilt(std::string_view name, Feature feature)
     {
+        // Writing is part of the file interface: a build without the interface lacks that first.
+        if (feature == Feature::Files || (feature == Feature::FilesWrite && FMINUS_HAS_FILES == 0))
+            return quoted(name) + " needs the file interface, which this build of FMinus leaves out (FMINUS_FILES=OFF)";
+        if (feature == Feature::FilesWrite)
+            return quoted(name) + " needs file writing, which this build of FMinus leaves out (FMINUS_FILES_WRITE=OFF)";
         const char* what = feature == Feature::Json        ? "the JSON parser"
                            : feature == Feature::Xml       ? "the XML parser"
                            : feature == Feature::WebServer ? "the web server"
@@ -328,6 +370,12 @@ namespace fminus::ir::detail
             ServerMatch,   // fminus_web_http_is: reads a route literal, keeps the numbers it took in the request
             ServerQuery,   // fminus_web_http_query_float, _int: reads a name literal and the request
             ServerReply,   // fminus_web_http_reply, _reply_bytes, _reply_text: answers, and hands the request back
+            FileOpen,      // fminus_rt_file_read, fminus_rt_file_list (runtime/Files.h): reads a name literal and its
+                           // ints, gives a new handle (or a shared one that says why)
+            FileNth,       // fminus_rt_file_read_nth: reads a listing, gives a new handle
+            FileRead,      // fminus_rt_file_status, _size, _data, _count: a handle's fields, which never change
+            FileClose,     // fminus_rt_file_close: frees a handle, and a file's bytes, which the program reads
+            FileWrite,     // fminus_rt_file_write, fminus_rt_file_append: reads a name literal, its ints and the bytes
         };
 
         struct RuntimeFacts
@@ -390,6 +438,16 @@ namespace fminus::ir::detail
             RuntimeFacts{"fminus_web_http_reply", RuntimeKind::ServerReply},
             RuntimeFacts{"fminus_web_http_reply_bytes", RuntimeKind::ServerReply},
             RuntimeFacts{"fminus_web_http_reply_text", RuntimeKind::ServerReply},
+            RuntimeFacts{"fminus_rt_file_read", RuntimeKind::FileOpen},
+            RuntimeFacts{"fminus_rt_file_list", RuntimeKind::FileOpen},
+            RuntimeFacts{"fminus_rt_file_read_nth", RuntimeKind::FileNth},
+            RuntimeFacts{"fminus_rt_file_status", RuntimeKind::FileRead},
+            RuntimeFacts{"fminus_rt_file_size", RuntimeKind::FileRead},
+            RuntimeFacts{"fminus_rt_file_data", RuntimeKind::FileRead},
+            RuntimeFacts{"fminus_rt_file_count", RuntimeKind::FileRead},
+            RuntimeFacts{"fminus_rt_file_close", RuntimeKind::FileClose},
+            RuntimeFacts{"fminus_rt_file_write", RuntimeKind::FileWrite},
+            RuntimeFacts{"fminus_rt_file_append", RuntimeKind::FileWrite},
         };
 
         // The heap's allocator family, named after its first function as LangRef asks: LLVM pairs an allocation with
@@ -399,7 +457,7 @@ namespace fminus::ir::detail
         // Gives the runtime's function `function` (kRuntimeFacts) the attributes that are true of its code, so LLVM
         // knows a call of it touches only what it touches: a call of fft_forward then changes no module's fields, and
         // memory from calloc is fresh and zeroed. Each one must stay true of runtime/Runtime.cpp, runtime/Fft.cpp,
-        // runtime/Bytes.cpp, runtime/Json.cpp, runtime/Xml.cpp, web/Web.cpp and web/Server.cpp:
+        // runtime/Bytes.cpp, runtime/Json.cpp, runtime/Xml.cpp, runtime/Files.cpp, web/Web.cpp and web/Server.cpp:
         // an attribute that is not is a miscompile. Every one of them is noexcept (nounwind), and all but
         // fminus_rt_parallel_for and the web library's that wait for another thread (http_wait, http_cancel,
         // http_close and http_accept) come back (willreturn): it runs a region's body, which may loop for ever, as a
@@ -655,6 +713,54 @@ namespace fminus::ir::detail
                     function.addParamAttr(arg, llvm::Attribute::ReadOnly);
                     function.addParamAttr(arg, keepsNone);
                 }
+                break;
+            case RuntimeKind::FileOpen:
+            case RuntimeKind::FileWrite:
+                // Reads the name literal and its ints (and file_write's and file_append's bytes), keeping no pointer to
+                // any of them, and changes the context and what only it reaches: its folders, its quotas, its list of
+                // the handles it gave (a new one linked in beside those the program holds, whose fields the reads read
+                // never change: a handle is opaque, as an FFT plan is), the system allocator's state; it reads and
+                // writes errno (Files.cpp turns a failed call's errno into a status). The handle keeps the context's
+                // pointer, so that one is captured. It frees nothing the program reads: a file's bytes are freed by
+                // file_close alone. Its result may be one of the runtime's shared handles of failures: no noalias.
+                function.setMemoryEffects(llvm::MemoryEffects::inaccessibleOrArgMemOnly()
+                                          | llvm::MemoryEffects::errnoMemOnly(llvm::ModRefInfo::ModRef));
+                for (unsigned arg = 1; arg < function.arg_size(); ++arg)
+                {
+                    if (!function.getArg(arg)->getType()->isPointerTy())
+                        continue;
+                    function.addParamAttr(arg, llvm::Attribute::ReadOnly);
+                    function.addParamAttr(arg, keepsNone);
+                }
+                if (facts->kind == RuntimeKind::FileOpen)
+                    function.addRetAttr(llvm::Attribute::NoUndef);
+                break;
+            case RuntimeKind::FileNth:
+                // Reads the listing, and through it its context (what only the context reaches, as FileOpen's), and
+                // gives a new handle as file_read does: the same memory, with the listing for the literal. It keeps no
+                // pointer to the listing.
+                function.setMemoryEffects(llvm::MemoryEffects::inaccessibleOrArgMemOnly()
+                                          | llvm::MemoryEffects::errnoMemOnly(llvm::ModRefInfo::ModRef));
+                function.addParamAttr(0, keepsNone);
+                function.addRetAttr(llvm::Attribute::NoUndef);
+                break;
+            case RuntimeKind::FileRead:
+                // Plain loads of the handle's first fields, which never change once the handle was given (and a shared
+                // failure's never at all): no lock, no atomic, no allocation, no system call. readonly, so that LLVM
+                // merges two reads of one handle with nothing between that may write (a handle is opaque: what the
+                // context's other functions change, inaccessible memory, is a write between). It keeps no pointer.
+                function.setMemoryEffects(llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref)
+                                          | llvm::MemoryEffects::inaccessibleMemOnly(llvm::ModRefInfo::Ref));
+                function.setDoesNotFreeMemory();
+                function.setNoSync();
+                function.addParamAttr(0, llvm::Attribute::ReadOnly);
+                function.addParamAttr(0, keepsNone);
+                break;
+            case RuntimeKind::FileClose:
+                // Frees the handle, and a file's bytes, which the program reads through file_data's pointer: so a load
+                // of them must not move after the call, which LLVM knows only of a call that may write any memory: its
+                // memory is left as it is (any). It keeps no pointer to the handle.
+                function.addParamAttr(0, keepsNone);
                 break;
             }
         }
@@ -1037,11 +1143,12 @@ namespace fminus::ir::detail
         const std::span<const Param> params(builtin.params.data(), builtin.arity);
         const auto format = std::ranges::find_if(params, [](Param param) {
             return param == Param::Format || param == Param::Path || param == Param::XmlPath || param == Param::Url
-                   || param == Param::ReplyFormat;
+                   || param == Param::ReplyFormat || param == Param::FileName || param == Param::FilePattern;
         });
-        // A URL's ints are the call's last arguments, after every other parameter's, as printf's are; any other
-        // format's follow it.
-        const bool trailing = format != params.end() && *format == Param::Url;
+        // A URL's ints and a file's name's are the call's last arguments, after every other parameter's, as printf's
+        // are; any other format's follow it.
+        const bool trailing = format != params.end()
+                              && (*format == Param::Url || *format == Param::FileName || *format == Param::FilePattern);
         const bool choices = !params.empty() && params.back() == Param::Choices;
         const std::size_t have = call.args.size();
         if (format == params.end() && !choices && have != params.size())
@@ -1055,8 +1162,8 @@ namespace fminus::ir::detail
                                 + ", have " + std::to_string(have));
             return recovery(type);
         }
-        // A format's ints follow it (a URL's end the call): every argument the other parameters leave, or, before
-        // choices, every one up to the first string literal.
+        // A format's ints follow it (a URL's and a file's name's end the call): every argument the other parameters
+        // leave, or, before choices, every one up to the first string literal.
         const std::size_t formatAt = static_cast<std::size_t>(format - params.begin());
         const std::size_t intsAt = trailing ? params.size() : formatAt + 1;
         std::size_t ints = have - params.size();
@@ -1098,7 +1205,8 @@ namespace fminus::ir::detail
             }
             if (param == Param::String || param == Param::Format || param == Param::Path || param == Param::XmlPath
                 || param == Param::Url || param == Param::ContentType || param == Param::Route
-                || param == Param::QueryName || param == Param::ReplyFormat)
+                || param == Param::QueryName || param == Param::ReplyFormat || param == Param::FileName
+                || param == Param::FilePattern)
             {
                 if (!isString(arg))
                 {
@@ -1110,13 +1218,17 @@ namespace fminus::ir::detail
                 if ((param == Param::Url && !checkUrl(literal, begin(arg)))
                     || (param == Param::ContentType && !checkContentType(literal, begin(arg)))
                     || (param == Param::Route && !checkRoute(literal, begin(arg)))
-                    || (param == Param::QueryName && !checkQueryName(literal, begin(arg))))
+                    || (param == Param::QueryName && !checkQueryName(literal, begin(arg)))
+                    || ((param == Param::FileName || param == Param::FilePattern)
+                        && !checkFileName(literal, begin(arg), builtin.name)))
                 {
                     fine = false;
                     continue;
                 }
                 if (param == Param::Url)
                     irArgs.push_back(webContext(location));   // the program's web context, then the URL (Web.cpp)
+                if (param == Param::FileName || param == Param::FilePattern)
+                    irArgs.push_back(filesContext());   // the program's file context, then the name (Files.cpp)
                 if (param == Param::Path || param == Param::XmlPath)
                 {
                     llvm::Value* path =
@@ -1157,6 +1269,8 @@ namespace fminus::ir::detail
                 }
                 if (param == Param::Url)   // what Program::webRequests() lists
                     recordWebRequest(location, builtin.name == "http_post" ? "POST" : "GET", literal);
+                if (param == Param::FileName || param == Param::FilePattern)   // what Program::files() lists
+                    recordFileUse(location, builtin.name.substr(5), literal);   // "read", "list", "write", "append"
                 irArgs.push_back(formatInts(*values));
                 irArgs.push_back(builder_.getInt32(static_cast<std::uint32_t>(values->size())));
                 continue;

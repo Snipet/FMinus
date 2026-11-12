@@ -1,0 +1,138 @@
+// The file interface's builtins (FMINUS_FILES, ON by default): a name is a literal, its ints the call's last
+// arguments, passed to the runtime after the program's file context, a global the host sets; every call recorded in
+// !fminus.files for the host. The runtime's functions are declared with what they do: a handle's reads only read it,
+// so two with nothing between are one; opening and closing have effects, and are kept. Then the driver's --files-read,
+// --files-deny and --files-types, and an executable's FMINUS_FILES_READ, on a folder of raw float tables the test
+// makes; and the driver's mistakes, each named by its option.
+// REQUIRES: files
+// UNSUPPORTED: files-types
+// RUN: fminus %s -O0 | FileCheck %s
+// RUN: fminus %s | FileCheck %s --check-prefix=OPT
+// RUN: rm -rf %t && mkdir -p %t/kit %t/tmp
+// RUN: printf '\000\000\200\077\000\000\000\100\000\000\100\100' > %t/kit/a.f32
+// RUN: printf '\000\000\200\277\000\000\000\077' > %t/kit/b.f32
+// RUN: fminus %s --run main 0 --files-read kit=%t/kit | FileCheck %s --check-prefix=FIRST
+// RUN: fminus %s --run main 1 --files-read %t/kit | FileCheck %s --check-prefix=SECOND
+// RUN: fminus %s --run main 0 | FileCheck %s --check-prefix=REFUSED
+// RUN: fminus %s --run main 0 --files-read other=%t/kit | FileCheck %s --check-prefix=REFUSED
+// RUN: fminus %s --run main 0 --files-read kit=%t/kit --files-types wav,json | FileCheck %s --check-prefix=REFUSED
+// RUN: fminus %s --run main 0 --files-read kit=%t/kit --files-types F32 | FileCheck %s --check-prefix=FIRST
+// RUN: fminus %s --run main 0 --files-read kit=%t/kit --files-deny %t/kit/../kit | FileCheck %s --check-prefix=REFUSED
+// RUN: env TMPDIR=%t/tmp fminus %s --emit exe -o %t/table
+// RUN: env FMINUS_FILES_READ=kit=%t/kit %t/table 1 | FileCheck %s --check-prefix=SECOND
+// RUN: env -u FMINUS_FILES_READ %t/table 0 | FileCheck %s --check-prefix=REFUSED
+// RUN: env FMINUS_FILES_READ=kit=%t/kit FMINUS_FILES_DENY=%t/kit %t/table 0 | FileCheck %s --check-prefix=REFUSED
+// RUN: env FMINUS_FILES_READ=kit=%t/none not %t/table 0 2>&1 | FileCheck %s --check-prefix=EXE
+// RUN: env FMINUS_FILES_READ=kit not %t/table 0 2>&1 | FileCheck %s --check-prefix=EXE-ENTRY
+// RUN: not fminus %s --emit exe -o %t/never --files-read kit=%t/kit 2>&1 | FileCheck %s --check-prefix=EMIT
+// RUN: not fminus %s --run main 0 --files-deny %t/kit 2>&1 | FileCheck %s --check-prefix=GRANT
+// RUN: not fminus %s --run main 0 --files-read kit= 2>&1 | FileCheck %s --check-prefix=SPEC
+// RUN: not fminus %s --run main 0 --files-read '.kit=%t/kit' 2>&1 | FileCheck %s --check-prefix=NAME
+// RUN: not fminus %s --run main 0 --files-read kit=%t/none 2>&1 | FileCheck %s --check-prefix=MISSING
+// RUN: not fminus %s --run main 0 --files-read kit=%t/kit --files-types .f32 2>&1 | FileCheck %s --check-prefix=TYPES
+// RUN: rm -rf %t
+
+#ifndef __FMINUS_FILES__
+#error __FMINUS_FILES__ is not defined
+#endif
+
+// The k-th table of the kit, in its names' order: its sum, plus 100 times how many there are; or why none.
+float table(int k)
+{
+    void* kit = file_list("kit/*.f32");
+    if (file_status(kit) != FILE_OK)
+        return (float)file_status(kit);
+    void* f = file_read_nth(kit, k);
+    float values[8];
+    const int n = bytes_floats(file_data(f), file_size(f), values, 8);
+    float sum = 100.0f * (float)file_count(kit);
+    for (int i = 0; i < n; ++i)
+        sum += values[i];
+    file_close(f);
+    file_close(kit);
+    return sum;
+}
+
+int preset(int bank, int k)
+{
+    void* f = file_read("presets/bank%d/%d.json", bank, k);
+    const int status = file_status(f);
+    file_close(f);
+    return status;
+}
+
+int twice(void* f)
+{
+    const void* a = file_data(f);
+    const void* b = file_data(f);
+    return file_size(f) + file_size(f) + (a == b ? 1 : 0);
+}
+
+int reopen(void* f)
+{
+    const int before = file_size(f);
+    void* g = file_read("kit/a.f32");
+    const int after = file_size(f);
+    file_close(g);
+    file_close(g);
+    return before + after + file_size(f);
+}
+
+float main(float k)
+{
+    return table((int)k);
+}
+
+// CHECK: @fminus_rt_files_context = global ptr null, align 8
+// CHECK: @.str = private unnamed_addr constant [9 x i8] c"kit/*.f32", align 1
+// CHECK: @.str.1 = private unnamed_addr constant [22 x i8] c"presets/bank%d/%d.json", align 1
+// CHECK-LABEL: define float @table(
+// CHECK: %files.context = load ptr, ptr @fminus_rt_files_context, align 8
+// CHECK: call ptr @fminus_rt_file_list(ptr %files.context, ptr @.str, i32 9, ptr null, i32 0)
+// CHECK: call ptr @fminus_rt_file_read_nth(ptr %{{.*}}, i32 %{{.*}})
+// CHECK-LABEL: define i32 @preset(
+// CHECK: %format.ints = alloca [2 x i32], align 4
+// CHECK: %files.context = load ptr, ptr @fminus_rt_files_context, align 8
+// CHECK: call ptr @fminus_rt_file_read(ptr %files.context, ptr @.str.1, i32 22, ptr %format.ints, i32 2)
+// CHECK: declare noundef ptr @fminus_rt_file_list(ptr, ptr readonly captures(none), i32, ptr readonly captures(none), i32) [[OPEN:#[0-9]+]]
+// CHECK: declare i32 @fminus_rt_file_status(ptr readonly captures(none)) [[READ:#[0-9]+]]
+// CHECK: declare noundef ptr @fminus_rt_file_read_nth(ptr captures(none), i32) [[OPEN]]
+// CHECK: declare ptr @fminus_rt_file_data(ptr readonly captures(none)) [[READ]]
+// CHECK: declare i32 @fminus_rt_file_size(ptr readonly captures(none)) [[READ]]
+// CHECK: declare i32 @fminus_rt_file_count(ptr readonly captures(none)) [[READ]]
+// CHECK: declare void @fminus_rt_file_close(ptr captures(none)) [[CLOSE:#[0-9]+]]
+// CHECK: declare noundef ptr @fminus_rt_file_read(ptr, ptr readonly captures(none), i32, ptr readonly captures(none), i32) [[OPEN]]
+// CHECK-DAG: attributes [[OPEN]] = { nounwind willreturn memory(argmem: readwrite, inaccessiblemem: readwrite, errnomem: readwrite) }
+// CHECK-DAG: attributes [[READ]] = { nofree nosync nounwind willreturn memory(argmem: read, inaccessiblemem: read) }
+// CHECK-DAG: attributes [[CLOSE]] = { nounwind willreturn }
+// CHECK: !fminus.files = !{[[LIST:![0-9]+]], [[PRESET:![0-9]+]], [[REOPEN:![0-9]+]]}
+// CHECK-DAG: [[LIST]] = !{!"list", !"kit/*.f32", !"{{.*}}files.fm", i32 {{[0-9]+}}, i32 17}
+// CHECK-DAG: [[PRESET]] = !{!"read", !"presets/bank*/*.json", !"{{.*}}files.fm", i32 {{[0-9]+}}, i32 15}
+// CHECK-DAG: [[REOPEN]] = !{!"read", !"kit/a.f32", !"{{.*}}files.fm", i32 {{[0-9]+}}, i32 15}
+
+// Two reads of one handle with nothing between are one; the data pointers they give are equal.
+// OPT-LABEL: define {{.*}}i32 @twice(
+// OPT-NEXT: entry:
+// OPT-NEXT: %file_size = tail call i32 @fminus_rt_file_size(ptr %f)
+// OPT-NOT: call
+// OPT: ret i32
+// An open between them is a write, as the context's memory goes: the read again; and each close stays.
+// OPT-LABEL: define {{.*}}i32 @reopen(
+// OPT: call i32 @fminus_rt_file_size(ptr %f)
+// OPT: call ptr @fminus_rt_file_read(
+// OPT: call i32 @fminus_rt_file_size(ptr %f)
+// OPT: call void @fminus_rt_file_close(
+// OPT: call void @fminus_rt_file_close(
+// OPT: call i32 @fminus_rt_file_size(ptr %f)
+
+// FIRST: 206
+// SECOND: 199.5
+// REFUSED: -2
+// EXE: FMINUS_FILES_READ: folders: 'kit': '{{.*}}none' cannot be opened:
+// EXE-ENTRY: FMINUS_FILES_READ: 'kit' is not name=directory
+// EMIT: fminus: --files-read: for --run's call only; an executable reads FMINUS_FILES_READ (and FMINUS_FILES_WRITE, FMINUS_FILES_DENY, FMINUS_FILES_TYPES, FMINUS_FILES_ANYWHERE) when it runs
+// GRANT: fminus: --files-deny: needs --files-read, --files-write or --files-anywhere, which grant what it narrows
+// SPEC: fminus: --files-read: 'kit=' is NAME=DIR, or a DIR named after its last segment
+// NAME: fminus: --files-read: folders: '.kit' is not a folder's name: 1 to 64 ASCII letters, digits, '_' and '-', not beginning with '-'
+// MISSING: fminus: --files-read: folders: 'kit': '{{.*}}none' cannot be opened: No such file or directory
+// TYPES: fminus: --files-types: types: '.f32' is not an extension: 1 to 16 ASCII letters and digits, without the dot

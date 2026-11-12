@@ -262,6 +262,57 @@ namespace fminus
             WebServerPolicy server;
         };
 
+        // What a program may reach of the file system (Options::files), in a build with the file interface
+        // (FMINUS_FILES, ON by default; fminus/Config.h's FMINUS_HAS_FILES; docs/research/files/README.md): the policy
+        // the runtime holds the program's file_read, file_list, file_write and file_append to, at every call. The
+        // default reaches nothing: a program has no files until its host maps a folder. In a build without the file
+        // interface it is not read: no program there can name a file.
+        //
+        // A program names a file by a folder and a path inside it ("presets/7.json"), never by where it is on this
+        // machine: the host maps each folder's name to a directory, and the program reaches only what is beneath one.
+        // What it reaches is decided from what was opened, not from a path's text: each folder's directory is opened
+        // once, when the program compiles (a folder renamed later is still the folder); each directory of a name is
+        // opened beneath the one before, never through a symbolic link (or, on Windows, any reparse point); each is
+        // compared by identity (device and inode; volume and file id) with the denied directories, as they were when
+        // the program compiled and as they are now; the file must be a regular file of an allowed type, within
+        // maxFileBytes, and is read whole into memory before the program sees it. The runtime's policy, not a sandbox:
+        // a program's own external functions are not its business (as the web's).
+        //
+        // The build's ceilings, which no policy can raise: a folder with `write` needs FMINUS_FILES_WRITE (OFF by
+        // default), `anywhere` FMINUS_FILES_ANYWHERE (OFF by default); a type must be one FMINUS_FILES_TYPES lists
+        // (when it lists any); maxFileBytes is at most FMINUS_FILES_MAX_BYTES. A policy that asks for more is a compile
+        // error with the runtime's message ("fminus::Program: files: anywhere is set, and this build of FMinus leaves
+        // out absolute names (FMINUS_FILES_ANYWHERE=OFF)"), and so is a folder whose directory cannot be opened.
+        struct FilePolicy
+        {
+            struct Folder
+            {
+                std::string name;                 // what a program's name begins with: "presets" (1 to 64 ASCII
+                                                  // letters, digits, '_' and '-', not beginning with '-'; unique,
+                                                  // letter case aside; matched exactly)
+                std::string directory;            // where that is on this machine (links in it followed, once)
+                bool write = false;               // file_write and file_append may work here (FMINUS_FILES_WRITE)
+                std::vector<std::string> types;   // the extensions allowed here ("wav", any letter case, no dot);
+                                                  // empty: the policy's
+            };
+            std::vector<Folder> folders;      // the allow-list; none, the default: no files
+            std::vector<std::string> deny;    // directories (or files) no name may lie in, pass through or reach,
+                                              // compared by identity; each looked up afresh at every call too
+            std::vector<std::string> types;   // the extensions allowed; empty: any the build allows
+            bool anywhere = false;            // absolute names ("/home/me/kit/a.wav"; "C:/Kit/a.wav" on Windows),
+                                              // read and listed wherever deny and the types allow, never written
+                                              // (FMINUS_FILES_ANYWHERE)
+            bool singleLink = false;          // refuse a file with more than one hard link
+            // A file read or written, at most (1 to FMINUS_FILES_MAX_BYTES): past it, FILE_LIMIT.
+            std::int32_t maxFileBytes = (256 << 20) < FMINUS_FILES_MAX_BYTES ? (256 << 20) : FMINUS_FILES_MAX_BYTES;
+            std::int32_t maxOpen = 64;                              // files and listings held at once (1 to 65536)
+            std::int64_t maxHeldBytes = std::int64_t{1} << 30;      // bytes of files read and not closed (to 2^48)
+            std::int64_t maxWrittenBytes = std::int64_t{1} << 30;   // bytes written in the Program's life (to 2^48)
+            std::int32_t maxFilesWritten = 1024;   // files written in its life: each file_write, and each file_append
+                                                   // that creates its file
+            std::int32_t maxListed = 4096;         // a listing's files (1 to 1048576): more is FILE_LIMIT
+        };
+
         struct Options
         {
             int optimisation = 2;                  // -O0 to -O3: LLVM's pipeline at that level, as fminus -O<n>
@@ -315,6 +366,9 @@ namespace fminus
             // The network the program may reach through http_get and http_post, and where its http_listen may listen
             // (WebPolicy, above): none, and nowhere, by default.
             WebPolicy web;
+            // The files the program may reach through file_read, file_list, file_write and file_append (FilePolicy,
+            // above): none by default.
+            FilePolicy files;
         };
 
         // Compiles `source`. Returns nullptr when it does not compile, with `errors` holding FMinus's messages, one a
@@ -689,6 +743,41 @@ namespace fminus
         // the program has not answered given up (its reply HTTP_CANCELLED), every thread in http_accept woken (null),
         // and http_port HTTP_CANCELLED from then on; an http_listen after it never listens.
         void stopWeb() noexcept;
+
+        // Files (a build with FMINUS_FILES). A program names a file only by a string literal, file_read("kit/%d.f32",
+        // k), whose %d are ints, so the host knows every file it may ask for before it runs anything: the operation,
+        // and the name as a pattern. The compiler has refused what no policy could let through (a name the rules
+        // refuse, a type outside FMINUS_FILES_TYPES, an absolute name in a build without FMINUS_FILES_ANYWHERE), and
+        // the runtime holds each call to Options::files once its %d are filled in.
+        //
+        //   options.files.folders = {{"kit", "/Users/me/Music/Kit", false, {"f32"}}};
+        //   auto program = Program::compile(source, errors, options);
+        //   for (const Program::FileUse& use : program->files())
+        //       show(use.operation, use.pattern, use.line);             // "list kit/*.f32", "read kit/*.f32"
+        //
+        // The program's files are its context's, which the Program holds: made when the program compiles, if it names
+        // a file and the policy grants a folder or anywhere (none otherwise: every call is FILE_REFUSED). Destroying
+        // the Program frees every file and listing the program still holds, closed or not, and closes the folders'
+        // directories; so a program that never closes what it reads leaks nothing past the Program. Every file
+        // builtin that touches the disk is refused in a [[clang::nonblocking]] or [[clang::nonallocating]] function: a
+        // program loads in a function its host calls off the audio thread, and reads the bytes on it (file_data and
+        // file_size are wait-free).
+        //
+        // One call of file_read, file_list, file_write or file_append in the program's source: its operation ("read",
+        // "list", "write" or "append"), its name as a pattern (each %d a "*", each %% a "%"; a listing's own "*" stays
+        // one), and where the call is, in every call site's order of lowering.
+        struct FileUse
+        {
+            std::string operation;
+            std::string pattern;
+            std::string file;   // as errors name it (Options::fileName, or an #include's)
+            int line = 0;
+            int column = 0;
+        };
+
+        // Every call of file_read, file_list, file_write and file_append the program makes, or none (and none in a
+        // build without the file interface, where a program cannot make one).
+        const std::vector<FileUse>& files() const;
 
         // Calling a function by name, for a host that learns a function's signature as it runs rather than when it is
         // built (function<Signature>, above, is for one it knows): a console that calls the function its user names, a

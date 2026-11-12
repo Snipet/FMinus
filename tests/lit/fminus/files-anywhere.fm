@@ -1,0 +1,27 @@
+// Absolute names (FMINUS_FILES_ANYWHERE): one that begins with '/' compiles, and is read only where the host says
+// anywhere (--files-anywhere, an executable's FMINUS_FILES_ANYWHERE=1); refused otherwise. A name written to one is
+// still an error: a file is written only in a folder granted for writing. The name here is of a directory that does
+// not exist, so nothing is opened: tests/unit/FileBuiltinsTest.cpp reads a file the test made by its absolute name.
+// REQUIRES: files-anywhere, files-write
+// RUN: fminus %s --run main | FileCheck %s --check-prefix=REFUSED
+// RUN: fminus %s --run main --files-anywhere | FileCheck %s --check-prefix=MISSING
+// RUN: fminus %s --run main --files-anywhere --files-deny /nonexistent-fminus-lit | FileCheck %s --check-prefix=MISSING
+// RUN: rm -rf %t && mkdir -p %t/tmp
+// RUN: env TMPDIR=%t/tmp fminus %s --emit exe -o %t/reads
+// RUN: env FMINUS_FILES_ANYWHERE=1 %t/reads | FileCheck %s --check-prefix=MISSING
+// RUN: env -u FMINUS_FILES_ANYWHERE %t/reads | FileCheck %s --check-prefix=REFUSED
+// RUN: not fminus %s -D WRITES 2>&1 | FileCheck %s --check-prefix=WRITES
+// RUN: rm -rf %t
+
+float main()
+{
+    void* f = file_read("/nonexistent-fminus-lit/a.f32");
+#ifdef WRITES
+    const int w = file_write("/nonexistent-fminus-lit/a.f32", f, 0);
+#endif
+    return (float)file_status(f);
+}
+
+// REFUSED: -2
+// MISSING: -1
+// WRITES: files-anywhere.fm:20:31: error: a file is written only in a folder its host grants for writing, never by an absolute name

@@ -7,7 +7,7 @@
 // runtime. Keep at least one source in runtime/ (the library cannot be empty).
 #pragma once
 
-#include "fminus/Config.h"   // FMINUS_HAS_JSON, FMINUS_HAS_XML: whether this build has each parser
+#include "fminus/Config.h"   // FMINUS_HAS_JSON, FMINUS_HAS_XML, FMINUS_HAS_FILES: whether this build has each part
 
 #include <cstdint>
 
@@ -280,6 +280,105 @@ extern "C"
                                       std::int32_t count, float* out, std::int32_t cap) noexcept;
     std::int32_t fminus_rt_xml_choice(const void* document, const void* path, const std::int32_t* ints,
                                       std::int32_t count, const void* choices) noexcept;
+#endif
+
+#if FMINUS_HAS_FILES
+    // The file interface (Files.cpp; a build with FMINUS_FILES only), for FMinus's file_* builtins. Files.h is its
+    // host half: the policy, its check, the context, the rules a name must keep to, and the status codes
+    // (FMINUS_FILE_OK 0, _MISSING -1, _REFUSED -2, _DENIED -3, _LIMIT -4, _FAILED -5, _INVALID -6), which a program
+    // knows as FILE_OK, FILE_MISSING and the rest.
+    //
+    // A name, or a listing's pattern, is the `length` bytes at `name` (a format: each %d the next of the `count` ints
+    // at `ints`, %% a percent sign; Format.h), filled in first and then checked in full (Files.h): the compiler's check
+    // of the literal is a courtesy, this one the rule. An extension a %d writes is refused, as is a name of more than
+    // 1024 bytes or 16 segments. The context is the program's (Context::handle); a null one is a program with no files,
+    // whose every operation is FMINUS_FILE_REFUSED.
+    //
+    // A handle is an opaque pointer that knows its kind, a file or a listing: each function reads the kind first, and a
+    // null handle, or one of the other kind, is FMINUS_FILE_INVALID, 0 or null (it is still a program's bug to pass
+    // memory that was never a handle). A file that could not be read, or a listing that could not be made, is a handle
+    // too, whose status says why: one of a few shared ones, which hold nothing and need no closing (closing one is
+    // harmless). So these never give null.
+    //
+    // fminus_rt_file_read opens the file the name says under the context's policy (Files.h: its folder, each
+    // directory beneath it opened in turn without following a link and compared with the denied ones, the file opened
+    // without blocking and examined: a regular file of an allowed type, within maxFileBytes, with one link under
+    // singleLink), reads all of it into memory (read to the limit and one byte more; allocated, never mapped), closes
+    // it, and gives a handle holding its bytes until fminus_rt_file_close. Its status is FMINUS_FILE_OK, or why not:
+    // _MISSING (no such file or directory), _REFUSED (the policy or the rules: Files.h), _DENIED (the system said no),
+    // _LIMIT (the file's size; maxOpen, the files and listings held; maxHeldBytes, the bytes of the files held),
+    // _FAILED (the read failed, or memory ran out).
+    //
+    // fminus_rt_file_list makes a snapshot of the regular files of one folder (or directory, anywhere) whose names fit
+    // the pattern (one "*" in its file part, before its extension), each a name a program could have written, of a
+    // type allowed there, and under singleLink with one link; sorted by the bytes of their names; at most maxListed
+    // (more is FMINUS_FILE_LIMIT, and no listing). It takes one of maxOpen's places until closed. fminus_rt_file_count
+    // is how many it holds; fminus_rt_file_read_nth(list, i) reads the i-th as fminus_rt_file_read reads a name (the
+    // listing's directory as it was written, then the file's name: the same checks, made again now), and an index
+    // outside 0 to count - 1, or a handle that is no listing, is a handle whose status is FMINUS_FILE_INVALID. A file
+    // that has gone since the snapshot is FMINUS_FILE_MISSING; one replaced since is read as it is now.
+    //
+    // fminus_rt_file_close frees a file's bytes (its data's address is no longer valid) or a listing, and gives back
+    // its places. Null, a shared failure's handle, or memory that is no handle: nothing. A closed handle's own memory
+    // stays its context's: until the context makes a later handle in its place, it reads as FMINUS_FILE_INVALID, 0 or
+    // null, and closing it again does nothing, whatever the allocator; afterwards it is that later handle, as a closed
+    // file descriptor's number is. One a program never closes is freed with its context.
+    //
+    // The reads take a handle and read fields that never change until it is closed: none allocates, locks, waits or
+    // makes a system call, so the audio thread may call them (wait-free).
+    //   status  FMINUS_FILE_OK, or why not (above); FMINUS_FILE_INVALID for null or a handle that is neither kind.
+    //   size    a file's bytes (0 for a file not read, a listing, null).
+    //   data    a file's bytes (one 0 byte after the last, not counted), valid until it is closed; null for a file
+    //           not read, a listing, null.
+    //   count   a listing's files (0 for a listing not made, a file, null).
+    //
+    // Opening, reading, listing, writing and closing allocate and wait on the disk for a time no one can bound: not for
+    // the audio thread.
+    void* fminus_rt_file_read(void* context, const char* name, std::int32_t length, const std::int32_t* ints,
+                              std::int32_t count) noexcept;
+    std::int32_t fminus_rt_file_status(const void* handle) noexcept;
+    std::int32_t fminus_rt_file_size(const void* file) noexcept;
+    const void* fminus_rt_file_data(const void* file) noexcept;
+    void* fminus_rt_file_list(void* context, const char* pattern, std::int32_t length, const std::int32_t* ints,
+                              std::int32_t count) noexcept;
+    std::int32_t fminus_rt_file_count(const void* list) noexcept;
+    void* fminus_rt_file_read_nth(void* list, std::int32_t index) noexcept;
+    void fminus_rt_file_close(void* handle) noexcept;
+
+#if FMINUS_HAS_FILES_WRITE
+    // Writing (a build with FMINUS_FILES_WRITE too), in a folder whose `write` the policy set; never an absolute name.
+    // Each returns a status: FMINUS_FILE_OK, or why not, as a read's, and _INVALID for a negative `bytes` (or a null
+    // `data` with bytes to write), _LIMIT for more than maxFileBytes, or past maxWrittenBytes or maxFilesWritten (which
+    // count what is attempted, for the context's life).
+    //
+    // fminus_rt_file_write writes the `bytes` bytes at `data` as the whole file, replacing it whole or not at all: a
+    // temporary file beside it, made exclusively through the directory's handle, written, flushed, renamed over it,
+    // and the directory flushed (Linux, macOS); any failure removes the temporary file and leaves the file as it was,
+    // except that a failure to flush the directory, after the rename, is FMINUS_FILE_FAILED with the new file in place.
+    // The target must be absent or a regular file (a link, a FIFO or a directory there is FMINUS_FILE_REFUSED).
+    //
+    // fminus_rt_file_append adds them at the end of a regular file with one link, or creates it when it is absent; its
+    // size after must be within maxFileBytes. It is not atomic: a failure half way may leave part of the bytes.
+    std::int32_t fminus_rt_file_write(void* context, const char* name, std::int32_t length, const std::int32_t* ints,
+                                      std::int32_t count, const void* data, std::int32_t bytes) noexcept;
+    std::int32_t fminus_rt_file_append(void* context, const char* name, std::int32_t length,
+                                       const std::int32_t* ints, std::int32_t count, const void* data,
+                                       std::int32_t bytes) noexcept;
+#endif
+
+    // An executable's (a C main whose program calls a file builtin): it has no host, so the person who runs it says
+    // what it may reach, in its environment: FMINUS_FILES_READ and FMINUS_FILES_WRITE, folders as "name=directory"
+    // entries separated by newlines or the system's list separator (':', ';' on Windows), read-only and writable
+    // (writable: a build with FMINUS_FILES_WRITE); FMINUS_FILES_DENY, denied directories, separated the same way;
+    // FMINUS_FILES_TYPES, extensions separated by spaces, commas or semicolons; FMINUS_FILES_ANYWHERE, "1" or "0" (or
+    // empty). The policy's limits are its defaults. Makes the context, when a folder or anywhere is given, and stores
+    // its handle in `*context` (null for no files, the default) and returns 0; or, for a mistake, says why on stderr
+    // ("<program>: FMINUS_FILES_READ: ...", the variable the mistake is in) and returns 2. A JIT never defines these
+    // two (RuntimeSymbols.def).
+    std::int32_t fminus_rt_files_main_start(void** context, const char* program) noexcept;
+
+    // Destroys the context fminus_rt_files_main_start made (null: nothing), after the program's main has returned.
+    void fminus_rt_files_main_stop(void* context) noexcept;
 #endif
 
     // The math builtins sinf, cosf, tanf, expf, tanhf and logf (Math.cpp), as the code generator's math modes call

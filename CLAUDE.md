@@ -48,6 +48,17 @@ asks for that specific change, and ask before restructuring anything.
   a `[[clang::nonblocking]]` server builtin calls stays wait-free in the library's code, proved by `HeapCalls` and
   seccomp's strict mode (`tests/unit/WebServerTest.cpp`, and through the JIT in `WebServeTest.cpp`). Its sockets on
   macOS and Windows have never been built.
+- The file interface (the user asked for it, 2026-11-11; `docs/files.md`, the research in `docs/research/files/`) is
+  part of the runtime (`src/runtime/Files*.cpp`; `Files.h` is the host's half) and the compiler (`src/ir/Files.cpp`):
+  `FMINUS_FILES` (ON), `FMINUS_FILES_WRITE` and `FMINUS_FILES_ANYWHERE` (OFF, need `FMINUS_FILES`), and the ceilings
+  `FMINUS_FILES_TYPES` and `FMINUS_FILES_MAX_BYTES`, which no policy raises; the `files` preset turns writing and
+  anywhere on. A build without an option compiles none of the file interface's code it gates. A program reaches only
+  the folders `Program::Options::files` maps (none by default), every operation through one function
+  (`Context::State::reach`), which never trusts a path's text: it walks a segment at a time beneath the folder's
+  handle, follows no link, and compares each directory by identity with the denied ones. No test may touch anything
+  outside a directory it made (beside `bin/`, or lit's `%t`), except `/dev/null` and `/proc` named as what must be
+  refused. Its macOS and Windows code has never been built or run (`FilesWindows.cpp` was only type-checked against
+  stub headers): say so before relying on it.
 - The smoke tests (`tests/smoke/`, `tests/lit/smoke/`) prove the toolchain. Keep them passing until the user retires
   them.
 - `docs/` is the manual (architecture, extending, building, testing; `docs/recipes/` patches). Keep it in step with

@@ -3,7 +3,7 @@
 #include "support/Aot.h"
 
 #include "fminus/Config.h"   // FMINUS_HAS_WEB
-#include "ir/CodeGen.h"       // ir::kWebContextSymbol
+#include "ir/CodeGen.h"       // ir::kWebContextSymbol, ir::kFilesContextSymbol
 #include "opt/BoundsCheck.h"
 #include "opt/LoopBudget.h"
 
@@ -248,6 +248,24 @@ namespace fminus::aot
                 value = builder.CreateFPTrunc(value, floatType);   // exact: it was a float, widened
             values.push_back(value);
         }
+        // A program that names a file gets its file context from the environment, there while main runs
+        // (runtime/Runtime.h, fminus_rt_files_main_start: none, the default, without FMINUS_FILES_READ,
+        // FMINUS_FILES_WRITE or FMINUS_FILES_ANYWHERE), or exits with 2 when the environment asks for what the runtime
+        // refuses. Before the web's, so that a mistake in either stops the program before any request is made.
+        llvm::GlobalVariable* files = module.getNamedGlobal(ir::kFilesContextSymbol);
+        if (files != nullptr)
+        {
+            llvm::Value* name = builder.CreateLoad(pointerType, argv, "program");
+            llvm::Value* started = builder.CreateCall(
+                module.getOrInsertFunction("fminus_rt_files_main_start", intType, pointerType, pointerType),
+                {files, name}, "files");
+            llvm::BasicBlock* refused = llvm::BasicBlock::Create(context, "files.refused", entry);
+            llvm::BasicBlock* allowed = llvm::BasicBlock::Create(context, "files.ready", entry);
+            builder.CreateCondBr(builder.CreateICmpEQ(started, builder.getInt32(0)), allowed, refused);
+            builder.SetInsertPoint(refused);
+            builder.CreateRet(started);
+            builder.SetInsertPoint(allowed);
+        }
         // A program that calls the web library gets its context from the environment, there while main runs (Web.h,
         // fminus_web_main_start), or exits with 2 when the library refuses what the environment allows.
         llvm::GlobalVariable* web = module.getNamedGlobal(ir::kWebContextSymbol);
@@ -321,6 +339,12 @@ namespace fminus::aot
         if (web != nullptr)
             builder.CreateCall(module.getOrInsertFunction("fminus_web_main_stop", builder.getVoidTy(), pointerType),
                                {builder.CreateAlignedLoad(pointerType, web, llvm::Align(8), /*isVolatile=*/true)});
+        if (files != nullptr)   // every file and listing the program still holds freed, the folders closed
+        {
+            llvm::Value* made = builder.CreateAlignedLoad(pointerType, files, llvm::Align(8), /*isVolatile=*/true);
+            builder.CreateCall(
+                module.getOrInsertFunction("fminus_rt_files_main_stop", builder.getVoidTy(), pointerType), {made});
+        }
         if (!sites.empty())
             failedCheck(module, builder, sites, argc, argv);
         if (budget != nullptr)

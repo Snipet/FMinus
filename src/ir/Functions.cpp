@@ -53,6 +53,17 @@ namespace fminus::ir::detail
                                      "generates calls: a program cannot declare it");
             return;
         }
+        // The file interface's names (runtime/RuntimeSymbols.def's fminus_rt_file_*, an executable's start and stop,
+        // the context's global), in every build, for the same reasons: a prototype of one would reach the runtime
+        // past the name's literal, its checks and files(), and fminus_rt_files_main_start would make a context from
+        // the process's environment that its host never gave.
+        if (std::ranges::any_of(kFilesPrefixes,
+                                [&](std::string_view prefix) { return function.name.starts_with(prefix); }))
+        {
+            error(function.location, quoted(function.name) + " is a name of the file interface, which the code FMinus "
+                                     "generates calls: a program cannot declare it");
+            return;
+        }
         if (const RuntimeBuiltin* runtime = findRuntimeBuiltin(function.name))
         {
             // A prototype with the builtin's own types, `int bytes_floats(const void* data, int bytes, float* out,
@@ -327,8 +338,8 @@ namespace fminus::ir::detail
     // What `name` names where it is used, as C++ looks a name up in a method: a block's variable or enumeration
     // constant; else, in a method, nothing if the module has a field or a method of the name (this's, which
     // lvalue() and the calls find); else the file's enumeration constant or constant (Constants.cpp); else, in a build
-    // with the web library, a status code's name (HTTP_REFUSED: Web.cpp). Captures nothing; nullptr for a name none of
-    // them has.
+    // with the web library, a status code's name (HTTP_REFUSED: Web.cpp), and in one with the file interface, one of
+    // its (FILE_REFUSED: Files.cpp). Captures nothing; nullptr for a name none of them has.
     const Lowering::Binding* Lowering::named(const std::string& name) const
     {
         if (const Binding* binding = lookup(name))
@@ -339,6 +350,10 @@ namespace fminus::ir::detail
                 || std::ranges::find(module->methods, name) != module->methods.end()))
             return nullptr;
         const auto found = fileScope_.find(name);
-        return found != fileScope_.end() ? &found->second : webStatus(name);
+        if (found != fileScope_.end())
+            return &found->second;
+        if (const Binding* status = webStatus(name))
+            return status;
+        return fileStatus(name);
     }
 } // namespace fminus::ir::detail

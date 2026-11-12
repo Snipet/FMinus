@@ -26,9 +26,10 @@ XML: C's string literals as builtins' arguments, formats with places for ints, c
 decoded into floats, a builtin that blocks, and the build options a builtin can need; recipe 39 is the JSON parser
 on it, a document read by paths the compiler prepares, each number correctly rounded; recipe 40 is the XML parser,
 made the same way; recipe 41 is the web library, an HTTP(S) client a program reaches only under its host's policy;
-and recipe 42 is its server, a program's requests taken on the audio thread, wait-free, its routes literals the host
-lists before anything runs. Then the pitfalls those recipes
-ran into, and design notes for what comes next. [simd.md](simd.md) has recipes 7 to 9, for vectors.
+recipe 42 is its server, a program's requests taken on the audio thread, wait-free, its routes literals the host
+lists before anything runs; and recipe 43 is the file interface, files a program reaches only through the folders its
+host maps, each directory opened beneath the last and compared by identity with the denied ones. Then the pitfalls
+those recipes ran into, and design notes for what comes next. [simd.md](simd.md) has recipes 7 to 9, for vectors.
 
 Recipes 1 to 4 are in the compiler now (`tanhf` and `%`; `bool` and its operators; `if`, `while` and `for`), and so are
 simd.md's 7 to 9, recipe 10 (`int`, `void` and pointers), recipe 11 (the heap), recipe 12 (arrays and modules), recipe
@@ -40,11 +41,11 @@ sizes of constant expressions), recipe 29 (the loop budget), recipe 30 (bounds c
 recipe 32 (one error a mistake, enumerated types, `-Wswitch`), recipe 33 (`double`), recipe 34 (2-D arrays), recipe 35
 (field attributes), recipe 36 (calls by name), recipe 37 (code ranges, for a profiler), recipe 38 (string literals as
 builtins' arguments, bytes to numbers, and the build options of builtins), recipe 39 (the JSON parser, and paths
-the compiler prepares), recipe 40 (the XML parser), recipe 41 (the web library) and recipe 42 (its server), so their
-sections describe how the code you have got there: read a section beside the files it names. Recipes 5 and 6, a
-runtime function and a pass, are not part of the language; they live in [recipes/](recipes/) as a patch, so you can
-apply them to see them work. None of these are sketches: each was applied to this repository, built with `-Werror`, and
-tested in the dev and asan presets, every test passing (recipes 38 to 42 in the release preset only: each says where).
+the compiler prepares), recipe 40 (the XML parser), recipe 41 (the web library), recipe 42 (its server) and recipe 43
+(the file interface), so their sections describe how the code you have got there: read a section beside the files it
+names. Recipes 5 and 6, a runtime function and a pass, are not part of the language; they live in [recipes/](recipes/)
+as a patch, so you can apply them to see them work. None of these are sketches: each was applied to this repository, built with `-Werror`, and
+tested in the dev and asan presets, every test passing (recipes 38 to 43 in the release preset only: each says where).
 [architecture.md](architecture.md) describes the stages they touch.
 
 FMinus follows C. When a recipe has a semantic choice to make, it makes C's: conversions, short-circuiting, which
@@ -85,7 +86,8 @@ on the heap and a kernel that can't allocate (recipe 11), `examples/saturator/` 
 through a buffer, against plain loops (recipes 9 and 10), `examples/convolver/` and `examples/delay/echo.fm` for loops
 over a module's fields (recipe 17), `examples/ensemble/` for `parallel for` and `parallel { }` (recipe 22), and
 `examples/wavetable/` for a document a host hands a program, read by path (recipes 39 and 40), `examples/fetch/` for
-a request a program makes (recipe 41), and `examples/remote/` for the requests a program answers (recipe 42).
+a request a program makes (recipe 41), `examples/remote/` for the requests a program answers (recipe 42), and
+`examples/kit/` for the files a program reads and writes (recipe 43).
 
 ## Ground rules
 
@@ -8173,6 +8175,277 @@ the type from a table of thirteen extensions, and limits (256 files, 16 MiB, 409
   options in a build without the server.
 - `examples/remote/`: `--check` listens on 127.0.0.1, drives the program with the library's client, and checks that a
   gain and a note sent over HTTP are heard in the output, and that the default policy listens nowhere.
+
+## Recipe 43: the file interface, files a program reaches only through its host's folders
+
+*In the compiler. Code: the runtime's part, `src/runtime/Files.h` (the host's half: `fminus::files::Policy`,
+`checkPolicy`, `Context`, the status codes' values), `Files.cpp` (names, policies, contexts, quotas, handles, `reach`,
+the C functions, an executable's start and stop), `FilesSystem.h`, `FilesPosix.cpp` and `FilesWindows.cpp` (the
+operating system's part), and their lines in `Runtime.h` and `RuntimeSymbols.def`; the `file_` entries of
+`kRuntimeBuiltins`, `Feature::Files`, `Feature::FilesWrite`, `Param::FileName`, `Param::FilePattern`, the `File*` kinds of
+`kRuntimeFacts` and their lines in `lowerRuntimeBuiltin` (`src/ir/Lowering.h`, `Calls.cpp`); `src/ir/Files.cpp` (a
+name's check, `scanFileName`, its record, the context global, the status codes' names) and its hooks in `named`
+(`Functions.cpp`), the reserved names (`Functions.cpp`, `Constants.cpp`, `ir::kFilesPrefixes` in `CodeGen.h`) and the
+undeclared-identifier errors (`Memory.cpp`, `Constants.cpp`); `__FMINUS_FILES__` and `__FMINUS_FILES_WRITE__`
+(`Preprocessor.cpp`); `Program::FilePolicy`, `Options::files`, `FileUse` and `files()` (`include/fminus/FMinus.h`,
+`src/api/FMinus.cpp`); an executable's context (`support/Aot.cpp`); the driver's `--files-read`, `--files-write`,
+`--files-deny`, `--files-types` and `--files-anywhere` (`tools/fminus/main.cpp`); `FMINUS_FILES`, `FMINUS_FILES_WRITE`,
+`FMINUS_FILES_ANYWHERE`, `FMINUS_FILES_TYPES` and `FMINUS_FILES_MAX_BYTES` (`cmake/FMinusOptions.cmake`,
+`cmake/templates/Config.h.in`, the root `CMakeLists.txt`'s feature loop) and the `files` preset.
+Tests: `tests/unit/FilesTest.cpp` (`[runtime][files]`: the runtime from C++, before any builtin),
+`tests/unit/FileBuiltinsTest.cpp` (the builtins, the host and programs, in every build), `tests/library/FilesPolicyTest.cpp`
+(the host API in C++17, in every build), `tests/lit/fminus/files.fm`, `files-errors.fm`, `files-write.fm`,
+`files-anywhere.fm`, `files-off.fm`, `files-write-off.fm`, `files-anywhere-off.fm` and `files-types.fm` (lit's new
+features `files`, `files-write`, `files-anywhere` and `files-types`); the example, `examples/kit/`. Built with `-Werror`
+and tested in the `release` preset on Linux x86-64 only, in four trees: the default (reading), one with
+`FMINUS_FILES_WRITE` and `FMINUS_FILES_ANYWHERE`, one with `FMINUS_FILES=OFF` and one with the web library and its
+server, every test passing but the one this machine cannot run (the smoke test of LLVM's own `opt`, as for recipes 38
+to 42); the runtime and its test under GCC's AddressSanitizer with UndefinedBehaviorSanitizer and under
+ThreadSanitizer, outside the presets, with a race harness and a fuzzer of names; not yet in `dev`, `files` or `asan`,
+nor on macOS or Windows, whose code was written and never compiled for them (`FilesWindows.cpp` was type-checked on
+Linux against stub headers written from the SDK's declarations, which found a `HANDLE` passed where an integer was
+taken: a default Windows build would not have compiled). [files.md](files.md) is its manual, and
+[research/files/README.md](research/files/README.md) the report it builds.*
+
+The fourth family of recipe 38's kind, and the first that is part of every build. A program loads what it plays from a
+folder its host maps, off the audio thread, and plays it from memory:
+
+```c
+int load()                                               // off the audio thread
+{
+    void* kit = file_list("kit/*.f32");                  // the folder "kit" is wherever the host says
+    const int status = file_status(kit);
+    for (int i = 0; i < file_count(kit) && i < 8; ++i)
+    {
+        void* f = file_read_nth(kit, i);                 // the whole file, in memory: refused in a nonblocking function
+        length[i] = bytes_floats(file_data(f), file_size(f), table[i], 4096);
+        file_close(f);
+    }
+    file_close(kit);
+    return status;
+}
+```
+
+It is the report's recommendation as its section 0 chose it: a folder the host maps and a path inside it, never a
+path of the machine; no files by default; reading in the default build, writing and absolute names off; every link
+refused; types by extension, an allow-list; listings in the first version; the code in the runtime library; and no
+decoder (files give bytes).
+
+### The runtime: a part of it, behind three switches
+
+Nothing here needs a dependency, so it is not a library of its own as the web's is: it is more of `fminus_runtime`
+(`src/runtime/Files*.cpp`, globbed), which an executable links already. It was built first, and tested from C++ before
+any builtin existed (`FilesTest.cpp`), as recipe 42's engine was.
+
+**The switches compile code out**, not merely turn it off. `FMINUS_FILES` guards every file of it (`#if
+FMINUS_HAS_FILES` around the whole), so a build without it has no `fminus_rt_file` symbol and imports no `openat`;
+`FMINUS_FILES_WRITE` guards everything that creates, writes or renames (so a reading build imports no `write`,
+`renameat`, `unlinkat` or `fsync`: no bug can make it write), and `FMINUS_FILES_ANYWHERE` the `realpath` that absolute
+names need. The other two options are not switches but ceilings, values in `fminus/Config.h` (`FMINUS_FILES_TYPES`, a
+string, and `FMINUS_FILES_MAX_BYTES`), which configure checks (`cmake/FMinusOptions.cmake`: each type 1 to 16 letters
+and digits, lowered and deduplicated; the bytes 1 to 2147483646) and both the runtime and the compiler read. The
+parsers' build-time limits (`FMINUS_JSON_MAX_BYTES`) were the model.
+
+**The host's half is C++, the program's C.** `Files.h` has `Policy` (the report's §6 struct), `checkPolicy` (every
+refusal a message naming the field: `folders: 'kit': write is set, and this build of FMinus leaves out writing files
+(FMINUS_FILES_WRITE=OFF)`) and `Context`, which opens each folder's directory once and holds it, holds each denied path
+that exists, and keeps the quotas and the handles under one mutex. `Runtime.h` has the ten C functions generated code
+calls, with the context's handle first and the name's literal, length, ints and count after it, as the web library's
+`get` takes its URL.
+
+**Handles know their kind**, as recipe 42 made the web library's: a 32-bit word first, `FMFf` for a file and `FMFl`
+for a listing, which every function reads before anything else. After it come the three fields the wait-free reads
+load (its status, its size or count, its data), which never change once the handle is returned until it is closed. A
+failure is not allocated: one shared handle per kind and status (`failures[2][6]`, `constinit`), never counted against
+`maxOpen`, which `file_close` recognises by its having no owner. So `file_read` never returns null, even when memory
+runs out. A closed handle's memory is not freed but kept by its context for the next handle (`spare`), its kind a third
+word, `FMFx`: a second close, or a read after the close, finds that word on any allocator, where freed memory's old kind
+word could still pass for a handle's (a reviewer's double close: harmless with glibc, whose free list overwrites the
+word, and a double free in the context's list of handles with an allocator that does not).
+
+### One way in: `reach`
+
+The report's lesson from Node's and Deno's advisories was that a check left off one operation is the bug, again and
+again. So every operation goes through one function, `Context::State::reach`, which takes the name's text with its
+`%d`s filled in and returns the directory its file is in, opened, or why not:
+
+1. **The name, in full** (`parseName`): the report's grammar with strict UTF-8, 1024 bytes and 16 segments, the extension
+   the literal wrote. The compiler checked the literal; the runtime trusts none of it.
+2. **The folder** by its exact name, or an absolute name only with `FMINUS_HAS_FILES_ANYWHERE`, the policy's `anywhere`
+   and an operation that reads. A write needs the folder's `write`.
+3. **The type**: the folder's list, else the policy's, and always the build's.
+4. **The deny-list's identities now**: the pinned ones, what is at each path (`os::lookUp`), and everything a look has
+   ever found at one (`seen`, at most 4096, past which everything is refused). A path that cannot be looked up, for a
+   reason other than absence, refuses everything: it fails closed.
+5. **The folder and its ancestors** compared with them (`os::ancestors`: `..` opened beneath each directory to the
+   root, only when there is a deny-list).
+6. **The walk**, one segment a call (`os::openDirectory`), each opened beneath the last without following a link and
+   compared with the denied identities; then the deny-list's paths looked at again (`settled`), and any change since 4
+   refuses the operation. `read` and `list` look once more after their own call.
+
+A deny path with nothing at it when the context is made has no identity to pin. The first version looked it up at each
+open and forgot what it found, and a reviewer read a denied directory made there afterwards, by renaming it (every
+time) and by exchanging it with a public one while names were walked (some 9,000 times in 30 seconds, through the deny
+path's own name too). Remembering what was found, and refusing an operation during which what is at a deny path
+changed, closes both; what is left, a directory made there and moved away before any operation looked, takes someone
+who can write in the folder. A second name for an entry is the other trap the walk meets: FAT and NTFS also find an
+entry by its 8.3 short name (`SSH~1` for `.ssh`), so on any file system but the native ones of Linux and macOS each
+segment must be one its directory lists (`os::nameListed`), and on Windows the opened object's long name must be the
+segment (`GetFinalPathNameByHandleW`).
+
+Then the operation's own call of the system's layer: `os::readFile` (look with `fstatat` before opening, so only a
+regular file is ever opened; open without blocking or following; look again with `fstat`, and compare; read to the limit
+plus one byte), `os::listDirectory`, `os::replaceFile` (after the context's first replacement in a directory has removed
+the temporary files dead writes left there, an hour old: `os::sweepTemporaries`) or `os::appendFile`. `FilesSystem.h` is
+the whole of what differs between systems, a dozen functions over an `os::Dir` (a descriptor, or a `HANDLE`) and an
+`os::Identity`: `FilesPosix.cpp` for Linux and macOS (`O_PATH` on Linux, `O_NOFOLLOW_ANY` on macOS), `FilesWindows.cpp`
+on `NtCreateFile` with `RootDirectory` and `OBJ_DONT_REPARSE`. Each segment the layer is given is checked once more
+(`plain`: never empty, `.`, `..`, nor holding a separator or a NUL), the last word before the kernel's: cap-std's
+critical bug of 2026 was a walk that handed the kernel a final segment with a trailing slash.
+
+*Why not `openat2` with `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS`*, which does the walk in one call on Linux 5.6 and later:
+the walk must stop at each directory anyway, to compare it with the denied ones, and a container's seccomp profile may
+refuse the call (Docker's did, before 20.10). One code path on every kernel is the one that gets tested.
+
+### The builtins' table rows
+
+| Builtin | Parameters | Result | Effect |
+|---|---|---|---|
+| `file_read` | `FileName` | `Pointer` | allocates |
+| `file_list` | `FilePattern` | `Pointer` | allocates |
+| `file_read_nth` | `Handle`, `Int` | `Pointer` | allocates |
+| `file_close` | `Handle` | `Void` | allocates |
+| `file_status`, `file_size`, `file_count` | `Handle` | `Int` | wait-free |
+| `file_data` | `Handle` | `Bytes`, a `const void*` | wait-free |
+| `file_write`, `file_append` | `FileName`, `Bytes`, `Int` | `Int` | allocates |
+
+The reads name `Feature::Files`, the two writes `Feature::FilesWrite`, so `isBuilt` asks `FMINUS_HAS_FILES` or
+`FMINUS_HAS_FILES_WRITE`, and `notBuilt` says which option is missing: in a build with no interface at all, even
+`file_write` gets the interface's message (`'file_write' needs the file interface, ...`), since that is what a program
+lacks first. `Effects.cpp` needs nothing: no builtin here blocks in the effects' sense (a disk's wait is the allocating
+class's, refused in both kinds of function, as `http_get` is), and the reads are wait-free.
+
+**`Param::FileName` and `Param::FilePattern`** are recipe 41's `Param::Url` again, with a check of their own: a format
+whose ints come last (`trailing`), so `file_write("takes/take%d.f32", data, bytes, n)` lowers to
+`fminus_rt_file_write(context, text, length, ints, count, data, bytes)`, the ints before the other parameters in the C
+call though after them in the builtin's. Before the text, the program's file context, loaded from the module's global
+(`filesContext`).
+
+### The name literal: its check and its record
+
+`scanFileName` (`src/ir/Files.cpp`) reads a literal as the runtime will read the name, each `%d` as the one digit it
+writes at least (so a name's length is counted at its least, and `COM%d` is a device name), and reports each mistake at
+its byte: the folder's characters, an empty segment, a control character or one of `\ : * ? " < > |` (C1 controls
+among them), bad UTF-8, a leading `.` or space and a trailing `.` or space, a device name of Windows in any case and
+spelling, an extension of 1 to 16 letters and digits that the literal writes, 255 bytes a segment, 16 segments, 1024
+bytes, and for a listing one `*`, in the file part, before the extension. Each is an error where the runtime would
+refuse anyway: what the compiler can see, it says where it is written.
+
+**The build's ceilings are its arguments** (`FileNameRules`): `FMINUS_FILES_TYPES`, `FMINUS_FILES_ANYWHERE`, whether
+the target is Windows (from the triple), and whether the call writes. So a type the build cannot touch, an absolute
+name in a build without them, the other system's form of one, and an absolute name written are compile errors, and a
+unit test can give `scanFileName` the rules of any build, Windows's among them, without building one.
+
+**The record** is recipe 41's: `recordFileUse` adds the operation (the builtin's name after `file_`), the pattern (each
+`%d` a `*`, each `%%` a `%`), the file, line and column to the named metadata `fminus.files`, which `ir::files` reads
+back and `Program::files()` returns, before any of the program's code has run.
+
+**The status codes** are recipe 41's too: `named()` falls back to `fileStatus`, after `webStatus`, so `FILE_REFUSED`
+folds and labels a `case`, and a program's own declaration hides it; in a build without the interface,
+`unbuiltFileStatus` makes the name the option's error.
+
+### What the runtime's functions touch, told to LLVM
+
+| Kind | Functions | Attributes |
+|---|---|---|
+| `FileOpen` | `read`, `list` | `nounwind`, `willreturn`; `memory(argmem: readwrite, inaccessiblemem: readwrite, errnomem: readwrite)`; the name and the ints `readonly captures(none)` (the context's pointer is captured: the handle keeps it); `noundef` result, not `noalias` (a failure is a shared handle) |
+| `FileNth` | `read_nth` | the same, the listing `captures(none)` |
+| `FileWrite` | `write`, `append` | as `FileOpen`, and the bytes `readonly captures(none)`; no result attribute |
+| `FileRead` | `status`, `size`, `data`, `count` | `nounwind`, `willreturn`, `nofree`, `nosync`, `memory(argmem: read, inaccessiblemem: read)`, the handle `readonly captures(none)` |
+| `FileClose` | `close` | `nounwind`, `willreturn`, the handle `captures(none)`; memory left as it is: any |
+
+The reads are the opposite of recipe 41's. A web request's fields change under the program, so its reads must not be
+merged; a file handle's never change once it is returned, so they are `readonly` and `nosync`, and LLVM merges two
+`file_size` calls of one handle with nothing between (`files.fm` checks it at `-O2`). A `file_read` between them is a
+write to the context's inaccessible memory, and the read after it is made again, which is right: nothing promises the
+two handles are different. `file_close` is recipe 42's reply again: it frees a file's bytes, which the program reads
+through `file_data`'s pointer, and only a call that may write any memory keeps a load of them from moving past it.
+
+### The host's side
+
+`Program::FilePolicy` (`FMinus.h`, C++17, in every build) is `Policy` as the host writes it. `compile()` copies it into
+`files::Policy` only under `FMINUS_HAS_FILES` and checks it with `checkPolicy` on every compile, whether or not the
+program names a file (`fminus::Program: files: <message>`), so a host learns of a policy its build cannot honour at
+once. The context is made only when the program has the context global and the policy grants a folder or `anywhere`,
+which is when the folders' directories are opened (a missing one fails `compile()`); otherwise the global stays null,
+and the runtime refuses every name. The `Impl` destructor resets the context before the JIT goes: every handle the
+program still holds is freed and the folders are closed. No function or constant of a program may be named
+`fminus_rt_file_*` or `fminus_rt_files_*` (`kFilesPrefixes`), in every build, so a program reaches the runtime only
+through its literals and `files()`, and never an executable's `fminus_rt_files_main_start`, which would make a context
+from the process's environment.
+
+### The driver and executables
+
+Recipe 41's way again, default-deny: `fminus --run` builds a `files::Policy` from `--files-read` and `--files-write`
+(`NAME=DIR`, or a `DIR` named after its last segment), `--files-deny`, `--files-types` and `--files-anywhere`, checks it
+with `checkPolicy` before anything compiles, makes the context after the JIT (so it is destroyed first) and stores its
+handle in the global; a mistake is named by the option it is in (`filesOptionOf`). An executable's C `main`
+(`addEntryPoint`) calls `fminus_rt_files_main_start(&fminus_rt_files_context, argv[0])` before the web's start, so a
+mistake in either stops it before any request is made, returning its non-zero result (2, with the variable and the
+reason on stderr), and `fminus_rt_files_main_stop` after the web's stop. `RuntimeSymbols.def` lists those two through
+`FMINUS_FILES_MAIN_SYMBOL`, which names nothing by default (so `JitRuntime.cpp` defines neither) and which
+`Constants.cpp` defines (so `kRuntimeNames` reserves them), as `WebSymbols.def`'s `FMINUS_WEB_MAIN_SYMBOL` does. An
+executable links nothing new: the code is in `libfminus_runtime.a`.
+
+### What it changes for programs and hosts
+
+- **Programs** that name no file compile to the same IR. The ten names are builtins in every build (a program's
+  function of one of them is an error), and so are the seven `FILE_` names, which a program's own declaration hides;
+  no function or constant may be named `fminus_rt_file_*` or `fminus_rt_files_*`. `__FMINUS_FILES__` and
+  `__FMINUS_FILES_WRITE__` cannot be defined.
+- **Hosts** get `Options::files` (default: no files) and `files()`, in every build, and `FMINUS_HAS_FILES` and its kin
+  in `fminus/Config.h`. Nothing is read unless a host maps a folder.
+- **The build** is unchanged in what it fetches: nothing. The default build compiles the reading half into the runtime;
+  `-DFMINUS_FILES=OFF` compiles none of it.
+- **The VS Code grammar** (0.19.0) colours the `file_` builtins and the `FILE_` names.
+
+### Tests
+
+- `tests/unit/FilesTest.cpp` (`[runtime][files]`), compiled with `FMINUS_FILES` on every system but Windows, its
+  seccomp case and its swap race on Linux alone: each trap built for real in a directory the test makes beside `bin/`
+  and removes (links of every kind and place, hard links with and without `singleLink`, a FIFO that must not hang, a
+  directory where a file was named, a file that grows while it is read, a file one byte over the limit, a folder
+  renamed after the context was made, the deny-list reached by another spelling, through a link, made afterwards and
+  renamed afterwards, a directory made at a denied path afterwards and then renamed, or exchanged with a public one
+  while names are walked, a denied path that cannot be looked up), a second name a file system answers to
+  (`os::nameListed` alone, then every name of every case's kind checked so: `os::checkEveryName`, a test hook), closed
+  handles read and closed twice, the temporary files of writers killed half way and their sweep, over 70 names refused
+  and 22 allowed, types in every
+  letter case, every reason `checkPolicy` refuses, the limits and quotas, listings (their order and what they skip),
+  absolute names with the deny-list on the real path and `/dev/null` and `/proc` refused, writes failed at each of their
+  six steps (`os::failNextReplaceAt`, a test hook compiled only with writing, since the tests run as root and
+  permissions cannot fail them), two contexts writing one file while a reader checks it is never torn, a directory
+  swapped for a link while names are walked, `FILE_DENIED` from a forked child that gives up root, an executable's
+  environment, and the wait-free proof (`HeapCalls`, and children under seccomp's strict mode).
+- `tests/unit/FileBuiltinsTest.cpp`, in every build: each builtin's effect through the table and through the effects'
+  errors (directly and through a called function); each name's error in a build without the interface or its writing;
+  then, with it, the status codes against `Files.h`'s values, the name errors at their columns, `scanFileName` given
+  the ceilings of other builds (types, absolute names, Windows), `files()` over several call sites and an `#include`,
+  `Options::files` checked by `compile()`, the reserved names, the JIT's symbols; a kit listed, loaded and played
+  through the JIT (and a table saved and compared, with writing), the same as an executable with `FMINUS_FILES_READ`,
+  absolute names, the wait-free proof through a `[[clang::nonblocking]]` function the JIT compiled, and a `Program`'s
+  destructor closing its folders (counted in `/proc/self/fd`) and freeing what its program held.
+- `tests/library/FilesPolicyTest.cpp`: `Options::files` and `files()` from a C++17 host.
+- `tests/lit/fminus/files.fm`: the calls, the context global and the declarations' attributes at `-O0`, the reads
+  merged and the closes kept at `-O2`, the metadata, `--run` with `--files-read` in both spellings, `--files-types` and
+  `--files-deny`, an executable with and without `FMINUS_FILES_READ`, and the driver's mistakes; `files-errors.fm`: each
+  name error once; `files-write.fm` and `files-anywhere.fm`: writing and absolute names through the driver and an
+  executable; `files-off.fm`, `files-write-off.fm` and `files-anywhere-off.fm`: each in the build it describes;
+  `files-types.fm`: in a build whose `FMINUS_FILES_TYPES` lists types (`%files_types`).
+- `examples/kit/`: `--check` writes four drum sounds into a folder of its own, plays them through the program and
+  compares the samples with C++ (identical), and checks that a denied subfolder, a type not allowed and the default
+  policy read nothing, and, with writing, that a take is saved byte for byte and refused in a folder granted for
+  reading alone.
 
 ## Pitfalls
 

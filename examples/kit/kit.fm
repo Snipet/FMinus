@@ -1,0 +1,167 @@
+// examples/kit/kit.fm: a small drum kit whose sounds are files (docs/files.md). Kit::load lists the folder its host
+// maps as "kit", reads each raw float table it finds there (*.f32, in their names' order) into its own arrays, off the
+// audio thread, and closes them; Kit::process, [[clang::nonblocking]], plays a pattern of sixteen steps on the pads
+// from those arrays, a sample at a time, and touches no file. In a build with file writing, process keeps what it
+// rendered, and Kit::save writes it, a take, into the folder "takes".
+//
+// Every name is a literal, so the host sees them all before anything runs (Program::files): list kit/*.f32, read
+// kit/private/secret.f32, read kit/notes.wav, write takes/take*.f32. Which directories "kit" and "takes" are, and what
+// may be read there, is the host's: the program reaches nothing under the default policy. secret() and notes() are for
+// the harness's checks: a file in a denied subfolder, and one of a type the host did not allow. Kit is there only in
+// a build with the file interface (#ifdef __FMINUS_FILES__), so the file compiles in every build.
+
+#ifdef __FMINUS_FILES__
+enum Size
+{
+    PADS = 8,          // tables the kit holds at most
+    LENGTH = 12000,    // samples a table holds at most: a quarter of a second at 48 kHz
+    STEP = 6000,       // samples a step of the pattern lasts: a sixteenth at 120 bpm and 48 kHz
+    TAKE = 48000,      // samples a take keeps: the first second
+};
+
+// The pattern: which pad each step strikes (its number modulo how many pads were loaded).
+const int pattern[16] = {2, 1, 3, 1, 2, 2, 3, 0, 2, 1, 3, 1, 2, 1, 3, 3};
+
+module Kit
+{
+    float sample[PADS][LENGTH];
+    int length[PADS];     // samples in each table
+    int position[PADS];   // where each pad is in its table: its length once it has finished
+    int count;            // tables loaded
+    int clock;            // samples played
+
+    // Off the audio thread (file_list, file_read_nth and file_close allocate and wait on the disk: the effects refuse
+    // them in a nonblocking function): every table of the folder "kit", in its names' order, up to PADS of them. How
+    // many, or why none: FILE_REFUSED when the host granted no folder "kit" (the default), FILE_MISSING when its
+    // directory has gone, FILE_LIMIT when it holds more tables than the host's maxListed.
+    int load()
+    {
+        void* kit = file_list("kit/*.f32");
+        const int status = file_status(kit);
+        count = 0;
+        clock = 0;
+        if (status == FILE_OK)
+        {
+            const int n = file_count(kit);
+            for (int i = 0; i < n && count < PADS; ++i)
+            {
+                void* f = file_read_nth(kit, i);
+                if (file_status(f) == FILE_OK)   // a table that went, or grew past a limit, since the listing: skipped
+                {
+                    const int values = bytes_floats(file_data(f), file_size(f), sample[count], LENGTH);
+                    length[count] = values < LENGTH ? values : LENGTH;
+                    position[count] = length[count];
+                    count += 1;
+                }
+                file_close(f);
+            }
+        }
+        file_close(kit);
+        return status == FILE_OK ? count : status;
+    }
+
+    void strike(int pad) [[clang::nonblocking]]
+    {
+        position[pad] = 0;
+    }
+
+#ifdef __FMINUS_FILES_WRITE__
+    float take[TAKE];
+    int taken;
+#endif
+
+    // On the audio thread: the pattern, every pad that is sounding summed, from the tables load() read. No file is
+    // touched here, and none could be: what was read is in the module's own arrays.
+    void process(float* out, int n) [[clang::nonblocking]]
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            if (count > 0 && clock % STEP == 0)
+                strike(pattern[(clock / STEP) % 16] % count);
+            clock += 1;
+            float x = 0.0f;
+            for (int p = 0; p < count; ++p)
+            {
+                if (position[p] < length[p])
+                {
+                    x += sample[p][position[p]];
+                    position[p] += 1;
+                }
+            }
+            out[i] = x;
+#ifdef __FMINUS_FILES_WRITE__
+            if (taken < TAKE)
+            {
+                take[taken] = x;
+                taken += 1;
+            }
+#endif
+        }
+    }
+
+#ifdef __FMINUS_FILES_WRITE__
+    // Off the audio thread: what process has rendered so far (its first second), written as the file
+    // takes/take<number>.f32, whole or not at all. FILE_OK, or why not: FILE_REFUSED when the host granted no folder
+    // "takes" for writing.
+    int save(int number)
+    {
+        return file_write("takes/take%d.f32", take, 4 * taken, number);
+    }
+#endif
+
+    // The harness's checks (README.md): whether a table in the kit's subfolder private/ can be read (not when the
+    // host denies that directory), and a file of another type beside the tables (not when the host allows f32 alone).
+    int secret()
+    {
+        void* f = file_read("kit/private/secret.f32");
+        const int status = file_status(f);
+        file_close(f);
+        return status;
+    }
+
+    int notes()
+    {
+        void* f = file_read("kit/notes.wav");
+        const int status = file_status(f);
+        file_close(f);
+        return status;
+    }
+};
+
+// For the driver and an executable (README.md): loads the kit, plays `seconds` of its pattern, and gives the sum of its
+// samples' magnitudes, which depends on every table; or, when nothing was loaded, why (FILE_REFUSED with no
+// --files-read, or no FMINUS_FILES_READ).
+float main(float seconds)
+{
+    Kit kit;
+    const int loaded = kit.load();
+    if (loaded <= 0)
+        return (float)loaded;
+    float block[480];
+    float sum = 0.0f;
+    const int blocks = (int)(seconds * 100.0f);
+    for (int b = 0; b < blocks; ++b)
+    {
+        kit.process(block, 480);
+        for (int i = 0; i < 480; ++i)
+            sum += fabsf(block[i]);
+    }
+    return sum;
+}
+
+#ifdef __FMINUS_FILES_WRITE__
+// For the driver: loads the kit, renders its first second, and saves it as takes/take<number>.f32: FILE_OK, or why
+// not (README.md).
+int bounce(int number)
+{
+    Kit kit;
+    const int loaded = kit.load();
+    if (loaded <= 0)
+        return loaded;
+    float block[480];
+    for (int b = 0; b < 100; ++b)
+        kit.process(block, 480);
+    return kit.save(number);
+}
+#endif
+#endif
