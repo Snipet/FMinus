@@ -29,7 +29,9 @@ asks for that specific change, and ask before restructuring anything.
 - `python/` is the Python package, `import fminus` (the user asked for it, 2026-11-09; `docs/python.md`): an extension
   module on the public API alone (`python/src/`, pybind11, C++17) and the Python around it (`python/fminus/`), built
   only with `FMINUS_BUILD_PYTHON=ON` (the `python` preset; `pyproject.toml` for pip), tested by `python/tests/`
-  (unittest; the ctest test `python`). It binds `FMinus.h` only: `docs/python.md` ends with what it leaves out.
+  (unittest; the ctest test `python`). It binds `FMinus.h` only: `docs/python.md` ends with what it leaves out. Its
+  wheels are `.github/workflows/wheels.yml`'s (cibuildwheel, set up in `pyproject.toml`; run by hand, and it uploads
+  to PyPI only when its `publish` input says so).
 - A string literal exists only as a builtin's argument (the user asked for the web research's findings to be built,
   2026-11-11; `docs/research/web/`): a format, a JSON Pointer, an XML path or a URL, checked and prepared when the
   program is compiled (`src/ir/Strings.cpp`, `Paths.cpp`, `Web.cpp`). The JSON and XML parsers (`FMINUS_JSON`,

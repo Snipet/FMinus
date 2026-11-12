@@ -147,9 +147,13 @@ elseif(FMINUS_PARSER_TOOLS_MODE STREQUAL "fetch")
   _fminus_build_autotool(bison "${FMINUS_BISON_VERSION}" "${FMINUS_BISON_SHA256}"
     URLS ${FMINUS_BISON_URLS}
     CONFIGURE_ARGS --disable-nls --enable-relocatable --disable-yacc --disable-dependency-tracking)
+  # _GNU_SOURCE: Flex 2.6.4 calls reallocarray where the C library has it, and a C library before glibc 2.29 (RHEL 8's,
+  # so the manylinux_2_28 image the Python wheels are built in) declares it only then; without the declaration the
+  # call is an error to clang 16 and GCC 14. It changes nothing elsewhere.
   _fminus_build_autotool(flex "${FMINUS_FLEX_VERSION}" "${FMINUS_FLEX_SHA256}"
     URLS ${FMINUS_FLEX_URL}
-    CONFIGURE_ARGS --disable-nls --disable-shared --disable-bootstrap --disable-dependency-tracking)
+    CONFIGURE_ARGS --disable-nls --disable-shared --disable-bootstrap --disable-dependency-tracking
+                   CPPFLAGS=-D_GNU_SOURCE)
   set(FMINUS_BISON_EXECUTABLE "${FMINUS_DEPS_DIR}/install/bison-${FMINUS_BISON_VERSION}/bin/bison")
   set(FMINUS_FLEX_EXECUTABLE "${FMINUS_DEPS_DIR}/install/flex-${FMINUS_FLEX_VERSION}/bin/flex")
   set(BISON_EXECUTABLE "${FMINUS_BISON_EXECUTABLE}" CACHE FILEPATH "GNU Bison (FMinus's deps cache)" FORCE)

@@ -910,6 +910,10 @@ loop budget or a bounds check stops raises `fminus.LoopBudgetError` or `fminus.B
 a function runs. A pointer has no extent, as in C: a length longer than its buffer reads or writes past it. The circuit
 compiler and vectors at the boundary are not bound yet (the manual lists what is not there).
 
+The Wheels workflow (`.github/workflows/wheels.yml`, run by hand) builds the package's wheels, one for each CPython on
+Linux, macOS and Windows, with its source distribution, and uploads them to PyPI, so that `pip install fminus` builds
+nothing ([docs/python.md](docs/python.md#wheels-and-pypi) has the one-time setup on PyPI and the steps of a release).
+
 ## Executables (ahead of time)
 
 For development, a module can also be compiled ahead of time for this machine, into a native executable you can run

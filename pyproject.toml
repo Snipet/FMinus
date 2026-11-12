@@ -43,9 +43,39 @@ FMINUS_BUILD_TESTS = "OFF"
 FMINUS_BUILD_TOOLS = "OFF"
 FMINUS_BUILD_EXAMPLES = "OFF"
 FMINUS_WERROR = "OFF"           # a newer compiler's new warning does not stop an install
+# FMinus has no C++ modules, and CMake scans every C++23 source for them all the same, with clang-scan-deps, which
+# not every clang comes with (manylinux's, which the wheels are built with, does not).
+CMAKE_CXX_SCAN_FOR_MODULES = "OFF"
 
 # The version is the project's, read from CMakeLists.txt: project(FMinus VERSION 0.1.0 ...).
 [tool.scikit-build.metadata.version]
 provider = "scikit_build_core.metadata.regex"
 input = "CMakeLists.txt"
 regex = 'project\(FMinus\s+VERSION\s+(?P<value>[0-9.]+)'
+
+# The wheels (.github/workflows/wheels.yml; docs/python.md, "Wheels and PyPI"): cibuildwheel builds one for each
+# CPython on each platform, and runs python/tests/ against each as it is installed. `pipx run cibuildwheel` builds
+# this machine's here; each wheel is a whole build of FMinus, and LLVM comes from the deps cache (FMINUS_DEPS_DIR).
+[tool.cibuildwheel]
+archs = ["auto64"]                          # no 32-bit: FMinus targets x86-64 and arm64
+skip = ["cp3??t-*", "*-musllinux_*"]        # free-threaded CPython (the module asks for the GIL); musl
+build-verbosity = 1                         # CMake's output: a first build of LLVM is long, and otherwise silent
+# NumPy, where it has a wheel for this Python, so that its tests run; they skip without it.
+before-test = "pip install --only-binary=:all: numpy || echo no NumPy wheel for this Python: its tests skip"
+test-command = "python -m unittest discover -s {project}/python/tests -v"
+
+# manylinux's compiler is GCC, and FMinus's runtime is clang's (its vector types and builtins): the image's own clang,
+# which uses GCC's C++ library, so the wheel keeps to manylinux's. The deps cache is the host's, passed in as
+# /host/<path>, where the container sees the host's files (the workflow caches it between runs).
+[tool.cibuildwheel.linux]
+before-all = "manylinux-install-clang"
+environment = { CC = "clang", CXX = "clang++" }
+environment-pass = ["FMINUS_DEPS_DIR"]
+
+# FMinus's minimum macOS (CMakeLists.txt), which is then the wheel's tag too.
+[tool.cibuildwheel.macos]
+environment = { MACOSX_DEPLOYMENT_TARGET = "14.0" }
+
+# Ninja and clang-cl, as FMinus's own build on Windows, from a developer prompt (docs/building.md, "Windows").
+[tool.cibuildwheel.windows]
+environment = { CMAKE_GENERATOR = "Ninja" }
