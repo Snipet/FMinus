@@ -59,7 +59,13 @@ namespace fminus::files::os
         std::uint64_t volume = 0;
         std::uint64_t high = 0;
         std::uint64_t low = 0;
-        friend bool operator==(const Identity&, const Identity&) = default;
+        // Written out, not defaulted: clang calls a type with a defaulted == and no padding trivially comparable, and
+        // Visual Studio's standard library (14.51) then hands a std::find over these to its vectorised search, which
+        // has no case for an element of 24 bytes (a static_assert: "unexpected size").
+        friend bool operator==(const Identity& a, const Identity& b) noexcept
+        {
+            return a.volume == b.volume && a.high == b.high && a.low == b.low;
+        }
     };
 
     // The host's directory for a folder, opened by its path (links in it followed: it is the host's text): FILE_OK,
