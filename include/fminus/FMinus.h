@@ -688,11 +688,11 @@ namespace fminus
         // pattern (each %d a "*", each %% a "%"), and where the call is, in every call site's order of lowering.
         struct WebRequest
         {
-            std::string method;
-            std::string pattern;
-            std::string file;   // as errors name it (Options::fileName, or an #include's)
-            int line = 0;
-            int column = 0;
+            std::string method;    // "GET" or "POST"
+            std::string pattern;   // the URL, each %d a "*" and each %% a "%"
+            std::string file;      // the source file, as errors name it (Options::fileName, or an #include's)
+            int line = 0;          // the call's line in that file, from 1
+            int column = 0;        // and its column, from 1, as the errors count it
         };
 
         // Every call of http_get and http_post the program makes, or none (and none in a build without the web
@@ -718,11 +718,11 @@ namespace fminus
         // site's order of lowering.
         struct WebRoute
         {
-            std::string method;
-            std::string pattern;
-            std::string file;   // as errors name it (Options::fileName, or an #include's)
-            int line = 0;
-            int column = 0;
+            std::string method;    // "GET", "POST", "PUT", "PATCH" or "DELETE"
+            std::string pattern;   // the path, each %d a "*"
+            std::string file;      // the source file, as errors name it (Options::fileName, or an #include's)
+            int line = 0;          // the call's line in that file, from 1
+            int column = 0;        // and its column, from 1, as the errors count it
         };
 
         // Every call of http_is the program makes, or none (and none in a build without the web server).
@@ -768,11 +768,11 @@ namespace fminus
         // one), and where the call is, in every call site's order of lowering.
         struct FileUse
         {
-            std::string operation;
-            std::string pattern;
-            std::string file;   // as errors name it (Options::fileName, or an #include's)
-            int line = 0;
-            int column = 0;
+            std::string operation;   // "read", "list", "write" or "append"
+            std::string pattern;     // the name, each %d a "*" and each %% a "%"; a listing's own "*" stays one
+            std::string file;        // the source file, as errors name it (Options::fileName, or an #include's)
+            int line = 0;            // the call's line in that file, from 1
+            int column = 0;          // and its column, from 1, as the errors count it
         };
 
         // Every call of file_read, file_list, file_write and file_append the program makes, or none (and none in a

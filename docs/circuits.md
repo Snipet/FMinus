@@ -221,7 +221,7 @@ too.
 | `.model NAME D(IS=x N=x RS=x ...)` | a diode model: IS (1e-14), N (1) and RS (0: none); CJO, TT, BV, IBV, M, VJ, EG, XTI, FC, KF and AF warn "ignored". A card of a built-in's name replaces it |
 | `.oversample 1\|2\|4\|8\|auto [iir\|fir] [blocks=auto\|nonlinear\|all]` | the oversampling factor, the halfbands, and which blocks run oversampled; `auto`, or no `.oversample`, leaves the factor to the self-test |
 | `.adaa on\|off\|auto` | Holters' first-order ADAA on the port; `auto` or none: the self-test's |
-| `.solver omega\|omega(K)\|newton(K)\|halley(K)\|auto` | the port's solver: the omega3 guess or the previous step's solution, then K Newton steps; or `halley(K)`, omega3 then K Halley steps ([below](#halley)), a diode pair's: the region's other ports keep K Newton steps, and a region without a pair's port refuses it; `auto`, none, or bare `omega` (an exp-affine port's candidates all start from omega3): the self-test's. An OTA's is `newton(K)`: omega3 is the diode's closed form, and is refused for it |
+| `.solver omega\|omega(K)\|newton(K)\|halley(K)\|auto` | the port's solver: the omega3 guess or the previous step's solution, then K Newton steps; or `halley(K)`, omega3 then K Halley steps ([below](#ports-and-laws)), a diode pair's: the region's other ports keep K Newton steps, and a region without a pair's port refuses it; `auto`, none, or bare `omega` (an exp-affine port's candidates all start from omega3): the self-test's. An OTA's is `newton(K)`: omega3 is the diode's closed form, and is refused for it |
 | `.channels 1\|2` | 2: tick and step take and return `float2`s |
 | `.method tr\|bdf2\|auto` | the integrator: the trapezoidal rule, or BDF2 ([below](#bdf2)), which ADAA (Holters' trapezoidal form) refuses; `auto`, or none while another searched dimension is open: the self-test's (the trapezoidal rule, and BDF2 twins where a block rings); none, the rest pinned: TR. A linear netlist ignores `bdf2`, with a warning: its blocks run the trapezoidal rule or matched designs |
 | `.prewarp on\|off` | off (the default, the user's ruling): an OTA's cutoff law is the circuit's; on: prewarped ([below](#prewarp)) |
@@ -290,7 +290,7 @@ another length or model an asymmetric pair. With ADAA one diode's mean is `vm + 
 c_P)) / dp`, `c = e^(v / N Vt)` stored as `c_P` (`1` at clear); an asymmetric pair's adds the other diode's `- kr` and
 `- kcr (cr - cr_P)`, `cr = e^(-v / N2 Vt)`.
 
-<a id="halley"></a>**Halley** (`.solver halley(K)`, 2026-11-10, the research note's §2.7). A Halley step, `v - 2 f f' /
+**Halley** (`.solver halley(K)`, 2026-11-10, the research note's §2.7). A Halley step, `v - 2 f f' /
 (2 f'^2 - f f'')` with `f = v - p + k phi(v)`, uses the exponentials a Newton step evaluates and one divide, and
 converges cubically: a pair's `f'' = kb (e - ei) / N Vt` comes from them (`sh = e - ei`, `f2 = (kb / N Vt) sh`), and
 the step is `v = fminf(fmaxf(v - (2 * f * d) / (2 * d * d - f * f2), lo), hi)`, kept in the bracket as Newton's is. It
