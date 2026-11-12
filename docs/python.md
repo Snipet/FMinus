@@ -325,14 +325,15 @@ runs `python/tests/` against each as it is installed, with NumPy where it has a 
 | `windows-x64` | `windows-latest` | `win_amd64` | the Deps workflow's archive |
 
 Each wheel is a whole build of FMinus, pip's own (`pyproject.toml`), so a platform's job compiles FMinus once for each
-CPython, seven times today (about two minutes each on four cores, and 24 MB a wheel on Linux). LLVM comes from the deps
-cache as for any build, which the job keeps between runs (`actions/cache`, under a key of `cmake/FMinusPins.cmake` and
-the two modules that build the dependencies). On Linux the wheels are built in manylinux's container, so that they run
-on any distribution of its C library or later, and LLVM, Bison and Flex are built there too, the first time (about half
-an hour on four cores). The image's compiler is GCC, and FMinus's runtime needs clang (its vector types and builtins),
-so the build installs the image's own clang (`manylinux-install-clang`), which uses GCC's C++ library. The Deps
-workflow's Linux archive does not do: it is built on Arch Linux, against a newer C library than a wheel may ask for.
-musllinux (Alpine) has no wheel: it would be another LLVM, built against musl.
+CPython, seven times today (two to four minutes each on GitHub's runners; a wheel is 24 MB on Linux, 21 MB on macOS and
+19 MB on Windows). LLVM comes from the deps cache as for any build, which the job keeps between runs (`actions/cache`,
+under a key of `cmake/FMinusPins.cmake` and the two modules that build the dependencies). On Linux the wheels are built
+in manylinux's container, so that they run on any distribution of its C library or later, and LLVM, Bison and Flex are
+built there too, the first time (about 40 minutes on GitHub's runner). The image's compiler is GCC, and FMinus's
+runtime needs clang (its vector types and builtins), so the build installs the image's own clang
+(`manylinux-install-clang`), which uses GCC's C++ library. The Deps workflow's Linux archive does not do: it is built
+on Arch Linux, against a newer C library than a wheel may ask for. musllinux (Alpine) has no wheel: it would be another
+LLVM, built against musl.
 
 **Running it.** Actions > Wheels > Run workflow, on any branch. `platforms` names the ones to build (empty: all but
 `linux-arm64`), `pythons` narrows the CPythons (`cp312-*` builds one a platform, to try a change), and `publish` says
@@ -380,6 +381,7 @@ it to `pypi`.
   compiled with pybind11's headers, and carries FMinus's `LICENSE` alone. Their licences ask a binary for their
   notices (README.md, "License"): add the five texts to the package (`license-files` in `pyproject.toml`) before the
   first upload.
-- **Runs elsewhere.** Built and tested on Linux (x86-64, CPython 3.13, clang 18). The Wheels workflow's Linux x86-64
-  build has been run in its container for one CPython, and that wheel tried on Debian 13 too. Its macOS, Windows and
-  Linux arm64 jobs build the same sources and have not run, nor has the workflow itself on GitHub.
+- **Runs elsewhere.** The Wheels workflow has built and tested the package on GitHub for one CPython, 3.12, on Linux
+  (x86-64), macOS (arm64) and Windows (x64): each wheel passed `python/tests/`, NumPy's included. The other CPythons,
+  the Linux arm64 job and an upload have not run. The tests grant a program no files and no network, so what the file
+  interface and the web library do on macOS and Windows is still untried.

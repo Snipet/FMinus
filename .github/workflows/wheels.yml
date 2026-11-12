@@ -16,7 +16,7 @@
 # LLVM comes from the deps cache, as for every build (FMINUS_DEPS_DIR), kept between runs by actions/cache under a key
 # of the pins. When the key misses:
 #   Linux           builds LLVM, Bison and Flex in cibuildwheel's manylinux container, with the image's own clang
-#                   (FMinus's runtime needs clang; GCC is the image's compiler): about half an hour on four cores,
+#                   (FMinus's runtime needs clang; GCC is the image's compiler): about 40 minutes on GitHub's runner,
 #                   once per pin. The Deps workflow's linux-x64 archive does not do here: it is built on Arch Linux,
 #                   against a newer C library than manylinux allows a wheel.
 #   macOS, Windows  unpacks the Deps workflow's archive for the platform (the release deps-llvm-<version>), whose

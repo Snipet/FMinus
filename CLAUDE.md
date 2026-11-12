@@ -59,8 +59,8 @@ asks for that specific change, and ask before restructuring anything.
   (`Context::State::reach`), which never trusts a path's text: it walks a segment at a time beneath the folder's
   handle, follows no link, and compares each directory by identity with the denied ones. No test may touch anything
   outside a directory it made (beside `bin/`, or lit's `%t`), except `/dev/null` and `/proc` named as what must be
-  refused. Its macOS and Windows code has never been built or run (`FilesWindows.cpp` was only type-checked against
-  stub headers): say so before relying on it.
+  refused. Its macOS and Windows code has been compiled (the Wheels workflow builds it on both, 2026-11-12) and never
+  run: say so before relying on it.
 - The smoke tests (`tests/smoke/`, `tests/lit/smoke/`) prove the toolchain. Keep them passing until the user retires
   them.
 - `docs/` is the manual (architecture, extending, building, testing; `docs/recipes/` patches). Keep it in step with
