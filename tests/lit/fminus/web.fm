@@ -1,0 +1,64 @@
+// The web library's builtins (src/web/Web.h; docs/web.md): http_get and http_post start a request under the program's
+// web context, a global of the module its host sets, which every such call loads and passes first; the URL is a
+// literal with places for ints, its ints the call's last arguments. The library's functions are declared with what
+// they do (recipe 19): the reads are not readonly, since the I/O thread writes what they read. Every URL is recorded
+// for the host (fminus.web.requests). With no --web-allow nothing is reachable, and a request is HTTP_REFUSED before
+// anything is sent; nor is a URL the patterns do not allow; an executable reads FMINUS_WEB_ALLOW when it runs. No test
+// here makes a request at all: tests/unit/WebTest.cpp fetches from a loopback server of its own.
+// REQUIRES: web
+// RUN: fminus %s -O0 | FileCheck %s
+// RUN: fminus %s --run main 3 | FileCheck %s --check-prefix=REFUSED
+// RUN: fminus %s --run main 3 --web-allow 'http://127.0.0.1:1/only' | FileCheck %s --check-prefix=REFUSED
+// RUN: not fminus %s --run main 3 --web-allow 'ftp://127.0.0.1/' 2>&1 | FileCheck %s --check-prefix=PATTERN
+// RUN: not fminus %s --web-allow 'http://127.0.0.1/' 2>&1 | FileCheck %s --check-prefix=EMIT
+// RUN: fminus %s --emit exe -o %t.web
+// RUN: %t.web 3 | FileCheck %s --check-prefix=REFUSED
+// RUN: env FMINUS_WEB_ALLOW='http://127.0.0.1:1/only, http://127.0.0.1:1/also' %t.web 3 | FileCheck %s --check-prefix=REFUSED
+// RUN: env FMINUS_WEB_ALLOW='http://user@127.0.0.1/' not %t.web 3 2>&1 | FileCheck %s --check-prefix=EXE
+
+#ifndef __FMINUS_WEB__
+#error __FMINUS_WEB__ is not defined
+#endif
+
+float poll(void* r) [[clang::nonblocking]]
+{
+    return (float)(http_status(r) + http_size(r) + http_progress(r)) + (!http_body(r) ? 0.0f : 1000.0f);
+}
+
+float main(float x)
+{
+    void* r = http_get("http://127.0.0.1:1/presets/%d.json", (int)x);
+    const int status = http_wait(r, -1);
+    float polled = poll(r);
+    float data[2] = {1.0f, 2.0f};
+    void* p = http_post("http://127.0.0.1:1/report?k=%d&wet=100%%", data, 8, "application/octet-stream", (int)x);
+    http_cancel(p);
+    if (http_status(p) == HTTP_REFUSED)
+        polled = polled + 0.5f;
+    http_close(p);
+    http_close(r);
+    return status == HTTP_REFUSED ? polled : 1000.0f;
+}
+
+// CHECK: @fminus_web_context = global ptr null, align 8
+// CHECK-LABEL: define float @main(
+// CHECK:         %web.context = load ptr, ptr @fminus_web_context, align 8
+// CHECK:         %http_get = call ptr @fminus_web_http_get(ptr %web.context, ptr @.str, i32 34, ptr %format.ints, i32 1)
+// CHECK:         %http_wait = call i32 @fminus_web_http_wait(ptr %{{.*}}, i32 -1)
+// CHECK:         %http_post = call ptr @fminus_web_http_post(ptr %web.context{{[0-9]*}}, ptr @.str.1, i32 40, ptr %format.ints{{[0-9]*}}, i32 1, ptr %{{.*}}, i32 8, ptr @.str.2, i32 24)
+// CHECK:         call void @fminus_web_http_cancel(
+// CHECK: declare i32 @fminus_web_http_status(ptr captures(none)) [[READ:#[0-9]+]]
+// CHECK: declare noundef ptr @fminus_web_http_get(ptr, ptr readonly captures(none), i32, ptr readonly captures(none), i32) [[START:#[0-9]+]]
+// CHECK: declare i32 @fminus_web_http_wait(ptr captures(none), i32) [[WAIT:#[0-9]+]]
+// CHECK: declare noundef ptr @fminus_web_http_post(ptr, ptr readonly captures(none), i32, ptr readonly captures(none), i32, ptr readonly captures(none), i32, ptr readonly captures(none), i32) [[START]]
+// CHECK: attributes [[READ]] = { nofree nounwind willreturn memory(argmem: readwrite, inaccessiblemem: readwrite) }
+// CHECK: attributes [[START]] = { nounwind willreturn memory(argmem: readwrite, inaccessiblemem: readwrite, errnomem: write) }
+// CHECK: attributes [[WAIT]] = { nounwind memory(argmem: readwrite, inaccessiblemem: readwrite) }
+// CHECK: !fminus.web.requests = !{![[GET:[0-9]+]], ![[POST:[0-9]+]]}
+// CHECK: ![[GET]] = !{!"GET", !"http://127.0.0.1:1/presets/*.json", !"{{.*}}web.fm", i32 30, i32 15}
+// CHECK: ![[POST]] = !{!"POST", !"http://127.0.0.1:1/report?k=*&wet=100%", !"{{.*}}web.fm", i32 34, i32 15}
+
+// REFUSED: -3.5
+// PATTERN: fminus: --web-allow: pattern 'ftp://127.0.0.1/' has the scheme 'ftp': only https and http are allowed
+// EMIT: fminus: --web-allow: for --run's call only; an executable reads FMINUS_WEB_ALLOW (and FMINUS_WEB_CA_FILE) when it runs
+// EXE: FMINUS_WEB_ALLOW: pattern 'http://user@127.0.0.1/'

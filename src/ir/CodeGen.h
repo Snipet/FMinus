@@ -149,4 +149,64 @@ namespace fminus::ir
         unsigned arity;
     };
     std::vector<BuiltinInfo> builtins();
+
+    // The web library's builtins (Calls.cpp, Web.cpp; a build with FMINUS_WEB). A module that calls http_get,
+    // http_post or http_listen defines the program's web context, this global, a pointer, null until its host sets it
+    // (a null context reaches nothing and listens nowhere: src/web/Web.h), and every such call passes it to the library.
+    // A program that declares a function of the name is an error then.
+    inline constexpr const char* kWebContextSymbol = "fminus_web_context";
+    // What every name of the web library's begins with (its C functions, web/WebSymbols.def, and the context's
+    // global): in every build, a function of a program cannot be named so (Functions.cpp).
+    inline constexpr std::string_view kWebPrefix = "fminus_web_";
+
+    // One call of http_get or http_post, as the code generator recorded it in the module's named metadata
+    // "fminus.web.requests", in the order it lowered them: its method, "GET" or "POST"; its URL literal as a pattern,
+    // each %d a "*" and %% a "%"; and where the call is (its file as the errors name it, its line and column).
+    struct WebRequest
+    {
+        std::string method;
+        std::string pattern;
+        std::string file;
+        int line = 0;
+        int column = 0;
+    };
+    std::vector<WebRequest> webRequests(const llvm::Module& module);
+
+    // One call of http_is, as the code generator recorded it in the module's named metadata "fminus.web.routes", in
+    // the order it lowered them (WebServer.cpp; a build with FMINUS_WEB_SERVER): its route literal's method ("GET",
+    // "POST", "PUT", "PATCH" or "DELETE") and its path as a pattern, each %d a "*"; and where the call is (its file as
+    // the errors name it, its line and column).
+    struct WebRoute
+    {
+        std::string method;
+        std::string pattern;
+        std::string file;
+        int line = 0;
+        int column = 0;
+    };
+    std::vector<WebRoute> webRoutes(const llvm::Module& module);
+
+    // The file interface's builtins (Calls.cpp, Files.cpp; a build with FMINUS_FILES). A module that calls file_read,
+    // file_list, file_write or file_append defines the program's file context, this global, a pointer, null until its
+    // host sets it (a null context reaches no file: runtime/Files.h), and every such call passes it to the runtime. A
+    // program that declares something of the name is an error then.
+    inline constexpr const char* kFilesContextSymbol = "fminus_rt_files_context";
+    // What every name of the file interface's begins with (its C functions, runtime/RuntimeSymbols.def, an executable's
+    // start and stop, and the context's global): in every build, a function or a constant of a program cannot be named
+    // so (Functions.cpp, Constants.cpp).
+    inline constexpr std::string_view kFilesPrefixes[] = {"fminus_rt_file_", "fminus_rt_files_"};
+
+    // One call of file_read, file_list, file_write or file_append, as the code generator recorded it in the module's
+    // named metadata "fminus.files", in the order it lowered them (Files.cpp): its operation ("read", "list", "write"
+    // or "append"); its name as a pattern, each %d a "*" and %% a "%" (a listing's own "*" stays one); and where the
+    // call is (its file as the errors name it, its line and column).
+    struct FileUse
+    {
+        std::string operation;
+        std::string pattern;
+        std::string file;
+        int line = 0;
+        int column = 0;
+    };
+    std::vector<FileUse> files(const llvm::Module& module);
 } // namespace fminus::ir

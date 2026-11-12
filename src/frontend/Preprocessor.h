@@ -15,6 +15,8 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 
@@ -48,4 +50,21 @@ namespace fminus::frontend
 
     // A value as Macros keeps it: trimmed, each run of spaces one space.
     std::string normalisedValue(std::string_view value);
+
+    // A macro FMinus defines before a program's first line, as C's implementation predefines its own: one for each
+    // build option of programs' builtins, named as C reserves names for the implementation (__FMINUS_JSON__ for
+    // FMINUS_JSON), and defined, to 1, only in a build that has the feature (fminus/Config.h), so that one source can
+    // test it with #ifdef and compile either way. Its name, what it stands for, its option, and whether it is defined.
+    struct PredefinedMacro
+    {
+        std::string_view name;
+        std::string_view feature;
+        std::string_view option;
+        bool defined;
+    };
+    std::span<const PredefinedMacro> predefinedMacros();
+
+    // The error of a #define, an #undef or a host's macro of a predefined macro's name, which neither a program nor a
+    // host may define or undefine, in a build with the feature or without it; or nothing for any other name.
+    std::optional<std::string> predefinedMacroError(std::string_view name);
 } // namespace fminus::frontend

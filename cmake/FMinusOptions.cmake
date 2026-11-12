@@ -6,6 +6,84 @@ option(FMINUS_BUILD_TESTS "Build the Catch2 and lit tests" ${PROJECT_IS_TOP_LEVE
 option(FMINUS_BUILD_TOOLS "Build the executables under tools/" ${PROJECT_IS_TOP_LEVEL})
 option(FMINUS_BUILD_EXAMPLES "Build the examples under examples/" ${PROJECT_IS_TOP_LEVEL})
 option(FMINUS_BUILD_PYTHON "Build the Python package, python/ (needs Python's development headers)" OFF)
+# What programs' builtins this build has. Each is a part of the runtime and the builtins that call it; a builtin of
+# one left out is still a name the compiler knows, and a call of it is an error that names the option. Either one on
+# fetches fast_float (cmake/FMinusFastFloat.cmake), the parsers' reader of numbers; JSON fetches yyjson
+# (cmake/FMinusJson.cmake), XML pugixml (cmake/FMinusXml.cmake).
+option(FMINUS_JSON "The JSON parser and the json_* builtins (fetches yyjson and fast_float)" ON)
+option(FMINUS_XML "The XML parser and the xml_* builtins (fetches pugixml and fast_float)" ON)
+# The web library, fminus_web (src/web/: an HTTP(S) client and the host's policy over what a program may reach), which
+# fminus_lib links only with this on. Off by default: with it off nothing is fetched or built for it. On, it fetches
+# libcurl and, on macOS and Linux, Mbed TLS (Windows uses Schannel), and builds both at configure time into the deps
+# cache (cmake/FMinusWeb.cmake).
+option(FMINUS_WEB "The web library: an HTTP(S) client under the host's policy (fetches libcurl, Mbed TLS)" OFF)
+# The web library's server (src/web/Server.cpp: a program listens where its host allows, and answers requests on its own
+# threads, the audio thread among them, wait-free), part of fminus_web. Off by default, and it needs FMINUS_WEB: with
+# it off nothing more is fetched or built, and the server's sources under src/web/ compile to nothing. On, it fetches
+# llhttp, the request parser (cmake/FMinusLlhttp.cmake), and fast_float when the parsers have not (a query's numbers).
+option(FMINUS_WEB_SERVER "The web library's server: a program answers HTTP requests under the host's policy (fetches llhttp)" OFF)
+if(FMINUS_WEB_SERVER AND NOT FMINUS_WEB)
+  message(FATAL_ERROR "FMinus: FMINUS_WEB_SERVER is ON and FMINUS_WEB is OFF: the server is part of the web library. "
+                      "Configure with -DFMINUS_WEB=ON as well, or turn FMINUS_WEB_SERVER off.")
+endif()
+# The file interface (src/runtime/Files*.cpp, src/runtime/Files.h; docs/research/files/README.md): a program's file_*
+# builtins, which read whole files into memory from folders its host grants, under the host's policy (none by default:
+# a program has no files until a host says otherwise). Part of the runtime, with no dependency. A build without it has
+# no code that opens a file; its builtins stay names the compiler knows, and a call of one is an error naming it.
+option(FMINUS_FILES "The file interface: a program reads files from folders its host grants (no dependency)" ON)
+# Writing (file_write, file_append), in folders a host grants for writing. Off by default: a build without it has no
+# code that creates, writes or renames a file, so no policy, option or bug can make it write.
+option(FMINUS_FILES_WRITE "The file interface's writing: file_write and file_append, in folders a host grants for writing" OFF)
+# Absolute names ("/home/me/kit/a.wav"), where a host's policy says anywhere. Off by default: a build without it reaches
+# files only through the folders a host maps, and refuses a policy that says anywhere.
+option(FMINUS_FILES_ANYWHERE "The file interface's absolute names, where a host's policy says anywhere" OFF)
+foreach(_files_option FMINUS_FILES_WRITE FMINUS_FILES_ANYWHERE)
+  if(${_files_option} AND NOT FMINUS_FILES)
+    message(FATAL_ERROR "FMinus: ${_files_option} is ON and FMINUS_FILES is OFF: it is part of the file interface. "
+                        "Configure with -DFMINUS_FILES=ON as well, or turn ${_files_option} off.")
+  endif()
+endforeach()
+# The types of file this build can ever touch: a list of extensions ("wav;f32;json"), each 1 to 16 ASCII letters and
+# digits, compared without regard to letter case; empty, any. A program's name with another extension is refused, and
+# so is a host's policy that allows one. fminus/Config.h has it in lower case, as FMINUS_FILES_TYPES.
+set(FMINUS_FILES_TYPES "" CACHE STRING
+    "The file interface's types: the extensions a build can ever read or write (a list, wav;f32;json); empty: any")
+set(FMINUS_FILES_TYPES_LOWER "")
+foreach(_files_type IN LISTS FMINUS_FILES_TYPES)
+  if(NOT _files_type MATCHES "^[A-Za-z0-9]+$")
+    message(FATAL_ERROR "FMinus: FMINUS_FILES_TYPES: '${_files_type}' is not an extension: 1 to 16 ASCII letters and "
+                        "digits, without the dot (FMINUS_FILES_TYPES is '${FMINUS_FILES_TYPES}')")
+  endif()
+  string(LENGTH "${_files_type}" _files_type_length)
+  if(_files_type_length GREATER 16)
+    message(FATAL_ERROR "FMinus: FMINUS_FILES_TYPES: '${_files_type}' is longer than 16 letters and digits")
+  endif()
+  string(TOLOWER "${_files_type}" _files_type)
+  if(NOT _files_type IN_LIST FMINUS_FILES_TYPES_LOWER)
+    list(APPEND FMINUS_FILES_TYPES_LOWER "${_files_type}")
+  endif()
+endforeach()
+# The largest file the file interface reads or writes, in bytes, whatever a host's policy says (1 to 2^31 - 2).
+set(FMINUS_FILES_MAX_BYTES 1073741824 CACHE STRING
+    "The file interface's largest file, in bytes (1 to 2147483646), whatever a host's policy says")
+if(NOT FMINUS_FILES_MAX_BYTES MATCHES "^[0-9]+$" OR FMINUS_FILES_MAX_BYTES MATCHES "^0+$"
+   OR FMINUS_FILES_MAX_BYTES MATCHES "^[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]")
+  message(FATAL_ERROR "FMinus: FMINUS_FILES_MAX_BYTES is '${FMINUS_FILES_MAX_BYTES}': a number of bytes from 1 to "
+                      "2147483646 (2^31 - 2)")
+endif()
+math(EXPR FMINUS_FILES_MAX_BYTES_VALUE "${FMINUS_FILES_MAX_BYTES}")
+if(FMINUS_FILES_MAX_BYTES_VALUE GREATER 2147483646)
+  message(FATAL_ERROR "FMinus: FMINUS_FILES_MAX_BYTES is '${FMINUS_FILES_MAX_BYTES}': a number of bytes from 1 to "
+                      "2147483646 (2^31 - 2)")
+endif()
+# The JSON parser's limits on a document (src/runtime/Json.cpp): its size in bytes, and how deeply its arrays and
+# objects may nest. json_parse of a document past either is null, as of one that is not JSON. fminus/Config.h has both.
+set(FMINUS_JSON_MAX_BYTES 67108864)   # 64 MiB
+set(FMINUS_JSON_MAX_DEPTH 1024)
+# The XML parser's (src/runtime/Xml.cpp), the same: a document's size in bytes, and how deeply its elements may nest,
+# the root element at depth 1. xml_parse of a document past either is null, as of one that is not XML.
+set(FMINUS_XML_MAX_BYTES 67108864)   # 64 MiB
+set(FMINUS_XML_MAX_DEPTH 1024)
 option(FMINUS_WERROR "Treat warnings in FMinus's own sources as errors" ON)
 set(FMINUS_CXX_STANDARD 23 CACHE STRING "C++ standard of FMinus's own targets")
 set(FMINUS_SANITIZERS "" CACHE STRING "Sanitizers for FMinus's own targets: a list of address, undefined, thread")

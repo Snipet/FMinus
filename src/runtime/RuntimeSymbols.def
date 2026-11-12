@@ -1,6 +1,14 @@
 // src/runtime/RuntimeSymbols.def: every function of the FMinus runtime (Runtime.h) generated code may call, one
 // FMINUS_RUNTIME_SYMBOL(name) each. support/JitRuntime.cpp defines them in a JIT by address; executables get them by
-// linking libfminus_runtime.a. Add a line whenever Runtime.h gains a function.
+// linking libfminus_runtime.a. Add a line whenever Runtime.h gains a function. A function of a build option is listed
+// under its FMINUS_HAS_ macro (fminus/Config.h, which Runtime.h includes, and so must every file that reads this one).
+//
+// An executable's C main calls the file interface's last two (support/Aot.h), a program never: they make a context
+// from the environment, so a JIT must not define them, and the list names them through FMINUS_FILES_MAIN_SYMBOL(name),
+// which a reader that wants them defines (as web/WebSymbols.def's FMINUS_WEB_MAIN_SYMBOL); by default it names nothing.
+#ifndef FMINUS_FILES_MAIN_SYMBOL
+#define FMINUS_FILES_MAIN_SYMBOL(name)
+#endif
 FMINUS_RUNTIME_SYMBOL(fminus_rt_abi_version)
 FMINUS_RUNTIME_SYMBOL(fminus_rt_main_args)
 FMINUS_RUNTIME_SYMBOL(fminus_rt_main_double_args)
@@ -19,6 +27,48 @@ FMINUS_RUNTIME_SYMBOL(fminus_rt_fft_forward_real)
 FMINUS_RUNTIME_SYMBOL(fminus_rt_fft_inverse_real)
 FMINUS_RUNTIME_SYMBOL(fminus_rt_fft_forward_complex)
 FMINUS_RUNTIME_SYMBOL(fminus_rt_fft_inverse_complex)
+FMINUS_RUNTIME_SYMBOL(fminus_rt_bytes_floats)
+FMINUS_RUNTIME_SYMBOL(fminus_rt_bytes_pcm16)
+FMINUS_RUNTIME_SYMBOL(fminus_rt_string_hash)
+#if FMINUS_HAS_JSON
+FMINUS_RUNTIME_SYMBOL(fminus_rt_json_parse)
+FMINUS_RUNTIME_SYMBOL(fminus_rt_json_free)
+FMINUS_RUNTIME_SYMBOL(fminus_rt_json_float)
+FMINUS_RUNTIME_SYMBOL(fminus_rt_json_double)
+FMINUS_RUNTIME_SYMBOL(fminus_rt_json_int)
+FMINUS_RUNTIME_SYMBOL(fminus_rt_json_bool)
+FMINUS_RUNTIME_SYMBOL(fminus_rt_json_count)
+FMINUS_RUNTIME_SYMBOL(fminus_rt_json_floats)
+FMINUS_RUNTIME_SYMBOL(fminus_rt_json_choice)
+FMINUS_RUNTIME_SYMBOL(fminus_rt_json_base64_floats)
+#endif
+#if FMINUS_HAS_XML
+FMINUS_RUNTIME_SYMBOL(fminus_rt_xml_parse)
+FMINUS_RUNTIME_SYMBOL(fminus_rt_xml_free)
+FMINUS_RUNTIME_SYMBOL(fminus_rt_xml_float)
+FMINUS_RUNTIME_SYMBOL(fminus_rt_xml_double)
+FMINUS_RUNTIME_SYMBOL(fminus_rt_xml_int)
+FMINUS_RUNTIME_SYMBOL(fminus_rt_xml_bool)
+FMINUS_RUNTIME_SYMBOL(fminus_rt_xml_count)
+FMINUS_RUNTIME_SYMBOL(fminus_rt_xml_floats)
+FMINUS_RUNTIME_SYMBOL(fminus_rt_xml_choice)
+#endif
+#if FMINUS_HAS_FILES
+FMINUS_RUNTIME_SYMBOL(fminus_rt_file_read)
+FMINUS_RUNTIME_SYMBOL(fminus_rt_file_status)
+FMINUS_RUNTIME_SYMBOL(fminus_rt_file_size)
+FMINUS_RUNTIME_SYMBOL(fminus_rt_file_data)
+FMINUS_RUNTIME_SYMBOL(fminus_rt_file_list)
+FMINUS_RUNTIME_SYMBOL(fminus_rt_file_count)
+FMINUS_RUNTIME_SYMBOL(fminus_rt_file_read_nth)
+FMINUS_RUNTIME_SYMBOL(fminus_rt_file_close)
+#if FMINUS_HAS_FILES_WRITE
+FMINUS_RUNTIME_SYMBOL(fminus_rt_file_write)
+FMINUS_RUNTIME_SYMBOL(fminus_rt_file_append)
+#endif
+FMINUS_FILES_MAIN_SYMBOL(fminus_rt_files_main_start)
+FMINUS_FILES_MAIN_SYMBOL(fminus_rt_files_main_stop)
+#endif
 FMINUS_RUNTIME_SYMBOL(fminus_rt_sinf)
 FMINUS_RUNTIME_SYMBOL(fminus_rt_cosf)
 FMINUS_RUNTIME_SYMBOL(fminus_rt_expf)
@@ -40,3 +90,4 @@ FMINUS_RUNTIME_SYMBOL(fminus_rt_libm_tanf)
 FMINUS_RUNTIME_SYMBOL(fminus_rt_parallel_for)
 FMINUS_RUNTIME_SYMBOL(fminus_rt_parallel_start)
 FMINUS_RUNTIME_SYMBOL(fminus_rt_parallel_stop)
+#undef FMINUS_FILES_MAIN_SYMBOL

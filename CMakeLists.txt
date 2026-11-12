@@ -5,6 +5,17 @@
 #   LLVM          cmake/FMinusLLVM.cmake         cache (default) | inline | system  -> FMinus::LLVM
 #   Bison, Flex   cmake/FMinusParserTools.cmake  fetch (default) | system           -> fminus_add_grammar()
 #   PFFFT         cmake/FMinusFft.cmake          two C files, into the runtime     -> fminus_pffft
+#   fast_float    cmake/FMinusFastFloat.cmake    headers, for the runtime's parsers -> fminus_fast_float
+#                                                (FMINUS_JSON or FMINUS_XML) and the
+#                                                web server's (FMINUS_WEB_SERVER)
+#   yyjson        cmake/FMinusJson.cmake         one C file, into the runtime       -> fminus_yyjson
+#                                                (FMINUS_JSON)
+#   pugixml       cmake/FMinusXml.cmake          one C++ file, into the runtime     -> fminus_pugixml
+#                                                (FMINUS_XML)
+#   libcurl,      cmake/FMinusWeb.cmake          built at configure time into the  -> fminus_web_curl,
+#   Mbed TLS                                     deps cache (FMINUS_WEB)              fminus_web_mbedtls
+#   llhttp        cmake/FMinusLlhttp.cmake       three C files, into fminus_web     -> fminus_llhttp
+#                                                (FMINUS_WEB_SERVER)
 #   CLI11         cmake/FMinusCLI11.cmake        tools only                         -> CLI11::CLI11
 #   Catch2, lit   cmake/FMinusTesting.cmake      tests only
 #   pybind11      cmake/FMinusPython.cmake       the Python package only (FMINUS_BUILD_PYTHON)
@@ -40,6 +51,11 @@ include(FMinusOptions)          # options, the deps cache, ccache, fminus_target
 include(FMinusParserTools)      # Bison, Flex, fminus_add_grammar() (first: a minute, where LLVM can take half an hour)
 include(FMinusLLVM)             # FMinus::LLVM
 include(FMinusFft)              # PFFFT, compiled into the runtime library
+include(FMinusFastFloat)        # fast_float, the parsers' numbers, when FMINUS_JSON, FMINUS_XML or FMINUS_WEB_SERVER is on
+include(FMinusJson)             # yyjson, the JSON parser, compiled into the runtime library when FMINUS_JSON is on
+include(FMinusXml)              # pugixml, the XML parser, compiled into the runtime library when FMINUS_XML is on
+include(FMinusWeb)              # libcurl and Mbed TLS, for the web library fminus_web, when FMINUS_WEB is on
+include(FMinusLlhttp)           # llhttp, the server's request parser, compiled into fminus_web when FMINUS_WEB_SERVER is on
 
 # Our own outputs only (set after LLVM, which places its own).
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin")
@@ -56,6 +72,13 @@ if(_fminus_asserts)
 else()
   set(FMINUS_LLVM_ASSERTIONS_01 0)
 endif()
+foreach(_feature JSON XML WEB WEB_SERVER FILES FILES_WRITE FILES_ANYWHERE)
+  if(FMINUS_${_feature})
+    set(FMINUS_HAS_${_feature} 1)
+  else()
+    set(FMINUS_HAS_${_feature} 0)
+  endif()
+endforeach()
 configure_file(cmake/templates/Config.h.in "${PROJECT_BINARY_DIR}/include/fminus/Config.h" @ONLY)
 
 if(FMINUS_BUILD_TESTS)

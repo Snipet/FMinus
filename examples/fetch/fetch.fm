@@ -1,0 +1,39 @@
+// examples/fetch/fetch.fm: the wavetable example's oscillator (../wavetable/wavetable.fm), its pack fetched from a
+// server its host allows rather than handed to it (docs/web.md). Download starts the request, then hands the body to
+// Wavetable::init, off the audio thread, as a plugin's loader thread would; the audio thread may watch its progress,
+// wait-free. The URL is a literal, so the host sees it before anything runs (Program::webRequests): here
+// http://127.0.0.1:*/packs/*.json, a local server's, its port and the pack's number the ints after it. Download is
+// there only in a build with the web library and the JSON parser (#if defined(__FMINUS_WEB__) && ...), so the file
+// compiles in every build.
+#include "../wavetable/wavetable.fm"
+
+#if defined(__FMINUS_WEB__) && defined(__FMINUS_JSON__)
+module Download
+{
+    void* request;
+
+    // Off the audio thread: starts fetching pack `pack` from the server at 127.0.0.1:`port`, and returns at once.
+    void start(int port, int pack)
+    {
+        request = http_get("http://127.0.0.1:%d/packs/%d.json", port, pack);
+    }
+
+    // On the audio thread, if it likes: the bytes received so far, wait-free.
+    int received() [[clang::nonblocking]]
+    {
+        return http_progress(request);
+    }
+
+    // Off the audio thread: waits for the pack (the host's policy bounds how long), hands it to the oscillator, and
+    // frees the request. The status: 200 when the tables are loaded, the server's other status, a failure
+    // (HTTP_REFUSED when the host's policy does not allow the URL, HTTP_TIMEOUT, ...), or 0 for a body that is no pack.
+    int finish(Wavetable* wavetable, float sampleRate)
+    {
+        int status = http_wait(request, -1);
+        if (status == 200 && !wavetable->init(http_body(request), http_size(request), sampleRate))
+            status = 0;
+        http_close(request);
+        return status;
+    }
+};
+#endif

@@ -1,0 +1,38 @@
+// A URL is a string literal, checked where it is written (src/ir/Web.cpp): a format's %d and its ints (Strings.cpp),
+// then no byte a URL cannot hold (CR, LF, a space, a backslash, anything not printable ASCII), a scheme of http or
+// https, and no credentials; a content type is printable ASCII. The effects: a request starts, is cancelled and is
+// closed off the audio thread (they allocate), http_wait blocks (a nonallocating function may call it, a nonblocking
+// one may not), and the reads are wait-free.
+// REQUIRES: web
+// RUN: not fminus %s 2>&1 | FileCheck %s --implicit-check-not=error:
+
+void* a(int k) { return http_get("http://example.com/%d/%d", k); }
+void* b(float k) { return http_get("http://example.com/%d", k); }
+void* c() { return http_get("http://example.com/a\r\nX-Evil: 1"); }
+void* d() { return http_get("https://user:secret@example.com/a"); }
+void* e() { return http_get("ftp://example.com/a"); }
+void* f() { return http_get("http://example.com/a b"); }
+void* g(const void* url) { return http_get(url); }
+void* h(const void* body) { return http_post("https://example.com/a", body, 4, "text/plain\n"); }
+void* i(const void* body, int k) { return http_post("https://example.com/%d", body, 4, "text/plain"); }
+void* j(const void* body) { return http_post("https://example.com/a", body, 4); }
+int wait(void* r) [[clang::nonallocating]] { return http_wait(r, 10); }
+int audio(void* r) [[clang::nonblocking]] { return http_status(r) + http_wait(r, 0); }
+void stop(void* r) [[clang::nonallocating]] { http_cancel(r); http_close(r); }
+void* start() [[clang::nonallocating]] { return http_get("https://example.com/"); }
+int user() { return HTTP_TIMEOUT + HTTP_LIMIT; }
+int own() { int HTTP_REFUSED = 7; return HTTP_REFUSED; }
+// CHECK: web-errors.fm:9:58: error: more '%' conversions than data arguments
+// CHECK: web-errors.fm:10:61: error: format specifies type 'int' but the argument has type 'float'
+// CHECK: web-errors.fm:11:50: error: character '\x0d' is not allowed in a URL: it is printable ASCII, without spaces or backslashes
+// CHECK: web-errors.fm:12:49: error: a URL cannot carry credentials ('@' before its host): the web library refuses them
+// CHECK: web-errors.fm:13:30: error: a URL's scheme is http or https, as 'https://example.com/a.json'
+// CHECK: web-errors.fm:14:50: error: character ' ' is not allowed in a URL: it is printable ASCII, without spaces or backslashes
+// CHECK: web-errors.fm:15:44: error: argument to 'http_get' must be a string literal
+// CHECK: web-errors.fm:16:91: error: character '\x0a' is not allowed in a content type: it is printable ASCII
+// CHECK: web-errors.fm:17:75: error: more '%' conversions than data arguments
+// CHECK: web-errors.fm:18:36: error: too few arguments to function call, expected at least 4, have 3
+// CHECK: web-errors.fm:20:69: error: function with 'nonblocking' attribute must not call non-'nonblocking' function 'http_wait'
+// CHECK: web-errors.fm:21:47: error: function with 'nonallocating' attribute must not call non-'nonallocating' function 'http_cancel'
+// CHECK: web-errors.fm:21:63: error: function with 'nonallocating' attribute must not call non-'nonallocating' function 'http_close'
+// CHECK: web-errors.fm:22:49: error: function with 'nonallocating' attribute must not call non-'nonallocating' function 'http_get'

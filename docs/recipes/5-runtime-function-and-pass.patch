@@ -1,22 +1,32 @@
 diff --git a/src/ir/Calls.cpp b/src/ir/Calls.cpp
-index a3e5e0e..6694760 100644
+index 303eb61..4f1f5fa 100644
 --- a/src/ir/Calls.cpp
 +++ b/src/ir/Calls.cpp
-@@ -2,9 +2,10 @@
+@@ -2,14 +2,15 @@
  // where the class's names hide the others); then the builtins, in the order a call tries them: the reductions,
  // poly_lanes and poly_index, poly_load and poly_store, <math.h>'s float functions (LLVM intrinsics, overloaded on
  // vectors; the transcendental ones the runtime's functions, by the math mode: Math.cpp), <stdlib.h>'s heap (malloc,
 -// calloc and free) and the FFT (fft_create, fft_forward, ...), both on the runtime's functions, and hash and randf
--// (inline: Hash.cpp); then the program's own functions. The runtime's functions are declared with what they do
--// (describeRuntime), so LLVM does not take one for an unknown function that may read and write all memory.
+-// (inline: Hash.cpp); then the program's own functions. The runtime's other builtins (bytes_floats, bytes_pcm16, the
+-// JSON parser's json_parse, json_float, ..., the XML parser's xml_parse, xml_float, ..., the web library's http_get,
+-// http_wait, ..., its server's http_listen, http_next, ..., the file interface's file_read, file_list, ..., and those
+-// that take string literals: Strings.cpp, Paths.cpp, Web.cpp, WebServer.cpp, Files.cpp) come before the rest, as a
+-// method of the module does, since their arguments are lowered as their parameters say (a literal is one only there).
+-// The runtime's functions are declared with what they do (describeRuntime), so LLVM does not take one for an unknown
+-// function that may read and write all memory.
 +// calloc and free) and the FFT (fft_create, fft_forward, ...), both on the runtime's functions, hash and randf
-+// (inline: Hash.cpp), and the runtime's other functions; then the program's own functions. The runtime's functions
-+// are declared with what they do (describeRuntime), so LLVM does not take one for an unknown function that may read
-+// and write all memory.
++// (inline: Hash.cpp), and db_to_gain (the runtime's: a float function with no prototype); then the program's own
++// functions. The runtime's other builtins (bytes_floats, bytes_pcm16, the JSON parser's json_parse, json_float, ...,
++// the XML parser's xml_parse, xml_float, ..., the web library's http_get, http_wait, ..., its server's http_listen,
++// http_next, ..., the file interface's file_read, file_list, ..., and those that take string literals: Strings.cpp,
++// Paths.cpp, Web.cpp, WebServer.cpp, Files.cpp) come before the rest, as a method of the module does, since their
++// arguments are lowered as their parameters say (a literal is one only there). The runtime's functions are declared
++// with what they do (describeRuntime), so LLVM does not take one for an unknown function that may read and write all
++// memory.
  #include "ir/Lowering.h"
  
- #include <llvm/IR/Attributes.h>
-@@ -222,6 +223,21 @@ namespace fminus::ir::detail
+ #include "fminus/Config.h"   // FMINUS_HAS_JSON, FMINUS_HAS_XML, FMINUS_HAS_WEB, FMINUS_HAS_WEB_SERVER,
+@@ -815,6 +816,21 @@ namespace fminus::ir::detail
          return nullptr;
      }
  
@@ -35,10 +45,10 @@ index a3e5e0e..6694760 100644
 +        return nullptr;
 +    }
 +
-     // What the effects refuse a nonallocating function (Effects.cpp): a builtin that allocates or frees.
-     bool allocates(std::string_view name)
+     const RuntimeBuiltin* findRuntimeBuiltin(std::string_view name)
      {
-@@ -304,6 +320,17 @@ namespace fminus::ir::detail
+         for (const RuntimeBuiltin& builtin : kRuntimeBuiltins)
+@@ -963,6 +979,17 @@ namespace fminus::ir::detail
                  llvm::Intrinsic::getOrInsertDeclaration(&module_, builtin->intrinsic, {typeOf(type)});
              return {builder_.CreateCall(intrinsic, irArgs), type};
          }
@@ -57,7 +67,7 @@ index a3e5e0e..6694760 100644
          if (found == functions_.end())
          {
 diff --git a/src/ir/Functions.cpp b/src/ir/Functions.cpp
-index fb60c65..c3787c0 100644
+index bdbcf28..9c4cd4c 100644
 --- a/src/ir/Functions.cpp
 +++ b/src/ir/Functions.cpp
 @@ -37,8 +37,8 @@ namespace fminus::ir::detail
@@ -72,12 +82,12 @@ index fb60c65..c3787c0 100644
              error(function.location, quoted(function.name) + " is a builtin and cannot be redefined");
              return;
 diff --git a/src/ir/Lowering.h b/src/ir/Lowering.h
-index 30eab34..4f8e692 100644
+index 3e47d03..b6202b6 100644
 --- a/src/ir/Lowering.h
 +++ b/src/ir/Lowering.h
-@@ -88,10 +88,20 @@ namespace fminus::ir::detail
-         bool allocates;
-     };
+@@ -287,12 +287,22 @@ namespace fminus::ir::detail
+     // its errors, as scanPath's. A format's own errors are scanFormat's, and not here again.
+     PathScan scanXmlPath(std::string_view text);
  
 +    // A function of the FMinus runtime (runtime/Runtime.h), float(float, ...), callable with no prototype (Calls.cpp):
 +    // JIT'd code finds it through support/JitRuntime.h, an executable links libfminus_runtime.a.
@@ -91,7 +101,9 @@ index 30eab34..4f8e692 100644
      const Builtin* findBuiltin(std::string_view name);   // <math.h>'s float functions, or nullptr
      const Allocation* findAllocation(std::string_view name);   // malloc, calloc, free, or nullptr
      const Fft* findFft(std::string_view name);           // fft_create, fft_forward, ..., or nullptr
+     const RuntimeBuiltin* findRuntimeBuiltin(std::string_view name);   // bytes_floats, ..., or nullptr
      bool allocates(std::string_view name);               // a builtin that allocates or frees: the heap's, a plan's
+     bool blocks(std::string_view name);                  // a builtin that may wait: http_wait
 +    const RuntimeFunction* findRuntimeFunction(std::string_view name);   // db_to_gain, or nullptr
      bool isReduction(std::string_view name);             // reduce_add, reduce_min, reduce_max
      bool isPolyQuery(std::string_view name);             // poly_lanes, poly_index
@@ -195,7 +207,7 @@ index 0000000..bbd5aff
 +    void registerPasses(llvm::PassBuilder& passes);
 +} // namespace fminus::opt
 diff --git a/src/runtime/Runtime.cpp b/src/runtime/Runtime.cpp
-index 6fc5bf7..821062d 100644
+index 3f00505..e91bb55 100644
 --- a/src/runtime/Runtime.cpp
 +++ b/src/runtime/Runtime.cpp
 @@ -2,6 +2,7 @@
@@ -206,7 +218,7 @@ index 6fc5bf7..821062d 100644
  #include <cstdio>
  #include <cstdlib>
  #include <cstring>
-@@ -97,3 +98,8 @@ extern "C" void fminus_rt_free(void* memory) noexcept
+@@ -137,3 +138,8 @@ extern "C" void fminus_rt_free(void* memory) noexcept
      std::free(memory);
  #endif
  }
@@ -216,10 +228,10 @@ index 6fc5bf7..821062d 100644
 +    return std::pow(10.0f, db / 20.0f);
 +}
 diff --git a/src/runtime/Runtime.h b/src/runtime/Runtime.h
-index c3ccc3c..54a7a30 100644
+index ba0816c..24cd33a 100644
 --- a/src/runtime/Runtime.h
 +++ b/src/runtime/Runtime.h
-@@ -127,4 +127,8 @@ extern "C"
+@@ -430,4 +430,8 @@ extern "C"
      float fminus_rt_libm_tanhf(float x) noexcept;
      float fminus_rt_libm_logf(float x) noexcept;
      float fminus_rt_libm_tanf(float x) noexcept;
@@ -229,19 +241,20 @@ index c3ccc3c..54a7a30 100644
 +    float fminus_rt_db_to_gain(float db) noexcept;
  }
 diff --git a/src/runtime/RuntimeSymbols.def b/src/runtime/RuntimeSymbols.def
-index ea56078..05e292f 100644
+index 5894aed..ec595b2 100644
 --- a/src/runtime/RuntimeSymbols.def
 +++ b/src/runtime/RuntimeSymbols.def
-@@ -37,3 +37,4 @@ FMINUS_RUNTIME_SYMBOL(fminus_rt_libm_tanf)
+@@ -90,4 +90,5 @@ FMINUS_RUNTIME_SYMBOL(fminus_rt_libm_tanf)
  FMINUS_RUNTIME_SYMBOL(fminus_rt_parallel_for)
  FMINUS_RUNTIME_SYMBOL(fminus_rt_parallel_start)
  FMINUS_RUNTIME_SYMBOL(fminus_rt_parallel_stop)
 +FMINUS_RUNTIME_SYMBOL(fminus_rt_db_to_gain)
+ #undef FMINUS_FILES_MAIN_SYMBOL
 diff --git a/src/support/HostTarget.cpp b/src/support/HostTarget.cpp
-index 7c15fa2..f0d91b8 100644
+index f9ef369..6cb2dfe 100644
 --- a/src/support/HostTarget.cpp
 +++ b/src/support/HostTarget.cpp
-@@ -4,6 +4,7 @@
+@@ -5,6 +5,7 @@
  #include "opt/KnobVersioning.h"
  #include "opt/LoopBudget.h"
  #include "opt/MathKernels.h"
@@ -249,7 +262,7 @@ index 7c15fa2..f0d91b8 100644
  #include "opt/ZeroInitElision.h"
  #include "support/LLVMInit.h"
  
-@@ -93,6 +94,7 @@ namespace fminus
+@@ -94,6 +95,7 @@ namespace fminus
          tuning.SLPVectorization = true;
          raiseSlpThreshold();
          llvm::PassBuilder passes(&machine, tuning);
@@ -319,7 +332,7 @@ index 0000000..7a8a38a
 +// CHECK: define float @softclip({{.*}} #[[ATTRS:[0-9]+]]
 +// CHECK: attributes #[[ATTRS]] = { {{.*}}"fminus-flops"="3"
 diff --git a/tests/unit/CodeGenTest.cpp b/tests/unit/CodeGenTest.cpp
-index 40f58aa..0d5c503 100644
+index 64bb4d5..2292b14 100644
 --- a/tests/unit/CodeGenTest.cpp
 +++ b/tests/unit/CodeGenTest.cpp
 @@ -162,3 +162,18 @@ TEST_CASE("every semantic error is reported, in source order, as clang words it"

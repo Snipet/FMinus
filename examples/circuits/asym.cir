@@ -1,7 +1,7 @@
 * asym.cir: an asymmetric clipper: R1 into C1, one 1N914 against two in series (D2+D3), so the positive half clips at
 * one forward voltage and the negative at two: the asymmetric pair's law, Is (e^(v / N Vt) - 1) - Is (e^(-v / 2 N Vt)
 * - 1). The configuration is the self-test's answer, pinned (fminus asym.cir --self-test without these three lines: 4x,
-* ADAA, omega(1), candidate 10 of 16; T1 -82.7, T2 -86.4, T3 0.44 dB). 4x omega(1) without ADAA fails T1 (-57.3 dB):
+* ADAA, omega(1), candidate 10 of 16; T1 -82.7, T2 -86.3, T3 0.44 dB). 4x omega(1) without ADAA fails T1 (-57.3 dB):
 * omega3's guess for the two diodes' side, at 4.5 V.
 .title Asym
 .input  u    in   scale=1

@@ -38,12 +38,17 @@ namespace fminus::aot
         std::vector<std::string> objects{};      // object files and archives, in link order
         std::vector<std::string> driverArgs{};   // to the driver as they are: -framework Accelerate, -lm, -v, ...
         bool linkRuntime = true;                 // libfminus_runtime.a (and this tree's sanitizer runtimes)
+        // libfminus_web.a, libcurl's and its TLS library's archives and the system libraries they need, in a build
+        // with the web library (FMINUS_WEB): emitExecutable sets it when the module calls the web library, and leaves
+        // it as given otherwise.
+        bool linkWeb = false;
     };
 
     // Links `options.objects` into `options.output` through the compiler driver.
     llvm::Error linkExecutable(const LinkOptions& options);
 
-    // Writes the module's object to a temporary file and links it, ahead of `options.objects`, into `options.output`.
+    // Writes the module's object to a temporary file and links it, ahead of `options.objects`, into `options.output`,
+    // with the web library's archives when the module calls a function of it (fminus_web_*).
     llvm::Error emitExecutable(llvm::Module& module, llvm::TargetMachine& machine, LinkOptions options);
 
     // Makes a program's `float main(float, ...)`, `double main(...)` or `bool main(...)` its executable's entry, its
@@ -66,5 +71,16 @@ namespace fminus::aot
     // (opt::boundsMessage's words, fminus_rt_main_bounds) and exits with 4 instead. With either, it calls main through
     // its address passed through an empty inline asm: an indirect call, so main is never inlined into it, and nothing
     // the optimiser finds of main before the passes (that it never returns, say) changes the code after the call.
+    //
+    // For a module that calls http_get, http_post or http_listen (its web context, ir::kWebContextSymbol), the C main
+    // makes the program's context from its environment before the call (fminus_web_main_start, src/web/Web.h:
+    // FMINUS_WEB_ALLOW, FMINUS_WEB_CA_FILE, and with the server FMINUS_WEB_LISTEN, FMINUS_WEB_TOKEN, FMINUS_WEB_HOSTS,
+    // FMINUS_WEB_ROOT, FMINUS_WEB_OPEN; none set, no network and no server), exiting with 2 when the library refuses
+    // the policy, and destroys it after the call (fminus_web_main_stop), so that no request, and no listening socket,
+    // outlives main. For a module that names a file (file_read, file_list, file_write or file_append: its file context,
+    // ir::kFilesContextSymbol), the same before the web's, from FMINUS_FILES_READ, FMINUS_FILES_WRITE,
+    // FMINUS_FILES_DENY, FMINUS_FILES_TYPES and FMINUS_FILES_ANYWHERE (fminus_rt_files_main_start, runtime/Runtime.h;
+    // neither a folder nor anywhere set, no files), and destroyed after it (fminus_rt_files_main_stop), every file the
+    // program holds freed.
     llvm::Error addEntryPoint(llvm::Module& module, std::optional<std::int64_t> loopBudget = std::nullopt);
 } // namespace fminus::aot

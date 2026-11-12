@@ -1,0 +1,77 @@
+// A route is a string literal, checked where it is written (src/ir/WebServer.cpp): a method of GET, POST, PUT, PATCH
+// or DELETE, one space, and a path the server serves ("/" and segments of letters, digits, '-', '.', '_', '~', none
+// empty, "." or ".."), %d its only conversion, at most 8, never two together nor one before a digit. A reply's format
+// is printf's %d, %g, %.Ng (N from 1 to 17) and %%, checked as clang checks printf's; a query's name is letters,
+// digits, '_', '-' and '.'. The effects: http_listen allocates, http_accept blocks (a nonallocating function may call
+// it, a nonblocking one may not), and what is done to a request is wait-free. And the driver's options: the server's
+// for --run only, each but --web-listen with it, and the policy's mistakes named by the option they are in.
+// REQUIRES: web-server
+// RUN: not fminus %s 2>&1 | FileCheck %s --implicit-check-not=error:
+// RUN: not fminus %s --web-listen 127.0.0.1:0 2>&1 | FileCheck %s --check-prefix=EMIT
+// RUN: not fminus %s --run ok --web-token abcdefghijklmnop 2>&1 | FileCheck %s --check-prefix=ALONE
+// RUN: not fminus %s --run ok --web-listen '*:8080' 2>&1 | FileCheck %s --check-prefix=OPEN
+// RUN: not fminus %s --run ok --web-listen 127.0.0.1:6000 2>&1 | FileCheck %s --check-prefix=PORT
+// RUN: not fminus %s --run ok --web-listen 127.0.0.1:0 --web-token short 2>&1 | FileCheck %s --check-prefix=TOKEN
+// RUN: not fminus %s --run ok --web-listen 127.0.0.1:0 --web-host 'a b' 2>&1 | FileCheck %s --check-prefix=HOST
+// RUN: not fminus %s --run ok --web-listen 127.0.0.1:0 --web-root %s.none 2>&1 | FileCheck %s --check-prefix=ROOT
+
+bool a(void* r) { return http_is(r, "get /x"); }
+bool b(void* r) { return http_is(r, "HEAD /x"); }
+bool c(void* r) { return http_is(r, "GET  /x"); }
+bool d(void* r) { return http_is(r, "GET /a//b"); }
+bool e(void* r) { return http_is(r, "GET /a/../b"); }
+bool f(void* r) { return http_is(r, "GET /a/%d%d"); }
+bool g(void* r) { return http_is(r, "GET /%d/%d/%d/%d/%d/%d/%d/%d/%d"); }
+bool h(void* r) { return http_is(r, "GET /a/%s"); }
+bool i(void* r) { return http_is(r, "GET /a?x=1"); }
+bool j(void* r) { return http_is(r, "GET /a b"); }
+bool k(void* r) { return http_is(r, "GET /%d5"); }
+bool l(void* r) { return http_is(r, "GET /100%%"); }
+int m(void* r, float x) { return http_reply_text(r, 200, "", "%d", x); }
+int n(void* r, int x) { return http_reply_text(r, 200, "", "%g", x); }
+int o(void* r, double x) { return http_reply_text(r, 200, "", "%.18g", x); }
+int p(void* r, double x) { return http_reply_text(r, 200, "", "%f", x); }
+int q(void* r) { return http_reply_text(r, 200, "", "%g"); }
+int s(void* r) { return http_reply_text(r, 200, "", "x", 1); }
+float t(void* r) { return http_query_float(r, "a b", 1.0f); }
+int u(void* r) { return http_query_int(r, "", 1); }
+int v(void* r, const void* d) { return http_reply_bytes(r, 200, d, 1, "a\nb"); }
+void* w(void* s) [[clang::nonblocking]] { return http_accept(s, 0); }
+void* x() [[clang::nonallocating]] { return http_listen(); }
+void* y(void* s) [[clang::nonallocating]] { return http_accept(s, 0); }
+int z(void* s) [[clang::nonblocking]] { void* r = http_next(s); return http_reply(r, http_is(r, "GET /") ? 204 : 404); }
+float ok() { return 1.0f; }
+
+// CHECK: web-server-errors.fm:18:38: error: 'get' is not a method a route can name: GET, POST, PUT, PATCH or DELETE
+// CHECK: web-server-errors.fm:19:38: error: 'HEAD' is not a method a route can name: GET, POST, PUT, PATCH or DELETE (a GET route answers HEAD too)
+// CHECK: web-server-errors.fm:20:42: error: a route has one space between its method and its path
+// CHECK: web-server-errors.fm:21:44: error: a route's path has no empty segment
+// CHECK: web-server-errors.fm:22:45: error: a route's path has no '.' or '..' segment
+// CHECK: web-server-errors.fm:23:47: error: a %d right after another can never match: each takes all the digits there are
+// CHECK: web-server-errors.fm:24:67: error: a route takes at most 8 %d
+// CHECK: web-server-errors.fm:25:46: error: invalid conversion specifier 's'
+// CHECK: web-server-errors.fm:25:46: note: a route takes %d, a decimal number of the path
+// CHECK: web-server-errors.fm:26:44: error: a route is a path alone: a request's query is read with http_query_float and http_query_int
+// CHECK: web-server-errors.fm:27:44: error: character ' ' is not allowed in a route's path: letters, digits, '/', '-', '.', '_', '~' and %d
+// CHECK: web-server-errors.fm:28:45: error: a digit right after %d can never match: %d takes all the digits there are
+// CHECK: web-server-errors.fm:29:46: error: a route's path cannot hold '%': %d, a number, is its only conversion
+// CHECK: web-server-errors.fm:30:68: error: format specifies type 'int' but the argument has type 'float'
+// CHECK: web-server-errors.fm:31:66: error: format specifies type 'double' but the argument has type 'int'
+// CHECK: web-server-errors.fm:32:65: error: a reply's %.Ng takes a precision N of 1 to 17
+// CHECK: web-server-errors.fm:32:65: note: a reply's format takes %d, an int; %g and %.Ng (N from 1 to 17), a float or a double; and %%, a percent sign
+// CHECK: web-server-errors.fm:33:65: error: invalid conversion specifier 'f'
+// CHECK: web-server-errors.fm:34:55: error: more '%' conversions than data arguments
+// CHECK: web-server-errors.fm:35:58: error: data argument not used by format string
+// CHECK: web-server-errors.fm:36:49: error: character ' ' is not allowed in a query's name: letters, digits, '_', '-' and '.'
+// CHECK: web-server-errors.fm:37:43: error: a query's name is 1 to 64 bytes, not 0
+// CHECK: web-server-errors.fm:38:73: error: character '\x0a' is not allowed in a content type: it is printable ASCII
+// CHECK: web-server-errors.fm:39:50: error: function with 'nonblocking' attribute must not call non-'nonblocking' function 'http_accept'
+// CHECK: web-server-errors.fm:40:45: error: function with 'nonallocating' attribute must not call non-'nonallocating' function 'http_listen'
+
+// EMIT: fminus: --web-listen: for --run's call only; an executable reads FMINUS_WEB_LISTEN (and FMINUS_WEB_TOKEN, FMINUS_WEB_HOSTS, FMINUS_WEB_ROOT, FMINUS_WEB_OPEN) when it runs
+// ALONE: fminus: --web-token: needs --web-listen, where the program may listen
+// OPEN: fminus: --web-listen: server.listen '*:8080' is not a loopback address: the policy needs a token (server.token), or open (server.open)
+// PORT: fminus: --web-listen: server.listen '127.0.0.1:6000'
+// TOKEN: fminus: --web-token: server.token has 5 characters (16 to 256)
+// HOST: fminus: --web-host: server.hosts has 'a b'
+// ROOT: fminus: --web-root: '{{.*}}.none' is not a directory

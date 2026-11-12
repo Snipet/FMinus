@@ -1,0 +1,30 @@
+// The JSON parser's errors, one each, from the command line: a path that is no JSON Pointer, at its first byte; an
+// escape that is neither ~0 nor ~1, at its ~; a path's places, as a format's (Strings.cpp); a path or a choice that is
+// no literal; and the effects: json_parse and json_free refused in a nonblocking function, and in a nonallocating one.
+// REQUIRES: json
+// RUN: not fminus %s 2>&1 | FileCheck %s --implicit-check-not=error:
+
+float paths(const void* doc, int k)
+{
+    return json_float(doc, "osc", 0.0f) + json_float(doc, "/osc/~2", 0.0f) + json_float(doc, "/osc/%d/%d", k, 0.0f)
+           + json_count(doc, k) + json_choice(doc, "/wave", "sine", k);
+}
+
+float process(const void* data, int bytes) [[clang::nonblocking]]
+{
+    void* doc = json_parse(data, bytes);
+    const float x = json_float(doc, "/x", 0.0f);
+    json_free(doc);
+    return x;
+}
+
+void end(void* doc) [[clang::nonallocating]] { json_free(doc); }
+
+// CHECK: json-errors.fm:9:29: error: a JSON Pointer must be empty or begin with '/'
+// CHECK: json-errors.fm:9:65: error: unknown escape sequence '~2' in a JSON Pointer: '~0' is '~' and '~1' is '/'
+// CHECK: json-errors.fm:9:104: error: more '%' conversions than data arguments
+// CHECK: json-errors.fm:10:30: error: argument to 'json_count' must be a string literal
+// CHECK: json-errors.fm:10:69: error: argument to 'json_choice' must be a string literal
+// CHECK: json-errors.fm:15:17: error: function with 'nonblocking' attribute must not call non-'nonblocking' function 'json_parse'
+// CHECK: json-errors.fm:17:5: error: function with 'nonblocking' attribute must not call non-'nonblocking' function 'json_free'
+// CHECK: json-errors.fm:21:48: error: function with 'nonallocating' attribute must not call non-'nonallocating' function 'json_free'

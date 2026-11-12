@@ -1,0 +1,42 @@
+// In a build without the file interface (FMINUS_FILES=OFF), each file_ builtin and each status code's name is still a
+// name FMinus knows: its use is an error that names the option, not an undeclared function or identifier;
+// __FMINUS_FILES__ and __FMINUS_FILES_WRITE__ are not defined; and the driver's file options say the build has no file
+// interface.
+// UNSUPPORTED: files
+// RUN: not fminus %s 2>&1 | FileCheck %s --implicit-check-not=error:
+// RUN: not fminus %s --run load --files-read kit=%S 2>&1 | FileCheck %s --check-prefix=READ
+// RUN: not fminus %s --run load --files-write user=%S 2>&1 | FileCheck %s --check-prefix=WRITE
+// RUN: not fminus %s --run load --files-anywhere 2>&1 | FileCheck %s --check-prefix=ANYWHERE
+// RUN: not fminus %s --run load --files-deny %S 2>&1 | FileCheck %s --check-prefix=DENY
+
+#if defined(__FMINUS_FILES__) || defined(__FMINUS_FILES_WRITE__)
+#error __FMINUS_FILES__ or __FMINUS_FILES_WRITE__ is defined
+#endif
+
+int load(const void* data)
+{
+    void* f = file_read("kit/%d.f32", 1);
+    void* l = file_list("kit/*.f32");
+    int s = file_status(f) + file_size(f) + file_count(l) + file_write("user/a.f32", data, 4);
+    const void* d = file_data(f);
+    void* g = file_read_nth(l, 0);
+    file_close(g);
+    return s + file_append("user/log.txt", data, 4) + FILE_REFUSED;
+}
+
+// CHECK: files-off.fm:18:15: error: 'file_read' needs the file interface, which this build of FMinus leaves out (FMINUS_FILES=OFF)
+// CHECK: files-off.fm:19:15: error: 'file_list' needs the file interface, which this build of FMinus leaves out (FMINUS_FILES=OFF)
+// CHECK: files-off.fm:20:13: error: 'file_status' needs the file interface, which this build of FMinus leaves out (FMINUS_FILES=OFF)
+// CHECK: files-off.fm:20:30: error: 'file_size' needs the file interface, which this build of FMinus leaves out (FMINUS_FILES=OFF)
+// CHECK: files-off.fm:20:45: error: 'file_count' needs the file interface, which this build of FMinus leaves out (FMINUS_FILES=OFF)
+// CHECK: files-off.fm:20:61: error: 'file_write' needs the file interface, which this build of FMinus leaves out (FMINUS_FILES=OFF)
+// CHECK: files-off.fm:21:21: error: 'file_data' needs the file interface, which this build of FMinus leaves out (FMINUS_FILES=OFF)
+// CHECK: files-off.fm:22:15: error: 'file_read_nth' needs the file interface, which this build of FMinus leaves out (FMINUS_FILES=OFF)
+// CHECK: files-off.fm:23:5: error: 'file_close' needs the file interface, which this build of FMinus leaves out (FMINUS_FILES=OFF)
+// CHECK: files-off.fm:24:16: error: 'file_append' needs the file interface, which this build of FMinus leaves out (FMINUS_FILES=OFF)
+// CHECK: files-off.fm:24:55: error: 'FILE_REFUSED' needs the file interface, which this build of FMinus leaves out (FMINUS_FILES=OFF)
+
+// READ: fminus: --files-read: this build of FMinus leaves out the file interface (FMINUS_FILES=OFF)
+// WRITE: fminus: --files-write: this build of FMinus leaves out the file interface (FMINUS_FILES=OFF)
+// ANYWHERE: fminus: --files-anywhere: this build of FMinus leaves out the file interface (FMINUS_FILES=OFF)
+// DENY: fminus: --files-deny: this build of FMinus leaves out the file interface (FMINUS_FILES=OFF)

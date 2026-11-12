@@ -1,0 +1,20 @@
+// In a build without the JSON parser (FMINUS_JSON=OFF), a json_ builtin is still a name FMinus knows: its call is an
+// error that names the option, not a call of an undeclared function, and __FMINUS_JSON__ is not defined.
+// UNSUPPORTED: json
+// RUN: not fminus %s 2>&1 | FileCheck %s --implicit-check-not=error:
+
+#ifdef __FMINUS_JSON__
+#error __FMINUS_JSON__ is defined
+#endif
+
+float load(const void* data, int bytes)
+{
+    void* doc = json_parse(data, bytes);
+    const float x = json_float(doc, "/x", 0.0f);
+    json_free(doc);
+    return x;
+}
+
+// CHECK: json-off.fm:12:17: error: 'json_parse' needs the JSON parser, which this build of FMinus leaves out (FMINUS_JSON=OFF)
+// CHECK: json-off.fm:13:21: error: 'json_float' needs the JSON parser, which this build of FMinus leaves out (FMINUS_JSON=OFF)
+// CHECK: json-off.fm:14:5: error: 'json_free' needs the JSON parser, which this build of FMinus leaves out (FMINUS_JSON=OFF)

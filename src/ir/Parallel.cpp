@@ -157,6 +157,7 @@ namespace fminus::ir::detail
                                f(*index.index);
                            },
                            [](const ast::SizeofExpr&) {},
+                           [](const ast::StringExpr&) {},
                        },
                        expr.node);
         }
@@ -311,6 +312,7 @@ namespace fminus::ir::detail
                                [&](const ast::NumberExpr&) {},
                                [&](const ast::BoolExpr&) {},
                                [&](const ast::SizeofExpr&) {},
+                               [&](const ast::StringExpr&) {},   // a constant of the program's
                                [&](const ast::BinaryExpr&) { reads(expr); },
                                [&](const ast::LogicalExpr&) { reads(expr); },
                                [&](const ast::ConditionalExpr&) { reads(expr); },

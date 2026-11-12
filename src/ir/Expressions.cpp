@@ -132,6 +132,7 @@ namespace fminus::ir::detail
                 [&](const ast::IncrementExpr& increment) { return lowerIncrement(expr.location, increment); },
                 [&](const ast::CastExpr& cast) { return lowerCast(expr.location, cast); },
                 [&](const ast::SizeofExpr& size) { return lowerSizeof(expr.location, size); },
+                [&](const ast::StringExpr&) { return notAValue(expr); },   // a builtin's argument only (Strings.cpp)
             },
             expr.node);
         value.failed = value.failed || diagnostics_.errors().size() != reported;
@@ -675,7 +676,9 @@ namespace fminus::ir::detail
     // multiplies by C's 0.999 (lowerAs, with the target's type as staticType knows it).
     Lowering::Value Lowering::lowerAssign(SourceLocation location, const ast::AssignExpr& assign)
     {
-        Value value = lowerAs(*assign.value, staticType(*assign.target).value_or(ast::Type::Void));
+        const std::optional<ast::Type> targetType = staticType(*assign.target);
+        Value value = isString(*assign.value) ? refuseString(*assign.value, targetType, Use::Assigning, location)
+                                              : lowerAs(*assign.value, targetType.value_or(ast::Type::Void));
         if (!isLValue(*assign.target))
         {
             error(location, "expression is not assignable");

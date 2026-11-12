@@ -1,0 +1,135 @@
+// examples/remote/remote.fm: a small synthesiser a browser controls (docs/web.md, "The server"). Remote plays a sine
+// whose gain and pitch a page sets over HTTP, and keeps a meter the page reads. It takes its requests itself, in its
+// [[clang::nonblocking]] process, between two blocks: the audio thread's own work, wait-free, with no lock and no
+// second thread ever touching gain or pitch. Its routes are literals, so its host sees them before anything runs
+// (Program::webRoutes), and the library answers 404 and 405 itself for anything else. Where it listens is the host's:
+// http_listen() takes no argument, and under the default policy listens nowhere.
+//
+// The page (page/index.html and page/remote.js) is the host's to hand over as static content: remote.cpp gives the
+// files to Options::web.server.files, and the driver reads the directory with --web-root (README.md). Remote is there
+// only in a build with the web server (#ifdef __FMINUS_WEB_SERVER__), so the file compiles in every build.
+
+#ifdef __FMINUS_WEB_SERVER__
+module Remote
+{
+    void* server;
+    float rate;       // the sample rate, Hz
+    float gain;       // as the page last set it: 0 to 1
+    float pitch;      // Hz: 20 to 20000
+    float heard;      // the gain as it is heard: it moves to `gain` over a few milliseconds, so a step does not click
+    float phase;      // the sine's, in cycles: 0 to 1
+    float level;      // the meter: the output's peak, held, a tenth less each block it is not reached again
+    int changes;      // requests that changed gain or pitch
+
+    // Off the audio thread, once: listens where the host's policy says (nowhere, by default), at once.
+    void init(float sampleRate)
+    {
+        server = http_listen();
+        rate = sampleRate;
+        gain = 0.25f;
+        pitch = 440.0f;
+        heard = gain;
+    }
+
+    // The port it listens on, or why it does not: HTTP_REFUSED (its host allowed none), HTTP_TRANSPORT (the address
+    // could not be bound), HTTP_CANCELLED (the host stopped it).
+    int port() [[clang::nonblocking]]
+    {
+        return http_port(server);
+    }
+
+    // One request, answered at once. Only the routes below reach it: the library answers 404 for a path none of them
+    // has and 405 for a method none has for its path. A number that is out of range, or not a number at all (?value=nan
+    // gives the fallback), is the program's to refuse: 400, and nothing changes.
+    void answer(void* r) [[clang::nonblocking]]
+    {
+        if (http_is(r, "POST /gain"))                                    // POST /gain?value=0.5
+        {
+            const float value = http_query_float(r, "value", -1.0f);
+            if (value >= 0.0f && value <= 1.0f)
+            {
+                gain = value;
+                changes += 1;
+                http_reply(r, 204);
+            }
+            else
+                http_reply(r, 400);
+        }
+        else if (http_is(r, "POST /pitch"))                              // POST /pitch?value=261.63
+        {
+            const float value = http_query_float(r, "value", -1.0f);
+            if (value >= 20.0f && value <= 20000.0f)
+            {
+                pitch = value;
+                changes += 1;
+                http_reply(r, 204);
+            }
+            else
+                http_reply(r, 400);
+        }
+        else if (http_is(r, "POST /note/%d"))                            // POST /note/69: A4, 440 Hz
+        {
+            const int note = http_arg(r, 0);                             // 0 to 2147483647: a %d has no sign
+            if (note <= 127)
+            {
+                pitch = 440.0f * expf(0.05776227f * (float)(note - 69));   // 2^((note - 69) / 12)
+                changes += 1;
+                http_reply(r, 204);
+            }
+            else
+                http_reply(r, 400);
+        }
+        else if (http_is(r, "GET /state"))                               // what the page shows
+            http_reply_text(r, 200, "application/json", "{\"gain\":%g,\"pitch\":%g,\"level\":%.4g,\"changes\":%d}",
+                            gain, pitch, level, changes);
+        else
+            http_reply(r, 404);   // a route of the program's this function does not answer: none, here
+    }
+
+    // On the audio thread: the requests waiting, answered, then the block, with gain and pitch as they now are.
+    void process(float* out, int n) [[clang::nonblocking]]
+    {
+        for (void* r = http_next(server); r; r = http_next(server))
+            answer(r);
+        const float step = pitch / rate;
+        float peak = 0.0f;
+        for (int i = 0; i < n; ++i)
+        {
+            heard += (gain - heard) * 0.002f;
+            out[i] = heard * sinf(6.2831853f * phase);
+            phase += step;
+            if (phase >= 1.0f)
+                phase -= 1.0f;
+            peak = fmaxf(peak, fabsf(out[i]));
+        }
+        level = fmaxf(peak, level * 0.9f);
+    }
+
+    // For the driver, which has no audio thread (README.md): renders blocks of 10 ms for about `seconds` seconds,
+    // waiting up to a block's time for a request between two (http_accept: it blocks, so this is no audio thread's
+    // code), and gives the changes the page made; or, when it does not listen, why (HTTP_REFUSED: no --web-listen).
+    int serve(float seconds)
+    {
+        if (http_port(server) <= 0)
+            return http_port(server);
+        float block[480];
+        const int blocks = (int)(seconds * 100.0f);
+        for (int b = 0; b < blocks && http_port(server) > 0; ++b)
+        {
+            void* r = http_accept(server, 10);
+            if (r)
+                answer(r);
+            process(block, 480);
+        }
+        return changes;
+    }
+};
+
+// fminus remote.fm --run serve 600 --web-listen localhost:8080 --web-root page (README.md).
+int serve(float seconds)
+{
+    Remote synth;
+    synth.init(48000.0f);
+    return synth.serve(seconds);
+}
+#endif

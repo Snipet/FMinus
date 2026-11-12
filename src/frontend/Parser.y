@@ -40,6 +40,7 @@
 //                  | "parallel" block                    FMinus's: the iterations, or the statements, at once
 //     label        : "case" expr ":" | "default" ":"                         the expr an integer constant expression
 //     expr         : NUMBER | "true" | "false" | IDENTIFIER | IDENTIFIER "(" (expr ("," expr)*)? ")" | "(" expr ")"
+//                  | STRING+          a string literal: the code generator takes one only as a builtin's argument
 //                  | ("-" | "+" | "!" | "~" | "*" | "&") expr | expr "[" expr "]"   *p, &x, p[i]
 //                  | "sizeof" "(" "const"? type pointer array_sizes? ")"             a type's size, an int
 //                  | expr ("*" | "/" | "%") expr | expr ("+" | "-") expr | expr ("<<" | ">>") expr
@@ -59,6 +60,10 @@
 // ^, &, equality, relational, shifts, additive, multiplicative, unary (and casts), and the postfix operators: ".",
 // "->", "[" and "++" and "--" after their operand. So `a & b == c` is a & (b == c), as in C, and `a << 1 + 2` is
 // a << 3. The unary "&" and "-" take UNARY's precedence (%prec), their binary ones their own.
+// A string literal is an expression to the grammar, as in C, so a call's arguments may be one; FMinus has no string
+// type, and the code generator refuses a literal anywhere but as the argument of a builtin's string parameter
+// (ir/Calls.cpp), each error at the literal. So the grammar stays C's, and a program it accepts means what it would in
+// C, where a literal is a char array.
 // A module's name is a type from its declaration on: the scanner returns it as MODULE_NAME (ParseContext.h), as a C
 // compiler returns a typedef's name, so `OnePole* p;` is a declaration and `a * b;` a product.
 // The grammar accepts any expression on the left of an assignment; the code generator rejects what is not an lvalue
@@ -156,6 +161,14 @@
         {
             std::vector<ast::ExprPtr> items;
             std::vector<ast::Brace> braces;
+        };
+
+        // A string literal's token (Lexer.l's stringValue): its characters, C's escapes resolved, and the offset in the
+        // token, from its opening quote, at which each one is spelt.
+        struct StringToken
+        {
+            std::string value;
+            std::vector<int> offsets;
         };
 
         // C23's fixed underlying type of an enumeration as written, `: int`: the type and where; or none.
@@ -403,6 +416,17 @@
             return name;
         }
 
+        // A string literal's token, `token` at `where`, appended to `literal`: its bytes, and where each is spelt (the
+        // token's column, and the byte's offset in it: a token is one line).
+        void appendString(fminus::ast::StringExpr& literal, const fminus::frontend::location& where,
+                          fminus::frontend::StringToken token)
+        {
+            const fminus::SourceLocation start = at(where);
+            literal.value += token.value;
+            for (const int offset : token.offsets)
+                literal.at.push_back(fminus::SourceLocation{start.line, start.column + offset, start.file});
+        }
+
         // A declarator's name, its pointer and the attributes after the name.
         fminus::frontend::Declarator named(const fminus::frontend::location& where, fminus::frontend::Pointer pointer,
                                            std::string name, std::vector<fminus::ast::Attribute> attributes)
@@ -513,7 +537,7 @@
 %token LPAREN "(" RPAREN ")" LBRACE "{" RBRACE "}" COMMA "," SEMI ";"
 %token <std::string> IDENTIFIER "identifier"
 %token <std::string> NUMBER "number"
-%token <std::string> STRING "string literal"
+%token <StringToken> STRING "string literal"
 
 %nterm <std::vector<ast::Function>> items
 %nterm <ast::Function> function
@@ -533,7 +557,8 @@
 %nterm <ast::Attribute> attribute
 %nterm <std::vector<ast::AttributeArg>> attribute_args
 %nterm <ast::AttributeArg> attribute_arg
-%nterm <std::string> attribute_word string_literal
+%nterm <std::string> attribute_word
+%nterm <ast::StringExpr> string_literal
 %nterm <std::vector<ast::Param>> params param_list
 %nterm <ast::Param> param
 %nterm <bool> qualifier
@@ -780,13 +805,13 @@ attribute_args
 attribute_arg
     : NUMBER                                { $$ = ast::AttributeArg{$1, false}; }
     | "-" NUMBER                            { $$ = ast::AttributeArg{"-" + $2, false}; }
-    | string_literal                        { $$ = ast::AttributeArg{$1, true}; }
+    | string_literal                        { $$ = ast::AttributeArg{$1.value, true}; }
     ;
 
 // C's adjacent string literals are one: "Cut" "off" is "Cutoff".
 string_literal
-    : STRING                                { $$ = $1; }
-    | string_literal STRING                 { $$ = $1 + $2; }
+    : STRING                                { appendString($$, @1, $1); }
+    | string_literal STRING                 { $$ = $1; appendString($$, @2, $2); }
     ;
 
 // `(void)` is C's empty list: one unnamed parameter of type void, which is no parameter.
@@ -1153,6 +1178,7 @@ expr
     | "(" cast_type ")" expr %prec UNARY    { $$ = ast::makeExpr(at(@1), ast::CastExpr{$2, $4}); }
     | "true"                                { $$ = ast::makeExpr(at(@1), ast::BoolExpr{true}); }
     | "false"                               { $$ = ast::makeExpr(at(@1), ast::BoolExpr{false}); }
+    | string_literal                        { $$ = ast::makeExpr(at(@1), $1); }
     | expr "<" expr                         { $$ = binary(@2, ast::BinaryOp::Less, $1, $3); }
     | expr ">" expr                         { $$ = binary(@2, ast::BinaryOp::Greater, $1, $3); }
     | expr "<=" expr                        { $$ = binary(@2, ast::BinaryOp::LessEqual, $1, $3); }

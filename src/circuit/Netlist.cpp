@@ -1877,7 +1877,7 @@ namespace fminus::circuit
             }
             if (name == ".solver")
             {
-                if (!once(n_.solver, head) || !arity(1, 1, ".solver omega|omega(K)|newton(K)|auto"))
+                if (!once(n_.solver, head) || !arity(1, 1, ".solver omega|omega(K)|newton(K)|halley(K)|auto"))
                     return true;
                 const std::string w = folded(t[1].text);
                 if (w == "auto")
@@ -1887,14 +1887,16 @@ namespace fminus::circuit
                 }
                 if (w == "omega")
                 {
-                    // the guess named, its steps left to the self-test (an EA port's candidates are all omega's)
+                    // the guess named, its steps left to the self-test (an EA port's candidates all start from
+                    // omega3, halley(K)'s too)
                     n_.solver.isAuto = true;
                     n_.solverBare = true;
                     return true;
                 }
                 const std::size_t open = w.find('(');
                 const std::string base = w.substr(0, open);
-                if ((base == "omega" || base == "newton") && open != std::string::npos && w.back() == ')')
+                if ((base == "omega" || base == "newton" || base == "halley") && open != std::string::npos &&
+                    w.back() == ')')
                 {
                     const std::string k = w.substr(open + 1, w.size() - open - 2);
                     const bool digits = !k.empty() && k.size() <= 2 &&
@@ -1904,15 +1906,18 @@ namespace fminus::circuit
                     if (steps < lo || steps > 8)
                     {
                         error(t[1].loc, "'.solver " + t[1].text + "': " + base + "(K) takes " +
-                                            (base == "omega" ? "0" : "1") + " to 8 Newton steps");
+                                            (base == "omega" ? "0" : "1") + " to 8 " +
+                                            (base == "halley" ? "Halley" : "Newton") + " steps");
                         return true;
                     }
-                    n_.solver.value = Solver{base == "omega" ? Solver::Guess::Omega : Solver::Guess::Previous, steps};
+                    // halley(K): a diode pair's, from omega3 (the plan refuses it where no port is a pair)
+                    n_.solver.value = Solver{base == "newton" ? Solver::Guess::Previous : Solver::Guess::Omega, steps,
+                                             base == "halley" ? Solver::Shape::Halley : Solver::Shape::Newton};
                     return true;
                 }
-                if (base == "newton")
+                if (base == "newton" || base == "halley")
                 {
-                    error(t[1].loc, "'.solver " + t[1].text + "': newton takes its step count, newton(K)");
+                    error(t[1].loc, "'.solver " + t[1].text + "': " + base + " takes its step count, " + base + "(K)");
                     return true;
                 }
                 if (base == "table")
@@ -1920,7 +1925,7 @@ namespace fminus::circuit
                     error(t[1].loc, "'.solver table' is not supported yet (Phase 3)");
                     return true;
                 }
-                error(t[1].loc, "'.solver " + t[1].text + "': omega, omega(K), newton(K) or auto");
+                error(t[1].loc, "'.solver " + t[1].text + "': omega, omega(K), newton(K), halley(K) or auto");
                 return true;
             }
             if (name == ".channels")

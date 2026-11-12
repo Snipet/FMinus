@@ -4,8 +4,12 @@
 # A test is a file with RUN lines (lit's internal shell: pipes, `not`, `env`; FileCheck checks the output). FMinus's
 # tools, then LLVM's (FileCheck, not, count, opt, llc, llvm-mca, ...), come first on PATH. Substitutions: %host_triple.
 # Features for REQUIRES/UNSUPPORTED: asserts, asan, ubsan, tsan, the host's architecture (arm64 or x86_64; Windows
-# spells them ARM64 and AMD64), its system (system-darwin, system-linux, system-windows) and avx (an x86-64 host whose
-# JIT targets AVX, as fminus-hostinfo --features lists it).
+# spells them ARM64 and AMD64), its system (system-darwin, system-linux, system-windows), avx (an x86-64 host whose
+# JIT targets AVX, as fminus-hostinfo --features lists it), json, xml, web and web-server (a build with the JSON parser,
+# FMINUS_JSON, the XML parser, FMINUS_XML, the web library, FMINUS_WEB, or its server, FMINUS_WEB_SERVER, as the build
+# tree's fminus/Config.h says), files, files-write and files-anywhere (the file interface, FMINUS_FILES, its writing,
+# FMINUS_FILES_WRITE, its absolute names, FMINUS_FILES_ANYWHERE), and files-types (a build whose FMINUS_FILES_TYPES
+# lists types).
 import os
 import platform
 import shutil
@@ -94,3 +98,50 @@ def jit_targets_avx():
 
 if jit_targets_avx():
     config.available_features.add("avx")
+
+
+# json, xml, web, web-server: this build has the JSON parser and its builtins (FMINUS_HAS_JSON 1 in fminus/Config.h),
+# the XML parser and its (FMINUS_HAS_XML 1), the web library and the http_ builtins (FMINUS_HAS_WEB 1), or its server
+# and http_listen, http_next, ... (FMINUS_HAS_WEB_SERVER 1).
+def has_feature(macro):
+    try:
+        with open(os.path.join(config.fminus_obj_root, "include", "fminus", "Config.h")) as header:
+            return any(line.split()[:3] == ["#define", macro, "1"] for line in header)
+    except OSError:
+        return False
+
+
+if has_feature("FMINUS_HAS_JSON"):
+    config.available_features.add("json")
+if has_feature("FMINUS_HAS_XML"):
+    config.available_features.add("xml")
+if has_feature("FMINUS_HAS_WEB"):
+    config.available_features.add("web")
+if has_feature("FMINUS_HAS_WEB_SERVER"):
+    config.available_features.add("web-server")
+
+
+# files, files-write, files-anywhere: the file interface and its file_ builtins (FMINUS_HAS_FILES 1), its writing
+# (FMINUS_HAS_FILES_WRITE 1), its absolute names (FMINUS_HAS_FILES_ANYWHERE 1); files-types: a build whose
+# FMINUS_FILES_TYPES lists the types it can touch (#define FMINUS_FILES_TYPES "wav;f32", not ""), whose tests say which.
+def files_types():
+    try:
+        with open(os.path.join(config.fminus_obj_root, "include", "fminus", "Config.h")) as header:
+            for line in header:
+                words = line.split(None, 2)
+                if words[:2] == ["#define", "FMINUS_FILES_TYPES"] and len(words) == 3:
+                    return words[2].split("//")[0].strip().strip('"')
+    except OSError:
+        pass
+    return ""
+
+
+if has_feature("FMINUS_HAS_FILES"):
+    config.available_features.add("files")
+if has_feature("FMINUS_HAS_FILES_WRITE"):
+    config.available_features.add("files-write")
+if has_feature("FMINUS_HAS_FILES_ANYWHERE"):
+    config.available_features.add("files-anywhere")
+if files_types():
+    config.available_features.add("files-types")
+    config.substitutions.append(("%files_types", files_types()))

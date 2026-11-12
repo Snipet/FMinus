@@ -26,18 +26,26 @@ namespace fminus::circuit
             return x - std::log(x);
         }
 
-        double newtonSteps(double p, double k, double nvt, double guess, int steps)
+        // a pair's steps from `guess` in the bracket: Newton's, or Halley's (Laws.cpp's lawSteps, the text's f'')
+        double newtonSteps(double p, double k, double nvt, double guess, int steps, double* start, Solver::Shape shape)
         {
             const double lo = std::fmin(0.0, p);
             const double hi = std::fmax(0.0, p);
             double v = std::fmin(std::fmax(guess, lo), hi);
             for (int i = 0; i < steps; ++i)
             {
+                *start = v;
                 const double e = std::exp(v / nvt);
-                const double ei = 1 / e;
+                const double ei = std::exp(-v / nvt);
                 const double f = v - p + k * 0.5 * (e - ei);
                 const double d = 1 + (k / nvt) * 0.5 * (e + ei);
-                v = std::fmin(std::fmax(v - f / d, lo), hi);
+                if (shape == Solver::Shape::Halley)
+                {
+                    const double h = (k / nvt) * 0.5 / nvt * (e - ei);
+                    v = std::fmin(std::fmax(v - (2 * f * d) / (2 * d * d - f * h), lo), hi);
+                }
+                else
+                    v = std::fmin(std::fmax(v - f / d, lo), hi);
             }
             return v;
         }
@@ -59,6 +67,7 @@ namespace fminus::circuit
             double lc1 = 0;   // and log cosh
             double kg1 = 0;   // its k g at n-1
             double g1 = 0;    // one diode's or an asymmetric pair's G(v(n-1)), the law's antiderivative
+            double v0 = 0;    // the last Newton step's starting point (fixed steps; ADAA's series reads it)
 
             Runner(const Holters& block, const RefOptions& options, RefStats* s)
                 : h(block)
@@ -80,7 +89,7 @@ namespace fminus::circuit
                 {
                     const LawShape shape = lawShape(h, 1);
                     if (o.steps >= 0)
-                        return lawStepsOf(shape, p, o.guess, v1, o.steps);
+                        return lawStepsOf(shape, p, o.guess, v1, o.steps, &v0, o.shape);
                     long unconverged = 0;
                     int iterations = 0;
                     const double v = lawConvergedOf(shape, p, v1, &unconverged, &iterations);
@@ -108,7 +117,7 @@ namespace fminus::circuit
                 if (o.steps < 0)
                     return converged(p, h.k, h.nvt, stats);
                 const double g = o.guess == Solver::Guess::Omega ? omegaGuess(p, h.k, h.nvt) : v1;
-                return newtonSteps(p, h.k, h.nvt, g, o.steps);
+                return newtonSteps(p, h.k, h.nvt, g, o.steps, &v0, o.shape);
             }
 
             // An OTA's step: its law's scale this step, kd g (g the stream's, or the block's).
@@ -213,11 +222,15 @@ namespace fminus::circuit
                     return y;
                 }
                 // first-order ADAA of the solved map, in the cancellation-free form:
-                //   vbar = vm + [dv (pm - vm) - (G(v) - G(v1))] / dp, G the law's antiderivative (a pair's k nvt cosh)
+                //   vbar = vm + [dv (pm - vm) - (G(v) - G(v1))] / dp, G the law's antiderivative (a pair's k nvt cosh);
+                // after fixed Newton steps its exponentials by the text's series from the last step's (Laws.h)
                 const bool pair = h.law == PortDef::Law::Pair;
-                const double e = std::exp(v / h.nvt);
-                const double c = 0.5 * (e + 1 / e);
-                const double g = pair ? 0 : lawAntiderivative(lawShape(h, 1), v);
+                const bool series = o.steps >= 1;
+                const double c =
+                    series ? lawCoshSeries(v0, v, h.nvt) : 0.5 * (std::exp(v / h.nvt) + std::exp(-v / h.nvt));
+                const double g = pair     ? 0
+                                 : series ? lawAntiderivativeSeries(lawShape(h, 1), v0, v)
+                                          : lawAntiderivative(lawShape(h, 1), v);
                 const double dpv = p - p1;
                 const double dv = v - v1;
                 const double vm = 0.5 * (v + v1);

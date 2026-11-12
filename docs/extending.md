@@ -18,11 +18,18 @@ error for each mistake, enumerated types as C has them, and FMinus's first warni
 C's `double`, for accumulators and slow state, and decides what an unsuffixed floating constant is when FMinus has two
 floating types. Then one adds C's arrays of arrays, 2-D arrays, with C's initialiser lists for them and a bounds check
 for each dimension. The next is for the host again: attributes on a module's fields, a unit, a label or a range, which
-FMinus passes on to the host, with C's string literals for their arguments. The last two are for the host too:
-calling a function by name, its signature learnt as the host runs, through a thunk the JIT compiles for it, its
-arguments checked and its errors values; and where the JIT put each function's machine code, which a sampling profiler
-maps its samples to, with what the optimiser inlined into it. Then the pitfalls those recipes ran into, and design notes
-for what comes next. [simd.md](simd.md) has recipes 7 to 9, for vectors.
+FMinus passes on to the host, with C's string literals for their arguments. The next two are for the host too: calling a
+function by name, its signature learnt as the host runs, through a thunk the JIT compiles for it, its arguments checked
+and its errors values; and where the JIT put each function's machine code, which a sampling profiler maps its samples
+to, with what the optimiser inlined into it. Recipe 38 is the first step towards a web library and parsers of JSON and
+XML: C's string literals as builtins' arguments, formats with places for ints, checked as clang checks `printf`'s, bytes
+decoded into floats, a builtin that blocks, and the build options a builtin can need; recipe 39 is the JSON parser
+on it, a document read by paths the compiler prepares, each number correctly rounded; recipe 40 is the XML parser,
+made the same way; recipe 41 is the web library, an HTTP(S) client a program reaches only under its host's policy;
+recipe 42 is its server, a program's requests taken on the audio thread, wait-free, its routes literals the host
+lists before anything runs; and recipe 43 is the file interface, files a program reaches only through the folders its
+host maps, each directory opened beneath the last and compared by identity with the denied ones. Then the pitfalls
+those recipes ran into, and design notes for what comes next. [simd.md](simd.md) has recipes 7 to 9, for vectors.
 
 Recipes 1 to 4 are in the compiler now (`tanhf` and `%`; `bool` and its operators; `if`, `while` and `for`), and so are
 simd.md's 7 to 9, recipe 10 (`int`, `void` and pointers), recipe 11 (the heap), recipe 12 (arrays and modules), recipe
@@ -32,11 +39,13 @@ runtime's attributes and loop progress, denormal control), recipe 21 (`#include`
 and `randf`), recipe 26 (constant tables), recipe 27 (`switch` and `enum`), recipe 28 (constants at the top level, and
 sizes of constant expressions), recipe 29 (the loop budget), recipe 30 (bounds checks), recipe 31 (`#if` and `#ifdef`),
 recipe 32 (one error a mistake, enumerated types, `-Wswitch`), recipe 33 (`double`), recipe 34 (2-D arrays), recipe 35
-(field attributes), recipe 36 (calls by name) and recipe 37 (code ranges, for a profiler), so their sections describe
-how the code you have got there: read a section beside the files it names. Recipes 5 and 6, a runtime function and a
-pass, are not part of the language; they live in [recipes/](recipes/) as a patch, so you can apply them to see them
-work. None of these are sketches: each was applied to this repository, built with `-Werror`, and tested in the dev and
-asan presets, every test passing.
+(field attributes), recipe 36 (calls by name), recipe 37 (code ranges, for a profiler), recipe 38 (string literals as
+builtins' arguments, bytes to numbers, and the build options of builtins), recipe 39 (the JSON parser, and paths
+the compiler prepares), recipe 40 (the XML parser), recipe 41 (the web library), recipe 42 (its server) and recipe 43
+(the file interface), so their sections describe how the code you have got there: read a section beside the files it
+names. Recipes 5 and 6, a runtime function and a pass, are not part of the language; they live in [recipes/](recipes/)
+as a patch, so you can apply them to see them work. None of these are sketches: each was applied to this repository, built with `-Werror`, and
+tested in the dev and asan presets, every test passing (recipes 38 to 43 in the release preset only: each says where).
 [architecture.md](architecture.md) describes the stages they touch.
 
 FMinus follows C. When a recipe has a semantic choice to make, it makes C's: conversions, short-circuiting, which
@@ -56,7 +65,7 @@ Most language features touch the same places, in this order:
 | 5 | `src/ir/` | its conversions and checks, and its lowering to LLVM IR, in the file its kind belongs to (`Lowering.h` lists them: types, functions, statements, expressions, calls, the math modes, vectors, memory, modules, effects, parallel regions, TBAA, denormals); a load or store of memory gets its type's tag (`tag`, recipe 17); a statement that holds code walks it in `Parallel.cpp`'s `Walker` too |
 | 6 | `src/runtime/` | if it needs C++ at run time, a runtime function (recipe 5); if a builtin calls it, its facts: in `kRuntimeFacts`, through `callRuntime` (recipe 19), or for a math builtin's, in `mathFunction` (`Math.cpp`, recipe 15) |
 | 7 | `src/jit/Call.cpp`, `src/support/Aot.cpp` | for a new type: whether a call by name, `Program::call` and `--run`, passes and returns it (`callType`'s `switch`, recipe 36), and whether an executable's `main` may take or return it (`addEntryPoint`) |
-| 8 | `tests/` | a dump in `FrontendTest.cpp`; results in `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `SwitchTest.cpp`, `EnumTest.cpp`, `IntTest.cpp`, `BitwiseTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `TableTest.cpp`, `TopLevelTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `HashTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`, `ParallelTest.cpp`, `DoubleTest.cpp`, `Array2DTest.cpp` or `FieldAttributeTest.cpp` (their helpers are in `Compile.h`); IR or errors in `tests/lit/fminus/` |
+| 8 | `tests/` | a dump in `FrontendTest.cpp`; results in `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `SwitchTest.cpp`, `EnumTest.cpp`, `IntTest.cpp`, `BitwiseTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `TableTest.cpp`, `TopLevelTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `HashTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`, `ParallelTest.cpp`, `DoubleTest.cpp`, `Array2DTest.cpp`, `FieldAttributeTest.cpp`, `StringTest.cpp`, `BytesTest.cpp`, `JsonTest.cpp` or `XmlTest.cpp` (their helpers are in `Compile.h`; a runtime function that must not allocate is counted with `HeapCalls.h`); IR or errors in `tests/lit/fminus/` |
 | 9 | `examples/` | a program that uses it, and a line in `tests/lit/fminus/examples.test` that runs it |
 | 10 | `editors/vscode/syntaxes/fminus.tmLanguage.json` | a new keyword, type or builtin, so VSCode highlights it (its README says where) |
 | 11 | `README.md` | the language table, and the deviations from C if any |
@@ -75,7 +84,10 @@ Each feature has an example to read beside its recipe: `examples/comparison/` fo
 (recipe 9), `examples/biquad/` for a block of samples a call, through pointers (recipe 10), `examples/delay/` for state
 on the heap and a kernel that can't allocate (recipe 11), `examples/saturator/` and `examples/meter/` for `poly float`
 through a buffer, against plain loops (recipes 9 and 10), `examples/convolver/` and `examples/delay/echo.fm` for loops
-over a module's fields (recipe 17), and `examples/ensemble/` for `parallel for` and `parallel { }` (recipe 22).
+over a module's fields (recipe 17), `examples/ensemble/` for `parallel for` and `parallel { }` (recipe 22), and
+`examples/wavetable/` for a document a host hands a program, read by path (recipes 39 and 40), `examples/fetch/` for
+a request a program makes (recipe 41), `examples/remote/` for the requests a program answers (recipe 42), and
+`examples/kit/` for the files a program reads and writes (recipe 43).
 
 ## Ground rules
 
@@ -6545,8 +6557,9 @@ character names, `µ`, in UTF-8), adjacent literals joined, `"Out" "put"` (`stri
 token, `STRING`, whose value is its characters: the scanner's `stringValue` resolves the escapes, and an escape that
 is wrong is clang's error at the escape, "unknown escape sequence '\q'" (which clang only warns of), "hex escape
 sequence out of range", "\x used with no following hex digits", "incomplete universal character name"; a line that
-ends inside one is "missing terminating '"' character". FMinus has no `char` and no string type, so a string where an
-expression goes is a syntax error, "unexpected string literal". A skipped group of an `#if` reads strings as strings,
+ends inside one is "missing terminating '"' character". FMinus has no `char` and no string type: a string where an
+expression goes was a syntax error, "unexpected string literal", until recipe 38 made a literal an expression to the
+parser, which the code generator takes only as a builtin's argument. A skipped group of an `#if` reads strings as strings,
 as C does: a `/*` inside one opens no comment, which would swallow the `#endif`.
 
 The tree keeps each argument as written, an `AttributeArg`: a number's spelling, or a string's characters with
@@ -6638,8 +6651,7 @@ budget or bounds checks has the same, and a field in an `#ifdef DEBUG` group has
 - `FrontendTest.cpp`: the dumps of fields' attributes (in each declarator, before the sizes, after an enumeration's
   list, a parameter's strings, adjacent literals), a local's and a constant's, and C's escapes written back; every
   keyword of the parser's, a vector type and a module's name as an attribute's namespace and name; the scanner's errors
-  for strings, and the parser's for an attribute after a size and a string where an expression or an attribute's name
-  goes.
+  for strings, and the parser's for an attribute after a size and a string where an attribute's name goes.
 - `tests/library/FieldAttributeTest.cpp`: `Module::Field::attributes` and `Parameter::attributes` as a host reads them
   (names, numbers with their values and spellings, strings with their escapes resolved and their UTF-8, two in one
   `[[ ]]`, none), `findAttribute`'s last and null, an ignored attribute in `warnings()` and in no list, and the same
@@ -7029,6 +7041,1411 @@ the calling thread sees its share of the region only.
   whole after `compile()` with no look-up, `codeRangeAt` inside, at the edges and outside every range, the same ranges
   again with a thunk's added after `callable()`; the same inlining when `compile()` optimises (`keepIr`), and none at
   `-O0`; a program whose code does not link, and one with no function; and the reference sampler at `-O0` and `-O2`.
+
+## Recipe 38: string literals as builtins' arguments, bytes to numbers, and the build options of builtins
+
+*In the compiler. Code: `StringExpr` (`src/frontend/Ast.h`, its dump in `Ast.cpp`); `StringToken`, `appendString`
+and `string_literal` as an expression (`Parser.y`), `stringValue`'s offsets (`Lexer.l`); `src/ir/Strings.cpp`
+(`scanFormat`, `stringConstant`, `formatArguments`, `refuseString`, `notAValue`); `Feature`, `isBuilt`, `notBuilt`,
+`RuntimeEffect`, `Param`, `RuntimeBuiltin`, `kRuntimeBuiltins`, `findRuntimeBuiltin`, `blocks` and
+`lowerRuntimeBuiltin` (`src/ir/Lowering.h`, `Calls.cpp`), `unsafe` (`Effects.cpp`), a prototype of one (`declare`,
+`Functions.cpp`); `predefinedMacros` and `predefinedMacroError` (`src/frontend/Preprocessor.h`, `.cpp`, with
+`macroNameError` and `#undef` in `Lexer.l`, and `parse` in `Frontend.cpp`); `src/runtime/Bytes.cpp`, `Format.h`,
+`Numbers.h` and `Numbers.cpp`; `FMINUS_JSON` and `FMINUS_XML` (`cmake/FMinusOptions.cmake`), `FMINUS_HAS_JSON` and
+`FMINUS_HAS_XML` (`cmake/templates/Config.h.in`), `cmake/FMinusFastFloat.cmake` and its pin. Tests:
+`tests/unit/StringTest.cpp` (`[strings]`), `BytesTest.cpp` (`[bytes]`), `NumbersTest.cpp` (`[numbers]`),
+`ConditionalTest.cpp` and `FrontendTest.cpp`, and `tests/lit/fminus/strings.fm`, `strings-errors.fm` and `bytes.fm`.
+Built with `-Werror` and tested in the `release` preset on Linux x86-64 only, every test passing but the one the
+machine it was written on cannot run (the smoke test of LLVM's own `opt`, which failed there before this recipe too);
+not yet in `dev` or `asan`, nor on macOS or Windows.*
+
+A program that loads an impulse response from a server, or reads a preset's cutoff from a JSON file, needs to say
+which: a URL, a key, a path. FMinus has no strings, and [research/web/README.md](research/web/README.md) weighs four
+ways to give it enough of them; it recommends the smallest, which this recipe builds: a string literal is legal as the
+argument of a builtin that takes one, and nowhere else. It is the step everything in that report stands on, and it
+comes with the scaffolding the parsers will need: a format with places for ints (`"/osc/%d/detune"`), checked as clang
+checks `printf`'s; a third class for the effects, a builtin that blocks; the build options that decide whether a
+build has the JSON and XML parsers, with what a host and a program see of them; and fast_float, the parsers' reader of
+numbers. No JSON or XML builtin came with it (recipe 39 adds JSON's, and recipe 40 XML's). Two builtins that need no
+parser prove the way from the source to the runtime and back, and are what the report wants for a payload a program's own server sends:
+
+```c
+module Loader
+{
+    float ir[65536];
+    int length;
+
+    // data: `bytes` bytes the host hands over (a file's, a response's): little-endian float32s
+    void load(const void* data, int bytes) { length = bytes_floats(data, bytes, ir, 65536); }
+};
+```
+
+### A literal is an expression to the parser
+
+Recipe 35 gave the scanner C's string literals, a `STRING` token whose value is the literal's characters, its escapes
+resolved. The parser took them only as an attribute's arguments, so a string anywhere else was "unexpected string
+literal". Now `expr` takes one too, `string_literal`, the same rule an attribute's argument reads (adjacent literals
+are one), as C's grammar does: the grammar keeps no new conflict (Bison reports none), and every program it accepts is
+C's. The tree's node, `StringExpr`, holds the bytes and where each one is spelt: the scanner's token carries each
+byte's offset in the token (`StringToken`, from `stringValue`), at its character or at its escape's backslash, and
+`appendString` turns them into locations, so that an error about a byte of a format, three literals and two lines
+later, is at that byte. A NUL is a byte like any other: `"a\0b"` is three.
+
+### Where a literal may go: a builtin's string parameter
+
+The code generator decides. FMinus has no type for a literal (C's is a `char` array), so a `StringExpr` is a value
+nowhere: `lower()` reports one wherever it goes, "FMinus has no strings: a string literal is only the argument of a
+builtin's string parameter", at the literal. Where C converts a char array with a warning, or refuses it, the error is
+clang's, where clang reports it (`refuseString`, given the place): an argument of the program's function or a
+builtin's numeric parameter (a math function's float, a size's, a plan's length's, `hash`'s and `randf`'s int), an
+initialiser, an assignment and a `return` know the type they want, so `float x = "dB";` is "initializing 'float' with
+an expression of incompatible type 'char[3]'" at the declarator's `x`, `y = "a"` "assigning to ..." at the `=`,
+`k("x")` of an `int` parameter "incompatible pointer to integer conversion passing 'char[2]' to parameter of type
+'int'" at the literal, and a `float*` parameter's "incompatible pointer types ...". A subscript is clang's "array
+subscript is not an integer", at the `[`, and a literal for a format's `%d` its "format specifies type 'int' but the
+argument has type 'char *'". After the literal's error, a builtin whose argument it was says nothing more
+(`reduce_add("a")`, `fft_forward(plan, "a", out)`): the argument's error says why, as with every failed value.
+Where C would take the array silently (as a `void*`, a `bool`, in a condition or an operand), clang has no words to
+borrow, and FMinus's say what it lacks. In an integer constant expression, a case label's, a literal is "expression is
+not an integer constant expression", as in C.
+
+A builtin that takes a literal says so in its table, `kRuntimeBuiltins` (`Calls.cpp`): each parameter is a `Param`, an
+`int`, bytes (a `const void*`, which any pointer converts to), floats it writes (a `float*`), a string or a format. A
+call of one is lowered before the generic path (after a method of the module of the same name, which comes first, as
+it does for every call), so its arguments are lowered as its parameters say. A string or a format must be a literal,
+"argument to 'name' must be a string literal" (clang's words for a builtin's constant argument), and becomes
+`stringConstant`'s private constant, its bytes and no NUL after them, as clang's `.str` is but for the NUL, passed as
+its address and its length in bytes:
+
+```llvm
+@.str = private unnamed_addr constant [14 x i8] c"/osc/%d/detune", align 1
+  %format.ints = alloca [1 x i32], align 4
+  store i32 %k1, ptr %0, align 4, !tbaa !2
+  %__fminus_string_hash = call i32 @fminus_rt_string_hash(ptr @.str, i32 14, ptr %format.ints, i32 1)
+```
+
+So the runtime never looks for an end (no `strlen`, and a NUL inside is data), and a program that does this means what
+it would in C, where the builtin would be a function of a `const char*` and a length. A prototype of a builtin with
+its own types, `int bytes_floats(const void* data, int bytes, float* out, int cap);`, declares nothing new, as
+`<math.h>`'s do; one of a builtin that takes a string cannot be written, since FMinus has no `char`, and is "conflicting
+types". A definition is refused, as any builtin's is.
+
+When this recipe was written no builtin of the language took a string (recipe 39's `json_` builtins do now). Two
+names C reserves for the implementation, `__fminus_string_hash(format, ...)` and `__fminus_string_hash_blocking`, are
+scaffolding: the 32-bit FNV-1a hash of the text a format and its ints make, which the tests compute again in C++, and
+so prove every byte's way to the runtime (escapes, adjacent literals, a NUL, a place for an int that spans two
+literals). They stay for now: the tests of formats and of the blocking class are written against them, and nothing
+else blocks yet (`http_wait` will).
+
+### Formats: places for ints, checked as clang checks `printf`'s
+
+With literals only, a program still needs `"/osc/2/detune"` in a loop over oscillators, or preset 17's URL. The C way
+that needs no string type is a format with `int` arguments: `Param::Format` is a literal with places for ints, and the
+call gives an `int` for each place after it. `scanFormat` (`Strings.cpp`) is the one check every family of builtins
+will use: `%d` is a place, `%%` a percent sign, and anything else after a `%` an error, in clang's words for `printf`'s
+and at the byte clang's caret is on (`formatArguments` turns an offset into its location). It reads a specifier as
+clang does (`ParsePrintfSpecifier`): flags, a width, a precision and a length modifier (`h hh l ll q j z t L I I32 I64
+w`), then the conversion:
+
+| Mistake | Error, at |
+|---|---|
+| `"%y"`, `"%5y"`, `"%lq"` | "invalid conversion specifier 'y'" (or `'q'`): no such conversion in C, clang's words at the conversion, with a note: "a format here takes %d, an int, and %%, a percent sign" |
+| `"%f"`, `"%5d"`, `"%ld"`, `"%s"` | "invalid conversion specifier 'f'" (`'5d'`, `'ld'`, `'s'`), at the byte after the `%`, and the note: C's specifiers that are not a plain `%d`, which clang takes and FMinus has no meaning for, in clang's words for one it would not take |
+| `"ab%"`, `"%q"`, `"%5"`, `"%l"` | "incomplete format specifier", at the `%`: the text ends before a conversion (`q` is a length modifier, BSD's `long long`) |
+| fewer ints than places | "more '%' conversions than data arguments", at the `d` of the first place without one |
+| more ints than places | "data argument not used by format string", at the first one left over (none when the format had an error: clang counts an int an invalid place was to take) |
+| a float, a pointer, a literal | "format specifies type 'int' but the argument has type 'float'" (`'char *'` for a literal), at the argument |
+
+An `int`, an enumeration's value and a `bool` (0 or 1) are what `%d` reads, as C promotes them for a variadic
+argument; FMinus converts nothing else, where C would pass a `float` as a `double` and leave `%d` undefined. The ints
+go in an array of the function's frame (tagged as ints, for TBAA), with their count, and the runtime gets the literal
+as written: it makes the text itself, `fminus::runtime::expandFormat` (`Format.h`), which trusts no byte of it (a `%d`
+past the last int is nothing). The host sees the pattern, `"https://example.com/presets/%d.json"`, which is what the
+report's permissions need (its §8). A family whose builtins want the path prepared when the program is compiled (the
+report's §6.4) builds its own table from `scanFormat`'s places, as JSON's does (recipe 39, `scanPath`).
+
+### `bytes_floats` and `bytes_pcm16`
+
+`bytes_floats(data, bytes, out, cap)` reads `bytes` bytes at `data` as little-endian IEEE float32s, and
+`bytes_pcm16(data, bytes, out, cap)` as little-endian signed 16-bit samples, each times 1/32768 (exact: a 16-bit
+integer and a power of two), to [-1, 1). Each returns how many values the data holds (`bytes / 4`, or `/ 2`: a partial
+value at the end is none) and writes the first of them, at most `cap`, so a call with a cap of 0 asks how many there
+are. A null `data` or a negative size is no data, and a null `out` or a cap that is not positive takes none. Each value
+is assembled from its bytes one by one (`runtime/Bytes.cpp`), so the data needs no alignment and the machine's byte
+order does not matter, and a float's bits are copied as they are, a NaN's payload too.
+
+Each is a loop bounded by `cap` over memory it is given: no allocation, no lock, no system call, so the effects class
+them wait-free and a nonblocking function may call them. Their declarations say what is true of `Bytes.cpp`
+(`kRuntimeFacts`, `RuntimeKind::Decode`, recipe 19): `memory(argmem: readwrite) nofree nosync nounwind willreturn`,
+`data` `readonly captures(none)`, `out` `writeonly captures(none)`. Neither is `nonnull` (both may be null) nor
+`noalias`: a program may decode in place, `out` at `data`'s own address. `bytes_floats` takes four bytes to four, so
+it goes first to last; `bytes_pcm16` takes two bytes to four, so it writes its last value first, and every sample is
+still there when its turn comes (`BytesTest.cpp`, "decode in place", calls both on a buffer of their own). The format scaffolding's (`RuntimeKind::ReadText`) reads its two pointers
+and nothing else: `memory(argmem: read)`. Bounds checks (recipe 30) do not look into a call's output, as they do not
+into the FFT's: `cap` is the program's promise.
+
+### The effects' third class: a builtin that blocks
+
+`Effects.cpp` had two classes of builtin: one that allocates (`allocates(name)`, refused in a nonallocating function
+and so in a nonblocking one) and every other, trusted, as clang trusts its own. A web library has a third: `http_wait`
+waits for a response, which a nonblocking function may not do, and allocates nothing, which a nonallocating one may.
+Each runtime builtin now names its class, `RuntimeEffect::WaitFree`, `Blocks` or `Allocates`, and `unsafe` asks
+`blocks(name)` after `allocates(name)`: a call of one that blocks is an error in a nonblocking function, in clang's
+words, with the notes down to it, and fine in a nonallocating one. Nothing in the language blocked yet;
+`__fminus_string_hash_blocking`, the scaffolding's second name, is classed so for the tests. (Recipe 41's `http_wait`
+is the first real one; the scaffolding stays, for builds without the web library: recipe 41 says why.)
+
+### The build options a builtin can need
+
+`FMINUS_JSON` and `FMINUS_XML` (`cmake/FMinusOptions.cmake`), both on by default, decide whether a build has the JSON
+and the XML parser. What a build has, it says three ways:
+
+- **To a host:** `FMINUS_HAS_JSON` and `FMINUS_HAS_XML` in the generated `fminus/Config.h`, 1 or 0, for `#if`.
+- **To a program:** `__FMINUS_JSON__` and `__FMINUS_XML__`, macros FMinus defines, to 1, before the program's first
+  line, only in a build with the feature (`predefinedMacros`, `Frontend.cpp`'s `parse`), so one source can test it
+  with `#ifdef` (recipe 31) and compile either way. Their names are C's for the implementation's (two underscores),
+  so no program's own can meet them. A program's `#define` or `#undef` of one, and a host's (`-D`,
+  `Program::Options::defines`), is an error in every build, with the feature or without it: "'__FMINUS_JSON__' cannot
+  be used as a macro name: FMinus defines it in a build with the JSON parser (FMINUS_JSON)" (`macroNameError` and
+  `#undef`, through `predefinedMacroError`). Clang only warns of a predefined macro redefined; FMinus's conditionals
+  would then answer for a feature the build does not have.
+- **To a call:** a builtin's table entry names the option it needs (`Feature`), and stays in the table whatever the
+  build has, so a call of one this build leaves out is an error that names the option, `'json_float' needs the JSON
+  parser, which this build of FMinus leaves out (FMINUS_JSON=OFF)` (`notBuilt`), not "call to undeclared function",
+  and its name is still a builtin's, which no program may define.
+
+No builtin needed an option when this recipe was written, so the last was tested through `notBuilt` and `isBuilt`
+themselves, against `Config.h`; recipe 39's `json_` builtins are the first that do.
+
+### fast_float
+
+The report chose fast_float to read the parsers' numbers: text straight to a correctly rounded `float` (reading a
+`double` and narrowing it rounds twice, and is now and then one bit off), the same in every locale (C's `strtof` reads
+`"0,5"` where the locale is German), and about five times faster than `strtod`. It is pinned like every other
+dependency, at 8.3.3 (2026-10-31). Its release has a single-header asset, `fast_float.h`, made by a script from the
+tag; no checkout reproduces that file's bytes, so a digest of it could only be taken on trust from the release page,
+and nothing here could build what it pins. The tag's archive is GitHub's generated one, whose bytes `git archive
+--prefix=fast_float-8.3.3/ v8.3.3 | gzip -n` reproduces, as the WinFlexBison pin's do: the pin is that archive, and
+its digest the one computed from the tag.
+
+`cmake/FMinusFastFloat.cmake` follows `FMinusFft.cmake`: fetched once into the deps cache (`.deps/src/fast_float-8.3.3`,
+marked with its hash), its own CMake never added, an interface library of its `include/` directory as a system one, so
+FMinus's warnings stay out of it. The runtime links it when `FMINUS_JSON` or `FMINUS_XML` is on; with both off, the
+module returns before it fetches anything. One file of the runtime includes it, `Numbers.cpp`, inside `#pragma GCC
+visibility push(hidden)` after the standard headers it uses, so its inline functions' copies are hidden: a plugin that
+links FMinus exports none of them. Being headers, its code is compiled in that file, so a sanitizer preset instruments
+it, where PFFFT's own objects keep their flags. Nothing calls it but the runtime's own reader (and recipe 39 adds
+`readDouble` beside it, which the JSON parser calls too), `fminus::runtime::readFloat(text, length, syntax, value)`
+(`Numbers.h`): the bytes the number at the start of a text takes (0 for none), in JSON's syntax or C's, an overflow an
+infinity and an underflow a zero, as IEEE rounds them.
+
+### What it changes for programs and hosts
+
+- **Programs** without string literals in code compile to the same IR. A literal where a value goes was a syntax
+  error, and is now the code generator's, at the literal, in clang's words where C has them. `bytes_floats` and
+  `bytes_pcm16` are new builtins, so a program's function of either name is now an error; so are the reserved
+  `__fminus_` names, and `__FMINUS_JSON__` and `__FMINUS_XML__` as macros.
+- **Hosts** get `FMINUS_HAS_JSON` and `FMINUS_HAS_XML` in `fminus/Config.h`. A host's define of a predefined macro is
+  refused. The runtime has three more functions (`RuntimeSymbols.def`), which the JIT defines and an executable links.
+- **The build** fetches fast_float (156,846 bytes) on a first configure with either option on, as it is by default,
+  into the deps cache.
+- **The VS Code grammar** (0.16.0) colours a string literal in code as in an attribute, with a format's `%d` and `%%`,
+  and the two new builtins.
+
+### Tests
+
+- `tests/unit/StringTest.cpp`: through the JIT, a literal's bytes and length in the runtime (a NUL, an empty literal,
+  adjacent literals, escapes, `%d` with negative and extreme ints and `%%`, a place across two literals, an
+  enumeration's and a `bool`'s value), in a nonblocking function; `scanFormat`'s places and errors, a specifier read as
+  clang reads one (flags, width, precision, length modifier: incomplete at the `%`, invalid at the conversion); each
+  format error at its column (in a second literal, at an escape); each misplaced literal's error, clang's and FMinus's,
+  at clang's column (the declarator, the `=`, the literal), a builtin's int parameter and a subscript among them, and
+  no second error from the builtin it was given to; the effects'
+  three classes, and a blocking builtin refused in a nonblocking function, through an unmarked one too, and allowed in a
+  nonallocating one; `notBuilt`'s messages, and `isBuilt` and the predefined macros against `Config.h`; a builtin's
+  prototype, conflicting ones and a definition.
+- `tests/unit/BytesTest.cpp`: float32s' every bit (one, minus zero, infinity, the least subnormal, a NaN's payload) at
+  three alignments; counts, caps, partial values, null data and output, negative sizes; PCM16's scaling, exact, through
+  the JIT and from C++; both decoding in place, a cap short of the count too; the parameters' conversions and errors.
+- `tests/unit/NumbersTest.cpp` (with either option): `readFloat`'s rounding (a decimal where reading a `double` and
+  narrowing it is wrong), overflow and underflow, JSON's syntax against C's, a comma, and its bounds.
+- `ConditionalTest.cpp`: the predefined macros as `Config.h` says, and their `#define`, `#undef` and host define refused
+  in every build; `FrontendTest.cpp`: a literal as an expression in the dump, and where each of its bytes is spelt.
+- `tests/lit/fminus/strings.fm`: the constants and the call at `-O0`, the declaration's attributes, the dump, and a
+  program through the JIT and as an executable; `strings-errors.fm`: each error once, from the command line, and the
+  macros'; `bytes.fm`: the calls and their attributes, and a program that decodes through the JIT and as an
+  executable.
+
+## Recipe 39: a JSON parser, and paths the compiler prepares
+
+*In the compiler. Code: `src/runtime/Json.cpp` (the engine and every `fminus_rt_json_` function), `readDouble` and
+`readInt` (`src/runtime/Numbers.h`, `.cpp`), the functions' declarations and the tables' layout (`Runtime.h`) and their
+lines in `RuntimeSymbols.def`; `src/ir/Paths.cpp` (`scanPath`, `preparedPath`, `preparedChoices`); the `json_` entries
+of `kRuntimeBuiltins`, `Param`'s `Document`, `Handle`, `Float`, `Double`, `Bool`, `Path` and `Choices`, `Result`,
+`paramType`, `resultType`, `lowerRuntimeBuiltin` and `formatInts`, and the facts `RuntimeKind::Document`,
+`DocumentRelease`, `Read`, `ReadChoice` and `ReadInto` (`src/ir/Lowering.h`, `Calls.cpp`), a prototype of one
+(`declare`, `Functions.cpp`); `cmake/FMinusJson.cmake`, the yyjson pin, `FMINUS_JSON_MAX_BYTES` and
+`FMINUS_JSON_MAX_DEPTH` (`cmake/FMinusOptions.cmake`, `Config.h.in`), the runtime's lines in `src/CMakeLists.txt`.
+Tests: `tests/unit/JsonTest.cpp` (`[json]`) with `HeapCalls.h` and `.cpp`, `NumbersTest.cpp`, and
+`tests/lit/fminus/json.fm`, `json-errors.fm` and `json-off.fm` (lit's new `json` feature); the example,
+`examples/wavetable/`. Built with `-Werror` and tested in the `release` preset on Linux x86-64 only, every test passing
+but the one this machine cannot run (the smoke test of LLVM's own `opt`, which failed here before recipe 38 too), and
+in a second tree configured with `-DFMINUS_JSON=OFF`, with the same result; not yet in `dev` or `asan` (so neither
+yyjson nor the new runtime code has run under a sanitizer), nor on macOS or Windows.*
+
+Recipe 38 gave programs string literals; this one gives them something to say with them. A host hands a program a
+document, a preset or a wavetable pack, and the program reads what it needs by path, off the audio thread or on it,
+each number correctly rounded:
+
+```c
+void* doc = json_parse(data, bytes);                       // allocates; null for a text that is no JSON
+float cutoff = json_float(doc, "/filter/cutoff", 1000.0f); // a JSON Pointer (RFC 6901); the fallback when absent
+int   voices = json_int(doc, "/master/voices", 8);
+int   wave   = json_choice(doc, "/osc/%d/wave", k, "sine", "saw", "square");   // which literal, or -1
+int   n      = json_floats(doc, "/tables/%d", t, row, 2048);                   // how many; at most 2048 written
+json_free(doc);
+```
+
+It is the report's recommendation, [research/web/README.md](research/web/README.md) §4.3, §6.1, §6.3 and §6.4's
+first level, with the answers its §10 recommends: an embedded parser (yyjson's reader) with fast_float for the
+numbers, paths prepared when the program is compiled, and `json_int` giving the fallback for a number that is no
+`int`, never a truncated or saturated one.
+
+### The engine: yyjson's reader, in the runtime
+
+yyjson 0.13.0 (2026-09-08, MIT) is two C files that read a document in one pass, without recursion, into a flat array
+of 16-byte values, validating all of RFC 8259 and its strings' UTF-8. It is pinned as fast_float is: its release has
+no files of its own, so the pin is GitHub's archive of the tag, whose bytes `git archive --prefix=yyjson-0.13.0/
+0.13.0 | gzip -n` reproduces, and its digest the one computed from the tag. `cmake/FMinusJson.cmake` follows
+`FMinusFft.cmake`, and does nothing at all when `FMINUS_JSON` is off: fetched once into the deps cache
+(`.deps/src/yyjson-0.13.0`, marked with its hash), its own CMake never added, one file, `src/yyjson.c`, compiled as an
+object library with its own flags (none of FMinus's warnings or sanitizers), whose objects go into
+`libfminus_runtime.a`. Two details matter:
+
+- **Its symbols are hidden only if `yyjson_api` is defined.** yyjson's header marks every function
+  `visibility("default")` unless the macro is defined already, so the C visibility preset alone would leave them
+  exported from a plugin. The module defines it empty, with the rest of `FMINUS_YYJSON_DEFINITIONS`, which `Json.cpp`
+  reads the header with too (inside `#pragma GCC visibility push(hidden)`, as `Numbers.cpp` includes fast_float).
+  `readelf` on `yyjson.c.o` shows every global symbol `HIDDEN`.
+- **What FMinus does not use is compiled out:** the writer, the incremental reader, files, yyjson's own JSON Pointer
+  and Patch, every extension of JSON (comments, trailing commas, `NaN`, JSON5: `YYJSON_DISABLE_NON_STANDARD`), and its
+  conversion of numbers (`YYJSON_DISABLE_FAST_FP_CONV`). A depth limit is compiled in,
+  `YYJSON_READER_DEPTH_LIMIT=FMINUS_JSON_MAX_DEPTH`. The object's code is 54 KB on x86-64 (`size`'s `text`).
+
+`json_parse` reads with one flag, `YYJSON_READ_NUMBER_AS_RAW`: every number stays its text, and a builtin converts it
+when it reads it, with fast_float (below). That takes conversion out of parsing, and keeps the C library's `strtod`,
+which yyjson would otherwise fall back to and which reads the locale, from ever running: the object still refers to
+it (yyjson's own number reader, which FMinus never calls, does), but no path from `json_parse` reaches it. yyjson is
+known to `Json.cpp` alone. Everything else, the prepared paths, the fallbacks, the promises to the audio thread, is
+the runtime's own, so another engine (the report's §6.4 level 2, a parser of the program's own paths) would change
+that file and nothing else.
+
+### The builtins
+
+| Builtin | Gives | Effect |
+|---|---|---|
+| `json_parse(const void* data, int bytes)` | a document, a `void*`: null for a text that is no JSON, larger than `FMINUS_JSON_MAX_BYTES` (64 MiB), or nested deeper than `FMINUS_JSON_MAX_DEPTH` (1024) | allocates |
+| `json_free(void* doc)` | frees it (null: nothing) | allocates |
+| `json_float(doc, path, ..., float fallback)`, `json_double(..., double fallback)` | the number at the path, correctly rounded; past the type's range an infinity, below its least subnormal a zero | wait-free |
+| `json_int(doc, path, ..., int fallback)` | the number, when it is an integer an `int` holds | wait-free |
+| `json_bool(doc, path, ..., bool fallback)` | `true` or `false` | wait-free |
+| `json_count(doc, path, ...)` | an array's elements or an object's members; else 0 | wait-free |
+| `json_floats(doc, path, ..., float* out, int cap)` | how many numbers an array of numbers, or of arrays of numbers row after row, holds; the first `cap` written; 0 and nothing written when any element is something else | wait-free |
+| `json_choice(doc, path, ..., "a", "b", ...)` | the index of the first literal a string equals, byte for byte; else -1 | wait-free |
+| `json_base64_floats(doc, path, ..., float* out, int cap)` | a base64 string's bytes as little-endian float32s, as `bytes_floats` reads them; 0 for no base64 | wait-free |
+
+`...` is the path's ints. Every read gives its fallback (or 0, or -1) when the document is null, the path reaches
+nothing, or the value is not of its kind, so a program never checks before it reads: the wavetable example checks
+once, that every table had its size. A null document is an empty one, as a null FFT plan does nothing. There is no
+way to get a string out: `json_choice` turns one into an index, an enumeration's value, which is all FMinus can hold.
+
+Their table entries are `RuntimeBuiltin`s, as recipe 38's are, with more `Param`s (a document is a `const void*`,
+json_free's handle a `void*`, the fallbacks a `float`, a `double` or a `bool`) and a `Result`, so `lowerRuntimeBuiltin`
+returns what each gives. A `bool` goes to the runtime as an `int`, 0 or 1, both ways: C's `bool` in a register is an
+ABI detail (`zeroext i1`) that an `int` avoids. A prototype with the builtin's own types (`void* json_parse(const void*
+data, int bytes);`) declares nothing new; `paramType` and `resultType` are what `declare` compares it with.
+
+### Paths, prepared when the program is compiled
+
+A path is a format (recipe 38: `%d` an int, `%%` a percent sign) and a JSON Pointer: empty for the whole document, or
+reference tokens, each after a `/`, in which `~1` is a `/` and `~0` a `~`. `Param::Path` lowers it with `scanPath`
+(`Paths.cpp`), not as a string: each token becomes its pieces, a run of the literal's bytes (its escapes undone) or the
+place of an int, in a private constant table the runtime walks:
+
+```llvm
+; "/osc/%d/de~1tune": three steps; "osc" is bytes 0 to 2, the second step the first int, "de/tune" bytes 3 to 9
+@.path = private unnamed_addr constant { i32, i32, [9 x i32], [10 x i8] }
+         { i32 9, i32 10, [9 x i32] [i32 1, i32 0, i32 3, i32 1, i32 0, i32 -1, i32 1, i32 3, i32 7],
+           [10 x i8] c"oscde/tune" }, align 4
+  %json_float = call float @fminus_rt_json_float(ptr %doc1, ptr @.path, ptr %format.ints, i32 1, float 1.5)
+```
+
+So the runtime never reads a path's text, and a call costs what walking the document costs. A `%d` is the int's
+decimal text in its token: an array's index, or a member's name, or part of one (`"/settings/osc_%d_level"`, Vital's
+shape). A token is an array index only as RFC 6901 writes one (`0`, or digits from 1 with no leading zero), so a
+negative int, `01` and `-` reach nothing. In an object, the first member of the name is taken. `json_choice`'s
+literals are a second table of the same layout, their lengths and their bytes (`preparedChoices`). Each table is one
+block, reached through one argument, so a read touches only argument memory and the document's (below). The runtime
+trusts no word of a table: a count or a piece past its end, or an int's place past the ints given, reaches nothing.
+
+A path that is no JSON Pointer is an error at its own byte. The format's errors are recipe 38's, at clang's columns:
+
+| Mistake | Error, at |
+|---|---|
+| `"osc"` | "a JSON Pointer must be empty or begin with '/'", at its first byte |
+| `"/a~2"` | "unknown escape sequence '~2' in a JSON Pointer: '~0' is '~' and '~1' is '/'", at the `~` |
+| `"/a~"` | "incomplete escape sequence '~' at the end of a JSON Pointer: ...", at the `~` |
+| `"/osc/%f"`, too few or too many ints, a `float` for `%d` | recipe 38's format errors |
+| a path, or a choice, that is not a literal | "argument to 'json_choice' must be a string literal", at it |
+| `json_choice(doc, "/w")` | "too few arguments to function call, expected at least 3, have 2" |
+
+clang has no words for a JSON Pointer, so the first three are FMinus's, in the shape of clang's own for C's escapes.
+`json_choice`'s ints end at its first string literal, after which every argument must be one.
+
+### Numbers
+
+A builtin reads a number's text with `Numbers.h`: `readFloat` straight to the nearest `float` (never a `double`
+narrowed: `1.00000005960464477550` is the float after 1, where the double, exactly halfway, narrows to 1), `readDouble`
+to the nearest `double`, both fast_float's, with JSON's syntax, in no locale. A test sets a German locale, where the C
+library's `strtod("0.5")` is 0, and reads the same numbers. `readInt` is FMinus's own, exact: the number is an integer
+when its last nonzero digit weighs at least 1, and an `int` holds it when it is within the `int` range. So `7.0`,
+`700e-2` and `0.07e2` are 7, `-0` is 0, `0e99999999999` is 0, and `1.5`, `3e9`, `2147483648` and
+`2147483647.0000000001` give the fallback: no truncation, no saturation, and no rounding through a `double`, which would
+make the last of those an `int`.
+
+### What the runtime promises the audio thread
+
+The effects class `json_parse` and `json_free` as allocating (refused in a nonallocating function, and so in a
+nonblocking one) and every read as wait-free (allowed in both). The reads keep the promise: they walk a finished
+document, which nothing writes once `json_parse` returns, through yyjson's inline accessors, with no allocation, no
+lock and no system call, in steps the document's size bounds. Their declarations say what is true of `Json.cpp`
+(recipe 19):
+
+```llvm
+declare float @fminus_rt_json_float(ptr readonly captures(none), ptr readonly captures(none),
+                                    ptr readonly captures(none), i32, float) #2
+attributes #2 = { nofree nosync nounwind willreturn memory(argmem: read, inaccessiblemem: read) }
+```
+
+`ReadInto`'s (`json_floats`, `json_base64_floats`) have `argmem: readwrite` and `out` `writeonly`. A document is
+opaque, as a plan is: what it points to, its values and its copy of the text, only it points to, so a read touches
+inaccessible memory there and argument memory elsewhere, and LLVM may share two reads of one document with nothing
+between them that writes. `json_parse` reads its text (`argmem: read`; yyjson copies what it needs, so the program may
+change its bytes after) and writes inaccessible memory and errno, as `fft_create` does, with a `noalias` result;
+`json_free` is `fft_destroy`'s. Neither is an allocator LLVM may remove: a null document means the text is no JSON.
+
+The tests prove the runtime's half, not only the effects'. `HeapCalls` (`tests/unit/HeapCalls.h`) counts the calls of
+the C heap's functions a thread makes: `fminus-tests` defines `malloc`, `free` and their kin, each counting and then
+calling glibc's own (`__libc_malloc`), and since the runtime is linked into the same executable, its yyjson calls them
+too. A hundred rounds of every read of the example's preset, through the JIT, make no call, where one `json_parse` and
+`json_free` make at least two. Then a child process enters seccomp's strict mode, in which any system call but `read`,
+`write` and `exit` kills it (a contended lock's `futex`, an allocator's `mmap` or `brk`), runs every read, and writes
+their sum back: it exits, with the parent's sum. The counter is there on Linux with glibc and no sanitizer; seccomp on
+Linux.
+
+### What a read costs
+
+Wait-free is a promise about waiting, not about time: a read's steps are bounded by the document, and the document
+is the server's. A step into an object looks through its members up to the one it names (yyjson keeps no index of
+them); one into an array of arrays or objects steps over the elements before its index (into a flat array, of
+numbers and strings, it goes straight there); and a value is read whole, every digit of a number (fast_float) and
+every character of a base64 string (checked before a byte is written). Measured on the release runtime, a 100,000
+member object's missing member took 0.6 ms to look for, the last of 100,000 objects in an array 0.9 ms, the number of
+a 60 MB `0.000...1` 89 ms, and a loop of `json_float(doc, "/%d", i)` over the 100,000 members 45 s: a `%d` loop over n
+is n² steps. A block of 64 samples at 48 kHz is 1.33 ms.
+
+So the reads are for a document's few known values, or for the time before the audio: a program reads a document in
+its `init`, into arrays, and its `process` reads those, as the wavetable example does (`examples/wavetable/`). Nothing
+in the compiler can tell a cheap read from a dear one, since that is the document's doing; the effects allow them all,
+as clang's allow a nonblocking function a loop of a million steps. Recipe 40's reads cost the same way.
+
+### Input from the network
+
+A document may come from anywhere, so every limit is the parser's, not the program's: at most 64 MiB of text (refused
+before yyjson sees it), at most 1024 levels of arrays and objects (refused by yyjson, which never recurses: a million
+`[`s are refused, not a stack overflow), sizes in `int`s with the count of values bounded by the text's size, and
+memory about 16 bytes a value plus a copy of the text. A read checks every word of a prepared table against its
+header, and base64 is checked whole before a byte of it is written. The tests parse RFC 8259's edges (the empty text,
+a truncated one, a NUL inside and after, a byte order mark, invalid UTF-8 of four kinds, numbers JSON does not write,
+huge and tiny exponents), nesting at the limit and past it, the size limit to the byte, and a 10 MB array read whole.
+
+### Without `FMINUS_JSON`
+
+`FMinusJson.cmake` returns before it fetches anything, so nothing of yyjson is fetched or compiled; `Json.cpp` compiles
+to nothing (`#if FMINUS_HAS_JSON`), `RuntimeSymbols.def` lists no `json_` function, and the runtime library has no
+JSON symbol. The compiler still knows every `json_` name (recipe 38's `Feature`): a call is `'json_parse' needs the
+JSON parser, which this build of FMinus leaves out (FMINUS_JSON=OFF)`, and `__FMINUS_JSON__` is undefined, so a
+program can `#ifdef` its loader out. `JsonTest.cpp`'s test of the names passes both ways, and lit's `json` feature
+(read from the build tree's `fminus/Config.h`) runs `json.fm` and `json-errors.fm` in a build with the parser and
+`json-off.fm` in one without. A second tree configured with `-DFMINUS_JSON=OFF` was built and its whole suite run.
+
+### What it changes for programs and hosts
+
+- **Programs** gain ten builtins, so a program's function of any of their names is an error, in every build.
+- **Hosts** get `FMINUS_JSON_MAX_BYTES` and `FMINUS_JSON_MAX_DEPTH` in `fminus/Config.h`. The runtime has ten more
+  functions in a build with the parser, which the JIT defines and an executable links: `libfminus_runtime.a` grows by
+  yyjson's objects and `Json.cpp`'s (from 219 KB to 312 KB on Linux x86-64, the release preset, with fast_float's
+  `Numbers.cpp` in both). A binary that links it carries yyjson's MIT notice (README, "License").
+- **The build** fetches yyjson (1,641,525 bytes) on a first configure with `FMINUS_JSON` on, as it is by default.
+- **The VS Code grammar** colours the ten builtins.
+
+### Tests
+
+- `tests/unit/JsonTest.cpp`: RFC 8259's valid and invalid documents, the null and empty inputs, a copy kept of the
+  text; the depth at its limit and past it (arrays, and objects of arrays), a million unclosed `[`s, a value 1023
+  levels down, the size limit to the byte; a 10 MB array counted and read; `json_float` on zeros, exponents, the
+  double-rounding hard cases, overflow, underflow, the least subnormal and the largest float, and every other kind
+  (its fallback); `json_double`; a comma-decimal locale (skipped without one); `json_int` on integers written every way
+  and on everything that is not one; `json_bool`, `json_count` and `json_choice` on each kind, a NUL and UTF-8 in a
+  string; `json_floats` flat, in rows, with a short cap, a cap of 0, a null `out`, and on every array it refuses;
+  `json_base64_floats` padded, unpadded, with a cap, and on every string it refuses; paths with escapes, the root,
+  empty names, a NUL, `%%`, and `%d` in and out of range, negative, `INT_MIN`, as a name or part of one; a null
+  document and malformed tables; a program through the JIT, every builtin and fallback; every read allocating nothing
+  and making no system call; the effects; each path error at its column; the parameters' conversions and the
+  arities; prototypes; and each builtin's name, compiled or refused as the build has it.
+- `tests/unit/NumbersTest.cpp`: `readDouble` and `readInt` beside `readFloat`.
+- `tests/lit/fminus/json.fm`: the tables and calls at `-O0`, the declarations' attributes, and a program that parses a
+  document (its bytes in ints) and reads it through the JIT and as an executable; `json-errors.fm`: each error once,
+  from the command line; `json-off.fm`: the option's error, in a build without it.
+- `examples/wavetable/`: a module that loads a wavetable pack from JSON in `init` and plays it in a nonblocking
+  `process`, bit for bit against C++, in one call and in blocks; ctest's `example.wavetable`.
+
+## Recipe 40: an XML parser, made as the JSON one is
+
+*In the compiler. Code: `src/runtime/Xml.cpp` (the engine and every `fminus_rt_xml_` function), `src/runtime/Tables.h`
+(a prepared table's reading, which `Json.cpp` had, now shared by both), `NumberSyntax::Xml` and `readInt`'s syntax
+(`src/runtime/Numbers.h`, `.cpp`), the functions' declarations and the XML path's layout (`Runtime.h`) and their lines
+in `RuntimeSymbols.def`; `src/ir/Paths.cpp` (`scanXmlPath`, `preparedXmlPath`); the `xml_` entries of
+`kRuntimeBuiltins`, `Param::XmlPath` and its lines in `lowerRuntimeBuiltin`, and the `xml_` facts, which are the JSON
+reads' kinds (`src/ir/Lowering.h`, `Calls.cpp`); `cmake/FMinusXml.cmake`, the pugixml pin, `FMINUS_XML_MAX_BYTES` and
+`FMINUS_XML_MAX_DEPTH` (`cmake/FMinusOptions.cmake`, `Config.h.in`), the runtime's lines in `src/CMakeLists.txt`.
+Tests: `tests/unit/XmlTest.cpp` (`[xml]`), `NumbersTest.cpp`, and `tests/lit/fminus/xml.fm`, `xml-errors.fm` and
+`xml-off.fm` (lit's new `xml` feature); the example, `examples/wavetable/`, which loads the same pack from XML too.
+Built with `-Werror` and tested in the `release` preset on Linux x86-64 only, every test passing but the one this
+machine cannot run (the smoke test of LLVM's own `opt`, as for recipes 38 and 39), in a second tree configured with
+`-DFMINUS_XML=OFF` and in a third with both parsers off, with the same result; not yet in `dev` or `asan` (so neither
+pugixml nor the new runtime code has run under a sanitizer), nor on macOS or Windows.*
+
+The second family of recipe 39's kind. A host that keeps its presets as XML hands the program the document, and the
+program reads it as it would read JSON:
+
+```c
+void* xml = xml_parse(data, bytes);                               // allocates; null for a text that is no XML
+float c  = xml_float(xml, "/preset/filter/@cutoff", 1000.0f);     // an attribute; the fallback when absent
+int   k  = xml_count(xml, "/preset/osc");                         // how many <osc> the preset has
+int   w  = xml_choice(xml, "/preset/osc[%d]/@wave", i, "sine", "saw");   // the i-th <osc>, from 0
+int   m  = xml_floats(xml, "/pack/table[%d]", t, row, 2048);      // an element's text as a list of numbers
+xml_free(xml);
+```
+
+It is the report's recommendation, [research/web/README.md](research/web/README.md) §4.3, §6.2 and §6.3, with the
+answer to its §10's seventh question settled so the two families agree: **an index counts from 0**, as C's arrays,
+JSON Pointer's and so `json_float`'s do, where XPath's counts from 1. `"/pack/table[0]"` is the first table, which
+XPath writes `/pack/table[1]`. Everything else is recipe 39's design, and on purpose the same: paths prepared when the
+program is compiled, the same fallbacks, the same effects, a null document an empty one, the same tables, the same
+number reader, the same off build.
+
+### The engine: pugixml, in the runtime
+
+pugixml 1.16 (2026-06-16, MIT) is one C++ file that parses a document into a tree, in a loop that does not recurse.
+It is pinned as yyjson is, by GitHub's archive of its tag (`v1.16`), whose bytes `git archive --prefix=pugixml-1.16/
+v1.16 | gzip -n` reproduces; the release also ships a tarball of its own, but the tag's archive is the one whose digest
+could be computed here from what it holds. `cmake/FMinusXml.cmake` is `FMinusJson.cmake` again, and does nothing when
+`FMINUS_XML` is off: fetched once into the deps cache, its own CMake never added, `src/pugixml.cpp` compiled as an
+object library with its own flags and its own C++ standard (it is written for any), whose objects go into
+`libfminus_runtime.a`. What FMinus does not use is compiled out, `FMINUS_PUGIXML_DEFINITIONS`, which `Xml.cpp` reads
+the header with too: XPath (`PUGIXML_NO_XPATH`), exceptions (`PUGIXML_NO_EXCEPTIONS`: a failure, out of memory too, is
+a status) and the STL (`PUGIXML_NO_STL`). Its symbols are hidden by the C++ visibility preset, inline ones too
+(`VISIBILITY_INLINES_HIDDEN`), and `Xml.cpp` includes the header inside `#pragma GCC visibility push(hidden)`;
+`readelf` on `pugixml.cpp.o` shows every global symbol `HIDDEN`, and `Xml.cpp.o` exports the nine `fminus_rt_xml_`
+functions and nothing else. The object's code is 69 KB on x86-64 (`size`'s `text`). pugixml's file loading and its
+number conversions are still in the object (they are member functions of its classes), so it refers to `fopen` and
+`strtod`; no path from what `Xml.cpp` calls reaches either.
+
+`xml_parse` checks the size first (`FMINUS_XML_MAX_BYTES`, 64 MiB), then parses a copy of the text
+(`load_buffer`, which never writes the program's bytes), as UTF-8 (a byte order mark is skipped), with
+`parse_cdata | parse_escapes | parse_eol | parse_wconv_attribute | parse_merge_pcdata`: elements, attributes, text and
+CDATA; the five predefined references and character references expanded; line ends made line feeds and an
+attribute's white space spaces; comments and processing instructions dropped, the text either side of one merged. Then
+it walks the tree once, by its parent and sibling links, with no recursion, and refuses a document with more than one
+root element (which pugixml, lenient, takes) or an element deeper than `FMINUS_XML_MAX_DEPTH` (1024, the root at 1):
+pugixml has no depth limit of its own. It is a reader, not a validator, as the report says: what XML forbids and does
+no harm may parse (invalid UTF-8, an attribute's name twice, of which the first counts, text after the root element).
+One thing XML forbids would do harm, and is refused: a character reference to U+0000 (`&#0;`, `&#x00;`, and
+`&#4294967296;`, since pugixml keeps a reference's value in 32 bits). pugixml expands it to a NUL, and a value, a
+C string to pugixml, would end there: `<v>1.5&#0;junk</v>` would read as 1.5, and `cubic&#0;evil` match the choice
+`"cubic"`. Before parsing, `xml_parse` looks for one anywhere in the text (`nulReference`, one `memchr` pass); only
+when there is one does it parse the text once more with no reference expanded and look in every value, so that one
+in a comment or a CDATA section, which is text, is still allowed, and the memory is still one tree's at a time.
+
+**Entities are inert by construction.** pugixml reads a DOCTYPE only to skip it (`parse_doctype` off, so not even its
+node is kept), and expands only the predefined and character references. An entity the document declares is never
+expanded, and an external one never fetched: a reference to either stays in the text as written. So "billion laughs"
+is a short document whose root's text is `&lol9;`, and `<!ENTITY secret SYSTEM "file:///...">` reads nothing. The
+tests prove it, not only for the result: an internal entity, billion laughs (whose parse makes three heap calls), an
+external general entity naming a real file, one naming a URL, and an external parameter entity are parsed and read in
+a child process under a seccomp filter that kills it on `open`, `openat`, `socket`, `connect` or `execve`; it exits
+normally, and a second child, which only `fopen`s the file under the same filter, is killed by `SIGSYS`, which shows
+the filter works.
+
+### The builtins
+
+| Builtin | Gives | Effect |
+|---|---|---|
+| `xml_parse(const void* data, int bytes)` | a document, a `void*`: null for a text that is no XML document (malformed, no root element or two), larger than 64 MiB, or nested deeper than 1024 | allocates |
+| `xml_free(void* doc)` | frees it (null: nothing) | allocates |
+| `xml_float(doc, path, ..., float fallback)`, `xml_double(..., double fallback)` | the value as a number, correctly rounded | wait-free |
+| `xml_int(doc, path, ..., int fallback)` | the value when it is an integer an `int` holds | wait-free |
+| `xml_bool(doc, path, ..., bool fallback)` | `true` for `true` or `1`, `false` for `false` or `0` | wait-free |
+| `xml_count(doc, path, ...)` | how many elements the last step matches: the parent's children of that name; with an index, 1 or 0; for an attribute, 1 or 0 | wait-free |
+| `xml_floats(doc, path, ..., float* out, int cap)` | how many numbers the value lists, separated by white space or a comma; the first `cap` written; 0 and nothing written when anything in it is not a number | wait-free |
+| `xml_choice(doc, path, ..., "a", "b", ...)` | the index of the first literal the value equals, byte for byte; else -1 | wait-free |
+
+A path names an attribute, whose value is read, or an element, whose text is read: its first text child, a CDATA
+section's or not, or the empty text when it has none (an element of children only has none). XML's white space around
+a value is not part of it, so `<gain> 0.5 </gain>` is 0.5 and `xml_choice` compares `" saw "` as `saw`. Numbers are XML
+Schema's, read by `readFloat` and `readDouble` with `NumberSyntax::Xml`: C's general syntax with a `+` allowed
+(`+1.5`, `007`, `.5`, `1.`, `INF`, `-INF`, `NaN`), the bytes after it none. `readInt` gained a syntax: XML's allows a
+`+`, leading zeros and digits on either side of the point, and is otherwise recipe 39's exact rule (`7.0` is 7, `1.5`
+and `3e9` give the fallback). A bool is XML Schema's four words, nothing else (`TRUE`, `yes`, `2`: the fallback). A
+list is numbers each followed by white space, or a comma with any white space around it, or the end: an empty item, a
+comma at either end, or a number run into a word is not a list, and `xml_floats` writes nothing. There is no
+`xml_base64_floats`: a table in XML is a list.
+
+Their `kRuntimeBuiltins` entries are the JSON ones' with `Param::XmlPath` for `Param::Path`; `lowerRuntimeBuiltin`
+prepares that parameter with `preparedXmlPath` and treats it as a format otherwise, so its ints, their checks and the
+choices are the same code. The runtime functions have the JSON functions' facts (`Document`, `DocumentRelease`, `Read`,
+`ReadChoice`, `ReadInto`), since they do the same with memory.
+
+### Paths, prepared when the program is compiled
+
+An XML path is a format, as a JSON Pointer is, and a small part of XPath: `/` and the root element's name, then child
+steps by element name, each with an index or none, and a last step that may be an attribute's name after `@`. A step
+with no index takes the first child of the name; an intermediate one too (XPath would take them all). A name matches
+as written, its prefix and colon among it: there are no namespaces, so `"/preset/fm:depth"` finds `<fm:depth>`
+whatever `fm` is bound to, and a default namespace changes nothing. `%d` may stand in a name (`"/osc_%d_level"`, the
+int in decimal) or be the index (`"[%d]"`), and `%%` is a percent sign. `scanXmlPath` prepares it into a table of the
+JSON path's layout, each step its kind (an element, with an index, with an int's index, an attribute), its name's
+pieces as a token's are, and its index:
+
+```llvm
+; "/p/a[%d]": two steps; "p" is byte 0; "a" is byte 1, with the first int as its index
+@.xmlpath.1 = private unnamed_addr constant { i32, i32, [9 x i32], [2 x i8] }
+              { i32 9, i32 2, [9 x i32] [i32 0, i32 1, i32 0, i32 1, i32 2, i32 1, i32 1, i32 1, i32 0],
+                [2 x i8] c"pa" }, align 4
+  %xml_float = call float @fminus_rt_xml_float(ptr %doc, ptr @.xmlpath.1, ptr %format.ints, i32 1, float -1.0)
+```
+
+The runtime reads it through `Tables.h`, which is `Json.cpp`'s table reading moved to a header both include (in an
+unnamed namespace, so each file keeps its own copy and exports none): it trusts no word, and a negative index, one past
+the children, an int's place past the ints, an attribute before the last step, or an unknown kind reaches nothing.
+What XPath has beyond this is an error at its first byte, since no XML name holds it; clang has no words for XPath,
+so the messages are FMinus's:
+
+| Mistake | Error, at |
+|---|---|
+| `"preset"`, `""` | "an XML path must begin with '/' and the root element's name", at its first byte (an empty one's quote) |
+| `"/@a"` | "the first step of an XML path is the root element's name, not an attribute", at the `@` |
+| `"/a//b"`, `"/a/"` | "expected an element's name after '/' in an XML path", at what follows the `/`, or the `/` at the end |
+| `"/a/@"` | "expected an attribute's name after '@' in an XML path" |
+| `"/a/@b/c"` | "an attribute must be the last step of an XML path", at the `/` |
+| `"/a/@b[0]"` | "an attribute takes no index in an XML path", at the `[` |
+| `"/a[x]"`, `"/a[-1]"`, `"/a[@n='1']"` | "expected an index in '[ ]' in an XML path: digits, from 0, or %d", at the byte |
+| `"/a[1"` | "expected ']' in an XML path", at the byte that is not one, or the `[` at the end |
+| `"/a[2147483648]"` | "an index in an XML path must be at most 2147483647", at its first digit |
+| `"/a[0]b"` | "expected '/' after ']' in an XML path" |
+| `"/a/*"`, `"/a/text()"`, `"/a/b c"` | "unexpected '*' in an XML path: a step is a name, an index '[n]' after it, or a last '@' and an attribute's name" |
+| `"/osc[%f]"`, too few or too many ints, a `float` for `%d` | recipe 38's format errors (and, for the first, the index's) |
+
+### What the runtime promises the audio thread
+
+The same as recipe 39's, kept the same way. The effects class `xml_parse` and `xml_free` as allocating and every read
+as wait-free. A read walks a finished tree, which nothing writes once `xml_parse` returns, through pugixml's
+accessors, which only follow pointers and read its strings: no allocation, no lock, no system call, and steps the
+document's size bounds (an element found among its parent's children, an attribute among its element's, a name's
+length by `strlen` within the document). `xml_floats` reads the list twice, to check it and then to write the first
+`cap`, stopping there. They cost what recipe 39's do ("What a read costs"): 100,000 siblings' last took 2.2 ms to find,
+a missing attribute among 100,000 0.7 ms, and a loop of `xml_float(doc, "/r/b[%d]", i)` over them 42 s. `XmlTest.cpp`
+proves it as `JsonTest.cpp` does: a hundred rounds of every read of the preset,
+through the JIT, make no heap call (`HeapCalls`), where a parse and a free make some, and a child under seccomp's strict
+mode runs every read and writes their sum back.
+
+### Without `FMINUS_XML`
+
+`FMinusXml.cmake` returns before it fetches anything, `Xml.cpp` compiles to nothing, `RuntimeSymbols.def` lists no
+`xml_` function, and a call of one is `'xml_parse' needs the XML parser, which this build of FMinus leaves out
+(FMINUS_XML=OFF)`; `__FMINUS_XML__` is undefined. A tree configured with `-DFMINUS_XML=OFF` (yyjson and fast_float
+still fetched, for JSON) and one with both options off (nothing of pugixml, yyjson or fast_float fetched or compiled)
+were built and their whole suites run; `nm` on each one's `libfminus_runtime.a` shows no `xml` or `pugi` symbol.
+
+### What it changes for programs and hosts
+
+- **Programs** gain nine builtins, so a program's function of any of their names is an error, in every build.
+- **Hosts** get `FMINUS_XML_MAX_BYTES` and `FMINUS_XML_MAX_DEPTH` in `fminus/Config.h`. The runtime has nine more
+  functions in a build with the parser: `libfminus_runtime.a` grows by pugixml's objects and `Xml.cpp`'s (from 313 KB
+  with the JSON parser alone to 453 KB with both, on Linux x86-64, the release preset). A binary that links it carries
+  pugixml's MIT notice (README, "License"). Memory for a document is pugixml's tree, a few dozen
+  bytes a node, plus the copy of the text: a hostile 64 MiB of `<a/>` is about 16 million nodes, 1.2 GB at its peak,
+  where a 64 MiB JSON array of zeros is about half that. The depth limit is checked once pugixml has built the tree
+  (it has no limit of its own), so a text past it costs its tree before it is refused, unlike yyjson's, which stops
+  at the limit: 64 MiB of unclosed `<a>`s is the worst there is, about 1.5 GB at its peak and 0.7 s, then null.
+- **The build** fetches pugixml (588,574 bytes) on a first configure with `FMINUS_XML` on, as it is by default.
+- **The VS Code grammar** colours the nine builtins.
+
+### Tests
+
+- `tests/unit/XmlTest.cpp`: well-formed documents (a declaration, a byte order mark, DOCTYPEs with and without an
+  internal subset, comments and processing instructions around and inside the root, references, CDATA, prefixes) and
+  documents that are not (nothing, no root, two roots, unclosed, mismatched, unquoted, after the root); the null and
+  empty inputs; a copy kept; the depth at its limit and past it, a million unclosed elements, 200,000 closed, a value
+  1024 levels down; the size limit to the byte; the entity attacks, confined; a reference to U+0000 in a value
+  refused, in every form, and allowed in a comment or CDATA; CDATA, mixed text, a comment between texts, references
+  in text and attributes, white space around values, prefixed and default namespaces, a DOCTYPE's default attribute
+  (not applied); a 10 MB document of about a hundred lists of 10,000 numbers each, in text and in attributes, read
+  whole and summed exactly; `xml_float` on XML Schema's numbers, the double-rounding hard cases,
+  overflow, underflow, and everything that is not one number; `xml_double`; a comma-decimal locale (skipped without
+  one); `xml_int`, `xml_bool`, `xml_count` and `xml_choice` on each kind of node; `xml_floats` with each separator, in
+  text, CDATA and attributes, with a short cap, a cap of 0, a null `out`, and on every list it refuses; paths with
+  indices from 0, the root's index, attributes, prefixes, and `%d` in and out of range, negative, `INT_MIN` and
+  `INT_MAX`, in a name and as an index; a null document and malformed tables; a program through the JIT; every read
+  allocating nothing and making no system call; the effects; the prepared tables; each path error at its column (each
+  column recounted by hand); the parameters' conversions and the arities; prototypes; each builtin's name in both
+  builds.
+- `tests/unit/NumbersTest.cpp`: XML's syntax in `readFloat` and `readInt`.
+- `tests/lit/fminus/xml.fm`: the tables and calls at `-O0`, the declarations' attributes, and a program that parses a
+  document and reads it through the JIT and as an executable; `xml-errors.fm`: the errors from the command line;
+  `xml-off.fm`: the option's error, in a build without it.
+- `examples/wavetable/`: `initXml` loads the same pack from XML (three tables as text, one as an attribute's list),
+  and `--check` compares its output with the JSON loader's and C++'s, bit for bit, and refuses five broken XML
+  documents.
+
+## Recipe 41: the web library, an HTTP(S) client under the host's policy
+
+*In the compiler. Code: `src/web/` (the library, `fminus_web`: `Web.h` and `Web.cpp`, the C functions and the I/O
+thread, and `Context::stop`; `Policy.h` and `Policy.cpp`, the pattern language, the URL rules and the address check;
+`Roots*.cpp`; `Main.cpp`, an executable's context; `WebSymbols.def`); the `http_` entries of `kRuntimeBuiltins`,
+`Feature::Web`, `Param::Url`, `Param::ContentType`, `Result::Bytes` and their lines in `lowerRuntimeBuiltin`, and the
+`fminus_web_` facts (`src/ir/Lowering.h`, `Calls.cpp`); `src/ir/Web.cpp` (a URL's checks, the requests' metadata, the
+context global, the status codes' names) and its hooks in `named` (`Functions.cpp`) and the undeclared-identifier
+errors (`Memory.cpp`, `Constants.cpp`); `__FMINUS_WEB__` (`Preprocessor.cpp`); `Program::Options::web`,
+`webRequests()` and `stopWeb()` (`include/fminus/FMinus.h`, `src/api/FMinus.cpp`); the JIT's symbols
+(`support/JitRuntime.cpp`), an executable's context and libraries (`support/Aot.cpp`, `Aot.h`); the driver's
+`--web-allow` and `--web-ca-file` (`tools/fminus/main.cpp`); `cmake/FMinusWeb.cmake`, the curl and Mbed TLS pins,
+`FMINUS_WEB` and `FMINUS_HAS_WEB`, the `web` preset, the library's and the link list's lines in `src/CMakeLists.txt`;
+`Scripts/pin-web.sh`, the pins' lines for the next releases (its libcurl half run here; GitHub's API, which its Mbed TLS
+half reads, refuses this machine).
+Tests: `tests/unit/WebTest.cpp` (`[web]`: the library against a loopback server, and programs through the JIT and as
+executables), `tests/unit/HttpTest.cpp` (the builtins, in every build), `tests/lit/fminus/web.fm`, `web-errors.fm` and
+`web-off.fm` (lit's new `web` feature); the example, `examples/fetch/`. Built with `-Werror` and tested in the
+`release` preset on Linux x86-64 only, in a tree with `-DFMINUS_WEB=ON` and in the default tree without it, every test
+passing but the one this machine cannot run (the smoke test of LLVM's own `opt`, as for recipes 38 to 40); the
+library's own tests under GCC's ThreadSanitizer and AddressSanitizer, outside the presets, and `stop()` racing
+`close`, waits and new requests under both, in a harness of its own (libcurl and Mbed TLS uninstrumented); not yet in
+`dev`, `web` or `asan`, nor on macOS or Windows. [web.md](web.md) is its manual.*
+
+The third family of recipe 38's kind, and the one the strings were for. A program fetches what it plays, off the audio
+thread, from a URL its host allows:
+
+```c
+void* r = http_get("https://example.com/presets/%d.json", k);   // a request, at once; refused unless allowed
+if (http_wait(r, 10000) == 200)                                 // blocks: not in a nonblocking function
+{
+    void* doc = json_parse(http_body(r), http_size(r));
+    gain = json_float(doc, "/gain", 1.0f);
+    json_free(doc);
+}
+http_close(r);
+```
+
+It is the report's recommendation, [research/web/README.md](research/web/README.md) §4.1, §4.4, §5, §7 and §8, with
+its §10's answers as it gives them: literals only for strings (B), HTTP(S) GET and POST first with no WebSocket and no
+server, libcurl with Mbed TLS (Schannel on Windows) bundled and pinned, `FMINUS_WEB` off by default, and the name
+"web".
+
+### The library: its own, beside the runtime
+
+`fminus_web` is a static library of its own (`src/web/`, globbed as `src/circuit/` is), never part of
+`fminus_runtime`: the runtime is what every host and every executable links, and networking brings a thread that must
+be joined before a plugin unloads, system libraries and a TLS stack, which a host that wants none of them should not
+have in its binary at all. `fminus_lib` links it only with the option on. libcurl and Mbed TLS are built at configure
+time into the deps cache, as Bison and Flex are (`cmake/FMinusWeb.cmake`): fetched once, configured, built and
+installed with their own CMake into `install/<name>-<version>-<flavor>`, the flavor a hash of the compiler and the
+arguments, then found there with `find_package` (each `<name>_DIR` cleared first, so a tree never keeps an install of
+another flavor that an earlier configure cached). libcurl is HTTP and HTTPS only; both are hidden and
+position-independent. [web.md](web.md) has the rest: one I/O thread on libcurl's multi interface, a context a host's
+policy, the checks at start, at each redirect and on each connection.
+
+`Context::stop()` is this recipe's addition to the library: the flag first, under the context's mutex, so a request
+started after it is cancelled where it starts (and one queued before it, where its hop begins, on the I/O thread);
+then a cancel of each request still pending, queued under the mutex and waited for. `http_close` now waits for every
+command queued before it is freed (`Engine::posted`, a barrier): a cancel `stop()` queued for a request that ended
+first would otherwise reach the I/O thread after the request was freed.
+
+### The builtins
+
+| Builtin | Parameters | Result | Effect |
+|---|---|---|---|
+| `http_get` | `Url` | `Pointer` | allocates |
+| `http_post` | `Url`, `Bytes`, `Int`, `ContentType` | `Pointer` | allocates |
+| `http_wait` | `Handle`, `Int` | `Int` | blocks |
+| `http_status`, `http_size`, `http_progress` | `Handle` | `Int` | wait-free |
+| `http_body` | `Handle` | `Bytes`, a `const void*` | wait-free |
+| `http_cancel`, `http_close` | `Handle` | `Void` | allocates |
+
+Their entries in `kRuntimeBuiltins` name `Feature::Web`, so a build without the library knows every name and refuses
+a call of one with `notBuilt`'s error, and their effect class, which `Effects.cpp` reads with no change: recipe 38
+built the third class, `Blocks`, for `http_wait`, which is the first real builtin in it. Two new parameter kinds:
+
+- **`Param::Url`** is a format whose ints come **last**, after every other argument, as `printf`'s do
+  (`http_post(url, data, bytes, type, k)`), where a path's follow it (`json_float(doc, path, k, fallback)`).
+  `lowerRuntimeBuiltin` computes where the ints start (`intsAt`) and does not shift the other parameters past them
+  when the format is a URL (`trailing`). Before its text, a URL passes the program's web context, loaded from the
+  module's global (`webContext`), so `http_get(url, ...)` calls `fminus_web_http_get(context, text, length, ints,
+  count)` with no hidden parameter in the table. Then `checkUrl`: no byte a URL cannot hold (a control byte, CR and
+  LF among them, a space, a backslash, anything not ASCII), a scheme of `http` or `https`, and no `@` before the path.
+  Each is an error at its byte, of a request the library would refuse anyway: what the compiler can see, it says
+  where it is written.
+- **`Param::ContentType`** is a string: its text and length, no ints, checked by `checkContentType` (printable ASCII,
+  at most 255 bytes).
+
+And a result, **`Result::Bytes`**, a `const void*`: `http_body`'s, which the program may only read.
+
+A null handle is the library's to handle: every function takes null and does nothing (`http_status` gives
+`HTTP_INVALID`). There is no null pointer constant in FMinus, but a `void*` parameter or field may be one.
+
+### What the library's functions touch, told to LLVM
+
+`kRuntimeFacts` gives each of them a kind (recipe 19), and each kind attributes that are true of `Web.cpp`:
+
+| Kind | Functions | Attributes |
+|---|---|---|
+| `WebStart` | `get`, `post` | `nounwind`, `willreturn`; `memory(argmem: readwrite, inaccessiblemem: readwrite, errnomem: write)`; the URL, the ints, the body and the type `readonly captures(none)` (the context's pointer is captured: the request keeps it); `noundef` result, not `noalias` (a refused request with no context is one shared request) |
+| `WebWait`, `WebEnd` | `wait`; `cancel`, `close` | `nounwind`, `memory(argmem: readwrite, inaccessiblemem: readwrite)`, the request `captures(none)`; no `willreturn`, as each waits for another thread |
+| `WebRead` | `status`, `size`, `body`, `progress` | `nounwind`, `willreturn`, `nofree`, `memory(argmem: readwrite, inaccessiblemem: readwrite)`, `captures(none)` |
+
+The reads are the case to get right. Each is an acquire load of what the I/O thread publishes, so it is **not**
+`readonly`, nor `nosync` (an acquire load synchronises with the store that published): were LLVM told a read only
+reads, it could merge two calls in a polling loop, or move one out of the loop, and a `process` that polls for a late
+table would never see it arrive. Saying they may write the request's memory (opaque to the program, as an FFT plan's
+is) keeps every call where the program wrote it, and still tells LLVM that none of them touches a module's fields.
+
+### The program's context, and what the host sees
+
+**The context** is a global of the module, `fminus_web_context` (`ir::kWebContextSymbol`), a pointer, null until the
+host sets it, defined at the first request a program starts (`webContext`), exactly as the loop budget's
+`fminus_rt_loop_budget` is (recipe 29). `Program::compile` creates the program's `web::Context` from `Options::web`
+when the program has the global and the host allowed something, looks the global up (which compiles the module, as
+the budget's look-up does) and stores the context's handle in it. A null context reaches nothing, in the library, so
+the default policy costs no context at all. The program cannot name the global (a function of its name is an error),
+nor the library's functions: nothing it asks of the library can widen the policy. (A program's own external
+functions are another matter, and not the library's: [web.md](web.md), "The policy is the library's, not a sandbox".)
+
+**The URLs** are literals, so the code generator records each call's in the module's named metadata,
+`fminus.web.requests`: its method, its pattern (each `%d` a `*`, each `%%` a `%`), its file, line and column
+(`recordWebRequest`), as the bounds checks record their sites (recipe 30). `ir::webRequests` reads them back, and
+`Program::webRequests()` returns them, before any of the program's code has run.
+
+**The status codes** are names a program uses without declaring them: `named()`, C++'s lookup in a method, falls back
+past the file's scope to `webStatus`, a static binding for each name with an enumeration constant's value, so
+`HTTP_REFUSED` folds, labels a `case` and sizes an array as an enumerator does, and a program's own declaration of
+the name, in a block or at the file's scope, is found first. In a build without the library `webStatus` finds
+nothing, and the two places that report an undeclared identifier (`lvalue`, `fold`) ask `unbuiltWebStatus` first, so
+`HTTP_REFUSED` is the error that names the option. *Why not macros:* FMinus substitutes none in code (recipe 31). *Why
+not an enumeration of a type of its own:* a program could not name the type.
+
+### Lifetime
+
+`~Program` (its `Impl`'s destructor) stops the context, then destroys it, before the JIT goes: every request
+cancelled and freed, every thread in the library's `http_wait` woken and out of it, the I/O thread joined if it was the
+last context. A thread still inside the program's code is the host's to stop first: `Program::stopWeb()` wakes one in
+`http_wait` with `HTTP_CANCELLED`, the host joins it, and only then destroys the `Program`, as it must for any thread
+running a program's code.
+
+### The driver and executables
+
+Neither has a host, so each takes its policy from the person who runs it, default-deny: `fminus --run` from
+`--web-allow PATTERN` (repeatable) and `--web-ca-file`, checked by `web::checkPolicy` before anything compiles, and an
+executable from its environment, `FMINUS_WEB_ALLOW` and `FMINUS_WEB_CA_FILE`, when it starts. `addEntryPoint` gives
+the C `main` of a module with the context global a call of `fminus_web_main_start(&fminus_web_context, argv[0])`
+before the program's `main` (a non-zero result, a refused policy, is the exit status, 2, its message already on
+stderr), and `fminus_web_main_stop` after it. Those two make a context from the environment, so no program may reach
+them: `WebSymbols.def` lists them under `FMINUS_WEB_MAIN_SYMBOL`, which `Constants.cpp` reads (the names stay reserved)
+and `JitRuntime.cpp` does not (a JIT never defines them), and `declare` (`Functions.cpp`) refuses a function of a
+program, a prototype or a definition, whose name begins `fminus_web_` (`ir::kWebPrefix`), in every build, so that a
+program cannot call the library past its literals and `webRequests()`. `emitExecutable` links the web library's archives only when the module
+declares a `fminus_web_` function: `src/CMakeLists.txt` writes the list (`libfminus_web.a`, then `FMINUS_WEB_LINK`
+from `FMinusWeb.cmake`: libcurl's and Mbed TLS's archives and the system libraries libcurl's own CMake links on the
+platform) into `generated/support/WebLink.inc`, which `linkExecutable` includes. An executable that makes no request
+is linked as before.
+
+### The scaffolding stays
+
+Recipe 38 made `__fminus_string_hash` and `__fminus_string_hash_blocking` to prove a literal's way to the runtime and
+the blocking class before any real builtin needed them, and said they would go when builtins of their own came. They
+stay: the default build has no web library, so `http_wait` cannot carry a blocking call through the effects there,
+and a build with both parsers off has no other format. `StringTest.cpp` and `strings*.fm` keep testing both in every
+build; `HttpTest.cpp` and `web*.fm` test the real ones where the library is.
+
+### What it changes for programs and hosts
+
+- **Programs** that use none of it compile to the same IR. `http_get` and its kin are new builtins in every build, so a
+  program's function of one of those names is an error; a program's own `HTTP_REFUSED` hides FMinus's. `__FMINUS_WEB__`
+  cannot be defined.
+- **Hosts** get `Program::Options::web` (default: no network), `webRequests()` and `stopWeb()`, in every build (the
+  policy is not read without the library), and `FMINUS_HAS_WEB` in `fminus/Config.h`. A host linking `FMinus::FMinus`
+  in a build with the library links `fminus_web`, and through it libcurl and Mbed TLS.
+- **The build** is unchanged by default: nothing is fetched or built with the option off. On, a first configure
+  downloads and builds libcurl and Mbed TLS (a minute or two).
+- **The VS Code grammar** (0.17.0) colours the `http_` builtins and the status codes' names.
+
+### Tests
+
+- `tests/unit/WebTest.cpp`: the library at its own level (patterns, the address check, every
+  status against a loopback server it starts, redirects, limits, HTTPS with its own certificate authority, contexts
+  destroyed with requests in flight and threads waiting); then programs, against the same server: one fetches a JSON
+  body through the JIT under `Options::web` and reads its numbers, and the same as an executable, run with
+  `FMINUS_WEB_ALLOW`, without it, with a pattern that does not match and with one the library refuses (exit 2); the
+  policy refusing through `http_status` (a URL, and a redirect, not allowed, and nothing sent); a `Program` destroyed
+  with requests in flight, and stopped with a thread in `http_wait` inside the program's code.
+- `tests/unit/HttpTest.cpp`, in every build: the effects of each builtin, through the table and through the effects'
+  errors; each builtin and status name known, with the option's error in a build without it; then, with it, the
+  status codes' values against `Web.h`'s, a URL's errors at their columns, `webRequests()` for four call sites in two
+  files, `Options::web` checked by `compile()`, and the default policy refusing, and a null handle, through the JIT.
+- `tests/lit/fminus/web.fm`: the calls and the declarations' attributes at `-O0`, the metadata, `--run` with no
+  pattern and with one that does not match (refused, no request made), a bad pattern, `--web-allow` with `--emit`, an
+  executable with and without `FMINUS_WEB_ALLOW`; `web-errors.fm`: each error once; `web-off.fm`: each name's error
+  and `--web-allow`'s in a build without the library.
+- `examples/fetch/`: `--check` serves the wavetable example's pack on 127.0.0.1, fetches it through the program, plays
+  it, compares the samples with the same pack loaded directly (identical), and checks a missing pack (404) and the
+  default policy (refused, no request).
+
+## Recipe 42: the web server, a program's requests taken on the audio thread
+
+*In the compiler. Code: the server in `src/web/` (`Server.h` and `Server.cpp`, the slots, the connections and the
+rules; `ServerPolicy.cpp`, the server's policy and its classifiers; `ServerRoot.cpp`, a directory as static files;
+`Sockets.h`, `SocketsPosix.cpp` and `SocketsWindows.cpp`; `Handle.h`, the kind every handle carries; and in `Web.h`,
+`Web.cpp`, `Policy.*`, `Main.cpp` and `WebSymbols.def`, their hooks); the server's entries of `kRuntimeBuiltins`,
+`Feature::WebServer`, `Param::Route`, `Param::QueryName`, `Param::ReplyFormat`, the `Server*` kinds of
+`kRuntimeFacts` and their lines in `lowerRuntimeBuiltin` (`src/ir/Lowering.h`, `Calls.cpp`); `src/ir/WebServer.cpp` (a
+route's check, its metadata and the route table, a query's name, a reply's format) and `finishWebRoutes`'s call in
+`CodeGen.cpp`; `__FMINUS_WEB_SERVER__` (`Preprocessor.cpp`); `Program::WebServerPolicy`, `webRoutes()` and
+`webPort()` (`include/fminus/FMinus.h`, `src/api/FMinus.cpp`); the driver's `--web-listen`, `--web-token`,
+`--web-host`, `--web-root` and `--web-open` (`tools/fminus/main.cpp`); `cmake/FMinusLlhttp.cmake`, llhttp's pin,
+`FMINUS_WEB_SERVER` and `FMINUS_HAS_WEB_SERVER`, the `web` preset, the server's lines in `src/CMakeLists.txt` and
+`cmake/FMinusFastFloat.cmake`; llhttp's line in `Scripts/pin-web.sh`.
+Tests: `tests/unit/WebServerTest.cpp` (`[server]`: the engine from C++), `tests/unit/HttpServerTest.cpp` (the builtins,
+in every build), `tests/unit/WebServeTest.cpp` (programs that serve, through the JIT and as executables),
+`tests/library/WebPolicyTest.cpp`'s server case (the host API in C++17, in every build),
+`tests/lit/fminus/web-server.fm`, `web-server-errors.fm` and `web-server-off.fm` (lit's new `web-server` feature); the
+example, `examples/remote/`. Built with `-Werror` and tested in the `release` preset on Linux x86-64 only, in three
+trees: `-DFMINUS_WEB=ON -DFMINUS_WEB_SERVER=ON`, `-DFMINUS_WEB=ON` alone, and the default, every test passing but the
+one this machine cannot run (the smoke test of LLVM's own `opt`, as for recipes 38 to 41); the engine and its test under
+GCC's AddressSanitizer with UndefinedBehaviorSanitizer and under ThreadSanitizer, outside the presets, with a race
+harness and a mutation fuzzer; not yet in `dev`, `web` or `asan`, nor on macOS or Windows, nor with IPv6. [web.md](
+web.md), "The server", is its manual, and [research/web/server.md](research/web/server.md) the report it builds.*
+
+The reverse of recipe 41: a request comes in, and the program answers it. FMinus has no callbacks, so the program
+**takes** its requests, and since taking, reading and answering one are wait-free, its audio thread may do it between
+two blocks:
+
+```c
+void process(float* out, int n) [[clang::nonblocking]]
+{
+    for (void* r = http_next(server); r; r = http_next(server))    // the requests waiting, or none
+    {
+        if (http_is(r, "POST /osc/%d/gain"))                         // a route literal, checked here
+        {
+            gain[http_arg(r, 0) & 7] = http_query_float(r, "value", 1.0f);
+            http_reply(r, 204);
+        }
+        else if (http_is(r, "GET /state"))
+            http_reply_text(r, 200, "application/json", "{\"level\":%g}", level);
+    }
+    // ... the block
+}
+```
+
+It is the report's recommendation as its section 0 chose it: the program serves, by builtins (its shape A), llhttp for
+the request's head and FMinus's own code for everything else, the LAN only with a token or the host's `open`, static
+content the host's, a reply's text C's `printf` in part, no CORS ever, no TLS yet, and an option of its own,
+`FMINUS_WEB_SERVER`, off by default.
+
+### The engine, in the library, behind its own option
+
+Nothing of the language is in the engine, and it was built first, tested from C++ before any builtin existed
+(`WebServerTest.cpp`). It lives in `fminus_web`, beside the client, for one reason: **the I/O thread**. A plugin
+should start as few threads as it can and join each before it unloads, and `fminus_web` has one already, waiting in
+`curl_multi_poll`, which takes descriptors beside libcurl's own. So a server's listening sockets and its connections
+are more descriptors in the same wait: two new commands on the same queue (`Serve`, `Unserve`), and after libcurl's
+transfers each turn, `Servers::turn()` accepts, reads, parses, writes and frees, then `descriptors()` rebuilds the
+array the next wait takes. A socket is closed only in a turn or a detach, and the array is rebuilt after each, so a
+closed descriptor never reaches curl, which would not report it.
+
+**llhttp** (9.4.3, pinned; `cmake/FMinusLlhttp.cmake`) is built as yyjson is (recipe 39): fetched once into the deps
+cache, its three generated C files an object library whose objects `src/CMakeLists.txt` puts into `fminus_web`, its
+own flags kept, its symbols hidden, its CMake never added. Every lenient flag stays off, and every limit is the
+server's own, counted in its callbacks: the head is fed at most what is left of its 16 KiB, fields are counted as they
+come, the parser is paused at the end of each message so one request at a time is read, and what FMinus does not serve
+is refused at the first callback that shows it (another version, a method outside the seven, any
+`Transfer-Encoding`, so llhttp's chunked machinery is never entered). fast_float reads a query's numbers, in
+`Server.cpp` alone, hidden as `Numbers.cpp` hides it (`cmake/FMinusFastFloat.cmake` now fetches it for the server too).
+
+**The option** is `FMINUS_WEB_SERVER` (`cmake/FMinusOptions.cmake`), which configure refuses without `FMINUS_WEB`,
+and `fminus/Config.h`'s `FMINUS_HAS_WEB_SERVER`. With it off, each of the server's sources is guarded by that macro
+and compiles to nothing, nothing is fetched, and `libfminus_web.a` has no llhttp, listen or root symbols.
+
+**The slots** are §4.3 of the report: a fixed table, `maxPending` of them, each with a reply buffer of
+`maxReplyBytes`, all made when the server starts. A slot's state is one atomic 64-bit word, a sequence number above 8
+bits of phase (free, published, claimed, answered, abandoned, done, closed): the I/O thread publishes with a store,
+`http_next` claims the oldest published slot with a compare-and-swap (at most twice the slots' number of tries, so it
+stays wait-free), a reply publishes with another, and the I/O thread sends and frees. A request the library gives up on
+while the program holds it (its client left, its reply timed out) goes to abandoned, which the program's reply turns to
+done, returning `HTTP_CANCELLED`, so a request never changes under the thread that holds it; until that reply the slot
+stays the program's, so a request never answered holds its slot until the server closes (and `maxPending` of them
+leave every later request a 503). While any slot is out the
+I/O thread turns once a millisecond instead of being woken, since waking it is a system call.
+
+**Handles that know their kind** (`Handle.h`). A request made, a request received and a server are all `void*` to a
+program, and recipe 41's functions took any pointer as a request. Each kind now begins with a 32-bit word of its own,
+which every C function reads first (`as<T>`): `http_status` of a server is `HTTP_INVALID`, `http_size` and `http_body`
+of a received request read its body, `http_close` of a server closes it. The client's request derives from `Handle`
+and nothing else of it changed: its tests pass as they were.
+
+### The builtins' table rows
+
+| Builtin | Parameters | Result | Effect |
+|---|---|---|---|
+| `http_listen` | none | `Pointer` | allocates |
+| `http_port` | `Handle` | `Int` | wait-free |
+| `http_next` | `Handle` | `Pointer` | wait-free |
+| `http_accept` | `Handle`, `Int` | `Pointer` | blocks |
+| `http_is` | `Handle`, `Route` | `Bool` | wait-free |
+| `http_arg` | `Handle`, `Int` | `Int` | wait-free |
+| `http_query_float`, `http_query_int` | `Handle`, `QueryName`, `Float` or `Int` | `Float` or `Int` | wait-free |
+| `http_reply` | `Handle`, `Int` | `Int` | wait-free |
+| `http_reply_bytes` | `Handle`, `Int`, `Bytes`, `Int`, `ContentType` | `Int` | wait-free |
+| `http_reply_text` | `Handle`, `Int`, `ContentType`, `ReplyFormat` | `Int` | wait-free |
+
+Their entries name `Feature::WebServer`, so `isBuilt` asks `FMINUS_HAS_WEB_SERVER` and `notBuilt` says `'http_listen'
+needs the web server, which this build of FMinus leaves out (FMINUS_WEB_SERVER=OFF)` in a build without it.
+`http_size`, `http_body` and `http_close` keep their recipe 41 rows (`Feature::Web`): they now take the server's
+handles too, which is the library's business, not the table's. `Effects.cpp` needs nothing: the three classes are
+recipe 38's, and `http_accept` is the second real builtin in `Blocks`. `http_is` returns the library's 0 or 1 as an
+`i32`, as `Result::Bool` already did for the parsers' `json_bool`.
+
+`http_listen()` takes no argument in the language, and three in the library: `lowerRuntimeBuiltin` replaces its
+arguments with `listenArguments()`, the program's web context (recipe 41's global, which `http_listen` now defines
+too) and two nulls and a zero for the route table, which is not known yet (below).
+
+Three new parameter kinds, each a string literal (`isString`, as recipe 38 made them):
+
+- **`Param::Route`**: checked by `checkRoute`, recorded by `recordWebRoute`, passed as a string is (its text and
+  length).
+- **`Param::QueryName`**: checked by `checkQueryName` (letters, digits, `_`, `-` and `.`, 1 to 64 bytes), passed as a
+  string.
+- **`Param::ReplyFormat`**: a format, like `Param::Format`, whose values follow it, but whose places are `printf`'s
+  `%d`, `%g` and `%.Ng` rather than ints alone: so it has its own scan (`scanReplyFormat`) and its own arguments
+  (`replyArguments`, `replyValues`), below.
+
+### The route literal: its check, its record and the table
+
+`scanRoute` reads a literal as the library will match it: a method of `GET`, `POST`, `PUT`, `PATCH` or `DELETE`, one
+space, and a path of `/` and segments of the characters rule 2 lets a request's path hold, with `%d` its only
+conversion. It refuses, each at its byte, what could never match a request, since a route that silently never matches
+is a bug the compiler can see: `HEAD` and `OPTIONS` (a `GET` route answers `HEAD`, and the library answers `OPTIONS`),
+an empty, `.` or `..` segment (a request's path never has one), `?` (a route is a path alone), `%%` (no request's path
+holds a `%`), more than 8 `%d` (the library keeps 8), two `%d` together or one before a digit (each takes all the
+digits there are, so the second could never have any). `checkRoute` reports the first, with the note `a route takes
+%d, a decimal number of the path` for an unknown conversion, as recipe 38's format does.
+
+**The record** is recipe 41's again: `recordWebRoute` adds the call's method, its path as a pattern (each `%d` a `*`),
+its file, line and column to the module's named metadata `fminus.web.routes`, which `ir::webRoutes` reads back and
+`Program::webRoutes()` returns.
+
+**The table** is what makes the library answer 404 and 405 itself: every route literal of the program, each once,
+handed to the library by `http_listen`, so that only a request some route names reaches the program's code. It cannot
+be made where `http_listen` is lowered, since an `http_is` may come after it (in a later function, or later in the
+same one). So `lowerRuntimeBuiltin` keeps each listen call (`webListens_`) and each route's text (`webRoutes_`), and
+`finishWebRoutes()`, which `lower` calls once every function is lowered and before the effects are checked, makes two
+private constants, `fminus.web.routes` (`[N x ptr]`, each a private constant of the literal's bytes) and
+`fminus.web.route.lengths` (`[N x i32]`), and patches every listen call's last three arguments. A program with no route
+passes null, null and 0, and its server answers 404 to everything that is not a file. The library trusts no byte of the
+table: a literal that is not a route there never matches.
+
+### The reply's format
+
+`printf` is the format a person reading a reply expects, and the one clang already has words for. `scanReplyFormat`
+reads `%d`, `%g`, `%.Ng` (N from 1 to 17: `%.9g` reads back as the same float, `%.17g` as the same double) and `%%`, and
+calls anything else clang's `invalid conversion specifier`, plus one message of its own, for a precision out of range.
+`replyArguments` then checks each value against its place, in clang's words (`format specifies type 'double' but the
+argument has type 'int'`, `more '%' conversions than data arguments`, `data argument not used by format string`), and
+converts it as C passes `printf`'s arguments: an `int` or a `bool` to a double exactly (`sitofp`), a float widened
+(`fpext`), a double as it is. A `%g`'s argument is lowered as a double parameter's is (`lowerAs`), so `0.1` is C's
+double `0.1`. `replyValues` stores them into an array of doubles in the function's frame, and the call passes its
+address and count after the format's text and length.
+
+*Why doubles, and not the ints and floats apart:* one array of one type is one parameter, and every value an `int`, a
+`float` or a `double` can hold is a double exactly, so nothing is lost; the library reads `%d`'s back as C converts a
+double to an int (saturated, NaN 0, which the compiler's check makes unreachable). It writes the text with
+`std::to_chars` into the slot's buffer: the same in every locale, and no allocation.
+
+### What the library's functions touch, told to LLVM
+
+| Kind | Functions | Attributes |
+|---|---|---|
+| `ServerListen` | `listen` | `nounwind`, `willreturn`; argument and inaccessible memory read and written, other memory read (the literals the table points to), errno read and written; both table pointers `readonly captures(none)`; `noundef` result, not `noalias` (the shared refused server, or the context's server again) |
+| `WebRead` | `port`, `arg` | recipe 41's reads: `nofree`, argument and inaccessible memory, `captures(none)`; not `readonly` |
+| `ServerTake` | `next` | `nofree`, `willreturn`, argument and inaccessible memory read and written, `noundef` result: two calls are two requests |
+| `ServerWait` | `accept` | the same, without `willreturn`: `http_accept(server, -1)` may wait for ever |
+| `ServerMatch` | `is` | as a take, and the route `readonly captures(none)`: it writes the numbers it took into the request, which `http_arg` reads |
+| `ServerQuery` | `query_float`, `query_int` | as a read, and the name `readonly captures(none)` |
+| `ServerReply` | `reply`, `reply_bytes`, `reply_text` | `nofree`, `willreturn`, the request `captures(none)`, every other pointer `readonly captures(none)`; memory left as it is: any |
+
+The replies are the case to get right this time. A reply hands the request back: the I/O thread sends it and reuses the
+slot's memory, the request's body among it, which the program reads through `http_body`'s pointer. LLVM must not move
+a load of that body past the reply, and the only way to tell it so is a call that may write any memory. So a reply's
+declaration leaves its memory effects alone; what it costs is a little optimisation around a reply, and the narrower
+attributes would be a miscompile. The lit test checks both ways: `http_next` and `http_port` stay inside a polling loop
+at `-O2`, and a body's load after a reply is a second load. A JIT test checks the polling loop too, with a request that
+arrives 50 ms into a loop of two billion looks.
+
+### The host's side
+
+`Program::Options::web.server` is a `WebServerPolicy` (`FMinus.h`, C++17, in every build), which `compile()` copies
+into `web::ServerPolicy` only under `FMINUS_HAS_WEB_SERVER` and checks with recipe 41's `web::checkPolicy`, whose
+server part (`compileServerPolicy`, `ServerPolicy.cpp`) refuses the first mistake (`fminus::Program: web:
+server.listen '0.0.0.0:8080': 0.0.0.0 is the unspecified address: write '*' for every interface`). A program now gets
+a context when its host allowed a pattern **or** gave a listen, so one may listen and reach nothing. `webRoutes()`
+returns the metadata as `webRequests()` does. `webPort()` asks the context (`Context::port()`, new, under its lock),
+and is 0 whenever the port is not positive. `stopWeb()` and `~Program` needed nothing new: `Context::stop()` and the
+context's destructor close the server (detached from the I/O thread, its sockets closed, every thread in `http_accept`
+woken and waited for).
+
+### The driver and executables
+
+Recipe 41's way, again: the driver's options (`--web-listen ADDR`, and with it `--web-token`, `--web-host`,
+`--web-root`, `--web-open`), for `--run` only, each refused without `--web-listen`, a policy mistake named by the
+option it is in; and an executable's environment, read by `fminus_web_main_start` (`Main.cpp`): `FMINUS_WEB_LISTEN`,
+and with it `FMINUS_WEB_TOKEN`, `FMINUS_WEB_HOSTS`, `FMINUS_WEB_ROOT` and `FMINUS_WEB_OPEN`, a mistake the exit status
+2 with the variable named. `main_start` now makes a context when either `FMINUS_WEB_ALLOW` or `FMINUS_WEB_LISTEN` says
+something, and `addEntryPoint` needed nothing new: `http_listen` defines the context global, which is what it looks
+for. A root directory is read by the library's `readServerRoot` (`ServerRoot.cpp`), once, for both: regular files only,
+no link followed (on POSIX each directory and file is opened beneath the directory that listed it, with `openat` and
+`O_NOFOLLOW`, so a directory swapped for a link mid-walk cannot lead out of the root), hidden names and unservable paths
+skipped with a note, an `index.html` at its directory's path too,
+the type from a table of thirteen extensions, and limits (256 files, 16 MiB, 4096 entries).
+
+### What it changes for programs and hosts
+
+- **Programs** that use none of it compile to the same IR. The eleven names are builtins in every build (a program's
+  function of one of them is an error); `__FMINUS_WEB_SERVER__` cannot be defined.
+- **Hosts** get `Options::web.server` (default: nowhere), `webRoutes()` and `webPort()`, in every build, and
+  `FMINUS_HAS_WEB_SERVER` in `fminus/Config.h`. Nothing listens unless a host gives an address.
+- **The build** is unchanged by default; `FMINUS_WEB=ON` alone is the client of recipe 41, fetching nothing more. With
+  the server on, a first configure fetches llhttp's 40 KB archive.
+- **The VS Code grammar** (0.18.0) colours the server's builtins and a reply format's `%g` and `%.Ng`.
+
+### Tests
+
+- `tests/unit/WebServerTest.cpp` (`[server]`), compiled only with the option: the policy (every refusal, every form
+  accepted) and its classifiers (loopback, the bad ports, a servable path, `Host` and `Origin`, the LAN and IPv6 cases
+  among them, judged and never bound); handle kinds crossed with every function; the route matcher; `%g` against
+  `snprintf` over 20 values and 4 formats; then the engine over loopback, from a raw socket and from the library's own
+  client: each rule and its status, a request a byte at a time, two in one write, keep-alive (with `Connection:
+  close`, HTTP/1.0 and the idle limit), connections dropped mid-request and mid-reply, a reply over the limit, two
+  clients and four takers, closing with idle connections, a held request and threads in `http_accept(-1)`; and the
+  proof that the wait-free functions are: `HeapCalls` counts no allocation, and children under seccomp's strict mode
+  make the same calls and exit with the expected sums.
+- `tests/unit/HttpServerTest.cpp`, in every build: each builtin's effect through the table and through the effects'
+  errors; each name's error in a build without the server; then, with it, the route errors at their columns, the reply
+  format's and the query name's, the route table (each literal once, a route lowered after the listen), the
+  declarations' attributes, `webRoutes()` over five call sites and an `#include`, and `Options::web.server` checked by
+  `compile()`.
+- `tests/unit/WebServeTest.cpp`: a module served through the JIT, its `process` taking requests a host thread drives
+  every millisecond while another `Program`'s client posts and gets (a gain set and read back as JSON, a table posted
+  as bytes and read back, 404 and 405 from the library, the host's file); a polling loop that sees a late request; a
+  loader in `http_accept` woken by `stopWeb()`; a `Program` destroyed with its server open; an executable started with
+  `FMINUS_WEB_LISTEN`, `FMINUS_WEB_ROOT` and `FMINUS_WEB_TOKEN` and driven over loopback, and refused without them;
+  `readServerRoot`, and a directory exchanged with a link to elsewhere, over and over, while it reads; and the
+  wait-free proof again, of a `[[clang::nonblocking]]` handler the JIT compiled (`HeapCalls`, seccomp's strict mode).
+- `tests/lit/fminus/web-server.fm`: the calls, the table and the declarations' attributes at `-O0`, the polling loops
+  and the body's reload at `-O2`, `--run` without a listen (`HTTP_REFUSED`), with one (the program asks itself and
+  answers on the same thread), with a token (401), and an executable with and without `FMINUS_WEB_LISTEN`;
+  `web-server-errors.fm`: each error once, and the driver's; `web-server-off.fm`: each name's error and the driver's
+  options in a build without the server.
+- `examples/remote/`: `--check` listens on 127.0.0.1, drives the program with the library's client, and checks that a
+  gain and a note sent over HTTP are heard in the output, and that the default policy listens nowhere.
+
+## Recipe 43: the file interface, files a program reaches only through its host's folders
+
+*In the compiler. Code: the runtime's part, `src/runtime/Files.h` (the host's half: `fminus::files::Policy`,
+`checkPolicy`, `Context`, the status codes' values), `Files.cpp` (names, policies, contexts, quotas, handles, `reach`,
+the C functions, an executable's start and stop), `FilesSystem.h`, `FilesPosix.cpp` and `FilesWindows.cpp` (the
+operating system's part), and their lines in `Runtime.h` and `RuntimeSymbols.def`; the `file_` entries of
+`kRuntimeBuiltins`, `Feature::Files`, `Feature::FilesWrite`, `Param::FileName`, `Param::FilePattern`, the `File*` kinds of
+`kRuntimeFacts` and their lines in `lowerRuntimeBuiltin` (`src/ir/Lowering.h`, `Calls.cpp`); `src/ir/Files.cpp` (a
+name's check, `scanFileName`, its record, the context global, the status codes' names) and its hooks in `named`
+(`Functions.cpp`), the reserved names (`Functions.cpp`, `Constants.cpp`, `ir::kFilesPrefixes` in `CodeGen.h`) and the
+undeclared-identifier errors (`Memory.cpp`, `Constants.cpp`); `__FMINUS_FILES__` and `__FMINUS_FILES_WRITE__`
+(`Preprocessor.cpp`); `Program::FilePolicy`, `Options::files`, `FileUse` and `files()` (`include/fminus/FMinus.h`,
+`src/api/FMinus.cpp`); an executable's context (`support/Aot.cpp`); the driver's `--files-read`, `--files-write`,
+`--files-deny`, `--files-types` and `--files-anywhere` (`tools/fminus/main.cpp`); `FMINUS_FILES`, `FMINUS_FILES_WRITE`,
+`FMINUS_FILES_ANYWHERE`, `FMINUS_FILES_TYPES` and `FMINUS_FILES_MAX_BYTES` (`cmake/FMinusOptions.cmake`,
+`cmake/templates/Config.h.in`, the root `CMakeLists.txt`'s feature loop) and the `files` preset.
+Tests: `tests/unit/FilesTest.cpp` (`[runtime][files]`: the runtime from C++, before any builtin),
+`tests/unit/FileBuiltinsTest.cpp` (the builtins, the host and programs, in every build), `tests/library/FilesPolicyTest.cpp`
+(the host API in C++17, in every build), `tests/lit/fminus/files.fm`, `files-errors.fm`, `files-write.fm`,
+`files-anywhere.fm`, `files-off.fm`, `files-write-off.fm`, `files-anywhere-off.fm` and `files-types.fm` (lit's new
+features `files`, `files-write`, `files-anywhere` and `files-types`); the example, `examples/kit/`. Built with `-Werror`
+and tested in the `release` preset on Linux x86-64 only, in four trees: the default (reading), one with
+`FMINUS_FILES_WRITE` and `FMINUS_FILES_ANYWHERE`, one with `FMINUS_FILES=OFF` and one with the web library and its
+server, every test passing but the one this machine cannot run (the smoke test of LLVM's own `opt`, as for recipes 38
+to 42); the runtime and its test under GCC's AddressSanitizer with UndefinedBehaviorSanitizer and under
+ThreadSanitizer, outside the presets, with a race harness and a fuzzer of names; not yet in `dev`, `files` or `asan`,
+nor on macOS or Windows, whose code was written and never compiled for them (`FilesWindows.cpp` was type-checked on
+Linux against stub headers written from the SDK's declarations, which found a `HANDLE` passed where an integer was
+taken: a default Windows build would not have compiled). [files.md](files.md) is its manual, and
+[research/files/README.md](research/files/README.md) the report it builds.*
+
+The fourth family of recipe 38's kind, and the first that is part of every build. A program loads what it plays from a
+folder its host maps, off the audio thread, and plays it from memory:
+
+```c
+int load()                                               // off the audio thread
+{
+    void* kit = file_list("kit/*.f32");                  // the folder "kit" is wherever the host says
+    const int status = file_status(kit);
+    for (int i = 0; i < file_count(kit) && i < 8; ++i)
+    {
+        void* f = file_read_nth(kit, i);                 // the whole file, in memory: refused in a nonblocking function
+        length[i] = bytes_floats(file_data(f), file_size(f), table[i], 4096);
+        file_close(f);
+    }
+    file_close(kit);
+    return status;
+}
+```
+
+It is the report's recommendation as its section 0 chose it: a folder the host maps and a path inside it, never a
+path of the machine; no files by default; reading in the default build, writing and absolute names off; every link
+refused; types by extension, an allow-list; listings in the first version; the code in the runtime library; and no
+decoder (files give bytes).
+
+### The runtime: a part of it, behind three switches
+
+Nothing here needs a dependency, so it is not a library of its own as the web's is: it is more of `fminus_runtime`
+(`src/runtime/Files*.cpp`, globbed), which an executable links already. It was built first, and tested from C++ before
+any builtin existed (`FilesTest.cpp`), as recipe 42's engine was.
+
+**The switches compile code out**, not merely turn it off. `FMINUS_FILES` guards every file of it (`#if
+FMINUS_HAS_FILES` around the whole), so a build without it has no `fminus_rt_file` symbol and imports no `openat`;
+`FMINUS_FILES_WRITE` guards everything that creates, writes or renames (so a reading build imports no `write`,
+`renameat`, `unlinkat` or `fsync`: no bug can make it write), and `FMINUS_FILES_ANYWHERE` the `realpath` that absolute
+names need. The other two options are not switches but ceilings, values in `fminus/Config.h` (`FMINUS_FILES_TYPES`, a
+string, and `FMINUS_FILES_MAX_BYTES`), which configure checks (`cmake/FMinusOptions.cmake`: each type 1 to 16 letters
+and digits, lowered and deduplicated; the bytes 1 to 2147483646) and both the runtime and the compiler read. The
+parsers' build-time limits (`FMINUS_JSON_MAX_BYTES`) were the model.
+
+**The host's half is C++, the program's C.** `Files.h` has `Policy` (the report's §6 struct), `checkPolicy` (every
+refusal a message naming the field: `folders: 'kit': write is set, and this build of FMinus leaves out writing files
+(FMINUS_FILES_WRITE=OFF)`) and `Context`, which opens each folder's directory once and holds it, holds each denied path
+that exists, and keeps the quotas and the handles under one mutex. `Runtime.h` has the ten C functions generated code
+calls, with the context's handle first and the name's literal, length, ints and count after it, as the web library's
+`get` takes its URL.
+
+**Handles know their kind**, as recipe 42 made the web library's: a 32-bit word first, `FMFf` for a file and `FMFl`
+for a listing, which every function reads before anything else. After it come the three fields the wait-free reads
+load (its status, its size or count, its data), which never change once the handle is returned until it is closed. A
+failure is not allocated: one shared handle per kind and status (`failures[2][6]`, `constinit`), never counted against
+`maxOpen`, which `file_close` recognises by its having no owner. So `file_read` never returns null, even when memory
+runs out. A closed handle's memory is not freed but kept by its context for the next handle (`spare`), its kind a third
+word, `FMFx`: a second close, or a read after the close, finds that word on any allocator, where freed memory's old kind
+word could still pass for a handle's (a reviewer's double close: harmless with glibc, whose free list overwrites the
+word, and a double free in the context's list of handles with an allocator that does not).
+
+### One way in: `reach`
+
+The report's lesson from Node's and Deno's advisories was that a check left off one operation is the bug, again and
+again. So every operation goes through one function, `Context::State::reach`, which takes the name's text with its
+`%d`s filled in and returns the directory its file is in, opened, or why not:
+
+1. **The name, in full** (`parseName`): the report's grammar with strict UTF-8, 1024 bytes and 16 segments, the extension
+   the literal wrote. The compiler checked the literal; the runtime trusts none of it.
+2. **The folder** by its exact name, or an absolute name only with `FMINUS_HAS_FILES_ANYWHERE`, the policy's `anywhere`
+   and an operation that reads. A write needs the folder's `write`.
+3. **The type**: the folder's list, else the policy's, and always the build's.
+4. **The deny-list's identities now**: the pinned ones, what is at each path (`os::lookUp`), and everything a look has
+   ever found at one (`seen`, at most 4096, past which everything is refused). A path that cannot be looked up, for a
+   reason other than absence, refuses everything: it fails closed.
+5. **The folder and its ancestors** compared with them (`os::ancestors`: `..` opened beneath each directory to the
+   root, only when there is a deny-list).
+6. **The walk**, one segment a call (`os::openDirectory`), each opened beneath the last without following a link and
+   compared with the denied identities; then the deny-list's paths looked at again (`settled`), and any change since 4
+   refuses the operation. `read` and `list` look once more after their own call.
+
+A deny path with nothing at it when the context is made has no identity to pin. The first version looked it up at each
+open and forgot what it found, and a reviewer read a denied directory made there afterwards, by renaming it (every
+time) and by exchanging it with a public one while names were walked (some 9,000 times in 30 seconds, through the deny
+path's own name too). Remembering what was found, and refusing an operation during which what is at a deny path
+changed, closes both; what is left, a directory made there and moved away before any operation looked, takes someone
+who can write in the folder. A second name for an entry is the other trap the walk meets: FAT and NTFS also find an
+entry by its 8.3 short name (`SSH~1` for `.ssh`), so on any file system but the native ones of Linux and macOS each
+segment must be one its directory lists (`os::nameListed`), and on Windows the opened object's long name must be the
+segment (`GetFinalPathNameByHandleW`).
+
+Then the operation's own call of the system's layer: `os::readFile` (look with `fstatat` before opening, so only a
+regular file is ever opened; open without blocking or following; look again with `fstat`, and compare; read to the limit
+plus one byte), `os::listDirectory`, `os::replaceFile` (after the context's first replacement in a directory has removed
+the temporary files dead writes left there, an hour old: `os::sweepTemporaries`) or `os::appendFile`. `FilesSystem.h` is
+the whole of what differs between systems, a dozen functions over an `os::Dir` (a descriptor, or a `HANDLE`) and an
+`os::Identity`: `FilesPosix.cpp` for Linux and macOS (`O_PATH` on Linux, `O_NOFOLLOW_ANY` on macOS), `FilesWindows.cpp`
+on `NtCreateFile` with `RootDirectory` and `OBJ_DONT_REPARSE`. Each segment the layer is given is checked once more
+(`plain`: never empty, `.`, `..`, nor holding a separator or a NUL), the last word before the kernel's: cap-std's
+critical bug of 2026 was a walk that handed the kernel a final segment with a trailing slash.
+
+*Why not `openat2` with `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS`*, which does the walk in one call on Linux 5.6 and later:
+the walk must stop at each directory anyway, to compare it with the denied ones, and a container's seccomp profile may
+refuse the call (Docker's did, before 20.10). One code path on every kernel is the one that gets tested.
+
+### The builtins' table rows
+
+| Builtin | Parameters | Result | Effect |
+|---|---|---|---|
+| `file_read` | `FileName` | `Pointer` | allocates |
+| `file_list` | `FilePattern` | `Pointer` | allocates |
+| `file_read_nth` | `Handle`, `Int` | `Pointer` | allocates |
+| `file_close` | `Handle` | `Void` | allocates |
+| `file_status`, `file_size`, `file_count` | `Handle` | `Int` | wait-free |
+| `file_data` | `Handle` | `Bytes`, a `const void*` | wait-free |
+| `file_write`, `file_append` | `FileName`, `Bytes`, `Int` | `Int` | allocates |
+
+The reads name `Feature::Files`, the two writes `Feature::FilesWrite`, so `isBuilt` asks `FMINUS_HAS_FILES` or
+`FMINUS_HAS_FILES_WRITE`, and `notBuilt` says which option is missing: in a build with no interface at all, even
+`file_write` gets the interface's message (`'file_write' needs the file interface, ...`), since that is what a program
+lacks first. `Effects.cpp` needs nothing: no builtin here blocks in the effects' sense (a disk's wait is the allocating
+class's, refused in both kinds of function, as `http_get` is), and the reads are wait-free.
+
+**`Param::FileName` and `Param::FilePattern`** are recipe 41's `Param::Url` again, with a check of their own: a format
+whose ints come last (`trailing`), so `file_write("takes/take%d.f32", data, bytes, n)` lowers to
+`fminus_rt_file_write(context, text, length, ints, count, data, bytes)`, the ints before the other parameters in the C
+call though after them in the builtin's. Before the text, the program's file context, loaded from the module's global
+(`filesContext`).
+
+### The name literal: its check and its record
+
+`scanFileName` (`src/ir/Files.cpp`) reads a literal as the runtime will read the name, each `%d` as the one digit it
+writes at least (so a name's length is counted at its least, and `COM%d` is a device name), and reports each mistake at
+its byte: the folder's characters, an empty segment, a control character or one of `\ : * ? " < > |` (C1 controls
+among them), bad UTF-8, a leading `.` or space and a trailing `.` or space, a device name of Windows in any case and
+spelling, an extension of 1 to 16 letters and digits that the literal writes, 255 bytes a segment, 16 segments, 1024
+bytes, and for a listing one `*`, in the file part, before the extension. Each is an error where the runtime would
+refuse anyway: what the compiler can see, it says where it is written.
+
+**The build's ceilings are its arguments** (`FileNameRules`): `FMINUS_FILES_TYPES`, `FMINUS_FILES_ANYWHERE`, whether
+the target is Windows (from the triple), and whether the call writes. So a type the build cannot touch, an absolute
+name in a build without them, the other system's form of one, and an absolute name written are compile errors, and a
+unit test can give `scanFileName` the rules of any build, Windows's among them, without building one.
+
+**The record** is recipe 41's: `recordFileUse` adds the operation (the builtin's name after `file_`), the pattern (each
+`%d` a `*`, each `%%` a `%`), the file, line and column to the named metadata `fminus.files`, which `ir::files` reads
+back and `Program::files()` returns, before any of the program's code has run.
+
+**The status codes** are recipe 41's too: `named()` falls back to `fileStatus`, after `webStatus`, so `FILE_REFUSED`
+folds and labels a `case`, and a program's own declaration hides it; in a build without the interface,
+`unbuiltFileStatus` makes the name the option's error.
+
+### What the runtime's functions touch, told to LLVM
+
+| Kind | Functions | Attributes |
+|---|---|---|
+| `FileOpen` | `read`, `list` | `nounwind`, `willreturn`; `memory(argmem: readwrite, inaccessiblemem: readwrite, errnomem: readwrite)`; the name and the ints `readonly captures(none)` (the context's pointer is captured: the handle keeps it); `noundef` result, not `noalias` (a failure is a shared handle) |
+| `FileNth` | `read_nth` | the same, the listing `captures(none)` |
+| `FileWrite` | `write`, `append` | as `FileOpen`, and the bytes `readonly captures(none)`; no result attribute |
+| `FileRead` | `status`, `size`, `data`, `count` | `nounwind`, `willreturn`, `nofree`, `nosync`, `memory(argmem: read, inaccessiblemem: read)`, the handle `readonly captures(none)` |
+| `FileClose` | `close` | `nounwind`, `willreturn`, the handle `captures(none)`; memory left as it is: any |
+
+The reads are the opposite of recipe 41's. A web request's fields change under the program, so its reads must not be
+merged; a file handle's never change once it is returned, so they are `readonly` and `nosync`, and LLVM merges two
+`file_size` calls of one handle with nothing between (`files.fm` checks it at `-O2`). A `file_read` between them is a
+write to the context's inaccessible memory, and the read after it is made again, which is right: nothing promises the
+two handles are different. `file_close` is recipe 42's reply again: it frees a file's bytes, which the program reads
+through `file_data`'s pointer, and only a call that may write any memory keeps a load of them from moving past it.
+
+### The host's side
+
+`Program::FilePolicy` (`FMinus.h`, C++17, in every build) is `Policy` as the host writes it. `compile()` copies it into
+`files::Policy` only under `FMINUS_HAS_FILES` and checks it with `checkPolicy` on every compile, whether or not the
+program names a file (`fminus::Program: files: <message>`), so a host learns of a policy its build cannot honour at
+once. The context is made only when the program has the context global and the policy grants a folder or `anywhere`,
+which is when the folders' directories are opened (a missing one fails `compile()`); otherwise the global stays null,
+and the runtime refuses every name. The `Impl` destructor resets the context before the JIT goes: every handle the
+program still holds is freed and the folders are closed. No function or constant of a program may be named
+`fminus_rt_file_*` or `fminus_rt_files_*` (`kFilesPrefixes`), in every build, so a program reaches the runtime only
+through its literals and `files()`, and never an executable's `fminus_rt_files_main_start`, which would make a context
+from the process's environment.
+
+### The driver and executables
+
+Recipe 41's way again, default-deny: `fminus --run` builds a `files::Policy` from `--files-read` and `--files-write`
+(`NAME=DIR`, or a `DIR` named after its last segment), `--files-deny`, `--files-types` and `--files-anywhere`, checks it
+with `checkPolicy` before anything compiles, makes the context after the JIT (so it is destroyed first) and stores its
+handle in the global; a mistake is named by the option it is in (`filesOptionOf`). An executable's C `main`
+(`addEntryPoint`) calls `fminus_rt_files_main_start(&fminus_rt_files_context, argv[0])` before the web's start, so a
+mistake in either stops it before any request is made, returning its non-zero result (2, with the variable and the
+reason on stderr), and `fminus_rt_files_main_stop` after the web's stop. `RuntimeSymbols.def` lists those two through
+`FMINUS_FILES_MAIN_SYMBOL`, which names nothing by default (so `JitRuntime.cpp` defines neither) and which
+`Constants.cpp` defines (so `kRuntimeNames` reserves them), as `WebSymbols.def`'s `FMINUS_WEB_MAIN_SYMBOL` does. An
+executable links nothing new: the code is in `libfminus_runtime.a`.
+
+### What it changes for programs and hosts
+
+- **Programs** that name no file compile to the same IR. The ten names are builtins in every build (a program's
+  function of one of them is an error), and so are the seven `FILE_` names, which a program's own declaration hides;
+  no function or constant may be named `fminus_rt_file_*` or `fminus_rt_files_*`. `__FMINUS_FILES__` and
+  `__FMINUS_FILES_WRITE__` cannot be defined.
+- **Hosts** get `Options::files` (default: no files) and `files()`, in every build, and `FMINUS_HAS_FILES` and its kin
+  in `fminus/Config.h`. Nothing is read unless a host maps a folder.
+- **The build** is unchanged in what it fetches: nothing. The default build compiles the reading half into the runtime;
+  `-DFMINUS_FILES=OFF` compiles none of it.
+- **The VS Code grammar** (0.19.0) colours the `file_` builtins and the `FILE_` names.
+
+### Tests
+
+- `tests/unit/FilesTest.cpp` (`[runtime][files]`), compiled with `FMINUS_FILES` on every system but Windows, its
+  seccomp case and its swap race on Linux alone: each trap built for real in a directory the test makes beside `bin/`
+  and removes (links of every kind and place, hard links with and without `singleLink`, a FIFO that must not hang, a
+  directory where a file was named, a file that grows while it is read, a file one byte over the limit, a folder
+  renamed after the context was made, the deny-list reached by another spelling, through a link, made afterwards and
+  renamed afterwards, a directory made at a denied path afterwards and then renamed, or exchanged with a public one
+  while names are walked, a denied path that cannot be looked up), a second name a file system answers to
+  (`os::nameListed` alone, then every name of every case's kind checked so: `os::checkEveryName`, a test hook), closed
+  handles read and closed twice, the temporary files of writers killed half way and their sweep, over 70 names refused
+  and 22 allowed, types in every
+  letter case, every reason `checkPolicy` refuses, the limits and quotas, listings (their order and what they skip),
+  absolute names with the deny-list on the real path and `/dev/null` and `/proc` refused, writes failed at each of their
+  six steps (`os::failNextReplaceAt`, a test hook compiled only with writing, since the tests run as root and
+  permissions cannot fail them), two contexts writing one file while a reader checks it is never torn, a directory
+  swapped for a link while names are walked, `FILE_DENIED` from a forked child that gives up root, an executable's
+  environment, and the wait-free proof (`HeapCalls`, and children under seccomp's strict mode).
+- `tests/unit/FileBuiltinsTest.cpp`, in every build: each builtin's effect through the table and through the effects'
+  errors (directly and through a called function); each name's error in a build without the interface or its writing;
+  then, with it, the status codes against `Files.h`'s values, the name errors at their columns, `scanFileName` given
+  the ceilings of other builds (types, absolute names, Windows), `files()` over several call sites and an `#include`,
+  `Options::files` checked by `compile()`, the reserved names, the JIT's symbols; a kit listed, loaded and played
+  through the JIT (and a table saved and compared, with writing), the same as an executable with `FMINUS_FILES_READ`,
+  absolute names, the wait-free proof through a `[[clang::nonblocking]]` function the JIT compiled, and a `Program`'s
+  destructor closing its folders (counted in `/proc/self/fd`) and freeing what its program held.
+- `tests/library/FilesPolicyTest.cpp`: `Options::files` and `files()` from a C++17 host.
+- `tests/lit/fminus/files.fm`: the calls, the context global and the declarations' attributes at `-O0`, the reads
+  merged and the closes kept at `-O2`, the metadata, `--run` with `--files-read` in both spellings, `--files-types` and
+  `--files-deny`, an executable with and without `FMINUS_FILES_READ`, and the driver's mistakes; `files-errors.fm`: each
+  name error once; `files-write.fm` and `files-anywhere.fm`: writing and absolute names through the driver and an
+  executable; `files-off.fm`, `files-write-off.fm` and `files-anywhere-off.fm`: each in the build it describes;
+  `files-types.fm`: in a build whose `FMINUS_FILES_TYPES` lists types (`%files_types`).
+- `examples/kit/`: `--check` writes four drum sounds into a folder of its own, plays them through the program and
+  compares the samples with C++ (identical), and checks that a denied subfolder, a type not allowed and the default
+  policy read nothing, and, with writing, that a take is saved byte for byte and refused in a folder granted for
+  reading alone.
 
 ## Pitfalls
 

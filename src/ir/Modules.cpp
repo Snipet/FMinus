@@ -366,6 +366,11 @@ namespace fminus::ir::detail
         const ast::Field& parameter = module.fields[field];
         const bool integral = parameter.type == ast::Type::Int || parameter.type == ast::Type::Bool;
         const ast::Type type = integral ? parameter.type : ast::Type::Float;
+        if (isString(*index.index))   // C's char array, which is no integer
+        {
+            error(location, "array subscript is not an integer");
+            return recovery(type);
+        }
         const Value at = lower(*index.index);
         if (at.type != ast::Type::Int && at.type != ast::Type::Bool)
         {
@@ -644,8 +649,13 @@ namespace fminus::ir::detail
         for (std::size_t i = 0; i < call.args.size(); ++i)
         {
             const bool known = method != functions_.end() && i + 1 < method->second->params.size();
-            args.push_back(known ? lowerAs(*call.args[i], method->second->params[i + 1].type)
-                                 : lower(*call.args[i]));
+            if (isString(*call.args[i]))
+                args.push_back(refuseString(*call.args[i],
+                                            known ? std::optional(method->second->params[i + 1].type) : std::nullopt,
+                                            Use::Passing, call.args[i]->location));
+            else
+                args.push_back(known ? lowerAs(*call.args[i], method->second->params[i + 1].type)
+                                     : lower(*call.args[i]));
         }
         return callMethod(location, *module, address, isConst, call.method, args);
     }

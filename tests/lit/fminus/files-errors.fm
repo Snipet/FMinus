@@ -1,0 +1,110 @@
+// A file's name is a literal checked where it is written, against the rules the runtime keeps (runtime/Files.h): each
+// mistake an error at its byte, in clang's manner. A folder's name and a path inside it; segments of UTF-8 without a
+// control character or any of \ : * ? " < > |, none beginning with '.' or a space nor ending with either, none a
+// device name of Windows (with or without an extension, in any letter case, the superscript digits among them); an
+// extension the literal writes, never a %d; at most 16 segments; a listing's pattern with one '*' in its file part,
+// before its extension; the ints after every other argument. tests/unit/FileBuiltinsTest.cpp has the rest, and the
+// build's ceilings (files-types.fm, files-anywhere-off.fm, files-write-off.fm).
+// REQUIRES: files
+// RUN: not fminus %s 2>&1 | FileCheck %s --implicit-check-not=error:
+
+void* a00() { return file_read("kit"); }
+void* a01() { return file_read(""); }
+void* a02() { return file_read("kit/"); }
+void* a03() { return file_read("kit//a.wav"); }
+void* a04() { return file_read("k.t/a.wav"); }
+void* a05() { return file_read("-kit/a.wav"); }
+void* a06() { return file_read("kit/../a.wav"); }
+void* a07() { return file_read("kit/.hidden.wav"); }
+void* a08() { return file_read("kit/ a.wav"); }
+void* a09() { return file_read("kit/a.wav."); }
+void* a10() { return file_read("kit/a /b.wav"); }
+void* a11() { return file_read("kit/a\\b.wav"); }
+void* a12() { return file_read("kit/a:b.wav"); }
+void* a13() { return file_read("kit/a*.wav"); }
+void* a14() { return file_read("kit/a?.wav"); }
+void* a15() { return file_read("kit/a\".wav"); }
+void* a16() { return file_read("kit/a<b>.wav"); }
+void* a17() { return file_read("kit/a|b.wav"); }
+void* a18() { return file_read("kit/a\tb.wav"); }
+void* a19() { return file_read("kit/a\x7f.wav"); }
+void* a20() { return file_read("kit/a\xc2\x85.wav"); }
+void* a21() { return file_read("kit/a\xff.wav"); }
+void* a22() { return file_read("kit/NUL.wav"); }
+void* a23() { return file_read("kit/con.txt"); }
+void* a24() { return file_read("kit/Com1.f32"); }
+void* a25() { return file_read("kit/lpt\xc2\xb9.wav"); }
+void* a26() { return file_read("kit/conin$.wav"); }
+void* a27() { return file_read("kit/sub/aux/x.wav"); }
+void* a28() { return file_read("kit/COM%d.wav", 3); }
+void* a29() { return file_read("kit/nul .wav"); }
+void* a30() { return file_read("kit/readme"); }
+void* a31() { return file_read("kit/a.%d", 3); }
+void* a32() { return file_read("kit/a.w%dv", 3); }
+void* a33() { return file_read("kit/a.wav-x"); }
+void* a34() { return file_read("kit/a.abcdefghijklmnopq"); }
+void* a35() { return file_read("a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p/q.wav"); }
+void* a38() { return file_read("kit/%s.wav", 3); }
+void* a39() { return file_read("kit/%d.wav"); }
+void* a40() { return file_read("kit/a.wav", 3); }
+void* a41() { return file_read(3); }
+void* a42() { return file_list("kit/a.wav"); }
+void* a43() { return file_list("kit/*a*.wav"); }
+void* a44() { return file_list("kit/a.*"); }
+void* a45() { return file_list("kit/*/a.wav"); }
+void* a46() { return file_list("kit/*"); }
+void* a47() { return file_read("kit/%d/x%d.wav", 1); }
+void* a48() { return file_read("kit%%/a.wav"); }
+void* a52() { return file_read("kit/a.wav "); }
+void* a53() { return file_read("kit/sub./a.wav"); }
+
+// CHECK: files-errors.fm:11:33: error: a file's name is a folder its host maps, '/' and a path inside it, as "presets/7.json"
+// CHECK: files-errors.fm:12:32: error: a file's name is a folder its host maps, '/' and a path inside it, as "presets/7.json"
+// CHECK: files-errors.fm:13:36: error: a file's name has no empty segment: no '//', and no '/' at its end
+// CHECK: files-errors.fm:14:37: error: a file's name has no empty segment: no '//', and no '/' at its end
+// CHECK: files-errors.fm:15:34: error: character '.' is not allowed in a folder's name: ASCII letters, digits, '_' and '-'
+// CHECK: files-errors.fm:16:33: error: a folder's name does not begin with '-'
+// CHECK: files-errors.fm:17:37: error: a segment of a file's name does not begin with '.': '.' and '..' and hidden files are out of reach
+// CHECK: files-errors.fm:18:37: error: a segment of a file's name does not begin with '.': '.' and '..' and hidden files are out of reach
+// CHECK: files-errors.fm:19:37: error: a segment of a file's name does not begin with a space
+// CHECK: files-errors.fm:20:42: error: a segment of a file's name does not end with '.' or a space, which Windows would take away
+// CHECK: files-errors.fm:21:38: error: a segment of a file's name does not end with '.' or a space, which Windows would take away
+// CHECK: files-errors.fm:22:38: error: character '\' is not allowed in a file's name: no control character, and none of \ : * ? " < > |
+// CHECK: files-errors.fm:23:38: error: character ':' is not allowed in a file's name: no control character, and none of \ : * ? " < > |
+// CHECK: files-errors.fm:24:38: error: character '*' is not allowed in a file's name: no control character, and none of \ : * ? " < > |
+// CHECK: files-errors.fm:25:38: error: character '?' is not allowed in a file's name: no control character, and none of \ : * ? " < > |
+// CHECK: files-errors.fm:26:38: error: character '"' is not allowed in a file's name: no control character, and none of \ : * ? " < > |
+// CHECK: files-errors.fm:27:38: error: character '<' is not allowed in a file's name: no control character, and none of \ : * ? " < > |
+// CHECK: files-errors.fm:28:38: error: character '|' is not allowed in a file's name: no control character, and none of \ : * ? " < > |
+// CHECK: files-errors.fm:29:38: error: character '\x09' is not allowed in a file's name: no control character, and none of \ : * ? " < > |
+// CHECK: files-errors.fm:30:38: error: character '\x7f' is not allowed in a file's name: no control character, and none of \ : * ? " < > |
+// CHECK: files-errors.fm:31:38: error: character '\xc2\x85' is not allowed in a file's name: no control character, and none of \ : * ? " < > |
+// CHECK: files-errors.fm:32:38: error: illegal character encoding in a file's name, byte '\xff': a name is UTF-8
+// CHECK: files-errors.fm:33:37: error: 'NUL' is a device name of Windows: no segment of a file's name may be one, in any letter case, with or without an extension
+// CHECK: files-errors.fm:34:37: error: 'con' is a device name of Windows: no segment of a file's name may be one, in any letter case, with or without an extension
+// CHECK: files-errors.fm:35:37: error: 'Com1' is a device name of Windows: no segment of a file's name may be one, in any letter case, with or without an extension
+// CHECK: files-errors.fm:36:37: error: 'lpt\xc2\xb9' is a device name of Windows: no segment of a file's name may be one, in any letter case, with or without an extension
+// CHECK: files-errors.fm:37:37: error: 'conin$' is a device name of Windows: no segment of a file's name may be one, in any letter case, with or without an extension
+// CHECK: files-errors.fm:38:41: error: 'aux' is a device name of Windows: no segment of a file's name may be one, in any letter case, with or without an extension
+// CHECK: files-errors.fm:39:37: error: 'COM%d' is a device name of Windows when its %d is a digit: no segment of a file's name may be one, in any letter case, with or without an extension
+// CHECK: files-errors.fm:40:37: error: 'nul ' is a device name of Windows: no segment of a file's name may be one, in any letter case, with or without an extension
+// CHECK: files-errors.fm:41:37: error: a file's name ends with its type, an extension: '.' and 1 to 16 ASCII letters and digits, as "7.json"
+// CHECK: files-errors.fm:42:39: error: a file's extension is its type, which the literal writes: no %d in it
+// CHECK: files-errors.fm:43:40: error: a file's extension is its type, which the literal writes: no %d in it
+// CHECK: files-errors.fm:44:38: error: a file's name ends with its type, an extension: '.' and 1 to 16 ASCII letters and digits, as "7.json"
+// CHECK: files-errors.fm:45:38: error: a file's name ends with its type, an extension: '.' and 1 to 16 ASCII letters and digits, as "7.json"
+// CHECK: files-errors.fm:46:64: error: a file's name has at most 16 segments, the folder's among them
+// CHECK: files-errors.fm:47:38: error: invalid conversion specifier 's'
+// CHECK: files-errors.fm:47:38: note: a format here takes %d, an int, and %%, a percent sign
+// CHECK: files-errors.fm:48:38: error: more '%' conversions than data arguments
+// CHECK: files-errors.fm:49:45: error: data argument not used by format string
+// CHECK: files-errors.fm:50:32: error: argument to 'file_read' must be a string literal
+// CHECK: files-errors.fm:51:37: error: a listing's pattern has one '*' in its file part, as "kit/*.f32"
+// CHECK: files-errors.fm:52:39: error: a listing's pattern has one '*'
+// CHECK: files-errors.fm:53:39: error: a listing's '*' comes before its extension, which the pattern writes, as "kit/*.f32"
+// CHECK: files-errors.fm:54:37: error: a listing's '*' is in its file part, the name's last segment
+// CHECK: files-errors.fm:55:37: error: a listing's '*' comes before its extension, which the pattern writes, as "kit/*.f32"
+// CHECK: files-errors.fm:56:42: error: more '%' conversions than data arguments
+// CHECK: files-errors.fm:57:36: error: character '%' is not allowed in a folder's name: ASCII letters, digits, '_' and '-'
+// CHECK: files-errors.fm:58:42: error: a segment of a file's name does not end with '.' or a space, which Windows would take away
+// CHECK: files-errors.fm:59:40: error: a segment of a file's name does not end with '.' or a space, which Windows would take away

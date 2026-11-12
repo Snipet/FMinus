@@ -57,7 +57,10 @@ namespace circuits
             // mkbench.py's name for this bench, and timing1.out's section.
             std::string name() const
             {
-                const std::string g = std::format("{}{}{}", solver.guess == fc::Solver::Guess::Omega ? "w" : "p",
+                const std::string g = std::format("{}{}{}",
+                                                  solver.shape == fc::Solver::Shape::Halley  ? "h"
+                                                  : solver.guess == fc::Solver::Guess::Omega ? "w"
+                                                                                             : "p",
                                                   solver.steps, adaa ? "_adaa" : "");
                 const std::string k = kind == fc::Halfband::Iir ? "iir" : "fir";
                 if (circuit == "OTA")
@@ -133,7 +136,24 @@ namespace circuits
                  fc::Region::Auto,
                  {},
                  "§3.3: 912 (as shipped, but FIR)"});
-            add({"DT", {G::Omega, 2}, false, 4, fc::Halfband::Iir, 1, fc::Region::Auto, {}, "as shipped"});
+            add({"DT",
+                 {G::Omega, 2},
+                 false,
+                 4,
+                 fc::Halfband::Iir,
+                 1,
+                 fc::Region::Auto,
+                 {},
+                 "as shipped until 2026-11-10"});
+            add({"DT",
+                 {G::Omega, 1, fc::Solver::Shape::Halley},
+                 false,
+                 4,
+                 fc::Halfband::Iir,
+                 1,
+                 fc::Region::Auto,
+                 {},
+                 "as shipped: one Halley step (optimization-as-built.md §2.7)"});
             add({"DT", {G::Omega, 1}, true, 4, fc::Halfband::Fir, 1, fc::Region::Auto, {}, "§3.3: 866"});
             add({"DT", {G::Omega, 2}, false, 4, fc::Halfband::Fir, 2, fc::Region::Auto, {}, "§3.3: float2, 965"});
             add({"DT", {G::Omega, 1}, true, 4, fc::Halfband::Fir, 2, fc::Region::Auto, {}, "§3.3: float2, 957"});

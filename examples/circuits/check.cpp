@@ -173,7 +173,10 @@ namespace circuits
         {
             return std::format("{}x {}, {}, {}({})", c.oversample, c.halfband == fc::Halfband::Iir ? "IIR" : "FIR",
                                c.adaa ? "ADAA" : "no ADAA",
-                               c.solver.guess == fc::Solver::Guess::Omega ? "omega" : "newton", c.solver.steps);
+                               c.solver.shape == fc::Solver::Shape::Halley  ? "halley"
+                               : c.solver.guess == fc::Solver::Guess::Omega ? "omega"
+                                                                            : "newton",
+                               c.solver.steps);
         }
 
         std::unique_ptr<Circuit> buildOrReport(Report& r, const std::string& text, const std::string& name,
@@ -258,12 +261,16 @@ namespace circuits
             {
                 const std::vector<double> in(12000, u);
                 const double exact = root(u);
-                // as shipped: plain omega3 + 2 steps, a fixed point the double reference shares
+                // as shipped: plain omega3 + 1 Halley step, a fixed point the double reference shares; one step's
+                // residual from omega3 (3.6e-5 V at 5 V, gated at 4e-5; 1.3e-5 with omega3 + 2 Newton steps, shipped
+                // until 2026-11-10, when the gate was 2e-5)
                 const std::vector<double> y = runTicks(*shipped, in, pots);
                 fc::RefOptions o;
-                o.steps = 2;
+                o.steps = plan.config.solver.steps;
+                o.guess = plan.config.solver.guess;
+                o.shape = plan.config.solver.shape;
                 const double ref = fc::simulate(plain, std::vector<double>(48000, u), o).back();
-                r.line(std::fabs(y.back() - ref) <= 1e-5 && std::fabs(y.back() - exact) <= 2e-5,
+                r.line(std::fabs(y.back() - ref) <= 1e-5 && std::fabs(y.back() - exact) <= 4e-5,
                        std::format("{} V, as shipped: {:.7f} V; the double reference of the same configuration {:.7f}, "
                                    "the exact root {:.7f}",
                                    u, y.back(), ref, exact));
@@ -572,36 +579,72 @@ namespace circuits
         }
 
         // ---- g. .channels 2: each lane is the scalar module's ----
+        // diodetone.cir as shipped, and ADAA's series tail on each exp-affine law: screamer-clip.cir as shipped (its
+        // omega3 guess leaves dl small: the series' arm alone), and diodetone.cir, asym.cir and halfwave.cir with ADAA
+        // after one Newton step from the previous v, whose correction takes the exact arm, |dl| >= 0.25, on a fifth to
+        // two fifths of the steps at these levels; a float2 computes both arms of its ?: and selects, a float branches.
+        // (ADAA after newton(1) is not a self-test candidate, and louder it is not finite: screamer-clip.cir's from
+        // 20 mV of noise, as before the series.)
         void stereo(Report& r)
         {
             std::printf("g. .channels 2: each lane against the scalar module, bit for bit\n");
-            const std::string text = netlist("diodetone.cir");
-            fc::Options two;
-            two.channels = 2;
-            auto pair = buildOrReport(r, text, "diodetone.cir", two);
-            auto single = buildOrReport(r, text, "diodetone.cir");
-            if (!pair || !single)
-                return;
-            const std::vector<double> a = fc::sine(1.0, 85, kWindow, 1, kHost);
-            std::vector<double> b = fc::noise(2.0, 1, 8192);
-            b.resize(kHost);
-            const std::vector<double> pots = potsWith(single->plan, "tone", 0.3);
-            const std::vector<double> ya = runTicks(*single, a, pots);
-            const std::vector<double> yb = runTicks(*single, b, pots);
-            Instance self(*pair->module);
-            pair->init(self.get(), 48000);
-            std::vector<float> fa(a.begin(), a.end());
-            std::vector<float> fb(b.begin(), b.end());
-            std::vector<float> pa(kHost);
-            std::vector<float> pb(kHost);
-            const std::vector<float> potBuffer(kHost, 0.3f);
-            pair->ticks2(self.get(), fa.data(), fb.data(), nullptr, potBuffer.data(), nullptr, pa.data(), pb.data(),
-                         static_cast<int>(kHost), 0);
-            std::size_t differ = 0;
-            for (std::size_t i = 0; i < kHost; ++i)
-                differ += (static_cast<double>(pa[i]) != ya[i] ? 1 : 0) + (static_cast<double>(pb[i]) != yb[i] ? 1 : 0);
-            r.line(differ == 0, std::format("{} of {} samples differ (a 1 V sine on one lane, 2 V noise on the other)",
-                                            differ, 2 * kHost));
+            struct Case
+            {
+                const char* name;
+                const char* pot;
+                bool previous;   // ADAA, newton(1)
+                double sine;     // lane a's level, a 996 Hz sine
+                double noise;    // lane b's, noise
+            };
+            for (const Case& k :
+                 {Case{"diodetone.cir", "tone", false, 1.0, 2.0}, Case{"screamer-clip.cir", "drive", false, 1.0, 2.0},
+                  Case{"diodetone.cir", "tone", true, 0.5, 0.5}, Case{"asym.cir", nullptr, true, 0.5, 0.5},
+                  Case{"halfwave.cir", nullptr, true, 0.5, 0.5}})
+            {
+                const std::string text = netlist(k.name);
+                fc::Options one;
+                if (k.previous)
+                {
+                    one.adaa = true;
+                    one.solver = fc::Solver{fc::Solver::Guess::Previous, 1};
+                }
+                fc::Options two = one;
+                two.channels = 2;
+                auto pair = buildOrReport(r, text, k.name, two);
+                auto single = buildOrReport(r, text, k.name, one);
+                if (!pair || !single)
+                    return;
+                const std::vector<double> a = fc::sine(k.sine, 85, kWindow, 1, kHost);
+                std::vector<double> b = fc::noise(k.noise, 1, 8192);
+                b.resize(kHost);
+                const std::vector<double> pots =
+                    k.pot != nullptr ? potsWith(single->plan, k.pot, 0.3) : std::vector<double>{};
+                const std::vector<double> ya = runTicks(*single, a, pots);
+                const std::vector<double> yb = runTicks(*single, b, pots);
+                Instance self(*pair->module);
+                pair->init(self.get(), 48000);
+                std::vector<float> fa(a.begin(), a.end());
+                std::vector<float> fb(b.begin(), b.end());
+                std::vector<float> pa(kHost);
+                std::vector<float> pb(kHost);
+                std::vector<float> potBuffer;
+                for (std::size_t i = 0; i < kHost; ++i)
+                {
+                    for (const double v : pots)
+                        potBuffer.push_back(static_cast<float>(v));
+                }
+                pair->ticks2(self.get(), fa.data(), fb.data(), nullptr, potBuffer.empty() ? nullptr : potBuffer.data(),
+                             nullptr, pa.data(), pb.data(), static_cast<int>(kHost), 0);
+                std::size_t differ = 0;
+                for (std::size_t i = 0; i < kHost; ++i)
+                    differ +=
+                        (static_cast<double>(pa[i]) != ya[i] ? 1 : 0) + (static_cast<double>(pb[i]) != yb[i] ? 1 : 0);
+                r.line(differ == 0 && finite(ya) && finite(yb),
+                       std::format("{}{}: {} of {} samples differ (a {:g} V sine on one lane, {:g} V noise on the "
+                                   "other){}",
+                                   k.name, k.previous ? " with ADAA, newton(1)" : "", differ, 2 * kHost, k.sine,
+                                   k.noise, finite(ya) && finite(yb) ? "" : "; not finite"));
+            }
         }
 
         // ---- h. block-split invariance ----
@@ -783,13 +826,17 @@ namespace circuits
         std::string directivesOf(const fc::Choice& c)
         {
             return std::format(".oversample {}, .adaa {}, .solver {}({})", c.oversample, c.adaa ? "on" : "off",
-                               c.solver.guess == fc::Solver::Guess::Omega ? "omega" : "newton", c.solver.steps);
+                               c.solver.shape == fc::Solver::Shape::Halley  ? "halley"
+                               : c.solver.guess == fc::Solver::Guess::Omega ? "omega"
+                                                                            : "newton",
+                               c.solver.steps);
         }
 
         // The self-test of `name` without its configuration directives, on 8 threads: it chooses `expected` (the
-        // shipped directives, which the report and Phase 0's measurements chose by hand), its notes list each
-        // candidate tried in the cost model's order with its verdict, and the answer's figures are section c's (when
-        // `c` is given; otherwise they are printed).
+        // shipped directives, which the report and Phase 0's measurements chose by hand, and diodetone.cir's the
+        // self-test's own one Halley step since 2026-11-10), its notes list each candidate tried in the cost model's
+        // order with its verdict, and the answer's figures are section c's (when `c` is given; otherwise they are
+        // printed).
         std::optional<fc::SelfTestResult> search(Report& r, const std::string& name, const std::string& expected,
                                                  const Figures* c)
         {
@@ -852,7 +899,7 @@ namespace circuits
             std::printf("i. the self-test's ordered search, on diodetone.cir and screamer-clip.cir without their "
                         "configuration directives (the full stress matrix, 8 threads)\n");
             const std::optional<fc::SelfTestResult> dt =
-                search(r, "diodetone.cir", ".oversample 4, .adaa off, .solver omega(2)", &diodeTone);
+                search(r, "diodetone.cir", ".oversample 4, .adaa off, .solver halley(1)", &diodeTone);
             search(r, "screamer-clip.cir", ".oversample 4, .adaa on, .solver omega(1)", &screamerClip);
             std::printf("j. diodetone.cir's self-test on the calling thread alone, against the 8 threads of i\n");
             if (!dt)
@@ -1886,7 +1933,7 @@ namespace circuits
         // ron in exactly 60 calls, each call's ratio (roff/ron)^(1/60), within 0.1 %; under a sine its flip makes no
         // larger a step than a pot moving the same resistance on the same grid ticks does; calls of 1, 61 and 64
         // samples give one call's bits with the switch flipping; under ADAA each call keeps the stored point's Newton
-        // residual; the self-test's stress matrix takes each position as a point.
+        // residual; the self-test's stress matrix takes each position as a point, and its answer is the one shipped.
         void switches(Report& r)
         {
             std::printf("p. switches: switch.cir, S1 closed at clip 1 (ron 1 ohm, roff 10 MEG), ramped by set() on the "
@@ -1987,12 +2034,21 @@ namespace circuits
                                                                      call, differ, whole.size()));
                 }
             }
-            // ADAA: each set() of a ramp keeps the stored point's Newton residual
+            // ADAA: each set() of a ramp keeps the stored point's Newton residual (switch.cir with ADAA on and its
+            // omega3 + 1 step, which it shipped until 2026-11-10; it ships the self-test's plain halley(1) since)
+            fc::Options withAdaa;
+            withAdaa.adaa = true;
+            withAdaa.solver = fc::Solver{fc::Solver::Guess::Omega, 1};
+            if (auto ca = buildOrReport(r, text, "switch.cir", withAdaa))
             {
-                Instance self(*c->module);
-                c->init(self.get(), 48000);
-                setTo(self.get(), 1);
-                const fc::PortDef& port = *c->plan.blocks.front().port;
+                Instance self(*ca->module);
+                ca->init(self.get(), 48000);
+                auto setAdaa = [&](int position)
+                {
+                    ca->setAll(self.get(), &tone, &position);
+                };
+                setAdaa(1);
+                const fc::PortDef& port = *ca->plan.blocks.front().port;
                 bool conducting = false;
                 std::vector<float> one(1);
                 for (int i = 0; i < 9600 && !conducting; ++i)
@@ -2000,21 +2056,21 @@ namespace circuits
                     one[0] = static_cast<float>(4.5 * std::sin(2 * std::numbers::pi * 996 * i / 48000));
                     float y = 0;
                     const int closed = 1;
-                    c->ticks(self.get(), one.data(), nullptr, &tone, &closed, &y, 1, i);
-                    conducting = i >= 2400 && std::fabs(fieldOf(*c, self.get(), "v_D1")) > 0.5;
+                    ca->ticks(self.get(), one.data(), nullptr, &tone, &closed, &y, 1, i);
+                    conducting = i >= 2400 && std::fabs(fieldOf(*ca, self.get(), "v_D1")) > 0.5;
                 }
                 auto residual = [&]
                 {
-                    const double v = fieldOf(*c, self.get(), "v_D1");
-                    const double pp = fieldOf(*c, self.get(), "p_D1");
-                    const double ka = fieldOf(*c, self.get(), "ka_D1");
+                    const double v = fieldOf(*ca, self.get(), "v_D1");
+                    const double pp = fieldOf(*ca, self.get(), "p_D1");
+                    const double ka = fieldOf(*ca, self.get(), "ka_D1");
                     return std::pair{pp - v - 2 * ka * std::sinh(v / port.nvt), std::fabs(pp)};
                 };
                 const auto [first, size] = residual();
                 double worstMove = 0;
                 for (int call = 0; call < 60; ++call)
                 {
-                    setTo(self.get(), 0);
+                    setAdaa(0);
                     const auto [now, pnow] = residual();
                     worstMove = std::fmax(worstMove, std::fabs(now - first) / std::fmax(size, pnow));
                 }
@@ -2033,6 +2089,8 @@ namespace circuits
             r.line(axes, std::format("the self-test's stress matrix: {} points, each switch position among them "
                                      "(\"{}\" ...)",
                                      matrix.points.size(), matrix.points.front().label));
+            // the self-test's answer, which it ships
+            search(r, "switch.cir", ".oversample 4, .adaa off, .solver halley(1)", nullptr);
         }
 
         // p, matched designs: rc8k.cir's one-pole and sallen-key.cir's biquad fail the 1x check trapezoidal and pass
@@ -2238,6 +2296,7 @@ namespace circuits
                     const std::vector<double> u = make(s, m, m * kHost);
                     fc::RefOptions ro;
                     ro.steps = plan.config.solver.steps;
+                    ro.shape = plan.config.solver.shape;
                     const std::vector<double> ref = fc::simulate(h, u, ro);
                     const double e = fc::bandErrorDb(fc::decimateWindow(runSteps(*c, u, pots), m, kWarm, kWindow),
                                                      fc::decimateWindow(ref, m, kWarm, kWindow), 0,
@@ -2659,6 +2718,7 @@ namespace circuits
                 o.adaa = block.port.has_value() && cfg.adaa;
                 o.steps = cfg.solver.steps;
                 o.guess = cfg.solver.guess;
+                o.shape = cfg.solver.shape;
                 return fc::simulate(h, in, o);
             };
             std::vector<double> x(u.begin(), u.end());

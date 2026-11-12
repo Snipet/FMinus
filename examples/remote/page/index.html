@@ -1,0 +1,49 @@
+<!doctype html>
+<!-- examples/remote/page/index.html: the remote example's page, which its host hands the library as static content
+     (remote.cpp, or the driver's --web-root). Plain HTML and script: no framework, nothing fetched from anywhere else,
+     and nothing that needs a secure context, so it works from a LAN address as from loopback (docs/web.md). -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FMinus remote</title>
+<style>
+  :root { color-scheme: light dark; --fg: #1d1d1f; --bg: #f5f5f7; --panel: #ffffff; --line: #d2d2d7; --accent: #0a7d55; }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg: #f5f5f7; --bg: #161618; --panel: #222225; --line: #3a3a3e; --accent: #3ccf91; }
+  }
+  body { margin: 0; padding: 16px; background: var(--bg); color: var(--fg); font: 16px/1.4 system-ui, sans-serif; }
+  main { max-width: 32rem; margin: 0 auto; background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+         padding: 16px 20px; }
+  h1 { font-size: 1.25rem; margin: 0 0 12px; }
+  label { display: block; margin: 14px 0 4px; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  .keys { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+  .keys button { flex: 1 0 2.5rem; padding: 10px 0; border: 1px solid var(--line); border-radius: 6px;
+                 background: var(--bg); color: var(--fg); font: inherit; }
+  .meter { height: 14px; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; margin-top: 6px; }
+  .meter div { height: 100%; width: 0; background: var(--accent); }
+  output, #status { font-variant-numeric: tabular-nums; }
+  #status { margin-top: 14px; font-size: 0.875rem; opacity: 0.75; }
+</style>
+</head>
+<body>
+<main>
+  <h1>FMinus remote</h1>
+  <label for="gain">Gain <output id="gain-value">-</output></label>
+  <input id="gain" type="range" min="0" max="1" step="0.01" value="0.25">
+  <label for="pitch">Pitch <output id="pitch-value">-</output> Hz</label>
+  <input id="pitch" type="range" min="0" max="1" step="0.001" value="0.6">
+  <label>Notes</label>
+  <div class="keys">
+    <button data-note="60">C4</button><button data-note="62">D4</button><button data-note="64">E4</button>
+    <button data-note="65">F4</button><button data-note="67">G4</button><button data-note="69">A4</button>
+    <button data-note="71">B4</button><button data-note="72">C5</button>
+  </div>
+  <label>Level <output id="level-value">-</output></label>
+  <div class="meter"><div id="level"></div></div>
+  <p id="status">connecting...</p>
+</main>
+<script src="remote.js"></script>
+</body>
+</html>

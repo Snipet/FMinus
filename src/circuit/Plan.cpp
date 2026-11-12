@@ -4,6 +4,7 @@
 
 #include "circuit/Dc.h"
 #include "circuit/Emit.h"
+#include "circuit/Laws.h"
 #include "circuit/Linear.h"
 #include "circuit/Mna.h"
 
@@ -56,7 +57,10 @@ namespace fminus::circuit
 
         std::string solverText(const Solver& s)
         {
-            return std::string(s.guess == Solver::Guess::Omega ? "omega(" : "newton(") + std::to_string(s.steps) + ")";
+            return std::string(s.shape == Solver::Shape::Halley  ? "halley("
+                               : s.guess == Solver::Guess::Omega ? "omega("
+                                                                 : "newton(") +
+                   std::to_string(s.steps) + ")";
         }
     } // namespace
 
@@ -106,15 +110,17 @@ namespace fminus::circuit
     {
         if (isFMinusKeyword(name))
             return true;
-        // the methods, the step's locals (an exp-affine port's; an asymmetric pair's conducting side's Is K, 1 / N Vt,
-        // log and N Vt, its two exponentials and ADAA's second; then an OTA's: kd g, its slope and its 2 Vt multiple,
-        // Newton's tanh, the tanh at v and the current (or ADAA's mean of it), ADAA's log cosh at v, its half step in
-        // x, its square, sinh(h), z, 1 + z, the log cosh difference and the midpoint's p - v), and os1, the one field
-        // without a '_' (tick's region sample)
-        static constexpr std::array<std::string_view, 44> kModule{
-            "init", "clear", "set", "tick", "step", "p",  "q",  "arg", "w",   "v",  "lo", "hi", "e",  "ei", "f",
-            "d",    "ec",    "c",   "dp",   "vm",   "vb", "sa", "si",  "sl",  "sn", "ef", "er", "cr", "ua", "kg",
-            "kgs",  "kgv",   "tn",  "th",   "ib",   "lc", "hh", "h2",  "s2",  "z",  "zu", "dl", "wm", "os1"};
+        // the methods, the step's locals (an exp-affine port's, a Halley step's e - ei and f'', with ADAA's 1 / dp, the
+        // last Newton step's point v0 and the series' steps from it, dl and dr, and their squares; an asymmetric pair's
+        // conducting side's Is K, 1 / N Vt, log and N Vt, its two exponentials and ADAA's second; then an OTA's: kd g,
+        // its slope and its 2 Vt multiple, Newton's tanh, the tanh at v and the current (or ADAA's mean of it), ADAA's
+        // log cosh at v, its half step in x, its square, sinh(h), z, 1 + z, the log cosh difference and the midpoint's
+        // p - v), and os1, the one field without a '_' (tick's region sample)
+        static constexpr std::array<std::string_view, 51> kModule{
+            "init", "clear", "set", "tick", "step", "p",  "q",  "arg", "w",   "v",  "lo",  "hi",  "e",
+            "ei",   "f",     "d",   "sh",   "f2",   "ec", "c",  "dp",  "rdp", "v0", "dl2", "dr",  "dr2",
+            "vm",   "vb",    "sa",  "si",   "sl",   "sn", "ef", "er",  "cr",  "ua", "kg",  "kgs", "kgv",
+            "tn",   "th",    "ib",  "lc",   "hh",   "h2", "s2", "z",   "zu",  "dl", "wm",  "os1"};
         if (std::find(kModule.begin(), kModule.end(), name) != kModule.end())
             return true;
         // b<N> (a block's step), y<k> and z<k> (tick's locals)
@@ -128,12 +134,13 @@ namespace fminus::circuit
         // init's parameter, the attribute's words, the halfband methods' parameters and locals, clear's loop
         // variable, and set's temporaries t<N>: FMinus reads a module's name as a type everywhere in the program
         // and the guard's fields and locals (ck_, fd_, fdstep_, sum_, gain_), a switch's ramp step (swstep_; its
-        // other names, sw_<S>, to_<S> and BDF2's h_<C>, carry the part's name, as the coefficients do), a matched
-        // block's output (ym_), and the probes' fields (Circuit.h's kProbeFields), methods (tick_pr, step_pr; b<N>_pr
-        // and pru_b<N> carry a block's number, as b<N>_set does) and tick_pr's locals (n_, e_)
+        // other names, sw_<S>, to_<S> and BDF2's h_<C>, carry the part's name, as the coefficients do), set()'s flag
+        // (lsok_; its ls_b<N> carry a block's number), a matched block's output (ym_), and the probes' fields
+        // (Circuit.h's kProbeFields), methods (tick_pr, step_pr; b<N>_pr and pru_b<N> carry a block's number, as
+        // b<N>_set does) and tick_pr's locals (n_, e_)
         static constexpr std::array<std::string_view, 21> kOther{
-            "rate",    "clang", "nonblocking", "x",   "o",       "s0",      "s1",      "t",  "y",  "v0",   "v1",
-            "i",       "ck_",   "fd_",         "ym_", "fdstep_", "sum_",    "gain_",   "swstep_", "tick_pr", "step_pr"};
+            "rate", "clang", "nonblocking", "x",       "o",    "s0",    "s1",      "t",     "y",       "v1",     "i",
+            "ck_",  "fd_",   "ym_",         "fdstep_", "sum_", "gain_", "swstep_", "lsok_", "tick_pr", "step_pr"};
         static constexpr std::array<std::string_view, 2> kProbeLocals{"n_", "e_"};
         for (const char* field : kProbeFields)
         {
@@ -2101,6 +2108,8 @@ namespace fminus::circuit
         p.key = keyOf(p.netlist, options);
         const bool hasPort =
             std::any_of(p.blocks.begin(), p.blocks.end(), [](const Block& b) { return b.port.has_value(); });
+        const bool pairPort = std::any_of(p.blocks.begin(), p.blocks.end(),
+                                          [](const Block& b) { return b.port && takesHalley(b.port->law); });
         // The Options' answer, when it is this netlist's (its key, which the version is part of).
         std::optional<Choice> chosen;
         if (options.chosen && options.chosen->key == p.key)
@@ -2182,9 +2191,13 @@ namespace fminus::circuit
         if (chosen)
         {
             std::string misfit;
-            if (p.smooth && cfg.solverFrom == fromChoice && cfg.solver.guess == Solver::Guess::Omega)
+            if (p.smooth && cfg.solverFrom == fromChoice && cfg.solver.guess == Solver::Guess::Omega &&
+                cfg.solver.shape == Solver::Shape::Newton)
                 misfit = "its solver omega(" + std::to_string(cfg.solver.steps) +
                          ") is a diode's (an OTA's port is solved from the previous step's v)";
+            else if (!pairPort && cfg.solverFrom == fromChoice && cfg.solver.shape == Solver::Shape::Halley)
+                misfit = "its solver halley(" + std::to_string(cfg.solver.steps) +
+                         ") is a diode pair's (no port here takes a Halley step)";
             else if (cfg.adaa && cfg.method == Method::Bdf2 &&
                      (cfg.adaaFrom == fromChoice || cfg.methodFrom == fromChoice))
             {
@@ -2203,8 +2216,21 @@ namespace fminus::circuit
                 configure();
             }
         }
+        // A Halley step is a diode pair's (Laws.cpp's takesHalley): halley(K) where no port takes one is refused, as
+        // omega(K) is at an OTA's port. One diode's, an asymmetric pair's and an OTA's Halley denominator can vanish
+        // in the bracket; in a region with a pair, those ports keep Newton steps (the notes say so).
+        if (hasPort && !pairPort && cfg.solver.shape == Solver::Shape::Halley)
+        {
+            const Loc loc = cfg.solverFrom == "the netlist" ? netlist.solver.loc : Loc{};
+            const std::string what = cfg.solverFrom == "the netlist" ? "'.solver"
+                                     : cfg.solverFrom == "Options"   ? "'Options::solver"
+                                                                     : "'Options::chosen's solver";
+            messages.error(loc, what + " halley(" + std::to_string(cfg.solver.steps) +
+                                    ")': only a diode pair's port takes a Halley step, and this region has none: " +
+                                    (p.smooth ? ".solver newton(K)" : ".solver omega(K)"));
+        }
         // omega3 is the diode's closed form: an OTA's port starts from the previous step's v
-        if (p.smooth && cfg.solver.guess == Solver::Guess::Omega)
+        else if (p.smooth && cfg.solver.guess == Solver::Guess::Omega)
         {
             const Loc loc = cfg.solverFrom == "the netlist" ? netlist.solver.loc : Loc{};
             const std::string what = cfg.solverFrom == "the netlist" ? "'.solver"

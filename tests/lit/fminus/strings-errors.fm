@@ -1,0 +1,40 @@
+// String literals' errors, one each, from the command line: a format's, as clang reports printf's and at its columns
+// (an invalid conversion, too few ints, too many, one that is no int), a builtin's string parameter given no literal,
+// and a literal anywhere but a builtin's string parameter, in clang's words for the conversion where C has one, and
+// FMinus's where it would take it as a char array; a builtin that blocks in a nonblocking function; and a predefined
+// macro defined, undefined, and given by the host.
+// RUN: not fminus %s 2>&1 | FileCheck %s --implicit-check-not=error:
+// RUN: echo '#define __FMINUS_JSON__ 1' | not fminus - 2>&1 | FileCheck %s --check-prefix=PROGRAM
+// RUN: echo '#undef __FMINUS_XML__' | not fminus - 2>&1 | FileCheck %s --check-prefix=UNDEF
+// RUN: echo 'float f() { return 1; }' | not fminus -D__FMINUS_JSON__ - 2>&1 | FileCheck %s --check-prefix=HOST
+
+int format(int k, float x)
+{
+    return __fminus_string_hash("/osc/%f", k) + __fminus_string_hash("%d/%d", k) + __fminus_string_hash("%d", k, k)
+           + __fminus_string_hash("%d", x) + __fminus_string_hash(k);
+}
+
+float take(float x) { return x; }
+
+float literal()
+{
+    float x = "dB";
+    return take("x") + "a" * 2;
+}
+
+int wait() [[clang::nonblocking]] { return __fminus_string_hash_blocking("x"); }
+
+// CHECK: strings-errors.fm:13:40: error: invalid conversion specifier 'f'
+// CHECK-NEXT: strings-errors.fm:13:40: note: a format here takes %d, an int, and %%, a percent sign
+// CHECK: strings-errors.fm:13:75: error: more '%' conversions than data arguments
+// CHECK: strings-errors.fm:13:114: error: data argument not used by format string
+// CHECK: strings-errors.fm:14:41: error: format specifies type 'int' but the argument has type 'float'
+// CHECK: strings-errors.fm:14:67: error: argument to '__fminus_string_hash' must be a string literal
+// CHECK: strings-errors.fm:21:11: error: initializing 'float' with an expression of incompatible type 'char[3]'
+// CHECK: strings-errors.fm:22:17: error: passing 'char[2]' to parameter of incompatible type 'float'
+// CHECK: strings-errors.fm:22:24: error: FMinus has no strings: a string literal is only the argument of a builtin's string parameter
+// CHECK: strings-errors.fm:25:44: error: function with 'nonblocking' attribute must not call non-'nonblocking' function '__fminus_string_hash_blocking'
+
+// PROGRAM: <stdin>:1:9: error: '__FMINUS_JSON__' cannot be used as a macro name: FMinus defines it in a build with the JSON parser (FMINUS_JSON)
+// UNDEF: <stdin>:1:8: error: '__FMINUS_XML__' cannot be used as a macro name: FMinus defines it in a build with the XML parser (FMINUS_XML)
+// HOST: fminus: -D __FMINUS_JSON__: '__FMINUS_JSON__' cannot be used as a macro name: FMinus defines it in a build with the JSON parser (FMINUS_JSON)

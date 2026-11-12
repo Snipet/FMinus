@@ -40,25 +40,40 @@ namespace fminus::circuit
         std::string ks;
         std::string kcr;
         std::string lnr;
-        // an OTA's: kd = K, and its gain g (a field when it moves, or a literal)
+        // an OTA's: kd = K, rkd = 1 / kd (ADAA), and its gain g (a field when it moves, or a literal)
         std::string kd;
+        std::string rkd;
         std::string g;
         Solver solver;
         bool adaa = false;
     };
 
-    // From p to v: the guess and the Newton steps, each in the bracket. An OTA's starts with kg = kd g and kgs = kg / 2
-    // Vt (with ADAA, kgv = kg 2 Vt and the carry: the stored point onto this step's curve, p_P += (kg - kgo_P) t_P,
-    // which keeps its Newton residual; report §5.1's mean pairs that point with this step's on one curve).
+    // Whether the law's port takes a Halley step under .solver halley(K): a diode pair's, whose Halley denominator
+    // cannot vanish from a point in the bracket; one diode's, an asymmetric pair's and an OTA's keep Newton steps, K of
+    // them (Laws.cpp gives each law's f'' and why).
+    bool takesHalley(PortDef::Law law);
+
+    // A port's steps under `solver`, as the notes and the header say them: "2 Newton steps", "1 Halley step", or for
+    // a law that keeps Newton's under halley(K), "1 Newton step (halley(1): one diode's law keeps Newton steps)".
+    std::string stepsText(const Solver& solver, PortDef::Law law);
+
+    // From p to v: the guess and the Newton (or Halley) steps, each in the bracket. An OTA's starts with kg = kd g and
+    // kgs = kg / 2 Vt (with ADAA, kgv = kg 2 Vt). With ADAA it starts with adaaHeadText's lines (an OTA's after kgv).
     std::vector<LawLine> solveText(const PortDef& port, const LawOperands& o);
 
+    // ADAA's lines that need p alone, at the top of the step: an OTA's carry, the stored point onto this step's curve,
+    // p_P += (kg - kgo_P) t_P, which keeps its Newton residual (report §5.1's mean pairs that point with this step's on
+    // one curve); then dp = p - p_P and its reciprocal rdp, which the mean multiplies by at the end (a divide there
+    // would wait on the solve; here it runs beside it).
+    std::vector<LawLine> adaaHeadText(const PortDef& port, const LawOperands& o);
+
     // ADAA's mean over [p_P, p] (the closed form F(p) = p v - H(v), H = v^2 / 2 + k Phi(v)): a diode's of v, as vb;
-    // an OTA's of its current (the i-form's source), as ib.
+    // an OTA's of its current (the i-form's source), as ib. It reads adaaHeadText's dp and rdp.
     std::vector<LawLine> adaaText(const PortDef& port, const LawOperands& o);
 
-    // What the step stores after its states: with ADAA, the point (p_P, and a pair's c_P = 2 cosh(v / N Vt); one
-    // diode's c_P = e^(v / N Vt); an asymmetric pair's that and cr_P = e^(-v / N2 Vt); an OTA's t_P = tanh(v / 2 Vt),
-    // lc_P = log cosh(v / 2 Vt) and kgo_P = kd g). v_P is the caller's.
+    // What the step stores after its states: an OTA's t_P = tanh(v / 2 Vt); with ADAA, the point (p_P, and a pair's
+    // c_P = 2 cosh(v / N Vt); one diode's c_P = e^(v / N Vt); an asymmetric pair's that and cr_P = e^(-v / N2 Vt); an
+    // OTA's lc_P = log cosh(v / 2 Vt) and kgo_P = kd g). v_P is the caller's.
     std::vector<LawLine> storeText(const PortDef& port, const LawOperands& o);
 
     // b<N>_set's carry, when a pot moves a diode's K (ADAA): the stored point onto the new curve, v_P held, its Newton
@@ -76,6 +91,10 @@ namespace fminus::circuit
     };
 
     std::vector<LawField> adaaFields(const PortDef& port);
+
+    // The fields every port of the law carries, after v_P, with or without ADAA: an OTA's t_P = tanh(v_P / 2 Vt), which
+    // the next step's first Newton step reads (and ADAA's carry and mean); none for a diode's.
+    std::vector<LawField> portFields(const PortDef& port);
 
     // ---- the double twin ----------------------------------------------------------------------------------------
 
@@ -106,7 +125,10 @@ namespace fminus::circuit
     // The guess (or the previous v) and `steps` Newton steps in the bracket, as the emitted text; and the solution to
     // convergence (as lawConverged below: a pair's and an OTA's are theirs, one diode's and an asymmetric pair's by
     // bracketed Newton from lawGuess).
-    double lawStepsOf(const LawShape& law, double p, Solver::Guess guess, double previous, int steps);
+    // `start`, when given, gets the last Newton step's starting point (ADAA's series reads it). `shape` Halley: a
+    // pair's steps are Halley's (lawSteps), the other laws' Newton's (takesHalley).
+    double lawStepsOf(const LawShape& law, double p, Solver::Guess guess, double previous, int steps,
+                      double* start = nullptr, Solver::Shape shape = Solver::Shape::Newton);
     double lawConvergedOf(const LawShape& law, double p, double previous, long* unconverged, int* iterations);
 
     // k of v + k phi(v) = p: a pair's h.k, an OTA's h.k g.
@@ -123,8 +145,16 @@ namespace fminus::circuit
     double logCosh(double x);
 
     // The guess and `steps` Newton steps in the bracket, as the emitted text: a pair's omega3 (or the previous v), an
-    // OTA's previous v.
-    double lawSteps(PortDef::Law law, double p, double k, double s, Solver::Guess guess, double previous, int steps);
+    // OTA's previous v. `shape` Halley: a pair's steps are Halley's, from the guess in the bracket (an OTA's stay
+    // Newton's).
+    double lawSteps(PortDef::Law law, double p, double k, double s, Solver::Guess guess, double previous, int steps,
+                    double* start = nullptr, Solver::Shape shape = Solver::Shape::Newton);
+
+    // ADAA's tail after Newton steps, as the text: the exponentials at the solved v from the last Newton step's at its
+    // point v0, by the addition theorem and e^dl's series to dl^4 (dl = (v - v0) / s; the exact form from |dl| =
+    // 0.25 on). cosh(v / s) so (a pair's), and an exp-affine law's antiderivative G(v) with its exponentials so.
+    double lawCoshSeries(double v0, double v, double s);
+    double lawAntiderivativeSeries(const LawShape& law, double v0, double v);
 
     // The solution to convergence: a pair's from omega3, at most 300 Newton steps in the bracket (Reference.h's
     // converged); an OTA's from the previous v by Newton kept in the bracket, which shrinks to where the root is and is

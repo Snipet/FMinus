@@ -47,7 +47,8 @@ Each file states what it tests in its first line, then has a few helpers and the
   `ControlFlowTest.cpp`, `SwitchTest.cpp`, `EnumTest.cpp`, `IntTest.cpp`, `BitwiseTest.cpp`, `PointerTest.cpp`,
   `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `TableTest.cpp`, `TopLevelTest.cpp`, `ModuleTest.cpp`,
   `FftTest.cpp`, `HashTest.cpp`, `ParamTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`, `ParallelTest.cpp`,
-  `RecoveryTest.cpp`, `DoubleTest.cpp`, `Array2DTest.cpp`, `FieldAttributeTest.cpp`, and the
+  `RecoveryTest.cpp`, `DoubleTest.cpp`, `Array2DTest.cpp`, `FieldAttributeTest.cpp`, `StringTest.cpp`, `BytesTest.cpp`,
+  `JsonTest.cpp` and `XmlTest.cpp` (with `HeapCalls.h`, which counts a thread's calls of the C heap), and the
   compiler's own: `VersionTest.cpp`, `TbaaTest.cpp`, `ZeroInitTest.cpp`, `AttributeTest.cpp`, `DenormalTest.cpp`,
   `LoopBudgetTest.cpp`, whose `compileAt` compiles at any level with the budget on or off, `BoundsCheckTest.cpp`,
   whose `compileAt` does the same with the bounds checks and keeps the checks' descriptions, and `CallThunkTest.cpp`,
@@ -99,7 +100,58 @@ TEST_CASE("functions compute what they say", "[codegen]")
   (where the machine code is, for a sampling profiler: `CodeRangesTest.cpp`'s `Jit::code` through both linkers in the
   unit tests, and `ProfileTest.cpp`'s `Program::codeRanges` and a reference sampler in the library's), `[include]`
   (`#include`: `IncludeTest.cpp`, in both), `[conditional]` (`#if`, `#ifdef` and macros, with a host's defines:
-  `ConditionalTest.cpp`, in both, whose `parsed` takes the defines and `condition` an `#if`'s expression),
+  `ConditionalTest.cpp`, in both, whose `parsed` takes the defines and `condition` an `#if`'s expression), `[strings]`
+  (string literals as builtins' arguments, formats, the effects' blocking class and the build options of builtins:
+  `StringTest.cpp`), `[bytes]` (`bytes_floats` and `bytes_pcm16`: `BytesTest.cpp`), `[numbers]` (the runtime's reader
+  of numbers on fast_float: `NumbersTest.cpp`, compiled only with `FMINUS_JSON` or `FMINUS_XML`, whose tests a build
+  without both lacks; a test of what a build has compares with `fminus/Config.h`, so it passes either way), `[json]`
+  (the JSON parser and its builtins: `JsonTest.cpp`, whose tests of the parser itself only a build with `FMINUS_JSON`
+  has, and whose test of the builtins' names passes in both: each call compiles, or is the error that names the
+  option; its proof that a read allocates nothing counts the C heap's calls through `HeapCalls.h`, on Linux with glibc
+  and no sanitizer only, and that it makes no system call runs the reads in a child under seccomp's strict mode, on
+  Linux; its locale test needs a German or French locale and skips without one: `localedef -i de_DE -f UTF-8
+  <dir>/de_DE.UTF-8` and `LOCPATH=<dir>` make one without root), `[xml]` (the XML parser and its builtins:
+  `XmlTest.cpp`, made as `JsonTest.cpp` is, in both builds the same way, with its heap count, its strict-mode child and
+  its locale test; and its proof that a document's entities are inert, which parses them in a child under a seccomp
+  filter that kills it if it opens a file or a socket, on Linux), `[web]` (the web library, docs/web.md: `HttpTest.cpp`,
+  in every build, its builtins' effects, names and errors, and with `FMINUS_WEB` the status codes, `webRequests()` and
+  `Options::web` through `fminus::Program`; and `WebTest.cpp`, compiled only with `FMINUS_WEB`, the library against a
+  loopback HTTP and HTTPS server the test starts on an ephemeral port, then programs fetching from it through the JIT
+  and as executables. No test makes a request or a DNS lookup beyond the loopback interface, ever; their network part
+  is not compiled on Windows), `[server]` (the web library's server, docs/web.md, "The server": `HttpServerTest.cpp`,
+  in every build, its builtins' effects, the off build's errors, the route, format and name checks at their columns,
+  the route table and the declarations' attributes, `webRoutes()` and `Options::web.server` through `fminus::Program`;
+  `WebServerTest.cpp`, compiled only with `FMINUS_WEB_SERVER`, the engine from C++ before any builtin, against raw
+  sockets and the library's own client: the policy and its classifiers (what a listen that is not loopback would do
+  is judged by them, never bound), each of the nine rules, keep-alive, the limits and timeouts, dropped clients,
+  threads taking at once, closing with threads waiting, and the wait-free proof, `HeapCalls` and a child under
+  seccomp's strict mode; and `WebServeTest.cpp`, programs that serve through the JIT and as an executable, and
+  `readServerRoot`, a directory swapped for a link to elsewhere while it reads (Linux, `renameat2`) among them, and
+  the wait-free proof of a JIT'd `[[clang::nonblocking]]` handler. Every socket they bind is on 127.0.0.1, and every connection they make is to it; this machine's
+  kernel has no IPv6, so the `localhost` and `[::1]` cases take their no-IPv6 branch. Their timeouts make them
+  timing-sensitive: run them when nothing else is building), `[files]` (the file interface, docs/files.md:
+  `FileBuiltinsTest.cpp`, in every build, its builtins' effects (directly and through a called function), the off
+  builds' errors, the status codes against the runtime's values, a name's errors at their columns, `scanFileName` given
+  other builds' ceilings, `files()`, `Options::files` through `fminus::Program`, the reserved names and the JIT's
+  symbols, then programs that list, load, play and write tables through the JIT and as an executable, absolute names,
+  the wait-free proof through a JIT'd `[[clang::nonblocking]]` function, and a `Program`'s destructor; `FilesTest.cpp`
+  (`[runtime][files]`), compiled only with `FMINUS_FILES` and not on Windows, the runtime from C++ before any builtin,
+  every trap built for real: links of every kind and place, hard links, a FIFO (which must not hang), a file that grows
+  while it is read, a folder renamed, the deny-list reached by another spelling, through a link and made afterwards, a
+  directory made at a denied path afterwards and renamed, or exchanged in and out of it while names are walked, a
+  second name a file system answers to (checked on every name here through a test hook, since no FAT or NTFS volume can
+  be mounted), handles read and closed again after their close, writes failed at each step through a test hook (the
+  tests run as root, so permissions cannot fail them) and writers killed half way, whose temporary files the next
+  write sweeps once they are an hour old, two contexts writing one file, a directory swapped for a link while names are
+  walked (Linux, `renameat2`), `FILE_DENIED` from a forked child that gives up root, and the wait-free proof,
+  `HeapCalls` and a child under seccomp's strict mode; and `tests/library/FilesPolicyTest.cpp`, the host's API in
+  C++17. Each test makes its directory beside `bin/` (`files-test/` and `file-builtins-test/`, `t<pid>-<n>` each) and
+  removes it, and the shared parent with it when it is the last (a test that finds the parent gone between making it
+  and making its own makes it again: ctest runs the cases at once, each a process); nothing outside it is read or
+  written, but `/dev/null` and `/proc` named as what must be refused. An executable's temporary object goes where
+  `TMPDIR` says, which the tests point inside their directory too. In a build with `FMINUS_FILES_TYPES`, a case whose
+  files are of a type the build leaves out is skipped (`fixtures()`), and the library test names a type the build
+  has; the ceiling's own refusals are tested in every build),
   `[circuit]` (the circuit compiler: `CircuitTest.cpp` its netlists,
   plans, equations (an OTA's against report §7.2's hand derivation; an inductor's, an E's and a G's stamps by hand, and
   RL and RLC responses as the bilinear map), the DC operating point by hand and its errors, the offset form (a biased
@@ -213,6 +265,13 @@ float gain(float x, float g)
 | `REQUIRES: asserts` | LLVM built with assertions |
 | `REQUIRES: asan`, `ubsan`, `tsan` | the sanitizer build |
 | `REQUIRES: system-darwin` (or `system-linux`) | the host's system (`veclib.fm`, which runs `--math fast`, needs Apple's vector math library) |
+| `REQUIRES: json` (or `UNSUPPORTED: json`) | a build with the JSON parser, `FMINUS_JSON`, as the build tree's `fminus/Config.h` says (`json.fm`, `json-errors.fm`; `json-off.fm` runs only without it) |
+| `REQUIRES: xml` (or `UNSUPPORTED: xml`) | a build with the XML parser, `FMINUS_XML`, the same way (`xml.fm`, `xml-errors.fm`; `xml-off.fm` runs only without it) |
+| `REQUIRES: web` (or `UNSUPPORTED: web`) | a build with the web library, `FMINUS_WEB`, the same way (`web.fm`, `web-errors.fm`, which make no request; `web-off.fm` runs only without it) |
+| `REQUIRES: web-server` (or `UNSUPPORTED: web-server`) | a build with its server, `FMINUS_WEB_SERVER`, the same way (`web-server.fm`, which listens on 127.0.0.1 and asks itself, and `web-server-errors.fm`; `web-server-off.fm` runs only without it) |
+| `REQUIRES: files` (or `UNSUPPORTED: files`) | a build with the file interface, `FMINUS_FILES`, the same way (`files.fm`, `files-errors.fm`, which read and write only in `%t`; `files-off.fm` runs only without it) |
+| `REQUIRES: files-write`, `files-anywhere` (or `UNSUPPORTED:`) | a build with its writing, `FMINUS_FILES_WRITE`, or its absolute names, `FMINUS_FILES_ANYWHERE` (`files-write.fm`, `files-anywhere.fm`; `files-write-off.fm` and `files-anywhere-off.fm` only without them) |
+| `REQUIRES: files-types` (or `UNSUPPORTED: files-types`) | a build whose `FMINUS_FILES_TYPES` lists the types it can touch, which `%files_types` substitutes (`files-types.fm`; `files.fm`, which reads a `.json`, only without it) |
 | `%if arm64 %{ ... %}` | a RUN line only on arm64, so the rest of the file still runs elsewhere (`simd.fm`, `poly.fm`); `%if system-darwin && arm64 %{ ... %}` for Apple's assembly (`math.fm`) |
 | `%if avx %{ ... %}` | an x86-64 host whose JIT targets AVX, as `fminus-hostinfo --features` lists it (`lit.cfg.py` asks it): x86-64's vector machine code (`math-large.fm`) |
 

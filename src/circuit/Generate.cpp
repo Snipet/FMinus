@@ -2,6 +2,7 @@
 // equations and pivots, then the module's text. Any error stops before emission.
 #include "circuit/Emit.h"
 #include "circuit/Halfbands.h"
+#include "circuit/Laws.h"
 #include "circuit/Netlist.h"
 #include "circuit/Plan.h"
 #include "fminus/Circuit.h"
@@ -32,10 +33,15 @@ namespace fminus::circuit
                 fail("Options::channels is " + std::to_string(*o.channels) + "; it is 1 or 2");
             if (o.solver)
             {
-                const int lo = o.solver->guess == Solver::Guess::Omega ? 0 : 1;
+                const int lo =
+                    o.solver->guess == Solver::Guess::Omega && o.solver->shape == Solver::Shape::Newton ? 0 : 1;
                 if (o.solver->steps < lo || o.solver->steps > 8)
                     fail("Options::solver's steps are " + std::to_string(o.solver->steps) + "; they are " +
                          std::to_string(lo) + " to 8");
+                // halley(K) is a diode pair's, from omega3: the previous v is no start of a Halley step
+                if (o.solver->shape == Solver::Shape::Halley && o.solver->guess != Solver::Guess::Omega)
+                    fail("Options::solver is a Halley step from the previous v; halley(K) starts from omega3 "
+                         "(Guess::Omega)");
             }
             if (!o.moduleName.empty() && !isPlainName(o.moduleName))
                 fail("Options::moduleName '" + o.moduleName + "' is not a letter followed by letters and digits");
@@ -49,10 +55,14 @@ namespace fminus::circuit
                     fail("Options::chosen's key '" + c.key + "' is not 16 hex digits");
                 if (c.oversample != 1 && c.oversample != 2 && c.oversample != 4 && c.oversample != 8)
                     fail("Options::chosen's oversample is " + std::to_string(c.oversample) + "; it is 1, 2, 4 or 8");
-                const int lo = c.solver.guess == Solver::Guess::Omega ? 0 : 1;
+                const int lo =
+                    c.solver.guess == Solver::Guess::Omega && c.solver.shape == Solver::Shape::Newton ? 0 : 1;
                 if (c.solver.steps < lo || c.solver.steps > 8)
                     fail("Options::chosen's solver steps are " + std::to_string(c.solver.steps) + "; they are " +
                          std::to_string(lo) + " to 8");
+                if (c.solver.shape == Solver::Shape::Halley && c.solver.guess != Solver::Guess::Omega)
+                    fail("Options::chosen's solver is a Halley step from the previous v; halley(K) starts from omega3 "
+                         "(Guess::Omega)");
             }
             return errors;
         }
@@ -106,8 +116,7 @@ namespace fminus::circuit
                     if (c.adaa)
                         text += " (designed at " + rate + " 2/3: ADAA)";
                     text += std::string(", ") + (c.solver.guess == Solver::Guess::Omega ? "omega3" : "the previous v") +
-                            " + " + std::to_string(c.solver.steps) +
-                            (c.solver.steps == 1 ? " Newton step" : " Newton steps");
+                            " + " + stepsText(c.solver, b.port->law);
                 }
                 else
                 {

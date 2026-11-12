@@ -70,6 +70,11 @@ namespace fminus::frontend
             }
             state.macros.emplace(name, normalisedValue(value));
         }
+        for (const PredefinedMacro& macro : predefinedMacros())   // after the host's, which may not name one
+        {
+            if (macro.defined)
+                state.macros.emplace(std::string(macro.name), "1");
+        }
         ScannerHandle scanner(source, state);
         Parser parser(scanner.get(), context);
         if (parser.parse() != 0 || diagnostics.hasErrors())

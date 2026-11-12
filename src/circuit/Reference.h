@@ -1,10 +1,10 @@
 // src/circuit/Reference.h: a block in Holters' form (Mna.h) simulated in double, the reference the checks compare the
 // emitted float code against. It is adaa.cpp's run<double> (docs/research/analog-circuits/experiments/), for N states
 // and at most one port of either law (Laws.h): solved to convergence (a diode pair's from the closed-form guess, report
-// §9.7's fix; an OTA's by bracketed Newton from the previous step's v), or with the emitted algorithm's fixed steps,
-// plain or with ADAA (an OTA's with the emitted carry when its gain moves). An OTA's gain is the block's Holters::g,
-// or a stream of one a sample. Its matrices are holters(): the derivation the emitted code computes in float, run in
-// double.
+// §9.7's fix; an OTA's by bracketed Newton from the previous step's v), or with the emitted algorithm's fixed steps
+// (Newton's, or a pair's Halley's), plain or with ADAA (an OTA's with the emitted carry when its gain moves). An OTA's
+// gain is the block's Holters::g, or a stream of one a sample. Its matrices are holters(): the derivation the emitted
+// code computes in float, run in double.
 #pragma once
 
 #include "circuit/Mna.h"
@@ -20,6 +20,7 @@ namespace fminus::circuit
         bool adaa = false;   // Holters' first-order ADAA, with the closed-form F
         int steps = -1;      // -1: solved to convergence; otherwise the emitted Newton steps
         Solver::Guess guess = Solver::Guess::Omega;
+        Solver::Shape shape = Solver::Shape::Newton;   // Halley: a pair's steps are Halley's (takesHalley)
         double eps = 1e-5;   // ADAA's |dp| below which the mean is the midpoint (volts)
         // ADAA, an OTA's: the stored point carried onto each step's curve when kd g moves, as the emitted step does.
         // false leaves it on the last step's curve: a check's control, to measure what the carry does.

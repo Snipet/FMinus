@@ -191,6 +191,128 @@ namespace fminus
             Both,
         };
 
+        // What a program may reach of the network (Options::web), in a build with the web library (FMINUS_WEB,
+        // fminus/Config.h's FMINUS_HAS_WEB; docs/web.md): the policy the library holds the program's http_get and
+        // http_post to, checked before each request is sent, at each redirect, and on each connection's address. The
+        // default reaches nothing, and nothing a program asks of the library can widen it (the library's policy, not
+        // a sandbox: a program's own external functions are not its business; docs/web.md). In a build without the
+        // library it is not read: no program there can call http_get.
+        //
+        // Its server part (WebServerPolicy, `server`), in a build with the web server too (FMINUS_WEB_SERVER,
+        // fminus/Config.h's FMINUS_HAS_WEB_SERVER; docs/research/web/server.md): where the program's http_listen may
+        // listen, and how. Its default listens nowhere. In a build without the server it is not read.
+        //
+        // What a listen may be (each with a port of 0 to 65535; 0: the system picks one, which webPort() then says):
+        //   "127.0.0.1:8080", "[::1]:8080"   that loopback address (any of 127.0.0.0/8)
+        //   "localhost:8080"                 both loopback addresses, one port (::1 left out without IPv6)
+        //   "192.168.1.20:8080"              one address of the machine: not loopback, so a token or open is needed
+        //   "*:8080"                         every interface: likewise
+        // A port browsers refuse (the Fetch standard's bad ports), the unspecified addresses themselves (write "*"),
+        // multicast, broadcast, IPv4 inside IPv6 and IPv6 link-local addresses are refused.
+        //
+        // What reaches the program: the library answers everything else itself, before the program sees it (src/web/
+        // Web.h has the nine rules): the request's head within limits; Host the address it arrived on (or localhost on
+        // loopback, or one of `hosts`), so a rebound name is refused; Origin and Sec-Fetch-Site, when present, the
+        // server's own; no form's content type; a path and a method some route of the program's names (404, 405
+        // otherwise); the token, when there is one; a body within maxRequestBytes. No CORS header is ever sent.
+        struct WebServerPolicy
+        {
+            std::string listen;                // where the program may listen (above); empty, the default: nowhere
+            std::vector<std::string> hosts;    // names a request's Host may say besides the address ("studio.local"),
+                                               // without a port
+            // A secret every request to a route must carry, as "Authorization: Bearer <token>": 16 to 256 characters
+            // of A-Z, a-z, 0-9, '-' and '_', from the system's random source. Static files are served without it.
+            std::string token;
+            bool open = false;                 // a listen that is not loopback with no token: the host means it
+            struct File
+            {
+                std::string path;    // "/" or "/app.js": a path a route could name, without a query, each once
+                std::string type;    // its Content-Type: printable ASCII with a '/', at most 255 bytes
+                std::string bytes;   // its body
+            };
+            std::vector<File> files;               // static content the library serves itself, to GET and HEAD
+            std::int32_t maxConnections = 16;      // open at once (1 to 1024)
+            std::int32_t maxPending = 16;          // requests the program has not answered yet (1 to 1024)
+            std::int32_t maxRequestBytes = 1 << 20;   // a request's body (0 to 2^30): past it, 413
+            std::int32_t maxReplyBytes = 64 << 10;    // a reply's body (0 to 2^24; all slots' at most 2^28 bytes):
+                                                      // past it, the reply is HTTP_LIMIT
+            std::int32_t requestTimeoutMs = 10000;    // to send a whole request (408 past it), and to take a reply
+            std::int32_t replyTimeoutMs = 2000;       // for the program to answer one, before the library answers 503
+            std::int32_t idleTimeoutMs = 15000;       // a connection kept alive with nothing on it (each 1 to 86400000)
+        };
+
+        struct WebPolicy
+        {
+            // The URLs a program may reach, as patterns: "https://example.com/presets/*", "https://*.example.com",
+            // "http://127.0.0.1:8080/*" (docs/web.md, "The pattern language": a scheme, a host or *.host, a port or *,
+            // a path, exact or a prefix ending in *). Empty, the default: no network, every request HTTP_REFUSED.
+            std::vector<std::string> allow;
+            std::int32_t maxBodyBytes = 16 << 20;   // a response's body at most (and a POST's): past it, HTTP_LIMIT
+            std::int32_t timeoutMs = 30000;         // a request, its redirects included: past it, HTTP_TIMEOUT
+            std::int32_t maxRedirects = 5;          // redirects a request follows, each checked again (0: none)
+            std::int32_t maxRequests = 16;          // requests the program has in flight at once
+            std::string caFile;                     // PEM roots to trust instead of the system's; empty: the system's
+            // Whether a pattern by name may reach a loopback, private or link-local address (a name that resolves to
+            // one is refused otherwise; an address pattern reaches its own address whatever this says).
+            bool privateAddresses = false;
+            // Names the host resolves itself, "name:port:address", for the program's requests alone (libcurl's
+            // CURLOPT_RESOLVE): split DNS, tests.
+            std::vector<std::string> resolve;
+            // Where the program's server may listen, and how (WebServerPolicy, above): nowhere by default.
+            WebServerPolicy server;
+        };
+
+        // What a program may reach of the file system (Options::files), in a build with the file interface
+        // (FMINUS_FILES, ON by default; fminus/Config.h's FMINUS_HAS_FILES; docs/research/files/README.md): the policy
+        // the runtime holds the program's file_read, file_list, file_write and file_append to, at every call. The
+        // default reaches nothing: a program has no files until its host maps a folder. In a build without the file
+        // interface it is not read: no program there can name a file.
+        //
+        // A program names a file by a folder and a path inside it ("presets/7.json"), never by where it is on this
+        // machine: the host maps each folder's name to a directory, and the program reaches only what is beneath one.
+        // What it reaches is decided from what was opened, not from a path's text: each folder's directory is opened
+        // once, when the program compiles (a folder renamed later is still the folder); each directory of a name is
+        // opened beneath the one before, never through a symbolic link (or, on Windows, any reparse point); each is
+        // compared by identity (device and inode; volume and file id) with the denied directories, as they were when
+        // the program compiled and as they are now; the file must be a regular file of an allowed type, within
+        // maxFileBytes, and is read whole into memory before the program sees it. The runtime's policy, not a sandbox:
+        // a program's own external functions are not its business (as the web's).
+        //
+        // The build's ceilings, which no policy can raise: a folder with `write` needs FMINUS_FILES_WRITE (OFF by
+        // default), `anywhere` FMINUS_FILES_ANYWHERE (OFF by default); a type must be one FMINUS_FILES_TYPES lists
+        // (when it lists any); maxFileBytes is at most FMINUS_FILES_MAX_BYTES. A policy that asks for more is a compile
+        // error with the runtime's message ("fminus::Program: files: anywhere is set, and this build of FMinus leaves
+        // out absolute names (FMINUS_FILES_ANYWHERE=OFF)"), and so is a folder whose directory cannot be opened.
+        struct FilePolicy
+        {
+            struct Folder
+            {
+                std::string name;                 // what a program's name begins with: "presets" (1 to 64 ASCII
+                                                  // letters, digits, '_' and '-', not beginning with '-'; unique,
+                                                  // letter case aside; matched exactly)
+                std::string directory;            // where that is on this machine (links in it followed, once)
+                bool write = false;               // file_write and file_append may work here (FMINUS_FILES_WRITE)
+                std::vector<std::string> types;   // the extensions allowed here ("wav", any letter case, no dot);
+                                                  // empty: the policy's
+            };
+            std::vector<Folder> folders;      // the allow-list; none, the default: no files
+            std::vector<std::string> deny;    // directories (or files) no name may lie in, pass through or reach,
+                                              // compared by identity; each looked up afresh at every call too
+            std::vector<std::string> types;   // the extensions allowed; empty: any the build allows
+            bool anywhere = false;            // absolute names ("/home/me/kit/a.wav"; "C:/Kit/a.wav" on Windows),
+                                              // read and listed wherever deny and the types allow, never written
+                                              // (FMINUS_FILES_ANYWHERE)
+            bool singleLink = false;          // refuse a file with more than one hard link
+            // A file read or written, at most (1 to FMINUS_FILES_MAX_BYTES): past it, FILE_LIMIT.
+            std::int32_t maxFileBytes = (256 << 20) < FMINUS_FILES_MAX_BYTES ? (256 << 20) : FMINUS_FILES_MAX_BYTES;
+            std::int32_t maxOpen = 64;                              // files and listings held at once (1 to 65536)
+            std::int64_t maxHeldBytes = std::int64_t{1} << 30;      // bytes of files read and not closed (to 2^48)
+            std::int64_t maxWrittenBytes = std::int64_t{1} << 30;   // bytes written in the Program's life (to 2^48)
+            std::int32_t maxFilesWritten = 1024;   // files written in its life: each file_write, and each file_append
+                                                   // that creates its file
+            std::int32_t maxListed = 4096;         // a listing's files (1 to 1048576): more is FILE_LIMIT
+        };
+
         struct Options
         {
             int optimisation = 2;                  // -O0 to -O3: LLVM's pipeline at that level, as fminus -O<n>
@@ -241,6 +363,12 @@ namespace fminus
             // the array's extent, and a call whose check fails returns early, with the check recorded for the host
             // (boundsViolation, below). Off, the default, the code is as it was, and as fast.
             bool boundsCheck = false;
+            // The network the program may reach through http_get and http_post, and where its http_listen may listen
+            // (WebPolicy, above): none, and nowhere, by default.
+            WebPolicy web;
+            // The files the program may reach through file_read, file_list, file_write and file_append (FilePolicy,
+            // above): none by default.
+            FilePolicy files;
         };
 
         // Compiles `source`. Returns nullptr when it does not compile, with `errors` holding FMinus's messages, one a
@@ -540,6 +668,116 @@ namespace fminus
 
         // Clears the record, so that the next call runs whole: before any call of the program, init's included.
         void clearBoundsViolation() noexcept;
+
+        // The web (a build with FMINUS_WEB; docs/web.md). A program reaches the network only through http_get and
+        // http_post, whose URLs are string literals, so the host knows every one before it runs anything: it may show
+        // them, ask its user, or refuse to run a program that names a host it does not allow. Each request is held to
+        // Options::web when it is made (its %d filled in), at each redirect, and on each connection's address.
+        //
+        //   options.web.allow = {"https://example.com/presets/*"};
+        //   auto program = Program::compile(source, errors, options);
+        //   for (const Program::WebRequest& request : program->webRequests())
+        //       show(request.method, request.pattern, request.line);       // "GET https://example.com/presets/*.json"
+        //
+        // The program's requests are its context's, which the Program holds: one I/O thread for the process drives
+        // every request, started by the first and joined when the last context goes. Destroying the Program stops its
+        // context (below) and frees every request it made, closed or not; so does a program that never closes what
+        // it opens leak nothing past the Program.
+        //
+        // One call of http_get or http_post in the program's source: its method ("GET" or "POST"), its URL as a
+        // pattern (each %d a "*", each %% a "%"), and where the call is, in every call site's order of lowering.
+        struct WebRequest
+        {
+            std::string method;    // "GET" or "POST"
+            std::string pattern;   // the URL, each %d a "*" and each %% a "%"
+            std::string file;      // the source file, as errors name it (Options::fileName, or an #include's)
+            int line = 0;          // the call's line in that file, from 1
+            int column = 0;        // and its column, from 1, as the errors count it
+        };
+
+        // Every call of http_get and http_post the program makes, or none (and none in a build without the web
+        // library, where a program cannot make one).
+        const std::vector<WebRequest>& webRequests() const;
+
+        // The web server (a build with FMINUS_WEB_SERVER). A program listens with http_listen(), which takes no
+        // argument: where is Options::web.server's, never the program's. It takes the requests that reach it with
+        // http_next (wait-free: on the audio thread, between blocks) or http_accept (which blocks), tells them apart
+        // with route literals, http_is(r, "PUT /osc/%d/gain"), and answers each once. Every route is a literal, so the
+        // host knows them all before anything runs, and the library answers 404 and 405 itself for a path or a method
+        // no route names: only a request the program declared reaches its code.
+        //
+        //   options.web.server.listen = "localhost:0";
+        //   auto program = Program::compile(source, errors, options);
+        //   for (const Program::WebRoute& route : program->webRoutes())
+        //       show(route.method, route.pattern, route.line);              // "PUT /osc/*/gain"
+        //   program->function<void()>("init", errors)();                    // which calls http_listen()
+        //   open("http://localhost:" + std::to_string(program->webPort()) + "/");
+        //
+        // One call of http_is in the program's source: its route's method ("GET", "POST", "PUT", "PATCH" or "DELETE";
+        // a GET route answers HEAD too), its path as a pattern (each %d a "*"), and where the call is, in every call
+        // site's order of lowering.
+        struct WebRoute
+        {
+            std::string method;    // "GET", "POST", "PUT", "PATCH" or "DELETE"
+            std::string pattern;   // the path, each %d a "*"
+            std::string file;      // the source file, as errors name it (Options::fileName, or an #include's)
+            int line = 0;          // the call's line in that file, from 1
+            int column = 0;        // and its column, from 1, as the errors count it
+        };
+
+        // Every call of http_is the program makes, or none (and none in a build without the web server).
+        const std::vector<WebRoute>& webRoutes() const;
+
+        // The port the program's server listens on (1 to 65535) once the program has called http_listen; 0 before,
+        // when its policy has no listen or the address could not be bound, once stopWeb() has closed it, and in a
+        // build without the web server. Takes a lock: not for the audio thread.
+        int webPort() const noexcept;
+
+        // Stops the program's network for good: every request in flight ends as HTTP_CANCELLED before this returns,
+        // waking every thread in http_wait, and every request the program starts from then on ends so at once. What
+        // completed stays readable until it is closed or the Program destroyed. A host that shuts a program down while
+        // a thread of its own is in the program (a loader in http_wait) calls this, joins that thread, then destroys
+        // the Program: destroying a Program while a thread still runs its code is undefined, as ever. Any thread may
+        // call it, any number of times; it waits for the I/O thread (briefly): not on the audio thread. The
+        // destructor calls it. It closes the program's server too: its sockets and every connection, every request
+        // the program has not answered given up (its reply HTTP_CANCELLED), every thread in http_accept woken (null),
+        // and http_port HTTP_CANCELLED from then on; an http_listen after it never listens.
+        void stopWeb() noexcept;
+
+        // Files (a build with FMINUS_FILES). A program names a file only by a string literal, file_read("kit/%d.f32",
+        // k), whose %d are ints, so the host knows every file it may ask for before it runs anything: the operation,
+        // and the name as a pattern. The compiler has refused what no policy could let through (a name the rules
+        // refuse, a type outside FMINUS_FILES_TYPES, an absolute name in a build without FMINUS_FILES_ANYWHERE), and
+        // the runtime holds each call to Options::files once its %d are filled in.
+        //
+        //   options.files.folders = {{"kit", "/Users/me/Music/Kit", false, {"f32"}}};
+        //   auto program = Program::compile(source, errors, options);
+        //   for (const Program::FileUse& use : program->files())
+        //       show(use.operation, use.pattern, use.line);             // "list kit/*.f32", "read kit/*.f32"
+        //
+        // The program's files are its context's, which the Program holds: made when the program compiles, if it names
+        // a file and the policy grants a folder or anywhere (none otherwise: every call is FILE_REFUSED). Destroying
+        // the Program frees every file and listing the program still holds, closed or not, and closes the folders'
+        // directories; so a program that never closes what it reads leaks nothing past the Program. Every file
+        // builtin that touches the disk is refused in a [[clang::nonblocking]] or [[clang::nonallocating]] function: a
+        // program loads in a function its host calls off the audio thread, and reads the bytes on it (file_data and
+        // file_size are wait-free).
+        //
+        // One call of file_read, file_list, file_write or file_append in the program's source: its operation ("read",
+        // "list", "write" or "append"), its name as a pattern (each %d a "*", each %% a "%"; a listing's own "*" stays
+        // one), and where the call is, in every call site's order of lowering.
+        struct FileUse
+        {
+            std::string operation;   // "read", "list", "write" or "append"
+            std::string pattern;     // the name, each %d a "*" and each %% a "%"; a listing's own "*" stays one
+            std::string file;        // the source file, as errors name it (Options::fileName, or an #include's)
+            int line = 0;            // the call's line in that file, from 1
+            int column = 0;          // and its column, from 1, as the errors count it
+        };
+
+        // Every call of file_read, file_list, file_write and file_append the program makes, or none (and none in a
+        // build without the file interface, where a program cannot make one).
+        const std::vector<FileUse>& files() const;
 
         // Calling a function by name, for a host that learns a function's signature as it runs rather than when it is
         // built (function<Signature>, above, is for one it knows): a console that calls the function its user names, a

@@ -143,6 +143,17 @@ namespace fminus::circuit
             return a.c > 0 ? b : -b;
         if (isUnit(b))
             return b.c > 0 ? a : -a;
+        // (x / c) c = x: the elimination normalises a row by its pivot and the back-substitution multiplies it back
+        for (const auto& [q, k] : {std::pair{&a, &b}, std::pair{&b, &a}})
+        {
+            if (q->kind != Val::Kind::Var || k->kind != Val::Kind::Const || q->divisor == 0 ||
+                std::fabs(k->c) != std::fabs(q->divisor))
+                continue;
+            Val x = Val::var(q->dividend, q->code, q->deps);
+            x.negated = q->dividendNegated;
+            const bool flipped = (q->negated != q->quotientNegated) != ((k->c < 0) != (q->divisor < 0));
+            return flipped ? -x : x;
+        }
         Code* code = codeOf(a, b);
         const Signed x = signedOf(a);
         const Signed y = signedOf(b);
@@ -163,6 +174,19 @@ namespace fminus::circuit
             return Val(a.c / b.c);
         if (isUnit(b))
             return b.c > 0 ? a : -a;
+        if (b.kind == Val::Kind::Const)
+        {
+            // x / c as (1 / c) x, a multiply (the reciprocal folded in double), remembering x and c for (x / c) c
+            Val q = Val(1 / b.c) * a;
+            if (q.kind == Val::Kind::Var)
+            {
+                q.dividend = a.name;
+                q.dividendNegated = a.negated;
+                q.quotientNegated = q.negated;
+                q.divisor = b.c;
+            }
+            return q;
+        }
         Code* code = codeOf(a, b);
         const Signed y = signedOf(b);
         if (a.kind == Val::Kind::Const)
@@ -171,8 +195,11 @@ namespace fminus::circuit
             const double numerator = y.negative ? -a.c : a.c;
             return temp(code, literal(numerator, true) + " / " + y.text, y.uses, false, b.deps);
         }
+        // x / y as x (1 / y): one divide for every quotient by y (the text "1 / y" is one temporary, Code::temp's)
+        const Val reciprocal = temp(code, "1 / " + y.text, y.uses, false, b.deps);
         const Signed x = signedOf(a);
-        return temp(code, x.text + " / " + y.text, joined(x.uses, y.uses), x.negative != y.negative, depsOf(a, b));
+        return temp(code, x.text + " * " + reciprocal.name, joined(x.uses, {reciprocal.name}), x.negative != y.negative,
+                    depsOf(a, b));
     }
 
     Val logOf(const Val& v)
@@ -309,8 +336,40 @@ namespace fminus::circuit
         }
     } // namespace
 
-    std::vector<std::string> Code::merged(const std::vector<Stmt>& stmts)
+    std::vector<Code::Stmt> Code::live(const std::vector<Stmt>& stmts)
     {
+        std::map<std::string, int> uses;
+        for (const Stmt& s : stmts)
+        {
+            for (const std::string& u : s.uses)
+                ++uses[u];
+        }
+        std::vector<bool> dead(stmts.size(), false);
+        for (bool removed = true; removed;)
+        {
+            removed = false;
+            for (std::size_t i = stmts.size(); i-- > 0;)
+            {
+                if (dead[i] || !stmts[i].declares || uses[stmts[i].lhs] != 0)
+                    continue;
+                dead[i] = true;
+                removed = true;
+                for (const std::string& u : stmts[i].uses)
+                    --uses[u];
+            }
+        }
+        std::vector<Stmt> out;
+        for (std::size_t i = 0; i < stmts.size(); ++i)
+        {
+            if (!dead[i])
+                out.push_back(stmts[i]);
+        }
+        return out;
+    }
+
+    std::vector<std::string> Code::merged(const std::vector<Stmt>& stmtsIn)
+    {
+        const std::vector<Stmt> stmts = live(stmtsIn);
         std::map<std::string, int> uses;
         for (const Stmt& s : stmts)
         {
@@ -348,7 +407,8 @@ namespace fminus::circuit
 
     int Code::operations() const
     {
-        return static_cast<int>(std::count_if(stmts_.begin(), stmts_.end(), [](const Stmt& s) { return s.declares; }));
+        const std::vector<Stmt> stmts = live(stmts_);
+        return static_cast<int>(std::count_if(stmts.begin(), stmts.end(), [](const Stmt& s) { return s.declares; }));
     }
 
     namespace
@@ -386,7 +446,7 @@ namespace fminus::circuit
         std::vector<Stmt> init;
         std::vector<Stmt> set;
         std::set<std::string> initTemps;
-        for (const Stmt& s : stmts_)
+        for (const Stmt& s : live(stmts_))
         {
             if (s.lhs.empty() || (s.deps & Val::kPots) != 0)
                 set.push_back(s);
@@ -760,7 +820,10 @@ namespace fminus::circuit
             {c.halfband == Halfband::Iir ? "iir" : "fir", c.halfbandFrom, true},
             {"blocks=" + region, c.regionFrom, true},
             {std::string(".adaa ") + (c.adaa ? "on" : "off"), c.adaaFrom},
-            {std::string(".solver ") + (c.solver.guess == Solver::Guess::Omega ? "omega(" : "newton(") +
+            {std::string(".solver ") +
+                 (c.solver.shape == Solver::Shape::Halley  ? "halley("
+                  : c.solver.guess == Solver::Guess::Omega ? "omega("
+                                                           : "newton(") +
                  std::to_string(c.solver.steps) + ")",
              c.solverFrom},
             {std::string(".method ") + (c.method == Method::Tr ? "tr" : "bdf2"), c.methodFrom},
@@ -844,6 +907,27 @@ namespace fminus::circuit
             }
 
             // The S elements, in netlist order: each one's ramp sw_<S>.
+            // What block b's coefficients read from set(): its pots, clamped, as b<N>_set takes them, then its
+            // switches' ramps (fields b<N>_set reads).
+            std::vector<std::string> setArguments(const Block& b) const
+            {
+                std::vector<std::string> list;
+                for (const std::string& key : b.pots)
+                {
+                    for (const PotInfo& p : plan.pots)
+                    {
+                        if (p.key == key)
+                            list.push_back("fminf(fmaxf(" + p.name + ", 0), 1)");
+                    }
+                }
+                for (const Branch& br : b.branches)
+                {
+                    if (br.isSwitch())
+                        list.push_back("sw_" + br.ident);
+                }
+                return list;
+            }
+
             std::vector<const Branch*> switchBranches() const
             {
                 std::vector<const Branch*> list;
@@ -892,8 +976,8 @@ namespace fminus::circuit
             }
 
             // The fields the guard sums: every float that carries from one sample to the next (the parts' states,
-            // the ports' last voltages, ADAA's last points, the halfbands' delay lines), each with its length (0: not
-            // an array).
+            // the ports' last voltages, an OTA's stored tanh, ADAA's last points, the halfbands' delay lines), each
+            // with its length (0: not an array).
             std::vector<std::pair<std::string, int>> carried() const
             {
                 std::vector<std::pair<std::string, int>> fields;
@@ -926,6 +1010,8 @@ namespace fminus::circuit
                     if (!b.port)
                         continue;
                     fields.emplace_back("v_" + b.port->name, 0);
+                    for (const LawField& f : portFields(*b.port))
+                        fields.emplace_back(f.name, 0);
                     if (!adaaBlock(b))
                         continue;
                     fields.emplace_back("p_" + b.port->name, 0);
@@ -1056,6 +1142,7 @@ namespace fminus::circuit
                 o.kcr = operandText(coefficient(i, "kcr_" + P));
                 o.lnr = operandText(coefficient(i, "lnr_" + P));
                 o.kd = operandText(coefficient(i, "kd_" + P));
+                o.rkd = operandText(coefficient(i, "rkd_" + P));
                 o.g = gainField(b) ? "g_" + P : literal(b.port->gainValue);
                 return o;
             }
@@ -1367,7 +1454,24 @@ namespace fminus::circuit
             {
                 std::string text = "//   solver: ";
                 text += c.solver.guess == Solver::Guess::Omega ? "omega3 + " : "the previous step's v + ";
-                text += std::to_string(c.solver.steps) + (c.solver.steps == 1 ? " Newton step" : " Newton steps");
+                // the region's laws: under halley(K) (the plan has checked that a pair's port is among them) a
+                // pair's port takes Halley steps, the others Newton's
+                std::vector<PortDef::Law> laws;
+                for (int i = plan.regionFirst; i <= plan.regionLast; ++i)
+                {
+                    const Block& b = plan.blocks[static_cast<std::size_t>(i)];
+                    if (b.port && std::find(laws.begin(), laws.end(), b.port->law) == laws.end())
+                        laws.push_back(b.port->law);
+                }
+                if (laws.size() == 1 || c.solver.shape == Solver::Shape::Newton)
+                    text += stepsText(c.solver, laws.front());
+                else
+                {
+                    Solver newton = c.solver;
+                    newton.shape = Solver::Shape::Newton;
+                    text += stepsText(c.solver, PortDef::Law::Pair) + " at a diode pair, " +
+                            stepsText(newton, PortDef::Law::Single) + " at the other ports";
+                }
                 text += " in [min(0, p), max(0, p)]";
                 if (c.adaa)
                     text += "; ADAA (Holters 2020, closed-form F)";
@@ -1466,6 +1570,8 @@ namespace fminus::circuit
                 const std::string& p = b.port->name;
                 at = portLine(b);
                 line("    " + type + " v_" + p + ";", b.port->parts + ": the port's voltage at the last step", 31);
+                for (const LawField& f : portFields(*b.port))
+                    line("    " + (f.vector ? type : std::string("float")) + " " + f.name + ";", f.note, 31);
                 if (!adaaBlock(b))
                     continue;
                 line("    " + type + " p_" + p + ";", "ADAA: the port's open-circuit voltage at the last step", 31);
@@ -1516,6 +1622,23 @@ namespace fminus::circuit
                 {
                     at = potLine();
                     line("    float swstep_;", "a ramp's most a set() call: 16 / (0.02 rate)", 31);
+                }
+            }
+            if (!plan.pots.empty() || !plan.switches.empty())
+            {
+                // set()'s memory of each b<N>_set's last arguments: it skips a block whose pots and switches' ramps
+                // are where they were, whose coefficients are then the same bits by construction
+                at = potLine();
+                line("    int lsok_;", "set(): 0 until it has called every b<N>_set (init's), then 1", 31);
+                bool first = true;
+                for (const Block& b : plan.blocks)
+                {
+                    if (!b.hasControls())
+                        continue;
+                    line("    float ls_b" + std::to_string(b.index) + "[" + std::to_string(setArguments(b).size()) +
+                             "];",
+                         first ? "b<N>_set's last pots and switches' ramps: set() skips it while they hold" : "", 31);
+                    first = false;
                 }
             }
             noted.clear();
@@ -1734,6 +1857,7 @@ namespace fminus::circuit
                             std::format(" {}", w.defaultPosition);
                     firstSwitch = false;
                 }
+                line("        lsok_ = 0;", "every b<N>_set runs at the next set(): the rate moved what they read");
                 line("        set(" + args + ");", note);
             }
             line("    }");
@@ -1777,6 +1901,8 @@ namespace fminus::circuit
                     continue;
                 const std::string& p = b.port->name;
                 line("        v_" + p + " = 0;");
+                for (const LawField& f : portFields(*b.port))
+                    line("        " + f.name + " = " + f.clear + ";");
                 if (!adaaBlock(b))
                     continue;
                 line("        p_" + p + " = 0;");
@@ -1910,21 +2036,29 @@ namespace fminus::circuit
                      " : sw_" + S + " + (to_" + S + " > sw_" + S + " ? swstep_ : -swstep_);");
             }
             at = potLine();
+            // each block's coefficients, unless its pots (clamped) and its switches' ramps are where they were at the
+            // last call: the same arguments give the same bits, so a block whose controls hold costs a compare (init
+            // clears lsok_, so the first call after it runs every block)
             for (const Block& b : plan.blocks)
             {
                 if (!b.hasControls())
                     continue;
+                const std::string n = std::to_string(b.index);
+                const std::vector<std::string> arguments = setArguments(b);
                 std::string args;
-                for (const std::string& key : b.pots)
-                {
-                    for (const PotInfo& p : plan.pots)
-                    {
-                        if (p.key == key)
-                            args += (args.empty() ? "" : ", ") + std::string("fminf(fmaxf(") + p.name + ", 0), 1)";
-                    }
-                }
-                line("        b" + std::to_string(b.index) + "_set(" + args + ");");
+                for (std::size_t k = 0; k < b.pots.size(); ++k)
+                    args += (args.empty() ? "" : ", ") + arguments[k];
+                std::string moved = "lsok_ == 0";
+                for (std::size_t k = 0; k < arguments.size(); ++k)
+                    moved += " || " + arguments[k] + " != ls_b" + n + "[" + std::to_string(k) + "]";
+                line("        if (" + moved + ")");
+                line("        {");
+                for (std::size_t k = 0; k < arguments.size(); ++k)
+                    line("            ls_b" + n + "[" + std::to_string(k) + "] = " + arguments[k] + ";");
+                line("            b" + n + "_set(" + args + ");");
+                line("        }");
             }
+            line("        lsok_ = 1;");
             line("    }");
         }
 
