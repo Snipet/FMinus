@@ -701,11 +701,13 @@ namespace fminus
         const std::vector<WebRequest>& webRequests() const;
 
         // The web server (a build with FMINUS_WEB_SERVER). A program listens with http_listen(), which takes no
-        // argument: where is Options::web.server's, never the program's. It takes the requests that reach it with
-        // http_next (wait-free: on the audio thread, between blocks) or http_accept (which blocks), tells them apart
-        // with route literals, http_is(r, "PUT /osc/%d/gain"), and answers each once. Every route is a literal, so the
-        // host knows them all before anything runs, and the library answers 404 and 405 itself for a path or a method
-        // no route names: only a request the program declared reaches its code.
+        // argument: where is Options::web.server's, never the program's. It takes the requests that reach it with a
+        // serve statement, whose routes are literals with typed parameters, `route "PUT /osc/{k}/gain" (int k, float
+        // value) { ... reply 204; }` (or with the builtins it is made of: http_next, wait-free, on the audio thread
+        // between blocks, or http_accept, which blocks, and route literals, http_is(r, "PUT /osc/%d/gain")), and
+        // answers each once. Every route is a literal, so the host knows them all, and a route's parameters, before
+        // anything runs, and the library answers 404 and 405 itself for a path or a method no route names: only a
+        // request the program declared reaches its code.
         //
         //   options.web.server.listen = "localhost:0";
         //   auto program = Program::compile(source, errors, options);
@@ -714,19 +716,36 @@ namespace fminus
         //   program->function<void()>("init", errors)();                    // which calls http_listen()
         //   open("http://localhost:" + std::to_string(program->webPort()) + "/");
         //
-        // One call of http_is in the program's source: its route's method ("GET", "POST", "PUT", "PATCH" or "DELETE";
-        // a GET route answers HEAD too), its path as a pattern (each %d a "*"), and where the call is, in every call
-        // site's order of lowering.
+        // A route statement's parameter: what the request fills it from, and what it must be. A value that is
+        // missing (with no default) or not one of its type, or outside its range, is answered 400 by the program's
+        // own code before its route's block runs; a hole's that is no number does not match the route (404).
+        struct RouteParameter
+        {
+            std::string name;                     // "value", the query's field of that name for a query's
+            std::string type;                     // "int", "float", "bool" or "http_request" (the request itself)
+            std::string source;                   // "path" (a hole of the route, `{note}`), "query" or "request"
+            std::optional<double> minimum;        // fminus::range(minimum, maximum): the least value a request may give
+            std::optional<double> maximum;        // and the greatest
+            std::optional<double> defaultValue;   // fminus::default(value): a query's, when the request has none
+        };
+
+        // One route of the program's source: a call of http_is, or a serve's route statement (`statement`). Its
+        // method ("GET", "POST", "PUT", "PATCH" or "DELETE"; a GET route answers HEAD too), its path as a pattern (each
+        // %d, or each hole, a "*"), and where the call or the `route` is, in every one's order of lowering; and a route
+        // statement's parameters, in order.
         struct WebRoute
         {
             std::string method;    // "GET", "POST", "PUT", "PATCH" or "DELETE"
-            std::string pattern;   // the path, each %d a "*"
+            std::string pattern;   // the path, each %d or hole a "*"
             std::string file;      // the source file, as errors name it (Options::fileName, or an #include's)
             int line = 0;          // the call's line in that file, from 1
             int column = 0;        // and its column, from 1, as the errors count it
+            bool statement = false;                    // a route statement's; an http_is call's otherwise
+            std::vector<RouteParameter> parameters{};  // a route statement's, in order; none for an http_is call
         };
 
-        // Every call of http_is the program makes, or none (and none in a build without the web server).
+        // Every route the program names, by an http_is call or a route statement, or none (and none in a build
+        // without the web server).
         const std::vector<WebRoute>& webRoutes() const;
 
         // The port the program's server listens on (1 to 65535) once the program has called http_listen; 0 before,

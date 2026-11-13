@@ -41,6 +41,10 @@
 //                  | "parallel" "for" "(" (declaration | expr? ";") expr? ";" expr? ")" statement
 //                  | "parallel" block                    FMinus's: the iterations, or the statements, at once
 //                  | ("defer" | "_Defer") statement      TS 25755's: run when the block it is in is left
+//                  | "serve" "(" expr ("," expr)? ")" "{" route* "}"    FMinus's: the requests waiting for its routes
+//                  | "reply" expr ("," expr)* ";"        answers the route's request, and leaves the route
+//     route        : "route" STRING+ ("(" (route_param ("," route_param)*)? ")")? attributes block
+//     route_param  : "const"? type pointer IDENTIFIER attributes        an int a {hole} or the query fills, ...
 //     label        : "case" expr ":" | "default" ":"                         the expr an integer constant expression
 //     expr         : NUMBER | "true" | "false" | IDENTIFIER | IDENTIFIER "(" (expr ("," expr)*)? ")" | "(" expr ")"
 //                  | STRING+          a string literal: the code generator takes one only as a builtin's argument
@@ -58,6 +62,11 @@
 //                  | "(" ("float" | "double" | "int" | "bool") ")" expr                       a cast
 //                  | "(" "enum" IDENTIFIER ")" expr                                  a cast to int, as C's to an enum
 //                  | expr ("=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=") expr
+//                  | "json" json_object | "json" json_array     a JSON literal: only a reply's body, never a value
+//     json_object  : "{" (json_member ("," json_member)* ","?)? "}"
+//     json_member  : STRING+ ":" json_value | IDENTIFIER           a name alone is its own key and its value
+//     json_array   : "[" (json_value ("," json_value)* ","?)? "]"
+//     json_value   : expr | json_object | json_array
 //
 // Precedence and associativity are C's, from the loosest: assignment (right to left), ?: (right to left), ||, &&, |,
 // ^, &, equality, relational, shifts, additive, multiplicative, unary (and casts), and the postfix operators: ".",
@@ -149,6 +158,13 @@
             std::vector<ast::Brace> braces = {};
             std::vector<ast::Attribute> attributes = {};   // C23's, after the name: `level [[ui::unit("dB")]]`
             SourceLocation comma = {};   // the comma before it, in a declaration's list after the first
+        };
+
+        // A route's parameter list as written: none at all, or a list, `()` too.
+        struct RouteParams
+        {
+            bool written = false;
+            std::vector<ast::RouteParam> params = {};
         };
 
         // An if's or a switch's head (C2y's, N3356): the declarations before its condition, and the condition.
@@ -539,6 +555,7 @@
 %token SWITCH "switch" CASE "case" DEFAULT "default" ENUM "enum"
 %token MODULE "module" THIS "this" ARROW "->" PARAM "param"
 %token DEFER "defer" DEFER_TS "_Defer"
+%token SERVE "serve" ROUTE "route" REPLY "reply" JSON "json"
 %token <ast::Type> MODULE_NAME "module name"
 %token <ast::Type> VECTOR_TYPE "vector type"
 %token <ast::Type> HANDLE_TYPE "handle type"
@@ -584,6 +601,12 @@
 %nterm <std::vector<Declarator>> declarators
 %nterm <Declarator> declarator
 %nterm <SelectionHead> selection_head
+%nterm <std::vector<ast::Route>> serve_items
+%nterm <ast::Route> route
+%nterm <RouteParams> route_params
+%nterm <std::vector<ast::RouteParam>> route_param_list
+%nterm <ast::RouteParam> route_param
+%nterm <ast::JsonValue> json_value json_object json_members json_member json_array json_values
 %nterm <ast::ExprPtr> expr
 %nterm <std::vector<ast::ExprPtr>> args arg_list
 
@@ -810,6 +833,10 @@ attribute_word
     | "param"                               { $$ = "param"; }
     | "defer"                               { $$ = "defer"; }
     | "_Defer"                              { $$ = "_Defer"; }
+    | "serve"                               { $$ = "serve"; }
+    | "route"                               { $$ = "route"; }
+    | "reply"                               { $$ = "reply"; }
+    | "json"                                { $$ = "json"; }
     ;
 
 // An attribute's arguments: numbers, a minus before any of them, and strings (C23's balanced tokens, of which FMinus
@@ -1157,6 +1184,65 @@ unlabeled
                                             }
     | "parallel" block                      { $$ = ast::Stmt{at(@1), ast::ParallelBlockStmt{$2}}; }
     | defer statement                       { $$ = ast::Stmt{at(@1), ast::DeferStmt{ast::own($2)}}; }
+    | "serve" "(" arg_list ")" "{" serve_items "}"
+                                            { $$ = ast::Stmt{at(@1), ast::ServeStmt{$3, $6}}; }
+    | "reply" arg_list ";"                  { $$ = ast::Stmt{at(@1), ast::ReplyStmt{$2}}; }
+    | "reply" ";"                           {
+                                                parseContext.diagnostics.error(at(@2), "expected expression");
+                                                $$ = ast::Stmt{at(@1), ast::ReplyStmt{}};
+                                            }
+    ;
+
+// A serve's routes. Anything else in its braces parses, and is an error: only a route may stand there.
+serve_items
+    : %empty                                {}
+    | serve_items route                     { $$ = $1; $$.push_back($2); }
+    | serve_items block_item                {
+                                                $$ = $1;
+                                                parseContext.diagnostics.error(at(@2), "only a route may stand in a "
+                                                                               "serve's braces: route \"METHOD /path\" "
+                                                                               "(parameters) { ... }");
+                                            }
+    ;
+
+// A route: its literal, its parameters (none, or a list), attributes after them (the code generator's error) and
+// its block, whose closing brace the missing reply's error is at.
+route
+    : "route" string_literal route_params attributes block
+                                            {
+                                                RouteParams params = $3;
+                                                $$.location = at(@1);
+                                                $$.literal = $2;
+                                                $$.literalLocation = at(@2);
+                                                $$.hasParams = params.written;
+                                                $$.params = std::move(params.params);
+                                                $$.attributes = $4;
+                                                $$.body = $5;
+                                                const fminus::frontend::location& end = @5;
+                                                $$.closing = at(end);
+                                                $$.closing.line = end.end.line;
+                                                $$.closing.column = end.end.column - 1;
+                                            }
+    ;
+
+route_params
+    : %empty                                {}
+    | "(" ")"                               { $$.written = true; }
+    | "(" route_param_list ")"              { $$.written = true; $$.params = $2; }
+    ;
+
+route_param_list
+    : route_param                           { $$.push_back($1); }
+    | route_param_list "," route_param      { $$ = $1; $$.push_back($3); }
+    ;
+
+// As a function's parameter, with C23's attributes after its name, as a field's: a range, a default.
+route_param
+    : qualifier type pointer IDENTIFIER attributes
+                                            {
+                                                const Declared d = declared($1, $2, $3);
+                                                $$ = ast::RouteParam{at(@4), $4, d.type, d.isConst, $5};
+                                            }
     ;
 
 // TS 25755's keyword, and the spelling it encourages, which FMinus takes as a keyword too. Its statement is an
@@ -1317,6 +1403,73 @@ expr
     | expr "&&" expr                        { $$ = logical(@2, ast::LogicalOp::And, $1, $3); }
     | expr "||" expr                        { $$ = logical(@2, ast::LogicalOp::Or, $1, $3); }
     | expr "?" expr ":" expr                { $$ = ast::makeExpr(at(@2), ast::ConditionalExpr{$1, $3, $5}); }
+    | "json" json_object                    { $$ = ast::makeExpr(at(@1), ast::JsonExpr{$2}); }
+    | "json" json_array                     { $$ = ast::makeExpr(at(@1), ast::JsonExpr{$2}); }
+    ;
+
+// A JSON literal's values: an expression, an object or an array, nested as JSON nests them.
+json_value
+    : expr                                  {
+                                                $$.location = at(@1);
+                                                $$.value = $1;
+                                            }
+    | json_object                           { $$ = $1; }
+    | json_array                            { $$ = $1; }
+    ;
+
+json_object
+    : "{" "}"                               { $$.kind = ast::JsonValue::Kind::Object; $$.location = at(@1); }
+    | "{" json_members "}"                  { $$ = $2; $$.location = at(@1); }
+    | "{" json_members "," "}"              { $$ = $2; $$.location = at(@1); }
+    ;
+
+json_members
+    : json_member                           { $$ = $1; }
+    | json_members "," json_member          {
+                                                $$ = $1;
+                                                ast::JsonValue member = $3;
+                                                $$.keys.push_back(std::move(member.keys.front()));
+                                                $$.keyLocations.push_back(member.keyLocations.front());
+                                                $$.elements.push_back(std::move(member.elements.front()));
+                                            }
+    ;
+
+// One member, as an object of one: `"key": value`, or a name alone, `gain`, which is `"gain": gain`.
+json_member
+    : string_literal ":" json_value         {
+                                                $$.kind = ast::JsonValue::Kind::Object;
+                                                $$.keys.push_back($1);
+                                                $$.keyLocations.push_back(at(@1));
+                                                $$.elements.push_back($3);
+                                            }
+    | IDENTIFIER                            {
+                                                const std::string name = $1;
+                                                const SourceLocation where = at(@1);
+                                                ast::StringExpr key{name, {}};
+                                                for (std::size_t i = 0; i < name.size(); ++i)
+                                                    key.at.push_back(SourceLocation{where.line,
+                                                                                    where.column
+                                                                                        + static_cast<int>(i),
+                                                                                    where.file});
+                                                $$.kind = ast::JsonValue::Kind::Object;
+                                                $$.keys.push_back(std::move(key));
+                                                $$.keyLocations.push_back(where);
+                                                ast::JsonValue value;
+                                                value.location = where;
+                                                value.value = ast::makeExpr(where, ast::VariableExpr{name});
+                                                $$.elements.push_back(std::move(value));
+                                            }
+    ;
+
+json_array
+    : "[" "]"                               { $$.kind = ast::JsonValue::Kind::Array; $$.location = at(@1); }
+    | "[" json_values "]"                   { $$ = $2; $$.location = at(@1); }
+    | "[" json_values "," "]"               { $$ = $2; $$.location = at(@1); }
+    ;
+
+json_values
+    : json_value                            { $$.kind = ast::JsonValue::Kind::Array; $$.elements.push_back($1); }
+    | json_values "," json_value            { $$ = $1; $$.elements.push_back($3); }
     ;
 
 args

@@ -343,7 +343,7 @@ TEST_CASE("every http_listen hands the library the program's route table, each l
     // A route after the listen that needs it, one twice, one in a function nothing calls.
     auto module = lowered("void* start() { return http_listen(); }\n"
                           "void* again() { return http_listen(); }\n"
-                          "int serve(void* r)\n"
+                          "int taker(void* r)\n"
                           "{\n"
                           "    if (http_is(r, \"GET /state\"))\n"
                           "        return http_reply(r, 204);\n"
@@ -480,7 +480,7 @@ TEST_CASE("webRoutes lists every route literal, its method and where it is, befo
     };
     std::string errors;
     auto program = fminus::Program::compile("#include \"presets.fm\"\n"
-                                            "int serve(void* r)\n"
+                                            "int taker(void* r)\n"
                                             "{\n"
                                             "    if (http_is(r, \"PUT /osc/%d/gain\") || preset(r))\n"
                                             "        return http_reply(r, 204);\n"

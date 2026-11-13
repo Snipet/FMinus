@@ -194,6 +194,10 @@ IDENTIFIER  [A-Za-z_][A-Za-z0-9_]*
 "param"                     { return Parser::make_PARAM(yyextra->where); }
 "defer"                     { return Parser::make_DEFER(yyextra->where); }
 "_Defer"                    { return Parser::make_DEFER_TS(yyextra->where); }
+"serve"                     { return Parser::make_SERVE(yyextra->where); }
+"route"                     { return Parser::make_ROUTE(yyextra->where); }
+"reply"                     { return Parser::make_REPLY(yyextra->where); }
+"json"                      { return Parser::make_JSON(yyextra->where); }
 
 {DIGITS}"."[0-9]*{EXPONENT}?[fF]?   |
 "."{DIGITS}{EXPONENT}?[fF]?         |

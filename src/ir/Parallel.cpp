@@ -109,6 +109,16 @@ namespace fminus::ir::detail
             return nullptr;
         }
 
+        // Calls f on each expression of a JSON literal's value, in order.
+        template <typename F>
+        void jsonValues(const ast::JsonValue& value, F&& f)
+        {
+            if (value.kind == ast::JsonValue::Kind::Value)
+                f(*value.value);
+            for (const ast::JsonValue& element : value.elements)
+                jsonValues(element, f);
+        }
+
         // Calls f on each of `expr`'s operands, in order.
         template <typename F>
         void operands(const ast::Expr& expr, F&& f)
@@ -158,6 +168,7 @@ namespace fminus::ir::detail
                            },
                            [](const ast::SizeofExpr&) {},
                            [](const ast::StringExpr&) {},
+                           [&](const ast::JsonExpr& json) { jsonValues(json.value, f); },
                        },
                        expr.node);
         }
@@ -267,6 +278,22 @@ namespace fminus::ir::detail
                                // What the deferred statement reaches, it reaches at the block's exits, as part of the
                                // code: its accesses are the code's.
                                [&](const ast::DeferStmt& deferred) { scoped([&] { statement(*deferred.body); }); },
+                               // A serve's server and timeout, then its routes' blocks, each with its parameters.
+                               [&](const ast::ServeStmt& serve) {
+                                   for (const ast::ExprPtr& arg : serve.args)
+                                       expression(*arg, Access::Kind::Read);
+                                   for (const ast::Route& route : serve.routes)
+                                       scoped([&] {
+                                           for (const ast::RouteParam& param : route.params)
+                                               declare(param.name, param.type);
+                                           for (const ast::Stmt& item : route.body)
+                                               statement(item);
+                                       });
+                               },
+                               [&](const ast::ReplyStmt& reply) {
+                                   for (const ast::ExprPtr& arg : reply.args)
+                                       expression(*arg, Access::Kind::Read);
+                               },
                            },
                            stmt.node);
             }
@@ -324,6 +351,7 @@ namespace fminus::ir::detail
                                [&](const ast::BoolExpr&) {},
                                [&](const ast::SizeofExpr&) {},
                                [&](const ast::StringExpr&) {},   // a constant of the program's
+                               [&](const ast::JsonExpr&) { reads(expr); },
                                [&](const ast::BinaryExpr&) { reads(expr); },
                                [&](const ast::LogicalExpr&) { reads(expr); },
                                [&](const ast::ConditionalExpr&) { reads(expr); },

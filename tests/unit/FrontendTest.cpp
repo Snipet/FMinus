@@ -213,6 +213,48 @@ TEST_CASE("defer and _Defer parse as TS 25755's defer statement: a statement aft
           == "test.fm:1:9: error: '_Defer' cannot be used as a macro name: it is one of FMinus's keywords\n");
 }
 
+TEST_CASE("serve, route and reply parse as FMinus's statements, a JSON literal as an expression", "[frontend]")
+{
+    CHECK(parsed("void f(http_server s)\n"
+                 "{\n"
+                 "    serve (s)\n"
+                 "    {\n"
+                 "        route \"POST /note/{n}\" (const int n [[fminus::range(0, 127)]], float g) { reply 204; }\n"
+                 "        route \"GET /\" \"state\" { if (s) reply 200, json { g, \"a\" \"b\": [1, (2), {}], }; }\n"
+                 "        route \"PUT /x\" () [[x::y]] { reply 200, \"text/plain\", \"%d\", 1; }\n"
+                 "    }\n"
+                 "    serve (s, 10 * 2) { route \"GET /y\" { reply 200, json [g, [], { \"z\": true }]; } }\n"
+                 "    return json { };\n"
+                 "}\n")
+          == "(function void f ((http_server s))\n"
+             "  (serve s\n"
+             "    (route \"POST /note/{n}\" ((const int n [[fminus::range(0, 127)]]) (float g))\n"
+             "      (reply 204))\n"
+             "    (route \"GET /state\"\n"
+             "      (if s\n"
+             "        (reply 200 (json {\"g\" g \"ab\" [1 2 {}]}))))\n"
+             "    (route \"PUT /x\" () [[x::y]]\n"
+             "      (reply 200 \"text/plain\" \"%d\" 1)))\n"
+             "  (serve s (* 10 2)\n"
+             "    (route \"GET /y\"\n"
+             "      (reply 200 (json [g [] {\"z\" true}]))))\n"
+             "  (return (json {})))\n");
+    // Only a route stands in a serve's braces; a reply has a status; the words are keywords, and attributes' names.
+    CHECK(parsed("void f(http_server s) { serve (s) { int x = 1; route \"GET /\" { reply 1; } } }")
+          == "test.fm:1:36: error: only a route may stand in a serve's braces: route \"METHOD /path\" (parameters) "
+             "{ ... }\n");
+    CHECK(parsed("void f() { reply; }") == "test.fm:1:17: error: expected expression\n");
+    CHECK(parsed("void f() { int json = 1; }")
+          == "test.fm:1:16: error: syntax error, unexpected json, expecting * or identifier\n");
+    CHECK(parsed("void serve() { }") == "test.fm:1:6: error: syntax error, unexpected serve, expecting * or identifier\n");
+    CHECK(parsed("void f() { g(json { \"a\" 1 }); }")
+          == "test.fm:1:25: error: syntax error, unexpected number, expecting : or string literal\n");
+    for (const char* word : {"serve", "route", "reply", "json"})
+        CHECK(parsed(std::string("#define ") + word + " 1\n")
+              == std::string("test.fm:1:9: error: '") + word
+                     + "' cannot be used as a macro name: it is one of FMinus's keywords\n");
+}
+
 TEST_CASE("if and switch parse C2y's declaration in their head, and its third form as the second", "[frontend]")
 {
     CHECK(parsed("int f(int x)\n"

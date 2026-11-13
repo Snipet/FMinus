@@ -689,6 +689,7 @@ namespace fminus::ir::detail
                 [&](const ast::ThisExpr&) { return notConstant(expr.location); },
                 [&](const ast::ConstructExpr&) { return notConstant(expr.location); },
                 [&](const ast::StringExpr&) { return notConstant(expr.location); },
+                [&](const ast::JsonExpr&) { return notConstant(expr.location); },
             },
             expr.node);
     }

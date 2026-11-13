@@ -28,6 +28,7 @@ namespace fminus::ir::detail
                 [](const ast::BoolExpr&) { return true; },
                 [](const ast::SizeofExpr&) { return true; },
                 [](const ast::StringExpr&) { return false; },   // an error wherever it is not a builtin's argument
+                [](const ast::JsonExpr&) { return false; },     // likewise, but as a reply's body
                 [&](const ast::UnaryExpr& unary) {
                     switch (unary.op)
                     {
@@ -150,14 +151,17 @@ namespace fminus::ir::detail
                        [&](const ast::WhileStmt& loop) { lowerWhile(loop); },
                        [&](const ast::ForStmt& loop) { lowerFor(loop); },
                        [&](const ast::BreakStmt&) {
-                           // A deferred statement is no loop either, and no break leaves it (TS 25755).
+                           // A deferred statement is no loop either, and no break leaves it (TS 25755); nor is a
+                           // route, which a reply leaves (Serve.cpp).
                            const bool inLoop = std::ranges::any_of(breakables_, [](const Breakable& around) {
-                               return around.kind != Breakable::Kind::Defer;
+                               return around.kind != Breakable::Kind::Defer && around.kind != Breakable::Kind::Route;
                            });
                            if (!inLoop)
                                error(stmt.location, "'break' statement not in loop or switch statement");
                            else if (breakables_.back().kind == Breakable::Kind::Defer)
                                error(stmt.location, "cannot break out of a defer statement");
+                           else if (breakables_.back().kind == Breakable::Kind::Route)
+                               error(stmt.location, "'break' cannot leave a route: a route ends with a reply");
                            else if (breakables_.back().kind == Breakable::Kind::Region)   // its body (Parallel.cpp)
                                error(stmt.location, regions_.back().loop
                                                         ? "'break' cannot leave a parallel for: its iterations run "
@@ -183,6 +187,8 @@ namespace fminus::ir::detail
                                error(stmt.location, "'continue' statement not in loop statement");
                            else if (loop->kind == Breakable::Kind::Defer)
                                error(stmt.location, "cannot continue loop outside of enclosing defer statement");
+                           else if (loop->kind == Breakable::Kind::Route)
+                               error(stmt.location, "'continue' cannot leave a route: a route ends with a reply");
                            else if (loop->continueTarget == nullptr)
                                error(stmt.location, "'continue' cannot leave a statement of a parallel block");
                            else
@@ -199,6 +205,8 @@ namespace fminus::ir::detail
                        [&](const ast::ParallelForStmt& loop) { lowerParallelFor(stmt.location, loop); },
                        [&](const ast::ParallelBlockStmt& block) { lowerParallelBlock(stmt.location, block); },
                        [&](const ast::DeferStmt& deferred) { reachDefer(stmt.location, deferred); },
+                       [&](const ast::ServeStmt& serve) { lowerServe(stmt.location, serve); },
+                       [&](const ast::ReplyStmt& reply) { lowerReply(stmt.location, reply); },
                    },
                    stmt.node);
     }
@@ -349,6 +357,16 @@ namespace fminus::ir::detail
                 builder_.CreateRetVoid();
             else
                 builder_.CreateRet(poison(result).ir);
+            return;
+        }
+        // In a route, whose way out is a reply (Serve.cpp), unless a parallel region inside it is nearer.
+        if (const Breakable* around = innermost({Breakable::Kind::Route, Breakable::Kind::Region});
+            around != nullptr && around->kind == Breakable::Kind::Route)
+        {
+            error(location, "cannot return from a route: a route ends with a reply");
+            if (ret.value != nullptr && !isString(*ret.value))
+                lower(*ret.value);   // for its own errors
+            builder_.CreateBr(routes_.back().next);
             return;
         }
         if (!regions_.empty())   // in a parallel region's body, a function of its own (Parallel.cpp)
@@ -590,6 +608,7 @@ namespace fminus::ir::detail
                               [&](const ast::CastExpr&) { return here; },
                               [&](const ast::SizeofExpr&) { return here; },
                               [&](const ast::StringExpr&) { return here; },
+                              [&](const ast::JsonExpr&) { return here; },
                           },
                           expr.node);
     }
@@ -677,6 +696,9 @@ namespace fminus::ir::detail
         else if (around->kind == Breakable::Kind::Defer)   // TS 25755: no switch jumps into a deferred statement
             diagnostics_.error(location, "cannot jump from switch statement to this case label",
                                {Diagnostic{around->location, "jump enters a defer statement", {}}});
+        else if (around->kind == Breakable::Kind::Route)   // nor into a route, which only its serve enters
+            diagnostics_.error(location, "cannot jump from switch statement to this case label",
+                               {Diagnostic{around->location, "jump enters a route", {}}});
         else
             branch = &switches_.back();
         // Nor into a defer's scope, the rest of its block after it: past a defer reached in a block of the switch's

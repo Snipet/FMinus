@@ -1394,6 +1394,32 @@ namespace fminus::web
                 out.put(digits, result.ptr);
         }
 
+        // %r and %R, a JSON literal's numbers (the compiler's formats only: ir/Serve.cpp): the shortest digits that read
+        // back as the same float (%r, of a float widened to the double it is given as) or double (%R), std::to_chars
+        // with no precision; a NaN or an infinity, which JSON has no number for, as null.
+        void putShortest(Writer& out, double value, bool single)
+        {
+            if (!std::isfinite(value))
+            {
+                constexpr std::string_view kNull = "null";
+                out.put(kNull.data(), kNull.data() + kNull.size());
+                return;
+            }
+            char digits[32];   // a double's shortest form: at most 17 digits, a sign, a point and an exponent
+            const std::to_chars_result result =
+                single ? std::to_chars(digits, digits + sizeof digits, static_cast<float>(value))
+                       : std::to_chars(digits, digits + sizeof digits, value);
+            if (result.ec == std::errc())
+                out.put(digits, result.ptr);
+        }
+
+        // %b, a JSON literal's bool: true for any value but 0.
+        void putBool(Writer& out, double value)
+        {
+            const std::string_view word = value != 0 ? "true" : "false";
+            out.put(word.data(), word.data() + word.size());
+        }
+
         void format(Writer& out, const char* text, std::int32_t length, const double* values, std::int32_t count)
         {
             if (text == nullptr || length < 0)
@@ -1415,15 +1441,19 @@ namespace fminus::web
                     out.put('%');
                     ++i;
                 }
-                else if (d == 'd' || d == 'g')
+                else if (d == 'd' || d == 'g' || d == 'r' || d == 'R' || d == 'b')
                 {
                     ++i;
                     if (next < count)
                     {
                         if (d == 'd')
                             putInt(out, values[next]);
-                        else
+                        else if (d == 'g')
                             putFloat(out, values[next], 6);
+                        else if (d == 'b')
+                            putBool(out, values[next]);
+                        else
+                            putShortest(out, values[next], d == 'r');
                         ++next;
                     }
                 }

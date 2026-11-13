@@ -271,8 +271,11 @@ float state(int port, int what)
         // What a host shows, or checks, before it runs anything.
         for (const fminus::Program::WebRoute& route : synth->program->webRoutes())
             std::printf("%s:%d: %s %s\n", route.file.c_str(), route.line, route.method.c_str(), route.pattern.c_str());
-        if (synth->program->webRoutes().size() != 4)
-            return fail("remote.fm should name 4 routes");
+        if (synth->program->webRoutes().size() != 5)
+            return fail("remote.fm should name 5 routes");
+        for (const fminus::Program::RouteParameter& parameter : synth->program->webRoutes()[0].parameters)
+            std::printf("  %s %s, from the %s, %g to %g\n", parameter.type.c_str(), parameter.name.c_str(),
+                        parameter.source.c_str(), parameter.minimum.value_or(0), parameter.maximum.value_or(0));
 
         const auto instance = makeInstance(*synth->module);
         if (!instance)

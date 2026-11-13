@@ -436,10 +436,13 @@ namespace fminus::ir::detail
             WebRead,       // fminus_web_http_status, _size, _body, _progress: a request's atomics, wait-free
             WebEnd,        // fminus_web_http_cancel, fminus_web_http_close: stops a request (and frees it)
             ServerListen,  // fminus_web_http_listen: reads the route table, gives the context's server
-            ServerTake,    // fminus_web_http_next: claims a request of the server's, wait-free
-            ServerWait,    // fminus_web_http_accept: waits for one
+            ServerTake,    // fminus_web_http_next, _next_in: claims a request of the server's (of a route set's),
+                           // wait-free
+            ServerWait,    // fminus_web_http_accept, _accept_in: waits for one
+            ServerRoute,   // fminus_web_http_route: which route a request was published for, its places kept in it
             ServerMatch,   // fminus_web_http_is: reads a route literal, keeps the numbers it took in the request
             ServerQuery,   // fminus_web_http_query_float, _int: reads a name literal and the request
+            ServerText,    // fminus_web_http_query_text: the same, giving the value's bytes and their count
             ServerReply,   // fminus_web_http_reply, _reply_bytes, _reply_text: answers, and hands the request back
             FileOpen,      // fminus_rt_file_read, fminus_rt_file_list (runtime/Files.h): reads a name literal and its
                            // ints, gives a new handle (or a shared one that says why)
@@ -502,10 +505,14 @@ namespace fminus::ir::detail
             RuntimeFacts{"fminus_web_http_port", RuntimeKind::WebRead},
             RuntimeFacts{"fminus_web_http_next", RuntimeKind::ServerTake},
             RuntimeFacts{"fminus_web_http_accept", RuntimeKind::ServerWait},
+            RuntimeFacts{"fminus_web_http_next_in", RuntimeKind::ServerTake},
+            RuntimeFacts{"fminus_web_http_accept_in", RuntimeKind::ServerWait},
+            RuntimeFacts{"fminus_web_http_route", RuntimeKind::ServerRoute},
             RuntimeFacts{"fminus_web_http_is", RuntimeKind::ServerMatch},
             RuntimeFacts{"fminus_web_http_arg", RuntimeKind::WebRead},
             RuntimeFacts{"fminus_web_http_query_float", RuntimeKind::ServerQuery},
             RuntimeFacts{"fminus_web_http_query_int", RuntimeKind::ServerQuery},
+            RuntimeFacts{"fminus_web_http_query_text", RuntimeKind::ServerText},
             RuntimeFacts{"fminus_web_http_reply", RuntimeKind::ServerReply},
             RuntimeFacts{"fminus_web_http_reply_bytes", RuntimeKind::ServerReply},
             RuntimeFacts{"fminus_web_http_reply_text", RuntimeKind::ServerReply},
@@ -738,16 +745,27 @@ namespace fminus::ir::detail
                 // Acquire loads of the server's slots and a compare-and-swap of one, which the I/O thread and every
                 // other taker race with: it changes what the next call reads (two calls are two requests, and a
                 // polling loop must call it each time round), so it writes. The slots are the library's memory. It
-                // frees nothing, and gives a request, never the server's own pointer.
-                function.setMemoryEffects(llvm::MemoryEffects::inaccessibleOrArgMemOnly());
-                function.setDoesNotFreeMemory();
-                function.addRetAttr(llvm::Attribute::NoUndef);
-                break;
+                // frees nothing, and gives a request, never the server's own pointer. _next_in reads its route set, a
+                // constant of the program's, and keeps no pointer to it.
             case RuntimeKind::ServerWait:
-                // The same, and the server's lock and condition variable, waited on.
+                // The same, and the server's lock and condition variable, waited on (and the context's deadline
+                // scopes, inaccessible too).
                 function.setMemoryEffects(llvm::MemoryEffects::inaccessibleOrArgMemOnly());
                 function.setDoesNotFreeMemory();
                 function.addRetAttr(llvm::Attribute::NoUndef);
+                if (function.arg_size() > 2)   // _next_in, _accept_in
+                {
+                    function.addParamAttr(1, llvm::Attribute::ReadOnly);
+                    function.addParamAttr(1, keepsNone);
+                }
+                break;
+            case RuntimeKind::ServerRoute:
+                // Reads the request (an acquire load of its phase, then the route it was published for) and writes
+                // that route's places into it, which http_arg reads: so it writes, as http_is does, and an http_arg
+                // after it reads again. Keeps no pointer to it.
+                function.setMemoryEffects(llvm::MemoryEffects::inaccessibleOrArgMemOnly());
+                function.setDoesNotFreeMemory();
+                function.addParamAttr(0, keepsNone);
                 break;
             case RuntimeKind::ServerMatch:
                 // Reads the request (an acquire load of its phase, which the I/O thread writes, then its method and
@@ -760,13 +778,21 @@ namespace fminus::ir::detail
                 function.addParamAttr(1, keepsNone);
                 break;
             case RuntimeKind::ServerQuery:
+            case RuntimeKind::ServerText:
                 // As WebRead (an acquire load of the request's phase, then its query), and the name literal, which it
-                // only reads.
+                // only reads. query_text writes the value's length (when its pointer is not null) and gives the
+                // address of bytes in the request's slot, which the I/O thread reuses after the reply (whose memory is
+                // any, so loads through it stay before it): neither noalias nor nonnull, null when there is none.
                 function.setMemoryEffects(llvm::MemoryEffects::inaccessibleOrArgMemOnly());
                 function.setDoesNotFreeMemory();
                 function.addParamAttr(0, keepsNone);
                 function.addParamAttr(1, llvm::Attribute::ReadOnly);
                 function.addParamAttr(1, keepsNone);
+                if (facts->kind == RuntimeKind::ServerText)
+                {
+                    function.addParamAttr(3, llvm::Attribute::WriteOnly);
+                    function.addParamAttr(3, keepsNone);
+                }
                 break;
             case RuntimeKind::ServerReply:
                 // Writes the reply into the request's own buffer and publishes it with a compare-and-swap, which hands
@@ -1203,6 +1229,17 @@ namespace fminus::ir::detail
     Lowering::Value Lowering::lowerRuntimeBuiltin(SourceLocation location, const RuntimeBuiltin& builtin,
                                                   const ast::CallExpr& call)
     {
+        std::vector<const ast::Expr*> args;
+        for (const ast::ExprPtr& arg : call.args)
+            args.push_back(arg.get());
+        return lowerRuntimeCall(location, builtin, args, std::nullopt);
+    }
+
+    // The same, of `args`; with `first`, the builtin's first argument is that value, already lowered (a reply's
+    // request: Serve.cpp), and args[0] is null in its place.
+    Lowering::Value Lowering::lowerRuntimeCall(SourceLocation location, const RuntimeBuiltin& builtin,
+                                               const std::vector<const ast::Expr*>& args, std::optional<Value> first)
+    {
         const ast::Type type = resultType(builtin.result);
         if (!isBuilt(builtin.feature))
         {
@@ -1210,7 +1247,7 @@ namespace fminus::ir::detail
             return recovery(type);
         }
         if (builtin.effect != RuntimeEffect::WaitFree)
-            calls_[function_->name].push_back({location, call.callee});   // what Effects.cpp checks
+            calls_[function_->name].push_back({location, std::string(builtin.name)});   // what Effects.cpp checks
         const std::span<const Param> params(builtin.params.data(), builtin.arity);
         const auto format = std::ranges::find_if(params, [](Param param) {
             return param == Param::Format || param == Param::Path || param == Param::XmlPath || param == Param::Url
@@ -1221,7 +1258,7 @@ namespace fminus::ir::detail
         const bool trailing = format != params.end()
                               && (*format == Param::Url || *format == Param::FileName || *format == Param::FilePattern);
         const bool choices = !params.empty() && params.back() == Param::Choices;
-        const std::size_t have = call.args.size();
+        const std::size_t have = args.size();
         if (format == params.end() && !choices && have != params.size())
         {
             wrongArity(location, have, params.size());
@@ -1241,7 +1278,7 @@ namespace fminus::ir::detail
         if (choices)
         {
             ints = 0;
-            while (formatAt + 1 + ints < have && !isString(*call.args[formatAt + 1 + ints]))
+            while (formatAt + 1 + ints < have && !isString(*args[formatAt + 1 + ints]))
                 ++ints;
             if (formatAt + 1 + ints == have)
             {
@@ -1255,21 +1292,25 @@ namespace fminus::ir::detail
         for (std::size_t i = 0; i < params.size(); ++i)
         {
             const std::size_t at = i > formatAt && !trailing ? i + ints : i;
-            const ast::Expr& arg = *call.args[at];
+            if (args[at] == nullptr)   // the value given for it
+            {
+                irArgs.push_back(convert(*first, *paramType(params[i]), location, Use::Passing));
+                continue;
+            }
+            const ast::Expr& arg = *args[at];
             const Param param = params[i];
             if (param == Param::Choices)
             {
                 std::vector<const ast::StringExpr*> literals;
                 for (std::size_t k = at; k < have; ++k)
                 {
-                    if (!isString(*call.args[k]))
+                    if (!isString(*args[k]))
                     {
-                        error(begin(*call.args[k]),
-                              "argument to " + quoted(builtin.name) + " must be a string literal");
+                        error(begin(*args[k]), "argument to " + quoted(builtin.name) + " must be a string literal");
                         fine = false;
                         continue;
                     }
-                    literals.push_back(&std::get<ast::StringExpr>(call.args[k]->node));
+                    literals.push_back(&std::get<ast::StringExpr>(args[k]->node));
                 }
                 irArgs.push_back(preparedChoices(literals));
                 continue;
@@ -1313,13 +1354,13 @@ namespace fminus::ir::detail
                     irArgs.push_back(builder_.getInt32(static_cast<std::uint32_t>(literal.value.size())));
                 }
                 if (param == Param::Route)   // what Program::webRoutes() lists, and the route table
-                    recordWebRoute(location, literal);
+                    recordWebRoute(location, literal, begin(arg));
                 if (param == Param::String || param == Param::ContentType || param == Param::Route
                     || param == Param::QueryName)
                     continue;
                 std::vector<const ast::Expr*> given;
                 for (std::size_t k = 0; k < ints; ++k)
-                    given.push_back(call.args[intsAt + k].get());
+                    given.push_back(args[intsAt + k]);
                 if (param == Param::ReplyFormat)   // its values, doubles (WebServer.cpp)
                 {
                     const std::optional<std::vector<llvm::Value*>> values = replyArguments(literal, given);

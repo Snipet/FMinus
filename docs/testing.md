@@ -49,7 +49,7 @@ Each file states what it tests in its first line, then has a few helpers and the
   `FftTest.cpp`, `HashTest.cpp`, `ParamTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`, `ParallelTest.cpp`,
   `RecoveryTest.cpp`, `DoubleTest.cpp`, `Array2DTest.cpp`, `FieldAttributeTest.cpp`, `StringTest.cpp`, `BytesTest.cpp`,
   `JsonTest.cpp`, `XmlTest.cpp` (with `HeapCalls.h`, which counts a thread's calls of the C heap), `HandleTest.cpp`,
-  `DeferTest.cpp` and `SelectionDeclarationTest.cpp`, and the
+  `DeferTest.cpp`, `SelectionDeclarationTest.cpp` and `ServeTest.cpp`'s errors, and the
   compiler's own: `VersionTest.cpp`, `TbaaTest.cpp`, `ZeroInitTest.cpp`, `AttributeTest.cpp`, `DenormalTest.cpp`,
   `LoopBudgetTest.cpp`, whose `compileAt` compiles at any level with the budget on or off, `BoundsCheckTest.cpp`,
   whose `compileAt` does the same with the bounds checks and keeps the checks' descriptions, and `CallThunkTest.cpp`,
@@ -128,7 +128,10 @@ TEST_CASE("functions compute what they say", "[codegen]")
   threads taking at once, closing with threads waiting, and the wait-free proof, `HeapCalls` and a child under
   seccomp's strict mode; and `WebServeTest.cpp`, programs that serve through the JIT and as an executable, and
   `readServerRoot`, a directory swapped for a link to elsewhere while it reads (Linux, `renameat2`) among them, and
-  the wait-free proof of a JIT'd `[[clang::nonblocking]]` handler. Every socket they bind is on 127.0.0.1, and every connection they make is to it; this machine's
+  the wait-free proof of a JIT'd `[[clang::nonblocking]]` handler; and `ServeTest.cpp` (`[serve]`), `serve`, `route`
+  and `reply` through the JIT over raw loopback requests (each parameter's 404 and 400, each reply's form, a JSON
+  literal's text, a refused reply's 500, two serves on two threads, `webRoutes()` with parameters, the wait-free proof
+  of a serve, and their errors). Every socket they bind is on 127.0.0.1, and every connection they make is to it; this machine's
   kernel has no IPv6, so the `localhost` and `[::1]` cases take their no-IPv6 branch. Their timeouts make them
   timing-sensitive: run them when nothing else is building), `[files]` (the file interface, docs/files.md:
   `FileBuiltinsTest.cpp`, in every build, its builtins' effects (directly and through a called function), the off
@@ -269,7 +272,7 @@ float gain(float x, float g)
 | `REQUIRES: json` (or `UNSUPPORTED: json`) | a build with the JSON parser, `FMINUS_JSON`, as the build tree's `fminus/Config.h` says (`json.fm`, `json-errors.fm`; `json-off.fm` runs only without it) |
 | `REQUIRES: xml` (or `UNSUPPORTED: xml`) | a build with the XML parser, `FMINUS_XML`, the same way (`xml.fm`, `xml-errors.fm`; `xml-off.fm` runs only without it) |
 | `REQUIRES: web` (or `UNSUPPORTED: web`) | a build with the web library, `FMINUS_WEB`, the same way (`web.fm`, `web-errors.fm`, which make no request; `web-off.fm` runs only without it) |
-| `REQUIRES: web-server` (or `UNSUPPORTED: web-server`) | a build with its server, `FMINUS_WEB_SERVER`, the same way (`web-server.fm`, which listens on 127.0.0.1 and asks itself, and `web-server-errors.fm`; `web-server-off.fm` runs only without it) |
+| `REQUIRES: web-server` (or `UNSUPPORTED: web-server`) | a build with its server, `FMINUS_WEB_SERVER`, the same way (`web-server.fm` and `serve.fm`, which listen on 127.0.0.1 and ask themselves, and `web-server-errors.fm` and `serve-errors.fm`; `web-server-off.fm` runs only without it) |
 | `REQUIRES: files` (or `UNSUPPORTED: files`) | a build with the file interface, `FMINUS_FILES`, the same way (`files.fm`, `files-errors.fm`, which read and write only in `%t`; `files-off.fm` runs only without it) |
 | `REQUIRES: files-write`, `files-anywhere` (or `UNSUPPORTED:`) | a build with its writing, `FMINUS_FILES_WRITE`, or its absolute names, `FMINUS_FILES_ANYWHERE` (`files-write.fm`, `files-anywhere.fm`; `files-write-off.fm` and `files-anywhere-off.fm` only without them) |
 | `REQUIRES: files-types` (or `UNSUPPORTED: files-types`) | a build whose `FMINUS_FILES_TYPES` lists the types it can touch, which `%files_types` substitutes (`files-types.fm`; `files.fm`, which reads a `.json`, only without it) |

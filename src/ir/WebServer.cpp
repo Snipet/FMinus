@@ -18,6 +18,13 @@
 //   and %.Ng with N from 1 to 17 a float or a double (which C promotes to one), %% a percent sign; checked as clang
 //   checks printf's, in its words ("format specifies type 'double' but the argument has type 'int'"). The library gets
 //   the format as written and the values as doubles (an int's exactly, a float's widened), and writes the text itself.
+// - A route statement's literal (Serve.cpp) is a route literal with holes, `{name}`, where a %d could stand
+//   (scanRouteHoles), each a %d to the library; it joins the table, and the metadata with its parameters.
+// - No two route literals of the program, a route statement's or an http_is call's, may be such that one request
+//   could match both, with neither more specific than the other (checkRouteOverlaps): Go's ServeMux's rule, a literal
+//   segment more specific than one with a hole, as the library ranks them when it publishes a request for the most
+//   specific route that matches. The same literal in two http_is calls stays legal: a program may test a request
+//   twice.
 #include "ir/Lowering.h"
 
 #include <llvm/IR/Constants.h>
@@ -186,6 +193,65 @@ namespace fminus::ir::detail
         }
         endSegment(text.size());
         return errors;
+    }
+
+    RouteHoles scanRouteHoles(std::string_view text)
+    {
+        RouteHoles scan;
+        const auto fail = [&](std::size_t offset, std::string message) {
+            scan.errors.push_back({offset, std::move(message)});
+            return scan;
+        };
+        std::size_t holeEnd = std::string_view::npos;   // one past the last hole's '}'
+        for (std::size_t i = 0; i < text.size(); ++i)
+        {
+            const char c = text[i];
+            if (c == '%')
+                return fail(i, "a route statement writes a hole as {name}, a parameter's name: %d is http_is's "
+                               "spelling");
+            if (c != '{')
+            {
+                if (holeEnd == i && isDigit(c))
+                    return fail(i, "a digit right after a hole can never match: a hole takes all the digits there "
+                                   "are");
+                scan.library += c;
+                scan.offsets.push_back(i);
+                continue;
+            }
+            const std::size_t close = text.find('}', i);
+            if (close == std::string_view::npos)
+                return fail(i, "a hole is a parameter's name in braces, {name}: this one has no '}'");
+            const std::string_view name = text.substr(i + 1, close - i - 1);
+            const bool identifier =
+                !name.empty() && !isDigit(name.front()) && std::ranges::all_of(name, [](char n) {
+                    return (n >= 'a' && n <= 'z') || (n >= 'A' && n <= 'Z') || isDigit(n) || n == '_';
+                });
+            if (!identifier)
+                return fail(i + 1, "a hole is a parameter's name in braces, {name}");
+            if (holeEnd == i)
+                return fail(i, "a hole right after another can never match: each takes all the digits there are");
+            if (scan.holes.size() == static_cast<std::size_t>(kMaxRouteNumbers))
+                return fail(i, "a route takes at most 8 holes");
+            scan.holes.push_back({std::string(name), i});
+            scan.library += "%d";
+            scan.offsets.push_back(i);
+            scan.offsets.push_back(i);
+            holeEnd = close + 1;
+            i = close;
+        }
+        // The rest is a route literal's (scanRoute), its words about %d said of holes.
+        for (FormatScan::Error error : scanRoute(scan.library))
+        {
+            error.offset = error.offset < scan.offsets.size() ? scan.offsets[error.offset]
+                                                              : (text.empty() ? 0 : text.size() - 1);
+            if (error.message.starts_with("a route is a path alone"))
+                error.message = "a route is a path alone: its parameters that no hole names are read from the "
+                                "request's query";
+            for (std::size_t at = error.message.find("%d"); at != std::string::npos; at = error.message.find("%d"))
+                error.message.replace(at, 2, "{name}");
+            scan.errors.push_back(std::move(error));
+        }
+        return scan;
     }
 
     ReplyFormatScan scanReplyFormat(std::string_view text)
@@ -382,35 +448,251 @@ namespace fminus::ir::detail
         return array;
     }
 
+    namespace
+    {
+        // A checked literal's path as a pattern, each %d a "*".
+        std::string pattern(const std::string& text)
+        {
+            std::string pattern;
+            for (std::size_t i = text.find(' ') + 1; i < text.size(); ++i)
+            {
+                if (text[i] == '%')   // %d
+                {
+                    pattern += '*';
+                    ++i;
+                }
+                else
+                    pattern += text[i];
+            }
+            return pattern;
+        }
+
+        // One route's entry of the metadata: its method, its pattern, where it is; for a route statement's, `statement`
+        // and its parameters too.
+        llvm::MDTuple* routeEntry(llvm::LLVMContext& context, const std::string& text, const std::string& file,
+                                  SourceLocation location, llvm::Metadata* parameters)
+        {
+            llvm::Type* i32 = llvm::Type::getInt32Ty(context);
+            std::vector<llvm::Metadata*> operands{
+                llvm::MDString::get(context, text.substr(0, text.find(' '))), llvm::MDString::get(context, pattern(text)),
+                llvm::MDString::get(context, file),
+                llvm::ConstantAsMetadata::get(llvm::ConstantInt::getSigned(i32, location.line)),
+                llvm::ConstantAsMetadata::get(llvm::ConstantInt::getSigned(i32, location.column))};
+            if (parameters != nullptr)
+                operands.push_back(parameters);
+            return llvm::MDTuple::get(context, operands);
+        }
+    } // namespace
+
     // The call's route, its method and its path as a pattern, each %d a "*", where it is: the module's named
-    // metadata, which ir::webRoutes reads. And the literal, once, for the route table.
-    void Lowering::recordWebRoute(SourceLocation location, const ast::StringExpr& literal)
+    // metadata, which ir::webRoutes reads. And the literal, once, for the route table, and for the check of
+    // overlaps, where it is written (`where`).
+    void Lowering::recordWebRoute(SourceLocation location, const ast::StringExpr& literal, SourceLocation where)
     {
         const std::string& text = literal.value;   // checked: a method, one space, a path
-        const std::size_t space = text.find(' ');
-        std::string pattern;
-        for (std::size_t i = space + 1; i < text.size(); ++i)
-        {
-            if (text[i] == '%')   // %d
-            {
-                pattern += '*';
-                ++i;
-            }
-            else
-                pattern += text[i];
-        }
-        if (std::ranges::find(webRoutes_, text) == webRoutes_.end())
-            webRoutes_.push_back(text);
+        routeIndex(text);
         if (relowering_ > 0)
             return;   // a deferred statement lowered again: recorded the first time (Statements.cpp)
-        llvm::LLVMContext& context = module_.getContext();
-        llvm::Type* i32 = llvm::Type::getInt32Ty(context);
-        llvm::NamedMDNode* routes = module_.getOrInsertNamedMetadata(kWebRoutesMetadata);
-        routes->addOperand(llvm::MDTuple::get(
-            context, {llvm::MDString::get(context, text.substr(0, space)), llvm::MDString::get(context, pattern),
-                      llvm::MDString::get(context, diagnostics_.file(location.file).name),
-                      llvm::ConstantAsMetadata::get(llvm::ConstantInt::getSigned(i32, location.line)),
-                      llvm::ConstantAsMetadata::get(llvm::ConstantInt::getSigned(i32, location.column))}));
+        routeLiterals_.push_back({text, text, where, false});
+        module_.getOrInsertNamedMetadata(kWebRoutesMetadata)
+            ->addOperand(routeEntry(module_.getContext(), text, diagnostics_.file(location.file).name, location,
+                                    nullptr));
+    }
+
+    // The route table's index of a route literal (the library's text), which joins the table if it is not in it yet.
+    std::size_t Lowering::routeIndex(const std::string& text)
+    {
+        const auto found = std::ranges::find(webRoutes_, text);
+        if (found != webRoutes_.end())
+            return static_cast<std::size_t>(found - webRoutes_.begin());
+        webRoutes_.push_back(text);
+        return webRoutes_.size() - 1;
+    }
+
+    // A route statement's literal, `library` the library's text of it (holes as %d), checked: in the metadata with
+    // its parameters (`parameters`, Serve.cpp's), and among the literals the overlaps are checked for.
+    void Lowering::recordRouteStatement(const ast::Route& route, const std::string& library,
+                                        llvm::Metadata* parameters)
+    {
+        if (relowering_ > 0)
+            return;
+        routeLiterals_.push_back({library, route.literal.value, route.literalLocation, true});
+        module_.getOrInsertNamedMetadata(kWebRoutesMetadata)
+            ->addOperand(routeEntry(module_.getContext(), library, diagnostics_.file(route.location.file).name,
+                                    route.location, parameters));
+    }
+
+    namespace
+    {
+        // A route literal's path, as the overlap check reads it: segments, each a sequence of items, a byte that is no
+        // digit, or a run of digits, its literal digits and whether a hole (a %d) ends it. A request's segment
+        // matches when its bytes are the items' in order, each run all of a run of digits there: the literal digits,
+        // and then, with a hole, one or more. (A hole takes 1 to 10 digits whose value an int holds; the check reads it
+        // as any number of digits, and so may call two routes overlapping that differ only past ten digits.)
+        struct Item
+        {
+            char byte = 0;          // a byte's, or 0 for a run
+            std::string digits;     // a run's literal digits
+            bool hole = false;      // a run's: a hole ends it
+        };
+        using Segment = std::vector<Item>;
+
+        std::vector<Segment> segments(const std::string& text)
+        {
+            std::vector<Segment> path(1);
+            for (std::size_t i = text.find(' ') + 2; i < text.size(); ++i)
+            {
+                const char c = text[i];
+                Segment& segment = path.back();
+                const bool inRun = !segment.empty() && segment.back().byte == 0 && !segment.back().hole;
+                if (c == '/')
+                    path.emplace_back();
+                else if (c == '%')   // %d
+                {
+                    if (inRun)
+                        segment.back().hole = true;
+                    else
+                        segment.push_back({0, "", true});
+                    ++i;
+                }
+                else if (isDigit(c))
+                {
+                    if (inRun)
+                        segment.back().digits += c;
+                    else
+                        segment.push_back({0, std::string(1, c), false});
+                }
+                else
+                    segment.push_back({c, "", false});
+            }
+            return path;
+        }
+
+        // What two runs' requests have in common: whether any (`meet`), whether every one of a's is b's, and the
+        // other way, and one that both match.
+        struct Relation
+        {
+            bool meet = false;
+            bool aInB = false;
+            bool bInA = false;
+            std::string example;
+        };
+
+        Relation relate(const Item& a, const Item& b)
+        {
+            Relation r;
+            if (a.byte != 0 || b.byte != 0)
+            {
+                r.meet = r.aInB = r.bInA = a.byte == b.byte;
+                r.example = std::string(1, a.byte);
+                return r;
+            }
+            const auto within = [](const Item& x, const Item& y) {   // all of x's are y's
+                if (!x.hole)
+                    return y.hole ? x.digits.size() > y.digits.size() && x.digits.starts_with(y.digits)
+                                  : x.digits == y.digits;
+                return y.hole && x.digits.starts_with(y.digits);
+            };
+            r.aInB = within(a, b);
+            r.bInA = within(b, a);
+            if (!a.hole || !b.hole)
+            {
+                // A run without a hole is one number: they meet when it is in the other's.
+                const Item& exact = !a.hole ? a : b;
+                r.meet = !a.hole ? r.aInB : r.bInA;
+                r.example = exact.digits;
+            }
+            else
+            {
+                const Item& longer = a.digits.size() >= b.digits.size() ? a : b;
+                const Item& shorter = &longer == &a ? b : a;
+                r.meet = longer.digits.starts_with(shorter.digits);
+                r.example = longer.digits + "0";
+            }
+            return r;
+        }
+
+        // A segment's rank, as the library ranks it: 0 with no hole, else its holes. The lower is the more specific.
+        int rank(const Segment& segment)
+        {
+            return static_cast<int>(std::ranges::count_if(segment, [](const Item& item) { return item.hole; }));
+        }
+    } // namespace
+
+    // Two route literals of the program that one request could match, the same method's, neither more specific than
+    // the other (Go's ServeMux's rule: a segment's requests all another's), or ranked the same by the library in
+    // every segment (then it would hand such a request to the first in its table): an error at the second, with a
+    // note at the first. The same literal twice, in two http_is calls, is a program testing a request twice, and
+    // fine.
+    void Lowering::checkRouteOverlaps()
+    {
+        std::vector<std::vector<Segment>> parsed;
+        for (const RouteLiteral& literal : routeLiterals_)
+            parsed.push_back(segments(literal.text));
+        for (std::size_t second = 1; second < routeLiterals_.size(); ++second)
+        {
+            const RouteLiteral& b = routeLiterals_[second];
+            for (std::size_t first = 0; first < second; ++first)
+            {
+                const RouteLiteral& a = routeLiterals_[first];
+                if (a.text.substr(0, a.text.find(' ')) != b.text.substr(0, b.text.find(' ')))
+                    continue;
+                const std::vector<Segment>& pa = parsed[first];
+                const std::vector<Segment>& pb = parsed[second];
+                if (pa.size() != pb.size())
+                    continue;
+                bool meet = true;
+                bool aInB = true;
+                bool bInA = true;
+                std::string example = a.text.substr(0, a.text.find(' ') + 1);
+                for (std::size_t k = 0; k < pa.size() && meet; ++k)
+                {
+                    example += '/';
+                    if (pa[k].size() != pb[k].size())
+                    {
+                        meet = false;
+                        break;
+                    }
+                    for (std::size_t i = 0; i < pa[k].size(); ++i)
+                    {
+                        const Relation r = relate(pa[k][i], pb[k][i]);
+                        meet = meet && r.meet;
+                        aInB = aInB && r.aInB;
+                        bInA = bInA && r.bInA;
+                        example += r.example;
+                    }
+                }
+                if (!meet)
+                    continue;
+                std::string why;
+                if (aInB && bInA)
+                {
+                    if (!a.statement && !b.statement)
+                        continue;   // the same literal in two http_is calls
+                    why = a.written == b.written
+                              ? "the route '" + b.written + "' is written twice: which would take its requests?"
+                              : "route '" + b.written + "' conflicts with '" + a.written
+                                    + "': they match the same requests, and neither would take them before the other";
+                }
+                else if (!aInB && !bInA)
+                    why = "route '" + b.written + "' conflicts with '" + a.written + "': " + example
+                          + " matches both, and neither is more specific than the other";
+                else
+                {
+                    // The more specific must be what the library takes: the first segment whose ranks differ decides.
+                    int decided = 0;
+                    for (std::size_t k = 0; k < pa.size() && decided == 0; ++k)
+                        decided = rank(pa[k]) < rank(pb[k]) ? 1 : rank(pa[k]) > rank(pb[k]) ? 2 : 0;
+                    if (decided == (aInB ? 1 : 2))
+                        continue;
+                    why = "route '" + b.written + "' conflicts with '" + a.written + "': " + example
+                          + " matches both, and each has as many holes as the other in each segment, so neither "
+                            "is taken before the other";
+                }
+                diagnostics_.error(b.location, why, {Diagnostic{a.location, "the other route is here", {}}});
+                break;   // one error a literal
+            }
+        }
     }
 
     // What http_listen passes the library: the program's web context (Web.cpp), and its route table, which
@@ -476,7 +758,26 @@ namespace fminus::ir
             return static_cast<int>(llvm::mdconst::extract<llvm::ConstantInt>(node.getOperand(i))->getSExtValue());
         };
         for (const llvm::MDNode* node : named->operands())
-            routes.push_back({text(*node, 0), text(*node, 1), text(*node, 2), number(*node, 3), number(*node, 4)});
+        {
+            WebRoute route{text(*node, 0), text(*node, 1), text(*node, 2), number(*node, 3), number(*node, 4)};
+            if (node->getNumOperands() > 5)   // a route statement's, with its parameters (Serve.cpp)
+            {
+                route.statement = true;
+                const auto real = [](const llvm::MDNode& entry, unsigned i) -> std::optional<double> {
+                    const auto* tuple = llvm::cast<llvm::MDNode>(entry.getOperand(i));
+                    if (tuple->getNumOperands() == 0)
+                        return std::nullopt;
+                    return llvm::mdconst::extract<llvm::ConstantFP>(tuple->getOperand(0))->getValueAPF().convertToDouble();
+                };
+                for (const llvm::MDOperand& operand : llvm::cast<llvm::MDNode>(node->getOperand(5))->operands())
+                {
+                    const auto& entry = *llvm::cast<llvm::MDNode>(operand);
+                    route.parameters.push_back({text(entry, 0), text(entry, 1), text(entry, 2), real(entry, 3),
+                                                real(entry, 4), real(entry, 5)});
+                }
+            }
+            routes.push_back(std::move(route));
+        }
         return routes;
     }
 } // namespace fminus::ir

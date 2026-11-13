@@ -133,6 +133,11 @@ namespace fminus::ir::detail
                 [&](const ast::CastExpr& cast) { return lowerCast(expr.location, cast); },
                 [&](const ast::SizeofExpr& size) { return lowerSizeof(expr.location, size); },
                 [&](const ast::StringExpr&) { return notAValue(expr); },   // a builtin's argument only (Strings.cpp)
+                [&](const ast::JsonExpr&) {   // a reply's body only (Serve.cpp)
+                    error(expr.location, "FMinus has no JSON values: a JSON literal is only a reply's body, 'reply "
+                                         "status, json { ... };'");
+                    return recovery(ast::Type::Float);
+                },
             },
             expr.node);
         value.failed = value.failed || diagnostics_.errors().size() != reported;

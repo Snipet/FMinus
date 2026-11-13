@@ -126,6 +126,7 @@ namespace fminus::ast
         std::string declared(Type type, bool isConst, bool isRestrict, const Expr* size = nullptr,
                              const Expr* rowSize = nullptr);
         std::string stringLiteral(const std::string& text);
+        std::string dump(const JsonValue& value);
 
         std::string dump(const Expr& expr)
         {
@@ -202,8 +203,36 @@ namespace fminus::ast
                                   [](const StringExpr& string) {   // "a\0b", one literal however written
                                       return stringLiteral(string.value);
                                   },
+                                  [](const JsonExpr& json) {   // (json {"gain" gain "taps" [a b]})
+                                      return "(json " + dump(json.value) + ")";
+                                  },
                               },
                               expr.node);
+        }
+
+        // A JSON literal's value: an expression, {"key" value ...}, or [value ...].
+        std::string dump(const JsonValue& value)
+        {
+            switch (value.kind)
+            {
+            case JsonValue::Kind::Value:
+                return dump(*value.value);
+            case JsonValue::Kind::Object:
+            {
+                std::string text = "{";
+                for (std::size_t i = 0; i < value.elements.size(); ++i)
+                    text += (i > 0 ? " " : "") + stringLiteral(value.keys[i].value) + " " + dump(value.elements[i]);
+                return text + "}";
+            }
+            case JsonValue::Kind::Array:
+            {
+                std::string text = "[";
+                for (std::size_t i = 0; i < value.elements.size(); ++i)
+                    text += (i > 0 ? " " : "") + dump(value.elements[i]);
+                return text + "]";
+            }
+            }
+            return "";
         }
 
         // A declared name's type, as C spells it: `const float`, `const float * restrict`, `float * const`,
@@ -316,6 +345,7 @@ namespace fminus::ast
         }
 
         std::string dump(const Stmt& stmt, const std::string& indent);
+        std::string dump(const Route& route, const std::string& indent);
 
         // A selection statement's declarations (C2y's), each followed by a space: `(decl int n 1) `.
         std::string declarations(const std::vector<Stmt>& init)
@@ -397,8 +427,41 @@ namespace fminus::ast
                                   [&](const DeferStmt& deferred) {   // (defer\n  s)
                                       return indent + "(defer\n" + dump(*deferred.body, indent + "  ") + ")";
                                   },
+                                  [&](const ServeStmt& serve) {   // (serve server 100\n  (route ...))
+                                      std::string text = indent + "(serve";
+                                      for (const ExprPtr& arg : serve.args)
+                                          text += " " + dump(*arg);
+                                      for (const Route& route : serve.routes)
+                                          text += "\n" + dump(route, indent + "  ");
+                                      return text + ")";
+                                  },
+                                  [&](const ReplyStmt& reply) {   // (reply 200 (json {"gain" gain}))
+                                      std::string text = indent + "(reply";
+                                      for (const ExprPtr& arg : reply.args)
+                                          text += " " + dump(*arg);
+                                      return text + ")";
+                                  },
                               },
                               stmt.node);
+        }
+
+        // (route "POST /note/{note}" ((int note [[fminus::range(0, 127)]]))\n  items...): its literal as written, its
+        // parameters when it has a list, the attributes after the list, and its block's items.
+        std::string dump(const Route& route, const std::string& indent)
+        {
+            std::string text = indent + "(route " + stringLiteral(route.literal.value);
+            if (route.hasParams)
+            {
+                std::string params;
+                for (const RouteParam& param : route.params)
+                    params += std::string(params.empty() ? "" : " ") + "(" + (param.isConst ? "const " : "")
+                              + typeName(param.type) + " " + param.name + attributesText(param.attributes) + ")";
+                text += " (" + params + ")";
+            }
+            text += attributesText(route.attributes);
+            for (const Stmt& item : route.body)
+                text += "\n" + dump(item, indent + "  ");
+            return text + ")";
         }
     } // namespace
 

@@ -6,6 +6,7 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -176,6 +177,20 @@ namespace fminus::ir
     // the order it lowered them (WebServer.cpp; a build with FMINUS_WEB_SERVER): its route literal's method ("GET",
     // "POST", "PUT", "PATCH" or "DELETE") and its path as a pattern, each %d a "*"; and where the call is (its file as
     // the errors name it, its line and column).
+    //
+    // A route statement's (Serve.cpp) is recorded there too, where its `route` is, with `statement` set and its
+    // parameters: each one's name, its type ("int", "float", "bool" or "http_request"), what fills it ("path", a hole;
+    // "query", the query's field of its name; "request", the request itself), and its fminus::range and
+    // fminus::default when it has them.
+    struct WebRouteParameter
+    {
+        std::string name;
+        std::string type;
+        std::string source;
+        std::optional<double> minimum;
+        std::optional<double> maximum;
+        std::optional<double> defaultValue;
+    };
     struct WebRoute
     {
         std::string method;
@@ -183,6 +198,8 @@ namespace fminus::ir
         std::string file;
         int line = 0;
         int column = 0;
+        bool statement = false;
+        std::vector<WebRouteParameter> parameters = {};
     };
     std::vector<WebRoute> webRoutes(const llvm::Module& module);
 

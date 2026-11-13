@@ -30,7 +30,8 @@ recipe 42 is its server, a program's requests taken on the audio thread, wait-fr
 lists before anything runs; and recipe 43 is the file interface, files a program reaches only through the folders its
 host maps, each directory opened beneath the last and compared by identity with the denied ones; and recipe 44 is C's
 own again, the first step of a report on syntax for networked programs: a type for each kind of handle, TS 25755's
-`defer`, and C2y's `if` and `switch` with a declaration. Then the pitfalls
+`defer`, and C2y's `if` and `switch` with a declaration; and recipe 45 is its second step, FMinus's own: `serve`,
+`route` and `reply`, statements over the server's builtins, and a JSON literal a reply writes. Then the pitfalls
 those recipes ran into, and design notes for what comes next. [simd.md](simd.md) has recipes 7 to 9, for vectors.
 
 Recipes 1 to 4 are in the compiler now (`tanhf` and `%`; `bool` and its operators; `if`, `while` and `for`), and so are
@@ -44,10 +45,11 @@ recipe 32 (one error a mistake, enumerated types, `-Wswitch`), recipe 33 (`doubl
 (field attributes), recipe 36 (calls by name), recipe 37 (code ranges, for a profiler), recipe 38 (string literals as
 builtins' arguments, bytes to numbers, and the build options of builtins), recipe 39 (the JSON parser, and paths
 the compiler prepares), recipe 40 (the XML parser), recipe 41 (the web library), recipe 42 (its server), recipe 43
-(the file interface) and recipe 44 (typed handles, `defer`, and `if` and `switch` with a declaration), so their sections describe how the code you have got there: read a section beside the files it
+(the file interface), recipe 44 (typed handles, `defer`, and `if` and `switch` with a declaration) and recipe 45
+(`serve`, `route`, `reply` and the JSON literal), so their sections describe how the code you have got there: read a section beside the files it
 names. Recipes 5 and 6, a runtime function and a pass, are not part of the language; they live in [recipes/](recipes/)
 as a patch, so you can apply them to see them work. None of these are sketches: each was applied to this repository, built with `-Werror`, and
-tested in the dev and asan presets, every test passing (recipes 38 to 44 in the release preset only: each says where).
+tested in the dev and asan presets, every test passing (recipes 38 to 45 in the release preset only: each says where).
 [architecture.md](architecture.md) describes the stages they touch.
 
 FMinus follows C. When a recipe has a semantic choice to make, it makes C's: conversions, short-circuiting, which
@@ -68,7 +70,7 @@ Most language features touch the same places, in this order:
 | 6 | `src/runtime/` | if it needs C++ at run time, a runtime function (recipe 5); if a builtin calls it, its facts: in `kRuntimeFacts`, through `callRuntime` (recipe 19), or for a math builtin's, in `mathFunction` (`Math.cpp`, recipe 15) |
 | 7 | `src/jit/Call.cpp`, `src/support/Aot.cpp` | for a new type: whether a call by name, `Program::call` and `--run`, passes and returns it (`callType`'s `switch`, recipe 36), and whether an executable's `main` may take or return it (`addEntryPoint`) |
 | 8 | `tests/` | a dump in `FrontendTest.cpp`; results in `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `SwitchTest.cpp`, `EnumTest.cpp`, `IntTest.cpp`, `BitwiseTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `TableTest.cpp`, `TopLevelTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `HashTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`, `ParallelTest.cpp`, `DoubleTest.cpp`, `Array2DTest.cpp`, `FieldAttributeTest.cpp`, `StringTest.cpp`, `BytesTest.cpp`, `JsonTest.cpp`, `XmlTest.cpp`, `HandleTest.cpp`,
-`DeferTest.cpp` or `SelectionDeclarationTest.cpp` (their helpers are in `Compile.h`; a runtime function that must not allocate is counted with `HeapCalls.h`); IR or errors in `tests/lit/fminus/` |
+`DeferTest.cpp`, `SelectionDeclarationTest.cpp` or `ServeTest.cpp` (their helpers are in `Compile.h`; a runtime function that must not allocate is counted with `HeapCalls.h`); IR or errors in `tests/lit/fminus/` |
 | 9 | `examples/` | a program that uses it, and a line in `tests/lit/fminus/examples.test` that runs it |
 | 10 | `editors/vscode/syntaxes/fminus.tmLanguage.json` | a new keyword, type or builtin, so VSCode highlights it (its README says where) |
 | 11 | `README.md` | the language table, and the deviations from C if any |
@@ -89,7 +91,7 @@ on the heap and a kernel that can't allocate (recipe 11), `examples/saturator/` 
 through a buffer, against plain loops (recipes 9 and 10), `examples/convolver/` and `examples/delay/echo.fm` for loops
 over a module's fields (recipe 17), `examples/ensemble/` for `parallel for` and `parallel { }` (recipe 22), and
 `examples/wavetable/` for a document a host hands a program, read by path (recipes 39 and 40), `examples/fetch/` for
-a request a program makes (recipe 41), `examples/remote/` for the requests a program answers (recipe 42), and
+a request a program makes (recipe 41), `examples/remote/` for the requests a program answers (recipes 42 and 45), and
 `examples/kit/` for the files a program reads and writes (recipe 43).
 
 ## Ground rules
@@ -8720,6 +8722,269 @@ switch's head is declared before its jump, outside the body's scopes, so no labe
 - `tests/lit/fminus/handles.fm`, `defer.fm` and `selection-declarations.fm`: the IR at `-O0` (a handle's tag, the
   copies of a deferred call at each exit, a declaration stored before its condition) and at `-O2`, and errors.
 
+## Recipe 45: `serve`, `route` and `reply`, and the JSON literal of scalars
+
+*In the compiler. Code: the four keywords (`src/frontend/Lexer.l`, `Parser.y`: `serve_items`, `route`,
+`route_params`, `route_param`, the `json_*` rules, and the words in `attribute_word`), `ServeStmt`, `Route`,
+`RouteParam`, `ReplyStmt`, `JsonExpr` and `JsonValue` and their dump (`src/frontend/Ast.h`, `Ast.cpp`); `src/ir/Serve.cpp`
+(`lowerServe`, `checkRouteParameters`, `lowerRoute`, `fillParameter`, `lowerReply`, `lowerJsonReply`, `jsonFormat`,
+`innermost`), `Breakable::Kind::Route`, `RouteState`, `RouteLiteral` and `RouteHoles` (`Lowering.h`); a route's holes,
+its record and the overlap check in `src/ir/WebServer.cpp` (`scanRouteHoles`, `routeIndex`, `recordRouteStatement`,
+`checkRouteOverlaps`, called from `CodeGen.cpp`); `lowerRuntimeCall`, the builtins' argument checks for a call whose
+first value is given (`Calls.cpp`), and the facts of `fminus_web_http_next_in`, `_accept_in`, `_route` and
+`_query_text` (`kRuntimeFacts`); `return`, `break`, `continue` and a `case` label in a route (`Statements.cpp`); the
+walks (`Parallel.cpp`, `Constants.cpp`, `Expressions.cpp`); `ir::WebRoute::parameters` and `statement`
+(`src/ir/CodeGen.h`), `Program::RouteParameter` and `Program::WebRoute`'s two new members
+(`include/fminus/FMinus.h`, `src/api/FMinus.cpp`); and in the library, a reply's format's `%r`, `%R` and `%b`
+(`src/web/Server.cpp`, `Web.h`). Tests: `tests/unit/ServeTest.cpp`, a case of `FrontendTest.cpp`,
+`tests/lit/fminus/serve.fm` and `serve-errors.fm`, and `web-server-off.fm`'s serve. The example `examples/remote/` is
+written with the statements. Built with `-Werror` and tested in the `release` preset on Linux x86-64 only, in two trees,
+the default and one with the web library, its server, file writing and absolute names, every test passing but the one
+this machine cannot run (the smoke test of LLVM's own `opt`, as for recipes 38 to 44); not in a tree with `FMINUS_WEB`
+and not its server, nor in `dev` or `asan`, nor on macOS or Windows. [research/syntax/README.md](research/syntax/README.md)
+is the report, §5 and §6.1; this is its second step. [web.md](web.md), "serve, route and reply" and "The JSON
+literal", is the manual.*
+
+FMinus's own syntax, the first since `parallel`: three statements that put the server's builtins (recipe 42) under a
+loop and a chain the compiler writes, and a literal that writes JSON without a JSON value. What a program wrote by hand
+in recipe 42 is now:
+
+```c
+void process(float* out, int n) [[clang::nonblocking]]
+{
+    serve (server)
+    {
+        route "POST /note/{note}" (int note [[fminus::range(0, 127)]])   // 404 for /note/x, 400 for /note/128
+        {
+            pitch = 440.0f * expf(0.05776227f * (float)(note - 69));
+            reply 204;
+        }
+        route "GET /state"
+        {
+            reply 200, json { gain, pitch, level, changes };
+        }
+    }
+    // ... the block
+}
+```
+
+and three mistakes that compiled before do not: a request taken and never answered (a route that can end without a
+reply), a number read from the wrong `%d` (a hole is its parameter), and two routes that would both take a request
+(an overlap).
+
+### Tokens, grammar, nodes
+
+`serve`, `route`, `reply` and `json` are keywords, each a token of its own and a word of `attribute_word`, where C23
+reads a keyword as a name. The rules are the report's appendix D's, with three changes, each without a conflict (488
+states, against 428 before):
+
+```
+unlabeled   : ... | "serve" "(" arg_list ")" "{" serve_items "}" | "reply" arg_list ";" | "reply" ";"
+serve_items : %empty | serve_items route | serve_items block_item          the last an error: only a route stands there
+route       : "route" string_literal route_params attributes block
+route_param : qualifier type pointer IDENTIFIER attributes                 a function's parameter, with C23's attributes
+expr        : ... | "json" json_object | "json" json_array
+json_member : string_literal ":" json_value | IDENTIFIER
+```
+
+A non-route in a serve's braces parses (so the error is FMinus's words, not Bison's), and `reply;` is clang's "expected
+expression". A route keeps its literal as written (`{name}` and all), where it begins, its parameters (whether a list
+was written, `()` included, for the dump), the attributes after them, its block's items and where its closing brace is
+(Bison's location of the block, whose end column is one past the brace): the missing reply's error is there. A
+`JsonValue` is an expression, or an object (its keys, each a `StringExpr` with its bytes' places, and its values), or an
+array; a bare name is its own key, a `VariableExpr` its value. The dump writes `(serve s 100 (route "PUT /x/{k}" ((int
+k)) ...))`, `(reply 200 (json {"gain" gain "taps" [a b]}))`.
+
+### A route's literal
+
+`scanRouteHoles` reads a route statement's literal into the literal the library takes, each `{name}` a `%d`, with the
+offset in the source of each byte, and the holes' names: a `%` is an error ("%d is http_is's spelling"), a hole is a C
+identifier in braces, never right after another nor before a digit, at most 8. Then the rest is `scanRoute`'s (recipe
+42), its errors moved back to the source's bytes and their "%d" said as "{name}". `checkRouteParameters` checks what a
+literal's holes and a parameter list must agree on: each parameter an `int`, a `float`, a `bool` or an `http_request`
+(one), each name once; a hole's an `int` with no default, another's name one a query may have (64 bytes at most); the
+attributes `checkAttributes` checks on a module's parameter (recipe 35), built into a `Field` for it, and an `int`'s
+default an integer, a `bool`'s 0 or 1; each hole a parameter's, and a different one's; no attribute after the list. It
+returns the parameters' description for the host, which `recordRouteStatement` puts into the route's entry of
+`fminus.web.routes` (a sixth operand, a tuple a parameter: name, type, source, and a range's ends and a default as
+empty or one-number tuples), which `ir::webRoutes` reads back and `Program::webRoutes()` returns: `statement` and
+`parameters`, both empty for an `http_is` call's, which keeps its five operands.
+
+A good literal's library text joins the route table (`routeIndex`, the one `http_is` uses: each text once, so its
+index is its position), and its index the serve's **route set**, one bit an index in 64-bit words, a private constant
+`serve.routes`, which `fminus_web_http_next_in` and `_accept_in` take with its number of words (the library's track,
+the commit before recipe 44: a take of the oldest request published for a route in the set).
+
+### What a serve lowers to
+
+```llvm
+  %serve.take = call ptr @fminus_web_http_next_in(ptr %0, ptr @serve.routes, i32 1)
+  store ptr %serve.take, ptr %serve.request, align 8, !tbaa !18
+  br label %serve.cond
+
+serve.cond:                                       ; preds = %serve.next, %entry
+  %request = load ptr, ptr %serve.request, align 8, !tbaa !18
+  %serve.none = icmp eq ptr %request, null
+  br i1 %serve.none, label %serve.end, label %serve.body
+
+serve.body:                                       ; preds = %serve.cond
+  %request2 = load ptr, ptr %serve.request, align 8, !tbaa !18
+  %route = call i32 @fminus_web_http_route(ptr %request2)
+  switch i32 %route, label %serve.default [
+    i32 0, label %serve.route
+    i32 1, label %serve.route10
+    i32 2, label %serve.route21
+  ]
+
+serve.route:                                      ; route "POST /gain" (float value [[fminus::range(0, 1)]])
+  %request3 = load ptr, ptr %serve.request, align 8, !tbaa !18
+  %value.text = call ptr @fminus_web_http_query_text(ptr %request3, ptr @.str, i32 5, ptr null)
+  %value.missing = icmp eq ptr %value.text, null
+  br i1 %value.missing, label %param.missing, label %param.read
+
+param.missing:                                    ; no default: 400
+  br label %serve.bad
+
+param.read:
+  %1 = call float @fminus_web_http_query_float(ptr %request3, ptr @.str, i32 5, float +qnan)
+  store float %1, ptr %value, align 4, !tbaa !21
+  %value.number = fcmp ord float %1, %1
+  br i1 %value.number, label %param.done, label %serve.bad
+
+param.done:                                       ; its range, as doubles
+  ...
+  br i1 %value.inrange, label %param.fits, label %serve.bad
+
+param.fits:                                       ; the block: gain = value; changes += 1; reply 204;
+  ...
+  %http_reply = call i32 @fminus_web_http_reply(ptr %request8, i32 204)
+  %7 = icmp eq i32 %http_reply, -5
+  %8 = icmp eq i32 %http_reply, -7
+  %reply.refused = or i1 %7, %8
+  br i1 %reply.refused, label %reply.refused9, label %reply.done
+  ...
+serve.bad:                                        ; a parameter that does not fit
+  %request37 = load ptr, ptr %serve.request, align 8, !tbaa !18
+  %33 = call i32 @fminus_web_http_reply(ptr %request37, i32 400)
+  br label %serve.next
+
+serve.next:                                       ; where every reply goes on to
+  %serve.take38 = call ptr @fminus_web_http_next_in(ptr %0, ptr @serve.routes, i32 1)
+  store ptr %serve.take38, ptr %serve.request, align 8, !tbaa !18
+  br label %serve.cond, !llvm.loop !27
+```
+
+The server and the timeout are computed once, before the first take. The take is `fminus_web_http_accept_in` the first
+time when there is a timeout, and `next_in` after (the serve waits once, then handles every request waiting). The
+`switch` is on `fminus_web_http_route`, which also loads the route's places into the request, so a hole's parameter is
+`http_arg(request, k)` for its hole's place `k`, with no `http_is`. Its default, a request published for a route of no
+case, cannot happen (a request taken by a set is one of its routes'), and is answered 500 all the same; a route whose
+literal was in error has no case, and its block is lowered where nothing reaches it, for its errors. The branch back
+carries `llvm.loop.mustprogress`, as a `for` over `http_next` does, and the loop budget counts it as any loop.
+
+**A parameter** is a stack slot, bound `const` in the route's outermost scope, the one its block's items are in (a
+function's parameters' and body's way: a local of the same name is a redefinition). A query's is found or not with
+`fminus_web_http_query_text` (null when absent), then read: an `int` by `http_query_int` twice, with the fallbacks 0 and
+1, which a value cannot both give (a malformed one gives each its fallback); a `float` by `http_query_float` with a NaN
+for its fallback, which a value never is (the library reads finite numbers only); a `bool` by its bytes, compared in
+the code: `true`, `false`, `1` or `0`. A missing one takes its default, or goes to `serve.bad`; one outside its range
+(compared as doubles, which hold every `int` and `float` exactly) too. `serve.bad` answers 400, and the serve goes on.
+
+**A reply** loads the request, and calls the builtin of its form through `lowerRuntimeCall`, `lowerRuntimeBuiltin`'s
+body with the call's arguments as a list of expressions and the first one, the request, given as a value: so each
+form's arguments are checked by the very code that checks the builtin's, in its words. The form is the values' (one;
+a string literal second; a JSON literal second; four), and none fits is FMinus's error, which lists the forms. Then
+`HTTP_LIMIT` or `HTTP_INVALID` (the request still the route's) answers 500; the deferred statements of the route's
+blocks run (`runDefers` from the route's first defer scope, `RouteState::defers`: after the reply is sent, so a defer
+cannot free what a `reply 200, data, ...` sends); and it branches to `serve.next`. `routes_` holds the route being
+lowered, and a `Breakable` of `Kind::Route` marks it among the loops and switches around: `break` and `continue` that
+would cross it, a `return` (unless a parallel region is nearer), a `case` label that a switch outside would jump to,
+and a `serve` are errors at their keywords; a `reply` whose innermost of route, deferred statement and region is no
+route is one too ("cannot reply from a defer statement", "'reply' statement not in a route").
+
+**Every path must reach a reply.** After its block, a route whose block can still fall through ends with a branch to
+`serve.next`, and an error at its closing brace when its start reaches that branch through its own blocks: a search of
+the CFG that stops at `serve.next` and `serve.bad`, so a constant condition's branch is one way, as for a function's
+end (recipe 4's `branchOn`). It cannot be `depth_first`: the serve's own blocks (`serve.bad`, `serve.next`, `serve.end`)
+are not finished yet, and LLVM 23's successors of an unfinished block read past its end (Pitfalls). The message is
+clang's for a function, said of a route: "route 'GET /a' does not reply in all control paths", or "... does not reply"
+when no reply was lowered in it.
+
+**Effects** need one line: a serve with a timeout records a call of `http_accept` at the `serve`, so a nonblocking
+function refuses it in the words it refuses `http_accept` in. A route's block is the function's, its calls the
+function's calls.
+
+### Overlap
+
+`checkRouteOverlaps` runs once every function is lowered, before the route table is made, over every route literal
+the program recorded, a route statement's or an `http_is` call's (`routeLiterals_`, in the order lowered, none from a
+deferred statement lowered again). Each path is read as segments of items, a byte that is no digit or a run of digits
+(its literal digits and whether a hole ends it: `1{x}` is one run), since a hole takes all the digits there are. Two
+routes of a method, with as many segments, each pair of segments of the same shape, meet when every pair of runs can
+take one number (a literal one `12` and a hole's `1{x}`: yes; `12` and `{x}`: yes; `1{x}` and `2{y}`: no). When they
+meet: the same requests both ways is the same route (legal for two `http_is` calls, an error otherwise); neither's
+requests all the other's is an error with a request both match (`GET /a/1/y`); one more specific is legal only if the
+library ranks it first (its route ranking, the first segment whose number of holes differs deciding), since a request
+goes to the route the library ranks first, and two that rank the same go to the first in its table. One error a
+literal, at the second, its note at the first. The check reads a hole as any number of digits: two routes that differ
+only past ten digits, or past an int's range, are called overlapping, which is the safe side.
+
+### The JSON literal
+
+A `JsonExpr` lowered as a value is an error ("FMinus has no JSON values: a JSON literal is only a reply's body"), as a
+string literal is, at its `json`; `isConstant`, `fold` and the walks know it. A reply's literal is `jsonFormat`'s: the
+object's and array's punctuation and the keys (escaped as RFC 8259 asks, `"`, `\` and the control characters, each `%`
+doubled for the format; UTF-8 checked, its byte the error) are the format's text, and each value a place, its value
+lowered in order and converted to a double, as a reply's format takes them: `%r` a `float` (widened), `%R` a `double`,
+`%d` an `int`, `%b` a `bool`. A pointer, a handle, a vector, a string literal or an enumeration's value is an error
+saying what a value may be (an enumeration's: "cast it to int for its number", since step 4 writes its constant's name:
+an `int` now would change what a program's replies say then). The call is `fminus_web_http_reply_text` with
+`application/json`; of `reply 200, json { gain, "pitch": (double)pitch, "changes": changes, "on": changes > 0 };`
+(`tests/lit/fminus/serve.fm`):
+
+```llvm
+@.str.2 = private unnamed_addr constant [43 x i8] c"{\22gain\22:%r,\22pitch\22:%R,\22changes\22:%d,\22on\22:%b}", align 1
+  ...
+  %http_reply_text = call i32 @fminus_web_http_reply_text(ptr %request23, i32 200, ptr @.str.1, i32 16, ptr @.str.2, i32 43, ptr %format.values, i32 4)
+```
+
+The library's formatter learned the three: `%r` narrows the double back to the float it was widened from and writes
+`std::to_chars(float)` with no precision, the shortest digits that read back as that float (`0.1f` is `0.1`), `%R` the
+same of the double, a NaN or an infinity `null`; `%b` `true` or `false`. No format a program writes can hold them:
+`scanReplyFormat` refuses every conversion but `%d`, `%g`, `%.Ng` and `%%`. `std::to_chars` allocates nothing and makes
+no system call, and the wait-free proof covers it (`ServeTest.cpp`).
+
+### What it changes for programs and hosts
+
+- **Programs** that use none of it compile to the same IR, but for two route literals of `http_is` calls one request
+  could match with neither more specific, which are now an error (the same literal twice is not). `serve`, `route`,
+  `reply` and `json` are keywords: of the tree's programs, `examples/remote/remote.fm`'s method and function `serve`,
+  `web-server-off.fm`'s function and three test programs' functions were named `serve`, and were renamed.
+- **Hosts** see a route statement in `webRoutes()` as an `http_is` call's entry, its `statement` set and its
+  `parameters` listed; `Program::RouteParameter` is new. Nothing else of the API changed.
+- **The library** writes three conversions it did not, which only the compiler's formats hold.
+- **The VS Code grammar** (0.21.0) colours the four words and a route's holes.
+
+### Tests
+
+- `tests/unit/ServeTest.cpp` (`[serve]`): through the JIT, a module whose nonblocking `process` serves, driven by raw
+  loopback requests from the test: a float, an int and a bool from the query (each missing, malformed and out of range
+  a 400; a default), an int from a hole (a 404 for no number, a 400 out of range), the request itself, two holes filled
+  out of the parameters' order, the more specific of two routes taking what both match, the bytes, text and JSON forms,
+  a reply's deferred statement run after it, a status the library refuses answered 500; the JSON literal's text (a
+  float's and a double's shortest digits, NaN and infinities `null`, `-0`, nesting, empty objects and arrays, escaped
+  and UTF-8 keys, `%` in a key), a literal over `maxReplyBytes` answered 500; two serves on two threads, each leaving the
+  other's request waiting, a serve with a timeout waking for a late request and waiting its time for none;
+  `webRoutes()` with parameters; the wait-free proof of a serve with four parameters and each reply form, `HeapCalls`
+  and seccomp's strict mode; the missing reply on each shape of the missing return's tests; every error at its column,
+  the overlap errors with their notes; and, without the web server, a serve's error.
+- `tests/unit/FrontendTest.cpp`: the dump, a non-route in a serve's braces, `reply;`, the words as no names and no
+  macros.
+- `tests/lit/fminus/serve.fm`: the loop and the switch at `-O0`, the facts of the four new declarations, the take kept
+  in the loop at `-O2`, the dump, and the driver asking its own server and answering with a JSON literal;
+  `serve-errors.fm`: errors and their notes; `web-server-off.fm`: a serve in a build without the server.
+- `examples/remote/`: `--check` as before, through `serve` and a JSON literal, its routes now five.
+
 ## Pitfalls
 
 Each of these was hit while writing the language or its recipes. [simd.md](simd.md) has the vector ones.
@@ -8752,6 +9017,7 @@ Each of these was hit while writing the language or its recipes. [simd.md](simd.
 | An invalid program compiles, to `undef`, with no error (`float x = c ? f() : g();` of two `void` calls) | a stand-in with no error behind it was failed (recipe 32), and every use of a failed value is silent | `poison()` is not failed; only `lower`'s count and `recovery()`, where an operand's or a declaration's error is behind it, fail a value |
 | A program compiles with a frozen parameter and is refused with a knob | a decision taken on the IR, where a frozen parameter's read is a constant (`branchOn` on a `ConstantInt`) | decide on the tree (`folds()`), and take only the value from the IR |
 | The verifier: "Terminator found in the middle of a basic block" at a `return` after a `defer return;` | the deferred statement ended the block with its error's `ret`, and the exit added its own | after the deferred statements, a fresh block when the last one ended its own (`runDefers`, recipe 44) |
+| The compiler crashes, somewhere unrelated (`Instruction::clone`), when a route can end without a reply | a walk of the CFG (`llvm::depth_first`) reached a block not finished yet, the serve's own, and LLVM 23's successors of an unfinished block read past its end | finish the block first, and walk only the route's own blocks, stopping at the serve's (`lowerRoute`) |
 | An error in a deferred statement is reported once for each `return` | it is lowered at every exit of its block, and lowering checks | the first lowering reports; the others `Diagnostics::rewind` what they reported (`lowerDeferred`) |
 | `json_float(d, ...)` of a `const void* d` "discards qualifiers" once documents are `json_doc`s | a read's document was a `const void*`, and C converts none to a pointer to a struct that is not `const` | the reads take a `const void*` as well (`Param::JsonRead`, `XmlRead`) |
 | "arithmetic on a pointer to an incomplete type 'fminus::ast::Stmt'" in `<vector>`, after adding a field to a node | `std::vector<Stmt> init = {};`: a default member initialiser instantiates the vector where `Stmt` is incomplete | no initialiser, as `ForStmt::init` has none; the parser's aggregates pass `{}` |

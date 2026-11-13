@@ -419,7 +419,7 @@ namespace fminus
         // A function the program defines, whose look-up links the program's code (codeRanges); empty when it has none.
         std::string linkName;
         std::vector<WebRequest> webRequests;   // every http_get's and http_post's URL (ir/Web.cpp)
-        std::vector<WebRoute> webRoutes;       // every http_is's route (ir/WebServer.cpp)
+        std::vector<WebRoute> webRoutes;       // every http_is call's route and route statement (ir/WebServer.cpp)
         std::vector<FileUse> files;            // every file_read's, file_list's, ... name (ir/Files.cpp)
 #if FMINUS_HAS_FILES
         // The program's file context (runtime/Files.h), whose handle the module's global holds; none when the program
@@ -654,8 +654,14 @@ namespace fminus
         // Every route the program names (ir/WebServer.cpp).
         std::vector<WebRoute> webRoutes;
         for (ir::WebRoute& route : ir::webRoutes(*module))
+        {
+            std::vector<RouteParameter> parameters;
+            for (ir::WebRouteParameter& parameter : route.parameters)
+                parameters.push_back({std::move(parameter.name), std::move(parameter.type), std::move(parameter.source),
+                                      parameter.minimum, parameter.maximum, parameter.defaultValue});
             webRoutes.push_back({std::move(route.method), std::move(route.pattern), std::move(route.file), route.line,
-                                 route.column});
+                                 route.column, route.statement, std::move(parameters)});
+        }
         [[maybe_unused]] const bool usesWeb = module->getNamedGlobal(ir::kWebContextSymbol) != nullptr;
         // Every file the program names, and whether it has a file context to set (ir/Files.cpp).
         std::vector<FileUse> fileUses;

@@ -75,7 +75,7 @@ TEST_CASE("Options::web.server listens nowhere by default, webRoutes lists every
     CHECK(quiet->webPort() == 0);
 
 #if FMINUS_HAS_WEB_SERVER
-    auto program = fminus::Program::compile("int serve()\n"
+    auto program = fminus::Program::compile("int taker()\n"
                                             "{\n"
                                             "    void* server = http_listen();\n"
                                             "    void* r = http_next(server);\n"
@@ -93,7 +93,7 @@ TEST_CASE("Options::web.server listens nowhere by default, webRoutes lists every
     CHECK(route.file == "program.fm");
     CHECK(route.line == 5);
     CHECK(route.column == 9);
-    auto* serve = program->function<int()>("serve", errors);
+    auto* serve = program->function<int()>("taker", errors);
     REQUIRE(serve != nullptr);
     CHECK(serve() == -4);   // HTTP_REFUSED: no listen by default, so no server
     CHECK(program->webPort() == 0);

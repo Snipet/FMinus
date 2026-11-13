@@ -631,6 +631,32 @@ namespace fminus::ast
         ExprPtr operand;
     };
 
+    // A JSON literal's value: an expression (a float, a double, an int or a bool, which the code generator checks), an
+    // object, `{ "gain": gain, pitch }`, whose members are keys and values (a bare name is its own key and its value),
+    // or an array, `[a, b, c]`. FMinus's own, not C's: docs/web.md, "The server".
+    struct JsonValue
+    {
+        enum class Kind
+        {
+            Value,
+            Object,
+            Array,
+        };
+        SourceLocation location;                   // the expression's, or its `{` or `[`
+        Kind kind = Kind::Value;
+        ExprPtr value;                             // a Value's
+        std::vector<StringExpr> keys;              // an Object's, its members' keys in order (adjacent literals one)
+        std::vector<SourceLocation> keyLocations;
+        std::vector<JsonValue> elements;           // an Object's members' values, in order, or an Array's values
+    };
+
+    // `json { "gain": gain }` or `json [a, b]`: a JSON literal, which, as a string literal, is an expression to the
+    // grammar and only an argument to the code generator: a reply's body (`reply 200, json { ... };`), never a value.
+    struct JsonExpr
+    {
+        JsonValue value;
+    };
+
     // An expression, where the tree places it (an operator written after its first operand at the operator: `a + b` at
     // `+`), and, when the source parenthesises it, `(e)`, where its outermost opening parenthesis is: the tree keeps no
     // node for the parentheses, and a diagnostic about the whole expression begins there, as clang's does
@@ -640,7 +666,7 @@ namespace fminus::ast
         SourceLocation location;
         std::variant<NumberExpr, VariableExpr, BoolExpr, UnaryExpr, BinaryExpr, LogicalExpr, CallExpr, AssignExpr,
                      ConditionalExpr, ConstructExpr, MemberExpr, MethodCallExpr, ThisExpr, IncrementExpr, CastExpr,
-                     IndexExpr, SizeofExpr, StringExpr>
+                     IndexExpr, SizeofExpr, StringExpr, JsonExpr>
             node;
         std::optional<SourceLocation> opening = std::nullopt;
     };
@@ -856,12 +882,56 @@ namespace fminus::ast
         StmtPtr body;
     };
 
+    // A route's parameter, `float value [[fminus::range(0, 1)]]`: an int a hole of its path fills (`{note}`), an int,
+    // a float or a bool the query's field of its name fills, or the request itself, an http_request. A const variable
+    // of the route's block.
+    struct RouteParam
+    {
+        SourceLocation location;   // of its name
+        std::string name;
+        Type type = Type::Int;
+        bool isConst = false;      // written so; every route parameter is const all the same
+        std::vector<Attribute> attributes;   // fminus::range and fminus::default, as a module parameter's
+    };
+
+    // `route "POST /note/{note}" (int note [[fminus::range(0, 127)]]) { ... }`, a serve's: a route literal, whose
+    // holes `{name}` are its parameters' (a %d to the library), its parameters, and a block of the function around the
+    // serve, which every path through must leave by a reply.
+    struct Route
+    {
+        SourceLocation location;               // of `route`
+        StringExpr literal;                    // as written, its holes and all
+        SourceLocation literalLocation;        // where it begins
+        bool hasParams = false;                // a parameter list is written, `()` too
+        std::vector<RouteParam> params;
+        std::vector<Attribute> attributes;     // after the parameter list: the code generator's error
+        std::vector<Stmt> body;
+        SourceLocation closing;                // its block's closing brace
+    };
+
+    // `serve (server) { routes }` and `serve (server, timeout_ms) { routes }`: FMinus's, not C's. It takes each request
+    // waiting for one of its routes, oldest first, and runs that route's block, until none waits; with a timeout it
+    // first waits up to that long for one (it blocks, as http_accept does). Its routes' blocks are blocks of the
+    // function it is in.
+    struct ServeStmt
+    {
+        std::vector<ExprPtr> args;      // the server, and the timeout if written (the code generator checks how many)
+        std::vector<Route> routes;
+    };
+
+    // `reply status;`, `reply status, more...;`: answers the route's request (as http_reply, http_reply_bytes,
+    // http_reply_text, or a JSON literal) and leaves the route, as return leaves a function.
+    struct ReplyStmt
+    {
+        std::vector<ExprPtr> args;
+    };
+
     struct Stmt
     {
         SourceLocation location;
         std::variant<DeclStmt, ExprStmt, ReturnStmt, BlockStmt, EmptyStmt, IfStmt, WhileStmt, ForStmt, BreakStmt,
                      ContinueStmt, SwitchStmt, CaseStmt, DefaultStmt, EnumStmt, ParallelForStmt, ParallelBlockStmt,
-                     DeferStmt>
+                     DeferStmt, ServeStmt, ReplyStmt>
             node;
     };
 

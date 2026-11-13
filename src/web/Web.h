@@ -512,9 +512,12 @@ extern "C"
     // printf writes it in the "C" locale: %d the next value as an int, %g as a double with 6 significant digits,
     // %.Ng with N (one or two digits; 0 is 1) significant digits, %% a percent sign; written by std::to_chars, so the
     // same in every locale, with no allocation. Each value is a double: the program's int as a double (exactly), its
-    // float widened to one (as printf's float argument is), its double as it is. The compiler checks the format; the
-    // library trusts no byte of it: a % that begins none of the four is itself, a %d of a value that is no int is
-    // C's conversion saturated (NaN is 0), and a place past the last value is nothing.
+    // float widened to one (as printf's float argument is), its double as it is. Three more, which no format a program
+    // writes may hold (the compiler refuses them) but those it makes of a JSON literal: %r the shortest digits that
+    // read back as the same float (the value narrowed back to the float it was widened from), %R as the same double
+    // (std::to_chars with no precision), each a NaN or an infinity as null; and %b true, or false for 0. The compiler
+    // checks the format; the library trusts no byte of it: a % that begins none of these is itself, a %d of a value
+    // that is no int is C's conversion saturated (NaN is 0), and a place past the last value is nothing.
     std::int32_t fminus_web_http_reply_text(void* request, std::int32_t status, const char* type,
                                             std::int32_t typeLength, const char* format, std::int32_t formatLength,
                                             const double* values, std::int32_t count) noexcept;

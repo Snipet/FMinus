@@ -22,7 +22,11 @@
 //     Web.cpp           the web library's builtins' own part: a URL literal checked and recorded for the host
 //                       (webRequests), the program's web context, and the status codes' names (HTTP_REFUSED, ...)
 //     WebServer.cpp     the web server's builtins' own part: a route literal checked and recorded for the host
-//                       (webRoutes), the route table http_listen hands the library, a query's name, a reply's format
+//                       (webRoutes), the route table http_listen hands the library, a query's name, a reply's format,
+//                       and two routes of the program that one request could match, refused
+//     Serve.cpp         serve, route and reply: a loop over the requests waiting for a serve's routes, a switch on
+//                       which route each was published for, its parameters filled and checked, and a reply that leaves
+//                       the route; a JSON literal, a reply's body, made into a format of the reply's
 //     Files.cpp         the file interface's builtins' own part: a file's name checked against the rules and the
 //                       build's ceilings and recorded for the host (files), the program's file context, and the
 //                       status codes' names (FILE_REFUSED, ...)
@@ -51,6 +55,7 @@
 
 #include <array>
 #include <cstddef>
+#include <initializer_list>
 #include <cstdint>
 #include <deque>
 #include <map>
@@ -271,6 +276,23 @@ namespace fminus::ir::detail
     };
     ReplyFormatScan scanReplyFormat(std::string_view text);
 
+    // A route statement's literal (WebServer.cpp, scanRouteHoles): its holes, `{name}`, each where a %d could stand,
+    // and the literal the library takes, each hole a %d (`library`, with the offset in `text` of each of its bytes);
+    // and its errors, scanRoute's of that literal among them, each at the offset in `text` of the byte it is about.
+    struct RouteHoles
+    {
+        struct Hole
+        {
+            std::string name;
+            std::size_t offset;   // of its '{'
+        };
+        std::string library;
+        std::vector<std::size_t> offsets;
+        std::vector<Hole> holes;
+        std::vector<FormatScan::Error> errors;
+    };
+    RouteHoles scanRouteHoles(std::string_view text);
+
     // A route literal's errors (WebServer.cpp, scanRoute): a method of GET, POST, PUT, PATCH or DELETE, one space, and a
     // path of "/" and segments of letters, digits, '-', '.', '_', '~' and %d, none empty, "." or "..", with at most 8
     // %d and never two together; each at the offset of the byte it is about. Empty: the route is good.
@@ -444,6 +466,7 @@ namespace fminus::ir::detail
                 Switch,   // switches_.back(): a label's
                 Region,
                 Defer,    // the deferred statement of the defer at `location`
+                Route,    // a route's block (Serve.cpp): which a break, a continue, a return and a label may not cross
             };
             Kind kind;
             llvm::BasicBlock* breakTarget;      // a loop's end, or a switch's; null for a region and a defer
@@ -492,6 +515,27 @@ namespace fminus::ir::detail
             std::optional<SourceLocation> defaultLabel;
             bool erroneous = false;
             std::size_t defers = 0;   // deferScopes_.size() where it begins: its body's blocks are those after
+        };
+
+        // A route whose block is being lowered (Serve.cpp): the slot of the serve's request, where a reply goes on to
+        // (the serve's next request), the defer scopes it opened (those from `defers` on), and its replies so far.
+        struct RouteState
+        {
+            llvm::Value* request;
+            llvm::BasicBlock* next;
+            std::size_t defers;
+            unsigned replies = 0;
+        };
+
+        // A route literal of the program, a route statement's or an http_is call's (WebServer.cpp), for the check that
+        // no two of them one request could match without one being more specific: the library's text (holes as
+        // %d), as it was written, where, and whether a route statement wrote it.
+        struct RouteLiteral
+        {
+            std::string text;
+            std::string written;
+            SourceLocation location;
+            bool statement;
         };
 
         // A constant expression's value, as fold() works it out (Constants.cpp): an int's or a bool's (0 or 1), and
@@ -717,6 +761,8 @@ namespace fminus::ir::detail
         Value lowerAllocation(SourceLocation location, const Allocation& allocation, const std::vector<Value>& args);
         Value lowerFft(SourceLocation location, const Fft& fft, const std::vector<Value>& args);
         Value lowerRuntimeBuiltin(SourceLocation location, const RuntimeBuiltin& builtin, const ast::CallExpr& call);
+        Value lowerRuntimeCall(SourceLocation location, const RuntimeBuiltin& builtin,
+                               const std::vector<const ast::Expr*>& args, std::optional<Value> first);
         llvm::Value* formatInts(const std::vector<llvm::Value*>& values);
         llvm::CallInst* callRuntime(const std::string& name, llvm::Type* result, const std::vector<llvm::Value*>& args);
 
@@ -742,9 +788,25 @@ namespace fminus::ir::detail
         std::optional<std::vector<llvm::Value*>> replyArguments(const ast::StringExpr& literal,
                                                                 const std::vector<const ast::Expr*>& values);
         llvm::Value* replyValues(const std::vector<llvm::Value*>& values);
-        void recordWebRoute(SourceLocation location, const ast::StringExpr& literal);
+        void recordWebRoute(SourceLocation location, const ast::StringExpr& literal, SourceLocation where);
+        std::size_t routeIndex(const std::string& text);
+        void recordRouteStatement(const ast::Route& route, const std::string& library, llvm::Metadata* parameters);
         std::vector<llvm::Value*> listenArguments(SourceLocation location);
+        void checkRouteOverlaps();
         void finishWebRoutes();
+
+        // ---- Serve.cpp ----------------------------------------------------------------------------------------------
+        void lowerServe(SourceLocation location, const ast::ServeStmt& serve);
+        bool checkRouteParameters(const ast::Route& route, const RouteHoles& holes, llvm::Metadata*& parameters);
+        void lowerRoute(const ast::Route& route, llvm::Value* request, llvm::BasicBlock* next, llvm::BasicBlock* bad,
+                        const RouteHoles& holes);
+        void fillParameter(const ast::RouteParam& param, std::optional<std::size_t> hole, llvm::Value* request,
+                           llvm::BasicBlock* bad);
+        void lowerReply(SourceLocation location, const ast::ReplyStmt& reply);
+        Value lowerJsonReply(SourceLocation location, const ast::Expr& status, const ast::JsonExpr& json,
+                             llvm::Value* request);
+        bool jsonFormat(const ast::JsonValue& value, std::string& format, std::vector<llvm::Value*>& values);
+        const Breakable* innermost(std::initializer_list<Breakable::Kind> kinds) const;
 
         // ---- Files.cpp ----------------------------------------------------------------------------------------------
         bool checkFileName(const ast::StringExpr& literal, SourceLocation where, std::string_view builtin);
@@ -876,5 +938,7 @@ namespace fminus::ir::detail
         // of http_listen, which hand the library their table, made once all are known (WebServer.cpp).
         std::vector<std::string> webRoutes_;
         std::vector<llvm::CallInst*> webListens_;
+        std::vector<RouteState> routes_;              // the route whose block is being lowered (Serve.cpp)
+        std::vector<RouteLiteral> routeLiterals_;     // every route literal, in the order lowered (WebServer.cpp)
     };
 } // namespace fminus::ir::detail

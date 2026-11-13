@@ -1,0 +1,179 @@
+// serve, route and reply (src/ir/Serve.cpp; docs/web.md, "The server"): the loop and the switch a serve is, its first
+// take fminus_web_http_next_in (or, with a timeout, fminus_web_http_accept_in) of its route set, a constant of the
+// program's, a switch on fminus_web_http_route, each route's parameters filled and checked (a 400 on serve.bad), its
+// block, and each reply's refusal answered 500 before the serve's next take; the route table with the routes' literals,
+// holes as %d; the metadata with their parameters; and a JSON literal as a reply's format, %r, %R, %d and %b its
+// places. At -O2 the take stays in the loop. Through the driver, a program asks its own server and answers with a JSON
+// literal, on one thread: nothing binds anything but 127.0.0.1, or connects anywhere else.
+// REQUIRES: web-server
+// RUN: fminus %s -O0 | FileCheck %s
+// RUN: fminus %s | FileCheck %s --check-prefix=OPT
+// RUN: fminus %s --emit ast | FileCheck %s --check-prefix=AST
+// RUN: fminus %s --run main 3 | FileCheck %s --check-prefix=REFUSED
+// RUN: fminus %s --run main 3 --web-listen 127.0.0.1:0 --web-allow 'http://127.0.0.1:*/note/*' | FileCheck %s --check-prefix=SERVED
+
+module Synth
+{
+    http_server server;
+    float gain;
+    float pitch;
+    int changes;
+
+    void process() [[clang::nonblocking]]
+    {
+        serve (server)
+        {
+            route "POST /gain" (float value [[fminus::range(0, 1)]])
+            {
+                gain = value;
+                changes += 1;
+                reply 204;
+            }
+            route "POST /note/{note}" (int note [[fminus::range(0, 127)]])
+            {
+                pitch = 440.0f * expf(0.05776227f * (float)(note - 69));
+                reply 204;
+            }
+            route "GET /state"
+            {
+                reply 200, json { gain, "pitch": (double)pitch, "changes": changes, "on": changes > 0 };
+            }
+        }
+    }
+};
+
+float main(float k)
+{
+    http_server server = http_listen();
+    const int port = http_port(server);
+    if (port <= 0)
+        return (float)port;
+    http_response c = http_get("http://127.0.0.1:%d/note/%d?gain=0.5", port, (int)k);
+    float got = -1.0f;
+    serve (server, 5000)
+    {
+        route "GET /note/{n}" (int n, float gain [[fminus::range(0, 1)]])
+        {
+            got = (float)n * gain;
+            reply 200, json { n, gain, "ok": true };
+        }
+    }
+    const int status = http_wait(c, 5000);
+    const int size = http_size(c);
+    http_close(c);
+    return (float)status * 1000.0f + (float)size + got;
+}
+
+// The route set of each serve (Synth's three routes, the table's 0 to 2; main's, 3), the reply's JSON as a format, and
+// the table with every route literal, holes as %d.
+// CHECK: @serve.routes = private unnamed_addr constant [1 x i64] [i64 7]
+// CHECK: @.str{{.*}} = private unnamed_addr constant [43 x i8] c"{\22gain\22:%r,\22pitch\22:%R,\22changes\22:%d,\22on\22:%b}", align 1
+// CHECK: @serve.routes.{{[0-9]+}} = private unnamed_addr constant [1 x i64] [i64 8]
+// CHECK: @.str{{.*}} = private unnamed_addr constant [26 x i8] c"{\22n\22:%d,\22gain\22:%r,\22ok\22:%b}", align 1
+// CHECK: @.route{{.*}} = private unnamed_addr constant [13 x i8] c"POST /note/%d", align 1
+// CHECK: @fminus.web.routes = private unnamed_addr constant [4 x ptr]
+
+// The loop, the switch on the route a request was published for, a parameter read and checked, the 400, a reply and its
+// refusal's 500, and the next take.
+// CHECK-LABEL: define void @"Synth::process"(
+// CHECK:         %serve.request = alloca ptr, align 8
+// CHECK:         %serve.take = call ptr @fminus_web_http_next_in(ptr %{{.*}}, ptr @serve.routes, i32 1)
+// CHECK-NEXT:    store ptr %serve.take, ptr %serve.request
+// CHECK-NEXT:    br label %serve.cond
+// CHECK:       serve.cond:
+// CHECK-NEXT:    %request = load ptr, ptr %serve.request
+// CHECK-NEXT:    %serve.none = icmp eq ptr %request, null
+// CHECK-NEXT:    br i1 %serve.none, label %serve.end, label %serve.body
+// CHECK:       serve.body:
+// CHECK:         %route = call i32 @fminus_web_http_route(ptr %{{.*}})
+// CHECK-NEXT:    switch i32 %route, label %serve.default [
+// CHECK-NEXT:      i32 0, label %serve.route
+// CHECK-NEXT:      i32 1, label %[[NOTE:serve.route[0-9]+]]
+// CHECK-NEXT:      i32 2, label %[[STATE:serve.route[0-9]+]]
+// CHECK:       serve.route:
+// CHECK:         %value.text = call ptr @fminus_web_http_query_text(ptr %{{.*}}, ptr @.str{{.*}}, i32 5, ptr null)
+// CHECK-NEXT:    %value.missing = icmp eq ptr %value.text, null
+// CHECK-NEXT:    br i1 %value.missing, label %param.missing, label %param.read
+// CHECK:       param.missing:
+// CHECK-NEXT:    br label %serve.bad
+// CHECK:       param.read:
+// CHECK-NEXT:    %[[VALUE:[0-9]+]] = call float @fminus_web_http_query_float(ptr %{{.*}}, ptr @.str{{.*}}, i32 5, float +qnan)
+// CHECK-NEXT:    store float %[[VALUE]], ptr %value
+// CHECK-NEXT:    %value.number = fcmp ord float %[[VALUE]], %[[VALUE]]
+// CHECK-NEXT:    br i1 %value.number, label %param.done, label %serve.bad
+// CHECK:         %value.inrange = and i1
+// CHECK-NEXT:    br i1 %value.inrange, label %param.fits, label %serve.bad
+// CHECK:         %http_reply = call i32 @fminus_web_http_reply(ptr %{{.*}}, i32 204)
+// CHECK-NEXT:    %[[LIMIT:[0-9]+]] = icmp eq i32 %http_reply, -5
+// CHECK-NEXT:    %[[INVALID:[0-9]+]] = icmp eq i32 %http_reply, -7
+// CHECK-NEXT:    %reply.refused = or i1 %[[LIMIT]], %[[INVALID]]
+// CHECK:         call i32 @fminus_web_http_reply(ptr %{{.*}}, i32 500)
+// CHECK:       [[NOTE]]:
+// CHECK:         call i32 @fminus_web_http_arg(ptr %{{.*}}, i32 0)
+// CHECK:         %note.inrange = and i1
+// CHECK:       [[STATE]]:
+// CHECK:         %json.float = fpext float %{{.*}} to double
+// CHECK:         %json.int = sitofp i32 %{{.*}} to double
+// CHECK:         %json.bool = uitofp i1 %{{.*}} to double
+// CHECK:         %http_reply_text = call i32 @fminus_web_http_reply_text(ptr %{{.*}}, i32 200, ptr @.str{{.*}}, i32 16, ptr @.str{{.*}}, i32 43, ptr %format.values, i32 4)
+// CHECK:       serve.default:
+// CHECK:         call i32 @fminus_web_http_reply(ptr %{{.*}}, i32 500)
+// CHECK-NEXT:    br label %serve.next
+// CHECK:       serve.bad:
+// CHECK:         call i32 @fminus_web_http_reply(ptr %{{.*}}, i32 400)
+// CHECK-NEXT:    br label %serve.next
+// CHECK:       serve.next:
+// CHECK-NEXT:    %serve.take{{[0-9]+}} = call ptr @fminus_web_http_next_in(ptr %{{.*}}, ptr @serve.routes, i32 1)
+// CHECK:         br label %serve.cond, !llvm.loop
+// CHECK:       serve.end:
+// CHECK-NEXT:    ret void
+
+// With a timeout, the first take waits.
+// CHECK-LABEL: define float @main(
+// CHECK:         %serve.take = call ptr @fminus_web_http_accept_in(ptr %{{.*}}, ptr @serve.routes.{{[0-9]+}}, i32 1, i32 5000)
+// CHECK:         switch i32 %route, label %serve.default [
+// CHECK-NEXT:      i32 3, label %serve.route
+// CHECK:       serve.next:
+// CHECK-NEXT:    %serve.take{{[0-9]+}} = call ptr @fminus_web_http_next_in(ptr %{{.*}}, ptr @serve.routes.{{[0-9]+}}, i32 1)
+
+// What the library's new functions do, told to LLVM.
+// CHECK: declare noundef ptr @fminus_web_http_next_in(ptr, ptr readonly captures(none), i32) [[READ:#[0-9]+]]
+// CHECK: declare i32 @fminus_web_http_route(ptr captures(none)) [[READ]]
+// CHECK: declare ptr @fminus_web_http_query_text(ptr captures(none), ptr readonly captures(none), i32, ptr writeonly captures(none)) [[READ]]
+// CHECK: declare noundef ptr @fminus_web_http_accept_in(ptr, ptr readonly captures(none), i32, i32) [[WAIT:#[0-9]+]]
+// CHECK: attributes [[READ]] = { nofree nounwind willreturn memory(argmem: readwrite, inaccessiblemem: readwrite) }
+// CHECK: attributes [[WAIT]] = { nofree nounwind memory(argmem: readwrite, inaccessiblemem: readwrite) }
+
+// The routes for the host, a route statement's with its parameters: name, type, source, range and default.
+// CHECK: !fminus.web.routes = !{![[GAIN:[0-9]+]], ![[NOTES:[0-9]+]], ![[GET:[0-9]+]], ![[MAIN:[0-9]+]]}
+// CHECK: ![[GAIN]] = !{!"POST", !"/gain", !"{{.*}}serve.fm", i32 26, i32 13, ![[GAINS:[0-9]+]]}
+// CHECK: ![[GAINS]] = !{![[VALUE:[0-9]+]]}
+// CHECK: ![[VALUE]] = !{!"value", !"float", !"query", ![[ZERO:[0-9]+]], ![[ONE:[0-9]+]], ![[NONE:[0-9]+]]}
+// CHECK: ![[ZERO]] = !{double 0.000000e+00}
+// CHECK: ![[ONE]] = !{double 1.000000e+00}
+// CHECK: ![[NONE]] = !{}
+// CHECK: ![[NOTES]] = !{!"POST", !"/note/*", !"{{.*}}serve.fm", i32 32, i32 13,
+// CHECK: !{!"note", !"int", !"path", ![[ZERO]], !{{[0-9]+}}, ![[NONE]]}
+// CHECK: ![[GET]] = !{!"GET", !"/state", !"{{.*}}serve.fm", i32 37, i32 13, ![[NONE]]}
+// CHECK: ![[MAIN]] = !{!"GET", !"/note/*", !"{{.*}}serve.fm", i32 55, i32 9,
+
+// At -O2, the loop keeps its take: a phi of the request, the route's switch, and the next take before the branch back.
+// OPT-LABEL: define void @"Synth::process"(
+// OPT:         %serve.take = tail call ptr @fminus_web_http_next_in(ptr %{{.*}}, ptr nonnull @serve.routes, i32 1)
+// OPT:       serve.body:
+// OPT-NEXT:    %[[REQUEST:.*]] = phi ptr [ %serve.take, %{{.*}} ], [ %serve.take{{[0-9]+}}, %serve.next ]
+// OPT-NEXT:    %route = tail call i32 @fminus_web_http_route(ptr nonnull %[[REQUEST]])
+// OPT:       serve.next:
+// OPT:         %serve.take{{[0-9]+}} = tail call ptr @fminus_web_http_next_in(ptr %{{.*}}, ptr nonnull @serve.routes, i32 1)
+
+// AST:      (method void Synth::process () {{\[\[}}clang::nonblocking{{\]\]}}
+// AST-NEXT:   (serve server
+// AST-NEXT:     (route "POST /gain" ((float value {{\[\[}}fminus::range(0, 1){{\]\]}}))
+// AST:          (route "GET /state"
+// AST-NEXT:       (reply 200 (json {"gain" gain "pitch" (cast double pitch) "changes" changes "on" (> changes 0)})))))
+// AST:        (serve server 5000
+// AST-NEXT:     (route "GET /note/{n}" ((int n) (float gain {{\[\[}}fminus::range(0, 1){{\]\]}}))
+
+// REFUSED: -4
+// The program asks itself GET /note/3?gain=0.5 and answers {"n":3,"gain":0.5,"ok":true}: 200, 28 bytes, and got 1.5.
+// SERVED: 200029.5
