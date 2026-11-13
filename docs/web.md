@@ -775,7 +775,7 @@ and told apart with `http_is` is answered by hand, as before the statements were
 | `int http_reply_bytes(r, status, data, bytes, "content/type")` | answers with `bytes` bytes at `data` (copied: the buffer is free again at once) | wait-free |
 | `int http_reply_text(r, status, "content/type", "format", ...)` | answers with text, C's `printf` of the values after the format (`%s` a `string`'s bytes) | wait-free |
 | `int http_reply_json(r, status, json ...)` | answers with a JSON literal's text, written in the request's own buffer, as `application/json` ([The JSON literal](#the-json-literal)): what `reply status, json ...;` is | wait-free |
-| `void http_close(server)` | stops listening and closes every connection: a request the program holds is given up, every thread in `http_accept` woken (null), the port `HTTP_CANCELLED` | allocates |
+| `void http_close(server)` | stops listening and closes every connection: a request the program holds is given up, every thread in `http_accept` woken (null), the port `HTTP_CANCELLED`; the replies the program has answered are sent first, for a quarter of a second at most ([below](#the-servers-threads-and-lifetime)) | allocates |
 
 - **A request is the caller's from `http_next` or `http_accept` until its reply**, and only the thread that took it
   should read or answer it (a program that hands it to another thread orders the two itself). One reply each: the
@@ -788,7 +788,8 @@ and told apart with `http_is` is answered by hand, as before the statements were
   or, having sent nothing, `HTTP_LIMIT` (the body is over the policy's `maxReplyBytes`: the request is still the
   caller's), `HTTP_INVALID` (not a request the caller holds, or a status, a size or a content type that cannot be:
   still the caller's), or `HTTP_CANCELLED` (the library gave up on it meanwhile: its client left, it timed out and was
-  answered 503, or the server closed; the handle is dead). The content type is a literal of printable ASCII, at most 255
+  answered 503, or the server closed; the handle is dead). A reply that returned 0 is sent, a close right after it
+  included. The content type is a literal of printable ASCII, at most 255
   bytes; empty means none for `http_reply`, `application/octet-stream` for bytes and `text/plain; charset=utf-8` for
   text. A `HEAD` request's reply keeps its `Content-Length` and drops its body.
 - **A query's number** is the value of the first field of that name, compared byte for byte (nothing is decoded) and
@@ -981,7 +982,9 @@ whether or not it listens; in a build without the server it is not read.
   `HTTP_REFUSED`), as it may reach and not listen.
 - **`Program::stopWeb()`** closes the server too: its sockets and every connection, every request the program has not
   answered given up (its reply `HTTP_CANCELLED`), every thread in `http_accept` woken (null), and `http_port`
-  `HTTP_CANCELLED` from then on; an `http_listen` after it never listens. `~Program` stops, then frees it.
+  `HTTP_CANCELLED` from then on; an `http_listen` after it never listens. The replies the program answered before it
+  are sent first, so it may take a quarter of a second more when a client does not read its reply (below). `~Program`
+  stops, then frees it.
 
 ### What a request meets
 
@@ -1148,13 +1151,28 @@ path after the listing, so there the root must be writable by no one else while 
   wakes it.
 - **Binding happens in `http_listen`**, on the calling thread, before the sockets are handed to the I/O thread: so
   `http_port` is final when `http_listen` returns.
-- **Closing** (`http_close`, `Program::stopWeb()`, `~Program`) detaches the server from the I/O thread, which closes
-  every socket, then wakes every thread in `http_accept`. The handles stay safe to use (each says closed, or
-  `HTTP_CANCELLED`) until the `Program` is destroyed, which waits for every thread in `http_accept` to have left. A
-  thread of the host's in `http_accept(-1)` is woken by `stopWeb()`: the host calls it, joins the thread, and then
-  destroys the `Program`.
-- **A reply answered just before the end** (an executable's `main` returning right after its last `http_reply`, a
-  `Program` destroyed) may never be sent: closing does not wait to flush.
+- **Closing** (`http_close`, `Program::stopWeb()`, `~Program`) stops listening at once, gives up every request the
+  program holds and has not answered (its reply, whenever it comes, `HTTP_CANCELLED`) and every one it has not taken
+  (its client gets nothing, the connection closed), and wakes every thread in `http_accept`. Then it **sends the
+  replies the program handed over before it**: each one whose reply returned 0 goes out whole, as the last response on
+  its connection (`Connection: close`), and so does a response already going out (a reply, a refusal, a file); then
+  the server lets go of its sockets. The I/O thread writes each into its socket as the close begins, never waiting
+  on a client, and the closing call waits for them to leave: a client that reads has its reply at once, and **a client
+  that does not read holds the close a quarter of a second at most**, after which its connection is closed with as
+  much of the reply as its socket took. `stopWeb()` and `~Program` wake every thread in `http_wait` and at a
+  `within`'s end meanwhile, not after. The handles stay safe to use (each says closed, or `HTTP_CANCELLED`) until the `Program` is destroyed, which
+  waits for every thread in `http_accept` to have left. A thread of the host's in `http_accept(-1)` is woken by
+  `stopWeb()`: the host calls it, joins the thread, and then destroys the `Program`.
+- **So a reply answered just before the end is sent**: an executable's `main` returning right after its last
+  `http_reply`, a run's last route followed by its `defer http_close(server)`, a `Program` destroyed or stopped as soon
+  as its loader returns. (Until 2026-11-13 closing closed every connection at once, and such a reply was lost: the
+  client saw an empty response.) Which comes first, a reply or the close, is decided by one atomic operation on the
+  request: a reply that returned 0 is sent, one that returned `HTTP_CANCELLED` was too late, and nothing is sent twice.
+
+*Why a quarter of a second, and not a setting:* the bound is the host's own wait, in `stopWeb()`, `~Program` or a
+loader's `http_close`, and only a client that does not read (or a network too slow for a reply of `maxReplyBytes`)
+ever meets it, since every reply is written into its socket as the close begins. No host knows its clients' speed to
+set it better, and a constant keeps the policy and its checks as they were.
 
 **Determinism.** A program that takes requests while it plays depends on when they arrive, as it depends on when a key
 is pressed: the block a change lands in is the network's. [Determinism](#determinism-and-offline-rendering) above holds
@@ -1170,7 +1188,7 @@ for the server as for the client. An offline bounce has no server: compiled with
 | `src/web/Roots*.cpp` | the system's root certificates, a file a platform |
 | `src/web/Main.cpp` | an executable's context, from `FMINUS_WEB_ALLOW` (and, with the server, `FMINUS_WEB_LISTEN`, `_TOKEN`, `_HOSTS`, `_ROOT`, `_OPEN`) |
 | `src/web/Handle.h` | the kind every handle carries first (a request made, a request received, a server), which every C function reads before anything else |
-| `src/web/Server.h`, `Server.cpp` | the server (`FMINUS_WEB_SERVER`): routes, the slots, each connection's state machine on llhttp, the nine rules, static files, the replies' formatting; driven by the I/O thread of `Web.cpp` |
+| `src/web/Server.h`, `Server.cpp` | the server (`FMINUS_WEB_SERVER`): routes, the slots, each connection's state machine on llhttp, the nine rules, static files, the replies' formatting, closing's drain (`Servers::drain`); driven by the I/O thread of `Web.cpp` |
 | `src/web/ServerPolicy.cpp` | the server's policy: the listen forms, the token, hosts and files, the limits; what counts as loopback, the browsers' bad ports, a servable path, an acceptable `Host` and `Origin` |
 | `src/web/ServerRoot.cpp` | `readServerRoot`: a directory's files as static content, for `--web-root` and `FMINUS_WEB_ROOT` |
 | `src/web/Sockets.h`, `SocketsPosix.cpp`, `SocketsWindows.cpp` | the server's sockets, the one part that differs between systems (only the Linux path built and run) |
@@ -1187,7 +1205,7 @@ for the server as for the client. An offline bounce has no server: compiled with
 | `Scripts/pin-web.sh` | the pin lines for new releases of all three (`Scripts/pin-web.sh 8.23.0 4.1.1 9.4.3`): libcurl's tarball and llhttp's tag archive downloaded and hashed, Mbed TLS's digest read from its GitHub release. Bump them on their security releases |
 | `tests/unit/WebTest.cpp` | the library against a loopback server of its own (HTTP and HTTPS, with a certificate authority it makes), and programs fetching through the JIT and as executables |
 | `tests/unit/HttpTest.cpp` | the builtins in the compiler, in every build |
-| `tests/unit/WebServerTest.cpp` | the server at its own level, from C++, before any builtin: the policy and its classifiers, each rule from a raw socket and from the library's client, keep-alive, limits and timeouts, dropped clients, many threads taking, closing with threads waiting, and the wait-free proof (`HeapCalls`, and seccomp's strict mode) |
+| `tests/unit/WebServerTest.cpp` | the server at its own level, from C++, before any builtin: the policy and its classifiers, each rule from a raw socket and from the library's client, keep-alive, limits and timeouts, dropped clients, many threads taking, closing with threads waiting, closing's replies sent (whole, beside the requests given up, and a client that does not read held to the bound, by `http_close`, `stop()` and `~Context`), and the wait-free proof (`HeapCalls`, and seccomp's strict mode) |
 | `tests/unit/HttpServerTest.cpp` | the server's builtins in the compiler, in every build: effects, the off build's errors, the route, format and name checks at their columns, the route table, the declarations' attributes, `webRoutes()`, the policy checked by `compile()` |
 | `tests/unit/WebServeTest.cpp` | programs that serve, through the JIT (an audio thread taking requests between blocks, a loader in `http_accept`, `stopWeb()`) and as an executable with its environment; `readServerRoot`, and a directory swapped for a link while it reads |
 | `tests/unit/WithinTest.cpp` | `within` through the JIT against a loopback server of its own (the promise, the deadline, nesting, each way out, `stopWeb()`, a reply and a serve inside one, a URL with holes, the report's script), a block the loop budget or a bounds check stops, the library's abandon and its wait-free proof (`HeapCalls`, and seccomp's strict mode), and the errors |
@@ -1246,7 +1264,15 @@ server.
   a slice and an enumeration (`JsonServeTest.cpp`); `fminus_web_http_post_json` from C++ and through the JIT, against
   loopback servers of the tests' own, and with the server's and the client's other tests under GCC's AddressSanitizer
   with UndefinedBehaviorSanitizer (every case) and ThreadSanitizer (every case but the fork-based proofs), the JIT's
-  tests compiled by clang uninstrumented beside them.
+  tests compiled by clang uninstrumented beside them. Closing's drain (2026-11-13): built and tested in the release
+  tree with the server and in the default tree, not in one with the client alone; its tests (`WebServerTest.cpp`'s,
+  closing by `http_close`, `stop()` and `~Context`; `ServeTest.cpp`'s, by a program's deferred `http_close`,
+  `stopWeb()` and `~Program`; the executable's last reply in `WebServeTest.cpp`; `example-remote --check`'s `run()`)
+  with the server's, the client's, `within`'s and `serve`'s other tests ran under GCC's ThreadSanitizer (every case but
+  the six fork-based proofs, three times over, and the lifetime cases twenty times more) and AddressSanitizer with
+  UndefinedBehaviorSanitizer and LeakSanitizer (every case), no report, the JIT's programs and the compiler's libraries
+  uninstrumented; and the report's reproduction, `curl` against the driver on loopback, gives 204 where it gave an empty
+  reply. The drain is in the portable part of `Server.cpp`: the sockets' code is unchanged.
 - **The wait-free proofs under both sanitizers** (2026-11-13): every proof's child under seccomp's strict mode is now
   `tests/unit/StrictMode.h`'s, which reads the child's result and then ends the child, never waiting for it to end by
   itself, so the fork-based proofs that ThreadSanitizer's own thread kept from exiting (above) run there too. The 18

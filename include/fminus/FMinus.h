@@ -778,7 +778,9 @@ namespace fminus
         // call it, any number of times; it waits for the I/O thread (briefly): not on the audio thread. The
         // destructor calls it. It closes the program's server too: its sockets and every connection, every request
         // the program has not answered given up (its reply HTTP_CANCELLED), every thread in http_accept woken (null),
-        // and http_port HTTP_CANCELLED from then on; an http_listen after it never listens.
+        // and http_port HTTP_CANCELLED from then on; an http_listen after it never listens. The replies the program
+        // answered before it are sent first, each the last on its connection: it waits for them a quarter of a second
+        // at most, so a client that does not read its reply cannot hold it longer.
         void stopWeb() noexcept;
 
         // Files (a build with FMINUS_FILES). A program names a file only by a string literal, file_read("kit/%d.f32",

@@ -1350,7 +1350,6 @@ TEST_CASE("destroying a context while threads wait on its requests wakes them, t
         for (int i = 0; i < 4; ++i)
             requests.push_back(get(*context, server.url("/slow")));
         std::atomic<int> cancelled{0};
-        std::atomic<int> waiting{0};
         std::vector<std::thread> waiters;
         for (void* request : requests)
         {
@@ -1359,14 +1358,21 @@ TEST_CASE("destroying a context while threads wait on its requests wakes them, t
                 waiters.emplace_back(
                     [&, request]
                     {
-                        ++waiting;
                         if (fminus_web_http_wait(request, -1) == FMINUS_WEB_CANCELLED)
                             ++cancelled;
                     });
             }
         }
-        REQUIRE(eventually([&] { return waiting.load() == 8; }));
-        std::this_thread::sleep_for(10ms);   // into the wait
+        // Every thread inside the library's wait, counted by the context: only then may it be destroyed (a wait that
+        // begins after ~Context has would read freed memory).
+        void* handle = context->handle();
+        if (!eventually([&] { return fminus::web::waitingThreads(handle) == 8; }))
+        {
+            context->stop();   // a thread that never got there must not be left waiting
+            for (std::thread& waiter : waiters)
+                waiter.join();
+            FAIL("the eight threads never all waited: " << fminus::web::waitingThreads(handle));
+        }
         context.reset();
         for (std::thread& waiter : waiters)
             waiter.join();
@@ -1704,23 +1710,23 @@ TEST_CASE("stop and destruction wake a thread at a scope's end; a scope left ope
     SECTION("Context::stop")
     {
         auto context = makeContext(loopback());
-        std::atomic<bool> ending{false};
         std::int32_t ended = -100;
         std::int32_t statuses[2] = {-100, -100};
         std::thread thread([&] {
             within(*context, -1);
             void* a = get(*context, server.url("/slow"));
             void* b = get(*context, server.url("/slow"));
-            ending.store(true);
             ended = endWithin(*context);
             statuses[0] = fminus_web_http_status(a);
             statuses[1] = fminus_web_http_status(b);
         });
-        REQUIRE(eventually([&] { return ending.load(); }));
-        std::this_thread::sleep_for(100ms);   // into the end's wait
+        // In the end's wait, counted by the context (a stop before it would end the block all the same, but not by
+        // waking it).
+        const bool inside = eventually([&] { return fminus::web::waitingThreads(context->handle()) == 1; });
         const auto start = std::chrono::steady_clock::now();
         context->stop();
         thread.join();
+        REQUIRE(inside);
         CHECK(since(start) < 2s);
         CHECK(ended == FMINUS_WEB_CANCELLED);
         CHECK(statuses[0] == FMINUS_WEB_CANCELLED);
@@ -1737,17 +1743,21 @@ TEST_CASE("stop and destruction wake a thread at a scope's end; a scope left ope
         {
             auto context = makeContext(loopback());
             void* handle = context->handle();
-            std::atomic<bool> ending{false};
             std::int32_t ended = -100;
             std::thread thread([&] {
                 fminus_web_http_within_begin(handle, -1);
                 fminus_web_http_get(handle, server.url("/slow").data(),
                                     static_cast<std::int32_t>(server.url("/slow").size()), nullptr, 0);
-                ending.store(true);
                 ended = fminus_web_http_within_end(handle);   // woken by the destruction; touches nothing after
             });
-            REQUIRE(eventually([&] { return ending.load(); }));
-            std::this_thread::sleep_for(100ms);
+            // In the end's wait, counted by the context: only then may it be destroyed (an end that begins after
+            // ~Context has would read freed memory).
+            if (!eventually([&] { return fminus::web::waitingThreads(handle) == 1; }))
+            {
+                context->stop();
+                thread.join();
+                FAIL("the thread never reached its scope's end");
+            }
             context.reset();
             thread.join();
             CHECK(ended == FMINUS_WEB_CANCELLED);
@@ -2116,17 +2126,16 @@ TEST_CASE("a Program destroyed with requests in flight, and stopped with a threa
         REQUIRE(wait(done) == 200);
         void* slow = start(server.port());
         std::atomic<int> result{1};
-        std::atomic<bool> waiting{false};
-        std::thread loader(
-            [&]
-            {
-                waiting = true;
-                result = wait(slow);
-            });
-        REQUIRE(eventually([&] { return waiting.load() && server.hits("/slow") == before + 5; }));
-        std::this_thread::sleep_for(10ms);   // into the wait
+        std::thread loader([&] { result = wait(slow); });
+        // In the wait, counted by the program's context (its module's global holds its handle): a stop before it
+        // would cancel the request all the same, but not by waking the loader.
+        const std::uintptr_t global = program->address("fminus_web_context", errors);
+        void* handle = global == 0 ? nullptr : *reinterpret_cast<void* const*>(global);
+        const bool inside = eventually(
+            [&] { return server.hits("/slow") == before + 5 && fminus::web::waitingThreads(handle) == 1; });
         program->stopWeb();
         loader.join();
+        REQUIRE(inside);
         CHECK(result.load() == FMINUS_WEB_CANCELLED);
         CHECK(body(done) == 5 + 1);                          // "hello", still there
         CHECK(wait(again(server.port())) == FMINUS_WEB_CANCELLED);   // stopped for good

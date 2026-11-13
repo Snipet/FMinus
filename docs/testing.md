@@ -143,7 +143,8 @@ TEST_CASE("functions compute what they say", "[codegen]")
   `WebServerTest.cpp`, compiled only with `FMINUS_WEB_SERVER`, the engine from C++ before any builtin, against raw
   sockets and the library's own client: the policy and its classifiers (what a listen that is not loopback would do
   is judged by them, never bound), each of the nine rules, keep-alive, the limits and timeouts, dropped clients,
-  threads taking at once, closing with threads waiting, and the wait-free proof, `HeapCalls` and a child under
+  threads taking at once, closing with threads waiting, the replies closing sends first (and a client that does not
+  read them held to the bound), and the wait-free proof, `HeapCalls` and a child under
   seccomp's strict mode; and `WebServeTest.cpp`, programs that serve through the JIT and as an executable, and
   `readServerRoot`, a directory swapped for a link to elsewhere while it reads (Linux, `renameat2`) among them, and
   the wait-free proof of a JIT'd `[[clang::nonblocking]]` handler; and `ServeTest.cpp` (`[serve]`), `serve`, `route`
@@ -160,8 +161,14 @@ TEST_CASE("functions compute what they say", "[codegen]")
   after the block and inside one through `this`), a block the loop budget
   (`[budget]`) or a bounds check (`[bounds]`) stops, the library's abandon with threads racing it and its wait-free
   proof, and the errors (in a build without the library, the one error). Every socket they bind is on 127.0.0.1, and every connection they make is to it; this machine's
-  kernel has no IPv6, so the `localhost` and `[::1]` cases take their no-IPv6 branch. Their timeouts make them
-  timing-sensitive: run them when nothing else is building), `[files]` (the file interface, docs/files.md:
+  kernel has no IPv6, so the `localhost` and `[::1]` cases take their no-IPv6 branch. A test that must know a thread
+  is inside one of the library's waits, or a request published, taken or given up, before it acts waits for the
+  library's own counts, `fminus::web::waitingThreads` (`Web.h`; a `Program`'s context is the handle its module's
+  global `fminus_web_context` holds) and `fminus::web::serverCounts` (`Server.h`), never for a sleep: a sleep is a
+  guess, which a loaded machine loses, and destroying a context before a thread is counted in its wait frees what that
+  thread is about to read. A sleep stays where it is the thing tested (a deadline's length, a client's pace). Their
+  timeouts make them timing-sensitive: run them when nothing else is building), `[files]` (the file interface,
+  docs/files.md:
   `FileBuiltinsTest.cpp`, in every build, its builtins' effects (directly and through a called function), the off
   builds' errors, the status codes against the runtime's values, a name's errors at their columns, `scanFileName` given
   other builds' ceilings, `files()`, `Options::files` through `fminus::Program`, the reserved names and the JIT's

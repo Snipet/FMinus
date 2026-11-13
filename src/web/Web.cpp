@@ -28,9 +28,11 @@
 //   mutex, so that a call the loop budget or a bounds check stopped leaves its thread no scope without taking a lock:
 //   it moves the record's generation on, and every scope begun under an earlier one is abandoned from then on.
 // - With the server (FMINUS_WEB_SERVER), a context has at most one, made by its first fminus_web_http_listen under its
-//   mutex, attached to the I/O thread by a command (Serve) queued under that mutex, and detached by another (Unserve)
-//   when it is closed, the context stopped or destroyed (stopServer), before it is marked closed. The I/O thread turns
-//   its servers after libcurl's transfers, and waits on their sockets in the same curl_multi_poll (Server.h).
+//   mutex, and attached to the I/O thread by a command (Serve) queued under that mutex. It is closed (when the program
+//   closes it, or the context is stopped or destroyed: beginClosingServer and endClosingServer) by two more: a Drain,
+//   after which it is marked closed, and once the replies the program handed over have gone out (or kDrainTime has
+//   passed), an Unserve that detaches it. The I/O thread turns its servers after libcurl's transfers, and waits on
+//   their sockets in the same curl_multi_poll (Server.h).
 #include "web/Web.h"
 
 #include "fminus/Config.h"
@@ -205,7 +207,9 @@ namespace fminus::web
                 Forget,
 #if FMINUS_HAS_WEB_SERVER
                 Serve,     // the I/O thread starts driving `server`
-                Unserve,   // and stops: its sockets closed, its requests given up
+                Drain,     // begins closing it: stops listening, gives up what the program has not answered, and sends
+                           // the replies it has (Servers::drain)
+                Unserve,   // and stops driving it: its sockets closed, its requests given up
 #endif
             } kind;
             Request* request = nullptr;
@@ -484,6 +488,9 @@ namespace fminus::web
 #if FMINUS_HAS_WEB_SERVER
             case Command::Serve:
                 servers_.attach(command.server);
+                break;
+            case Command::Drain:
+                servers_.drain(command.server);
                 break;
             case Command::Unserve:
                 servers_.detach(command.server);
@@ -1030,11 +1037,35 @@ namespace fminus::web
             return invalid ? FMINUS_WEB_INVALID : 0;
         }
 
-        // Closes the context's server, if it has one: the I/O thread lets go of it (its sockets closed, its requests
-        // given up), then it is marked closed (its port FMINUS_WEB_CANCELLED, every thread in accept woken). Waits for
-        // the I/O thread: not under the context's mutex, which the I/O thread takes.
-        void stopServer([[maybe_unused]] Context::State& state)
+#if FMINUS_HAS_WEB_SERVER
+        // How long closing a server lets the I/O thread send the replies the program handed over before it (Web.h,
+        // fminus_web_http_close). Each is written into its socket as the close begins, so a client that reads has it at
+        // once: this bounds a client that does not read (or a network too slow for the reply), and so the host's own
+        // call, stopWeb() or ~Program or a loader's http_close, whose time is the host's to count on. A constant, not a
+        // policy's: no host knows its clients' speed to set it better.
+        constexpr auto kDrainTime = std::chrono::milliseconds(250);
+
+        // A server being closed, between beginClosingServer and endClosingServer: null when there is nothing to wait
+        // for.
+        struct Closing
         {
+            Server* server = nullptr;
+            Clock::time_point until;
+        };
+#else
+        struct Closing
+        {
+        };
+#endif
+
+        // Closes the context's server, if it has one, in two halves, so that Context::stop and ~Context wake every
+        // thread waiting at once, and cancel their requests while the replies go out. The first: the I/O thread stops
+        // listening, gives up every request the program has not answered, and begins sending the replies it has
+        // (Command::Drain); then the server is marked closed (its port FMINUS_WEB_CANCELLED, every thread in accept
+        // woken). Waits for the I/O thread: not under the context's mutex, which the I/O thread takes.
+        Closing beginClosingServer([[maybe_unused]] Context::State& state)
+        {
+            Closing closing;
 #if FMINUS_HAS_WEB_SERVER
             Server* server = nullptr;
             bool usesEngine = false;
@@ -1044,15 +1075,38 @@ namespace fminus::web
                 usesEngine = state.usesEngine;
             }
             if (server == nullptr)
-                return;
+                return closing;
             if (usesEngine)
             {
-                Command command{Command::Unserve, nullptr, &state, 0};
+                Command command{Command::Drain, nullptr, &state, 0};
                 command.server = server;
                 engine().wait(engine().postSurely(command));
+                closing.server = server;
+                closing.until = Clock::now() + kDrainTime;
             }
             closeServer(*server);
 #endif
+            return closing;
+        }
+
+        // The second: waits until the replies have gone out, or kDrainTime has passed, then the I/O thread lets go of
+        // the server (Command::Unserve), closing whatever is left. Each close has its own two halves: two threads
+        // closing at once each wait for the same drain, and the second Unserve finds nothing.
+        void endClosingServer([[maybe_unused]] const Closing& closing)
+        {
+#if FMINUS_HAS_WEB_SERVER
+            if (closing.server == nullptr)
+                return;
+            waitDrained(*closing.server, closing.until);
+            Command command{Command::Unserve, nullptr, nullptr, 0};
+            command.server = closing.server;
+            engine().wait(engine().postSurely(command));
+#endif
+        }
+
+        void stopServer(Context::State& state)
+        {
+            endClosingServer(beginClosingServer(state));
         }
     } // namespace
 
@@ -1102,7 +1156,7 @@ namespace fminus::web
             std::lock_guard lock(state.mutex);
             state.destroying = true;
         }
-        stopServer(state);
+        const Closing closing = beginClosingServer(state);
         if (state.usesEngine)
         {
             // Cancels what is in flight; the Forget, handled after those, frees the share.
@@ -1120,6 +1174,7 @@ namespace fminus::web
                 engine().postSurely({Command::Cancel, request, &state, 0});
             engine().wait(engine().postSurely({Command::Forget, nullptr, &state, 0}));
         }
+        endClosingServer(closing);   // before the I/O thread may be joined (release, below)
         {
             std::unique_lock lock(state.mutex);
             state.dying = true;
@@ -1157,9 +1212,10 @@ namespace fminus::web
 
     // The flag first, under the mutex: a start that takes the mutex after it is cancelled there, one before it is in
     // the list, and its Start command, if it is queued after the cancels below, finds the flag as its hop begins. Then
-    // a cancel of each request still pending, one at a time, each waited for. Each is queued under the mutex, so that
-    // a thread closing that request meanwhile (close removes it under the mutex) queues its own cancel after it, and
-    // frees the request only once both have been handled.
+    // the server's first half of closing (every thread in accept woken), and a cancel of each request still pending,
+    // one at a time, each waited for. Each is queued under the mutex, so that a thread closing that request meanwhile
+    // (close removes it under the mutex) queues its own cancel after it, and frees the request only once both have been
+    // handled. Last, the server's second half: the replies the program handed over have gone out, or their time has.
     void Context::stop() noexcept
     {
         State& state = *state_;
@@ -1169,10 +1225,8 @@ namespace fminus::web
             state.stopped.store(true, std::memory_order_release);
             usesEngine = state.usesEngine;
         }
-        stopServer(state);
-        if (!usesEngine)
-            return;
-        for (;;)
+        const Closing closing = beginClosingServer(state);
+        while (usesEngine)
         {
             std::uint64_t sequence = 0;
             {
@@ -1187,9 +1241,10 @@ namespace fminus::web
                 }
             }
             if (sequence == 0)
-                return;
+                break;
             engine().wait(sequence);
         }
+        endClosingServer(closing);
     }
 
     void* Context::handle() noexcept
@@ -1209,6 +1264,15 @@ namespace fminus::web
     bool ioThreadRunning()
     {
         return engine().running();
+    }
+
+    std::int32_t waitingThreads(void* context)
+    {
+        if (context == nullptr)
+            return 0;
+        Context::State& state = *static_cast<Context::State*>(context);
+        std::lock_guard lock(state.mutex);
+        return state.waiters;
     }
 } // namespace fminus::web
 

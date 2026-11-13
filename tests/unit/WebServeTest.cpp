@@ -490,8 +490,9 @@ TEST_CASE("an executable serves with FMINUS_WEB_LISTEN, its files from FMINUS_WE
     };
 
     {
-        // The third request's reply may never be sent: main returns at once after it, and its context, its server
-        // with it, is destroyed then, before the I/O thread's next turn (as a Program's would be).
+        // The third request's reply is sent all the same: main returns at once after it, and its context, its server
+        // with it, is destroyed then, maybe before the I/O thread's next turn; closing sends the replies handed over
+        // first (as a Program's destruction does).
         std::pair<int, std::string> result;
         std::thread server([&] {
             result = run("env FMINUS_WEB_LISTEN='127.0.0.1:" + std::to_string(port) + "' FMINUS_WEB_ROOT='" +
@@ -504,7 +505,7 @@ TEST_CASE("an executable serves with FMINUS_WEB_LISTEN, its files from FMINUS_WE
         const int two = add(port, 2);
         const int last = add(port, 0);
         server.join();
-        CHECK((last == 200000 + 2 || last == FMINUS_WEB_TRANSPORT));
+        CHECK(last == 200000 + 2);
         CHECK(index == 200000 + 12);    // the root's index.html at "/", served by the library
         CHECK(script == 200000 + 2);
         CHECK(one == 200000 + 2);       // "40"

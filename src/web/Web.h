@@ -217,9 +217,11 @@ namespace fminus::web
         // Cancels every request still in flight, wakes every thread waiting on one (its wait returns
         // FMINUS_WEB_CANCELLED), waits for those threads to leave, frees every request made under it, closed or not,
         // and, if it was the last context to have used the I/O thread, joins that thread. Its server is closed first
-        // (stop()), every thread in fminus_web_http_accept woken and waited for, and then freed with every request
-        // it received. No thread may start a request under it, or use one of its requests or its server, once this
-        // has begun, except to wait on one already waited on, or in fminus_web_http_accept.
+        // (stop(): the replies the program handed over sent, for up to a quarter of a second), every thread in
+        // fminus_web_http_accept woken and waited for, and then freed with every request it received. No thread may
+        // start a request under it, or use one of its requests or its server, once this has begun, except a thread
+        // already in fminus_web_http_wait, a deadline scope's end or fminus_web_http_accept (counted there: see
+        // waitingThreads, below); a call that begins meanwhile may touch freed memory.
         ~Context();
 
         Context(const Context&) = delete;
@@ -231,10 +233,11 @@ namespace fminus::web
         // Stops the context's network for good: every request in flight is cancelled (FMINUS_WEB_CANCELLED, which
         // wakes the threads waiting on it) before this returns, and every request started from then on is
         // cancelled at once, a request one starts while this runs too. Its server, if it listens, is closed as
-        // fminus_web_http_close closes it (below), and one listened for from then on never listens (its port is
-        // FMINUS_WEB_CANCELLED). What has completed stays as it is, its body
-        // readable until it is closed or the context destroyed. Any thread may call it, any number of times; it waits
-        // for the I/O thread (briefly), so not the audio thread.
+        // fminus_web_http_close closes it (below): every thread in fminus_web_http_accept woken at once, the replies
+        // the program handed over sent before this returns (a quarter of a second at most, for a client that does not
+        // read), and one listened for from then on never listens (its port is FMINUS_WEB_CANCELLED). What has completed
+        // stays as it is, its body readable until it is closed or the context destroyed. Any thread may call it, any
+        // number of times; it waits for the I/O thread (briefly), so not the audio thread.
         void stop() noexcept;
 
         // What the policy says of `url` as it stands, without making a request: 0 when a pattern allows it, else
@@ -256,6 +259,14 @@ namespace fminus::web
 
     // Whether the I/O thread is running (for tests: it is joined when the last context that used it goes).
     bool ioThreadRunning();
+
+    // How many threads are in the library's waits on the requests of the context whose handle (Context::handle()) is
+    // `context`: fminus_web_http_wait, and a deadline scope's end. Each is counted under the context's mutex from
+    // before its first look at the context to after its last, and holds the mutex from its count until it waits; so
+    // stop() and ~Context, which take the mutex first, find every thread counted already waiting, wake it, and
+    // (~Context) wait for it to leave. For tests, which would otherwise guess with a sleep that a thread is inside the
+    // wait. Takes the mutex: not for the audio thread.
+    std::int32_t waitingThreads(void* context);
 
 #if FMINUS_HAS_WEB_SERVER
     // A directory's files as a server's static content (ServerPolicy::files), for a host that has no files of its own
@@ -544,6 +555,7 @@ extern "C"
     //                         size or a content type that cannot be (the request is still the caller's)
     //   FMINUS_WEB_CANCELLED  the library gave up on the request meanwhile (its client left, its reply timed out and
     //                         was answered 503, or the server closed): the handle is dead, and its slot free
+    // A reply that returned 0 is sent, a server closed right after it included (fminus_web_http_close, below).
     // A request taken must be answered: its slot is the taker's until it is, whatever its client was told, so one never
     // answered holds its slot until the server closes, and maxPending of them leave every later request a 503.
     // A content type is the `typeLength` bytes at `type`, printable ASCII, at most 255 bytes; empty: none for a reply
@@ -595,10 +607,13 @@ extern "C"
     // fminus_web_http_size and fminus_web_http_body (above) on a request a server received: its body, of
     // Content-Length bytes (with one 0 byte after its last, not counted), until the request is answered.
     //
-    // fminus_web_http_close (above) on a server: stops listening, closes every connection (a request waiting is given
-    // up: its answer is FMINUS_WEB_CANCELLED), wakes every thread in fminus_web_http_accept (null), and leaves the
-    // port FMINUS_WEB_CANCELLED. The handle, and those of the requests it received, stay safe to use until the context
-    // is destroyed. Any number of times; the shared refused server: nothing. Waits for the I/O thread (briefly): not
-    // for the audio thread.
+    // fminus_web_http_close (above) on a server: stops listening, gives up every request the program has not answered
+    // (its answer is FMINUS_WEB_CANCELLED) and every one it has not taken, wakes every thread in fminus_web_http_accept
+    // (null), and leaves the port FMINUS_WEB_CANCELLED; then sends every reply the program published before it (one
+    // that returned 0), each the last response on its connection (Connection: close), and closes every connection. It
+    // waits for those replies to go out a quarter of a second at most: a client that does not read its reply cannot
+    // hold it longer (its connection is closed with as much of the reply as its socket took). The handle, and those of
+    // the requests it received, stay safe to use until the context is destroyed. Any number of times; the shared
+    // refused server: nothing. Waits for the I/O thread (briefly), and for those replies: not for the audio thread.
 #endif
 }

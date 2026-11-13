@@ -21,6 +21,7 @@
 #include "HeapCalls.h"
 #include "StrictMode.h"
 #include "fminus/FMinus.h"
+#include "web/Server.h"
 #include "web/Web.h"
 
 #include <array>
@@ -535,14 +536,26 @@ TEST_CASE("two serves on two threads each take their own routes' requests, and l
     auto* load = served.program->function<int(void*, int)>("Split::load", errors);
     REQUIRE(load);
     const auto audio = [&] { return field<int>(*served.program, *served.instance, "Split", "audio"); };
+    // Where the server's requests and threads are (the library's counts), looked at every millisecond for 5 s.
+    void* server = field<void*>(*served.program, *served.instance, "Split", "server");
+    const auto counted = [&](const std::function<bool(const fminus::web::ServerCounts&)>& condition) {
+        for (int i = 0; i < 5000; ++i)
+        {
+            if (condition(fminus::web::serverCounts(server)))
+                return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return condition(fminus::web::serverCounts(server));
+    };
     {
         const Pump pump([&] { served.process(served.instance->memory()); });
         CHECK(request(served.port, "POST", "/a").status == 204);
         // The loader's route: the audio thread's serve leaves it waiting.
         const int waiting = sendRequest(served.port, "PUT", "/b/3", "");
         REQUIRE(waiting >= 0);
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        CHECK(request(served.port, "POST", "/a").status == 204);   // not in the way
+        REQUIRE(counted([](const fminus::web::ServerCounts& c) { return c.published == 1; }));
+        CHECK(request(served.port, "POST", "/a").status == 204);   // not in the way: a serve passed it by to take this
+        CHECK(fminus::web::serverCounts(server).published == 1);
         CHECK(field<int>(*served.program, *served.instance, "Split", "loaded") == 0);
         // The loader, on a thread of its own, takes it (and only it), while the audio thread goes on.
         int taken = -1;
@@ -550,11 +563,12 @@ TEST_CASE("two serves on two threads each take their own routes' requests, and l
         CHECK(readResponse(waiting).status == 201);
         loader.join();
         CHECK(taken == 3);
-        // A loader that waits, then takes what came meanwhile: a request sent 50 ms into its wait.
+        // A loader that waits, then takes what came meanwhile: a request sent once it is in its wait.
         std::thread late([&] { taken = load(served.instance->memory(), 5000); });
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        const bool inWait = counted([](const fminus::web::ServerCounts& c) { return c.accepting == 1; });
         const Response got = request(served.port, "GET", "/b/9");
         late.join();
+        CHECK(inWait);
         CHECK(got.body == "{\"k\":9,\"loaded\":3}");
         CHECK(taken == 0);
         CHECK(audio() == 2);
@@ -566,6 +580,91 @@ TEST_CASE("two serves on two threads each take their own routes' requests, and l
     CHECK(load(served.instance->memory(), 0) == 0);
 }
 #endif
+
+TEST_CASE("a reply just before the server closes reaches its client: closed by the program's deferred http_close, by "
+          "stopWeb() and by ~Program",
+          "[serve][web][server][lifetime]")
+{
+    // The report's program: POST /stop ends the loop at once, and the function's deferred http_close closes the server
+    // while the reply may not have gone out yet. The second is the same without the close: the host closes, as soon as
+    // the loader has returned. (A closed server also ends the loop, so that nothing here can spin for ever.)
+    constexpr const char* kCloses = "int run()\n"
+                                    "{\n"
+                                    "    http_server server = http_listen();\n"
+                                    "    defer http_close(server);\n"
+                                    "    bool stop = false;\n"
+                                    "    while (!stop && http_port(server) > 0)\n"
+                                    "    {\n"
+                                    "        serve (server, 10)\n"
+                                    "        {\n"
+                                    "            route \"POST /stop\" { stop = true; reply 204; }\n"
+                                    "        }\n"
+                                    "    }\n"
+                                    "    return stop ? 1 : 0;\n"
+                                    "}\n";
+    constexpr const char* kServes = "int run()\n"
+                                    "{\n"
+                                    "    http_server server = http_listen();\n"
+                                    "    bool stop = false;\n"
+                                    "    while (!stop && http_port(server) > 0)\n"
+                                    "    {\n"
+                                    "        serve (server, 10)\n"
+                                    "        {\n"
+                                    "            route \"POST /stop\" { stop = true; reply 204; }\n"
+                                    "        }\n"
+                                    "    }\n"
+                                    "    return stop ? 1 : 0;\n"
+                                    "}\n";
+    for (const char* closing : {"http_close", "stopWeb", "~Program"})
+    {
+        INFO(closing);
+        const std::string way(closing);
+        for (int round = 0; round < 4; ++round)
+        {
+            fminus::Program::Options options;
+            options.web.server.listen = "127.0.0.1:0";
+            auto program = compileProgram(way == "http_close" ? kCloses : kServes, options);
+            std::string errors;
+            auto* run = program->function<int()>("run", errors);
+            INFO(errors);
+            REQUIRE(run);
+            std::atomic<int> stopped{-1};
+            std::thread loader([&] { stopped = run(); });
+            int port = 0;
+            for (int i = 0; i < 5000 && port == 0; ++i)
+            {
+                port = program->webPort();
+                if (port == 0)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            if (port == 0)
+            {
+                program->stopWeb();   // ends the loop: the server closed
+                loader.join();
+                FAIL("the program never listened");
+            }
+            const int fd = sendRequest(port, "POST", "/stop", "");
+            Response response;
+            if (way == "http_close")
+            {
+                response = readResponse(fd);
+                loader.join();
+            }
+            else
+            {
+                loader.join();   // the loader has replied and returned: the host closes at once
+                if (way == "stopWeb")
+                    program->stopWeb();
+                else
+                    program.reset();
+                response = readResponse(fd);
+            }
+            CHECK(stopped.load() == 1);
+            CHECK(response.status == 204);
+            CHECK(response.head.find("Connection: close") != std::string::npos);
+        }
+    }
+}
 
 TEST_CASE("webRoutes lists a route statement with its parameters: name, type, what fills it, range and default",
           "[serve][web][server][library]")

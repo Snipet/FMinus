@@ -21,9 +21,13 @@
 // - The I/O thread gives up on a request when its client leaves or its reply times out: a published one goes back to
 //   free, a claimed one to abandoned (the 503 sent for it), which the program's reply turns to done (and returns
 //   FMINUS_WEB_CANCELLED for), and the I/O thread then frees. So the request a program holds never changes under it.
-// - Closing a server (fminus_web_http_close, Context::stop, ~Context) detaches it from the I/O thread, which closes
-//   every socket it has; then marks it closed and wakes the threads in fminus_web_http_accept. Its slots stay, as do
-//   its handles, until the context is destroyed.
+// - Closing a server (fminus_web_http_close, Context::stop, ~Context) is two commands. The first (Drain) has the I/O
+//   thread close its listening sockets, give up every request published (closed) or claimed (abandoned), make every
+//   answered reply its connection's last response, and close every connection with nothing to send; then the server
+//   is marked closed and the threads in fminus_web_http_accept are woken. The connections left send their responses,
+//   unread, each closed once it is out, and the I/O thread says so when none is left (waitDrained). The closing
+//   thread waits for that, a quarter of a second at most (Web.cpp's kDrainTime), then the second command (Unserve)
+//   detaches the server, closing whatever is left. Its slots stay, as do its handles, until the context is destroyed.
 #pragma once
 
 #include "fminus/Config.h"
@@ -67,9 +71,14 @@ namespace fminus::web
     // The context a server was made under (null for the refused server).
     Context::State* serverContext(const Server& server) noexcept;
 
-    // Marks the server closed, after the I/O thread has let go of it (Servers::detach): its port is FMINUS_WEB_CANCELLED
-    // from now on, and every thread in fminus_web_http_accept is woken (null). Any number of times.
+    // Marks the server closed, once the I/O thread has stopped listening for it and given up what the program has not
+    // answered (Servers::drain): its port is FMINUS_WEB_CANCELLED from now on, and every thread in
+    // fminus_web_http_accept is woken (null). Any number of times.
     void closeServer(Server& server) noexcept;
+
+    // Waits until the server's drain is over (Servers::drain: every reply it kept sent, or its connection gone), or
+    // until `until`, whichever comes first. True when it is over. Takes the server's mutex; not for the I/O thread.
+    bool waitDrained(Server& server, std::chrono::steady_clock::time_point until) noexcept;
 
     // Frees a closed server, once every thread in fminus_web_http_accept has left (it waits for them).
     void freeServer(Server* server) noexcept;
@@ -86,20 +95,31 @@ namespace fminus::web
         // FMINUS_WEB_FAILED.
         void attach(Server* server) noexcept;
 
-        // Stops driving `server`: closes its listening sockets and every connection, and gives up every request it has
-        // published or the program holds. Nothing, for a server it does not drive.
+        // Begins closing `server`: closes its listening sockets, gives up every request it has published (closed) or
+        // the program holds (abandoned, so that its reply says FMINUS_WEB_CANCELLED), makes every reply the program has
+        // published its connection's last response (Connection: close), and closes every connection with nothing to
+        // send. Those left keep sending, nothing read from them, on this command and on each turn after, and each is
+        // closed once its response is out (or its requestTimeoutMs to take it has passed); when none is left, the drain
+        // is over (waitDrained). For a server it does not drive, the drain is over at once; for one it drains already,
+        // nothing.
+        void drain(Server* server) noexcept;
+
+        // Stops driving `server`: closes its listening sockets and every connection, a draining one's included, and
+        // gives up every request it has published or the program holds; its drain, if any, is over. Nothing, for a
+        // server it does not drive.
         void detach(Server* server) noexcept;
 
         // One turn: replies to send and slots to free, connections to accept, bytes to read, parse and write,
-        // deadlines passed.
+        // deadlines passed; for a draining server, its responses to send.
         void turn() noexcept;
 
         // The descriptors to wait on, after a turn, in `out` (cleared first): every listening socket and every
-        // connection that is waiting for bytes or has bytes to send; nothing closed, ever (a socket is closed only in
-        // a turn or a detach, and the array is made again after each). And how long the wait may be, at most `cap`
-        // milliseconds: 1 while a request is published or claimed, else until the next deadline. A turn tries every
-        // socket it has something to do with, whatever the wait reported (curl reports no hang-up or error of an extra
-        // descriptor, only its readability and writability), so the wait's revents are not read.
+        // connection that is waiting for bytes or has bytes to send (a draining server's waits for none); nothing
+        // closed, ever (a socket is closed only in a command or a turn, and the array is made again after each). And
+        // how long the wait may be, at most `cap` milliseconds: 1 while a request is published or claimed, else until
+        // the next deadline. A turn tries every socket it has something to do with, whatever the wait reported (curl
+        // reports no hang-up or error of an extra descriptor, only its readability and writability), so the wait's
+        // revents are not read.
         void descriptors(std::vector<curl_waitfd>& out) noexcept;
         int timeoutMs(int cap) const noexcept;
 
@@ -144,6 +164,20 @@ namespace fminus::web
     // segment by segment from the first, the first that differs deciding: a literal segment before one with a %d (and
     // one with fewer %d before one with more), a %d's before a %s.
     int compareSpecificity(std::string_view a, std::string_view b) noexcept;
+
+    // Where a server's requests and threads are, for tests that must know it rather than guess with a sleep: its
+    // requests published and not taken, those a taker holds, and those given up while held (abandoned) and not yet
+    // answered, each a load of a slot's state; and the threads in fminus_web_http_accept on it, each counted from its
+    // first look at the server to its last (counted, a thread is in the wait or about to look whether the server is
+    // closed, and ~Context waits for it to leave). Zeros for a handle that is not a server. Wait-free.
+    struct ServerCounts
+    {
+        std::int32_t published = 0;
+        std::int32_t held = 0;
+        std::int32_t abandoned = 0;
+        std::int32_t accepting = 0;
+    };
+    ServerCounts serverCounts(void* server) noexcept;
 } // namespace fminus::web
 
 #endif

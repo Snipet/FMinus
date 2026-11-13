@@ -100,9 +100,9 @@ module Remote
             process(block, 480);
             serve (server, 10)
             {
-                route "POST /stop"                                       // ends the run two blocks on, its reply
-                {                                                        // sent by then: a route sees the loop's b
-                    blocks = b + 2;
+                route "POST /stop"                                       // ends the run at once: its reply goes
+                {                                                        // out as the host closes the server
+                    blocks = 0;
                     reply 204;
                 }
             }

@@ -337,18 +337,21 @@ namespace fminus::web
 
         std::atomic<std::int32_t> port{FMINUS_WEB_REFUSED};
 
-        // fminus_web_http_accept's.
+        // fminus_web_http_accept's, and the closing thread's (waitDrained).
         std::mutex mutex;
         std::condition_variable changed;
         std::atomic<std::int32_t> waiters{0};
-        bool closed = false;   // under the mutex
-        bool dying = false;    // under the mutex
+        bool closed = false;    // under the mutex
+        bool dying = false;     // under the mutex
+        bool drained = false;   // under the mutex: its drain is over (Servers::drain)
 
         // The maker's until it is attached, then the I/O thread's.
         std::vector<sockets::Socket> listeners;
         std::vector<Clock::time_point> acceptAgain;   // a listener's pause after accept failed
         std::vector<std::unique_ptr<Connection>> connections;
         std::uint64_t sequence = 0;
+        bool draining = false;     // Servers::drain has begun: its connections only send
+        bool drainOver = false;    // and `drained` is set
     };
 
     namespace
@@ -1190,6 +1193,50 @@ namespace fminus::web
             }
         }
 
+        // ---- closing: the drain ------------------------------------------------------------------------------------
+
+        // The drain is over: the closing thread waiting in waitDrained is told. Once.
+        void endDrain(Server& s)
+        {
+            if (s.drainOver)
+                return;
+            s.drainOver = true;
+            {
+                std::lock_guard lock(s.mutex);
+                s.drained = true;
+            }
+            s.changed.notify_all();
+        }
+
+        // A draining connection's turn: it sends what it has left (closing once it is out: closeAfter), and nothing is
+        // read from it; or it is closed once its time to take the response has passed. Never waits: the socket is
+        // non-blocking, and a client that does not read only leaves its response where it is.
+        void turnDraining(Server& s, Connection& c, Clock::time_point now)
+        {
+            if (c.dead)
+                return;
+            if (c.stage != Connection::Stage::Writing || !c.closeAfter)
+            {
+                closeConnection(c);   // nothing to send (Servers::drain keeps no other)
+                return;
+            }
+            try
+            {
+                writeTo(s, c, now);
+            }
+            catch (const std::bad_alloc&)
+            {
+                closeConnection(c);
+            }
+            if (!c.dead && now >= c.deadline)
+                closeConnection(c);
+        }
+
+        void dropDead(Server& s)
+        {
+            std::erase_if(s.connections, [](const std::unique_ptr<Connection>& c) { return c->dead; });
+        }
+
         void acceptConnections(Server& s, Clock::time_point now)
         {
             for (std::size_t i = 0; i < s.listeners.size(); ++i)
@@ -1728,6 +1775,12 @@ namespace fminus::web
         server.changed.notify_all();
     }
 
+    bool waitDrained(Server& server, Clock::time_point until) noexcept
+    {
+        std::unique_lock lock(server.mutex);
+        return server.changed.wait_until(lock, until, [&] { return server.drained; });
+    }
+
     void freeServer(Server* server) noexcept
     {
         if (server == nullptr || server == refusedServer())
@@ -1760,11 +1813,87 @@ namespace fminus::web
         }
     }
 
+    void Servers::drain(Server* server) noexcept
+    {
+        Server& s = *server;
+        if (std::find(servers_.begin(), servers_.end(), server) == servers_.end())
+        {
+            endDrain(s);   // not driven (never attached, or detached already): nothing of it to send
+            return;
+        }
+        if (s.draining)
+            return;
+        s.draining = true;
+        for (sockets::Socket socket : s.listeners)
+            sockets::closeSocket(socket);
+        s.listeners.clear();
+        s.acceptAgain.clear();
+        const Clock::time_point now = Clock::now();
+        // The slots: what the program has not taken is closed, what it holds abandoned (its reply says
+        // FMINUS_WEB_CANCELLED), and a reply it has published (which only the I/O thread moves on from Answered)
+        // becomes its connection's response, the last on it. A taker's compare-and-swap and these decide which comes
+        // first: a reply that returned 0 is sent.
+        for (const std::unique_ptr<Slot>& owned : s.slots)
+        {
+            Slot& slot = *owned;
+            for (;;)
+            {
+                std::uint64_t word = slot.state.load(std::memory_order_acquire);
+                const Phase phase = phaseOf(word);
+                if (phase == Abandoned || phase == Closed)
+                    break;
+                if (phase == Answered)
+                {
+                    if (Connection* c = slot.connection)
+                    {
+                        c->keepAlive = false;
+                        try
+                        {
+                            sendReply(*c, slot, now);
+                        }
+                        catch (const std::bad_alloc&)
+                        {
+                            c->slot = nullptr;
+                            closeConnection(*c);
+                        }
+                    }
+                    slot.state.store(withPhase(word, Closed), std::memory_order_release);
+                    break;
+                }
+                const Phase next = phase == Claimed ? Abandoned : Closed;
+                if (slot.state.compare_exchange_weak(word, withPhase(word, next), std::memory_order_acq_rel))
+                    break;
+            }
+            slot.connection = nullptr;
+        }
+        // The connections: one with a response going out keeps it, as its last (a reply just made, a reply or a
+        // refusal already going out, a file), and sends what its socket takes now; every other is closed.
+        for (const std::unique_ptr<Connection>& owned : s.connections)
+        {
+            Connection& c = *owned;
+            if (c.dead)
+                continue;
+            if (c.stage == Connection::Stage::Writing)
+            {
+                c.closeAfter = true;
+                turnDraining(s, c, now);
+            }
+            else
+                closeConnection(c);
+        }
+        dropDead(s);
+        if (s.connections.empty())
+            endDrain(s);
+    }
+
     void Servers::detach(Server* server) noexcept
     {
         const auto found = std::find(servers_.begin(), servers_.end(), server);
         if (found == servers_.end())
+        {
+            endDrain(*server);
             return;
+        }
         servers_.erase(found);
         for (const std::unique_ptr<Connection>& c : server->connections)
             closeConnection(*c);
@@ -1788,6 +1917,7 @@ namespace fminus::web
             }
             slot->connection = nullptr;
         }
+        endDrain(*server);
     }
 
     void Servers::turn() noexcept
@@ -1796,6 +1926,17 @@ namespace fminus::web
         for (Server* server : servers_)
         {
             Server& s = *server;
+            if (s.draining)
+            {
+                if (s.drainOver)
+                    continue;
+                for (const std::unique_ptr<Connection>& owned : s.connections)
+                    turnDraining(s, *owned, now);
+                dropDead(s);
+                if (s.connections.empty())
+                    endDrain(s);
+                continue;
+            }
             turnSlots(s, now);
             acceptConnections(s, now);
             for (const std::unique_ptr<Connection>& owned : s.connections)
@@ -1809,7 +1950,7 @@ namespace fminus::web
                     closeConnection(*owned);
                 }
             }
-            std::erase_if(s.connections, [](const std::unique_ptr<Connection>& c) { return c->dead; });
+            dropDead(s);
         }
     }
 
@@ -1829,8 +1970,8 @@ namespace fminus::web
                 for (const std::unique_ptr<Connection>& c : server->connections)
                 {
                     short events = 0;
-                    if (wantsBytes(*c))
-                        events |= CURL_WAIT_POLLIN;
+                    if (!server->draining && wantsBytes(*c))   // a draining one reads nothing: a waiting byte
+                        events |= CURL_WAIT_POLLIN;             // would wake the wait at once, each time round
                     if (c->sent < c->out.size())
                         events |= CURL_WAIT_POLLOUT;
                     if (events != 0)
@@ -1852,6 +1993,8 @@ namespace fminus::web
         {
             for (const std::unique_ptr<Slot>& slot : server->slots)
             {
+                if (server->draining)
+                    break;   // its slots are no longer its turns' (Servers::drain)
                 const Phase phase = phaseOf(slot->state.load(std::memory_order_acquire));
                 if (phase == Published || phase == Claimed || phase == Answered || phase == Done)
                     return std::min(cap, 1);
@@ -1905,6 +2048,23 @@ namespace fminus::web
     {
         const Slot* slot = held(handle);
         return slot == nullptr ? nullptr : slot->body.data();
+    }
+
+    ServerCounts serverCounts(void* handle) noexcept
+    {
+        ServerCounts counts;
+        Server* server = as<Server>(handle);
+        if (server == nullptr)
+            return counts;
+        for (const std::unique_ptr<Slot>& slot : server->slots)
+        {
+            const Phase phase = phaseOf(slot->state.load(std::memory_order_acquire));
+            counts.published += phase == Published ? 1 : 0;
+            counts.held += phase == Claimed ? 1 : 0;
+            counts.abandoned += phase == Abandoned ? 1 : 0;
+        }
+        counts.accepting = server->waiters.load(std::memory_order_seq_cst);
+        return counts;
     }
 } // namespace fminus::web
 

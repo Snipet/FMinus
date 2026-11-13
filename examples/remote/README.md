@@ -23,19 +23,23 @@ an audio thread that calls `process` a block at a time. A second `Program` in th
 client, then fetches the page (served by the library, byte for byte), asks for `/nothing` and `GET /gain` (404 and 405,
 from the library: the program never sees them), sends `POST /gain?value=0.5` and `POST /note/81` (204), `?value=nan` and
 `/note/128` (the program's 400), and reads `/state` back. Once the audio thread has stopped, a second rendered after the
-requests must be heard as they said: a peak of 0.5 at 880 Hz. Last, the host calls `stopWeb()`, and nothing listens
-there any more.
+requests must be heard as they said: a peak of 0.5 at 880 Hz. Then the host calls `stopWeb()`, and nothing listens
+there any more. Last, the driver's way (below): the program compiled again, its `run(30)` on a thread of its own, `POST
+/stop` sent by the client, and the program destroyed on that thread as soon as `run` returns, maybe before the reply
+has gone out; the client must have its 204 all the same (closing sends the replies handed over first: [docs/web.md](
+../../docs/web.md), "The server's threads and lifetime"), and `run` must have ended at once.
 
 ```
 the default policy: the program's port is HTTP_REFUSED, and nothing listens
-.../examples/remote/remote.fm:50: POST /gain
-.../examples/remote/remote.fm:56: POST /pitch
-.../examples/remote/remote.fm:62: POST /note/*
-.../examples/remote/remote.fm:68: GET /state
-.../examples/remote/remote.fm:102: POST /stop
+.../examples/remote/remote.fm:51: POST /gain
+.../examples/remote/remote.fm:57: POST /pitch
+.../examples/remote/remote.fm:63: POST /note/*
+.../examples/remote/remote.fm:69: GET /state
+.../examples/remote/remote.fm:103: POST /stop
   float value, from the query, 0 to 1
 listening on 127.0.0.1:40267
 heard: a peak of 0.2500 at 439 Hz before, 0.5000 at 880 Hz after POST /gain?value=0.5 and POST /note/81
+POST /stop: 204, and run() returned at once; the program was destroyed as soon as it had
 checked: the page served by the library; 404 and 405 without the program; ...
 ```
 
@@ -48,10 +52,10 @@ ms, and prints the URL to open. An address that is not loopback needs `--token`,
 
 The driver has no audio thread, so `remote.fm` has a function for it: `run(seconds)` renders blocks of 10 ms for about
 that long, calling `process` for each, and between two waits up to a block's time with a serve of its own (`serve
-(server, 10)`, which blocks) for a route only it has, `POST /stop`, which ends the run two blocks on (its reply sent by
-then); the requests for `process`'s routes it leaves waiting for `process`, at the next block (a serve takes only its
-own routes' requests). It returns the changes the page made. The page is the directory `--web-root` reads once, as the
-program starts:
+(server, 10)`, which blocks) for a route only it has, `POST /stop`, which ends the run at once: the driver destroys the
+program as soon as `run` returns, and closing sends the stop's reply first. The requests for `process`'s routes it
+leaves waiting for `process`, at the next block (a serve takes only its own routes' requests). It returns the changes
+the page made. The page is the directory `--web-root` reads once, as the program starts:
 
 ```bash
 build-web/bin/fminus examples/remote/remote.fm --run run 600 --web-listen localhost:8080 --web-root examples/remote/page
@@ -69,7 +73,7 @@ curl -X POST 'http://localhost:8080/gain?value=2'             # 400: the program
 curl http://localhost:8080/state                              # {"gain":0.5,"pitch":880.0001,"level":0.48573467,"changes":2}
 curl -i http://localhost:8080/gain                            # 405, Allow: POST: the library's
 curl -i -H 'Origin: http://evil.example' -X POST 'http://localhost:8080/gain?value=1'   # 403: another site's page
-curl -X POST http://localhost:8080/stop                       # 204, and the run ends two blocks on
+curl -X POST http://localhost:8080/stop                       # 204, and the run ends
 ```
 
 Stop it with Ctrl-C or `POST /stop`; it prints the changes when its time is up. Without `--web-listen`, `run` returns -4

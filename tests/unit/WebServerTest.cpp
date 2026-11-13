@@ -1059,19 +1059,39 @@ namespace
                "Content-Length: 0\r\n\r\n";
     }
 
+    // Whether `condition` holds within `limit`, looked at every millisecond: what a test waits for, where the library
+    // can say it (fminus::web::serverCounts), rather than guess with a sleep.
+    bool eventually(const std::function<bool()>& condition, std::chrono::milliseconds limit = 5000ms)
+    {
+        const auto end = std::chrono::steady_clock::now() + limit;
+        while (!condition())
+        {
+            if (std::chrono::steady_clock::now() >= end)
+                return false;
+            std::this_thread::sleep_for(1ms);
+        }
+        return true;
+    }
+
+    fminus::web::ServerCounts counts(void* server)
+    {
+        return fminus::web::serverCounts(server);
+    }
+
     // Sends each request on a connection of its own, in order, each published before the next is sent (the
     // connections are returned, open, for the caller to read and close).
     std::vector<int> sendEach(void* server, int port, const std::vector<std::string>& requests)
     {
         std::vector<int> fds;
+        const std::int32_t before = counts(server).published;
         for (const std::string& text : requests)
         {
             const int fd = connectTo(port);
             REQUIRE(sendAll(fd, text));
             fds.push_back(fd);
-            std::this_thread::sleep_for(30ms);   // published, in this order (the I/O thread turns every millisecond)
+            const auto published = before + static_cast<std::int32_t>(fds.size());
+            REQUIRE(eventually([&] { return counts(server).published == published; }));   // in this order
         }
-        (void)server;
         return fds;
     }
 } // namespace
@@ -1322,6 +1342,8 @@ TEST_CASE("taken by route set: a blocked taker is woken by its own route, never 
         });
         REQUIRE(sendAll(a, request(port, "GET", "/audio/1")));
         REQUIRE(sendAll(b, request(port, "GET", "/audio/2")));
+        // Both published, each waking the loader, and the loader in its take: then a while for a wrong wake to show.
+        CHECK(eventually([&] { return counts(served.server).published == 2 && counts(served.server).accepting == 1; }));
         std::this_thread::sleep_for(150ms);
         CHECK_FALSE(returned.load());
         REQUIRE(sendAll(c, request(port, "GET", "/preset/p")));
@@ -1570,7 +1592,13 @@ TEST_CASE("rule 1: connections beyond maxConnections are closed at once", "[web]
     Served served(policy);
     const int a = connectTo(served.port);
     const int b = connectTo(served.port);
-    std::this_thread::sleep_for(100ms);
+    // Both taken by the server, each answered once: the third is beyond the limit.
+    for (const int fd : {a, b})
+    {
+        REQUIRE(sendAll(fd, get(served.port, "/hello")));
+        Reader first(fd);
+        REQUIRE(first.next().has_value());
+    }
     const int c = connectTo(served.port);
     CHECK(closedWithin(c, 2000ms));
     CHECK_FALSE(closedWithin(a, 100ms));
@@ -1583,8 +1611,8 @@ TEST_CASE("rule 1: connections beyond maxConnections are closed at once", "[web]
     ::close(a);
     ::close(b);
     ::close(c);
-    std::this_thread::sleep_for(100ms);
-    CHECK(roundTrip(served.port, get(served.port, "/hello")).status == 200);   // room again
+    // Room again, once the I/O thread has seen them go (until then a new one is closed at once, unanswered).
+    CHECK(eventually([&] { return roundTrip(served.port, get(served.port, "/hello")).status == 200; }));
 }
 
 TEST_CASE("rule 2: the head's size, fields, version, method, target and framing", "[web][server][rules]")
@@ -1907,7 +1935,7 @@ TEST_CASE("rule 9: every slot taken is 503 with Retry-After; a request no one an
     const int b = connectTo(served.port);
     REQUIRE(sendAll(a, get(served.port, "/hello")));
     REQUIRE(sendAll(b, get(served.port, "/hello")));
-    std::this_thread::sleep_for(100ms);
+    REQUIRE(eventually([&] { return counts(served.server).published == 2; }));   // every slot taken
     Response full = roundTrip(served.port, get(served.port, "/hello"));
     CHECK(full.status == 503);
     CHECK(full.header("retry-after") == "1");
@@ -2114,16 +2142,16 @@ TEST_CASE("connections dropped mid-request and mid-reply; a reply after its clie
     void* request = fminus_web_http_accept(served.server, 5000);
     REQUIRE(request != nullptr);
     ::close(fd);
-    std::this_thread::sleep_for(200ms);
+    CHECK(eventually([&] { return counts(served.server).abandoned == 1; }));   // the I/O thread saw it go
     CHECK(is(request, "GET /hello") == 1);   // still the caller's to read
     CHECK(fminus_web_http_reply(request, 200) == FMINUS_WEB_CANCELLED);
     CHECK(fminus_web_http_reply(request, 200) == FMINUS_WEB_INVALID);   // dead now
     // And a published one whose client leaves is never taken.
     const int gone = connectTo(port);
     REQUIRE(sendAll(gone, get(port, "/hello")));
-    std::this_thread::sleep_for(100ms);
+    REQUIRE(eventually([&] { return counts(served.server).published == 1; }));
     ::close(gone);
-    std::this_thread::sleep_for(200ms);
+    CHECK(eventually([&] { return counts(served.server).published == 0; }));   // given up, not taken
     CHECK(fminus_web_http_next(served.server) == nullptr);
 }
 
@@ -2344,7 +2372,7 @@ TEST_CASE("close, stop and destruction with connections open, requests out and a
             got = fminus_web_http_accept(server, -1);
             returned.store(true);
         });
-        std::this_thread::sleep_for(100ms);
+        CHECK(eventually([&] { return counts(server).accepting == 1; }));   // in its take
         CHECK_FALSE(returned.load());
         fminus_web_http_close(server);
         acceptor.join();
@@ -2373,13 +2401,13 @@ TEST_CASE("close, stop and destruction with connections open, requests out and a
         REQUIRE(sendAll(open, get(port, "/hello")));
         void* got = reinterpret_cast<void*>(1);
         std::thread acceptor([&] {
-            std::this_thread::sleep_for(50ms);
             void* first = fminus_web_http_accept(server, -1);   // the published request
             got = fminus_web_http_accept(server, -1);           // then nothing until the stop
             if (first != nullptr)
                 fminus_web_http_reply(first, 200);
         });
-        std::this_thread::sleep_for(300ms);
+        // The request taken, and the acceptor in its second take.
+        CHECK(eventually([&] { return counts(server).held == 1 && counts(server).accepting == 1; }));
         context->stop();
         acceptor.join();
         CHECK(got == nullptr);
@@ -2402,17 +2430,22 @@ TEST_CASE("close, stop and destruction with connections open, requests out and a
         const int open = connectTo(port);
         const int waiting = connectTo(port);
         REQUIRE(sendAll(waiting, get(port, "/hello") + get(port, "/osc/1/detune")));
-        std::this_thread::sleep_for(100ms);
+        REQUIRE(eventually([&] { return counts(server).published == 1; }));   // the first: one at a time
         void* held = fminus_web_http_next(server);
         REQUIRE(held != nullptr);
         std::vector<void*> got(3, reinterpret_cast<void*>(1));
         std::vector<std::thread> acceptors;
         for (int i = 0; i < 3; ++i)
-            acceptors.emplace_back([&, i] {
-                std::this_thread::sleep_for(20ms);
-                got[static_cast<std::size_t>(i)] = fminus_web_http_accept(server, -1);
-            });
-        std::this_thread::sleep_for(200ms);
+            acceptors.emplace_back([&, i] { got[static_cast<std::size_t>(i)] = fminus_web_http_accept(server, -1); });
+        // All three in accept, counted by the server: only then may the context go (a take that begins after ~Context
+        // has would read freed memory).
+        if (!eventually([&] { return counts(server).accepting == 3; }))
+        {
+            context->stop();
+            for (std::thread& t : acceptors)
+                t.join();
+            FAIL("the three threads never all reached accept");
+        }
         context.reset();   // the threads in accept are woken, waited for, then the server is freed
         for (std::thread& t : acceptors)
             t.join();
@@ -2422,6 +2455,192 @@ TEST_CASE("close, stop and destruction with connections open, requests out and a
         ::close(open);
         ::close(waiting);
         CHECK_FALSE(fminus::web::ioThreadRunning());
+    }
+}
+
+namespace
+{
+    // The three ways a server closes: the program's http_close, its context stopped (Program::stopWeb()) or destroyed
+    // (~Program). `server` is the context's.
+    enum class Closing
+    {
+        Close,
+        Stop,
+        Destroy,
+    };
+
+    const char* nameOf(Closing closing)
+    {
+        return closing == Closing::Close ? "http_close" : closing == Closing::Stop ? "Context::stop" : "~Context";
+    }
+
+    void closeBy(Closing closing, std::unique_ptr<Context>& context, void* server)
+    {
+        if (closing == Closing::Close)
+            fminus_web_http_close(server);
+        else if (closing == Closing::Stop)
+            context->stop();
+        else
+            context.reset();
+    }
+
+    // Bytes a reader can check whole: the i-th is 'a' + i % 26.
+    std::string pattern(std::size_t size)
+    {
+        std::string bytes(size, '\0');
+        for (std::size_t i = 0; i < size; ++i)
+            bytes[i] = static_cast<char>('a' + i % 26);
+        return bytes;
+    }
+
+    // Reads what a connection has until its end (the server's FIN, or a reset), each read within `wait` of the last:
+    // how many bytes came, and in `ended` whether the end came (false: the bytes stopped and the connection stayed
+    // open).
+    std::size_t readToEnd(int fd, bool& ended, std::chrono::milliseconds wait = 3000ms)
+    {
+        std::size_t total = 0;
+        char chunk[65536];
+        for (;;)
+        {
+            pollfd p{fd, POLLIN, 0};
+            if (::poll(&p, 1, static_cast<int>(wait.count())) <= 0)
+            {
+                ended = false;
+                return total;
+            }
+            const ssize_t got = ::recv(fd, chunk, sizeof chunk, 0);
+            if (got <= 0)
+            {
+                ended = true;
+                return total;
+            }
+            total += static_cast<std::size_t>(got);
+        }
+    }
+} // namespace
+
+TEST_CASE("closing sends every reply handed over before it, then closes: a reply answered and the server closed at "
+          "once reaches its client whole",
+          "[web][server][lifetime]")
+{
+    // The program answers, and closes at once on the same thread (a run's last route, then its deferred http_close; a
+    // host's stopWeb() or ~Program right after its loader returns). The I/O thread might send the reply on a turn of
+    // its own first, so rounds: closing that dropped it would lose it in most.
+    for (const Closing closing : {Closing::Close, Closing::Stop, Closing::Destroy})
+    {
+        INFO(nameOf(closing));
+        const std::string body = pattern(60000);   // under maxReplyBytes (64 KiB): more than one write may take
+        for (int round = 0; round < 10; ++round)
+        {
+            INFO("round " << round);
+            auto context = makeContext(serving());
+            void* server = listen(*context, kRoutes);
+            const int port = fminus_web_http_port(server);
+            REQUIRE(port > 0);
+            const int fd = connectTo(port);
+            REQUIRE(sendAll(fd, get(port, "/big")));
+            void* request = fminus_web_http_accept(server, 5000);
+            REQUIRE(request != nullptr);
+            REQUIRE(replyBytes(request, 200, body, "application/octet-stream") == 0);
+            closeBy(closing, context, server);
+            Reader reader(fd);
+            const std::optional<Response> response = reader.next();
+            REQUIRE(response);
+            CHECK(response->status == 200);
+            CHECK(response->body.size() == body.size());
+            CHECK((response->body == body));
+            // The last on its connection: the close says so when it sent the reply, and an ordinary reply says
+            // nothing when the I/O thread had sent it on a turn of its own first (above). Either way it is whole, and
+            // the connection ends after it.
+            const std::string connection = response->header("connection");
+            CHECK((connection.empty() || connection == "close"));
+            CHECK(closedWithin(fd, 1000ms));
+            ::close(fd);
+        }
+    }
+}
+
+TEST_CASE("closing gives up what the program holds and has not answered, and what it has not taken, as before; the "
+          "reply it answered goes out beside them",
+          "[web][server][lifetime]")
+{
+    for (const Closing closing : {Closing::Close, Closing::Stop, Closing::Destroy})
+    {
+        INFO(nameOf(closing));
+        auto context = makeContext(serving());
+        void* server = listen(*context, kRoutes);
+        const int port = fminus_web_http_port(server);
+        REQUIRE(port > 0);
+        const int answered = connectTo(port);
+        const int held = connectTo(port);
+        REQUIRE(sendAll(answered, get(port, "/osc/4/detune")));
+        REQUIRE(sendAll(held, get(port, "/hello")));
+        void* first = fminus_web_http_accept(server, 5000);
+        void* second = fminus_web_http_accept(server, 5000);
+        REQUIRE(first != nullptr);
+        REQUIRE(second != nullptr);
+        if (is(first, "GET /hello") == 1)
+            std::swap(first, second);
+        REQUIRE(is(first, "GET /osc/%d/detune") == 1);
+        const int waiting = connectTo(port);
+        REQUIRE(sendAll(waiting, get(port, "/hello")));   // published by now, or still being read: either way untaken
+        REQUIRE(replyText(first, 200, "osc %d", {double(fminus_web_http_arg(first, 0))}) == 0);
+        closeBy(closing, context, server);
+        // The reply answered before the close: sent, then the connection closed.
+        Reader reader(answered);
+        const std::optional<Response> response = reader.next();
+        REQUIRE(response);
+        CHECK(response->body == "osc 4");
+        CHECK(closedWithin(answered, 1000ms));
+        // The request held and not answered, and the one not taken: nothing, the connection closed.
+        for (const int fd : {held, waiting})
+        {
+            bool ended = false;
+            CHECK(readToEnd(fd, ended) == 0);
+            CHECK(ended);
+        }
+        // The held one's reply, after: HTTP_CANCELLED, as it always was (a destroyed context's handles are dead).
+        if (closing != Closing::Destroy)
+            CHECK(fminus_web_http_reply(second, 200) == FMINUS_WEB_CANCELLED);
+        for (const int fd : {answered, held, waiting})
+            ::close(fd);
+    }
+}
+
+TEST_CASE("a client that never reads its reply cannot hold the close past its bound", "[web][server][lifetime]")
+{
+    // A reply of 8 MiB to a client that reads nothing: more than the sockets between them hold (a send buffer grows to
+    // 4 MiB at most on Linux, and an unread receive buffer stays at its first size, 128 KiB). Closing sends what they
+    // take, waits for the rest until its bound (a quarter of a second), then closes: the client, reading at last, has
+    // a part of the reply, and then the connection's end. (Its receive buffer is left as it is: a small one would make
+    // the kernel trickle the rest to it on its persist timer, minutes for a few MiB.)
+    for (const Closing closing : {Closing::Close, Closing::Stop, Closing::Destroy})
+    {
+        INFO(nameOf(closing));
+        Policy policy = serving();
+        policy.server.maxPending = 1;
+        policy.server.maxReplyBytes = 8 << 20;
+        auto context = makeContext(policy);
+        void* server = listen(*context, kRoutes);
+        const int port = fminus_web_http_port(server);
+        REQUIRE(port > 0);
+        const int fd = connectTo(port);
+        REQUIRE(sendAll(fd, get(port, "/big")));
+        void* request = fminus_web_http_accept(server, 5000);
+        REQUIRE(request != nullptr);
+        const std::string body(8 << 20, 'b');
+        REQUIRE(replyBytes(request, 200, body) == 0);
+        const auto started = std::chrono::steady_clock::now();
+        closeBy(closing, context, server);
+        const auto took = std::chrono::steady_clock::now() - started;
+        CHECK(took >= 200ms);   // it waited for the client
+        CHECK(took < 2s);       // and gave up at its bound (with room for a loaded machine)
+        bool ended = false;
+        const std::size_t got = readToEnd(fd, ended);
+        CHECK(got > 0);
+        CHECK(got < body.size());
+        CHECK(ended);
+        ::close(fd);
     }
 }
 

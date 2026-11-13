@@ -178,6 +178,17 @@ namespace
         return true;
     }
 
+    // A Program's web context, as the library knows it (Context::handle()): what its module's global holds. For
+    // fminus::web::waitingThreads, which tells a test that a thread is in a wait rather than leave it to guess.
+    void* webContextOf(fminus::Program& program)
+    {
+        std::string errors;
+        const std::uintptr_t global = program.address("fminus_web_context", errors);
+        INFO(errors);
+        REQUIRE(global != 0);
+        return *reinterpret_cast<void* const*>(global);
+    }
+
     // An HTTP/1.1 server on 127.0.0.1 at an ephemeral port, a thread a connection, each closed after its response:
     //   /ok           200 "hello"
     //   /after/N      200 "late", N milliseconds after the request
@@ -625,13 +636,17 @@ TEST_CASE("stopWeb wakes a thread at a within's end, and destroying the program 
                                  "}\n";
     auto program = compileFor(origin, source, 2);
     auto* held = function<int(int)>(*program, "held");
+    void* handle = webContextOf(*program);
     std::atomic<int> result{-100};
     std::thread loader([&] { result = held(origin.port()); });
-    REQUIRE(eventually([&] { return origin.hits("/slow") == 1; }));
-    std::this_thread::sleep_for(50ms);   // into the end's wait
+    // In the end's wait, counted by the program's context (its module's global holds its handle): a stop before it
+    // would end the block all the same, but not by waking it.
+    const bool inside =
+        eventually([&] { return origin.hits("/slow") == 1 && fminus::web::waitingThreads(handle) == 1; });
     const auto start = Clock::now();
     program->stopWeb();
     loader.join();
+    REQUIRE(inside);
     CHECK(since(start) < 2000ms);
     CHECK(result.load() == FMINUS_WEB_CANCELLED);
     program.reset();
@@ -1094,6 +1109,7 @@ TEST_CASE("a stop on a thread with no scope open leaves another thread's scope a
         auto* stopsFirst = function<float(int, float)>(*program, "stopsFirst");
         program->setLoopBudget(1'000'000'000);
         const int before = origin.hits("/slow");
+        void* handle = webContextOf(*program);
         std::atomic<int> result{-100};
         std::atomic<long long> took{0};
         std::thread other([&] {
@@ -1101,8 +1117,9 @@ TEST_CASE("a stop on a thread with no scope open leaves another thread's scope a
             result = held(origin.port(), 400);
             took = since(start).count();
         });
-        REQUIRE(eventually([&] { return origin.hits("/slow") == before + 1; }));
-        std::this_thread::sleep_for(50ms);   // into its wait
+        const bool inside = eventually(
+            [&] { return origin.hits("/slow") == before + 1 && fminus::web::waitingThreads(handle) == 1; });
+        CHECK(inside);   // in its end's wait
         program->setLoopBudget(10000);
         CHECK(stopsFirst(origin.port(), INFINITY) == 0.0f);   // abandons this thread's scopes: none
         CHECK(program->loopBudgetExceeded());
