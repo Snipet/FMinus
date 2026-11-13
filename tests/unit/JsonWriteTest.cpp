@@ -10,11 +10,13 @@
 #if FMINUS_HAS_JSON
 #include "HeapCalls.h"
 #include "Shapes.h"
+#include "StrictMode.h"
 #include "ir/Lowering.h"
 #include "runtime/Runtime.h"
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <array>
 #include <bit>
 #include <charconv>
 #include <cmath>
@@ -26,14 +28,6 @@
 #include <string>
 #include <string_view>
 #include <vector>
-
-#if defined(__linux__)
-#include <linux/seccomp.h>
-#include <sys/prctl.h>
-#include <sys/syscall.h>
-#include <sys/wait.h>
-#include <unistd.h>
-#endif
 
 using namespace fminus::test::shapes;
 
@@ -599,36 +593,16 @@ TEST_CASE("json_write allocates nothing and makes no system call", "[runtime][js
     else
         WARN("this build does not count the heap's calls (a sanitizer): allocation is not checked");
 #if defined(__linux__)
-    int fds[2];
-    REQUIRE(::pipe(fds) == 0);
-    const pid_t child = ::fork();
-    REQUIRE(child >= 0);
-    if (child == 0)
+    const auto writeAndCompare = [&]
     {
-        ::close(fds[0]);
-        if (::prctl(PR_SET_SECCOMP, SECCOMP_MODE_STRICT) != 0)
-            ::syscall(SYS_exit, 2);
-        std::int64_t result[2] = {writeAll(), 0};
+        std::array<std::int64_t, 2> result{writeAll(), 0};
         result[1] = std::memcmp(buffer, expected.data(), 10) == 0 ? 1 : 0;
-        const ssize_t written = ::write(fds[1], result, sizeof result);
-        ::syscall(SYS_exit, written == sizeof result ? 0 : 1);
-    }
-    ::close(fds[1]);
-    int status = 0;
-    ::waitpid(child, &status, 0);
-    std::int64_t result[2] = {0, 0};
-    const ssize_t got = ::read(fds[0], result, sizeof result);
-    ::close(fds[0]);
-    INFO("status " << status);
-    if (WIFEXITED(status) && WEXITSTATUS(status) == 2)
-        WARN("seccomp's strict mode is not available here: the system calls are not checked");
-    else
+        return result;
+    };
+    if (const fminus::test::Sealed<std::array<std::int64_t, 2>> result = fminus::test::inStrictMode(writeAndCompare))
     {
-        CHECK(WIFEXITED(status));
-        CHECK(WEXITSTATUS(status) == 0);
-        CHECK(got == static_cast<ssize_t>(sizeof result));
-        CHECK(result[0] == whole);
-        CHECK(result[1] == 1);
+        CHECK((*result)[0] == whole);
+        CHECK((*result)[1] == 1);
     }
 #endif
 }

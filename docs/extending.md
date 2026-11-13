@@ -7461,8 +7461,8 @@ calling glibc's own (`__libc_malloc`), and since the runtime is linked into the 
 too. A hundred rounds of every read of the example's preset, through the JIT, make no call, where one `json_parse` and
 `json_free` make at least two. Then a child process enters seccomp's strict mode, in which any system call but `read`,
 `write` and `exit` kills it (a contended lock's `futex`, an allocator's `mmap` or `brk`), runs every read, and writes
-their sum back: it exits, with the parent's sum. The counter is there on Linux with glibc and no sanitizer; seccomp on
-Linux.
+their sum back: the parent's sum (`tests/unit/StrictMode.h`, the helper every such proof uses: [testing.md](testing.md),
+"A wait-free proof"). The counter is there on Linux with glibc and no sanitizer; seccomp on Linux, in every build.
 
 ### What a read costs
 
@@ -8177,7 +8177,7 @@ the type from a table of thirteen extensions, and limits (256 files, 16 MiB, 409
   close`, HTTP/1.0 and the idle limit), connections dropped mid-request and mid-reply, a reply over the limit, two
   clients and four takers, closing with idle connections, a held request and threads in `http_accept(-1)`; and the
   proof that the wait-free functions are: `HeapCalls` counts no allocation, and children under seccomp's strict mode
-  make the same calls and exit with the expected sums.
+  make the same calls and send back the expected sums.
 - `tests/unit/HttpServerTest.cpp`, in every build: each builtin's effect through the table and through the effects'
   errors; each name's error in a build without the server; then, with it, the route errors at their columns, the reply
   format's and the query name's, the route table (each literal once, a route lowered after the listen), the
@@ -9573,8 +9573,8 @@ an acquire load, sees the new generation. Every scope begun under an older gener
 end of any thread drops it from the vector under the mutex. Another thread's scopes are never touched. The steps are a
 walk of the records, a few atomic loads, and two stores when there is something to abandon: no lock, no allocation, no
 system call, which `WithinTest.cpp` proves as the tree proves a wait-free builtin, under `HeapCalls` (0 calls) and in a
-child under seccomp's strict mode (it exits), for a context with no record, a thread with two scopes open, one with
-none while another thread holds one, and a null context.
+child under seccomp's strict mode (its result arrives), for a context with no record, a thread with two scopes open,
+one with none while another thread holds one, and a null context.
 
 **The passes call it**, but only where it can matter. A scope belongs to the frame of the function that called
 `within_begin`: after inlining, the function that holds the call. When a call stops, that function either stops itself
@@ -10085,7 +10085,9 @@ hole's attributes without its default, a number's as a string's, so the one erro
   uninstrumented, since `Compile.h`'s vectors are clang's): `JsonWriteTest`, `JsonModuleTest`, `XmlTextTest`,
   `FileTextTest`, `FilesTest`, `JsonFileTest`, `WebTextTest`, `WebTest`, `WebServerTest`, `JsonLiteralTest` and
   `JsonServeTest`, 157 cases, under AddressSanitizer with UndefinedBehaviorSanitizer, no report; and 148 under
-  ThreadSanitizer (all but the nine fork-based proofs, which TSan's own thread keeps from exiting), no report.
+  ThreadSanitizer (all but the nine fork-based proofs, which TSan's own thread keeps from exiting), no report. They
+  run there since: their helper, `tests/unit/StrictMode.h`, ends that thread itself ([testing.md](testing.md), "A
+  wait-free proof"; [web.md](web.md), "What is verified where").
 
 ## Pitfalls
 

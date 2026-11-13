@@ -918,7 +918,8 @@ blocks.
 That the wait-free builtins are wait-free in the library's code is proved, not asserted
 (`tests/unit/WebServerTest.cpp`): `HeapCalls` counts no allocation in `http_next`, `http_port`, `http_is`, `http_arg`,
 the query's reads, `http_size`, `http_body` and each reply, and a child process under seccomp's strict mode, in which
-any system call but `read`, `write` and `exit` kills it, makes the same calls and exits with the expected results.
+any system call but `read`, `write` and `exit` kills it, makes the same calls and sends back the expected results
+(`tests/unit/StrictMode.h`, which every such proof uses; [testing.md](testing.md), "A wait-free proof").
 `tests/unit/WebServeTest.cpp` makes the same proof of a `[[clang::nonblocking]]` handler compiled by the JIT, whose
 builtins take, read and answer the request through the definitions the JIT gives them, and `tests/unit/ServeTest.cpp`
 of a `serve` in a nonblocking method: its takes by route set, its parameters' reads and checks, each form of reply and
@@ -1246,6 +1247,17 @@ server.
   loopback servers of the tests' own, and with the server's and the client's other tests under GCC's AddressSanitizer
   with UndefinedBehaviorSanitizer (every case) and ThreadSanitizer (every case but the fork-based proofs), the JIT's
   tests compiled by clang uninstrumented beside them.
+- **The wait-free proofs under both sanitizers** (2026-11-13): every proof's child under seccomp's strict mode is now
+  `tests/unit/StrictMode.h`'s, which reads the child's result and then ends the child, never waiting for it to end by
+  itself, so the fork-based proofs that ThreadSanitizer's own thread kept from exiting (above) run there too. The 18
+  proof cases (`WebServerTest.cpp`'s three, `WebServeTest.cpp`'s, `ServeTest.cpp`'s, `JsonServeTest.cpp`'s,
+  `WithinTest.cpp`'s, and those of the JSON, XML, document-text and file tests) and the helper's own six
+  (`StrictModeTest.cpp`), each in a process of its own as ctest runs a case, ran 20 times under GCC 13's
+  ThreadSanitizer (480 runs, every one passed, no report, none longer than a second) and once under AddressSanitizer
+  with UndefinedBehaviorSanitizer (no report), outside the presets, with the web library, llhttp and the runtime's own
+  sources but `Math.cpp` instrumented, and the test files compiled by g++ from a copy whose `Compile.h` spells `float2`
+  and `float4` as GCC's vector types. The proof of `xml_text` as it was, built the same way, still stalled there (its
+  parent in `waitpid`, its child a zombie leader beside the sanitizer's thread), stopped after 60 seconds.
 - **Not run anywhere yet:** macOS and Windows (their root-certificate loaders, Schannel, the frameworks and system
   libraries an executable links, and the server's sockets there: `SocketsPosix.cpp` with macOS's `SO_NOSIGPIPE`,
   `SocketsWindows.cpp`, curl's handling of extra descriptors on Windows, llhttp built by clang-cl, whose header marks

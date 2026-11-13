@@ -17,6 +17,7 @@
 
 #if FMINUS_HAS_WEB_SERVER && FMINUS_HAS_JSON && !defined(_WIN32)
 #include "HeapCalls.h"
+#include "StrictMode.h"
 #include "fminus/FMinus.h"
 
 #include <atomic>
@@ -39,14 +40,7 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/time.h>
-#include <sys/wait.h>
 #include <unistd.h>
-
-#if defined(__linux__)
-#include <linux/seccomp.h>
-#include <sys/prctl.h>
-#include <sys/syscall.h>
-#endif
 
 using namespace fminus::test;
 
@@ -371,38 +365,20 @@ TEST_CASE("a reply of a module in a [[clang::nonblocking]] method allocates noth
     bool checked = false;
     for (int attempt = 0; attempt < 200 && !checked; ++attempt)
     {
-        int fds[2];
-        REQUIRE(::pipe(fds) == 0);
         const int before = answered();
-        const pid_t child = ::fork();
-        REQUIRE(child >= 0);
-        if (child == 0)
+        const Sealed<int> result = inStrictMode(
+            [&]
+            {
+                served.process(memory);
+                return answered() - before;
+            });
+        if (!result.available())
         {
-            ::close(fds[0]);
-            if (::prctl(PR_SET_SECCOMP, SECCOMP_MODE_STRICT) != 0)
-                ::syscall(SYS_exit, 2);
-            served.process(memory);
-            const int result = answered() - before;
-            const ssize_t written = ::write(fds[1], &result, sizeof result);
-            ::syscall(SYS_exit, written == sizeof result ? 0 : 1);
-        }
-        ::close(fds[1]);
-        int status = 0;
-        ::waitpid(child, &status, 0);
-        int result = 0;
-        const ssize_t got = ::read(fds[0], &result, sizeof result);
-        ::close(fds[0]);
-        INFO("status " << status);
-        if (WIFEXITED(status) && WEXITSTATUS(status) == 2)
-        {
-            WARN("seccomp's strict mode is not available here: the system calls are not checked");
-            checked = true;
+            checked = true;   // it warned: the system calls are not checked
             break;
         }
-        REQUIRE(WIFEXITED(status));
-        REQUIRE(WEXITSTATUS(status) == 0);
-        REQUIRE(got == static_cast<ssize_t>(sizeof result));
-        if (result == 1)
+        REQUIRE(result.returned());   // its failure says why
+        if (*result == 1)
             checked = true;
         else
             std::this_thread::sleep_for(std::chrono::milliseconds(5));   // not published yet

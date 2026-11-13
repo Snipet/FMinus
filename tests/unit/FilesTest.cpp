@@ -16,6 +16,7 @@
 
 #if FMINUS_HAS_FILES && !defined(_WIN32)
 #include "HeapCalls.h"
+#include "StrictMode.h"
 #include "runtime/Files.h"
 #include "runtime/FilesSystem.h"
 #include "runtime/Runtime.h"
@@ -43,12 +44,6 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
-
-#if defined(__linux__)
-#include <linux/seccomp.h>
-#include <sys/prctl.h>
-#include <sys/syscall.h>
-#endif
 
 namespace
 {
@@ -1484,35 +1479,8 @@ TEST_CASE("the reads of a file and a listing allocate nothing and make no system
     }
 #if defined(__linux__)
     // In a child under seccomp's strict mode, where any system call but read, write and exit kills it.
-    int fds[2];
-    REQUIRE(::pipe(fds) == 0);
-    const pid_t child = ::fork();
-    REQUIRE(child >= 0);
-    if (child == 0)
-    {
-        ::close(fds[0]);
-        if (::prctl(PR_SET_SECCOMP, SECCOMP_MODE_STRICT) != 0)
-            ::syscall(SYS_exit, 2);
-        const long sum = readAll();
-        const ssize_t written = ::write(fds[1], &sum, sizeof sum);
-        ::syscall(SYS_exit, written == sizeof sum ? 0 : 1);
-    }
-    ::close(fds[1]);
-    int result = 0;
-    ::waitpid(child, &result, 0);
-    long sum = 0;
-    const ssize_t got = ::read(fds[0], &sum, sizeof sum);
-    ::close(fds[0]);
-    INFO("status " << result);
-    if (WIFEXITED(result) && WEXITSTATUS(result) == 2)
-        WARN("seccomp's strict mode is not available here: the system calls are not checked");
-    else
-    {
-        CHECK(WIFEXITED(result));
-        CHECK(WEXITSTATUS(result) == 0);
-        CHECK(got == static_cast<ssize_t>(sizeof sum));
-        CHECK(sum == expected);
-    }
+    if (const fminus::test::Sealed<long> sum = fminus::test::inStrictMode(readAll))
+        CHECK(*sum == expected);
 #endif
     fminus_rt_file_close(a);
     fminus_rt_file_close(l);

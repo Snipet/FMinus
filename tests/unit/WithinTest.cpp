@@ -24,6 +24,7 @@
 
 #if FMINUS_HAS_WEB && !defined(_WIN32)
 #include "HeapCalls.h"
+#include "StrictMode.h"
 #include "fminus/FMinus.h"
 #include "web/Policy.h"
 #include "web/Web.h"
@@ -47,14 +48,7 @@
 #include <poll.h>
 #include <sys/socket.h>
 #include <sys/time.h>
-#include <sys/wait.h>
 #include <unistd.h>
-
-#if defined(__linux__)
-#include <linux/seccomp.h>
-#include <sys/prctl.h>
-#include <sys/syscall.h>
-#endif
 #endif
 
 using namespace fminus::test;
@@ -1372,35 +1366,8 @@ TEST_CASE("the library's abandon is wait-free: it allocates nothing and makes no
 #if defined(__linux__)
     REQUIRE(fminus_web_http_within_begin(handle, 1000) == 0);
     REQUIRE(fminus_web_http_within_begin(handle, -1) == 0);
-    int fds[2];
-    REQUIRE(::pipe(fds) == 0);
-    const pid_t child = ::fork();
-    REQUIRE(child >= 0);
-    if (child == 0)
-    {
-        ::close(fds[0]);
-        if (::prctl(PR_SET_SECCOMP, SECCOMP_MODE_STRICT) != 0)
-            ::syscall(SYS_exit, 2);
-        const int result = abandonAll();
-        const ssize_t written = ::write(fds[1], &result, sizeof result);
-        ::syscall(SYS_exit, written == sizeof result ? 0 : 1);
-    }
-    ::close(fds[1]);
-    int status = 0;
-    ::waitpid(child, &status, 0);
-    int result = -1;
-    const ssize_t got = ::read(fds[0], &result, sizeof result);
-    ::close(fds[0]);
-    INFO("status " << status);
-    if (WIFEXITED(status) && WEXITSTATUS(status) == 2)
-        WARN("seccomp's strict mode is not available here: the system calls are not checked");
-    else
-    {
-        REQUIRE(WIFEXITED(status));
-        CHECK(WEXITSTATUS(status) == 0);
-        REQUIRE(got == static_cast<ssize_t>(sizeof result));
-        CHECK(result == 200);
-    }
+    if (const fminus::test::Sealed<int> result = fminus::test::inStrictMode(abandonAll))
+        CHECK(*result == 200);
     CHECK(fminus_web_http_within_abandon(handle) == 2);   // the parent's own, which the child's did not touch
 #else
     WARN("seccomp is Linux's: the system calls are not checked here");

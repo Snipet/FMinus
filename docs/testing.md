@@ -29,7 +29,9 @@ presets. Run them through the preset, not with `ctest --test-dir build-asan`: th
 instantiations (LLVM's `df_iterator`, and the `PassConcept` vector a pass callback's `addPass` grows), so without it
 the JIT and AOT smoke tests abort with a false "container-overflow" inside LLVM's passes. Running `fminus-tests` by
 hand from `build-asan/`, set it yourself. Under tsan, one test skips itself: `ZeroInitTest.cpp`'s check that its dirty
-stack reaches a JIT'd function's locals, since ThreadSanitizer's runtime writes the frames in between (below).
+stack reaches a JIT'd function's locals, since ThreadSanitizer's runtime writes the frames in between (below). The
+wait-free proofs run under both: their count of the heap's calls only warns there, and their child under seccomp's
+strict mode proves as in any build (below, "A wait-free proof").
 
 On Windows `fminus-tests` and `fminus-library-tests` run in UTF-8 (`tests/utf8.manifest`, their active code page;
 Windows 10 1903 or later), so ctest's filter, a test's whole name, reaches Catch2 as the `TEST_CASE` spells it: without
@@ -97,6 +99,7 @@ TEST_CASE("functions compute what they say", "[codegen]")
   `[pointer]`, `[heap]`, `[effects]`, `[math]` (the math modes and their kernels), `[versions]` (knob versioning and
   flat streams), `[tbaa]`, `[zeroinit]`, `[attributes]` and `[progress]` (the runtime's and libm's attributes, and loop
   progress), `[denormals]`, `[parallel]` (parallel regions, and `[runtime]` among them for the pool on its own),
+  `[strict]` (the helpers of the wait-free proofs, `StrictModeTest.cpp`: below, "A wait-free proof"),
   `[ir]` (`Program::Options::keepIr`'s texts), `[budget]` (the loop budget: `LoopBudgetTest.cpp`, in the unit tests and
   the library's), `[bounds]` (bounds checks: `BoundsCheckTest.cpp`, in both too), `[call]` (calls by name:
   `CallThunkTest.cpp`'s thunks in the unit tests, and `CallTest.cpp`'s `Program::call` in the library's), `[profile]`
@@ -245,6 +248,30 @@ TEST_CASE("functions compute what they say", "[codegen]")
   is whichever ran first: a test checks the index is one of theirs. The record is the program's global,
   `fminus_rt_bounds`: `lookup<fminus_rt_bounds_state>(*jit, ...)` reads and clears it as a host does;
   `opt::boundsSites(module)`, read before the JIT takes the module, says what each number means.
+- **A wait-free proof** (that a runtime function, a builtin's code through the JIT, or the web library's audio-thread
+  half allocates nothing and makes no system call) has two halves, and every proof in the tree is written with the same
+  two helpers. `HeapCalls` (`HeapCalls.h`) counts the C heap's calls this thread makes: a hundred or a thousand rounds
+  of the calls, counted, make none. It counts on Linux with glibc and no sanitizer only; elsewhere, and under a
+  sanitizer, whose heap is its own, the half warns and checks nothing. `inStrictMode(body)` (`StrictMode.h`) runs the
+  calls in a child process under seccomp's strict mode, in which any system call but `read`, `write`, `exit` and
+  `sigreturn` kills the thread that makes it, and gives back what `body` returned there:
+  `if (const auto sum = inStrictMode(readAll)) CHECK(*sum == expected);`. The child writes its result to a pipe and
+  leaves with the raw `exit`; the parent waits for the result up to a limit (`kStrictLimit`, 30 seconds), then kills
+  the child and reaps it. It never waits for the child to end by itself: under ThreadSanitizer a child forked from a
+  process with one thread has a thread of the sanitizer's, which strict mode (set with `prctl`, on the calling thread
+  alone) does not bind and the raw `exit`, which ends one thread, leaves running, so a proof that waited for the child
+  stalled there for ever. The result arriving is the proof, and the caller checks it is the one expected. A child whose
+  thread ended without it (strict mode killed it) fails a check at once, in words that say so, whether its process
+  ended or another thread kept it alive (the kernel clears a word the parent shares when the thread ends,
+  `set_tid_address(2)`); one that sent nothing within the limit fails saying its body hung; where strict mode is not
+  there (another system, or a kernel that refuses it) the proof warns and checks nothing. A proof that takes a request
+  published before the fork calls it again until the child finds one, and `REQUIRE`s each child's result. Strict mode
+  sees system calls, not allocations (a malloc the heap serves from what it holds makes none), which is why a proof has
+  both halves. `StrictModeTest.cpp` (`[strict]`) proves the helpers can fail: a body that calls `getpid`, one that
+  allocates 64 MiB (an `mmap`) and one that spins are each a failure that says which, in a child alone, in one a thread
+  of the test's keeps alive as ThreadSanitizer's does (not under ThreadSanitizer, which has its own there), and in one
+  forked beside a thread of the parent's; two proofs written with `inStrictMode`, tagged `[!shouldfail]`, must fail
+  their test case; and `HeapCalls` counts a body's malloc and free.
 
 ## lit and FileCheck
 

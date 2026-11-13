@@ -8,12 +8,12 @@
 #include "fminus/Config.h"
 #include "fminus/FMinus.h"
 #include "HeapCalls.h"
+#include "StrictMode.h"
 
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstdint>
 #include <cstring>
-#include <optional>
 #include <string>
 #include <vector>
 
@@ -27,16 +27,9 @@
 #endif
 
 #if !defined(_WIN32)
-#include <sys/wait.h>
 #include <unistd.h>
 #else
 #include <process.h>
-#endif
-
-#if defined(__linux__)
-#include <linux/seccomp.h>
-#include <sys/prctl.h>
-#include <sys/syscall.h>
 #endif
 
 using namespace fminus::test;
@@ -52,44 +45,6 @@ namespace
         char out[64] = {};
         const int n = read(document.data(), static_cast<int>(document.size()), k, out, 64);
         return n < 0 ? "<" + std::to_string(n) + ">" : std::string(out, static_cast<std::size_t>(n < 64 ? n : 64));
-    }
-#endif
-
-#if defined(__linux__)
-    // `run`'s result in a child under seccomp's strict mode, where any system call but read, write and exit kills it;
-    // nullopt (and a warning) where the mode is not there.
-    template <typename Run>
-    std::optional<int> sealed(Run run)
-    {
-        int fds[2];
-        REQUIRE(::pipe(fds) == 0);
-        const pid_t child = ::fork();
-        REQUIRE(child >= 0);
-        if (child == 0)
-        {
-            ::close(fds[0]);
-            if (::prctl(PR_SET_SECCOMP, SECCOMP_MODE_STRICT) != 0)
-                ::syscall(SYS_exit, 2);
-            const int result = run();
-            const ssize_t written = ::write(fds[1], &result, sizeof result);
-            ::syscall(SYS_exit, written == sizeof result ? 0 : 1);
-        }
-        ::close(fds[1]);
-        int status = 0;
-        ::waitpid(child, &status, 0);
-        int result = 0;
-        const ssize_t got = ::read(fds[0], &result, sizeof result);
-        ::close(fds[0]);
-        if (WIFEXITED(status) && WEXITSTATUS(status) == 2)
-        {
-            WARN("seccomp's strict mode is not available here: the system calls are not checked");
-            return std::nullopt;
-        }
-        INFO("status " << status);
-        CHECK(WIFEXITED(status));
-        CHECK(WEXITSTATUS(status) == 0);
-        CHECK(got == static_cast<ssize_t>(sizeof result));
-        return result;
     }
 #endif
 }   // namespace
@@ -383,7 +338,7 @@ TEST_CASE("file_name: a listing's own name of each file, in its order; empty out
         CHECK(calls == 0);
     }
 #if defined(__linux__)
-    if (const std::optional<int> sealedResult = sealed([&] { return sizes(listing, 3); }))
+    if (const Sealed<int> sealedResult = inStrictMode([&] { return sizes(listing, 3); }))
         CHECK(*sealedResult == 6590);
 #endif
     fminus_rt_file_close(listing);
@@ -436,7 +391,7 @@ TEST_CASE("json_string and xml_string through the JIT allocate nothing and make 
         CHECK(calls == 0);
     }
 #if defined(__linux__)
-    if (const std::optional<int> sealedResult = sealed([&] { return read(j, x); }))
+    if (const Sealed<int> sealedResult = inStrictMode([&] { return read(j, x); }))
         CHECK(*sealedResult == expected);
 #endif
     auto* release = program->function<void(void*, void*)>("release", errors);

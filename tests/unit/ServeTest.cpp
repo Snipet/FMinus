@@ -19,9 +19,11 @@
 
 #if FMINUS_HAS_WEB_SERVER && !defined(_WIN32)
 #include "HeapCalls.h"
+#include "StrictMode.h"
 #include "fminus/FMinus.h"
 #include "web/Web.h"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -39,14 +41,7 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/time.h>
-#include <sys/wait.h>
 #include <unistd.h>
-
-#if defined(__linux__)
-#include <linux/seccomp.h>
-#include <sys/prctl.h>
-#include <sys/syscall.h>
-#endif
 #endif
 
 using namespace fminus::test;
@@ -845,42 +840,24 @@ TEST_CASE("a serve in a [[clang::nonblocking]] method, compiled by the JIT, take
         bool checked = false;
         for (int attempt = 0; attempt < 200 && !checked; ++attempt)
         {
-            int fds[2];
-            REQUIRE(::pipe(fds) == 0);
             const int before = answered();
-            const pid_t child = ::fork();
-            REQUIRE(child >= 0);
-            if (child == 0)
+            const Sealed<std::array<double, 2>> result = inStrictMode(
+                [&]
+                {
+                    served.process(memory);
+                    return std::array<double, 2>{double(answered() - before),
+                                                 field<double>(*served.program, *served.instance, "Taker", "sum")};
+                });
+            if (!result.available())
             {
-                ::close(fds[0]);
-                if (::prctl(PR_SET_SECCOMP, SECCOMP_MODE_STRICT) != 0)
-                    ::syscall(SYS_exit, 2);
-                served.process(memory);
-                double result[2] = {double(answered() - before),
-                                    field<double>(*served.program, *served.instance, "Taker", "sum")};
-                const ssize_t written = ::write(fds[1], result, sizeof result);
-                ::syscall(SYS_exit, written == sizeof result ? 0 : 1);
-            }
-            ::close(fds[1]);
-            int status = 0;
-            ::waitpid(child, &status, 0);
-            double result[2] = {0, 0};
-            const ssize_t got = ::read(fds[0], result, sizeof result);
-            ::close(fds[0]);
-            INFO("status " << status);
-            if (WIFEXITED(status) && WEXITSTATUS(status) == 2)
-            {
-                WARN("seccomp's strict mode is not available here: the system calls are not checked");
-                checked = true;
+                checked = true;   // it warned: the system calls are not checked
                 kind = 4;
                 break;
             }
-            REQUIRE(WIFEXITED(status));
-            REQUIRE(WEXITSTATUS(status) == 0);
-            REQUIRE(got == static_cast<ssize_t>(sizeof result));
-            if (result[0] == 1)
+            REQUIRE(result.returned());   // its failure says why
+            if ((*result)[0] == 1)
             {
-                CHECK(result[1] == expected);
+                CHECK((*result)[1] == expected);
                 checked = true;
             }
             else

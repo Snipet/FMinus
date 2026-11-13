@@ -10,6 +10,7 @@
 #if FMINUS_HAS_JSON
 #include "HeapCalls.h"
 #include "Shapes.h"
+#include "StrictMode.h"
 #include "ir/Lowering.h"
 #include "runtime/Runtime.h"
 
@@ -23,14 +24,6 @@
 #include <string>
 #include <string_view>
 #include <vector>
-
-#if defined(__linux__)
-#include <linux/seccomp.h>
-#include <sys/prctl.h>
-#include <sys/syscall.h>
-#include <sys/wait.h>
-#include <unistd.h>
-#endif
 
 using namespace fminus::test::shapes;
 
@@ -512,34 +505,8 @@ TEST_CASE("json_module and json_text allocate nothing and make no system call", 
     else
         WARN("this build does not count the heap's calls (a sanitizer): allocation is not checked");
 #if defined(__linux__)
-    int fds[2];
-    REQUIRE(::pipe(fds) == 0);
-    const pid_t child = ::fork();
-    REQUIRE(child >= 0);
-    if (child == 0)
-    {
-        ::close(fds[0]);
-        if (::prctl(PR_SET_SECCOMP, SECCOMP_MODE_STRICT) != 0)
-            ::syscall(SYS_exit, 2);
-        const double sum = readAll();
-        const ssize_t written = ::write(fds[1], &sum, sizeof sum);
-        ::syscall(SYS_exit, written == sizeof sum ? 0 : 1);
-    }
-    ::close(fds[1]);
-    int status = 0;
-    ::waitpid(child, &status, 0);
-    double sum = 0;
-    const ssize_t got = ::read(fds[0], &sum, sizeof sum);
-    ::close(fds[0]);
-    if (WIFEXITED(status) && WEXITSTATUS(status) == 2)
-        WARN("seccomp's strict mode is not available here: the system calls are not checked");
-    else
-    {
-        CHECK(WIFEXITED(status));
-        CHECK(WEXITSTATUS(status) == 0);
-        CHECK(got == static_cast<ssize_t>(sizeof sum));
-        CHECK(sum == expected);
-    }
+    if (const fminus::test::Sealed<double> sum = fminus::test::inStrictMode(readAll))
+        CHECK(*sum == expected);
 #endif
 }
 #endif

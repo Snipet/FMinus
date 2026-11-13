@@ -7,6 +7,7 @@
 
 #if FMINUS_HAS_XML
 #include "HeapCalls.h"
+#include "StrictMode.h"
 #include "ir/Lowering.h"
 #include "runtime/Runtime.h"
 
@@ -17,14 +18,6 @@
 #include <string>
 #include <string_view>
 #include <vector>
-
-#if defined(__linux__)
-#include <linux/seccomp.h>
-#include <sys/prctl.h>
-#include <sys/syscall.h>
-#include <sys/wait.h>
-#include <unistd.h>
-#endif
 
 namespace
 {
@@ -140,34 +133,8 @@ TEST_CASE("xml_text allocates nothing and makes no system call", "[runtime][xml]
     else
         WARN("this build does not count the heap's calls (a sanitizer): allocation is not checked");
 #if defined(__linux__)
-    int fds[2];
-    REQUIRE(::pipe(fds) == 0);
-    const pid_t child = ::fork();
-    REQUIRE(child >= 0);
-    if (child == 0)
-    {
-        ::close(fds[0]);
-        if (::prctl(PR_SET_SECCOMP, SECCOMP_MODE_STRICT) != 0)
-            ::syscall(SYS_exit, 2);
-        const std::int64_t sum = readAll();
-        const ssize_t written = ::write(fds[1], &sum, sizeof sum);
-        ::syscall(SYS_exit, written == sizeof sum ? 0 : 1);
-    }
-    ::close(fds[1]);
-    int status = 0;
-    ::waitpid(child, &status, 0);
-    std::int64_t sum = 0;
-    const ssize_t got = ::read(fds[0], &sum, sizeof sum);
-    ::close(fds[0]);
-    if (WIFEXITED(status) && WEXITSTATUS(status) == 2)
-        WARN("seccomp's strict mode is not available here: the system calls are not checked");
-    else
-    {
-        CHECK(WIFEXITED(status));
-        CHECK(WEXITSTATUS(status) == 0);
-        CHECK(got == static_cast<ssize_t>(sizeof sum));
-        CHECK(sum == expected);
-    }
+    if (const fminus::test::Sealed<std::int64_t> sum = fminus::test::inStrictMode(readAll))
+        CHECK(*sum == expected);
 #endif
 }
 #endif

@@ -20,6 +20,7 @@
 
 #include "HeapCalls.h"
 #include "Shapes.h"
+#include "StrictMode.h"
 #include "runtime/Runtime.h"
 #include "web/Policy.h"
 #include "web/Server.h"
@@ -2512,40 +2513,23 @@ TEST_CASE("taking, reading and answering a request allocate nothing and make no 
         bool checked = false;
         for (int attempt = 0; attempt < 200 && !checked; ++attempt)
         {
-            int fds[2];
-            REQUIRE(::pipe(fds) == 0);
-            const pid_t child = ::fork();
-            REQUIRE(child >= 0);
-            if (child == 0)
+            const fminus::test::Sealed<std::array<double, 2>> result = fminus::test::inStrictMode(
+                [&]
+                {
+                    std::array<double, 2> taken{0, 0};
+                    taken[0] = handle(served.server, kind, taken[1]) ? 1 : 0;
+                    return taken;
+                });
+            if (!result.available())
             {
-                ::close(fds[0]);
-                if (::prctl(PR_SET_SECCOMP, SECCOMP_MODE_STRICT) != 0)
-                    ::syscall(SYS_exit, 2);
-                double result[2] = {0, 0};
-                result[0] = handle(served.server, kind, result[1]) ? 1 : 0;
-                const ssize_t written = ::write(fds[1], result, sizeof result);
-                ::syscall(SYS_exit, written == sizeof result ? 0 : 1);
-            }
-            ::close(fds[1]);
-            int status = 0;
-            ::waitpid(child, &status, 0);
-            double result[2] = {0, 0};
-            const ssize_t got = ::read(fds[0], result, sizeof result);
-            ::close(fds[0]);
-            INFO("status " << status);
-            if (WIFEXITED(status) && WEXITSTATUS(status) == 2)
-            {
-                WARN("seccomp's strict mode is not available here: the system calls are not checked");
-                checked = true;
+                checked = true;   // it warned: the system calls are not checked
                 kind = 4;
                 break;
             }
-            REQUIRE(WIFEXITED(status));
-            REQUIRE(WEXITSTATUS(status) == 0);
-            REQUIRE(got == static_cast<ssize_t>(sizeof result));
-            if (result[0] == 1)
+            REQUIRE(result.returned());   // its failure says why
+            if ((*result)[0] == 1)
             {
-                CHECK(result[1] == expected);
+                CHECK((*result)[1] == expected);
                 checked = true;
             }
             else
@@ -2644,38 +2628,22 @@ TEST_CASE("taking by route set and reading a request's text allocate nothing and
     bool checked = false;
     for (int attempt = 0; attempt < 200 && !checked; ++attempt)
     {
-        int fds[2];
-        REQUIRE(::pipe(fds) == 0);
-        const pid_t child = ::fork();
-        REQUIRE(child >= 0);
-        if (child == 0)
+        const fminus::test::Sealed<std::array<double, 2>> result = fminus::test::inStrictMode(
+            [&]
+            {
+                std::array<double, 2> taken{0, 0};
+                taken[0] = handle(served.server, taken[1]) ? 1 : 0;
+                return taken;
+            });
+        if (!result.available())
         {
-            ::close(fds[0]);
-            if (::prctl(PR_SET_SECCOMP, SECCOMP_MODE_STRICT) != 0)
-                ::syscall(SYS_exit, 2);
-            double result[2] = {0, 0};
-            result[0] = handle(served.server, result[1]) ? 1 : 0;
-            const ssize_t written = ::write(fds[1], result, sizeof result);
-            ::syscall(SYS_exit, written == sizeof result ? 0 : 1);
-        }
-        ::close(fds[1]);
-        int status = 0;
-        ::waitpid(child, &status, 0);
-        double result[2] = {0, 0};
-        const ssize_t got = ::read(fds[0], result, sizeof result);
-        ::close(fds[0]);
-        INFO("status " << status);
-        if (WIFEXITED(status) && WEXITSTATUS(status) == 2)
-        {
-            WARN("seccomp's strict mode is not available here: the system calls are not checked");
+            checked = true;   // it warned: the system calls are not checked
             break;
         }
-        REQUIRE(WIFEXITED(status));
-        REQUIRE(WEXITSTATUS(status) == 0);
-        REQUIRE(got == static_cast<ssize_t>(sizeof result));
-        if (result[0] == 1)
+        REQUIRE(result.returned());   // its failure says why
+        if ((*result)[0] == 1)
         {
-            CHECK(result[1] == expected);
+            CHECK((*result)[1] == expected);
             checked = true;
         }
         else
@@ -2963,36 +2931,15 @@ TEST_CASE("a JSON literal written into the reply buffer and published allocates 
     bool checked = false;
     for (int attempt = 0; attempt < 200 && !checked; ++attempt)
     {
-        int fds[2];
-        REQUIRE(::pipe(fds) == 0);
-        const pid_t child = ::fork();
-        REQUIRE(child >= 0);
-        if (child == 0)
+        const fminus::test::Sealed<int> result = fminus::test::inStrictMode([&] { return handle(served.server); });
+        if (!result.available())
         {
-            ::close(fds[0]);
-            if (::prctl(PR_SET_SECCOMP, SECCOMP_MODE_STRICT) != 0)
-                ::syscall(SYS_exit, 2);
-            const int result = handle(served.server);
-            const ssize_t written = ::write(fds[1], &result, sizeof result);
-            ::syscall(SYS_exit, written == sizeof result ? 0 : 1);
-        }
-        ::close(fds[1]);
-        int status = 0;
-        ::waitpid(child, &status, 0);
-        int result = -2;
-        const ssize_t got = ::read(fds[0], &result, sizeof result);
-        ::close(fds[0]);
-        INFO("status " << status);
-        if (WIFEXITED(status) && WEXITSTATUS(status) == 2)
-        {
-            WARN("seccomp's strict mode is not available here: the system calls are not checked");
+            checked = true;   // it warned: the system calls are not checked
             break;
         }
-        REQUIRE(WIFEXITED(status));
-        REQUIRE(WEXITSTATUS(status) == 0);
-        REQUIRE(got == static_cast<ssize_t>(sizeof result));
-        CHECK(result >= 0);
-        if (result == 1)
+        REQUIRE(result.returned());   // its failure says why
+        CHECK(*result >= 0);
+        if (*result == 1)
             checked = true;
         else
             std::this_thread::sleep_for(5ms);   // not published yet

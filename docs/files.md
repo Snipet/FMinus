@@ -353,9 +353,9 @@ the research quotes say the same in the same words: never on the thread that ren
   built ([below](#what-is-not-built)).
 - **The reads are proved wait-free**, not asserted: `HeapCalls` counts no heap call in `file_status`, `file_size`,
   `file_data` and `file_count` (on a file, a listing, a failure and null), and a child process under seccomp's strict
-  mode, in which any system call but `read`, `write` and `exit` kills it, makes the same calls and exits with the
+  mode, in which any system call but `read`, `write` and `exit` kills it, makes the same calls and sends back the
   expected sums: in the runtime's code (`tests/unit/FilesTest.cpp`) and through a `[[clang::nonblocking]]` function the
-  JIT compiled (`tests/unit/FileBuiltinsTest.cpp`), on Linux.
+  JIT compiled (`tests/unit/FileBuiltinsTest.cpp`), on Linux ([testing.md](testing.md), "A wait-free proof").
 - **LLVM is told so.** A handle's four reads are declared `readonly`, `nofree` and `nosync` (unlike the web library's,
   which another thread changes): two reads of one handle with nothing between are merged, and a `file_read` between
   them is a write to the context's memory, so the read is repeated ([extending.md](extending.md), recipe 43).
@@ -631,7 +631,8 @@ Recipe 43 in [extending.md](extending.md) walks through it as a change to the co
 - **Outside the tree**, by hand, as the web library's were: the runtime's sources and `FilesTest.cpp` under GCC 13's
   AddressSanitizer with UndefinedBehaviorSanitizer (all 28 cases: "All tests passed (1378 assertions in 28 test
   cases)") and ThreadSanitizer (26, without the seccomp case and the `FILE_DENIED` one, whose forked children cannot
-  run under ThreadSanitizer's background thread); a race harness that exchanged a folder's subdirectory and a file with
+  run under ThreadSanitizer's background thread; the seccomp case runs there since its helper ends that thread itself:
+  [testing.md](testing.md), "A wait-free proof"); a race harness that exchanged a folder's subdirectory and a file with
   links to outside (`renameat2` with `RENAME_EXCHANGE`) while three threads read, listed and read the listed files (40
   seconds under AddressSanitizer, 4.0 million swaps; 30 under ThreadSanitizer, 3.1 million), with no byte from
   outside returned; a second one that also exchanged a denied directory, one pinned and one made after the context,
