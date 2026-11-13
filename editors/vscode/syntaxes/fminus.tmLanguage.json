@@ -191,7 +191,7 @@
         },
         "keywords": {
             "patterns": [
-                { "name": "keyword.control.fminus", "match": "\\b(?:if|else|while|for|switch|case|default|break|continue|return|parallel|defer|_Defer|serve|route|reply|when)\\b" },
+                { "name": "keyword.control.fminus", "match": "\\b(?:if|else|while|for|switch|case|default|break|continue|return|parallel|defer|_Defer|serve|route|reply|when|within)\\b" },
                 { "name": "keyword.other.json.fminus", "match": "\\bjson\\b" },
                 { "name": "variable.language.this.fminus", "match": "\\bthis\\b" }
             ]

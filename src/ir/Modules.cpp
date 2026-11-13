@@ -152,6 +152,7 @@ namespace fminus::ir::detail
                                found.push_back(&when);
                                one(when.body);
                            },
+                           [&](const ast::WithinStmt& within) { one(within.body); },
                        },
                        stmt.node);
         }

@@ -23,7 +23,10 @@
 //   a request records the id of the innermost one its starting thread had open there (under the mutex, as it joins
 //   the list), and a scope's end waits on the context's condition variable, as fminus_web_http_wait does, for those of
 //   its requests still in the list to end, then queues an Expire for each left (FMINUS_WEB_TIMEOUT), under the mutex
-//   as Context::stop queues its cancels, and waits for the I/O thread to have handled them.
+//   as Context::stop queues its cancels, and waits for the I/O thread to have handled them. A thread that begins one
+//   has a record of the context's (State::Holder), which fminus_web_http_within_abandon reads and writes without the
+//   mutex, so that a call the loop budget or a bounds check stopped leaves its thread no scope without taking a lock:
+//   it moves the record's generation on, and every scope begun under an earlier one is abandoned from then on.
 // - With the server (FMINUS_WEB_SERVER), a context has at most one, made by its first fminus_web_http_listen under its
 //   mutex, attached to the I/O thread by a command (Serve) queued under that mutex, and detached by another (Unserve)
 //   when it is closed, the context stopped or destroyed (stopServer), before it is marked closed. The I/O thread turns
@@ -84,18 +87,45 @@ namespace fminus::web
 
         CURLSH* share = nullptr;   // the I/O thread's
 
+        // A thread that has begun a scope here, and how many it has open: what fminus_web_http_within_abandon reads
+        // without the mutex. Made by a thread's first begin (under the mutex), and kept for the context's life: a
+        // record whose thread has none open is taken by the next thread that begins one, so there are never more than
+        // the most threads that had scopes open here at once. Only its thread writes `generation` and `open` (its
+        // begins and ends, under the mutex, and its abandon, without); `thread` is written under the mutex, by a begin
+        // that takes a record with none open.
+        struct Holder
+        {
+            std::atomic<std::thread::id> thread;
+            std::atomic<std::uint64_t> generation{1};   // a scope begun under another generation is abandoned
+            std::atomic<std::int32_t> open{0};          // the thread's scopes here of this generation
+            Holder* next = nullptr;                     // set before the record is published, never after
+        };
+        std::atomic<Holder*> holders{nullptr};   // pushed under the mutex, read by abandon without it
+
         // The deadline scopes open (fminus_web_http_within_begin), every thread's, in the order they were begun, under
-        // the mutex. A thread's innermost is its last here; a request it starts joins that one (Request::scope).
+        // the mutex. A thread's innermost is its last here that is not abandoned; a request it starts joins that one
+        // (Request::scope).
         struct Scope
         {
             std::uint64_t id = 0;            // never 0, never reused
             std::thread::id owner;           // the thread that began it, the only one that sees it
             bool bounded = false;            // it has a deadline: its own, or an enclosing one's
             Clock::time_point deadline;      // the earlier of its own and the enclosing scope's
+            Holder* holder = nullptr;        // its thread's record
+            std::uint64_t generation = 0;    // the record's when it began: abandoned once the record's is past it
         };
         std::vector<Scope> scopes;
         std::uint64_t scopesBegun = 0;
         bool destroying = false;   // ~Context has begun (under the mutex): a scope's end says so
+
+        State() = default;
+        State(const State&) = delete;
+        State& operator=(const State&) = delete;
+        ~State()
+        {
+            for (Holder* holder = holders.load(std::memory_order_relaxed); holder != nullptr;)
+                delete std::exchange(holder, holder->next);
+        }
 
 #if FMINUS_HAS_WEB_SERVER
         Server* server = nullptr;   // its first listen's, under the mutex; freed by ~Context
@@ -697,17 +727,62 @@ namespace fminus::web
             context.changed.notify_all();
         }
 
-        // The calling thread's innermost deadline scope under the context, or null. Under the context's mutex; the
-        // pointer only until the mutex is let go (another thread's begin may move the scopes).
+        // Whether `scope` was abandoned (fminus_web_http_within_abandon): its thread's record has moved on to a later
+        // generation. Under the context's mutex; for another thread's scope, a stale read says it is not, which only
+        // keeps it in the list a little longer (no thread but its own sees it).
+        bool abandoned(const Context::State::Scope& scope)
+        {
+            return scope.holder->generation.load(std::memory_order_relaxed) != scope.generation;
+        }
+
+        // The calling thread's innermost deadline scope under the context, or null: its last begun that it has neither
+        // ended nor abandoned. Under the context's mutex; the pointer only until the mutex is let go (another thread's
+        // begin may move the scopes).
         Context::State::Scope* innermost(Context::State& context)
         {
             const std::thread::id me = std::this_thread::get_id();
             for (auto scope = context.scopes.rbegin(); scope != context.scopes.rend(); ++scope)
             {
-                if (scope->owner == me)
+                if (scope->owner == me && !abandoned(*scope))
                     return &*scope;
             }
             return nullptr;
+        }
+
+        // Drops the abandoned scopes from the list, under the context's mutex (it allocates nothing).
+        void dropAbandoned(Context::State& context)
+        {
+            std::erase_if(context.scopes, [](const Context::State::Scope& scope) { return abandoned(scope); });
+        }
+
+        // The calling thread's record under the context, made or taken if it has none, or null when memory ran out.
+        // Under the context's mutex.
+        Context::State::Holder* holderOf(Context::State& context)
+        {
+            static_assert(std::atomic<std::thread::id>::is_always_lock_free,
+                          "fminus_web_http_within_abandon reads a record's thread without a lock");
+            const std::thread::id me = std::this_thread::get_id();
+            Context::State::Holder* free = nullptr;
+            for (Context::State::Holder* holder = context.holders.load(std::memory_order_relaxed); holder != nullptr;
+                 holder = holder->next)
+            {
+                if (holder->thread.load(std::memory_order_relaxed) == me)
+                    return holder;
+                // A record with none open is no thread's: its abandon, if one ran, stored `open` last, so its
+                // generation is the one a scope begun now must carry.
+                if (free == nullptr && holder->open.load(std::memory_order_acquire) == 0)
+                    free = holder;
+            }
+            if (free == nullptr)
+            {
+                free = new (std::nothrow) Context::State::Holder;
+                if (free == nullptr)
+                    return nullptr;
+                free->next = context.holders.load(std::memory_order_relaxed);
+                context.holders.store(free, std::memory_order_release);
+            }
+            free->thread.store(me, std::memory_order_release);
+            return free;
         }
 
         // A request under `context`, checked, and started unless the check or a limit ended it; or, with a `refusal`
@@ -1247,8 +1322,14 @@ extern "C"
         Context::State& state = *static_cast<Context::State*>(context);
         const auto now = fminus::web::Clock::now();
         std::lock_guard lock(state.mutex);
+        fminus::web::dropAbandoned(state);
+        Context::State::Holder* holder = fminus::web::holderOf(state);
+        if (holder == nullptr)
+            return FMINUS_WEB_FAILED;
         Context::State::Scope scope;
         scope.owner = std::this_thread::get_id();
+        scope.holder = holder;
+        scope.generation = holder->generation.load(std::memory_order_relaxed);
         scope.bounded = timeoutMs >= 0;
         if (scope.bounded)
             scope.deadline = now + std::chrono::milliseconds(timeoutMs);
@@ -1268,6 +1349,7 @@ extern "C"
             return FMINUS_WEB_FAILED;
         }
         state.scopesBegun = scope.id;
+        holder->open.store(holder->open.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
         return 0;
     }
 
@@ -1315,6 +1397,9 @@ extern "C"
                 }
             }
             std::erase_if(state.scopes, [&](const Context::State::Scope& open) { return open.id == scope.id; });
+            scope.holder->open.store(scope.holder->open.load(std::memory_order_relaxed) - 1,
+                                     std::memory_order_relaxed);
+            fminus::web::dropAbandoned(state);
             if (sequence != 0)
             {
                 result = FMINUS_WEB_TIMEOUT;
@@ -1328,6 +1413,34 @@ extern "C"
         if (--state.waiters == 0 && state.dying)
             state.changed.notify_all();
         return result;
+    }
+
+    // Without the mutex: a walk of the records (each published, with its `next`, before the list's head points to it,
+    // and never freed before the context) for the calling thread's, and, when it has scopes open, its generation moved
+    // on and its count stored 0, in that order: a begin that then takes the record, seeing 0, sees the new generation
+    // (holderOf). Only this thread writes either, so no store races another. The scopes stay in the list, abandoned
+    // (innermost skips them), until a begin or an end of any thread drops them under the mutex. Its steps are bounded
+    // by the records, at most the most threads that had scopes open here at once.
+    std::int32_t fminus_web_http_within_abandon(void* context) noexcept
+    {
+        if (context == nullptr)
+            return 0;
+        Context::State& state = *static_cast<Context::State*>(context);
+        const std::thread::id me = std::this_thread::get_id();
+        for (Context::State::Holder* holder = state.holders.load(std::memory_order_acquire); holder != nullptr;
+             holder = holder->next)
+        {
+            if (holder->thread.load(std::memory_order_relaxed) != me)
+                continue;
+            const std::int32_t open = holder->open.load(std::memory_order_relaxed);
+            if (open == 0)
+                return 0;
+            holder->generation.store(holder->generation.load(std::memory_order_relaxed) + 1,
+                                     std::memory_order_relaxed);
+            holder->open.store(0, std::memory_order_release);
+            return open;
+        }
+        return 0;
     }
 
     std::int32_t fminus_web_http_status(const void* handle) noexcept

@@ -202,6 +202,7 @@ IDENTIFIER  [A-Za-z_][A-Za-z0-9_]*
 "reply"                     { return Parser::make_REPLY(yyextra->where); }
 "json"                      { return Parser::make_JSON(yyextra->where); }
 "when"                      { return Parser::make_WHEN(yyextra->where); }
+"within"                    { return Parser::make_WITHIN(yyextra->where); }
 
 {DIGITS}"."[0-9]*{EXPONENT}?[fF]?   |
 "."{DIGITS}{EXPONENT}?[fF]?         |

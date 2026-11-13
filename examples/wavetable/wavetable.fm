@@ -104,11 +104,11 @@ module Wavetable
             const float between = count > 1 ? where - t : 0;
             const int k = (int)phase;
             const int next = k + 1 == size ? 0 : k + 1;
-            const float within = interpolation == Linear ? phase - k : 0;
+            const float fraction = interpolation == Linear ? phase - k : 0;
             const float* a = &tables[t * size];
             const float* b = count > 1 ? &tables[(t + 1) * size] : a;
-            const float x = a[k] + within * (a[next] - a[k]);
-            const float y = b[k] + within * (b[next] - b[k]);
+            const float x = a[k] + fraction * (a[next] - a[k]);
+            const float y = b[k] + fraction * (b[next] - b[k]);
             output[i] = gain * (x + between * (y - x));
             phase += frequency[i] * size / rate;
             if (phase >= size)

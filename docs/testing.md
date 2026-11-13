@@ -50,7 +50,7 @@ Each file states what it tests in its first line, then has a few helpers and the
   `RecoveryTest.cpp`, `DoubleTest.cpp`, `Array2DTest.cpp`, `FieldAttributeTest.cpp`, `StringTest.cpp`, `BytesTest.cpp`,
   `JsonTest.cpp`, `XmlTest.cpp` (with `HeapCalls.h`, which counts a thread's calls of the C heap), `HandleTest.cpp`,
   `DeferTest.cpp`, `SelectionDeclarationTest.cpp`, `ServeTest.cpp`'s errors, `StringTypeTest.cpp`,
-  `WhenTest.cpp` and `JsonReadTest.cpp`, and the
+  `WhenTest.cpp`, `WithinTest.cpp`'s errors and `JsonReadTest.cpp`, and the
   compiler's own: `VersionTest.cpp`, `TbaaTest.cpp`, `ZeroInitTest.cpp`, `AttributeTest.cpp`, `DenormalTest.cpp`,
   `LoopBudgetTest.cpp`, whose `compileAt` compiles at any level with the budget on or off, `BoundsCheckTest.cpp`,
   whose `compileAt` does the same with the bounds checks and keeps the checks' descriptions, and `CallThunkTest.cpp`,
@@ -137,7 +137,13 @@ TEST_CASE("functions compute what they say", "[codegen]")
   and `reply` through the JIT over raw loopback requests (each parameter's 404 and 400, each reply's form, a JSON
   literal's text, a refused reply's 500, two serves on two threads, `webRoutes()` with parameters, the wait-free proof
   of a serve, and their errors; and where they meet `when`, `string` and `char`: a route's `when`s and a `switch` on a
-  string in a nonblocking method, the missing reply through both, and the errors). Every socket they bind is on 127.0.0.1, and every connection they make is to it; this machine's
+  string in a nonblocking method, the missing reply through both, and the errors); and `WithinTest.cpp` (`[within]`),
+  `within` through the JIT against a small HTTP/1.1 server of its own (the promise at the brace, the deadline, nesting,
+  each way out, `stopWeb()`, a reply and a serve in a block, the report's script, and where it meets `json_read`
+  (`[json-read]`): a module filled from each document a block fetched, after the block and inside one through
+  `this`), a block the loop budget
+  (`[budget]`) or a bounds check (`[bounds]`) stops, the library's abandon with threads racing it and its wait-free
+  proof, and the errors (in a build without the library, the one error). Every socket they bind is on 127.0.0.1, and every connection they make is to it; this machine's
   kernel has no IPv6, so the `localhost` and `[::1]` cases take their no-IPv6 branch. Their timeouts make them
   timing-sensitive: run them when nothing else is building), `[files]` (the file interface, docs/files.md:
   `FileBuiltinsTest.cpp`, in every build, its builtins' effects (directly and through a called function), the off
@@ -170,14 +176,17 @@ TEST_CASE("functions compute what they say", "[codegen]")
   planning, their errors), BDF2's blocks as the BDF2 map, the matched design (`src/circuit/Linear.h`: its poles and
   magnitudes, the region a block it cannot serve joins, the eigenvalues), prewarp, halfbands, reference and analysis,
   and the probes' nodes (their first-mention order, DC volts and which a probe can read, `Options::probes` changing
-  nothing but the text, the probe fields' names refused);
+  nothing but the text, the probe fields' names refused), and the language's words refused as a pot's, a switch's, an
+  input's or the module's name: every word the scanner makes a token of, read from the parser's tokens and the handle
+  types, is in `isFMinusKeyword`, so a keyword added to `Lexer.l` fails here until the circuit compiler has it;
   `CircuitEmitTest.cpp` its emitted text, compiled through `fminus::Program`, the coefficients (the Woodbury form's
   against the double derivation all in set), an OTA's in 48 configurations and Phase 1's elements and diode laws in
   40, the carry of a pot's move for one diode and an asymmetric pair, its ADAA mean against the double one over a
   saturating sweep, an OTA driven hard against the reference, BDF2 against its double reference, a switch's ramp, its
   block splits and its ADAA point, a matched block's float coefficients and response, the probes (their fields after
   the module's own, every method nonblocking in one and two channels, init, clear, the rings, the slots, prn_'s wrap,
-  an ADAA input only a probe reads, the output's bits probed or not in other configurations and in every math mode);
+  an ADAA input only a probe reads, the output's bits probed or not in other configurations and in every math mode),
+  and nodes and parts named as the language's words (`within`, `string`, `char`, ...) compiling;
   `CircuitSearchTest.cpp` its
   self-test: both rows' candidates' order, the synth's stress matrix and a law input's arguments over its scale,
   switch positions as axes, the method check (its flag, its measure, its warning and the BDF2 twins), the search, the

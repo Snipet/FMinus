@@ -482,6 +482,7 @@ namespace fminus::ir::detail
             WebWait,       // fminus_web_http_wait: waits on a request
             WebRead,       // fminus_web_http_status, _size, _body, _progress: a request's atomics, wait-free
             WebEnd,        // fminus_web_http_cancel, fminus_web_http_close: stops a request (and frees it)
+            WebScope,      // fminus_web_http_within_begin: opens a deadline scope of the calling thread
             ServerListen,  // fminus_web_http_listen: reads the route table, gives the context's server
             ServerTake,    // fminus_web_http_next, _next_in: claims a request of the server's (of a route set's),
                            // wait-free
@@ -551,6 +552,8 @@ namespace fminus::ir::detail
             RuntimeFacts{"fminus_web_http_progress", RuntimeKind::WebRead},
             RuntimeFacts{"fminus_web_http_cancel", RuntimeKind::WebEnd},
             RuntimeFacts{"fminus_web_http_close", RuntimeKind::WebEnd},
+            RuntimeFacts{"fminus_web_http_within_begin", RuntimeKind::WebScope},
+            RuntimeFacts{"fminus_web_http_within_end", RuntimeKind::WebWait},
             RuntimeFacts{"fminus_web_http_listen", RuntimeKind::ServerListen},
             RuntimeFacts{"fminus_web_http_port", RuntimeKind::WebRead},
             RuntimeFacts{"fminus_web_http_next", RuntimeKind::ServerTake},
@@ -593,7 +596,8 @@ namespace fminus::ir::detail
         // runtime/Bytes.cpp, runtime/Json.cpp, runtime/Xml.cpp, runtime/Files.cpp, web/Web.cpp and web/Server.cpp:
         // an attribute that is not is a miscompile. Every one of them is noexcept (nounwind), and all but
         // fminus_rt_parallel_for and the web library's that wait for another thread (http_wait, http_cancel,
-        // http_close and http_accept) come back (willreturn): it runs a region's body, which may loop for ever, as a
+        // http_close, http_accept and a within's end) come back (willreturn): it runs a region's body, which may
+        // loop for ever, as a
         // loop with a constant condition may, and http_accept(server, -1) waits for a request that may never come. None takes nonnull: a null plan is a plan that does nothing, and the heap's
         // results may be null. Nor does an FFT buffer take noalias, though `out` must not overlap `in`: a program that
         // transforms in place gets what PFFFT gives it, as before.
@@ -780,10 +784,19 @@ namespace fminus::ir::detail
                 }
                 function.addRetAttr(llvm::Attribute::NoUndef);
                 break;
+            case RuntimeKind::WebScope:
+                // The context's mutex, its list of scopes and the thread's record of them (the library's memory,
+                // which only the context's pointer reaches), and the system allocator's state and errno: a scope
+                // allocates as the list grows. It keeps no pointer to the context beyond the context's own memory.
+                function.setMemoryEffects(llvm::MemoryEffects::inaccessibleOrArgMemOnly()
+                                          | llvm::MemoryEffects::errnoMemOnly(llvm::ModRefInfo::Mod));
+                function.addParamAttr(0, keepsNone);
+                break;
             case RuntimeKind::WebWait:
             case RuntimeKind::WebEnd:
                 // A lock and a condition variable of the request's context, the I/O thread's queue, and a close's
                 // free: the request's memory and the library's, which only its handle reaches. It keeps no pointer.
+                // A within's end (fminus_web_http_within_end) is the same of its scope's requests, through the context.
                 function.setMemoryEffects(llvm::MemoryEffects::inaccessibleOrArgMemOnly());
                 function.addParamAttr(0, keepsNone);
                 break;

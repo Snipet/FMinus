@@ -968,12 +968,24 @@ namespace fminus::ast
         StmtPtr body;
     };
 
+    // `within (milliseconds) { ... }`: FMinus's, not C's, a deadline scope for the web client's requests. The
+    // milliseconds (an int, computed once where the block begins; negative: no deadline of its own) bound the block:
+    // where it ends, every request the thread running it started in it, in the block or in a function it called, has
+    // ended, those still pending at the deadline cancelled (HTTP_TIMEOUT); and the deadline bounds every wait in it
+    // (http_wait, http_accept, a serve with a timeout). Leaving it by return, break, continue or a reply does the same
+    // first, as its end does. Its body is a block, braces required.
+    struct WithinStmt
+    {
+        ExprPtr timeout;
+        StmtPtr body;   // a BlockStmt
+    };
+
     struct Stmt
     {
         SourceLocation location;
         std::variant<DeclStmt, ExprStmt, ReturnStmt, BlockStmt, EmptyStmt, IfStmt, WhileStmt, ForStmt, BreakStmt,
                      ContinueStmt, SwitchStmt, CaseStmt, DefaultStmt, EnumStmt, ParallelForStmt, ParallelBlockStmt,
-                     DeferStmt, ServeStmt, ReplyStmt, WhenStmt>
+                     DeferStmt, ServeStmt, ReplyStmt, WhenStmt, WithinStmt>
             node;
     };
 

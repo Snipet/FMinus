@@ -445,6 +445,10 @@ namespace fminus::ast
                                       return indent + "(when " + dump(*when.condition) + "\n"
                                              + dump(*when.body, indent + "  ") + ")";
                                   },
+                                  [&](const WithinStmt& within) {   // (within 100\n  (block ...))
+                                      return indent + "(within " + dump(*within.timeout) + "\n"
+                                             + dump(*within.body, indent + "  ") + ")";
+                                  },
                               },
                               stmt.node);
         }

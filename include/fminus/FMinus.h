@@ -765,7 +765,8 @@ namespace fminus
         int webPort() const noexcept;
 
         // Stops the program's network for good: every request in flight ends as HTTP_CANCELLED before this returns,
-        // waking every thread in http_wait, and every request the program starts from then on ends so at once. What
+        // waking every thread in http_wait or at a within block's end, and every request the program starts from then
+        // on ends so at once. What
         // completed stays readable until it is closed or the Program destroyed. A host that shuts a program down while
         // a thread of its own is in the program (a loader in http_wait) calls this, joins that thread, then destroys
         // the Program: destroying a Program while a thread still runs its code is undefined, as ever. Any thread may

@@ -381,6 +381,16 @@ extern "C"
     // A scope left open is freed with its context.
     std::int32_t fminus_web_http_within_end(void* context) noexcept;
 
+    // Abandons every scope the calling thread has open under `context`, at once and without waiting: for a call the
+    // program's loop budget or a bounds check stopped, which leaves every block it was in without reaching its end
+    // (the compiler's passes call it on their way out of each function that begins a scope: opt/EarlyReturn.h). The
+    // requests that joined them go on as requests started outside any scope do, under the policy's own limits, and no
+    // later request, wait or scope of the thread sees them; nor does a later thread the system gives the same id.
+    // Returns how many scopes it abandoned (0: the thread had none open there). A null context: 0. Wait-free: it
+    // takes no lock, allocates nothing and makes no system call, whether the thread has a scope open or not: a few
+    // atomic loads, and two atomic stores when it has one (Web.cpp says how). Another thread's scopes are left alone.
+    std::int32_t fminus_web_http_within_abandon(void* context) noexcept;
+
     // An executable's (support/Aot.h: the C main of a program that calls http_get or http_post). It has no host, so the
     // person who runs it says what it may reach, in its environment: FMINUS_WEB_ALLOW, the patterns (above) separated
     // by spaces, commas or newlines (unset or empty: no network, the default), and FMINUS_WEB_CA_FILE, PEM roots to

@@ -42,8 +42,8 @@ for (const auto& request : program->webRequests())               // every URL, b
     show(request.method, request.pattern, request.line);         // GET https://example.com/presets/*.json 11
 ```
 
-Contents: [building it](#building-it), [the builtins](#the-builtins), [the status codes](#the-status-codes), [the
-host's side](#the-hosts-side), [the pattern language](#the-pattern-language), [the driver and
+Contents: [building it](#building-it), [the builtins](#the-builtins), [the status codes](#the-status-codes),
+[within](#within), [the host's side](#the-hosts-side), [the pattern language](#the-pattern-language), [the driver and
 executables](#the-driver-and-executables), [threads and lifetime](#threads-and-lifetime), [determinism and offline
 rendering](#determinism-and-offline-rendering), [plugins](#plugins-and-entitlements), [the server](#the-server) (its
 [building](#building-the-server), [builtins](#the-servers-builtins), [routes and replies](#routes-and-replies), [the
@@ -157,6 +157,89 @@ not sent.
 a macro in code, so C's way for a library's constants (`EOF`, `errno`'s) is not open, and a builtin enumeration would
 give the names a type of FMinus's own that a program cannot name. Constants with an enumeration's behaviour, outside
 the file's scope, are what C's `<errno.h>` names would be if they were declarations.
+
+## within
+
+`within (milliseconds) { ... }` is a deadline around everything a block starts, and a promise about it: where the block
+ends, every request the thread running it started in it has ended. It is `parallel { }`'s promise ("has finished,
+every statement, where it ends") for requests, and Trio's `move_on_after`, Kotlin's `withTimeout`, with C's syntax and
+no closure: the deadline is a scope, so nothing has to be passed down to the functions the block calls.
+
+```c
+enum { MOST = 16 };
+
+float main(float count)
+{
+    const int packs = (int)count < MOST ? (int)count : MOST;
+    http_response r[MOST];
+    within (10000)                                   // all of them at once; none is still running after the block
+    {
+        for (int k = 0; k < packs; ++k)
+            r[k] = http_get("https://example.com/packs/%d.json", k);
+    }
+    int loaded = 0;
+    for (int k = 0; k < packs; ++k)                  // every r[k] has its final status: 200, a failure, HTTP_TIMEOUT
+    {
+        defer http_close(r[k]);
+        loaded += http_status(r[k]) == 200 ? 1 : 0;
+    }
+    return (float)loaded;
+}
+```
+
+- **The form**: the keyword, an `int` in parentheses, computed once where the block begins (a `float` converts as an
+  argument does), and a block, braces required. A negative value is no deadline of its own: the block still waits for
+  what it started, as long as each request's own policy lets it run.
+- **The promise.** Every request the block started (`http_get`, `http_post`), in the block itself or in any function
+  it called, has ended where it ends: the end waits for those still pending until the deadline, then cancels what is
+  left, whose status is `HTTP_TIMEOUT` (time ended it, not the program). A request the block's code closed already is
+  not the end's concern. Each request keeps its policy's own limits (`timeoutMs`, `maxRequests`) besides.
+- **The deadline bounds every wait inside the block**: `http_wait`, `http_accept`, a `serve` with a timeout, and the
+  block's own end. A wait whose own timeout is later than the deadline, or that has none (`http_wait(r, -1)`), returns
+  when the deadline passes, with what it would have returned on its own timeout (`http_wait`: the status, 0 if still
+  pending; `http_accept`: null; a `serve`: no request). A shorter timeout of its own still counts.
+- **Leaving early.** `return`, `break` and `continue` out of the block, and a `reply` in a route, do what its end does
+  first, exactly once: wait for or cancel what the block started, then leave. A `defer` in the block runs before that
+  wait, as it does before the block's end; a `reply` is sent before it, so the route's client has its answer while its
+  scope's requests end, as a route's deferred statements run after its reply (recipe 45). A `return`'s value is
+  computed before either. The lowering is `defer`'s: the scope's end is a deferred action of a block around the
+  braces, whose code is at each way out.
+- **Nesting.** An inner block cannot outlast an outer one: its deadline is the earlier of its own and the outer's. A
+  request belongs to the innermost block it was started in, and an outer block's end does not wait for an inner's
+  (whose end has ended them already).
+- **Whose requests.** A block's scope is its thread's and its program's: requests the thread running it starts, and the
+  waits that thread makes. Two threads in two blocks do not see each other's. **A `parallel` region inside a block runs
+  on other threads**: a request an iteration or a statement starts on one of the pool's threads is not the block's, the
+  block's end does not wait for it, and its waits are not bounded by the block's deadline. (The calling thread works
+  in the region too, and what it runs there is the block's: so which of a region's requests the end waits for is the
+  pool's choice. Start a block's requests outside a region, or give the region's body a `within` of its own.) A
+  `within` inside a region's body is the body's thread's own, and ends there (a region's body cannot be left any other
+  way).
+- **It blocks**, and its beginning allocates (the scope is kept in the program's context): a
+  `[[clang::nonblocking]]` function refuses it in the words it refuses `http_wait` in, "must not call
+  non-'nonblocking' function 'http_wait'", and a `[[clang::nonallocating]]` one in clang's words for an allocation,
+  "must not allocate or deallocate memory", each at the `within`; a function that calls one holding it is refused at
+  the call, with a note at the `within`. On the audio thread, where a program cannot wait, `when` is the statement:
+  `when (http_status(request) == 200) ...` runs once, on the block the response arrived in (`examples/fetch/`'s
+  `Live`).
+- **A switch may not jump into one**: a `case` label inside its block, past where its scope begins, is clang's "cannot
+  jump from switch statement to this case label", with a note at the `within` ("jump enters a 'within' block").
+- **When its beginning fails** (no memory for the scope), the block runs with no deadline and nothing to wait for at its
+  end, and its end ends nothing: an enclosing block's scope is not ended in its place.
+- **A call the loop budget or a bounds check stops** (recipes 29 and 30) leaves the block without reaching its end, as
+  it leaves every block, and runs no deferred statement. A scope is its thread's, found by the thread's id, so one left
+  open would bound the thread's later waits by a deadline long past, and a later thread given the same id would find it.
+  So each way out those checks make, in a function that begins a scope, first **abandons** the thread's scopes: no
+  wait, nothing cancelled; their requests go on as requests started outside any block do, under the policy's limits,
+  freed with the program if it never closes them; afterwards the thread has no scope, and its next block has its own
+  deadline. The abandon takes no lock, allocates nothing and makes no system call (an audio thread's stop path may run
+  it). A program compiled without either check is as it was.
+- **In a build without the library** it is parsed, and is the error `http_wait` is there: "'within' needs the web
+  library, which this build of FMinus leaves out (FMINUS_WEB=OFF)".
+- **Underneath** are three of the library's functions (`src/web/Web.h`, "deadline scopes"): `within_begin` and
+  `within_end`, which the block calls where it begins and at each way out, and `within_abandon`, which the stopped
+  call's way out calls. `within` is a keyword; `await` is not (FMinus has no `async`, and a word reserved for nothing
+  would break programs for nothing). [extending.md](extending.md), recipe 49, walks through it.
 
 ## The host's side
 
@@ -297,6 +380,9 @@ its user controls at run time without rebuilding it. Neither is anything the pro
   What completed stays readable. A host that shuts a program down while a thread of its own is inside it (a loader
   blocked in `http_wait`) calls `stopWeb()`, joins that thread, then destroys the `Program`. Destroying a `Program`
   while a thread still runs its code is undefined, as it always is.
+- **A thread at a `within` block's end** is woken by `stopWeb()` as one in `http_wait` is: the block's requests end
+  as `HTTP_CANCELLED`, and the block ends at once. A `within` begun after the stop has its requests cancelled as they
+  start, and nothing to wait for.
 - **`~Program`** stops the network, then destroys the context: every request the program made, closed or not, is
   freed, every thread still in the library's `http_wait` is woken and has left it, and the I/O thread is joined if this
   was the last context. A program that never closes what it opens leaks nothing past its `Program`, and no I/O thread
@@ -316,6 +402,12 @@ that starts using a table on the block in which it arrived: the block a response
 
 The load-then-run shape keeps it: fetch and parse in `init` or a loader method, off the audio thread, wait for the
 result, and only then play. Then the output depends on the payload alone, as it does on a preset file.
+
+A `within` block changes nothing of this. It waits as `http_wait` does, off the audio thread, and a request its
+deadline cancels is one whose result depended on the network's timing, as a wait with a timeout's does: a loader that
+must be repeatable gives its block a deadline it is content to fail at, and treats `HTTP_TIMEOUT` as it treats any
+failure. A `when` that swaps a table in on the block it arrived in (`examples/fetch/`'s `Live`) is the polling shape
+above, and gives determinism up in just those words.
 
 An offline bounce should not depend on a server. A host that renders offline fetches before it renders (and refuses
 to start, or reports, when a fetch failed); a disk cache and an `offline` policy (serve the cache or fail) are the
@@ -1012,6 +1104,8 @@ for the server as for the client. An offline bounce has no server: compiled with
 | `src/web/WebSymbols.def` | every function generated code calls, which the JIT defines by address |
 | `src/ir/Calls.cpp` | the builtins' table, with `Feature::Web`, their effects, and what each library function touches (`kRuntimeFacts`) |
 | `src/ir/Web.cpp` | a URL's checks, `webRequests()`'s metadata, the module's context global, the status codes' names |
+| `src/ir/Within.cpp` | a `within` block: its milliseconds, the scope begun, and its end at each way out (`defer`'s mechanism, `Statements.cpp`); its effects in `Effects.cpp` |
+| `src/opt/EarlyReturn.cpp` | the loop budget's and the bounds checks' way out of a function that begins a scope: the thread's scopes abandoned first |
 | `src/ir/WebServer.cpp` | a route literal's checks, `webRoutes()`'s metadata and the program's route table, a query's name, a reply's format and its values |
 | `src/api/FMinus.cpp` | `Options::web` (and `.server`), the `Program`'s context, `webRequests()`, `webRoutes()`, `webPort()`, `stopWeb()` |
 | `src/support/Aot.cpp` | an executable's context in its C `main`, and the libraries it links |
@@ -1023,8 +1117,10 @@ for the server as for the client. An offline bounce has no server: compiled with
 | `tests/unit/WebServerTest.cpp` | the server at its own level, from C++, before any builtin: the policy and its classifiers, each rule from a raw socket and from the library's client, keep-alive, limits and timeouts, dropped clients, many threads taking, closing with threads waiting, and the wait-free proof (`HeapCalls`, and seccomp's strict mode) |
 | `tests/unit/HttpServerTest.cpp` | the server's builtins in the compiler, in every build: effects, the off build's errors, the route, format and name checks at their columns, the route table, the declarations' attributes, `webRoutes()`, the policy checked by `compile()` |
 | `tests/unit/WebServeTest.cpp` | programs that serve, through the JIT (an audio thread taking requests between blocks, a loader in `http_accept`, `stopWeb()`) and as an executable with its environment; `readServerRoot`, and a directory swapped for a link while it reads |
+| `tests/unit/WithinTest.cpp` | `within` through the JIT against a loopback server of its own (the promise, the deadline, nesting, each way out, `stopWeb()`, a reply and a serve inside one, the report's script), a block the loop budget or a bounds check stops, the library's abandon and its wait-free proof (`HeapCalls`, and seccomp's strict mode), and the errors |
 | `tests/lit/fminus/web*.fm` | the IR, the errors, the driver; `web-off.fm` in a build without the library, `web-server-off.fm` in one without the server |
-| `examples/fetch/` | the wavetable example's pack fetched from a server its host allows |
+| `tests/lit/fminus/within*.fm` | a `within`'s IR (its end at each way out, the abandon on the passes' ways out), its errors, and `within-off.fm` in a build without the library |
+| `examples/fetch/` | the wavetable example's pack fetched from a server its host allows; packs at once in a `within`; a table swapped in by a `when` |
 | `examples/remote/` | a synthesiser a browser controls: its page served by the library, its requests taken in `process` |
 
 Recipe 41 in [extending.md](extending.md) walks through the client as a change to the compiler, and recipe 42 the
@@ -1054,7 +1150,13 @@ server.
   hand through the driver with `curl` on loopback. `serve`, `route` and `reply` (2026-11-13): built and tested in the
   release tree with the server and in the default tree, not in one with the client alone; their wait-free proof is of a
   JIT'd serve (`ServeTest.cpp`); `examples/remote/` through them was driven again through the driver with `curl` on
-  loopback; nothing of them ran under a sanitizer.
+  loopback; nothing of them ran under a sanitizer. `within` (2026-11-13): built and tested in the release tree with the
+  library and its server and in the default tree, not in one with the client alone; its tests (`WithinTest.cpp`, the
+  library's and the JIT's, against their own loopback server) and the library's other tests ran under GCC's
+  AddressSanitizer with UndefinedBehaviorSanitizer and LeakSanitizer (every case, no report; `HeapCalls` counts nothing
+  there, so the abandon's allocation proof only ran in the normal build, its seccomp half under both) and under
+  ThreadSanitizer (every case but the five fork-based proofs, which TSan's own thread keeps from exiting: no report,
+  three times over), outside the presets, with the compiler's libraries uninstrumented.
 - **Not run anywhere yet:** macOS and Windows (their root-certificate loaders, Schannel, the frameworks and system
   libraries an executable links, and the server's sockets there: `SocketsPosix.cpp` with macOS's `SO_NOSIGPIPE`,
   `SocketsWindows.cpp`, curl's handling of extra descriptors on Windows, llhttp built by clang-cl, whose header marks

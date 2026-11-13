@@ -508,6 +508,32 @@ TEST_CASE("when parses as FMinus's statement: a condition in parentheses, and a 
     CHECK(parsed("void g(bool c) { when (c) {} }\n") == "(function void g ((bool c))\n  (when c\n    (block)))\n");
 }
 
+TEST_CASE("within parses as FMinus's statement: milliseconds in parentheses, and a block", "[frontend]")
+{
+    CHECK(parsed("int f(int port, int ms) { http_response r; within (ms * 2) { r = g(port); defer h(r); within (10) "
+                 "{ } } return 0; }\n")
+          == "(function int f ((int port) (int ms))\n"
+             "  (decl http_response r)\n"
+             "  (within (* ms 2)\n"
+             "    (block\n"
+             "      (= r (call g port))\n"
+             "      (defer\n"
+             "        (call h r))\n"
+             "      (within 10\n"
+             "        (block))))\n"
+             "  (return 0))\n");
+    // Braces required: its body is a block, as a route's is. A keyword: no variable's name, nor a macro's; await
+    // stays an identifier.
+    CHECK(parsed("void f() { within (10) g(); }\n")
+          == "test.fm:1:24: error: syntax error, unexpected identifier, expecting {\n");
+    CHECK(parsed("void g() { int within = 1; }\n")
+          == "test.fm:1:16: error: syntax error, unexpected within, expecting * or identifier\n");
+    CHECK(parsed("#define within 1\n") == "test.fm:1:9: error: 'within' cannot be used as a macro name: it is one of "
+                                           "FMinus's keywords\n");
+    CHECK(parsed("int await(int x) { int await = x; return await; }\n")
+          == "(function int await ((int x))\n  (decl int await x)\n  (return await))\n");
+}
+
 TEST_CASE("a route's block holds a when, a string and a char array as any block does", "[frontend]")
 {
     CHECK(parsed("module M { http_server s; void f() { serve (s) { route \"GET /a\" (int n) { char c[4] = \"ab\"; "

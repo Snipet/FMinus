@@ -33,7 +33,8 @@ own again, the first step of a report on syntax for networked programs: a type f
 `defer`, and C2y's `if` and `switch` with a declaration; and recipe 45 is its second step, FMinus's own: `serve`,
 `route` and `reply`, statements over the server's builtins, and a JSON literal a reply writes. Recipe 46 is the
 same report's text: FMinus's type `string`, a read-only view of bytes, and `char` to keep one; and recipe 47 its
-`when`, a statement that runs once each time its condition becomes true; and recipe 50 its `json_read`, a module
+`when`, a statement that runs once each time its condition becomes true; and recipe 49 its `within`, a deadline for the
+requests a block starts, every one of them ended where the block ends; and recipe 50 its `json_read`, a module
 filled from a JSON document in one walk, by a table of the module's fields the compiler makes. Then the pitfalls
 those recipes ran into, and design notes for what comes next. [simd.md](simd.md) has recipes 7 to 9, for vectors.
 
@@ -49,10 +50,10 @@ recipe 32 (one error a mistake, enumerated types, `-Wswitch`), recipe 33 (`doubl
 builtins' arguments, bytes to numbers, and the build options of builtins), recipe 39 (the JSON parser, and paths
 the compiler prepares), recipe 40 (the XML parser), recipe 41 (the web library), recipe 42 (its server), recipe 43
 (the file interface), recipe 44 (typed handles, `defer`, and `if` and `switch` with a declaration), recipe 45
-(`serve`, `route`, `reply` and the JSON literal), recipe 46 (`string` and `char`), recipe 47 (`when`) and recipe 50 (`json_read`), so their sections describe how the code you have got there: read a section beside the files it
+(`serve`, `route`, `reply` and the JSON literal), recipe 46 (`string` and `char`), recipe 47 (`when`), recipe 49 (`within`) and recipe 50 (`json_read`), so their sections describe how the code you have got there: read a section beside the files it
 names. Recipes 5 and 6, a runtime function and a pass, are not part of the language; they live in [recipes/](recipes/)
 as a patch, so you can apply them to see them work. None of these are sketches: each was applied to this repository, built with `-Werror`, and
-tested in the dev and asan presets, every test passing (recipes 38 to 47 and 50 in the release preset only: each says where).
+tested in the dev and asan presets, every test passing (recipes 38 to 47, 49 and 50 in the release preset only: each says where).
 [architecture.md](architecture.md) describes the stages they touch.
 
 FMinus follows C. When a recipe has a semantic choice to make, it makes C's: conversions, short-circuiting, which
@@ -65,7 +66,7 @@ Most language features touch the same places, in this order:
 
 | # | Where | What to add |
 |---|---|---|
-| 1 | `src/frontend/Lexer.l` | a rule for each new token. Keywords go before `{IDENTIFIER}`; `macroNameError` reads a name with the scanner itself, so a new keyword is refused as a macro's name with nothing more to add. |
+| 1 | `src/frontend/Lexer.l` | a rule for each new token. Keywords go before `{IDENTIFIER}`; `macroNameError` reads a name with the scanner itself, so a new keyword is refused as a macro's name with nothing more to add. A new keyword or type's word goes into `isFMinusKeyword` (`src/circuit/Emit.cpp`) too, the circuit compiler's list of the words it must not emit as a name ([circuits.md](circuits.md)): `CircuitTest.cpp` reads the scanner's words from the parser's tokens and the handle types and fails until it has each. |
 | 2 | `src/frontend/Parser.y` | the tokens (`%token`), their precedence if they are operators, and the grammar rules with their actions |
 | 3 | `src/frontend/Ast.h` | a node: an alternative of `Expr::node` or `Stmt::node`, or an enumerator of `UnaryOp`, `BinaryOp`, `AssignOp`, `IncrementOp`, `Kind` (a type's) |
 | 4 | `src/frontend/Ast.cpp` | its `dump` |
@@ -73,7 +74,7 @@ Most language features touch the same places, in this order:
 | 6 | `src/runtime/` | if it needs C++ at run time, a runtime function (recipe 5); if a builtin calls it, its facts: in `kRuntimeFacts`, through `callRuntime` (recipe 19), or for a math builtin's, in `mathFunction` (`Math.cpp`, recipe 15) |
 | 7 | `src/jit/Call.cpp`, `src/support/Aot.cpp` | for a new type: whether a call by name, `Program::call` and `--run`, passes and returns it (`callType`'s `switch`, recipe 36), and whether an executable's `main` may take or return it (`addEntryPoint`) |
 | 8 | `tests/` | a dump in `FrontendTest.cpp`; results in `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `SwitchTest.cpp`, `EnumTest.cpp`, `IntTest.cpp`, `BitwiseTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `TableTest.cpp`, `TopLevelTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `HashTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`, `ParallelTest.cpp`, `DoubleTest.cpp`, `Array2DTest.cpp`, `FieldAttributeTest.cpp`, `StringTest.cpp`, `BytesTest.cpp`, `JsonTest.cpp`, `XmlTest.cpp`, `HandleTest.cpp`,
-`DeferTest.cpp`, `SelectionDeclarationTest.cpp`, `ServeTest.cpp`, `StringTypeTest.cpp` or `WhenTest.cpp` (their helpers are in `Compile.h`; a runtime function that must not allocate is counted with `HeapCalls.h`); IR or errors in `tests/lit/fminus/` |
+`DeferTest.cpp`, `SelectionDeclarationTest.cpp`, `ServeTest.cpp`, `StringTypeTest.cpp`, `WhenTest.cpp` or `WithinTest.cpp` (their helpers are in `Compile.h`; a runtime function that must not allocate is counted with `HeapCalls.h`); IR or errors in `tests/lit/fminus/` |
 | 9 | `examples/` | a program that uses it, and a line in `tests/lit/fminus/examples.test` that runs it |
 | 10 | `editors/vscode/syntaxes/fminus.tmLanguage.json` | a new keyword, type or builtin, so VSCode highlights it (its README says where) |
 | 11 | `README.md` | the language table, and the deviations from C if any |
@@ -94,7 +95,7 @@ on the heap and a kernel that can't allocate (recipe 11), `examples/saturator/` 
 through a buffer, against plain loops (recipes 9 and 10), `examples/convolver/` and `examples/delay/echo.fm` for loops
 over a module's fields (recipe 17), `examples/ensemble/` for `parallel for` and `parallel { }` (recipe 22), and
 `examples/wavetable/` for a document a host hands a program, read by path (recipes 39 and 40), `examples/fetch/` for
-a request a program makes (recipe 41), `examples/remote/` for the requests a program answers (recipes 42 and 45), and
+a request a program makes (recipe 41), and several at once in a `within` (recipe 49), `examples/remote/` for the requests a program answers (recipes 42 and 45), and
 `examples/kit/` for the files a program reads and writes (recipe 43), and `examples/trigger/` for `when` (recipe
 47).
 
@@ -8660,7 +8661,8 @@ pass, a failed bounds check's trap made a return there too, and each caller made
 blocks the deferred statements belonged to are gone, merged and moved, and code to run there would change what the
 optimiser decided, which those passes are built not to do. So what such a statement would have released (a request,
 a document) stays held: a stopped call is a program's bug, whose instance its host re-initialises or discards (recipe
-29). Whether to change that is open.
+29). Whether to change that is open. A `within` block's scope is the one thing such a call must not leave behind,
+since it is the thread's and outlives the call: those ways out abandon it (recipe 49).
 
 ### `if` and `switch` with a declaration
 
@@ -9215,6 +9217,216 @@ refused too). It allocates and waits for nothing, so a nonblocking method may ho
 - `tests/lit/fminus/when.fm`: the IR at `-O0` (the load, the store, the test) and at `-O2` (the state a register
   through the loop), `sizeof`, and the errors; `examples.test` runs `examples/trigger/`.
 
+## Recipe 49: `within`, a deadline for the requests a block starts
+
+*In the compiler and the web library. Code: the `WITHIN` token and its rule (`src/frontend/Lexer.l`, `Parser.y`, and
+the word in `attribute_word`), `WithinStmt` and its dump (`src/frontend/Ast.h`, `Ast.cpp`); its lowering,
+`src/ir/Within.cpp` (`lowerWithin`, `lowerWithinEnd`), on `defer`'s mechanism (`Deferred::within` in `Lowering.h`,
+`lowerDeferred`, `closeDefers` and `lowerLabel`'s note in `Statements.cpp`); its effects (`kWithinCall`, and the words
+in `Effects.cpp`); the facts of `fminus_web_http_within_begin` and `_end` (`RuntimeKind::WebScope` and
+`kRuntimeFacts`, `Calls.cpp`); the walks (`Parallel.cpp`'s `Walker`, `Modules.cpp`'s `collectWhens`); the passes' ways
+out (`returnEarly` and `abandonScopes`, `src/opt/EarlyReturn.h` and `.cpp`, which `BoundsCheck.cpp` and `LoopBudget.cpp`
+call); and in the library, `fminus_web_http_within_abandon` and the records it reads (`State::Holder`, `holderOf`,
+`abandoned`, `dropAbandoned`: `src/web/Web.h`, `Web.cpp`, `WebSymbols.def`). Tests: `tests/unit/WithinTest.cpp`, a
+case of `FrontendTest.cpp`, `tests/lit/fminus/within.fm`, `within-errors.fm` and `within-off.fm`; `examples/fetch/`
+(`countPacks`, and `Live`'s `when`). Built with `-Werror` and tested in the `release` preset on Linux x86-64 only, in two
+trees, the default and one with the web library, its server, file writing and absolute names, every test passing but
+the one this machine cannot run (the smoke test of LLVM's own `opt`); the library's part and the JIT's tests of it also
+under GCC's ThreadSanitizer and AddressSanitizer, outside the presets; not in `dev` or `asan`, nor on macOS or Windows.
+[research/syntax/README.md](research/syntax/README.md) is the report, its §7.1; [web.md](web.md), "within", is the
+manual. The library's begin and end came first, in the commit before recipe 44, tested from C++.*
+
+Structured concurrency's one rule, for requests: a child lives in a lexical block, and the block does not end before
+it. FMinus had it for threads (`parallel { }`); a program that fetched eight packs had to wait for each by hand, and
+one it forgot kept running past the code that needed it.
+
+```c
+http_response r[MOST];
+within (10000)                                   // all of them at once; none is still running after the block
+{
+    for (int k = 0; k < packs; ++k)
+        r[k] = http_get("https://example.com/packs/%d.json", k);
+}
+// here every r[k] has its final status: 200, a failure, or HTTP_TIMEOUT
+```
+
+### Tokens, grammar, node
+
+`within` is a keyword, a token of its own and a word of `attribute_word`. The rule is the report's appendix D's, one
+line: `unlabeled: "within" "(" expr ")" block`, braces required, so `within (10) f();` is Bison's "unexpected
+identifier, expecting {". No conflict (504 states, against 498 before): after the `)` only a `{` can follow. The node
+holds the milliseconds and its body as a `BlockStmt` at its brace, so a walk that knows blocks walks it with nothing
+new, and it dumps as `(within ms\n  (block ...))`. `await`, which the report reserved only in its prototype, stays an
+identifier: FMinus has no `async`, and a word reserved for a feature that is not built would break programs for nothing.
+
+### What a within lowers to
+
+The library's half (`src/web/Web.h`, "deadline scopes") is a scope of the calling thread under the program's context:
+`within_begin(context, ms)` opens one, which the thread's `http_get` and `http_post` join and its `http_wait`,
+`http_accept` and `_accept_in` read; `within_end(context)` waits for its requests until the deadline, ends the rest as
+`HTTP_TIMEOUT`, and closes it. The statement pairs them on every way out, which is `defer`'s problem solved once
+already (recipe 44): `lowerWithin` computes the milliseconds (an `int`, converted as an argument is: a `float` is
+truncated, a pointer is clang's error), begins the scope, keeps whether it began in a slot, and opens a `DeferScope` of
+its own around the braces, whose one `Deferred` is the end: no statement, and `within`, the slot. Each way out that
+leaves that scope (`closeDefers` at the brace, `runDefers` for `return`, `break`, `continue` and a `reply`) calls
+`lowerDeferred`, which for a within's end lowers `lowerWithinEnd`: the end, when the scope began.
+
+```llvm
+  %web.context = load ptr, ptr @fminus_web_context, align 8
+  %within.begun = call i32 @fminus_web_http_within_begin(ptr %web.context, i32 %0)
+  %within.open = icmp eq i32 %within.begun, 0
+  store i1 %within.open, ptr %within.slot, align 1, !tbaa !8
+  ...
+if.then:                                          ; return seen; after defer seen = http_status(r);
+  %seen5 = load i32, ptr %seen, align 4, !tbaa !3
+  %http_status = call i32 @fminus_web_http_status(ptr %r6)
+  store i32 %http_status, ptr %seen, align 4, !tbaa !3
+  %within.opened = load i1, ptr %within.slot, align 1, !tbaa !8
+  br i1 %within.opened, label %within.end, label %within.done
+within.end:
+  %web.context7 = load ptr, ptr @fminus_web_context, align 8
+  %within.ended = call i32 @fminus_web_http_within_end(ptr %web.context7)
+  br label %within.done
+within.done:
+  ret i32 %seen5
+```
+
+So the order is `defer`'s: a `return`'s value first, then the block's own deferred statements (their `DeferScope` is
+inside the within's), then the end; a `reply` sends first and ends the scope after, as a route's deferred statements
+run after its reply (recipe 45), so the client has its answer while the scope's requests end. The slot is for a begin
+that failed (no memory: no scope open), whose end must not end the enclosing scope in its place; at `-O2` it is a
+register. The end's result is no value of the program's: each request's status says what ended it. The end has no
+errors of its own, so `closeDefers` lowers none in an unreachable block for its errors, and a switch that would jump
+into the block, past the begin, is `lowerLabel`'s "cannot jump from switch statement to this case label", its note at
+the within: "jump enters a 'within' block". The walks need a line each: the race checks walk the milliseconds and the
+block, and `collectWhens` walks the block, so a `when` inside one has its state.
+
+The declarations (recipe 19): `within_begin` is `RuntimeKind::WebScope`, `willreturn`, `memory(argmem: readwrite,
+inaccessiblemem: readwrite, errnomem: write)`, the context `captures(none)` (it allocates as the list of scopes grows);
+`within_end` is `WebWait`'s, with no `willreturn` (it waits for a deadline and the I/O thread). It changes the statuses
+of the scope's requests, which the program reads again with `http_status`, a `WebRead`, never merged.
+
+### Effects and errors
+
+A within allocates where it begins and waits where it ends. It is recorded among the function's calls as one callee of
+its own, `kWithinCall` (a keyword, so no function of a program has its name), which `unsafe` refuses under either
+effect, each in words of its own, at the `within`:
+
+| The program writes | FMinus, at the `within` |
+|---|---|
+| a within in a `[[clang::nonblocking]]` function | "function with 'nonblocking' attribute must not call non-'nonblocking' function 'http_wait'": the words `http_wait` is refused in, as a `serve` with a timeout is refused in `http_accept`'s |
+| in a `[[clang::nonallocating]]` one | clang's words for an allocation that is no call: "function with 'nonallocating' attribute must not allocate or deallocate memory" |
+| a call of a function that holds one | the call's error, its note at the within: "function cannot be inferred 'nonallocating' because it allocates or deallocates memory" (or "... calls non-'nonblocking' function 'http_wait'") |
+| a `case` label inside its block | "cannot jump from switch statement to this case label", note "jump enters a 'within' block" |
+| `within (p) { }` of a `float* p` | "passing 'float *' to parameter of incompatible type 'int'" |
+| any within, in a build without `FMINUS_WEB` | "'within' needs the web library, which this build of FMinus leaves out (FMINUS_WEB=OFF)", once; its block is lowered plainly, for its own errors |
+
+One record, not two (a wait and an allocation), so a nonblocking function has one error a within, not two (recipe 32).
+A `parallel` region inside a block runs its body on other threads: their requests are not the block's (what the
+calling thread runs of the region is, so which ones is the pool's choice: web.md says so), and a within inside a
+region's body is its thread's own, which ends there (a region's body is left no other way).
+
+### A block a stopped call abandons
+
+A call the loop budget or a bounds check stops leaves every block at once, without reaching its end, and runs no
+deferred statement (recipes 29, 30 and 44: the checks are made in the optimised code, where the blocks are gone). For
+`defer` that is accepted. For a within it is not: the scope is found by the thread's id, so one begun and never ended
+stays the thread's. Every later wait of the thread would be bounded by its deadline, long past (`http_wait(r, 50)`
+returns at once), every later within would take it as its enclosing scope's (its deadline already past), and a later
+thread the system gives the same id would inherit it. Tested: with the abandon below taken out, `WithinTest.cpp`'s
+`http_wait(r, 50)` after a stopped call returns in 0 ms, and a new `within (150)` ends at once.
+
+**The library gains an abandon**, `fminus_web_http_within_abandon(context)`: every scope the calling thread has open
+under the context is dropped at once. It waits for nothing: the scopes' requests go on as requests started outside
+any scope do, under the policy's limits, and are freed with the context when the program never closes them (it never
+saw them: the stopped call wrote nothing). It must be cheap and must not block, since an audio thread's way out may
+come to it; the scopes are a vector under the context's mutex, so it cannot touch them. Instead a thread that begins a
+scope has a **record** of the context's (`State::Holder`): its thread's id, a count of its scopes open, and a
+generation that each scope copies when it begins. The records are a list pushed under the mutex (a record whose thread
+has none open is taken by the next thread that begins one, so the list never holds more than the most threads that had
+scopes at once) and never freed before the context, so the abandon walks it without a lock: for its thread's record,
+when it has scopes open, it moves the generation on and stores the count 0, in that order, and returns how many. Only
+the record's own thread writes those two, so no store races another; a begin that then takes the record, seeing 0 with
+an acquire load, sees the new generation. Every scope begun under an older generation is **abandoned**: `innermost`
+(which every request's start, every wait and every begin asks for the thread's scope) skips it, and the next begin or
+end of any thread drops it from the vector under the mutex. Another thread's scopes are never touched. The steps are a
+walk of the records, a few atomic loads, and two stores when there is something to abandon: no lock, no allocation, no
+system call, which `WithinTest.cpp` proves as the tree proves a wait-free builtin, under `HeapCalls` (0 calls) and in a
+child under seccomp's strict mode (it exits), for a context with no record, a thread with two scopes open, one with
+none while another thread holds one, and a null context.
+
+**The passes call it**, but only where it can matter. A scope belongs to the frame of the function that called
+`within_begin`: after inlining, the function that holds the call. When a call stops, that function either stops itself
+(its stop block, the budget's `budget.stop` or the checks' `bounds.stop`) or returns after the call of the function
+that did (its `budget.unwind` or `bounds.unwind`), on the scope's own thread, and every function between it and the
+host returns too, so every scope the thread has open belongs to a frame that is going. So `returnEarly`, which both
+passes call to make each of those blocks' return, first calls `abandonScopes`, which in a function that calls
+`within_begin` loads the program's context and calls the abandon:
+
+```llvm
+budget.stop:
+  store atomic i64 -1, ptr @fminus_rt_loop_budget monotonic, align 8
+  store atomic i32 1, ptr getelementptr inbounds ({ i64, i32 }, ptr @fminus_rt_loop_budget, i32 0, i32 1) monotonic, align 4
+  %web.context12 = load ptr, ptr @fminus_web_context, align 8
+  %within.abandoned13 = call i32 @fminus_web_http_within_abandon(ptr %web.context12)
+  ret float 0.000000e+00
+```
+
+Why not once, where a stop is first taken? Because a thread can stop without taking one: a parallel region's part
+stops on another thread, and the region's caller, the thread with the scope, only unwinds; and while the record of the
+bounds checks holds a failure (from another thread's call of the same program, say), every function returns as soon
+as a call of one that may stop returns, without any check of its own failing. So it is each unwinding function's way
+out, and of those, only a function that begins a scope needs it: one that begins none has no scope of its own, and the
+function whose scope it is will pass its own way out after it. A function that holds no call that may stop cannot be
+cut short, and ends its scope at its brace. A program without a within has no call of `within_begin`, and the passes
+leave it as it was, byte for byte (`within.fm` checks `spin` and `plain`, and every lit test that pins the passes'
+IR is unchanged). The declaration says what the abandon touches: `nofree nounwind willreturn memory(argmem: readwrite,
+inaccessiblemem: readwrite)`, the context `captures(none)`; a function that calls it has `inaccessiblemem` added to
+its memory effects where they did not have it.
+
+A better way would have needed no call on the stop paths: a scope that knows its frame (a stack address the block
+passed to the begin) could be found dead by the thread's next library call, when that call is made from a frame above
+it. But a host calls the same function again from the same depth, whose frame is at the same address, and a thread
+the system gave a gone thread's id could be at any depth: no address test tells a dead scope from a live one. The
+abandon is what makes "after a stopped call, the thread has no scope" true.
+
+### What it changes for programs and hosts
+
+- **Programs**: `within` is a keyword; `examples/wavetable/wavetable.fm`'s local of that name is `fraction` now, and no
+  other program in the tree used it. A program without a within compiles to the same IR, with or without the passes.
+- **Hosts**: nothing new in `FMinus.h`. `stopWeb()` and `~Program` wake a thread at a within's end as they wake one in
+  `http_wait`; a call stopped inside a block leaves its requests running until they end or the program goes.
+- **The library**: one function more, `fminus_web_http_within_abandon`, in `WebSymbols.def`; a thread's first begin
+  under a context makes its record (32 bytes), kept for the context's life.
+- **The VS Code grammar** (0.23.0) colours `within`.
+
+### Tests
+
+- `tests/unit/WithinTest.cpp` (`[within]`), through the JIT at `-O0` and `-O2`, against a small HTTP/1.1 server of its
+  own on 127.0.0.1 (`/ok`, `/after/N`, `/slow`, `/pack/K.json`): six requests at once all 200 at the brace in about
+  one's time; a slow one among them `HTTP_TIMEOUT` at the deadline, the others 200; no deadline; one already passed; a
+  request started in a function the block calls; `http_wait(r, -1)` inside returning at the deadline with 0; nested
+  blocks (the inner ends with the outer's deadline, an outer request still pending after the inner end); `return` with
+  a `defer` before the end, `continue` and `break`; `stopWeb()` waking a thread at the brace; with the server, a reply
+  inside a block received before its scope ends and a serve bounded by the deadline; the report's script (eight packs
+  in one within, then each read); where it meets recipe 50, a module `json_read` fills from each pack after the block,
+  and one a method fills through `this` inside a block; a block the loop budget (`[budget]`) and one a bounds check (`[bounds]`) stop with a
+  request pending, then on the same thread `http_wait(r, 50)` waiting its 50 ms, a new within with its own deadline and
+  its promise, and the program destroyed with the connection closed and the I/O thread gone; a stop on a thread with no
+  scope leaving another thread's scope whole; a program without a within, with both passes, has no abandon. The
+  library's abandon alone: what it abandons (all of the thread's, at once), what it leaves (their requests, which
+  complete or wait their own time; another thread's scope), threads that come and go, threads racing begins, ends and
+  abandons, and its wait-free proof. The errors, each once at its column; without the library, its one error.
+- `tests/unit/FrontendTest.cpp`: the dump, braces required, `within` as no variable's or macro's name, `await` an
+  identifier.
+- `tests/lit/fminus/within.fm`: the IR at `-O0` (the begin, the slot, the end at each way out after the block's
+  defer, three ends for a loop's `continue`, `break` and brace), the declarations' attributes, the abandon on the loop
+  budget's ways out of the functions that begin a scope and not of those that begin none, no abandon with bounds
+  checks and none failing at `-O2`, the dump, and `--run` with no network; `within-errors.fm`: the effects, the jump,
+  the milliseconds; `within-off.fm`: a build without the library.
+- `examples/fetch/`: `--check` fetches four packs at once in `countPacks`'s within (three on the server), and plays
+  `Live` until its `when` swaps the pack's first table in, silence before and the table after, the `when` fired once.
+
 ## Recipe 50: `json_read`, a module filled from a JSON document by a table of its fields
 
 *In the compiler. Code: `json_read`'s row of `kRuntimeBuiltins`, `Param::Module`, its argument in `lowerRuntimeCall`,
@@ -9399,7 +9611,7 @@ build.
   attribute on a field names `fminus::default(value)` too.
 - **Hosts** see the `json::` attributes and a field's `fminus::default` in `Module::Field::attributes` as before;
   `setDefaults` sets parameters only.
-- **The VS Code grammar** colours `json_read` (its version is left for the merge with the other steps).
+- **The VS Code grammar** (0.23.0, the version recipe 49 gave it) colours `json_read`.
 
 ### Tests
 

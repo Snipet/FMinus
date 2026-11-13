@@ -208,6 +208,7 @@ namespace fminus::ir::detail
                        [&](const ast::ServeStmt& serve) { lowerServe(stmt.location, serve); },
                        [&](const ast::ReplyStmt& reply) { lowerReply(stmt.location, reply); },
                        [&](const ast::WhenStmt& when) { lowerWhen(stmt.location, when); },
+                       [&](const ast::WithinStmt& within) { lowerWithin(stmt.location, within); },
                    },
                    stmt.node);
     }
@@ -251,8 +252,8 @@ namespace fminus::ir::detail
         const std::vector<Deferred> reached = deferScopes_[block].reached;
         for (const Deferred& deferred : reached)
         {
-            if (deferLowered_.contains(deferred.statement))
-                continue;
+            if (deferred.within != nullptr || deferLowered_.contains(deferred.statement))
+                continue;   // a within's end has no errors of its own
             const llvm::IRBuilderBase::InsertPointGuard resume(builder_);
             builder_.SetInsertPoint(newBlock("defer.unreachable"));
             lowerDeferred(deferred);
@@ -294,6 +295,11 @@ namespace fminus::ir::detail
     // function around a parallel region that the statement captured stays captured.
     void Lowering::lowerDeferred(const Deferred& deferred)
     {
+        if (deferred.within != nullptr)
+        {
+            lowerWithinEnd(deferred);
+            return;
+        }
         const bool again = !deferLowered_.insert(deferred.statement).second;
         if (builder_.GetInsertBlock()->hasTerminator())   // after another's error (runDefers)
             builder_.SetInsertPoint(newBlock("unreachable"));
@@ -714,7 +720,8 @@ namespace fminus::ir::detail
         else
             branch = &switches_.back();
         // Nor into a defer's scope, the rest of its block after it: past a defer reached in a block of the switch's
-        // body that holds the label, clang's error, and a note at each defer, the last reached first.
+        // body that holds the label, clang's error, and a note at each defer, the last reached first. Nor into a
+        // within block, past where its scope begins, whose end would end a scope the jump never began (Within.cpp).
         if (branch != nullptr)
         {
             std::vector<Diagnostic> bypassed;
@@ -722,7 +729,10 @@ namespace fminus::ir::detail
             {
                 const std::vector<Deferred>& reached = deferScopes_[block].reached;
                 for (auto deferred = reached.rbegin(); deferred != reached.rend(); ++deferred)
-                    bypassed.push_back(Diagnostic{deferred->location, "jump bypasses defer statement", {}});
+                    bypassed.push_back(Diagnostic{deferred->location,
+                                                  deferred->within != nullptr ? "jump enters a 'within' block"
+                                                                              : "jump bypasses defer statement",
+                                                  {}});
             }
             if (!bypassed.empty())
                 diagnostics_.error(location, "cannot jump from switch statement to this case label",

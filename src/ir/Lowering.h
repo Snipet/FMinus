@@ -136,6 +136,10 @@ namespace fminus::ir::detail
     bool isBuilt(Feature feature);                                 // whether this build has it (Calls.cpp)
     std::string notBuilt(std::string_view name, Feature feature);   // the error of a call of `name`, which needs it
 
+    // The callee a within block is recorded as among a function's calls (Within.cpp): it allocates where it begins and
+    // waits where it ends, which Effects.cpp says in words of its own. A keyword, so no function of a program has it.
+    inline constexpr std::string_view kWithinCall = "within";
+
     // What a builtin of the runtime may do, for the effects (Effects.cpp): allocate or free, which a nonallocating
     // function may not (and so neither may a nonblocking one); block, waiting for something (a request, a thread),
     // which a nonblocking function may not, and a nonallocating one may; or neither: it is wait-free, and the audio
@@ -525,7 +529,8 @@ namespace fminus::ir::detail
         // A defer statement reached in a block being lowered (Statements.cpp), whose deferred statement each of the
         // block's exits lowers: the statement and where it is, and what the code around it was, which its deferred
         // statement sees wherever it is lowered: the names of its block declared before it (the scope `scope`, as it
-        // was), and the loops and switches around it.
+        // was), and the loops and switches around it. Or a within block's end (Within.cpp): no statement, and the slot
+        // that says whether its scope was begun, which each of the block's exits ends.
         struct Deferred
         {
             const ast::DeferStmt* statement;
@@ -534,6 +539,7 @@ namespace fminus::ir::detail
             std::unordered_map<std::string, Binding> visible;
             std::size_t breakables;
             std::size_t switches;
+            llvm::Value* within = nullptr;
         };
 
         // A block that may hold defer statements, and those of them reached so far, in order (Statements.cpp).
@@ -734,6 +740,10 @@ namespace fminus::ir::detail
         llvm::BasicBlock* bypass(const Switch& branch, llvm::BasicBlock* label);
         void declareVariable(SourceLocation location, const ast::DeclStmt& decl);
         void lowerWhen(SourceLocation location, const ast::WhenStmt& when);
+
+        // ---- Within.cpp ---------------------------------------------------------------------------------------------
+        void lowerWithin(SourceLocation location, const ast::WithinStmt& within);
+        void lowerWithinEnd(const Deferred& end);
         void refuseAttributes(const ast::DeclStmt& decl);
         void redefinition(SourceLocation location, const std::string& name, bool enumerator, const Binding& previous);
 

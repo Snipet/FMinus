@@ -26,6 +26,7 @@ FMINUS_RUNTIME_SYMBOL(fminus_web_http_cancel)
 FMINUS_RUNTIME_SYMBOL(fminus_web_http_close)
 FMINUS_RUNTIME_SYMBOL(fminus_web_http_within_begin)
 FMINUS_RUNTIME_SYMBOL(fminus_web_http_within_end)
+FMINUS_RUNTIME_SYMBOL(fminus_web_http_within_abandon)
 #if FMINUS_HAS_WEB_SERVER
 FMINUS_RUNTIME_SYMBOL(fminus_web_http_listen)
 FMINUS_RUNTIME_SYMBOL(fminus_web_http_port)

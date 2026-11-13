@@ -3,9 +3,10 @@
 // serves it on 127.0.0.1 itself (or uses a server already there, --port), compiles fetch.fm allowing that server's
 // /packs/ and nothing else (Options::web), lists the URLs the program names before running anything, fetches the pack
 // through Download, plays it, and compares the output with the same pack handed to Wavetable::init directly: they must
-// be the same, bit for bit. With --check (what ctest runs) it also compiles the program with the default policy, which
-// reaches nothing, and checks that the fetch is refused (HTTP_REFUSED) with no request reaching the server. No request
-// ever leaves the loopback interface. In a build without the web library or the JSON parser (FMINUS_WEB is off by
+// be the same, bit for bit. With --check (what ctest runs) it also fetches three packs at once in countPacks's within
+// block (and a fourth the server lacks), plays Live until its when swaps the pack's first table in, which must then
+// play as that table, and compiles the program with the default policy, which reaches nothing, and checks that the
+// fetch is refused (HTTP_REFUSED) with no request reaching the server. No request ever leaves the loopback interface. In a build without the web library or the JSON parser (FMINUS_WEB is off by
 // default), and on Windows, whose loopback server is not written, it says so and exits 0.
 //
 //     build-web/bin/example-fetch --check                   (its own server, on an ephemeral port)
@@ -23,6 +24,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -45,9 +47,8 @@
 namespace
 {
     // The wavetable example's pack (examples/wavetable/bench.cpp: makePack and toJson): sine, triangle, saw and square,
-    // the last three as the first harmonics of their series, each sample computed in double and rounded once, written
-    // in the fewest digits that read back as the same float.
-    std::string packJson(int size)
+    // the last three as the first harmonics of their series, each sample computed in double and rounded once.
+    std::vector<std::vector<float>> packTables(int size)
     {
         constexpr double kPi = 3.14159265358979323846;
         const auto series = [&](int harmonics, auto&& amplitude) {
@@ -61,12 +62,18 @@ namespace
             }
             return table;
         };
-        const std::vector<std::vector<float>> tables{
+        return {
             series(1, [](int) { return 1.0; }),
             series(31, [&](int h) { return h % 2 == 0 ? 0.0 : (h % 4 == 1 ? 8 : -8) / (kPi * kPi * h * h); }),
             series(64, [&](int h) { return (h % 2 == 1 ? 2 : -2) / (kPi * h); }),
             series(63, [&](int h) { return h % 2 == 0 ? 0.0 : 4 / (kPi * h); }),
         };
+    }
+
+    // The pack as JSON, its samples in the fewest digits that read back as the same float.
+    std::string packJson(int size)
+    {
+        const std::vector<std::vector<float>> tables = packTables(size);
         std::string text = std::format(R"({{"name": "basic shapes", "size": {}, "gain": 0.5, )"
                                        R"("interpolation": "linear", "tables": [)",
                                        size);
@@ -81,12 +88,21 @@ namespace
         return text + "]}";
     }
 
-    // An HTTP/1.1 server on 127.0.0.1, an ephemeral port: GET /packs/1.json is the pack, anything else 404. One
-    // connection at a time, each closed after its response.
+    // The pack's first table as raw little-endian float32s, as a program's own server sends a table (bytes_floats).
+    std::string packF32(int size)
+    {
+        const std::vector<float> table = packTables(size).front();
+        std::string bytes(table.size() * sizeof(float), '\0');
+        std::memcpy(bytes.data(), table.data(), bytes.size());   // little-endian on every machine FMinus targets
+        return bytes;
+    }
+
+    // An HTTP/1.1 server on 127.0.0.1, an ephemeral port: GET /packs/1.json, /packs/2.json and /packs/3.json are the
+    // pack, /packs/1.f32 its first table, anything else 404. One connection at a time, each closed after its response.
     class Server
     {
     public:
-        explicit Server(std::string pack) : pack_(std::move(pack))
+        explicit Server(std::string pack) : pack_(std::move(pack)), table_(packF32(2048))
         {
             listener_ = ::socket(AF_INET, SOCK_STREAM, 0);
             sockaddr_in where{};
@@ -146,12 +162,15 @@ namespace
                 }
                 const std::size_t start = request.find(' ') + 1;
                 const std::string path = request.substr(start, request.find(' ', start) - start);
-                const bool found = request.starts_with("GET ") && path == "/packs/1.json";
-                const std::string body = found ? pack_ : "no such pack";
-                const std::string response = std::format("HTTP/1.1 {}\r\nContent-Type: application/json\r\n"
-                                                         "Content-Length: {}\r\nConnection: close\r\n\r\n",
-                                                         found ? "200 OK" : "404 Not Found", body.size())
-                                             + body;
+                const bool json = path == "/packs/1.json" || path == "/packs/2.json" || path == "/packs/3.json";
+                const bool table = path == "/packs/1.f32";
+                const bool found = request.starts_with("GET ") && (json || table);
+                const std::string body = !found ? "no such pack" : json ? pack_ : table_;
+                const std::string response =
+                    std::format("HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                found ? "200 OK" : "404 Not Found",
+                                table ? "application/octet-stream" : "application/json", body.size())
+                    + body;
                 for (std::size_t sent = 0; sent < response.size();)
                 {
                     const ssize_t put = ::send(fd, response.data() + sent, response.size() - sent, MSG_NOSIGNAL);
@@ -164,6 +183,7 @@ namespace
         }
 
         std::string pack_;
+        std::string table_;
         int listener_ = -1;
         int port_ = 0;
         std::atomic<bool> stop_{false};
@@ -205,6 +225,12 @@ namespace
         void (*start)(void*, int, int) = nullptr;
         int (*received)(void*) = nullptr;
         int (*finish)(void*, void*, float) = nullptr;
+        int (*countPacks)(int, int) = nullptr;
+        const fminus::Program::Module* live = nullptr;
+        void (*liveStart)(void*, int, int, float) = nullptr;
+        void (*liveProcess)(void*, float*, int) = nullptr;
+        int (*liveLoaded)(void*) = nullptr;
+        void (*liveEnd)(void*) = nullptr;
     };
 
     std::optional<Fetcher> compileFetcher(const std::string& path, std::vector<std::string> allow, std::string& errors)
@@ -242,11 +268,19 @@ namespace
         fetcher.start = program.function<void(void*, int, int)>("Download::start", errors);
         fetcher.received = program.function<int(void*)>("Download::received", errors);
         fetcher.finish = program.function<int(void*, void*, float)>("Download::finish", errors);
+        fetcher.countPacks = program.function<int(int, int)>("countPacks", errors);
+        fetcher.live = program.module("Live");
+        fetcher.liveStart = program.function<void(void*, int, int, float)>("Live::start", errors);
+        fetcher.liveProcess = program.function<void(void*, float*, int)>("Live::process", errors);
+        fetcher.liveLoaded = program.function<int(void*)>("Live::loaded", errors);
+        fetcher.liveEnd = program.function<void(void*)>("Live::end", errors);
         if (fetcher.wavetable == nullptr || fetcher.download == nullptr || fetcher.finish == nullptr
             || fetcher.init == nullptr || fetcher.process == nullptr || fetcher.end == nullptr
-            || fetcher.start == nullptr || fetcher.received == nullptr)
+            || fetcher.start == nullptr || fetcher.received == nullptr || fetcher.countPacks == nullptr
+            || fetcher.live == nullptr || fetcher.liveStart == nullptr || fetcher.liveProcess == nullptr
+            || fetcher.liveLoaded == nullptr || fetcher.liveEnd == nullptr)
         {
-            errors = path + " has no modules Wavetable and Download with their methods: " + errors;
+            errors = path + " has no modules Wavetable, Download and Live, and countPacks, with their methods: " + errors;
             return std::nullopt;
         }
         return fetcher;
@@ -346,8 +380,52 @@ int main(int argc, char** argv)
         return fail("the fetched pack plays otherwise than the same pack loaded directly");
     // A pack the server does not have: its status, which the program reads as any other.
     std::vector<float> none(16);
-    if (const int missing = fetchAndPlay(*fetcher, port, 2, none); server && missing != 404)
+    if (const int missing = fetchAndPlay(*fetcher, port, 9, none); server && missing != 404)
         return fail(std::format("a pack the server lacks: status {}, not 404", missing));
+    // Four at once in one within: the server has three of them, and every request has ended where the block ends.
+    if (const int packs = fetcher->countPacks(port, 4); server && packs != 3)
+        return fail(std::format("four packs fetched at once, three on the server: {} found, not 3", packs));
+    // Live: silence until the table arrives, on whichever block it does, then the table, from its first sample, at
+    // the default 220 Hz; its when fires once. (A server of one's own may have no /packs/1.f32.)
+    if (server)
+    {
+        const auto live = makeInstance(*fetcher->live);
+        if (!live)
+            return fail("no memory for Live");
+        fetcher->liveStart(live.get(), port, 1, 48000.0f);
+        std::vector<float> block(256);
+        int silent = 0;
+        for (; silent < 5000 && fetcher->liveLoaded(live.get()) == 0; ++silent)
+        {
+            fetcher->liveProcess(live.get(), block.data(), static_cast<int>(block.size()));
+            if (fetcher->liveLoaded(live.get()) == 0)
+            {
+                if (std::any_of(block.begin(), block.end(), [](float x) { return x != 0.0f; }))
+                    return fail("Live sounded before its table arrived");
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
+        if (fetcher->liveLoaded(live.get()) != 1)
+            return fail("Live's table never arrived");
+        const std::vector<float> table = packTables(2048).front();
+        float phase = 0.0f;
+        for (int b = 0; b < 8; ++b)
+        {
+            if (b > 0)
+                fetcher->liveProcess(live.get(), block.data(), static_cast<int>(block.size()));
+            for (const float sample : block)
+            {
+                if (sample != table[static_cast<std::size_t>(static_cast<int>(phase))])
+                    return fail("Live plays otherwise than its table from the block it arrived in");
+                phase += 220.0f * 2048 / 48000.0f;
+                if (phase >= 2048)
+                    phase -= 2048;
+            }
+        }
+        if (fetcher->liveLoaded(live.get()) != 1)
+            return fail("Live's when fired more than once");
+        fetcher->liveEnd(live.get());
+    }
     // The default policy reaches nothing: refused, before anything is sent.
     std::optional<Fetcher> closed = compileFetcher(path, {}, errors);
     if (!closed)
@@ -358,8 +436,8 @@ int main(int argc, char** argv)
         return fail(std::format("with no URL allowed, the fetch gave {}, not HTTP_REFUSED (-4)", refused));
     if (server && server->requests() != before)
         return fail("with no URL allowed, a request reached the server");
-    std::printf("checked: the same samples as the pack loaded directly; a missing pack is 404; with no URL allowed, "
-                "HTTP_REFUSED and no request\n");
+    std::printf("checked: the same samples as the pack loaded directly; a missing pack is 404; three packs of four at "
+                "once in a within; Live's table swapped in once; with no URL allowed, HTTP_REFUSED and no request\n");
     return 0;
 }
 

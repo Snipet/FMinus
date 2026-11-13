@@ -303,6 +303,11 @@ namespace fminus::ir::detail
                                        record(Access::Kind::When, self(), stmt.location);
                                    scoped([&] { statement(*when.body); });
                                },
+                               // Its milliseconds, then its block. Its scope is the thread's own, which no other sees.
+                               [&](const ast::WithinStmt& within) {
+                                   expression(*within.timeout, Access::Kind::Read);
+                                   statement(*within.body);
+                               },
                            },
                            stmt.node);
             }

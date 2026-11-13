@@ -1,6 +1,6 @@
 # FMinus for VSCode
 
-Syntax highlighting for FMinus (`.fm`): keywords (`switch`, `case`, `default`, `parallel`, `defer`, `serve`, `route`, `reply`, `json` and `when` among them), types
+Syntax highlighting for FMinus (`.fm`): keywords (`switch`, `case`, `default`, `parallel`, `defer`, `serve`, `route`, `reply`, `json`, `when` and `within` among them), types
 (`float`, `double`, `int`, `bool`, `void`, the SIMD recipes' `float4` and `poly float`, the handles, `http_response`,
 `json_doc`, `fft_plan` and the rest, `string` and `char`) and qualifiers (`const`,
 `restrict`, `poly`, `param`), modules (`module OnePole`, with the name it declares, and `this`), enumerations
@@ -32,8 +32,8 @@ It is declarative: three JSON files, no code, nothing that runs on your files.
 ## Installing
 
 ```bash
-python3 editors/vscode/package.py                               # build-vscode/fminus-0.22.0.vsix
-code --install-extension build-vscode/fminus-0.22.0.vsix
+python3 editors/vscode/package.py                               # build-vscode/fminus-0.23.0.vsix
+code --install-extension build-vscode/fminus-0.23.0.vsix
 ```
 
 Then reload the window (Developer: Reload Window). `code` comes with VSCode; if it isn't on PATH, run "Shell Command:

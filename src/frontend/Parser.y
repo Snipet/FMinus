@@ -45,6 +45,7 @@
 //                  | "serve" "(" expr ("," expr)? ")" "{" route* "}"    FMinus's: the requests waiting for its routes
 //                  | "reply" expr ("," expr)* ";"        answers the route's request, and leaves the route
 //                  | "when" "(" expr ")" statement       FMinus's: run each time the condition becomes true
+//                  | "within" "(" expr ")" block         FMinus's: every request started in it ended at its end
 //     route        : "route" STRING+ ("(" (route_param ("," route_param)*)? ")")? attributes block
 //     route_param  : "const"? type pointer IDENTIFIER attributes        an int a {hole} or the query fills, ...
 //     label        : "case" expr ":" | "default" ":"                         the expr an integer constant expression
@@ -560,6 +561,7 @@
 %token SERVE "serve" ROUTE "route" REPLY "reply" JSON "json"
 %token CHAR "char" STRING_TYPE "string"
 %token WHEN "when"
+%token WITHIN "within"
 %token <ast::Type> MODULE_NAME "module name"
 %token <ast::Type> VECTOR_TYPE "vector type"
 %token <ast::Type> HANDLE_TYPE "handle type"
@@ -844,6 +846,7 @@ attribute_word
     | "char"                                { $$ = "char"; }
     | "string"                              { $$ = "string"; }
     | "when"                                { $$ = "when"; }
+    | "within"                              { $$ = "within"; }
     ;
 
 // An attribute's arguments: numbers, a minus before any of them, and strings (C23's balanced tokens, of which FMinus
@@ -1201,6 +1204,11 @@ unlabeled
                                                 $$ = ast::Stmt{at(@1), ast::ReplyStmt{}};
                                             }
     | "when" "(" expr ")" statement         { $$ = ast::Stmt{at(@1), ast::WhenStmt{$3, ast::own($5)}}; }
+    | "within" "(" expr ")" block           {
+                                                $$ = ast::Stmt{at(@1), ast::WithinStmt{
+                                                                           $3, ast::own(ast::Stmt{
+                                                                                   at(@5), ast::BlockStmt{$5}})}};
+                                            }
     ;
 
 // A serve's routes. Anything else in its braces parses, and is an error: only a route may stand there.

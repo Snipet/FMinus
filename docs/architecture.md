@@ -208,8 +208,9 @@ on it without the code generator.
     `BreakStmt`, `ContinueStmt`, `SwitchStmt`, `CaseStmt` and `DefaultStmt` (a label, with a body only as a labelled
     statement), `EnumStmt` (an `Enum` in a block), `ParallelForStmt`, `ParallelBlockStmt`, `DeferStmt` (TS 25755's
     `defer s`), `ServeStmt` (its server and timeout, and its `Route`s: a literal, `RouteParam`s and a block),
-    `ReplyStmt` and `WhenStmt` (FMinus's `when (c) s`). An `IfStmt`'s and a `SwitchStmt`'s `init` are C2y's
-    declarations in their head, none without.
+    `ReplyStmt`, `WhenStmt` (FMinus's `when (c) s`) and `WithinStmt` (FMinus's `within (ms) { ... }`: its
+    milliseconds and a `BlockStmt`). An `IfStmt`'s and a `SwitchStmt`'s `init` are C2y's declarations in their head,
+    none without.
 - **Enumerations.** An `Enum` is a tag (or none) and its `Enumerator`s, a name and a value as written (or none). The
   program holds the top level's and the modules' in `Program::enums`, in source order, each with how many functions
   and modules come before it and the module it is in. A module's `Field` records how many of its module's
@@ -286,6 +287,7 @@ they lower:
 | `Web.cpp` | the web library's builtins' own part (`http_get`, `http_post`: a build with `FMINUS_WEB`; [web.md](web.md)): a URL literal checked beyond its format, printable ASCII, http or https, no credentials (`checkUrl`), and a content type (`checkContentType`); each call's URL as a pattern in the module's named metadata `fminus.web.requests` (`recordWebRequest`, read by `ir::webRequests` for `Program::webRequests`); the program's web context, the module's global `fminus_web_context` the host sets, loaded where a request starts (`webContext`); the status codes' names, `HTTP_REFUSED` and the rest, constants outside the file's scope (`webStatus`, which `named` falls back to) |
 | `WebServer.cpp` | the web server's builtins' own part (`http_listen`, `http_is`, the replies: a build with `FMINUS_WEB_SERVER`; [web.md](web.md), "The server"): a route literal checked where it is written (`scanRoute`, `checkRoute`), a query's name (`checkQueryName`), a reply's format and its values, checked as clang checks `printf`'s and passed as doubles (`scanReplyFormat`, `replyArguments`, `replyValues`); each route in the module's named metadata `fminus.web.routes` (`recordWebRoute`, read by `ir::webRoutes` for `Program::webRoutes`), and the program's route table, each literal once, `fminus.web.routes` and `fminus.web.route.lengths`, which every `http_listen` passes with the web context (`listenArguments`), filled in once every function is lowered (`finishWebRoutes`, from `lower`), after the check that no two route literals one request could match are neither more specific than the other (`checkRouteOverlaps`) |
 | `Serve.cpp` | `serve`, `route` and `reply` ([web.md](web.md), "serve, route and reply"): a serve's routes checked (`scanRouteHoles` for the literal, `checkRouteParameters`) and in the route table, its route set a constant of the program, the loop over `fminus_web_http_next_in` (or `_accept_in`) and the `switch` on `fminus_web_http_route` (`lowerServe`), each route's parameters filled and checked, a 400 when one does not fit (`lowerRoute`, `fillParameter`), the missing reply at a route's closing brace; a reply in the form its values say, a refusal answered 500, the deferred statements of the route's blocks, the jump to the next request (`lowerReply`); and a JSON literal made into a reply's format, `%r`, `%R`, `%d` and `%b` its places (`lowerJsonReply`, `jsonFormat`) |
+| `Within.cpp` | `within (ms) { ... }` ([web.md](web.md), "within"): its milliseconds, the thread's deadline scope begun (`fminus_web_http_within_begin`), and its end a `Deferred` of a block of its own around the braces (`Deferred::within`, the slot that says whether the scope was begun), which `lowerDeferred` lowers at each way out as a call of `fminus_web_http_within_end` (`lowerWithin`, `lowerWithinEnd`); its effects are `Effects.cpp`'s (`kWithinCall`), a switch's jump into it `lowerLabel`'s; and in a build without the library, the error `http_wait`'s is |
 | `Files.cpp` | the file interface's builtins' own part (`file_read`, `file_list`, `file_write`, `file_append`: a build with `FMINUS_FILES`; [files.md](files.md)): a file's name or a listing's pattern checked where it is written against the rules the runtime keeps and the build's ceilings, `FMINUS_FILES_TYPES`, `FMINUS_FILES_ANYWHERE` and the target's form of an absolute name (`scanFileName`, `checkFileName`); each call's name as a pattern in the module's named metadata `fminus.files` (`recordFileUse`, read by `ir::files` for `Program::files`); the program's file context, the module's global `fminus_rt_files_context` the host sets, loaded where a name is used (`filesContext`); the status codes' names, `FILE_REFUSED` and the rest (`fileStatus`, which `named` falls back to after `webStatus`) |
 | `Hash.cpp` | `hash` and `randf`: lowbias32's integer instructions inline (`mixBits`), and the hash's top 24 bits over 2^23 (`lowerHash`) |
 | `Vectors.cpp` | vector literals in both forms, swizzles, `?:` with a vector condition |
@@ -509,7 +511,9 @@ C keeps the enumerated type, and `lowerSwitch` reads it for clang's `-Wswitch`, 
     already, and returns; and each function that called one that may stop reads the record after the call and returns
     if it is set. A function it changed carries the attribute `fminus-bounds-check`. Before the loop budget, so that
     the budget's count is written back on these returns too; both share `src/opt/EarlyReturn.h` (which calls run which
-    functions, and what a function that may now return early no longer promises).
+    functions, what a function that may now return early no longer promises, and its return: in a function that begins
+    a `within` block's deadline scope, after a call of `fminus_web_http_within_abandon`, so that a stopped call leaves
+    its thread no scope).
   - **The loop budget** (`LoopBudgetPass`, `src/opt/LoopBudget.h`, extending.md recipe 29), after the bounds checks, at
     every level, for a module whose flag `fminus.loop-budget` is 1: each function that loops, or can call itself
     again, counts down the program's budget, a loop whose count ScalarEvolution knows charged it in its preheader and
@@ -813,7 +817,7 @@ pivots, so the float code computes what the reference computes, operation for op
 - **Semantics follow C unless a deviation is documented.** The README lists the deviations: `float` and `int` are the
   only arithmetic types, an unsuffixed `1.5` is a `float`, pointers point to seven types and convert only through
   `void*` or by adding `const`, a handle type is a keyword, `string` is FMinus's view of bytes and `char` only an
-  element, `when` is FMinus's, `serve`, `route` and `reply` are FMinus's and a JSON literal only a reply's body, `defer`
+  element, `when` and `within` are FMinus's, `serve`, `route` and `reply` are FMinus's and a JSON literal only a reply's body, `defer`
   is TS 25755's and an `if`'s declaration C2y's, the heap's
   memory is aligned and zeroed, `%` works on floats, calls may precede definitions, uninitialised variables are 0 (one a
   switch's jump passes too), an enumerated type is `int` (or its fixed type), the top level holds constants and no
