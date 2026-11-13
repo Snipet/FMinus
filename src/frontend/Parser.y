@@ -9,12 +9,13 @@
 //     method       : "const"? type pointer IDENTIFIER "(" params ")" attributes block
 //     attributes   : ("[" "[" attribute ("," attribute)* "]" "]")*
 //     attribute    : attribute_word ("::" attribute_word)? ("(" attribute_arg ("," attribute_arg)* ")")?
-//     attribute_word: IDENTIFIER | MODULE_NAME | a keyword                  C23 reads a keyword there as a name
+//     attribute_word: IDENTIFIER | MODULE_NAME | a keyword or a type's word  C23 reads a keyword there as a name
 //     attribute_arg: "-"? NUMBER | STRING+                 a number, or a string (C's adjacent literals are one)
 //     params       : (param ("," param)*)? | "void"                                  (void) is none, as in C
 //     param        : "const"? type pointer IDENTIFIER? | "const"? type IDENTIFIER array_sizes       a pointer
 //     type         : "float" | "double" | "bool" | "int" | "void" | VECTOR_TYPE | "poly" ("float" | "bool")
-//                  | MODULE_NAME
+//                  | MODULE_NAME | HANDLE_TYPE              http_response, json_doc, ...: the runtime's handles
+//                  | "char" | "string"                  a byte, an element or a pointee only; a view of bytes
 //                  | "enum" IDENTIFIER                  int (or its fixed type), the name a tag declared before
 //     pointer      : ("*" ("const" | "restrict")*)?        with a *, the first const is the pointee's (const float*),
 //                                                          and one after it the pointer's own (float* const)
@@ -36,11 +37,20 @@
 //                  | "if" "(" expr ")" statement ("else" statement)? | "while" "(" expr ")" statement
 //                  | "for" "(" (declaration | expr? ";") expr? ";" expr? ")" statement | "break" ";" | "continue" ";"
 //                  | "switch" "(" expr ")" statement
+//                  | ("if" | "switch") "(" (declaration expr | "const"? type declarator) ")" ...   C2y's: names
+//                                                        in scope to the statement's end, the else's too
 //                  | "parallel" "for" "(" (declaration | expr? ";") expr? ";" expr? ")" statement
 //                  | "parallel" block                    FMinus's: the iterations, or the statements, at once
+//                  | ("defer" | "_Defer") statement      TS 25755's: run when the block it is in is left
+//                  | "serve" "(" expr ("," expr)? ")" "{" route* "}"    FMinus's: the requests waiting for its routes
+//                  | "reply" expr ("," expr)* ";"        answers the route's request, and leaves the route
+//                  | "when" "(" expr ")" statement       FMinus's: run each time the condition becomes true
+//                  | "within" "(" expr ")" block         FMinus's: every request started in it ended at its end
+//     route        : "route" STRING+ ("(" (route_param ("," route_param)*)? ")")? attributes block
+//     route_param  : "const"? type pointer IDENTIFIER attributes        an int a {hole} or the query fills, ...
 //     label        : "case" expr ":" | "default" ":"                         the expr an integer constant expression
 //     expr         : NUMBER | "true" | "false" | IDENTIFIER | IDENTIFIER "(" (expr ("," expr)*)? ")" | "(" expr ")"
-//                  | STRING+          a string literal: the code generator takes one only as a builtin's argument
+//                  | STRING+          a string literal: a builtin's argument, or a value where a string is wanted
 //                  | ("-" | "+" | "!" | "~" | "*" | "&") expr | expr "[" expr "]"   *p, &x, p[i]
 //                  | "sizeof" "(" "const"? type pointer array_sizes? ")"             a type's size, an int
 //                  | expr ("*" | "/" | "%") expr | expr ("+" | "-") expr | expr ("<<" | ">>") expr
@@ -55,15 +65,21 @@
 //                  | "(" ("float" | "double" | "int" | "bool") ")" expr                       a cast
 //                  | "(" "enum" IDENTIFIER ")" expr                                  a cast to int, as C's to an enum
 //                  | expr ("=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=") expr
+//                  | "json" json_object | "json" json_array     a JSON literal: a sink's argument, never a value
+//                  | "json" "(" expr ")"                         one value written at the top: json (preset)
+//     json_object  : "{" (json_member ("," json_member)* ","?)? "}"
+//     json_member  : STRING+ ":" json_value | IDENTIFIER           a name alone is its own key and its value
+//     json_array   : "[" (json_value ("," json_value)* ","?)? "]"
+//     json_value   : expr | json_object | json_array
 //
 // Precedence and associativity are C's, from the loosest: assignment (right to left), ?: (right to left), ||, &&, |,
 // ^, &, equality, relational, shifts, additive, multiplicative, unary (and casts), and the postfix operators: ".",
 // "->", "[" and "++" and "--" after their operand. So `a & b == c` is a & (b == c), as in C, and `a << 1 + 2` is
 // a << 3. The unary "&" and "-" take UNARY's precedence (%prec), their binary ones their own.
-// A string literal is an expression to the grammar, as in C, so a call's arguments may be one; FMinus has no string
-// type, and the code generator refuses a literal anywhere but as the argument of a builtin's string parameter
-// (ir/Calls.cpp), each error at the literal. So the grammar stays C's, and a program it accepts means what it would in
-// C, where a literal is a char array.
+// A string literal is an expression to the grammar, as in C, so a call's arguments may be one. The code generator
+// takes it as the argument of a builtin's string parameter (ir/Calls.cpp), or as a value of FMinus's type string where
+// one is wanted (an initialiser, an assignment, an argument, an operand of == or !=, a case), and refuses it anywhere
+// else, each error at the literal. So the grammar stays C's.
 // A module's name is a type from its declaration on: the scanner returns it as MODULE_NAME (ParseContext.h), as a C
 // compiler returns a typedef's name, so `OnePole* p;` is a declaration and `a * b;` a product.
 // The grammar accepts any expression on the left of an assignment; the code generator rejects what is not an lvalue
@@ -145,6 +161,21 @@
             ast::ExprPtr rowSize = nullptr;   // its rows' size, as written; null for `[]`, which C refuses
             std::vector<ast::Brace> braces = {};
             std::vector<ast::Attribute> attributes = {};   // C23's, after the name: `level [[ui::unit("dB")]]`
+            SourceLocation comma = {};   // the comma before it, in a declaration's list after the first
+        };
+
+        // A route's parameter list as written: none at all, or a list, `()` too.
+        struct RouteParams
+        {
+            bool written = false;
+            std::vector<ast::RouteParam> params = {};
+        };
+
+        // An if's or a switch's head (C2y's, N3356): the declarations before its condition, and the condition.
+        struct SelectionHead
+        {
+            std::vector<ast::Stmt> init;
+            ast::ExprPtr condition;
         };
 
         // An array's sizes as written: `[size]`, or a 2-D array's `[size][rowSize]` (`rows`). Null for `[]`.
@@ -527,8 +558,14 @@
 %token IF "if" ELSE "else" WHILE "while" FOR "for" BREAK "break" CONTINUE "continue" PARALLEL "parallel"
 %token SWITCH "switch" CASE "case" DEFAULT "default" ENUM "enum"
 %token MODULE "module" THIS "this" ARROW "->" PARAM "param"
+%token DEFER "defer" DEFER_TS "_Defer"
+%token SERVE "serve" ROUTE "route" REPLY "reply" JSON "json"
+%token CHAR "char" STRING_TYPE "string"
+%token WHEN "when"
+%token WITHIN "within"
 %token <ast::Type> MODULE_NAME "module name"
 %token <ast::Type> VECTOR_TYPE "vector type"
+%token <ast::Type> HANDLE_TYPE "handle type"
 %token DOT "." POLY "poly"
 %token PLUS "+" MINUS "-" STAR "*" SLASH "/" PERCENT "%" INCREMENT "++" DECREMENT "--"
 %token PIPE "|" CARET "^" TILDE "~" SHL "<<" SHR ">>"
@@ -570,6 +607,13 @@
 %nterm <ast::ExprPtr> optional_expr
 %nterm <std::vector<Declarator>> declarators
 %nterm <Declarator> declarator
+%nterm <SelectionHead> selection_head
+%nterm <std::vector<ast::Route>> serve_items
+%nterm <ast::Route> route
+%nterm <RouteParams> route_params
+%nterm <std::vector<ast::RouteParam>> route_param_list
+%nterm <ast::RouteParam> route_param
+%nterm <ast::JsonValue> json_value json_object json_members json_member json_array json_values
 %nterm <ast::ExprPtr> expr
 %nterm <std::vector<ast::ExprPtr>> args arg_list
 
@@ -767,6 +811,7 @@ attribute_word
     : IDENTIFIER                            { $$ = $1; }
     | MODULE_NAME                           { const ast::Type type = $1; $$ = type.module->name; }
     | VECTOR_TYPE                           { $$ = ast::typeName($1); }
+    | HANDLE_TYPE                           { $$ = ast::typeName($1); }
     | "float"                               { $$ = "float"; }
     | "double"                              { $$ = "double"; }
     | "bool"                                { $$ = "bool"; }
@@ -793,6 +838,16 @@ attribute_word
     | "module"                              { $$ = "module"; }
     | "this"                                { $$ = "this"; }
     | "param"                               { $$ = "param"; }
+    | "defer"                               { $$ = "defer"; }
+    | "_Defer"                              { $$ = "_Defer"; }
+    | "serve"                               { $$ = "serve"; }
+    | "route"                               { $$ = "route"; }
+    | "reply"                               { $$ = "reply"; }
+    | "json"                                { $$ = "json"; }
+    | "char"                                { $$ = "char"; }
+    | "string"                              { $$ = "string"; }
+    | "when"                                { $$ = "when"; }
+    | "within"                              { $$ = "within"; }
     ;
 
 // An attribute's arguments: numbers, a minus before any of them, and strings (C23's balanced tokens, of which FMinus
@@ -883,6 +938,9 @@ type
     | "int"                                 { $$ = ast::Type::Int; }
     | "void"                                { $$ = ast::Type::Void; }
     | VECTOR_TYPE                           { $$ = $1; }
+    | HANDLE_TYPE                           { $$ = $1; }
+    | "char"                                { $$ = ast::Type::Char; }
+    | "string"                              { $$ = ast::Type::String; }
     | "poly" "float"                        { $$ = ast::Type::PolyFloat; }
     | "poly" "bool"                         { $$ = ast::Type::PolyBool; }
     | "poly" "double"                       {
@@ -995,7 +1053,7 @@ declaration
 
 declarators
     : declarator                            { $$.push_back($1); }
-    | declarators "," declarator            { $$ = $1; $$.push_back($3); }
+    | declarators "," declarator            { $$ = $1; $$.push_back($3); $$.back().comma = at(@2); }
     ;
 
 // C23's attributes after a declarator's name appertain to what it declares: a field's are the host's
@@ -1103,20 +1161,158 @@ unlabeled
     | "return" ";"                          { $$ = ast::Stmt{at(@1), ast::ReturnStmt{nullptr}}; }
     | ";"                                   { $$ = ast::Stmt{at(@1), ast::EmptyStmt{}}; }
     | "if" "(" expr ")" statement %prec THEN
-                                            { $$ = ast::Stmt{at(@1), ast::IfStmt{$3, ast::own($5), nullptr}}; }
+                                            { $$ = ast::Stmt{at(@1), ast::IfStmt{$3, ast::own($5), nullptr, {}}}; }
     | "if" "(" expr ")" statement "else" statement
-                                            { $$ = ast::Stmt{at(@1), ast::IfStmt{$3, ast::own($5), ast::own($7)}}; }
+                                            { $$ = ast::Stmt{at(@1), ast::IfStmt{$3, ast::own($5), ast::own($7), {}}}; }
+    | "if" "(" selection_head ")" statement %prec THEN
+                                            {
+                                                SelectionHead head = $3;
+                                                $$ = ast::Stmt{at(@1), ast::IfStmt{std::move(head.condition),
+                                                                                   ast::own($5), nullptr,
+                                                                                   std::move(head.init)}};
+                                            }
+    | "if" "(" selection_head ")" statement "else" statement
+                                            {
+                                                SelectionHead head = $3;
+                                                $$ = ast::Stmt{at(@1), ast::IfStmt{std::move(head.condition),
+                                                                                   ast::own($5), ast::own($7),
+                                                                                   std::move(head.init)}};
+                                            }
     | "while" "(" expr ")" statement        { $$ = ast::Stmt{at(@1), ast::WhileStmt{$3, ast::own($5)}}; }
     | "for" "(" for_init optional_expr ";" optional_expr ")" statement
                                             { $$ = ast::Stmt{at(@1), ast::ForStmt{$3, $4, $6, ast::own($8)}}; }
     | "break" ";"                           { $$ = ast::Stmt{at(@1), ast::BreakStmt{}}; }
     | "continue" ";"                        { $$ = ast::Stmt{at(@1), ast::ContinueStmt{}}; }
-    | "switch" "(" expr ")" statement       { $$ = ast::Stmt{at(@1), ast::SwitchStmt{$3, ast::own($5)}}; }
+    | "switch" "(" expr ")" statement       { $$ = ast::Stmt{at(@1), ast::SwitchStmt{$3, ast::own($5), {}}}; }
+    | "switch" "(" selection_head ")" statement
+                                            {
+                                                SelectionHead head = $3;
+                                                $$ = ast::Stmt{at(@1), ast::SwitchStmt{std::move(head.condition),
+                                                                                       ast::own($5),
+                                                                                       std::move(head.init)}};
+                                            }
     | "parallel" "for" "(" for_init optional_expr ";" optional_expr ")" statement
                                             {
                                                 $$ = ast::Stmt{at(@1), ast::ParallelForStmt{$4, $5, $7, ast::own($9)}};
                                             }
     | "parallel" block                      { $$ = ast::Stmt{at(@1), ast::ParallelBlockStmt{$2}}; }
+    | defer statement                       { $$ = ast::Stmt{at(@1), ast::DeferStmt{ast::own($2)}}; }
+    | "serve" "(" arg_list ")" "{" serve_items "}"
+                                            { $$ = ast::Stmt{at(@1), ast::ServeStmt{$3, $6}}; }
+    | "reply" arg_list ";"                  { $$ = ast::Stmt{at(@1), ast::ReplyStmt{$2}}; }
+    | "reply" ";"                           {
+                                                parseContext.diagnostics.error(at(@2), "expected expression");
+                                                $$ = ast::Stmt{at(@1), ast::ReplyStmt{}};
+                                            }
+    | "when" "(" expr ")" statement         { $$ = ast::Stmt{at(@1), ast::WhenStmt{$3, ast::own($5)}}; }
+    | "within" "(" expr ")" block           {
+                                                $$ = ast::Stmt{at(@1), ast::WithinStmt{
+                                                                           $3, ast::own(ast::Stmt{
+                                                                                   at(@5), ast::BlockStmt{$5}})}};
+                                            }
+    ;
+
+// A serve's routes. Anything else in its braces parses, and is an error: only a route may stand there.
+serve_items
+    : %empty                                {}
+    | serve_items route                     { $$ = $1; $$.push_back($2); }
+    | serve_items block_item                {
+                                                $$ = $1;
+                                                parseContext.diagnostics.error(at(@2), "only a route may stand in a "
+                                                                               "serve's braces: route \"METHOD /path\" "
+                                                                               "(parameters) { ... }");
+                                            }
+    ;
+
+// A route: its literal, its parameters (none, or a list), attributes after them (the code generator's error) and
+// its block, whose closing brace the missing reply's error is at.
+route
+    : "route" string_literal route_params attributes block
+                                            {
+                                                RouteParams params = $3;
+                                                $$.location = at(@1);
+                                                $$.literal = $2;
+                                                $$.literalLocation = at(@2);
+                                                $$.hasParams = params.written;
+                                                $$.params = std::move(params.params);
+                                                $$.attributes = $4;
+                                                $$.body = $5;
+                                                const fminus::frontend::location& end = @5;
+                                                $$.closing = at(end);
+                                                $$.closing.line = end.end.line;
+                                                $$.closing.column = end.end.column - 1;
+                                            }
+    ;
+
+route_params
+    : %empty                                {}
+    | "(" ")"                               { $$.written = true; }
+    | "(" route_param_list ")"              { $$.written = true; $$.params = $2; }
+    ;
+
+route_param_list
+    : route_param                           { $$.push_back($1); }
+    | route_param_list "," route_param      { $$ = $1; $$.push_back($3); }
+    ;
+
+// As a function's parameter, with C23's attributes after its name, as a field's: a range, a default.
+route_param
+    : qualifier type pointer IDENTIFIER attributes
+                                            {
+                                                const Declared d = declared($1, $2, $3);
+                                                $$ = ast::RouteParam{at(@4), $4, d.type, d.isConst, $5};
+                                            }
+    ;
+
+// TS 25755's keyword, and the spelling it encourages, which FMinus takes as a keyword too. Its statement is an
+// unlabeled one in the TS; a case or default label there parses, as clang parses it, and is the code generator's error:
+// a switch would jump into the deferred statement (ir/Statements.cpp).
+defer
+    : "defer"
+    | "_Defer"
+    ;
+
+// C2y's head of an if or a switch with a declaration (N3356, N3580): a declaration, its ; included, and the condition;
+// or one declarator with an initialiser, whose name is then the condition, as C2y rewrites `if (T x = e)` to
+// `if (T x = e; x)`. clang's errors for what C2y refuses: more than one declarator in that form, at the comma; none
+// with no initialiser, at the name; and a first clause that is no declaration, at its start.
+selection_head
+    : declaration expr                      { $$.init = $1; $$.condition = $2; }
+    | qualifier type declarators            {
+                                                std::vector<Declarator> declarators = $3;
+                                                if (declarators.size() > 1)
+                                                    parseContext.diagnostics.error(declarators[1].comma, "multiple "
+                                                                                   "declarations are not allowed");
+                                                declarators.resize(1);
+                                                Declarator& d = declarators.front();
+                                                if (!d.init && !d.hasList)
+                                                    parseContext.diagnostics.error(d.location, "variable declaration "
+                                                                                   "in condition must have an "
+                                                                                   "initializer");
+                                                const SourceLocation where = d.location;
+                                                std::string name = d.name;
+                                                $$.init = declarationsOf($1, $2, std::move(declarators), parseContext);
+                                                $$.condition = ast::makeExpr(where, ast::VariableExpr{std::move(name)});
+                                            }
+    | declaration qualifier type declarator {
+                                                // A second declaration: C2y's condition is an expression.
+                                                const bool isConst = $2;
+                                                parseContext.diagnostics.error(at(isConst ? @2 : @3),
+                                                                               "expected expression");
+                                                $$.init = $1;
+                                                $$.condition = ast::makeExpr(at(@4), ast::BoolExpr{false});
+                                            }
+    | expr ";" expr                         {
+                                                parseContext.diagnostics.error(at(@1), "first clause in condition "
+                                                                                       "must be a declaration");
+                                                $$.init.push_back(ast::Stmt{at(@1), ast::ExprStmt{$1}});
+                                                $$.condition = $3;
+                                            }
+    | ";" expr                              {
+                                                parseContext.diagnostics.error(at(@1), "first clause in condition "
+                                                                                       "must be a declaration");
+                                                $$.condition = $2;
+                                            }
     ;
 
 // The first clause of a for: a declaration (its ; included), an expression and ;, or just ;.
@@ -1226,6 +1422,79 @@ expr
     | expr "&&" expr                        { $$ = logical(@2, ast::LogicalOp::And, $1, $3); }
     | expr "||" expr                        { $$ = logical(@2, ast::LogicalOp::Or, $1, $3); }
     | expr "?" expr ":" expr                { $$ = ast::makeExpr(at(@2), ast::ConditionalExpr{$1, $3, $5}); }
+    | "json" json_object                    { $$ = ast::makeExpr(at(@1), ast::JsonExpr{$2}); }
+    | "json" json_array                     { $$ = ast::makeExpr(at(@1), ast::JsonExpr{$2}); }
+    | "json" "(" expr ")"                   {
+                                                ast::JsonValue value;
+                                                value.location = at(@3);
+                                                value.value = $3;
+                                                $$ = ast::makeExpr(at(@1), ast::JsonExpr{std::move(value)});
+                                            }
+    ;
+
+// A JSON literal's values: an expression, an object or an array, nested as JSON nests them.
+json_value
+    : expr                                  {
+                                                $$.location = at(@1);
+                                                $$.value = $1;
+                                            }
+    | json_object                           { $$ = $1; }
+    | json_array                            { $$ = $1; }
+    ;
+
+json_object
+    : "{" "}"                               { $$.kind = ast::JsonValue::Kind::Object; $$.location = at(@1); }
+    | "{" json_members "}"                  { $$ = $2; $$.location = at(@1); }
+    | "{" json_members "," "}"              { $$ = $2; $$.location = at(@1); }
+    ;
+
+json_members
+    : json_member                           { $$ = $1; }
+    | json_members "," json_member          {
+                                                $$ = $1;
+                                                ast::JsonValue member = $3;
+                                                $$.keys.push_back(std::move(member.keys.front()));
+                                                $$.keyLocations.push_back(member.keyLocations.front());
+                                                $$.elements.push_back(std::move(member.elements.front()));
+                                            }
+    ;
+
+// One member, as an object of one: `"key": value`, or a name alone, `gain`, which is `"gain": gain`.
+json_member
+    : string_literal ":" json_value         {
+                                                $$.kind = ast::JsonValue::Kind::Object;
+                                                $$.keys.push_back($1);
+                                                $$.keyLocations.push_back(at(@1));
+                                                $$.elements.push_back($3);
+                                            }
+    | IDENTIFIER                            {
+                                                const std::string name = $1;
+                                                const SourceLocation where = at(@1);
+                                                ast::StringExpr key{name, {}};
+                                                for (std::size_t i = 0; i < name.size(); ++i)
+                                                    key.at.push_back(SourceLocation{where.line,
+                                                                                    where.column
+                                                                                        + static_cast<int>(i),
+                                                                                    where.file});
+                                                $$.kind = ast::JsonValue::Kind::Object;
+                                                $$.keys.push_back(std::move(key));
+                                                $$.keyLocations.push_back(where);
+                                                ast::JsonValue value;
+                                                value.location = where;
+                                                value.value = ast::makeExpr(where, ast::VariableExpr{name});
+                                                $$.elements.push_back(std::move(value));
+                                            }
+    ;
+
+json_array
+    : "[" "]"                               { $$.kind = ast::JsonValue::Kind::Array; $$.location = at(@1); }
+    | "[" json_values "]"                   { $$ = $2; $$.location = at(@1); }
+    | "[" json_values "," "]"               { $$ = $2; $$.location = at(@1); }
+    ;
+
+json_values
+    : json_value                            { $$.kind = ast::JsonValue::Kind::Array; $$.elements.push_back($1); }
+    | json_values "," json_value            { $$ = $1; $$.elements.push_back($3); }
     ;
 
 args

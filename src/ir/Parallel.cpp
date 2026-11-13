@@ -32,11 +32,13 @@
 //   - a parallel for that assigns its own loop variable (each iteration has its own);
 //   - two statements of a parallel { } of which one changes a variable that the other uses;
 //   - a statement of a parallel { } that declares a variable (it would end with the statement);
-//   - break or return out of a region, or continue out of a statement of a block (Statements.cpp).
+//   - break or return out of a region, or continue out of a statement of a block (Statements.cpp);
+//   - a `when` in a region: its state is its module's, which every iteration, or every statement, would change at
+//     once, as a method that changes its module would.
 // Whether a method changes its module (changesModule) is worked out once, over every method: one that assigns one of
 // its fields (an array field's elements included) or takes the address of one, or of the module (`this` as a value),
-// or calls a method that does on the module or on a module among its fields. What it writes through a pointer field
-// is not its module's.
+// holds a `when` (whose state is the module's), or calls a method that does on the module or on a module among its
+// fields. What it writes through a pointer field is not its module's.
 #include "ir/Lowering.h"
 
 #include <llvm/IR/Constants.h>
@@ -84,6 +86,7 @@ namespace fminus::ir::detail
                 Write,     // an assignment, ++ or --
                 Address,   // &x, an array's name as a pointer, `this` as a value: what the pointer reaches is unknown
                 Call,      // a method called on it: a write when the method changes its module
+                When,      // a `when`'s state, the module's (`this`), written
             };
             Kind kind = Kind::Read;
             Place place;
@@ -107,6 +110,16 @@ namespace fminus::ir::detail
                     return field.isParam ? nullptr : &field;   // a parameter is read as cutoff[i], and never written
             }
             return nullptr;
+        }
+
+        // Calls f on each expression of a JSON literal's value, in order.
+        template <typename F>
+        void jsonValues(const ast::JsonValue& value, F&& f)
+        {
+            if (value.kind == ast::JsonValue::Kind::Value)
+                f(*value.value);
+            for (const ast::JsonValue& element : value.elements)
+                jsonValues(element, f);
         }
 
         // Calls f on each of `expr`'s operands, in order.
@@ -158,6 +171,7 @@ namespace fminus::ir::detail
                            },
                            [](const ast::SizeofExpr&) {},
                            [](const ast::StringExpr&) {},
+                           [&](const ast::JsonExpr& json) { jsonValues(json.value, f); },
                        },
                        expr.node);
         }
@@ -221,10 +235,14 @@ namespace fminus::ir::detail
                                },
                                [](const ast::EmptyStmt&) {},
                                [&](const ast::IfStmt& branch) {
-                                   expression(*branch.condition, Access::Kind::Read);
-                                   scoped([&] { statement(*branch.thenBranch); });
-                                   if (branch.elseBranch)
-                                       scoped([&] { statement(*branch.elseBranch); });
+                                   scoped([&] {   // C2y's declarations in its head, the statement's
+                                       for (const ast::Stmt& item : branch.init)
+                                           statement(item);
+                                       expression(*branch.condition, Access::Kind::Read);
+                                       scoped([&] { statement(*branch.thenBranch); });
+                                       if (branch.elseBranch)
+                                           scoped([&] { statement(*branch.elseBranch); });
+                                   });
                                },
                                [&](const ast::WhileStmt& loop) {
                                    expression(*loop.condition, Access::Kind::Read);
@@ -234,8 +252,12 @@ namespace fminus::ir::detail
                                [](const ast::BreakStmt&) {},
                                [](const ast::ContinueStmt&) {},
                                [&](const ast::SwitchStmt& branch) {
-                                   expression(*branch.value, Access::Kind::Read);
-                                   scoped([&] { statement(*branch.body); });
+                                   scoped([&] {
+                                       for (const ast::Stmt& item : branch.init)
+                                           statement(item);
+                                       expression(*branch.value, Access::Kind::Read);
+                                       scoped([&] { statement(*branch.body); });
+                                   });
                                },
                                [&](const ast::CaseStmt& label) {   // its value is a constant: it reads nothing
                                    if (label.body)
@@ -255,6 +277,36 @@ namespace fminus::ir::detail
                                [&](const ast::ParallelBlockStmt& block) {
                                    for (const ast::Stmt& task : block.tasks)
                                        scoped([&] { statement(task); });
+                               },
+                               // What the deferred statement reaches, it reaches at the block's exits, as part of the
+                               // code: its accesses are the code's.
+                               [&](const ast::DeferStmt& deferred) { scoped([&] { statement(*deferred.body); }); },
+                               // A serve's server and timeout, then its routes' blocks, each with its parameters.
+                               [&](const ast::ServeStmt& serve) {
+                                   for (const ast::ExprPtr& arg : serve.args)
+                                       expression(*arg, Access::Kind::Read);
+                                   for (const ast::Route& route : serve.routes)
+                                       scoped([&] {
+                                           for (const ast::RouteParam& param : route.params)
+                                               declare(param.name, param.type);
+                                           for (const ast::Stmt& item : route.body)
+                                               statement(item);
+                                       });
+                               },
+                               [&](const ast::ReplyStmt& reply) {
+                                   for (const ast::ExprPtr& arg : reply.args)
+                                       expression(*arg, Access::Kind::Read);
+                               },
+                               [&](const ast::WhenStmt& when) {
+                                   expression(*when.condition, Access::Kind::Read);
+                                   if (around_.module != nullptr)   // else it has no state: an error of its own
+                                       record(Access::Kind::When, self(), stmt.location);
+                                   scoped([&] { statement(*when.body); });
+                               },
+                               // Its milliseconds, then its block. Its scope is the thread's own, which no other sees.
+                               [&](const ast::WithinStmt& within) {
+                                   expression(*within.timeout, Access::Kind::Read);
+                                   statement(*within.body);
                                },
                            },
                            stmt.node);
@@ -285,6 +337,11 @@ namespace fminus::ir::detail
                                [&](const ast::CallExpr& call) {
                                    for (const ast::ExprPtr& arg : call.args)
                                        expression(*arg, Access::Kind::Read);
+                                   // An address's holes read their variables (Calls.cpp, lowerHoles).
+                                   if (call.callee == "http_get" || call.callee == "http_post"
+                                       || call.callee == "file_read" || call.callee == "file_list"
+                                       || call.callee == "file_write" || call.callee == "file_append")
+                                       holes(call);
                                    // In a method, tick(x) is this->tick(x) when the module has a tick (Calls.cpp).
                                    if (around_.module != nullptr && around_.defined(around_.module->name + "::" + call.callee))
                                        record(Access::Kind::Call, self(), expr.location,
@@ -313,6 +370,7 @@ namespace fminus::ir::detail
                                [&](const ast::BoolExpr&) {},
                                [&](const ast::SizeofExpr&) {},
                                [&](const ast::StringExpr&) {},   // a constant of the program's
+                               [&](const ast::JsonExpr&) { reads(expr); },
                                [&](const ast::BinaryExpr&) { reads(expr); },
                                [&](const ast::LogicalExpr&) { reads(expr); },
                                [&](const ast::ConditionalExpr&) { reads(expr); },
@@ -436,6 +494,18 @@ namespace fminus::ir::detail
             }
 
             // `expr`, a place, used as `use`. An array read is its address (C's decay: a pointer to it escapes).
+            // The variables an address literal's holes name (scanHoles), each read where its call is.
+            void holes(const ast::CallExpr& call)
+            {
+                if (call.args.empty())
+                    return;
+                const auto* literal = std::get_if<ast::StringExpr>(&call.args.front()->node);
+                if (literal == nullptr)
+                    return;
+                for (const HoleScan::Hole& hole : scanHoles(literal->value).holes)
+                    placed(ast::Expr{call.args.front()->location, ast::VariableExpr{hole.name}}, Access::Kind::Read);
+            }
+
             void placed(const ast::Expr& expr, Access::Kind use)
             {
                 if (std::optional<Place> found = place(expr))
@@ -505,7 +575,8 @@ namespace fminus::ir::detail
                 {
                     if (access.place.root != Place::Root::Self)
                         continue;
-                    if (access.kind == Access::Kind::Write || access.kind == Access::Kind::Address)
+                    if (access.kind == Access::Kind::Write || access.kind == Access::Kind::Address
+                        || access.kind == Access::Kind::When)
                         changed = true;
                     else if (access.kind == Access::Kind::Call)
                         calls[name].push_back(access.method);
@@ -568,6 +639,12 @@ namespace fminus::ir::detail
         std::set<std::string> reported;
         for (const Access& access : walker.accesses())
         {
+            if (access.kind == Access::Kind::When)
+            {
+                error(access.location, "every iteration of the parallel for runs this 'when', whose state is the "
+                                       "module's ('this'), and the iterations run at once");
+                continue;
+            }
             if (access.place.counter)
             {
                 error(access.location, "cannot assign " + quoted(access.place.name)
@@ -611,6 +688,10 @@ namespace fminus::ir::detail
             if (std::holds_alternative<ast::EnumStmt>(task.node))
                 error(task.location, "a statement of a parallel block cannot declare an enumeration (its constants "
                                      "would end with it): declare it before the block");
+            if (std::holds_alternative<ast::DeferStmt>(task.node))
+                error(task.location, "a statement of a parallel block cannot be a defer statement (each statement is a "
+                                     "task, which would run it as soon as it began): defer it before the block, or "
+                                     "inside a statement's braces");
             Walker walker(regionSurroundings(
                 function_,
                 [this](const std::string& name) -> std::optional<ast::Type> {
@@ -620,7 +701,16 @@ namespace fminus::ir::detail
                 },
                 [this](const std::string& name) { return functions_.contains(name); }));
             walker.statement(task);
-            tasks.push_back(walker.accesses());
+            std::vector<Access> accesses;   // a `when`'s is refused here, and in no race below
+            for (const Access& access : walker.accesses())
+            {
+                if (access.kind == Access::Kind::When)
+                    error(access.location, "a statement of a parallel block cannot run a 'when': its state is the "
+                                           "module's ('this'), and the block's statements run at once");
+                else
+                    accesses.push_back(access);
+            }
+            tasks.push_back(std::move(accesses));
         }
 
         // A statement's write: an assignment, an address taken (what the pointer reaches is unknown), a call that
@@ -752,7 +842,7 @@ namespace fminus::ir::detail
         llvm::Value* at = builder_.CreateLoad(i32, slot, name);
         builder_.CreateCondBr(builder_.CreateICmpSLT(at, body->getArg(2), "parallel.more"), bodyBlock, endBlock);
         builder_.SetInsertPoint(bodyBlock);
-        breakables_.push_back({Breakable::Kind::Region, nullptr, incBlock});
+        breakables_.push_back({Breakable::Kind::Region, nullptr, incBlock, deferScopes_.size()});
         lowerScoped(*loop.body);
         breakables_.pop_back();
         fallThrough(incBlock);
@@ -793,7 +883,7 @@ namespace fminus::ir::detail
             llvm::BasicBlock* task = newBlock("parallel.statement");
             which->addCase(builder_.getInt32(static_cast<std::uint32_t>(i)), task);
             builder_.SetInsertPoint(task);
-            breakables_.push_back({Breakable::Kind::Region, nullptr, nullptr});
+            breakables_.push_back({Breakable::Kind::Region, nullptr, nullptr, deferScopes_.size()});
             lowerScoped(block.tasks[i]);
             breakables_.pop_back();
             fallThrough(incBlock);

@@ -29,6 +29,11 @@ int save(const void* data, int k)
 {
     return file_write("user/take%d.f32", data, 4, k) + file_append("user/log.txt", data, 4);
 }
+
+int named(const void* data, string name, int k)
+{
+    return file_write("user/{name}/{k}.f32", data, 4) + file_append("user/{name}.txt", data, 4);
+}
 #endif
 
 float main(float k)
@@ -38,6 +43,8 @@ float main(float k)
 
 // CHECK: files-write-off.fm:30:12: error: 'file_write' needs file writing, which this build of FMinus leaves out (FMINUS_FILES_WRITE=OFF)
 // CHECK: files-write-off.fm:30:56: error: 'file_append' needs file writing, which this build of FMinus leaves out (FMINUS_FILES_WRITE=OFF)
+// CHECK: files-write-off.fm:35:12: error: 'file_write' needs file writing, which this build of FMinus leaves out (FMINUS_FILES_WRITE=OFF)
+// CHECK: files-write-off.fm:35:57: error: 'file_append' needs file writing, which this build of FMinus leaves out (FMINUS_FILES_WRITE=OFF)
 
 // WRITE: fminus: --files-write: this build of FMinus leaves out file writing (FMINUS_FILES_WRITE=OFF)
 // EXE: FMINUS_FILES_WRITE: folders: 'user': write is set, and this build of FMinus leaves out writing files (FMINUS_FILES_WRITE=OFF)

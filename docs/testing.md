@@ -29,7 +29,9 @@ presets. Run them through the preset, not with `ctest --test-dir build-asan`: th
 instantiations (LLVM's `df_iterator`, and the `PassConcept` vector a pass callback's `addPass` grows), so without it
 the JIT and AOT smoke tests abort with a false "container-overflow" inside LLVM's passes. Running `fminus-tests` by
 hand from `build-asan/`, set it yourself. Under tsan, one test skips itself: `ZeroInitTest.cpp`'s check that its dirty
-stack reaches a JIT'd function's locals, since ThreadSanitizer's runtime writes the frames in between (below).
+stack reaches a JIT'd function's locals, since ThreadSanitizer's runtime writes the frames in between (below). The
+wait-free proofs run under both: their count of the heap's calls only warns there, and their child under seccomp's
+strict mode proves as in any build (below, "A wait-free proof").
 
 On Windows `fminus-tests` and `fminus-library-tests` run in UTF-8 (`tests/utf8.manifest`, their active code page;
 Windows 10 1903 or later), so ctest's filter, a test's whole name, reaches Catch2 as the `TEST_CASE` spells it: without
@@ -48,7 +50,10 @@ Each file states what it tests in its first line, then has a few helpers and the
   `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `TableTest.cpp`, `TopLevelTest.cpp`, `ModuleTest.cpp`,
   `FftTest.cpp`, `HashTest.cpp`, `ParamTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`, `ParallelTest.cpp`,
   `RecoveryTest.cpp`, `DoubleTest.cpp`, `Array2DTest.cpp`, `FieldAttributeTest.cpp`, `StringTest.cpp`, `BytesTest.cpp`,
-  `JsonTest.cpp` and `XmlTest.cpp` (with `HeapCalls.h`, which counts a thread's calls of the C heap), and the
+  `JsonTest.cpp`, `XmlTest.cpp` (with `HeapCalls.h`, which counts a thread's calls of the C heap), `HandleTest.cpp`,
+  `DeferTest.cpp`, `SelectionDeclarationTest.cpp`, `ServeTest.cpp`'s errors, `StringTypeTest.cpp`,
+  `WhenTest.cpp`, `WithinTest.cpp`'s errors, `JsonReadTest.cpp`, `JsonLiteralTest.cpp`, `HoleTest.cpp`'s and
+  `DocumentTextTest.cpp`'s, and the
   compiler's own: `VersionTest.cpp`, `TbaaTest.cpp`, `ZeroInitTest.cpp`, `AttributeTest.cpp`, `DenormalTest.cpp`,
   `LoopBudgetTest.cpp`, whose `compileAt` compiles at any level with the budget on or off, `BoundsCheckTest.cpp`,
   whose `compileAt` does the same with the bounds checks and keeps the checks' descriptions, and `CallThunkTest.cpp`,
@@ -94,6 +99,7 @@ TEST_CASE("functions compute what they say", "[codegen]")
   `[pointer]`, `[heap]`, `[effects]`, `[math]` (the math modes and their kernels), `[versions]` (knob versioning and
   flat streams), `[tbaa]`, `[zeroinit]`, `[attributes]` and `[progress]` (the runtime's and libm's attributes, and loop
   progress), `[denormals]`, `[parallel]` (parallel regions, and `[runtime]` among them for the pool on its own),
+  `[strict]` (the helpers of the wait-free proofs, `StrictModeTest.cpp`: below, "A wait-free proof"),
   `[ir]` (`Program::Options::keepIr`'s texts), `[budget]` (the loop budget: `LoopBudgetTest.cpp`, in the unit tests and
   the library's), `[bounds]` (bounds checks: `BoundsCheckTest.cpp`, in both too), `[call]` (calls by name:
   `CallThunkTest.cpp`'s thunks in the unit tests, and `CallTest.cpp`'s `Program::call` in the library's), `[profile]`
@@ -102,7 +108,20 @@ TEST_CASE("functions compute what they say", "[codegen]")
   (`#include`: `IncludeTest.cpp`, in both), `[conditional]` (`#if`, `#ifdef` and macros, with a host's defines:
   `ConditionalTest.cpp`, in both, whose `parsed` takes the defines and `condition` an `#if`'s expression), `[strings]`
   (string literals as builtins' arguments, formats, the effects' blocking class and the build options of builtins:
-  `StringTest.cpp`), `[bytes]` (`bytes_floats` and `bytes_pcm16`: `BytesTest.cpp`), `[numbers]` (the runtime's reader
+  `StringTest.cpp`), `[string-type]` (the type `string`, its builtins and `char` arrays: `StringTypeTest.cpp`, in both,
+  the unit tests' with `HeapCalls.h`; and the text a document and a listing give, `json_string`, `xml_string` and
+  `file_name`: `DocumentTextTest.cpp`), `[holes]` (an address's `{name}` holes: `HoleTest.cpp`, `scanHoles` and the
+  errors in every build, and with `FMINUS_FILES` files read, listed and written by names with holes in a directory it
+  makes, with `FMINUS_WEB_SERVER` a URL's strings percent-encoded byte by byte, one program asking another on
+  loopback), `[when]` (`when`: `WhenTest.cpp`, in both), `[bytes]` (`bytes_floats` and
+  `bytes_pcm16`: `BytesTest.cpp`), `[json-read]` (`json_read`, a module's table and the `json::` attributes:
+  `JsonReadTest.cpp`, whose program tests only a build with `FMINUS_JSON` has, and whose test of the name passes in
+  both; its proofs as `[json]`'s), the JSON literal's values and sinks (`[json]` too: `JsonLiteralTest.cpp`, every kind
+  of value written as a file and read back, `json (value)`, `json_slice`, a module's names and parameters, JSON Lines,
+  the size limit, the errors, with `FMINUS_FILES_WRITE` and `FMINUS_JSON`, and in a build without either the error
+  that names it; `JsonFileTest.cpp` (`[runtime][files][json]`), `fminus_rt_file_write_json` and `_append_json` from
+  C++; `JsonServeTest.cpp`, with the web server, a reply's modules, `http_reply_json`, the wait-free proof of a reply's
+  module, and the research's data work against a loopback server of the test's own), `[numbers]` (the runtime's reader
   of numbers on fast_float: `NumbersTest.cpp`, compiled only with `FMINUS_JSON` or `FMINUS_XML`, whose tests a build
   without both lacks; a test of what a build has compares with `fminus/Config.h`, so it passes either way), `[json]`
   (the JSON parser and its builtins: `JsonTest.cpp`, whose tests of the parser itself only a build with `FMINUS_JSON`
@@ -124,12 +143,32 @@ TEST_CASE("functions compute what they say", "[codegen]")
   `WebServerTest.cpp`, compiled only with `FMINUS_WEB_SERVER`, the engine from C++ before any builtin, against raw
   sockets and the library's own client: the policy and its classifiers (what a listen that is not loopback would do
   is judged by them, never bound), each of the nine rules, keep-alive, the limits and timeouts, dropped clients,
-  threads taking at once, closing with threads waiting, and the wait-free proof, `HeapCalls` and a child under
+  threads taking at once, closing with threads waiting, the replies closing sends first (and a client that does not
+  read them held to the bound), and the wait-free proof, `HeapCalls` and a child under
   seccomp's strict mode; and `WebServeTest.cpp`, programs that serve through the JIT and as an executable, and
   `readServerRoot`, a directory swapped for a link to elsewhere while it reads (Linux, `renameat2`) among them, and
-  the wait-free proof of a JIT'd `[[clang::nonblocking]]` handler. Every socket they bind is on 127.0.0.1, and every connection they make is to it; this machine's
-  kernel has no IPv6, so the `localhost` and `[::1]` cases take their no-IPv6 branch. Their timeouts make them
-  timing-sensitive: run them when nothing else is building), `[files]` (the file interface, docs/files.md:
+  the wait-free proof of a JIT'd `[[clang::nonblocking]]` handler; and `ServeTest.cpp` (`[serve]`), `serve`, `route`
+  and `reply` through the JIT over raw loopback requests (each parameter's 404 and 400, each reply's form, a JSON
+  literal's text, a refused reply's 500, two serves on two threads, `webRoutes()` with parameters, the wait-free proof
+  of a serve, and their errors; and where they meet `when`, `string` and `char`: a route's `when`s and a `switch` on a
+  string in a nonblocking method, the missing reply through both, and the errors; a route's `string` parameters, a
+  request's header, path and query as text, a JSON literal's strings and `%s`; and where they meet `json_read`
+  (`[json-read]`): a route's body read into a module and stored by a file name with a hole in a directory the test
+  makes beside `bin/`, and the one rule of a field's and a route parameter's defaults); and `WithinTest.cpp`
+  (`[within]`), `within` through the JIT against a small HTTP/1.1 server of its own (the promise at the brace, the
+  deadline, nesting, each way out, `stopWeb()`, a reply and a serve in a block, URLs with holes (`[holes]`), the
+  report's script, and where it meets `json_read` (`[json-read]`): a module filled from each document a block fetched,
+  after the block and inside one through `this`), a block the loop budget
+  (`[budget]`) or a bounds check (`[bounds]`) stops, the library's abandon with threads racing it and its wait-free
+  proof, and the errors (in a build without the library, the one error). Every socket they bind is on 127.0.0.1, and every connection they make is to it; this machine's
+  kernel has no IPv6, so the `localhost` and `[::1]` cases take their no-IPv6 branch. A test that must know a thread
+  is inside one of the library's waits, or a request published, taken or given up, before it acts waits for the
+  library's own counts, `fminus::web::waitingThreads` (`Web.h`; a `Program`'s context is the handle its module's
+  global `fminus_web_context` holds) and `fminus::web::serverCounts` (`Server.h`), never for a sleep: a sleep is a
+  guess, which a loaded machine loses, and destroying a context before a thread is counted in its wait frees what that
+  thread is about to read. A sleep stays where it is the thing tested (a deadline's length, a client's pace). Their
+  timeouts make them timing-sensitive: run them when nothing else is building), `[files]` (the file interface,
+  docs/files.md:
   `FileBuiltinsTest.cpp`, in every build, its builtins' effects (directly and through a called function), the off
   builds' errors, the status codes against the runtime's values, a name's errors at their columns, `scanFileName` given
   other builds' ceilings, `files()`, `Options::files` through `fminus::Program`, the reserved names and the JIT's
@@ -160,14 +199,17 @@ TEST_CASE("functions compute what they say", "[codegen]")
   planning, their errors), BDF2's blocks as the BDF2 map, the matched design (`src/circuit/Linear.h`: its poles and
   magnitudes, the region a block it cannot serve joins, the eigenvalues), prewarp, halfbands, reference and analysis,
   and the probes' nodes (their first-mention order, DC volts and which a probe can read, `Options::probes` changing
-  nothing but the text, the probe fields' names refused);
+  nothing but the text, the probe fields' names refused), and the language's words refused as a pot's, a switch's, an
+  input's or the module's name: every word the scanner makes a token of, read from the parser's tokens and the handle
+  types, is in `isFMinusKeyword`, so a keyword added to `Lexer.l` fails here until the circuit compiler has it;
   `CircuitEmitTest.cpp` its emitted text, compiled through `fminus::Program`, the coefficients (the Woodbury form's
   against the double derivation all in set), an OTA's in 48 configurations and Phase 1's elements and diode laws in
   40, the carry of a pot's move for one diode and an asymmetric pair, its ADAA mean against the double one over a
   saturating sweep, an OTA driven hard against the reference, BDF2 against its double reference, a switch's ramp, its
   block splits and its ADAA point, a matched block's float coefficients and response, the probes (their fields after
   the module's own, every method nonblocking in one and two channels, init, clear, the rings, the slots, prn_'s wrap,
-  an ADAA input only a probe reads, the output's bits probed or not in other configurations and in every math mode);
+  an ADAA input only a probe reads, the output's bits probed or not in other configurations and in every math mode),
+  and nodes and parts named as the language's words (`within`, `string`, `char`, ...) compiling;
   `CircuitSearchTest.cpp` its
   self-test: both rows' candidates' order, the synth's stress matrix and a law input's arguments over its scale,
   switch positions as axes, the method check (its flag, its measure, its warning and the BDF2 twins), the search, the
@@ -213,6 +255,30 @@ TEST_CASE("functions compute what they say", "[codegen]")
   is whichever ran first: a test checks the index is one of theirs. The record is the program's global,
   `fminus_rt_bounds`: `lookup<fminus_rt_bounds_state>(*jit, ...)` reads and clears it as a host does;
   `opt::boundsSites(module)`, read before the JIT takes the module, says what each number means.
+- **A wait-free proof** (that a runtime function, a builtin's code through the JIT, or the web library's audio-thread
+  half allocates nothing and makes no system call) has two halves, and every proof in the tree is written with the same
+  two helpers. `HeapCalls` (`HeapCalls.h`) counts the C heap's calls this thread makes: a hundred or a thousand rounds
+  of the calls, counted, make none. It counts on Linux with glibc and no sanitizer only; elsewhere, and under a
+  sanitizer, whose heap is its own, the half warns and checks nothing. `inStrictMode(body)` (`StrictMode.h`) runs the
+  calls in a child process under seccomp's strict mode, in which any system call but `read`, `write`, `exit` and
+  `sigreturn` kills the thread that makes it, and gives back what `body` returned there:
+  `if (const auto sum = inStrictMode(readAll)) CHECK(*sum == expected);`. The child writes its result to a pipe and
+  leaves with the raw `exit`; the parent waits for the result up to a limit (`kStrictLimit`, 30 seconds), then kills
+  the child and reaps it. It never waits for the child to end by itself: under ThreadSanitizer a child forked from a
+  process with one thread has a thread of the sanitizer's, which strict mode (set with `prctl`, on the calling thread
+  alone) does not bind and the raw `exit`, which ends one thread, leaves running, so a proof that waited for the child
+  stalled there for ever. The result arriving is the proof, and the caller checks it is the one expected. A child whose
+  thread ended without it (strict mode killed it) fails a check at once, in words that say so, whether its process
+  ended or another thread kept it alive (the kernel clears a word the parent shares when the thread ends,
+  `set_tid_address(2)`); one that sent nothing within the limit fails saying its body hung; where strict mode is not
+  there (another system, or a kernel that refuses it) the proof warns and checks nothing. A proof that takes a request
+  published before the fork calls it again until the child finds one, and `REQUIRE`s each child's result. Strict mode
+  sees system calls, not allocations (a malloc the heap serves from what it holds makes none), which is why a proof has
+  both halves. `StrictModeTest.cpp` (`[strict]`) proves the helpers can fail: a body that calls `getpid`, one that
+  allocates 64 MiB (an `mmap`) and one that spins are each a failure that says which, in a child alone, in one a thread
+  of the test's keeps alive as ThreadSanitizer's does (not under ThreadSanitizer, which has its own there), and in one
+  forked beside a thread of the parent's; two proofs written with `inStrictMode`, tagged `[!shouldfail]`, must fail
+  their test case; and `HeapCalls` counts a body's malloc and free.
 
 ## lit and FileCheck
 
@@ -268,7 +334,7 @@ float gain(float x, float g)
 | `REQUIRES: json` (or `UNSUPPORTED: json`) | a build with the JSON parser, `FMINUS_JSON`, as the build tree's `fminus/Config.h` says (`json.fm`, `json-errors.fm`; `json-off.fm` runs only without it) |
 | `REQUIRES: xml` (or `UNSUPPORTED: xml`) | a build with the XML parser, `FMINUS_XML`, the same way (`xml.fm`, `xml-errors.fm`; `xml-off.fm` runs only without it) |
 | `REQUIRES: web` (or `UNSUPPORTED: web`) | a build with the web library, `FMINUS_WEB`, the same way (`web.fm`, `web-errors.fm`, which make no request; `web-off.fm` runs only without it) |
-| `REQUIRES: web-server` (or `UNSUPPORTED: web-server`) | a build with its server, `FMINUS_WEB_SERVER`, the same way (`web-server.fm`, which listens on 127.0.0.1 and asks itself, and `web-server-errors.fm`; `web-server-off.fm` runs only without it) |
+| `REQUIRES: web-server` (or `UNSUPPORTED: web-server`) | a build with its server, `FMINUS_WEB_SERVER`, the same way (`web-server.fm`, `serve.fm` and `serve-strings.fm`, which listen on 127.0.0.1 and ask themselves, the last two answering with JSON literals, so `REQUIRES: web-server, json`; and `web-server-errors.fm`, `serve-errors.fm` and `serve-when.fm`, a route's `when` and `switch` on a string; `web-server-off.fm` runs only without it) |
 | `REQUIRES: files` (or `UNSUPPORTED: files`) | a build with the file interface, `FMINUS_FILES`, the same way (`files.fm`, `files-errors.fm`, which read and write only in `%t`; `files-off.fm` runs only without it) |
 | `REQUIRES: files-write`, `files-anywhere` (or `UNSUPPORTED:`) | a build with its writing, `FMINUS_FILES_WRITE`, or its absolute names, `FMINUS_FILES_ANYWHERE` (`files-write.fm`, `files-anywhere.fm`; `files-write-off.fm` and `files-anywhere-off.fm` only without them) |
 | `REQUIRES: files-types` (or `UNSUPPORTED: files-types`) | a build whose `FMINUS_FILES_TYPES` lists the types it can touch, which `%files_types` substitutes (`files-types.fm`; `files.fm`, which reads a `.json`, only without it) |
@@ -305,6 +371,35 @@ includes `"Inputs/include/pole.fm"`, beside itself.
 - Prefer `CHECK-NOT: call` and similar properties over transcribing the whole function.
 - Check loop metadata at `-O0`, where the lowering wrote it: passes that duplicate a latch do not always copy it
   (`progress.fm`).
+
+## Builds that leave features out
+
+A build option that leaves a feature out (`FMINUS_JSON`, `FMINUS_XML`, `FMINUS_FILES`, `FMINUS_FILES_WRITE`,
+`FMINUS_WEB`, `FMINUS_WEB_SERVER`) changes what compiles: a unit test's `#if FMINUS_HAS_...` branch, a helper only
+the feature's tests use (an unused one is an error under `-Werror`), a lit test's `REQUIRES:` or `UNSUPPORTED:`, and
+an example's `#ifdef __FMINUS_...__`. A change to a feature is tested in these trees, each the `release` preset in a
+directory of its own (`-B`), configured once and then built and tested as any other:
+
+| Tree | Options beside the preset's | What only it runs |
+|---|---|---|
+| `build-release` | none: JSON, XML and files on, writing and the web off | `files-write-off.fm`, `web-off.fm`, `within-off.fm`, `web-server-off.fm`, the unit tests' branches without the web library |
+| `build-release-web` | `-DFMINUS_WEB=ON -DFMINUS_WEB_SERVER=ON -DFMINUS_FILES_WRITE=ON -DFMINUS_FILES_ANYWHERE=ON` | every feature: the server's tests, which listen on 127.0.0.1 and ask themselves; files written in `%t` |
+| `build-release-off` | `-DFMINUS_JSON=OFF -DFMINUS_XML=OFF -DFMINUS_FILES=OFF` | every parser and the file interface left out: `json-off.fm`, `json-literal-off.fm`, `xml-off.fm`, `files-off.fm` |
+| `build-release-webonly` | `-DFMINUS_WEB=ON` | the client without the server: `web-server-off.fm` beside `within` and a URL's holes working |
+| `build-release-nojson` | `-DFMINUS_WEB=ON -DFMINUS_WEB_SERVER=ON -DFMINUS_FILES_WRITE=ON -DFMINUS_FILES_ANYWHERE=ON -DFMINUS_JSON=OFF -DFMINUS_XML=OFF` | the server without the JSON writer: every sink's JSON literal (a reply's, `http_reply_json`'s, `http_post`'s, `file_write`'s and `file_append`'s) is the "leaves out" error (`json-literal-sinks-off.fm`, `serve-errors.fm`'s `NOJSON` lines, `ServeTest.cpp`, `JsonLiteralTest.cpp`), and `examples/presets/` and `examples/remote/` compile to nothing |
+
+```bash
+cmake --preset release -B build-release-off -DFMINUS_JSON=OFF -DFMINUS_XML=OFF -DFMINUS_FILES=OFF
+cmake --build build-release-off
+ctest --test-dir build-release-off --output-on-failure
+```
+
+The trees share the release flavor of LLVM in the dependency cache, and the web library's dependencies once one tree
+has built them, so a new tree compiles FMinus alone. In each, every test passes but those a machine cannot run.
+`examples-every-build.test` compiles each example that uses a feature a build may leave out, so an example missing
+its `#ifdef` fails in the tree that leaves the feature out. A lit test whose output differs by feature takes check
+prefixes by it, `--check-prefixes=CHECK,%if json %{JSON%} %else %{NOJSON%}` (`serve-errors.fm`), rather than leaving
+the other trees untested.
 
 ## Example harnesses
 

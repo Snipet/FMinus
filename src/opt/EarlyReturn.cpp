@@ -4,8 +4,11 @@
 #include <llvm/IR/Attributes.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/Function.h>
+#include <llvm/IR/GlobalVariable.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/InstrTypes.h>
+#include <llvm/IR/Instructions.h>
+#include <llvm/IR/Module.h>
 #include <llvm/Support/ModRef.h>
 
 namespace fminus::opt
@@ -20,6 +23,53 @@ namespace fminus::opt
             llvm::Attribute::Range,
             llvm::Attribute::NoFPClass,
         };
+
+        // Whether `function` begins a deadline scope: calls the web library's begin.
+        bool beginsScope(const llvm::Function& function)
+        {
+            for (const llvm::BasicBlock& block : function)
+            {
+                for (const llvm::Instruction& instruction : block)
+                {
+                    const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+                    const llvm::Function* callee = call != nullptr ? call->getCalledFunction() : nullptr;
+                    if (callee != nullptr && callee->getName() == kWithinBeginSymbol)
+                        return true;
+                }
+            }
+            return false;
+        }
+
+        // In a function that begins a deadline scope, at `at`: the thread's scopes under the program's context
+        // abandoned (EarlyReturn.h). The library's function reads and writes the context's memory only, comes back,
+        // frees nothing and keeps no pointer to the context.
+        void abandonScopes(llvm::IRBuilderBase& at, llvm::Function& function)
+        {
+            llvm::Module& module = *function.getParent();
+            llvm::GlobalVariable* context = module.getNamedGlobal(kWebContextGlobal);
+            if (context == nullptr || !beginsScope(function))
+                return;
+            llvm::LLVMContext& llvmContext = module.getContext();
+            llvm::FunctionCallee abandon = module.getOrInsertFunction(
+                kWithinAbandonSymbol, llvm::FunctionType::get(llvm::Type::getInt32Ty(llvmContext),
+                                                              {llvm::PointerType::getUnqual(llvmContext)}, false));
+            if (auto* declared = llvm::dyn_cast<llvm::Function>(abandon.getCallee());
+                declared != nullptr && declared->isDeclaration() && !declared->doesNotThrow())
+            {
+                declared->setDoesNotThrow();
+                declared->setWillReturn();
+                declared->setDoesNotFreeMemory();
+                declared->setMemoryEffects(llvm::MemoryEffects::inaccessibleOrArgMemOnly());
+                declared->addParamAttr(0, llvm::Attribute::getWithCaptureInfo(llvmContext, llvm::CaptureInfo::none()));
+            }
+            llvm::LoadInst* handle = at.CreateAlignedLoad(at.getPtrTy(), context, llvm::Align(8), "web.context");
+            at.CreateCall(abandon, {handle}, "within.abandoned");
+            const llvm::MemoryEffects memory = function.getMemoryEffects();
+            const llvm::MemoryEffects abandoning =
+                memory | llvm::MemoryEffects::inaccessibleMemOnly(llvm::ModRefInfo::ModRef);
+            if (abandoning != memory)
+                function.setMemoryEffects(abandoning);
+        }
     } // namespace
 
     void reachedFunctions(llvm::CallBase& call, llvm::SmallVectorImpl<llvm::Function*>& functions,
@@ -73,8 +123,9 @@ namespace fminus::opt
                                   | llvm::MemoryEffects(llvm::IRMemLocation::Other, llvm::ModRefInfo::ModRef));
     }
 
-    void returnEarly(llvm::IRBuilderBase& at, const llvm::Function& function)
+    void returnEarly(llvm::IRBuilderBase& at, llvm::Function& function)
     {
+        abandonScopes(at, function);
         llvm::Type* result = function.getReturnType();
         if (result->isVoidTy())
             at.CreateRetVoid();

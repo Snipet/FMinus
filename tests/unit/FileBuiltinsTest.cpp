@@ -28,6 +28,7 @@
 
 #if FMINUS_HAS_FILES
 #include "HeapCalls.h"
+#include "StrictMode.h"
 #include "frontend/Frontend.h"
 #include "runtime/Files.h"
 #include "support/Aot.h"
@@ -39,6 +40,7 @@
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/Target/TargetMachine.h>
 
+#include <array>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -58,12 +60,6 @@
 
 #if FMINUS_HAS_FILES && defined(__GLIBC__)
 #include <malloc.h>
-#endif
-
-#if FMINUS_HAS_FILES && defined(__linux__)
-#include <linux/seccomp.h>
-#include <sys/prctl.h>
-#include <sys/syscall.h>
 #endif
 
 using namespace fminus::test;
@@ -1023,35 +1019,10 @@ TEST_CASE("a [[clang::nonblocking]] function, compiled by the JIT, reads a file'
         CHECK(calls == 0);
     }
     // In a child under seccomp's strict mode, where any system call but read, write and exit kills it.
-    int fds[2];
-    REQUIRE(::pipe(fds) == 0);
-    const pid_t child = ::fork();
-    REQUIRE(child >= 0);
-    if (child == 0)
+    if (const auto got = inStrictMode([&] { return std::array<float, 2>{sum(f, l), sum(gone, nullptr)}; }))
     {
-        ::close(fds[0]);
-        if (::prctl(PR_SET_SECCOMP, SECCOMP_MODE_STRICT) != 0)
-            ::syscall(SYS_exit, 2);
-        const float result[2] = {sum(f, l), sum(gone, nullptr)};
-        const ssize_t written = ::write(fds[1], result, sizeof result);
-        ::syscall(SYS_exit, written == sizeof result ? 0 : 1);
-    }
-    ::close(fds[1]);
-    int result = 0;
-    ::waitpid(child, &result, 0);
-    float got[2] = {};
-    const ssize_t read = ::read(fds[0], got, sizeof got);
-    ::close(fds[0]);
-    INFO("status " << result);
-    if (WIFEXITED(result) && WEXITSTATUS(result) == 2)
-        WARN("seccomp's strict mode is not available here: the system calls are not checked");
-    else
-    {
-        CHECK(WIFEXITED(result));
-        CHECK(WEXITSTATUS(result) == 0);
-        CHECK(read == static_cast<ssize_t>(sizeof got));
-        CHECK(got[0] == expected);
-        CHECK(got[1] == refused);
+        CHECK((*got)[0] == expected);
+        CHECK((*got)[1] == refused);
     }
 }
 

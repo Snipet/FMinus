@@ -53,7 +53,7 @@ set(FMINUS_PFFFT_URL "https://github.com/marton78/pffft/archive/${FMINUS_PFFFT_C
 set(FMINUS_PFFFT_SHA256 "5379901efa11e889379b1f647ba69911c564a86b20fd1f93d156343d0ba9bfcb")   # 184,640 bytes
 
 # fast_float: numbers read from text, correctly rounded to float and the same in every locale, for the runtime's
-# parsers (cmake/FMinusFastFloat.cmake; header-only). Fetched only when FMINUS_JSON or FMINUS_XML is ON. GitHub's
+# parsers and string_float (cmake/FMinusFastFloat.cmake; header-only), fetched for every build. GitHub's
 # archive of the release's tag (the release's single fast_float.h is an asset whose bytes no checkout reproduces); its
 # hash is that of the archive rebuilt from the tag, `git archive --prefix=fast_float-8.3.3/ v8.3.3 | gzip -n`, as the
 # WinFlexBison pin's is; and of the archive GitHub serves, downloaded and hashed since (2026-11-11), as yyjson's and

@@ -1,0 +1,61 @@
+// A JSON literal as a POST's body (Calls.cpp; web/Web.cpp's fminus_web_http_post_json): the URL's ints (or strings:
+// none, null, null and 0), then the runtime's writer by its address, fminus_rt_json_write, which the web library calls
+// to measure the text and to write it into the request's own body, then the description and the slots. Its
+// declaration is a start's, reading any memory besides (what the slots point to), so at -O2 the stores into the array
+// it writes stay before the call. Run, a program posts an array of modules to its own server, which reads it with
+// json_parse and answers with a JSON literal: nothing binds anything but 127.0.0.1, or connects anywhere else.
+// REQUIRES: json, web-server
+// RUN: fminus %s -O0 | FileCheck %s
+// RUN: fminus %s -O2 | FileCheck %s --check-prefix=OPT
+// RUN: fminus %s --run main 3 --web-listen 127.0.0.1:0 --web-allow 'http://127.0.0.1:*/days/*' | FileCheck %s --check-prefix=SERVED
+
+module Day { int sensor; float mean; };
+
+int main(int k)
+{
+    http_server server = http_listen();
+    defer http_close(server);
+    const int port = http_port(server);
+    if (port <= 0)
+        return port;
+    Day day[2];
+    day[0].sensor = 7;
+    day[1].sensor = 8;
+    day[1].mean = 0.5f;
+    http_response c = http_post("http://127.0.0.1:{port}/days/{k}", json { "days": day, "k": k });
+    defer http_close(c);
+    int got = 0;
+    serve (server, 5000)
+    {
+        route "POST /days/{n}" (int n, http_request q)
+        {
+            json_doc doc = json_parse(http_body(q), http_size(q));
+            defer json_free(doc);
+            got = n * 10000 + json_int(doc, "/days/1/sensor", -1) * 100 + json_count(doc, "/days") * 10
+                  + (json_float(doc, "/days/1/mean", 0.0f) == 0.5f ? 1 : 0);
+            reply 201, json { "got": got };
+        }
+    }
+    if (http_wait(c, 5000) != 201)
+        return http_status(c);
+    json_doc answer = json_parse(http_body(c), http_size(c));
+    defer json_free(answer);
+    return json_int(answer, "/got", -1);
+}
+
+// CHECK-LABEL: define i32 @main(
+// CHECK:         store ptr %{{.*}}, ptr %{{[0-9]+}}, align 8
+// CHECK:         %http_post = call ptr @fminus_web_http_post_json(ptr %{{.*}}, ptr @.str{{.*}}, i32 {{[0-9]+}}, ptr %format.ints, i32 2, ptr null, ptr null, i32 0, ptr @fminus_rt_json_write, ptr @.json, ptr %json.values)
+// CHECK:         %json.bytes = call i32 @fminus_rt_json_write(ptr %reply.buffer, i32 %reply.room, ptr @.json.{{[0-9]+}}, ptr %json.values{{[0-9]+}})
+// CHECK-DAG: declare noundef ptr @fminus_web_http_post_json(ptr, ptr readonly captures(none), i32, ptr readonly captures(none), i32, ptr readonly captures(none), ptr readonly captures(none), i32, ptr readonly captures(none), ptr readonly captures(none), ptr readonly captures(none)) [[POST:#[0-9]+]]
+// CHECK-DAG: declare i32 @fminus_rt_json_write(ptr writeonly captures(none), i32, ptr readonly captures(none), ptr readonly captures(none)) [[WRITER:#[0-9]+]]
+// CHECK-DAG: attributes [[POST]] = { nounwind willreturn memory(read, argmem: readwrite, inaccessiblemem: readwrite, errnomem: readwrite) }
+// CHECK-DAG: attributes [[WRITER]] = { nofree nosync nounwind willreturn memory(read, argmem: readwrite) }
+
+// OPT-LABEL: define i32 @main(
+// OPT:         store i32 8, ptr
+// OPT:         store float 5.000000e-01, ptr
+// OPT:         call ptr @fminus_web_http_post_json(
+
+// The route's n (3), the second day's sensor (8), the days' count (2) and its mean read back.
+// SERVED: 30821

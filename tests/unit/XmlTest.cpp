@@ -10,6 +10,7 @@
 // without FMINUS_XML, every xml_ builtin is the error that names the option.
 #include "Compile.h"
 #include "HeapCalls.h"
+#include "StrictMode.h"
 #include "fminus/Config.h"
 #include "ir/Lowering.h"
 #include "runtime/Runtime.h"
@@ -921,35 +922,8 @@ TEST_CASE("every read allocates nothing and makes no system call; parsing alloca
 #if defined(__linux__)
     // In a child under seccomp's strict mode, where any system call but read, write and exit kills it (no futex, no
     // mmap, no brk): the reads, and their sum written back.
-    int fds[2];
-    REQUIRE(::pipe(fds) == 0);
-    const pid_t child = ::fork();
-    REQUIRE(child >= 0);
-    if (child == 0)
-    {
-        ::close(fds[0]);
-        if (::prctl(PR_SET_SECCOMP, SECCOMP_MODE_STRICT) != 0)
-            ::syscall(SYS_exit, 2);   // no seccomp here
-        const double sum = readAll();
-        const ssize_t written = ::write(fds[1], &sum, sizeof sum);
-        ::syscall(SYS_exit, written == sizeof sum ? 0 : 1);
-    }
-    ::close(fds[1]);
-    int status = 0;
-    ::waitpid(child, &status, 0);
-    double sum = 0;
-    const ssize_t got = ::read(fds[0], &sum, sizeof sum);
-    ::close(fds[0]);
-    INFO("status " << status);
-    if (WIFEXITED(status) && WEXITSTATUS(status) == 2)
-        WARN("seccomp's strict mode is not available here: the system calls are not checked");
-    else
-    {
-        CHECK(WIFEXITED(status));
-        CHECK(WEXITSTATUS(status) == 0);
-        CHECK(got == static_cast<ssize_t>(sizeof sum));
-        CHECK(sum == expected);
-    }
+    if (const Sealed<double> sum = inStrictMode(readAll))
+        CHECK(*sum == expected);
 #endif
     reads.release(doc);
 }
@@ -1098,10 +1072,10 @@ TEST_CASE("an XML path's errors are at its own bytes, and its ints are a format'
                    "void o(const void* d) { xml_free(d); }\n"
                    "int p(const void* d) { return xml_floats(d, \"/a\"); }\n"
                    "void* q(const void* d) { return xml_parse(d); }\n")
-          == "test.fm:1:27: error: passing 'float' to parameter of incompatible type 'const void *'\n"
+          == "test.fm:1:27: error: passing 'float' to parameter of incompatible type 'xml_doc'\n"
              "test.fm:2:43: error: passing 'float *' to parameter of incompatible type 'float'\n"
              "test.fm:3:39: error: incompatible pointer types passing 'int *' to parameter of type 'float *'\n"
-             "test.fm:4:25: error: passing 'const void *' to parameter of type 'void *' discards qualifiers\n"
+             "test.fm:4:25: error: passing 'const void *' to parameter of type 'xml_doc' discards qualifiers\n"
              "test.fm:5:31: error: too few arguments to function call, expected at least 4, have 2\n"
              "test.fm:6:33: error: too few arguments to function call, expected 2, have 1\n");
 }

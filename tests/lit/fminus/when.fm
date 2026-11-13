@@ -1,0 +1,76 @@
+// `when (c) s`: its state a bool of the module's instance after the declared fields (sizeof counts it), loaded and
+// given c before s runs, s run when c is true and the state was false. At -O0, a load, a store and the test; optimised,
+// in a loop over samples, the state is a register through the loop, read before it and written after it. Then the
+// errors, each once.
+// RUN: sed '/^\/\/ ERRORS$/,$d' %s | fminus - -O0 | FileCheck %s
+// RUN: sed '/^\/\/ ERRORS$/,$d' %s | fminus - | FileCheck %s --check-prefix=OPT
+// RUN: sed '/^\/\/ ERRORS$/,$d' %s | fminus - --run size | FileCheck %s --check-prefix=SIZE
+// RUN: sed -n '/^\/\/ ERRORS$/,$p' %s | not fminus - 2>&1 | FileCheck %s --check-prefix=ERR --implicit-check-not=error:
+
+module Trigger
+{
+    float level;
+    void process(const float* gate, float* out, int n) [[clang::nonblocking]]
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            when (gate[i] > 0.5f)
+                level = 1;
+            out[i] = level;
+            level *= 0.999f;
+        }
+    }
+};
+
+int size() { return sizeof(Trigger); }
+
+// CHECK:       %Trigger = type { float, i1 }
+// CHECK-LABEL: define void @"Trigger::process"(
+// CHECK:       for.body:
+// CHECK:         %cmp5 = fcmp ogt float {{%.*}}, 5.000000e-01
+// CHECK-NEXT:    %this6 = load ptr, ptr %this.addr, align 8
+// CHECK-NEXT:    %when.was = getelementptr inbounds nuw %Trigger, ptr %this6, i32 0, i32 1
+// CHECK-NEXT:    %was = load i1, ptr %when.was, align 1, !tbaa [[BOOL:![0-9]+]]
+// CHECK-NEXT:    store i1 %cmp5, ptr %when.was, align 1, !tbaa [[BOOL]]
+// CHECK-NEXT:    %armed = xor i1 %was, true
+// CHECK-NEXT:    %when.fires = and i1 %cmp5, %armed
+// CHECK-NEXT:    br i1 %when.fires, label %when.then, label %when.end
+// CHECK:       when.then:
+// CHECK:         store float 1.000000e+00, ptr %level
+// CHECK-NEXT:    br label %when.end
+// CHECK: [[BOOL]] = !{[[BOOLTYPE:![0-9]+]], [[BOOLTYPE]], i64 0}
+// CHECK: [[BOOLTYPE]] = !{!"bool", {{![0-9]+}}, i64 0}
+
+// OPT-LABEL: define void @"Trigger::process"(
+// OPT:         %when.was = getelementptr inbounds nuw i8, ptr %this, i64 4
+// OPT-NEXT:    %when.was.promoted = load i1, ptr %when.was
+// OPT:       for.body:
+// OPT-NOT:     load i1
+// OPT-NOT:     store i1
+// OPT:         fcmp
+// OPT:       for.cond.for.end_crit_edge:
+// OPT:         store i1 {{%.*}}, ptr %when.was
+// OPT:         ret void
+
+// SIZE: 8
+
+// ERRORS
+int outside(bool c)
+{
+    when (c)
+        return 1;
+    return 0;
+}
+
+module M
+{
+    int n;
+    void all(const float* x, int k)
+    {
+        parallel for (int i = 0; i < k; ++i)
+            when (x[i] > 0) {}
+    }
+};
+
+// ERR: <stdin>:4:5: error: a 'when' keeps its state, one bool, in the instance of the module whose method it is in, and 'outside' is no method: move it into a method of a module
+// ERR: <stdin>:15:13: error: every iteration of the parallel for runs this 'when', whose state is the module's ('this'), and the iterations run at once

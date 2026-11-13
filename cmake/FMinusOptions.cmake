@@ -7,8 +7,9 @@ option(FMINUS_BUILD_TOOLS "Build the executables under tools/" ${PROJECT_IS_TOP_
 option(FMINUS_BUILD_EXAMPLES "Build the examples under examples/" ${PROJECT_IS_TOP_LEVEL})
 option(FMINUS_BUILD_PYTHON "Build the Python package, python/ (needs Python's development headers)" OFF)
 # What programs' builtins this build has. Each is a part of the runtime and the builtins that call it; a builtin of
-# one left out is still a name the compiler knows, and a call of it is an error that names the option. Either one on
-# fetches fast_float (cmake/FMinusFastFloat.cmake), the parsers' reader of numbers; JSON fetches yyjson
+# one left out is still a name the compiler knows, and a call of it is an error that names the option. Every build
+# fetches fast_float (cmake/FMinusFastFloat.cmake), the parsers' reader of numbers and string_float's; JSON fetches
+# yyjson
 # (cmake/FMinusJson.cmake), XML pugixml (cmake/FMinusXml.cmake).
 option(FMINUS_JSON "The JSON parser and the json_* builtins (fetches yyjson and fast_float)" ON)
 option(FMINUS_XML "The XML parser and the xml_* builtins (fetches pugixml and fast_float)" ON)

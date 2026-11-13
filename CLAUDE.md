@@ -32,11 +32,12 @@ asks for that specific change, and ask before restructuring anything.
   (unittest; the ctest test `python`). It binds `FMinus.h` only: `docs/python.md` ends with what it leaves out. Its
   wheels are `.github/workflows/wheels.yml`'s (cibuildwheel, set up in `pyproject.toml`; run by hand, and it uploads
   to PyPI only when its `publish` input says so).
-- A string literal exists only as a builtin's argument (the user asked for the web research's findings to be built,
-  2026-11-11; `docs/research/web/`): a format, a JSON Pointer, an XML path or a URL, checked and prepared when the
-  program is compiled (`src/ir/Strings.cpp`, `Paths.cpp`, `Web.cpp`). The JSON and XML parsers (`FMINUS_JSON`,
-  `FMINUS_XML`, both ON; yyjson, pugixml, fast_float) are compiled into the runtime. A feature a build leaves out keeps
-  its builtins as known names, with a "this build leaves out" error, and its macro (`__FMINUS_JSON__`, ...) undefined.
+- A string literal is a `string` where one is wanted (the syntax steps, below) and otherwise a builtin's argument (the
+  user asked for the web research's findings to be built, 2026-11-11; `docs/research/web/`): a format, a JSON Pointer,
+  an XML path or a URL, checked and prepared when the program is compiled (`src/ir/Strings.cpp`, `Paths.cpp`,
+  `Web.cpp`). The JSON and XML parsers (`FMINUS_JSON`, `FMINUS_XML`, both ON; yyjson, pugixml, fast_float) are compiled
+  into the runtime. A feature a build leaves out keeps its builtins as known names, with a "this build leaves out"
+  error, and its macro (`__FMINUS_JSON__`, ...) undefined.
 - `src/web/` is its own library too, `fminus_web` (no LLVM), built only with `FMINUS_WEB=ON` (OFF by default; the `web`
   preset; `docs/web.md`): the HTTP(S) client behind the `http_*` builtins, on libcurl and Mbed TLS (Schannel on
   Windows), which `cmake/FMinusWeb.cmake` builds at configure time into the deps cache. Every function generated code
@@ -61,6 +62,18 @@ asks for that specific change, and ask before restructuring anything.
   outside a directory it made (beside `bin/`, or lit's `%t`), except `/dev/null` and `/proc` named as what must be
   refused. Its macOS and Windows code has been compiled (the Wheels workflow builds it on both, 2026-11-12) and never
   run: say so before relying on it.
+- The syntax for networked programs (the user asked for the research, 2026-11-12, and for its five steps to be built,
+  2026-11-13; `docs/research/syntax/`, `docs/extending.md`'s recipes 44 to 51): C's `defer` and `if` and `switch` with a
+  declaration, typed handles (`http_request`, `json_doc`, ...), and FMinus's own `serve`, `route`, `reply`, `within` and
+  `when`; a `string` type, a read-only view (text is read as a value and made only in sinks: nothing joins two strings
+  or builds one), with `char` arrays to keep text in; `{name}` holes in URLs, file names and routes; a JSON literal, an
+  argument and never a value, written by the runtime's writer (`src/runtime/JsonWrite.cpp`), and `json_read`, each by a
+  shape table that `src/ir/Shapes.cpp` makes. A new keyword goes in `isFMinusKeyword` (`src/circuit/Emit.cpp`) too: a
+  test checks that list against the scanner. A call that the loop budget or a bounds check stops runs no deferred
+  statement and no `reply`; a `within` it stops abandons its scope (`src/opt/EarlyReturn.cpp`). A runtime function
+  handed an array of pointers reads memory that is not its arguments': say so in `kRuntimeFacts`. No preset builds a
+  tree without JSON, XML or the file interface, nor the web library without its server, nor the server without JSON:
+  build those after a change to anything a feature gates (`docs/testing.md`, "Builds that leave features out").
 - The smoke tests (`tests/smoke/`, `tests/lit/smoke/`) prove the toolchain. Keep them passing until the user retires
   them.
 - `docs/` is the manual (architecture, extending, building, testing; `docs/recipes/` patches). Keep it in step with

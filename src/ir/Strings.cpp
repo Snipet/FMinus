@@ -1,21 +1,27 @@
-// src/ir/Strings.cpp: string literals. FMinus has no string type: a literal is only the argument of a builtin's
-// string parameter (Param::String or Param::Format, Calls.cpp), and is then a private constant of the program, its
-// bytes and no NUL after them, passed to the runtime as its address and its length, so the runtime never looks for an
-// end and a literal may hold a NUL ("a\0b" is three bytes). A program that passes one means what it would in C, where
-// the literal is a char array and the builtin a function of a const char* and a length; anywhere else a literal would
-// have C's meaning, a char array, which FMinus does not have, so it is an error, in clang's words for the conversion
-// and where clang reports it when there is one (passing it to an int parameter, initialising a float with it, ...),
-// and at the literal otherwise.
+// src/ir/Strings.cpp: string literals. A literal is the argument of a builtin's string parameter (Param::String or
+// Param::Format, Calls.cpp), and is then a private constant of the program, its bytes and no NUL after them, passed to
+// the runtime as its address and its length, so the runtime never looks for an end and a literal may hold a NUL
+// ("a\0b" is three bytes). A program that passes one means what it would in C, where the literal is a char array and
+// the builtin a function of a const char* and a length. Where a value of FMinus's type string is wanted, a literal is
+// one (Text.cpp). Anywhere else a literal would have C's meaning, a char array, which FMinus does not have, so it is an
+// error, in clang's words for the conversion and where clang reports it when there is one (passing it to an int
+// parameter, initialising a float with it, ...), and at the literal otherwise.
 //
 // A format is a literal with places for ints, checked as clang checks printf's (scanFormat, formatArguments): %d is
 // the next int argument, %% a percent sign, and anything else after a % an error at it; too few ints is an error at
 // the first % left without one, too many at the first int left over, and an argument that is no int an error at it.
 // The runtime gets the literal as written (its escapes resolved) and the ints, and makes the text itself
 // (runtime/Format.h). Every family of builtins that takes a path, a key or a URL with numbers in it checks it here.
+//
+// An address, a URL or a file's name, may name its values where they go instead: `{name}`, a hole, a variable in
+// scope (scanHoles finds them; Calls.cpp's lowerHoles fills them), `{{` and `}}` a brace. The library gets each hole
+// as a %d, or a %s for a string's, and its %% as it was: the literal's own percent signs reach it as themselves.
 #include "ir/Lowering.h"
 
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/GlobalVariable.h>
+
+#include <algorithm>
 
 namespace fminus::ir::detail
 {
@@ -97,6 +103,72 @@ namespace fminus::ir::detail
         return scan;
     }
 
+    HoleScan scanHoles(std::string_view text)
+    {
+        HoleScan scan;
+        const auto fail = [&](std::size_t offset, std::string message) {
+            scan.errors.push_back({offset, std::move(message)});
+            return scan;
+        };
+        const auto put = [&](char c, std::size_t offset) {
+            scan.library += c;
+            scan.offsets.push_back(offset);
+        };
+        const auto identifierByte = [](char c) {
+            return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+        };
+        std::optional<std::size_t> firstPercent;   // the literal's first %d, for the error at a hole after it
+        for (std::size_t i = 0; i < text.size(); ++i)
+        {
+            const char c = text[i];
+            if (c == '%' && i + 1 < text.size() && (text[i + 1] == '%' || text[i + 1] == 'd'))
+            {
+                if (text[i + 1] == 'd' && !scan.holes.empty())
+                    return fail(i, "a literal names its values by holes, {name}, or by %d after it, not both: this "
+                                   "one has a hole before");
+                if (text[i + 1] == 'd' && !firstPercent)
+                    firstPercent = i;
+                scan.percent = scan.percent || text[i + 1] == 'd';
+                put(c, i);
+                put(text[i + 1], i + 1);
+                ++i;
+                continue;
+            }
+            if ((c == '{' || c == '}') && i + 1 < text.size() && text[i + 1] == c)
+            {
+                put(c, i);   // {{ and }}: a brace
+                ++i;
+                continue;
+            }
+            if (c == '}')
+                return fail(i, "a '}' ends a hole, {name}, and this one ends none: a brace is written '}}'");
+            if (c != '{')
+            {
+                put(c, i);
+                continue;
+            }
+            const std::size_t close = text.find('}', i + 1);
+            if (close == std::string_view::npos)
+                return fail(i, "a '{' begins a hole, {name}, and this one has no '}': a brace is written '{{'");
+            const std::string_view name = text.substr(i + 1, close - i - 1);
+            if (name.empty())
+                return fail(close, "a hole names a variable, {name}, and this one names none");
+            if (name.front() >= '0' && name.front() <= '9')
+                return fail(i + 1, "a hole names a variable, {name}, and a name does not begin with a digit");
+            if (const auto bad = std::ranges::find_if_not(name, identifierByte); bad != name.end())
+                return fail(i + 1 + static_cast<std::size_t>(bad - name.begin()),
+                            "a hole names a variable, {name}: '" + shown(*bad) + "' is no part of a name");
+            if (firstPercent)
+                return fail(i, "a literal names its values by holes, {name}, or by %d after it, not both: this one "
+                               "has a %d before");
+            scan.holes.push_back({std::string(name), i, scan.library.size()});
+            put('%', i);
+            put('d', i);
+            i = close;
+        }
+        return scan;
+    }
+
     bool Lowering::isString(const ast::Expr& expr)
     {
         return std::holds_alternative<ast::StringExpr>(expr.node);
@@ -126,8 +198,20 @@ namespace fminus::ir::detail
                                {{literal.at[wrong.offset], "a format here takes %d, an int, and %%, a percent sign",
                                  {}}});
         std::vector<llvm::Value*> values;
-        for (const ast::Expr* arg : ints)
+        bool extraFine = true;   // the arguments past the last place, lowered for their own errors alone
+        for (std::size_t k = 0; k < ints.size(); ++k)
         {
+            const ast::Expr* arg = ints[k];
+            if (k >= scan.places.size())
+            {
+                // No place reads it, so it has no type to be wrong in (clang checks an argument against its
+                // conversion, and there is none): its own errors, and then "data argument not used" if it has none.
+                // A string literal is C's char*, which a variadic argument may be.
+                if (!isString(*arg))
+                    extraFine = !lower(*arg).failed && extraFine;
+                values.push_back(poison(ast::Type::Int).ir);
+                continue;
+            }
             // C passes a variadic argument as it is, promoted: an int (an enumeration's, a bool's 0 or 1) is one, and
             // anything else is not what %d reads, clang's -Wformat, which FMinus refuses.
             if (isString(*arg))   // C's char array, passed as a char*
@@ -154,9 +238,12 @@ namespace fminus::ir::detail
             error(literal.at[scan.places[ints.size()] + 1], "more '%' conversions than data arguments");   // at d
             fine = false;
         }
-        else if (ints.size() > scan.places.size() && scan.errors.empty())   // clang counts one an error was about
+        else if (ints.size() > scan.places.size())
         {
-            error(begin(*ints[scan.places.size()]), "data argument not used by format string");
+            // clang says it of a call whose arguments are all well formed; one with an error of its own has had its
+            // one error.
+            if (scan.errors.empty() && extraFine)
+                error(begin(*ints[scan.places.size()]), "data argument not used by format string");
             fine = false;
         }
         if (!fine)
@@ -174,6 +261,8 @@ namespace fminus::ir::detail
                                            SourceLocation where)
     {
         const auto& literal = std::get<ast::StringExpr>(expr.node);
+        if (type == ast::Type::String)   // FMinus's string: no refusal at all (Text.cpp)
+            return stringValue(literal);
         const bool phrased =
             use == Use::Initializing || use == Use::Assigning || use == Use::Returning || use == Use::Passing;
         if (!type || !phrased || *type == ast::Type::Void || *type == ast::Type::Bool
@@ -236,8 +325,8 @@ namespace fminus::ir::detail
     // builtin that takes no string there, a void* or a bool. C would have a char array; FMinus has none.
     Lowering::Value Lowering::notAValue(const ast::Expr& expr)
     {
-        error(expr.location, "FMinus has no strings: a string literal is only the argument of a builtin's string "
-                             "parameter");
+        error(expr.location, "FMinus has no char arrays here: a string literal is a 'string' where one is wanted, or "
+                             "the argument of a builtin's string parameter");
         return recovery(ast::Type::Float);
     }
 } // namespace fminus::ir::detail

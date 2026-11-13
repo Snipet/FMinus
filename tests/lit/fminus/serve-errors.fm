@@ -1,0 +1,81 @@
+// serve, route and reply's errors (src/ir/Serve.cpp, src/ir/WebServer.cpp), each once, at its column: a serve with a
+// timeout in a nonblocking function (it blocks, as http_accept does), a route's literal and parameters, a route that
+// can end without a reply, what a route's block may not do, a reply outside a route or in no form, a JSON literal's
+// values and a JSON literal anywhere but a sink, and two routes one request could match, with a note at the first.
+// REQUIRES: web-server
+// RUN: not fminus %s 2>&1 | FileCheck %s --check-prefixes=CHECK,%if json %{JSON%} %else %{NOJSON%} --implicit-check-not=error: --implicit-check-not=note:
+
+module M
+{
+    http_server server;
+    float gain;
+
+    void process() [[clang::nonblocking]]
+    {
+        serve (server, 10)
+        {
+            route "POST /gain/%d" (float value) { gain = value; reply 204; }
+            route "POST /a/{k}" (float k, int k2 [[fminus::range(1, 0)]]) { reply 204; }
+            route "GET /b" (int n) { if (n > 0) reply 200; }
+            route "GET /c" { return; }
+            route "GET /d" { reply 200, json { "x": server }; }
+            route "GET /e" { reply 200, "text/plain"; }
+        }
+        reply 204;
+    }
+
+    float level() { return json { "gain": gain }; }
+
+    void load()
+    {
+        serve (server) { route "GET /f/{x}/2" (int x) { reply 1; } route "GET /f/1/{y}" (int y) { reply 1; } }
+    }
+
+    void text(string t, bool b)
+    {
+        serve (server)
+        {
+            route "GET /g" (string s, char c) { reply 204; }
+            route "GET /h" { reply 200, json { "s": "text", "t": t, "u": b ? "x" : "y" }; }
+            route "GET /i" { reply 200, t, "%d", 1; }
+            route "GET /j" { reply 200, "text/plain", "%g", t; }
+            route "GET /k" { switch (t) { case "a": reply 200; } }
+            route "GET /l" { when (b) reply 204; }
+        }
+        serve (t, "10") { route "GET /m" { reply 204; } }
+    }
+};
+
+void outside(http_server server, bool b)
+{
+    serve (server) { route "GET /n" { when (b) reply 204; reply 200; } }
+}
+
+// CHECK: serve-errors.fm:15:9: error: function with 'nonblocking' attribute must not call non-'nonblocking' function 'http_accept'
+// CHECK: serve-errors.fm:17:31: error: a route statement writes a hole as {name}, a parameter's name: %d is http_is's spelling
+// CHECK: serve-errors.fm:18:40: error: parameter 'k' fills the hole {k}, a segment of the path or a number in one: it is an int or a string, not 'float'
+// CHECK: serve-errors.fm:18:52: error: fminus::range's minimum must be below its maximum
+// CHECK: serve-errors.fm:19:60: error: route 'GET /b' does not reply in all control paths
+// CHECK: serve-errors.fm:20:30: error: cannot return from a route: a route ends with a reply
+// Without the JSON writer (FMINUS_JSON=OFF), a reply's JSON literal is that one error, and its values go unchecked.
+// JSON: serve-errors.fm:21:53: error: a JSON literal's value is a float, a double, an int, a bool, a string, an enumeration's value, a float2, float4 or float8, an array or a module, or an object or an array of them, not 'http_server'
+// NOJSON: serve-errors.fm:21:41: error: a JSON literal needs the JSON writer, which this build of FMinus leaves out (FMINUS_JSON=OFF)
+// CHECK: serve-errors.fm:22:30: error: no form of reply takes 2 values: a reply is 'reply status;', 'reply status, data, bytes, "type";', 'reply status, "type", "format", values...;' or 'reply status, json { ... };'
+// CHECK: serve-errors.fm:24:9: error: 'reply' statement not in a route
+// CHECK: serve-errors.fm:27:28: error: FMinus has no JSON values: a JSON literal is only the body of a reply, http_reply_json, http_post, file_write or file_append
+// CHECK: serve-errors.fm:31:74: error: route 'GET /f/1/{y}' conflicts with 'GET /f/{x}/2': GET /f/1/2 matches both, and neither is more specific than the other
+// CHECK: serve-errors.fm:31:32: note: the other route is here
+
+// Where serve meets string, char and when: a char parameter (a string in a JSON literal, a literal, a string or a ?:
+// of literals, is no error), a string where a reply's content type or a %g's value goes, a switch
+// on a string without a default and a when that may not reply, a string as a serve's server or timeout, and a when in
+// a route of a function that is no method.
+// CHECK: serve-errors.fm:38:44: error: a route's parameter is an int, a float, a bool, a string or an http_request, not 'char'
+// NOJSON: serve-errors.fm:39:41: error: a JSON literal needs the JSON writer, which this build of FMinus leaves out (FMINUS_JSON=OFF)
+// CHECK: serve-errors.fm:40:41: error: argument to 'http_reply_text' must be a string literal
+// CHECK: serve-errors.fm:41:61: error: format specifies type 'double' but the argument has type 'string'
+// CHECK: serve-errors.fm:42:66: error: route 'GET /k' does not reply in all control paths
+// CHECK: serve-errors.fm:43:50: error: route 'GET /l' does not reply in all control paths
+// CHECK: serve-errors.fm:45:16: error: passing 'string' to parameter of incompatible type 'http_server'
+// CHECK: serve-errors.fm:45:19: error: incompatible pointer to integer conversion passing 'char[3]' to parameter of type 'int'
+// CHECK: serve-errors.fm:51:39: error: a 'when' keeps its state, one bool, in the instance of the module whose method it is in, and 'outside' is no method: move it into a method of a module

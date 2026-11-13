@@ -1,7 +1,7 @@
 // Field attributes' errors, one each, in clang's words where clang has them: FMinus's own where they do not apply or
-// take other arguments (fminus::default on a field, which starts at 0; fminus::range on a field of no numbers, or with
-// a string), one of its namespace it does not have, clang's (a function's) on a field, a number C does not write, and
-// a local's or a constant's (a module's fields and parameters take attributes, for the host). A host's attribute is no
+// take other arguments (fminus::default on a field of no numbers or bools; fminus::range on a field of no numbers, or
+// with a string), one of its namespace it does not have, clang's (a function's) on a field, a number C does not
+// write, and a local's or a constant's (a module's fields and parameters take attributes, for the host). A host's attribute is no
 // error, and a name without a namespace that C23 does not have is clang's warning, which the program compiles with.
 // And the scanner's and the parser's: a string not closed, an unknown escape, an attribute after an array's size (C23's
 // for its type); and the code generator's, a string where a value goes (strings-errors.fm has the rest of those).
@@ -16,7 +16,7 @@ module Osc { float phase; };
 
 module Errors
 {
-    float a [[fminus::default(1)]] [[ui::unit("dB")]];
+    float* a [[fminus::default(1)]] [[ui::unit("dB")]];
     Osc o [[fminus::range(0, 1)]];
     float b [[fminus::range(0, "1")]];
     float c [[fminus::smooth(5)]];
@@ -33,10 +33,10 @@ module Errors
 
 const float k [[ui::unit("dB")]] = 1;
 
-// CHECK: field-attributes-errors.fm:19:15: error: 'fminus::default' attribute only applies to parameters: a field starts at 0, and a method such as init sets it
+// CHECK: field-attributes-errors.fm:19:16: error: 'fminus::default' attribute only applies to parameters and to fields of numbers and bools (float, double, int, bool, a float vector and arrays of them), not 'float *'
 // CHECK: field-attributes-errors.fm:20:13: error: 'fminus::range' attribute only applies to fields of numbers (float, double, int, a float vector and arrays of them), not 'Osc'
 // CHECK: field-attributes-errors.fm:21:15: error: 'fminus::range' takes two numbers, a minimum and a maximum
-// CHECK: field-attributes-errors.fm:22:15: error: unknown attribute 'fminus::smooth': a field takes fminus::range(min, max)
+// CHECK: field-attributes-errors.fm:22:15: error: unknown attribute 'fminus::smooth': a field takes fminus::range(min, max) and fminus::default(value)
 // CHECK: field-attributes-errors.fm:23:15: error: 'clang::nonblocking' attribute only applies to functions
 // CHECK: field-attributes-errors.fm:24:15: error: invalid number '08' in 'ui::step'
 // CHECK: field-attributes-errors.fm:25:21: error: 'fminus::default' takes one number

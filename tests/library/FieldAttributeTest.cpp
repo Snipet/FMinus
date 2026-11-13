@@ -169,7 +169,34 @@ TEST_CASE("the loop budget, bounds checks and #if leave a field's attributes as 
 TEST_CASE("a field FMinus refuses an attribute of is no program for a host", "[library][fieldattr]")
 {
     std::string errors;
-    CHECK(Program::compile("module M { float level [[fminus::default(1)]]; };", errors) == nullptr);
-    CHECK(errors == "program.fm:1:26: error: 'fminus::default' attribute only applies to parameters: a field starts at "
-                    "0, and a method such as init sets it\n");
+    CHECK(Program::compile("module M { float* level [[fminus::default(1)]]; };", errors) == nullptr);
+    CHECK(errors == "program.fm:1:27: error: 'fminus::default' attribute only applies to parameters and to fields of "
+                    "numbers and bools (float, double, int, bool, a float vector and arrays of them), not 'float *'\n");
+}
+
+TEST_CASE("json::name, json::skip and a field's fminus::default go to the host as written", "[library][fieldattr]")
+{
+    // FMinus gives them a meaning (json_read's table, when the program reads a document into the module) and passes
+    // them on all the same, with every other. A field's default is no Parameter: setDefaults sets none, and a module's
+    // fields start at 0.
+    std::string errors;
+    const std::unique_ptr<Program> program =
+        Program::compile("module Preset\n"
+                         "{\n"
+                         "    float gain [[json::name(\"Gain dB\")]] [[ui::unit(\"dB\")]] [[fminus::default(-6)]];\n"
+                         "    int scratch [[json::skip]];\n"
+                         "};\n",
+                         errors);
+    REQUIRE(program);
+    CHECK(errors.empty());
+    const Program::Module* preset = program->module("Preset");
+    REQUIRE(preset != nullptr);
+    const Program::Module::Field& gain = fieldNamed(*preset, "gain");
+    CHECK(namesOf(gain.attributes) == std::vector<std::string>{"json::name", "ui::unit", "fminus::default"});
+    CHECK(Program::findAttribute(gain.attributes, "json::name")->arguments.at(0).text == "Gain dB");
+    CHECK(Program::findAttribute(gain.attributes, "fminus::default")->arguments.at(0).number == -6);
+    const Program::Module::Field& scratch = fieldNamed(*preset, "scratch");
+    CHECK(namesOf(scratch.attributes) == std::vector<std::string>{"json::skip"});
+    CHECK(scratch.attributes.at(0).arguments.empty());
+    CHECK(preset->parameters.empty());
 }

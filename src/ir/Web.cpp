@@ -6,6 +6,11 @@
 //   no backslash (no CR or LF, so nothing a program writes can add a line to a request), a scheme of http or https,
 //   and no credentials (an '@' in the authority: the library refuses userinfo of any kind). A content type, http_post's
 //   fourth, is printable ASCII, at most 255 bytes, as the library takes one.
+// - A URL may name its values by holes, `{name}` (Strings.cpp), in its path, its query and its fragment, an int or a
+//   string, and in its port, an int, never in its scheme or its host (checkUrlHoles): the host is what the host's
+//   list of the program's URLs names. A string is percent-encoded by the library as it is filled in, and a path
+//   segment it makes empty, "." or ".." is a request refused before anything is sent (HTTP_INVALID); the URL filled in
+//   is then checked as every URL is.
 // - Each call's URL is recorded in the module's named metadata "fminus.web.requests" (ir::WebRequest, CodeGen.h): the
 //   host reads them all before it runs anything (Program::webRequests), since every URL is a literal.
 // - The program's web context is one global of its module, ir::kWebContextSymbol, a pointer the host sets (null: no
@@ -102,6 +107,40 @@ namespace fminus::ir::detail
         return true;
     }
 
+    // A URL's holes (lowerHoles has filled them, and checkUrl seen its scheme): none in its scheme or its host, and in
+    // its port an int's only. Each error at its hole, and then false.
+    bool Lowering::checkUrlHoles(const Filled& filled)
+    {
+        const std::string_view text = filled.literal.value;
+        const std::size_t authority = text.find("://") + 3;   // checkUrl found http:// or https://
+        const std::size_t end = std::min(text.find_first_of("/?#", authority), text.size());
+        // The port: after the authority's last ':', when no ']' (an IPv6 address's) comes after it.
+        const std::size_t colon = text.substr(authority, end - authority).rfind(':');
+        const std::size_t bracket = text.substr(authority, end - authority).rfind(']');
+        const bool hasPort =
+            colon != std::string_view::npos && (bracket == std::string_view::npos || bracket < colon);
+        const std::size_t port = hasPort ? authority + colon + 1 : end;
+        for (std::size_t k = 0; k < filled.places.size(); ++k)
+        {
+            const std::size_t place = filled.places[k];
+            if (place >= end)
+                continue;
+            const SourceLocation where = filled.literal.at[place];
+            if (place < port)
+            {
+                error(where, "a URL's scheme and host are its literal's own: a hole may be in its port, its path, its "
+                             "query or its fragment");
+                return false;
+            }
+            if (filled.texts[k])
+            {
+                error(where, "a URL's port is a number: its hole is an int, not a string");
+                return false;
+            }
+        }
+        return true;
+    }
+
     // A content type literal: printable ASCII, at most 255 bytes, as the library takes one.
     bool Lowering::checkContentType(const ast::StringExpr& literal, SourceLocation where)
     {
@@ -124,17 +163,19 @@ namespace fminus::ir::detail
         return true;
     }
 
-    // The call's method and its URL as a pattern, each %d a "*" and %% a "%", where it is: the module's named
-    // metadata, which ir::webRequests reads.
+    // The call's method and its URL as a pattern, each %d (and each hole: a %d or a %s) a "*" and %% a "%", where it
+    // is: the module's named metadata, which ir::webRequests reads.
     void Lowering::recordWebRequest(SourceLocation location, std::string_view method, const ast::StringExpr& literal)
     {
+        if (relowering_ > 0)
+            return;   // a deferred statement lowered again: recorded the first time (Statements.cpp)
         std::string pattern;
         const std::string& text = literal.value;
         for (std::size_t i = 0; i < text.size(); ++i)
         {
-            if (text[i] == '%' && i + 1 < text.size())   // the format is checked: %d or %%
+            if (text[i] == '%' && i + 1 < text.size())   // the format is checked: %d, %s (a hole's) or %%
             {
-                pattern += text[i + 1] == 'd' ? '*' : '%';
+                pattern += text[i + 1] == '%' ? '%' : '*';
                 ++i;
             }
             else

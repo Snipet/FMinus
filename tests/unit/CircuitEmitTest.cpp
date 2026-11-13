@@ -1334,6 +1334,20 @@ TEST_CASE("names keep their case, and a pot's sections have names of their own",
     compiled(r);
 }
 
+TEST_CASE("nodes and parts named as the language's words compile: within, string, when, route, reply, char, defer",
+          "[circuit]")
+{
+    // A node's or a part's name reaches the module only inside names of its own (x_char, gc_char, v_defer) and in
+    // comments; a pot, an input or the module named so is refused (CircuitTest.cpp).
+    const fc::Result r = fc::generate(".title Words\n.input u string\n.output y when\n.pot gain 0.5\n"
+                                      "route string within {1k + 9k * gain}\nreply within when 10k\n"
+                                      "char when 0 10n\ndefer within 0 1N4148\n",
+                                      "t.cir");
+    CHECK(r.source.find("float x_char;") != std::string::npos);
+    CHECK(r.source.find("float v_defer;") != std::string::npos);
+    compiled(r);
+}
+
 TEST_CASE("Result's fields: the inputs, the latency, and each line's netlist line", "[circuit]")
 {
     const fc::Result r = fc::generate(fc::test::kScreamer, "screamer.cir");

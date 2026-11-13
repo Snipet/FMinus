@@ -434,4 +434,14 @@ extern "C" std::int32_t fminus_rt_xml_choice(const void* document, const void* p
         return -1;
     return choose(choices, text.bytes, static_cast<std::size_t>(text.length));
 }
+
+extern "C" const char* fminus_rt_xml_text(const void* document, const void* path, const std::int32_t* ints,
+                                          std::int32_t count, std::int32_t* length) noexcept
+{
+    Text text;
+    const bool found = valueAt(document, path, ints, count, text);
+    if (length != nullptr)
+        *length = found ? text.length : 0;
+    return found ? text.bytes : nullptr;
+}
 #endif

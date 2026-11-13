@@ -96,7 +96,7 @@ module Kit
 
     int load()
     {
-        void* kit = file_list("kit/*.f32");
+        file_listing kit = file_list("kit/*.f32");
         const int status = file_status(kit);
         count = 0;
         clock = 0;
@@ -105,7 +105,7 @@ module Kit
             const int n = file_count(kit);
             for (int i = 0; i < n && count < PADS; ++i)
             {
-                void* f = file_read_nth(kit, i);
+                file_content f = file_read_nth(kit, i);
                 if (file_status(f) == FILE_OK)
                 {
                     const int values = bytes_floats(file_data(f), file_size(f), sample[count], LENGTH);

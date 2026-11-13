@@ -70,9 +70,10 @@ The executable:
   that is not a number. (`fminus` itself exits with 1 when a program doesn't compile.)
 
 This is where FMinus departs from C. C's `main` returns an `int`, the exit status, takes `argc` and `argv`, and
-prints through `printf`. FMinus has no strings and no I/O, so the executable does the command line and the printing
-for it, and `main` stays a plain function over floats. It has `int` and pointers now (extending.md, recipe 10), but
-`argv` is a `char**`, which needs `char` and pointers to pointers, so C's `int main(int argc, char** argv)` waits for
+prints through `printf`. FMinus has no I/O (and its strings are read-only views), so the executable does the command
+line and the printing for it, and `main` stays a plain function over floats. It has `int` and pointers now
+(extending.md, recipe 10), and `char` as an array's element (recipe 46), but `argv` is a `char**`, which needs pointers
+to pointers, so C's `int main(int argc, char** argv)` waits for
 them ("Where to go next").
 
 `main` is otherwise an ordinary function:

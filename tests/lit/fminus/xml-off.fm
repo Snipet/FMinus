@@ -15,6 +15,9 @@ float load(const void* data, int bytes)
     return x;
 }
 
+string name(xml_doc doc, int k) { return xml_string(doc, "/preset/osc[%d]/@name", k, "none"); }
+
 // CHECK: xml-off.fm:12:17: error: 'xml_parse' needs the XML parser, which this build of FMinus leaves out (FMINUS_XML=OFF)
 // CHECK: xml-off.fm:13:21: error: 'xml_float' needs the XML parser, which this build of FMinus leaves out (FMINUS_XML=OFF)
 // CHECK: xml-off.fm:14:5: error: 'xml_free' needs the XML parser, which this build of FMinus leaves out (FMINUS_XML=OFF)
+// CHECK: xml-off.fm:18:42: error: 'xml_string' needs the XML parser, which this build of FMinus leaves out (FMINUS_XML=OFF)

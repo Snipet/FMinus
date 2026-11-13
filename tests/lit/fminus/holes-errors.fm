@@ -1,0 +1,63 @@
+// Holes' errors, each once at its byte (src/ir/Strings.cpp's scanHoles, Calls.cpp's lowerHoles, Web.cpp's
+// checkUrlHoles, Files.cpp's scanFileName, WebServer.cpp's scanRouteHoles, Serve.cpp): a brace alone, an empty hole,
+// a name that is none, a hole beside a %d, values after a literal with holes, a hole of no type a hole takes, one in
+// a URL's host or a string in its port, one in a file's folder or extension, a string's hole in a route that is not
+// a whole segment, a string parameter's range and a default that is no string, and http_header's name.
+// REQUIRES: web-server, files
+// RUN: not fminus %s 2>&1 | FileCheck %s --implicit-check-not=error: --implicit-check-not=note:
+
+void urls(string name, int k, float x)
+{
+    http_response a = http_get("https://{name}.example.com/");
+    http_response b = http_get("https://example.com:{name}/");
+    http_response c = http_get("https://example.com/{x}");
+    http_response d = http_get("https://example.com/{k}/%d", k);
+    http_response e = http_get("https://example.com/{k}", k);
+    http_response f = http_get("https://example.com/{}");
+    http_response g = http_get("https://example.com/}");
+    http_response h = http_get("https://example.com/{k");
+    http_response i = http_get("https://example.com/{9k}");
+    http_response j = http_get("https://example.com/{missing}");
+}
+
+void files(string name, int k)
+{
+    file_content a = file_read("{name}/a.json");
+    file_content b = file_read("presets/a.{name}");
+    file_listing c = file_list("presets/{name}/a.json");
+    file_content d = file_read("presets/%d/{k}.json", k);
+}
+
+void routes(http_server server, http_request q)
+{
+    string h = http_header(q, "X Preset");
+    serve (server)
+    {
+        route "GET /a/{s}.json" (string s) { reply 204; }
+        route "GET /b" (string s [[fminus::range(0, 1)]]) { reply 204; }
+        route "GET /c" (string s [[fminus::default(3)]]) { reply 204; }
+        route "GET /d/{s}" (string s [[fminus::default("x")]]) { reply 204; }
+        route "GET /e/{s}" (float s) { reply 204; }
+    }
+}
+
+// CHECK: holes-errors.fm:11:41: error: a URL's scheme and host are its literal's own: a hole may be in its port, its path, its query or its fragment
+// CHECK: holes-errors.fm:12:53: error: a URL's port is a number: its hole is an int, not a string
+// CHECK: holes-errors.fm:13:53: error: hole {x} has type 'float': a hole takes an int, a bool, an enumeration's value or a string
+// CHECK: holes-errors.fm:14:57: error: a literal names its values by holes, {name}, or by %d after it, not both: this one has a hole before
+// CHECK: holes-errors.fm:15:59: error: a literal with holes takes no values after it: each hole, {name}, names its own
+// CHECK: holes-errors.fm:16:54: error: a hole names a variable, {name}, and this one names none
+// CHECK: holes-errors.fm:17:53: error: a '}' ends a hole, {name}, and this one ends none: a brace is written '}}'
+// CHECK: holes-errors.fm:18:53: error: a '{' begins a hole, {name}, and this one has no '}': a brace is written '{{[{][{]}}'
+// CHECK: holes-errors.fm:19:54: error: a hole names a variable, {name}, and a name does not begin with a digit
+// CHECK: holes-errors.fm:20:53: error: use of undeclared identifier 'missing'
+// CHECK: holes-errors.fm:25:33: error: a file's folder is its literal's own, a name its host maps: no hole in it
+// CHECK: holes-errors.fm:26:43: error: a file's extension is its type, which the literal writes: no hole in it
+// CHECK: holes-errors.fm:27:48: error: a listing's pattern has one '*' in its file part, as "kit/*.f32"
+// CHECK: holes-errors.fm:28:44: error: a literal names its values by holes, {name}, or by %d after it, not both: this one has a %d before
+// CHECK: holes-errors.fm:33:33: error: character ' ' is not allowed in a header's name: an HTTP token, letters, digits and !#$%&'*+-.^_`|~
+// CHECK: holes-errors.fm:36:23: error: a string's hole is a whole segment of the path, as "/presets/{name}": it takes all the segment's bytes
+// CHECK: holes-errors.fm:37:36: error: 'fminus::range' does not apply to a string parameter: a string has no range
+// CHECK: holes-errors.fm:38:36: error: the default of a string parameter is a string literal, as fminus::default("saw")
+// CHECK: holes-errors.fm:39:40: error: 'fminus::default' does not apply to a hole's parameter: a request the route takes always has its segment
+// CHECK: holes-errors.fm:40:35: error: parameter 's' fills the hole {s}, a segment of the path or a number in one: it is an int or a string, not 'float'

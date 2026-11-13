@@ -15,11 +15,15 @@
 #include "circuit/Plan.h"
 #include "circuit/Reference.h"
 #include "CircuitNetlists.h"
+#include "frontend/Ast.h"
+#include "frontend/Frontend.h"
+#include "frontend/Parser.tab.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <complex>
 #include <format>
@@ -1628,6 +1632,77 @@ TEST_CASE("the language's keywords are refused as names: switch, case, default a
                        + "}\nR2 o 0 1k\n")
               == "t.cir:3:6: error: pot '" + std::string(name)
                      + "' is an FMinus keyword or builtin, or a name the module uses: rename it\n");
+    }
+}
+
+TEST_CASE("the words the language gained since are refused as names: within, string, json, when and the rest",
+          "[circuit]")
+{
+    // Each was a name the emitted module wrote bare (a pot is set()'s parameter), which then did not compile.
+    for (const char* name : {"defer", "serve", "route", "reply", "json", "when", "string", "char", "within"})
+    {
+        INFO(name);
+        CHECK(fc::isFMinusKeyword(name));
+        CHECK(errorsOf(".input u in\n.output y o\n.pot " + std::string(name) + "\nR1 in o {1k + " + name
+                       + "}\nR2 o 0 1k\n")
+              == "t.cir:3:6: error: pot '" + std::string(name)
+                     + "' is an FMinus keyword or builtin, or a name the module uses: rename it\n");
+    }
+    CHECK(errorsOf(".input within in\n.output y o\nR1 in o 1k\nR2 o 0 1k\n")
+          == "t.cir:1:8: error: .input 'within' is an FMinus keyword or builtin, or a name the module uses: rename "
+             "it\n");
+    CHECK(errorsOf(".title string\n.input u in\n.output y o\nR1 in o 1k\nR2 o 0 1k\n")
+          == "t.cir:1:8: error: the module's name 'string' is an FMinus keyword or builtin\n");
+    // The handle types' names and _Defer have a '_', which no netlist's name has; they are FMinus's words all the same.
+    for (const char* name : {"_Defer", "http_response", "http_request", "http_server", "json_doc", "xml_doc",
+                             "file_content", "file_listing", "fft_plan"})
+    {
+        INFO(name);
+        CHECK(fc::isFMinusKeyword(name));
+    }
+}
+
+TEST_CASE("every word the scanner makes a token of, and every type's word, is refused as a name", "[circuit]")
+{
+    // The scanner (src/frontend/Lexer.l) is the authority: a word is the language's when it is not an identifier to
+    // the scanner, which macroNameError asks it. The candidates are the parser's tokens spelt as identifiers and the
+    // words of the types one token stands for (a handle type, a vector type), so a keyword or a type added to the
+    // scanner fails here until isFMinusKeyword (src/circuit/Emit.cpp) has it too.
+    using fminus::frontend::Parser;
+    std::vector<std::string> candidates;
+    for (int kind = 0; kind < static_cast<int>(Parser::YYNTOKENS); ++kind)
+        candidates.emplace_back(Parser::symbol_name(static_cast<Parser::symbol_kind_type>(kind)));
+    for (int handle = 1; std::string_view(fminus::ast::handleName(static_cast<fminus::ast::Handle>(handle))) != "?";
+         ++handle)
+        candidates.emplace_back(fminus::ast::handleName(static_cast<fminus::ast::Handle>(handle)));
+    for (const fminus::ast::Type vector : {fminus::ast::Type::Float2, fminus::ast::Type::Float4,
+                                           fminus::ast::Type::Float8})
+        candidates.push_back(fminus::ast::typeName(vector));
+    const auto isWord = [](const std::string& text) {
+        return !text.empty() && (std::isalpha(static_cast<unsigned char>(text[0])) != 0 || text[0] == '_')
+               && std::all_of(text.begin(), text.end(), [](char c) {
+                      return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_';
+                  });
+    };
+    std::vector<std::string> words;
+    for (const std::string& candidate : candidates)
+    {
+        if (!isWord(candidate))
+            continue;
+        const std::optional<std::string> refused = fminus::frontend::macroNameError(candidate);
+        if (refused && refused->ends_with("it is one of FMinus's keywords"))
+            words.push_back(candidate);
+    }
+    // Not vacuous: the first keyword, the last added, a handle's and a vector's word are among them.
+    for (const char* known : {"float", "within", "_Defer", "http_response", "fft_plan", "float8"})
+    {
+        INFO(known);
+        CHECK(std::find(words.begin(), words.end(), known) != words.end());
+    }
+    for (const std::string& word : words)
+    {
+        INFO(word);
+        CHECK(fc::isFMinusKeyword(word));
     }
 }
 

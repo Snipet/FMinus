@@ -1,8 +1,11 @@
 // examples/fetch/fetch.fm: the wavetable example's oscillator (../wavetable/wavetable.fm), its pack fetched from a
 // server its host allows rather than handed to it (docs/web.md). Download starts the request, then hands the body to
 // Wavetable::init, off the audio thread, as a plugin's loader thread would; the audio thread may watch its progress,
-// wait-free. The URL is a literal, so the host sees it before anything runs (Program::webRequests): here
-// http://127.0.0.1:*/packs/*.json, a local server's, its port and the pack's number the ints after it. Download is
+// wait-free. countPacks is a script's way: several packs at once in one within block, every one ended where the block
+// ends. Live is the other way for the audio thread: it plays at once, and a when swaps the pack's first table in on the
+// block it arrives in, which gives up determinism (docs/web.md, "Determinism and offline rendering"). The URLs are
+// literals, so the host sees them before anything runs (Program::webRequests): here http://127.0.0.1:*/packs/*.json
+// and http://127.0.0.1:*/packs/*.f32, a local server's, its port and the pack's number the ints after it. All of it is
 // there only in a build with the web library and the JSON parser (#if defined(__FMINUS_WEB__) && ...), so the file
 // compiles in every build.
 #include "../wavetable/wavetable.fm"
@@ -10,7 +13,7 @@
 #if defined(__FMINUS_WEB__) && defined(__FMINUS_JSON__)
 module Download
 {
-    void* request;
+    http_response request;
 
     // Off the audio thread: starts fetching pack `pack` from the server at 127.0.0.1:`port`, and returns at once.
     void start(int port, int pack)
@@ -34,6 +37,87 @@ module Download
             status = 0;
         http_close(request);
         return status;
+    }
+};
+
+enum { MOST_PACKS = 8 };
+
+// Off the audio thread, as a script would: packs 1 to `count` (at most 8) fetched at once under one deadline, then each
+// read. How many are packs (a JSON document with tables of a size); every request is closed on every path.
+int countPacks(int port, int count)
+{
+    const int packs = count < MOST_PACKS ? count : MOST_PACKS;
+    http_response r[MOST_PACKS];
+    within (10000)                       // all of them at once: where the block ends, none is still running
+    {
+        for (int k = 0; k < packs; ++k)
+            r[k] = http_get("http://127.0.0.1:%d/packs/%d.json", port, k + 1);
+    }
+    int found = 0;
+    for (int k = 0; k < packs; ++k)
+    {
+        defer http_close(r[k]);
+        if (http_status(r[k]) != 200)    // its final status: 200, the server's other, a failure, or HTTP_TIMEOUT
+            continue;
+        json_doc doc = json_parse(http_body(r[k]), http_size(r[k]));
+        defer json_free(doc);
+        if (json_count(doc, "/tables") >= 1 && json_int(doc, "/size", 0) >= 2)
+            found += 1;
+    }
+    return found;
+}
+
+// For a plugin that must sound at once: silence until the pack's first table arrives, as raw float32s
+// (/packs/<n>.f32), then that table, swapped in on the block it arrives in. Its output depends on when the response
+// came, so a render is not the same twice: Download's way, load then play, is the deterministic one.
+module Live
+{
+    param float frequency [[fminus::range(1, 20000)]] [[fminus::default(220)]];   // Hz
+    http_response request;
+    float table[2048];
+    int length;      // samples of `table`: 0 until it arrives
+    int arrivals;    // how many times the when fired: once
+    float rate;
+    float phase;
+
+    // Off the audio thread: starts fetching pack `pack`'s table, and returns at once.
+    void start(int port, int pack, float sampleRate)
+    {
+        rate = sampleRate;
+        request = http_get("http://127.0.0.1:%d/packs/%d.f32", port, pack);
+    }
+
+    void process(float* restrict output, int n) [[clang::nonblocking]]
+    {
+        when (http_status(request) == 200)   // once, on the block the table arrives in
+        {
+            length = bytes_floats(http_body(request), http_size(request), table, 2048);
+            length = length < 2048 ? length : 2048;
+            arrivals += 1;
+        }
+        for (int i = 0; i < n; ++i)
+        {
+            if (length < 2)
+            {
+                output[i] = 0.0f;
+                continue;
+            }
+            output[i] = table[(int)phase];
+            phase += frequency[i] * length / rate;
+            if (phase >= length)
+                phase -= length;
+        }
+    }
+
+    int loaded()
+    {
+        return arrivals;
+    }
+
+    // Off the audio thread, at the end.
+    void end()
+    {
+        http_close(request);
     }
 };
 #endif

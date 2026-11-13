@@ -3,7 +3,9 @@
 //     CodeGen.cpp       ir::lower(), and the two passes: declare every function, then define each body
 //     Types.cpp         FMinus's types as LLVM's, the conversions between them, the errors' helpers
 //     Functions.cpp     declarations and prototypes (libm's attributes), bodies and parameters, stack slots and scopes
-//     Statements.cpp    blocks, declarations, return, if, while, for, switch and its labels, break and continue
+//     Statements.cpp    blocks, declarations, return, if, while, for, switch and its labels, break and continue,
+//                       defer, each block's deferred statements lowered at each of its exits, and when, its state a
+//                       bool of the module's instance
 //     Expressions.cpp   constants, variables, operators, &&, ||, ?:, casts, assignment, ++ and --
 //     Constants.cpp     C's integer constant expressions, worked out where they are written (a case label's value,
 //                       an enumerator's, an array's size), enumerations: their constants, in a block's scope or the
@@ -11,17 +13,26 @@
 //     Calls.cpp         calls: the builtins (math functions, reductions, poly queries and memory, the heap, the FFT,
 //                       the runtime's others: bytes_floats, ...) and the program's
 //     Strings.cpp       string literals: a builtin's argument, a private constant passed as its address and length;
-//                       a format's places for ints, checked; the errors of a literal anywhere else
+//                       a format's places for ints, checked; an address's holes, {name}; the errors of a literal
+//                       anywhere else
+//     Text.cpp          the type string, a pointer and a length: a literal as one, == by content, a switch's
+//                       comparisons, its loads and stores as its two members, and the string_* builtins
 //     Paths.cpp         a JSON Pointer literal, json_float's and the others', or an XML path, xml_float's and the
 //                       others', prepared into a private table of steps the runtime walks; json_choice's and
 //                       xml_choice's literals into another
+//     Shapes.cpp        a type made into the words of a shape, the runtime's description of a value in memory that its
+//                       JSON functions take; a module's table, json_read's, made once a type; the json:: attributes
 //     Math.cpp          sinf, cosf, tanf, expf, tanhf and logf in the vector and libm math modes: the runtime's
 //                       functions
 //     Hash.cpp          hash and randf: an int's bits mixed, and a float uniform in [-1, 1) from them, inline
 //     Web.cpp           the web library's builtins' own part: a URL literal checked and recorded for the host
 //                       (webRequests), the program's web context, and the status codes' names (HTTP_REFUSED, ...)
 //     WebServer.cpp     the web server's builtins' own part: a route literal checked and recorded for the host
-//                       (webRoutes), the route table http_listen hands the library, a query's name, a reply's format
+//                       (webRoutes), the route table http_listen hands the library, a query's name, a reply's format,
+//                       and two routes of the program that one request could match, refused
+//     Serve.cpp         serve, route and reply: a loop over the requests waiting for a serve's routes, a switch on
+//                       which route each was published for, its parameters filled and checked, and a reply that leaves
+//                       the route; a JSON literal, a reply's body, written by the runtime's JSON writer
 //     Files.cpp         the file interface's builtins' own part: a file's name checked against the rules and the
 //                       build's ceilings and recorded for the host (files), the program's file context, and the
 //                       status codes' names (FILE_REFUSED, ...)
@@ -50,6 +61,7 @@
 
 #include <array>
 #include <cstddef>
+#include <initializer_list>
 #include <cstdint>
 #include <deque>
 #include <map>
@@ -125,6 +137,10 @@ namespace fminus::ir::detail
     bool isBuilt(Feature feature);                                 // whether this build has it (Calls.cpp)
     std::string notBuilt(std::string_view name, Feature feature);   // the error of a call of `name`, which needs it
 
+    // The callee a within block is recorded as among a function's calls (Within.cpp): it allocates where it begins and
+    // waits where it ends, which Effects.cpp says in words of its own. A keyword, so no function of a program has it.
+    inline constexpr std::string_view kWithinCall = "within";
+
     // What a builtin of the runtime may do, for the effects (Effects.cpp): allocate or free, which a nonallocating
     // function may not (and so neither may a nonblocking one); block, waiting for something (a request, a thread),
     // which a nonblocking function may not, and a nonallocating one may; or neither: it is wait-free, and the audio
@@ -140,12 +156,19 @@ namespace fminus::ir::detail
     // to C's); floats it writes, a float*; a string, which must be a string literal, passed as its address and its
     // length in bytes (Strings.cpp: no NUL ends it, and it may hold one); or a format, a string literal with places for
     // ints (%d, and %% for a percent sign), checked when the program is compiled (formatArguments), after which the
-    // call gives an int for each place, passed as their address and their count. Then the JSON parser's: a document,
-    // a const void* (json_parse's, read); a handle, a void* (json_free's); a float, a double or a bool (a read's
+    // call gives an int for each place, passed as their address and their count. Then the handles (Ast.h), each a ptr:
+    // an http_response, an http_request, an http_server, a json_doc, an xml_doc, a file_content or a file_listing, or
+    // either of two of them (http_size's and http_body's message, an http_response or an http_request; http_close's, an
+    // http_response or an http_server; file_status's and file_close's, a file_content or a file_listing), to which a
+    // void* converts as C's does; and a document a read takes, a json_doc or an xml_doc that the read only reads, to
+    // which a const void* converts too, as it did when a document was one (C's `const struct fminus_json_doc*`). Then
+    // the JSON parser's: a float, a double or a bool (a read's
     // fallback; a bool goes to the runtime as an int, 0 or 1); a path, a format that is a JSON Pointer, prepared when
     // the program is compiled into a table of steps (Paths.cpp), passed as its address and then its ints' address and
     // count, as a format's; and choices, every argument after the path's ints, string literals (at least one),
-    // prepared into one table, passed as its address. The XML parser's take the same, but for its path: an XML path, a
+    // prepared into one table, passed as its address; and the module json_read fills, a pointer to one (not const),
+    // passed as the table of its module type's shape (Shapes.cpp) and then its address. The XML parser's take the
+    // same, but for its path: an XML path, a
     // format that is a small part of XPath (child steps by name, [n], a last @attribute), prepared as a JSON one is.
     // The web library's take a URL, a format whose ints are the call's last arguments, after every other parameter
     // (as printf's are), checked further (Web.cpp: no byte a URL cannot hold, http or https, no credentials) and
@@ -153,12 +176,26 @@ namespace fminus::ir::detail
     // printable ASCII. The web server's take a route, a string that is a method and a path with places for numbers
     // the request's path holds ("PUT /osc/%d/gain"), checked (WebServer.cpp) and recorded for the host and for the
     // route table, passed as a string is; a query's name, a string of letters, digits, '_', '-' and '.'; and a reply's
-    // format, a format whose places are C's printf's %d (an int or a bool) and %g or %.Ng (a float or a double),
-    // checked as clang checks printf's, after which the call gives a double for each place, passed as their address and
-    // their count. The file interface's take a file's name, a format whose ints are the call's last arguments, as a
+    // format, a format whose places are C's printf's %d (an int or a bool), %g or %.Ng (a float or a double) and %s (a
+    // string), checked as clang checks printf's, after which the call gives a double for each number's place, passed as
+    // their address and their count, and with a %s the strings after them, as an address's are (the _s function).
+    // The file interface's take a file's name, a format whose ints are the call's last arguments, as a
     // URL's are, checked further (Files.cpp: the rules a name keeps to, and the build's ceilings) and recorded for the
     // host, passed after the program's file context as a format is; and a listing's pattern, the same with one '*' in
-    // its file part.
+    // its file part. Then the string_* builtins' (Text.cpp): a string, any value of type string (a literal among
+    // them), passed to a function of the runtime as its pointer and its length; a char* the builtin writes; and a
+    // const char* it reads. A builtin that gives a string from a function of the runtime (Result::String with a
+    // symbol) takes its string, if any, as the fallback for when the runtime finds none, which the code chooses (the
+    // runtime takes none). And a header's name, http_header's, a literal that is an HTTP token (RFC 9110). And a JSON
+    // literal (Shapes.cpp: json { ... }, json [ ... ] or json (value)), the body of http_post's, file_write's and
+    // file_append's JSON forms and of http_reply_json, passed as its description and its values' slots (after the
+    // URL's or the name's strings, none or not, and for a POST the writer's address: Web.h); and json_slice's array or
+    // pointer, a builtin that is only ever a JSON literal's value.
+    //
+    // A URL, a file's name and a listing's pattern may name their values by holes in place of %d (scanHoles):
+    // `{name}`, a variable in scope, an int (a bool, an enumeration's value) written in decimal or a string filled in
+    // (escaped, or checked, by the library), each a %d or a %s to the library, which then takes the strings too; the
+    // call has no ints after the literal then.
     enum class Param
     {
         Int,
@@ -166,13 +203,24 @@ namespace fminus::ir::detail
         Floats,
         String,
         Format,
-        Document,
-        Handle,
+        Response,
+        Request,
+        Server,
+        Message,
+        Closable,
+        JsonDoc,
+        JsonRead,
+        XmlDoc,
+        XmlRead,
+        FileContent,
+        FileListing,
+        FileHandle,
         Float,
         Double,
         Bool,
         Path,
         Choices,
+        Module,
         XmlPath,
         Url,
         ContentType,
@@ -181,19 +229,36 @@ namespace fminus::ir::detail
         ReplyFormat,
         FileName,
         FilePattern,
+        HeaderName,
+        Text,
+        Chars,
+        CharData,
+        Json,
+        Elements,
     };
 
-    // What a builtin of the runtime gives: an int, a float, a double, a bool (an int from the runtime, 0 or 1), a void*,
-    // a const void* (bytes the program may only read: http_body's) or nothing.
+    // What a builtin of the runtime gives: an int, a float, a double, a bool (an int from the runtime, 0 or 1), a
+    // handle (an http_response, an http_request, an http_server, a json_doc, an xml_doc, a file_content or a
+    // file_listing), a const void* (bytes the program may only read: http_body's) or nothing; or a string, made inline
+    // (no symbol), or from a function of the runtime that returns its pointer and writes its length through a pointer
+    // after its other arguments (no function of the runtime returns a struct, since C's ABI for one differs by
+    // platform).
     enum class Result
     {
         Int,
         Float,
         Double,
         Bool,
-        Pointer,
+        Response,
+        Request,
+        Server,
+        JsonDoc,
+        XmlDoc,
+        FileContent,
+        FileListing,
         Bytes,
         Void,
+        String,
     };
 
     // A builtin that calls a function of the runtime with its arguments, as Param says to pass each (Calls.cpp,
@@ -213,8 +278,10 @@ namespace fminus::ir::detail
 
     // The C type of a runtime builtin's parameter or result, as its prototype would write it (Calls.cpp): what a
     // prototype of the builtin must say (Functions.cpp), and what an argument converts to. A string, a format, a path
-    // and choices have none (std::nullopt): FMinus has no char.
+    // and choices have none (std::nullopt): they take a literal only. A parameter that takes either of two handles has
+    // the first here, and the second as otherType (none for any other parameter).
     std::optional<ast::Type> paramType(Param param);
+    std::optional<ast::Type> otherType(Param param);
     ast::Type resultType(Result result);
 
     // A format's places for ints (Strings.cpp, scanFormat): the offset in the literal's bytes of each %d's '%', in
@@ -231,25 +298,68 @@ namespace fminus::ir::detail
     };
     FormatScan scanFormat(std::string_view text);
 
-    // A reply's format (WebServer.cpp, scanReplyFormat): C's printf's %d, %g, %.Ng (N from 1 to 17) and %%. Each place,
-    // in order, the offset of its '%' and whether it takes a double (%g, %.Ng) or an int (%d); and its errors, each at
-    // the offset of the byte it is about, in clang's words for printf's where clang has words for it.
+    // An address literal's holes (Strings.cpp, scanHoles): `{name}`, a C identifier in braces, each a place the
+    // library takes, `{{` and `}}` a brace. `library` is the literal with each brace unescaped and each hole a "%d"
+    // (whose 'd' becomes an 's' for a string's), `offsets` the offset in the literal of each of its bytes (a hole's
+    // two bytes its '{'), and each hole its name, its '{' and where its "%d" is in `library`. A literal's %d and %%
+    // are as they were: a %d with a hole is an error, at the second kind, and so are a lone '{' or '}', an empty `{}`
+    // and a name that is no identifier, each at its byte. `percent`: the literal has a %d.
+    struct HoleScan
+    {
+        struct Hole
+        {
+            std::string name;
+            std::size_t offset;   // of its '{'
+            std::size_t at;       // of its '%' in `library`
+        };
+        std::string library;
+        std::vector<std::size_t> offsets;
+        std::vector<Hole> holes;
+        std::vector<FormatScan::Error> errors;
+        bool percent = false;
+    };
+    HoleScan scanHoles(std::string_view text);
+
+    // A reply's format (WebServer.cpp, scanReplyFormat): C's printf's %d, %g, %.Ng (N from 1 to 17), %s and %%. Each
+    // place, in order, the offset of its '%' and whether it takes a double (%g, %.Ng), an int (%d) or a string (%s);
+    // and its errors, each at the offset of the byte it is about, in clang's words for printf's where clang has words
+    // for it.
     struct ReplyFormatScan
     {
         struct Place
         {
             std::size_t offset;
             bool real;
+            bool text = false;
         };
         std::vector<Place> places;
         std::vector<FormatScan::Error> errors;
     };
     ReplyFormatScan scanReplyFormat(std::string_view text);
 
+    // A route statement's literal (WebServer.cpp, scanRouteHoles): its holes, `{name}`, each where a %d could stand, or
+    // a whole segment for a string's (a name in `texts`), and the literal the library takes, each hole a %d, a
+    // string's a %s (`library`, with the offset in `text` of each of its bytes); and its errors, scanRoute's of that
+    // literal among them, each at the offset in `text` of the byte it is about.
+    struct RouteHoles
+    {
+        struct Hole
+        {
+            std::string name;
+            std::size_t offset;   // of its '{'
+        };
+        std::string library;
+        std::vector<std::size_t> offsets;
+        std::vector<Hole> holes;
+        std::vector<FormatScan::Error> errors;
+    };
+    RouteHoles scanRouteHoles(std::string_view text, const std::vector<std::string>& texts = {});
+
     // A route literal's errors (WebServer.cpp, scanRoute): a method of GET, POST, PUT, PATCH or DELETE, one space, and a
     // path of "/" and segments of letters, digits, '-', '.', '_', '~' and %d, none empty, "." or "..", with at most 8
-    // %d and never two together; each at the offset of the byte it is about. Empty: the route is good.
-    std::vector<FormatScan::Error> scanRoute(std::string_view text);
+    // %d and never two together; with `texts` (a route statement's), a %s too, a whole segment, counted with the %d;
+    // each at the offset of the byte it is about. Empty: the route is good.
+    std::vector<FormatScan::Error> scanRoute(std::string_view text, bool texts = false);
 
     // A file's name, or with `pattern` a listing's (Files.cpp, scanFileName), against the rules of runtime/Files.h,
     // each %d checked as a digit it may write: a folder's name and a path inside it, or with `anywhere` (a build with
@@ -258,11 +368,13 @@ namespace fminus::ir::detail
     // '.' or a space nor ending with either, none a device name of Windows; an extension the literal writes, of a type
     // in `types` (FMINUS_FILES_TYPES's form: lower case, separated by ';'; empty: any); at most 16 segments. Each
     // error at the offset of the byte it is about; empty: the name is good. `writes`: an absolute name is an error (a
-    // file is written only in a folder).
+    // file is written only in a folder). `holes`: the name's places are holes (each a %d, or a %s read as a letter),
+    // which the folder may not hold either.
     struct FileNameRules
     {
         bool pattern = false;
         bool writes = false;
+        bool holes = false;
         bool anywhere = false;           // the build has absolute names (FMINUS_FILES_ANYWHERE)
         bool windows = false;            // the target's form of an absolute name is Windows'
         std::string_view types = {};     // the build's types (FMINUS_FILES_TYPES)
@@ -286,6 +398,37 @@ namespace fminus::ir::detail
     // holds them (runtime/Runtime.h), each its kind, its name's pieces as a JSON Pointer's token's, and its index; and
     // its errors, as scanPath's. A format's own errors are scanFormat's, and not here again.
     PathScan scanXmlPath(std::string_view text);
+
+    // A table of shapes being made (Shapes.cpp): the runtime's description of values in memory, which its JSON
+    // functions walk (runtime/Runtime.h, "shapes"). `code` is its words, and `bytes` the names they point into (a
+    // field's JSON name, an enumeration constant's), each an offset and a length. Lowering::shapeConstant lays one out
+    // as a constant of the program, as a path's table is laid out: its word count and byte count, its words, its bytes.
+    struct ShapeTable
+    {
+        std::vector<std::int32_t> code;
+        std::string bytes;
+    };
+
+    // What a shape is made for: the module reader, json_read, which leaves a string out (it would point into the
+    // document, which the module outlives); or the writer of a JSON literal's values, which takes a string too.
+    enum class ShapeUse
+    {
+        Read,
+        Write,
+    };
+
+    // Why a type has no shape (Lowering::appendShape): none for its kind (a pointer, a handle, a poly type, a char
+    // array of no byte, and for reading a string); nested past the runtime's 16 levels (each array and module one); a
+    // module whose shape would hold more than the runtime's 1024 fields; or an offset, a stride or a count past an
+    // int32's range.
+    enum class ShapeProblem
+    {
+        None,
+        NoShape,
+        TooDeep,
+        TooManyFields,
+        TooLarge,
+    };
 
     const Builtin* findBuiltin(std::string_view name);   // <math.h>'s float functions, or nullptr
     const Allocation* findAllocation(std::string_view name);   // malloc, calloc, free, or nullptr
@@ -409,6 +552,8 @@ namespace fminus::ir::detail
         // which switch a case label is of. break leaves the innermost of either, continue goes to the innermost loop's
         // next iteration, and a label belongs to the innermost switch. A parallel region's body is one too, whose
         // break (and a parallel { }'s continue) goes nowhere, and which no label reaches from outside: an error.
+        // A deferred statement being lowered is one too, which break, continue and a label of a switch around it may
+        // not cross (TS 25755).
         struct Breakable
         {
             enum class Kind
@@ -416,10 +561,37 @@ namespace fminus::ir::detail
                 Loop,
                 Switch,   // switches_.back(): a label's
                 Region,
+                Defer,    // the deferred statement of the defer at `location`
+                Route,    // a route's block (Serve.cpp): which a break, a continue, a return and a label may not cross
             };
             Kind kind;
-            llvm::BasicBlock* breakTarget;      // a loop's end, or a switch's; null for a region
+            llvm::BasicBlock* breakTarget;      // a loop's end, or a switch's; null for a region and a defer
             llvm::BasicBlock* continueTarget;   // a loop's next iteration, a parallel for's too; null otherwise
+            std::size_t defers = 0;             // deferScopes_.size() where it begins: the blocks a jump to it leaves
+                                                // are those after
+            SourceLocation location = {};       // a defer's
+        };
+
+        // A defer statement reached in a block being lowered (Statements.cpp), whose deferred statement each of the
+        // block's exits lowers: the statement and where it is, and what the code around it was, which its deferred
+        // statement sees wherever it is lowered: the names of its block declared before it (the scope `scope`, as it
+        // was), and the loops and switches around it. Or a within block's end (Within.cpp): no statement, and the slot
+        // that says whether its scope was begun, which each of the block's exits ends.
+        struct Deferred
+        {
+            const ast::DeferStmt* statement;
+            SourceLocation location;
+            std::size_t scope;
+            std::unordered_map<std::string, Binding> visible;
+            std::size_t breakables;
+            std::size_t switches;
+            llvm::Value* within = nullptr;
+        };
+
+        // A block that may hold defer statements, and those of them reached so far, in order (Statements.cpp).
+        struct DeferScope
+        {
+            std::vector<Deferred> reached;
         };
 
         // A label a switch has (Statements.cpp): where its value is written, and the name it is written as when it is
@@ -440,6 +612,79 @@ namespace fminus::ir::detail
             std::map<std::int32_t, CaseLabel> cases;
             std::optional<SourceLocation> defaultLabel;
             bool erroneous = false;
+            std::size_t defers = 0;   // deferScopes_.size() where it begins: its body's blocks are those after
+            // A switch on a string has no instruction (null): its value, the instruction that ends the block it was
+            // computed in until the body is lowered and the comparisons go there (Text.cpp), its cases' literals in
+            // order with their blocks, each literal's first label, and where no case takes it (the default's block).
+            llvm::Value* text = nullptr;
+            llvm::Instruction* compare = nullptr;
+            std::vector<std::pair<std::string, llvm::BasicBlock*>> texts = {};
+            std::map<std::string, CaseLabel> textCases = {};
+            llvm::BasicBlock* otherwise = nullptr;
+        };
+
+        // A route whose block is being lowered (Serve.cpp): the slot of the serve's request, where a reply goes on to
+        // (the serve's next request), the defer scopes it opened (those from `defers` on), and its replies so far.
+        struct RouteState
+        {
+            llvm::Value* request;
+            llvm::BasicBlock* next;
+            std::size_t defers;
+            unsigned replies = 0;
+        };
+
+        // An address literal whose holes were filled in (Calls.cpp, lowerHoles): the literal the library takes, each
+        // hole a %d or a %s, with where each of its bytes is written (a hole's two at its '{'); each hole's '%' in it
+        // and whether it is a string's; and the holes' values, the ints' and the strings', each in order.
+        struct Filled
+        {
+            ast::StringExpr literal;
+            std::vector<std::size_t> places;
+            std::vector<bool> texts;
+            std::vector<llvm::Value*> ints;
+            std::vector<llvm::Value*> strings;
+        };
+
+        // A JSON literal's description for the runtime's writer, being made (Shapes.cpp, describeJson): its operations
+        // and its bytes (runtime/Runtime.h's fminus_rt_json_write: a table laid out as a shape's), the bytes not yet
+        // in an operation, and its values, each lowered where it is written, with the first of its 8-byte slots, and
+        // the slots they take.
+        struct JsonPlan
+        {
+            // A value's slots: a number, a bool or an enumeration's value at its slot's start, in its own type; a
+            // string's pointer and length; a vector's lanes; an array's or a module's address (a pointer type); or,
+            // with a count, a span's address and its count, in the slot after it.
+            struct Slot
+            {
+                std::int32_t slot;
+                llvm::Value* ir;
+                ast::Type type;
+                llvm::Value* count = nullptr;
+            };
+            ShapeTable table;
+            std::string pending;
+            std::vector<Slot> values;
+            std::int32_t slots = 0;
+            void flush();
+        };
+
+        // A JSON literal lowered (Shapes.cpp, lowerJsonLiteral): its description, a constant of the program's, and its
+        // values' slots, an array of the frame (null when it has none), what fminus_rt_json_write takes.
+        struct JsonLiteral
+        {
+            llvm::Value* description;
+            llvm::Value* values;
+        };
+
+        // A route literal of the program, a route statement's or an http_is call's (WebServer.cpp), for the check that
+        // no two of them one request could match without one being more specific: the library's text (holes as
+        // %d), as it was written, where, and whether a route statement wrote it.
+        struct RouteLiteral
+        {
+            std::string text;
+            std::string written;
+            SourceLocation location;
+            bool statement;
         };
 
         // A constant expression's value, as fold() works it out (Constants.cpp): an int's or a bool's (0 or 1), and
@@ -560,7 +805,14 @@ namespace fminus::ir::detail
         void lowerStatements(const std::vector<ast::Stmt>& statements);
         void lowerStatement(const ast::Stmt& stmt);
         void lowerScoped(const ast::Stmt& stmt);
+        void lowerBlock(const std::vector<ast::Stmt>& items);
         void lowerReturn(SourceLocation location, const ast::ReturnStmt& ret);
+        void openDefers();
+        void closeDefers();
+        void reachDefer(SourceLocation location, const ast::DeferStmt& statement);
+        void runDefers(std::size_t from);
+        void lowerDeferred(const Deferred& deferred);
+        const Breakable* deferAround() const;
         llvm::BasicBlock* newBlock(const char* name);
         void fallThrough(llvm::BasicBlock* target);
         void branchOn(const ast::Expr& test, llvm::Value* condition, llvm::BasicBlock* whenTrue,
@@ -576,6 +828,11 @@ namespace fminus::ir::detail
         static SourceLocation begin(const ast::Expr& expr);
         llvm::BasicBlock* bypass(const Switch& branch, llvm::BasicBlock* label);
         void declareVariable(SourceLocation location, const ast::DeclStmt& decl);
+        void lowerWhen(SourceLocation location, const ast::WhenStmt& when);
+
+        // ---- Within.cpp ---------------------------------------------------------------------------------------------
+        void lowerWithin(SourceLocation location, const ast::WithinStmt& within);
+        void lowerWithinEnd(const Deferred& end);
         void refuseAttributes(const ast::DeclStmt& decl);
         void redefinition(SourceLocation location, const std::string& name, bool enumerator, const Binding& previous);
 
@@ -610,7 +867,8 @@ namespace fminus::ir::detail
         static ast::Type recovered(ast::BinaryOp op, const Value& lhs, const Value& rhs);
         llvm::Value* arithmetic(ast::BinaryOp op, ast::Type type, llvm::Value* lhs, llvm::Value* rhs);
         llvm::Value* lowerLogical(SourceLocation location, const ast::LogicalExpr& logical);
-        Value lowerConditional(SourceLocation location, const ast::ConditionalExpr& conditional, bool doubles);
+        Value lowerConditional(SourceLocation location, const ast::ConditionalExpr& conditional, bool doubles,
+                               bool text = false);
         Value lowerNumber(SourceLocation location, const ast::NumberExpr& number, bool doubles = false);
         llvm::Value* lowerInteger(SourceLocation location, const std::string& spelling, bool hex);
         Value lowerCast(SourceLocation location, const ast::CastExpr& cast);
@@ -641,6 +899,7 @@ namespace fminus::ir::detail
         llvm::Value* write(SourceLocation location, const LValue& target, Value value, Use use);
         Value lowerAddressOf(SourceLocation location, const ast::Expr& operand);
         Value pointerArithmetic(SourceLocation location, ast::BinaryOp op, Value lhs, Value rhs);
+        Value handleOperands(SourceLocation location, ast::BinaryOp op, Value lhs, Value rhs);
         void zero(llvm::Value* address, ast::Type type);
         Placed placeList(ast::Type type, const ast::DeclStmt& decl, bool report);
         llvm::Value* elementAt(ast::Type array, llvm::Value* address, std::uint64_t at, const char* name);
@@ -657,7 +916,13 @@ namespace fminus::ir::detail
         Value lowerAllocation(SourceLocation location, const Allocation& allocation, const std::vector<Value>& args);
         Value lowerFft(SourceLocation location, const Fft& fft, const std::vector<Value>& args);
         Value lowerRuntimeBuiltin(SourceLocation location, const RuntimeBuiltin& builtin, const ast::CallExpr& call);
+        Value lowerRuntimeCall(SourceLocation location, const RuntimeBuiltin& builtin,
+                               const std::vector<const ast::Expr*>& args, std::optional<Value> first);
         llvm::Value* formatInts(const std::vector<llvm::Value*>& values);
+        std::pair<llvm::Value*, llvm::Value*> formatTexts(const std::vector<llvm::Value*>& values);
+        std::optional<Filled> lowerHoles(const ast::StringExpr& literal, const HoleScan& scan);
+        Value textResult(const RuntimeBuiltin& builtin, std::vector<llvm::Value*> args,
+                         std::optional<llvm::Value*> fallback);
         llvm::CallInst* callRuntime(const std::string& name, llvm::Type* result, const std::vector<llvm::Value*>& args);
 
         // ---- Strings.cpp --------------------------------------------------------------------------------------------
@@ -668,8 +933,23 @@ namespace fminus::ir::detail
         Value refuseString(const ast::Expr& expr, std::optional<ast::Type> type, Use use, SourceLocation where);
         Value notAValue(const ast::Expr& expr);
 
+        // ---- Text.cpp -----------------------------------------------------------------------------------------------
+        Value stringValue(const ast::StringExpr& literal);
+        llvm::Value* loadString(llvm::Value* address, const std::string& name);
+        void storeString(llvm::Value* value, llvm::Value* address);
+        void store(llvm::Value* value, llvm::Value* address, ast::Type type);
+        llvm::Value* stringsEqual(llvm::Value* a, llvm::Value* b);
+        Value stringOperands(SourceLocation location, ast::BinaryOp op, Value lhs, Value rhs);
+        Value lowerLiteralOperand(SourceLocation location, const ast::BinaryExpr& operation);
+        Value lowerText(SourceLocation location, const RuntimeBuiltin& builtin, const std::vector<llvm::Value*>& args);
+        void textCase(Switch& branch, const ast::Expr& value, llvm::BasicBlock* block);
+        void compareTexts(Switch& branch, llvm::BasicBlock* end);
+        void initializeChars(SourceLocation location, llvm::Value* address, ast::Type type,
+                             const ast::StringExpr& literal);
+
         // ---- Web.cpp ------------------------------------------------------------------------------------------------
         bool checkUrl(const ast::StringExpr& literal, SourceLocation where);
+        bool checkUrlHoles(const Filled& filled);
         bool checkContentType(const ast::StringExpr& literal, SourceLocation where);
         void recordWebRequest(SourceLocation location, std::string_view method, const ast::StringExpr& literal);
         llvm::Value* webContext(SourceLocation location);
@@ -679,15 +959,32 @@ namespace fminus::ir::detail
         // ---- WebServer.cpp ------------------------------------------------------------------------------------------
         bool checkRoute(const ast::StringExpr& literal, SourceLocation where);
         bool checkQueryName(const ast::StringExpr& literal, SourceLocation where);
+        bool checkHeaderName(const ast::StringExpr& literal, SourceLocation where);
         std::optional<std::vector<llvm::Value*>> replyArguments(const ast::StringExpr& literal,
-                                                                const std::vector<const ast::Expr*>& values);
+                                                                const std::vector<const ast::Expr*>& values,
+                                                                std::vector<llvm::Value*>& texts);
         llvm::Value* replyValues(const std::vector<llvm::Value*>& values);
-        void recordWebRoute(SourceLocation location, const ast::StringExpr& literal);
+        void recordWebRoute(SourceLocation location, const ast::StringExpr& literal, SourceLocation where);
+        std::size_t routeIndex(const std::string& text);
+        void recordRouteStatement(const ast::Route& route, const std::string& library, llvm::Metadata* parameters);
         std::vector<llvm::Value*> listenArguments(SourceLocation location);
+        void checkRouteOverlaps();
         void finishWebRoutes();
 
+        // ---- Serve.cpp ----------------------------------------------------------------------------------------------
+        void lowerServe(SourceLocation location, const ast::ServeStmt& serve);
+        bool checkRouteParameters(const ast::Route& route, const RouteHoles& holes, llvm::Metadata*& parameters);
+        void lowerRoute(const ast::Route& route, llvm::Value* request, llvm::BasicBlock* next, llvm::BasicBlock* bad,
+                        const RouteHoles& holes);
+        void fillParameter(const ast::RouteParam& param, std::optional<std::size_t> hole, llvm::Value* request,
+                           llvm::BasicBlock* bad);
+        void lowerReply(SourceLocation location, const ast::ReplyStmt& reply);
+        llvm::Value* replyJson(llvm::Value* request, llvm::Value* status, const JsonLiteral& literal);
+        const Breakable* innermost(std::initializer_list<Breakable::Kind> kinds) const;
+
         // ---- Files.cpp ----------------------------------------------------------------------------------------------
-        bool checkFileName(const ast::StringExpr& literal, SourceLocation where, std::string_view builtin);
+        bool checkFileName(const ast::StringExpr& literal, SourceLocation where, std::string_view builtin,
+                           bool holes = false);
         void recordFileUse(SourceLocation location, std::string_view operation, const ast::StringExpr& literal);
         llvm::Value* filesContext();
         const Binding* fileStatus(const std::string& name) const;
@@ -697,6 +994,27 @@ namespace fminus::ir::detail
         llvm::Value* preparedPath(const ast::StringExpr& literal);
         llvm::Value* preparedXmlPath(const ast::StringExpr& literal, SourceLocation where);
         llvm::Value* preparedChoices(const std::vector<const ast::StringExpr*>& literals);
+
+        // ---- Shapes.cpp ---------------------------------------------------------------------------------------------
+        ShapeProblem appendShape(ast::Type type, ShapeUse use, ShapeTable& table, int depth = 0);
+        ShapeProblem appendField(const ast::Module& module, unsigned index, ShapeUse use, ShapeTable& table,
+                                 int depth);
+        static bool leftOut(const ast::Field& field);
+        static std::string jsonName(const ast::Field& field);
+        llvm::GlobalVariable* shapeConstant(const ShapeTable& table, const std::string& name);
+        llvm::Value* moduleShape(SourceLocation location, const ast::Module& module);
+        bool lowerFilled(SourceLocation location, const RuntimeBuiltin& builtin, const ast::Expr& arg,
+                         std::vector<llvm::Value*>& irArgs);
+        void checkJsonAttribute(const ast::Attribute& attribute);
+        void checkJsonNames(const ast::Module& module);
+        std::optional<std::string> parameterIn(ast::Type type) const;
+        std::optional<JsonLiteral> lowerJsonLiteral(const ast::Expr& literal);
+        bool describeJson(const ast::JsonValue& value, JsonPlan& plan);
+        bool describeJsonValue(const ast::Expr& expr, JsonPlan& plan);
+        bool describeJsonSlice(SourceLocation location, const ast::CallExpr& call, JsonPlan& plan);
+        bool describeJsonThis(SourceLocation location, const ast::Module& module, JsonPlan& plan);
+        bool addJsonShape(SourceLocation location, ast::Type type, bool address, JsonPlan& plan);
+        llvm::Value* jsonWriter();
 
         // ---- Math.cpp -----------------------------------------------------------------------------------------------
         llvm::Value* lowerMath(const Builtin& builtin, ast::Type type, llvm::Value* x);
@@ -713,7 +1031,7 @@ namespace fminus::ir::detail
         void layOut(const ast::Module& module, std::size_t& enums);
         ast::Type fieldType(const ast::Field& field) const;
         void checkParameter(const ast::Module& module, const ast::Field& field);
-        void checkAttributes(const ast::Field& field, ast::Type type, bool refused);
+        void checkAttributes(const ast::Field& field, ast::Type type, bool refused, bool member = false);
         llvm::Type* slotTypeOf(ast::Type type);
         ParamBinding bindingOf(const ast::Module& module, const ast::Field& field) const;
         std::optional<unsigned> parameterOf(const ast::Expr& base) const;
@@ -783,10 +1101,19 @@ namespace fminus::ir::detail
         const ast::Function topLevel_{};   // what function_ is while a top-level constant's initialiser is lowered
         std::vector<Breakable> breakables_;                                // the loops and switches around
         std::vector<Switch> switches_;                                     // the switches around, inner last
+        std::vector<DeferScope> deferScopes_;   // the function's blocks being lowered, inner last (Statements.cpp)
+        // The defer statements whose deferred statement was lowered once: it reported its errors then, and each later
+        // lowering of it, at another exit of its block, reports none.
+        std::unordered_set<const ast::DeferStmt*> deferLowered_;
+        // How many deferred statements around the code being lowered are lowered again: while any is, what the code
+        // records for the host (its URLs, routes and files) it recorded the first time, and records nothing.
+        unsigned relowering_ = 0;
         std::unordered_map<std::string, Effect> effects_;                  // each name's, from all its declarations
         std::unordered_map<std::string, std::vector<CallSite>> calls_;     // each definition's calls, in order
         std::unordered_map<const ast::Module*, llvm::StructType*> structs_;   // each module's layout
         std::unordered_map<const ast::Field*, ast::Type> fieldTypes_;         // each field's, its array's size known
+        // Each `when`'s state: its field in its module's struct, after the declared ones (Modules.cpp, layOut).
+        std::unordered_map<const ast::WhenStmt*, unsigned> whenFields_;
         std::map<std::string, ParamBinding> bindings_;                     // the host's, by qualified name
         std::map<std::pair<unsigned, bool>, llvm::Value*> entryLoads_;     // the method's parameters, read at entry
         std::vector<llvm::Instruction*> streamReads_;                      // its loads of its streams' samples
@@ -803,11 +1130,18 @@ namespace fminus::ir::detail
         // Whether the arithmetic the next lower() is part of has a double, as the arithmetic around it says: its floating
         // constants are then doubles (Expressions.cpp, lowerAs). None at the top of an arithmetic.
         std::optional<bool> doubleArithmetic_;
+        // Whether the next lower() is of a value a string is wanted for (lowerAs): a literal is then one, and so is
+        // each arm of a ?: (Text.cpp).
+        bool stringWanted_ = false;
         std::deque<Extent> extents_;                                       // the arrays' extents values carry
         bool webContextClash_ = false;   // a function of the web context's name was reported (Web.cpp)
         // The route literals of the program's http_is calls, each once, in the order they were lowered, and the calls
         // of http_listen, which hand the library their table, made once all are known (WebServer.cpp).
         std::vector<std::string> webRoutes_;
         std::vector<llvm::CallInst*> webListens_;
+        std::vector<RouteState> routes_;              // the route whose block is being lowered (Serve.cpp)
+        std::vector<RouteLiteral> routeLiterals_;     // every route literal, in the order lowered (WebServer.cpp)
+        // Each module type's table for json_read, made at its first call (Shapes.cpp, moduleShape).
+        std::unordered_map<const ast::Module*, llvm::GlobalVariable*> moduleShapes_;
     };
 } // namespace fminus::ir::detail

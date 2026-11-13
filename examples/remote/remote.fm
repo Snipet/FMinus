@@ -1,18 +1,20 @@
 // examples/remote/remote.fm: a small synthesiser a browser controls (docs/web.md, "The server"). Remote plays a sine
 // whose gain and pitch a page sets over HTTP, and keeps a meter the page reads. It takes its requests itself, in its
-// [[clang::nonblocking]] process, between two blocks: the audio thread's own work, wait-free, with no lock and no
-// second thread ever touching gain or pitch. Its routes are literals, so its host sees them before anything runs
-// (Program::webRoutes), and the library answers 404 and 405 itself for anything else. Where it listens is the host's:
-// http_listen() takes no argument, and under the default policy listens nowhere.
+// [[clang::nonblocking]] process, between two blocks, with a serve statement: the audio thread's own work, wait-free,
+// with no lock and no second thread ever touching gain or pitch. Its routes are literals with typed parameters, so its
+// host sees them, and their ranges, before anything runs (Program::webRoutes), and the library answers 404 and 405
+// itself for anything else. Each route answers with a reply, which the compiler checks every path reaches. Where it
+// listens is the host's: http_listen() takes no argument, and under the default policy listens nowhere.
 //
 // The page (page/index.html and page/remote.js) is the host's to hand over as static content: remote.cpp gives the
 // files to Options::web.server.files, and the driver reads the directory with --web-root (README.md). Remote is there
-// only in a build with the web server (#ifdef __FMINUS_WEB_SERVER__), so the file compiles in every build.
+// only in a build with the web server and the JSON writer its replies use (#if defined(__FMINUS_WEB_SERVER__) && ...),
+// so the file compiles in every build.
 
-#ifdef __FMINUS_WEB_SERVER__
+#if defined(__FMINUS_WEB_SERVER__) && defined(__FMINUS_JSON__)
 module Remote
 {
-    void* server;
+    http_server server;
     float rate;       // the sample rate, Hz
     float gain;       // as the page last set it: 0 to 1
     float pitch;      // Hz: 20 to 20000
@@ -38,59 +40,37 @@ module Remote
         return http_port(server);
     }
 
-    // One request, answered at once. Only the routes below reach it: the library answers 404 for a path none of them
-    // has and 405 for a method none has for its path. A number that is out of range, or not a number at all (?value=nan
-    // gives the fallback), is the program's to refuse: 400, and nothing changes.
-    void answer(void* r) [[clang::nonblocking]]
+    // On the audio thread: the requests waiting for its routes, answered, then the block, with gain and pitch as they
+    // now are. Only these routes reach it: the library answers 404 for a path none of them has and 405 for a method
+    // none has for its path. A parameter that is missing, not a number (?value=nan) or out of its range is answered
+    // 400 before its route runs, and nothing changes; a number of the path that is no number does not match (404).
+    void process(float* out, int n) [[clang::nonblocking]]
     {
-        if (http_is(r, "POST /gain"))                                    // POST /gain?value=0.5
+        serve (server)                                                   // wait-free: each request waiting, or none
         {
-            const float value = http_query_float(r, "value", -1.0f);
-            if (value >= 0.0f && value <= 1.0f)
+            route "POST /gain" (float value [[fminus::range(0, 1)]])     // POST /gain?value=0.5
             {
                 gain = value;
                 changes += 1;
-                http_reply(r, 204);
+                reply 204;
             }
-            else
-                http_reply(r, 400);
-        }
-        else if (http_is(r, "POST /pitch"))                              // POST /pitch?value=261.63
-        {
-            const float value = http_query_float(r, "value", -1.0f);
-            if (value >= 20.0f && value <= 20000.0f)
+            route "POST /pitch" (float value [[fminus::range(20, 20000)]])   // POST /pitch?value=261.63
             {
                 pitch = value;
                 changes += 1;
-                http_reply(r, 204);
+                reply 204;
             }
-            else
-                http_reply(r, 400);
-        }
-        else if (http_is(r, "POST /note/%d"))                            // POST /note/69: A4, 440 Hz
-        {
-            const int note = http_arg(r, 0);                             // 0 to 2147483647: a %d has no sign
-            if (note <= 127)
+            route "POST /note/{note}" (int note [[fminus::range(0, 127)]])  // POST /note/69: A4, 440 Hz
             {
                 pitch = 440.0f * expf(0.05776227f * (float)(note - 69));   // 2^((note - 69) / 12)
                 changes += 1;
-                http_reply(r, 204);
+                reply 204;
             }
-            else
-                http_reply(r, 400);
+            route "GET /state"                                           // what the page shows
+            {
+                reply 200, json { gain, pitch, level, changes };         // {"gain":0.25,"pitch":440,...}
+            }
         }
-        else if (http_is(r, "GET /state"))                               // what the page shows
-            http_reply_text(r, 200, "application/json", "{\"gain\":%g,\"pitch\":%g,\"level\":%.4g,\"changes\":%d}",
-                            gain, pitch, level, changes);
-        else
-            http_reply(r, 404);   // a route of the program's this function does not answer: none, here
-    }
-
-    // On the audio thread: the requests waiting, answered, then the block, with gain and pitch as they now are.
-    void process(float* out, int n) [[clang::nonblocking]]
-    {
-        for (void* r = http_next(server); r; r = http_next(server))
-            answer(r);
         const float step = pitch / rate;
         float peak = 0.0f;
         for (int i = 0; i < n; ++i)
@@ -105,31 +85,37 @@ module Remote
         level = fmaxf(peak, level * 0.9f);
     }
 
-    // For the driver, which has no audio thread (README.md): renders blocks of 10 ms for about `seconds` seconds,
-    // waiting up to a block's time for a request between two (http_accept: it blocks, so this is no audio thread's
-    // code), and gives the changes the page made; or, when it does not listen, why (HTTP_REFUSED: no --web-listen).
-    int serve(float seconds)
+    // For the driver, which has no audio thread (README.md): renders blocks of 10 ms for about `seconds` seconds, and
+    // between two waits up to a block's time for POST /stop (a serve with a timeout blocks, so this is no audio
+    // thread's code; the requests for process's routes it leaves to process, at the next block), and gives the changes
+    // the page made; or, when it does not listen, why (HTTP_REFUSED: no --web-listen).
+    int run(float seconds)
     {
         if (http_port(server) <= 0)
             return http_port(server);
         float block[480];
-        const int blocks = (int)(seconds * 100.0f);
+        int blocks = (int)(seconds * 100.0f);
         for (int b = 0; b < blocks && http_port(server) > 0; ++b)
         {
-            void* r = http_accept(server, 10);
-            if (r)
-                answer(r);
             process(block, 480);
+            serve (server, 10)
+            {
+                route "POST /stop"                                       // ends the run at once: its reply goes
+                {                                                        // out as the host closes the server
+                    blocks = 0;
+                    reply 204;
+                }
+            }
         }
         return changes;
     }
 };
 
-// fminus remote.fm --run serve 600 --web-listen localhost:8080 --web-root page (README.md).
-int serve(float seconds)
+// fminus remote.fm --run run 600 --web-listen localhost:8080 --web-root page (README.md).
+int run(float seconds)
 {
     Remote synth;
     synth.init(48000.0f);
-    return synth.serve(seconds);
+    return synth.run(seconds);
 }
 #endif

@@ -1,0 +1,29 @@
+// In a build with the server and file writing and without the JSON writer (FMINUS_JSON=OFF), every sink of a JSON
+// literal is the error that names the option, once, at the literal: a reply's, http_reply_json's, a POST's body, and
+// file_write's and file_append's, a literal in braces or json (expression) alike, holes in the address or not.
+// REQUIRES: web-server, files-write
+// UNSUPPORTED: json
+// RUN: not fminus %s 2>&1 | FileCheck %s --implicit-check-not=error:
+
+module P { float gain; };
+
+int sinks(http_request q, P* p, float* a, int n, string name)
+{
+    int s = http_reply_json(q, 200, json { "n": n });
+    http_response r = http_post("https://example.com/p/{name}", json (*p));
+    s = s + file_write("out/{name}.json", json { "a": json_slice(a, n) });
+    s = s + file_append("out/log.jsonl", json (n));
+    http_close(r);
+    return s;
+}
+
+void served(http_server server, P* p)
+{
+    serve (server) { route "GET /p" { reply 200, json (*p); } }
+}
+
+// CHECK: json-literal-sinks-off.fm:12:37: error: a JSON literal needs the JSON writer, which this build of FMinus leaves out (FMINUS_JSON=OFF)
+// CHECK: json-literal-sinks-off.fm:13:65: error: a JSON literal needs the JSON writer, which this build of FMinus leaves out (FMINUS_JSON=OFF)
+// CHECK: json-literal-sinks-off.fm:14:43: error: a JSON literal needs the JSON writer, which this build of FMinus leaves out (FMINUS_JSON=OFF)
+// CHECK: json-literal-sinks-off.fm:15:42: error: a JSON literal needs the JSON writer, which this build of FMinus leaves out (FMINUS_JSON=OFF)
+// CHECK: json-literal-sinks-off.fm:22:50: error: a JSON literal needs the JSON writer, which this build of FMinus leaves out (FMINUS_JSON=OFF)
