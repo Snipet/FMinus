@@ -33,7 +33,8 @@ own again, the first step of a report on syntax for networked programs: a type f
 `defer`, and C2y's `if` and `switch` with a declaration; and recipe 45 is its second step, FMinus's own: `serve`,
 `route` and `reply`, statements over the server's builtins, and a JSON literal a reply writes. Recipe 46 is the
 same report's text: FMinus's type `string`, a read-only view of bytes, and `char` to keep one; and recipe 47 its
-`when`, a statement that runs once each time its condition becomes true. Then the pitfalls
+`when`, a statement that runs once each time its condition becomes true; and recipe 50 its `json_read`, a module
+filled from a JSON document in one walk, by a table of the module's fields the compiler makes. Then the pitfalls
 those recipes ran into, and design notes for what comes next. [simd.md](simd.md) has recipes 7 to 9, for vectors.
 
 Recipes 1 to 4 are in the compiler now (`tanhf` and `%`; `bool` and its operators; `if`, `while` and `for`), and so are
@@ -48,10 +49,10 @@ recipe 32 (one error a mistake, enumerated types, `-Wswitch`), recipe 33 (`doubl
 builtins' arguments, bytes to numbers, and the build options of builtins), recipe 39 (the JSON parser, and paths
 the compiler prepares), recipe 40 (the XML parser), recipe 41 (the web library), recipe 42 (its server), recipe 43
 (the file interface), recipe 44 (typed handles, `defer`, and `if` and `switch` with a declaration), recipe 45
-(`serve`, `route`, `reply` and the JSON literal), recipe 46 (`string` and `char`) and recipe 47 (`when`), so their sections describe how the code you have got there: read a section beside the files it
+(`serve`, `route`, `reply` and the JSON literal), recipe 46 (`string` and `char`), recipe 47 (`when`) and recipe 50 (`json_read`), so their sections describe how the code you have got there: read a section beside the files it
 names. Recipes 5 and 6, a runtime function and a pass, are not part of the language; they live in [recipes/](recipes/)
 as a patch, so you can apply them to see them work. None of these are sketches: each was applied to this repository, built with `-Werror`, and
-tested in the dev and asan presets, every test passing (recipes 38 to 47 in the release preset only: each says where).
+tested in the dev and asan presets, every test passing (recipes 38 to 47 and 50 in the release preset only: each says where).
 [architecture.md](architecture.md) describes the stages they touch.
 
 FMinus follows C. When a recipe has a semantic choice to make, it makes C's: conversions, short-circuiting, which
@@ -6581,7 +6582,7 @@ escaped), so `--emit ast` reads as the source does.
 | Attribute | Where | What FMinus does |
 |---|---|---|
 | `fminus::range(min, max)` | a parameter, or a field of numbers: `float`, `double`, `int`, a float vector, or an array of them | two numbers, the minimum below the maximum: what a host's control or display spans. FMinus neither clamps to it nor checks it |
-| `fminus::default(value)` | a parameter | one number, inside the range: what `setDefaults` sets. On a field it is an error: a field starts at 0, and a method such as `init` sets it |
+| `fminus::default(value)` | a parameter | one number, inside the range: what `setDefaults` sets. On a field it is an error: a field starts at 0, and a method such as `init` sets it (since recipe 50, a field of numbers or `bool`s takes one too: what `json_read` sets the field to when a document does not fill it, which still does not initialise it) |
 | another `fminus::` name | | "unknown attribute": the namespace is FMinus's |
 | `clang::nonblocking`, `clang::nonallocating` | | "only applies to functions"; another `clang::` name is unknown, as it is on a function |
 | a name without a namespace that is none of C23's standard attributes | | ignored, with clang's warning: "unknown attribute 'range' ignored [-Wunknown-attributes]", and a note, "did you mean 'fminus::range'?", for `range` (and `default` on a parameter). The host never sees it |
@@ -9213,6 +9214,211 @@ refused too). It allocates and waits for nothing, so a nonblocking method may ho
   the host allocates and zeroes works.
 - `tests/lit/fminus/when.fm`: the IR at `-O0` (the load, the store, the test) and at `-O2` (the state a register
   through the loop), `sizeof`, and the errors; `examples.test` runs `examples/trigger/`.
+
+## Recipe 50: `json_read`, a module filled from a JSON document by a table of its fields
+
+*In the compiler. Code: `json_read`'s row of `kRuntimeBuiltins`, `Param::Module`, its argument in `lowerRuntimeCall`,
+and the facts of `fminus_rt_json_module`, `RuntimeKind::ReadModule` (`src/ir/Calls.cpp`, `Lowering.h`);
+`src/ir/Shapes.cpp` (`ShapeTable`, `ShapeUse` and `ShapeProblem` in `Lowering.h`; `appendShape`, `appendField`,
+`leftOut`, `jsonName`, `shapeConstant`, `moduleShape`, `lowerFilled`, `checkJsonAttribute`, `checkJsonNames`,
+`moduleShapes_`); a field's `fminus::default`, the `json::` attributes' place among the others and the notes for
+`[[name]]`, `[[skip]]` and `[[default]]` (`checkAttributes` and `layOut`, `src/ir/Modules.cpp`); the comment of
+`Program::Attribute` (`include/fminus/FMinus.h`). The runtime's half, `fminus_rt_json_module` and the shapes'
+format (`src/runtime/Json.cpp`, `JsonShapes.h`, `Runtime.h`), came with the libraries' commit before recipe 46 and is
+unchanged. Tests: `tests/unit/JsonReadTest.cpp`, cases of `FieldAttributeTest.cpp` and
+`tests/library/FieldAttributeTest.cpp`, `tests/lit/fminus/json-read.fm`, `json-read-errors.fm`, a line of
+`json-off.fm`, and `field-attributes-errors.fm`'s changed lines. The example: `examples/settings/`. Built with `-Werror`
+and tested in the `release` preset on Linux x86-64 only, in two trees, the default and one with the web library, its
+server, file writing and absolute names, every test passing but the one this machine cannot run (the smoke test of
+LLVM's own `opt`); not in a tree without `FMINUS_JSON` (`json-off.fm`'s line and the unit test's branch for it have
+not run), nor in `dev` or `asan`, nor on macOS or Windows. [research/syntax/README.md](research/syntax/README.md) is
+the report, §6.2; this is the reading half of its step 4.*
+
+Five `json_float`s walk a document five times, and say nothing about which value was missing. A module says what it
+wants once, by its fields, and the compiler knows them:
+
+```c
+enum Wave { SINE, SAW, SQUARE };
+
+module Preset
+{
+    float gain [[fminus::range(0, 1)]];
+    float cutoff [[fminus::range(20, 20000)]] [[fminus::default(1000)]];
+    float q [[json::name("resonance")]] [[fminus::default(0.707)]];
+    enum Wave wave;                                // "SAW", or 1
+    char name[16];
+    int loads [[json::skip]];                      // the program's own
+
+    bool load(json_doc doc, int k) [[clang::nonblocking]]
+    {
+        return json_read(doc, "/presets/%d", k, this);   // false: gain, wave or name not filled
+    }
+};
+```
+
+### The builtin
+
+`bool json_read(json_doc doc, "pointer", ..., Module* into)` is a row of `kRuntimeBuiltins` beside `json_floats`:
+`Param::JsonRead`, `Param::Path` (so its path and its ints are every read's: `""` the root, its errors recipe 39's) and
+`Param::Module`, the last argument, a pointer to the module it fills. `lowerFilled` (`Shapes.cpp`) lowers that one:
+`&preset`, `this`, a parameter `Preset* p`, an array's name (its first element); the module's type's table
+(`moduleShape`) goes to the runtime first, then the address, after the path's table and its ints:
+
+```llvm
+@json.shape.Preset = private unnamed_addr constant { i32, i32, [70 x i32], [41 x i8] } { i32 70, i32 41, ... }, align 4
+  %json_read = call i32 @fminus_rt_json_module(ptr %doc1, ptr @.path, ptr %format.ints, i32 1,
+                                               ptr @json.shape.Preset, ptr %p)
+  %tobool = icmp ne i32 %json_read, 0
+```
+
+The result is the runtime's, 1 when every field without a default was filled, as a `bool` (`Result::Bool`). Since no
+one C type takes a pointer to any module, `paramType` has none for `Param::Module`, so a prototype of `json_read` cannot
+be written, as one of any builtin that takes a path cannot.
+
+| The program writes | FMinus, at |
+|---|---|
+| `json_read(doc, "", x)`, `x` a `float*` (a `void*`, a module itself, a row) | "'json_read' fills a module: its last argument must be a pointer to one, not 'float *'", the argument |
+| `json_read(doc, "", "m")` | the same, "not a string literal" |
+| `json_read(doc, "", f)`, `f` a `const Fine*` | C's "passing 'const Fine *' to parameter of type 'Fine *' discards qualifiers", the call, as every passing error |
+| `json_read(doc, "", n)` of a module with no field it fills | "'json_read' has nothing to fill in 'Notes': it fills no parameter, string, pointer, handle, poly type or field with [[json::skip]], and 'Notes' has no other field", the call |
+| a module nested past 16 levels, of more than 1024 fields to fill, or past an int32's offsets | "'json_read' cannot fill 'M': ...", the call: the runtime would refuse its table |
+
+### The table: a type made into words
+
+The runtime's half came first, with its format (`runtime/Runtime.h`, "shapes", and `JsonShapes.h`, which checks a
+table whole before it reads a byte by it). `Shapes.cpp` is the compiler's: **`appendShape(type, use, table, depth)`
+appends a type's shape**, a value of it in memory, to a `ShapeTable`, its words and the bytes its names are offsets
+into:
+
+| Type | Words |
+|---|---|
+| `float`, `double`, `int`, `bool` | 1, 2, 3, 4 |
+| an enumerated type's value | 7, its size (4, or 1 for `enum E : bool`), its constants' count, and each constant's value and name, as written, the order declared (`enumerations_`) |
+| `float2`, `float4`, `float8` | 11, its lanes |
+| `char name[n]` | 6, n |
+| an array (a 2-D one an array of rows) | 9, its count, its elements' stride (the data layout's), its element's shape |
+| a module | 12, its fields' count, each field's record (`appendField`) |
+| a `string`, for writing only (`ShapeUse::Write`) | 5 |
+| a pointer, a handle, a poly type (its width is the target's), a `char` array of no byte; for reading, a string | none (`ShapeProblem::NoShape`) |
+
+A field's record is its size in words, its JSON name (an offset and a length), its offset (the struct layout's), its
+flags, its range and its default when it has them, each a double as two words, and its shape. A range goes in when the
+field's values are numbers (`float`, `double`, `int` or an enumeration's, through its arrays and a vector's lanes),
+a default when they are numbers or `bool`s: what the runtime takes. **`appendField` leaves a field out** when
+`leftOut` says so (a `param`, whose value is the host's: a program never writes one; a field with `[[json::skip]]`)
+or its type has no shape, and the module's count is the fields it kept; the bools of the module's `when`s follow the
+declared fields and are no field of the tree. A problem other than no shape (too deep, too many fields, too large) is
+the whole table's. The handoff's worked example is the test's (`JsonReadTest.cpp`, "a module's table, word by word"):
+
+```
+module Filter { float cutoff [[fminus::range(20, 20000)]] [[fminus::default(1000)]]; float q; };
+20, 7,                                                            words, bytes
+12, 2,                                                            a module of 2 fields
+12, 0, 6, 0, 3, 0, 1077149696, 0, 1087604736, 0, 1083129856, 1,  "cutoff" at 0, range 20..20000, default 1000, float
+6, 6, 1, 4, 0, 1                                                  "q" at 4, no flags, float
+"cutoffq"
+```
+
+**One table a type.** `moduleShape` makes the module's at the first call that names it, `json.shape.Preset`, a private
+constant laid out as a path's table (`shapeConstant`), keeps it in `moduleShapes_`, and every later call passes the
+same one; a nested module's shape is inside its outer one's, as the format has it. The writer of a JSON literal,
+`fminus_rt_json_write`, takes the same shapes: a later step's literal of a module appends the module's shape with
+`ShapeUse::Write`, the same words but for a string field, which it takes and the reader leaves out.
+
+### What it reads
+
+The runtime's rules, pinned by `tests/unit/JsonModuleTest.cpp` and, through the JIT, by `JsonReadTest.cpp`: each field
+from the member of its JSON name, byte for byte, the first of two of one name; a member no field names ignored; a
+field filled only by a value of its kind inside its range (an `int` from an integer an `int` holds, an enumeration from
+its constant's name as written or an integer, a `char` array from a string that fits with room for its 0, the rest
+zeroed, an array or a vector from as many elements as fit, a nested module from an object by its own fields); a field
+not filled set to its default, a nested module to its fields', or left as it was; a null document, a path that reaches
+nothing, or no object there, nothing filled and the defaults set. An array of modules the document does not have is
+left as it was, its elements' defaults unset: it has no default of its own, and counts as missing.
+
+### The attributes
+
+**`json::name` and `json::skip`** make `json::` FMinus's namespace (until now any `json::` attribute was the host's, as
+every namespace FMinus does not know; no program or test in the tree used one). `checkAttributes` hands a module's
+field's and parameter's to `checkJsonAttribute`, in source order among the others; a route's parameter's are not
+handed over (`member`), and stay `Serve.cpp`'s "unknown attribute" there. Both still go to the host, as written,
+with the field's others. Two fields under one JSON name are found when the module is laid out (`checkJsonNames`):
+every field a literal or `json_read` could name counts, a parameter and a string among them, but not a pointer, a
+handle or a skipped field.
+
+**`fminus::default` on a field** is any field's whose values are numbers or `bool`s, a parameter's as before: on a field
+that is no `param` it means what `json_read` sets the field to when a document does not fill it, and nothing else. **It
+does not initialise the field**: a module's fields start at 0, as C's do, and `fresh()` of a module with defaults reads
+0. An enumeration's is its constant's number. It is checked against the field's range as a parameter's is, and an
+`int`'s must be an integer, a `bool`'s 0 or 1, as a route parameter's must. `[[fminus::range]]` on such a field also
+means a value outside it does not fill it.
+
+| The program writes | FMinus, at |
+|---|---|
+| `[[json::name]]`, `[[json::name("a", "b")]]` | clang's "'json::name' attribute takes one argument", the attribute |
+| `[[json::name(1)]]` | clang's "'json::name' attribute requires a string" |
+| `[[json::name("")]]` | "'json::name' takes a name of one byte or more: the JSON member's the field is read and written as" |
+| `[[json::name("\xff")]]` | "'json::name' takes UTF-8 text, as a JSON member's name is, and byte 1 of the name is no part of any" |
+| `[[json::skip(1)]]` | clang's "'json::skip' attribute takes no arguments" |
+| `[[json::rename("x")]]` | "unknown attribute 'json::rename': a field takes json::name("name") and json::skip" |
+| `float c [[json::name("a")]];` after a field `a` | "duplicate JSON name 'a' in module 'M'", the second's name, and a note at the first, "previous field of that JSON name is here" |
+| `string t [[fminus::default(1)]];` | "'fminus::default' attribute only applies to parameters and to fields of numbers and bools (float, double, int, bool, a float vector and arrays of them), not 'string'" |
+| `int i [[fminus::default(1.5)]];`, `bool o [[fminus::default(2)]];` | "the default of an int field is an int, not 1.5", "the default of a bool field is 0 or 1, not 2" |
+| `[[name("x")]]`, `[[skip]]` on a field | clang's warning, ignored, with a note: "did you mean 'json::name'?" (and `[[default]]` on a field that takes one, "did you mean 'fminus::default'?") |
+
+### What the runtime promises
+
+`json_read` is `RuntimeEffect::WaitFree`, as every read is, so a `[[clang::nonblocking]]` function may call it; the
+runtime keeps the promise (no allocation, lock or system call: `JsonModuleTest.cpp`'s proof, and `JsonReadTest.cpp`'s
+through the JIT, `HeapCalls` and seccomp's strict mode). Wait-free is not cheap: one walk of the object's members,
+each compared with the fields not yet named, and each value read whole (recipe 39, "What a read costs"). Its
+declaration says what `Json.cpp` does (`RuntimeKind::ReadModule`): a read's, `inaccessiblemem: read` for the document
+and its tables read only, but `argmem: readwrite`, since it writes the module, which keeps no pointer (`captures(none)`,
+not `writeonly`, so that the facts stay true if the runtime ever reads a field first):
+
+```llvm
+declare i32 @fminus_rt_json_module(ptr readonly captures(none), ptr readonly captures(none),
+                                   ptr readonly captures(none), i32, ptr readonly captures(none), ptr captures(none)) #1
+attributes #1 = { nofree nosync nounwind willreturn memory(argmem: readwrite, inaccessiblemem: read) }
+```
+
+So a field stored before the call and read after it is loaded again (`JsonReadTest.cpp`, through `this`), and a
+local's zeroing stays before the call at `-O2` (`json-read.fm`): a field the document does not fill keeps it.
+
+### Without `FMINUS_JSON`
+
+`json_read` is a known name (`Feature::Json`): "'json_read' needs the JSON parser, which this build of FMinus leaves out
+(FMINUS_JSON=OFF)". The `json::` attributes and a field's `fminus::default` are the language's, checked in every
+build.
+
+### What it changes for programs and hosts
+
+- **Programs**: `json_read` is a builtin's name (a function of that name is refused). A field's `fminus::default`, an
+  error before, compiles; a `json::` attribute that FMinus does not know, or one of its two misused, is an error
+  where it was the host's; and two fields under one JSON name are an error. The message for an unknown `fminus::`
+  attribute on a field names `fminus::default(value)` too.
+- **Hosts** see the `json::` attributes and a field's `fminus::default` in `Module::Field::attributes` as before;
+  `setDefaults` sets parameters only.
+- **The VS Code grammar** colours `json_read` (its version is left for the merge with the other steps).
+
+### Tests
+
+- `tests/unit/JsonReadTest.cpp` (`[json-read]`): through the JIT, every kind of field (`float`, `double`, `int`,
+  `bool`, enumerations of `int` and of `bool` by name and by number, a `char` array, 1-D and 2-D arrays, a `float4`, a
+  nested module and an array of them) at the root and at a path with its ints; missing, of another kind and out of
+  range, with and without defaults, each element of an array by itself, a member no field names, two of one name, no
+  object, no document, no path; a module whose every field has a default; a default that does not initialise; names
+  (escaped, UTF-8, the last of two) and `json::skip`; a string, a pointer, a handle and a parameter left alone; `this`
+  and what a method reads after the call; 100 rounds allocating nothing and a child under seccomp's strict mode; the
+  tables word by word (the handoff's `Filter` and `Osc`, and a module holding both), one table for three calls; the
+  errors, each once at its column (modules nested 17 deep and one of 1025 fields among them, beside 16 and 1024, which
+  are read), and the warnings' notes; a nonblocking and a nonallocating function; the name in
+  every build.
+- `tests/unit/FieldAttributeTest.cpp` and `tests/library/FieldAttributeTest.cpp`: the changed messages, and the
+  `json::` attributes and a field's default as a host reads them.
+- `tests/lit/fminus/json-read.fm`: the table and the call at `-O0`, the declaration's attributes, the zeroing kept at
+  `-O2`, a document read through the JIT and as an executable, and `examples/settings/`; `json-read-errors.fm`: the
+  errors; `json-off.fm`: the option's error.
 
 ## Pitfalls
 

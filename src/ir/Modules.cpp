@@ -210,7 +210,7 @@ namespace fminus::ir::detail
                 error(field.location, "duplicate member " + quoted(field.name));
             if (field.isParam)
             {
-                checkAttributes(field, type, false);
+                checkAttributes(field, type, false, true);
                 checkParameter(module, field);
                 elements.push_back(
                     llvm::StructType::get(module_.getContext(), {builder_.getPtrTy(), slotTypeOf(type)}));
@@ -254,10 +254,11 @@ namespace fminus::ir::detail
             {
                 type = ast::Type::Float;
             }
-            checkAttributes(field, type, diagnostics_.errors().size() != reported);
+            checkAttributes(field, type, diagnostics_.errors().size() != reported, true);
             fieldTypes_.insert_or_assign(&field, type);
             elements.push_back(typeOf(type));
         }
+        checkJsonNames(module);   // two fields under one JSON name (Shapes.cpp)
         declareEnums(std::numeric_limits<std::size_t>::max());
         for (const ast::Function& method : program_->functions)
         {
@@ -301,25 +302,37 @@ namespace fminus::ir::detail
     // A field's attributes, a parameter's among them, where `type` is the field's as layOut worked it out (an array's
     // with its sizes), or, with `refused`, what layOut put in place of a type it reported an error for, which is then
     // the declaration's one error. FMinus's own: fminus::range(minimum, maximum), two numbers in order, a parameter's
-    // or a field's of numbers (what the host's control or display spans), and fminus::default(value), one number, a
-    // parameter's, within its range; another of its namespace is unknown. Clang's are a function's (Effects.cpp). A
-    // name without a namespace that is none of C23's standard attributes is ignored, with clang's warning: C keeps
-    // those names for its standard, and `range` is more likely fminus::range misspelt than anything a host reads.
-    // Any other is the host's, a unit, a label or a hint, which FMinus passes on as written (Program::Attribute), its
-    // numbers checked as numbers C writes: C23 ignores an attribute it does not know, and the host may know it.
-    void Lowering::checkAttributes(const ast::Field& field, ast::Type type, bool refused)
+    // or a field's of numbers (what the host's control or display spans, and the values json_read fills a field
+    // with), and fminus::default(value), one number, a parameter's (what setDefaults sets) or a field's whose values
+    // are numbers or bools (what json_read sets it to when a document does not fill it: an int's an integer, a bool's
+    // 0 or 1), within its range; another of its namespace is unknown. With `member` (a module's field or parameter;
+    // not a route's parameter, which Serve.cpp checks), json::name("name") and json::skip (Shapes.cpp,
+    // checkJsonAttribute). Clang's are a function's (Effects.cpp). A name without a namespace that is none of C23's
+    // standard attributes is ignored, with clang's warning: C keeps those names for its standard, and `range` is more
+    // likely fminus::range misspelt than anything a host reads. Any other is the host's, a unit, a label or a hint,
+    // which FMinus passes on as written (Program::Attribute), its numbers checked as numbers C writes: C23 ignores an
+    // attribute it does not know, and the host may know it.
+    void Lowering::checkAttributes(const ast::Field& field, ast::Type type, bool refused, bool member)
     {
         const ast::Type element = ast::isArray(type) ? ast::elementOf(type) : type;
         const bool numeric = ast::isArithmetic(element) && element != ast::Type::Bool && !ast::isMask(element);
+        // What a field's default sets: its values, a float vector's lanes floats (an enumerated type is its int or
+        // its bool to ==).
+        const ast::Type leaf = ast::lanes(element) > 1 && !ast::isMask(element) ? ast::Type::Float : element;
+        const bool defaults = leaf == ast::Type::Float || leaf == ast::Type::Double || leaf == ast::Type::Int
+                              || leaf == ast::Type::Bool;
         std::optional<double> minimum, maximum, initial;
         for (const ast::Attribute& attribute : field.attributes)
         {
             if (ast::isIgnoredAttribute(attribute.name))
             {
                 std::vector<Diagnostic> notes;
-                if (attribute.name == "range" || (attribute.name == "default" && field.isParam))
+                if (attribute.name == "range" || (attribute.name == "default" && (field.isParam || defaults)))
                     notes.push_back(
                         {attribute.location, "did you mean " + quoted("fminus::" + attribute.name) + "?", {}});
+                else if (member && (attribute.name == "name" || attribute.name == "skip"))
+                    notes.push_back(
+                        {attribute.location, "did you mean " + quoted("json::" + attribute.name) + "?", {}});
                 diagnostics_.warning(attribute.location,
                                      "unknown attribute " + quoted(attribute.name) + " ignored [-Wunknown-attributes]",
                                      std::move(notes));
@@ -360,11 +373,23 @@ namespace fminus::ir::detail
             }
             else if (attribute.name == "fminus::default")
             {
-                if (!field.isParam)
-                    error(attribute.location, "'fminus::default' attribute only applies to parameters: a field starts "
-                                              "at 0, and a method such as init sets it");
+                const bool integral = !field.isParam && leaf == ast::Type::Int;
+                const bool truth = !field.isParam && leaf == ast::Type::Bool;
+                if (!field.isParam && !defaults)
+                {
+                    if (!refused)
+                        error(attribute.location, "'fminus::default' attribute only applies to parameters and to "
+                                                  "fields of numbers and bools (float, double, int, bool, a float "
+                                                  "vector and arrays of them), not "
+                                                      + quoted(ast::typeName(type)));
+                }
                 else if (!onlyNumbers || numbers.size() != 1)
                     error(attribute.location, "'fminus::default' takes one number");
+                else if (integral && (std::trunc(numbers[0]) != numbers[0] || numbers[0] < -2147483648.0
+                                      || numbers[0] > 2147483647.0))
+                    error(attribute.location, std::format("the default of an int field is an int, not {}", numbers[0]));
+                else if (truth && numbers[0] != 0 && numbers[0] != 1)
+                    error(attribute.location, std::format("the default of a bool field is 0 or 1, not {}", numbers[0]));
                 else
                     initial = numbers[0];
             }
@@ -372,7 +397,9 @@ namespace fminus::ir::detail
                 error(attribute.location,
                       "unknown attribute " + quoted(attribute.name)
                           + (field.isParam ? ": a parameter takes fminus::range(min, max) and fminus::default(value)"
-                                           : ": a field takes fminus::range(min, max)"));
+                                           : ": a field takes fminus::range(min, max) and fminus::default(value)"));
+            else if (member && attribute.name.starts_with("json::"))
+                checkJsonAttribute(attribute);   // Shapes.cpp
             else if (attribute.name == "clang::nonblocking" || attribute.name == "clang::nonallocating")
                 error(attribute.location, quoted(attribute.name) + " attribute only applies to functions");
             else if (attribute.name.starts_with("clang::"))

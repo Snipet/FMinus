@@ -1,0 +1,62 @@
+// examples/settings/settings.fm: a synth's settings read from a JSON document in one call (README.md, the language;
+// docs/extending.md, recipe 50). json_read fills a module from the object at a path, each field from the member of
+// its name (or its [[json::name]]), in one walk of the object: a number only when it is inside the field's
+// fminus::range, an enumeration from its constant's name or its number, a char array from a string that fits, a
+// nested module and an array of them the same way, field by field. A field the document does not fill takes its
+// fminus::default, and json_read says whether every field without one was filled. Members no field names are ignored,
+// and a field with [[json::skip]] is the program's own.
+//
+//     fminus examples/settings/settings.fm --run main 0       1329.5: preset 0, whole (the first oscillator's level
+//                                                              its default)
+//     fminus examples/settings/settings.fm --run main 1       -117: preset 1's cutoff is out of its range, and it has
+//                                                              no oscillators
+//     fminus examples/settings/settings.fm --run main 2       -1: there is no preset 2
+//
+// The document is a constant here, to keep the example whole; a host hands one over (a file's bytes, a request's
+// body) and the program parses it off the audio thread, as load does.
+enum Wave { SINE, SAW, SQUARE };
+
+module Oscillator
+{
+    float detune [[fminus::range(-12, 12)]] [[fminus::default(0)]];   // semitones
+    enum Wave wave [[fminus::default(1)]];                             // "SAW", or 1
+    float level [[fminus::range(0, 1)]] [[fminus::default(0.5)]];
+};
+
+module Settings
+{
+    char name[16];
+    float cutoff [[fminus::range(20, 20000)]];                                             // no default: required
+    float resonance [[json::name("q")]] [[fminus::range(0.1, 10)]] [[fminus::default(0.707)]];
+    Oscillator osc[2];
+    int loads [[json::skip]];   // the program's own count, which no document sets
+
+    // The preset `preset` of a document's text, off the audio thread (parsing allocates): whether every field without
+    // a default came from it. The fields it did not fill keep their defaults, or what they were.
+    bool load(const void* data, int bytes, int preset)
+    {
+        json_doc doc = json_parse(data, bytes);
+        defer json_free(doc);
+        loads += 1;
+        return json_read(doc, "/presets/%d", preset, this);
+    }
+};
+
+const string kPresets = "{\"presets\": ["
+                        "{\"name\": \"warm pad\", \"cutoff\": 1200, \"q\": 0.5, \"comment\": \"ignored\","
+                        " \"osc\": [{\"detune\": -0.25, \"wave\": \"SAW\"},"
+                        " {\"detune\": 7, \"wave\": 2, \"level\": 0.25}]},"
+                        "{\"name\": \"too bright\", \"cutoff\": 30000}"
+                        "]}";
+
+// Preset `preset`'s cutoff, its oscillators' detunes, waves and levels, and its name's first letter, summed; negated
+// and less 1 when a field without a default was missing or out of its range.
+float main(float preset)
+{
+    Settings s;
+    const bool whole = s.load(string_data(kPresets), string_size(kPresets), (int)preset);
+    float sum = s.cutoff + (float)s.name[0];
+    for (int k = 0; k < 2; ++k)
+        sum += s.osc[k].detune + (float)s.osc[k].wave + s.osc[k].level;
+    return whole ? sum : -1.0f - sum;
+}

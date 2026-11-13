@@ -1,5 +1,6 @@
 // tests/unit/FieldAttributeTest.cpp: attributes on a module's fields (ir/Modules.cpp, checkAttributes). FMinus's own,
-// fminus::range on a field of numbers or a parameter and fminus::default on a parameter, are checked; clang's are a
+// fminus::range on a field of numbers or a parameter and fminus::default on a parameter or a field of numbers or bools
+// (JsonReadTest.cpp has the json:: ones and what a field's default means), are checked; clang's are a
 // function's; a name without a namespace that C23 does not have is ignored with clang's warning; any other is the
 // host's, passed on as written, and changes nothing in the code. A local's (a parallel for's counter's too) or a
 // constant's is refused. The host's view of them is tests/library/FieldAttributeTest.cpp.
@@ -101,7 +102,8 @@ TEST_CASE("a field's attributes are the host's: the code is the same without the
                       "test.fm:3:47: warning: unknown attribute 'default' ignored [-Wunknown-attributes]\n"
                       "test.fm:3:47: note: did you mean 'fminus::default'?\n"
                       "test.fm:4:19: warning: unknown attribute 'label' ignored [-Wunknown-attributes]\n"
-                      "test.fm:4:38: warning: unknown attribute 'default' ignored [-Wunknown-attributes]\n");
+                      "test.fm:4:38: warning: unknown attribute 'default' ignored [-Wunknown-attributes]\n"
+                      "test.fm:4:38: note: did you mean 'fminus::default'?\n");
 }
 
 TEST_CASE("field attributes' errors are reported in clang's words", "[codegen][fieldattr]")
@@ -109,7 +111,7 @@ TEST_CASE("field attributes' errors are reported in clang's words", "[codegen][f
     CHECK(errorsOf("module Osc { float phase; };\n"
                    "module M\n"
                    "{\n"
-                   "    float a [[fminus::default(1)]];\n"
+                   "    float* a [[fminus::default(1)]];\n"
                    "    float b [[fminus::range(1)]] [[fminus::range(\"0\", 1)]] [[fminus::range(2, 1)]];\n"
                    "    Osc o [[fminus::range(0, 1)]];\n"
                    "    float* p [[fminus::range(0, 1)]];\n"
@@ -126,8 +128,8 @@ TEST_CASE("field attributes' errors are reported in clang's words", "[codegen][f
                    "out[i] = 0; }\n"
                    "};\n"
                    "const float k [[ui::unit(\"dB\")]] = 1;\n")
-          == "test.fm:4:15: error: 'fminus::default' attribute only applies to parameters: a field starts at 0, and a "
-             "method such as init sets it\n"
+          == "test.fm:4:16: error: 'fminus::default' attribute only applies to parameters and to fields of numbers and "
+             "bools (float, double, int, bool, a float vector and arrays of them), not 'float *'\n"
              "test.fm:5:15: error: 'fminus::range' takes two numbers, a minimum and a maximum\n"
              "test.fm:5:36: error: 'fminus::range' takes two numbers, a minimum and a maximum\n"
              "test.fm:5:62: error: fminus::range's minimum must be below its maximum\n"
@@ -137,7 +139,8 @@ TEST_CASE("field attributes' errors are reported in clang's words", "[codegen][f
              "float vector and arrays of them), not 'float *'\n"
              "test.fm:8:15: error: 'fminus::range' attribute only applies to fields of numbers (float, double, int, a "
              "float vector and arrays of them), not 'bool'\n"
-             "test.fm:9:15: error: unknown attribute 'fminus::smooth': a field takes fminus::range(min, max)\n"
+             "test.fm:9:15: error: unknown attribute 'fminus::smooth': a field takes fminus::range(min, max) and "
+             "fminus::default(value)\n"
              "test.fm:9:37: error: 'clang::nonblocking' attribute only applies to functions\n"
              "test.fm:9:60: error: unknown attribute 'clang::fast': FMinus has clang::nonallocating and "
              "clang::nonblocking\n"

@@ -49,8 +49,8 @@ Each file states what it tests in its first line, then has a few helpers and the
   `FftTest.cpp`, `HashTest.cpp`, `ParamTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`, `ParallelTest.cpp`,
   `RecoveryTest.cpp`, `DoubleTest.cpp`, `Array2DTest.cpp`, `FieldAttributeTest.cpp`, `StringTest.cpp`, `BytesTest.cpp`,
   `JsonTest.cpp`, `XmlTest.cpp` (with `HeapCalls.h`, which counts a thread's calls of the C heap), `HandleTest.cpp`,
-  `DeferTest.cpp`, `SelectionDeclarationTest.cpp`, `ServeTest.cpp`'s errors, `StringTypeTest.cpp` and
-  `WhenTest.cpp`, and the
+  `DeferTest.cpp`, `SelectionDeclarationTest.cpp`, `ServeTest.cpp`'s errors, `StringTypeTest.cpp`,
+  `WhenTest.cpp` and `JsonReadTest.cpp`, and the
   compiler's own: `VersionTest.cpp`, `TbaaTest.cpp`, `ZeroInitTest.cpp`, `AttributeTest.cpp`, `DenormalTest.cpp`,
   `LoopBudgetTest.cpp`, whose `compileAt` compiles at any level with the budget on or off, `BoundsCheckTest.cpp`,
   whose `compileAt` does the same with the bounds checks and keeps the checks' descriptions, and `CallThunkTest.cpp`,
@@ -106,7 +106,9 @@ TEST_CASE("functions compute what they say", "[codegen]")
   (string literals as builtins' arguments, formats, the effects' blocking class and the build options of builtins:
   `StringTest.cpp`), `[string-type]` (the type `string`, its builtins and `char` arrays: `StringTypeTest.cpp`, in both,
   the unit tests' with `HeapCalls.h`), `[when]` (`when`: `WhenTest.cpp`, in both), `[bytes]` (`bytes_floats` and
-  `bytes_pcm16`: `BytesTest.cpp`), `[numbers]` (the runtime's reader
+  `bytes_pcm16`: `BytesTest.cpp`), `[json-read]` (`json_read`, a module's table and the `json::` attributes:
+  `JsonReadTest.cpp`, whose program tests only a build with `FMINUS_JSON` has, and whose test of the name passes in
+  both; its proofs as `[json]`'s), `[numbers]` (the runtime's reader
   of numbers on fast_float: `NumbersTest.cpp`, compiled only with `FMINUS_JSON` or `FMINUS_XML`, whose tests a build
   without both lacks; a test of what a build has compares with `fminus/Config.h`, so it passes either way), `[json]`
   (the JSON parser and its builtins: `JsonTest.cpp`, whose tests of the parser itself only a build with `FMINUS_JSON`

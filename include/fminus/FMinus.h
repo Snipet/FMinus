@@ -432,8 +432,11 @@ namespace fminus
 
         // An attribute of a field or a parameter, written after its name, C23's way:
         // `float level [[ui::unit("dB")]] [[fminus::range(-60, 0)]];` has two. FMinus's own have a meaning,
-        // fminus::range (a parameter's, or a field's of numbers) and fminus::default (a parameter's), and a clang::
-        // one, a function's, is refused on a field. Every other is the host's, passed on as written for the host to
+        // fminus::range (a parameter's, or a field's of numbers) and fminus::default (a parameter's, or a field's of
+        // numbers or bools, which json_read sets it to when a document does not fill it), and the json:: ones,
+        // json::name("name") and json::skip (the name json_read reads a field under, or none), and a clang:: one, a
+        // function's, is refused on a field. These are passed on too, as written. Every other is the host's, passed on
+        // as written for the host to
         // decide what it means, a unit, a label or a display hint: FMinus checks only that its numbers are numbers
         // (docs/extending.md, recipe 35). One exception: a name without a namespace that is none of C23's standard
         // attributes (deprecated, maybe_unused and the rest), `[[range(0, 1)]]`, is ignored with clang's warning

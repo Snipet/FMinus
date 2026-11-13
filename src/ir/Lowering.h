@@ -19,6 +19,8 @@
 //     Paths.cpp         a JSON Pointer literal, json_float's and the others', or an XML path, xml_float's and the
 //                       others', prepared into a private table of steps the runtime walks; json_choice's and
 //                       xml_choice's literals into another
+//     Shapes.cpp        a type made into the words of a shape, the runtime's description of a value in memory that its
+//                       JSON functions take; a module's table, json_read's, made once a type; the json:: attributes
 //     Math.cpp          sinf, cosf, tanf, expf, tanhf and logf in the vector and libm math modes: the runtime's
 //                       functions
 //     Hash.cpp          hash and randf: an int's bits mixed, and a float uniform in [-1, 1) from them, inline
@@ -159,7 +161,9 @@ namespace fminus::ir::detail
     // fallback; a bool goes to the runtime as an int, 0 or 1); a path, a format that is a JSON Pointer, prepared when
     // the program is compiled into a table of steps (Paths.cpp), passed as its address and then its ints' address and
     // count, as a format's; and choices, every argument after the path's ints, string literals (at least one),
-    // prepared into one table, passed as its address. The XML parser's take the same, but for its path: an XML path, a
+    // prepared into one table, passed as its address; and the module json_read fills, a pointer to one (not const),
+    // passed as the table of its module type's shape (Shapes.cpp) and then its address. The XML parser's take the
+    // same, but for its path: an XML path, a
     // format that is a small part of XPath (child steps by name, [n], a last @attribute), prepared as a JSON one is.
     // The web library's take a URL, a format whose ints are the call's last arguments, after every other parameter
     // (as printf's are), checked further (Web.cpp: no byte a URL cannot hold, http or https, no credentials) and
@@ -199,6 +203,7 @@ namespace fminus::ir::detail
         Bool,
         Path,
         Choices,
+        Module,
         XmlPath,
         Url,
         ContentType,
@@ -343,6 +348,37 @@ namespace fminus::ir::detail
     // holds them (runtime/Runtime.h), each its kind, its name's pieces as a JSON Pointer's token's, and its index; and
     // its errors, as scanPath's. A format's own errors are scanFormat's, and not here again.
     PathScan scanXmlPath(std::string_view text);
+
+    // A table of shapes being made (Shapes.cpp): the runtime's description of values in memory, which its JSON
+    // functions walk (runtime/Runtime.h, "shapes"). `code` is its words, and `bytes` the names they point into (a
+    // field's JSON name, an enumeration constant's), each an offset and a length. Lowering::shapeConstant lays one out
+    // as a constant of the program, as a path's table is laid out: its word count and byte count, its words, its bytes.
+    struct ShapeTable
+    {
+        std::vector<std::int32_t> code;
+        std::string bytes;
+    };
+
+    // What a shape is made for: the module reader, json_read, which leaves a string out (it would point into the
+    // document, which the module outlives); or the writer of a JSON literal's values, which takes a string too.
+    enum class ShapeUse
+    {
+        Read,
+        Write,
+    };
+
+    // Why a type has no shape (Lowering::appendShape): none for its kind (a pointer, a handle, a poly type, a char
+    // array of no byte, and for reading a string); nested past the runtime's 16 levels (each array and module one); a
+    // module whose shape would hold more than the runtime's 1024 fields; or an offset, a stride or a count past an
+    // int32's range.
+    enum class ShapeProblem
+    {
+        None,
+        NoShape,
+        TooDeep,
+        TooManyFields,
+        TooLarge,
+    };
 
     const Builtin* findBuiltin(std::string_view name);   // <math.h>'s float functions, or nullptr
     const Allocation* findAllocation(std::string_view name);   // malloc, calloc, free, or nullptr
@@ -854,6 +890,19 @@ namespace fminus::ir::detail
         llvm::Value* preparedXmlPath(const ast::StringExpr& literal, SourceLocation where);
         llvm::Value* preparedChoices(const std::vector<const ast::StringExpr*>& literals);
 
+        // ---- Shapes.cpp ---------------------------------------------------------------------------------------------
+        ShapeProblem appendShape(ast::Type type, ShapeUse use, ShapeTable& table, int depth = 0);
+        ShapeProblem appendField(const ast::Module& module, unsigned index, ShapeUse use, ShapeTable& table,
+                                 int depth);
+        static bool leftOut(const ast::Field& field);
+        static std::string jsonName(const ast::Field& field);
+        llvm::GlobalVariable* shapeConstant(const ShapeTable& table, const std::string& name);
+        llvm::Value* moduleShape(SourceLocation location, const ast::Module& module);
+        bool lowerFilled(SourceLocation location, const RuntimeBuiltin& builtin, const ast::Expr& arg,
+                         std::vector<llvm::Value*>& irArgs);
+        void checkJsonAttribute(const ast::Attribute& attribute);
+        void checkJsonNames(const ast::Module& module);
+
         // ---- Math.cpp -----------------------------------------------------------------------------------------------
         llvm::Value* lowerMath(const Builtin& builtin, ast::Type type, llvm::Value* x);
         static std::string mathName(const Builtin& builtin, MathFunction which);
@@ -869,7 +918,7 @@ namespace fminus::ir::detail
         void layOut(const ast::Module& module, std::size_t& enums);
         ast::Type fieldType(const ast::Field& field) const;
         void checkParameter(const ast::Module& module, const ast::Field& field);
-        void checkAttributes(const ast::Field& field, ast::Type type, bool refused);
+        void checkAttributes(const ast::Field& field, ast::Type type, bool refused, bool member = false);
         llvm::Type* slotTypeOf(ast::Type type);
         ParamBinding bindingOf(const ast::Module& module, const ast::Field& field) const;
         std::optional<unsigned> parameterOf(const ast::Expr& base) const;
@@ -979,5 +1028,7 @@ namespace fminus::ir::detail
         std::vector<llvm::CallInst*> webListens_;
         std::vector<RouteState> routes_;              // the route whose block is being lowered (Serve.cpp)
         std::vector<RouteLiteral> routeLiterals_;     // every route literal, in the order lowered (WebServer.cpp)
+        // Each module type's table for json_read, made at its first call (Shapes.cpp, moduleShape).
+        std::unordered_map<const ast::Module*, llvm::GlobalVariable*> moduleShapes_;
     };
 } // namespace fminus::ir::detail

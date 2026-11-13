@@ -95,7 +95,9 @@ namespace fminus::ir::detail
         // argument, the fallback, when there is none of that kind; json_count an array's or an object's size;
         // json_floats(doc, path, out, cap) an array of numbers, or of rows of them; json_choice(doc, path, "a", "b",
         // ...) the index of the literal a string equals, or -1; json_base64_floats(doc, path, out, cap) a base64
-        // string's float32s. A null document is an empty one. Every read is wait-free.
+        // string's float32s; json_read(doc, path, into) fills the module `into` points to from the object there, field
+        // by field in one walk, by its type's table (Shapes.cpp), and says whether every field without a default was
+        // filled. A null document is an empty one. Every read is wait-free.
         RuntimeBuiltin{"json_parse", "fminus_rt_json_parse", {Param::Bytes, Param::Int}, 2, RuntimeEffect::Allocates,
                        Feature::Json, Result::JsonDoc},
         RuntimeBuiltin{"json_free", "fminus_rt_json_free", {Param::JsonDoc}, 1, RuntimeEffect::Allocates, Feature::Json,
@@ -118,6 +120,8 @@ namespace fminus::ir::detail
         RuntimeBuiltin{"json_base64_floats", "fminus_rt_json_base64_floats",
                        {Param::JsonRead, Param::Path, Param::Floats, Param::Int}, 4, RuntimeEffect::WaitFree,
                        Feature::Json, Result::Int},
+        RuntimeBuiltin{"json_read", "fminus_rt_json_module", {Param::JsonRead, Param::Path, Param::Module}, 3,
+                       RuntimeEffect::WaitFree, Feature::Json, Result::Bool},
         // The XML parser (runtime/Xml.cpp), in a build with FMINUS_XML, made as the JSON parser's are. xml_parse(data,
         // bytes) gives a document, an xml_doc (null for a text that is no XML, too large or nested too deeply), and
         // xml_free(doc) frees it: both allocate. The reads take the document, an XML path with places for ints
@@ -314,6 +318,7 @@ namespace fminus::ir::detail
         case Param::Format:
         case Param::Path:
         case Param::Choices:
+        case Param::Module:   // a pointer to any module: no one type
         case Param::XmlPath:
         case Param::Url:
         case Param::ContentType:
@@ -356,6 +361,7 @@ namespace fminus::ir::detail
         case Param::Bool:
         case Param::Path:
         case Param::Choices:
+        case Param::Module:
         case Param::XmlPath:
         case Param::Url:
         case Param::ContentType:
@@ -470,6 +476,7 @@ namespace fminus::ir::detail
             ReadChoice,    // fminus_rt_json_choice, fminus_rt_xml_choice: and the literals' table
             ReadInto,      // fminus_rt_json_floats, fminus_rt_json_base64_floats, fminus_rt_xml_floats: and writes
                            // floats
+            ReadModule,    // fminus_rt_json_module: and a module's table, and writes the module's fields
             WebStart,      // fminus_web_http_get, fminus_web_http_post (src/web/Web.h): reads a URL literal, its ints
                            // (and a POST's body and content type), gives a new request
             WebWait,       // fminus_web_http_wait: waits on a request
@@ -525,6 +532,7 @@ namespace fminus::ir::detail
             RuntimeFacts{"fminus_rt_json_choice", RuntimeKind::ReadChoice},
             RuntimeFacts{"fminus_rt_json_floats", RuntimeKind::ReadInto},
             RuntimeFacts{"fminus_rt_json_base64_floats", RuntimeKind::ReadInto},
+            RuntimeFacts{"fminus_rt_json_module", RuntimeKind::ReadModule},
             RuntimeFacts{"fminus_rt_xml_parse", RuntimeKind::Document},
             RuntimeFacts{"fminus_rt_xml_free", RuntimeKind::DocumentRelease},
             RuntimeFacts{"fminus_rt_xml_float", RuntimeKind::Read},
@@ -736,6 +744,23 @@ namespace fminus::ir::detail
                                                                                    : llvm::Attribute::ReadOnly);
                     function.addParamAttr(4, keepsNone);
                 }
+                break;
+            case RuntimeKind::ReadModule:
+                // A read, as json_floats is: the document (inaccessible memory), the path's table, the ints, and the
+                // module's table, a constant of the program's (Shapes.cpp), all read and none kept; and it writes the
+                // module's fields that the table names, and no other memory: inside the module, at the offsets the
+                // table gives, never through a pointer it holds (a table has none). It keeps no pointer to the module.
+                // Wait-free, as every read is: nofree and nosync.
+                function.setMemoryEffects(llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::ModRef)
+                                          | llvm::MemoryEffects::inaccessibleMemOnly(llvm::ModRefInfo::Ref));
+                function.setDoesNotFreeMemory();
+                function.setNoSync();
+                for (unsigned arg : {0u, 1u, 2u, 4u})
+                {
+                    function.addParamAttr(arg, llvm::Attribute::ReadOnly);
+                    function.addParamAttr(arg, keepsNone);
+                }
+                function.addParamAttr(5, keepsNone);
                 break;
             case RuntimeKind::WebStart:
                 // Reads the URL literal and its ints, and a POST's body and content type, keeping no pointer to any of
@@ -1380,6 +1405,11 @@ namespace fminus::ir::detail
                     literals.push_back(&std::get<ast::StringExpr>(args[k]->node));
                 }
                 irArgs.push_back(preparedChoices(literals));
+                continue;
+            }
+            if (param == Param::Module)   // json_read's: its type's table, then its address (Shapes.cpp)
+            {
+                fine = lowerFilled(location, builtin, arg, irArgs) && fine;
                 continue;
             }
             if (param == Param::String || param == Param::Format || param == Param::Path || param == Param::XmlPath

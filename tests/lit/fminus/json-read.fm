@@ -1,0 +1,88 @@
+// json_read (Shapes.cpp, runtime/Json.cpp's fminus_rt_json_module): a module filled from the object at a path, by a
+// private constant of its type's shape, one table a type however many calls name it, made once: its fields' JSON
+// names (json::name), offsets, kinds, ranges and defaults, nested modules' and arrays' shapes inside it, a json::skip
+// field, a string and a parameter left out; then its bytes, the names. The call passes the path's table and its ints,
+// the module's table, and the module's address; its declaration says what it does (a read: it writes only the module
+// it is given). A program reads a document through the JIT and as an executable; and the example that shows it.
+// REQUIRES: json
+// RUN: fminus %s -O0 | FileCheck %s
+// RUN: fminus %s -O2 | FileCheck %s --check-prefix=OPT
+// RUN: fminus %s --run main 0 | FileCheck %s --check-prefix=FIRST
+// RUN: fminus %s --run main 1 | FileCheck %s --check-prefix=SECOND
+// RUN: fminus %s --emit exe -o %t.read
+// RUN: %t.read 0 | FileCheck %s --check-prefix=FIRST
+// RUN: fminus %S/../../../examples/settings/settings.fm --run main 0 | FileCheck %s --check-prefix=EXAMPLE0
+// RUN: fminus %S/../../../examples/settings/settings.fm --run main 1 | FileCheck %s --check-prefix=EXAMPLE1
+// RUN: fminus %S/../../../examples/settings/settings.fm --run main 2 | FileCheck %s --check-prefix=EXAMPLE2
+
+enum Wave { SINE, SAW, SQUARE };
+
+module Osc
+{
+    float detune [[fminus::range(-1, 1)]] [[fminus::default(0)]];
+    enum Wave wave [[json::name("shape")]];
+};
+
+module Preset
+{
+    float gain [[fminus::range(0, 1)]];
+    float cutoff [[fminus::range(20, 20000)]] [[fminus::default(1000)]];
+    char name[8];
+    Osc osc[2];
+    int scratch [[json::skip]];
+    string label;
+    param float level;
+};
+
+const string kText = "{\"presets\": [{\"gain\": 0.5, \"name\": \"warm\", \"other\": 1,"
+                     " \"osc\": [{\"detune\": 0.25, \"shape\": \"SAW\"}, {\"shape\": 2}]}, {\"gain\": 3}]}";
+
+float score(json_doc doc, int k) [[clang::nonblocking]]
+{
+    Preset p;
+    const bool all = json_read(doc, "/presets/%d", k, &p);
+    return (all ? 1000.0f : 0.0f) + p.gain + p.cutoff + p.osc[0].detune + (float)p.osc[0].wave * 10.0f
+           + (float)p.osc[1].wave * 100.0f + (float)p.name[0];
+}
+
+bool again(json_doc doc, Preset* p) { return json_read(doc, "", p); }
+
+float main(float k)
+{
+    json_doc doc = json_parse(string_data(kText), string_size(kText));
+    defer json_free(doc);
+    return score(doc, (int)k);
+}
+
+// "/presets/%d", then Preset's table: 4 fields of its 7 (no "scratch", "label" or "level"). "gain" at 0, a range of 0
+// to 1, a float; "cutoff" at 4, a range and a default of 1000; "name" at 8, 8 bytes; "osc" at 16, an array of 2 Oscs 8
+// bytes apart, each "detune" at 0 with its range and its default 0, and "shape" (its json::name) at 4, an enumeration
+// of 3 constants as written. The doubles are two words each, the low first: 1.0 is 0, 1072693248.
+// CHECK: @.path = private unnamed_addr constant { i32, i32, [6 x i32], [7 x i8] } { i32 6, i32 7, [6 x i32] [i32 1, i32 0, i32 7, i32 1, i32 0, i32 -1], [7 x i8] c"presets" }, align 4
+// CHECK: @json.shape.Preset = private unnamed_addr constant { i32, i32, [70 x i32], [41 x i8] } { i32 70, i32 41, [70 x i32] [i32 12, i32 4, i32 10, i32 0, i32 4, i32 0, i32 1, i32 0, i32 0, i32 0, i32 1072693248, i32 1, i32 12, i32 4, i32 6, i32 4, i32 3, i32 0, i32 1077149696, i32 0, i32 1087604736, i32 0, i32 1083129856, i32 1, i32 7, i32 10, i32 4, i32 8, i32 0, i32 6, i32 8, i32 39, i32 14, i32 3, i32 16, i32 0, i32 9, i32 2, i32 8, i32 12, i32 2, i32 12, i32 17, i32 6, i32 0, i32 3, i32 0, i32 -1074790400, i32 0, i32 1072693248, i32 0, i32 0, i32 1, i32 17, i32 23, i32 5, i32 4, i32 0, i32 7, i32 4, i32 3, i32 0, i32 28, i32 4, i32 1, i32 32, i32 3, i32 2, i32 35, i32 6], [41 x i8] c"gaincutoffnameoscdetuneshapeSINESAWSQUARE" }, align 4
+// CHECK-NOT: @json.shape.Preset.
+// CHECK-LABEL: define float @score(
+// CHECK: %json_read = call i32 @fminus_rt_json_module(ptr %doc1, ptr @.path, ptr %format.ints, i32 1, ptr @json.shape.Preset, ptr %p)
+// CHECK-NEXT: %tobool = icmp ne i32 %json_read, 0
+// The same table for a second call.
+// CHECK-LABEL: define zeroext i1 @again(
+// CHECK: call i32 @fminus_rt_json_module(ptr %doc1, ptr @.path.1, ptr null, i32 0, ptr @json.shape.Preset, ptr %p2)
+// CHECK: declare i32 @fminus_rt_json_module(ptr readonly captures(none), ptr readonly captures(none), ptr readonly captures(none), i32, ptr readonly captures(none), ptr captures(none)) [[READ:#[0-9]+]]
+// CHECK: attributes [[READ]] = { nofree nosync nounwind willreturn memory(argmem: readwrite, inaccessiblemem: read) }
+
+// Optimised: the local's zeroing stays before the call (the runtime may leave a field as it was), and every field is
+// loaded after it.
+// OPT-LABEL: define float @score(
+// OPT: call void @llvm.memset.p0.i64(ptr {{.*}}%p, i8 0, i64 72, i1 false)
+// OPT: call i32 @fminus_rt_json_module(ptr %doc, ptr nonnull @.path, ptr nonnull %format.ints, i32 1, ptr nonnull @json.shape.Preset, ptr nonnull %p)
+// OPT: load float, ptr %p
+// OPT: ret float
+
+// Preset 0: all filled (the second Osc's detune its default), 1000 + 0.5 + 1000 + 0.25 + 10 * SAW + 100 * SQUARE + 'w';
+// preset 1: its gain out of range, no "osc", so false: its cutoff's default alone.
+// FIRST: {{^}}2329.75{{$}}
+// SECOND: {{^}}1000{{$}}
+
+// EXAMPLE0: {{^}}1329.5{{$}}
+// EXAMPLE1: {{^}}-117{{$}}
+// EXAMPLE2: {{^}}-1{{$}}
