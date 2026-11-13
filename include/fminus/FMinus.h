@@ -729,15 +729,20 @@ namespace fminus
         //
         // A route statement's parameter: what the request fills it from, and what it must be. A value that is
         // missing (with no default) or not one of its type, or outside its range, is answered 400 by the program's
-        // own code before its route's block runs; a hole's that is no number does not match the route (404).
+        // own code before its route's block runs; a hole's that is no number does not match the route (404). A
+        // string's is a whole segment of the path (its bytes as the server holds them, letters, digits, '-', '.', '_'
+        // and '~'), or the query's field of its name, its bytes as sent, nothing decoded.
         struct RouteParameter
         {
             std::string name;                     // "value", the query's field of that name for a query's
-            std::string type;                     // "int", "float", "bool" or "http_request" (the request itself)
+            std::string type;                     // "int", "float", "bool", "string" or "http_request" (the request)
             std::string source;                   // "path" (a hole of the route, `{note}`), "query" or "request"
             std::optional<double> minimum;        // fminus::range(minimum, maximum): the least value a request may give
             std::optional<double> maximum;        // and the greatest
             std::optional<double> defaultValue;   // fminus::default(value): a query's, when the request has none
+            // fminus::default("text"): a string parameter's of the query, when the request has none (defaultValue
+            // is a number's, and none for a string).
+            std::optional<std::string> defaultText = std::nullopt;
         };
 
         // One route of the program's source: a call of http_is, or a serve's route statement (`statement`). Its

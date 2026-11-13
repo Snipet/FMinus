@@ -160,7 +160,7 @@
             ]
         },
         "strings": {
-            "comment": "Lexer.l's string literals, C's, which FMinus has as an attribute's arguments and a builtin's: C's escapes (simple, octal, hex, and universal character names); another escape is an error, and so is a string a line ends inside. A format's places, %d and %%, a reply's %g and %.Ng, and a route's holes, {name}, stand out.",
+            "comment": "Lexer.l's string literals, C's, which FMinus has as an attribute's arguments and a builtin's: C's escapes (simple, octal, hex, and universal character names); another escape is an error, and so is a string a line ends inside. A format's places, %d and %%, a reply's %g, %.Ng and %s, and an address's holes, {name} ({{ and }} a brace), stand out.",
             "name": "string.quoted.double.fminus",
             "begin": "\"",
             "end": "(\")|$",
@@ -169,7 +169,8 @@
             "patterns": [
                 { "name": "constant.character.escape.fminus", "match": "\\\\(?:['\"?\\\\abfnrtv]|[0-7]{1,3}|x[0-9A-Fa-f]+|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8})" },
                 { "name": "invalid.illegal.unknown-escape.fminus", "match": "\\\\." },
-                { "name": "constant.other.placeholder.fminus", "match": "%(?:[d%g]|\\.[0-9]{1,2}g)" },
+                { "name": "constant.other.placeholder.fminus", "match": "%(?:[d%gs]|\\.[0-9]{1,2}g)" },
+                { "name": "constant.character.escape.fminus", "match": "\\{\\{|\\}\\}" },
                 { "name": "constant.other.placeholder.fminus", "match": "\\{[A-Za-z_][A-Za-z0-9_]*\\}" }
             ]
         },
@@ -214,7 +215,7 @@
         },
         "builtins": {
             "comment": "The builtins: <math.h>'s float functions and its exact double ones, <stdlib.h>'s heap, the FFT, hash and randf, bytes to numbers, and the recipes' reductions, poly queries, poly loads and stores, and runtime function.",
-            "match": "\\b(fabsf|sqrtf|sinf|cosf|tanf|expf|logf|floorf|fminf|fmaxf|tanhf|sqrt|fabs|floor|fmin|fmax|fma|malloc|calloc|free|fft_create|fft_create_complex|fft_forward|fft_inverse|fft_destroy|hash|randf|bytes_floats|bytes_pcm16|json_parse|json_free|json_float|json_double|json_int|json_bool|json_count|json_floats|json_choice|json_base64_floats|json_read|xml_parse|xml_free|xml_float|xml_double|xml_int|xml_bool|xml_count|xml_floats|xml_choice|http_get|http_post|http_wait|http_status|http_size|http_body|http_progress|http_cancel|http_close|http_listen|http_port|http_next|http_accept|http_is|http_arg|http_query_float|http_query_int|http_reply|http_reply_bytes|http_reply_text|file_read|file_status|file_size|file_data|file_list|file_count|file_read_nth|file_close|file_write|file_append|string_size|string_byte|string_slice|string_find|string_starts|string_ends|string_float|string_int|string_data|string_copy|string_of|reduce_add|reduce_min|reduce_max|poly_lanes|poly_index|poly_load|poly_store|db_to_gain)\\s*(?=\\()",
+            "match": "\\b(fabsf|sqrtf|sinf|cosf|tanf|expf|logf|floorf|fminf|fmaxf|tanhf|sqrt|fabs|floor|fmin|fmax|fma|malloc|calloc|free|fft_create|fft_create_complex|fft_forward|fft_inverse|fft_destroy|hash|randf|bytes_floats|bytes_pcm16|json_parse|json_free|json_float|json_double|json_int|json_bool|json_count|json_floats|json_choice|json_base64_floats|json_read|json_string|xml_parse|xml_free|xml_float|xml_double|xml_int|xml_bool|xml_count|xml_floats|xml_choice|xml_string|http_get|http_post|http_wait|http_status|http_size|http_body|http_progress|http_cancel|http_close|http_listen|http_port|http_next|http_accept|http_is|http_arg|http_query_float|http_query_int|http_header|http_path|http_query_string|http_reply|http_reply_bytes|http_reply_text|file_read|file_status|file_size|file_data|file_list|file_count|file_name|file_read_nth|file_close|file_write|file_append|string_size|string_byte|string_slice|string_find|string_starts|string_ends|string_float|string_int|string_data|string_copy|string_of|reduce_add|reduce_min|reduce_max|poly_lanes|poly_index|poly_load|poly_store|db_to_gain)\\s*(?=\\()",
             "captures": { "1": { "name": "support.function.builtin.fminus" } }
         },
         "functions": {

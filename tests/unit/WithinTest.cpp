@@ -5,8 +5,9 @@
 // slow one cancelled at the deadline (HTTP_TIMEOUT) while the others are 200, no deadline, one already passed, a request
 // started in a function the block calls, nested blocks, each way out (return, break, continue) after the block's own
 // defers, http_wait(r, -1) returning at the deadline, stopWeb() waking a thread at a block's end, a reply sent before
-// its route's scope ends and a serve bounded by the deadline (with the server), and the report's script (with the JSON
-// parser), and a module json_read fills from what a block fetched, after the block and inside one. Then a block
+// its route's scope ends and a serve bounded by the deadline (with the server), requests whose URLs have holes, a
+// string's among them (recipe 48's _s entry points), and the report's script (with the JSON parser), and a module
+// json_read fills from what a block fetched, after the block and inside one. Then a block
 // abandoned by the loop budget and by a bounds check, each with a request pending: afterwards the thread waits its own
 // time, a new block has its own deadline and its promise, and the program is destroyed with
 // nothing left; and a stop on a thread with no scope leaves another thread's scope alone. The library's abandon alone:
@@ -730,6 +731,81 @@ TEST_CASE("a reply in a within is sent before its scope ends; a serve in one wai
     }
 }
 #endif
+
+TEST_CASE("a request whose URL has holes, a string's among them, is the within's as any other",
+          "[web][within][holes]")
+{
+    // Where within and recipe 48 meet: a URL with holes (an int's in the port and the path, a string's in the path) is
+    // started through the library's _s entry points, which join the thread's scope as http_get and http_post do. The
+    // brace waits for them; one held by the server is cancelled at the deadline (HTTP_TIMEOUT). The string from the
+    // char array is "slow" only while the request is made: the stores around the call must both stay, at -O2 too.
+    Origin origin;
+    const char* source = "int fetch(int port, int slow, int ms, int* statuses)\n"
+                         "{\n"
+                         "    char held[8] = \"xlow\";\n"
+                         "    const string late = \"after\";\n"
+                         "    const int wait = 200;\n"
+                         "    http_response r[3];\n"
+                         "    within (ms)\n"
+                         "    {\n"
+                         "        held[0] = 115;   // 's'\n"
+                         "        const string stalled = string_of(held, 4);\n"
+                         "        r[0] = http_get(\"http://127.0.0.1:{port}/{late}/{wait}\");\n"
+                         "        r[1] = http_post(\"http://127.0.0.1:{port}/{late}/{wait}\", held, 0, \"\");\n"
+                         "        if (slow)\n"
+                         "            r[2] = http_get(\"http://127.0.0.1:{port}/{stalled}\");\n"
+                         "        else\n"
+                         "            r[2] = http_get(\"http://127.0.0.1:{port}/{late}/{wait}\");\n"
+                         "        held[0] = 120;   // 'x'\n"
+                         "    }\n"
+                         "    int pending = 0;\n"
+                         "    for (int k = 0; k < 3; ++k)\n"
+                         "    {\n"
+                         "        statuses[k] = http_status(r[k]);\n"
+                         "        if (statuses[k] == HTTP_PENDING)\n"
+                         "            pending += 1;\n"
+                         "        http_close(r[k]);\n"
+                         "    }\n"
+                         "    return pending;\n"
+                         "}\n";
+    for (const int level : {0, 2})
+    {
+        INFO("-O" << level);
+        fminus::Program::Options options;
+        options.keepIr = fminus::Program::KeepIr::Optimised;
+        auto program = compileFor(origin, source, level, options);
+        if (level == 2)
+        {
+            const std::string ir = program->optimisedIr();
+            CHECK(ir.find("@fminus_web_http_get_s(") != std::string::npos);
+            CHECK(ir.find("@fminus_web_http_post_s(") != std::string::npos);
+            CHECK(ir.find("@fminus_web_http_within_end(") != std::string::npos);
+        }
+        auto* fetch = function<int(int, int, int, int*)>(*program, "fetch");
+        const int port = origin.port();
+        const int before = origin.hits("/after/200");
+
+        // Three at once, each 200 ms: the brace waits for all of them, which together take about one's time.
+        int statuses[3] = {};
+        auto start = Clock::now();
+        CHECK(fetch(port, 0, 10000, statuses) == 0);
+        CHECK(since(start) >= 190ms);
+        CHECK(since(start) < 1000ms);
+        CHECK((statuses[0] == 200 && statuses[1] == 200 && statuses[2] == 200));
+        CHECK(origin.hits("/after/200") == before + 3);
+
+        // The held one, named by the char array's view: cancelled at the deadline, the others 200; none pending.
+        start = Clock::now();
+        CHECK(fetch(port, 1, 400, statuses) == 0);
+        CHECK(since(start) >= 390ms);
+        CHECK(since(start) < 3000ms);
+        CHECK((statuses[0] == 200 && statuses[1] == 200));
+        CHECK(statuses[2] == FMINUS_WEB_TIMEOUT);
+        CHECK(origin.hits("/slow") == level / 2 + 1);
+        CHECK(origin.hits("/xlow") == 0);
+    }
+    CHECK(eventually([&] { return origin.open() == 0; }));
+}
 
 #if FMINUS_HAS_JSON
 TEST_CASE("the report's script: every pack at once in one within, then each read", "[web][within][library]")

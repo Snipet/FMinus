@@ -12,10 +12,16 @@
 // the first % left without one, too many at the first int left over, and an argument that is no int an error at it.
 // The runtime gets the literal as written (its escapes resolved) and the ints, and makes the text itself
 // (runtime/Format.h). Every family of builtins that takes a path, a key or a URL with numbers in it checks it here.
+//
+// An address, a URL or a file's name, may name its values where they go instead: `{name}`, a hole, a variable in
+// scope (scanHoles finds them; Calls.cpp's lowerHoles fills them), `{{` and `}}` a brace. The library gets each hole
+// as a %d, or a %s for a string's, and its %% as it was: the literal's own percent signs reach it as themselves.
 #include "ir/Lowering.h"
 
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/GlobalVariable.h>
+
+#include <algorithm>
 
 namespace fminus::ir::detail
 {
@@ -93,6 +99,72 @@ namespace fminus::ir::detail
                 scan.errors.push_back({i + 1, "invalid conversion specifier '" + specifier + "'"});
             }
             i = j;
+        }
+        return scan;
+    }
+
+    HoleScan scanHoles(std::string_view text)
+    {
+        HoleScan scan;
+        const auto fail = [&](std::size_t offset, std::string message) {
+            scan.errors.push_back({offset, std::move(message)});
+            return scan;
+        };
+        const auto put = [&](char c, std::size_t offset) {
+            scan.library += c;
+            scan.offsets.push_back(offset);
+        };
+        const auto identifierByte = [](char c) {
+            return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+        };
+        std::optional<std::size_t> firstPercent;   // the literal's first %d, for the error at a hole after it
+        for (std::size_t i = 0; i < text.size(); ++i)
+        {
+            const char c = text[i];
+            if (c == '%' && i + 1 < text.size() && (text[i + 1] == '%' || text[i + 1] == 'd'))
+            {
+                if (text[i + 1] == 'd' && !scan.holes.empty())
+                    return fail(i, "a literal names its values by holes, {name}, or by %d after it, not both: this "
+                                   "one has a hole before");
+                if (text[i + 1] == 'd' && !firstPercent)
+                    firstPercent = i;
+                scan.percent = scan.percent || text[i + 1] == 'd';
+                put(c, i);
+                put(text[i + 1], i + 1);
+                ++i;
+                continue;
+            }
+            if ((c == '{' || c == '}') && i + 1 < text.size() && text[i + 1] == c)
+            {
+                put(c, i);   // {{ and }}: a brace
+                ++i;
+                continue;
+            }
+            if (c == '}')
+                return fail(i, "a '}' ends a hole, {name}, and this one ends none: a brace is written '}}'");
+            if (c != '{')
+            {
+                put(c, i);
+                continue;
+            }
+            const std::size_t close = text.find('}', i + 1);
+            if (close == std::string_view::npos)
+                return fail(i, "a '{' begins a hole, {name}, and this one has no '}': a brace is written '{{'");
+            const std::string_view name = text.substr(i + 1, close - i - 1);
+            if (name.empty())
+                return fail(close, "a hole names a variable, {name}, and this one names none");
+            if (name.front() >= '0' && name.front() <= '9')
+                return fail(i + 1, "a hole names a variable, {name}, and a name does not begin with a digit");
+            if (const auto bad = std::ranges::find_if_not(name, identifierByte); bad != name.end())
+                return fail(i + 1 + static_cast<std::size_t>(bad - name.begin()),
+                            "a hole names a variable, {name}: '" + shown(*bad) + "' is no part of a name");
+            if (firstPercent)
+                return fail(i, "a literal names its values by holes, {name}, or by %d after it, not both: this one "
+                               "has a %d before");
+            scan.holes.push_back({std::string(name), i, scan.library.size()});
+            put('%', i);
+            put('d', i);
+            i = close;
         }
         return scan;
     }

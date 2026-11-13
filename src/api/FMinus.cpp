@@ -658,7 +658,8 @@ namespace fminus
             std::vector<RouteParameter> parameters;
             for (ir::WebRouteParameter& parameter : route.parameters)
                 parameters.push_back({std::move(parameter.name), std::move(parameter.type), std::move(parameter.source),
-                                      parameter.minimum, parameter.maximum, parameter.defaultValue});
+                                      parameter.minimum, parameter.maximum, parameter.defaultValue,
+                                      std::move(parameter.defaultText)});
             webRoutes.push_back({std::move(route.method), std::move(route.pattern), std::move(route.file), route.line,
                                  route.column, route.statement, std::move(parameters)});
         }

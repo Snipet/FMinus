@@ -105,6 +105,7 @@ them.
 | `int file_size(f)`, `const void* file_data(f)` | the bytes read and their address, until `file_close`; one 0 byte follows the last, not counted. 0 and null for a file that was not read | wait-free |
 | `file_listing file_list("folder/*.ext", ...)` | the regular files of one directory whose names fit the pattern, in the order of their names' bytes, as of now ([listings](#listings)) | allocates |
 | `int file_count(list)` | how many | wait-free |
+| `string file_name(list, i)` | the `i`-th file's own name (from 0), without its folder (`"pad1.f32"`), a view valid until the listing's `file_close`; empty outside 0 to `file_count - 1`, and for a listing not made | wait-free |
 | `file_content file_read_nth(list, i)` | reads the `i`-th (from 0), as `file_read` does | allocates |
 | `void file_close(h)` | frees a file's bytes, or a listing | allocates |
 | `int file_write("name", data, bytes, ...)` | writes `bytes` bytes at `data` as the whole file, replacing it in one step or not at all ([writing](#writing)); `FMINUS_FILES_WRITE` | allocates |
@@ -113,6 +114,8 @@ them.
 - **A name is a string literal**, a format whose `%d`s are the `int`s after every other argument, as a URL's are
   (`file_write("takes/take%d.f32", data, bytes, n)`), checked where it is written ([below](#names-and-what-the-compiler-refuses))
   and recorded for the host: `Program::files()` lists every call, before anything runs.
+- **Or it names its values in holes** ([below](#holes)), `file_read("presets/{name}.json")`: each `{name}` a variable
+  in scope, an `int`, a `bool`, an enumeration's value or a `string`; the host's list has a `*` for each.
 - **A handle is opaque, and knows its kind**: a file, a `file_content`, or a listing, a `file_listing`, C's handles,
   which the compiler keeps apart (`file_count(f)` of a file is an error) while a `void*` converts to either, as in C,
   so a program that says `void*` compiles as before ([extending.md](extending.md), recipe 44). `file_read`, `file_list` and
@@ -132,7 +135,13 @@ them.
   from `file_data` on the audio thread for as long as the handle is open ([the audio thread](#the-audio-thread)).
 - **Bytes, not text.** `bytes_floats` and `bytes_pcm16` turn a file's bytes into numbers, and `json_parse` and
   `xml_parse` parse them ([README](../README.md), the builtins), and `string_of(file_data(f), file_size(f))` views them
-  as text, a `string` valid until `file_close`; no builtin gives a program a file's name.
+  as text, a `string` valid until `file_close`.
+- **A listing gives its files' names**, `file_name(list, i)`, each the entry's own as the listing holds it (only a name
+  a program could have written: [listings](#listings)), valid until the listing is closed. What a name is then good
+  for: comparing (`==`, `string_ends`), keeping (`string_copy` into a `char` array), a JSON literal or a reply, and **a
+  hole of a later name**, `file_read("kit/{name}")` no (the literal writes its extension), but
+  `file_read("kit/{stem}.f32")` with `stem` the name without its extension (`string_slice`), where the run-time
+  checks of a string's hole apply as to any string's ([holes](#holes)).
 - **The effects** ([extending.md](extending.md), recipe 11): every builtin that touches the disk is in the class that
   allocates, refused in a `[[clang::nonblocking]]` function and in a `[[clang::nonallocating]]` one, directly or
   through a function it calls (with clang's note naming the call); the four reads are wait-free, allowed in both.
@@ -202,6 +211,28 @@ setting at run time.
 | with it | `file_write("/tmp/a.f32", ...)` | `a file is written only in a folder its host grants for writing, never by an absolute name` |
 | without `FMINUS_FILES_WRITE` | `file_write(...)`, `file_append(...)` | `'file_write' needs file writing, which this build of FMinus leaves out (FMINUS_FILES_WRITE=OFF)` |
 
+### Holes
+
+A name may name its values where they go instead of `%d`s after it: `file_write("presets/{name}.json", data, bytes)`,
+`file_list("kit/{bank}/*.f32")`. A hole is `{identifier}`, a variable in scope where the call is (a local, a parameter,
+a field, a constant), of type `int`, `bool` or an enumerated type (written in decimal, as `%d` is) or `string`; not an
+expression. A literal has `%d`s or holes, not both, and a literal with holes takes no ints after it. `{{` and `}}` are a
+brace, `%%` a percent sign.
+
+- **No hole in the folder** (the first segment, or an absolute name's root) **nor in the extension**, which the
+  literal writes: the folder is what the host mapped, the extension the file's type.
+- **A `string` joins the segment it is written in**, and cannot add one: the name filled in is checked when it runs by
+  the rules the compiler applies to a literal's segments: no `/`, `\` or `*` from the string, no leading `.` or space,
+  no trailing `.` or space, none of `: ? " < > |` or a control character, no device name of Windows, UTF-8, 255 bytes a
+  segment, 1024 a name, 16 segments. A name that breaks one is **`FILE_INVALID`**, a status the program reads, never a
+  trap, and nothing is opened. Then `reach` opens it exactly as any name (the policy's refusals `FILE_REFUSED`).
+- **The host's list** (`Program::files()`) has a `*` for each hole, as for each `%d`: `"presets/*.json"`.
+
+Each mistake is an error at its byte, as a literal's are: a brace alone, an empty hole, a name that is none, a hole of
+another type (`hole {x} has type 'float': a hole takes an int, a bool, an enumeration's value or a string`), `a file's
+folder is its literal's own, a name its host maps: no hole in it`, `a file's extension is its type, which the literal
+writes: no hole in it`, a `%d` beside a hole, values after a literal with holes.
+
 The target is the program's (`Options::targetTriple`, or the process's): a name that begins with a drive letter is
 judged a Windows name only when the program is compiled for Windows. A name with no `/` at all, such as `"C:\\x"`, gets
 the first row's message.
@@ -241,7 +272,8 @@ regard to ASCII letter case, so `*.wav` finds `KICK.WAV` on every system, not on
 - **In the order of the names' bytes**, FMinus's own (operating systems promise none): `CLAP.F32` before `hat.f32`.
 - **Only what a program could have read.** A listing holds regular files whose names the rules allow (no hidden file,
   no device name, nothing with a `:`), of a type allowed in that folder, and, under `singleLink`, with one link. Links,
-  directories, FIFOs and anything else are skipped, never listed. A program never sees a name: only an index.
+  directories, FIFOs and anything else are skipped, never listed. A program reads a name by its index, `file_name`, a
+  view of the listing's own copy.
 - **All or nothing.** More matching files than the policy's `maxListed` is `FILE_LIMIT`, and no listing at all, not
   the first `maxListed`. A listing counts as one of `maxOpen`'s handles.
 
@@ -586,6 +618,13 @@ Recipe 43 in [extending.md](extending.md) walks through it as a change to the co
   twice, clean under AddressSanitizer. `FilesWindows.cpp` and `Files.cpp`'s Windows lines were type-checked on Linux
   (`clang++ -fsyntax-only -D_WIN32`, with the build's warnings and `-Werror`) against stub headers written from the
   Windows SDK's declarations: that finds a wrong type or name, not a wrong behaviour.
+- **Holes and `file_name`** (2026-11-13): built and tested in the default tree and in one with the web library, its
+  server, writing and absolute names, not in one with `FMINUS_FILES=OFF` nor with `FMINUS_FILES_TYPES` set; the
+  runtime's half (`fminus_rt_file_read_s` and the rest, `fminus_rt_file_name`) ran under the sanitizers when it was
+  written; through the JIT, a name a string makes wrong is `FILE_INVALID` (`tests/unit/HoleTest.cpp`), and a
+  nonblocking function reading a listing's names allocates nothing and makes no system call
+  (`tests/unit/DocumentTextTest.cpp`). `examples/presets/` writes and reads its files by names with holes, in a
+  directory its check makes.
 - **Not run anywhere yet:** macOS (the `O_RDONLY` walk, `O_NOFOLLOW_ANY`, `F_BARRIERFSYNC`, `EMLINK`'s meaning,
   `fstatfs`'s type names, the tests' non-Linux paths) and Windows (all of `FilesWindows.cpp`: `NtCreateFile` with and
   without `OBJ_DONT_REPARSE`, `FILE_ID_INFO`, ancestors by the final path, the long-name check, listing by

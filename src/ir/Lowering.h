@@ -13,7 +13,8 @@
 //     Calls.cpp         calls: the builtins (math functions, reductions, poly queries and memory, the heap, the FFT,
 //                       the runtime's others: bytes_floats, ...) and the program's
 //     Strings.cpp       string literals: a builtin's argument, a private constant passed as its address and length;
-//                       a format's places for ints, checked; the errors of a literal anywhere else
+//                       a format's places for ints, checked; an address's holes, {name}; the errors of a literal
+//                       anywhere else
 //     Text.cpp          the type string, a pointer and a length: a literal as one, == by content, a switch's
 //                       comparisons, its loads and stores as its two members, and the string_* builtins
 //     Paths.cpp         a JSON Pointer literal, json_float's and the others', or an XML path, xml_float's and the
@@ -31,7 +32,7 @@
 //                       and two routes of the program that one request could match, refused
 //     Serve.cpp         serve, route and reply: a loop over the requests waiting for a serve's routes, a switch on
 //                       which route each was published for, its parameters filled and checked, and a reply that leaves
-//                       the route; a JSON literal, a reply's body, made into a format of the reply's
+//                       the route; a JSON literal, a reply's body, written by the runtime's JSON writer
 //     Files.cpp         the file interface's builtins' own part: a file's name checked against the rules and the
 //                       build's ceilings and recorded for the host (files), the program's file context, and the
 //                       status codes' names (FILE_REFUSED, ...)
@@ -175,14 +176,22 @@ namespace fminus::ir::detail
     // printable ASCII. The web server's take a route, a string that is a method and a path with places for numbers
     // the request's path holds ("PUT /osc/%d/gain"), checked (WebServer.cpp) and recorded for the host and for the
     // route table, passed as a string is; a query's name, a string of letters, digits, '_', '-' and '.'; and a reply's
-    // format, a format whose places are C's printf's %d (an int or a bool) and %g or %.Ng (a float or a double),
-    // checked as clang checks printf's, after which the call gives a double for each place, passed as their address and
-    // their count. The file interface's take a file's name, a format whose ints are the call's last arguments, as a
+    // format, a format whose places are C's printf's %d (an int or a bool), %g or %.Ng (a float or a double) and %s (a
+    // string), checked as clang checks printf's, after which the call gives a double for each number's place, passed as
+    // their address and their count, and with a %s the strings after them, as an address's are (the _s function).
+    // The file interface's take a file's name, a format whose ints are the call's last arguments, as a
     // URL's are, checked further (Files.cpp: the rules a name keeps to, and the build's ceilings) and recorded for the
     // host, passed after the program's file context as a format is; and a listing's pattern, the same with one '*' in
     // its file part. Then the string_* builtins' (Text.cpp): a string, any value of type string (a literal among
     // them), passed to a function of the runtime as its pointer and its length; a char* the builtin writes; and a
-    // const char* it reads.
+    // const char* it reads. A builtin that gives a string from a function of the runtime (Result::String with a
+    // symbol) takes its string, if any, as the fallback for when the runtime finds none, which the code chooses (the
+    // runtime takes none). And a header's name, http_header's, a literal that is an HTTP token (RFC 9110).
+    //
+    // A URL, a file's name and a listing's pattern may name their values by holes in place of %d (scanHoles):
+    // `{name}`, a variable in scope, an int (a bool, an enumeration's value) written in decimal or a string filled in
+    // (escaped, or checked, by the library), each a %d or a %s to the library, which then takes the strings too; the
+    // call has no ints after the literal then.
     enum class Param
     {
         Int,
@@ -216,6 +225,7 @@ namespace fminus::ir::detail
         ReplyFormat,
         FileName,
         FilePattern,
+        HeaderName,
         Text,
         Chars,
         CharData,
@@ -223,8 +233,10 @@ namespace fminus::ir::detail
 
     // What a builtin of the runtime gives: an int, a float, a double, a bool (an int from the runtime, 0 or 1), a
     // handle (an http_response, an http_request, an http_server, a json_doc, an xml_doc, a file_content or a
-    // file_listing), a const void* (bytes the program may only read: http_body's) or nothing; or a string (made
-    // inline: no function of the runtime returns one, since C's ABI for a struct differs by platform).
+    // file_listing), a const void* (bytes the program may only read: http_body's) or nothing; or a string, made inline
+    // (no symbol), or from a function of the runtime that returns its pointer and writes its length through a pointer
+    // after its other arguments (no function of the runtime returns a struct, since C's ABI for one differs by
+    // platform).
     enum class Result
     {
         Int,
@@ -280,24 +292,49 @@ namespace fminus::ir::detail
     };
     FormatScan scanFormat(std::string_view text);
 
-    // A reply's format (WebServer.cpp, scanReplyFormat): C's printf's %d, %g, %.Ng (N from 1 to 17) and %%. Each place,
-    // in order, the offset of its '%' and whether it takes a double (%g, %.Ng) or an int (%d); and its errors, each at
-    // the offset of the byte it is about, in clang's words for printf's where clang has words for it.
+    // An address literal's holes (Strings.cpp, scanHoles): `{name}`, a C identifier in braces, each a place the
+    // library takes, `{{` and `}}` a brace. `library` is the literal with each brace unescaped and each hole a "%d"
+    // (whose 'd' becomes an 's' for a string's), `offsets` the offset in the literal of each of its bytes (a hole's
+    // two bytes its '{'), and each hole its name, its '{' and where its "%d" is in `library`. A literal's %d and %%
+    // are as they were: a %d with a hole is an error, at the second kind, and so are a lone '{' or '}', an empty `{}`
+    // and a name that is no identifier, each at its byte. `percent`: the literal has a %d.
+    struct HoleScan
+    {
+        struct Hole
+        {
+            std::string name;
+            std::size_t offset;   // of its '{'
+            std::size_t at;       // of its '%' in `library`
+        };
+        std::string library;
+        std::vector<std::size_t> offsets;
+        std::vector<Hole> holes;
+        std::vector<FormatScan::Error> errors;
+        bool percent = false;
+    };
+    HoleScan scanHoles(std::string_view text);
+
+    // A reply's format (WebServer.cpp, scanReplyFormat): C's printf's %d, %g, %.Ng (N from 1 to 17), %s and %%. Each
+    // place, in order, the offset of its '%' and whether it takes a double (%g, %.Ng), an int (%d) or a string (%s);
+    // and its errors, each at the offset of the byte it is about, in clang's words for printf's where clang has words
+    // for it.
     struct ReplyFormatScan
     {
         struct Place
         {
             std::size_t offset;
             bool real;
+            bool text = false;
         };
         std::vector<Place> places;
         std::vector<FormatScan::Error> errors;
     };
     ReplyFormatScan scanReplyFormat(std::string_view text);
 
-    // A route statement's literal (WebServer.cpp, scanRouteHoles): its holes, `{name}`, each where a %d could stand,
-    // and the literal the library takes, each hole a %d (`library`, with the offset in `text` of each of its bytes);
-    // and its errors, scanRoute's of that literal among them, each at the offset in `text` of the byte it is about.
+    // A route statement's literal (WebServer.cpp, scanRouteHoles): its holes, `{name}`, each where a %d could stand, or
+    // a whole segment for a string's (a name in `texts`), and the literal the library takes, each hole a %d, a
+    // string's a %s (`library`, with the offset in `text` of each of its bytes); and its errors, scanRoute's of that
+    // literal among them, each at the offset in `text` of the byte it is about.
     struct RouteHoles
     {
         struct Hole
@@ -310,12 +347,13 @@ namespace fminus::ir::detail
         std::vector<Hole> holes;
         std::vector<FormatScan::Error> errors;
     };
-    RouteHoles scanRouteHoles(std::string_view text);
+    RouteHoles scanRouteHoles(std::string_view text, const std::vector<std::string>& texts = {});
 
     // A route literal's errors (WebServer.cpp, scanRoute): a method of GET, POST, PUT, PATCH or DELETE, one space, and a
     // path of "/" and segments of letters, digits, '-', '.', '_', '~' and %d, none empty, "." or "..", with at most 8
-    // %d and never two together; each at the offset of the byte it is about. Empty: the route is good.
-    std::vector<FormatScan::Error> scanRoute(std::string_view text);
+    // %d and never two together; with `texts` (a route statement's), a %s too, a whole segment, counted with the %d;
+    // each at the offset of the byte it is about. Empty: the route is good.
+    std::vector<FormatScan::Error> scanRoute(std::string_view text, bool texts = false);
 
     // A file's name, or with `pattern` a listing's (Files.cpp, scanFileName), against the rules of runtime/Files.h,
     // each %d checked as a digit it may write: a folder's name and a path inside it, or with `anywhere` (a build with
@@ -324,11 +362,13 @@ namespace fminus::ir::detail
     // '.' or a space nor ending with either, none a device name of Windows; an extension the literal writes, of a type
     // in `types` (FMINUS_FILES_TYPES's form: lower case, separated by ';'; empty: any); at most 16 segments. Each
     // error at the offset of the byte it is about; empty: the name is good. `writes`: an absolute name is an error (a
-    // file is written only in a folder).
+    // file is written only in a folder). `holes`: the name's places are holes (each a %d, or a %s read as a letter),
+    // which the folder may not hold either.
     struct FileNameRules
     {
         bool pattern = false;
         bool writes = false;
+        bool holes = false;
         bool anywhere = false;           // the build has absolute names (FMINUS_FILES_ANYWHERE)
         bool windows = false;            // the target's form of an absolute name is Windows'
         std::string_view types = {};     // the build's types (FMINUS_FILES_TYPES)
@@ -587,6 +627,31 @@ namespace fminus::ir::detail
             unsigned replies = 0;
         };
 
+        // An address literal whose holes were filled in (Calls.cpp, lowerHoles): the literal the library takes, each
+        // hole a %d or a %s, with where each of its bytes is written (a hole's two at its '{'); each hole's '%' in it
+        // and whether it is a string's; and the holes' values, the ints' and the strings', each in order.
+        struct Filled
+        {
+            ast::StringExpr literal;
+            std::vector<std::size_t> places;
+            std::vector<bool> texts;
+            std::vector<llvm::Value*> ints;
+            std::vector<llvm::Value*> strings;
+        };
+
+        // A JSON literal's description for the runtime's writer, being made (Serve.cpp, jsonDescribe): its operations
+        // (runtime/Runtime.h's fminus_rt_json_write), its bytes, the bytes not yet in an operation, and its values,
+        // each lowered with the first of its 8-byte slots, and the slots they take.
+        struct JsonPlan
+        {
+            std::vector<std::int32_t> code;
+            std::string bytes;
+            std::string pending;
+            std::vector<std::pair<std::int32_t, Value>> values;
+            std::int32_t slots = 0;
+            void flush();
+        };
+
         // A route literal of the program, a route statement's or an http_is call's (WebServer.cpp), for the check that
         // no two of them one request could match without one being more specific: the library's text (holes as
         // %d), as it was written, where, and whether a route statement wrote it.
@@ -830,6 +895,10 @@ namespace fminus::ir::detail
         Value lowerRuntimeCall(SourceLocation location, const RuntimeBuiltin& builtin,
                                const std::vector<const ast::Expr*>& args, std::optional<Value> first);
         llvm::Value* formatInts(const std::vector<llvm::Value*>& values);
+        std::pair<llvm::Value*, llvm::Value*> formatTexts(const std::vector<llvm::Value*>& values);
+        std::optional<Filled> lowerHoles(const ast::StringExpr& literal, const HoleScan& scan);
+        Value textResult(const RuntimeBuiltin& builtin, std::vector<llvm::Value*> args,
+                         std::optional<llvm::Value*> fallback);
         llvm::CallInst* callRuntime(const std::string& name, llvm::Type* result, const std::vector<llvm::Value*>& args);
 
         // ---- Strings.cpp --------------------------------------------------------------------------------------------
@@ -856,6 +925,7 @@ namespace fminus::ir::detail
 
         // ---- Web.cpp ------------------------------------------------------------------------------------------------
         bool checkUrl(const ast::StringExpr& literal, SourceLocation where);
+        bool checkUrlHoles(const Filled& filled);
         bool checkContentType(const ast::StringExpr& literal, SourceLocation where);
         void recordWebRequest(SourceLocation location, std::string_view method, const ast::StringExpr& literal);
         llvm::Value* webContext(SourceLocation location);
@@ -865,8 +935,10 @@ namespace fminus::ir::detail
         // ---- WebServer.cpp ------------------------------------------------------------------------------------------
         bool checkRoute(const ast::StringExpr& literal, SourceLocation where);
         bool checkQueryName(const ast::StringExpr& literal, SourceLocation where);
+        bool checkHeaderName(const ast::StringExpr& literal, SourceLocation where);
         std::optional<std::vector<llvm::Value*>> replyArguments(const ast::StringExpr& literal,
-                                                                const std::vector<const ast::Expr*>& values);
+                                                                const std::vector<const ast::Expr*>& values,
+                                                                std::vector<llvm::Value*>& texts);
         llvm::Value* replyValues(const std::vector<llvm::Value*>& values);
         void recordWebRoute(SourceLocation location, const ast::StringExpr& literal, SourceLocation where);
         std::size_t routeIndex(const std::string& text);
@@ -883,13 +955,13 @@ namespace fminus::ir::detail
         void fillParameter(const ast::RouteParam& param, std::optional<std::size_t> hole, llvm::Value* request,
                            llvm::BasicBlock* bad);
         void lowerReply(SourceLocation location, const ast::ReplyStmt& reply);
-        Value lowerJsonReply(SourceLocation location, const ast::Expr& status, const ast::JsonExpr& json,
-                             llvm::Value* request);
-        bool jsonFormat(const ast::JsonValue& value, std::string& format, std::vector<llvm::Value*>& values);
+        Value lowerJsonReply(const ast::Expr& status, const ast::Expr& literal, llvm::Value* request);
+        bool jsonDescribe(const ast::JsonValue& value, JsonPlan& plan);
         const Breakable* innermost(std::initializer_list<Breakable::Kind> kinds) const;
 
         // ---- Files.cpp ----------------------------------------------------------------------------------------------
-        bool checkFileName(const ast::StringExpr& literal, SourceLocation where, std::string_view builtin);
+        bool checkFileName(const ast::StringExpr& literal, SourceLocation where, std::string_view builtin,
+                           bool holes = false);
         void recordFileUse(SourceLocation location, std::string_view operation, const ast::StringExpr& literal);
         llvm::Value* filesContext();
         const Binding* fileStatus(const std::string& name) const;

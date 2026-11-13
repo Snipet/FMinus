@@ -1,0 +1,71 @@
+// Holes in a file's name (src/ir/Strings.cpp's scanHoles, Calls.cpp's lowerHoles; docs/files.md): `{name}`, a
+// variable in scope, each a %d (an int, a bool, an enumeration's value) or a %s (a string) of the literal the runtime
+// takes, `{{` a brace. With a string's hole the call is the _s function, which takes the strings in two arrays of the
+// frame (their addresses, their lengths) after the ints, and reads through them memory no argument points to; with
+// ints' alone, the plain function, as for %d. Each name is recorded with a '*' for each hole. Run, a name a string
+// makes another segment of, or "..", is FILE_INVALID (-6), a status, and nothing is opened.
+// REQUIRES: files
+// RUN: fminus %s -O0 | FileCheck %s
+// RUN: fminus %s | FileCheck %s --check-prefix=OPT
+// RUN: rm -rf %t && mkdir -p %t/presets/warm
+// RUN: printf 'abc' > %t/presets/warm/3-1.txt
+// RUN: printf 'braced' > '%t/presets/{x}.txt'
+// RUN: fminus %s --run main 3 --files-read presets=%t/presets | FileCheck %s --check-prefix=RESULT
+// RUN: rm -rf %t
+
+enum Wave { SINE, SAW };
+
+int size(string name, int k, enum Wave wave)
+{
+    file_content c = file_read("presets/{name}/{k}-{wave}.txt");
+    defer file_close(c);
+    return file_status(c) == FILE_OK ? file_size(c) : file_status(c);
+}
+
+int numbers(int k, bool on)
+{
+    file_content c = file_read("presets/v{k}/{on}.txt");
+    defer file_close(c);
+    return file_status(c);
+}
+
+int braces()
+{
+    file_content c = file_read("presets/{{x}}.txt");
+    defer file_close(c);
+    return file_size(c);
+}
+
+int main(int k)
+{
+    return size("warm", k, SAW) * 1000 + size("..", k, SAW) * 100 + size("warm/..", k, SAW) * 10 + braces();
+}
+
+// CHECK: @.str = private unnamed_addr constant [20 x i8] c"presets/%s/%d-%d.txt", align 1
+// CHECK: @.str.1 = private unnamed_addr constant [18 x i8] c"presets/v%d/%d.txt", align 1
+// CHECK: @.str.2 = private unnamed_addr constant [15 x i8] c"presets/{x}.txt", align 1
+// CHECK-LABEL: define i32 @size(
+// CHECK: store i32 %k2, ptr %{{[0-9]+}}, align 4, !tbaa
+// CHECK: store i32 %wave3, ptr %{{[0-9]+}}, align 4, !tbaa
+// CHECK: store ptr %{{[0-9]+}}, ptr %{{[0-9]+}}, align 8, !tbaa
+// CHECK: store i32 %{{[0-9]+}}, ptr %{{[0-9]+}}, align 4, !tbaa
+// CHECK: %file_read = call ptr @fminus_rt_file_read_s(ptr %files.context, ptr @.str, i32 20, ptr %format.ints, i32 2, ptr %format.texts, ptr %format.lengths, i32 1)
+// CHECK-LABEL: define i32 @numbers(
+// CHECK: %file_read = call ptr @fminus_rt_file_read(ptr %files.context, ptr @.str.1, i32 18, ptr %format.ints, i32 2)
+// CHECK-LABEL: define i32 @braces(
+// CHECK: call ptr @fminus_rt_file_read(ptr %files.context, ptr @.str.2, i32 15, ptr null, i32 0)
+// CHECK: declare noundef ptr @fminus_rt_file_read_s(ptr, ptr readonly captures(none), i32, ptr readonly captures(none), i32, ptr readonly captures(none), ptr readonly captures(none), i32) [[S:#[0-9]+]]
+// CHECK: attributes [[S]] = { nounwind willreturn memory(read, argmem: readwrite, inaccessiblemem: readwrite, errnomem: readwrite{{.*}}) }
+// CHECK: !fminus.files = !{![[A:[0-9]+]], ![[B:[0-9]+]], ![[C:[0-9]+]]}
+// CHECK: ![[A]] = !{!"read", !"presets/*/*-*.txt",
+// CHECK: ![[B]] = !{!"read", !"presets/v*/*.txt",
+// CHECK: ![[C]] = !{!"read", !"presets/{x}.txt",
+
+// Optimised, the strings' arrays stay: the call reads them.
+// OPT-LABEL: define {{.*}}i32 @size(
+// OPT: %name.fca.0.extract = extractvalue { ptr, i32 } %name, 0
+// OPT: store ptr %name.fca.0.extract, ptr %format.texts
+// OPT: call ptr @fminus_rt_file_read_s(
+
+// The result: 3 * 1000 + FILE_INVALID * 100 + FILE_INVALID * 10 + 6
+// RESULT: 2346

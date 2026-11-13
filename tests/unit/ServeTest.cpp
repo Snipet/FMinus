@@ -5,7 +5,9 @@
 // answered 500, two serves on two threads each taking its own routes' requests only, webRoutes() with the parameters,
 // and the wait-free proof of a serve in a [[clang::nonblocking]] method (HeapCalls, seccomp's strict mode). Then the
 // compiler's errors, each at its column, and the missing reply on each shape of control flow the missing return's tests
-// cover; and where a serve meets string, char and when (a route's when, a switch on a string in a route, their errors).
+// cover; and where a serve meets string, char and when (a route's when, a switch on a string in a route, their errors);
+// and where it meets json_read and holes (a route's string parameters, its body read into a module, stored by a file
+// name with a hole in a directory the test makes beside bin/, with the JSON parser and file writing).
 // Nothing here binds or connects anywhere but 127.0.0.1. In a build without the web server, a serve is the
 // error that names the option; the rest is not compiled, nor on Windows, whose sockets it is not written for.
 #include "Compile.h"
@@ -25,7 +27,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <functional>
+#include <iterator>
 #include <memory>
 #include <thread>
 #include <vector>
@@ -57,6 +62,18 @@ TEST_CASE("a serve, in a build without the web server, is the error its builtins
              "(FMINUS_WEB_SERVER=OFF)\n");
     CHECK(errorsOf("void f() { reply 204; }")
           == "test.fm:1:12: error: 'reply' statement not in a route\n");
+}
+#endif
+
+#if FMINUS_HAS_WEB_SERVER && !FMINUS_HAS_JSON
+TEST_CASE("a JSON literal, in a build without the JSON writer, is the error that names the option", "[codegen][serve]")
+{
+    CHECK(errorsOf("void f(http_server s)\n"
+                   "{\n"
+                   "    serve (s) { route \"GET /a\" { reply 200, json { \"a\": 1 }; } }\n"
+                   "}\n")
+          == "test.fm:3:40: error: a JSON literal needs the JSON writer, which this build of FMinus leaves out "
+             "(FMINUS_JSON=OFF)\n");
 }
 #endif
 
@@ -144,6 +161,29 @@ namespace
     Response request(int port, const std::string& method, const std::string& target, const std::string& body = "")
     {
         return readResponse(sendRequest(port, method, target, body));
+    }
+
+    // The same, with header fields of its own before the end of the head ("Name: value\r\n" each).
+    Response requestWith(int port, const std::string& method, const std::string& target, const std::string& fields)
+    {
+        const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (fd < 0)
+            return {};
+        timeval wait{20, 0};
+        ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &wait, sizeof wait);
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        address.sin_port = htons(static_cast<std::uint16_t>(port));
+        if (::connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof address) != 0)
+        {
+            ::close(fd);
+            return {};
+        }
+        const std::string text = method + " " + target + " HTTP/1.1\r\nHost: 127.0.0.1:" + std::to_string(port)
+                                 + "\r\nConnection: close\r\n" + fields + "Content-Length: 0\r\n\r\n";
+        ::send(fd, text.data(), text.size(), MSG_NOSIGNAL);
+        return readResponse(fd);
     }
 
     // The host's audio thread: `process` called about once a millisecond until it is destroyed.
@@ -362,7 +402,8 @@ TEST_CASE("a JSON literal is written as the program wrote it: its numbers shorte
         "    float zero;\n"
         "    float tenth;\n"
         "    int replies;\n"
-        "    void init() { server = http_listen(); tenth = 0.1f; }\n"
+        "    char kept[4];\n"
+        "    void init() { server = http_listen(); tenth = 0.1f; kept[0] = 97; kept[2] = 98; }\n"
         "    int port() { return http_port(server); }\n"
         "    void process() [[clang::nonblocking]]\n"
         "    {\n"
@@ -390,6 +431,18 @@ TEST_CASE("a JSON literal is written as the program wrote it: its numbers shorte
         "            }\n"
         "            route \"GET /empty\" { reply 200, json {}; }\n"
         "            route \"GET /array\" { reply 200, json [tenth, 2]; }\n"
+        "            route \"GET /strings/{name}\" (string name, string q [[fminus::default(\"\")]], http_request r)\n"
+        "            {\n"
+        "                const string t = \"q\\\"b\\\\c\\n\\t\\x01\\x7f\\xc3\\xa9 %d\";\n"
+        "                reply 200, json { name, \"q\": q, \"lit\": \"a\\\"b\", \"t\": t, \"empty\": \"\", "
+        "\"none\": string_slice(t, 3, 1),\n"
+        "                                  \"zero\": string_of(&kept[0], 3), \"path\": http_path(r), "
+        "\"pick\": [q == \"\" ? \"no q\" : q, name] };\n"
+        "            }\n"
+        "            route \"GET /format/{name}\" (string name, int n)\n"
+        "            {\n"
+        "                reply 200, \"text/plain\", \"%s=%d [%s] %s%%\", name, n, \"lit\", string_slice(name, 1, 3);\n"
+        "            }\n"
         "        }\n"
         "    }\n"
         "};\n";
@@ -409,6 +462,20 @@ TEST_CASE("a JSON literal is written as the program wrote it: its numbers shorte
           == "{\"q\\\"b\\\\c\\n\\t\\u0001\x7f\":0,\"%d %%\":1,\"\xc3\xa9t\xc3\xa9\":2,\"a/b\":3}");
     CHECK(request(served.port, "GET", "/empty").body == "{}");
     CHECK(request(served.port, "GET", "/array").body == "[0.1,2]");
+    // Strings: a parameter's, a literal's, a string's with every byte JSON escapes (and one above 0x7f, as it is), an
+    // empty one, crossed ends, a 0 byte, a builtin's, and an arm of a ?:.
+    CHECK(request(served.port, "GET", "/strings/warm-pad?q=a%22b").body
+          == "{\"name\":\"warm-pad\",\"q\":\"a%22b\",\"lit\":\"a\\\"b\","
+             "\"t\":\"q\\\"b\\\\c\\n\\t\\u0001\x7f\xc3\xa9 %d\","
+             "\"empty\":\"\",\"none\":\"\",\"zero\":\"a\\u0000b\",\"path\":\"/strings/warm-pad\","
+             "\"pick\":[\"a%22b\",\"warm-pad\"]}");
+    CHECK(request(served.port, "GET", "/strings/x").body
+          == "{\"name\":\"x\",\"q\":\"\",\"lit\":\"a\\\"b\",\"t\":\"q\\\"b\\\\c\\n\\t\\u0001\x7f\xc3\xa9 %d\","
+             "\"empty\":\"\",\"none\":\"\",\"zero\":\"a\\u0000b\",\"path\":\"/strings/x\",\"pick\":[\"no q\",\"x\"]}");
+    // %s in a reply's format: a string's bytes as they are, a literal's too.
+    const Response formatted = request(served.port, "GET", "/format/bright?n=7");
+    CHECK(formatted.body == "bright=7 [lit] ri%");
+    CHECK(formatted.head.find("Content-Type: text/plain") != std::string::npos);
 }
 
 TEST_CASE("a reply over the host's maxReplyBytes is the library's HTTP_LIMIT, which the route answers 500",
@@ -547,6 +614,126 @@ TEST_CASE("webRoutes lists a route statement with its parameters: name, type, wh
     CHECK(is->webRoutes()[0].parameters.empty());
 }
 
+TEST_CASE("a string parameter is a whole segment of the path, or a query's field as sent; a request's header, path "
+          "and query read as text",
+          "[serve][web][server][string]")
+{
+    constexpr const char* kTexts =
+        "module Texts\n"
+        "{\n"
+        "    http_server server;\n"
+        "    char kept[32];\n"
+        "    int size;\n"
+        "    void init() { server = http_listen(); }\n"
+        "    int port() { return http_port(server); }\n"
+        "    void process() [[clang::nonblocking]]\n"
+        "    {\n"
+        "        serve (server)\n"
+        "        {\n"
+        "            route \"PUT /presets/{name}\" (string name)\n"
+        "            {\n"
+        "                size = string_copy(kept, 32, name);\n"
+        "                reply 201, string_data(name), string_size(name), \"text/plain\";\n"
+        "            }\n"
+        "            route \"GET /presets/{name}\" (string name, string mode [[fminus::default(\"full\")]])\n"
+        "            {\n"
+        "                switch (mode)\n"
+        "                {\n"
+        "                case \"full\":\n"
+        "                    reply 200, string_data(name), string_size(name), \"text/plain\";\n"
+        "                case \"size\":\n"
+        "                    reply 200, \"text/plain\", \"%d\", string_size(name);\n"
+        "                default:\n"
+        "                    reply 200, string_data(mode), string_size(mode), \"text/plain\";\n"
+        "                }\n"
+        "            }\n"
+        "            route \"GET /presets/default\" { reply 200, \"text/plain\", \"the literal\"; }\n"
+        "            route \"GET /presets/{k}\" (int k) { reply 200, \"text/plain\", \"number %d\", k; }\n"
+        "            route \"GET /a/{x}/{n}/{y}\" (string y, int n, string x)\n"
+        "            {\n"
+        "                reply 200, \"text/plain\", \"%d %d %d %d\", string_size(x), n, string_size(y), x == y;\n"
+        "            }\n"
+        "            route \"GET /need\" (string v) { reply 200, string_data(v), string_size(v), \"text/plain\"; }\n"
+        "            route \"GET /header\" (http_request q)\n"
+        "            {\n"
+        "                const string h = http_header(q, \"X-Preset\");\n"
+        "                reply 200, string_data(h), string_size(h), \"text/plain\";\n"
+        "            }\n"
+        "            route \"GET /path/{k}\" (int k, http_request q)\n"
+        "            {\n"
+        "                const string p = http_path(q);\n"
+        "                reply 200, string_data(p), string_size(p), \"text/plain\";\n"
+        "            }\n"
+        "            route \"GET /query\" (http_request q)\n"
+        "            {\n"
+        "                const string v = http_query_string(q, \"v\", \"(none)\");\n"
+        "                reply 200, string_data(v), string_size(v), \"text/plain\";\n"
+        "            }\n"
+        "        }\n"
+        "    }\n"
+        "};\n";
+    Served served = serveProgram(kTexts, "Texts");
+    const Pump pump([&] { served.process(served.instance->memory()); });
+    const int port = served.port;
+
+    // From the path: a whole segment, its bytes as the server holds them, kept in a char array.
+    const Response put = request(port, "PUT", "/presets/warm-pad_2.v~1");
+    CHECK(put.status == 201);
+    CHECK(put.body == "warm-pad_2.v~1");
+    CHECK(field<int>(*served.program, *served.instance, "Texts", "size") == 14);
+    CHECK(request(port, "GET", "/presets/bright").body == "bright");
+    // A literal segment before a number's hole before a string's, whichever the program wrote first.
+    CHECK(request(port, "GET", "/presets/default").body == "the literal");
+    CHECK(request(port, "GET", "/presets/0042").body == "number 42");
+    CHECK(request(port, "GET", "/presets/42x").body == "42x");
+    // A path the server holds no segment of (a byte it takes no path with, an empty segment) is the library's 400.
+    CHECK(request(port, "GET", "/presets/a%20b").status == 400);
+    CHECK(request(port, "GET", "/presets/").status == 400);
+    // From the query, as sent (nothing decoded), its default when it is missing; empty is empty.
+    CHECK(request(port, "GET", "/presets/x?mode=size").body == "1");
+    CHECK(request(port, "GET", "/presets/x?mode=a%20b+c").body == "a%20b+c");
+    CHECK(request(port, "GET", "/presets/x?mode=").body == "");
+    CHECK(request(port, "GET", "/presets/xyz").body == "xyz");
+    CHECK(request(port, "GET", "/need?v=hello").body == "hello");
+    CHECK(request(port, "GET", "/need?v=").status == 200);
+    CHECK(request(port, "GET", "/need?v").status == 200);
+    CHECK(request(port, "GET", "/need").status == 400);
+    CHECK(request(port, "GET", "/need?w=1").status == 400);
+    // Holes filled in the path's order whatever the parameters' order, strings and ints together.
+    CHECK(request(port, "GET", "/a/abc/7/de").body == "3 7 2 0");
+    CHECK(request(port, "GET", "/a/q/0/q").body == "1 0 1 1");
+    // A header: its first field of the name, in any letter case, without the white space around its value; empty
+    // when there is none.
+    CHECK(requestWith(port, "GET", "/header", "x-preset:   warm pad \t\r\nX-Preset: second\r\n").body == "warm pad");
+    CHECK(requestWith(port, "GET", "/header", "X-PRESET: Up\r\n").body == "Up");
+    CHECK(requestWith(port, "GET", "/header", "").body == "");
+    CHECK(requestWith(port, "GET", "/header", "X-Presets: no\r\n").body == "");
+    // The path as sent, without its query.
+    CHECK(request(port, "GET", "/path/007?x=1").body == "/path/007");
+    // A query's field, or the fallback.
+    CHECK(request(port, "GET", "/query?v=%41&w=2").body == "%41");
+    CHECK(request(port, "GET", "/query?w=2").body == "(none)");
+    CHECK(request(port, "GET", "/query?v=").body == "");
+
+    // And the host's list of them.
+    const std::vector<fminus::Program::WebRoute>& routes = served.program->webRoutes();
+    REQUIRE(routes.size() == 9);
+    CHECK(routes[0].pattern == "/presets/*");
+    REQUIRE(routes[0].parameters.size() == 1);
+    CHECK(routes[0].parameters[0].type == "string");
+    CHECK(routes[0].parameters[0].source == "path");
+    CHECK_FALSE(routes[0].parameters[0].defaultText);
+    REQUIRE(routes[1].parameters.size() == 2);
+    CHECK(routes[1].parameters[1].name == "mode");
+    CHECK(routes[1].parameters[1].type == "string");
+    CHECK(routes[1].parameters[1].source == "query");
+    CHECK(routes[1].parameters[1].defaultText == "full");
+    CHECK_FALSE(routes[1].parameters[1].defaultValue);
+    CHECK_FALSE(routes[1].parameters[1].minimum);
+    CHECK(routes[4].pattern == "/a/*/*/*");
+    CHECK_FALSE(routes[5].parameters[0].defaultText);
+}
+
 TEST_CASE("a serve in a [[clang::nonblocking]] method, compiled by the JIT, takes, fills and answers without "
           "allocating or making a system call",
           "[serve][web][server][library]")
@@ -567,10 +754,12 @@ TEST_CASE("a serve in a [[clang::nonblocking]] method, compiled by the JIT, take
         "    {\n"
         "        serve (server)\n"
         "        {\n"
-        "            route \"POST /table/{k}\" (int k [[fminus::range(0, 99)]], float v, int n, bool b "
-        "[[fminus::default(0)]], http_request r)\n"
+        "            route \"POST /table/{k}/{name}\" (int k [[fminus::range(0, 99)]], float v, int n, bool b "
+        "[[fminus::default(0)]], http_request r, string name, string mode [[fminus::default(\"none\")]])\n"
         "            {\n"
-        "                sum = k + v + n + (b ? 100 : 0) + http_size(r);\n"
+        "                sum = k + v + n + (b ? 100 : 0) + http_size(r) + string_size(name) + string_size(mode)\n"
+        "                      + string_size(http_header(r, \"x-n\")) + string_size(http_path(r))\n"
+        "                      + string_size(http_query_string(r, \"v\", \"\"));\n"
         "                answered += 1;\n"
         "                if (kind == 0)\n"
         "                    reply 204;\n"
@@ -586,9 +775,10 @@ TEST_CASE("a serve in a [[clang::nonblocking]] method, compiled by the JIT, take
     fminus::Program::Options options;
     options.web.server.replyTimeoutMs = 20000;
     Served served = serveProgram(kTaker, "Taker", options);
-    const double expected = 12 + 0.75 - 3 + 100 + 4;
-    const std::string post = "POST /table/12?v=0.75&n=-3&b=true HTTP/1.1\r\nHost: 127.0.0.1:"
-                             + std::to_string(served.port) + "\r\nContent-Length: 4\r\n\r\nwxyz";
+    // The bytes, the name (3), the mode's default (4), the header (5), the path (13) and the query's v (4).
+    const double expected = 12 + 0.75 - 3 + 100 + 4 + 3 + 4 + 5 + 13 + 4;
+    const std::string post = "POST /table/12/abc?v=0.75&n=-3&b=true HTTP/1.1\r\nHost: 127.0.0.1:"
+                             + std::to_string(served.port) + "\r\nX-N: hello\r\nContent-Length: 4\r\n\r\nwxyz";
     std::vector<int> clients;
     const auto send = [&] {
         const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
@@ -841,10 +1031,14 @@ TEST_CASE("serve, route and reply's errors, each once at its column", "[codegen]
                    "{ reply 1; }\n"
                    "    }\n"
                    "}\n")
-          == "test.fm:5:30: error: a route's parameter is an int, a float, a bool or an http_request, not 'int *'\n"
-             "test.fm:5:40: error: a route's parameter is an int, a float, a bool or an http_request, not 'float4'\n"
-             "test.fm:5:50: error: a route's parameter is an int, a float, a bool or an http_request, not 'double'\n"
-             "test.fm:6:35: error: parameter 'x' fills the hole {x}, a number of the path: it is an int, not 'float'\n"
+          == "test.fm:5:30: error: a route's parameter is an int, a float, a bool, a string or an http_request, not "
+             "'int *'\n"
+             "test.fm:5:40: error: a route's parameter is an int, a float, a bool, a string or an http_request, not "
+             "'float4'\n"
+             "test.fm:5:50: error: a route's parameter is an int, a float, a bool, a string or an http_request, not "
+             "'double'\n"
+             "test.fm:6:35: error: parameter 'x' fills the hole {x}, a segment of the path or a number in one: it is "
+             "an int or a string, not 'float'\n"
              "test.fm:6:46: error: fminus::range's minimum must be below its maximum\n"
              "test.fm:6:78: error: the default of an int parameter is an int, not 1.5\n"
              "test.fm:7:37: error: 'fminus::default' does not apply to a hole's parameter: a request the route takes "
@@ -892,10 +1086,8 @@ TEST_CASE("serve, route and reply's errors, each once at its column", "[codegen]
              "test.fm:10:56: error: format specifies type 'double' but the argument has type 'int'\n"
              "test.fm:11:44: error: character '\\x0a' is not allowed in a content type: it is printable ASCII\n"
              "test.fm:12:53: error: a JSON literal is a reply's whole body: nothing follows it\n"
-             "test.fm:13:48: error: a JSON literal's value is a float, a double, an int, a bool, an object or an "
-             "array, not 'int *'\n"
-             "test.fm:13:56: error: a JSON literal's value is a float, a double, an int, a bool, an object or an "
-             "array in this version, and not yet a string\n"
+             "test.fm:13:48: error: a JSON literal's value is a float, a double, an int, a bool, a string, an object "
+             "or an array, not 'int *'\n"
              "test.fm:13:64: error: duplicate key 'a' in a JSON object\n"
              "test.fm:13:43: note: previous key is here\n"
              "test.fm:14:31: error: incompatible pointer to integer conversion passing 'char[4]' to parameter of "
@@ -903,8 +1095,8 @@ TEST_CASE("serve, route and reply's errors, each once at its column", "[codegen]
              "test.fm:15:44: error: a JSON key is UTF-8 text, and this byte is no part of any\n"
              "test.fm:15:59: error: FMinus has no JSON values: a JSON literal is only a reply's body, 'reply "
              "status, json { ... };'\n"
-             "test.fm:16:36: error: a JSON literal does not take a value of an enumerated type yet: cast it to "
-             "int for its number\n"
+             "test.fm:16:36: error: a JSON literal does not take a value of an enumerated type yet, which a later "
+             "version writes as its constant's name: cast it to int for its number\n"
              "test.fm:16:59: error: FMinus has no JSON values: a JSON literal is only a reply's body, 'reply "
              "status, json { ... };'\n"
              "test.fm:20:20: error: FMinus has no JSON values: a JSON literal is only a reply's body, 'reply "
@@ -1109,32 +1301,60 @@ TEST_CASE("a route sees through a when as through an if without an else, and thr
     }
 }
 
+TEST_CASE("a JSON literal's values a later version writes are each an error that says so", "[codegen][serve][json]")
+{
+    CHECK(errorsOf("enum Wave { SINE, SAW };\n"
+                   "module M { float x; };\n"
+                   "void f(http_server s, float* p)\n"
+                   "{\n"
+                   "    float a[3];\n"
+                   "    float4 v;\n"
+                   "    M m;\n"
+                   "    enum Wave w = SAW;\n"
+                   "    serve (s) { route \"GET /a\" { reply 200, json { \"a\": a, \"v\": v, \"m\": m, \"w\": w, "
+                   "\"p\": p, \"s\": s }; } }\n"
+                   "}\n")
+          == "test.fm:9:57: error: a JSON literal does not take an array yet, which a later version writes: write its "
+             "elements, [a[0], a[1], ...]\n"
+             "test.fm:9:65: error: a JSON literal does not take a vector yet, which a later version writes: write its "
+             "lanes, [v.x, v.y, ...]\n"
+             "test.fm:9:73: error: a JSON literal does not take a module yet, which a later version writes: write its "
+             "fields, { \"name\": m.name, ... }\n"
+             "test.fm:9:81: error: a JSON literal does not take a value of an enumerated type yet, which a later "
+             "version writes as its constant's name: cast it to int for its number\n"
+             "test.fm:9:89: error: a JSON literal's value is a float, a double, an int, a bool, a string, an object or "
+             "an array, not 'float *'\n"
+             "test.fm:9:97: error: a JSON literal's value is a float, a double, an int, a bool, a string, an object or "
+             "an array, not 'http_server'\n");
+}
+
 TEST_CASE("serve meets string, char and when: each error once, at its column", "[codegen][serve][when][string]")
 {
-    // A string or char parameter is a later step's, as any other type is; a when in a route of a function that is no
-    // method has nowhere to keep its state.
+    // A char parameter is no route's, as any other type but theirs; a string's default is a string, it has no range,
+    // and its hole is a whole segment; a when in a route of a function that is no method has nowhere to keep its state.
+    const std::string kinds = "a route's parameter is an int, a float, a bool, a string or an http_request, not ";
     CHECK(errorsOf("void f(http_server s, int n)\n"
                    "{\n"
                    "    serve (s)\n"
                    "    {\n"
                    "        route \"GET /a\" (string text, const char c, char* p, string q [[fminus::default(1)]]) "
                    "{ reply 1; }\n"
-                   "        route \"GET /b/{k}\" (string k) { reply 1; }\n"
+                   "        route \"GET /b/{k}x\" (string k [[fminus::range(0, 1)]]) { reply 1; }\n"
                    "        route \"GET /c\" (int k) { when (k > 1) reply 1; reply 2; }\n"
                    "    }\n"
                    "}\n")
-          == "test.fm:5:32: error: a route's parameter is an int, a float, a bool or an http_request, not 'string'\n"
-             "test.fm:5:49: error: a route's parameter is an int, a float, a bool or an http_request, not 'char'\n"
-             "test.fm:5:58: error: a route's parameter is an int, a float, a bool or an http_request, not 'char *'\n"
-             "test.fm:5:68: error: a route's parameter is an int, a float, a bool or an http_request, not 'string'\n"
-             "test.fm:6:36: error: a route's parameter is an int, a float, a bool or an http_request, not 'string'\n"
+          == "test.fm:5:49: error: " + kinds + "'char'\n"
+             "test.fm:5:58: error: " + kinds + "'char *'\n"
+             "test.fm:5:72: error: the default of a string parameter is a string literal, as fminus::default(\"saw\")\n"
+             "test.fm:6:23: error: a string's hole is a whole segment of the path, as \"/presets/{name}\": it takes "
+             "all the segment's bytes\n"
+             "test.fm:6:41: error: 'fminus::range' does not apply to a string parameter: a string has no range\n"
              "test.fm:7:34: error: a 'when' keeps its state, one bool, in the instance of the module whose method it "
              "is in, and 'f' is no method: move it into a method of a module\n");
-    // A string in a JSON literal, a literal, a string or a ?: of literals, one error each (a char element is an int);
-    // a string where a reply's content type or format goes is the text form's non-literal, and among a format's
-    // values the error another non-number is; a string as a serve's server or timeout, the error each gives.
-    const std::string json = "a JSON literal's value is a float, a double, an int, a bool, an object or an array in "
-                             "this version, and not yet a string\n";
+    // A string in a JSON literal, a literal, a string or a ?: of literals, is a JSON string (a char element an int):
+    // no error; a string where a reply's content type or format goes is the text form's non-literal, and among a
+    // format's values for a %g the error another non-number is; a string as a serve's server or timeout, the error
+    // each gives.
     const std::string literal = "argument to 'http_reply_text' must be a string literal\n";
     CHECK(errorsOf("module M\n"
                    "{\n"
@@ -1167,9 +1387,8 @@ TEST_CASE("serve meets string, char and when: each error once, at its column", "
                    "        serve (server, t) { route \"GET /e\" { reply 1; } }\n"
                    "    }\n"
                    "};\n")
-          == "test.fm:12:52: error: " + json + "test.fm:13:52: error: " + json + "test.fm:13:61: error: " + json
-                 + "test.fm:13:76: error: " + json + "test.fm:14:40: error: " + literal + "test.fm:15:54: error: "
-                 + literal + "test.fm:16:66: error: format specifies type 'double' but the argument has type 'string'\n"
+          == "test.fm:14:40: error: " + literal + "test.fm:15:54: error: " + literal
+                 + "test.fm:16:66: error: format specifies type 'double' but the argument has type 'string'\n"
                  + "test.fm:17:40: error: " + literal + "test.fm:18:28: error: " + literal
                  + "test.fm:25:16: error: passing 'char[7]' to parameter of incompatible type 'http_server'\n"
                    "test.fm:26:16: error: passing 'string' to parameter of incompatible type 'http_server'\n"
@@ -1177,4 +1396,185 @@ TEST_CASE("serve meets string, char and when: each error once, at its column", "
                    "type 'int'\n"
                    "test.fm:28:24: error: passing 'string' to parameter of incompatible type 'int'\n");
 }
+
+TEST_CASE("a route's parameters and a module's fields: one rule for their defaults and the json:: attributes",
+          "[codegen][serve][json-read][string]")
+{
+    // A string field takes no default (json_read leaves it out), nor a range; a number's default is no string, a
+    // field's or a parameter's; a route's string parameter takes a string literal of the query's, and no range;
+    // json::name and json::skip are a module's fields', unknown on a route's parameter. Each error once, at its column.
+    const std::string field = "'fminus::default' does not apply to a string field: json_read leaves a string field "
+                              "out, so its default would never be used\n";
+    const std::string unknown = ": a route's parameter takes fminus::range(min, max) and fminus::default(value)\n";
+    CHECK(errorsOf("module Fields\n"
+                   "{\n"
+                   "    string s [[fminus::default(\"x\")]];\n"
+                   "    string t [[fminus::default(1)]] [[fminus::range(0, 1)]];\n"
+                   "    float f [[fminus::default(\"x\")]];\n"
+                   "    param float g [[fminus::default(\"x\")]];\n"
+                   "    param string h [[fminus::default(\"x\")]];\n"
+                   "    float k [[json::name(\"kk\")]];\n"
+                   "};\n"
+                   "\n"
+                   "void routes(http_server server)\n"
+                   "{\n"
+                   "    serve (server)\n"
+                   "    {\n"
+                   "        route \"GET /a\" (int n [[fminus::default(\"x\")]], string s [[fminus::default(1)]]) "
+                   "{ reply 204; }\n"
+                   "        route \"GET /b\" (string s [[json::name(\"x\")]], float f [[json::skip]]) { reply 204; }\n"
+                   "        route \"GET /c\" (string s [[fminus::default(\"ok\")]], string t [[fminus::range(0, 1)]]) "
+                   "{ reply 204; }\n"
+                   "        route \"GET /d/{s}\" (string s [[fminus::default(1)]]) { reply 204; }\n"
+                   "    }\n"
+                   "}\n")
+          == "test.fm:3:16: error: " + field + "test.fm:4:16: error: " + field
+                 + "test.fm:4:39: error: 'fminus::range' attribute only applies to fields of numbers (float, double, "
+                   "int, a float vector and arrays of them), not 'string'\n"
+                   "test.fm:5:15: error: 'fminus::default' takes one number\n"
+                   "test.fm:6:21: error: 'fminus::default' takes one number\n"
+                   "test.fm:7:18: error: a parameter is a float, an int or a bool, not 'string'\n"
+                   "test.fm:15:33: error: 'fminus::default' takes one number\n"
+                   "test.fm:15:68: error: the default of a string parameter is a string literal, as "
+                   "fminus::default(\"saw\")\n"
+                   "test.fm:16:36: error: unknown attribute 'json::name'" + unknown
+                 + "test.fm:16:65: error: unknown attribute 'json::skip'" + unknown
+                 + "test.fm:17:72: error: 'fminus::range' does not apply to a string parameter: a string has no "
+                   "range\n"
+                   "test.fm:18:40: error: 'fminus::default' does not apply to a hole's parameter: a request the route "
+                   "takes always has its segment\n");
+}
+
+#if FMINUS_HAS_JSON && FMINUS_HAS_FILES_WRITE
+namespace
+{
+    // Where recipes 48 and 50 meet: a route with a string parameter of its path and one of its query, and the request,
+    // whose body is parsed and read into a module with json_read, then stored by a file name with a hole.
+    constexpr const char* kStore =
+        "enum Wave { SINE, SAW, SQUARE };\n"
+        "module Preset\n"
+        "{\n"
+        "    char label[16];\n"
+        "    float gain [[fminus::range(0, 1)]];\n"
+        "    enum Wave wave [[fminus::default(1)]];\n"
+        "    int steps [[json::name(\"n\")]] [[fminus::default(4)]];\n"
+        "};\n"
+        "module Store\n"
+        "{\n"
+        "    http_server server;\n"
+        "    int stored;\n"
+        "    void init() { server = http_listen(); }\n"
+        "    int port() { return http_port(server); }\n"
+        "    void process()\n"
+        "    {\n"
+        "        serve (server)\n"
+        "        {\n"
+        "            route \"PUT /presets/{name}\" (string name, http_request q,\n"
+        "                                         string tag [[fminus::default(\"none\")]])\n"
+        "            {\n"
+        "                json_doc doc = json_parse(http_body(q), http_size(q));\n"
+        "                defer json_free(doc);\n"
+        "                Preset p;\n"
+        "                if (!json_read(doc, \"\", &p))\n"
+        "                    reply 422, json { \"error\": \"incomplete\", name, tag };\n"
+        "                switch (file_write(\"presets/{name}.json\", http_body(q), http_size(q)))\n"
+        "                {\n"
+        "                case FILE_OK:\n"
+        "                    stored += 1;\n"
+        "                    reply 201, json { name, tag, \"first\": p.label[0], \"gain\": p.gain,\n"
+        "                                      \"wave\": (int)p.wave, \"n\": p.steps };\n"
+        "                case FILE_INVALID:\n"
+        "                    reply 400, json { \"error\": \"not a name\", name };\n"
+        "                default:\n"
+        "                    reply 500;\n"
+        "                }\n"
+        "            }\n"
+        "        }\n"
+        "    }\n"
+        "};\n";
+
+    // A directory of this test's own beside bin/ (the build tree), removed when it goes.
+    class StoreDirectory
+    {
+    public:
+        StoreDirectory()
+        {
+            namespace fs = std::filesystem;
+            fs::path tree;
+#if defined(__linux__)
+            std::error_code error;
+            const fs::path self = fs::read_symlink("/proc/self/exe", error);
+            if (!error)
+                tree = self.parent_path().parent_path();
+#endif
+            if (tree.empty())
+                tree = fs::current_path();
+            path_ = tree / "serve-test" / ("t" + std::to_string(::getpid()));
+            fs::remove_all(path_);
+            fs::create_directories(path_);
+            path_ = fs::canonical(path_);
+        }
+        ~StoreDirectory()
+        {
+            std::error_code ignored;
+            std::filesystem::remove_all(path_, ignored);
+            std::filesystem::remove(path_.parent_path(), ignored);
+        }
+        StoreDirectory(const StoreDirectory&) = delete;
+        StoreDirectory& operator=(const StoreDirectory&) = delete;
+
+        const std::filesystem::path& path() const { return path_; }
+
+    private:
+        std::filesystem::path path_;
+    };
+} // namespace
+
+TEST_CASE("a route with string parameters reads its body into a module with json_read and stores it by a name with a "
+          "hole",
+          "[serve][web][server][json-read][holes][files]")
+{
+    const StoreDirectory directory;
+    fminus::Program::Options options;
+    options.files.folders = {{"presets", directory.path().string(), true, {}}};
+    Served served = serveProgram(kStore, "Store", options);
+    const Pump pump([&] { served.process(served.instance->memory()); });
+    const int port = served.port;
+    const auto stored = [&] { return field<int>(*served.program, *served.instance, "Store", "stored"); };
+    const auto contents = [&](const std::string& name) {
+        std::ifstream in(directory.path() / name, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    };
+
+    // Whole: the module filled (a char array, a number in its range, an enumeration by name, a default), the body
+    // stored as presets/warm.json, and the reply's strings the route's parameters.
+    const std::string warm = R"({"label":"warm pad","gain":0.25,"wave":"SQUARE","extra":[1,2]})";
+    Response response = request(port, "PUT", "/presets/warm", warm);
+    CHECK(response.status == 201);
+    CHECK(response.body == R"({"name":"warm","tag":"none","first":119,"gain":0.25,"wave":2,"n":4})");
+    CHECK(contents("warm.json") == warm);
+    CHECK(stored() == 1);
+
+    // The query's string as sent; a gain outside its range does not fill the field, json_read says so, and nothing is
+    // stored.
+    response = request(port, "PUT", "/presets/cold?tag=a%20b", R"({"label":"c","gain":2,"n":8})");
+    CHECK(response.status == 422);
+    CHECK(response.body == R"({"error":"incomplete","name":"cold","tag":"a%20b"})");
+    CHECK_FALSE(std::filesystem::exists(directory.path() / "cold.json"));
+
+    // A name the file's rules refuse (a hidden file): FILE_INVALID, the route's 400, nothing written.
+    response = request(port, "PUT", "/presets/.hidden", warm);
+    CHECK(response.status == 400);
+    CHECK(response.body == R"({"error":"not a name","name":".hidden"})");
+    CHECK_FALSE(std::filesystem::exists(directory.path() / ".hidden.json"));
+
+    // Another whole one, the enumeration by its number and the field by its json::name.
+    const std::string bright = R"({"gain":1,"label":"b","wave":0,"n":16})";
+    response = request(port, "PUT", "/presets/bright-2?tag=x", bright);
+    CHECK(response.status == 201);
+    CHECK(response.body == R"({"name":"bright-2","tag":"x","first":98,"gain":1,"wave":0,"n":16})");
+    CHECK(contents("bright-2.json") == bright);
+    CHECK(stored() == 2);
+}
+#endif
 #endif

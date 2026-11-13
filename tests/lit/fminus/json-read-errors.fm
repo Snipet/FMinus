@@ -38,7 +38,7 @@ module Attributes
 // CHECK: json-read-errors.fm:21:33: error: unknown attribute 'json::other': a field takes json::name("name") and json::skip
 // CHECK: json-read-errors.fm:22:15: error: duplicate JSON name 'a' in module 'Attributes'
 // CHECK: json-read-errors.fm:20:11: note: previous field of that JSON name is here
-// CHECK: json-read-errors.fm:23:16: error: 'fminus::default' attribute only applies to parameters and to fields of numbers and bools (float, double, int, bool, a float vector and arrays of them), not 'string'
+// CHECK: json-read-errors.fm:23:16: error: 'fminus::default' does not apply to a string field: json_read leaves a string field out, so its default would never be used
 // CHECK: json-read-errors.fm:24:13: error: the default of an int field is an int, not 0.5
 // CHECK: json-read-errors.fm:25:14: error: the default of a bool field is 0 or 1, not -1
 // CHECK: json-read-errors.fm:26:11: error: the default of 'r', 2, is outside its fminus::range(0, 1)

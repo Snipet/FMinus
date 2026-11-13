@@ -798,8 +798,10 @@ TEST_CASE("a format the library trusts no byte of: stray percents, missing value
           "[web][server]")
 {
     std::mutex mutex;
-    std::vector<std::string> formats = {"%", "a%", "%x%q", "%d %g %.5g", "%.g", "%.123g", "%.5", "%%%d"};
-    std::vector<std::vector<double>> values = {{}, {}, {}, {1.0}, {2.0}, {3.0}, {}, {std::nan(""), 1.0}};
+    // %r, %R and %b were a JSON literal's, which the JSON writer writes now: each is itself, as %s is here (only
+    // fminus_web_http_reply_text_s fills a %s).
+    std::vector<std::string> formats = {"%", "a%", "%x%q", "%d %g %.5g", "%.g", "%.123g", "%.5", "%%%d", "%r%R%b%s %d"};
+    std::vector<std::vector<double>> values = {{}, {}, {}, {1.0}, {2.0}, {3.0}, {}, {std::nan(""), 1.0}, {4.0}};
     std::size_t next = 0;
     Served served(serving(), [&](void* r) {
         std::lock_guard lock(mutex);
@@ -807,7 +809,7 @@ TEST_CASE("a format the library trusts no byte of: stray percents, missing value
         ++next;
     });
     auto client = clientFor(served.port);
-    const std::vector<std::string> expected = {"%", "a%", "%x%q", "1  ", "%.g", "%.123g", "%.5", "%0"};
+    const std::vector<std::string> expected = {"%", "a%", "%x%q", "1  ", "%.g", "%.123g", "%.5", "%0", "%r%R%b%s 4"};
     for (std::size_t i = 0; i < formats.size(); ++i)
     {
         void* request = clientGet(*client, served.port, "/hello");
@@ -816,6 +818,71 @@ TEST_CASE("a format the library trusts no byte of: stray percents, missing value
         CHECK(bodyOf(request) == expected[i]);
         fminus_web_http_close(request);
     }
+}
+
+TEST_CASE("a reply's text with strings: each %s the next string as it is, the values in the other places",
+          "[web][server]")
+{
+    struct Case
+    {
+        std::string format;
+        std::vector<double> values;
+        std::vector<std::string> texts;
+        std::string expected;
+    };
+    const std::vector<Case> cases = {
+        {"%s", {}, {"warm"}, "warm"},
+        {"%s=%g, %s=%d %%", {0.5, 7.0}, {"gain", "n"}, "gain=0.5, n=7 %"},
+        {"[%s][%s]", {}, {"", std::string("a\0b\n\"\xff", 6)}, std::string("[][a\0b\n\"\xff]", 10)},
+        {"%s %s %s", {}, {"one"}, "one  "},   // a %s past the last string is nothing
+        {"no places", {}, {"unused"}, "no places"},
+        {"%d%s%g", {1.0, 2.0}, {"-"}, "1-2"},
+    };
+    std::mutex mutex;
+    std::size_t next = 0;
+    Served served(serving(), [&](void* r) {
+        std::lock_guard lock(mutex);
+        const Case& c = cases[next++];
+        std::vector<const char*> data;
+        std::vector<std::int32_t> lengths;
+        for (const std::string& text : c.texts)
+        {
+            data.push_back(text.data());
+            lengths.push_back(static_cast<std::int32_t>(text.size()));
+        }
+        fminus_web_http_reply_text_s(r, 200, "", 0, c.format.data(), static_cast<std::int32_t>(c.format.size()),
+                                     c.values.data(), static_cast<std::int32_t>(c.values.size()), data.data(),
+                                     lengths.data(), static_cast<std::int32_t>(data.size()));
+    });
+    auto client = clientFor(served.port);
+    for (const Case& c : cases)
+    {
+        void* request = clientGet(*client, served.port, "/hello");
+        REQUIRE(fminus_web_http_wait(request, 5000) == 200);
+        INFO(c.format);
+        CHECK(bodyOf(request) == c.expected);
+        fminus_web_http_close(request);
+    }
+    // A string that is not one, a negative length or a null address with bytes, is FMINUS_WEB_INVALID and sends
+    // nothing; null arrays, or none, leave every %s empty.
+    Served held(serving(), nullptr);
+    auto heldClient = clientFor(held.port);
+    void* asked = clientGet(*heldClient, held.port, "/hello");
+    void* received = fminus_web_http_accept(held.server, 5000);
+    REQUIRE(received != nullptr);
+    const char* texts[] = {"x", nullptr};
+    const std::int32_t negative[] = {1, -1};
+    const std::int32_t nullWithBytes[] = {1, 3};
+    CHECK(fminus_web_http_reply_text_s(received, 200, "", 0, "%s%s", 4, nullptr, 0, texts, negative, 2)
+          == FMINUS_WEB_INVALID);
+    CHECK(fminus_web_http_reply_text_s(received, 200, "", 0, "%s%s", 4, nullptr, 0, texts, nullWithBytes, 2)
+          == FMINUS_WEB_INVALID);
+    CHECK(fminus_web_http_reply_text_s(nullptr, 200, "", 0, "%s", 2, nullptr, 0, texts, negative, 1)
+          == FMINUS_WEB_INVALID);
+    CHECK(fminus_web_http_reply_text_s(received, 200, "", 0, "<%s>", 4, nullptr, 0, nullptr, nullptr, 2) == 0);
+    REQUIRE(fminus_web_http_wait(asked, 5000) == 200);
+    CHECK(bodyOf(asked) == "<>");
+    fminus_web_http_close(asked);
 }
 
 // ---- the library's own client against the server ------------------------------------------------------------------
@@ -2378,13 +2445,17 @@ TEST_CASE("taking, reading and answering a request allocate nothing and make no 
         sum += static_cast<double>(queryFloat(r, "v", 0.0f)) + queryInt(r, "n", 0) + fminus_web_http_size(r);
         sum += static_cast<const char*>(fminus_web_http_body(r))[0];
         static const double values[] = {0.1, 2.0, -7.0};
+        static const char* const texts[] = {"warm", "pad"};
+        static const std::int32_t lengths[] = {4, 3};
         std::int32_t replied = 0;
         if (kind == 0)
             replied = fminus_web_http_reply(r, 204);
         else if (kind == 1)
             replied = fminus_web_http_reply_bytes(r, 200, "bytes", 5, "a/b", 3);
-        else
+        else if (kind == 2)
             replied = fminus_web_http_reply_text(r, 200, "", 0, "%g %.9g %d %%", 13, values, 3);
+        else
+            replied = fminus_web_http_reply_text_s(r, 200, "", 0, "%s %g %s", 8, values, 1, texts, lengths, 2);
         return replied == 0;
     };
     const double expected = port + 10.0 + 12.0 + 0.75 - 3.0 + 4.0 + 'w';
@@ -2399,7 +2470,7 @@ TEST_CASE("taking, reading and answering a request allocate nothing and make no 
     // In this process: no allocation, counted on this thread, for each kind of reply.
     if (fminus::test::HeapCalls::counted())
     {
-        for (int kind = 0; kind < 3; ++kind)
+        for (int kind = 0; kind < 4; ++kind)
         {
             send();
             bool done = false;
@@ -2425,6 +2496,8 @@ TEST_CASE("taking, reading and answering a request allocate nothing and make no 
         }
         Reader replies(clients[2]);
         CHECK(replies.next()->body == "0.1 2 -7 %");
+        Reader strings(clients[3]);
+        CHECK(strings.next()->body == "warm 0.1 pad");
     }
     else
         WARN("this build does not count the heap's calls (a sanitizer): allocation is not checked");
@@ -2434,7 +2507,7 @@ TEST_CASE("taking, reading and answering a request allocate nothing and make no 
     // is untouched, and is answered after. Linux only.
     send();
 #if defined(__linux__)
-    for (int kind = 0; kind < 3; ++kind)
+    for (int kind = 0; kind < 4; ++kind)
     {
         bool checked = false;
         for (int attempt = 0; attempt < 200 && !checked; ++attempt)
@@ -2464,7 +2537,7 @@ TEST_CASE("taking, reading and answering a request allocate nothing and make no 
             {
                 WARN("seccomp's strict mode is not available here: the system calls are not checked");
                 checked = true;
-                kind = 3;
+                kind = 4;
                 break;
             }
             REQUIRE(WIFEXITED(status));

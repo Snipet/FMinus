@@ -50,7 +50,7 @@ Each file states what it tests in its first line, then has a few helpers and the
   `RecoveryTest.cpp`, `DoubleTest.cpp`, `Array2DTest.cpp`, `FieldAttributeTest.cpp`, `StringTest.cpp`, `BytesTest.cpp`,
   `JsonTest.cpp`, `XmlTest.cpp` (with `HeapCalls.h`, which counts a thread's calls of the C heap), `HandleTest.cpp`,
   `DeferTest.cpp`, `SelectionDeclarationTest.cpp`, `ServeTest.cpp`'s errors, `StringTypeTest.cpp`,
-  `WhenTest.cpp`, `WithinTest.cpp`'s errors and `JsonReadTest.cpp`, and the
+  `WhenTest.cpp`, `WithinTest.cpp`'s errors, `JsonReadTest.cpp`, `HoleTest.cpp`'s and `DocumentTextTest.cpp`'s, and the
   compiler's own: `VersionTest.cpp`, `TbaaTest.cpp`, `ZeroInitTest.cpp`, `AttributeTest.cpp`, `DenormalTest.cpp`,
   `LoopBudgetTest.cpp`, whose `compileAt` compiles at any level with the budget on or off, `BoundsCheckTest.cpp`,
   whose `compileAt` does the same with the bounds checks and keeps the checks' descriptions, and `CallThunkTest.cpp`,
@@ -105,7 +105,11 @@ TEST_CASE("functions compute what they say", "[codegen]")
   `ConditionalTest.cpp`, in both, whose `parsed` takes the defines and `condition` an `#if`'s expression), `[strings]`
   (string literals as builtins' arguments, formats, the effects' blocking class and the build options of builtins:
   `StringTest.cpp`), `[string-type]` (the type `string`, its builtins and `char` arrays: `StringTypeTest.cpp`, in both,
-  the unit tests' with `HeapCalls.h`), `[when]` (`when`: `WhenTest.cpp`, in both), `[bytes]` (`bytes_floats` and
+  the unit tests' with `HeapCalls.h`; and the text a document and a listing give, `json_string`, `xml_string` and
+  `file_name`: `DocumentTextTest.cpp`), `[holes]` (an address's `{name}` holes: `HoleTest.cpp`, `scanHoles` and the
+  errors in every build, and with `FMINUS_FILES` files read, listed and written by names with holes in a directory it
+  makes, with `FMINUS_WEB_SERVER` a URL's strings percent-encoded byte by byte, one program asking another on
+  loopback), `[when]` (`when`: `WhenTest.cpp`, in both), `[bytes]` (`bytes_floats` and
   `bytes_pcm16`: `BytesTest.cpp`), `[json-read]` (`json_read`, a module's table and the `json::` attributes:
   `JsonReadTest.cpp`, whose program tests only a build with `FMINUS_JSON` has, and whose test of the name passes in
   both; its proofs as `[json]`'s), `[numbers]` (the runtime's reader
@@ -137,11 +141,14 @@ TEST_CASE("functions compute what they say", "[codegen]")
   and `reply` through the JIT over raw loopback requests (each parameter's 404 and 400, each reply's form, a JSON
   literal's text, a refused reply's 500, two serves on two threads, `webRoutes()` with parameters, the wait-free proof
   of a serve, and their errors; and where they meet `when`, `string` and `char`: a route's `when`s and a `switch` on a
-  string in a nonblocking method, the missing reply through both, and the errors); and `WithinTest.cpp` (`[within]`),
-  `within` through the JIT against a small HTTP/1.1 server of its own (the promise at the brace, the deadline, nesting,
-  each way out, `stopWeb()`, a reply and a serve in a block, the report's script, and where it meets `json_read`
-  (`[json-read]`): a module filled from each document a block fetched, after the block and inside one through
-  `this`), a block the loop budget
+  string in a nonblocking method, the missing reply through both, and the errors; a route's `string` parameters, a
+  request's header, path and query as text, a JSON literal's strings and `%s`; and where they meet `json_read`
+  (`[json-read]`): a route's body read into a module and stored by a file name with a hole in a directory the test
+  makes beside `bin/`, and the one rule of a field's and a route parameter's defaults); and `WithinTest.cpp`
+  (`[within]`), `within` through the JIT against a small HTTP/1.1 server of its own (the promise at the brace, the
+  deadline, nesting, each way out, `stopWeb()`, a reply and a serve in a block, URLs with holes (`[holes]`), the
+  report's script, and where it meets `json_read` (`[json-read]`): a module filled from each document a block fetched,
+  after the block and inside one through `this`), a block the loop budget
   (`[budget]`) or a bounds check (`[bounds]`) stops, the library's abandon with threads racing it and its wait-free
   proof, and the errors (in a build without the library, the one error). Every socket they bind is on 127.0.0.1, and every connection they make is to it; this machine's
   kernel has no IPv6, so the `localhost` and `[::1]` cases take their no-IPv6 branch. Their timeouts make them

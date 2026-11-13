@@ -306,7 +306,10 @@ namespace fminus::ir::detail
     // or a field's of numbers (what the host's control or display spans, and the values json_read fills a field
     // with), and fminus::default(value), one number, a parameter's (what setDefaults sets) or a field's whose values
     // are numbers or bools (what json_read sets it to when a document does not fill it: an int's an integer, a bool's
-    // 0 or 1), within its range; another of its namespace is unknown. With `member` (a module's field or parameter;
+    // 0 or 1), within its range; another of its namespace is unknown. A route's string parameter (Serve.cpp) has no
+    // range, and its default is one string literal, the text a request without it reads; a string field takes none,
+    // as json_read leaves a string out (Shapes.cpp): a number's default is no string, and a string's no number, for a
+    // field and a parameter alike. With `member` (a module's field or parameter;
     // not a route's parameter, which Serve.cpp checks), json::name("name") and json::skip (Shapes.cpp,
     // checkJsonAttribute). Clang's are a function's (Effects.cpp). A name without a namespace that is none of C23's
     // standard attributes is ignored, with clang's warning: C keeps those names for its standard, and `range` is more
@@ -322,6 +325,7 @@ namespace fminus::ir::detail
         const ast::Type leaf = ast::lanes(element) > 1 && !ast::isMask(element) ? ast::Type::Float : element;
         const bool defaults = leaf == ast::Type::Float || leaf == ast::Type::Double || leaf == ast::Type::Int
                               || leaf == ast::Type::Bool;
+        const bool text = leaf == ast::Type::String;
         std::optional<double> minimum, maximum, initial;
         for (const ast::Attribute& attribute : field.attributes)
         {
@@ -358,7 +362,13 @@ namespace fminus::ir::detail
             const bool onlyNumbers = numbers.size() == attribute.args.size();
             if (attribute.name == "fminus::range")
             {
-                if (!onlyNumbers || numbers.size() != 2)
+                if (field.isParam && text)
+                {
+                    if (!refused)
+                        error(attribute.location,
+                              "'fminus::range' does not apply to a string parameter: a string has no range");
+                }
+                else if (!onlyNumbers || numbers.size() != 2)
                     error(attribute.location, "'fminus::range' takes two numbers, a minimum and a maximum");
                 else if (!field.isParam && !numeric && !refused)
                     error(attribute.location, "'fminus::range' attribute only applies to fields of numbers (float, "
@@ -376,13 +386,25 @@ namespace fminus::ir::detail
             {
                 const bool integral = !field.isParam && leaf == ast::Type::Int;
                 const bool truth = !field.isParam && leaf == ast::Type::Bool;
-                if (!field.isParam && !defaults)
+                if (!field.isParam && text)
+                {
+                    if (!refused)
+                        error(attribute.location, "'fminus::default' does not apply to a string field: json_read "
+                                                  "leaves a string field out, so its default would never be used");
+                }
+                else if (!field.isParam && !defaults)
                 {
                     if (!refused)
                         error(attribute.location, "'fminus::default' attribute only applies to parameters and to "
                                                   "fields of numbers and bools (float, double, int, bool, a float "
                                                   "vector and arrays of them), not "
                                                       + quoted(ast::typeName(type)));
+                }
+                else if (field.isParam && text)
+                {
+                    if (!refused && (attribute.args.size() != 1 || !attribute.args[0].isString))
+                        error(attribute.location, "the default of a string parameter is a string literal, as "
+                                                  "fminus::default(\"saw\")");
                 }
                 else if (!onlyNumbers || numbers.size() != 1)
                     error(attribute.location, "'fminus::default' takes one number");

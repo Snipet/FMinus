@@ -53,26 +53,22 @@ void outside(http_server server, bool b)
 
 // CHECK: serve-errors.fm:15:9: error: function with 'nonblocking' attribute must not call non-'nonblocking' function 'http_accept'
 // CHECK: serve-errors.fm:17:31: error: a route statement writes a hole as {name}, a parameter's name: %d is http_is's spelling
-// CHECK: serve-errors.fm:18:40: error: parameter 'k' fills the hole {k}, a number of the path: it is an int, not 'float'
+// CHECK: serve-errors.fm:18:40: error: parameter 'k' fills the hole {k}, a segment of the path or a number in one: it is an int or a string, not 'float'
 // CHECK: serve-errors.fm:18:52: error: fminus::range's minimum must be below its maximum
 // CHECK: serve-errors.fm:19:60: error: route 'GET /b' does not reply in all control paths
 // CHECK: serve-errors.fm:20:30: error: cannot return from a route: a route ends with a reply
-// CHECK: serve-errors.fm:21:53: error: a JSON literal's value is a float, a double, an int, a bool, an object or an array, not 'http_server'
+// CHECK: serve-errors.fm:21:53: error: a JSON literal's value is a float, a double, an int, a bool, a string, an object or an array, not 'http_server'
 // CHECK: serve-errors.fm:22:30: error: no form of reply takes 2 values: a reply is 'reply status;', 'reply status, data, bytes, "type";', 'reply status, "type", "format", values...;' or 'reply status, json { ... };'
 // CHECK: serve-errors.fm:24:9: error: 'reply' statement not in a route
 // CHECK: serve-errors.fm:27:28: error: FMinus has no JSON values: a JSON literal is only a reply's body, 'reply status, json { ... };'
 // CHECK: serve-errors.fm:31:74: error: route 'GET /f/1/{y}' conflicts with 'GET /f/{x}/2': GET /f/1/2 matches both, and neither is more specific than the other
 // CHECK: serve-errors.fm:31:32: note: the other route is here
 
-// Where serve meets string, char and when: a string or char parameter, a string in a JSON literal (a literal, a
-// string, a ?: of literals: one error each), a string where a reply's content type or a format's value goes, a switch
+// Where serve meets string, char and when: a char parameter (a string in a JSON literal, a literal, a string or a ?:
+// of literals, is no error), a string where a reply's content type or a %g's value goes, a switch
 // on a string without a default and a when that may not reply, a string as a serve's server or timeout, and a when in
 // a route of a function that is no method.
-// CHECK: serve-errors.fm:38:36: error: a route's parameter is an int, a float, a bool or an http_request, not 'string'
-// CHECK: serve-errors.fm:38:44: error: a route's parameter is an int, a float, a bool or an http_request, not 'char'
-// CHECK: serve-errors.fm:39:53: error: a JSON literal's value is a float, a double, an int, a bool, an object or an array in this version, and not yet a string
-// CHECK: serve-errors.fm:39:66: error: a JSON literal's value is a float, a double, an int, a bool, an object or an array in this version, and not yet a string
-// CHECK: serve-errors.fm:39:74: error: a JSON literal's value is a float, a double, an int, a bool, an object or an array in this version, and not yet a string
+// CHECK: serve-errors.fm:38:44: error: a route's parameter is an int, a float, a bool, a string or an http_request, not 'char'
 // CHECK: serve-errors.fm:40:41: error: argument to 'http_reply_text' must be a string literal
 // CHECK: serve-errors.fm:41:61: error: format specifies type 'double' but the argument has type 'string'
 // CHECK: serve-errors.fm:42:66: error: route 'GET /k' does not reply in all control paths

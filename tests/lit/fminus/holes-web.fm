@@ -1,0 +1,49 @@
+// Holes in a URL (src/ir/Calls.cpp's lowerHoles, Web.cpp's checkUrlHoles; docs/web.md): `{name}` in the port (an int),
+// the path, the query and the fragment, each a %d or a %s of the literal the library takes, and its own %% a percent
+// sign still. With a string's hole the call is fminus_web_http_get_s or _post_s, which take the strings in two arrays
+// after the ints and read through them memory no argument points to (memory(read, ...)); with ints' alone, the plain
+// function, as for %d. Each URL is recorded with a '*' for each hole. Run with no network, every request is
+// HTTP_REFUSED (-4); with a policy, one whose string makes a path segment ".." is HTTP_INVALID (-7) before anything is
+// sent, and the others find no server at port 1 (HTTP_TRANSPORT, -1).
+// REQUIRES: web
+// RUN: fminus %s -O0 | FileCheck %s
+// RUN: fminus %s --run main 3 | FileCheck %s --check-prefix=REFUSED
+// RUN: fminus %s --run main 3 --web-allow 'http://127.0.0.1:1/*' | FileCheck %s --check-prefix=RESULT
+
+int status(http_response r)
+{
+    defer http_close(r);
+    return http_wait(r, 10000);
+}
+
+int get(string name, int port, int k)
+{
+    return status(http_get("http://127.0.0.1:{port}/presets/{name}/v.json?k={k}&w=100%%#{name}"));
+}
+
+int post(int k, const float* data)
+{
+    return status(http_post("http://127.0.0.1:1/takes/{k}", data, 4, "application/octet-stream"));
+}
+
+int main(int k)
+{
+    float data[1] = {1.0f};
+    return get("warm", 1, k) * 100 + get("..", 1, k) * 10 + post(k, data);
+}
+
+// CHECK: @.str = private unnamed_addr constant [53 x i8] c"http://127.0.0.1:%d/presets/%s/v.json?k=%d&w=100%%#%s", align 1
+// CHECK: @.str.1 = private unnamed_addr constant [27 x i8] c"http://127.0.0.1:1/takes/%d", align 1
+// CHECK-LABEL: define i32 @get(
+// CHECK: %http_get = call ptr @fminus_web_http_get_s(ptr %web.context, ptr @.str, i32 53, ptr %format.ints, i32 2, ptr %format.texts, ptr %format.lengths, i32 2)
+// CHECK-LABEL: define i32 @post(
+// CHECK: %http_post = call ptr @fminus_web_http_post(ptr %web.context, ptr @.str.1, i32 27, ptr %format.ints, i32 1, ptr %{{.*}}, i32 4, ptr @.str.2, i32 24)
+// CHECK: declare noundef ptr @fminus_web_http_get_s(ptr, ptr readonly captures(none), i32, ptr readonly captures(none), i32, ptr readonly captures(none), ptr readonly captures(none), i32) [[S:#[0-9]+]]
+// CHECK: attributes [[S]] = { nounwind willreturn memory(read, argmem: readwrite, inaccessiblemem: readwrite, errnomem: write{{.*}}) }
+// CHECK: !fminus.web.requests = !{![[A:[0-9]+]], ![[B:[0-9]+]]}
+// CHECK: ![[A]] = !{!"GET", !"http://127.0.0.1:*/presets/*/v.json?k=*&w=100%#*",
+// CHECK: ![[B]] = !{!"POST", !"http://127.0.0.1:1/takes/*",
+
+// REFUSED: -444
+// HTTP_TRANSPORT * 100 + HTTP_INVALID * 10 + HTTP_TRANSPORT
+// RESULT: -171

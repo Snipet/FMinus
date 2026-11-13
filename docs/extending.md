@@ -33,9 +33,11 @@ own again, the first step of a report on syntax for networked programs: a type f
 `defer`, and C2y's `if` and `switch` with a declaration; and recipe 45 is its second step, FMinus's own: `serve`,
 `route` and `reply`, statements over the server's builtins, and a JSON literal a reply writes. Recipe 46 is the
 same report's text: FMinus's type `string`, a read-only view of bytes, and `char` to keep one; and recipe 47 its
-`when`, a statement that runs once each time its condition becomes true; and recipe 49 its `within`, a deadline for the
-requests a block starts, every one of them ended where the block ends; and recipe 50 its `json_read`, a module
-filled from a JSON document in one walk, by a table of the module's fields the compiler makes. Then the pitfalls
+`when`, a statement that runs once each time its condition becomes true. Recipe 48 is where text goes and comes from:
+`{name}` holes in addresses, a route's `string` parameters, a request's, a document's and a listing's text, strings in a
+JSON literal, which the runtime's JSON writer now writes, and `%s` in a reply; recipe 49 is the report's `within`, a
+deadline for the requests a block starts, every one of them ended where the block ends; and recipe 50 its `json_read`, a
+module filled from a JSON document in one walk, by a table of the module's fields the compiler makes. Then the pitfalls
 those recipes ran into, and design notes for what comes next. [simd.md](simd.md) has recipes 7 to 9, for vectors.
 
 Recipes 1 to 4 are in the compiler now (`tanhf` and `%`; `bool` and its operators; `if`, `while` and `for`), and so are
@@ -50,10 +52,10 @@ recipe 32 (one error a mistake, enumerated types, `-Wswitch`), recipe 33 (`doubl
 builtins' arguments, bytes to numbers, and the build options of builtins), recipe 39 (the JSON parser, and paths
 the compiler prepares), recipe 40 (the XML parser), recipe 41 (the web library), recipe 42 (its server), recipe 43
 (the file interface), recipe 44 (typed handles, `defer`, and `if` and `switch` with a declaration), recipe 45
-(`serve`, `route`, `reply` and the JSON literal), recipe 46 (`string` and `char`), recipe 47 (`when`), recipe 49 (`within`) and recipe 50 (`json_read`), so their sections describe how the code you have got there: read a section beside the files it
+(`serve`, `route`, `reply` and the JSON literal), recipe 46 (`string` and `char`), recipe 47 (`when`), recipe 48 (holes, and text from requests, documents and listings), recipe 49 (`within`) and recipe 50 (`json_read`), so their sections describe how the code you have got there: read a section beside the files it
 names. Recipes 5 and 6, a runtime function and a pass, are not part of the language; they live in [recipes/](recipes/)
 as a patch, so you can apply them to see them work. None of these are sketches: each was applied to this repository, built with `-Werror`, and
-tested in the dev and asan presets, every test passing (recipes 38 to 47, 49 and 50 in the release preset only: each says where).
+tested in the dev and asan presets, every test passing (recipes 38 to 50 in the release preset only: each says where).
 [architecture.md](architecture.md) describes the stages they touch.
 
 FMinus follows C. When a recipe has a semantic choice to make, it makes C's: conversions, short-circuiting, which
@@ -74,7 +76,7 @@ Most language features touch the same places, in this order:
 | 6 | `src/runtime/` | if it needs C++ at run time, a runtime function (recipe 5); if a builtin calls it, its facts: in `kRuntimeFacts`, through `callRuntime` (recipe 19), or for a math builtin's, in `mathFunction` (`Math.cpp`, recipe 15) |
 | 7 | `src/jit/Call.cpp`, `src/support/Aot.cpp` | for a new type: whether a call by name, `Program::call` and `--run`, passes and returns it (`callType`'s `switch`, recipe 36), and whether an executable's `main` may take or return it (`addEntryPoint`) |
 | 8 | `tests/` | a dump in `FrontendTest.cpp`; results in `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `SwitchTest.cpp`, `EnumTest.cpp`, `IntTest.cpp`, `BitwiseTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `TableTest.cpp`, `TopLevelTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `HashTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`, `ParallelTest.cpp`, `DoubleTest.cpp`, `Array2DTest.cpp`, `FieldAttributeTest.cpp`, `StringTest.cpp`, `BytesTest.cpp`, `JsonTest.cpp`, `XmlTest.cpp`, `HandleTest.cpp`,
-`DeferTest.cpp`, `SelectionDeclarationTest.cpp`, `ServeTest.cpp`, `StringTypeTest.cpp`, `WhenTest.cpp` or `WithinTest.cpp` (their helpers are in `Compile.h`; a runtime function that must not allocate is counted with `HeapCalls.h`); IR or errors in `tests/lit/fminus/` |
+`DeferTest.cpp`, `SelectionDeclarationTest.cpp`, `ServeTest.cpp`, `StringTypeTest.cpp`, `WhenTest.cpp`, `HoleTest.cpp`, `DocumentTextTest.cpp`, `WithinTest.cpp` or `JsonReadTest.cpp` (their helpers are in `Compile.h`; a runtime function that must not allocate is counted with `HeapCalls.h`); IR or errors in `tests/lit/fminus/` |
 | 9 | `examples/` | a program that uses it, and a line in `tests/lit/fminus/examples.test` that runs it |
 | 10 | `editors/vscode/syntaxes/fminus.tmLanguage.json` | a new keyword, type or builtin, so VSCode highlights it (its README says where) |
 | 11 | `README.md` | the language table, and the deviations from C if any |
@@ -96,8 +98,9 @@ through a buffer, against plain loops (recipes 9 and 10), `examples/convolver/` 
 over a module's fields (recipe 17), `examples/ensemble/` for `parallel for` and `parallel { }` (recipe 22), and
 `examples/wavetable/` for a document a host hands a program, read by path (recipes 39 and 40), `examples/fetch/` for
 a request a program makes (recipe 41), and several at once in a `within` (recipe 49), `examples/remote/` for the requests a program answers (recipes 42 and 45), and
-`examples/kit/` for the files a program reads and writes (recipe 43), and `examples/trigger/` for `when` (recipe
-47).
+`examples/kit/` for the files a program reads and writes (recipe 43), `examples/trigger/` for `when` (recipe
+47), `examples/presets/` for holes and a route's `string` parameter (recipe 48), and `examples/settings/` for a module
+read from a JSON document (recipe 50).
 
 ## Ground rules
 
@@ -8956,6 +8959,9 @@ step 4 writes its constant's name: an `int` now would change what a program's re
   %http_reply_text = call i32 @fminus_web_http_reply_text(ptr %request23, i32 200, ptr @.str.1, i32 16, ptr @.str.2, i32 43, ptr %format.values, i32 4)
 ```
 
+(Since recipe 48 a JSON literal is the runtime's JSON writer's, written into the request's own buffer, and the three
+conversions below are gone from the library: what follows is how this recipe made it.)
+
 The library's formatter learned the three: `%r` narrows the double back to the float it was widened from and writes
 `std::to_chars(float)` with no precision, the shortest digits that read back as that float (`0.1f` is `0.1`), `%R` the
 same of the double, a NaN or an infinity `null`; `%b` `true` or `false`. No format a program writes can hold them:
@@ -9217,6 +9223,215 @@ refused too). It allocates and waits for nothing, so a nonblocking method may ho
 - `tests/lit/fminus/when.fm`: the IR at `-O0` (the load, the store, the test) and at `-O2` (the state a register
   through the loop), `sizeof`, and the errors; `examples.test` runs `examples/trigger/`.
 
+## Recipe 48: holes, and text from requests, documents and listings
+
+*In the compiler, and a little of the web library. Code: an address's holes, `scanHoles` and `HoleScan`
+(`src/ir/Strings.cpp`, `Lowering.h`), filled where a call's literal is (`lowerHoles`, `Filled`, `formatTexts` and the
+address branch of `lowerRuntimeCall`, `src/ir/Calls.cpp`), checked for a URL (`checkUrlHoles`, `Web.cpp`) and a file's
+name (`FileNameRules::holes`, `spelled`, `checkFileName`, `Files.cpp`), and recorded with a `*` each
+(`recordWebRequest`, `recordFileUse`), and read for the race checks (`Walker::holes`, `Parallel.cpp`); a route's
+`string` parameters (`scanRouteHoles` and `scanRoute` with their texts,
+the overlap check's `isText`, `sample` and `rank`, `checkHeaderName`, `WebServer.cpp`; `checkRouteParameters`,
+`textDefaultOf` and `fillParameter`, `Serve.cpp`), and their default in the host's list
+(`ir::WebRouteParameter::defaultText`, `Program::RouteParameter::defaultText`, `include/fminus/FMinus.h`,
+`src/api/FMinus.cpp`); the builtins that give text (`http_header`, `http_path`, `http_query_string`, `json_string`,
+`xml_string`, `file_name`: their rows, `Param::HeaderName`, and `textResult`, `Calls.cpp`) and their facts
+(`ServerText`, `ReadString`, `FileEntry`; the `_s` functions' memory beyond their arguments); the JSON literal through
+the runtime's writer (`lowerJsonReply`, `jsonDescribe`, `JsonPlan`, `Serve.cpp`; `JsonWrite` and `ServerBuffer` facts);
+`%s` in a reply's format (`scanReplyFormat`, `replyArguments`, `WebServer.cpp`); and in the library,
+`fminus_web_http_reply_text_s` and the formatter without `%r`, `%R` and `%b` (`src/web/Server.cpp`, `Web.h`,
+`WebSymbols.def`). The example `examples/presets/`. Tests: `tests/unit/HoleTest.cpp`, `DocumentTextTest.cpp`, cases of
+`ServeTest.cpp`, `HttpServerTest.cpp`, `WebServerTest.cpp` and `FrontendTest.cpp`, `tests/lit/fminus/holes.fm`,
+`holes-web.fm`, `holes-errors.fm`, `serve-strings.fm` and `string-reads.fm`. Built with `-Werror` and tested in the
+`release` preset on Linux x86-64 only, in two trees, the default and one with the web library, its server, file writing
+and absolute names, every test passing but the one this machine cannot run (the smoke test of LLVM's own `opt`); not in
+a tree without `FMINUS_JSON`, nor in one with the web library and not its server, nor in `dev` or `asan`, nor on macOS
+or Windows. [research/syntax/README.md](research/syntax/README.md) is the report, §4.2, §4.3, §5.2 and §6.1; this is the
+rest of its step 3. The libraries' halves came first, in the two commits before recipe 44 and the one before recipe 46
+(`fminus_web_http_text`, `_path`, `_header`; `fminus_rt_json_text`, `_xml_text`, `_file_name`; the `_s` functions;
+`fminus_rt_json_write`, `fminus_web_http_reply_buffer` and `_reply_written`).*
+
+Text, recipe 46's view, now goes somewhere and comes from somewhere: into an address by a hole, out of a request, a
+document and a listing, and into a JSON literal or a reply. Nothing is built: a string is read, and written only where
+it goes.
+
+```c
+route "PUT /presets/{name}" (string name, http_request q)      // a whole segment of the path
+{
+    if (!string_starts(http_header(q, "content-type"), "application/json"))
+        reply 415;
+    if (file_write("presets/{name}.json", http_body(q), http_size(q)) != FILE_OK)   // ".hidden": FILE_INVALID
+        reply 400, json { "error": "no such name", "name": name };
+    reply 204;
+}
+```
+
+### Holes
+
+**`scanHoles` reads an address literal** (a URL, a file's name, a listing's pattern) into the literal the library takes:
+each `{name}` a `%d` (whose `d` becomes an `s` once its variable is known to be a string), `{{` and `}}` a brace, `%d`
+and `%%` as they were, and for each byte of the result the offset of the byte of the literal it stands for, so every
+later check reports at the source's byte. It refuses a brace alone, an empty hole, a name that is no C identifier, and
+a `%d` beside a hole, the error at the second kind ("a literal names its values by holes, {name}, or by %d after it,
+not both"). A literal with no hole goes the way it always went, its braces unescaped; one with holes takes no ints after
+it ("a literal with holes takes no values after it").
+
+**`lowerHoles` fills them**: each hole a `VariableExpr` at its `{`, lowered as any name is (so an unknown one is clang's
+"use of undeclared identifier", and a field, a parameter, a constant and an enumerator are found as in an expression);
+an `int`, a `bool` or an enumeration's value converted to an `int`, a `string` kept as its pair; anything else "hole {x}
+has type 'float': a hole takes an int, a bool, an enumeration's value or a string". The format's own errors are
+`scanFormat`'s on the literal with every hole a `%d`. Then the checks of the literal's kind run on the filled literal:
+`checkUrl` as ever, and `checkUrlHoles`, no hole before the port (the scheme's and the host's bytes are what the host's
+list names), a string's never in it; `checkFileName` with `holes`, which reads a `%s` as a letter and refuses a hole in
+the folder or the extension, its messages' `%d` said as "hole" (a device name "this segment", since its bytes are no
+longer the source's). The call is the builtin's own function when every hole is a number's, and its `_s` function when
+one is a string's: the strings after the ints, in two arrays of the frame, their addresses and their lengths
+(`formatTexts`), as `runtime/Format.h`'s `expandPlaces` takes them.
+
+```llvm
+@.str = private unnamed_addr constant [20 x i8] c"presets/%s/%d-%d.txt", align 1
+  %file_read = call ptr @fminus_rt_file_read_s(ptr %files.context, ptr @.str, i32 20, ptr %format.ints, i32 2,
+                                               ptr %format.texts, ptr %format.lengths, i32 1)
+```
+
+What a string may become is the library's to check, where the bytes are: a URL's string percent-encoded (a path segment
+it makes `.`, `..` or empty `HTTP_INVALID` before anything is sent), a file name's joining its segment and the name then
+checked by the rules a literal's segments keep (`FILE_INVALID`). Nothing about enforcement changed: the filled URL meets
+the policy, the filled name `reach`. The host's lists keep their form, a `*` a hole. A hole's variable is no node of
+the tree, so the race checks' walk (`Parallel.cpp`'s `Walker::holes`) scans the literal again and records each as read
+where its call is: a statement of a parallel block that names one in a hole races with one that changes it, as a `%d`'s
+argument would.
+
+### A route's `string` parameters
+
+A route's literal had holes already (recipe 45); `scanRouteHoles` now takes the names of its string parameters, whose
+holes must be a whole segment ("a string's hole is a whole segment of the path"), each a `%s` of the library's table,
+and `scanRoute` takes a `%s` when it is a route statement's (an `http_is` literal still refuses one, as `%s` there is
+clang's invalid conversion). The overlap check reads a `%s` segment as one that takes any segment: within another only
+when that is one too, ranked after any number of number holes, as the library ranks it (track 2's note). A parameter
+`string` is filled by `fminus_web_http_text` of its place (a hole's) or by `fminus_web_http_query_text` (the query's
+field: its bytes as sent, nothing decoded), into its slot as its two members; missing is its default,
+`[[fminus::default("text")]]` (a string literal's pair), or a 400. A `string` has no range ("'fminus::range' does not
+apply to a string parameter"), and its default is a string ("the default of a string parameter is a string literal"):
+`checkAttributes`' rules (`Modules.cpp`), where a field's are too, and where a `string` field takes no default at all
+(recipe 50).
+The metadata's tuple of a parameter has a seventh operand, a string's default or none, which `ir::webRoutes` reads into
+`defaultText`, a member added after the others to `Program::RouteParameter`.
+
+### Text from a request, a document, a listing
+
+No runtime function returns a struct (C's ABI for one differs by platform), so a builtin whose result is a `string` and
+which has a symbol, a `Result::String` row, is called with one more argument, the address of an `int` of the frame,
+where the function writes the length of the bytes whose address it returns; `textResult` loads it and makes the pair.
+Such a row's `Param::Text` is its fallback, never passed: chosen member by member, with two `select`s, when the address
+is null (nothing there, or not text). So `json_string(doc, "/name", "none")` is
+
+```llvm
+  %json_string.data = call ptr @fminus_rt_json_text(ptr %doc, ptr @.path, ptr null, i32 0, ptr %json_string.length)
+  %json_string.size = load i32, ptr %json_string.length, align 4, !tbaa !5
+  %json_string.none = icmp eq ptr %json_string.data, null
+  %1 = select i1 %json_string.none, ptr @.str, ptr %json_string.data
+  %2 = select i1 %json_string.none, i32 4, i32 %json_string.size
+```
+
+| Builtin | The library's function | Its address is valid |
+|---|---|---|
+| `http_header(q, "name")` | `fminus_web_http_header`, the name a literal checked as an HTTP token (`checkHeaderName`) | until the reply |
+| `http_path(q)` | `fminus_web_http_path` | until the reply |
+| `http_query_string(q, "name", fallback)` | `fminus_web_http_query_text` | until the reply |
+| `json_string(doc, path, ..., fallback)` | `fminus_rt_json_text` | until `json_free` |
+| `xml_string(doc, path, ..., fallback)` | `fminus_rt_xml_text` | until `xml_free` |
+| `file_name(list, i)` | `fminus_rt_file_name` (null outside the listing: the empty string) | until `file_close` |
+
+Each is wait-free, so a nonblocking function may call it, and each is described as a read that writes its last
+argument: the request's (`ServerText`, now any of the four functions: its pointer arguments read but the last, which it
+writes), the document's (`ReadString`, `Read`'s with argument 4 written) and the listing's (`FileEntry`, `FileRead`'s
+with its length written). Their result is neither `noalias` nor `nonnull`, and the memory it points into is freed or
+reused by a call whose memory is any (the reply, `json_free`, `file_close`), so a load through it stays before that.
+
+### The JSON literal, through the runtime's writer
+
+Recipe 45 made a JSON literal a format of the reply's text, with three conversions of the library's own. A string
+cannot go that way (it must be escaped), and the next step writes arrays and modules, so **every** JSON literal of a
+reply is now the runtime's JSON writer's (`fminus_rt_json_write`, track 3's), writing straight into the request's own
+reply buffer. `jsonDescribe` builds the literal's description as track 3's note lays it out: its keys and punctuation
+bytes, collected while no value comes (`JsonPlan::pending`) and flushed as an operation `0, offset, count`, and each
+value an operation `1, slot, shape`, its value lowered in the order written into `JsonPlan::values` with its first
+slot: a `float` 1, a `double` 2, an `int` 3, a `bool` 4 (a byte), a `string` 5 (its pointer and its length, two slots).
+A key is escaped by the compiler as before (`jsonKey`, without the `%` it doubled for a format); a string value by the
+writer, as RFC 8259 asks, bytes above 0x7F as they are. Then `lowerJsonReply` stores the values into an `[n x i64]` of
+the frame, makes the description a private constant laid out as a path's table, and calls
+
+```llvm
+  %reply.buffer = call ptr @fminus_web_http_reply_buffer(ptr %request, ptr %reply.capacity)
+  %reply.room = load i32, ptr %reply.capacity, align 4, !tbaa !23
+  %json.bytes = call i32 @fminus_rt_json_write(ptr %reply.buffer, i32 %reply.room, ptr @.json, ptr %json.values)
+  %http_reply_written = call i32 @fminus_web_http_reply_written(ptr %request, i32 200, i32 %json.bytes, ptr @.str.1, i32 16)
+```
+
+`reply_written` says `HTTP_LIMIT` for a text past the capacity, which the route answers 500 as before. Every output
+recipe 45's tests pin is the same, byte for byte: the writer's numbers are `std::to_chars` with no precision, as `%r`
+and `%R` were. `%r`, `%R` and `%b` are gone from the library's formatter (a `%` that begins none of its places is
+itself). An enumeration's value, an array, a vector and a module stay refused, each an error that says a later version
+writes it (the writer has their shapes; the next step uses them). The writer is part of `FMINUS_JSON`: in a build
+without it a JSON literal is "a JSON literal needs the JSON writer, which this build of FMinus leaves out
+(FMINUS_JSON=OFF)".
+
+### `%s` in a reply
+
+`scanReplyFormat` takes a plain `%s` (`Place::text`); `replyArguments` lowers its value as a string is wanted (a literal
+is one), "format specifies type 'string' but the argument has type 'int'" otherwise, and gives the strings apart from
+the doubles. With one, the call is `fminus_web_http_reply_text_s`, new in the library: the strings after the values in
+two arrays, as the `_s` functions take them, each written as it is; a string that is not one (a negative length, a null
+address with bytes) `HTTP_INVALID`. `fminus_web_http_reply_text` is that function with no strings, its results as they
+were (a `%s` there is itself). It is wait-free, in `WebSymbols.def`, and inside both proofs (`HeapCalls` and seccomp's
+strict mode, `WebServerTest.cpp`).
+
+### What the runtime's functions touch, told to LLVM
+
+- **An `_s` function reads memory no argument points to**: each string's bytes, through the address an array of the
+  frame holds. `argmem` alone would let LLVM drop a store to a `char` array whose view is such a string, so
+  `describeRuntime` adds `otherMemOnly(Ref)` to every `_s` function whose memory is not any already (`memory(read,
+  argmem: readwrite, ...)`).
+- **`fminus_rt_json_write`** reads any memory and writes only its arguments' (`memory(read, argmem: readwrite)`): a
+  value's slot may hold a string's address. Nofree, nosync, its buffer writeonly, its description and values readonly.
+- **`fminus_web_http_reply_buffer`** is `WebRead`'s kind, writing its capacity; `_reply_written` and `_reply_text_s` are
+  replies, their memory any, so the writer's stores into the buffer stay before the publish.
+
+### What it changes for programs and hosts
+
+- **Programs**: a brace in an address literal is a hole now, `{{` one brace (no literal in the tree had one). A route
+  may take a `string`; the messages that listed a route parameter's types name it, and a hole's says "a segment of the
+  path or a number in one". A JSON literal may hold strings; `http_header`, `http_path`, `http_query_string`,
+  `json_string`, `xml_string` and `file_name` are taken names. A reply's `%s` is a place. A program that uses none of
+  it compiles to the same IR, but for a JSON literal, which is now the writer's calls, and needs `FMINUS_JSON`.
+- **Hosts** see a hole as a `*`, a `string` route parameter as `"string"`, and its default in `defaultText`. The
+  Python package does not bind `webRoutes()` (docs/python.md), so nothing there changes.
+- **The library**'s formatter lost `%r`, `%R` and `%b`, which only the compiler's formats held, and gained
+  `fminus_web_http_reply_text_s`.
+- **The VS Code grammar** (0.24.0) colours the six builtins, `%s`, and `{{` and `}}` as a brace.
+
+### Tests
+
+- `tests/unit/HoleTest.cpp` (`[holes]`): `scanHoles` itself; each mistake of a file's name and of a URL at its byte;
+  `files()` and `webRequests()` with a `*` a hole; through the JIT, files read, listed and written by names with holes
+  of each type, and every name a string makes wrong `FILE_INVALID`; a URL's string percent-encoded byte by byte (all
+  256), a path segment `..`, `.` or empty `HTTP_INVALID`, a `/` `HTTP_REFUSED`, one program asking another on loopback.
+- `tests/unit/ServeTest.cpp`: a `string` parameter from the path and the query, its default, a header, the path, a
+  query's string, and the overlap's ranking; the host's list; the wait-free proof with them, and a JSON literal written
+  in place; a JSON literal's strings and their escapes, `%s`; the errors where `string` meets `serve`; and, in a build
+  without `FMINUS_JSON`, the JSON literal's error.
+- `tests/unit/DocumentTextTest.cpp`: `json_string`, `xml_string` and `file_name` at their edges, a nonblocking function
+  calling every wait-free builtin of the step, their errors, and the reads proved wait-free through the JIT.
+- `tests/unit/HttpServerTest.cpp`: `%s` in `scanReplyFormat` and its errors. `tests/unit/WebServerTest.cpp`: the
+  formatter's `%r`, `%R`, `%b` and `%s` as themselves, `fminus_web_http_reply_text_s`, and the wait-free proof with it.
+- `tests/unit/FrontendTest.cpp`: a route's `string` parameters and an address's holes in the dump.
+- `tests/lit/fminus/holes.fm` and `holes-web.fm`: the IR of each kind of hole at `-O0` and `-O2`, the facts of the `_s`
+  functions, the metadata, and runs; `holes-errors.fm`: every error once at its column; `serve-strings.fm`: a route's
+  strings, the request's text, a JSON literal's string and `%s`, run on loopback; `string-reads.fm`: the documents' and
+  the listing's text; `serve.fm`, `serve-errors.fm`: the writer's calls, the changed messages.
+- `examples/presets/`: `--check` on loopback, in a directory it makes.
+
 ## Recipe 49: `within`, a deadline for the requests a block starts
 
 *In the compiler and the web library. Code: the `WITHIN` token and its rule (`src/frontend/Lexer.l`, `Parser.y`, and
@@ -9410,7 +9625,10 @@ abandon is what makes "after a stopped call, the thread has no scope" true.
   a `defer` before the end, `continue` and `break`; `stopWeb()` waking a thread at the brace; with the server, a reply
   inside a block received before its scope ends and a serve bounded by the deadline; the report's script (eight packs
   in one within, then each read); where it meets recipe 50, a module `json_read` fills from each pack after the block,
-  and one a method fills through `this` inside a block; a block the loop budget (`[budget]`) and one a bounds check (`[bounds]`) stop with a
+  and one a method fills through `this` inside a block; where it meets recipe 48, requests whose URLs have holes (an
+  `int`'s in the port and the path, a `string`'s from a `char` array in the path), started through the library's `_s`
+  entry points, all 200 at the brace and the held one `HTTP_TIMEOUT` at the deadline; a block the loop budget
+  (`[budget]`) and one a bounds check (`[bounds]`) stop with a
   request pending, then on the same thread `http_wait(r, 50)` waiting its 50 ms, a new within with its own deadline and
   its promise, and the program destroyed with the connection closed and the I/O thread gone; a stop on a thread with no
   scope leaving another thread's scope whole; a program without a within, with both passes, has no abandon. The
@@ -9534,8 +9752,10 @@ module Filter { float cutoff [[fminus::range(20, 20000)]] [[fminus::default(1000
 **One table a type.** `moduleShape` makes the module's at the first call that names it, `json.shape.Preset`, a private
 constant laid out as a path's table (`shapeConstant`), keeps it in `moduleShapes_`, and every later call passes the
 same one; a nested module's shape is inside its outer one's, as the format has it. The writer of a JSON literal,
-`fminus_rt_json_write`, takes the same shapes: a later step's literal of a module appends the module's shape with
-`ShapeUse::Write`, the same words but for a string field, which it takes and the reader leaves out.
+`fminus_rt_json_write`, takes the same shapes: since recipe 48 it writes every JSON literal, from a description
+`jsonDescribe` (`Serve.cpp`) makes of the literal's numbers, bools and strings, whose shapes are these words' first
+five kinds; a later step's literal of a module appends the module's shape with `ShapeUse::Write`, the same words but
+for a string field, which it takes and the reader leaves out.
 
 ### What it reads
 
@@ -9563,7 +9783,10 @@ that is no `param` it means what `json_read` sets the field to when a document d
 does not initialise the field**: a module's fields start at 0, as C's do, and `fresh()` of a module with defaults reads
 0. An enumeration's is its constant's number. It is checked against the field's range as a parameter's is, and an
 `int`'s must be an integer, a `bool`'s 0 or 1, as a route parameter's must. `[[fminus::range]]` on such a field also
-means a value outside it does not fill it.
+means a value outside it does not fill it. A `string` field takes no default, and the error says why (`json_read`
+leaves it out, so the default would never be used), while a route's `string` parameter takes a string literal
+(recipe 48): one function checks both (`checkAttributes`), and a number's default is no string, nor a string's a
+number, for a field and a parameter alike.
 
 | The program writes | FMinus, at |
 |---|---|
@@ -9574,7 +9797,7 @@ means a value outside it does not fill it.
 | `[[json::skip(1)]]` | clang's "'json::skip' attribute takes no arguments" |
 | `[[json::rename("x")]]` | "unknown attribute 'json::rename': a field takes json::name("name") and json::skip" |
 | `float c [[json::name("a")]];` after a field `a` | "duplicate JSON name 'a' in module 'M'", the second's name, and a note at the first, "previous field of that JSON name is here" |
-| `string t [[fminus::default(1)]];` | "'fminus::default' attribute only applies to parameters and to fields of numbers and bools (float, double, int, bool, a float vector and arrays of them), not 'string'" |
+| `string t [[fminus::default(1)]];` | "'fminus::default' does not apply to a string field: json_read leaves a string field out, so its default would never be used" |
 | `int i [[fminus::default(1.5)]];`, `bool o [[fminus::default(2)]];` | "the default of an int field is an int, not 1.5", "the default of a bool field is 0 or 1, not 2" |
 | `[[name("x")]]`, `[[skip]]` on a field | clang's warning, ignored, with a note: "did you mean 'json::name'?" (and `[[default]]` on a field that takes one, "did you mean 'fminus::default'?") |
 
@@ -9631,6 +9854,12 @@ build.
 - `tests/lit/fminus/json-read.fm`: the table and the call at `-O0`, the declaration's attributes, the zeroing kept at
   `-O2`, a document read through the JIT and as an executable, and `examples/settings/`; `json-read-errors.fm`: the
   errors; `json-off.fm`: the option's error.
+- `tests/unit/ServeTest.cpp`, where it meets recipe 48: a route with a `string` parameter of its path and one of its
+  query and the request, whose body `json_read` reads into a module, stored by a file name with a hole in a directory
+  the test makes (a whole module 201 and the file written as sent; a value out of range 422 and nothing written; a
+  hidden name `FILE_INVALID`, 400); and the one rule of a field's and a route parameter's attributes (a `string`
+  field's default refused, saying why; a number's default no string; a route's `string` parameter's a string literal;
+  `json::name` and `json::skip` unknown on a route's parameter), each error once at its column.
 
 ## Pitfalls
 

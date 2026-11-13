@@ -179,9 +179,9 @@ namespace fminus::ir
     // the errors name it, its line and column).
     //
     // A route statement's (Serve.cpp) is recorded there too, where its `route` is, with `statement` set and its
-    // parameters: each one's name, its type ("int", "float", "bool" or "http_request"), what fills it ("path", a hole;
-    // "query", the query's field of its name; "request", the request itself), and its fminus::range and
-    // fminus::default when it has them.
+    // parameters: each one's name, its type ("int", "float", "bool", "string" or "http_request"), what fills it
+    // ("path", a hole; "query", the query's field of its name; "request", the request itself), and its fminus::range
+    // and fminus::default when it has them (a string's default its text).
     struct WebRouteParameter
     {
         std::string name;
@@ -190,6 +190,7 @@ namespace fminus::ir
         std::optional<double> minimum;
         std::optional<double> maximum;
         std::optional<double> defaultValue;
+        std::optional<std::string> defaultText = std::nullopt;   // a string's
     };
     struct WebRoute
     {

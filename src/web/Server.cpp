@@ -1394,39 +1394,27 @@ namespace fminus::web
                 out.put(digits, result.ptr);
         }
 
-        // %r and %R, a JSON literal's numbers (the compiler's formats only: ir/Serve.cpp): the shortest digits that read
-        // back as the same float (%r, of a float widened to the double it is given as) or double (%R), std::to_chars
-        // with no precision; a NaN or an infinity, which JSON has no number for, as null.
-        void putShortest(Writer& out, double value, bool single)
+        // A format's strings, fminus_web_http_reply_text_s's: the i-th the lengths[i] bytes at data[i] (checked by the
+        // caller: none negative, none null with bytes).
+        struct Texts
         {
-            if (!std::isfinite(value))
-            {
-                constexpr std::string_view kNull = "null";
-                out.put(kNull.data(), kNull.data() + kNull.size());
-                return;
-            }
-            char digits[32];   // a double's shortest form: at most 17 digits, a sign, a point and an exponent
-            const std::to_chars_result result =
-                single ? std::to_chars(digits, digits + sizeof digits, static_cast<float>(value))
-                       : std::to_chars(digits, digits + sizeof digits, value);
-            if (result.ec == std::errc())
-                out.put(digits, result.ptr);
-        }
+            const char* const* data = nullptr;
+            const std::int32_t* lengths = nullptr;
+            std::int32_t count = 0;
+        };
 
-        // %b, a JSON literal's bool: true for any value but 0.
-        void putBool(Writer& out, double value)
-        {
-            const std::string_view word = value != 0 ? "true" : "false";
-            out.put(word.data(), word.data() + word.size());
-        }
-
-        void format(Writer& out, const char* text, std::int32_t length, const double* values, std::int32_t count)
+        // The format's text with its places filled: each value for a %d, %g or %.Ng, and with `texts` (the _s entry
+        // point's), each string for a %s, its bytes as they are (a %s past the last is nothing). Without `texts` a %s
+        // is itself, as every % that begins no place is.
+        void format(Writer& out, const char* text, std::int32_t length, const double* values, std::int32_t count,
+                    const Texts* texts = nullptr)
         {
             if (text == nullptr || length < 0)
                 return;
             if (values == nullptr || count < 0)
                 count = 0;
             std::int32_t next = 0;
+            std::int32_t nextText = 0;
             for (std::int32_t i = 0; i < length && !out.over; ++i)
             {
                 const char c = text[i];
@@ -1441,20 +1429,27 @@ namespace fminus::web
                     out.put('%');
                     ++i;
                 }
-                else if (d == 'd' || d == 'g' || d == 'r' || d == 'R' || d == 'b')
+                else if (d == 'd' || d == 'g')
                 {
                     ++i;
                     if (next < count)
                     {
                         if (d == 'd')
                             putInt(out, values[next]);
-                        else if (d == 'g')
-                            putFloat(out, values[next], 6);
-                        else if (d == 'b')
-                            putBool(out, values[next]);
                         else
-                            putShortest(out, values[next], d == 'r');
+                            putFloat(out, values[next], 6);
                         ++next;
+                    }
+                }
+                else if (d == 's' && texts != nullptr)
+                {
+                    ++i;
+                    if (nextText < texts->count)
+                    {
+                        const char* bytes = texts->data[nextText];
+                        if (texts->lengths[nextText] > 0)
+                            out.put(bytes, bytes + texts->lengths[nextText]);
+                        ++nextText;
                     }
                 }
                 else if (d == '.')
@@ -2032,6 +2027,29 @@ namespace fminus::web
             }
             return true;
         }
+
+        // A reply whose body is a format's text (fminus_web_http_reply_text, and _s with `texts`): its places filled
+        // into the request's own buffer, then published.
+        std::int32_t replyText(void* handle, std::int32_t status, const char* type, std::int32_t typeLength,
+                               const char* text, std::int32_t length, const double* values, std::int32_t count,
+                               const Texts* texts)
+        {
+            Slot* slot = held(handle);
+            if (slot == nullptr || !validType(type, typeLength) || length < 0 || (text == nullptr && length > 0) ||
+                status < 200 || status > 599)
+                return FMINUS_WEB_INVALID;
+            Writer out{slot->buffer.get(), slot->buffer.get() + slot->capacity};
+            format(out, text, length, values, count, texts);
+            if (out.over)
+                return FMINUS_WEB_LIMIT;
+            const auto bytes = static_cast<std::int32_t>(out.at - slot->buffer.get());
+            if (!validStatus(status, bytes > 0))
+                return FMINUS_WEB_INVALID;
+            slot->replyStatus = status;
+            slot->replyBytes = bytes;
+            setType(*slot, type, typeLength, "text/plain; charset=utf-8");
+            return finishReply(*slot);
+        }
     } // namespace
 } // namespace fminus::web
 
@@ -2213,21 +2231,26 @@ extern "C"
                                             std::int32_t typeLength, const char* format, std::int32_t formatLength,
                                             const double* values, std::int32_t count) noexcept
     {
-        Slot* slot = fminus::web::held(handle);
-        if (slot == nullptr || !fminus::web::validType(type, typeLength) || formatLength < 0 ||
-            (format == nullptr && formatLength > 0) || status < 200 || status > 599)
-            return FMINUS_WEB_INVALID;
-        fminus::web::Writer out{slot->buffer.get(), slot->buffer.get() + slot->capacity};
-        fminus::web::format(out, format, formatLength, values, count);
-        if (out.over)
-            return FMINUS_WEB_LIMIT;
-        const auto bytes = static_cast<std::int32_t>(out.at - slot->buffer.get());
-        if (!fminus::web::validStatus(status, bytes > 0))
-            return FMINUS_WEB_INVALID;
-        slot->replyStatus = status;
-        slot->replyBytes = bytes;
-        fminus::web::setType(*slot, type, typeLength, "text/plain; charset=utf-8");
-        return fminus::web::finishReply(*slot);
+        return fminus::web::replyText(handle, status, type, typeLength, format, formatLength, values, count, nullptr);
+    }
+
+    std::int32_t fminus_web_http_reply_text_s(void* handle, std::int32_t status, const char* type,
+                                              std::int32_t typeLength, const char* format, std::int32_t formatLength,
+                                              const double* values, std::int32_t count, const char* const* texts,
+                                              const std::int32_t* lengths, std::int32_t textCount) noexcept
+    {
+        // The strings: none that is not one; none at all for null arrays or a count below 1.
+        fminus::web::Texts strings;
+        if (texts != nullptr && lengths != nullptr && textCount > 0)
+        {
+            for (std::int32_t i = 0; i < textCount; ++i)
+            {
+                if (lengths[i] < 0 || (texts[i] == nullptr && lengths[i] > 0))
+                    return FMINUS_WEB_INVALID;
+            }
+            strings = {texts, lengths, textCount};
+        }
+        return fminus::web::replyText(handle, status, type, typeLength, format, formatLength, values, count, &strings);
     }
 
     char* fminus_web_http_reply_buffer(void* handle, std::int32_t* capacity) noexcept

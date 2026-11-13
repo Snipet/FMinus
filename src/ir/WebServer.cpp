@@ -15,16 +15,20 @@
 // - A query's name, http_query_float's and http_query_int's, is a literal of letters, digits, '_', '-' and '.', 1 to
 //   64 bytes.
 // - A reply's format, http_reply_text's, is C's printf's, in part: %d an int (or a bool, which C promotes to one), %g
-//   and %.Ng with N from 1 to 17 a float or a double (which C promotes to one), %% a percent sign; checked as clang
-//   checks printf's, in its words ("format specifies type 'double' but the argument has type 'int'"). The library gets
-//   the format as written and the values as doubles (an int's exactly, a float's widened), and writes the text itself.
+//   and %.Ng with N from 1 to 17 a float or a double (which C promotes to one), %s a string (a literal among them), %%
+//   a percent sign; checked as clang checks printf's, in its words ("format specifies type 'double' but the argument
+//   has type 'int'"). The library gets the format as written, the values as doubles (an int's exactly, a float's
+//   widened) and, with a %s, the strings in two arrays (fminus_web_http_reply_text_s), and writes the text itself.
 // - A route statement's literal (Serve.cpp) is a route literal with holes, `{name}`, where a %d could stand
-//   (scanRouteHoles), each a %d to the library; it joins the table, and the metadata with its parameters.
+//   (scanRouteHoles), each a %d to the library, or a whole segment for a string parameter's, a %s to the library;
+//   it joins the table, and the metadata with its parameters. An http_is call's literal takes %d alone, as before.
+// - A header's name, http_header's, is a literal that is an HTTP token (RFC 9110: letters, digits and
+//   !#$%&'*+-.^_`|~), which the library compares without regard to ASCII case.
 // - No two route literals of the program, a route statement's or an http_is call's, may be such that one request
 //   could match both, with neither more specific than the other (checkRouteOverlaps): Go's ServeMux's rule, a literal
-//   segment more specific than one with a hole, as the library ranks them when it publishes a request for the most
-//   specific route that matches. The same literal in two http_is calls stays legal: a program may test a request
-//   twice.
+//   segment more specific than one with a number's hole, and that more specific than a string's, as the library ranks
+//   them when it publishes a request for the most specific route that matches. The same literal in two http_is calls
+//   stays legal: a program may test a request twice.
 #include "ir/Lowering.h"
 
 #include <llvm/IR/Constants.h>
@@ -78,7 +82,7 @@ namespace fminus::ir::detail
         }
     } // namespace
 
-    std::vector<FormatScan::Error> scanRoute(std::string_view text)
+    std::vector<FormatScan::Error> scanRoute(std::string_view text, bool texts)
     {
         std::vector<FormatScan::Error> errors;
         const std::size_t space = text.find(' ');
@@ -141,6 +145,24 @@ namespace fminus::ir::detail
             }
             if (c == '%')
             {
+                if (texts && i + 1 < text.size() && text[i + 1] == 's')
+                {
+                    // A string's place: a whole segment (scanRouteHoles makes it one; the library matches no other).
+                    if (text[i - 1] != '/' || (i + 2 < text.size() && text[i + 2] != '/'))
+                    {
+                        errors.push_back({i, "a string's place is a whole segment of the path"});
+                        return errors;
+                    }
+                    if (++numbers > kMaxRouteNumbers)
+                    {
+                        errors.push_back({i, "a route takes at most 8 %d"});
+                        return errors;
+                    }
+                    segmentHasNumber = true;
+                    numberEnd = i + 2;
+                    ++i;
+                    continue;
+                }
                 if (i + 1 < text.size() && text[i + 1] == 'd')
                 {
                     if (numberEnd == i)
@@ -195,7 +217,7 @@ namespace fminus::ir::detail
         return errors;
     }
 
-    RouteHoles scanRouteHoles(std::string_view text)
+    RouteHoles scanRouteHoles(std::string_view text, const std::vector<std::string>& texts)
     {
         RouteHoles scan;
         const auto fail = [&](std::size_t offset, std::string message) {
@@ -232,15 +254,21 @@ namespace fminus::ir::detail
                 return fail(i, "a hole right after another can never match: each takes all the digits there are");
             if (scan.holes.size() == static_cast<std::size_t>(kMaxRouteNumbers))
                 return fail(i, "a route takes at most 8 holes");
+            const bool isText = std::ranges::find(texts, name) != texts.end();
+            const bool segmentStarts = !scan.library.empty() && scan.library.back() == '/';
+            const bool segmentEnds = close + 1 == text.size() || text[close + 1] == '/';
+            if (isText && (!segmentStarts || !segmentEnds))
+                return fail(i, "a string's hole is a whole segment of the path, as \"/presets/{name}\": it takes all "
+                               "the segment's bytes");
             scan.holes.push_back({std::string(name), i});
-            scan.library += "%d";
+            scan.library += isText ? "%s" : "%d";
             scan.offsets.push_back(i);
             scan.offsets.push_back(i);
             holeEnd = close + 1;
             i = close;
         }
         // The rest is a route literal's (scanRoute), its words about %d said of holes.
-        for (FormatScan::Error error : scanRoute(scan.library))
+        for (FormatScan::Error error : scanRoute(scan.library, true))
         {
             error.offset = error.offset < scan.offsets.size() ? scan.offsets[error.offset]
                                                               : (text.empty() ? 0 : text.size() - 1);
@@ -300,6 +328,8 @@ namespace fminus::ir::detail
                 ;   // a percent sign
             else if (j == i + 1 && text[j] == 'g')
                 scan.places.push_back({i, true});
+            else if (j == i + 1 && text[j] == 's')
+                scan.places.push_back({i, false, true});
             else if (plain && precision == i + 2 && length == j && text[j] == 'g')
             {
                 // %.Ng: N of one or two digits, 1 to 17, as the library reads it (Web.h)
@@ -363,12 +393,38 @@ namespace fminus::ir::detail
         return true;
     }
 
+    // A header's name: an HTTP token (RFC 9110, 5.6.2), letters, digits and !#$%&'*+-.^_`|~, at least one.
+    bool Lowering::checkHeaderName(const ast::StringExpr& literal, SourceLocation where)
+    {
+        const std::string_view text = literal.value;
+        for (std::size_t i = 0; i < text.size(); ++i)
+        {
+            const char c = text[i];
+            if ((c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && !isDigit(c)
+                && std::string_view("!#$%&'*+-.^_`|~").find(c) == std::string_view::npos)
+            {
+                error(i < literal.at.size() ? literal.at[i] : where,
+                      "character '" + shown(c) + "' is not allowed in a header's name: an HTTP token, letters, digits "
+                                                 "and !#$%&'*+-.^_`|~");
+                return false;
+            }
+        }
+        if (text.empty())
+        {
+            error(where, "a header's name is at least one byte, an HTTP token");
+            return false;
+        }
+        return true;
+    }
+
     // A reply's values, after its format in a call: checked against its places (scanReplyFormat), each converted to a
-    // double, as C passes printf's (an int, a bool promoted to one, converted exactly; a float widened). Each error
-    // where clang reports printf's, and then there are none. A place's value is lowered as an argument of its type is
-    // (lowerAs): a %g's 0.1 is C's double 0.1, as printf's is.
+    // double, as C passes printf's (an int, a bool promoted to one, converted exactly; a float widened), and a %s's
+    // string into `texts` instead. Each error where clang reports printf's, and then there are none. A place's value is
+    // lowered as an argument of its type is (lowerAs): a %g's 0.1 is C's double 0.1, as printf's is, and a %s's literal
+    // is a string.
     std::optional<std::vector<llvm::Value*>> Lowering::replyArguments(const ast::StringExpr& literal,
-                                                                     const std::vector<const ast::Expr*>& values)
+                                                                     const std::vector<const ast::Expr*>& values,
+                                                                     std::vector<llvm::Value*>& texts)
     {
         const ReplyFormatScan scan = scanReplyFormat(literal.value);
         bool fine = scan.errors.empty();
@@ -379,7 +435,7 @@ namespace fminus::ir::detail
             diagnostics_.error(at(wrong.offset), wrong.message,
                                {{at(wrong.offset),
                                  "a reply's format takes %d, an int; %g and %.Ng (N from 1 to 17), a float or a "
-                                 "double; and %%, a percent sign",
+                                 "double; %s, a string; and %%, a percent sign",
                                  {}}});
         const ast::Type real = ast::Type::Double;
         std::vector<llvm::Value*> converted;
@@ -388,6 +444,20 @@ namespace fminus::ir::detail
             const ast::Expr& arg = *values[k];
             const bool placed = k < scan.places.size();
             const bool wantsReal = placed && scan.places[k].real;
+            if (placed && scan.places[k].text)   // a string, a literal among them
+            {
+                const Value value = lowerAs(arg, ast::Type::String);
+                fine = fine && !value.failed;
+                if (!value.failed && value.type != ast::Type::String)
+                {
+                    error(begin(arg), "format specifies type 'string' but the argument has type "
+                                          + quoted(ast::typeName(value.type)));
+                    fine = false;
+                }
+                if (fine)
+                    texts.push_back(value.ir);
+                continue;
+            }
             const std::string wanted = wantsReal ? "'double'" : "'int'";
             if (isString(arg))   // C's char array, passed as a char*
             {
@@ -534,8 +604,26 @@ namespace fminus::ir::detail
             char byte = 0;          // a byte's, or 0 for a run
             std::string digits;     // a run's literal digits
             bool hole = false;      // a run's: a hole ends it
+            bool text = false;      // a string's place (a %s), a whole segment of its own: any segment's bytes
         };
         using Segment = std::vector<Item>;
+
+        // Whether a segment is a string's place, which matches any segment a request's path may have.
+        bool isText(const Segment& segment)
+        {
+            return segment.size() == 1 && segment.front().text;
+        }
+
+        // A segment of a request that `segment` matches, for a message.
+        std::string sample(const Segment& segment)
+        {
+            if (isText(segment))
+                return "x";
+            std::string text;
+            for (const Item& item : segment)
+                text += item.byte != 0 ? std::string(1, item.byte) : item.digits + (item.hole ? "0" : "");
+            return text;
+        }
 
         std::vector<Segment> segments(const std::string& text)
         {
@@ -547,6 +635,11 @@ namespace fminus::ir::detail
                 const bool inRun = !segment.empty() && segment.back().byte == 0 && !segment.back().hole;
                 if (c == '/')
                     path.emplace_back();
+                else if (c == '%' && text[i + 1] == 's')   // a whole segment
+                {
+                    segment.push_back({0, "", true, true});
+                    ++i;
+                }
                 else if (c == '%')   // %d
                 {
                     if (inRun)
@@ -612,9 +705,12 @@ namespace fminus::ir::detail
             return r;
         }
 
-        // A segment's rank, as the library ranks it: 0 with no hole, else its holes. The lower is the more specific.
+        // A segment's rank, as the library ranks it: 0 with no hole, else its holes, and a string's place after any
+        // number of them. The lower is the more specific.
         int rank(const Segment& segment)
         {
+            if (isText(segment))
+                return 255;
             return static_cast<int>(std::ranges::count_if(segment, [](const Item& item) { return item.hole; }));
         }
     } // namespace
@@ -648,6 +744,14 @@ namespace fminus::ir::detail
                 for (std::size_t k = 0; k < pa.size() && meet; ++k)
                 {
                     example += '/';
+                    if (isText(pa[k]) || isText(pb[k]))
+                    {
+                        // A string's place takes every segment the other takes, and the other takes only its own.
+                        aInB = aInB && isText(pb[k]);
+                        bInA = bInA && isText(pa[k]);
+                        example += sample(isText(pa[k]) ? pb[k] : pa[k]);
+                        continue;
+                    }
                     if (pa[k].size() != pb[k].size())
                     {
                         meet = false;
@@ -774,6 +878,9 @@ namespace fminus::ir
                     const auto& entry = *llvm::cast<llvm::MDNode>(operand);
                     route.parameters.push_back({text(entry, 0), text(entry, 1), text(entry, 2), real(entry, 3),
                                                 real(entry, 4), real(entry, 5)});
+                    if (const auto* fallback = llvm::cast<llvm::MDNode>(entry.getOperand(6));
+                        fallback->getNumOperands() > 0)   // a string's default
+                        route.parameters.back().defaultText = text(*fallback, 0);
                 }
             }
             routes.push_back(std::move(route));

@@ -553,6 +553,22 @@ TEST_CASE("a route's block holds a when, a string and a char array as any block 
              "          (reply 200))))))\n");
 }
 
+TEST_CASE("a route's string parameters, its default a string, and an address's holes, which are its literal's bytes",
+          "[frontend]")
+{
+    CHECK(parsed("void f(http_server s, string name)\n"
+                 "{\n"
+                 "    http_response r = http_get(\"https://x.com/{name}/{{a}}\");\n"
+                 "    serve (s) { route \"PUT /p/{name}\" (string name, string mode [[fminus::default(\"full\")]]) "
+                 "{ reply 204; } }\n"
+                 "}\n")
+          == "(function void f ((http_server s) (string name))\n"
+             "  (decl http_response r (call http_get \"https://x.com/{name}/{{a}}\"))\n"
+             "  (serve s\n"
+             "    (route \"PUT /p/{name}\" ((string name) (string mode [[fminus::default(\"full\")]]))\n"
+             "      (reply 204))))\n");
+}
+
 TEST_CASE("constants keep their spelling: C's decimal, hex and integer forms", "[frontend]")
 {
     CHECK(parsed("float f() { return fmaxf(fminf(1, .5), g(2e3, 1.e-2f, 3.25E+1F, 0x1.8p1, 0x1p-3f, 1.)); }")

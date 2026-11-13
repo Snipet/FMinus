@@ -110,6 +110,18 @@ fetches.
   backslash (so no CR or LF: nothing a program writes adds a header to a request), its scheme `http` or `https`, and
   it carries no credentials (no `@` before its path); each mistake is an error at its byte. The content type is a
   literal too, printable ASCII, at most 255 bytes (empty: `application/octet-stream`).
+- **Or the URL names its values where they go, in holes**: `http_get("https://example.com/users/{user}/presets/{k}.json")`,
+  each `{name}` a variable in scope (a local, a parameter, a field, a constant: a name, not an expression), an `int`,
+  a `bool` or an enumeration's value (written in decimal, as `%d` is) or a `string`. A literal has `%d`s or holes, not
+  both, and a literal with holes takes no ints after it; `{{` and `}}` are a brace, `%%` a percent sign still. No hole
+  may be in the scheme or the host; a port may be an `int`'s; the path, the query and the fragment take either. **A
+  string is percent-encoded** as it is filled in, every byte but the unreserved ones (`A`-`Z`, `a`-`z`, `0`-`9`, `-`,
+  `.`, `_`, `~`) written `%XX`, so it cannot add a `/`, a `?`, a `#` or a `%` of its own; in the path, one that makes
+  a whole segment `.`, `..` or empty makes the request `HTTP_INVALID` before anything is sent. The URL filled in is
+  then checked as every URL is (the policy's patterns, its 8192 bytes, the rest). The host's list
+  (`Program::webRequests()`) has a `*` for each hole, as for each `%d`. Each mistake is an error at its byte: a brace
+  alone, an empty hole, a name that is none, a hole of another type ("hole {x} has type 'float': a hole takes an int, a
+  bool, an enumeration's value or a string"), one in the host, a string's in the port, a `%d` beside a hole.
 - **A request is an opaque `http_response`**, as an FFT plan is an `fft_plan`: C's handle, a pointer to a struct the
   program never sees, which the compiler keeps apart from the other handles (`http_status(doc)` of a `json_doc` is an
   error), while a `void*` converts to it and back, as in C, so a program that says `void*` compiles as before
@@ -190,10 +202,11 @@ float main(float count)
 - **The form**: the keyword, an `int` in parentheses, computed once where the block begins (a `float` converts as an
   argument does), and a block, braces required. A negative value is no deadline of its own: the block still waits for
   what it started, as long as each request's own policy lets it run.
-- **The promise.** Every request the block started (`http_get`, `http_post`), in the block itself or in any function
-  it called, has ended where it ends: the end waits for those still pending until the deadline, then cancels what is
-  left, whose status is `HTTP_TIMEOUT` (time ended it, not the program). A request the block's code closed already is
-  not the end's concern. Each request keeps its policy's own limits (`timeoutMs`, `maxRequests`) besides.
+- **The promise.** Every request the block started (`http_get`, `http_post`, a URL with holes as one without), in the
+  block itself or in any function it called, has ended where it ends: the end waits for those still pending until the
+  deadline, then cancels what is left, whose status is `HTTP_TIMEOUT` (time ended it, not the program). A request the
+  block's code closed already is not the end's concern. Each request keeps its policy's own limits (`timeoutMs`,
+  `maxRequests`) besides.
 - **The deadline bounds every wait inside the block**: `http_wait`, `http_accept`, a `serve` with a timeout, and the
   block's own end. A wait whose own timeout is later than the deadline, or that has none (`http_wait(r, -1)`), returns
   when the deadline passes, with what it would have returned on its own timeout (`http_wait`: the status, 0 if still
@@ -440,9 +453,10 @@ report's answer, and are not built yet (below).
 ## The server
 
 A program serves when its host lets it: `http_listen()` starts its server where the host's policy says, and the program
-**takes** the requests that reach it and answers each, as it polls a download's status. FMinus has no callbacks, and no
-builtin gives a request's text as a `string` yet (the next step's), so a program sees a request as a route it named,
-numbers and bytes (its body viewed as text by `string_of`): never a path as text, a header or a cookie. Taking, reading
+**takes** the requests that reach it and answers each, as it polls a download's status. FMinus has no callbacks: a
+program sees a request as a route it named, its parameters (numbers, and `string`s of its path and query), its bytes
+and its text as views of what the library holds (`http_path`, `http_header`, `http_query_string`), valid until its
+reply. Taking, reading
 and answering a request are wait-free, so the audio thread may serve between two blocks, and a change lands at a block
 boundary on the thread that computes the block, with no lock and no second thread touching the program's state. A
 `serve` statement says it, FMinus's own ([its section](#serve-route-and-reply)):
@@ -589,19 +603,24 @@ handles every one waiting and is done: it blocks, and a nonblocking function ref
 `{name}`, where a `%d` could stand: a whole segment or part of one (`"/osc/{k}/gain"`, `"/v{major}"`), at most 8 a
 route, never two together nor one before a digit. `%d` is `http_is`'s spelling, and an error in a route. Each hole is
 one of the route's parameters, each a different one. **A parameter** is `type name attributes`, the type `int`,
-`float`, `bool` or `http_request` (a `string` one, text of the path or the query, is the next step's: `string` and
-`char` are refused there as any other type is):
+`float`, `bool`, `string` or `http_request` (`char`, and any other type, is refused). **A `string`'s hole is a whole
+segment** (`"/presets/{name}"`; `"/presets/{name}.json"` is an error, "a string's hole is a whole segment of the path"),
+a `%s` to the library:
 
 | A parameter | Is filled from | When the request does not fit |
 |---|---|---|
 | named in a hole, an `int` | that part of the path: digits, as `%d` takes them (no sign; 1 to 10 digits that fit an `int`) | the route does not match: the library's 404 |
+| named in a hole, a `string` | that segment of the path, its bytes as the server holds them (letters, digits, `-`, `.`, `_`, `~`; never `.` or `..`), valid until the reply | (a path of other bytes is the library's 400 before any route) |
 | any other `int`, `float` or `bool` | the query's field of its name, read as `http_query_int` and `http_query_float` read (a `bool` is `true`, `false`, `1` or `0`) | missing, or not a value of its type: **400**, and the block does not run. With `[[fminus::default(x)]]`, missing is `x` (a malformed one is still 400) |
+| any other `string` | the query's field of its name, its value's bytes as sent (nothing is decoded, as nothing is for a number), valid until the reply; `?v=` and `?v` are present and empty | missing: **400**, or its `[[fminus::default("text")]]` |
 | with `[[fminus::range(a, b)]]` (path or query) | | outside it: **400**, and the block does not run |
 | an `http_request` (one at most) | the request itself, for `http_body`, `http_size` and the rest | |
 
 The 400s are the compiled code's, before the block: wait-free, a reply with no body. A parameter's attributes are a
 module parameter's, checked as there (a range's ends in order, a default inside its range; an `int`'s default an
-integer, a `bool`'s 0 or 1); a hole's has no default. **Parameters are `const`** variables of the route's block, in
+integer, a `bool`'s 0 or 1, a `string`'s a string literal, and a `string` has no range); a hole's has no default, and
+`json::name` and `json::skip`, a module's fields' (`json_read`'s), are unknown attributes there. **Parameters are
+`const`** variables of the route's block, in
 scope there only, as a function's are in its body: two routes of a serve may use the same names. Attributes after the
 parameter list are refused (`'clang::nonblocking' attribute cannot be applied to a route: ...`): a route is a block of
 its function, whose attributes cover it.
@@ -641,12 +660,15 @@ not answered does.
 
 **What the compiler knows.** Every route literal of the program, a route's (each hole a `%d`) and an `http_is`'s, is in
 the route table `http_listen` hands the library, and in `Program::webRoutes()`, a route statement's with its
-parameters: each one's name, type, what fills it (`"path"`, `"query"` or `"request"`), its range and its default, so a
+parameters: each one's name, type, what fills it (`"path"`, `"query"` or `"request"`), its range and its default (a
+`string`'s in `defaultText`), so a
 host can build a control page, or an OpenAPI description, from a program it has not run. And **two route literals one
 request could match are an error** (at the second, with a note at the first), unless one is more specific, Go's
 `ServeMux` rule (<https://pkg.go.dev/net/http#ServeMux>, "Precedence"): a literal segment is more specific than one with
 a hole. The library hands a request to the most specific route that matches, ranking segment by segment from the
-first: a literal one before one with fewer holes before one with more. So `GET /a/1` and `GET /a/{x}` may both be
+first: a literal one before one with fewer holes before one with more, and those before a `string`'s, which takes any
+segment. So `GET /presets/default`, `GET /presets/{k}` (an `int`) and `GET /presets/{name}` (a `string`) may all be
+routes, each request the first of them that fits; `GET /a/{s}` and `GET /{t}/b` (two strings) may not. So `GET /a/1` and `GET /a/{x}` may both be
 routes (`/a/1` is the first's, `/a/2` the second's), as may `GET /b/{x}-1` and `GET /b/{x}-{y}`; `GET /a/{x}/y` and
 `GET /a/1/{z}` may not (`GET /a/1/y` matches both, and neither is more specific), nor `GET /c/1{x}` and `GET /c/{x}`
 (each a segment of one hole, which the library ranks the same), nor the same route in two serves (which would take
@@ -656,8 +678,8 @@ as any number of digits, so it refuses two routes that would differ only past te
 **What it lowers to**: the builtins, called as a program would call them, and three of the library's own:
 `fminus_web_http_next_in` (or, with a timeout, `fminus_web_http_accept_in`) of the serve's route set, one bit for each of
 its routes in the table, a constant of the program; `fminus_web_http_route`, the route a request was published for,
-which also makes that route's numbers the request's (for `http_arg`); and `fminus_web_http_query_text`, whether the
-query has a field. A loop over the takes, a `switch` on the route, each case its parameters filled and checked and its
+which also makes that route's numbers the request's (for `http_arg`, and a `string`'s segment for
+`fminus_web_http_text`); and `fminus_web_http_query_text`, whether the query has a field, and a `string`'s bytes. A loop over the takes, a `switch` on the route, each case its parameters filled and checked and its
 block, each reply a jump to the next take ([extending.md](extending.md), recipe 45).
 
 ### The JSON literal
@@ -671,17 +693,24 @@ reply 200, json { "state": { "gain": gain }, "taps": [a, b, c] };
 **A JSON literal is an argument, never a value**, as a format is: `json { members }` and `json [ values ]` are
 expressions to the grammar, and the compiler takes one only where something writes it, which in this version is a
 `reply` ("FMinus has no JSON values: a JSON literal is only a reply's body, ..." anywhere else). Nothing allocates and
-no JSON value is ever made: the literal is a format the compiler makes, its keys and its structure constant text, each
-value a place, which the library writes into the request's own buffer, as a reply's text.
+no JSON value is ever made: the compiler makes a constant description of the literal, its keys and its structure as
+bytes and each value's kind, the values are stored in slots of the function's frame, and the runtime's JSON writer
+(`fminus_rt_json_write`, part of `FMINUS_JSON`) writes the text straight into the request's own reply buffer
+(`fminus_web_http_reply_buffer`), which is then published (`fminus_web_http_reply_written`), wait-free. **It needs the
+JSON writer**: in a build without `FMINUS_JSON` a JSON literal is the error that says so ("a JSON literal needs the
+JSON writer, which this build of FMinus leaves out (FMINUS_JSON=OFF)").
 
 - **A member** is `"key": value`, or a bare name, which is `"name": name`. A key is a string literal (adjacent ones are
   one), written as a JSON string, escaped as RFC 8259 asks (`"`, `\` and the control characters), and UTF-8 text (a
   byte that is no part of any is an error). A duplicate key in one object is an error at the second.
-- **A value** is a nested `{ }` or `[ ]`, or an expression of type `float`, `double`, `int` or `bool`. Anything else is
-  an error saying what a value may be: a pointer, a handle, a vector, an array, a module, a string, a literal or a
-  `string` (a JSON literal's string is the next step's: "a JSON literal's value is a float, a double, an int, a bool,
-  an object or an array in this version, and not yet a string"), or a value of an enumerated type (cast it to `int`
-  for its number: a later version writes an enumeration's constant by its name).
+- **A value** is a nested `{ }` or `[ ]`, or an expression of type `float`, `double`, `int`, `bool` or `string` (a
+  string literal among them). A pointer or a handle is an error saying what a value may be; a value of an enumerated
+  type, an array, a vector and a module are not values of one yet, each an error that says so (a later version writes
+  an enumeration's constant by its name, and the others whole: cast an enumeration's value to `int` for its number,
+  and write an array's elements or a vector's lanes one by one).
+- **How a string is written**: a JSON string, `"`, `\` and U+0000 to U+001F escaped as RFC 8259 asks (`\"`, `\\`,
+  `\b`, `\f`, `\n`, `\r`, `\t`, `\u00XX`), every other byte as it is (bytes above 0x7F too: no UTF-8 check), so a
+  string from a request, a document or a listing cannot end the literal's string or add a member.
 - **How a number is written**: an `int` in decimal; a `bool` as `true` or `false`; a `float` or a `double` as **the
   shortest digits that read back as the same value** (`std::to_chars` with no precision: `0.1f` is `0.1`, `1.0f / 3` is
   `0.33333334`, `1e20f` is `1e+20`), and a NaN or an infinity, which JSON has no number for, as `null`. The same in every
@@ -704,16 +733,22 @@ and told apart with `http_is` is answered by hand, as before the statements were
 | `bool http_is(r, "METHOD /path/%d")` | whether the request is the route's: its method and its path, each `%d` a decimal number of the path; when it is, it keeps the numbers for `http_arg` | wait-free |
 | `int http_arg(r, i)` | the `i`-th number (from 0) the last `http_is` that matched took, or 0 | wait-free |
 | `float http_query_float(r, "name", fallback)`, `int http_query_int(r, "name", fallback)` | a number of the request's query (`?name=0.5`), or the fallback | wait-free |
+| `string http_header(r, "name")` | the request's first header field of that name (a literal, an HTTP token: letters, digits and ``!#$%&'*+-.^_`\|~``, compared without regard to ASCII case), its value without the spaces and tabs around it; empty when there is none. With a token in the server's policy, `Authorization` is the host's and reads empty | wait-free |
+| `string http_path(r)` | the request's path as sent, without its query (`/osc/3/detune`) | wait-free |
+| `string http_query_string(r, "name", fallback)` | the query's first field of that name, its value's bytes as sent (nothing decoded), or the fallback when it has none (`?v=` is present and empty): what a route's `string` parameter of the query reads | wait-free |
 | `int http_size(r)`, `const void* http_body(r)` | the request's body (the client's two builtins, on a request the program received), until it is answered | wait-free |
 | `int http_reply(r, status)` | answers with no body | wait-free |
 | `int http_reply_bytes(r, status, data, bytes, "content/type")` | answers with `bytes` bytes at `data` (copied: the buffer is free again at once) | wait-free |
-| `int http_reply_text(r, status, "content/type", "format", ...)` | answers with text, C's `printf` of the values after the format | wait-free |
+| `int http_reply_text(r, status, "content/type", "format", ...)` | answers with text, C's `printf` of the values after the format (`%s` a `string`'s bytes) | wait-free |
 | `void http_close(server)` | stops listening and closes every connection: a request the program holds is given up, every thread in `http_accept` woken (null), the port `HTTP_CANCELLED` | allocates |
 
 - **A request is the caller's from `http_next` or `http_accept` until its reply**, and only the thread that took it
   should read or answer it (a program that hands it to another thread orders the two itself). One reply each: the
-  handle is dead after it, as a client's request is after `http_close`. Until then its method, path, query and body
-  never change.
+  handle is dead after it, as a client's request is after `http_close`. Until then its method, path, query, header
+  fields and body never change, and **a `string` read from it (a parameter, `http_path`, `http_header`,
+  `http_query_string`) is valid until its reply**, after which its bytes are the next request's: the compiler does not
+  check it, as it does not check a body's pointer. Its text is bytes as sent: nothing is decoded, and no encoding is
+  checked.
 - **A reply** is a status of 200 to 599 (204 and 304 with no body) and returns 0 once it is the library's to send;
   or, having sent nothing, `HTTP_LIMIT` (the body is over the policy's `maxReplyBytes`: the request is still the
   caller's), `HTTP_INVALID` (not a request the caller holds, or a status, a size or a content type that cannot be:
@@ -783,10 +818,12 @@ nothing); a program bounds it itself (`http_arg(r, 0) & 15`, or a 400).
 | `%d` | an `int` or a `bool` | the value in decimal |
 | `%g` | a `float` or a `double` (a float as `printf` promotes one) | six significant digits, as `printf` writes them |
 | `%.Ng`, N from 1 to 17 | the same | N significant digits: `%.9g` reads back as the same float, `%.17g` as the same double |
+| `%s` | a `string` (a literal among them) | its bytes as they are (nothing escaped: a JSON literal escapes) |
 | `%%` | nothing | `%` |
 
 Errors: `format specifies type 'int' but the argument has type 'float'`, `format specifies type 'double' but the
-argument has type 'int'`, `more '%' conversions than data arguments`, `data argument not used by format string`,
+argument has type 'int'`, `format specifies type 'string' but the argument has type 'int'`, `more '%' conversions than
+data arguments`, `data argument not used by format string`,
 `invalid conversion specifier 'f'`, and FMinus's own `a reply's %.Ng takes a precision N of 1 to 17`. The text is
 written by `std::to_chars` into the request's own buffer, the same in every locale, with no allocation. As in C, a NaN
 is `nan` and an infinity `inf`, which JSON cannot hold: a program that might have one says so itself. Arrays of numbers
@@ -1117,11 +1154,13 @@ for the server as for the client. An offline bounce has no server: compiled with
 | `tests/unit/WebServerTest.cpp` | the server at its own level, from C++, before any builtin: the policy and its classifiers, each rule from a raw socket and from the library's client, keep-alive, limits and timeouts, dropped clients, many threads taking, closing with threads waiting, and the wait-free proof (`HeapCalls`, and seccomp's strict mode) |
 | `tests/unit/HttpServerTest.cpp` | the server's builtins in the compiler, in every build: effects, the off build's errors, the route, format and name checks at their columns, the route table, the declarations' attributes, `webRoutes()`, the policy checked by `compile()` |
 | `tests/unit/WebServeTest.cpp` | programs that serve, through the JIT (an audio thread taking requests between blocks, a loader in `http_accept`, `stopWeb()`) and as an executable with its environment; `readServerRoot`, and a directory swapped for a link while it reads |
-| `tests/unit/WithinTest.cpp` | `within` through the JIT against a loopback server of its own (the promise, the deadline, nesting, each way out, `stopWeb()`, a reply and a serve inside one, the report's script), a block the loop budget or a bounds check stops, the library's abandon and its wait-free proof (`HeapCalls`, and seccomp's strict mode), and the errors |
+| `tests/unit/WithinTest.cpp` | `within` through the JIT against a loopback server of its own (the promise, the deadline, nesting, each way out, `stopWeb()`, a reply and a serve inside one, a URL with holes, the report's script), a block the loop budget or a bounds check stops, the library's abandon and its wait-free proof (`HeapCalls`, and seccomp's strict mode), and the errors |
 | `tests/lit/fminus/web*.fm` | the IR, the errors, the driver; `web-off.fm` in a build without the library, `web-server-off.fm` in one without the server |
 | `tests/lit/fminus/within*.fm` | a `within`'s IR (its end at each way out, the abandon on the passes' ways out), its errors, and `within-off.fm` in a build without the library |
+| `tests/unit/HoleTest.cpp`, `tests/lit/fminus/holes*.fm` | a URL's holes: each mistake an error at its byte, `webRequests()`'s `*`, and a string percent-encoded byte by byte, sent by one program to another that serves on loopback |
 | `examples/fetch/` | the wavetable example's pack fetched from a server its host allows; packs at once in a `within`; a table swapped in by a `when` |
 | `examples/remote/` | a synthesiser a browser controls: its page served by the library, its requests taken in `process` |
+| `examples/presets/` | named presets kept over HTTP as files: a route's `string` parameter, a file's name with a hole, a JSON literal's strings |
 
 Recipe 41 in [extending.md](extending.md) walks through the client as a change to the compiler, and recipe 42 the
 server.
@@ -1156,7 +1195,14 @@ server.
   AddressSanitizer with UndefinedBehaviorSanitizer and LeakSanitizer (every case, no report; `HeapCalls` counts nothing
   there, so the abandon's allocation proof only ran in the normal build, its seccomp half under both) and under
   ThreadSanitizer (every case but the five fork-based proofs, which TSan's own thread keeps from exiting: no report,
-  three times over), outside the presets, with the compiler's libraries uninstrumented.
+  three times over), outside the presets, with the compiler's libraries uninstrumented. Holes, a route's `string`
+  parameters, a request's text, a JSON literal through the runtime's writer and `%s` (2026-11-13): built and tested in
+  the same two trees, not in one with the client alone nor in one without `FMINUS_JSON` (whose errors are written and
+  not run); the wait-free proof of a JIT'd serve covers a `string` parameter of the path and of the query,
+  `http_header`, `http_path`, `http_query_string`, a JSON literal written in place and `%s`;
+  `fminus_web_http_reply_text_s` and the formatter without `%r`, `%R` and `%b` ran under GCC's AddressSanitizer with
+  UndefinedBehaviorSanitizer and ThreadSanitizer with the server's tests; `examples/presets/` was driven by its own
+  check, on loopback.
 - **Not run anywhere yet:** macOS and Windows (their root-certificate loaders, Schannel, the frameworks and system
   libraries an executable links, and the server's sockets there: `SocketsPosix.cpp` with macOS's `SO_NOSIGPIPE`,
   `SocketsWindows.cpp`, curl's handling of extra descriptors on Windows, llhttp built by clang-cl, whose header marks
@@ -1182,9 +1228,10 @@ server.
   the user's problem first, and Windows would need Mbed TLS there), so the LAN is plain HTTP and the token crosses it
   in the clear; **a stream from the server** (server-sent events, WebSockets): a page polls; **chunked request
   bodies**, `Expect: 100-continue` (417), pipelining beyond one request at a time, HTTP/2, compression and ranges;
-  **other origins** (CORS): never; **reading a request's headers or cookies**, templating: FMinus has a `string` now,
-  a view, but a builtin that gives a request's path, query or header as one is the next step's, and nothing builds
-  text, by design; **a JSON writer** (`%g` in a reply's format, and arrays as bytes); **an "embed this file" builtin**: static
+  **other origins** (CORS): never; **cookies** (a header's text is read, `http_header`, and nothing more of them),
+  templating: nothing builds text, by design (a JSON literal and a format write it where it goes); **a JSON literal's
+  arrays, vectors, modules and enumerations' names** (the writer has their shapes, the next step uses them; arrays as
+  bytes meanwhile); **an "embed this file" builtin**: static
   content is the host's; **a server of the host's own** with a ready-made parameter surface: an example host shows the
   way first (`examples/remote/`); and the Python package's binding of it.
 - **A disk cache and an `offline` policy** (the report's §8): a host that wants either keeps its own, and hands the

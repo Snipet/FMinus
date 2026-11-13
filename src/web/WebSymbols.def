@@ -46,6 +46,7 @@ FMINUS_RUNTIME_SYMBOL(fminus_web_http_query_text)
 FMINUS_RUNTIME_SYMBOL(fminus_web_http_reply)
 FMINUS_RUNTIME_SYMBOL(fminus_web_http_reply_bytes)
 FMINUS_RUNTIME_SYMBOL(fminus_web_http_reply_text)
+FMINUS_RUNTIME_SYMBOL(fminus_web_http_reply_text_s)
 FMINUS_RUNTIME_SYMBOL(fminus_web_http_reply_buffer)
 FMINUS_RUNTIME_SYMBOL(fminus_web_http_reply_written)
 #endif

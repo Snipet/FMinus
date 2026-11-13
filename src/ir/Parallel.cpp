@@ -337,6 +337,11 @@ namespace fminus::ir::detail
                                [&](const ast::CallExpr& call) {
                                    for (const ast::ExprPtr& arg : call.args)
                                        expression(*arg, Access::Kind::Read);
+                                   // An address's holes read their variables (Calls.cpp, lowerHoles).
+                                   if (call.callee == "http_get" || call.callee == "http_post"
+                                       || call.callee == "file_read" || call.callee == "file_list"
+                                       || call.callee == "file_write" || call.callee == "file_append")
+                                       holes(call);
                                    // In a method, tick(x) is this->tick(x) when the module has a tick (Calls.cpp).
                                    if (around_.module != nullptr && around_.defined(around_.module->name + "::" + call.callee))
                                        record(Access::Kind::Call, self(), expr.location,
@@ -489,6 +494,18 @@ namespace fminus::ir::detail
             }
 
             // `expr`, a place, used as `use`. An array read is its address (C's decay: a pointer to it escapes).
+            // The variables an address literal's holes name (scanHoles), each read where its call is.
+            void holes(const ast::CallExpr& call)
+            {
+                if (call.args.empty())
+                    return;
+                const auto* literal = std::get_if<ast::StringExpr>(&call.args.front()->node);
+                if (literal == nullptr)
+                    return;
+                for (const HoleScan::Hole& hole : scanHoles(literal->value).holes)
+                    placed(ast::Expr{call.args.front()->location, ast::VariableExpr{hole.name}}, Access::Kind::Read);
+            }
+
             void placed(const ast::Expr& expr, Access::Kind use)
             {
                 if (std::optional<Place> found = place(expr))

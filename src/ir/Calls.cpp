@@ -122,6 +122,10 @@ namespace fminus::ir::detail
                        Feature::Json, Result::Int},
         RuntimeBuiltin{"json_read", "fminus_rt_json_module", {Param::JsonRead, Param::Path, Param::Module}, 3,
                        RuntimeEffect::WaitFree, Feature::Json, Result::Bool},
+        // json_string(doc, path, ..., fallback): the string there, its bytes unescaped as the parser holds them, valid
+        // until json_free; the fallback when there is none, or what is there is no string. Wait-free.
+        RuntimeBuiltin{"json_string", "fminus_rt_json_text", {Param::JsonRead, Param::Path, Param::Text}, 3,
+                       RuntimeEffect::WaitFree, Feature::Json, Result::String},
         // The XML parser (runtime/Xml.cpp), in a build with FMINUS_XML, made as the JSON parser's are. xml_parse(data,
         // bytes) gives a document, an xml_doc (null for a text that is no XML, too large or nested too deeply), and
         // xml_free(doc) frees it: both allocate. The reads take the document, an XML path with places for ints
@@ -149,6 +153,10 @@ namespace fminus::ir::detail
                        Feature::Xml, Result::Int},
         RuntimeBuiltin{"xml_choice", "fminus_rt_xml_choice", {Param::XmlRead, Param::XmlPath, Param::Choices}, 3,
                        RuntimeEffect::WaitFree, Feature::Xml, Result::Int},
+        // xml_string(doc, path, ..., fallback): the attribute's value or the element's text there as text, XML's white
+        // space around it left out, valid until xml_free; the fallback when nothing is there. Wait-free.
+        RuntimeBuiltin{"xml_string", "fminus_rt_xml_text", {Param::XmlRead, Param::XmlPath, Param::Text}, 3,
+                       RuntimeEffect::WaitFree, Feature::Xml, Result::String},
         // The web library (src/web/Web.h), in a build with FMINUS_WEB. http_get(url, ...) and http_post(url, data,
         // bytes, content_type, ...) start a request under the program's web context (Web.cpp) and give its handle, an
         // http_response, at once: the URL a literal with places for the ints after every other argument, content_type
@@ -211,6 +219,18 @@ namespace fminus::ir::detail
         RuntimeBuiltin{"http_reply_text", "fminus_web_http_reply_text",
                        {Param::Request, Param::Int, Param::ContentType, Param::ReplyFormat}, 4, RuntimeEffect::WaitFree,
                        Feature::WebServer, Result::Int},
+        // A request's text, each valid until the request is answered and wait-free: http_header(r, "name") its first
+        // header field of that name (a literal, an HTTP token, compared without regard to ASCII case), its value
+        // without the white space around it, empty when there is none; http_path(r) its path as sent, without its
+        // query; http_query_string(r, "name", fallback) its query's field of that name, its bytes as sent (nothing
+        // decoded), or the fallback when it has none.
+        RuntimeBuiltin{"http_header", "fminus_web_http_header", {Param::Request, Param::HeaderName}, 2,
+                       RuntimeEffect::WaitFree, Feature::WebServer, Result::String},
+        RuntimeBuiltin{"http_path", "fminus_web_http_path", {Param::Request}, 1, RuntimeEffect::WaitFree,
+                       Feature::WebServer, Result::String},
+        RuntimeBuiltin{"http_query_string", "fminus_web_http_query_text",
+                       {Param::Request, Param::QueryName, Param::Text}, 3, RuntimeEffect::WaitFree, Feature::WebServer,
+                       Result::String},
         // The file interface (runtime/Files.h, Runtime.h's fminus_rt_file_*), in a build with FMINUS_FILES. file_read(
         // "folder/name.ext", ...) opens the file the name says under the program's file context (Files.cpp) and reads
         // it whole into memory, and gives a handle, a file_content, which says why when it could not (a shared handle:
@@ -235,6 +255,10 @@ namespace fminus::ir::detail
                        RuntimeEffect::Allocates, Feature::Files, Result::FileContent},
         RuntimeBuiltin{"file_close", "fminus_rt_file_close", {Param::FileHandle}, 1, RuntimeEffect::Allocates,
                        Feature::Files, Result::Void},
+        // file_name(list, i): the i-th file's own name in a listing, without its folder, valid until the listing is
+        // closed; empty for an index outside it. Wait-free, as file_count.
+        RuntimeBuiltin{"file_name", "fminus_rt_file_name", {Param::FileListing, Param::Int}, 2, RuntimeEffect::WaitFree,
+                       Feature::Files, Result::String},
         // Its writing, in a build with FMINUS_FILES_WRITE too: file_write("folder/name.ext", data, bytes, ...) writes
         // the bytes as the whole file, replacing it whole or not at all, and file_append adds them at its end; each
         // gives a status (FILE_OK, or why not).
@@ -327,6 +351,7 @@ namespace fminus::ir::detail
         case Param::ReplyFormat:
         case Param::FileName:
         case Param::FilePattern:
+        case Param::HeaderName:
             break;
         }
         return std::nullopt;
@@ -370,6 +395,7 @@ namespace fminus::ir::detail
         case Param::ReplyFormat:
         case Param::FileName:
         case Param::FilePattern:
+        case Param::HeaderName:
         case Param::Text:
         case Param::Chars:
         case Param::CharData:
@@ -477,6 +503,7 @@ namespace fminus::ir::detail
             ReadInto,      // fminus_rt_json_floats, fminus_rt_json_base64_floats, fminus_rt_xml_floats: and writes
                            // floats
             ReadModule,    // fminus_rt_json_module: and a module's table, and writes the module's fields
+            ReadString,    // fminus_rt_json_text, fminus_rt_xml_text: and writes the length of the text it gives
             WebStart,      // fminus_web_http_get, fminus_web_http_post (src/web/Web.h): reads a URL literal, its ints
                            // (and a POST's body and content type), gives a new request
             WebWait,       // fminus_web_http_wait: waits on a request
@@ -490,12 +517,16 @@ namespace fminus::ir::detail
             ServerRoute,   // fminus_web_http_route: which route a request was published for, its places kept in it
             ServerMatch,   // fminus_web_http_is: reads a route literal, keeps the numbers it took in the request
             ServerQuery,   // fminus_web_http_query_float, _int: reads a name literal and the request
-            ServerText,    // fminus_web_http_query_text: the same, giving the value's bytes and their count
-            ServerReply,   // fminus_web_http_reply, _reply_bytes, _reply_text: answers, and hands the request back
+            ServerText,    // fminus_web_http_query_text, _header, _path, _text: a request's bytes and their count
+            ServerReply,   // fminus_web_http_reply, _reply_bytes, _reply_text, _reply_text_s, _reply_written: answers,
+                           // and hands the request back
+            ServerBuffer,  // fminus_web_http_reply_buffer: the request's own reply buffer, and its capacity
+            JsonWrite,     // fminus_rt_json_write: a JSON literal's text, from its description and its values' slots
             FileOpen,      // fminus_rt_file_read, fminus_rt_file_list (runtime/Files.h): reads a name literal and its
                            // ints, gives a new handle (or a shared one that says why)
             FileNth,       // fminus_rt_file_read_nth: reads a listing, gives a new handle
             FileRead,      // fminus_rt_file_status, _size, _data, _count: a handle's fields, which never change
+            FileEntry,     // fminus_rt_file_name: a listing's name of a file, and writes its length
             FileClose,     // fminus_rt_file_close: frees a handle, and a file's bytes, which the program reads
             FileWrite,     // fminus_rt_file_write, fminus_rt_file_append: reads a name literal, its ints and the bytes
             TextRead,      // fminus_rt_string_equal, _find, _float, _int (runtime/Text.cpp): reads strings' bytes
@@ -534,6 +565,8 @@ namespace fminus::ir::detail
             RuntimeFacts{"fminus_rt_json_floats", RuntimeKind::ReadInto},
             RuntimeFacts{"fminus_rt_json_base64_floats", RuntimeKind::ReadInto},
             RuntimeFacts{"fminus_rt_json_module", RuntimeKind::ReadModule},
+            RuntimeFacts{"fminus_rt_json_text", RuntimeKind::ReadString},
+            RuntimeFacts{"fminus_rt_json_write", RuntimeKind::JsonWrite},
             RuntimeFacts{"fminus_rt_xml_parse", RuntimeKind::Document},
             RuntimeFacts{"fminus_rt_xml_free", RuntimeKind::DocumentRelease},
             RuntimeFacts{"fminus_rt_xml_float", RuntimeKind::Read},
@@ -543,8 +576,11 @@ namespace fminus::ir::detail
             RuntimeFacts{"fminus_rt_xml_count", RuntimeKind::Read},
             RuntimeFacts{"fminus_rt_xml_choice", RuntimeKind::ReadChoice},
             RuntimeFacts{"fminus_rt_xml_floats", RuntimeKind::ReadInto},
+            RuntimeFacts{"fminus_rt_xml_text", RuntimeKind::ReadString},
             RuntimeFacts{"fminus_web_http_get", RuntimeKind::WebStart},
             RuntimeFacts{"fminus_web_http_post", RuntimeKind::WebStart},
+            RuntimeFacts{"fminus_web_http_get_s", RuntimeKind::WebStart},
+            RuntimeFacts{"fminus_web_http_post_s", RuntimeKind::WebStart},
             RuntimeFacts{"fminus_web_http_wait", RuntimeKind::WebWait},
             RuntimeFacts{"fminus_web_http_status", RuntimeKind::WebRead},
             RuntimeFacts{"fminus_web_http_size", RuntimeKind::WebRead},
@@ -566,19 +602,30 @@ namespace fminus::ir::detail
             RuntimeFacts{"fminus_web_http_query_float", RuntimeKind::ServerQuery},
             RuntimeFacts{"fminus_web_http_query_int", RuntimeKind::ServerQuery},
             RuntimeFacts{"fminus_web_http_query_text", RuntimeKind::ServerText},
+            RuntimeFacts{"fminus_web_http_header", RuntimeKind::ServerText},
+            RuntimeFacts{"fminus_web_http_path", RuntimeKind::ServerText},
+            RuntimeFacts{"fminus_web_http_text", RuntimeKind::ServerText},
             RuntimeFacts{"fminus_web_http_reply", RuntimeKind::ServerReply},
             RuntimeFacts{"fminus_web_http_reply_bytes", RuntimeKind::ServerReply},
             RuntimeFacts{"fminus_web_http_reply_text", RuntimeKind::ServerReply},
+            RuntimeFacts{"fminus_web_http_reply_text_s", RuntimeKind::ServerReply},
+            RuntimeFacts{"fminus_web_http_reply_buffer", RuntimeKind::ServerBuffer},
+            RuntimeFacts{"fminus_web_http_reply_written", RuntimeKind::ServerReply},
             RuntimeFacts{"fminus_rt_file_read", RuntimeKind::FileOpen},
             RuntimeFacts{"fminus_rt_file_list", RuntimeKind::FileOpen},
+            RuntimeFacts{"fminus_rt_file_read_s", RuntimeKind::FileOpen},
+            RuntimeFacts{"fminus_rt_file_list_s", RuntimeKind::FileOpen},
             RuntimeFacts{"fminus_rt_file_read_nth", RuntimeKind::FileNth},
             RuntimeFacts{"fminus_rt_file_status", RuntimeKind::FileRead},
             RuntimeFacts{"fminus_rt_file_size", RuntimeKind::FileRead},
             RuntimeFacts{"fminus_rt_file_data", RuntimeKind::FileRead},
             RuntimeFacts{"fminus_rt_file_count", RuntimeKind::FileRead},
+            RuntimeFacts{"fminus_rt_file_name", RuntimeKind::FileEntry},
             RuntimeFacts{"fminus_rt_file_close", RuntimeKind::FileClose},
             RuntimeFacts{"fminus_rt_file_write", RuntimeKind::FileWrite},
             RuntimeFacts{"fminus_rt_file_append", RuntimeKind::FileWrite},
+            RuntimeFacts{"fminus_rt_file_write_s", RuntimeKind::FileWrite},
+            RuntimeFacts{"fminus_rt_file_append_s", RuntimeKind::FileWrite},
             RuntimeFacts{"fminus_rt_string_equal", RuntimeKind::TextRead},
             RuntimeFacts{"fminus_rt_string_find", RuntimeKind::TextRead},
             RuntimeFacts{"fminus_rt_string_float", RuntimeKind::TextRead},
@@ -725,15 +772,21 @@ namespace fminus::ir::detail
             case RuntimeKind::Read:
             case RuntimeKind::ReadChoice:
             case RuntimeKind::ReadInto:
+            case RuntimeKind::ReadString:
                 // Reads the document, the path's table (a constant of the program's, one block: Paths.cpp), the ints
                 // and json_choice's or xml_choice's table, keeping no pointer to any of them, and writes only
-                // json_floats', json_base64_floats' and xml_floats' `out` (no more than `cap` floats of it).
+                // json_floats', json_base64_floats' and xml_floats' `out` (no more than `cap` floats of it), or
+                // json_text's and xml_text's `length`; those two give the address of bytes in the document, valid until
+                // it is freed (whose memory is any, so loads through it stay before it): neither noalias nor nonnull,
+                // null when there is no text.
                 // A document is opaque, as an FFT plan is: what it points to, its values and its copy of the text, only
                 // it points to, so a read touches inaccessible memory there, and writes none. It allocates, frees and
                 // waits for nothing (the effects let it run on the audio thread): nofree and nosync too.
                 function.setMemoryEffects(
-                    llvm::MemoryEffects::argMemOnly(facts->kind == RuntimeKind::ReadInto ? llvm::ModRefInfo::ModRef
-                                                                                         : llvm::ModRefInfo::Ref)
+                    llvm::MemoryEffects::argMemOnly(facts->kind == RuntimeKind::ReadInto
+                                                            || facts->kind == RuntimeKind::ReadString
+                                                        ? llvm::ModRefInfo::ModRef
+                                                        : llvm::ModRefInfo::Ref)
                     | llvm::MemoryEffects::inaccessibleMemOnly(llvm::ModRefInfo::Ref));
                 function.setDoesNotFreeMemory();
                 function.setNoSync();
@@ -744,8 +797,8 @@ namespace fminus::ir::detail
                 }
                 if (facts->kind != RuntimeKind::Read)
                 {
-                    function.addParamAttr(4, facts->kind == RuntimeKind::ReadInto ? llvm::Attribute::WriteOnly
-                                                                                   : llvm::Attribute::ReadOnly);
+                    function.addParamAttr(4, facts->kind == RuntimeKind::ReadChoice ? llvm::Attribute::ReadOnly
+                                                                                     : llvm::Attribute::WriteOnly);
                     function.addParamAttr(4, keepsNone);
                 }
                 break;
@@ -864,19 +917,21 @@ namespace fminus::ir::detail
                 break;
             case RuntimeKind::ServerQuery:
             case RuntimeKind::ServerText:
-                // As WebRead (an acquire load of the request's phase, then its query), and the name literal, which it
-                // only reads. query_text writes the value's length (when its pointer is not null) and gives the
-                // address of bytes in the request's slot, which the I/O thread reuses after the reply (whose memory is
-                // any, so loads through it stay before it): neither noalias nor nonnull, null when there is none.
+                // As WebRead (an acquire load of the request's phase, then its query, its head or its places), and the
+                // name literal, which it only reads. The text functions write the bytes' count (their last argument,
+                // when it is not null) and give the address of bytes in the request's slot, which the I/O thread
+                // reuses after the reply (whose memory is any, so loads through it stay before it): neither noalias
+                // nor nonnull, null when there is none (or an empty header's non-null address).
                 function.setMemoryEffects(llvm::MemoryEffects::inaccessibleOrArgMemOnly());
                 function.setDoesNotFreeMemory();
                 function.addParamAttr(0, keepsNone);
-                function.addParamAttr(1, llvm::Attribute::ReadOnly);
-                function.addParamAttr(1, keepsNone);
-                if (facts->kind == RuntimeKind::ServerText)
+                for (unsigned arg = 1; arg < function.arg_size(); ++arg)
                 {
-                    function.addParamAttr(3, llvm::Attribute::WriteOnly);
-                    function.addParamAttr(3, keepsNone);
+                    if (!function.getArg(arg)->getType()->isPointerTy())
+                        continue;
+                    const bool length = facts->kind == RuntimeKind::ServerText && arg + 1 == function.arg_size();
+                    function.addParamAttr(arg, length ? llvm::Attribute::WriteOnly : llvm::Attribute::ReadOnly);
+                    function.addParamAttr(arg, keepsNone);
                 }
                 break;
             case RuntimeKind::ServerReply:
@@ -892,6 +947,34 @@ namespace fminus::ir::detail
                 {
                     if (!function.getArg(arg)->getType()->isPointerTy())
                         continue;
+                    function.addParamAttr(arg, llvm::Attribute::ReadOnly);
+                    function.addParamAttr(arg, keepsNone);
+                }
+                break;
+            case RuntimeKind::ServerBuffer:
+                // As WebRead (the slot of a request the caller holds), writing the capacity (when its pointer is not
+                // null) and giving the address of the slot's reply buffer, which the program's code then writes and
+                // reply_written publishes (whose memory is any, so those stores stay before it): neither noalias nor
+                // nonnull, null for a handle not held.
+                function.setMemoryEffects(llvm::MemoryEffects::inaccessibleOrArgMemOnly());
+                function.setDoesNotFreeMemory();
+                function.addParamAttr(0, keepsNone);
+                function.addParamAttr(1, llvm::Attribute::WriteOnly);
+                function.addParamAttr(1, keepsNone);
+                break;
+            case RuntimeKind::JsonWrite:
+                // Writes the buffer (no more than `capacity` bytes of it) and reads the description, the values' slots
+                // and what they point to, a string's bytes among them, which no argument points to: it reads any
+                // memory, and writes only its arguments'. It keeps no pointer, allocates, frees, locks and waits for
+                // nothing (the effects let it run on the audio thread): nofree and nosync.
+                function.setMemoryEffects(llvm::MemoryEffects::readOnly()
+                                          | llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::ModRef));
+                function.setDoesNotFreeMemory();
+                function.setNoSync();
+                function.addParamAttr(0, llvm::Attribute::WriteOnly);
+                function.addParamAttr(0, keepsNone);
+                for (unsigned arg : {2u, 3u})
+                {
                     function.addParamAttr(arg, llvm::Attribute::ReadOnly);
                     function.addParamAttr(arg, keepsNone);
                 }
@@ -927,16 +1010,26 @@ namespace fminus::ir::detail
                 function.addRetAttr(llvm::Attribute::NoUndef);
                 break;
             case RuntimeKind::FileRead:
+            case RuntimeKind::FileEntry:
                 // Plain loads of the handle's first fields, which never change once the handle was given (and a shared
                 // failure's never at all): no lock, no atomic, no allocation, no system call. readonly, so that LLVM
                 // merges two reads of one handle with nothing between that may write (a handle is opaque: what the
                 // context's other functions change, inaccessible memory, is a write between). It keeps no pointer.
-                function.setMemoryEffects(llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref)
+                // file_name writes its name's length too, and gives the address of bytes the listing holds until it is
+                // closed (whose memory is any): neither noalias nor nonnull, null outside the listing.
+                function.setMemoryEffects(llvm::MemoryEffects::argMemOnly(facts->kind == RuntimeKind::FileEntry
+                                                                              ? llvm::ModRefInfo::ModRef
+                                                                              : llvm::ModRefInfo::Ref)
                                           | llvm::MemoryEffects::inaccessibleMemOnly(llvm::ModRefInfo::Ref));
                 function.setDoesNotFreeMemory();
                 function.setNoSync();
                 function.addParamAttr(0, llvm::Attribute::ReadOnly);
                 function.addParamAttr(0, keepsNone);
+                if (facts->kind == RuntimeKind::FileEntry)
+                {
+                    function.addParamAttr(2, llvm::Attribute::WriteOnly);
+                    function.addParamAttr(2, keepsNone);
+                }
                 break;
             case RuntimeKind::FileClose:
                 // Frees the handle, and a file's bytes, which the program reads through file_data's pointer: so a load
@@ -965,6 +1058,13 @@ namespace fminus::ir::detail
                 }
                 break;
             }
+            // A function that takes strings in arrays (an address's, file_read_s, http_get_s, ...) reads each string's
+            // bytes through a pointer the arrays hold, not one it was given: memory no argument points to, which it
+            // only reads (and keeps no pointer to: what it keeps it copies).
+            if (std::string_view(function.getName()).ends_with("_s")
+                && function.getMemoryEffects() != llvm::MemoryEffects::unknown())
+                function.setMemoryEffects(function.getMemoryEffects()
+                                          | llvm::MemoryEffects::otherMemOnly(llvm::ModRefInfo::Ref));
         }
     } // namespace
 
@@ -1394,6 +1494,8 @@ namespace fminus::ir::detail
         }
         std::vector<llvm::Value*> irArgs;
         bool fine = true;
+        bool texts = false;                             // an address with a string's hole: the symbol's _s function
+        std::optional<llvm::Value*> fallback;           // a string's, of a builtin that gives one from the runtime
         for (std::size_t i = 0; i < params.size(); ++i)
         {
             const std::size_t at = i > formatAt && !trailing ? i + ints : i;
@@ -1428,7 +1530,7 @@ namespace fminus::ir::detail
             if (param == Param::String || param == Param::Format || param == Param::Path || param == Param::XmlPath
                 || param == Param::Url || param == Param::ContentType || param == Param::Route
                 || param == Param::QueryName || param == Param::ReplyFormat || param == Param::FileName
-                || param == Param::FilePattern)
+                || param == Param::FilePattern || param == Param::HeaderName)
             {
                 if (!isString(arg))
                 {
@@ -1436,13 +1538,53 @@ namespace fminus::ir::detail
                     fine = false;
                     continue;
                 }
-                const auto& literal = std::get<ast::StringExpr>(arg.node);
-                if ((param == Param::Url && !checkUrl(literal, begin(arg)))
+                const auto& written = std::get<ast::StringExpr>(arg.node);
+                const bool address = param == Param::Url || param == Param::FileName || param == Param::FilePattern;
+                // An address's holes, filled in (lowerHoles): then it is the literal the library takes, each hole a %d
+                // or a %s, and the call has no ints after it. Without any, it is its braces unescaped ({{ is '{').
+                std::optional<Filled> filled;
+                ast::StringExpr unescaped;
+                if (address)
+                {
+                    const HoleScan scan = scanHoles(written.value);
+                    if (!scan.errors.empty())
+                    {
+                        const FormatScan::Error& wrong = scan.errors.front();
+                        error(wrong.offset < written.at.size() ? written.at[wrong.offset] : begin(arg), wrong.message);
+                        fine = false;
+                        continue;
+                    }
+                    if (!scan.holes.empty() && ints > 0)
+                    {
+                        error(begin(*args[intsAt]), "a literal with holes takes no values after it: each hole, "
+                                                    "{name}, names its own");
+                        fine = false;
+                        continue;
+                    }
+                    if (!scan.holes.empty())
+                    {
+                        filled = lowerHoles(written, scan);
+                        if (!filled)
+                        {
+                            fine = false;
+                            continue;
+                        }
+                    }
+                    else
+                    {
+                        unescaped.value = scan.library;
+                        for (const std::size_t offset : scan.offsets)
+                            unescaped.at.push_back(offset < written.at.size() ? written.at[offset] : begin(arg));
+                    }
+                }
+                const ast::StringExpr& literal = filled ? filled->literal : address ? unescaped : written;
+                if ((param == Param::Url && (!checkUrl(literal, begin(arg)) || (filled && !checkUrlHoles(*filled))))
                     || (param == Param::ContentType && !checkContentType(literal, begin(arg)))
                     || (param == Param::Route && !checkRoute(literal, begin(arg)))
                     || (param == Param::QueryName && !checkQueryName(literal, begin(arg)))
+                    || (param == Param::HeaderName && !checkHeaderName(literal, begin(arg)))
                     || ((param == Param::FileName || param == Param::FilePattern)
-                        && !checkFileName(literal, begin(arg), builtin.name)))
+                        && !checkFileName(literal, begin(arg), builtin.name, filled.has_value())))
                 {
                     fine = false;
                     continue;
@@ -1466,14 +1608,33 @@ namespace fminus::ir::detail
                 if (param == Param::Route)   // what Program::webRoutes() lists, and the route table
                     recordWebRoute(location, literal, begin(arg));
                 if (param == Param::String || param == Param::ContentType || param == Param::Route
-                    || param == Param::QueryName)
+                    || param == Param::QueryName || param == Param::HeaderName)
                     continue;
+                if (filled)
+                {
+                    if (param == Param::Url)   // what Program::webRequests() lists, each hole a "*"
+                        recordWebRequest(location, builtin.name == "http_post" ? "POST" : "GET", literal);
+                    else   // what Program::files() lists
+                        recordFileUse(location, builtin.name.substr(5), literal);
+                    irArgs.push_back(formatInts(filled->ints));
+                    irArgs.push_back(builder_.getInt32(static_cast<std::uint32_t>(filled->ints.size())));
+                    if (!filled->strings.empty())   // the strings, after the ints, for the _s function
+                    {
+                        const auto [data, sizes] = formatTexts(filled->strings);
+                        irArgs.push_back(data);
+                        irArgs.push_back(sizes);
+                        irArgs.push_back(builder_.getInt32(static_cast<std::uint32_t>(filled->strings.size())));
+                        texts = true;
+                    }
+                    continue;
+                }
                 std::vector<const ast::Expr*> given;
                 for (std::size_t k = 0; k < ints; ++k)
                     given.push_back(args[intsAt + k]);
-                if (param == Param::ReplyFormat)   // its values, doubles (WebServer.cpp)
+                if (param == Param::ReplyFormat)   // its values, doubles, and its strings (WebServer.cpp)
                 {
-                    const std::optional<std::vector<llvm::Value*>> values = replyArguments(literal, given);
+                    std::vector<llvm::Value*> strings;
+                    const std::optional<std::vector<llvm::Value*>> values = replyArguments(literal, given, strings);
                     if (!values)
                     {
                         fine = false;
@@ -1481,6 +1642,14 @@ namespace fminus::ir::detail
                     }
                     irArgs.push_back(replyValues(*values));
                     irArgs.push_back(builder_.getInt32(static_cast<std::uint32_t>(values->size())));
+                    if (!strings.empty())   // the strings, after the values, for the _s function
+                    {
+                        const auto [data, sizes] = formatTexts(strings);
+                        irArgs.push_back(data);
+                        irArgs.push_back(sizes);
+                        irArgs.push_back(builder_.getInt32(static_cast<std::uint32_t>(strings.size())));
+                        texts = true;
+                    }
                     continue;
                 }
                 const std::optional<std::vector<llvm::Value*>> values = formatArguments(literal, given);
@@ -1518,6 +1687,11 @@ namespace fminus::ir::detail
             llvm::Value* converted = readOnly ? value.ir : convert(value, to, location, Use::Passing);
             if (param == Param::Bool)   // to the runtime as an int, 0 or 1
                 converted = builder_.CreateZExt(converted, builder_.getInt32Ty());
+            if (param == Param::Text && builtin.result == Result::String && !builtin.symbol.empty())
+            {
+                fallback = converted;   // chosen when the runtime finds none (textResult)
+                continue;
+            }
             if (param == Param::Text && !builtin.symbol.empty())   // to the runtime as its pointer and its length
             {
                 irArgs.push_back(builder_.CreateExtractValue(converted, 0, "data"));
@@ -1530,11 +1704,14 @@ namespace fminus::ir::detail
             return recovery(type);
         if (builtin.symbol.empty())   // made inline: a string's (Text.cpp)
             return lowerText(location, builtin, irArgs);
+        if (builtin.result == Result::String)   // a pointer from the runtime, and a length it writes
+            return textResult(builtin, std::move(irArgs), fallback);
         const bool listen = builtin.symbol == "fminus_web_http_listen";
         if (listen)
             irArgs = listenArguments(location);
         llvm::Type* returned = builtin.result == Result::Bool ? builder_.getInt32Ty() : typeOf(type);
-        llvm::CallInst* result = callRuntime(std::string(builtin.symbol), returned, irArgs);
+        llvm::CallInst* result =
+            callRuntime(std::string(builtin.symbol) + (texts ? "_s" : ""), returned, irArgs);
         if (listen)
             webListens_.push_back(result);   // its route table, once every route is known (finishWebRoutes)
         if (builtin.result == Result::Void)
@@ -1556,6 +1733,108 @@ namespace fminus::ir::detail
                                                                                    static_cast<unsigned>(k))),
                 ast::Type::Int);
         return array;
+    }
+
+    // A format's strings, in two arrays of the function's stack frame, their addresses and their lengths (the _s
+    // functions' texts and lengths, runtime/Format.h's expandPlaces): each string's pointer and its length, in order.
+    std::pair<llvm::Value*, llvm::Value*> Lowering::formatTexts(const std::vector<llvm::Value*>& values)
+    {
+        llvm::AllocaInst* data =
+            allocate(llvm::ArrayType::get(builder_.getPtrTy(), values.size()), "format.texts");
+        llvm::AllocaInst* sizes =
+            allocate(llvm::ArrayType::get(builder_.getInt32Ty(), values.size()), "format.lengths");
+        for (std::size_t k = 0; k < values.size(); ++k)
+        {
+            const auto at = static_cast<unsigned>(k);
+            tag(builder_.CreateStore(builder_.CreateExtractValue(values[k], 0),
+                                     builder_.CreateConstInBoundsGEP2_32(data->getAllocatedType(), data, 0, at)),
+                ast::Type::pointerTo(ast::Kind::Char, true));
+            tag(builder_.CreateStore(builder_.CreateExtractValue(values[k], 1),
+                                     builder_.CreateConstInBoundsGEP2_32(sizes->getAllocatedType(), sizes, 0, at)),
+                ast::Type::Int);
+        }
+        return {data, sizes};
+    }
+
+    // An address literal's holes (scanHoles: none in error), each a variable lowered where it is written: an int, a
+    // bool or an enumeration's value, which the library writes in decimal (a %d), or a string, which it fills in (a
+    // %s), in the hole's place of `scan.library`. Anything else is an error at the hole, in the manner of a format's; a
+    // name in no scope is clang's. Null after any error.
+    std::optional<Lowering::Filled> Lowering::lowerHoles(const ast::StringExpr& literal, const HoleScan& scan)
+    {
+        const auto at = [&](std::size_t offset) {
+            return offset < literal.at.size() ? literal.at[offset]
+                   : literal.at.empty()      ? SourceLocation{}
+                                             : literal.at.back();
+        };
+        Filled filled;
+        filled.literal.value = scan.library;
+        for (const std::size_t offset : scan.offsets)
+            filled.literal.at.push_back(at(offset));
+        // Its format's own errors (a % before anything but d or %), each hole a %d there, as formatArguments reports
+        // them.
+        const FormatScan format = scanFormat(scan.library);
+        bool fine = format.errors.empty();
+        for (const FormatScan::Error& wrong : format.errors)
+            diagnostics_.error(filled.literal.at[wrong.offset], wrong.message,
+                               {{filled.literal.at[wrong.offset],
+                                 "a format here takes %d, an int, and %%, a percent sign; and holes, {name}", {}}});
+        for (const HoleScan::Hole& hole : scan.holes)
+        {
+            const SourceLocation where = at(hole.offset);
+            const ast::Expr name{where, ast::VariableExpr{hole.name}};
+            const Value value = lower(name);
+            filled.places.push_back(hole.at);
+            if (value.failed)   // its own error says why
+            {
+                fine = false;
+                continue;
+            }
+            if (value.type == ast::Type::String)
+            {
+                filled.literal.value[hole.at + 1] = 's';
+                filled.texts.push_back(true);
+                filled.strings.push_back(value.ir);
+                continue;
+            }
+            filled.texts.push_back(false);
+            if (value.type.kind == ast::Kind::Int || value.type == ast::Type::Bool)
+            {
+                filled.ints.push_back(convert(value, ast::Type::Int, where, Use::Passing));
+                continue;
+            }
+            error(where, "hole {" + hole.name + "} has type " + quoted(ast::typeName(value.type))
+                             + ": a hole takes an int, a bool, an enumeration's value or a string");
+            fine = false;
+        }
+        if (!fine)
+            return std::nullopt;
+        return filled;
+    }
+
+    // A builtin that gives a string from a function of the runtime (Result::String with a symbol): `args` and the
+    // address of an int of the frame, where the runtime writes the length of the bytes whose address it returns; the
+    // pair. With `fallback`, that string when the runtime gives no address (none there, or not text).
+    Lowering::Value Lowering::textResult(const RuntimeBuiltin& builtin, std::vector<llvm::Value*> args,
+                                         std::optional<llvm::Value*> fallback)
+    {
+        llvm::AllocaInst* length = allocate(builder_.getInt32Ty(), std::string(builtin.name) + ".length");
+        args.push_back(length);
+        llvm::CallInst* data = callRuntime(std::string(builtin.symbol), builder_.getPtrTy(), args);
+        data->setName(std::string(builtin.name) + ".data");
+        llvm::LoadInst* size = builder_.CreateLoad(builder_.getInt32Ty(), length, std::string(builtin.name) + ".size");
+        tag(size, ast::Type::Int);
+        llvm::Value* pointer = data;
+        llvm::Value* count = size;
+        if (fallback)
+        {
+            llvm::Value* none = builder_.CreateIsNull(data, std::string(builtin.name) + ".none");
+            pointer = builder_.CreateSelect(none, builder_.CreateExtractValue(*fallback, 0), data);
+            count = builder_.CreateSelect(none, builder_.CreateExtractValue(*fallback, 1), size);
+        }
+        llvm::Type* type = typeOf(ast::Type::String);
+        llvm::Value* value = builder_.CreateInsertValue(llvm::PoisonValue::get(type), pointer, 0);
+        return {builder_.CreateInsertValue(value, count, 1, builtin.name), ast::Type::String};
     }
 
     // A call of the runtime's function `name` (runtime/Runtime.h), declared from the arguments' IR types, with the

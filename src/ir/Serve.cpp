@@ -29,11 +29,16 @@
 // _text, each checked as the builtin checks its arguments), answers 500 when the library refused the reply and still
 // holds the request (HTTP_LIMIT, HTTP_INVALID), runs the deferred statements of the route's blocks, and goes to
 // serve.next. A route whose block can reach its end without a reply is an error at its closing brace, the missing
-// return's analysis on the route's own blocks.
+// return's analysis on the route's own blocks. A parameter may be a string: a hole's, a whole segment of the path (a %s
+// of the route table), by fminus_web_http_text, or a query's field, by fminus_web_http_query_text, its bytes as sent;
+// either way the request's bytes, valid until its reply.
 //
-// A JSON literal, a reply's body, is a format of the reply's that the compiler makes: its keys and its structure
-// constant text, each value a place, %r (a float's shortest digits), %R (a double's), %d (an int) or %b (a bool's
-// words), which the library writes into the request's buffer (web/Server.cpp): no JSON value is ever made.
+// A JSON literal, a reply's body, is written by the runtime's JSON writer (fminus_rt_json_write, runtime/JsonWrite.cpp)
+// straight into the request's own reply buffer (fminus_web_http_reply_buffer), which is then published
+// (fminus_web_http_reply_written): its keys and its structure a constant description the compiler makes, the bytes
+// and the operations a table as a path's is, and each value stored in an 8-byte slot of the frame with its shape (a
+// float, a double, an int, a bool, a string): no JSON value is ever made. In a build without FMINUS_JSON the writer is
+// not in the runtime, and a JSON literal is the error that names the option.
 #include "ir/Lowering.h"
 
 #include <llvm/IR/CFG.h>
@@ -89,9 +94,18 @@ namespace fminus::ir::detail
         std::optional<double> defaultOf(const ast::RouteParam& param)
         {
             const ast::Attribute* fallback = lastNamed(param.attributes, "fminus::default");
-            if (fallback == nullptr || fallback->args.size() != 1)
+            if (fallback == nullptr || fallback->args.size() != 1 || fallback->args[0].isString)
                 return std::nullopt;
             return ast::attributeNumber(fallback->args[0]);
+        }
+
+        // A string parameter's fminus::default("text"), when it has a good one.
+        std::optional<std::string> textDefaultOf(const ast::RouteParam& param)
+        {
+            const ast::Attribute* fallback = lastNamed(param.attributes, "fminus::default");
+            if (fallback == nullptr || fallback->args.size() != 1 || !fallback->args[0].isString)
+                return std::nullopt;
+            return fallback->args[0].text;
         }
 
         // Where the `offset`-th byte of a literal is spelt, or the literal's own place.
@@ -101,8 +115,8 @@ namespace fminus::ir::detail
         }
 
         // A key of a JSON literal, written into `out` as a JSON string's contents (RFC 8259, §7: '"', '\\' and the
-        // control characters escaped), each '%' doubled for the format it is part of. The offset of a byte that is no
-        // part of UTF-8 text, which no JSON string may hold, or none.
+        // control characters escaped, as the writer escapes a string value). The offset of a byte that is no part of
+        // UTF-8 text, which no JSON string may hold, or none.
         std::optional<std::size_t> jsonKey(std::string_view key, std::string& out)
         {
             for (std::size_t i = 0; i < key.size();)
@@ -153,9 +167,6 @@ namespace fminus::ir::detail
                 case '\t':
                     out += "\\t";
                     break;
-                case '%':
-                    out += "%%";
-                    break;
                 default:
                     if (byte < 0x20)
                     {
@@ -185,10 +196,11 @@ namespace fminus::ir::detail
         return nullptr;
     }
 
-    // A route's parameters and holes, checked: each parameter an int, a float, a bool or an http_request (one at
-    // most), its name its own; a hole's an int, without a default; another's name one a query may have; their
-    // attributes a module parameter's, checked as there; each hole a different parameter's. No attribute after the
-    // list. Their description for the host (Program::webRoutes), into `parameters`. Whether all is well.
+    // A route's parameters and holes, checked: each parameter an int, a float, a bool, a string or an http_request (one
+    // at most), its name its own; a hole's an int or a string (whose hole scanRouteHoles made a whole segment), without
+    // a default; another's name one a query may have; their attributes a module parameter's, checked as there, and a
+    // string's default a string, and no range; each hole a different parameter's. No attribute after the list. Their
+    // description for the host (Program::webRoutes), into `parameters`. Whether all is well.
     bool Lowering::checkRouteParameters(const ast::Route& route, const RouteHoles& holes, llvm::Metadata*& parameters)
     {
         const std::size_t reported = diagnostics_.errors().size();
@@ -203,6 +215,12 @@ namespace fminus::ir::detail
                 operands.push_back(llvm::ConstantAsMetadata::get(llvm::ConstantFP::get(builder_.getDoubleTy(), *value)));
             return llvm::MDTuple::get(context, operands);
         };
+        const auto words = [&](const std::optional<std::string>& value) {
+            std::vector<llvm::Metadata*> operands;
+            if (value)
+                operands.push_back(llvm::MDString::get(context, *value));
+            return llvm::MDTuple::get(context, operands);
+        };
         std::vector<llvm::Metadata*> described;
         std::set<std::string> names;
         const ast::RouteParam* request = nullptr;
@@ -210,9 +228,11 @@ namespace fminus::ir::detail
         {
             const ast::Type type = param.type;
             const bool isRequest = type == ast::Type::handleType(ast::Handle::HttpRequest);
-            if (type != ast::Type::Int && type != ast::Type::Float && type != ast::Type::Bool && !isRequest)
+            const bool isText = type == ast::Type::String;
+            if (type != ast::Type::Int && type != ast::Type::Float && type != ast::Type::Bool && !isText && !isRequest)
             {
-                error(param.location, "a route's parameter is an int, a float, a bool or an http_request, not "
+                error(param.location, "a route's parameter is an int, a float, a bool, a string or an http_request, "
+                                      "not "
                                           + quoted(ast::typeName(type)));
                 continue;
             }
@@ -233,29 +253,38 @@ namespace fminus::ir::detail
                           quoted(param.attributes.front().name) + " attribute does not apply to the route's request");
                 else if (inPath)
                     error(param.location, "parameter " + quoted(param.name) + " fills the hole {" + param.name
-                                              + "}, a number of the path: it is an int, not 'http_request'");
+                                              + "}, a segment of the path or a number in one: it is an int or a "
+                                                "string, not 'http_request'");
                 request = &param;
                 described.push_back(llvm::MDTuple::get(
                     context, {llvm::MDString::get(context, param.name), llvm::MDString::get(context, "http_request"),
                               llvm::MDString::get(context, "request"), number(std::nullopt), number(std::nullopt),
-                              number(std::nullopt)}));
+                              number(std::nullopt), words(std::nullopt)}));
                 continue;
             }
-            if (inPath && type != ast::Type::Int)
+            if (inPath && type != ast::Type::Int && !isText)
                 error(param.location, "parameter " + quoted(param.name) + " fills the hole {" + param.name
-                                          + "}, a number of the path: it is an int, not " + quoted(ast::typeName(type)));
+                                          + "}, a segment of the path or a number in one: it is an int or a string, "
+                                            "not "
+                                          + quoted(ast::typeName(type)));
             if (!inPath && param.name.size() > kMaxQueryName)
                 error(param.location, "parameter " + quoted(param.name) + " is read from the query's field of its "
                                           "name, which is 1 to 64 bytes, not " + std::to_string(param.name.size()));
-            // A module parameter's attributes, checked as its are (Modules.cpp).
-            const ast::Field field{param.location, param.name, type, false, false, true, param.attributes, nullptr, 0,
+            // A module parameter's attributes, checked as its are (Modules.cpp), a string's range and default among
+            // them; a hole's string's default is refused below, once.
+            std::vector<ast::Attribute> attributes = param.attributes;
+            if (isText && inPath)
+                std::erase_if(attributes,
+                              [](const ast::Attribute& attribute) { return attribute.name == "fminus::default"; });
+            const ast::Field field{param.location, param.name, type, false, false, true, attributes, nullptr, 0,
                                    nullptr};
             checkAttributes(field, type, false);
             for (const ast::Attribute& attribute : param.attributes)
             {
                 if (attribute.name == "fminus::default" && inPath)
                     error(attribute.location, "'fminus::default' does not apply to a hole's parameter: a request "
-                                              "the route takes always has its number");
+                                              "the route takes always has its "
+                                                  + std::string(isText ? "segment" : "number"));
                 else if (attribute.name != "fminus::range" && attribute.name != "fminus::default"
                          && !ast::isIgnoredAttribute(attribute.name) && !attribute.name.starts_with("fminus::")
                          && !attribute.name.starts_with("clang::"))
@@ -271,13 +300,14 @@ namespace fminus::ir::detail
             else if (fallback && !inPath && type == ast::Type::Bool && *fallback != 0 && *fallback != 1)
                 error(lastNamed(param.attributes, "fminus::default")->location,
                       "the default of a bool parameter is 0 or 1, not " + std::format("{}", *fallback));
-            const std::optional<std::pair<double, double>> range = rangeOf(param);
+            const std::optional<std::pair<double, double>> range = isText ? std::nullopt : rangeOf(param);
             described.push_back(llvm::MDTuple::get(
                 context, {llvm::MDString::get(context, param.name), llvm::MDString::get(context, ast::typeName(type)),
                           llvm::MDString::get(context, inPath ? "path" : "query"),
                           number(range ? std::optional(range->first) : std::nullopt),
                           number(range ? std::optional(range->second) : std::nullopt),
-                          number(inPath ? std::nullopt : fallback)}));
+                          number(inPath || isText ? std::nullopt : fallback),
+                          words(inPath || !isText ? std::nullopt : textDefaultOf(param))}));
         }
         std::set<std::string> filled;
         for (const RouteHoles::Hole& hole : holes.holes)
@@ -335,7 +365,13 @@ namespace fminus::ir::detail
         std::vector<std::uint64_t> set;
         for (const ast::Route& route : serve.routes)
         {
-            holes.push_back(scanRouteHoles(route.literal.value));
+            std::vector<std::string> texts;   // its string parameters, whose holes are whole segments, a %s each
+            for (const ast::RouteParam& param : route.params)
+            {
+                if (param.type == ast::Type::String)
+                    texts.push_back(param.name);
+            }
+            holes.push_back(scanRouteHoles(route.literal.value, texts));
             const RouteHoles& scan = holes.back();
             bool fine = scan.errors.empty();
             if (!fine)
@@ -482,17 +518,20 @@ namespace fminus::ir::detail
         scopes_.pop_back();
     }
 
-    // A route's parameter, filled from the request: a hole's (`hole`, its place) from the path, as http_arg reads it;
-    // another's from the query's field of its name, missing its default or a 400, not a value of its type a 400 (an
-    // int as http_query_int reads one, called with two fallbacks that a value cannot both be; a float as
-    // http_query_float, with a NaN for its fallback, which no value is; a bool true, false, 1 or 0, its bytes
-    // compared); then its range, outside it a 400; the request itself for an http_request. A const variable.
+    // A route's parameter, filled from the request: a hole's (`hole`, its place) from the path, as http_arg reads it,
+    // or a string's as http_text gives its segment; another's from the query's field of its name, missing its default
+    // or a 400, not a value of its type a 400 (an int as http_query_int reads one, called with two fallbacks that a
+    // value cannot both be; a float as http_query_float, with a NaN for its fallback, which no value is; a bool true,
+    // false, 1 or 0, its bytes compared; a string its bytes as they are, nothing decoded); then its range, outside it
+    // a 400; the request itself for an http_request. A const variable. A string's bytes are the request's, valid until
+    // its reply.
     void Lowering::fillParameter(const ast::RouteParam& param, std::optional<std::size_t> hole, llvm::Value* request,
                                  llvm::BasicBlock* bad)
     {
         const ast::Type type = param.type;
         const bool isRequest = type == ast::Type::handleType(ast::Handle::HttpRequest);
-        if (type != ast::Type::Int && type != ast::Type::Float && type != ast::Type::Bool && !isRequest)
+        const bool isText = type == ast::Type::String;
+        if (type != ast::Type::Int && type != ast::Type::Float && type != ast::Type::Bool && !isText && !isRequest)
         {
             // checkRouteParameters reported it: a variable of its type all the same, 0, so that its uses report
             // nothing more.
@@ -515,7 +554,22 @@ namespace fminus::ir::detail
             return;
         }
         llvm::Type* i32 = builder_.getInt32Ty();
-        if (hole)
+        // A string from the request's bytes and their count, which the library wrote at `size`.
+        const auto pair = [&](llvm::Value* data, llvm::AllocaInst* size) {
+            llvm::LoadInst* count = builder_.CreateLoad(i32, size, param.name + ".size");
+            tag(count, ast::Type::Int);
+            llvm::Value* value = builder_.CreateInsertValue(llvm::PoisonValue::get(typeOf(type)), data, 0);
+            return builder_.CreateInsertValue(value, count, 1, param.name);
+        };
+        if (hole && isText)
+        {
+            llvm::AllocaInst* size = allocate(i32, param.name + ".length");
+            llvm::Value* data = callRuntime("fminus_web_http_text", builder_.getPtrTy(),
+                                            {request, builder_.getInt32(static_cast<std::uint32_t>(*hole)), size});
+            data->setName(param.name + ".text");
+            storeString(pair(data, size), slot);
+        }
+        else if (hole)
             tag(builder_.CreateStore(callRuntime("fminus_web_http_arg", i32,
                                                  {request, builder_.getInt32(static_cast<std::uint32_t>(*hole))}),
                                      slot),
@@ -525,7 +579,8 @@ namespace fminus::ir::detail
             ast::StringExpr name{param.name, {}};
             llvm::Value* text = stringConstant(name);
             llvm::Value* length = builder_.getInt32(static_cast<std::uint32_t>(param.name.size()));
-            llvm::AllocaInst* bytes = type == ast::Type::Bool ? allocate(i32, param.name + ".length") : nullptr;
+            llvm::AllocaInst* bytes =
+                type == ast::Type::Bool || isText ? allocate(i32, param.name + ".length") : nullptr;
             llvm::Value* found = callRuntime("fminus_web_http_query_text", builder_.getPtrTy(),
                                              {request, text, length,
                                               bytes != nullptr ? static_cast<llvm::Value*>(bytes)
@@ -537,7 +592,13 @@ namespace fminus::ir::detail
             builder_.CreateCondBr(builder_.CreateIsNull(found, param.name + ".missing"), missing, read);
 
             builder_.SetInsertPoint(missing);
-            if (const std::optional<double> fallback = defaultOf(param))
+            const std::optional<std::string> words = isText ? textDefaultOf(param) : std::nullopt;
+            if (words)
+            {
+                storeString(stringValue(ast::StringExpr{*words, {}}).ir, slot);
+                builder_.CreateBr(done);
+            }
+            else if (const std::optional<double> fallback = isText ? std::nullopt : defaultOf(param))
             {
                 // A float's rounded to the nearest float, as C converts a constant (ConstantFP::get).
                 llvm::Value* value =
@@ -553,7 +614,12 @@ namespace fminus::ir::detail
                 builder_.CreateBr(bad);
 
             builder_.SetInsertPoint(read);
-            if (type == ast::Type::Int)
+            if (isText)
+            {
+                storeString(pair(found, bytes), slot);
+                builder_.CreateBr(done);
+            }
+            else if (type == ast::Type::Int)
             {
                 llvm::Value* zero =
                     callRuntime("fminus_web_http_query_int", i32, {request, text, length, builder_.getInt32(0)});
@@ -609,7 +675,7 @@ namespace fminus::ir::detail
             }
             builder_.SetInsertPoint(done);
         }
-        if (const std::optional<std::pair<double, double>> range = rangeOf(param))
+        if (const std::optional<std::pair<double, double>> range = isText ? std::nullopt : rangeOf(param))
         {
             llvm::LoadInst* loaded = builder_.CreateLoad(typeOf(type), slot, param.name);
             tag(loaded, type);
@@ -669,7 +735,7 @@ namespace fminus::ir::detail
         if (json != nullptr && count > 2)
             error(begin(*reply.args[2]), "a JSON literal is a reply's whole body: nothing follows it");
         else if (json != nullptr)
-            answered = lowerJsonReply(location, *reply.args[0], *json, request);
+            answered = lowerJsonReply(*reply.args[0], *reply.args[1], request);
         else
         {
             // A string second, a literal or a value of type string, is the text form's, whose content type is a
@@ -716,92 +782,153 @@ namespace fminus::ir::detail
         builder_.CreateBr(route.next);
     }
 
-    // `reply status, json { ... };`: the literal made into a format of the reply's and its values (jsonFormat),
-    // answered as http_reply_text with the content type application/json. Failed when the status or the literal was in
-    // error.
-    Lowering::Value Lowering::lowerJsonReply(SourceLocation location, const ast::Expr& status, const ast::JsonExpr& json,
-                                             llvm::Value* request)
+    // `reply status, json { ... };`: the literal's description (jsonDescribe) and its values in slots of the frame,
+    // written by the runtime's JSON writer into the request's reply buffer, whose capacity is the host's maxReplyBytes,
+    // and published with the content type application/json. A text that does not fit is the library's HTTP_LIMIT, which
+    // the route answers 500. Failed when the status or the literal was in error, or the build has no JSON writer.
+    Lowering::Value Lowering::lowerJsonReply(const ast::Expr& status, const ast::Expr& literal, llvm::Value* request)
     {
-        (void)location;
         const Value code = isString(status) ? refuseString(status, ast::Type::Int, Use::Passing, begin(status))
                                             : lowerAs(status, ast::Type::Int);
         llvm::Value* converted = convert(code, ast::Type::Int, begin(status), Use::Passing);
-        std::string format;
-        std::vector<llvm::Value*> values;
-        const bool fine = jsonFormat(json.value, format, values);
+        if (!isBuilt(Feature::Json))
+        {
+            error(begin(literal), "a JSON literal needs the JSON writer, which this build of FMinus leaves out "
+                                  "(FMINUS_JSON=OFF)");
+            return {nullptr, ast::Type::Int, nullptr, true};
+        }
+        JsonPlan plan;
+        const bool fine = jsonDescribe(std::get<ast::JsonExpr>(literal.node).value, plan);
+        plan.flush();
         if (!fine || code.failed)
             return {nullptr, ast::Type::Int, nullptr, true};
+
+        // The values, each at its slot's start in its own type, a string's pointer and length in two slots.
+        llvm::Value* values = llvm::ConstantPointerNull::get(builder_.getPtrTy());
+        if (plan.slots > 0)
+        {
+            llvm::AllocaInst* slots =
+                allocate(llvm::ArrayType::get(builder_.getInt64Ty(), static_cast<std::uint64_t>(plan.slots)),
+                         "json.values");
+            slots->setAlignment(llvm::Align(8));
+            for (const auto& [slot, value] : plan.values)
+            {
+                llvm::Value* at = builder_.CreateConstInBoundsGEP1_32(builder_.getInt8Ty(), slots,
+                                                                       static_cast<unsigned>(8 * slot));
+                if (value.type == ast::Type::String)
+                {
+                    tag(builder_.CreateStore(builder_.CreateExtractValue(value.ir, 0), at),
+                        ast::Type::pointerTo(ast::Kind::Char, true));
+                    tag(builder_.CreateStore(builder_.CreateExtractValue(value.ir, 1),
+                                             builder_.CreateConstInBoundsGEP1_32(builder_.getInt8Ty(), slots,
+                                                                                 static_cast<unsigned>(8 * slot + 8))),
+                        ast::Type::Int);
+                }
+                else if (value.type == ast::Type::Bool)   // one byte, 0 or 1
+                    tag(builder_.CreateStore(builder_.CreateZExt(value.ir, builder_.getInt8Ty()), at), ast::Type::Bool);
+                else
+                    tag(builder_.CreateStore(value.ir, at), value.type);
+            }
+            values = slots;
+        }
+        // Its description: the operations, then the bytes, one constant of the program's (a path's table's layout).
+        llvm::LLVMContext& context = module_.getContext();
+        std::vector<std::uint32_t> words(plan.code.begin(), plan.code.end());
+        llvm::Constant* fields[] = {
+            builder_.getInt32(static_cast<std::uint32_t>(words.size())),
+            builder_.getInt32(static_cast<std::uint32_t>(plan.bytes.size())),
+            llvm::ConstantDataArray::get(context, words),
+            llvm::ConstantDataArray::getString(context, plan.bytes, false),
+        };
+        llvm::Constant* table = llvm::ConstantStruct::getAnon(context, fields);
+        auto* description = new llvm::GlobalVariable(module_, table->getType(), true,
+                                                     llvm::GlobalValue::PrivateLinkage, table, ".json");
+        description->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+        description->setAlignment(llvm::Align(4));
+
+        llvm::Type* i32 = builder_.getInt32Ty();
+        llvm::AllocaInst* capacity = allocate(i32, "reply.capacity");
+        llvm::Value* buffer = callRuntime("fminus_web_http_reply_buffer", builder_.getPtrTy(), {request, capacity});
+        buffer->setName("reply.buffer");
+        llvm::LoadInst* room = builder_.CreateLoad(i32, capacity, "reply.room");
+        tag(room, ast::Type::Int);
+        llvm::Value* written = callRuntime("fminus_rt_json_write", i32, {buffer, room, description, values});
+        written->setName("json.bytes");
         const std::string type = "application/json";
-        llvm::Value* answered = callRuntime(
-            "fminus_web_http_reply_text", builder_.getInt32Ty(),
-            {request, converted, stringConstant(ast::StringExpr{type, {}}),
-             builder_.getInt32(static_cast<std::uint32_t>(type.size())), stringConstant(ast::StringExpr{format, {}}),
-             builder_.getInt32(static_cast<std::uint32_t>(format.size())), replyValues(values),
-             builder_.getInt32(static_cast<std::uint32_t>(values.size()))});
-        answered->setName("http_reply_text");
+        llvm::Value* answered = callRuntime("fminus_web_http_reply_written", i32,
+                                            {request, converted, written, stringConstant(ast::StringExpr{type, {}}),
+                                             builder_.getInt32(static_cast<std::uint32_t>(type.size()))});
+        answered->setName("http_reply_written");
         return {answered, ast::Type::Int};
     }
 
-    // A JSON literal's value appended to `format`, a reply's format: an object's and an array's text, its keys
-    // escaped, and a place for each value, its value (a double, as a reply's format takes) appended to `values`, in
-    // the order written: %r a float, %R a double, %d an int, %b a bool. Each error once, where it is; false after one.
-    bool Lowering::jsonFormat(const ast::JsonValue& value, std::string& format, std::vector<llvm::Value*>& values)
+    // The bytes not yet in an operation, as one: `0, offset, count` of the description's bytes.
+    void Lowering::JsonPlan::flush()
+    {
+        if (pending.empty())
+            return;
+        code.insert(code.end(),
+                    {0, static_cast<std::int32_t>(bytes.size()), static_cast<std::int32_t>(pending.size())});
+        bytes += pending;
+        pending.clear();
+    }
+
+    // A JSON literal's value added to `plan`: an object's and an array's text and its keys, escaped, as bytes, and each
+    // value an operation of its own, `1, slot, shape`, its value lowered in the order written and kept with its slot (a
+    // float 1, a double 2, an int 3, a bool 4, each one slot; a string 5, its pointer and its length two). A literal is
+    // a string here (lowerAs). Each error once, where it is; false after one.
+    bool Lowering::jsonDescribe(const ast::JsonValue& value, JsonPlan& plan)
     {
         switch (value.kind)
         {
         case ast::JsonValue::Kind::Value:
         {
             const ast::Expr& expr = *value.value;
-            // Lowered as a string is wanted (lowerAs), so that a literal, an arm of a ?: among them, is one: a string,
-            // literal or not, is a later step's, one error at it.
+            const std::optional<ast::Type> declared = staticType(expr);
+            const auto later = [&](const std::string& what, const std::string& instead) {
+                error(begin(expr), "a JSON literal does not take " + what + " yet, which a later version writes"
+                                       + instead);
+                return false;
+            };
+            if (declared && ast::isArray(*declared))
+                return later("an array", ": write its elements, [a[0], a[1], ...]");
             const Value lowered = lowerAs(expr, ast::Type::String);
             if (lowered.failed)
                 return false;
-            if (lowered.type == ast::Type::String)
-            {
-                error(begin(expr), "a JSON literal's value is a float, a double, an int, a bool, an object or an "
-                                   "array in this version, and not yet a string");
-                return false;
-            }
             if (lowered.type.enumeration != 0)
-            {
-                error(begin(expr), "a JSON literal does not take a value of an enumerated type yet: cast it to "
-                                   "int for its number");
-                return false;
-            }
-            llvm::Type* real = builder_.getDoubleTy();
+                return later("a value of an enumerated type", " as its constant's name: cast it to int for its "
+                                                              "number");
+            if (ast::isVector(lowered.type))
+                return later("a vector", ": write its lanes, [v.x, v.y, ...]");
+            if (ast::isModule(lowered.type))
+                return later("a module", ": write its fields, { \"name\": m.name, ... }");
+            std::int32_t shape = 0;
             if (lowered.type == ast::Type::Float)
-            {
-                format += "%r";
-                values.push_back(builder_.CreateFPExt(lowered.ir, real, "json.float"));
-            }
+                shape = 1;
             else if (lowered.type == ast::Type::Double)
-            {
-                format += "%R";
-                values.push_back(lowered.ir);
-            }
+                shape = 2;
             else if (lowered.type == ast::Type::Int)
-            {
-                format += "%d";
-                values.push_back(builder_.CreateSIToFP(lowered.ir, real, "json.int"));
-            }
+                shape = 3;
             else if (lowered.type == ast::Type::Bool)
-            {
-                format += "%b";
-                values.push_back(builder_.CreateUIToFP(lowered.ir, real, "json.bool"));
-            }
+                shape = 4;
+            else if (lowered.type == ast::Type::String)
+                shape = 5;
             else
             {
-                error(begin(expr), "a JSON literal's value is a float, a double, an int, a bool, an object or an "
-                                   "array, not " + quoted(ast::typeName(lowered.type)));
+                error(begin(expr), "a JSON literal's value is a float, a double, an int, a bool, a string, an object "
+                                   "or an array, not " + quoted(ast::typeName(lowered.type)));
                 return false;
             }
+            plan.flush();
+            plan.code.insert(plan.code.end(), {1, plan.slots, shape});
+            plan.values.emplace_back(plan.slots, lowered);
+            plan.slots += shape == 5 ? 2 : 1;
             return true;
         }
         case ast::JsonValue::Kind::Object:
         {
             bool fine = true;
-            format += '{';
+            plan.pending += '{';
             std::map<std::string, SourceLocation> seen;
             for (std::size_t i = 0; i < value.elements.size(); ++i)
             {
@@ -813,29 +940,29 @@ namespace fminus::ir::detail
                                        {Diagnostic{previous->second, "previous key is here", {}}});
                     fine = false;
                 }
-                format += i > 0 ? ",\"" : "\"";
-                if (const std::optional<std::size_t> bad = jsonKey(key.value, format))
+                plan.pending += i > 0 ? ",\"" : "\"";
+                if (const std::optional<std::size_t> bad = jsonKey(key.value, plan.pending))
                 {
                     error(byteAt(key, *bad, where), "a JSON key is UTF-8 text, and this byte is no part of any");
                     fine = false;
                 }
-                format += "\":";
-                fine = jsonFormat(value.elements[i], format, values) && fine;
+                plan.pending += "\":";
+                fine = jsonDescribe(value.elements[i], plan) && fine;
             }
-            format += '}';
+            plan.pending += '}';
             return fine;
         }
         case ast::JsonValue::Kind::Array:
         {
             bool fine = true;
-            format += '[';
+            plan.pending += '[';
             for (std::size_t i = 0; i < value.elements.size(); ++i)
             {
                 if (i > 0)
-                    format += ',';
-                fine = jsonFormat(value.elements[i], format, values) && fine;
+                    plan.pending += ',';
+                fine = jsonDescribe(value.elements[i], plan) && fine;
             }
-            format += ']';
+            plan.pending += ']';
             return fine;
         }
         }
