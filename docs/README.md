@@ -31,14 +31,17 @@ Elsewhere:
   (a `bool main`), `biquad/` (a module filtering a block a call, its cutoff a stream), `delay/` (the heap, and a kernel
   that can't allocate, in plain C and as a module), `saturator/` and `meter/` (`poly float` through a buffer, against
   plain loops: a stateless tanh, and reductions; each a module with a knob, the meter's readings labelled for its host
-  by their attributes), `voices/` (modules, in memory a host of the
-  public API allocates, their controls knobs), `convolver/` (the FFT: a convolution by overlap-add), `parameters/` (a
-  filter's cutoff swept through a knob or a stream, or frozen), `noise/` (white noise from a count of samples, `randf`,
-  and a voice's own source, `hash`), `plugin/` (a JUCE plugin whose DSP is an FMinus program: a stream, knobs and a
-  frozen sample rate, compiled in `prepareToPlay`, its own CMake project), `wavetable/` (tables from a JSON or an XML
-  document), `settings/` (a synth's settings, a module filled from a JSON document in one call: `json_read`), `fetch/`
-  (the same pack fetched from a server its host allows: the web library, `within` and `when`), `remote/` (a
-  synthesiser a browser controls, its requests taken in its nonblocking `process`: the web library's server),
-  `kit/` (a drum kit whose sounds are files in a folder its host grants, loaded off the audio thread and played on it:
-  the file interface), `presets/` (named presets kept over HTTP as files: a route's `string` parameter, a file's name
-  with a hole, `file_name`, a body read into a module with `json_read` and stored as `json (preset)`), and `trigger/` (an envelope a gate triggers, its note-on found by `when`).
+  by their attributes), `voices/` (modules, in memory a host of the public API allocates, their controls knobs),
+  `convolver/` (the FFT: a convolution by overlap-add), `parameters/` (a filter's cutoff swept through a knob or a
+  stream, or frozen), `noise/` (white noise from a count of samples, `randf`, and a voice's own source, `hash`),
+  `plugin/` (a JUCE plugin whose DSP is an FMinus program: a stream, knobs and a frozen sample rate, compiled in
+  `prepareToPlay`, its own CMake project), `wavetable/` (tables from a JSON or an XML document), `settings/` (a synth's
+  settings, a module filled from a JSON document in one call: `json_read`), `fetch/` (the same pack fetched from a
+  server its host allows: the web library, `within` and `when`), `remote/` (a synthesiser a browser controls, its
+  requests taken in its nonblocking `process`: the web library's server), `kit/` (a drum kit whose sounds are files in a
+  folder its host grants, loaded off the audio thread and played on it: the file interface), `presets/` (named presets
+  kept over HTTP as files: a route's `string` parameter, a file's name with a hole, `file_name`, a body read into a
+  module with `json_read` and stored as `json (preset)`), `trigger/` (an envelope a gate triggers, its note-on found by
+  `when`), `ensemble/` (sixteen voices at once: `parallel for` and `parallel { }`), `hello/` (FMinus as a library at its
+  smallest: a C++ `main` that compiles a one-line program from a string) and `circuits/` (SPICE netlists as FMinus
+  modules: the circuit compiler, [circuits.md](circuits.md)).
