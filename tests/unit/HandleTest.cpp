@@ -177,17 +177,17 @@ TEST_CASE("a handle has no arithmetic, element, field or pointer to it: clang's 
              "test.fm:12:9: error: initializing 'int' with an expression of incompatible type 'fft_plan'\n"
              "test.fm:13:14: error: initializing 'fft_plan' with an expression of type 'const void *' discards "
              "qualifiers\n"
-             "test.fm:14:15: error: FMinus has pointers to float, double, int, float2, float4, float8, void and "
-             "modules, not to 'fft_plan'\n"
+             "test.fm:14:15: error: FMinus has pointers to float, double, int, float2, float4, float8, char, "
+             "void and modules, not to 'fft_plan'\n"
              "test.fm:15:13: error: statement requires expression of integer type ('fft_plan' invalid)\n"
              "test.fm:16:23: error: incomplete definition of type 'struct fminus_fft_plan'\n"
-             "test.fm:18:18: error: FMinus has pointers to float, double, int, float2, float4, float8, void and "
-             "modules, not to 'fft_plan'\n");
+             "test.fm:18:18: error: FMinus has pointers to float, double, int, float2, float4, float8, char, "
+             "void and modules, not to 'fft_plan'\n");
     // An array of void* is no array of handles, and &p would be a pointer to one.
     CHECK(errorsOf("void f() { void* plans[2]; }\n") == "test.fm:1:18: error: FMinus has no arrays of pointers\n");
     CHECK(errorsOf("void f(fft_plan p) { void* q = &p; }\n")
-          == "test.fm:1:32: error: FMinus has pointers to float, double, int, float2, float4, float8, void and modules, "
-             "not to 'fft_plan'\n");
+          == "test.fm:1:32: error: FMinus has pointers to float, double, int, float2, float4, float8, char, void and "
+             "modules, not to 'fft_plan'\n");
 #if FMINUS_HAS_JSON && FMINUS_HAS_XML
     // A handle of another kind: C's incompatible pointer types, naming both.
     CHECK(errorsOf("float f(json_doc doc, fft_plan p, bool c)\n"

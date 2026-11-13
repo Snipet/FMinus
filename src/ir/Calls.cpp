@@ -238,6 +238,35 @@ namespace fminus::ir::detail
                        RuntimeEffect::Allocates, Feature::FilesWrite, Result::Int},
         RuntimeBuiltin{"file_append", "fminus_rt_file_append", {Param::FileName, Param::Bytes, Param::Int}, 3,
                        RuntimeEffect::Allocates, Feature::FilesWrite, Result::Int},
+        // The string type's (Text.cpp), in every build, every one wait-free: a string is a pointer and a length over
+        // bytes something else owns, and nothing here allocates on its behalf. Those without a symbol are made inline:
+        // string_size(s) its length; string_byte(s, i) byte i as 0 to 255, or -1 outside it; string_slice(s, from, to)
+        // the bytes from `from` up to `to`, each clamped to the string, empty when they cross; string_starts(s, with)
+        // and string_ends(s, with); string_data(s) its bytes' address, a const void*; and string_of(data, size) a view
+        // of `size` bytes at `data`, or the empty string for a null `data` or a negative size. The runtime's
+        // (runtime/Text.cpp): string_find(s, what) where `what` first occurs, or -1 (an empty `what` at 0);
+        // string_float(s, fallback) and string_int(s, fallback) the whole string read as a number as a query's is, or
+        // the fallback; string_copy(out, cap, s) its first `cap` bytes copied, and its length.
+        RuntimeBuiltin{"string_size", "", {Param::Text}, 1, RuntimeEffect::WaitFree, Feature::None, Result::Int},
+        RuntimeBuiltin{"string_byte", "", {Param::Text, Param::Int}, 2, RuntimeEffect::WaitFree, Feature::None,
+                       Result::Int},
+        RuntimeBuiltin{"string_slice", "", {Param::Text, Param::Int, Param::Int}, 3, RuntimeEffect::WaitFree,
+                       Feature::None, Result::String},
+        RuntimeBuiltin{"string_find", "fminus_rt_string_find", {Param::Text, Param::Text}, 2, RuntimeEffect::WaitFree,
+                       Feature::None, Result::Int},
+        RuntimeBuiltin{"string_starts", "", {Param::Text, Param::Text}, 2, RuntimeEffect::WaitFree, Feature::None,
+                       Result::Bool},
+        RuntimeBuiltin{"string_ends", "", {Param::Text, Param::Text}, 2, RuntimeEffect::WaitFree, Feature::None,
+                       Result::Bool},
+        RuntimeBuiltin{"string_float", "fminus_rt_string_float", {Param::Text, Param::Float}, 2,
+                       RuntimeEffect::WaitFree, Feature::None, Result::Float},
+        RuntimeBuiltin{"string_int", "fminus_rt_string_int", {Param::Text, Param::Int}, 2, RuntimeEffect::WaitFree,
+                       Feature::None, Result::Int},
+        RuntimeBuiltin{"string_data", "", {Param::Text}, 1, RuntimeEffect::WaitFree, Feature::None, Result::Bytes},
+        RuntimeBuiltin{"string_copy", "fminus_rt_string_copy", {Param::Chars, Param::Int, Param::Text}, 3,
+                       RuntimeEffect::WaitFree, Feature::None, Result::Int},
+        RuntimeBuiltin{"string_of", "", {Param::CharData, Param::Int}, 2, RuntimeEffect::WaitFree, Feature::None,
+                       Result::String},
     };
 
     std::optional<ast::Type> paramType(Param param)
@@ -275,6 +304,12 @@ namespace fminus::ir::detail
             return ast::Type::Double;
         case Param::Bool:
             return ast::Type::Bool;
+        case Param::Text:
+            return ast::Type::String;
+        case Param::Chars:
+            return ast::Type::pointerTo(ast::Kind::Char, false);
+        case Param::CharData:
+            return ast::Type::pointerTo(ast::Kind::Char, true);
         case Param::String:
         case Param::Format:
         case Param::Path:
@@ -329,6 +364,9 @@ namespace fminus::ir::detail
         case Param::ReplyFormat:
         case Param::FileName:
         case Param::FilePattern:
+        case Param::Text:
+        case Param::Chars:
+        case Param::CharData:
             break;
         }
         return std::nullopt;
@@ -362,6 +400,8 @@ namespace fminus::ir::detail
             return ast::Type::handleType(ast::Handle::FileListing);
         case Result::Bytes:
             return ast::Type::pointerTo(ast::Kind::Void, true);
+        case Result::String:
+            return ast::Type::String;
         case Result::Void:
             break;
         }
@@ -450,6 +490,8 @@ namespace fminus::ir::detail
             FileRead,      // fminus_rt_file_status, _size, _data, _count: a handle's fields, which never change
             FileClose,     // fminus_rt_file_close: frees a handle, and a file's bytes, which the program reads
             FileWrite,     // fminus_rt_file_write, fminus_rt_file_append: reads a name literal, its ints and the bytes
+            TextRead,      // fminus_rt_string_equal, _find, _float, _int (runtime/Text.cpp): reads strings' bytes
+            TextCopy,      // fminus_rt_string_copy: reads a string's bytes, writes them into a char array
         };
 
         struct RuntimeFacts
@@ -526,6 +568,11 @@ namespace fminus::ir::detail
             RuntimeFacts{"fminus_rt_file_close", RuntimeKind::FileClose},
             RuntimeFacts{"fminus_rt_file_write", RuntimeKind::FileWrite},
             RuntimeFacts{"fminus_rt_file_append", RuntimeKind::FileWrite},
+            RuntimeFacts{"fminus_rt_string_equal", RuntimeKind::TextRead},
+            RuntimeFacts{"fminus_rt_string_find", RuntimeKind::TextRead},
+            RuntimeFacts{"fminus_rt_string_float", RuntimeKind::TextRead},
+            RuntimeFacts{"fminus_rt_string_int", RuntimeKind::TextRead},
+            RuntimeFacts{"fminus_rt_string_copy", RuntimeKind::TextCopy},
         };
 
         // The heap's allocator family, named after its first function as LangRef asks: LLVM pairs an allocation with
@@ -858,6 +905,26 @@ namespace fminus::ir::detail
                 // of them must not move after the call, which LLVM knows only of a call that may write any memory: its
                 // memory is left as it is (any). It keeps no pointer to the handle.
                 function.addParamAttr(0, keepsNone);
+                break;
+            case RuntimeKind::TextRead:
+            case RuntimeKind::TextCopy:
+                // Reads the bytes its strings point to (each a pointer and a length), and string_copy writes `out`
+                // (no more than `cap` bytes of it, which may overlap the string: a memmove), keeping no pointer to any;
+                // nothing else. It allocates, frees, locks and waits for nothing (the effects let it run on the audio
+                // thread): nofree and nosync. A pointer may be null with a length of 0, so none is nonnull.
+                function.setMemoryEffects(llvm::MemoryEffects::argMemOnly(
+                    facts->kind == RuntimeKind::TextCopy ? llvm::ModRefInfo::ModRef : llvm::ModRefInfo::Ref));
+                function.setDoesNotFreeMemory();
+                function.setNoSync();
+                for (unsigned arg = 0; arg < function.arg_size(); ++arg)
+                {
+                    if (!function.getArg(arg)->getType()->isPointerTy())
+                        continue;
+                    function.addParamAttr(arg, facts->kind == RuntimeKind::TextCopy && arg == 0
+                                                   ? llvm::Attribute::WriteOnly
+                                                   : llvm::Attribute::ReadOnly);
+                    function.addParamAttr(arg, keepsNone);
+                }
                 break;
             }
         }
@@ -1408,10 +1475,18 @@ namespace fminus::ir::detail
             llvm::Value* converted = readOnly ? value.ir : convert(value, to, location, Use::Passing);
             if (param == Param::Bool)   // to the runtime as an int, 0 or 1
                 converted = builder_.CreateZExt(converted, builder_.getInt32Ty());
+            if (param == Param::Text && !builtin.symbol.empty())   // to the runtime as its pointer and its length
+            {
+                irArgs.push_back(builder_.CreateExtractValue(converted, 0, "data"));
+                irArgs.push_back(builder_.CreateExtractValue(converted, 1, "size"));
+                continue;
+            }
             irArgs.push_back(converted);
         }
         if (!fine)
             return recovery(type);
+        if (builtin.symbol.empty())   // made inline: a string's (Text.cpp)
+            return lowerText(location, builtin, irArgs);
         const bool listen = builtin.symbol == "fminus_web_http_listen";
         if (listen)
             irArgs = listenArguments(location);

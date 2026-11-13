@@ -100,6 +100,61 @@ namespace fminus::ir::detail
             unit->addFnAttr(llvm::Attribute::NoSync);
             return unit;
         }
+
+        // The `when` statements in `stmt`, in source order, into `found`: where their state goes (layOut).
+        void collectWhens(const ast::Stmt& stmt, std::vector<const ast::WhenStmt*>& found)
+        {
+            const auto each = [&](const std::vector<ast::Stmt>& items) {
+                for (const ast::Stmt& item : items)
+                    collectWhens(item, found);
+            };
+            const auto one = [&](const ast::StmtPtr& item) {
+                if (item)
+                    collectWhens(*item, found);
+            };
+            std::visit(Overloaded{
+                           [](const ast::DeclStmt&) {},
+                           [](const ast::ExprStmt&) {},
+                           [](const ast::ReturnStmt&) {},
+                           [&](const ast::BlockStmt& block) { each(block.items); },
+                           [](const ast::EmptyStmt&) {},
+                           [&](const ast::IfStmt& branch) {
+                               each(branch.init);
+                               one(branch.thenBranch);
+                               one(branch.elseBranch);
+                           },
+                           [&](const ast::WhileStmt& loop) { one(loop.body); },
+                           [&](const ast::ForStmt& loop) {
+                               each(loop.init);
+                               one(loop.body);
+                           },
+                           [](const ast::BreakStmt&) {},
+                           [](const ast::ContinueStmt&) {},
+                           [&](const ast::SwitchStmt& branch) {
+                               each(branch.init);
+                               one(branch.body);
+                           },
+                           [&](const ast::CaseStmt& label) { one(label.body); },
+                           [&](const ast::DefaultStmt& label) { one(label.body); },
+                           [](const ast::EnumStmt&) {},
+                           [&](const ast::ParallelForStmt& loop) {
+                               each(loop.init);
+                               one(loop.body);
+                           },
+                           [&](const ast::ParallelBlockStmt& block) { each(block.tasks); },
+                           [&](const ast::DeferStmt& deferred) { one(deferred.body); },
+                           [&](const ast::ServeStmt& serve) {   // a route's block is a block of the method
+                               for (const ast::Route& route : serve.routes)
+                                   each(route.body);
+                           },
+                           [](const ast::ReplyStmt&) {},
+                           [&](const ast::WhenStmt& when) {
+                               found.push_back(&when);
+                               one(when.body);
+                           },
+                       },
+                       stmt.node);
+        }
     } // namespace
 
     // Every module's struct type, opaque until layOut gives it its body, so that a field or a parameter may point to
@@ -134,8 +189,9 @@ namespace fminus::ir::detail
     // refused when it has an initialiser or is const (nothing runs when a module is made, so it would only ever be 0),
     // when its type is incomplete (void, `float a[]`, or a module not yet laid out: its own, or a later one, by value)
     // or one FMinus cannot point to, and when another member has its name. A refused field takes a float's place, so
-    // the module's uses report no more errors. Then its methods' `this` is described (describeThis), which needs its
-    // size.
+    // the module's uses report no more errors. After the declared fields, a bool for each `when` in its methods, in
+    // source order: its state (Statements.cpp, lowerWhen), which no host is told of but the module's size counts. Then
+    // its methods' `this` is described (describeThis), which needs its size.
     void Lowering::layOut(const ast::Module& module, std::size_t& enums)
     {
         const std::size_t first = enums;
@@ -203,6 +259,19 @@ namespace fminus::ir::detail
             elements.push_back(typeOf(type));
         }
         declareEnums(std::numeric_limits<std::size_t>::max());
+        for (const ast::Function& method : program_->functions)
+        {
+            if (method.module != &module || !method.isDefinition)
+                continue;
+            std::vector<const ast::WhenStmt*> whens;
+            for (const ast::Stmt& stmt : method.body)
+                collectWhens(stmt, whens);
+            for (const ast::WhenStmt* when : whens)
+            {
+                whenFields_.emplace(when, static_cast<unsigned>(elements.size()));
+                elements.push_back(typeOf(ast::Type::Bool));
+            }
+        }
         structs_.at(&module)->setBody(elements);
         describeThis(module);
     }

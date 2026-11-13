@@ -24,6 +24,12 @@
 //   OnePole* (a module's pointer)  void*, or a pointer to a C++ struct with the same fields in the same order (which
 //                                  C++ lays out as FMinus does); module() says where each field is. A module itself
 //                                  never crosses: FMinus passes and returns modules by pointer only
+//   char*, const char*             the same pointer, to bytes FMinus reads as unsigned (0 to 255)
+//   string                         none promised: LLVM's pair {ptr, i32}, a pointer and an int in two registers each
+//                                  way on x86-64 and arm64 (what C does there with struct { const char* data; int
+//                                  size; } while registers remain), which other platforms' C does not match; keep it
+//                                  inside FMinus, and pass a host's text as a const char* and an int (string_of).
+//                                  call() and --run pass none
 //
 // A module's method is a function too, named as C++ qualifies it, whose first parameter is the instance it runs on:
 // `float tick(float x)` in `module OnePole` is function<float(void*, float)>("OnePole::tick", errors).
@@ -481,7 +487,9 @@ namespace fminus
                 std::string name;
                 std::string type;          // as FMinus writes it: "float", "double", "float4", "float[16]",
                                            // "double[8]", "float[4][16]", "Osc", "Osc *", a handle's "json_doc" (laid
-                                           // out as a void* is); a parameter's "param float"
+                                           // out as a void* is); "string" (C's struct { const char* data; int size;
+                                           // }: 16 bytes, aligned to 8, valid as long as what it points into);
+                                           // "char[32]", bytes; a parameter's "param float"
                                            // (its slot). A "double" is 8 bytes, C++'s double, aligned to 8: a host
                                            // that reads fields by type reads one as a double, not as a float
                                            // (docs/extending.md, recipe 33)

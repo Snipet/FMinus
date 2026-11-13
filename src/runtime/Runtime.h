@@ -131,6 +131,28 @@ extern "C"
     std::int32_t fminus_rt_string_hash(const char* text, std::int32_t length, const std::int32_t* ints,
                                        std::int32_t count) noexcept;
 
+    // The type string's (Text.cpp, for ir/Text.cpp): a string is a pointer and a length, the `n` bytes at `s` (a null
+    // pointer or a length that is not positive is the empty string), which these read and nothing else. None
+    // allocates, locks or waits, so the audio thread may call them (wait-free: each is bounded by its strings'
+    // lengths).
+    //   fminus_rt_string_equal   1 when the two strings have the same length and the same bytes, else 0: what == and a
+    //                            switch on a string compare by; it reads no byte when the lengths differ.
+    //   fminus_rt_string_find    where `w` first occurs in `s`, from 0, or -1; an empty `w` is found at 0.
+    //   fminus_rt_string_float   the whole string read as a float, by the rules a query's number has (web/Server.cpp):
+    //                            a decimal number as fast_float's general format reads it (no '+', no space around
+    //                            it), correctly rounded, and finite (an overflow, an infinity or a NaN is no number);
+    //                            else `fallback`.
+    //   fminus_rt_string_int     the whole string read as an int, as a query's is: decimal digits, a '-' before them
+    //                            or not, and a value an int holds; else `fallback`.
+    //   fminus_rt_string_copy    the first `cap` bytes of `s` at most copied to `out` (none for a null `out` or a cap
+    //                            that is not positive; the two may overlap), and the string's length, which may be
+    //                            more: a call with a cap of 0 asks how many there are.
+    std::int32_t fminus_rt_string_equal(const char* a, std::int32_t an, const char* b, std::int32_t bn) noexcept;
+    std::int32_t fminus_rt_string_find(const char* s, std::int32_t n, const char* w, std::int32_t wn) noexcept;
+    float fminus_rt_string_float(const char* s, std::int32_t n, float fallback) noexcept;
+    std::int32_t fminus_rt_string_int(const char* s, std::int32_t n, std::int32_t fallback) noexcept;
+    std::int32_t fminus_rt_string_copy(char* out, std::int32_t cap, const char* s, std::int32_t n) noexcept;
+
 #if FMINUS_HAS_JSON
     // The JSON parser (Json.cpp, on yyjson; a build with FMINUS_JSON only), for FMinus's json_* builtins.
     //

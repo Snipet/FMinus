@@ -1,15 +1,13 @@
-// src/runtime/Numbers.h: numbers read from text, for the runtime's parsers of JSON and XML, on fast_float
-// (cmake/FMinusFastFloat.cmake): correctly rounded straight to a float, never through a double (which rounds twice, and
-// is one bit off now and then), and the same on every machine and in every locale (C's strtof reads "0,5" where the
-// locale is German, and reads "0.5" as 0 there). In a build with FMINUS_JSON or FMINUS_XML (fminus/Config.h); in one
-// with neither, there is no fast_float, and nothing here.
+// src/runtime/Numbers.h: numbers read from text, for the runtime's parsers of JSON and XML and a string's
+// string_float, on fast_float (cmake/FMinusFastFloat.cmake): correctly rounded straight to a float, never through a
+// double (which rounds twice, and is one bit off now and then), and the same on every machine and in every locale (C's
+// strtof reads "0,5" where the locale is German, and reads "0.5" as 0 there). In every build.
 #pragma once
 
 #include "fminus/Config.h"
 
 #include <cstdint>
 
-#if FMINUS_HAS_JSON || FMINUS_HAS_XML
 namespace fminus::runtime
 {
     // Which numbers a text may write: JSON's (RFC 8259: -?int frac? exp?, no leading zero, no '+', no infinity or
@@ -41,4 +39,3 @@ namespace fminus::runtime
     // nothing and reads only the bytes it is given.
     bool readInt(const char* text, std::int32_t length, NumberSyntax syntax, std::int32_t& value) noexcept;
 } // namespace fminus::runtime
-#endif

@@ -3,8 +3,9 @@
  * (Scanner.h).
  *
  * Comments are C's: // to the end of the line, and block comments, which do not nest. String literals are C's, with C's
- * escapes, and FMinus has them as an attribute's arguments and a builtin's (Parser.y): the token's value is the
- * string's characters, its escapes resolved, and where in the token each one is spelt (stringValue). Constants are C's:
+ * escapes, and FMinus has them as an attribute's arguments, a builtin's and values of its type string (Parser.y): the
+ * token's value is the string's characters, its escapes resolved, and where in the token each one is spelt
+ * (stringValue). Constants are C's:
  * floating ones (1.5, 1., .5, 2e3, 1.5e-3f, hex
  * floats such as 0x1.8p1 and 0x1p-3f) and integer ones (2, 010 in octal, 0x1F in hex), one token whose spelling tells
  * the code generator which. The f or F suffix is allowed only where C allows it
@@ -176,6 +177,8 @@ IDENTIFIER  [A-Za-z_][A-Za-z0-9_]*
 "file_content"              { return handleType(fminus::ast::Handle::FileContent, yyextra->where); }
 "file_listing"              { return handleType(fminus::ast::Handle::FileListing, yyextra->where); }
 "fft_plan"                  { return handleType(fminus::ast::Handle::FftPlan, yyextra->where); }
+"char"                      { return Parser::make_CHAR(yyextra->where); }
+"string"                    { return Parser::make_STRING_TYPE(yyextra->where); }
 "true"                      { return Parser::make_TRUE(yyextra->where); }
 "false"                     { return Parser::make_FALSE(yyextra->where); }
 "if"                        { return Parser::make_IF(yyextra->where); }
@@ -198,6 +201,7 @@ IDENTIFIER  [A-Za-z_][A-Za-z0-9_]*
 "route"                     { return Parser::make_ROUTE(yyextra->where); }
 "reply"                     { return Parser::make_REPLY(yyextra->where); }
 "json"                      { return Parser::make_JSON(yyextra->where); }
+"when"                      { return Parser::make_WHEN(yyextra->where); }
 
 {DIGITS}"."[0-9]*{EXPONENT}?[fF]?   |
 "."{DIGITS}{EXPONENT}?[fF]?         |

@@ -1,11 +1,10 @@
-// src/runtime/Numbers.cpp: numbers read from text, on fast_float (Numbers.h), compiled only into a build with
-// FMINUS_JSON or FMINUS_XML. fast_float is headers only, and this is the one file of the runtime that includes them:
-// its inline functions are compiled here, hidden (a plugin that links FMinus exports none of them, so they cannot meet
-// another copy of fast_float in the host's process), after the standard headers they use, which keep their own
-// visibility.
+// src/runtime/Numbers.cpp: numbers read from text, on fast_float (Numbers.h), compiled into every build (the parsers
+// and string_float read numbers). fast_float is headers only, and this is the one file of the runtime that includes
+// them: its inline functions are compiled here, hidden (a plugin that links FMinus exports none of them, so they
+// cannot meet another copy of fast_float in the host's process), after the standard headers they use, which keep their
+// own visibility.
 #include "runtime/Numbers.h"
 
-#if FMINUS_HAS_JSON || FMINUS_HAS_XML
 #include <algorithm>
 #include <bit>
 #include <cassert>
@@ -166,4 +165,3 @@ namespace fminus::runtime
         return true;
     }
 } // namespace fminus::runtime
-#endif

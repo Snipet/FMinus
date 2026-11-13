@@ -30,7 +30,26 @@ module M
     {
         serve (server) { route "GET /f/{x}/2" (int x) { reply 1; } route "GET /f/1/{y}" (int y) { reply 1; } }
     }
+
+    void text(string t, bool b)
+    {
+        serve (server)
+        {
+            route "GET /g" (string s, char c) { reply 204; }
+            route "GET /h" { reply 200, json { "s": "text", "t": t, "u": b ? "x" : "y" }; }
+            route "GET /i" { reply 200, t, "%d", 1; }
+            route "GET /j" { reply 200, "text/plain", "%g", t; }
+            route "GET /k" { switch (t) { case "a": reply 200; } }
+            route "GET /l" { when (b) reply 204; }
+        }
+        serve (t, "10") { route "GET /m" { reply 204; } }
+    }
 };
+
+void outside(http_server server, bool b)
+{
+    serve (server) { route "GET /n" { when (b) reply 204; reply 200; } }
+}
 
 // CHECK: serve-errors.fm:15:9: error: function with 'nonblocking' attribute must not call non-'nonblocking' function 'http_accept'
 // CHECK: serve-errors.fm:17:31: error: a route statement writes a hole as {name}, a parameter's name: %d is http_is's spelling
@@ -44,3 +63,20 @@ module M
 // CHECK: serve-errors.fm:27:28: error: FMinus has no JSON values: a JSON literal is only a reply's body, 'reply status, json { ... };'
 // CHECK: serve-errors.fm:31:74: error: route 'GET /f/1/{y}' conflicts with 'GET /f/{x}/2': GET /f/1/2 matches both, and neither is more specific than the other
 // CHECK: serve-errors.fm:31:32: note: the other route is here
+
+// Where serve meets string, char and when: a string or char parameter, a string in a JSON literal (a literal, a
+// string, a ?: of literals: one error each), a string where a reply's content type or a format's value goes, a switch
+// on a string without a default and a when that may not reply, a string as a serve's server or timeout, and a when in
+// a route of a function that is no method.
+// CHECK: serve-errors.fm:38:36: error: a route's parameter is an int, a float, a bool or an http_request, not 'string'
+// CHECK: serve-errors.fm:38:44: error: a route's parameter is an int, a float, a bool or an http_request, not 'char'
+// CHECK: serve-errors.fm:39:53: error: a JSON literal's value is a float, a double, an int, a bool, an object or an array in this version, and not yet a string
+// CHECK: serve-errors.fm:39:66: error: a JSON literal's value is a float, a double, an int, a bool, an object or an array in this version, and not yet a string
+// CHECK: serve-errors.fm:39:74: error: a JSON literal's value is a float, a double, an int, a bool, an object or an array in this version, and not yet a string
+// CHECK: serve-errors.fm:40:41: error: argument to 'http_reply_text' must be a string literal
+// CHECK: serve-errors.fm:41:61: error: format specifies type 'double' but the argument has type 'string'
+// CHECK: serve-errors.fm:42:66: error: route 'GET /k' does not reply in all control paths
+// CHECK: serve-errors.fm:43:50: error: route 'GET /l' does not reply in all control paths
+// CHECK: serve-errors.fm:45:16: error: passing 'string' to parameter of incompatible type 'http_server'
+// CHECK: serve-errors.fm:45:19: error: incompatible pointer to integer conversion passing 'char[3]' to parameter of type 'int'
+// CHECK: serve-errors.fm:51:39: error: a 'when' keeps its state, one bool, in the instance of the module whose method it is in, and 'outside' is no method: move it into a method of a module

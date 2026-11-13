@@ -5,7 +5,7 @@
 // a method's loop over its module's buffer (`tail[i] += result[i]`, both fields) loads the fields once, before the
 // loop, where it would load them again after every store of a float, and the loop runs on vectors.
 //
-// FMinus's tree is a root and five scalar types under it, in clang's style (MDBuilder::createTBAAScalarTypeNode) and
+// FMinus's tree is a root and six scalar types under it, in clang's style (MDBuilder::createTBAAScalarTypeNode) and
 // with clang's names:
 //
 //     !{!"FMinus TBAA"}                   the root (accesses tagged in another tree, clang's, may alias FMinus's)
@@ -14,12 +14,16 @@
 //       !{!"int", root, i64 0}
 //       !{!"bool", root, i64 0}           bool, and the lane masks
 //       !{!"any pointer", root, i64 0}    every pointer, whatever it points to, void* too, and every handle
+//       !{!"char", root, i64 0}           a char array's bytes: a leaf as the others are, so not C's char, which may
+//                                         alias anything (FMinus's char has no such licence, and needs none)
 //
 // A float vector is its elements' type, so a float4* over a float buffer, poly_load and poly_store, and the FFT's
 // float2 bins reach float memory and back, as they must. One pointer type is enough: FMinus has no pointer to a
 // pointer, so a pointer in memory is only ever reached as itself. A handle is a pointer (C's, to a struct the program
 // never sees), tagged as one: a field that was a void* and is now an http_server aliases as it did, and an element of
-// an array of handles, the one pointer FMinus reaches through another, is reached only as a handle. Each tag is a
+// an array of handles, the one pointer FMinus reaches through another, is reached only as a handle. A string in
+// memory is its two members, each read and written as what it is: its pointer as a pointer, its length as an int
+// (Text.cpp); what it points to is read untagged (string_byte), since it may be any bytes. Each tag is a
 // scalar access tag, its base type its access type, at offset 0; struct-path tags, which would also tell one float
 // field from another, are not emitted.
 //
@@ -63,9 +67,12 @@ namespace fminus::ir::detail
             case ast::Kind::Pointer:
             case ast::Kind::Handle:   // a pointer, to a struct the program never sees
                 return "any pointer";
+            case ast::Kind::Char:     // FMinus's: a type of its own, which aliases nothing else (not C's char)
+                return "char";
             case ast::Kind::Void:
             case ast::Kind::Module:   // its fields are loaded and stored, each as its own type
             case ast::Kind::Array:    // likewise its elements
+            case ast::Kind::String:   // likewise its two members, a pointer and an int (Text.cpp)
                 return nullptr;
             }
             return nullptr;

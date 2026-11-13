@@ -86,6 +86,20 @@ namespace fminus::ast
     // arithmetic, no element and no field, and no pointer to one (FMinus has no pointers to pointers). `handle` says
     // which, for a handle's type, or a pointer's or an array's whose pointee is one (an array of handles' name stands
     // for a pointer to its first, which only that array gives).
+    //
+    // A string is FMinus's, not C's: a read-only view of bytes something else owns, a pointer and a length (in C,
+    // `typedef struct { const char* data; int size; } string;`), {ptr, i32} in LLVM, 16 bytes aligned to 8. No NUL
+    // follows its bytes and no encoding is checked. A string literal is one wherever a string is wanted (an
+    // initialiser, an assignment, an argument, an operand of == or !=, a case of a switch on a string), its bytes a
+    // constant of the program. Two compare with == and != by content; nothing joins, orders or indexes them (the
+    // string_* builtins read one). A declaration without an initialiser is the empty string, a null pointer and 0. It
+    // lives as long as what it points into, which the compiler does not check (README.md). Arrays of strings are
+    // allowed, as of handles: an array's name stands for a pointer to its first, which no variable can hold.
+    //
+    // char is an array's element type and a pointer's pointee only, a byte: `char name[32];`, `const char* p`. No
+    // variable, parameter or result is a char; an element read, name[i] or *p, is an int from 0 to 255 on every machine
+    // (C leaves a plain char's sign to the implementation: FMinus's is unsigned, as clang's -funsigned-char makes it),
+    // and a store keeps the low 8 bits.
     struct Module;
 
     enum class Handle
@@ -125,6 +139,8 @@ namespace fminus::ast
         Module,
         Array,
         Handle,
+        Char,     // a byte: an array's element or a pointer's pointee only
+        String,   // a read-only view of bytes: a pointer and a length
     };
 
     struct Type
@@ -214,6 +230,7 @@ namespace fminus::ast
 
         static const Type Void, Float, Double, Bool, Int, Float2, Float4, Float8, Bool2, Bool4, Bool8, PolyFloat,
             PolyBool;
+        static const Type Char, String;
     };
 
     inline constexpr Type Type::Void{Kind::Void};
@@ -229,6 +246,8 @@ namespace fminus::ast
     inline constexpr Type Type::Bool8{Kind::Bool8};
     inline constexpr Type Type::PolyFloat{Kind::PolyFloat};
     inline constexpr Type Type::PolyBool{Kind::PolyBool};
+    inline constexpr Type Type::Char{Kind::Char};
+    inline constexpr Type Type::String{Kind::String};
 
     inline bool isPoly(Type type)
     {
@@ -253,6 +272,8 @@ namespace fminus::ast
         case Kind::Module:
         case Kind::Array:
         case Kind::Handle:
+        case Kind::Char:
+        case Kind::String:
             return 1;
         case Kind::Float2:
         case Kind::Bool2:
@@ -328,18 +349,26 @@ namespace fminus::ast
         return hasRows(type) ? pointee(element) : element;
     }
 
-    // Whether FMinus has pointers to `kind`: to float, double, int, float2, float4, float8, void and modules.
+    // Whether FMinus has pointers to `kind`: to float, double, int, float2, float4, float8, char, void and modules.
     inline bool canPointTo(Kind kind)
     {
         return kind == Kind::Float || kind == Kind::Double || kind == Kind::Int || kind == Kind::Float2
-               || kind == Kind::Float4 || kind == Kind::Float8 || kind == Kind::Void || kind == Kind::Module;
+               || kind == Kind::Float4 || kind == Kind::Float8 || kind == Kind::Void || kind == Kind::Module
+               || kind == Kind::Char;
     }
 
-    // Whether an array may hold elements of `kind`: what FMinus can point to but void, and handles, which no program
-    // can point to but an array's name stands for a pointer to (FMinus's one way to keep several).
+    // Whether an array may hold elements of `kind`: what FMinus can point to but void, and handles and strings, which
+    // no program can point to but an array's name stands for a pointer to (FMinus's one way to keep several).
     inline bool canBeElement(Kind kind)
     {
-        return (canPointTo(kind) && kind != Kind::Void) || kind == Kind::Handle;
+        return (canPointTo(kind) && kind != Kind::Void) || kind == Kind::Handle || kind == Kind::String;
+    }
+
+    // Whether what a pointer of `type` points to, or an array of it holds, is a handle or a string: what only an
+    // array's name points to, and no variable.
+    inline bool pointsToView(Type type)
+    {
+        return type.pointee == Kind::Handle || type.pointee == Kind::String;
     }
 
     // Whether `type` is one of C's floating types, float or double: what `x != 0` tests as a float, and what converts
@@ -358,10 +387,11 @@ namespace fminus::ast
     }
 
     // Whether a value of `type` takes part in arithmetic: every type's but void's, a pointer's (whose arithmetic is
-    // its own), a module's, an array's and a handle's (which has none).
+    // its own), a module's, an array's, a handle's and a string's (which have none).
     inline bool isArithmetic(Type type)
     {
-        return type != Type::Void && !isPointer(type) && !isModule(type) && !isArray(type) && !isHandle(type);
+        return type != Type::Void && !isPointer(type) && !isModule(type) && !isArray(type) && !isHandle(type)
+               && type != Type::String;
     }
 
     inline bool isMask(Type type)
@@ -485,9 +515,9 @@ namespace fminus::ast
 
     // A string literal, C's adjacent ones joined (`"Cut" "off"` is "Cutoff"): its bytes, C's escapes resolved (a NUL
     // among them, `"a\0b"`, is a byte like any other), and where each byte is spelt, at its character or at its
-    // escape's backslash, for an error about a place inside it (a format's '%': ir/Strings.cpp). FMinus has no string
-    // type: a literal is only the argument of a builtin's string parameter, which the code generator checks
-    // (ir/Calls.cpp); anywhere else it is an error.
+    // escape's backslash, for an error about a place inside it (a format's '%': ir/Strings.cpp). A literal is the
+    // argument of a builtin's string parameter, which the code generator checks (ir/Calls.cpp), or a value of type
+    // string where one is wanted (Type::String); anywhere else it is an error.
     struct StringExpr
     {
         std::string value;
@@ -926,12 +956,24 @@ namespace fminus::ast
         std::vector<ExprPtr> args;
     };
 
+    // `when (condition) statement`: FMinus's, not C's. It runs the statement when the condition is true and was false
+    // the last time this `when` was reached (or it was never reached): `if (c && !was) statement; was = c;`, the
+    // condition computed once and `was` stored before the statement runs, so leaving it (return, break, continue) does
+    // not arm it again. `was` is the compiler's, a bool of the module's instance after its declared fields, one for
+    // each `when`: so a `when` is a method's statement, refused where it would change its module at once from several
+    // threads (a parallel region), and a rising edge each time round a loop (`for (...) when (gate[i] > 0.5f) ...`).
+    struct WhenStmt
+    {
+        ExprPtr condition;
+        StmtPtr body;
+    };
+
     struct Stmt
     {
         SourceLocation location;
         std::variant<DeclStmt, ExprStmt, ReturnStmt, BlockStmt, EmptyStmt, IfStmt, WhileStmt, ForStmt, BreakStmt,
                      ContinueStmt, SwitchStmt, CaseStmt, DefaultStmt, EnumStmt, ParallelForStmt, ParallelBlockStmt,
-                     DeferStmt, ServeStmt, ReplyStmt>
+                     DeferStmt, ServeStmt, ReplyStmt, WhenStmt>
             node;
     };
 

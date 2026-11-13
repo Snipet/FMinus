@@ -49,7 +49,8 @@ Each file states what it tests in its first line, then has a few helpers and the
   `FftTest.cpp`, `HashTest.cpp`, `ParamTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`, `ParallelTest.cpp`,
   `RecoveryTest.cpp`, `DoubleTest.cpp`, `Array2DTest.cpp`, `FieldAttributeTest.cpp`, `StringTest.cpp`, `BytesTest.cpp`,
   `JsonTest.cpp`, `XmlTest.cpp` (with `HeapCalls.h`, which counts a thread's calls of the C heap), `HandleTest.cpp`,
-  `DeferTest.cpp`, `SelectionDeclarationTest.cpp` and `ServeTest.cpp`'s errors, and the
+  `DeferTest.cpp`, `SelectionDeclarationTest.cpp`, `ServeTest.cpp`'s errors, `StringTypeTest.cpp` and
+  `WhenTest.cpp`, and the
   compiler's own: `VersionTest.cpp`, `TbaaTest.cpp`, `ZeroInitTest.cpp`, `AttributeTest.cpp`, `DenormalTest.cpp`,
   `LoopBudgetTest.cpp`, whose `compileAt` compiles at any level with the budget on or off, `BoundsCheckTest.cpp`,
   whose `compileAt` does the same with the bounds checks and keeps the checks' descriptions, and `CallThunkTest.cpp`,
@@ -103,7 +104,9 @@ TEST_CASE("functions compute what they say", "[codegen]")
   (`#include`: `IncludeTest.cpp`, in both), `[conditional]` (`#if`, `#ifdef` and macros, with a host's defines:
   `ConditionalTest.cpp`, in both, whose `parsed` takes the defines and `condition` an `#if`'s expression), `[strings]`
   (string literals as builtins' arguments, formats, the effects' blocking class and the build options of builtins:
-  `StringTest.cpp`), `[bytes]` (`bytes_floats` and `bytes_pcm16`: `BytesTest.cpp`), `[numbers]` (the runtime's reader
+  `StringTest.cpp`), `[string-type]` (the type `string`, its builtins and `char` arrays: `StringTypeTest.cpp`, in both,
+  the unit tests' with `HeapCalls.h`), `[when]` (`when`: `WhenTest.cpp`, in both), `[bytes]` (`bytes_floats` and
+  `bytes_pcm16`: `BytesTest.cpp`), `[numbers]` (the runtime's reader
   of numbers on fast_float: `NumbersTest.cpp`, compiled only with `FMINUS_JSON` or `FMINUS_XML`, whose tests a build
   without both lacks; a test of what a build has compares with `fminus/Config.h`, so it passes either way), `[json]`
   (the JSON parser and its builtins: `JsonTest.cpp`, whose tests of the parser itself only a build with `FMINUS_JSON`
@@ -131,7 +134,8 @@ TEST_CASE("functions compute what they say", "[codegen]")
   the wait-free proof of a JIT'd `[[clang::nonblocking]]` handler; and `ServeTest.cpp` (`[serve]`), `serve`, `route`
   and `reply` through the JIT over raw loopback requests (each parameter's 404 and 400, each reply's form, a JSON
   literal's text, a refused reply's 500, two serves on two threads, `webRoutes()` with parameters, the wait-free proof
-  of a serve, and their errors). Every socket they bind is on 127.0.0.1, and every connection they make is to it; this machine's
+  of a serve, and their errors; and where they meet `when`, `string` and `char`: a route's `when`s and a `switch` on a
+  string in a nonblocking method, the missing reply through both, and the errors). Every socket they bind is on 127.0.0.1, and every connection they make is to it; this machine's
   kernel has no IPv6, so the `localhost` and `[::1]` cases take their no-IPv6 branch. Their timeouts make them
   timing-sensitive: run them when nothing else is building), `[files]` (the file interface, docs/files.md:
   `FileBuiltinsTest.cpp`, in every build, its builtins' effects (directly and through a called function), the off
@@ -272,7 +276,7 @@ float gain(float x, float g)
 | `REQUIRES: json` (or `UNSUPPORTED: json`) | a build with the JSON parser, `FMINUS_JSON`, as the build tree's `fminus/Config.h` says (`json.fm`, `json-errors.fm`; `json-off.fm` runs only without it) |
 | `REQUIRES: xml` (or `UNSUPPORTED: xml`) | a build with the XML parser, `FMINUS_XML`, the same way (`xml.fm`, `xml-errors.fm`; `xml-off.fm` runs only without it) |
 | `REQUIRES: web` (or `UNSUPPORTED: web`) | a build with the web library, `FMINUS_WEB`, the same way (`web.fm`, `web-errors.fm`, which make no request; `web-off.fm` runs only without it) |
-| `REQUIRES: web-server` (or `UNSUPPORTED: web-server`) | a build with its server, `FMINUS_WEB_SERVER`, the same way (`web-server.fm` and `serve.fm`, which listen on 127.0.0.1 and ask themselves, and `web-server-errors.fm` and `serve-errors.fm`; `web-server-off.fm` runs only without it) |
+| `REQUIRES: web-server` (or `UNSUPPORTED: web-server`) | a build with its server, `FMINUS_WEB_SERVER`, the same way (`web-server.fm` and `serve.fm`, which listen on 127.0.0.1 and ask themselves, and `web-server-errors.fm`, `serve-errors.fm` and `serve-when.fm`, a route's `when` and `switch` on a string; `web-server-off.fm` runs only without it) |
 | `REQUIRES: files` (or `UNSUPPORTED: files`) | a build with the file interface, `FMINUS_FILES`, the same way (`files.fm`, `files-errors.fm`, which read and write only in `%t`; `files-off.fm` runs only without it) |
 | `REQUIRES: files-write`, `files-anywhere` (or `UNSUPPORTED:`) | a build with its writing, `FMINUS_FILES_WRITE`, or its absolute names, `FMINUS_FILES_ANYWHERE` (`files-write.fm`, `files-anywhere.fm`; `files-write-off.fm` and `files-anywhere-off.fm` only without them) |
 | `REQUIRES: files-types` (or `UNSUPPORTED: files-types`) | a build whose `FMINUS_FILES_TYPES` lists the types it can touch, which `%files_types` substitutes (`files-types.fm`; `files.fm`, which reads a `.json`, only without it) |

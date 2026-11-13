@@ -27,6 +27,7 @@
 #include <llvm/IR/Metadata.h>
 #include <llvm/IR/Module.h>
 
+#include <algorithm>
 #include <memory>
 #include <string>
 
@@ -64,6 +65,20 @@ namespace fminus::ir
             prepareModules(program);
             for (const ast::Function& function : program.functions)
                 declare(function);
+            // A function the program declares and never defines is a C function of the process, which C's ABI passes
+            // a struct to by rules of each platform's own: a string is no parameter or result of one, for now.
+            for (const ast::Function& function : program.functions)
+            {
+                const auto found = functions_.find(function.name);
+                const bool text = function.returnType == ast::Type::String
+                                  || std::ranges::any_of(function.params, [](const ast::Param& param) {
+                                         return param.type == ast::Type::String;
+                                     });
+                if (text && found != functions_.end() && found->second == &function && !function.isDefinition)
+                    error(function.location, "an external function cannot take or return a 'string' yet: C passes a "
+                                             "struct by each platform's own rules; define " + quoted(function.name)
+                                             + " in the program, or pass string_data(s) and string_size(s)");
+            }
             // The next enumeration, constant and module, each in source order; between them, a constant before the
             // enumerations and the modules declared after it, an enumeration of the top level before the modules
             // after it, a module's own inside it (layOut). Each before the functions after it.

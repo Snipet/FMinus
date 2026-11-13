@@ -1,0 +1,56 @@
+// Where serve meets when and string (src/ir/Serve.cpp, Statements.cpp's lowerWhen, Modules.cpp's collectWhens,
+// Text.cpp): a route's block is a block of its method, so a when there has its bool in the module's instance after the
+// declared fields, loaded, stored and tested as anywhere in a method; a switch on a string in a route compares its
+// cases in order and replies from each. Nothing here listens: the program is only compiled.
+// REQUIRES: web-server
+// RUN: fminus %s -O0 | FileCheck %s
+// RUN: fminus %s --emit ast | FileCheck %s --check-prefix=AST
+
+module Gate
+{
+    http_server server;
+    char mode[8];
+    int size;
+    int fired;
+
+    void process() [[clang::nonblocking]]
+    {
+        when (size > 0) fired += 1;
+        serve (server)
+        {
+            route "POST /gate" (int level)
+            {
+                when (level > 0) fired += 1;
+                when (level > 5) reply 202;
+                switch (string_of(mode, size))
+                {
+                case "saw":
+                    reply 200;
+                default:
+                    reply 404;
+                }
+            }
+        }
+    }
+};
+
+// The method's when first, then the route's two, each a bool after the four declared fields.
+// CHECK: %Gate = type { ptr, [8 x i8], i32, i32, i1, i1, i1 }
+
+// CHECK-LABEL: define void @"Gate::process"(
+// CHECK:         %when.was = getelementptr inbounds nuw %Gate, ptr %{{.*}}, i32 0, i32 4
+// CHECK:       serve.route:
+// CHECK:         %when.was{{[0-9]+}} = getelementptr inbounds nuw %Gate, ptr %{{.*}}, i32 0, i32 5
+// CHECK-NEXT:    %was{{[0-9]*}} = load i1, ptr %when.was{{[0-9]+}}
+// CHECK-NEXT:    store i1 %{{.*}}, ptr %when.was{{[0-9]+}}
+// CHECK:         %when.was{{[0-9]+}} = getelementptr inbounds nuw %Gate, ptr %{{.*}}, i32 0, i32 6
+// CHECK:         call i32 @fminus_web_http_reply(ptr %{{.*}}, i32 202)
+// CHECK:         call i32 @fminus_rt_string_equal(ptr %{{.*}}, i32 %{{.*}}, ptr @{{.*}}, i32 3)
+// CHECK:         call i32 @fminus_web_http_reply(ptr %{{.*}}, i32 200)
+// CHECK:         call i32 @fminus_web_http_reply(ptr %{{.*}}, i32 404)
+
+// AST:      (route "POST /gate" ((int level))
+// AST-NEXT:   (when (> level 0)
+// AST-NEXT:     (+= fired 1))
+// AST-NEXT:   (when (> level 5)
+// AST-NEXT:     (reply 202))

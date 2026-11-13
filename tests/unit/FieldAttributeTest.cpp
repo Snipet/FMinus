@@ -161,8 +161,8 @@ TEST_CASE("field attributes' errors are reported in clang's words", "[codegen][f
                    "};\n")
           == "test.fm:4:16: error: 'fminus::range' attribute only applies to fields of numbers (float, double, int, a "
              "float vector and arrays of them), not 'Osc[4]'\n"
-             "test.fm:5:10: error: FMinus has arrays of float, double, int, float2, float4, float8, modules "
-             "and handles, not of 'bool'\n"
+             "test.fm:5:10: error: FMinus has arrays of float, double, int, float2, float4, float8, char, string, "
+             "modules and handles, not of 'bool'\n"
              "test.fm:6:10: error: field has incomplete type 'void'\n"
              "test.fm:7:11: error: field has incomplete type 'float[]'\n");
 }

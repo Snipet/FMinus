@@ -1,8 +1,8 @@
 # cmake/FMinusFastFloat.cmake: fast_float, the reader of numbers behind the runtime's parsers (src/runtime/Numbers.cpp):
 # text to a float correctly rounded, straight from its digits and never through a double, and the same in every
-# locale, where C's strtof reads a "0,5" in a German one; and behind the web server's query numbers
-# (src/web/Server.cpp). Only when FMINUS_JSON, FMINUS_XML or FMINUS_WEB_SERVER is on: with all three off, nothing is
-# fetched, and there is no target.
+# locale, where C's strtof reads a "0,5" in a German one; behind the web server's query numbers (src/web/Server.cpp);
+# and behind a string's, string_float's (src/runtime/Text.cpp), which every build has: so it is fetched for every
+# build.
 #
 # It is headers only. The release's tag is fetched once (pinned in cmake/FMinusPins.cmake) into
 # ${FMINUS_DEPS_DIR}/src/fast_float-<version>, marked with its hash, and every later configure of any build tree uses
@@ -12,10 +12,6 @@
 # does, in one file of its own too (web/Server.cpp).
 #
 # Gives fminus_fast_float (#include <fast_float/fast_float.h>).
-if(NOT FMINUS_JSON AND NOT FMINUS_XML AND NOT FMINUS_WEB_SERVER)
-  return()
-endif()
-
 include(FetchContent)
 
 set(FMINUS_FAST_FLOAT_SOURCE_DIR "${FMINUS_DEPS_DIR}/src/fast_float-${FMINUS_FAST_FLOAT_VERSION}")

@@ -131,8 +131,8 @@ them.
   handle's fields never change once it is returned, so the reads are plain loads, and a table may be read straight
   from `file_data` on the audio thread for as long as the handle is open ([the audio thread](#the-audio-thread)).
 - **Bytes, not text.** `bytes_floats` and `bytes_pcm16` turn a file's bytes into numbers, and `json_parse` and
-  `xml_parse` parse them ([README](../README.md), the builtins); FMinus has no strings, and no builtin gives a program a
-  file's name.
+  `xml_parse` parse them ([README](../README.md), the builtins), and `string_of(file_data(f), file_size(f))` views them
+  as text, a `string` valid until `file_close`; no builtin gives a program a file's name.
 - **The effects** ([extending.md](extending.md), recipe 11): every builtin that touches the disk is in the class that
   allocates, refused in a `[[clang::nonblocking]]` function and in a `[[clang::nonallocating]]` one, directly or
   through a function it calls (with clang's note naming the call); the four reads are wait-free, allowed in both.

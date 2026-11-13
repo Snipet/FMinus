@@ -68,8 +68,8 @@ namespace fminus::ir::detail
         {
             // A prototype with the builtin's own types, `int bytes_floats(const void* data, int bytes, float* out,
             // int cap);` or `void json_free(json_doc doc);`, declares nothing new, as <math.h>'s do; one of a builtin
-            // that takes a string cannot be written, since FMinus has no char. A handle may be written void*, as it was
-            // before FMinus had handles (`void json_free(void* doc);`), and a parameter that takes either of two
+            // that takes a string literal cannot be written: a literal is no type. A handle may be written void*, as it
+            // was before FMinus had handles (`void json_free(void* doc);`), and a parameter that takes either of two
             // handles as either.
             const ast::Type voidPointer = ast::Type::pointerTo(ast::Kind::Void, false);
             const ast::Type result = resultType(runtime->result);

@@ -32,11 +32,13 @@
 //   - a parallel for that assigns its own loop variable (each iteration has its own);
 //   - two statements of a parallel { } of which one changes a variable that the other uses;
 //   - a statement of a parallel { } that declares a variable (it would end with the statement);
-//   - break or return out of a region, or continue out of a statement of a block (Statements.cpp).
+//   - break or return out of a region, or continue out of a statement of a block (Statements.cpp);
+//   - a `when` in a region: its state is its module's, which every iteration, or every statement, would change at
+//     once, as a method that changes its module would.
 // Whether a method changes its module (changesModule) is worked out once, over every method: one that assigns one of
 // its fields (an array field's elements included) or takes the address of one, or of the module (`this` as a value),
-// or calls a method that does on the module or on a module among its fields. What it writes through a pointer field
-// is not its module's.
+// holds a `when` (whose state is the module's), or calls a method that does on the module or on a module among its
+// fields. What it writes through a pointer field is not its module's.
 #include "ir/Lowering.h"
 
 #include <llvm/IR/Constants.h>
@@ -84,6 +86,7 @@ namespace fminus::ir::detail
                 Write,     // an assignment, ++ or --
                 Address,   // &x, an array's name as a pointer, `this` as a value: what the pointer reaches is unknown
                 Call,      // a method called on it: a write when the method changes its module
+                When,      // a `when`'s state, the module's (`this`), written
             };
             Kind kind = Kind::Read;
             Place place;
@@ -293,6 +296,12 @@ namespace fminus::ir::detail
                                [&](const ast::ReplyStmt& reply) {
                                    for (const ast::ExprPtr& arg : reply.args)
                                        expression(*arg, Access::Kind::Read);
+                               },
+                               [&](const ast::WhenStmt& when) {
+                                   expression(*when.condition, Access::Kind::Read);
+                                   if (around_.module != nullptr)   // else it has no state: an error of its own
+                                       record(Access::Kind::When, self(), stmt.location);
+                                   scoped([&] { statement(*when.body); });
                                },
                            },
                            stmt.node);
@@ -544,7 +553,8 @@ namespace fminus::ir::detail
                 {
                     if (access.place.root != Place::Root::Self)
                         continue;
-                    if (access.kind == Access::Kind::Write || access.kind == Access::Kind::Address)
+                    if (access.kind == Access::Kind::Write || access.kind == Access::Kind::Address
+                        || access.kind == Access::Kind::When)
                         changed = true;
                     else if (access.kind == Access::Kind::Call)
                         calls[name].push_back(access.method);
@@ -607,6 +617,12 @@ namespace fminus::ir::detail
         std::set<std::string> reported;
         for (const Access& access : walker.accesses())
         {
+            if (access.kind == Access::Kind::When)
+            {
+                error(access.location, "every iteration of the parallel for runs this 'when', whose state is the "
+                                       "module's ('this'), and the iterations run at once");
+                continue;
+            }
             if (access.place.counter)
             {
                 error(access.location, "cannot assign " + quoted(access.place.name)
@@ -663,7 +679,16 @@ namespace fminus::ir::detail
                 },
                 [this](const std::string& name) { return functions_.contains(name); }));
             walker.statement(task);
-            tasks.push_back(walker.accesses());
+            std::vector<Access> accesses;   // a `when`'s is refused here, and in no race below
+            for (const Access& access : walker.accesses())
+            {
+                if (access.kind == Access::Kind::When)
+                    error(access.location, "a statement of a parallel block cannot run a 'when': its state is the "
+                                           "module's ('this'), and the block's statements run at once");
+                else
+                    accesses.push_back(access);
+            }
+            tasks.push_back(std::move(accesses));
         }
 
         // A statement's write: an assignment, an address taken (what the pointer reaches is unknown), a call that

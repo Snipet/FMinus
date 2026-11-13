@@ -15,6 +15,7 @@
 //     param        : "const"? type pointer IDENTIFIER? | "const"? type IDENTIFIER array_sizes       a pointer
 //     type         : "float" | "double" | "bool" | "int" | "void" | VECTOR_TYPE | "poly" ("float" | "bool")
 //                  | MODULE_NAME | HANDLE_TYPE              http_response, json_doc, ...: the runtime's handles
+//                  | "char" | "string"                  a byte, an element or a pointee only; a view of bytes
 //                  | "enum" IDENTIFIER                  int (or its fixed type), the name a tag declared before
 //     pointer      : ("*" ("const" | "restrict")*)?        with a *, the first const is the pointee's (const float*),
 //                                                          and one after it the pointer's own (float* const)
@@ -43,11 +44,12 @@
 //                  | ("defer" | "_Defer") statement      TS 25755's: run when the block it is in is left
 //                  | "serve" "(" expr ("," expr)? ")" "{" route* "}"    FMinus's: the requests waiting for its routes
 //                  | "reply" expr ("," expr)* ";"        answers the route's request, and leaves the route
+//                  | "when" "(" expr ")" statement       FMinus's: run each time the condition becomes true
 //     route        : "route" STRING+ ("(" (route_param ("," route_param)*)? ")")? attributes block
 //     route_param  : "const"? type pointer IDENTIFIER attributes        an int a {hole} or the query fills, ...
 //     label        : "case" expr ":" | "default" ":"                         the expr an integer constant expression
 //     expr         : NUMBER | "true" | "false" | IDENTIFIER | IDENTIFIER "(" (expr ("," expr)*)? ")" | "(" expr ")"
-//                  | STRING+          a string literal: the code generator takes one only as a builtin's argument
+//                  | STRING+          a string literal: a builtin's argument, or a value where a string is wanted
 //                  | ("-" | "+" | "!" | "~" | "*" | "&") expr | expr "[" expr "]"   *p, &x, p[i]
 //                  | "sizeof" "(" "const"? type pointer array_sizes? ")"             a type's size, an int
 //                  | expr ("*" | "/" | "%") expr | expr ("+" | "-") expr | expr ("<<" | ">>") expr
@@ -72,10 +74,10 @@
 // ^, &, equality, relational, shifts, additive, multiplicative, unary (and casts), and the postfix operators: ".",
 // "->", "[" and "++" and "--" after their operand. So `a & b == c` is a & (b == c), as in C, and `a << 1 + 2` is
 // a << 3. The unary "&" and "-" take UNARY's precedence (%prec), their binary ones their own.
-// A string literal is an expression to the grammar, as in C, so a call's arguments may be one; FMinus has no string
-// type, and the code generator refuses a literal anywhere but as the argument of a builtin's string parameter
-// (ir/Calls.cpp), each error at the literal. So the grammar stays C's, and a program it accepts means what it would in
-// C, where a literal is a char array.
+// A string literal is an expression to the grammar, as in C, so a call's arguments may be one. The code generator
+// takes it as the argument of a builtin's string parameter (ir/Calls.cpp), or as a value of FMinus's type string where
+// one is wanted (an initialiser, an assignment, an argument, an operand of == or !=, a case), and refuses it anywhere
+// else, each error at the literal. So the grammar stays C's.
 // A module's name is a type from its declaration on: the scanner returns it as MODULE_NAME (ParseContext.h), as a C
 // compiler returns a typedef's name, so `OnePole* p;` is a declaration and `a * b;` a product.
 // The grammar accepts any expression on the left of an assignment; the code generator rejects what is not an lvalue
@@ -556,6 +558,8 @@
 %token MODULE "module" THIS "this" ARROW "->" PARAM "param"
 %token DEFER "defer" DEFER_TS "_Defer"
 %token SERVE "serve" ROUTE "route" REPLY "reply" JSON "json"
+%token CHAR "char" STRING_TYPE "string"
+%token WHEN "when"
 %token <ast::Type> MODULE_NAME "module name"
 %token <ast::Type> VECTOR_TYPE "vector type"
 %token <ast::Type> HANDLE_TYPE "handle type"
@@ -837,6 +841,9 @@ attribute_word
     | "route"                               { $$ = "route"; }
     | "reply"                               { $$ = "reply"; }
     | "json"                                { $$ = "json"; }
+    | "char"                                { $$ = "char"; }
+    | "string"                              { $$ = "string"; }
+    | "when"                                { $$ = "when"; }
     ;
 
 // An attribute's arguments: numbers, a minus before any of them, and strings (C23's balanced tokens, of which FMinus
@@ -928,6 +935,8 @@ type
     | "void"                                { $$ = ast::Type::Void; }
     | VECTOR_TYPE                           { $$ = $1; }
     | HANDLE_TYPE                           { $$ = $1; }
+    | "char"                                { $$ = ast::Type::Char; }
+    | "string"                              { $$ = ast::Type::String; }
     | "poly" "float"                        { $$ = ast::Type::PolyFloat; }
     | "poly" "bool"                         { $$ = ast::Type::PolyBool; }
     | "poly" "double"                       {
@@ -1191,6 +1200,7 @@ unlabeled
                                                 parseContext.diagnostics.error(at(@2), "expected expression");
                                                 $$ = ast::Stmt{at(@1), ast::ReplyStmt{}};
                                             }
+    | "when" "(" expr ")" statement         { $$ = ast::Stmt{at(@1), ast::WhenStmt{$3, ast::own($5)}}; }
     ;
 
 // A serve's routes. Anything else in its braces parses, and is an error: only a route may stand there.

@@ -5,7 +5,8 @@
 // answered 500, two serves on two threads each taking its own routes' requests only, webRoutes() with the parameters,
 // and the wait-free proof of a serve in a [[clang::nonblocking]] method (HeapCalls, seccomp's strict mode). Then the
 // compiler's errors, each at its column, and the missing reply on each shape of control flow the missing return's tests
-// cover. Nothing here binds or connects anywhere but 127.0.0.1. In a build without the web server, a serve is the
+// cover; and where a serve meets string, char and when (a route's when, a switch on a string in a route, their errors).
+// Nothing here binds or connects anywhere but 127.0.0.1. In a build without the web server, a serve is the
 // error that names the option; the rest is not compiled, nor on Windows, whose sockets it is not written for.
 #include "Compile.h"
 #include "fminus/Config.h"
@@ -894,7 +895,7 @@ TEST_CASE("serve, route and reply's errors, each once at its column", "[codegen]
              "test.fm:13:48: error: a JSON literal's value is a float, a double, an int, a bool, an object or an "
              "array, not 'int *'\n"
              "test.fm:13:56: error: a JSON literal's value is a float, a double, an int, a bool, an object or an "
-             "array: FMinus has no strings yet, and a string literal is none of these\n"
+             "array in this version, and not yet a string\n"
              "test.fm:13:64: error: duplicate key 'a' in a JSON object\n"
              "test.fm:13:43: note: previous key is here\n"
              "test.fm:14:31: error: incompatible pointer to integer conversion passing 'char[4]' to parameter of "
@@ -970,5 +971,210 @@ TEST_CASE("no two routes one request could match unless one is more specific: an
              "test.fm:17:43: error: route 'PUT /d/{n}' conflicts with 'PUT /d/%d': they match the same requests, and "
              "neither would take them before the other\n"
              "test.fm:14:48: note: the other route is here\n");
+}
+
+// Where serve meets string, char and when (src/ir/Serve.cpp, Text.cpp, Statements.cpp's lowerWhen, Modules.cpp's
+// collectWhens): a route's block is a block of its method, so a when there keeps its bool in the module's instance,
+// and a switch on a string replies from its cases.
+TEST_CASE("a route in a [[clang::nonblocking]] method uses a when, a switch on a string and a char array: each edge "
+          "once, each case's reply, nothing allocated",
+          "[serve][web][server][when][string]")
+{
+    constexpr const char* kGate =
+        "module Gate\n"
+        "{\n"
+        "    http_server server;\n"
+        "    char mode[8];\n"
+        "    int size;\n"
+        "    int fired;\n"
+        "    int answered;\n"
+        "    void init() { server = http_listen(); size = string_copy(mode, 8, \"saw\"); }\n"
+        "    int port() { return http_port(server); }\n"
+        "    void process() [[clang::nonblocking]]\n"
+        "    {\n"
+        "        serve (server)\n"
+        "        {\n"
+        "            route \"POST /gate\" (int level)\n"
+        "            {\n"
+        "                answered += 1;\n"
+        "                when (level > 0) fired += 1;\n"
+        "                when (level > 5) reply 202;\n"
+        "                const string shape = string_of(mode, size);\n"
+        "                switch (shape)\n"
+        "                {\n"
+        "                case \"saw\":\n"
+        "                    reply 200, \"text/plain\", \"saw %d\", fired;\n"
+        "                case \"sine\":\n"
+        "                    reply 201, \"text/plain\", \"sine %d\", fired;\n"
+        "                default:\n"
+        "                    reply 404;\n"
+        "                }\n"
+        "            }\n"
+        "            route \"POST /mode/{k}\" (int k)\n"
+        "            {\n"
+        "                const string names[3] = {\"saw\", \"sine\", \"square\"};\n"
+        "                size = string_copy(mode, 8, k >= 0 && k < 3 ? names[k] : \"none\");\n"
+        "                reply 204;\n"
+        "            }\n"
+        "        }\n"
+        "    }\n"
+        "};\n";
+    Served served = serveProgram(kGate, "Gate");
+    // The module's two whens are two bools after its declared fields, of which the host is told nothing.
+    const fminus::Program::Module* layout = served.program->module("Gate");
+    REQUIRE(layout != nullptr);
+    CHECK(layout->fields.size() == 5);
+    {
+        const Pump pump([&] { served.process(served.instance->memory()); });
+        const int port = served.port;
+        // The first when fires on each rising edge of level > 0, request after request; the second answers 202 on
+        // each rising edge of level > 5, and the switch answers the rest by the mode's text.
+        CHECK(request(port, "POST", "/gate?level=1").body == "saw 1");
+        CHECK(request(port, "POST", "/gate?level=2").body == "saw 1");
+        CHECK(request(port, "POST", "/gate?level=0").body == "saw 1");
+        CHECK(request(port, "POST", "/gate?level=3").body == "saw 2");
+        CHECK(request(port, "POST", "/gate?level=6").status == 202);
+        CHECK(request(port, "POST", "/gate?level=7").body == "saw 2");
+        CHECK(request(port, "POST", "/gate?level=7").body == "saw 2");
+        CHECK(request(port, "POST", "/mode/1").status == 204);
+        const Response sine = request(port, "POST", "/gate?level=0");
+        CHECK(sine.status == 201);
+        CHECK(sine.body == "sine 2");
+        CHECK(request(port, "POST", "/mode/2").status == 204);
+        CHECK(request(port, "POST", "/gate?level=9").status == 202);   // both whens fire
+        CHECK(request(port, "POST", "/gate?level=0").status == 404);   // "square" is no case
+        CHECK(request(port, "POST", "/gate").status == 400);
+    }
+    CHECK(field<int>(*served.program, *served.instance, "Gate", "fired") == 3);
+
+    // Taken, filled, switched and answered on this thread, without a call of the heap: the mode is "square" still.
+    if (fminus::test::HeapCalls::counted())
+    {
+        const auto answered = [&] { return field<int>(*served.program, *served.instance, "Gate", "answered"); };
+        const int fd = sendRequest(served.port, "POST", "/gate?level=1", "");
+        REQUIRE(fd >= 0);
+        const int before = answered();
+        bool done = false;
+        for (int attempt = 0; attempt < 500 && !done; ++attempt)
+        {
+            long calls = 0;
+            {
+                const fminus::test::HeapCalls counting;
+                served.process(served.instance->memory());
+                calls = counting.count();
+            }
+            done = answered() > before;
+            if (done)
+                CHECK(calls == 0);
+            else
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        CHECK(done);
+        const Response response = readResponse(fd);
+        CHECK(response.status == 404);
+        CHECK(field<int>(*served.program, *served.instance, "Gate", "fired") == 4);
+    }
+    else
+        WARN("this build does not count the heap's calls (a sanitizer): allocation is not checked");
+}
+
+TEST_CASE("a route sees through a when as through an if without an else, and through a switch on a string as through "
+          "one on an int",
+          "[codegen][serve][when][string]")
+{
+    const auto routed = [](const std::string& block) {
+        return "module M\n{\n    void f(http_server s, int n, string t)\n    {\n        serve (s) { route \"GET /a\" "
+               + block + " }\n    }\n};\n";
+    };
+    // A reply in a when's statement is allowed; a switch on a string with a default replies on every path.
+    for (const char* block : {"{ when (n > 0) reply 204; reply 200; }", "{ when (n > 0) { reply 204; } reply 200; }",
+                              "{ switch (t) { case \"a\": reply 1; case \"b\": reply 2; default: reply 3; } }",
+                              "{ switch (t) { case \"a\": when (n > 0) reply 1; reply 2; default: reply 3; } }"})
+    {
+        INFO(block);
+        std::string errors;
+        CHECK(compile(routed(block), &errors) != nullptr);
+        CHECK(errors.empty());
+    }
+    // A when may not run its statement; a switch on a string without a default may take no case.
+    for (const char* block : {"{ when (n > 0) reply 204; }", "{ when (n > 0) { reply 204; } }",
+                              "{ switch (t) { case \"a\": reply 1; case \"b\": reply 2; } }",
+                              "{ switch (t) { case \"a\": reply 1; default: when (n > 0) reply 2; } }"})
+    {
+        INFO(block);
+        const std::size_t close = routed(block).find(" }\n    }\n") - 1;   // the route block's closing brace
+        const std::size_t lineStart = routed(block).rfind('\n', close) + 1;
+        CHECK(errorsOf(routed(block)) == "test.fm:5:" + std::to_string(close - lineStart + 1)
+                                             + ": error: route 'GET /a' does not reply in all control paths\n");
+    }
+}
+
+TEST_CASE("serve meets string, char and when: each error once, at its column", "[codegen][serve][when][string]")
+{
+    // A string or char parameter is a later step's, as any other type is; a when in a route of a function that is no
+    // method has nowhere to keep its state.
+    CHECK(errorsOf("void f(http_server s, int n)\n"
+                   "{\n"
+                   "    serve (s)\n"
+                   "    {\n"
+                   "        route \"GET /a\" (string text, const char c, char* p, string q [[fminus::default(1)]]) "
+                   "{ reply 1; }\n"
+                   "        route \"GET /b/{k}\" (string k) { reply 1; }\n"
+                   "        route \"GET /c\" (int k) { when (k > 1) reply 1; reply 2; }\n"
+                   "    }\n"
+                   "}\n")
+          == "test.fm:5:32: error: a route's parameter is an int, a float, a bool or an http_request, not 'string'\n"
+             "test.fm:5:49: error: a route's parameter is an int, a float, a bool or an http_request, not 'char'\n"
+             "test.fm:5:58: error: a route's parameter is an int, a float, a bool or an http_request, not 'char *'\n"
+             "test.fm:5:68: error: a route's parameter is an int, a float, a bool or an http_request, not 'string'\n"
+             "test.fm:6:36: error: a route's parameter is an int, a float, a bool or an http_request, not 'string'\n"
+             "test.fm:7:34: error: a 'when' keeps its state, one bool, in the instance of the module whose method it "
+             "is in, and 'f' is no method: move it into a method of a module\n");
+    // A string in a JSON literal, a literal, a string or a ?: of literals, one error each (a char element is an int);
+    // a string where a reply's content type or format goes is the text form's non-literal, and among a format's
+    // values the error another non-number is; a string as a serve's server or timeout, the error each gives.
+    const std::string json = "a JSON literal's value is a float, a double, an int, a bool, an object or an array in "
+                             "this version, and not yet a string\n";
+    const std::string literal = "argument to 'http_reply_text' must be a string literal\n";
+    CHECK(errorsOf("module M\n"
+                   "{\n"
+                   "    http_server server;\n"
+                   "    char name[4];\n"
+                   "    void f(bool b) [[clang::nonblocking]]\n"
+                   "    {\n"
+                   "        string t = \"text/plain\";\n"
+                   "        serve (server)\n"
+                   "        {\n"
+                   "            route \"GET /a\" (int n)\n"
+                   "            {\n"
+                   "                if (n == 1) reply 200, json { \"a\": \"lit\", \"c\": name[0] };\n"
+                   "                if (n == 2) reply 200, json { \"a\": t, \"b\": [b ? \"x\" : \"y\", string_slice(t, 0, "
+                   "1)] };\n"
+                   "                if (n == 3) reply 200, t, \"%d\", n;\n"
+                   "                if (n == 4) reply 200, \"text/plain\", t, n;\n"
+                   "                if (n == 5) reply 200, \"text/plain\", \"%d %g\", n, t;\n"
+                   "                if (n == 6) reply 200, string_slice(t, 0, 4), \"%d\", n;\n"
+                   "                reply 200, b ? t : \"text/html\", \"%d\", n;\n"
+                   "            }\n"
+                   "        }\n"
+                   "    }\n"
+                   "    void g()\n"
+                   "    {\n"
+                   "        string t = \"x\";\n"
+                   "        serve (\"server\") { route \"GET /b\" { reply 1; } }\n"
+                   "        serve (t) { route \"GET /c\" { reply 1; } }\n"
+                   "        serve (server, \"10\") { route \"GET /d\" { reply 1; } }\n"
+                   "        serve (server, t) { route \"GET /e\" { reply 1; } }\n"
+                   "    }\n"
+                   "};\n")
+          == "test.fm:12:52: error: " + json + "test.fm:13:52: error: " + json + "test.fm:13:61: error: " + json
+                 + "test.fm:13:76: error: " + json + "test.fm:14:40: error: " + literal + "test.fm:15:54: error: "
+                 + literal + "test.fm:16:66: error: format specifies type 'double' but the argument has type 'string'\n"
+                 + "test.fm:17:40: error: " + literal + "test.fm:18:28: error: " + literal
+                 + "test.fm:25:16: error: passing 'char[7]' to parameter of incompatible type 'http_server'\n"
+                   "test.fm:26:16: error: passing 'string' to parameter of incompatible type 'http_server'\n"
+                   "test.fm:27:24: error: incompatible pointer to integer conversion passing 'char[3]' to parameter of "
+                   "type 'int'\n"
+                   "test.fm:28:24: error: passing 'string' to parameter of incompatible type 'int'\n");
 }
 #endif

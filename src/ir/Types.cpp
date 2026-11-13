@@ -45,6 +45,10 @@ namespace fminus::ir::detail
             return structs_.at(type.module);   // layOut() made one for every module (Modules.cpp)
         case ast::Kind::Array:
             return llvm::ArrayType::get(typeOf(ast::pointee(type)), static_cast<std::uint64_t>(type.count));
+        case ast::Kind::Char:
+            return builder_.getInt8Ty();
+        case ast::Kind::String:   // C's struct { const char* data; int size; }: 16 bytes, aligned to 8
+            return llvm::StructType::get(module_.getContext(), {builder_.getPtrTy(), builder_.getInt32Ty()});
         }
         return builder_.getFloatTy();
     }
@@ -64,13 +68,31 @@ namespace fminus::ir::detail
     // and a lane mask is 0 or 1 per lane as the float vector of its size. A double does not: a vector's lanes are
     // floats, and it would be rounded to one silently (clang's error; a vector literal's element converts, as a cast
     // does: Vectors.cpp). Nothing else converts from a vector, and nothing at all from void (a call of a void function
-    // has no value): those are errors, reported for `use`. A value that failed converts silently.
+    // has no value): those are errors, reported for `use`. A value that failed converts silently. A string converts to
+    // nothing and nothing to it (a literal is one where one is wanted: lowerAs), and is no condition. A char, which no
+    // value is, is what a number converts to on its way into a char array's element: its low 8 bits.
     llvm::Value* Lowering::convert(Value value, ast::Type type, SourceLocation location, Use use)
     {
         if (value.type == type)
             return value.ir;
         if (value.failed)   // its own error says why: it converts to anything, as a poison of the type (Value)
             return poison(type).ir;
+        if (value.type == ast::Type::String || type == ast::Type::String)
+        {
+            if (value.type == ast::Type::String && (use == Use::Condition || use == Use::Logical))
+                diagnostics_.error(location,
+                                   use == Use::Condition
+                                       ? "statement requires expression of scalar type ('string' invalid)"
+                                       : "a logical operator needs scalar operands, not 'string'",
+                                   {Diagnostic{location, "a string is no condition: test whether it is empty with "
+                                                         "string_size(s) > 0",
+                                               {}}});
+            else
+                incompatible(location, use, value.type, type);
+            return poison(type).ir;
+        }
+        if (type == ast::Type::Char && ast::isArithmetic(value.type) && !ast::isVector(value.type))
+            return builder_.CreateTrunc(convert(value, ast::Type::Int, location, use), builder_.getInt8Ty(), "conv");
         const bool aggregate = ast::isModule(value.type) || ast::isModule(type) || ast::isArray(value.type)
                                || ast::isArray(type);
         if (value.type == ast::Type::Void || type == ast::Type::Void || aggregate)   // a module converts to nothing
@@ -193,8 +215,14 @@ namespace fminus::ir::detail
         const ast::Type element = ast::elementOf(type);
         if (ast::isArray(type) && !ast::canBeElement(element.kind))
         {
-            error(location, "FMinus has arrays of float, double, int, float2, float4, float8, modules and handles, "
-                            "not of " + quoted(ast::typeName(element)));
+            error(location, "FMinus has arrays of float, double, int, float2, float4, float8, char, string, modules "
+                            "and handles, not of " + quoted(ast::typeName(element)));
+            return false;
+        }
+        if (type == ast::Type::Char)   // C's char, which FMinus keeps only in arrays
+        {
+            error(location, "FMinus has no 'char' variables, parameters or results: a char is an array's element or a "
+                            "pointer's pointee, and an element reads as an int from 0 to 255");
             return false;
         }
         if (!ast::isPointer(type) || ast::canPointTo(type.pointee))
@@ -205,8 +233,8 @@ namespace fminus::ir::detail
 
     void Lowering::noPointerTo(SourceLocation location, ast::Type pointee)
     {
-        error(location, "FMinus has pointers to float, double, int, float2, float4, float8, void and modules, not "
-                        "to " + quoted(ast::typeName(pointee)));
+        error(location, "FMinus has pointers to float, double, int, float2, float4, float8, char, void and modules, "
+                        "not to " + quoted(ast::typeName(pointee)));
     }
 
     // A type's size in bytes, as C and clang's ext_vector_type have it on the 64-bit targets FMinus runs on: a double
@@ -240,8 +268,11 @@ namespace fminus::ir::detail
         case ast::Kind::Pointer:
         case ast::Kind::Handle:
             return 8;
+        case ast::Kind::Char:
+            return 1;
         case ast::Kind::Module:
         case ast::Kind::Array:
+        case ast::Kind::String:
             return module_.getDataLayout().getTypeAllocSize(typeOf(type)).getFixedValue();
         }
         return std::nullopt;

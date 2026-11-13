@@ -154,6 +154,8 @@ namespace fminus::jit
         case ast::Kind::PolyBool:
         case ast::Kind::Module:
         case ast::Kind::Array:
+        case ast::Kind::Char:     // no value is one: an array's element, a pointer's pointee
+        case ast::Kind::String:   // a pointer and a length, a struct C's ABI passes by each platform's rules
             return std::nullopt;
         }
         return std::nullopt;

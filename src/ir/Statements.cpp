@@ -207,6 +207,7 @@ namespace fminus::ir::detail
                        [&](const ast::DeferStmt& deferred) { reachDefer(stmt.location, deferred); },
                        [&](const ast::ServeStmt& serve) { lowerServe(stmt.location, serve); },
                        [&](const ast::ReplyStmt& reply) { lowerReply(stmt.location, reply); },
+                       [&](const ast::WhenStmt& when) { lowerWhen(stmt.location, when); },
                    },
                    stmt.node);
     }
@@ -541,7 +542,10 @@ namespace fminus::ir::detail
     // Nothing reaches what the body has before its first label (lowerStatement). An operand with an error of its own
     // gives the switch no second error (Value). A value of an enumerated type that does not fold to a constant
     // (folds(), as clang's check folds it: a constant of the top level is one), without a default, gets clang's
-    // -Wswitch for the constants no case has (unhandled()).
+    // -Wswitch for the constants no case has (unhandled()). A switch on a string (WG14 N3895's, with lengths in place
+    // of NULs) has no instruction: the block its value is computed in ends in a placeholder while the body is lowered,
+    // its labels collect their literals, and then the placeholder gives way to their comparisons, in the labels'
+    // order (Text.cpp, compareTexts).
     void Lowering::lowerSwitch(const ast::SwitchStmt& branch)
     {
         // C2y's declarations in its head, a scope around the whole statement (lowerIf), made before the jump: no
@@ -553,21 +557,29 @@ namespace fminus::ir::detail
             lowerStatements(branch.init);
         }
         const Value value = lower(*branch.value);
+        const bool text = value.type == ast::Type::String;
         llvm::Value* condition = poison(ast::Type::Int).ir;
         if (ast::arithmeticOf(value.type) == ast::Type::Int)
             condition = convert(value, ast::Type::Int, branch.value->location, Use::Initializing);
-        else if (!value.failed)
+        else if (!value.failed && !text)
             error(branch.value->location, "statement requires expression of integer type ("
                                               + quoted(ast::typeName(value.type)) + " invalid)");
         llvm::BasicBlock* endBlock = newBlock("sw.epilog");
-        llvm::SwitchInst* instruction = builder_.CreateSwitch(condition, endBlock);
+        llvm::SwitchInst* instruction = text ? nullptr : builder_.CreateSwitch(condition, endBlock);
         breakables_.push_back({Breakable::Kind::Switch, endBlock, nullptr, deferScopes_.size()});
         switches_.push_back({instruction, scopes_.size(), {}, std::nullopt, false, deferScopes_.size()});
+        if (text)
+        {
+            switches_.back().text = value.ir;
+            switches_.back().compare = builder_.CreateUnreachable();
+        }
         lowerScoped(*branch.body);
-        const Switch lowered = std::move(switches_.back());
+        Switch lowered = std::move(switches_.back());
         switches_.pop_back();
         breakables_.pop_back();
         fallThrough(endBlock);
+        if (text)
+            compareTexts(lowered, endBlock);
         if (llvm::BasicBlock* last = &endBlock->getParent()->back(); last != endBlock)
             endBlock->moveAfter(last);   // after the labels' blocks, as clang's
         builder_.SetInsertPoint(endBlock);
@@ -719,7 +731,9 @@ namespace fminus::ir::detail
 
         llvm::BasicBlock* block = newBlock(value != nullptr ? "sw.bb" : "sw.default");
         fallThrough(block);
-        if (branch != nullptr && value != nullptr)
+        if (branch != nullptr && value != nullptr && branch->instruction == nullptr)
+            textCase(*branch, *value, block);   // a switch on a string's (Text.cpp)
+        else if (branch != nullptr && value != nullptr)
         {
             const std::optional<std::int32_t> constant = integerConstant(*value);
             if (!constant)
@@ -755,7 +769,10 @@ namespace fminus::ir::detail
             else
             {
                 branch->defaultLabel = location;
-                branch->instruction->setDefaultDest(bypass(*branch, block));
+                if (branch->instruction != nullptr)
+                    branch->instruction->setDefaultDest(bypass(*branch, block));
+                else
+                    branch->otherwise = bypass(*branch, block);
             }
         }
         builder_.SetInsertPoint(block);
@@ -818,7 +835,7 @@ namespace fminus::ir::detail
             error(location, "variable has incomplete type 'void'");
             type = ast::Type::Float;   // so its uses report no more errors
         }
-        if (!checkType(location, type))   // likewise
+        if (!checkType(location, type) && type != ast::Type::Char)   // likewise (a char stays a byte)
             type = ast::isArray(type) ? floatsLike(type) : ast::Type::pointerTo(ast::Kind::Float, type.pointeeConst);
         if (decl.isConst && ast::isArray(type) && !decl.init && !ast::isModule(ast::elementOf(type)))
         {
@@ -830,7 +847,10 @@ namespace fminus::ir::detail
         {
             llvm::AllocaInst* slot = allocate(typeOf(type), decl.name);
             zero(slot, type);
-            if (decl.init)
+            if (decl.init && isString(*decl.init) && ast::isArray(type) && !ast::hasRows(type)
+                && ast::pointee(type) == ast::Type::Char)   // C's `char name[8] = "abc";` (Text.cpp)
+                initializeChars(decl.init->location, slot, type, std::get<ast::StringExpr>(decl.init->node));
+            else if (decl.init)
             {
                 const Value value = lower(*decl.init);
                 if (ast::isArray(type))
@@ -859,6 +879,41 @@ namespace fminus::ir::detail
         llvm::AllocaInst* slot = allocate(typeOf(type), decl.name);
         builder_.CreateStore(value, slot);
         declare(slot, decl.isConst, type);
+    }
+
+    // `when (c) s`: c computed once, as an if's condition (a poly bool is the error it is there: a when is one
+    // decision); `was`, the when's own bool in the instance of the method's module (whenFields_, after the declared
+    // fields), loaded and then given c, before s runs; and s, in when.then, when c is true and `was` false. A compare,
+    // a load, a store and a branch: in a loop over samples, a rising edge each time round. Outside a method it has no
+    // instance to keep its state in, an error that says so; in a parallel region it would change the module from
+    // several threads at once, which the region's checks refused (Parallel.cpp). Either way it is lowered as an if, for
+    // its other errors.
+    void Lowering::lowerWhen(SourceLocation location, const ast::WhenStmt& when)
+    {
+        const ast::Module* module = function_ != nullptr ? function_->module : nullptr;
+        if (module == nullptr)
+            error(location, "a 'when' keeps its state, one bool, in the instance of the module whose method it is in, "
+                            "and " + quoted(function_ != nullptr ? function_->name : "this") + " is no method: move it "
+                            "into a method of a module");
+        llvm::Value* condition =
+            convert(lower(*when.condition), ast::Type::Bool, when.condition->location, Use::Condition);
+        const auto field = whenFields_.find(&when);
+        if (module != nullptr && regions_.empty() && field != whenFields_.end())
+        {
+            llvm::Value* state =
+                builder_.CreateStructGEP(structs_.at(module), self(), field->second, "when.was");
+            llvm::LoadInst* was = builder_.CreateLoad(builder_.getInt1Ty(), state, "was");
+            tag(was, ast::Type::Bool);
+            tag(builder_.CreateStore(condition, state), ast::Type::Bool);
+            condition = builder_.CreateAnd(condition, builder_.CreateNot(was, "armed"), "when.fires");
+        }
+        llvm::BasicBlock* thenBlock = newBlock("when.then");
+        llvm::BasicBlock* endBlock = newBlock("when.end");
+        builder_.CreateCondBr(condition, thenBlock, endBlock);
+        builder_.SetInsertPoint(thenBlock);
+        lowerScoped(*when.body);
+        fallThrough(endBlock);
+        builder_.SetInsertPoint(endBlock);
     }
 
     // A local's attributes, or a constant's of the top level: C23 lets a declarator have them, and FMinus gives them

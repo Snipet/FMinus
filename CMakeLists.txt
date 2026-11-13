@@ -51,7 +51,7 @@ include(FMinusOptions)          # options, the deps cache, ccache, fminus_target
 include(FMinusParserTools)      # Bison, Flex, fminus_add_grammar() (first: a minute, where LLVM can take half an hour)
 include(FMinusLLVM)             # FMinus::LLVM
 include(FMinusFft)              # PFFFT, compiled into the runtime library
-include(FMinusFastFloat)        # fast_float, the parsers' numbers, when FMINUS_JSON, FMINUS_XML or FMINUS_WEB_SERVER is on
+include(FMinusFastFloat)        # fast_float, the numbers of the parsers, the web server and string_float
 include(FMinusJson)             # yyjson, the JSON parser, compiled into the runtime library when FMINUS_JSON is on
 include(FMinusXml)              # pugixml, the XML parser, compiled into the runtime library when FMINUS_XML is on
 include(FMinusWeb)              # libcurl and Mbed TLS, for the web library fminus_web, when FMINUS_WEB is on

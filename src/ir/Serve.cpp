@@ -628,9 +628,9 @@ namespace fminus::ir::detail
     }
 
     // `reply status, ...;`: the route's request answered, in the form its values say (one: http_reply; then a string
-    // literal: http_reply_text; then a JSON literal; else four: http_reply_bytes), each value checked as the builtin
-    // checks it; a refusal that leaves the request the route's (HTTP_LIMIT, HTTP_INVALID) answered 500; then the
-    // deferred statements of the route's blocks, and the serve's next request.
+    // literal, or a string: http_reply_text; then a JSON literal; else four: http_reply_bytes), each value checked as
+    // the builtin checks it; a refusal that leaves the request the route's (HTTP_LIMIT, HTTP_INVALID) answered 500;
+    // then the deferred statements of the route's blocks, and the serve's next request.
     void Lowering::lowerReply(SourceLocation location, const ast::ReplyStmt& reply)
     {
         const Breakable* around =
@@ -672,7 +672,20 @@ namespace fminus::ir::detail
             answered = lowerJsonReply(location, *reply.args[0], *json, request);
         else
         {
-            const bool text = count >= 2 && isString(*reply.args[1]);
+            // A string second, a literal or a value of type string, is the text form's, whose content type is a
+            // literal only: a `string` there is the error a non-literal is, at it, and not the bytes form's three.
+            const auto givesString = [&](const ast::Expr& expr) {
+                if (isString(expr) || staticType(expr) == std::optional(ast::Type::String))
+                    return true;
+                const auto* call = std::get_if<ast::CallExpr>(&expr.node);
+                const RuntimeBuiltin* builtin = call != nullptr ? findRuntimeBuiltin(call->callee) : nullptr;
+                return builtin != nullptr && resultType(builtin->result) == ast::Type::String;
+            };
+            const auto* choice = count >= 2 ? std::get_if<ast::ConditionalExpr>(&reply.args[1]->node) : nullptr;
+            const bool text = count >= 2
+                              && (givesString(*reply.args[1])
+                                  || (choice != nullptr
+                                      && (givesString(*choice->thenValue) || givesString(*choice->elseValue))));
             if (count != 1 && (text ? count < 3 : count != 4))
                 error(location, "no form of reply takes " + std::to_string(count) + " values: " + kReplyForms);
             else
@@ -739,15 +752,17 @@ namespace fminus::ir::detail
         case ast::JsonValue::Kind::Value:
         {
             const ast::Expr& expr = *value.value;
-            if (isString(expr))
-            {
-                error(begin(expr), "a JSON literal's value is a float, a double, an int, a bool, an object or an "
-                                   "array: FMinus has no strings yet, and a string literal is none of these");
-                return false;
-            }
-            const Value lowered = lower(expr);
+            // Lowered as a string is wanted (lowerAs), so that a literal, an arm of a ?: among them, is one: a string,
+            // literal or not, is a later step's, one error at it.
+            const Value lowered = lowerAs(expr, ast::Type::String);
             if (lowered.failed)
                 return false;
+            if (lowered.type == ast::Type::String)
+            {
+                error(begin(expr), "a JSON literal's value is a float, a double, an int, a bool, an object or an "
+                                   "array in this version, and not yet a string");
+                return false;
+            }
             if (lowered.type.enumeration != 0)
             {
                 error(begin(expr), "a JSON literal does not take a value of an enumerated type yet: cast it to "

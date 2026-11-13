@@ -441,6 +441,10 @@ namespace fminus::ast
                                           text += " " + dump(*arg);
                                       return text + ")";
                                   },
+                                  [&](const WhenStmt& when) {   // (when c\n  s)
+                                      return indent + "(when " + dump(*when.condition) + "\n"
+                                             + dump(*when.body, indent + "  ") + ")";
+                                  },
                               },
                               stmt.node);
         }
@@ -551,6 +555,10 @@ namespace fminus::ast
             return typeName(pointee(type)) + "[" + std::to_string(type.count) + "]";
         case Kind::Handle:   // its typedef's name, as clang writes one: http_response
             return handleName(type.handle);
+        case Kind::Char:
+            return "char";
+        case Kind::String:   // FMinus's, a typedef's name to clang
+            return "string";
         }
         return "?";
     }

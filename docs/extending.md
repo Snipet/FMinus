@@ -31,7 +31,9 @@ lists before anything runs; and recipe 43 is the file interface, files a program
 host maps, each directory opened beneath the last and compared by identity with the denied ones; and recipe 44 is C's
 own again, the first step of a report on syntax for networked programs: a type for each kind of handle, TS 25755's
 `defer`, and C2y's `if` and `switch` with a declaration; and recipe 45 is its second step, FMinus's own: `serve`,
-`route` and `reply`, statements over the server's builtins, and a JSON literal a reply writes. Then the pitfalls
+`route` and `reply`, statements over the server's builtins, and a JSON literal a reply writes. Recipe 46 is the
+same report's text: FMinus's type `string`, a read-only view of bytes, and `char` to keep one; and recipe 47 its
+`when`, a statement that runs once each time its condition becomes true. Then the pitfalls
 those recipes ran into, and design notes for what comes next. [simd.md](simd.md) has recipes 7 to 9, for vectors.
 
 Recipes 1 to 4 are in the compiler now (`tanhf` and `%`; `bool` and its operators; `if`, `while` and `for`), and so are
@@ -45,11 +47,11 @@ recipe 32 (one error a mistake, enumerated types, `-Wswitch`), recipe 33 (`doubl
 (field attributes), recipe 36 (calls by name), recipe 37 (code ranges, for a profiler), recipe 38 (string literals as
 builtins' arguments, bytes to numbers, and the build options of builtins), recipe 39 (the JSON parser, and paths
 the compiler prepares), recipe 40 (the XML parser), recipe 41 (the web library), recipe 42 (its server), recipe 43
-(the file interface), recipe 44 (typed handles, `defer`, and `if` and `switch` with a declaration) and recipe 45
-(`serve`, `route`, `reply` and the JSON literal), so their sections describe how the code you have got there: read a section beside the files it
+(the file interface), recipe 44 (typed handles, `defer`, and `if` and `switch` with a declaration), recipe 45
+(`serve`, `route`, `reply` and the JSON literal), recipe 46 (`string` and `char`) and recipe 47 (`when`), so their sections describe how the code you have got there: read a section beside the files it
 names. Recipes 5 and 6, a runtime function and a pass, are not part of the language; they live in [recipes/](recipes/)
 as a patch, so you can apply them to see them work. None of these are sketches: each was applied to this repository, built with `-Werror`, and
-tested in the dev and asan presets, every test passing (recipes 38 to 45 in the release preset only: each says where).
+tested in the dev and asan presets, every test passing (recipes 38 to 47 in the release preset only: each says where).
 [architecture.md](architecture.md) describes the stages they touch.
 
 FMinus follows C. When a recipe has a semantic choice to make, it makes C's: conversions, short-circuiting, which
@@ -70,7 +72,7 @@ Most language features touch the same places, in this order:
 | 6 | `src/runtime/` | if it needs C++ at run time, a runtime function (recipe 5); if a builtin calls it, its facts: in `kRuntimeFacts`, through `callRuntime` (recipe 19), or for a math builtin's, in `mathFunction` (`Math.cpp`, recipe 15) |
 | 7 | `src/jit/Call.cpp`, `src/support/Aot.cpp` | for a new type: whether a call by name, `Program::call` and `--run`, passes and returns it (`callType`'s `switch`, recipe 36), and whether an executable's `main` may take or return it (`addEntryPoint`) |
 | 8 | `tests/` | a dump in `FrontendTest.cpp`; results in `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `SwitchTest.cpp`, `EnumTest.cpp`, `IntTest.cpp`, `BitwiseTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `TableTest.cpp`, `TopLevelTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `HashTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`, `ParallelTest.cpp`, `DoubleTest.cpp`, `Array2DTest.cpp`, `FieldAttributeTest.cpp`, `StringTest.cpp`, `BytesTest.cpp`, `JsonTest.cpp`, `XmlTest.cpp`, `HandleTest.cpp`,
-`DeferTest.cpp`, `SelectionDeclarationTest.cpp` or `ServeTest.cpp` (their helpers are in `Compile.h`; a runtime function that must not allocate is counted with `HeapCalls.h`); IR or errors in `tests/lit/fminus/` |
+`DeferTest.cpp`, `SelectionDeclarationTest.cpp`, `ServeTest.cpp`, `StringTypeTest.cpp` or `WhenTest.cpp` (their helpers are in `Compile.h`; a runtime function that must not allocate is counted with `HeapCalls.h`); IR or errors in `tests/lit/fminus/` |
 | 9 | `examples/` | a program that uses it, and a line in `tests/lit/fminus/examples.test` that runs it |
 | 10 | `editors/vscode/syntaxes/fminus.tmLanguage.json` | a new keyword, type or builtin, so VSCode highlights it (its README says where) |
 | 11 | `README.md` | the language table, and the deviations from C if any |
@@ -92,7 +94,8 @@ through a buffer, against plain loops (recipes 9 and 10), `examples/convolver/` 
 over a module's fields (recipe 17), `examples/ensemble/` for `parallel for` and `parallel { }` (recipe 22), and
 `examples/wavetable/` for a document a host hands a program, read by path (recipes 39 and 40), `examples/fetch/` for
 a request a program makes (recipe 41), `examples/remote/` for the requests a program answers (recipes 42 and 45), and
-`examples/kit/` for the files a program reads and writes (recipe 43).
+`examples/kit/` for the files a program reads and writes (recipe 43), and `examples/trigger/` for `when` (recipe
+47).
 
 ## Ground rules
 
@@ -7099,9 +7102,10 @@ later, is at that byte. A NUL is a byte like any other: `"a\0b"` is three.
 
 ### Where a literal may go: a builtin's string parameter
 
-The code generator decides. FMinus has no type for a literal (C's is a `char` array), so a `StringExpr` is a value
-nowhere: `lower()` reports one wherever it goes, "FMinus has no strings: a string literal is only the argument of a
-builtin's string parameter", at the literal. Where C converts a char array with a warning, or refuses it, the error is
+The code generator decides. FMinus has no type for a literal as C has it (C's is a `char` array), so a `StringExpr` is
+a value nowhere (but a `string` where one is wanted, since recipe 46): `lower()` reports one wherever it goes, "FMinus
+has no char arrays here: a string literal is a 'string' where one is wanted, or the argument of a builtin's string
+parameter" (before recipe 46, "FMinus has no strings: ..."), at the literal. Where C converts a char array with a warning, or refuses it, the error is
 clang's, where clang reports it (`refuseString`, given the place): an argument of the program's function or a
 builtin's numeric parameter (a math function's float, a size's, a plan's length's, `hash`'s and `randf`'s int), an
 initialiser, an assignment and a `return` know the type they want, so `float x = "dB";` is "initializing 'float' with
@@ -8936,9 +8940,10 @@ string literal is, at its `json`; `isConstant`, `fold` and the walks know it. A 
 object's and array's punctuation and the keys (escaped as RFC 8259 asks, `"`, `\` and the control characters, each `%`
 doubled for the format; UTF-8 checked, its byte the error) are the format's text, and each value a place, its value
 lowered in order and converted to a double, as a reply's format takes them: `%r` a `float` (widened), `%R` a `double`,
-`%d` an `int`, `%b` a `bool`. A pointer, a handle, a vector, a string literal or an enumeration's value is an error
-saying what a value may be (an enumeration's: "cast it to int for its number", since step 4 writes its constant's name:
-an `int` now would change what a program's replies say then). The call is `fminus_web_http_reply_text` with
+`%d` an `int`, `%b` a `bool`. A pointer, a handle, a vector, a string or an enumeration's value is an error saying
+what a value may be (a string's, a literal or a `string`, lowered as a string is wanted so that either is one error:
+"... in this version, and not yet a string", the next step's; an enumeration's: "cast it to int for its number", since
+step 4 writes its constant's name: an `int` now would change what a program's replies say then). The call is `fminus_web_http_reply_text` with
 `application/json`; of `reply 200, json { gain, "pitch": (double)pitch, "changes": changes, "on": changes > 0 };`
 (`tests/lit/fminus/serve.fm`):
 
@@ -8977,13 +8982,237 @@ no system call, and the wait-free proof covers it (`ServeTest.cpp`).
   other's request waiting, a serve with a timeout waking for a late request and waiting its time for none;
   `webRoutes()` with parameters; the wait-free proof of a serve with four parameters and each reply form, `HeapCalls`
   and seccomp's strict mode; the missing reply on each shape of the missing return's tests; every error at its column,
-  the overlap errors with their notes; and, without the web server, a serve's error.
+  the overlap errors with their notes; and, without the web server, a serve's error. Since recipes 46 and 47, where
+  they meet: a route in a nonblocking method with two `when`s, a `switch` on a string and a `char` array, each edge
+  once and nothing allocated; the missing reply through a `when` and a `switch` on a string, with and without a
+  `default`; a `string` or `char` parameter, a string in a JSON literal, in a reply and as a serve's argument, each one
+  error at its column.
 - `tests/unit/FrontendTest.cpp`: the dump, a non-route in a serve's braces, `reply;`, the words as no names and no
-  macros.
+  macros; and a route's block holding a `when`, a `string` and a `char` array.
 - `tests/lit/fminus/serve.fm`: the loop and the switch at `-O0`, the facts of the four new declarations, the take kept
   in the loop at `-O2`, the dump, and the driver asking its own server and answering with a JSON literal;
-  `serve-errors.fm`: errors and their notes; `web-server-off.fm`: a serve in a build without the server.
+  `serve-errors.fm`: errors and their notes (and, since recipes 46 and 47, the errors where they meet strings and
+  `when`); `serve-when.fm`: a route's `when`s, each a bool of the module's after the method's own, and a `switch` on
+  a string in a route; `web-server-off.fm`: a serve in a build without the server.
 - `examples/remote/`: `--check` as before, through `serve` and a JSON literal, its routes now five.
+
+## Recipe 46: `string`, a read-only view of bytes, and `char` to keep one
+
+*In the compiler. Code: the two words, `char` and `string` (`CHAR` and `STRING_TYPE` in `src/frontend/Lexer.l` and
+`Parser.y`, in `type` and `attribute_word`), `Kind::Char`, `Kind::String`, `Type::Char`, `Type::String`,
+`canPointTo`, `canBeElement` and `pointsToView` (`src/frontend/Ast.h`, `typeName` in `Ast.cpp`), their LLVM types,
+sizes, conversions and checks (`typeOf`, `sizeOf`, `convert`, `checkType`: `src/ir/Types.cpp`), their tags
+(`Tbaa.cpp`), a char element read and written as a byte (`element`, `read`, `write`, `lowerAddressOf` in
+`Memory.cpp`), the string itself (`src/ir/Text.cpp`: `stringValue`, `loadString`, `storeString`, `store`,
+`stringsEqual`, `stringOperands`, `lowerLiteralOperand`, `lowerText`, `textCase`, `compareTexts`, `initializeChars`), a
+literal wanted as a string (`stringWanted_` and `lowerAs`, `Expressions.cpp`; `refuseString`, `Strings.cpp`), a switch
+on one (`Switch::text` and the rest, `lowerSwitch` and `lowerLabel` in `Statements.cpp`), a char array sized by its
+literal (`declaredArray`, `Constants.cpp`), an external function's refusal (`CodeGen.cpp`), the builtins' table rows
+and `Param::Text`, `Param::Chars`, `Param::CharData` and `Result::String` (`Lowering.h`, `Calls.cpp`), the runtime's
+half (`src/runtime/Text.cpp`, `Runtime.h`, `RuntimeSymbols.def`), and a call by name's refusal (`jit::callType`).
+fast_float is now fetched for every build (`cmake/FMinusFastFloat.cmake`), since `string_float` reads numbers in every
+build. Tests: `tests/unit/StringTypeTest.cpp`, a case of `FrontendTest.cpp`, `tests/library/StringTypeTest.cpp`,
+`tests/lit/fminus/string-type.fm`. Built with `-Werror` and tested in the `release` preset on Linux x86-64 only, in
+two trees, the default and one with the web library, its server, file writing and absolute names, every test passing
+but the one this machine cannot run (the smoke test of LLVM's own `opt`); not yet in `dev` or `asan`, nor on macOS or
+Windows. [research/syntax/README.md](research/syntax/README.md) is the report; this is the first part of its step 3,
+its §4.1. Holes in addresses, and the builtins that give strings from a request, a document or a listing, are a later
+step's.*
+
+Text, as a value the program reads and never builds:
+
+```c
+module Presets
+{
+    char name[32];                         // a program's own bytes, to keep one
+    int size;
+
+    int pick(string wanted)                // a view: a pointer and a length, passed in two registers
+    {
+        size = string_copy(name, 32, wanted);
+        switch (string_of(name, size < 32 ? size : 32))
+        {
+        case "warm":
+            return 1;
+        case "bright":
+            return 2;
+        default:
+            return string_starts(wanted, "user-") ? string_int(string_slice(wanted, 5, 99), -1) : 0;
+        }
+    }
+};
+```
+
+### The type: a pointer and a length
+
+**`string` is a kind, as `float` is** (`Kind::String`), and a keyword. Its LLVM type is the literal struct
+`{ ptr, i32 }`: a value, as a float is, in a register pair, never an address (a module's value is its address; a
+string's is not). That is what lets a function take and return one with no memory: LLVM passes the struct's two members
+as two arguments, the pointer then the length, and returns them in two registers. On x86-64 and arm64 that is what C
+does with `struct { const char* data; int size; }` while registers remain, but no ABI promises it, and Windows' C
+returns such a struct through memory: so `FMinus.h` promises a host nothing for a string, `call()` and `--run` refuse
+one (`jit::callType` gives none, as for a vector), and a prototype the program declares and never defines may not take
+or return one (`CodeGen.cpp`, after the declarations: "an external function cannot take or return a 'string' yet").
+In memory it is C's struct, 16 bytes aligned to 8, so a module's string field is where a C++ host's struct would put
+it, and `module()` names its type `"string"`.
+
+**Its memory is its two members.** `loadString` loads the pointer, tagged as a pointer, and the length, tagged as an
+int, and builds the pair; `storeString` stores them back. `read()` and `write()` call them for a variable, a field or
+an element, and an array's list and a const table store through `store`, so every string in memory is reached as what
+it is. An array of strings is one an array's name points into, as one of handles is (`pointsToView`): no variable can
+hold a pointer to a string, and `string* p` is the pointer error it always was.
+
+**A literal is a string where one is wanted.** `lowerAs(expr, Type::String)` sets `stringWanted_`, which the next
+`lower()` takes, as `doubleArithmetic_` passes a double's arithmetic on: the literal then lowers to a constant pair, its
+bytes the private constant a builtin's literal is (`stringConstant`, no NUL) and their count. So an initialiser, an
+assignment, an argument, a result and an array's list take one with no rule of their own, and a constant of the top
+level, `const string NAME = "saw";`, falls out of the constants' code (the pair is a constant; `string_size("four")`
+folds to 4 too). A `?:` passes the wish to its arms (`c ? "on" : "off"`). `refuseString`, which every place that
+converts a literal calls, gives the pair when the type is a string. Anywhere else a literal is what it was, and its
+error says what FMinus lacks there: "FMinus has no char arrays here: a string literal is a 'string' where one is
+wanted, or the argument of a builtin's string parameter". A builtin's literal parameter (a URL, a path, a format)
+still takes a literal only: a `string` variable there is "argument to 'http_get' must be a string literal".
+
+**`==` and `!=` compare by content**: the same length, then the same bytes, through the runtime's
+`fminus_rt_string_equal`, declared as reading its arguments only (so LLVM may merge two calls and move one out of a
+loop). A literal beside a string is one (`lowerLiteralOperand` lowers the other operand first, which a literal's lack of
+code makes safe), and two literals are two strings. Every other operator is clang's error for a struct
+("invalid operands to binary expression ('string' and 'string')"), a cast is "cannot cast from 'string' to 'int'", a
+subscript is "subscripted value is not a pointer", and a string as a condition is clang's "statement requires
+expression of scalar type ('string' invalid)" with a note that names the test to write, `string_size(s) > 0`.
+
+**A switch on a string** has no LLVM `switch`: its value's block ends in a placeholder (`unreachable`) while the body is
+lowered, each `case` records its literal and its block (`textCase`: duplicates are clang's error with its note), and
+then `compareTexts` puts the comparisons where the placeholder was, in the labels' order, each a call and a branch to
+its label's block or to the next comparison (`sw.next`), the last to the default's block or past the switch. The
+semantics are WG14 N3895's with lengths for NULs: the case whose bytes equal the value's. Fallthrough, `break`,
+`default`, a jump that passes a declaration (`bypass`) and one past a `defer` work as for an integer switch, since the
+labels are the same code. A case that is no literal is "case value of a switch on a 'string' must be a string literal".
+
+### The builtins
+
+They are rows of `kRuntimeBuiltins`, so a prototype of one, `int string_size(string s);`, declares nothing new, and a
+definition is refused, as for every builtin. `Param::Text` takes any string (a literal among them); `Param::Chars` and
+`Param::CharData` a `char*` and a `const char*`, to which a `void*` and a `const void*` convert as to any pointer.
+A row with no symbol is made inline (`lowerText`): `string_size` and `string_data` are an `extractvalue`;
+`string_slice` clamps both ends with `smin` and `smax` and moves the pointer with a plain `getelementptr` (an empty
+string's null takes 0); `string_byte` reads behind a branch, never outside the string, untagged (a string may view
+bytes of any type); `string_of` selects the empty string for a null pointer or a negative size; `string_starts` and
+`string_ends` call the comparison on the string's first or last bytes, or on the whole string when it is the shorter.
+The others are the runtime's, each a pointer and a length a string: `string_find` (a `std::string_view` find),
+`string_float` and `string_int` (the web server's rules for a query's number: fast_float's general format or
+`std::from_chars`, the whole string, finite, no `+`), and `string_copy` (a `memmove` of at most `cap` bytes, and the
+length). None allocates, locks or waits: every one is `RuntimeEffect::WaitFree`, which the effects let a
+`[[clang::nonblocking]]` function call, and the runtime's are described as reading their arguments only (`TextRead`,
+`TextCopy` in `describeRuntime`). A string reaches a runtime function as two arguments, its pointer and its length; no
+runtime function returns one.
+
+### `char`, to keep one
+
+`Kind::Char` is a byte, `i8`, and only an element and a pointee: `checkType` refuses a `char` variable, parameter,
+result or field ("FMinus has no 'char' variables, parameters or results"), but not `sizeof(char)`, which is 1. An
+element is an lvalue whose type is `int` and whose `whole` is `char` (`element`): `read` loads the byte with its tag and
+widens it with `zext`, so it is 0 to 255 on every machine, and `write` stores the int's low 8 bits and gives back what
+the byte then holds, as C's assignment does. `&name[i]` is a `char*` (`lowerAddressOf` reads `whole`). The tag is
+`"char"`, a leaf of FMinus's tree as `"int"` is: FMinus's `char` aliases nothing else, where C's may alias anything.
+`char name[8] = "abc";` copies the literal's bytes into the zeroed array (`initializeChars`), clang's error if they do
+not fit (C's NUL is counted only where it fits); `char name[] = "abc";` has C's four elements (`declaredArray`).
+
+### What it changes for programs and hosts
+
+- **Programs**: `string`, `char` and the eleven builtins' names are taken: a variable or a function so named must be
+  renamed (none in the tree was). A literal where a string is wanted now compiles; every other literal error is as it
+  was, its words for what FMinus lacks changed. Messages that list the types an array or a pointer may have name `char`
+  and `string`.
+- **Hosts** see a string field as `"string"`, 16 bytes, and a char array as `"char[32]"`; a function that takes or
+  returns a string is none `call()` passes, and none a C++ signature should name.
+- **Builds** fetch fast_float whatever their options (it was fetched only with the parsers or the server).
+- **The VS Code grammar** (0.22.0) colours `string`, `char` and the builtins.
+
+### Tests
+
+- `tests/unit/StringTypeTest.cpp` (`[string-type]`): a literal in each place it may go (an initialiser, an assignment,
+  an argument, a result, a `?:`'s arms, a constant of the top level and an array of them); `==` and `!=` (lengths that
+  differ, an empty literal against the empty string, a NUL among the bytes, a view of a char array); a switch with
+  fallthrough, a default, none, adjacent literals and a declaration in its head; each builtin at its edges (empty, out
+  of range, negative, crossing ends, a cap of 0, numbers with a `+`, a space, an overflow, `nan`, `inf`); char arrays
+  (0 to 255, a store's low 8 bits, `&name[i]`, `*p`, through a `void*`, 2-D, a module's, a copy); strings in fields,
+  1-D and 2-D arrays and a `parallel for`; a nonblocking function calling every builtin, which allocates nothing
+  (`HeapCalls`); and the errors, each once at its column.
+- `tests/unit/FrontendTest.cpp`: the words as types and in a dump, and no variable or macro of either name.
+- `tests/library/StringTypeTest.cpp`: a string field, an array of them and a char array as `module()` describes them,
+  and `callable()` refusing a string.
+- `tests/lit/fminus/string-type.fm`: the IR at `-O0` (the two members' loads and tags, the comparison, a switch's
+  chain, a char's `zext` and tag) and at `-O2`, `--run`'s refusal, and errors.
+
+## Recipe 47: `when`, a statement that runs once each time its condition becomes true
+
+*In the compiler. Code: the `WHEN` token and its rule (`src/frontend/Lexer.l`, `Parser.y`), `WhenStmt` and its dump
+(`src/frontend/Ast.h`, `Ast.cpp`), its state's fields (`layOut` and `collectWhens` in `src/ir/Modules.cpp`,
+`whenFields_` in `Lowering.h`), its lowering (`lowerWhen`, `Statements.cpp`), and its refusal in a parallel region and
+its part in whether a method changes its module (`Access::Kind::When`, `checkParallelFor`, `checkParallelBlock`,
+`changesModule`: `Parallel.cpp`). The example: `examples/trigger/`. Tests: `tests/unit/WhenTest.cpp`, a case of
+`FrontendTest.cpp`, `tests/library/WhenTest.cpp`, `tests/lit/fminus/when.fm` and two lines of `examples.test`. Built
+and tested as recipe 46 was. [research/syntax/README.md](research/syntax/README.md) is the report; this is its §7.2.*
+
+The synchronous languages' `await` reduced to one bit, for the audio thread, where waiting means looking again next
+block: `when (c) s` is `if (c && !was) s; was = c;`, `c` computed once.
+
+```c
+module Envelope
+{
+    float level;
+    void process(const float* gate, float* out, int n) [[clang::nonblocking]]
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            when (gate[i] > 0.5f)   // the note starts on the sample the gate rises, once
+                level = 1.0f;
+            out[i] = level;
+            level *= 0.999f;
+        }
+    }
+};
+```
+
+**The grammar** is one rule, `unlabeled: "when" "(" expr ")" statement`, which adds no conflict (438 states, against
+428 before recipe 46): with no `else`, nothing follows the statement to decide between. `WhenStmt` holds the condition
+and the statement and dumps as `(when c s)`.
+
+**Its state is a field the compiler adds.** `layOut` gives a module's struct, after its declared fields, a bool for each
+`when` of its methods, in source order (`collectWhens` walks a method's statements, every kind of them, for `-Wswitch`'s
+sake a visit with no default, and a serve's routes' blocks, which are the method's), and records each one's field in
+`whenFields_`. The module's size and alignment count
+them, so `sizeof` grows and a host allocating by `module()`'s size holds them, but `module()` lists the fields the
+program declared only (`FMinus.cpp` walks the tree's fields). Every instance starts at 0, as its fields do, and a copy
+copies the bools with the rest.
+
+**The lowering** is `lowerWhen`: the condition converted as an `if`'s is (so a `poly bool` is clang's error, "statement
+requires expression of scalar type"), then the bool's address from `this` (`self()`), its load, the store of the
+condition, and `c && !was` as an `and` and an `xor`, then `when.then` and `when.end`, as an `if` without an `else`.
+The store comes before the statement, so leaving it by `return`, `break` or `continue` does not arm it again. Optimised,
+in a loop over samples, LLVM keeps the bool in a register through the loop, loaded before it and stored after it: each
+sample costs a compare and a logical operation (`tests/lit/fminus/when.fm`).
+
+**Where it may be.** A function that is no method has no instance: "a 'when' keeps its state, one bool, in the instance
+of the module whose method it is in, and 'f' is no method". In a parallel region its store would race: the region's
+walk (`Walker`) records a `when` as an access of its own kind to `this`, which `checkParallelFor` and
+`checkParallelBlock` refuse in their words for a method that changes its module ("every iteration of the parallel for
+runs this 'when', whose state is the module's ('this'), and the iterations run at once"), and `changesModule` counts as
+a change, so a method that holds one is a method that changes its module (a `parallel for` that calls it on `this` is
+refused too). It allocates and waits for nothing, so a nonblocking method may hold one, and the effects need no rule.
+
+### Tests
+
+- `tests/unit/WhenTest.cpp` (`[when]`): a rising edge fires once, and again after a false; a condition that stays true
+  does not; the first reach with a true condition fires; two whens and two instances keep their own state, in the
+  bools after the fields where a C++ struct finds them; a loop over samples fires on each edge, a copy of the module
+  copies its state; a `return`, `continue` and `break` in the statement do not arm it again; the refusals.
+- `tests/unit/FrontendTest.cpp`: the dump, and `when` as no variable's name.
+- `tests/library/WhenTest.cpp`: the module's size counts the state, `module()` lists no field for it, and an instance
+  the host allocates and zeroes works.
+- `tests/lit/fminus/when.fm`: the IR at `-O0` (the load, the store, the test) and at `-O2` (the state a register
+  through the loop), `sizeof`, and the errors; `examples.test` runs `examples/trigger/`.
 
 ## Pitfalls
 

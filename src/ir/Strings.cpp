@@ -1,11 +1,11 @@
-// src/ir/Strings.cpp: string literals. FMinus has no string type: a literal is only the argument of a builtin's
-// string parameter (Param::String or Param::Format, Calls.cpp), and is then a private constant of the program, its
-// bytes and no NUL after them, passed to the runtime as its address and its length, so the runtime never looks for an
-// end and a literal may hold a NUL ("a\0b" is three bytes). A program that passes one means what it would in C, where
-// the literal is a char array and the builtin a function of a const char* and a length; anywhere else a literal would
-// have C's meaning, a char array, which FMinus does not have, so it is an error, in clang's words for the conversion
-// and where clang reports it when there is one (passing it to an int parameter, initialising a float with it, ...),
-// and at the literal otherwise.
+// src/ir/Strings.cpp: string literals. A literal is the argument of a builtin's string parameter (Param::String or
+// Param::Format, Calls.cpp), and is then a private constant of the program, its bytes and no NUL after them, passed to
+// the runtime as its address and its length, so the runtime never looks for an end and a literal may hold a NUL
+// ("a\0b" is three bytes). A program that passes one means what it would in C, where the literal is a char array and
+// the builtin a function of a const char* and a length. Where a value of FMinus's type string is wanted, a literal is
+// one (Text.cpp). Anywhere else a literal would have C's meaning, a char array, which FMinus does not have, so it is an
+// error, in clang's words for the conversion and where clang reports it when there is one (passing it to an int
+// parameter, initialising a float with it, ...), and at the literal otherwise.
 //
 // A format is a literal with places for ints, checked as clang checks printf's (scanFormat, formatArguments): %d is
 // the next int argument, %% a percent sign, and anything else after a % an error at it; too few ints is an error at
@@ -174,6 +174,8 @@ namespace fminus::ir::detail
                                            SourceLocation where)
     {
         const auto& literal = std::get<ast::StringExpr>(expr.node);
+        if (type == ast::Type::String)   // FMinus's string: no refusal at all (Text.cpp)
+            return stringValue(literal);
         const bool phrased =
             use == Use::Initializing || use == Use::Assigning || use == Use::Returning || use == Use::Passing;
         if (!type || !phrased || *type == ast::Type::Void || *type == ast::Type::Bool
@@ -236,8 +238,8 @@ namespace fminus::ir::detail
     // builtin that takes no string there, a void* or a bool. C would have a char array; FMinus has none.
     Lowering::Value Lowering::notAValue(const ast::Expr& expr)
     {
-        error(expr.location, "FMinus has no strings: a string literal is only the argument of a builtin's string "
-                             "parameter");
+        error(expr.location, "FMinus has no char arrays here: a string literal is a 'string' where one is wanted, or "
+                             "the argument of a builtin's string parameter");
         return recovery(ast::Type::Float);
     }
 } // namespace fminus::ir::detail

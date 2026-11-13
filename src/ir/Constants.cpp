@@ -259,9 +259,17 @@ namespace fminus::ir::detail
 
     // The array a declaration declares, `type` (its tree's, or the stand-in after an error), sized: by its sizes, or
     // its list (sized). One initialised with `= expr` and no size has one element (and a row of one), and the error
-    // its initialiser reports.
+    // its initialiser reports; but a char array's string literal sizes it as C's does, its bytes and the NUL C puts
+    // after them, which is 0 as the rest of an array is (`char name[] = "abc";` holds 4).
     ast::Type Lowering::declaredArray(SourceLocation location, const ast::DeclStmt& decl, ast::Type type)
     {
+        if (decl.size == nullptr && decl.init && isString(*decl.init) && !ast::hasRows(type)
+            && ast::pointee(type) == ast::Type::Char)
+        {
+            const std::size_t bytes = std::get<ast::StringExpr>(decl.init->node).value.size();
+            type.count = static_cast<int>(std::min<std::size_t>(bytes + 1, std::size_t{1} << 30));
+            return type;
+        }
         if (decl.size == nullptr && decl.init)
         {
             type.count = 1;
@@ -373,7 +381,7 @@ namespace fminus::ir::detail
         }
         if (ast::isArray(type))
             type = declaredArray(location, decl, type);
-        if (!checkType(location, type))
+        if (!checkType(location, type) && type != ast::Type::Char)
             type = ast::isArray(type) ? floatsLike(type) : ast::Type::pointerTo(ast::Kind::Float, type.pointeeConst);
         if (const std::uint64_t bytes =
                 ast::isArray(type) ? module_.getDataLayout().getTypeAllocSize(typeOf(type)).getFixedValue() : 0;

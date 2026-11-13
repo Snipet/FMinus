@@ -210,7 +210,8 @@ namespace fminus::ir::detail
     // pointer to its first element in turn: grid[i][j]). A pointer into an array the code generator can see is checked
     // first (Bounds.cpp): the element must be one of the array's, or, for its `address` (&p[i]), at most one past the
     // last; the element carries the extent on, for &. A row is checked as an element (grid[4] of a float[4][16] is
-    // out, whatever is done with it), and its own elements against the row (Bounds.cpp).
+    // out, whatever is done with it), and its own elements against the row (Bounds.cpp). A char is a byte in memory
+    // (`whole`) and an int to the program (`type`): read() widens it, write() keeps its low 8 bits.
     std::optional<Lowering::LValue> Lowering::element(SourceLocation location, Value pointer,
                                                       std::optional<Value> index, bool address)
     {
@@ -222,7 +223,8 @@ namespace fminus::ir::detail
             return std::nullopt;
         }
         const bool row = ast::isArray(type);
-        if (!ast::canPointTo(type.kind) && !row && !ast::isHandle(type))   // an array of handles' element is one
+        // an array of handles' element is one, and an array of strings'
+        if (!ast::canPointTo(type.kind) && !row && !ast::isHandle(type) && type != ast::Type::String)
             return std::nullopt;
         if (row)
             address = false;
@@ -241,7 +243,7 @@ namespace fminus::ir::detail
         }
         if (offset != nullptr)
             at = builder_.CreateInBoundsGEP(typeOf(type), pointer.ir, offset, "arrayidx");
-        LValue target{at, type, pointer.type.pointeeConst, "", type, {}};
+        LValue target{at, type == ast::Type::Char ? ast::Type::Int : type, pointer.type.pointeeConst, "", type, {}};
         target.extent = extent;
         return target;
     }
@@ -293,7 +295,8 @@ namespace fminus::ir::detail
     // shufflevector for several). An array is no load: its name stands for a pointer to its first element, const
     // when the array is (C's decay), which carries the array's extent under Options::boundsCheck, the array `named`
     // so in a failed check's message (Bounds.cpp). Nor is a module, whose value is its address. The load carries its
-    // type's TBAA tag (Tbaa.cpp), as every load and store of a value does.
+    // type's TBAA tag (Tbaa.cpp), as every load and store of a value does. A char is a byte, widened to an int from 0
+    // to 255 (FMinus's char is unsigned); a string its two members, each loaded as what it is (Text.cpp).
     Lowering::Value Lowering::read(const LValue& source, std::string named)
     {
         if (ast::isArray(source.type))
@@ -302,7 +305,14 @@ namespace fminus::ir::detail
                     arrayExtent(source.type, std::move(named))};
         if (ast::isModule(source.type))
             return {source.address, source.type};
+        if (source.whole == ast::Type::String)
+            return {loadString(source.address, source.name), source.type};
         llvm::LoadInst* loaded = builder_.CreateLoad(typeOf(source.whole), source.address, source.name);
+        if (source.whole == ast::Type::Char)
+        {
+            tag(loaded, source.whole);
+            return {builder_.CreateZExt(loaded, builder_.getInt32Ty(), "conv"), ast::Type::Int};
+        }
         tag(loaded, source.whole);
         if (source.components.empty())
             return {loaded, source.type};
@@ -324,10 +334,17 @@ namespace fminus::ir::detail
 
     // `value` converted to the target's type and stored: for components, the vector is loaded, the lanes inserted
     // and the vector stored back; a module is copied whole. Returns what was stored, the value of an assignment (a
-    // module's: its address).
+    // module's: its address). A char keeps the int's low 8 bits, and the assignment's value is what it then holds, as
+    // C's is; a string is stored as its two members (Text.cpp).
     llvm::Value* Lowering::write(SourceLocation location, const LValue& target, Value value, Use use)
     {
         llvm::Value* stored = convert(value, target.type, location, use);
+        if (target.whole == ast::Type::Char && target.components.empty())
+        {
+            llvm::Value* byte = builder_.CreateTrunc(stored, builder_.getInt8Ty(), "conv");
+            tag(builder_.CreateStore(byte, target.address), target.whole);
+            return builder_.CreateZExt(byte, builder_.getInt32Ty(), "conv");
+        }
         if (ast::isModule(target.type))
         {
             if (value.type == target.type)
@@ -336,7 +353,7 @@ namespace fminus::ir::detail
         }
         if (target.components.empty())
         {
-            tag(builder_.CreateStore(stored, target.address), target.type);
+            store(stored, target.address, target.type);
             return stored;
         }
         llvm::LoadInst* whole = builder_.CreateLoad(typeOf(target.whole), target.address, target.name);
@@ -372,12 +389,13 @@ namespace fminus::ir::detail
             error(location, "address of vector element requested");
             return failed;
         }
-        if (!ast::canPointTo(target->type.kind))
+        const ast::Type pointee = target->whole == ast::Type::Char ? target->whole : target->type;   // &name[i]
+        if (!ast::canPointTo(pointee.kind))
         {
-            noPointerTo(location, target->type);
+            noPointerTo(location, pointee);
             return failed;
         }
-        return {target->address, ast::Type::pointerTo(target->type, target->isConst), target->extent};
+        return {target->address, ast::Type::pointerTo(pointee, target->isConst), target->extent};
     }
 
     // Every byte of what is at `address` 0, as a declaration of an array or a module starts.
@@ -452,7 +470,8 @@ namespace fminus::ir::detail
 
     // `float c[4] = {1, 2};`: the list's values, converted to the element type, in order, each where placeList puts
     // it (`float g[2][3] = {{1, 2}, {3}};`, a 2-D array's rows); the rest stay 0. An array of modules takes no list:
-    // its modules start at 0, as every module does.
+    // its modules start at 0, as every module does. A char's value keeps its low 8 bits, and a string is stored as
+    // its two members.
     void Lowering::initializeArray(SourceLocation location, llvm::Value* address, ast::Type type,
                                    const ast::DeclStmt& decl)
     {
@@ -465,9 +484,8 @@ namespace fminus::ir::detail
         for (const auto& [at, item] : placeList(type, decl, true).values)
         {
             const Value value = lowerAs(*item, element);
-            tag(builder_.CreateStore(convert(value, element, item->location, Use::Initializing),
-                                     elementAt(type, address, at, "arrayinit")),
-                element);
+            store(convert(value, element, item->location, Use::Initializing), elementAt(type, address, at, "arrayinit"),
+                  element);
         }
     }
 
@@ -509,7 +527,7 @@ namespace fminus::ir::detail
         llvm::AllocaInst* slot = allocate(arrayType, decl.name);
         zero(slot, type);
         for (const auto& [at, value] : values)
-            tag(builder_.CreateStore(value, elementAt(type, slot, at, "arrayinit")), element);
+            store(value, elementAt(type, slot, at, "arrayinit"), element);
         return slot;
     }
 
@@ -645,8 +663,7 @@ namespace fminus::ir::detail
             // A void* compares with any pointer, as in C: it converts to the void* first.
             const bool samePointee = ast::samePointee(lhs.type, rhs.type) || voidPointee;
             if (samePointee && op == ast::BinaryOp::Subtract
-                && (ast::canPointTo(lhs.type.pointee) || ast::hasRows(lhs.type)
-                    || lhs.type.pointee == ast::Kind::Handle))
+                && (ast::canPointTo(lhs.type.pointee) || ast::hasRows(lhs.type) || ast::pointsToView(lhs.type)))
             {
                 llvm::Value* difference =
                     builder_.CreatePtrDiff(typeOf(ast::pointee(lhs.type)), lhs.ir, rhs.ir, "sub.ptr.div");
@@ -694,9 +711,9 @@ namespace fminus::ir::detail
             error(location, "invalid operands to binary expression " + operands);
             return poison(isComparison(op) ? ast::Type::Bool : pointer.type);
         }
-        // A pointer to a handle is an array of handles' name: its elements are pointers.
-        if (!ast::canPointTo(pointer.type.pointee) && !ast::hasRows(pointer.type)
-            && pointer.type.pointee != ast::Kind::Handle)
+        // A pointer to a handle is an array of handles' name: its elements are pointers; and one to a string an array
+        // of strings'.
+        if (!ast::canPointTo(pointer.type.pointee) && !ast::hasRows(pointer.type) && !ast::pointsToView(pointer.type))
             return recovery(pointer.type);   // its declaration reported it
         llvm::Value* index = builder_.CreateSExt(convert(offset, ast::Type::Int, location, Use::Initializing),
                                                  builder_.getInt64Ty(), "idx.ext");

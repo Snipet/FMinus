@@ -468,6 +468,65 @@ TEST_CASE("the handle types are type words, as float4 is: a declaration's, a par
     }
 }
 
+TEST_CASE("string and char are type words; a literal is a string's value, a case's and an operand's", "[frontend]")
+{
+    CHECK(parsed("string f(string s, const char* p, char buf[8]) { char name[4][16]; string t = \"a\" \"b\"; "
+                 "switch (s) { case \"x\": return t; } return s == \"y\" ? s : t; }\n"
+                 "module M { string label; char text[32]; };\n")
+          == "(function string f ((string s) (const char * p) (char * buf))\n"
+             "  (decl char[4][16] name)\n"
+             "  (decl string t \"ab\")\n"
+             "  (switch s\n"
+             "    (block\n"
+             "      (case \"x\")\n"
+             "      (return t)))\n"
+             "  (return (?: (== s \"y\") s t)))\n"
+             "(module M\n"
+             "  (field string label)\n"
+             "  (field char[32] text))\n");
+    // Each word is a keyword: no variable's name, nor a macro's, but an attribute's (above, every keyword's).
+    CHECK(parsed("void f() { int string = 1; }")
+          == "test.fm:1:16: error: syntax error, unexpected string, expecting * or identifier\n");
+    CHECK(parsed("#define char 1\n") == "test.fm:1:9: error: 'char' cannot be used as a macro name: it is one of "
+                                         "FMinus's keywords\n");
+}
+
+TEST_CASE("when parses as FMinus's statement: a condition in parentheses, and a statement", "[frontend]")
+{
+    CHECK(parsed("module M { int n; void f(bool c) { when (c) n++; when (n > 2) { n = 0; } } };\n")
+          == "(module M\n"
+             "  (field int n))\n"
+             "(method void M::f ((bool c))\n"
+             "  (when c\n"
+             "    (post++ n))\n"
+             "  (when (> n 2)\n"
+             "    (block\n"
+             "      (= n 0))))\n");
+    // A keyword: no variable's name. Outside a method it parses, and is the code generator's error (WhenTest.cpp).
+    CHECK(parsed("void g() { int when = 1; }\n")
+          == "test.fm:1:16: error: syntax error, unexpected when, expecting * or identifier\n");
+    CHECK(parsed("void g(bool c) { when (c) {} }\n") == "(function void g ((bool c))\n  (when c\n    (block)))\n");
+}
+
+TEST_CASE("a route's block holds a when, a string and a char array as any block does", "[frontend]")
+{
+    CHECK(parsed("module M { http_server s; void f() { serve (s) { route \"GET /a\" (int n) { char c[4] = \"ab\"; "
+                 "string t = \"x\"; when (n > 0) reply 204; switch (t) { case \"x\": reply 200; } } } } };\n")
+          == "(module M\n"
+             "  (field http_server s))\n"
+             "(method void M::f ()\n"
+             "  (serve s\n"
+             "    (route \"GET /a\" ((int n))\n"
+             "      (decl char[4] c \"ab\")\n"
+             "      (decl string t \"x\")\n"
+             "      (when (> n 0)\n"
+             "        (reply 204))\n"
+             "      (switch t\n"
+             "        (block\n"
+             "          (case \"x\")\n"
+             "          (reply 200))))))\n");
+}
+
 TEST_CASE("constants keep their spelling: C's decimal, hex and integer forms", "[frontend]")
 {
     CHECK(parsed("float f() { return fmaxf(fminf(1, .5), g(2e3, 1.e-2f, 3.25E+1F, 0x1.8p1, 0x1p-3f, 1.)); }")

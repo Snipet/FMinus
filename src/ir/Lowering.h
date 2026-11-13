@@ -3,8 +3,9 @@
 //     CodeGen.cpp       ir::lower(), and the two passes: declare every function, then define each body
 //     Types.cpp         FMinus's types as LLVM's, the conversions between them, the errors' helpers
 //     Functions.cpp     declarations and prototypes (libm's attributes), bodies and parameters, stack slots and scopes
-//     Statements.cpp    blocks, declarations, return, if, while, for, switch and its labels, break and continue, and
-//                       defer, each block's deferred statements lowered at each of its exits
+//     Statements.cpp    blocks, declarations, return, if, while, for, switch and its labels, break and continue,
+//                       defer, each block's deferred statements lowered at each of its exits, and when, its state a
+//                       bool of the module's instance
 //     Expressions.cpp   constants, variables, operators, &&, ||, ?:, casts, assignment, ++ and --
 //     Constants.cpp     C's integer constant expressions, worked out where they are written (a case label's value,
 //                       an enumerator's, an array's size), enumerations: their constants, in a block's scope or the
@@ -13,6 +14,8 @@
 //                       the runtime's others: bytes_floats, ...) and the program's
 //     Strings.cpp       string literals: a builtin's argument, a private constant passed as its address and length;
 //                       a format's places for ints, checked; the errors of a literal anywhere else
+//     Text.cpp          the type string, a pointer and a length: a literal as one, == by content, a switch's
+//                       comparisons, its loads and stores as its two members, and the string_* builtins
 //     Paths.cpp         a JSON Pointer literal, json_float's and the others', or an XML path, xml_float's and the
 //                       others', prepared into a private table of steps the runtime walks; json_choice's and
 //                       xml_choice's literals into another
@@ -169,7 +172,9 @@ namespace fminus::ir::detail
     // their count. The file interface's take a file's name, a format whose ints are the call's last arguments, as a
     // URL's are, checked further (Files.cpp: the rules a name keeps to, and the build's ceilings) and recorded for the
     // host, passed after the program's file context as a format is; and a listing's pattern, the same with one '*' in
-    // its file part.
+    // its file part. Then the string_* builtins' (Text.cpp): a string, any value of type string (a literal among
+    // them), passed to a function of the runtime as its pointer and its length; a char* the builtin writes; and a
+    // const char* it reads.
     enum class Param
     {
         Int,
@@ -202,11 +207,15 @@ namespace fminus::ir::detail
         ReplyFormat,
         FileName,
         FilePattern,
+        Text,
+        Chars,
+        CharData,
     };
 
     // What a builtin of the runtime gives: an int, a float, a double, a bool (an int from the runtime, 0 or 1), a
     // handle (an http_response, an http_request, an http_server, a json_doc, an xml_doc, a file_content or a
-    // file_listing), a const void* (bytes the program may only read: http_body's) or nothing.
+    // file_listing), a const void* (bytes the program may only read: http_body's) or nothing; or a string (made
+    // inline: no function of the runtime returns one, since C's ABI for a struct differs by platform).
     enum class Result
     {
         Int,
@@ -222,6 +231,7 @@ namespace fminus::ir::detail
         FileListing,
         Bytes,
         Void,
+        String,
     };
 
     // A builtin that calls a function of the runtime with its arguments, as Param says to pass each (Calls.cpp,
@@ -241,8 +251,8 @@ namespace fminus::ir::detail
 
     // The C type of a runtime builtin's parameter or result, as its prototype would write it (Calls.cpp): what a
     // prototype of the builtin must say (Functions.cpp), and what an argument converts to. A string, a format, a path
-    // and choices have none (std::nullopt): FMinus has no char. A parameter that takes either of two handles has the
-    // first here, and the second as otherType (none for any other parameter).
+    // and choices have none (std::nullopt): they take a literal only. A parameter that takes either of two handles has
+    // the first here, and the second as otherType (none for any other parameter).
     std::optional<ast::Type> paramType(Param param);
     std::optional<ast::Type> otherType(Param param);
     ast::Type resultType(Result result);
@@ -515,6 +525,14 @@ namespace fminus::ir::detail
             std::optional<SourceLocation> defaultLabel;
             bool erroneous = false;
             std::size_t defers = 0;   // deferScopes_.size() where it begins: its body's blocks are those after
+            // A switch on a string has no instruction (null): its value, the instruction that ends the block it was
+            // computed in until the body is lowered and the comparisons go there (Text.cpp), its cases' literals in
+            // order with their blocks, each literal's first label, and where no case takes it (the default's block).
+            llvm::Value* text = nullptr;
+            llvm::Instruction* compare = nullptr;
+            std::vector<std::pair<std::string, llvm::BasicBlock*>> texts = {};
+            std::map<std::string, CaseLabel> textCases = {};
+            llvm::BasicBlock* otherwise = nullptr;
         };
 
         // A route whose block is being lowered (Serve.cpp): the slot of the serve's request, where a reply goes on to
@@ -679,6 +697,7 @@ namespace fminus::ir::detail
         static SourceLocation begin(const ast::Expr& expr);
         llvm::BasicBlock* bypass(const Switch& branch, llvm::BasicBlock* label);
         void declareVariable(SourceLocation location, const ast::DeclStmt& decl);
+        void lowerWhen(SourceLocation location, const ast::WhenStmt& when);
         void refuseAttributes(const ast::DeclStmt& decl);
         void redefinition(SourceLocation location, const std::string& name, bool enumerator, const Binding& previous);
 
@@ -713,7 +732,8 @@ namespace fminus::ir::detail
         static ast::Type recovered(ast::BinaryOp op, const Value& lhs, const Value& rhs);
         llvm::Value* arithmetic(ast::BinaryOp op, ast::Type type, llvm::Value* lhs, llvm::Value* rhs);
         llvm::Value* lowerLogical(SourceLocation location, const ast::LogicalExpr& logical);
-        Value lowerConditional(SourceLocation location, const ast::ConditionalExpr& conditional, bool doubles);
+        Value lowerConditional(SourceLocation location, const ast::ConditionalExpr& conditional, bool doubles,
+                               bool text = false);
         Value lowerNumber(SourceLocation location, const ast::NumberExpr& number, bool doubles = false);
         llvm::Value* lowerInteger(SourceLocation location, const std::string& spelling, bool hex);
         Value lowerCast(SourceLocation location, const ast::CastExpr& cast);
@@ -773,6 +793,20 @@ namespace fminus::ir::detail
                                                                  const std::vector<const ast::Expr*>& ints);
         Value refuseString(const ast::Expr& expr, std::optional<ast::Type> type, Use use, SourceLocation where);
         Value notAValue(const ast::Expr& expr);
+
+        // ---- Text.cpp -----------------------------------------------------------------------------------------------
+        Value stringValue(const ast::StringExpr& literal);
+        llvm::Value* loadString(llvm::Value* address, const std::string& name);
+        void storeString(llvm::Value* value, llvm::Value* address);
+        void store(llvm::Value* value, llvm::Value* address, ast::Type type);
+        llvm::Value* stringsEqual(llvm::Value* a, llvm::Value* b);
+        Value stringOperands(SourceLocation location, ast::BinaryOp op, Value lhs, Value rhs);
+        Value lowerLiteralOperand(SourceLocation location, const ast::BinaryExpr& operation);
+        Value lowerText(SourceLocation location, const RuntimeBuiltin& builtin, const std::vector<llvm::Value*>& args);
+        void textCase(Switch& branch, const ast::Expr& value, llvm::BasicBlock* block);
+        void compareTexts(Switch& branch, llvm::BasicBlock* end);
+        void initializeChars(SourceLocation location, llvm::Value* address, ast::Type type,
+                             const ast::StringExpr& literal);
 
         // ---- Web.cpp ------------------------------------------------------------------------------------------------
         bool checkUrl(const ast::StringExpr& literal, SourceLocation where);
@@ -916,6 +950,8 @@ namespace fminus::ir::detail
         std::unordered_map<std::string, std::vector<CallSite>> calls_;     // each definition's calls, in order
         std::unordered_map<const ast::Module*, llvm::StructType*> structs_;   // each module's layout
         std::unordered_map<const ast::Field*, ast::Type> fieldTypes_;         // each field's, its array's size known
+        // Each `when`'s state: its field in its module's struct, after the declared ones (Modules.cpp, layOut).
+        std::unordered_map<const ast::WhenStmt*, unsigned> whenFields_;
         std::map<std::string, ParamBinding> bindings_;                     // the host's, by qualified name
         std::map<std::pair<unsigned, bool>, llvm::Value*> entryLoads_;     // the method's parameters, read at entry
         std::vector<llvm::Instruction*> streamReads_;                      // its loads of its streams' samples
@@ -932,6 +968,9 @@ namespace fminus::ir::detail
         // Whether the arithmetic the next lower() is part of has a double, as the arithmetic around it says: its floating
         // constants are then doubles (Expressions.cpp, lowerAs). None at the top of an arithmetic.
         std::optional<bool> doubleArithmetic_;
+        // Whether the next lower() is of a value a string is wanted for (lowerAs): a literal is then one, and so is
+        // each arm of a ?: (Text.cpp).
+        bool stringWanted_ = false;
         std::deque<Extent> extents_;                                       // the arrays' extents values carry
         bool webContextClash_ = false;   // a function of the web context's name was reported (Web.cpp)
         // The route literals of the program's http_is calls, each once, in the order they were lowered, and the calls

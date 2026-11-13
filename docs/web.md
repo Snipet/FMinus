@@ -126,8 +126,8 @@ fetches.
   thread can start, wait for or free a request.
 - **The reads change from another thread.** Their declarations say so to LLVM (they are not `readonly`), so a polling
   loop reads the status again each time round, and two calls are never merged.
-- **A body is bytes.** `json_parse`, `xml_parse`, `bytes_floats` and `bytes_pcm16` turn it into numbers; FMinus has no
-  strings, and nothing gives a program a body as text.
+- **A body is bytes.** `json_parse`, `xml_parse`, `bytes_floats` and `bytes_pcm16` turn it into numbers, and
+  `string_of(http_body(r), http_size(r))` views it as text, a `string` valid until `http_close`.
 
 ## The status codes
 
@@ -348,11 +348,12 @@ report's answer, and are not built yet (below).
 ## The server
 
 A program serves when its host lets it: `http_listen()` starts its server where the host's policy says, and the program
-**takes** the requests that reach it and answers each, as it polls a download's status. FMinus has no callbacks and no
-strings, so a program sees a request as a route it named, numbers and bytes: never a path as text, a header or a
-cookie. Taking, reading and answering a request are wait-free, so the audio thread may serve between two blocks, and a
-change lands at a block boundary on the thread that computes the block, with no lock and no second thread touching
-the program's state. A `serve` statement says it, FMinus's own ([its section](#serve-route-and-reply)):
+**takes** the requests that reach it and answers each, as it polls a download's status. FMinus has no callbacks, and no
+builtin gives a request's text as a `string` yet (the next step's), so a program sees a request as a route it named,
+numbers and bytes (its body viewed as text by `string_of`): never a path as text, a header or a cookie. Taking, reading
+and answering a request are wait-free, so the audio thread may serve between two blocks, and a change lands at a block
+boundary on the thread that computes the block, with no lock and no second thread touching the program's state. A
+`serve` statement says it, FMinus's own ([its section](#serve-route-and-reply)):
 
 ```c
 module Synth
@@ -496,7 +497,8 @@ handles every one waiting and is done: it blocks, and a nonblocking function ref
 `{name}`, where a `%d` could stand: a whole segment or part of one (`"/osc/{k}/gain"`, `"/v{major}"`), at most 8 a
 route, never two together nor one before a digit. `%d` is `http_is`'s spelling, and an error in a route. Each hole is
 one of the route's parameters, each a different one. **A parameter** is `type name attributes`, the type `int`,
-`float`, `bool` or `http_request`:
+`float`, `bool` or `http_request` (a `string` one, text of the path or the query, is the next step's: `string` and
+`char` are refused there as any other type is):
 
 | A parameter | Is filled from | When the request does not fit |
 |---|---|---|
@@ -522,14 +524,16 @@ the three reply builtins' arguments without the request, and a JSON literal ([be
 | `reply 200, "content/type", "format", values...;` | `http_reply_text(r, ...)`, a format as [below](#routes-and-replies) | as given |
 | `reply 200, json { ... };` | the literal, written into the request's buffer | `application/json` |
 
-Which form it is follows from the values (one; a string literal second; a JSON literal second; four), and each is
-checked as its builtin checks its arguments, in the same words; a reply that fits none says what the forms are.
+Which form it is follows from the values (one; a string literal second, or a `string`, which is the text form's
+error, its content type and format literals only; a JSON literal second; four), and each is checked as its builtin
+checks its arguments, in the same words; a reply that fits none says what the forms are.
 
 - **It leaves the route**, as `return` leaves a function: the reply is sent, then the deferred statements of the route's
   blocks run (as a `return`'s value is computed before them), and the serve goes on to its next request.
 - **Every path through a route must reach a `reply`**, the analysis of a non-void function's missing `return`, constant
   conditions and all: `route 'GET /state' does not reply` (no path does) or `... does not reply in all control paths`,
-  at the route's closing brace.
+  at the route's closing brace. A `when`, `when (c) reply 204;`, may not run its statement, as an `if` without an
+  `else`; a `switch`, on a `string` too, replies on every path only with a `default`.
 - **What a route may not do**, each an error at its keyword: `return` ("cannot return from a route: a route ends with a
   reply"); a `break` or `continue` that would leave it (one of a loop of its own is a loop's); a `serve` of its own; a
   `reply` in a deferred statement ("cannot reply from a defer statement"); and a `case` label a `switch` around the
@@ -572,7 +576,7 @@ reply 200, json { gain, pitch, level, changes };              // a name alone is
 reply 200, json { "state": { "gain": gain }, "taps": [a, b, c] };
 ```
 
-**A JSON literal is an argument, never a value**, as a string literal is: `json { members }` and `json [ values ]` are
+**A JSON literal is an argument, never a value**, as a format is: `json { members }` and `json [ values ]` are
 expressions to the grammar, and the compiler takes one only where something writes it, which in this version is a
 `reply` ("FMinus has no JSON values: a JSON literal is only a reply's body, ..." anywhere else). Nothing allocates and
 no JSON value is ever made: the literal is a format the compiler makes, its keys and its structure constant text, each
@@ -582,9 +586,10 @@ value a place, which the library writes into the request's own buffer, as a repl
   one), written as a JSON string, escaped as RFC 8259 asks (`"`, `\` and the control characters), and UTF-8 text (a
   byte that is no part of any is an error). A duplicate key in one object is an error at the second.
 - **A value** is a nested `{ }` or `[ ]`, or an expression of type `float`, `double`, `int` or `bool`. Anything else is
-  an error saying what a value may be: a pointer, a handle, a vector, an array, a module, a string literal (FMinus has
-  no strings yet), or a value of an enumerated type (cast it to `int` for its number: a later version writes an
-  enumeration's constant by its name).
+  an error saying what a value may be: a pointer, a handle, a vector, an array, a module, a string, a literal or a
+  `string` (a JSON literal's string is the next step's: "a JSON literal's value is a float, a double, an int, a bool,
+  an object or an array in this version, and not yet a string"), or a value of an enumerated type (cast it to `int`
+  for its number: a later version writes an enumeration's constant by its name).
 - **How a number is written**: an `int` in decimal; a `bool` as `true` or `false`; a `float` or a `double` as **the
   shortest digits that read back as the same value** (`std::to_chars` with no precision: `0.1f` is `0.1`, `1.0f / 3` is
   `0.33333334`, `1e20f` is `1e+20`), and a NaN or an infinity, which JSON has no number for, as `null`. The same in every
@@ -1075,8 +1080,9 @@ server.
   the user's problem first, and Windows would need Mbed TLS there), so the LAN is plain HTTP and the token crosses it
   in the clear; **a stream from the server** (server-sent events, WebSockets): a page polls; **chunked request
   bodies**, `Expect: 100-continue` (417), pipelining beyond one request at a time, HTTP/2, compression and ranges;
-  **other origins** (CORS): never; **reading a request's headers or cookies**, templating: FMinus has no strings, by
-  design; **a JSON writer** (`%g` in a reply's format, and arrays as bytes); **an "embed this file" builtin**: static
+  **other origins** (CORS): never; **reading a request's headers or cookies**, templating: FMinus has a `string` now,
+  a view, but a builtin that gives a request's path, query or header as one is the next step's, and nothing builds
+  text, by design; **a JSON writer** (`%g` in a reply's format, and arrays as bytes); **an "embed this file" builtin**: static
   content is the host's; **a server of the host's own** with a ready-made parameter surface: an example host shows the
   way first (`examples/remote/`); and the Python package's binding of it.
 - **A disk cache and an `offline` policy** (the report's §8): a host that wants either keeps its own, and hands the
