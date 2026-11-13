@@ -328,6 +328,52 @@ namespace fminus::files
                                                  : std::string_view{};
             return !tooLong && extensionWritten(literal);
         }
+
+        // The name a builtin that takes strings was given (Runtime.h, fminus_rt_file_read_s), its %d and %s filled in,
+        // in `buffer`: FMINUS_FILE_OK, or why not. A format with no %s is prepare's, its failure FMINUS_FILE_REFUSED,
+        // as the entry points without strings have it. With a %s, a name that cannot be is FMINUS_FILE_INVALID, a
+        // status the program reads: a %s in the literal's folder (before its first "/": an absolute name's root, too)
+        // or in its extension (an extension not written out, as prepare refuses one); a text that is not one
+        // (Format.h), or that holds a "/" (it would make a segment of its own) or a "*" (a listing's is its literal's);
+        // a name longer than a name may be; one the rules refuse (parseName: the bytes a segment may have, its ends,
+        // the device names, the lengths). The policy's refusals are the operation's, later, as ever.
+        std::int32_t prepareText(const char* format, std::int32_t length, const std::int32_t* ints, std::int32_t count,
+                                 const char* const* texts, const std::int32_t* lengths, std::int32_t textCount,
+                                 bool pattern, char (&buffer)[kMostNameBytes + 1], std::string_view& text)
+        {
+            if (!runtime::hasTextPlace(format, length))
+                return prepare(format, length, ints, count, buffer, text) ? FMINUS_FILE_OK : FMINUS_FILE_REFUSED;
+            const std::string_view literal(format, static_cast<std::size_t>(length));
+            const std::size_t slash = std::min(literal.find('/'), literal.size());
+            if (runtime::hasTextPlace(format, static_cast<std::int32_t>(slash)) || !extensionWritten(literal))
+                return FMINUS_FILE_INVALID;
+            std::size_t n = 0;
+            bool tooLong = false;
+            bool refused = false;
+            const auto put = [&](char c)
+            {
+                if (n == sizeof buffer)
+                    tooLong = true;
+                else
+                    buffer[n++] = c;
+            };
+            const bool formed = runtime::expandPlaces(format, length, ints, count, texts, lengths, textCount, put,
+                                                      [&](const char* bytes, std::int32_t size)
+                                                      {
+                                                          for (std::int32_t i = 0; i < size && !tooLong; ++i)
+                                                          {
+                                                              refused = refused || bytes[i] == '/' || bytes[i] == '*';
+                                                              put(bytes[i]);
+                                                          }
+                                                      });
+            if (!formed || refused || tooLong || n > kMostNameBytes)
+                return FMINUS_FILE_INVALID;
+            text = std::string_view(buffer, n);
+            Name name;
+            if (parseName(text, pattern, name) != FMINUS_FILE_OK)
+                return FMINUS_FILE_INVALID;
+            return FMINUS_FILE_OK;
+        }
     }   // namespace
 
     // What every handle begins with: its kind, so that a handle of another kind is never read as this one. The kinds
@@ -1152,6 +1198,67 @@ extern "C"
         }
     }
 
+    const char* fminus_rt_file_name(const void* list, std::int32_t index, std::int32_t* length) noexcept
+    {
+        const Handle* h = fminus::files::as(list, Kind::List);
+        if (h == nullptr || h->list == nullptr || index < 0 || index >= h->size)
+        {
+            if (length != nullptr)
+                *length = 0;
+            return nullptr;
+        }
+        const std::string& name = h->list->names[static_cast<std::size_t>(index)];
+        if (length != nullptr)
+            *length = static_cast<std::int32_t>(name.size());   // a segment: at most 255 bytes
+        return name.data();
+    }
+
+    void* fminus_rt_file_read_s(void* context, const char* name, std::int32_t length, const std::int32_t* ints,
+                                std::int32_t count, const char* const* texts, const std::int32_t* lengths,
+                                std::int32_t textCount) noexcept
+    {
+        using namespace fminus::files;
+        if (context == nullptr)
+            return failure(Kind::File, FMINUS_FILE_REFUSED);
+        try
+        {
+            char buffer[kMostNameBytes + 1];
+            std::string_view text;
+            const std::int32_t status =
+                prepareText(name, length, ints, count, texts, lengths, textCount, false, buffer, text);
+            if (status != FMINUS_FILE_OK)
+                return failure(Kind::File, status);
+            return stateOf(context)->read(text);
+        }
+        catch (const std::exception&)
+        {
+            return failure(Kind::File, FMINUS_FILE_FAILED);
+        }
+    }
+
+    void* fminus_rt_file_list_s(void* context, const char* pattern, std::int32_t length, const std::int32_t* ints,
+                                std::int32_t count, const char* const* texts, const std::int32_t* lengths,
+                                std::int32_t textCount) noexcept
+    {
+        using namespace fminus::files;
+        if (context == nullptr)
+            return failure(Kind::List, FMINUS_FILE_REFUSED);
+        try
+        {
+            char buffer[kMostNameBytes + 1];
+            std::string_view text;
+            const std::int32_t status =
+                prepareText(pattern, length, ints, count, texts, lengths, textCount, true, buffer, text);
+            if (status != FMINUS_FILE_OK)
+                return failure(Kind::List, status);
+            return stateOf(context)->list(text);
+        }
+        catch (const std::exception&)
+        {
+            return failure(Kind::List, FMINUS_FILE_FAILED);
+        }
+    }
+
     void fminus_rt_file_close(void* handle) noexcept
     {
         auto* h = static_cast<Handle*>(handle);
@@ -1200,6 +1307,53 @@ extern "C"
             std::string_view text;
             if (!prepare(name, length, ints, count, buffer, text))
                 return FMINUS_FILE_REFUSED;
+            return stateOf(context)->write(text, data, bytes, true);
+        }
+        catch (const std::exception&)
+        {
+            return FMINUS_FILE_FAILED;
+        }
+    }
+
+    std::int32_t fminus_rt_file_write_s(void* context, const char* name, std::int32_t length, const std::int32_t* ints,
+                                        std::int32_t count, const char* const* texts, const std::int32_t* lengths,
+                                        std::int32_t textCount, const void* data, std::int32_t bytes) noexcept
+    {
+        using namespace fminus::files;
+        if (context == nullptr)
+            return FMINUS_FILE_REFUSED;
+        try
+        {
+            char buffer[kMostNameBytes + 1];
+            std::string_view text;
+            const std::int32_t status =
+                prepareText(name, length, ints, count, texts, lengths, textCount, false, buffer, text);
+            if (status != FMINUS_FILE_OK)
+                return status;
+            return stateOf(context)->write(text, data, bytes, false);
+        }
+        catch (const std::exception&)
+        {
+            return FMINUS_FILE_FAILED;
+        }
+    }
+
+    std::int32_t fminus_rt_file_append_s(void* context, const char* name, std::int32_t length,
+                                         const std::int32_t* ints, std::int32_t count, const char* const* texts,
+                                         const std::int32_t* lengths, std::int32_t textCount, const void* data,
+                                         std::int32_t bytes) noexcept
+    {
+        using namespace fminus::files;
+        if (context == nullptr)
+            return FMINUS_FILE_REFUSED;
+        try
+        {
+            char buffer[kMostNameBytes + 1];
+            std::string_view text;
+            const std::int32_t status =
+                prepareText(name, length, ints, count, texts, lengths, textCount, false, buffer, text);
+            if (status != FMINUS_FILE_OK)
+                return status;
             return stateOf(context)->write(text, data, bytes, true);
         }
         catch (const std::exception&)

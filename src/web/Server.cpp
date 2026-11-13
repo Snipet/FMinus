@@ -2229,6 +2229,29 @@ extern "C"
         fminus::web::setType(*slot, type, typeLength, "text/plain; charset=utf-8");
         return fminus::web::finishReply(*slot);
     }
+
+    char* fminus_web_http_reply_buffer(void* handle, std::int32_t* capacity) noexcept
+    {
+        Slot* slot = fminus::web::held(handle);
+        if (capacity != nullptr)
+            *capacity = slot == nullptr ? 0 : slot->capacity;
+        return slot == nullptr ? nullptr : slot->buffer.get();
+    }
+
+    std::int32_t fminus_web_http_reply_written(void* handle, std::int32_t status, std::int32_t bytes, const char* type,
+                                               std::int32_t typeLength) noexcept
+    {
+        Slot* slot = fminus::web::held(handle);
+        if (slot == nullptr || bytes < 0 || !fminus::web::validStatus(status, bytes > 0) ||
+            !fminus::web::validType(type, typeLength))
+            return FMINUS_WEB_INVALID;
+        if (bytes > slot->capacity)
+            return FMINUS_WEB_LIMIT;
+        slot->replyStatus = status;
+        slot->replyBytes = bytes;
+        fminus::web::setType(*slot, type, typeLength, "application/octet-stream");
+        return fminus::web::finishReply(*slot);
+    }
 }
 
 #endif

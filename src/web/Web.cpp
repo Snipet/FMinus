@@ -710,16 +710,17 @@ namespace fminus::web
             return nullptr;
         }
 
-        // A request under `context`, checked, and started unless the check or a limit ended it.
+        // A request under `context`, checked, and started unless the check or a limit ended it; or, with a `refusal`
+        // (the URL's places could not be filled: expandUrl), ended with it before its URL is looked at.
         Request* start(Context::State* context, std::string url, bool post, const void* data, std::int32_t bytes,
-                       std::string_view type)
+                       std::string_view type, std::int32_t refusal = 0)
         {
             Request* request = new (std::nothrow) Request;
             if (request == nullptr)
                 return nullptr;
             request->context = context;
             const Policy& policy = context->policy.policy;
-            std::int32_t status = checkUrl(context->policy, url, request->target);
+            std::int32_t status = refusal != 0 ? refusal : checkUrl(context->policy, url, request->target);
             if (status == 0 && post)
             {
                 request->post = true;
@@ -799,6 +800,122 @@ namespace fminus::web
             std::string out;
             runtime::expandFormat(text, length, ints, count, [&](char c) { out.push_back(c); });
             return out;
+        }
+
+        // The URL a format with %d and %s places makes (runtime/Format.h), in `out`: each %s's text percent-encoded,
+        // every byte but A-Z, a-z, 0-9, "-", ".", "_" and "~" written %XX, so that a text never ends a part of the URL
+        // nor begins one. 0, or FMINUS_WEB_INVALID when a text is not one (a negative length, or a null address and
+        // bytes), when a %s is in the scheme or the authority (its host, its port: everything before the "://" the
+        // literal writes and up to the "/", "?" or "#" after it; with no "://" before it, a %s is in the scheme), or
+        // when a path segment a %s is written in is empty, "." or ".." once filled in. The parts are the literal's: a
+        // %d writes digits and a minus, and an encoded text none of ":/?#", so every delimiter is the literal's own.
+        // Only the first 8193 bytes are kept (one more than a URL may have, so checkUrl finds it too long) and the
+        // rest only looked at: a text of any length takes no more memory.
+        std::int32_t expandUrl(const char* format, std::int32_t length, const std::int32_t* ints, std::int32_t count,
+                               const char* const* texts, const std::int32_t* lengths, std::int32_t textCount,
+                               std::string& out)
+        {
+            constexpr std::size_t kKept = 8192 + 1;
+            enum class Part
+            {
+                Scheme,
+                Authority,
+                Path,
+                Query,   // or the fragment: a text there is encoded and nothing more
+            };
+            Part part = Part::Scheme;
+            int slashes = 0;   // in the scheme: 1 after a ":", 2 after ":/"
+            // The path segment being written: its bytes, whether they are all "." (two at most), and whether a %s is
+            // in it.
+            std::size_t segment = 0;
+            bool dots = true;
+            bool hasText = false;
+            bool invalid = false;
+            const auto endSegment = [&]
+            {
+                if (hasText && (segment == 0 || (dots && segment <= 2)))
+                    invalid = true;
+                segment = 0;
+                dots = true;
+                hasText = false;
+            };
+            const auto put = [&](char c)
+            {
+                if (out.size() < kKept)
+                    out.push_back(c);
+            };
+            const auto literal = [&](char c)
+            {
+                put(c);
+                switch (part)
+                {
+                case Part::Scheme:
+                    if (c == ':')
+                        slashes = 1;
+                    else if (c == '/' && slashes > 0)
+                    {
+                        if (++slashes == 3)
+                            part = Part::Authority;
+                    }
+                    else
+                        slashes = 0;
+                    break;
+                case Part::Authority:
+                    if (c == '/')
+                        part = Part::Path;
+                    else if (c == '?' || c == '#')
+                        part = Part::Query;
+                    break;
+                case Part::Path:
+                    if (c == '/' || c == '?' || c == '#')
+                    {
+                        endSegment();
+                        if (c != '/')
+                            part = Part::Query;
+                    }
+                    else
+                    {
+                        dots = dots && c == '.';
+                        ++segment;
+                    }
+                    break;
+                case Part::Query:
+                    break;
+                }
+            };
+            const auto text = [&](const char* bytes, std::int32_t size)
+            {
+                static constexpr char kHex[] = "0123456789ABCDEF";
+                if (part == Part::Scheme || part == Part::Authority)
+                    invalid = true;
+                hasText = true;
+                for (std::int32_t i = 0; i < size; ++i)
+                {
+                    const char c = bytes[i];
+                    const bool unreserved = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+                                            c == '-' || c == '.' || c == '_' || c == '~';
+                    if (unreserved)
+                        put(c);
+                    else
+                    {
+                        put('%');
+                        put(kHex[static_cast<unsigned char>(c) >> 4]);
+                        put(kHex[static_cast<unsigned char>(c) & 15]);
+                    }
+                    if (part == Part::Path)
+                    {
+                        dots = dots && c == '.';
+                        segment += unreserved ? 1 : 3;
+                    }
+                    if (out.size() >= kKept && (part != Part::Path || !dots || segment > 2))
+                        break;   // too long already, and nothing more to tell of its segment
+                }
+            };
+            if (!runtime::expandPlaces(format, length, ints, count, texts, lengths, textCount, literal, text))
+                return FMINUS_WEB_INVALID;
+            if (part == Part::Path)
+                endSegment();
+            return invalid ? FMINUS_WEB_INVALID : 0;
         }
 
         // Closes the context's server, if it has one: the I/O thread lets go of it (its sockets closed, its requests
@@ -1037,6 +1154,50 @@ extern "C"
             return madeHandle(fminus::web::start(static_cast<Context::State*>(context),
                                                  fminus::web::expand(url, length, ints, count), true, data, bytes,
                                                  contentType));
+        }
+        catch (const std::bad_alloc&)
+        {
+            return nullptr;
+        }
+    }
+
+    void* fminus_web_http_get_s(void* context, const char* url, std::int32_t length, const std::int32_t* ints,
+                                std::int32_t count, const char* const* texts, const std::int32_t* lengths,
+                                std::int32_t textCount) noexcept
+    {
+        if (context == nullptr)
+            return madeHandle(&fminus::web::refused());
+        try
+        {
+            std::string filled;
+            const std::int32_t refusal =
+                fminus::web::expandUrl(url, length, ints, count, texts, lengths, textCount, filled);
+            return madeHandle(fminus::web::start(static_cast<Context::State*>(context), std::move(filled), false,
+                                                 nullptr, 0, {}, refusal));
+        }
+        catch (const std::bad_alloc&)
+        {
+            return nullptr;
+        }
+    }
+
+    void* fminus_web_http_post_s(void* context, const char* url, std::int32_t length, const std::int32_t* ints,
+                                 std::int32_t count, const char* const* texts, const std::int32_t* lengths,
+                                 std::int32_t textCount, const void* data, std::int32_t bytes, const char* type,
+                                 std::int32_t typeLength) noexcept
+    {
+        if (context == nullptr)
+            return madeHandle(&fminus::web::refused());
+        try
+        {
+            const std::string_view contentType = type == nullptr || typeLength <= 0
+                                                     ? std::string_view()
+                                                     : std::string_view(type, static_cast<std::size_t>(typeLength));
+            std::string filled;
+            const std::int32_t refusal =
+                fminus::web::expandUrl(url, length, ints, count, texts, lengths, textCount, filled);
+            return madeHandle(fminus::web::start(static_cast<Context::State*>(context), std::move(filled), true, data,
+                                                 bytes, contentType, refusal));
         }
         catch (const std::bad_alloc&)
         {

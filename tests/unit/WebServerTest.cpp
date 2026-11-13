@@ -19,6 +19,8 @@
 #if FMINUS_HAS_WEB_SERVER && !defined(_WIN32)
 
 #include "HeapCalls.h"
+#include "Shapes.h"
+#include "runtime/Runtime.h"
 #include "web/Policy.h"
 #include "web/Server.h"
 #include "web/Web.h"
@@ -2615,6 +2617,394 @@ TEST_CASE("taking by route set and reading a request's text allocate nothing and
     CHECK(fminus_web_http_reply(last, 204) == 0);
     for (int fd : clients)
         ::close(fd);
+}
+
+// ---- a reply written in place, and URLs with strings ------------------------------------------------------------
+
+namespace
+{
+    // The oldest request the server has published, taken, waiting up to five seconds for one.
+    void* takeOne(void* server)
+    {
+        for (int attempt = 0; attempt < 2500; ++attempt)
+        {
+            if (void* r = fminus_web_http_next(server))
+                return r;
+            std::this_thread::sleep_for(2ms);
+        }
+        return nullptr;
+    }
+
+    std::int32_t replyWritten(void* request, std::int32_t status, std::int32_t bytes, std::string_view type = {})
+    {
+        return fminus_web_http_reply_written(request, status, bytes, type.data(),
+                                             static_cast<std::int32_t>(type.size()));
+    }
+
+#if FMINUS_HAS_JSON
+    // A module, its shape, and the literal {"osc": <module>, "level": <float>} a reply writes.
+    struct Voice
+    {
+        float detune;
+        std::int32_t notes[3];
+        bool on;
+        char name[8];
+    };
+
+    std::vector<std::int32_t> voiceLiteral()
+    {
+        using fminus::test::shapes::Table;
+        namespace k = fminus::test::shapes;
+        Table t;
+        t.literal(R"({"osc":)");
+        t.value(0, Table::pointer(t.module({
+                       {"detune", offsetof(Voice, detune), Table::scalar(k::Float)},
+                       {"notes", offsetof(Voice, notes), Table::array(3, 4, Table::scalar(k::Int))},
+                       {"on", offsetof(Voice, on), Table::scalar(k::Bool)},
+                       {"name", offsetof(Voice, name), Table::chars(8)},
+                   })));
+        t.literal(R"(,"level":)");
+        t.value(1, Table::scalar(k::Float));
+        t.literal("}");
+        return t.layout();
+    }
+
+    constexpr std::string_view kVoiceText = R"({"osc":{"detune":-0.25,"notes":[60,64,67],"on":true,"name":"lead"},"level":0.1})";
+#endif
+} // namespace
+
+TEST_CASE("a reply written in place: the request's own buffer, its capacity, and the reply published from it",
+          "[web][server]")
+{
+    Policy policy = serving();
+    policy.server.maxReplyBytes = 100;
+    Served served(policy, nullptr);
+    const int port = served.port;
+
+    // What is no request the caller holds has no buffer.
+    std::int32_t capacity = -1;
+    CHECK(fminus_web_http_reply_buffer(nullptr, &capacity) == nullptr);
+    CHECK(capacity == 0);
+    capacity = -1;
+    CHECK(fminus_web_http_reply_buffer(served.server, &capacity) == nullptr);
+    CHECK(capacity == 0);
+    CHECK(replyWritten(nullptr, 200, 0) == FMINUS_WEB_INVALID);
+    CHECK(replyWritten(served.server, 200, 0) == FMINUS_WEB_INVALID);
+
+    // A body written into the buffer, its type, and every refusal before it, the request still the caller's.
+    const int fd = connectTo(port);
+    REQUIRE(sendAll(fd, get(port, "/hello")));
+    void* r = takeOne(served.server);
+    REQUIRE(r != nullptr);
+    char* buffer = fminus_web_http_reply_buffer(r, &capacity);
+    REQUIRE(buffer != nullptr);
+    CHECK(capacity == 100);
+    CHECK(fminus_web_http_reply_buffer(r, nullptr) == buffer);   // the same buffer each time, no capacity asked
+    std::memset(buffer, 'x', 100);
+    std::memcpy(buffer, "in place", 8);
+    CHECK(replyWritten(r, 200, 101, "text/plain") == FMINUS_WEB_LIMIT);
+    CHECK(replyWritten(r, 200, -1, "text/plain") == FMINUS_WEB_INVALID);
+    CHECK(replyWritten(r, 204, 8) == FMINUS_WEB_INVALID);    // 204 has no body
+    CHECK(replyWritten(r, 304, 8) == FMINUS_WEB_INVALID);
+    CHECK(replyWritten(r, 199, 8) == FMINUS_WEB_INVALID);
+    CHECK(replyWritten(r, 600, 8) == FMINUS_WEB_INVALID);
+    CHECK(replyWritten(r, 200, 8, "text/plain\r\nX-A: b") == FMINUS_WEB_INVALID);
+    CHECK(replyWritten(r, 200, 8, "text/plain") == 0);
+    CHECK(replyWritten(r, 200, 8, "text/plain") == FMINUS_WEB_INVALID);   // answered: the handle is dead
+    CHECK(fminus_web_http_reply_buffer(r, &capacity) == nullptr);
+    CHECK(capacity == 0);
+    Reader reader(fd);
+    std::optional<Response> response = reader.next();
+    REQUIRE(response);
+    CHECK(response->status == 200);
+    CHECK(response->body == "in place");
+    CHECK(response->header("content-type") == "text/plain");
+
+    // The whole capacity, the default type; then no body (204), on the same connection.
+    REQUIRE(sendAll(fd, get(port, "/hello")));
+    r = takeOne(served.server);
+    REQUIRE(r != nullptr);
+    buffer = fminus_web_http_reply_buffer(r, &capacity);
+    REQUIRE(buffer != nullptr);
+    for (int i = 0; i < 100; ++i)
+        buffer[i] = static_cast<char>('a' + i % 26);
+    CHECK(replyWritten(r, 201, 100) == 0);
+    response = reader.next();
+    REQUIRE(response);
+    CHECK(response->status == 201);
+    CHECK(response->body.size() == 100);
+    CHECK(response->body.substr(0, 3) == "abc");
+    CHECK(response->header("content-type") == "application/octet-stream");
+    REQUIRE(sendAll(fd, get(port, "/hello")));
+    r = takeOne(served.server);
+    REQUIRE(r != nullptr);
+    CHECK(replyWritten(r, 204, 0) == 0);
+    response = reader.next();
+    REQUIRE(response);
+    CHECK(response->status == 204);
+    CHECK(response->body.empty());
+
+    // A HEAD keeps the Content-Length and drops the body.
+    REQUIRE(sendAll(fd, "HEAD /hello HTTP/1.1\r\nHost: " + hostOf(port) + "\r\n\r\n"));
+    r = takeOne(served.server);
+    REQUIRE(r != nullptr);
+    std::memcpy(fminus_web_http_reply_buffer(r, nullptr), "twelve bytes", 12);
+    CHECK(replyWritten(r, 200, 12, "a/b") == 0);
+    response = reader.next(true);
+    REQUIRE(response);
+    CHECK(response->header("content-length") == "12");
+    ::close(fd);
+}
+
+TEST_CASE("a request whose reply buffer was got and nothing published is unanswered, then answered by any reply",
+          "[web][server]")
+{
+    Policy policy = serving();
+    policy.server.replyTimeoutMs = 300;
+    Served served(policy, nullptr);
+    const int port = served.port;
+
+    // Got, nothing published: the library answers 503 at replyTimeoutMs, and the reply then is cancelled.
+    {
+        const int fd = connectTo(port);
+        REQUIRE(sendAll(fd, get(port, "/hello")));
+        void* r = takeOne(served.server);
+        REQUIRE(r != nullptr);
+        std::int32_t capacity = 0;
+        char* buffer = fminus_web_http_reply_buffer(r, &capacity);
+        REQUIRE(buffer != nullptr);
+        std::memcpy(buffer, "late", 4);
+        Reader reader(fd);
+        std::optional<Response> response = reader.next();
+        REQUIRE(response);
+        CHECK(response->status == 503);
+        CHECK(fminus_web_http_reply_buffer(r, nullptr) == buffer);   // still the taker's, until it answers
+        CHECK(replyWritten(r, 200, 4) == FMINUS_WEB_CANCELLED);
+        CHECK(fminus_web_http_reply_buffer(r, nullptr) == nullptr);
+        ::close(fd);
+    }
+    // Got, then answered by another reply, which copies over what was written there.
+    {
+        const int fd = connectTo(port);
+        REQUIRE(sendAll(fd, get(port, "/hello")));
+        void* r = takeOne(served.server);
+        REQUIRE(r != nullptr);
+        std::memcpy(fminus_web_http_reply_buffer(r, nullptr), "written", 7);
+        CHECK(replyBytes(r, 200, "copied") == 0);
+        Reader reader(fd);
+        std::optional<Response> response = reader.next();
+        REQUIRE(response);
+        CHECK(response->body == "copied");
+        ::close(fd);
+    }
+    // A server with a capacity of 0: a buffer, and no byte in it.
+    Policy none = serving();
+    none.server.maxReplyBytes = 0;
+    Served empty(none, nullptr);
+    const int fd = connectTo(empty.port);
+    REQUIRE(sendAll(fd, get(empty.port, "/hello")));
+    void* r = takeOne(empty.server);
+    REQUIRE(r != nullptr);
+    std::int32_t capacity = -1;
+    CHECK(fminus_web_http_reply_buffer(r, &capacity) != nullptr);
+    CHECK(capacity == 0);
+    CHECK(replyWritten(r, 200, 1) == FMINUS_WEB_LIMIT);
+    CHECK(replyWritten(r, 200, 0) == 0);
+    Reader reader(fd);
+    std::optional<Response> response = reader.next();
+    REQUIRE(response);
+    CHECK(response->status == 200);
+    CHECK(response->header("content-length") == "0");
+    ::close(fd);
+}
+
+#if FMINUS_HAS_JSON
+TEST_CASE("a JSON literal written into the reply buffer and published allocates nothing and makes no system call",
+          "[web][server][json]")
+{
+    Policy policy = serving();
+    policy.server.replyTimeoutMs = 20000;
+    Served served(policy, nullptr);
+    const int port = served.port;
+    const std::vector<std::int32_t> literal = voiceLiteral();
+    // What the audio thread does: takes a request, writes the literal into its buffer, and publishes it. 1 when
+    // it answered one, 0 when there was none, -1 when anything failed.
+    const auto handle = [&literal](void* server) -> int
+    {
+        void* r = fminus_web_http_next(server);
+        if (r == nullptr)
+            return 0;
+        Voice voice{-0.25f, {60, 64, 67}, true, {'l', 'e', 'a', 'd', 0, 0, 0, 0}};
+        std::uint64_t slots[2] = {0, 0};
+        const Voice* address = &voice;
+        std::memcpy(&slots[0], &address, sizeof address);
+        const float level = 0.1f;
+        std::memcpy(&slots[1], &level, sizeof level);
+        std::int32_t capacity = 0;
+        char* buffer = fminus_web_http_reply_buffer(r, &capacity);
+        const std::int32_t bytes = fminus_rt_json_write(buffer, capacity, literal.data(), slots);
+        if (buffer == nullptr || bytes < 0 || bytes > capacity)
+            return -1;
+        return fminus_web_http_reply_written(r, 200, bytes, "application/json", 16) == 0 ? 1 : -1;
+    };
+    std::vector<int> clients;
+    const auto send = [&]
+    {
+        const int fd = connectTo(port);
+        REQUIRE(sendAll(fd, get(port, "/hello")));
+        clients.push_back(fd);
+    };
+
+    if (fminus::test::HeapCalls::counted())
+    {
+        send();
+        int done = 0;
+        for (int attempt = 0; attempt < 500 && done == 0; ++attempt)
+        {
+            long calls = 0;
+            {
+                const fminus::test::HeapCalls counting;
+                done = handle(served.server);
+                calls = counting.count();
+            }
+            if (done != 0)
+            {
+                CHECK(done == 1);
+                CHECK(calls == 0);
+            }
+            else
+                std::this_thread::sleep_for(2ms);
+        }
+        CHECK(done == 1);
+        Reader replies(clients.back());
+        std::optional<Response> response = replies.next();
+        REQUIRE(response);
+        CHECK(response->body == kVoiceText);
+        CHECK(response->header("content-type") == "application/json");
+    }
+    else
+        WARN("this build does not count the heap's calls (a sanitizer): allocation is not checked");
+
+    send();
+#if defined(__linux__)
+    bool checked = false;
+    for (int attempt = 0; attempt < 200 && !checked; ++attempt)
+    {
+        int fds[2];
+        REQUIRE(::pipe(fds) == 0);
+        const pid_t child = ::fork();
+        REQUIRE(child >= 0);
+        if (child == 0)
+        {
+            ::close(fds[0]);
+            if (::prctl(PR_SET_SECCOMP, SECCOMP_MODE_STRICT) != 0)
+                ::syscall(SYS_exit, 2);
+            const int result = handle(served.server);
+            const ssize_t written = ::write(fds[1], &result, sizeof result);
+            ::syscall(SYS_exit, written == sizeof result ? 0 : 1);
+        }
+        ::close(fds[1]);
+        int status = 0;
+        ::waitpid(child, &status, 0);
+        int result = -2;
+        const ssize_t got = ::read(fds[0], &result, sizeof result);
+        ::close(fds[0]);
+        INFO("status " << status);
+        if (WIFEXITED(status) && WEXITSTATUS(status) == 2)
+        {
+            WARN("seccomp's strict mode is not available here: the system calls are not checked");
+            break;
+        }
+        REQUIRE(WIFEXITED(status));
+        REQUIRE(WEXITSTATUS(status) == 0);
+        REQUIRE(got == static_cast<ssize_t>(sizeof result));
+        CHECK(result >= 0);
+        if (result == 1)
+            checked = true;
+        else
+            std::this_thread::sleep_for(5ms);   // not published yet
+    }
+    CHECK(checked);
+#else
+    WARN("seccomp is Linux's: the system calls are not checked here");
+#endif
+    // The parent's copy of the request, untouched by the child, answered here as well.
+    CHECK(handle(served.server) == 1);
+    Reader replies(clients.back());
+    std::optional<Response> response = replies.next();
+    REQUIRE(response);
+    CHECK(response->body == kVoiceText);
+    for (int fd : clients)
+        ::close(fd);
+}
+#endif
+
+TEST_CASE("a URL's %s is percent-encoded as it is filled in, and reaches the server as the program wrote it",
+          "[web][server]")
+{
+    std::mutex mutex;
+    std::vector<std::string> seen;   // each request's path, its first place's text, and its query's "name"
+    const auto record = [&](void* r)
+    {
+        std::int32_t length = 0;
+        const char* path = fminus_web_http_path(r, &length);
+        std::string entry(path, static_cast<std::size_t>(length));
+        fminus_web_http_route(r);
+        const char* text = fminus_web_http_text(r, 0, &length);
+        entry += " " + std::string(text == nullptr ? "" : std::string(text, static_cast<std::size_t>(length)));
+        text = fminus_web_http_query_text(r, "name", 4, &length);
+        entry += " " + (text == nullptr ? std::string("-") : std::string(text, static_cast<std::size_t>(length)));
+        entry += " " + bodyOf(r);
+        {
+            const std::lock_guard lock(mutex);
+            seen.push_back(entry);
+        }
+        replyBytes(r, 200, "ok");
+    };
+    Served served(serving(), record, {"GET /presets/%s", "POST /presets/%s/%d"});
+    const int port = served.port;
+    const std::unique_ptr<Context> client = clientFor(port);
+    const std::string base = "http://127.0.0.1:" + std::to_string(port);
+
+    const auto getS = [&](const std::string& format, const std::vector<std::string>& texts,
+                          const std::vector<std::int32_t>& ints = {})
+    {
+        std::vector<const char*> addresses;
+        std::vector<std::int32_t> lengths;
+        for (const std::string& t : texts)
+        {
+            addresses.push_back(t.data());
+            lengths.push_back(static_cast<std::int32_t>(t.size()));
+        }
+        void* r = fminus_web_http_get_s(client->handle(), format.data(), static_cast<std::int32_t>(format.size()),
+                                        ints.data(), static_cast<std::int32_t>(ints.size()), addresses.data(),
+                                        lengths.data(), static_cast<std::int32_t>(texts.size()));
+        REQUIRE(r != nullptr);
+        const std::int32_t status = fminus_web_http_wait(r, 10000);
+        fminus_web_http_close(r);
+        return status;
+    };
+    // Unreserved bytes as they are; every other byte %XX, in the query, UTF-8 and the delimiters among them.
+    CHECK(getS(base + "/presets/%s", {"warm.pad-1_~"}) == 200);
+    CHECK(getS(base + "/presets/%s?name=%s&v=%d", {"lead", "a b/c?d=\xc3\xa9&#%"}, {42}) == 200);
+    CHECK(getS(base + "/presets/%%%s", {"x"}) == 400);   // a literal's percent sign: the server takes none
+    const std::string body = "{}";
+    const std::string format = base + "/presets/%s/%d";
+    const char* texts[] = {"pad"};
+    const std::int32_t lengths[] = {3};
+    const std::int32_t ints[] = {7};
+    void* post = fminus_web_http_post_s(client->handle(), format.data(), static_cast<std::int32_t>(format.size()), ints,
+                                        1, texts, lengths, 1, body.data(), 2, "application/json", 16);
+    REQUIRE(post != nullptr);
+    CHECK(fminus_web_http_wait(post, 10000) == 200);
+    fminus_web_http_close(post);
+
+    served.program.reset();
+    const std::lock_guard lock(mutex);
+    REQUIRE(seen.size() == 3);
+    CHECK(seen[0] == "/presets/warm.pad-1_~ warm.pad-1_~ - ");
+    CHECK(seen[1] == "/presets/lead lead a%20b%2Fc%3Fd%3D%C3%A9%26%23%25 ");
+    CHECK(seen[2] == "/presets/pad/7 pad - {}");
 }
 
 #endif

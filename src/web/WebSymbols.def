@@ -15,6 +15,8 @@
 #endif
 FMINUS_RUNTIME_SYMBOL(fminus_web_http_get)
 FMINUS_RUNTIME_SYMBOL(fminus_web_http_post)
+FMINUS_RUNTIME_SYMBOL(fminus_web_http_get_s)
+FMINUS_RUNTIME_SYMBOL(fminus_web_http_post_s)
 FMINUS_RUNTIME_SYMBOL(fminus_web_http_wait)
 FMINUS_RUNTIME_SYMBOL(fminus_web_http_status)
 FMINUS_RUNTIME_SYMBOL(fminus_web_http_size)
@@ -43,6 +45,8 @@ FMINUS_RUNTIME_SYMBOL(fminus_web_http_query_text)
 FMINUS_RUNTIME_SYMBOL(fminus_web_http_reply)
 FMINUS_RUNTIME_SYMBOL(fminus_web_http_reply_bytes)
 FMINUS_RUNTIME_SYMBOL(fminus_web_http_reply_text)
+FMINUS_RUNTIME_SYMBOL(fminus_web_http_reply_buffer)
+FMINUS_RUNTIME_SYMBOL(fminus_web_http_reply_written)
 #endif
 FMINUS_WEB_MAIN_SYMBOL(fminus_web_main_start)
 FMINUS_WEB_MAIN_SYMBOL(fminus_web_main_stop)

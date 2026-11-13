@@ -203,6 +203,88 @@ extern "C"
                                        std::int32_t count, const void* choices) noexcept;
     std::int32_t fminus_rt_json_base64_floats(const void* document, const void* path, const std::int32_t* ints,
                                               std::int32_t count, float* out, std::int32_t cap) noexcept;
+
+    // The string at the path (a read as the others are: wait-free, bounded by the document): the address of its bytes,
+    // unescaped, as the parser holds them, and their count in `*length` (when `length` is not null); valid until the
+    // document is freed. A 0 byte follows them, not counted, but a string may hold one itself ("\u0000"): its length
+    // is the count. Null, and 0, when the value there is not a string, or nothing is there; an empty string is a
+    // non-null address and 0.
+    const char* fminus_rt_json_text(const void* document, const void* path, const std::int32_t* ints,
+                                    std::int32_t count, std::int32_t* length) noexcept;
+
+    // ---- shapes: the values in memory that json_write writes and json_module fills (JsonShapes.h) -------------------
+    //
+    // A shape is a constant of the program, a tree of int32 words in a table laid out as a path's (`words` int32s,
+    // then `length` bytes, at 4-byte alignment, together: int32 words, length; int32 code[words]; char bytes[length]).
+    // Each shape is its kind and then the kind's words:
+    //   1 float            4 bytes                                     (no words)
+    //   2 double           8 bytes
+    //   3 int              4 bytes
+    //   4 bool             1 byte, 0 for false and anything else true
+    //   5 string           an address (8 bytes), then its length, an int, at 8: what a string's two slots hold
+    //   6 char array       n                  n bytes, the text those before the first 0 (or all n)
+    //   7 enumeration      size, n, then n triples (value, a, b): the constant `value` is named bytes[a] to
+    //                      bytes[a + b - 1]; the value an int (size 4) or a byte (size 1: an enumeration of bool)
+    //   8 pointer          <shape>            an address (8 bytes) of a value of that shape; null is JSON's null
+    //   9 array            count, stride, <shape>   `count` elements `stride` bytes apart (a 2-D array is an array
+    //                                             of arrays: the outer stride a row's bytes)
+    //  10 span             capacity, stride, <shape>   an address, then a count, an int, at 8 (a pointer and a count
+    //                                             in two slots), the count clamped to 0 to `capacity`
+    //  11 vector           lanes              2, 4 or 8 floats (a float2, float4, float8)
+    //  12 module           n, then n fields   an object: each field a record of words,
+    //                          size, a, b, offset, flags, [least (2 words), greatest (2 words)], [default (2 words)],
+    //                          <shape>
+    //                      `size` the record's words (itself among them); the name bytes[a] to bytes[a + b - 1] (as
+    //                      it is: the writer escapes it); the value at `offset` bytes from the module's address;
+    //                      flags 1, a range, and 2, a default, whose numbers follow, each a double as two words (its
+    //                      IEEE bits' low 32 first). A range only on a field whose values are numbers (float, double,
+    //                      int, an enumeration's, or arrays of them), a default on those or a bool's.
+    // Pointers, arrays, spans and modules nest at most 16 deep (the outermost shape at depth 0); a module has at most
+    // 1024 fields. A table is checked whole before a byte of the program's memory is read by it, and one that is not
+    // well formed (a word or a byte outside it, an unknown kind, a negative count, size or stride, a field's size not
+    // its record's, too deep) is refused: nothing is read or written. The offsets, counts and strides themselves, and
+    // the memory they reach, are trusted, as a compiler's constant is.
+    //
+    // fminus_rt_json_write writes a JSON literal's text into `buffer`, from its description (a table, as above, whose
+    // code is a list of operations) and its values, the 8-byte slots at `values` that the compiled code filled:
+    //   0, a, b            bytes[a] to bytes[a + b - 1], as they are (the keys and the punctuation, which the compiler
+    //                      wrote and escaped)
+    //   1, slot, <shape>   the value of the shape at values + 8 * slot (a scalar stored at its slot's start in its own
+    //                      type; a string, a span: its address in one slot and its length in the next; a vector in as
+    //                      many slots as its bytes take; an array or a module by a pointer shape, its address in the
+    //                      slot)
+    // A float or a double is the shortest decimal digits that read back as the same value (std::to_chars: 0.1f is
+    // 0.1), NaN and the infinities null; an int in decimal; a bool true or false; an enumeration's value the name of its
+    // first constant with that value, as a string, or its number when none has it; a string, and a char array, a JSON
+    // string, '"' and '\' escaped and U+0000 to U+001F as \b \f \n \r \t or \u00XX, every other byte as it is
+    // (no UTF-8 check); arrays, spans and vectors JSON arrays; a module an object of its fields in their order. Returns
+    // the bytes the whole text takes (INT32_MAX when it is that or more), and writes the first `capacity` of them: a
+    // result above the capacity did not fit, and nothing past the capacity is written (a null buffer or a capacity not
+    // positive: none). -1, and nothing written, when the description is not well formed, or it has a value and
+    // `values` is null. It allocates nothing, takes no lock and makes no system call (wait-free), and takes time in
+    // proportion to the description and the values' sizes; it recurses as deep as its shapes nest.
+    std::int32_t fminus_rt_json_write(char* buffer, std::int32_t capacity, const void* description,
+                                      const void* values) noexcept;
+
+    // fminus_rt_json_module fills the module at `module` from the object at the path, by `shape`, a table whose code is
+    // one module shape (a pointer, a string or a span in it, or a char array of no byte, is not well formed). Each
+    // field is filled only by a value of its kind: a float, a double or an int by the number json_float, json_double
+    // or json_int reads; a bool by true or false; an enumeration by a string that is one of its names (byte for byte,
+    // the first) or an integer an int holds (0 or 1 for one of bool); a char array of n by a string of at most n - 1
+    // bytes (its bytes, the rest zeroed); an array or a vector by an array, as many elements as fit (more is no
+    // error), each by the same rules, one of the wrong kind left as it was, and elements past the document's left as
+    // they were; a module by an object, by its own fields' rules. A number outside the field's range (an array's
+    // element's too) does not fill it. A field not filled is set to its default when it has one (an array's every
+    // element), and a module to its own fields' defaults; else it is left as it was. A member no field names is
+    // ignored; of two members of one name, the first is read. A null document, a path where nothing is, or a value
+    // there that is no object fills nothing, and the defaults apply. Returns 1 when every field with no default, at
+    // every depth (the modules of an array's elements that the document has among them), was filled; else 0. 0, and
+    // nothing written, for a table that is not well formed or a null module. One walk of the object's members (each
+    // nested object's once), each looked for among the fields its module has not yet named: steps in proportion to
+    // the members times the fields, besides reading the values, as the other reads are (wait-free, bounded by the
+    // document and the shape); it recurses as deep as the shape nests.
+    std::int32_t fminus_rt_json_module(const void* document, const void* path, const std::int32_t* ints,
+                                       std::int32_t count, const void* shape, void* module) noexcept;
 #endif
 
 #if FMINUS_HAS_XML
@@ -280,6 +362,13 @@ extern "C"
                                       std::int32_t count, float* out, std::int32_t cap) noexcept;
     std::int32_t fminus_rt_xml_choice(const void* document, const void* path, const std::int32_t* ints,
                                       std::int32_t count, const void* choices) noexcept;
+
+    // The value at the path as text (a read as the others are): an attribute's value or an element's text, as the
+    // other reads find it, XML's white space before and after it left out: the address of its bytes and their count in
+    // `*length` (when `length` is not null), no 0 byte after them, valid until the document is freed. Null, and 0, when
+    // nothing is at the path; an element with no text is a non-null address and 0.
+    const char* fminus_rt_xml_text(const void* document, const void* path, const std::int32_t* ints,
+                                   std::int32_t count, std::int32_t* length) noexcept;
 #endif
 
 #if FMINUS_HAS_FILES
@@ -345,6 +434,27 @@ extern "C"
     void* fminus_rt_file_read_nth(void* list, std::int32_t index) noexcept;
     void fminus_rt_file_close(void* handle) noexcept;
 
+    // The i-th file's name in a listing (a read, as count is: wait-free): the entry's own name, without its directory
+    // ("pad1.f32"), the address of its bytes and their count in `*length` (when `length` is not null), a 0 byte after
+    // them (not counted), valid until the listing is closed. Null, and 0, for an index outside 0 to count - 1, or a
+    // handle that is no listing that was made.
+    const char* fminus_rt_file_name(const void* list, std::int32_t index, std::int32_t* length) noexcept;
+
+    // fminus_rt_file_read and fminus_rt_file_list with strings: the name's format has %s places as well as %d, each %s
+    // the next of the `textCount` texts, the i-th the `lengths[i]` bytes at `texts[i]` (a %s past the last: empty), and
+    // joins the segment it is written in. A format with no %s is exactly the entry point without strings. With one,
+    // the name filled in is checked, and one that cannot be is FMINUS_FILE_INVALID (a status the program reads): a text
+    // with a negative length, or a null address and bytes; a text holding "/" or "*"; a %s in the folder (or the root
+    // of an absolute name) or in the extension, or a literal whose extension is not written out; a name the rules
+    // refuse (Files.h: a segment's bytes, its first and last, a device's name, 255 bytes a segment, 1024 a name, 16
+    // segments). Then it is opened, or listed, as a name without strings is, the policy's refusals FMINUS_FILE_REFUSED.
+    void* fminus_rt_file_read_s(void* context, const char* name, std::int32_t length, const std::int32_t* ints,
+                                std::int32_t count, const char* const* texts, const std::int32_t* lengths,
+                                std::int32_t textCount) noexcept;
+    void* fminus_rt_file_list_s(void* context, const char* pattern, std::int32_t length, const std::int32_t* ints,
+                                std::int32_t count, const char* const* texts, const std::int32_t* lengths,
+                                std::int32_t textCount) noexcept;
+
 #if FMINUS_HAS_FILES_WRITE
     // Writing (a build with FMINUS_FILES_WRITE too), in a folder whose `write` the policy set; never an absolute name.
     // Each returns a status: FMINUS_FILE_OK, or why not, as a read's, and _INVALID for a negative `bytes` (or a null
@@ -364,6 +474,15 @@ extern "C"
     std::int32_t fminus_rt_file_append(void* context, const char* name, std::int32_t length,
                                        const std::int32_t* ints, std::int32_t count, const void* data,
                                        std::int32_t bytes) noexcept;
+
+    // The same with strings in the name, as fminus_rt_file_read_s takes them.
+    std::int32_t fminus_rt_file_write_s(void* context, const char* name, std::int32_t length, const std::int32_t* ints,
+                                        std::int32_t count, const char* const* texts, const std::int32_t* lengths,
+                                        std::int32_t textCount, const void* data, std::int32_t bytes) noexcept;
+    std::int32_t fminus_rt_file_append_s(void* context, const char* name, std::int32_t length,
+                                         const std::int32_t* ints, std::int32_t count, const char* const* texts,
+                                         const std::int32_t* lengths, std::int32_t textCount, const void* data,
+                                         std::int32_t bytes) noexcept;
 #endif
 
     // An executable's (a C main whose program calls a file builtin): it has no host, so the person who runs it says

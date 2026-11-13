@@ -41,6 +41,9 @@ FMINUS_RUNTIME_SYMBOL(fminus_rt_json_count)
 FMINUS_RUNTIME_SYMBOL(fminus_rt_json_floats)
 FMINUS_RUNTIME_SYMBOL(fminus_rt_json_choice)
 FMINUS_RUNTIME_SYMBOL(fminus_rt_json_base64_floats)
+FMINUS_RUNTIME_SYMBOL(fminus_rt_json_text)
+FMINUS_RUNTIME_SYMBOL(fminus_rt_json_write)
+FMINUS_RUNTIME_SYMBOL(fminus_rt_json_module)
 #endif
 #if FMINUS_HAS_XML
 FMINUS_RUNTIME_SYMBOL(fminus_rt_xml_parse)
@@ -52,6 +55,7 @@ FMINUS_RUNTIME_SYMBOL(fminus_rt_xml_bool)
 FMINUS_RUNTIME_SYMBOL(fminus_rt_xml_count)
 FMINUS_RUNTIME_SYMBOL(fminus_rt_xml_floats)
 FMINUS_RUNTIME_SYMBOL(fminus_rt_xml_choice)
+FMINUS_RUNTIME_SYMBOL(fminus_rt_xml_text)
 #endif
 #if FMINUS_HAS_FILES
 FMINUS_RUNTIME_SYMBOL(fminus_rt_file_read)
@@ -62,9 +66,14 @@ FMINUS_RUNTIME_SYMBOL(fminus_rt_file_list)
 FMINUS_RUNTIME_SYMBOL(fminus_rt_file_count)
 FMINUS_RUNTIME_SYMBOL(fminus_rt_file_read_nth)
 FMINUS_RUNTIME_SYMBOL(fminus_rt_file_close)
+FMINUS_RUNTIME_SYMBOL(fminus_rt_file_name)
+FMINUS_RUNTIME_SYMBOL(fminus_rt_file_read_s)
+FMINUS_RUNTIME_SYMBOL(fminus_rt_file_list_s)
 #if FMINUS_HAS_FILES_WRITE
 FMINUS_RUNTIME_SYMBOL(fminus_rt_file_write)
 FMINUS_RUNTIME_SYMBOL(fminus_rt_file_append)
+FMINUS_RUNTIME_SYMBOL(fminus_rt_file_write_s)
+FMINUS_RUNTIME_SYMBOL(fminus_rt_file_append_s)
 #endif
 FMINUS_FILES_MAIN_SYMBOL(fminus_rt_files_main_start)
 FMINUS_FILES_MAIN_SYMBOL(fminus_rt_files_main_stop)

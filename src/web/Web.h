@@ -300,6 +300,25 @@ extern "C"
                                std::int32_t count, const void* data, std::int32_t bytes, const char* type,
                                std::int32_t typeLength) noexcept;
 
+    // fminus_web_http_get and fminus_web_http_post with strings in the URL: its format has %s places as well as %d,
+    // each %s the next of the `textCount` texts, the i-th the `lengths[i]` bytes at `texts[i]` (a %s past the last:
+    // empty), each percent-encoded as it is filled in: every byte but the unreserved ones (A-Z, a-z, 0-9, "-", ".", "_",
+    // "~") written %XX, in upper case. The request is FMINUS_WEB_INVALID, before anything is looked up or sent, when a
+    // text is not one (a negative length, or a null address and bytes), when a %s is in the scheme or the authority
+    // (the literal's text up to the "/", "?" or "#" after its "://", the host and the port among it; everything, when
+    // the literal has no "://" before the %s), or when a path segment a %s is written in is, filled in, empty, "." or
+    // "..". The URL filled in then meets every check a URL meets (above): a text whose "/" or "\" becomes %2F or %5C
+    // in the path is FMINUS_WEB_REFUSED, as a literal's would be, and one past 8192 bytes, encoded, FMINUS_WEB_LIMIT.
+    // A %s in the query or the fragment is encoded and nothing more. A format with no %s is exactly the entry point
+    // without strings. A null context: refused, as theirs.
+    void* fminus_web_http_get_s(void* context, const char* url, std::int32_t length, const std::int32_t* ints,
+                                std::int32_t count, const char* const* texts, const std::int32_t* lengths,
+                                std::int32_t textCount) noexcept;
+    void* fminus_web_http_post_s(void* context, const char* url, std::int32_t length, const std::int32_t* ints,
+                                 std::int32_t count, const char* const* texts, const std::int32_t* lengths,
+                                 std::int32_t textCount, const void* data, std::int32_t bytes, const char* type,
+                                 std::int32_t typeLength) noexcept;
+
     // Blocks the calling thread until the request is done or `timeoutMs` milliseconds have passed (0: does not wait;
     // negative: until it is done, which the policy's timeout bounds), and returns its status then (0 if it is still
     // pending). While the calling thread has a deadline scope open under the request's context (below), its innermost
@@ -521,6 +540,21 @@ extern "C"
     std::int32_t fminus_web_http_reply_text(void* request, std::int32_t status, const char* type,
                                             std::int32_t typeLength, const char* format, std::int32_t formatLength,
                                             const double* values, std::int32_t count) noexcept;
+
+    // A reply written in place: the body written straight into the request's own reply buffer (the one the replies
+    // above copy into), then published. fminus_web_http_reply_buffer gives that buffer's address, and its capacity,
+    // the policy's maxReplyBytes, in `*capacity` (when `capacity` is not null); null and 0 for a handle that is not a
+    // request the caller holds. The buffer is the caller's to write until it answers the request, and nothing else
+    // reads it before then: getting it answers nothing (a request whose buffer was got and nothing published is still
+    // unanswered, and still must be answered, by any reply). fminus_web_http_reply_written answers the request with
+    // `status` and the first `bytes` bytes of the buffer as its body, with the content type of `typeLength` bytes at
+    // `type` (empty: application/octet-stream), and returns as the replies above: 0; FMINUS_WEB_LIMIT for `bytes` over
+    // the capacity (the request still the caller's); FMINUS_WEB_INVALID for a handle not held, a negative `bytes`, a
+    // status or a content type that cannot be (204 and 304 with a body among them); FMINUS_WEB_CANCELLED. Both are
+    // wait-free; json_write (runtime/Runtime.h) writes a literal into the buffer and gives the bytes to publish.
+    char* fminus_web_http_reply_buffer(void* request, std::int32_t* capacity) noexcept;
+    std::int32_t fminus_web_http_reply_written(void* request, std::int32_t status, std::int32_t bytes,
+                                               const char* type, std::int32_t typeLength) noexcept;
 
     // fminus_web_http_size and fminus_web_http_body (above) on a request a server received: its body, of
     // Content-Length bytes (with one 0 byte after its last, not counted), until the request is answered.
