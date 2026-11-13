@@ -73,8 +73,8 @@ curl -X POST http://localhost:8080/stop                       # 204, and the run
 ```
 
 Stop it with Ctrl-C or `POST /stop`; it prints the changes when its time is up. Without `--web-listen`, `run` returns -4
-(`HTTP_REFUSED`) at once: nothing listens unless the person running it says where. In a build without the web server,
-`remote.fm` compiles to nothing, and `--run run` says it has no such function.
+(`HTTP_REFUSED`) at once: nothing listens unless the person running it says where. In a build without the web server or
+the JSON parser, `remote.fm` compiles to nothing, and `--run run` says it has no such function.
 
 From another device on the network, the listen must not be loopback, so it needs a token (or `--web-open`), which the
 page reads from its address after a `#` (a browser never sends that part to a server) and sends on each request:

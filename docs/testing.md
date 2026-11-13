@@ -300,7 +300,7 @@ float gain(float x, float g)
 | `REQUIRES: json` (or `UNSUPPORTED: json`) | a build with the JSON parser, `FMINUS_JSON`, as the build tree's `fminus/Config.h` says (`json.fm`, `json-errors.fm`; `json-off.fm` runs only without it) |
 | `REQUIRES: xml` (or `UNSUPPORTED: xml`) | a build with the XML parser, `FMINUS_XML`, the same way (`xml.fm`, `xml-errors.fm`; `xml-off.fm` runs only without it) |
 | `REQUIRES: web` (or `UNSUPPORTED: web`) | a build with the web library, `FMINUS_WEB`, the same way (`web.fm`, `web-errors.fm`, which make no request; `web-off.fm` runs only without it) |
-| `REQUIRES: web-server` (or `UNSUPPORTED: web-server`) | a build with its server, `FMINUS_WEB_SERVER`, the same way (`web-server.fm` and `serve.fm`, which listen on 127.0.0.1 and ask themselves, and `web-server-errors.fm`, `serve-errors.fm` and `serve-when.fm`, a route's `when` and `switch` on a string; `web-server-off.fm` runs only without it) |
+| `REQUIRES: web-server` (or `UNSUPPORTED: web-server`) | a build with its server, `FMINUS_WEB_SERVER`, the same way (`web-server.fm`, `serve.fm` and `serve-strings.fm`, which listen on 127.0.0.1 and ask themselves, the last two answering with JSON literals, so `REQUIRES: web-server, json`; and `web-server-errors.fm`, `serve-errors.fm` and `serve-when.fm`, a route's `when` and `switch` on a string; `web-server-off.fm` runs only without it) |
 | `REQUIRES: files` (or `UNSUPPORTED: files`) | a build with the file interface, `FMINUS_FILES`, the same way (`files.fm`, `files-errors.fm`, which read and write only in `%t`; `files-off.fm` runs only without it) |
 | `REQUIRES: files-write`, `files-anywhere` (or `UNSUPPORTED:`) | a build with its writing, `FMINUS_FILES_WRITE`, or its absolute names, `FMINUS_FILES_ANYWHERE` (`files-write.fm`, `files-anywhere.fm`; `files-write-off.fm` and `files-anywhere-off.fm` only without them) |
 | `REQUIRES: files-types` (or `UNSUPPORTED: files-types`) | a build whose `FMINUS_FILES_TYPES` lists the types it can touch, which `%files_types` substitutes (`files-types.fm`; `files.fm`, which reads a `.json`, only without it) |
@@ -337,6 +337,35 @@ includes `"Inputs/include/pole.fm"`, beside itself.
 - Prefer `CHECK-NOT: call` and similar properties over transcribing the whole function.
 - Check loop metadata at `-O0`, where the lowering wrote it: passes that duplicate a latch do not always copy it
   (`progress.fm`).
+
+## Builds that leave features out
+
+A build option that leaves a feature out (`FMINUS_JSON`, `FMINUS_XML`, `FMINUS_FILES`, `FMINUS_FILES_WRITE`,
+`FMINUS_WEB`, `FMINUS_WEB_SERVER`) changes what compiles: a unit test's `#if FMINUS_HAS_...` branch, a helper only
+the feature's tests use (an unused one is an error under `-Werror`), a lit test's `REQUIRES:` or `UNSUPPORTED:`, and
+an example's `#ifdef __FMINUS_...__`. A change to a feature is tested in these trees, each the `release` preset in a
+directory of its own (`-B`), configured once and then built and tested as any other:
+
+| Tree | Options beside the preset's | What only it runs |
+|---|---|---|
+| `build-release` | none: JSON, XML and files on, writing and the web off | `files-write-off.fm`, `web-off.fm`, `within-off.fm`, `web-server-off.fm`, the unit tests' branches without the web library |
+| `build-release-web` | `-DFMINUS_WEB=ON -DFMINUS_WEB_SERVER=ON -DFMINUS_FILES_WRITE=ON -DFMINUS_FILES_ANYWHERE=ON` | every feature: the server's tests, which listen on 127.0.0.1 and ask themselves; files written in `%t` |
+| `build-release-off` | `-DFMINUS_JSON=OFF -DFMINUS_XML=OFF -DFMINUS_FILES=OFF` | every parser and the file interface left out: `json-off.fm`, `json-literal-off.fm`, `xml-off.fm`, `files-off.fm` |
+| `build-release-webonly` | `-DFMINUS_WEB=ON` | the client without the server: `web-server-off.fm` beside `within` and a URL's holes working |
+| `build-release-nojson` | `-DFMINUS_WEB=ON -DFMINUS_WEB_SERVER=ON -DFMINUS_FILES_WRITE=ON -DFMINUS_FILES_ANYWHERE=ON -DFMINUS_JSON=OFF -DFMINUS_XML=OFF` | the server without the JSON writer: every sink's JSON literal (a reply's, `http_reply_json`'s, `http_post`'s, `file_write`'s and `file_append`'s) is the "leaves out" error (`json-literal-sinks-off.fm`, `serve-errors.fm`'s `NOJSON` lines, `ServeTest.cpp`, `JsonLiteralTest.cpp`), and `examples/presets/` and `examples/remote/` compile to nothing |
+
+```bash
+cmake --preset release -B build-release-off -DFMINUS_JSON=OFF -DFMINUS_XML=OFF -DFMINUS_FILES=OFF
+cmake --build build-release-off
+ctest --test-dir build-release-off --output-on-failure
+```
+
+The trees share the release flavor of LLVM in the dependency cache, and the web library's dependencies once one tree
+has built them, so a new tree compiles FMinus alone. In each, every test passes but those a machine cannot run.
+`examples-every-build.test` compiles each example that uses a feature a build may leave out, so an example missing
+its `#ifdef` fails in the tree that leaves the feature out. A lit test whose output differs by feature takes check
+prefixes by it, `--check-prefixes=CHECK,%if json %{JSON%} %else %{NOJSON%}` (`serve-errors.fm`), rather than leaving
+the other trees untested.
 
 ## Example harnesses
 

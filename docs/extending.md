@@ -8753,10 +8753,11 @@ walks (`Parallel.cpp`, `Constants.cpp`, `Expressions.cpp`); `ir::WebRoute::param
 `tests/lit/fminus/serve.fm` and `serve-errors.fm`, and `web-server-off.fm`'s serve. The example `examples/remote/` is
 written with the statements. Built with `-Werror` and tested in the `release` preset on Linux x86-64 only, in two trees,
 the default and one with the web library, its server, file writing and absolute names, every test passing but the one
-this machine cannot run (the smoke test of LLVM's own `opt`, as for recipes 38 to 44); not in a tree with `FMINUS_WEB`
-and not its server, nor in `dev` or `asan`, nor on macOS or Windows. [research/syntax/README.md](research/syntax/README.md)
-is the report, §5 and §6.1; this is its second step. [web.md](web.md), "serve, route and reply" and "The JSON
-literal", is the manual.*
+this machine cannot run (the smoke test of LLVM's own `opt`, as for recipes 38 to 44), and since also in the three
+trees that leave features out ([testing.md](testing.md), "Builds that leave features out"), one of them with
+`FMINUS_WEB` and not its server; not in `dev` or `asan`, nor on macOS or Windows.
+[research/syntax/README.md](research/syntax/README.md) is the report, §5 and §6.1; this is its second step.
+[web.md](web.md), "serve, route and reply" and "The JSON literal", is the manual.*
 
 FMinus's own syntax, the first since `parallel`: three statements that put the server's builtins (recipe 42) under a
 loop and a chain the compiler writes, and a literal that writes JSON without a JSON value. What a program wrote by hand
@@ -9247,9 +9248,10 @@ the runtime's writer (`lowerJsonReply`, `jsonDescribe`, `JsonPlan`, `Serve.cpp`;
 `ServeTest.cpp`, `HttpServerTest.cpp`, `WebServerTest.cpp` and `FrontendTest.cpp`, `tests/lit/fminus/holes.fm`,
 `holes-web.fm`, `holes-errors.fm`, `serve-strings.fm` and `string-reads.fm`. Built with `-Werror` and tested in the
 `release` preset on Linux x86-64 only, in two trees, the default and one with the web library, its server, file writing
-and absolute names, every test passing but the one this machine cannot run (the smoke test of LLVM's own `opt`); not in
-a tree without `FMINUS_JSON`, nor in one with the web library and not its server, nor in `dev` or `asan`, nor on macOS
-or Windows. [research/syntax/README.md](research/syntax/README.md) is the report, §4.2, §4.3, §5.2 and §6.1; this is the
+and absolute names, every test passing but the one this machine cannot run (the smoke test of LLVM's own `opt`), and
+since also in the three trees that leave features out ([testing.md](testing.md), "Builds that leave features out"),
+without `FMINUS_JSON` and with the web library and not its server among them; not in `dev` or `asan`, nor on macOS or
+Windows. [research/syntax/README.md](research/syntax/README.md) is the report, §4.2, §4.3, §5.2 and §6.1; this is the
 rest of its step 3. The libraries' halves came first, in the two commits before recipe 44 and the one before recipe 46
 (`fminus_web_http_text`, `_path`, `_header`; `fminus_rt_json_text`, `_xml_text`, `_file_name`; the `_s` functions;
 `fminus_rt_json_write`, `fminus_web_http_reply_buffer` and `_reply_written`).*
@@ -9664,9 +9666,9 @@ unchanged. Tests: `tests/unit/JsonReadTest.cpp`, cases of `FieldAttributeTest.cp
 `json-off.fm`, and `field-attributes-errors.fm`'s changed lines. The example: `examples/settings/`. Built with `-Werror`
 and tested in the `release` preset on Linux x86-64 only, in two trees, the default and one with the web library, its
 server, file writing and absolute names, every test passing but the one this machine cannot run (the smoke test of
-LLVM's own `opt`); not in a tree without `FMINUS_JSON` (`json-off.fm`'s line and the unit test's branch for it have
-not run), nor in `dev` or `asan`, nor on macOS or Windows. [research/syntax/README.md](research/syntax/README.md) is
-the report, §6.2; this is the reading half of its step 4.*
+LLVM's own `opt`), and since also in the three trees that leave features out ([testing.md](testing.md), "Builds that
+leave features out"), two of them without `FMINUS_JSON`; not in `dev` or `asan`, nor on macOS or Windows.
+[research/syntax/README.md](research/syntax/README.md) is the report, §6.2; this is the reading half of its step 4.*
 
 Five `json_float`s walk a document five times, and say nothing about which value was missing. A module says what it
 wants once, by its fields, and the compiler knows them:
@@ -9883,8 +9885,9 @@ default reported once (`checkRouteParameters`). The example `examples/presets/`,
 `json-literal-errors.fm` and `json-literal-off.fm` (new), and `serve-errors.fm`'s changed lines. Built with `-Werror`
 and tested in the `release` preset on Linux x86-64 only, in two trees, the default and one with the web library, its
 server, file writing and absolute names, every test passing but the one this machine cannot run (the smoke test of
-LLVM's own `opt`); not in a tree without `FMINUS_JSON` (`json-literal-off.fm` and the unit tests' branches for it have
-not run), nor in one with the web library and not its server, nor in `dev` or `asan`, nor on macOS or Windows. The
+LLVM's own `opt`), and since also in the three trees that leave features out ([testing.md](testing.md), "Builds that
+leave features out"), without `FMINUS_JSON` and with the web library and not its server among them; not in `dev` or
+`asan`, nor on macOS or Windows. The
 libraries' new functions and their tests, with the libraries' others, ran under GCC 13's AddressSanitizer with
 UndefinedBehaviorSanitizer and under ThreadSanitizer (below). [research/syntax/README.md](research/syntax/README.md)
 is the report, §6 and §8; this is the last of its steps. [web.md](web.md), "The JSON literal", and

@@ -8,7 +8,7 @@
 // call fminus_web_http_reply_text_s, the strings in two arrays after the values. Run, a program
 // asks its own server for a preset by name, and answers with the name, a header and the path: nothing binds anything
 // but 127.0.0.1, or connects anywhere else.
-// REQUIRES: web-server
+// REQUIRES: web-server, json
 // RUN: fminus %s -O0 | FileCheck %s
 // RUN: fminus %s --emit ast | FileCheck %s --check-prefix=AST
 // RUN: fminus %s --run main 3 --web-listen 127.0.0.1:0 --web-allow 'http://127.0.0.1:*/presets/*' | FileCheck %s --check-prefix=SERVED

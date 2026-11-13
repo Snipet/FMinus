@@ -72,7 +72,7 @@ TEST_CASE("a JSON literal, in a build without the JSON writer, is the error that
                    "{\n"
                    "    serve (s) { route \"GET /a\" { reply 200, json { \"a\": 1 }; } }\n"
                    "}\n")
-          == "test.fm:3:40: error: a JSON literal needs the JSON writer, which this build of FMinus leaves out "
+          == "test.fm:3:45: error: a JSON literal needs the JSON writer, which this build of FMinus leaves out "
              "(FMINUS_JSON=OFF)\n");
 }
 #endif
@@ -392,6 +392,7 @@ TEST_CASE("a serve's routes take their parameters from the path and the query: w
     CHECK(request(port, "GET", "/nothing").status == 404);
 }
 
+#if FMINUS_HAS_JSON   // the JSON literal is the JSON writer's (FMINUS_JSON)
 TEST_CASE("a JSON literal is written as the program wrote it: its numbers shortest, a NaN null, its keys escaped",
           "[serve][web][server][json]")
 {
@@ -569,6 +570,7 @@ TEST_CASE("two serves on two threads each take their own routes' requests, and l
     CHECK(std::chrono::steady_clock::now() - start >= std::chrono::milliseconds(25));
     CHECK(load(served.instance->memory(), 0) == 0);
 }
+#endif
 
 TEST_CASE("webRoutes lists a route statement with its parameters: name, type, what fills it, range and default",
           "[serve][web][server][library]")
@@ -734,6 +736,7 @@ TEST_CASE("a string parameter is a whole segment of the path, or a query's field
     CHECK_FALSE(routes[5].parameters[0].defaultText);
 }
 
+#if FMINUS_HAS_JSON
 TEST_CASE("a serve in a [[clang::nonblocking]] method, compiled by the JIT, takes, fills and answers without "
           "allocating or making a system call",
           "[serve][web][server][library]")
@@ -898,6 +901,7 @@ TEST_CASE("a serve in a [[clang::nonblocking]] method, compiled by the JIT, take
     for (int fd : clients)
         ::close(fd);
 }
+#endif
 
 TEST_CASE("every path through a route must reach a reply: the missing return's analysis, at the closing brace",
           "[codegen][serve]")
@@ -1056,7 +1060,28 @@ TEST_CASE("serve, route and reply's errors, each once at its column", "[codegen]
              "test.fm:11:34: error: the default of a bool parameter is 0 or 1, not 2\n"
              "test.fm:12:29: error: parameter 'a_query_name_that_is_longer_than_sixty_four_bytes_which_no_query_name_is' "
              "is read from the query's field of its name, which is 1 to 64 bytes, not 72\n");
-    // A reply's forms, each builtin's checks of its arguments, and the JSON literal's.
+    // A reply's forms, each builtin's checks of its arguments, and the JSON literal's; in a build without the JSON
+    // writer, each literal of a reply is that one error, and the checks of its keys and values are not made.
+#if FMINUS_HAS_JSON
+    const std::string written = "test.fm:13:48: error: a JSON literal does not write a pointer, 'int *': write what "
+                                "it points to, *p, or its first elements, json_slice(p, count)\n"
+                                "test.fm:13:64: error: duplicate key 'a' in a JSON object\n"
+                                "test.fm:13:43: note: previous key is here\n"
+                                "test.fm:14:31: error: incompatible pointer to integer conversion passing 'char[4]' to "
+                                "parameter of type 'int'\n"
+                                "test.fm:15:44: error: a JSON key is UTF-8 text, and this byte is no part of any\n"
+                                "test.fm:15:59: error: FMinus has no JSON values: a JSON literal is only the body of a "
+                                "reply, http_reply_json, http_post, file_write or file_append\n"
+                                "test.fm:16:59: error: FMinus has no JSON values: a JSON literal is only the body of a "
+                                "reply, http_reply_json, http_post, file_write or file_append\n";
+#else
+    const std::string notBuilt = "error: a JSON literal needs the JSON writer, which this build of FMinus leaves out "
+                                 "(FMINUS_JSON=OFF)\n";
+    const std::string written = "test.fm:13:36: " + notBuilt
+                                + "test.fm:14:31: error: incompatible pointer to integer conversion passing 'char[4]' "
+                                  "to parameter of type 'int'\n"
+                                  "test.fm:15:36: " + notBuilt + "test.fm:16:24: " + notBuilt;
+#endif
     CHECK(errorsOf("enum E { A, B };\n"
                    "void f(http_server s, const float* t, int* p)\n"
                    "{\n"
@@ -1086,19 +1111,9 @@ TEST_CASE("serve, route and reply's errors, each once at its column", "[codegen]
              "test.fm:10:56: error: format specifies type 'double' but the argument has type 'int'\n"
              "test.fm:11:44: error: character '\\x0a' is not allowed in a content type: it is printable ASCII\n"
              "test.fm:12:53: error: a JSON literal is a reply's whole body: nothing follows it\n"
-             "test.fm:13:48: error: a JSON literal does not write a pointer, 'int *': write what it points to, *p, "
-             "or its first elements, json_slice(p, count)\n"
-             "test.fm:13:64: error: duplicate key 'a' in a JSON object\n"
-             "test.fm:13:43: note: previous key is here\n"
-             "test.fm:14:31: error: incompatible pointer to integer conversion passing 'char[4]' to parameter of "
-             "type 'int'\n"
-             "test.fm:15:44: error: a JSON key is UTF-8 text, and this byte is no part of any\n"
-             "test.fm:15:59: error: FMinus has no JSON values: a JSON literal is only the body of a reply, "
-             "http_reply_json, http_post, file_write or file_append\n"
-             "test.fm:16:59: error: FMinus has no JSON values: a JSON literal is only the body of a reply, "
-             "http_reply_json, http_post, file_write or file_append\n"
-             "test.fm:20:20: error: FMinus has no JSON values: a JSON literal is only the body of a reply, "
-             "http_reply_json, http_post, file_write or file_append\n");
+             + written
+             + "test.fm:20:20: error: FMinus has no JSON values: a JSON literal is only the body of a reply, "
+               "http_reply_json, http_post, file_write or file_append\n");
 }
 
 TEST_CASE("no two routes one request could match unless one is more specific: an error at the second, a note at the "
@@ -1299,6 +1314,7 @@ TEST_CASE("a route sees through a when as through an if without an else, and thr
     }
 }
 
+#if FMINUS_HAS_JSON
 TEST_CASE("a JSON literal in a reply writes arrays, vectors, modules and enumerations; a pointer and a handle are "
           "errors that say so",
           "[codegen][serve][json]")
@@ -1322,6 +1338,7 @@ TEST_CASE("a JSON literal in a reply writes arrays, vectors, modules and enumera
              "enumeration's value, a float2, float4 or float8, an array or a module, or an object or an array of "
              "them, not 'http_server'\n");
 }
+#endif
 
 TEST_CASE("serve meets string, char and when: each error once, at its column", "[codegen][serve][when][string]")
 {
@@ -1351,6 +1368,14 @@ TEST_CASE("serve meets string, char and when: each error once, at its column", "
     // format's values for a %g the error another non-number is; a string as a serve's server or timeout, the error
     // each gives.
     const std::string literal = "argument to 'http_reply_text' must be a string literal\n";
+#if FMINUS_HAS_JSON
+    const std::string json;   // in a build without the JSON writer, each JSON literal is that one error
+#else
+    const std::string json = "test.fm:12:40: error: a JSON literal needs the JSON writer, which this build of FMinus "
+                             "leaves out (FMINUS_JSON=OFF)\n"
+                             "test.fm:13:40: error: a JSON literal needs the JSON writer, which this build of FMinus "
+                             "leaves out (FMINUS_JSON=OFF)\n";
+#endif
     CHECK(errorsOf("module M\n"
                    "{\n"
                    "    http_server server;\n"
@@ -1382,7 +1407,7 @@ TEST_CASE("serve meets string, char and when: each error once, at its column", "
                    "        serve (server, t) { route \"GET /e\" { reply 1; } }\n"
                    "    }\n"
                    "};\n")
-          == "test.fm:14:40: error: " + literal + "test.fm:15:54: error: " + literal
+          == json + "test.fm:14:40: error: " + literal + "test.fm:15:54: error: " + literal
                  + "test.fm:16:66: error: format specifies type 'double' but the argument has type 'string'\n"
                  + "test.fm:17:40: error: " + literal + "test.fm:18:28: error: " + literal
                  + "test.fm:25:16: error: passing 'char[7]' to parameter of incompatible type 'http_server'\n"

@@ -43,6 +43,7 @@ using namespace fminus::test;
 
 namespace
 {
+#if FMINUS_HAS_JSON || FMINUS_HAS_XML
     // What a function of the program, (data, size, k, out, cap) -> its string's length, wrote into `out`.
     using Read = int(const void*, int, int, char*, int);
 
@@ -52,6 +53,7 @@ namespace
         const int n = read(document.data(), static_cast<int>(document.size()), k, out, 64);
         return n < 0 ? "<" + std::to_string(n) + ">" : std::string(out, static_cast<std::size_t>(n < 64 ? n : 64));
     }
+#endif
 
 #if defined(__linux__)
     // `run`'s result in a child under seccomp's strict mode, where any system call but read, write and exit kills it;

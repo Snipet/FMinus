@@ -1937,6 +1937,7 @@ TEST_CASE("HTTPS against the loopback server, with the test's own certificate au
 
 namespace
 {
+#if FMINUS_HAS_JSON
     // A program that fetches pack <k> from the loopback server at <port>, parses it and reads its numbers: the gain
     // times 1000, plus the table's sum, plus the index times 100; or the status, when it is no 200.
     const char* const kFetch = "float fetch(int port, int k)\n"
@@ -1960,6 +1961,7 @@ namespace
                                "    json_free(doc);\n"
                                "    return result;\n"
                                "}\n";
+#endif
 
     std::unique_ptr<fminus::Program> compileProgram(const std::string& source, const fminus::Program::Options& options)
     {

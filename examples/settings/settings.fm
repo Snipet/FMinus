@@ -13,7 +13,10 @@
 //     fminus examples/settings/settings.fm --run main 2       -1: there is no preset 2
 //
 // The document is a constant here, to keep the example whole; a host hands one over (a file's bytes, a request's
-// body) and the program parses it off the audio thread, as load does.
+// body) and the program parses it off the audio thread, as load does. It is there only in a build with the JSON parser
+// (#ifdef __FMINUS_JSON__), so the file compiles in every build.
+
+#ifdef __FMINUS_JSON__
 enum Wave { SINE, SAW, SQUARE };
 
 module Oscillator
@@ -60,3 +63,4 @@ float main(float preset)
         sum += s.osc[k].detune + (float)s.osc[k].wave + s.osc[k].level;
     return whole ? sum : -1.0f - sum;
 }
+#endif

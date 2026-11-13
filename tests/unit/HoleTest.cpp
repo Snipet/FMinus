@@ -57,6 +57,7 @@ namespace
         return out;
     }
 
+#if FMINUS_HAS_FILES || FMINUS_HAS_WEB
     std::unique_ptr<fminus::Program> compileProgram(const std::string& source, const fminus::Program::Options& options)
     {
         std::string errors;
@@ -65,6 +66,7 @@ namespace
         REQUIRE(program);
         return program;
     }
+#endif
 }   // namespace
 
 TEST_CASE("scanHoles: each hole a %d to the library, its braces unescaped, its percent signs as they were",

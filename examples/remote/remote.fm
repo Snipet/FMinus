@@ -8,9 +8,10 @@
 //
 // The page (page/index.html and page/remote.js) is the host's to hand over as static content: remote.cpp gives the
 // files to Options::web.server.files, and the driver reads the directory with --web-root (README.md). Remote is there
-// only in a build with the web server (#ifdef __FMINUS_WEB_SERVER__), so the file compiles in every build.
+// only in a build with the web server and the JSON writer its replies use (#if defined(__FMINUS_WEB_SERVER__) && ...),
+// so the file compiles in every build.
 
-#ifdef __FMINUS_WEB_SERVER__
+#if defined(__FMINUS_WEB_SERVER__) && defined(__FMINUS_JSON__)
 module Remote
 {
     http_server server;

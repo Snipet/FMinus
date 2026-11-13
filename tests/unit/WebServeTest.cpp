@@ -58,6 +58,7 @@
 
 namespace
 {
+#if FMINUS_HAS_JSON
     // The program that serves: a synth whose process() takes the requests waiting, between blocks, and whose load()
     // takes them on a thread of the host's, in http_accept, until its server closes.
     constexpr const char* kSynth =
@@ -189,6 +190,7 @@ namespace
         "    http_close(r);\n"
         "    return status * 1000 + size;\n"
         "}\n";
+#endif
 
     std::unique_ptr<fminus::Program> compileProgram(const char* source, const fminus::Program::Options& options)
     {

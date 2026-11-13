@@ -27,6 +27,25 @@ void served(void* s) [[clang::nonblocking]]
     serve (s, 10) { route "GET /b" { reply 204; } }
 }
 
+// A request's text, and a serve whose route takes a string and replies with one in a JSON literal: one error a call,
+// and one a serve.
+int texts(http_request q, http_server s)
+{
+    int n = string_size(http_header(q, "content-type")) + string_size(http_path(q));
+    n = n + string_size(http_query_string(q, "mode", "full"));
+    serve (s) { route "GET /p/{name}" (string name) { reply 200, json { "name": name }; } }
+    return n;
+}
+
+// A reply of json (expression) in a serve, and http_reply_json itself: the server's error, once each, whatever the JSON
+// writer.
+module P { float gain; };
+int replied(http_request q, http_server s, P* p)
+{
+    serve (s) { route "GET /p" { reply 200, json (*p); } }
+    return http_reply_json(q, 200, json (*p));
+}
+
 // CHECK: web-server-off.fm:15:15: error: 'http_listen' needs the web server, which this build of FMinus leaves out (FMINUS_WEB_SERVER=OFF)
 // CHECK: web-server-off.fm:16:15: error: 'http_next' needs the web server, which this build of FMinus leaves out (FMINUS_WEB_SERVER=OFF)
 // CHECK: web-server-off.fm:17:15: error: 'http_accept' needs the web server, which this build of FMinus leaves out (FMINUS_WEB_SERVER=OFF)
@@ -40,6 +59,12 @@ void served(void* s) [[clang::nonblocking]]
 // CHECK: web-server-off.fm:20:74: error: 'http_reply_text' needs the web server, which this build of FMinus leaves out (FMINUS_WEB_SERVER=OFF)
 // CHECK: web-server-off.fm:26:5: error: 'serve' needs the web server, which this build of FMinus leaves out (FMINUS_WEB_SERVER=OFF)
 // CHECK: web-server-off.fm:27:5: error: 'serve' needs the web server, which this build of FMinus leaves out (FMINUS_WEB_SERVER=OFF)
+// CHECK: web-server-off.fm:34:25: error: 'http_header' needs the web server, which this build of FMinus leaves out (FMINUS_WEB_SERVER=OFF)
+// CHECK: web-server-off.fm:34:71: error: 'http_path' needs the web server, which this build of FMinus leaves out (FMINUS_WEB_SERVER=OFF)
+// CHECK: web-server-off.fm:35:25: error: 'http_query_string' needs the web server, which this build of FMinus leaves out (FMINUS_WEB_SERVER=OFF)
+// CHECK: web-server-off.fm:36:5: error: 'serve' needs the web server, which this build of FMinus leaves out (FMINUS_WEB_SERVER=OFF)
+// CHECK: web-server-off.fm:45:5: error: 'serve' needs the web server, which this build of FMinus leaves out (FMINUS_WEB_SERVER=OFF)
+// CHECK: web-server-off.fm:46:12: error: 'http_reply_json' needs the web server, which this build of FMinus leaves out (FMINUS_WEB_SERVER=OFF)
 
 // LISTEN: fminus: --web-listen: this build of FMinus leaves out the web server (FMINUS_WEB_SERVER=OFF)
 // ROOT: fminus: --web-root: this build of FMinus leaves out the web server (FMINUS_WEB_SERVER=OFF)

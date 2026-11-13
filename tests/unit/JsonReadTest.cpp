@@ -43,6 +43,7 @@ namespace
     constexpr const char* kCall = "module M { float a; };\n"
                                   "bool r(json_doc d, M* m) { return json_read(d, \"\", m); }\n";
 
+#if FMINUS_HAS_JSON
     // The program compiled at -O0 into a module, kept with its context: its constants, as the JIT would get them.
     struct Lowered
     {
@@ -91,6 +92,7 @@ namespace
         }
         return names;
     }
+#endif
 } // namespace
 
 #if FMINUS_HAS_JSON

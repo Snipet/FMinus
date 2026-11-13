@@ -6,7 +6,7 @@
 // request's reply buffer: a constant description of its bytes and operations, each value in an 8-byte slot of the
 // frame, then published. At -O2 the take stays in the loop. Through the driver, a program asks its own server and answers with a JSON
 // literal, on one thread: nothing binds anything but 127.0.0.1, or connects anywhere else.
-// REQUIRES: web-server
+// REQUIRES: web-server, json
 // RUN: fminus %s -O0 | FileCheck %s
 // RUN: fminus %s | FileCheck %s --check-prefix=OPT
 // RUN: fminus %s --emit ast | FileCheck %s --check-prefix=AST

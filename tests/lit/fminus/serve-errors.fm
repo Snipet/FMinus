@@ -3,7 +3,7 @@
 // can end without a reply, what a route's block may not do, a reply outside a route or in no form, a JSON literal's
 // values and a JSON literal anywhere but a sink, and two routes one request could match, with a note at the first.
 // REQUIRES: web-server
-// RUN: not fminus %s 2>&1 | FileCheck %s --implicit-check-not=error: --implicit-check-not=note:
+// RUN: not fminus %s 2>&1 | FileCheck %s --check-prefixes=CHECK,%if json %{JSON%} %else %{NOJSON%} --implicit-check-not=error: --implicit-check-not=note:
 
 module M
 {
@@ -57,7 +57,9 @@ void outside(http_server server, bool b)
 // CHECK: serve-errors.fm:18:52: error: fminus::range's minimum must be below its maximum
 // CHECK: serve-errors.fm:19:60: error: route 'GET /b' does not reply in all control paths
 // CHECK: serve-errors.fm:20:30: error: cannot return from a route: a route ends with a reply
-// CHECK: serve-errors.fm:21:53: error: a JSON literal's value is a float, a double, an int, a bool, a string, an enumeration's value, a float2, float4 or float8, an array or a module, or an object or an array of them, not 'http_server'
+// Without the JSON writer (FMINUS_JSON=OFF), a reply's JSON literal is that one error, and its values go unchecked.
+// JSON: serve-errors.fm:21:53: error: a JSON literal's value is a float, a double, an int, a bool, a string, an enumeration's value, a float2, float4 or float8, an array or a module, or an object or an array of them, not 'http_server'
+// NOJSON: serve-errors.fm:21:41: error: a JSON literal needs the JSON writer, which this build of FMinus leaves out (FMINUS_JSON=OFF)
 // CHECK: serve-errors.fm:22:30: error: no form of reply takes 2 values: a reply is 'reply status;', 'reply status, data, bytes, "type";', 'reply status, "type", "format", values...;' or 'reply status, json { ... };'
 // CHECK: serve-errors.fm:24:9: error: 'reply' statement not in a route
 // CHECK: serve-errors.fm:27:28: error: FMinus has no JSON values: a JSON literal is only the body of a reply, http_reply_json, http_post, file_write or file_append
@@ -69,6 +71,7 @@ void outside(http_server server, bool b)
 // on a string without a default and a when that may not reply, a string as a serve's server or timeout, and a when in
 // a route of a function that is no method.
 // CHECK: serve-errors.fm:38:44: error: a route's parameter is an int, a float, a bool, a string or an http_request, not 'char'
+// NOJSON: serve-errors.fm:39:41: error: a JSON literal needs the JSON writer, which this build of FMinus leaves out (FMINUS_JSON=OFF)
 // CHECK: serve-errors.fm:40:41: error: argument to 'http_reply_text' must be a string literal
 // CHECK: serve-errors.fm:41:61: error: format specifies type 'double' but the argument has type 'string'
 // CHECK: serve-errors.fm:42:66: error: route 'GET /k' does not reply in all control paths
