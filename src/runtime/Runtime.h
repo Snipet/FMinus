@@ -505,6 +505,28 @@ extern "C"
                                          const std::int32_t* ints, std::int32_t count, const char* const* texts,
                                          const std::int32_t* lengths, std::int32_t textCount, const void* data,
                                          std::int32_t bytes) noexcept;
+
+#if FMINUS_HAS_JSON
+    // file_write and file_append of a JSON literal (a build with FMINUS_JSON too): the file's bytes are the text
+    // fminus_rt_json_write makes of `description` and `values`, and for fminus_rt_file_append_json that text and one
+    // newline after it (so that appends make JSON Lines). The name, with or without strings (null `texts` and a
+    // `textCount` of 0: none, exactly as fminus_rt_file_write's), as fminus_rt_file_write_s takes it. The text is
+    // measured first (a call with no buffer, which writes nothing), and its size meets the same checks as `bytes`
+    // does, in the same order, after the name's: more than maxFileBytes is FMINUS_FILE_LIMIT. Only then is it written,
+    // once, into a buffer of exactly its size, which the file is written from as fminus_rt_file_write writes `data`;
+    // the values are read twice, and must not change between (a second text of another size is FMINUS_FILE_FAILED,
+    // and nothing is written). A description that is not well formed (or one with values and a null `values`) is
+    // FMINUS_FILE_INVALID, as a negative `bytes` is: after the name's own refusals, before the policy's; a buffer that
+    // cannot be had, FMINUS_FILE_FAILED. The same statuses, and the same quotas, as fminus_rt_file_write's otherwise.
+    std::int32_t fminus_rt_file_write_json(void* context, const char* name, std::int32_t length,
+                                           const std::int32_t* ints, std::int32_t count, const char* const* texts,
+                                           const std::int32_t* lengths, std::int32_t textCount,
+                                           const void* description, const void* values) noexcept;
+    std::int32_t fminus_rt_file_append_json(void* context, const char* name, std::int32_t length,
+                                            const std::int32_t* ints, std::int32_t count, const char* const* texts,
+                                            const std::int32_t* lengths, std::int32_t textCount,
+                                            const void* description, const void* values) noexcept;
+#endif
 #endif
 
     // An executable's (a C main whose program calls a file builtin): it has no host, so the person who runs it says

@@ -1,7 +1,7 @@
 // serve, route and reply's errors (src/ir/Serve.cpp, src/ir/WebServer.cpp), each once, at its column: a serve with a
 // timeout in a nonblocking function (it blocks, as http_accept does), a route's literal and parameters, a route that
 // can end without a reply, what a route's block may not do, a reply outside a route or in no form, a JSON literal's
-// values and a JSON literal anywhere but a reply, and two routes one request could match, with a note at the first.
+// values and a JSON literal anywhere but a sink, and two routes one request could match, with a note at the first.
 // REQUIRES: web-server
 // RUN: not fminus %s 2>&1 | FileCheck %s --implicit-check-not=error: --implicit-check-not=note:
 
@@ -57,10 +57,10 @@ void outside(http_server server, bool b)
 // CHECK: serve-errors.fm:18:52: error: fminus::range's minimum must be below its maximum
 // CHECK: serve-errors.fm:19:60: error: route 'GET /b' does not reply in all control paths
 // CHECK: serve-errors.fm:20:30: error: cannot return from a route: a route ends with a reply
-// CHECK: serve-errors.fm:21:53: error: a JSON literal's value is a float, a double, an int, a bool, a string, an object or an array, not 'http_server'
+// CHECK: serve-errors.fm:21:53: error: a JSON literal's value is a float, a double, an int, a bool, a string, an enumeration's value, a float2, float4 or float8, an array or a module, or an object or an array of them, not 'http_server'
 // CHECK: serve-errors.fm:22:30: error: no form of reply takes 2 values: a reply is 'reply status;', 'reply status, data, bytes, "type";', 'reply status, "type", "format", values...;' or 'reply status, json { ... };'
 // CHECK: serve-errors.fm:24:9: error: 'reply' statement not in a route
-// CHECK: serve-errors.fm:27:28: error: FMinus has no JSON values: a JSON literal is only a reply's body, 'reply status, json { ... };'
+// CHECK: serve-errors.fm:27:28: error: FMinus has no JSON values: a JSON literal is only the body of a reply, http_reply_json, http_post, file_write or file_append
 // CHECK: serve-errors.fm:31:74: error: route 'GET /f/1/{y}' conflicts with 'GET /f/{x}/2': GET /f/1/2 matches both, and neither is more specific than the other
 // CHECK: serve-errors.fm:31:32: note: the other route is here
 

@@ -1,10 +1,12 @@
 // examples/presets/presets.fm: a store of named presets a page or a script keeps over HTTP (docs/web.md and
-// docs/files.md; docs/research/syntax/README.md, §8's service). A preset has a name, which the request's path gives
-// (`PUT /presets/warm-pad`), and a body of JSON, `{"gain": 0.5, "cutoff": 1200}`, whose numbers are checked when it
-// arrives and which is then stored as it came, as the file presets/<name>.json in the folder its host maps. The name is
-// a string, a route's parameter: a whole segment of the path, filled into the file's name by a hole, `{name}`, where
-// the runtime checks it again (no '/', no leading '.', no device name of Windows: a name it refuses is the program's
-// 400). Its host sees every route and every file it can name before anything runs: each hole a "*".
+// docs/files.md; docs/research/syntax/README.md, §8's service, in full). A preset has a name, which the request's path
+// gives (`PUT /presets/warm-pad`), and a body of JSON, `{"gain": 0.5, "cutoff": 1200, "wave": "SAW"}`, read into a
+// module, Preset, by its fields' names: a field missing, of another kind or outside its range is the program's 400, and
+// nothing is written. What is stored is the preset, not whatever was sent: the module written back as JSON,
+// `json (preset)`, as the file presets/<name>.json in the folder its host maps. The name is a string, a route's
+// parameter: a whole segment of the path, filled into the file's name by a hole, `{name}`, where the runtime checks it
+// again (no '/', no leading '.', no device name of Windows: a name it refuses is the program's 400). Its host sees
+// every route and every file it can name before anything runs: each hole a "*".
 //
 // It runs on a thread of the host's, not the audio thread: it parses JSON and writes files, which allocate and wait
 // on the disk, and its serve waits up to 100 ms for a request (a serve with a timeout blocks). It is there only in a
@@ -14,20 +16,28 @@
 #ifdef __FMINUS_JSON__
 #ifdef __FMINUS_FILES_WRITE__
 
-// A preset's body checked and stored as presets/<name>.json: the status to answer with. Not JSON, or a number missing
-// or out of its range, is 400, and nothing is written; a name the file interface refuses (".hidden", "con") is 400 too;
-// a body that is no JSON by its content type, 415.
+enum Wave { SINE, SAW, SQUARE };
+
+module Preset                                        // what a preset holds, and so what its JSON says
+{
+    float gain [[fminus::range(0, 1)]];
+    float cutoff [[fminus::range(20, 20000)]];
+    enum Wave wave;                                  // "wave": "SAW"
+};
+
+// A preset's body read and stored as presets/<name>.json: the status to answer with. Not JSON, or a field missing, of
+// another kind or out of its range, is 400, and nothing is written; a name the file interface refuses (".hidden",
+// "con") is 400 too; a body that is no JSON by its content type, 415.
 int store(http_request q, string name)
 {
     if (!string_starts(http_header(q, "content-type"), "application/json"))
         return 415;
     json_doc doc = json_parse(http_body(q), http_size(q));
     defer json_free(doc);
-    const float gain = json_float(doc, "/gain", -1.0f);
-    const float cutoff = json_float(doc, "/cutoff", -1.0f);
-    if (!doc || gain < 0.0f || gain > 1.0f || cutoff < 20.0f || cutoff > 20000.0f)
+    Preset preset;
+    if (!json_read(doc, "", &preset))                // a field missing, of another kind or out of its range
         return 400;
-    switch (file_write("presets/{name}.json", http_body(q), http_size(q)))
+    switch (file_write("presets/{name}.json", json (preset)))
     {
     case FILE_OK:
         return 204;
@@ -43,6 +53,7 @@ int store(http_request q, string name)
 int run(float seconds)
 {
     http_server server = http_listen();
+    defer http_close(server);
     if (http_port(server) <= 0)
         return http_port(server);
     int stored = 0;
@@ -55,8 +66,8 @@ int run(float seconds)
                 const int status = store(q, name);
                 stored += status == 204 ? 1 : 0;
                 if (status == 400)
-                    reply 400, json { "error": "a preset is JSON, gain 0 to 1 and cutoff 20 to 20000, under a name "
-                                               "a file may have", "name": name };
+                    reply 400, json { "error": "a preset is JSON: gain 0 to 1, cutoff 20 to 20000 and a wave, SINE, "
+                                               "SAW or SQUARE, under a name a file may have", "name": name };
                 reply status;
             }
             route "POST /presets/{name}" (string name, http_request q)  // the same, for a client that only POSTs

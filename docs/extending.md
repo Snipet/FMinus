@@ -36,8 +36,10 @@ same report's text: FMinus's type `string`, a read-only view of bytes, and `char
 `when`, a statement that runs once each time its condition becomes true. Recipe 48 is where text goes and comes from:
 `{name}` holes in addresses, a route's `string` parameters, a request's, a document's and a listing's text, strings in a
 JSON literal, which the runtime's JSON writer now writes, and `%s` in a reply; recipe 49 is the report's `within`, a
-deadline for the requests a block starts, every one of them ended where the block ends; and recipe 50 its `json_read`, a
-module filled from a JSON document in one walk, by a table of the module's fields the compiler makes. Then the pitfalls
+deadline for the requests a block starts, every one of them ended where the block ends; recipe 50 its `json_read`, a
+module filled from a JSON document in one walk, by a table of the module's fields the compiler makes; and recipe 51 the
+report's last piece, a JSON literal of arrays, vectors, enumerations by name and modules, from the same table, written
+as a reply's, a POST's and a file's bytes. Then the pitfalls
 those recipes ran into, and design notes for what comes next. [simd.md](simd.md) has recipes 7 to 9, for vectors.
 
 Recipes 1 to 4 are in the compiler now (`tanhf` and `%`; `bool` and its operators; `if`, `while` and `for`), and so are
@@ -52,10 +54,10 @@ recipe 32 (one error a mistake, enumerated types, `-Wswitch`), recipe 33 (`doubl
 builtins' arguments, bytes to numbers, and the build options of builtins), recipe 39 (the JSON parser, and paths
 the compiler prepares), recipe 40 (the XML parser), recipe 41 (the web library), recipe 42 (its server), recipe 43
 (the file interface), recipe 44 (typed handles, `defer`, and `if` and `switch` with a declaration), recipe 45
-(`serve`, `route`, `reply` and the JSON literal), recipe 46 (`string` and `char`), recipe 47 (`when`), recipe 48 (holes, and text from requests, documents and listings), recipe 49 (`within`) and recipe 50 (`json_read`), so their sections describe how the code you have got there: read a section beside the files it
+(`serve`, `route`, `reply` and the JSON literal), recipe 46 (`string` and `char`), recipe 47 (`when`), recipe 48 (holes, and text from requests, documents and listings), recipe 49 (`within`), recipe 50 (`json_read`) and recipe 51 (a JSON literal of modules, and its sinks), so their sections describe how the code you have got there: read a section beside the files it
 names. Recipes 5 and 6, a runtime function and a pass, are not part of the language; they live in [recipes/](recipes/)
 as a patch, so you can apply them to see them work. None of these are sketches: each was applied to this repository, built with `-Werror`, and
-tested in the dev and asan presets, every test passing (recipes 38 to 50 in the release preset only: each says where).
+tested in the dev and asan presets, every test passing (recipes 38 to 51 in the release preset only: each says where).
 [architecture.md](architecture.md) describes the stages they touch.
 
 FMinus follows C. When a recipe has a semantic choice to make, it makes C's: conversions, short-circuiting, which
@@ -99,8 +101,9 @@ over a module's fields (recipe 17), `examples/ensemble/` for `parallel for` and 
 `examples/wavetable/` for a document a host hands a program, read by path (recipes 39 and 40), `examples/fetch/` for
 a request a program makes (recipe 41), and several at once in a `within` (recipe 49), `examples/remote/` for the requests a program answers (recipes 42 and 45), and
 `examples/kit/` for the files a program reads and writes (recipe 43), `examples/trigger/` for `when` (recipe
-47), `examples/presets/` for holes and a route's `string` parameter (recipe 48), and `examples/settings/` for a module
-read from a JSON document (recipe 50).
+47), `examples/presets/` for holes and a route's `string` parameter (recipe 48) and a module read from a request's
+body and written back as JSON (recipe 51), and `examples/settings/` for a module read from a JSON document (recipe
+50).
 
 ## Ground rules
 
@@ -9373,7 +9376,8 @@ the frame, makes the description a private constant laid out as a path's table, 
 recipe 45's tests pin is the same, byte for byte: the writer's numbers are `std::to_chars` with no precision, as `%r`
 and `%R` were. `%r`, `%R` and `%b` are gone from the library's formatter (a `%` that begins none of its places is
 itself). An enumeration's value, an array, a vector and a module stay refused, each an error that says a later version
-writes it (the writer has their shapes; the next step uses them). The writer is part of `FMINUS_JSON`: in a build
+writes it (the writer has their shapes; the next step uses them). (Since recipe 51 they are written, `jsonDescribe` is
+`Shapes.cpp`'s `describeJson` on `appendShape`, and a reply's literal is a call of `http_reply_json`.) The writer is part of `FMINUS_JSON`: in a build
 without it a JSON literal is "a JSON literal needs the JSON writer, which this build of FMinus leaves out
 (FMINUS_JSON=OFF)".
 
@@ -9755,7 +9759,8 @@ same one; a nested module's shape is inside its outer one's, as the format has i
 `fminus_rt_json_write`, takes the same shapes: since recipe 48 it writes every JSON literal, from a description
 `jsonDescribe` (`Serve.cpp`) makes of the literal's numbers, bools and strings, whose shapes are these words' first
 five kinds; a later step's literal of a module appends the module's shape with `ShapeUse::Write`, the same words but
-for a string field, which it takes and the reader leaves out.
+for a string field, which it takes and the reader leaves out. (Recipe 51 made it so: one function, `appendShape`,
+makes every shape of a literal's values too.)
 
 ### What it reads
 
@@ -9861,6 +9866,224 @@ build.
   field's default refused, saying why; a number's default no string; a route's `string` parameter's a string literal;
   `json::name` and `json::skip` unknown on a route's parameter), each error once at its column.
 
+## Recipe 51: a JSON literal of arrays, vectors, enumerations and modules, and JSON as a body and a file
+
+*In the compiler, and an entry point each in the runtime and the web library. Code: `json (expression)` (`Parser.y`,
+`Ast.h`'s `JsonExpr`, its dump); the literal's description and values (`src/ir/Shapes.cpp`: `lowerJsonLiteral`,
+`describeJson`, `describeJsonValue`, `addJsonShape`, `describeJsonSlice`, `describeJsonThis`, `parameterIn`,
+`jsonKey`, `JsonPlan` and `JsonLiteral` in `Lowering.h`; `jsonDescribe` and `lowerJsonReply` are gone from
+`Serve.cpp`); the sinks (`src/ir/Calls.cpp`: the JSON forms of `http_post`, `file_write` and `file_append` in
+`kRuntimeBuiltins`, `findJsonForm`, `Param::Json` and `Param::Elements`, `http_reply_json` and `json_slice`'s rows,
+`jsonWriter`, the facts of the three new functions; `Serve.cpp`'s `replyJson`, which a reply of a literal calls through
+`http_reply_json`); the library (`fminus_rt_file_write_json` and `_append_json`, `src/runtime/Files.cpp`,
+`Runtime.h`, `RuntimeSymbols.def`; `fminus_web_http_post_json`, `src/web/Web.cpp`, `Web.h`, `WebSymbols.def`); a hole's
+default reported once (`checkRouteParameters`). The example `examples/presets/`, the research's service in full. Tests:
+`tests/unit/JsonLiteralTest.cpp`, `JsonServeTest.cpp` and `JsonFileTest.cpp` (new), cases of `WebServerTest.cpp`,
+`ServeTest.cpp` and `FrontendTest.cpp`, `tests/lit/fminus/json-literal.fm`, `json-literal-web.fm`,
+`json-literal-errors.fm` and `json-literal-off.fm` (new), and `serve-errors.fm`'s changed lines. Built with `-Werror`
+and tested in the `release` preset on Linux x86-64 only, in two trees, the default and one with the web library, its
+server, file writing and absolute names, every test passing but the one this machine cannot run (the smoke test of
+LLVM's own `opt`); not in a tree without `FMINUS_JSON` (`json-literal-off.fm` and the unit tests' branches for it have
+not run), nor in one with the web library and not its server, nor in `dev` or `asan`, nor on macOS or Windows. The
+libraries' new functions and their tests, with the libraries' others, ran under GCC 13's AddressSanitizer with
+UndefinedBehaviorSanitizer and under ThreadSanitizer (below). [research/syntax/README.md](research/syntax/README.md)
+is the report, §6 and §8; this is the last of its steps. [web.md](web.md), "The JSON literal", and
+[files.md](files.md), "A JSON literal as a file", are the manual.*
+
+Recipe 48 wrote a literal's numbers, bools and strings, and refused the rest; the runtime's writer already had a shape
+for everything else (track 3's), and recipe 50 a function that makes a module type's. This recipe joins them, and gives
+a literal its two other sinks, so the research's data work is now the program it wrote:
+
+```c
+module Day { int sensor; float mean; float peak; };
+
+Day day[SENSORS];
+// ... each day's mean and peak
+file_write("out/summary.json", json { "days": day });                         // an array of modules
+http_response sent = http_post("https://api.example.com/summaries", json { "days": day });
+```
+
+### One shape-maker
+
+A JSON literal's description was `jsonDescribe`'s, which wrote the kinds `1` to `5` by hand; json_read's table was
+`appendShape`'s. Now **`appendShape` makes every shape**, for both: `describeJsonValue` asks it for the shape of each
+value's type with `ShapeUse::Write`, and `JsonPlan` holds a `ShapeTable` (its words and its bytes, the literal's own
+and the names its shapes carry: a field's JSON name, an enumeration's constants) that `shapeConstant` lays out, as it
+does a module's table. What is kept: `appendShape`, `appendField`, `leftOut` and `jsonName` as recipe 50 wrote them,
+and the literal's walk (`describeJson`, an object's keys and an array's punctuation as bytes, a key escaped by
+`jsonKey`, now `Shapes.cpp`'s, on its UTF-8 check). What went: the hand-written kinds, `lowerJsonReply`'s own layout of
+the constant, and its storing of the slots, which `lowerJsonLiteral` does for every sink. So a module type's shape is
+the same words in json_read's table and in a literal's description, but for a `string` field (written, not read).
+
+### What a value becomes
+
+Each value is an operation, `1, slot, shape`, and its slots, filled in the order the values are written, once each:
+
+| A value | Its shape | Its slots |
+|---|---|---|
+| `float`, `double`, `int`, `bool` | 1, 2, 3, 4 | the value, at its slot's start in its own type (a bool a byte) |
+| an enumeration's value | 7: its size, its constants and their names (appendShape) | the value (an `enum E : bool`'s a byte) |
+| a `string` | 5 | its pointer and its length, two slots |
+| `float2`, `float4`, `float8` | 11 and its lanes | its lanes, one, two or four slots (stored at a slot's alignment, 8) |
+| an array (a `char` array a string, shape 6; 2-D, an array of rows) | 8, a pointer, around 9 and its element's | its address |
+| a module, a value or `*p` | 8 around 12, its fields' records | its address |
+| `json_slice(a, n)` | 10, a span: capacity, stride, the element's | the address and the count, two slots |
+
+A value's type comes from `staticType` when it is an array (whose name lowers to its first element's address, the
+array's own), else from the value lowered as a string is wanted (so a literal is a string). A pointer is an error
+that says to write `*p` or `json_slice(p, n)`; a handle, a poly type, a bool vector, and an array of any of them,
+the error that lists what a value may be. A pointer shape costs a level: an array or a module nests 16 deep below it,
+the writer's bound (json_read's table, with no pointer, takes one more).
+
+**An enumeration's value is its constant's name** (`"SAW"`), the first constant of that value as written, or its
+number when none has it: the error recipe 45 put there ("cast it to int for its number", so that an `int` then would
+not change what a program's replies said now) is gone, and a cast still writes the number.
+
+**`json (value)`** is a fourth form of the literal, `"json" "(" expr ")"`, its `JsonValue` a value at the top: no
+conflict (507 states, against 504 before), and it dumps as `(json preset)`.
+
+### A module's object, and its parameters
+
+A module is written by its shape, recipe 50's: the same fields as `json_read`'s table, under the same names
+(`json::name`), the same left out (`json::skip`, pointers, handles, poly types, a `when`'s state), but a `string`
+field, which is written. **A parameter** is the hard case. Its slot is a stream's pointer and a value (the knob's,
+which the host stores with an atomic store, or a flat stream's), and a frozen one has none at all: its value is a
+constant compiled into its methods. So the writer, which reads memory, cannot write one from the module's bytes, and
+the rule FMinus already had decides where it can be written: **a parameter is read only in a method of its own
+module, as `cutoff[i]`** (`parameterOf`, recipe 14; `m.cutoff` anywhere is "parameter 'cutoff' is read as
+cutoff[i], in a method of 'M'"). So a literal writes a module with a parameter only as `*this` in one of its own
+methods, and there field by field (`describeJsonThis`): each field the module's shape has by its address and a pointer
+shape, each parameter as `cutoff[0]` reads it (`lowerParameter`: a knob's value, read where the method starts, a
+frozen one's constant, a stream's first sample of the call), the object's text the same as the writer would make of
+the module's shape with the parameters in their places. Anywhere else (another instance, `*p` outside its methods, a
+module or an array holding one: `parameterIn` looks through them) it is an error that says why and how to leave the
+parameter out: "a JSON literal writes a parameter's value only where a method of its module reads it, as *this:
+'cutoff' of 'Synth' is one (leave it out with [[json::skip]])".
+
+### `json_slice`
+
+`json_slice(array, count)` is a row of `kRuntimeBuiltins` with no function (`Param::Elements`, an array or a pointer:
+no one C type, so no prototype can be written), whose call anywhere but in a literal is an error; in a literal,
+`describeJsonSlice` makes it a span. **The capacity**: an array's own size, so the writer clamps the count to it (a
+negative count is 0); for a pointer, an `int`'s greatest, 2147483647, so the count alone bounds it, the program vouching
+for the elements as it does for `bytes_floats`' (the description cannot know more, and a smaller bound would cut a
+count the program meant). Its elements are anything a literal writes but a `char` (a `char` array is a string, written
+whole; `string_slice` makes part of one).
+
+### The sinks
+
+```llvm
+@.json = private unnamed_addr constant { i32, i32, [65 x i32], [57 x i8] } { i32 65, i32 57, [65 x i32] [i32 0, i32 0,
+         i32 8, i32 1, i32 0, i32 10, i32 3, i32 12, ... ], [57 x i8] c"{\22days\22:sensormeanmost,\22taps\22:,..." }
+  %file_write = call i32 @fminus_rt_file_write_json(ptr %files.context, ptr @.str.1, i32 11, ptr null, i32 0,
+                         ptr %format.texts, ptr %format.lengths, i32 1, ptr @.json, ptr %json.values)
+  %http_post = call ptr @fminus_web_http_post_json(ptr %web.context12, ptr @.str, i32 27, ptr %format.ints, i32 2,
+                         ptr null, ptr null, i32 0, ptr @fminus_rt_json_write, ptr @.json, ptr %json.values)
+```
+
+- **A reply**, `reply status, json ...;`, is now a call of **`http_reply_json(request, status, json ...)`**, a builtin
+  a program in the `http_is` style may call itself: `lowerReply` hands `lowerRuntimeCall` its row with the request
+  given, so the status is checked as every builtin's argument is, and `replyJson` emits recipe 48's sequence
+  (`reply_buffer`, `json_write` into it, `reply_written`), unchanged, wait-free.
+- **A POST and a file** need a buffer of the text's size, known only by writing it. The writer returns the size the
+  whole text takes and writes nothing past its capacity, so **the library's entry point measures first** (a call with
+  no buffer), checks the size as it checks `bytes` (`maxBodyBytes`: `HTTP_LIMIT`; `maxFileBytes`, the quotas:
+  `FILE_LIMIT`), in the same order, then writes once into a buffer of exactly that size: the request's own body (a
+  `std::vector` resized, so no second copy), or the buffer the file is written from (one, besides the copy into the
+  file itself). The values are in the frame's slots, stored once before the call, and read twice; a second text of
+  another size (what another thread's change between the passes would make) is `HTTP_INVALID` or `FILE_FAILED`.
+  `file_append` adds a newline (JSON Lines), counted against `maxFileBytes` with the text.
+- **Each takes the address's strings always** (null, null and 0 when the name or the URL has none: the `_s` functions
+  showed a format with no `%s` is exactly the plain one's), so there is one function a sink and no `_s` twin.
+- **The web library does not link the runtime**, and an executable links the runtime before it (`Aot.cpp`), so a
+  call of `fminus_rt_json_write` from `Web.cpp` would not resolve there. So **the program passes the writer's
+  address**, `jsonWriter`, a declaration of `fminus_rt_json_write` described as a call of it would be: the JIT defines
+  it, an executable's object references it, and the library stays free of the runtime (and of `FMINUS_JSON`).
+- The JSON forms are rows of the same names after the plain ones (`findJsonForm`): a call whose second argument is a
+  literal takes its row, so the effects (they allocate), the build options (`'http_post' needs the web library`
+  first, then the literal's "needs the JSON writer"), the URL's and the name's checks and the host's lists are the
+  plain form's. A literal anywhere else is "FMinus has no JSON values: a JSON literal is only the body of a reply,
+  http_reply_json, http_post, file_write or file_append".
+
+### What the functions touch, told to LLVM
+
+The three new functions are their kinds' (`WebStart`, `FileWrite`), and read any memory besides (`describeRuntime`:
+a name ending in `_json` gains `readOnly()`), since the slots hold addresses of arrays, modules and strings no argument
+points to: an argmem-only declaration would let LLVM delete the stores it reads (recipe 48's lesson). At `-O2` the
+stores into a local array of modules stay before `fminus_rt_file_write_json` (`json-literal.fm`) and
+`fminus_web_http_post_json` (`json-literal-web.fm`):
+
+```llvm
+declare i32 @fminus_rt_file_write_json(ptr, ptr readonly captures(none), i32, ptr readonly captures(none), i32,
+        ptr readonly captures(none), ptr readonly captures(none), i32, ptr readonly captures(none),
+        ptr readonly captures(none)) #1
+attributes #1 = { nounwind willreturn memory(read, argmem: readwrite, inaccessiblemem: readwrite, errnomem: readwrite) }
+```
+
+### Errors
+
+| The program writes | FMinus, at |
+|---|---|
+| `json { "p": p }`, `p` a `float*` | "a JSON literal does not write a pointer, 'float *': write what it points to, *p, or its first elements, json_slice(p, count)", the value |
+| `json { "h": h }`, `h` an `http_server` (an array of handles, a `poly float`, a `bool4`) | "a JSON literal's value is a float, a double, an int, a bool, a string, an enumeration's value, a float2, float4 or float8, an array or a module, or an object or an array of them, not 'http_server'" |
+| `json (s)`, `Synth` having a parameter, outside its methods | "a JSON literal writes a parameter's value only where a method of its module reads it, as *this: 'cutoff' of 'Synth' is one (leave it out with [[json::skip]])" |
+| `json_slice(a, 2);` as a statement | "'json_slice' is a JSON literal's value, the first elements of an array written there, and nothing anywhere else", the call |
+| `json_slice(text, 2)`, `char text[8]` | "'json_slice' writes elements a JSON literal writes, and a char is none: a char array is a string, written whole" |
+| `json_slice(n, 1)`, `json_slice("ab", 1)` | "'json_slice' takes an array or a pointer, and a count: not 'int'" ("... not a string literal") |
+| `http_reply_json(r, 200, n)` | "'http_reply_json' takes a JSON literal here: json { ... }, json [ ... ] or json (value)" |
+| `int json_slice(float* a, int n);` | clang's "conflicting types for 'json_slice'", as for any builtin with no prototype |
+| any sink's literal without `FMINUS_JSON` | "a JSON literal needs the JSON writer, which this build of FMinus leaves out (FMINUS_JSON=OFF)", the literal; `json_slice` "... needs the JSON writer ..." |
+
+And recipe 48's small debt: a hole's `int` parameter with `[[fminus::default("x")]]` had two errors at one column
+("takes one number" and "does not apply to a hole's parameter"); `checkRouteParameters` now hands `checkAttributes` a
+hole's attributes without its default, a number's as a string's, so the one error is the hole's.
+
+### What it changes for programs and hosts
+
+- **Programs**: a JSON literal writes arrays, vectors, enumerations (by name: what a literal of an enumerated value
+  wrote changed from an error to `"SAW"`) and modules; `http_post`, `file_write` and `file_append` take one;
+  `http_reply_json` and `json_slice` are builtins' names. Nothing a program compiled before means anything else: every
+  value newly written was an error.
+- **Hosts** see no new API; `Program::files()` and `webRequests()` list a JSON form's name and URL as the plain one's.
+  The runtime and the web library have one new function each sink (`RuntimeSymbols.def`, `WebSymbols.def`), and the
+  web library's takes the writer by its address (`fminus_web_json_writer`, `Web.h`).
+- **The VS Code grammar** (0.25.0) colours `json_slice` and `http_reply_json`.
+
+### Tests
+
+- `tests/unit/JsonFileTest.cpp` (`[runtime][files][json]`), the runtime's half from C++ with descriptions built as the
+  compiler lays them out (`Shapes.h`): a span of modules and a string written whole and appended as JSON Lines; the
+  size limit on the text and on its newline; the quota; the policy's refusals, a null context, a description the
+  writer refuses (`FILE_INVALID`, counted against no quota). `WebServerTest.cpp`'s last case, the web library's:
+  the text measured and written into the body, sent as `application/json`, with and without strings in the URL,
+  `maxBodyBytes` one byte short and exact, a description refused, no writer, a `..` segment, a null context.
+- `tests/unit/JsonLiteralTest.cpp` (`[json]`): through the JIT, a module of every kind of field written as `json (*a)`
+  and read back with `json_read` into one equal to it byte for byte, and the exact text; each kind of value at the
+  top, in an object and in an array; `json_slice` of an array (clamped, negative), of a pointer, of rows and of strings;
+  JSON names (escaped, UTF-8), `json::skip`, the fields left out, a `char` array of no 0 and of no letter; `*this` with a
+  knob, a frozen parameter and a stream; JSON Lines, `FILE_LIMIT` with values evaluated once; every error at its column;
+  in a build without file writing, without the web library or without the JSON writer, the error that names it.
+- `tests/unit/JsonServeTest.cpp` (`[json]`, with the web server): a reply of a module, an array of them, a slice and an
+  enumeration; `http_reply_json` in the `http_is` style and its `HTTP_LIMIT`; the wait-free proof of a reply's module
+  in a `[[clang::nonblocking]]` method (`HeapCalls`, and a child under seccomp's strict mode); the research's data
+  work, eight sensors' days fetched at once in a `within` from a loopback server the test starts, written with
+  `file_write` and posted with `http_post`, the file and the body the same text, which the server reads back with
+  `json_read`; a POST's literal over `maxBodyBytes`, `HTTP_LIMIT` with its values evaluated once.
+- `tests/unit/FrontendTest.cpp`: `json (value)` and `json_slice` in the dump. `ServeTest.cpp`: the changed messages,
+  and a hole's default once.
+- `tests/lit/fminus/json-literal.fm`: the description word by word, the slots at `-O0`, the call, the declarations,
+  the stores kept at `-O2`, a run through the JIT and as an executable, the file and the line it wrote;
+  `json-literal-web.fm`: a POST's call with the writer's address, the declarations, and a program posting an array of
+  modules to its own server; `json-literal-errors.fm`, and `json-literal-off.fm` in a build without `FMINUS_JSON`.
+- `examples/presets/`: its check stores two presets, each the file of its module written back, and refuses a body out
+  of range, without a field or with a wave no constant names.
+- **Sanitizers**, outside the tree (a harness of track 3's, GCC 13, the web library, llhttp and the runtime's
+  `Files`, `FilesPosix`, `Json`, `JsonWrite`, `Numbers` and `Xml` instrumented, the JIT's tests compiled by clang
+  uninstrumented, since `Compile.h`'s vectors are clang's): `JsonWriteTest`, `JsonModuleTest`, `XmlTextTest`,
+  `FileTextTest`, `FilesTest`, `JsonFileTest`, `WebTextTest`, `WebTest`, `WebServerTest`, `JsonLiteralTest` and
+  `JsonServeTest`, 157 cases, under AddressSanitizer with UndefinedBehaviorSanitizer, no report; and 148 under
+  ThreadSanitizer (all but the nine fork-based proofs, which TSan's own thread keeps from exiting), no report.
+
 ## Pitfalls
 
 Each of these was hit while writing the language or its recipes. [simd.md](simd.md) has the vector ones.
@@ -9895,6 +10118,7 @@ Each of these was hit while writing the language or its recipes. [simd.md](simd.
 | The verifier: "Terminator found in the middle of a basic block" at a `return` after a `defer return;` | the deferred statement ended the block with its error's `ret`, and the exit added its own | after the deferred statements, a fresh block when the last one ended its own (`runDefers`, recipe 44) |
 | The compiler crashes, somewhere unrelated (`Instruction::clone`), when a route can end without a reply | a walk of the CFG (`llvm::depth_first`) reached a block not finished yet, the serve's own, and LLVM 23's successors of an unfinished block read past its end | finish the block first, and walk only the route's own blocks, stopping at the serve's (`lowerRoute`) |
 | An error in a deferred statement is reported once for each `return` | it is lowered at every exit of its block, and lowering checks | the first lowering reports; the others `Diagnostics::rewind` what they reported (`lowerDeferred`) |
+| An `-O0` IR test's `CHECK-NEXT` fails after the code that emits the same instructions was moved, though nothing it emits changed | IRBuilder calls nested in one C++ call's arguments run in an order C++ leaves unspecified, and a helper called in an argument (`at(slot)`) where a local was before runs at another point | build each instruction in a statement of its own, in the order the IR should have (`lowerJsonLiteral`) |
 | `json_float(d, ...)` of a `const void* d` "discards qualifiers" once documents are `json_doc`s | a read's document was a `const void*`, and C converts none to a pointer to a struct that is not `const` | the reads take a `const void*` as well (`Param::JsonRead`, `XmlRead`) |
 | "arithmetic on a pointer to an incomplete type 'fminus::ast::Stmt'" in `<vector>`, after adding a field to a node | `std::vector<Stmt> init = {};`: a default member initialiser instantiates the vector where `Stmt` is incomplete | no initialiser, as `ForStmt::init` has none; the parser's aggregates pass `{}` |
 | The compiler crashes on `p->y`, and `--emit ast` prints a `OnePole*` as `? *` | a pointer built from a type's kind, `pointerTo(type.kind, ...)`, lost its module | pass the `Type`: `pointerTo(type, ...)` keeps `module` |

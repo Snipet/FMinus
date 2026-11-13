@@ -50,7 +50,8 @@ Each file states what it tests in its first line, then has a few helpers and the
   `RecoveryTest.cpp`, `DoubleTest.cpp`, `Array2DTest.cpp`, `FieldAttributeTest.cpp`, `StringTest.cpp`, `BytesTest.cpp`,
   `JsonTest.cpp`, `XmlTest.cpp` (with `HeapCalls.h`, which counts a thread's calls of the C heap), `HandleTest.cpp`,
   `DeferTest.cpp`, `SelectionDeclarationTest.cpp`, `ServeTest.cpp`'s errors, `StringTypeTest.cpp`,
-  `WhenTest.cpp`, `WithinTest.cpp`'s errors, `JsonReadTest.cpp`, `HoleTest.cpp`'s and `DocumentTextTest.cpp`'s, and the
+  `WhenTest.cpp`, `WithinTest.cpp`'s errors, `JsonReadTest.cpp`, `JsonLiteralTest.cpp`, `HoleTest.cpp`'s and
+  `DocumentTextTest.cpp`'s, and the
   compiler's own: `VersionTest.cpp`, `TbaaTest.cpp`, `ZeroInitTest.cpp`, `AttributeTest.cpp`, `DenormalTest.cpp`,
   `LoopBudgetTest.cpp`, whose `compileAt` compiles at any level with the budget on or off, `BoundsCheckTest.cpp`,
   whose `compileAt` does the same with the bounds checks and keeps the checks' descriptions, and `CallThunkTest.cpp`,
@@ -112,7 +113,12 @@ TEST_CASE("functions compute what they say", "[codegen]")
   loopback), `[when]` (`when`: `WhenTest.cpp`, in both), `[bytes]` (`bytes_floats` and
   `bytes_pcm16`: `BytesTest.cpp`), `[json-read]` (`json_read`, a module's table and the `json::` attributes:
   `JsonReadTest.cpp`, whose program tests only a build with `FMINUS_JSON` has, and whose test of the name passes in
-  both; its proofs as `[json]`'s), `[numbers]` (the runtime's reader
+  both; its proofs as `[json]`'s), the JSON literal's values and sinks (`[json]` too: `JsonLiteralTest.cpp`, every kind
+  of value written as a file and read back, `json (value)`, `json_slice`, a module's names and parameters, JSON Lines,
+  the size limit, the errors, with `FMINUS_FILES_WRITE` and `FMINUS_JSON`, and in a build without either the error
+  that names it; `JsonFileTest.cpp` (`[runtime][files][json]`), `fminus_rt_file_write_json` and `_append_json` from
+  C++; `JsonServeTest.cpp`, with the web server, a reply's modules, `http_reply_json`, the wait-free proof of a reply's
+  module, and the research's data work against a loopback server of the test's own), `[numbers]` (the runtime's reader
   of numbers on fast_float: `NumbersTest.cpp`, compiled only with `FMINUS_JSON` or `FMINUS_XML`, whose tests a build
   without both lacks; a test of what a build has compares with `fminus/Config.h`, so it passes either way), `[json]`
   (the JSON parser and its builtins: `JsonTest.cpp`, whose tests of the parser itself only a build with `FMINUS_JSON`

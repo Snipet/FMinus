@@ -97,6 +97,7 @@ fetches.
 |---|---|---|
 | `http_response http_get(url, ...)` | starts a GET of the URL and returns its request, a handle, at once | allocates |
 | `http_response http_post(url, data, bytes, content_type, ...)` | starts a POST of `bytes` bytes at `data` (copied: the buffer is free again when it returns) | allocates |
+| `http_response http_post(url, json ..., ...)` | starts a POST of a JSON literal's text, sent as `application/json`: measured, refused over the policy's `maxBodyBytes` (`HTTP_LIMIT`), written into the request's own body ([The JSON literal](#the-json-literal)) | allocates |
 | `int http_wait(r, timeout_ms)` | blocks until the request is done or `timeout_ms` has passed (0: not at all; negative: until done, which the policy's timeout bounds), and gives its status then, 0 if still pending | blocks |
 | `int http_status(r)` | 0 while pending, the HTTP status once a response arrived, or a failure (below) | wait-free |
 | `int http_size(r)`, `const void* http_body(r)` | the body's bytes and its address, once the status is an HTTP status (0 and null before, and after a failure); valid until `http_close`. A NUL follows the last byte, not counted | wait-free |
@@ -626,14 +627,14 @@ parameter list are refused (`'clang::nonblocking' attribute cannot be applied to
 its function, whose attributes cover it.
 
 **`reply status;`**, or **`reply status, more...;`**, answers the route's request and leaves the route. Its forms are
-the three reply builtins' arguments without the request, and a JSON literal ([below](#the-json-literal)):
+the four reply builtins' arguments without the request, the fourth's a JSON literal ([below](#the-json-literal)):
 
 | Written | Is | Content type |
 |---|---|---|
 | `reply 204;` | `http_reply(r, 204)` | none |
 | `reply 200, data, bytes, "content/type";` | `http_reply_bytes(r, 200, data, bytes, "content/type")` | as given |
 | `reply 200, "content/type", "format", values...;` | `http_reply_text(r, ...)`, a format as [below](#routes-and-replies) | as given |
-| `reply 200, json { ... };` | the literal, written into the request's buffer | `application/json` |
+| `reply 200, json { ... };` | `http_reply_json(r, 200, json { ... })`: the literal, written into the request's buffer | `application/json` |
 
 Which form it is follows from the values (one; a string literal second, or a `string`, which is the text form's
 error, its content type and format literals only; a JSON literal second; four), and each is checked as its builtin
@@ -687,38 +688,71 @@ block, each reply a jump to the next take ([extending.md](extending.md), recipe 
 ```c
 reply 200, json { "gain": gain, "pitch": pitch, "changes": changes, "on": active };
 reply 200, json { gain, pitch, level, changes };              // a name alone is its own key
-reply 200, json { "state": { "gain": gain }, "taps": [a, b, c] };
+reply 200, json { "state": { "gain": gain }, "taps": taps, "wave": wave };   // an array, an enumeration's name
+reply 200, json (preset);                                     // one value: a module is an object of its fields
+http_response sent = http_post("https://api.example.com/summaries", json { "days": day });   // an array of modules
+file_write("presets/{name}.json", json (preset));             // a file's bytes ([files.md](files.md))
+file_append("log/days.jsonl", json { "day": k, "mean": mean });   // and a newline after them: JSON Lines
 ```
 
-**A JSON literal is an argument, never a value**, as a format is: `json { members }` and `json [ values ]` are
-expressions to the grammar, and the compiler takes one only where something writes it, which in this version is a
-`reply` ("FMinus has no JSON values: a JSON literal is only a reply's body, ..." anywhere else). Nothing allocates and
-no JSON value is ever made: the compiler makes a constant description of the literal, its keys and its structure as
-bytes and each value's kind, the values are stored in slots of the function's frame, and the runtime's JSON writer
-(`fminus_rt_json_write`, part of `FMINUS_JSON`) writes the text straight into the request's own reply buffer
-(`fminus_web_http_reply_buffer`), which is then published (`fminus_web_http_reply_written`), wait-free. **It needs the
-JSON writer**: in a build without `FMINUS_JSON` a JSON literal is the error that says so ("a JSON literal needs the
-JSON writer, which this build of FMinus leaves out (FMINUS_JSON=OFF)").
+**A JSON literal is an argument, never a value**, as a format is: `json { members }`, `json [ values ]` and `json
+(value)` are expressions to the grammar, and the compiler takes one only where something writes it: a `reply` and
+`http_reply_json`, the body of `http_post`, and the bytes of `file_write` and `file_append` ("FMinus has no JSON
+values: a JSON literal is only the body of a reply, http_reply_json, http_post, file_write or file_append" anywhere
+else). No JSON value is ever made: the compiler makes a constant description of the literal (its keys and structure as
+bytes, and each value's shape: [extending.md](extending.md), recipe 51), the values are stored in slots of the
+function's frame, once each, in the order written, and the runtime's JSON writer (`fminus_rt_json_write`, part of
+`FMINUS_JSON`) writes the text where it goes. **It needs the JSON writer**: in a build without `FMINUS_JSON` a JSON
+literal is the error that says so ("a JSON literal needs the JSON writer, which this build of FMinus leaves out
+(FMINUS_JSON=OFF)"), and `json_slice` is the error that names the option.
+
+| A value that is | Is written as |
+|---|---|
+| a `float` or a `double` | **the shortest digits that read back as the same value** (`std::to_chars` with no precision: `0.1f` is `0.1`, `1.0f / 3` is `0.33333334`, `1e20f` is `1e+20`); a NaN or an infinity, which JSON has no number for, `null`. The same in every locale |
+| an `int`, a `bool` | in decimal; `true` or `false` |
+| a `string` (a literal among them) | a JSON string, `"`, `\` and U+0000 to U+001F escaped as RFC 8259 asks (`\"`, `\\`, `\b`, `\f`, `\n`, `\r`, `\t`, `\u00XX`), every other byte as it is (no UTF-8 check), so a string from a request, a document or a listing cannot end the literal's string or add a member |
+| **a value of an enumerated type** | **its constant's name**, a JSON string (`"SAW"`: the first constant of that value, as written); a value no constant has, its number. **This replaces the error of recipes 45 to 50** (which said to cast to `int`, and still does what it did: `(int)wave` is a number) |
+| a `char` array | a JSON string of its bytes up to its first 0 (or all of them) |
+| an array of one dimension, of anything below | a JSON array of all its elements |
+| an array of two dimensions | an array of arrays, a row each |
+| a `float2`, `float4`, `float8` | an array of its lanes |
+| **a module**, a value or what a pointer points to, `*p` | an object of its fields, in their order (below) |
+| an array of modules | an array of such objects |
+| `json_slice(array, count)` | the array's first `count` elements, the count clamped to the array's size (`json_slice(day, n)`); or of a pointer, `json_slice(p, n)`, the program vouching for the `n` elements, as it does for `bytes_floats` |
 
 - **A member** is `"key": value`, or a bare name, which is `"name": name`. A key is a string literal (adjacent ones are
-  one), written as a JSON string, escaped as RFC 8259 asks (`"`, `\` and the control characters), and UTF-8 text (a
-  byte that is no part of any is an error). A duplicate key in one object is an error at the second.
-- **A value** is a nested `{ }` or `[ ]`, or an expression of type `float`, `double`, `int`, `bool` or `string` (a
-  string literal among them). A pointer or a handle is an error saying what a value may be; a value of an enumerated
-  type, an array, a vector and a module are not values of one yet, each an error that says so (a later version writes
-  an enumeration's constant by its name, and the others whole: cast an enumeration's value to `int` for its number,
-  and write an array's elements or a vector's lanes one by one).
-- **How a string is written**: a JSON string, `"`, `\` and U+0000 to U+001F escaped as RFC 8259 asks (`\"`, `\\`,
-  `\b`, `\f`, `\n`, `\r`, `\t`, `\u00XX`), every other byte as it is (bytes above 0x7F too: no UTF-8 check), so a
-  string from a request, a document or a listing cannot end the literal's string or add a member.
-- **How a number is written**: an `int` in decimal; a `bool` as `true` or `false`; a `float` or a `double` as **the
-  shortest digits that read back as the same value** (`std::to_chars` with no precision: `0.1f` is `0.1`, `1.0f / 3` is
-  `0.33333334`, `1e20f` is `1e+20`), and a NaN or an infinity, which JSON has no number for, as `null`. The same in every
-  locale, with no allocation.
-- **Order**: members as written; values evaluated left to right, once each, before anything is sent.
-- **Size**: a reply's body is at most the host's `maxReplyBytes`; a literal whose text does not fit is `HTTP_LIMIT`,
-  which the route answers 500.
-
+  one), written as a JSON string, escaped as above, and UTF-8 text (a byte that is no part of any is an error). A
+  duplicate key in one object is an error at the second. A value may also be a nested `{ }` or `[ ]`.
+- **A module's object** is its fields in their order, each under its own name or its `[[json::name("...")]]` (two
+  fields under one JSON name are an error), the names `json_read` reads them by ([README.md](../README.md), JSON): the same
+  fields, under the same names, as `json_read`'s table. Left out: a field with `[[json::skip]]`, a pointer, a handle
+  and a poly type (none has a JSON value), and a `when`'s hidden state. A `string` field **is** written (`json_read`
+  leaves one out, since it would point into the document). A field that is a module or an array of them nests.
+- **A module's parameter** is the host's value, which only a method of its module reads (as `cutoff[i]`). So a literal
+  writes one only as **`*this`, in a method of its own module**, each parameter as `cutoff[0]` reads it there: a knob's
+  value, a frozen one's constant, a stream's first sample of the call. A module with a parameter written anywhere else
+  (another instance, a pointer's `*p` outside its methods, a module or an array holding one) is an error that says so,
+  and that `[[json::skip]]` leaves the parameter out ("a JSON literal writes a parameter's value only where a method of
+  its module reads it, as *this: 'cutoff' of 'Synth' is one (leave it out with [[json::skip]])").
+- **Not a value**: a pointer ("write what it points to, *p, or its first elements, json_slice(p, count)"), a handle, a
+  poly type, a bool vector, and an array of any of them, each an error saying what a value may be. `json_slice`
+  anywhere but in a literal is an error, and its elements are never `char`s (a `char` array is a string, written
+  whole).
+- **`json (value)`** is a literal of one value at the top: `json (preset)` an object, `json (taps)` an array, `json
+  (0.5f)` a number.
+- **Nothing is built, and the shape is the program's**: an array's and a module's layout is known when the program is
+  compiled, so the description says where each field is, and the writer walks it, nested 16 deep at most, a module of
+  1024 fields at most, with no allocation, lock or system call (`tests/unit/JsonWriteTest.cpp`, and through the JIT
+  `JsonServeTest.cpp`): a reply's literal of modules is wait-free on the audio thread.
+- **Where it goes**: a **reply**'s literal, `reply status, json ...;` or **`http_reply_json(r, status, json ...)`**
+  (the builtin a reply of a literal is made of, for programs in the `http_is` style, whose result is the library's:
+  `0`, or `HTTP_LIMIT` for a text over the host's `maxReplyBytes`, which a route answers 500), is written straight into
+  the request's own reply buffer (`fminus_web_http_reply_buffer`) and published (`fminus_web_http_reply_written`),
+  wait-free. A **POST**'s, `http_post(url, json ..., ints...)`, is the request's body, sent as `application/json`: the
+  library measures the text (a first pass of the writer, which writes nothing), refuses one over the policy's
+  `maxBodyBytes` (`HTTP_LIMIT`, and nothing is sent), and writes it once into the request's own body, a buffer of
+  exactly its size, before `http_post` returns (it allocates, as `http_post` always has). A **file**'s, `file_write` and
+  `file_append`: [files.md](files.md), "Writing".
 ### The server's builtins
 
 What a `serve` is made of, and what a program may still call itself: a request taken with `http_next` or `http_accept`
@@ -740,6 +774,7 @@ and told apart with `http_is` is answered by hand, as before the statements were
 | `int http_reply(r, status)` | answers with no body | wait-free |
 | `int http_reply_bytes(r, status, data, bytes, "content/type")` | answers with `bytes` bytes at `data` (copied: the buffer is free again at once) | wait-free |
 | `int http_reply_text(r, status, "content/type", "format", ...)` | answers with text, C's `printf` of the values after the format (`%s` a `string`'s bytes) | wait-free |
+| `int http_reply_json(r, status, json ...)` | answers with a JSON literal's text, written in the request's own buffer, as `application/json` ([The JSON literal](#the-json-literal)): what `reply status, json ...;` is | wait-free |
 | `void http_close(server)` | stops listening and closes every connection: a request the program holds is given up, every thread in `http_accept` woken (null), the port `HTTP_CANCELLED` | allocates |
 
 - **A request is the caller's from `http_next` or `http_accept` until its reply**, and only the thread that took it
@@ -1158,9 +1193,11 @@ for the server as for the client. An offline bounce has no server: compiled with
 | `tests/lit/fminus/web*.fm` | the IR, the errors, the driver; `web-off.fm` in a build without the library, `web-server-off.fm` in one without the server |
 | `tests/lit/fminus/within*.fm` | a `within`'s IR (its end at each way out, the abandon on the passes' ways out), its errors, and `within-off.fm` in a build without the library |
 | `tests/unit/HoleTest.cpp`, `tests/lit/fminus/holes*.fm` | a URL's holes: each mistake an error at its byte, `webRequests()`'s `*`, and a string percent-encoded byte by byte, sent by one program to another that serves on loopback |
+| `tests/unit/JsonServeTest.cpp`, `tests/lit/fminus/json-literal-web.fm` | a JSON literal of modules, arrays, enumerations and slices in a reply and `http_reply_json`, its `HTTP_LIMIT`, the wait-free proof of a reply's module, and the research's data work: days fetched at once, written with `file_write` and posted with `http_post` to a loopback server of the test's own, read back there with `json_read`; a POST's literal over `maxBodyBytes` |
+| `tests/unit/WebServerTest.cpp`'s last case | `fminus_web_http_post_json` from C++: the text measured, written into the request's body and sent as `application/json`, with and without strings in its URL, its refusals and its limit |
 | `examples/fetch/` | the wavetable example's pack fetched from a server its host allows; packs at once in a `within`; a table swapped in by a `when` |
 | `examples/remote/` | a synthesiser a browser controls: its page served by the library, its requests taken in `process` |
-| `examples/presets/` | named presets kept over HTTP as files: a route's `string` parameter, a file's name with a hole, a JSON literal's strings |
+| `examples/presets/` | named presets kept over HTTP as files: a route's `string` parameter, a file's name with a hole, a body read into a module with `json_read` and the module written back with `json (preset)` |
 
 Recipe 41 in [extending.md](extending.md) walks through the client as a change to the compiler, and recipe 42 the
 server.
@@ -1202,7 +1239,13 @@ server.
   `http_header`, `http_path`, `http_query_string`, a JSON literal written in place and `%s`;
   `fminus_web_http_reply_text_s` and the formatter without `%r`, `%R` and `%b` ran under GCC's AddressSanitizer with
   UndefinedBehaviorSanitizer and ThreadSanitizer with the server's tests; `examples/presets/` was driven by its own
-  check, on loopback.
+  check, on loopback. A JSON literal of arrays, vectors, enumerations and modules, `json (value)`, `json_slice`,
+  `http_reply_json` and a POST's literal (2026-11-13): built and tested in the same two trees, not in one with the
+  client alone nor in one without `FMINUS_JSON`; the wait-free proof of a JIT'd reply of a module, an array of modules,
+  a slice and an enumeration (`JsonServeTest.cpp`); `fminus_web_http_post_json` from C++ and through the JIT, against
+  loopback servers of the tests' own, and with the server's and the client's other tests under GCC's AddressSanitizer
+  with UndefinedBehaviorSanitizer (every case) and ThreadSanitizer (every case but the fork-based proofs), the JIT's
+  tests compiled by clang uninstrumented beside them.
 - **Not run anywhere yet:** macOS and Windows (their root-certificate loaders, Schannel, the frameworks and system
   libraries an executable links, and the server's sockets there: `SocketsPosix.cpp` with macOS's `SO_NOSIGPIPE`,
   `SocketsWindows.cpp`, curl's handling of extra descriptors on Windows, llhttp built by clang-cl, whose header marks
@@ -1229,9 +1272,10 @@ server.
   in the clear; **a stream from the server** (server-sent events, WebSockets): a page polls; **chunked request
   bodies**, `Expect: 100-continue` (417), pipelining beyond one request at a time, HTTP/2, compression and ranges;
   **other origins** (CORS): never; **cookies** (a header's text is read, `http_header`, and nothing more of them),
-  templating: nothing builds text, by design (a JSON literal and a format write it where it goes); **a JSON literal's
-  arrays, vectors, modules and enumerations' names** (the writer has their shapes, the next step uses them; arrays as
-  bytes meanwhile); **an "embed this file" builtin**: static
+  templating: nothing builds text, by design (a JSON literal and a format write it where it goes); **a JSON value**
+  (a literal is an argument only: no document is built, edited or written whole from one), and **a literal's array of
+  a length known only when it runs** beyond the first elements of one the program has (`json_slice`); **an "embed this
+  file" builtin**: static
   content is the host's; **a server of the host's own** with a ready-made parameter surface: an example host shows the
   way first (`examples/remote/`); and the Python package's binding of it.
 - **A disk cache and an `offline` policy** (the report's §8): a host that wants either keeps its own, and hands the

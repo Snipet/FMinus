@@ -1,0 +1,17 @@
+// In a build without the JSON writer (FMINUS_JSON=OFF; the writer is part of the JSON feature), json_slice is still a
+// name FMinus knows, whose call is the error that names the option, wherever it is; and a JSON literal anywhere but a
+// sink is no value, as in every build. (A sink's literal in such a build is the error that names the option, at the
+// literal: tests/unit/ServeTest.cpp and JsonLiteralTest.cpp, in the builds that have the sink.)
+// UNSUPPORTED: json
+// RUN: not fminus %s 2>&1 | FileCheck %s --implicit-check-not=error:
+
+float f(float* p)
+{
+    float a[4];
+    json_slice(a, 2);
+    return json_slice(p, 1) + json (1.0f);
+}
+
+// CHECK: json-literal-off.fm:11:5: error: 'json_slice' needs the JSON writer, which this build of FMinus leaves out (FMINUS_JSON=OFF)
+// CHECK: json-literal-off.fm:12:12: error: 'json_slice' needs the JSON writer, which this build of FMinus leaves out (FMINUS_JSON=OFF)
+// CHECK: json-literal-off.fm:12:31: error: FMinus has no JSON values: a JSON literal is only the body of a reply, http_reply_json, http_post, file_write or file_append

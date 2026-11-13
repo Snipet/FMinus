@@ -186,7 +186,11 @@ namespace fminus::ir::detail
     // them), passed to a function of the runtime as its pointer and its length; a char* the builtin writes; and a
     // const char* it reads. A builtin that gives a string from a function of the runtime (Result::String with a
     // symbol) takes its string, if any, as the fallback for when the runtime finds none, which the code chooses (the
-    // runtime takes none). And a header's name, http_header's, a literal that is an HTTP token (RFC 9110).
+    // runtime takes none). And a header's name, http_header's, a literal that is an HTTP token (RFC 9110). And a JSON
+    // literal (Shapes.cpp: json { ... }, json [ ... ] or json (value)), the body of http_post's, file_write's and
+    // file_append's JSON forms and of http_reply_json, passed as its description and its values' slots (after the
+    // URL's or the name's strings, none or not, and for a POST the writer's address: Web.h); and json_slice's array or
+    // pointer, a builtin that is only ever a JSON literal's value.
     //
     // A URL, a file's name and a listing's pattern may name their values by holes in place of %d (scanHoles):
     // `{name}`, a variable in scope, an int (a bool, an enumeration's value) written in decimal or a string filled in
@@ -229,6 +233,8 @@ namespace fminus::ir::detail
         Text,
         Chars,
         CharData,
+        Json,
+        Elements,
     };
 
     // What a builtin of the runtime gives: an int, a float, a double, a bool (an int from the runtime, 0 or 1), a
@@ -639,17 +645,35 @@ namespace fminus::ir::detail
             std::vector<llvm::Value*> strings;
         };
 
-        // A JSON literal's description for the runtime's writer, being made (Serve.cpp, jsonDescribe): its operations
-        // (runtime/Runtime.h's fminus_rt_json_write), its bytes, the bytes not yet in an operation, and its values,
-        // each lowered with the first of its 8-byte slots, and the slots they take.
+        // A JSON literal's description for the runtime's writer, being made (Shapes.cpp, describeJson): its operations
+        // and its bytes (runtime/Runtime.h's fminus_rt_json_write: a table laid out as a shape's), the bytes not yet
+        // in an operation, and its values, each lowered where it is written, with the first of its 8-byte slots, and
+        // the slots they take.
         struct JsonPlan
         {
-            std::vector<std::int32_t> code;
-            std::string bytes;
+            // A value's slots: a number, a bool or an enumeration's value at its slot's start, in its own type; a
+            // string's pointer and length; a vector's lanes; an array's or a module's address (a pointer type); or,
+            // with a count, a span's address and its count, in the slot after it.
+            struct Slot
+            {
+                std::int32_t slot;
+                llvm::Value* ir;
+                ast::Type type;
+                llvm::Value* count = nullptr;
+            };
+            ShapeTable table;
             std::string pending;
-            std::vector<std::pair<std::int32_t, Value>> values;
+            std::vector<Slot> values;
             std::int32_t slots = 0;
             void flush();
+        };
+
+        // A JSON literal lowered (Shapes.cpp, lowerJsonLiteral): its description, a constant of the program's, and its
+        // values' slots, an array of the frame (null when it has none), what fminus_rt_json_write takes.
+        struct JsonLiteral
+        {
+            llvm::Value* description;
+            llvm::Value* values;
         };
 
         // A route literal of the program, a route statement's or an http_is call's (WebServer.cpp), for the check that
@@ -955,8 +979,7 @@ namespace fminus::ir::detail
         void fillParameter(const ast::RouteParam& param, std::optional<std::size_t> hole, llvm::Value* request,
                            llvm::BasicBlock* bad);
         void lowerReply(SourceLocation location, const ast::ReplyStmt& reply);
-        Value lowerJsonReply(const ast::Expr& status, const ast::Expr& literal, llvm::Value* request);
-        bool jsonDescribe(const ast::JsonValue& value, JsonPlan& plan);
+        llvm::Value* replyJson(llvm::Value* request, llvm::Value* status, const JsonLiteral& literal);
         const Breakable* innermost(std::initializer_list<Breakable::Kind> kinds) const;
 
         // ---- Files.cpp ----------------------------------------------------------------------------------------------
@@ -984,6 +1007,14 @@ namespace fminus::ir::detail
                          std::vector<llvm::Value*>& irArgs);
         void checkJsonAttribute(const ast::Attribute& attribute);
         void checkJsonNames(const ast::Module& module);
+        std::optional<std::string> parameterIn(ast::Type type) const;
+        std::optional<JsonLiteral> lowerJsonLiteral(const ast::Expr& literal);
+        bool describeJson(const ast::JsonValue& value, JsonPlan& plan);
+        bool describeJsonValue(const ast::Expr& expr, JsonPlan& plan);
+        bool describeJsonSlice(SourceLocation location, const ast::CallExpr& call, JsonPlan& plan);
+        bool describeJsonThis(SourceLocation location, const ast::Module& module, JsonPlan& plan);
+        bool addJsonShape(SourceLocation location, ast::Type type, bool address, JsonPlan& plan);
+        llvm::Value* jsonWriter();
 
         // ---- Math.cpp -----------------------------------------------------------------------------------------------
         llvm::Value* lowerMath(const Builtin& builtin, ast::Type type, llvm::Value* x);

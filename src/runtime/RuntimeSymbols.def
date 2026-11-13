@@ -79,6 +79,10 @@ FMINUS_RUNTIME_SYMBOL(fminus_rt_file_write)
 FMINUS_RUNTIME_SYMBOL(fminus_rt_file_append)
 FMINUS_RUNTIME_SYMBOL(fminus_rt_file_write_s)
 FMINUS_RUNTIME_SYMBOL(fminus_rt_file_append_s)
+#if FMINUS_HAS_JSON
+FMINUS_RUNTIME_SYMBOL(fminus_rt_file_write_json)
+FMINUS_RUNTIME_SYMBOL(fminus_rt_file_append_json)
+#endif
 #endif
 FMINUS_FILES_MAIN_SYMBOL(fminus_rt_files_main_start)
 FMINUS_FILES_MAIN_SYMBOL(fminus_rt_files_main_stop)

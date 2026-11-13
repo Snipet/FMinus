@@ -255,6 +255,22 @@ TEST_CASE("serve, route and reply parse as FMinus's statements, a JSON literal a
                      + "' cannot be used as a macro name: it is one of FMinus's keywords\n");
 }
 
+TEST_CASE("json (value) parses as a JSON literal of one value, and json_slice as a call in one", "[frontend]")
+{
+    CHECK(parsed("void f(float p, float* a, int n)\n"
+                 "{\n"
+                 "    file_write(\"out/p.json\", json (p));\n"
+                 "    file_append(\"out/a.jsonl\", json (*a + 1), n);\n"
+                 "    g(json { \"slice\": json_slice(a, n), \"one\": json ((p)) }, json (n));\n"
+                 "}\n")
+          == "(function void f ((float p) (float * a) (int n))\n"
+             "  (call file_write \"out/p.json\" (json p))\n"
+             "  (call file_append \"out/a.jsonl\" (json (+ (* a) 1)) n)\n"
+             "  (call g (json {\"slice\" (call json_slice a n) \"one\" (json p)}) (json n)))\n");
+    // Its value is one expression: json () is none.
+    CHECK(parsed("void f() { g(json ()); }") == "test.fm:1:20: error: syntax error, unexpected )\n");
+}
+
 TEST_CASE("if and switch parse C2y's declaration in their head, and its third form as the second", "[frontend]")
 {
     CHECK(parsed("int f(int x)\n"

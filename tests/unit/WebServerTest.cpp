@@ -3080,4 +3080,107 @@ TEST_CASE("a URL's %s is percent-encoded as it is filled in, and reaches the ser
     CHECK(seen[2] == "/presets/pad/7 pad - {}");
 }
 
+
+#if FMINUS_HAS_JSON
+TEST_CASE("a POST of a JSON literal: its text measured, then written into the request's own body and sent as "
+          "application/json",
+          "[web][server][json]")
+{
+    std::mutex mutex;
+    std::vector<std::string> seen;   // each request's path, its content type and its body
+    const auto record = [&](void* r)
+    {
+        std::int32_t length = 0;
+        const char* path = fminus_web_http_path(r, &length);
+        std::string entry(path, static_cast<std::size_t>(length));
+        const char* type = fminus_web_http_header(r, "content-type", 12, &length);
+        entry += " " + std::string(type == nullptr ? "-" : std::string(type, static_cast<std::size_t>(length)));
+        entry += " " + bodyOf(r);
+        {
+            const std::lock_guard lock(mutex);
+            seen.push_back(entry);
+        }
+        replyBytes(r, 201, "ok");
+    };
+    Served served(serving(), record, {"POST /voices/%s/%d", "POST /plain"});
+    const int port = served.port;
+    const std::unique_ptr<Context> client = clientFor(port);
+    const std::string base = "http://127.0.0.1:" + std::to_string(port);
+
+    // The literal {"osc": <voice>, "level": <float>}, its values in their slots: a pointer to the module, a float.
+    const std::vector<std::int32_t> description = voiceLiteral();
+    Voice voice{-0.25f, {60, 64, 67}, true, "lead"};
+    std::uint64_t slots[2] = {};
+    const Voice* address = &voice;
+    std::memcpy(&slots[0], &address, sizeof address);
+    const float level = 0.1f;
+    std::memcpy(&slots[1], &level, sizeof level);
+
+    // With a string and an int in its URL, and with neither: the text sent is the writer's, whole.
+    const std::string format = base + "/voices/%s/%d";
+    const char* texts[] = {"lead.pad"};
+    const std::int32_t lengths[] = {8};
+    const std::int32_t ints[] = {7};
+    void* posted = fminus_web_http_post_json(client->handle(), format.data(), static_cast<std::int32_t>(format.size()),
+                                             ints, 1, texts, lengths, 1, &fminus_rt_json_write, description.data(),
+                                             slots);
+    REQUIRE(posted != nullptr);
+    CHECK(fminus_web_http_wait(posted, 10000) == 201);
+    fminus_web_http_close(posted);
+    const std::string plain = base + "/plain";
+    posted = fminus_web_http_post_json(client->handle(), plain.data(), static_cast<std::int32_t>(plain.size()), nullptr,
+                                       0, nullptr, nullptr, 0, &fminus_rt_json_write, description.data(), slots);
+    REQUIRE(posted != nullptr);
+    CHECK(fminus_web_http_wait(posted, 10000) == 201);
+    fminus_web_http_close(posted);
+
+    // Ended before anything is sent: a description the writer refuses, no writer, a %s the URL refuses.
+    const std::int32_t broken[] = {3, 0, 1, 0, 99};   // a value of kind 99
+    const auto refused = [&](const std::string& url, fminus_web_json_writer writer, const void* table,
+                             const char* const* strings, const std::int32_t* sizes, std::int32_t count)
+    {
+        void* r = fminus_web_http_post_json(client->handle(), url.data(), static_cast<std::int32_t>(url.size()),
+                                            nullptr, 0, strings, sizes, count, writer, table, slots);
+        REQUIRE(r != nullptr);
+        const std::int32_t status = fminus_web_http_status(r);
+        fminus_web_http_close(r);
+        return status;
+    };
+    CHECK(refused(plain, &fminus_rt_json_write, broken, nullptr, nullptr, 0) == FMINUS_WEB_INVALID);
+    CHECK(refused(plain, nullptr, description.data(), nullptr, nullptr, 0) == FMINUS_WEB_INVALID);
+    const char* dots[] = {".."};
+    const std::int32_t two[] = {2};
+    CHECK(refused(base + "/voices/%s/1", &fminus_rt_json_write, description.data(), dots, two, 1)
+          == FMINUS_WEB_INVALID);
+    // A null context, as the other entry points': the shared refused request.
+    void* none = fminus_web_http_post_json(nullptr, plain.data(), static_cast<std::int32_t>(plain.size()), nullptr, 0,
+                                           nullptr, nullptr, 0, &fminus_rt_json_write, description.data(), slots);
+    CHECK(fminus_web_http_status(none) == FMINUS_WEB_REFUSED);
+    fminus_web_http_close(none);
+
+    // Over the policy's maxBodyBytes: a limit one byte short of the text is FMINUS_WEB_LIMIT, and nothing is sent; one
+    // of exactly its size, sent.
+    const std::size_t size = kVoiceText.size();
+    for (const std::int32_t most : {static_cast<std::int32_t>(size - 1), static_cast<std::int32_t>(size)})
+    {
+        Policy small;
+        small.allow = {"http://127.0.0.1:" + std::to_string(port) + "/*"};
+        small.maxBodyBytes = most;
+        const std::unique_ptr<Context> limited = makeContext(small);
+        void* r = fminus_web_http_post_json(limited->handle(), plain.data(), static_cast<std::int32_t>(plain.size()),
+                                            nullptr, 0, nullptr, nullptr, 0, &fminus_rt_json_write,
+                                            description.data(), slots);
+        REQUIRE(r != nullptr);
+        CHECK(fminus_web_http_wait(r, 10000) == (most < static_cast<std::int32_t>(size) ? FMINUS_WEB_LIMIT : 201));
+        fminus_web_http_close(r);
+    }
+
+    served.program.reset();
+    const std::lock_guard lock(mutex);
+    REQUIRE(seen.size() == 3);
+    CHECK(seen[0] == "/voices/lead.pad/7 application/json " + std::string(kVoiceText));
+    CHECK(seen[1] == "/plain application/json " + std::string(kVoiceText));
+    CHECK(seen[2] == seen[1]);
+}
+#endif
 #endif

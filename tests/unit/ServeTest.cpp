@@ -1086,21 +1086,19 @@ TEST_CASE("serve, route and reply's errors, each once at its column", "[codegen]
              "test.fm:10:56: error: format specifies type 'double' but the argument has type 'int'\n"
              "test.fm:11:44: error: character '\\x0a' is not allowed in a content type: it is printable ASCII\n"
              "test.fm:12:53: error: a JSON literal is a reply's whole body: nothing follows it\n"
-             "test.fm:13:48: error: a JSON literal's value is a float, a double, an int, a bool, a string, an object "
-             "or an array, not 'int *'\n"
+             "test.fm:13:48: error: a JSON literal does not write a pointer, 'int *': write what it points to, *p, "
+             "or its first elements, json_slice(p, count)\n"
              "test.fm:13:64: error: duplicate key 'a' in a JSON object\n"
              "test.fm:13:43: note: previous key is here\n"
              "test.fm:14:31: error: incompatible pointer to integer conversion passing 'char[4]' to parameter of "
              "type 'int'\n"
              "test.fm:15:44: error: a JSON key is UTF-8 text, and this byte is no part of any\n"
-             "test.fm:15:59: error: FMinus has no JSON values: a JSON literal is only a reply's body, 'reply "
-             "status, json { ... };'\n"
-             "test.fm:16:36: error: a JSON literal does not take a value of an enumerated type yet, which a later "
-             "version writes as its constant's name: cast it to int for its number\n"
-             "test.fm:16:59: error: FMinus has no JSON values: a JSON literal is only a reply's body, 'reply "
-             "status, json { ... };'\n"
-             "test.fm:20:20: error: FMinus has no JSON values: a JSON literal is only a reply's body, 'reply "
-             "status, json { ... };'\n");
+             "test.fm:15:59: error: FMinus has no JSON values: a JSON literal is only the body of a reply, "
+             "http_reply_json, http_post, file_write or file_append\n"
+             "test.fm:16:59: error: FMinus has no JSON values: a JSON literal is only the body of a reply, "
+             "http_reply_json, http_post, file_write or file_append\n"
+             "test.fm:20:20: error: FMinus has no JSON values: a JSON literal is only the body of a reply, "
+             "http_reply_json, http_post, file_write or file_append\n");
 }
 
 TEST_CASE("no two routes one request could match unless one is more specific: an error at the second, a note at the "
@@ -1301,8 +1299,12 @@ TEST_CASE("a route sees through a when as through an if without an else, and thr
     }
 }
 
-TEST_CASE("a JSON literal's values a later version writes are each an error that says so", "[codegen][serve][json]")
+TEST_CASE("a JSON literal in a reply writes arrays, vectors, modules and enumerations; a pointer and a handle are "
+          "errors that say so",
+          "[codegen][serve][json]")
 {
+    // What recipe 48 refused (an array, a vector, a module, an enumeration's value) a reply now writes (JsonLiteralTest
+    // .cpp has their text); a pointer and a handle stay errors, each saying what a value may be.
     CHECK(errorsOf("enum Wave { SINE, SAW };\n"
                    "module M { float x; };\n"
                    "void f(http_server s, float* p)\n"
@@ -1314,18 +1316,11 @@ TEST_CASE("a JSON literal's values a later version writes are each an error that
                    "    serve (s) { route \"GET /a\" { reply 200, json { \"a\": a, \"v\": v, \"m\": m, \"w\": w, "
                    "\"p\": p, \"s\": s }; } }\n"
                    "}\n")
-          == "test.fm:9:57: error: a JSON literal does not take an array yet, which a later version writes: write its "
-             "elements, [a[0], a[1], ...]\n"
-             "test.fm:9:65: error: a JSON literal does not take a vector yet, which a later version writes: write its "
-             "lanes, [v.x, v.y, ...]\n"
-             "test.fm:9:73: error: a JSON literal does not take a module yet, which a later version writes: write its "
-             "fields, { \"name\": m.name, ... }\n"
-             "test.fm:9:81: error: a JSON literal does not take a value of an enumerated type yet, which a later "
-             "version writes as its constant's name: cast it to int for its number\n"
-             "test.fm:9:89: error: a JSON literal's value is a float, a double, an int, a bool, a string, an object or "
-             "an array, not 'float *'\n"
-             "test.fm:9:97: error: a JSON literal's value is a float, a double, an int, a bool, a string, an object or "
-             "an array, not 'http_server'\n");
+          == "test.fm:9:89: error: a JSON literal does not write a pointer, 'float *': write what it points to, *p, or "
+             "its first elements, json_slice(p, count)\n"
+             "test.fm:9:97: error: a JSON literal's value is a float, a double, an int, a bool, a string, an "
+             "enumeration's value, a float2, float4 or float8, an array or a module, or an object or an array of "
+             "them, not 'http_server'\n");
 }
 
 TEST_CASE("serve meets string, char and when: each error once, at its column", "[codegen][serve][when][string]")
@@ -1426,6 +1421,7 @@ TEST_CASE("a route's parameters and a module's fields: one rule for their defaul
                    "        route \"GET /c\" (string s [[fminus::default(\"ok\")]], string t [[fminus::range(0, 1)]]) "
                    "{ reply 204; }\n"
                    "        route \"GET /d/{s}\" (string s [[fminus::default(1)]]) { reply 204; }\n"
+                   "        route \"GET /e/{n}\" (int n [[fminus::default(\"x\")]]) { reply 204; }\n"
                    "    }\n"
                    "}\n")
           == "test.fm:3:16: error: " + field + "test.fm:4:16: error: " + field
@@ -1442,7 +1438,10 @@ TEST_CASE("a route's parameters and a module's fields: one rule for their defaul
                  + "test.fm:17:72: error: 'fminus::range' does not apply to a string parameter: a string has no "
                    "range\n"
                    "test.fm:18:40: error: 'fminus::default' does not apply to a hole's parameter: a request the route "
-                   "takes always has its segment\n");
+                   "takes always has its segment\n"
+                   // An int hole's default that is no number: the one error, not "takes one number" too.
+                   "test.fm:19:37: error: 'fminus::default' does not apply to a hole's parameter: a request the route "
+                   "takes always has its number\n");
 }
 
 #if FMINUS_HAS_JSON && FMINUS_HAS_FILES_WRITE

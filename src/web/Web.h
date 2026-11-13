@@ -319,6 +319,26 @@ extern "C"
                                  std::int32_t textCount, const void* data, std::int32_t bytes, const char* type,
                                  std::int32_t typeLength) noexcept;
 
+    // A function that writes a JSON literal's text into `buffer`, no more than `capacity` bytes of it, from its
+    // description and its values, and returns the bytes the whole text takes, or -1 for a description it refuses: the
+    // runtime's fminus_rt_json_write (runtime/Runtime.h), which a program passes by its address. The web library does
+    // not link the runtime; this is how its POST of a JSON literal reaches the writer.
+    using fminus_web_json_writer = std::int32_t (*)(char* buffer, std::int32_t capacity, const void* description,
+                                                    const void* values) noexcept;
+
+    // A POST whose body is a JSON literal's text, sent as application/json: the URL as fminus_web_http_post_s takes
+    // it (null `texts` and a `textCount` of 0: none, exactly as fminus_web_http_post's), and the body what `write`
+    // makes of `description` and `values`. It is measured first (a call with no buffer, which writes nothing), and a
+    // text over the policy's maxBodyBytes is FMINUS_WEB_LIMIT, as a body of that size is; then written once, straight
+    // into the request's own body, a buffer of exactly its size (no second copy), before this returns: the values
+    // may change once it has. A description `write` refuses (it returns -1), a null `write`, or a second text of
+    // another size than the first (values that changed between the two passes), is FMINUS_WEB_INVALID. The same
+    // checks, in the same order, as fminus_web_http_post's otherwise. A null context: refused, as theirs.
+    void* fminus_web_http_post_json(void* context, const char* url, std::int32_t length, const std::int32_t* ints,
+                                    std::int32_t count, const char* const* texts, const std::int32_t* lengths,
+                                    std::int32_t textCount, fminus_web_json_writer write, const void* description,
+                                    const void* values) noexcept;
+
     // Blocks the calling thread until the request is done or `timeoutMs` milliseconds have passed (0: does not wait;
     // negative: until it is done, which the policy's timeout bounds), and returns its status then (0 if it is still
     // pending). While the calling thread has a deadline scope open under the request's context (below), its innermost

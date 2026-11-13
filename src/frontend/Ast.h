@@ -661,9 +661,10 @@ namespace fminus::ast
         ExprPtr operand;
     };
 
-    // A JSON literal's value: an expression (a float, a double, an int or a bool, which the code generator checks), an
-    // object, `{ "gain": gain, pitch }`, whose members are keys and values (a bare name is its own key and its value),
-    // or an array, `[a, b, c]`. FMinus's own, not C's: docs/web.md, "The server".
+    // A JSON literal's value: an expression (a number, a bool, a string, an enumeration's value, a vector, an array,
+    // a module or json_slice(a, n), which the code generator checks), an object, `{ "gain": gain, pitch }`, whose
+    // members are keys and values (a bare name is its own key and its value), or an array, `[a, b, c]`. FMinus's own,
+    // not C's: docs/web.md, "The JSON literal".
     struct JsonValue
     {
         enum class Kind
@@ -680,8 +681,10 @@ namespace fminus::ast
         std::vector<JsonValue> elements;           // an Object's members' values, in order, or an Array's values
     };
 
-    // `json { "gain": gain }` or `json [a, b]`: a JSON literal, which, as a string literal, is an expression to the
-    // grammar and only an argument to the code generator: a reply's body (`reply 200, json { ... };`), never a value.
+    // `json { "gain": gain }`, `json [a, b]` or `json (preset)` (one value, its Value): a JSON literal, which, as a
+    // string literal, is an expression to the grammar and only an argument to the code generator: a reply's body
+    // (`reply 200, json { ... };`, http_reply_json), a POST's (http_post) or a file's (file_write, file_append), never
+    // a value. The dump writes the last `(json preset)`.
     struct JsonExpr
     {
         JsonValue value;

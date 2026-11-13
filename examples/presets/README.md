@@ -1,16 +1,20 @@
 # Presets: a store of named presets, kept over HTTP as files
 
 `presets.fm` is a small service: a page or a script stores presets by name and reads them back
-([docs/web.md](../../docs/web.md), [docs/files.md](../../docs/files.md); the research's service, its §8, as far as this
-version goes). A preset has a **name**, which the request's path gives, and a body of JSON whose numbers the program
-checks when it arrives and then stores as it came, as the file `presets/<name>.json` in the one folder its host maps:
+([docs/web.md](../../docs/web.md), [docs/files.md](../../docs/files.md); the research's service, its §8, in full). A
+preset has a **name**, which the request's path gives, and a body of JSON read into a **module** by its fields' names,
+each checked by its range when it arrives; what is stored, as the file `presets/<name>.json` in the one folder its host
+maps, is the preset written back as JSON, not whatever was sent:
 
 ```c
-route "PUT /presets/{name}" (string name, http_request q)      // a string parameter: a whole segment of the path
+enum Wave { SINE, SAW, SQUARE };
+
+module Preset                                        // what a preset holds, and so what its JSON says
 {
-    const int status = store(q, name);                         // json_parse, json_float, file_write
-    ...
-}
+    float gain [[fminus::range(0, 1)]];
+    float cutoff [[fminus::range(20, 20000)]];
+    enum Wave wave;                                  // "wave": "SAW"
+};
 
 int store(http_request q, string name)
 {
@@ -18,19 +22,23 @@ int store(http_request q, string name)
         return 415;
     json_doc doc = json_parse(http_body(q), http_size(q));
     defer json_free(doc);
-    const float gain = json_float(doc, "/gain", -1.0f);
-    const float cutoff = json_float(doc, "/cutoff", -1.0f);
-    if (!doc || gain < 0.0f || gain > 1.0f || cutoff < 20.0f || cutoff > 20000.0f)
+    Preset preset;
+    if (!json_read(doc, "", &preset))                // a field missing, of another kind or out of its range
         return 400;
-    switch (file_write("presets/{name}.json", http_body(q), http_size(q)))   // a hole: the name, checked again
+    switch (file_write("presets/{name}.json", json (preset)))   // a hole: the name, checked again
     {
     case FILE_OK: return 204;
-    case FILE_INVALID: return 400;                             // a name no file may have: ".hidden", "con"
+    case FILE_INVALID: return 400;                   // a name no file may have: ".hidden", "con"
     default: return 500;
     }
 }
 ```
 
+- **A preset is a module.** `json_read` fills it field by field in one walk of the document, by the names its fields
+  have (a member no field names, `"note"`, is ignored); a field missing, of another kind (`"wave": "TRIANGLE"`, which no
+  constant of `Wave` names) or out of its `fminus::range` (`"gain": 2`) makes it false, and nothing is written. `json
+  (preset)` writes it back, its fields in their order, the enumeration by its constant's name: `{"gain":0.5,
+  "cutoff":1200,"wave":"SAW"}`, whatever spacing, order or extra members the body had.
 - **The name is text the program never builds.** It is a view of the request's path (a `string`, valid until the
   reply), passed to a function, compared, and filled into the file's name by a hole, `{name}`, where the runtime checks
   it again by the rules a literal's segments keep (no `/`, no leading `.`, no device name of Windows, ...): one that
@@ -59,24 +67,25 @@ build/bin/example-presets --listen localhost:8080 --folder ./mine   # serve for 
 lets the program listen on `127.0.0.1:0`, lists its routes and files, and runs `run(60)` on a thread of its own. A
 second `Program` in the same process, the library's own client, then stores two presets by name with `POST` (the
 library's client sends `GET` and `POST`, so `presets.fm` takes a preset by either), its URLs with holes
-(`http_post("http://127.0.0.1:{port}/presets/{name}", ...)`), checks the files are the bodies as sent and reads them
-back; sends a gain of 2 (400, and the stored preset as it was), the names `.hidden` and `con` (400, and no file), a name
-with a space (the library's 400) and a body of `text/plain` (415); reads a preset no one stored (404); and lists two,
-in their names' order. Then the host calls `stopWeb()`, `run` sees its server closed and returns the presets it
+(`http_post("http://127.0.0.1:{port}/presets/{name}", ...)`), one body with a member no field names and one with its
+members in another order and the wave by its number, checks each file is its preset written back as JSON and reads
+them back; sends a gain of 2, a body without a wave and one whose wave no constant names (400 each, and the stored
+preset as it was), the names `.hidden` and `con` (400, and no file), a name with a space (the library's 400) and a body
+of `text/plain` (415); reads a preset no one stored (404); and lists two, in their names' order. Then the host calls `stopWeb()`, `run` sees its server closed and returns the presets it
 stored, 2. Last it compiles the program with the default policy, under which `run` gives `HTTP_REFUSED` (-4) at once.
 
 ```
-.../examples/presets/presets.fm:53: PUT /presets/* (string name, from the path) (http_request q, from the request)
-.../examples/presets/presets.fm:62: POST /presets/* (string name, from the path) (http_request q, from the request)
-.../examples/presets/presets.fm:68: GET /presets/* (string name, from the path)
-.../examples/presets/presets.fm:76: GET /presets
-.../examples/presets/presets.fm:82: GET /names/* (int i, from the path)
-.../examples/presets/presets.fm:30: write presets/*.json
-.../examples/presets/presets.fm:70: read presets/*.json
-.../examples/presets/presets.fm:78: list presets/*.json
-.../examples/presets/presets.fm:84: list presets/*.json
+.../examples/presets/presets.fm:64: PUT /presets/* (string name, from the path) (http_request q, from the request)
+.../examples/presets/presets.fm:73: POST /presets/* (string name, from the path) (http_request q, from the request)
+.../examples/presets/presets.fm:79: GET /presets/* (string name, from the path)
+.../examples/presets/presets.fm:87: GET /presets
+.../examples/presets/presets.fm:93: GET /names/* (int i, from the path)
+.../examples/presets/presets.fm:40: write presets/*.json
+.../examples/presets/presets.fm:81: read presets/*.json
+.../examples/presets/presets.fm:89: list presets/*.json
+.../examples/presets/presets.fm:95: list presets/*.json
 listening on 127.0.0.1:40925, presets in .../build-web/presets-check-498
-stored warm-pad and bright.2, read back byte for byte; refused a gain of 2, .hidden, con, a space and text/plain; listed 2
+stored warm-pad and bright.2 as presets, read back; refused a gain of 2, no wave, a wave TRIANGLE, .hidden, con, a space and text/plain; listed 2
 checked: the default policy listens nowhere
 ```
 
@@ -90,10 +99,11 @@ build/bin/fminus examples/presets/presets.fm --run run 600 --web-listen localhos
 Then, from the same machine:
 
 ```bash
-curl -X PUT --json '{"gain": 0.5, "cutoff": 1200}' http://localhost:8080/presets/warm-pad      # 204
-curl http://localhost:8080/presets/warm-pad                    # {"gain": 0.5, "cutoff": 1200}, as it was sent
-curl -X PUT --json '{"gain": 2, "cutoff": 1200}' http://localhost:8080/presets/warm-pad        # 400, and why
-curl -X PUT --json '{"gain": 0.5, "cutoff": 1200}' http://localhost:8080/presets/.hidden       # 400: no such file name
+curl -X PUT --json '{"gain": 0.5, "cutoff": 1200, "wave": "SAW"}' http://localhost:8080/presets/warm-pad   # 204
+curl http://localhost:8080/presets/warm-pad                    # {"gain":0.5,"cutoff":1200,"wave":"SAW"}, the preset
+curl -X PUT --json '{"gain": 2, "cutoff": 1200, "wave": 1}' http://localhost:8080/presets/warm-pad   # 400, and why
+curl -X PUT --json '{"gain": 0.5, "cutoff": 1200}' http://localhost:8080/presets/warm-pad      # 400: no wave
+curl -X PUT --json '{"gain": 0.5, "cutoff": 1200, "wave": 0}' http://localhost:8080/presets/.hidden   # 400: no such file name
 curl http://localhost:8080/presets                             # {"count":1,"first":"warm-pad.json"}
 curl http://localhost:8080/names/0                             # warm-pad
 ```
@@ -104,6 +114,5 @@ without `--files-write` every write is `FILE_REFUSED`, which the program answers
 
 ## What it does not do yet
 
-A preset's numbers are checked one by one, and what is stored is whatever was sent: reading a body into a module by
-its fields, and writing one back as JSON, are the next version's. A listing's names come one request at a time: a JSON
-literal has no array of a length known only when it runs.
+A listing's names come one request at a time: a JSON literal writes an array of a size known when the program is
+compiled, or the first elements of one (`json_slice`), and has no array of names a listing gives only when it runs.

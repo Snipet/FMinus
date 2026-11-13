@@ -65,7 +65,8 @@
 //                  | "(" ("float" | "double" | "int" | "bool") ")" expr                       a cast
 //                  | "(" "enum" IDENTIFIER ")" expr                                  a cast to int, as C's to an enum
 //                  | expr ("=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=") expr
-//                  | "json" json_object | "json" json_array     a JSON literal: only a reply's body, never a value
+//                  | "json" json_object | "json" json_array     a JSON literal: a sink's argument, never a value
+//                  | "json" "(" expr ")"                         one value written at the top: json (preset)
 //     json_object  : "{" (json_member ("," json_member)* ","?)? "}"
 //     json_member  : STRING+ ":" json_value | IDENTIFIER           a name alone is its own key and its value
 //     json_array   : "[" (json_value ("," json_value)* ","?)? "]"
@@ -1423,6 +1424,12 @@ expr
     | expr "?" expr ":" expr                { $$ = ast::makeExpr(at(@2), ast::ConditionalExpr{$1, $3, $5}); }
     | "json" json_object                    { $$ = ast::makeExpr(at(@1), ast::JsonExpr{$2}); }
     | "json" json_array                     { $$ = ast::makeExpr(at(@1), ast::JsonExpr{$2}); }
+    | "json" "(" expr ")"                   {
+                                                ast::JsonValue value;
+                                                value.location = at(@3);
+                                                value.value = $3;
+                                                $$ = ast::makeExpr(at(@1), ast::JsonExpr{std::move(value)});
+                                            }
     ;
 
 // A JSON literal's values: an expression, an object or an array, nested as JSON nests them.

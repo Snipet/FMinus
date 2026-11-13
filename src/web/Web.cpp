@@ -785,10 +785,21 @@ namespace fminus::web
             return free;
         }
 
+        // A POST's body a JSON literal's writer makes (fminus_web_http_post_json): the writer, the literal's
+        // description and its values.
+        struct JsonBody
+        {
+            fminus_web_json_writer write;
+            const void* description;
+            const void* values;
+        };
+
         // A request under `context`, checked, and started unless the check or a limit ended it; or, with a `refusal`
-        // (the URL's places could not be filled: expandUrl), ended with it before its URL is looked at.
+        // (the URL's places could not be filled: expandUrl), ended with it before its URL is looked at. A POST's body
+        // is the `bytes` bytes at `data`, or with `json` the text its writer makes, measured first and then written
+        // into the request's own body.
         Request* start(Context::State* context, std::string url, bool post, const void* data, std::int32_t bytes,
-                       std::string_view type, std::int32_t refusal = 0)
+                       std::string_view type, std::int32_t refusal = 0, const JsonBody* json = nullptr)
         {
             Request* request = new (std::nothrow) Request;
             if (request == nullptr)
@@ -796,7 +807,33 @@ namespace fminus::web
             request->context = context;
             const Policy& policy = context->policy.policy;
             std::int32_t status = refusal != 0 ? refusal : checkUrl(context->policy, url, request->target);
-            if (status == 0 && post)
+            if (status == 0 && post && json != nullptr)
+            {
+                request->post = true;
+                const std::int32_t measured =
+                    json->write == nullptr ? -1 : json->write(nullptr, 0, json->description, json->values);
+                if (measured < 0)
+                    status = FMINUS_WEB_INVALID;
+                else if (measured > policy.maxBodyBytes)
+                    status = FMINUS_WEB_LIMIT;
+                else if (!validContentType(type))
+                    status = FMINUS_WEB_REFUSED;
+                else
+                {
+                    try
+                    {
+                        request->data.resize(static_cast<std::size_t>(measured));
+                        if (json->write(request->data.data(), measured, json->description, json->values) != measured)
+                            status = FMINUS_WEB_INVALID;   // the values changed between the two passes
+                        request->type = std::string(type);
+                    }
+                    catch (const std::bad_alloc&)
+                    {
+                        status = FMINUS_WEB_FAILED;
+                    }
+                }
+            }
+            else if (status == 0 && post)
             {
                 request->post = true;
                 if (bytes < 0 || (data == nullptr && bytes > 0))
@@ -1273,6 +1310,28 @@ extern "C"
                 fminus::web::expandUrl(url, length, ints, count, texts, lengths, textCount, filled);
             return madeHandle(fminus::web::start(static_cast<Context::State*>(context), std::move(filled), true, data,
                                                  bytes, contentType, refusal));
+        }
+        catch (const std::bad_alloc&)
+        {
+            return nullptr;
+        }
+    }
+
+    void* fminus_web_http_post_json(void* context, const char* url, std::int32_t length, const std::int32_t* ints,
+                                    std::int32_t count, const char* const* texts, const std::int32_t* lengths,
+                                    std::int32_t textCount, fminus_web_json_writer write, const void* description,
+                                    const void* values) noexcept
+    {
+        if (context == nullptr)
+            return madeHandle(&fminus::web::refused());
+        try
+        {
+            std::string filled;
+            const std::int32_t refusal =
+                fminus::web::expandUrl(url, length, ints, count, texts, lengths, textCount, filled);
+            const fminus::web::JsonBody body{write, description, values};
+            return madeHandle(fminus::web::start(static_cast<Context::State*>(context), std::move(filled), true, nullptr,
+                                                 0, "application/json", refusal, &body));
         }
         catch (const std::bad_alloc&)
         {

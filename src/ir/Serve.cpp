@@ -35,10 +35,9 @@
 //
 // A JSON literal, a reply's body, is written by the runtime's JSON writer (fminus_rt_json_write, runtime/JsonWrite.cpp)
 // straight into the request's own reply buffer (fminus_web_http_reply_buffer), which is then published
-// (fminus_web_http_reply_written): its keys and its structure a constant description the compiler makes, the bytes
-// and the operations a table as a path's is, and each value stored in an 8-byte slot of the frame with its shape (a
-// float, a double, an int, a bool, a string): no JSON value is ever made. In a build without FMINUS_JSON the writer is
-// not in the runtime, and a JSON literal is the error that names the option.
+// (fminus_web_http_reply_written): a reply of one is a call of http_reply_json (replyJson), its literal Shapes.cpp's,
+// a constant description and its values' slots of the frame: no JSON value is ever made. In a build without
+// FMINUS_JSON the writer is not in the runtime, and a JSON literal is the error that names the option.
 #include "ir/Lowering.h"
 
 #include <llvm/IR/CFG.h>
@@ -112,76 +111,6 @@ namespace fminus::ir::detail
         SourceLocation byteAt(const ast::StringExpr& literal, std::size_t offset, SourceLocation where)
         {
             return offset < literal.at.size() ? literal.at[offset] : where;
-        }
-
-        // A key of a JSON literal, written into `out` as a JSON string's contents (RFC 8259, §7: '"', '\\' and the
-        // control characters escaped, as the writer escapes a string value). The offset of a byte that is no part of
-        // UTF-8 text, which no JSON string may hold, or none.
-        std::optional<std::size_t> jsonKey(std::string_view key, std::string& out)
-        {
-            for (std::size_t i = 0; i < key.size();)
-            {
-                const auto byte = static_cast<unsigned char>(key[i]);
-                if (byte >= 0x80)
-                {
-                    // UTF-8: a lead byte and its continuation bytes, the shortest form, no surrogate, at most U+10FFFF.
-                    const std::size_t length = byte >= 0xc2 && byte <= 0xdf   ? 2
-                                               : byte >= 0xe0 && byte <= 0xef ? 3
-                                               : byte >= 0xf0 && byte <= 0xf4 ? 4
-                                                                               : 0;
-                    if (length == 0 || i + length > key.size())
-                        return i;
-                    for (std::size_t k = 1; k < length; ++k)
-                    {
-                        if ((static_cast<unsigned char>(key[i + k]) & 0xc0) != 0x80)
-                            return i;
-                    }
-                    const auto second = static_cast<unsigned char>(key[i + 1]);
-                    if ((byte == 0xe0 && second < 0xa0) || (byte == 0xed && second >= 0xa0)
-                        || (byte == 0xf0 && second < 0x90) || (byte == 0xf4 && second >= 0x90))
-                        return i;
-                    out.append(key.substr(i, length));
-                    i += length;
-                    continue;
-                }
-                switch (key[i])
-                {
-                case '"':
-                    out += "\\\"";
-                    break;
-                case '\\':
-                    out += "\\\\";
-                    break;
-                case '\b':
-                    out += "\\b";
-                    break;
-                case '\f':
-                    out += "\\f";
-                    break;
-                case '\n':
-                    out += "\\n";
-                    break;
-                case '\r':
-                    out += "\\r";
-                    break;
-                case '\t':
-                    out += "\\t";
-                    break;
-                default:
-                    if (byte < 0x20)
-                    {
-                        constexpr std::string_view kHex = "0123456789abcdef";
-                        out += "\\u00";
-                        out += kHex[byte >> 4];
-                        out += kHex[byte & 15];
-                    }
-                    else
-                        out += key[i];
-                    break;
-                }
-                ++i;
-            }
-            return std::nullopt;
         }
     } // namespace
 
@@ -271,9 +200,10 @@ namespace fminus::ir::detail
                 error(param.location, "parameter " + quoted(param.name) + " is read from the query's field of its "
                                           "name, which is 1 to 64 bytes, not " + std::to_string(param.name.size()));
             // A module parameter's attributes, checked as its are (Modules.cpp), a string's range and default among
-            // them; a hole's string's default is refused below, once.
+            // them; a hole's default, a string's or a number's, is refused below, once (one mistake, one error: not
+            // also what checkAttributes says of a default that is no number, or out of the range).
             std::vector<ast::Attribute> attributes = param.attributes;
-            if (isText && inPath)
+            if (inPath)
                 std::erase_if(attributes,
                               [](const ast::Attribute& attribute) { return attribute.name == "fminus::default"; });
             const ast::Field field{param.location, param.name, type, false, false, true, attributes, nullptr, 0,
@@ -734,8 +664,10 @@ namespace fminus::ir::detail
         Value answered{nullptr, ast::Type::Int, nullptr, true};
         if (json != nullptr && count > 2)
             error(begin(*reply.args[2]), "a JSON literal is a reply's whole body: nothing follows it");
-        else if (json != nullptr)
-            answered = lowerJsonReply(*reply.args[0], *reply.args[1], request);
+        else if (json != nullptr)   // http_reply_json's call, its request given
+            answered = lowerRuntimeCall(location, *findRuntimeBuiltin("http_reply_json"),
+                                        {nullptr, reply.args[0].get(), reply.args[1].get()},
+                                        Value{request, requestType});
         else
         {
             // A string second, a literal or a value of type string, is the text form's, whose content type is a
@@ -782,190 +714,26 @@ namespace fminus::ir::detail
         builder_.CreateBr(route.next);
     }
 
-    // `reply status, json { ... };`: the literal's description (jsonDescribe) and its values in slots of the frame,
-    // written by the runtime's JSON writer into the request's reply buffer, whose capacity is the host's maxReplyBytes,
-    // and published with the content type application/json. A text that does not fit is the library's HTTP_LIMIT, which
-    // the route answers 500. Failed when the status or the literal was in error, or the build has no JSON writer.
-    Lowering::Value Lowering::lowerJsonReply(const ast::Expr& status, const ast::Expr& literal, llvm::Value* request)
+    // `reply status, json { ... };` and http_reply_json(r, status, json { ... }): the literal (lowerJsonLiteral)
+    // written by the runtime's JSON writer straight into the request's reply buffer, whose capacity is the host's
+    // maxReplyBytes, and published with the content type application/json. A text that does not fit is the library's
+    // HTTP_LIMIT (reply_written's, which takes the whole text's size), which a route answers 500. The reply's status.
+    llvm::Value* Lowering::replyJson(llvm::Value* request, llvm::Value* status, const JsonLiteral& literal)
     {
-        const Value code = isString(status) ? refuseString(status, ast::Type::Int, Use::Passing, begin(status))
-                                            : lowerAs(status, ast::Type::Int);
-        llvm::Value* converted = convert(code, ast::Type::Int, begin(status), Use::Passing);
-        if (!isBuilt(Feature::Json))
-        {
-            error(begin(literal), "a JSON literal needs the JSON writer, which this build of FMinus leaves out "
-                                  "(FMINUS_JSON=OFF)");
-            return {nullptr, ast::Type::Int, nullptr, true};
-        }
-        JsonPlan plan;
-        const bool fine = jsonDescribe(std::get<ast::JsonExpr>(literal.node).value, plan);
-        plan.flush();
-        if (!fine || code.failed)
-            return {nullptr, ast::Type::Int, nullptr, true};
-
-        // The values, each at its slot's start in its own type, a string's pointer and length in two slots.
-        llvm::Value* values = llvm::ConstantPointerNull::get(builder_.getPtrTy());
-        if (plan.slots > 0)
-        {
-            llvm::AllocaInst* slots =
-                allocate(llvm::ArrayType::get(builder_.getInt64Ty(), static_cast<std::uint64_t>(plan.slots)),
-                         "json.values");
-            slots->setAlignment(llvm::Align(8));
-            for (const auto& [slot, value] : plan.values)
-            {
-                llvm::Value* at = builder_.CreateConstInBoundsGEP1_32(builder_.getInt8Ty(), slots,
-                                                                       static_cast<unsigned>(8 * slot));
-                if (value.type == ast::Type::String)
-                {
-                    tag(builder_.CreateStore(builder_.CreateExtractValue(value.ir, 0), at),
-                        ast::Type::pointerTo(ast::Kind::Char, true));
-                    tag(builder_.CreateStore(builder_.CreateExtractValue(value.ir, 1),
-                                             builder_.CreateConstInBoundsGEP1_32(builder_.getInt8Ty(), slots,
-                                                                                 static_cast<unsigned>(8 * slot + 8))),
-                        ast::Type::Int);
-                }
-                else if (value.type == ast::Type::Bool)   // one byte, 0 or 1
-                    tag(builder_.CreateStore(builder_.CreateZExt(value.ir, builder_.getInt8Ty()), at), ast::Type::Bool);
-                else
-                    tag(builder_.CreateStore(value.ir, at), value.type);
-            }
-            values = slots;
-        }
-        // Its description: the operations, then the bytes, one constant of the program's (a path's table's layout).
-        llvm::LLVMContext& context = module_.getContext();
-        std::vector<std::uint32_t> words(plan.code.begin(), plan.code.end());
-        llvm::Constant* fields[] = {
-            builder_.getInt32(static_cast<std::uint32_t>(words.size())),
-            builder_.getInt32(static_cast<std::uint32_t>(plan.bytes.size())),
-            llvm::ConstantDataArray::get(context, words),
-            llvm::ConstantDataArray::getString(context, plan.bytes, false),
-        };
-        llvm::Constant* table = llvm::ConstantStruct::getAnon(context, fields);
-        auto* description = new llvm::GlobalVariable(module_, table->getType(), true,
-                                                     llvm::GlobalValue::PrivateLinkage, table, ".json");
-        description->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
-        description->setAlignment(llvm::Align(4));
-
         llvm::Type* i32 = builder_.getInt32Ty();
         llvm::AllocaInst* capacity = allocate(i32, "reply.capacity");
         llvm::Value* buffer = callRuntime("fminus_web_http_reply_buffer", builder_.getPtrTy(), {request, capacity});
         buffer->setName("reply.buffer");
         llvm::LoadInst* room = builder_.CreateLoad(i32, capacity, "reply.room");
         tag(room, ast::Type::Int);
-        llvm::Value* written = callRuntime("fminus_rt_json_write", i32, {buffer, room, description, values});
+        llvm::Value* written =
+            callRuntime("fminus_rt_json_write", i32, {buffer, room, literal.description, literal.values});
         written->setName("json.bytes");
         const std::string type = "application/json";
         llvm::Value* answered = callRuntime("fminus_web_http_reply_written", i32,
-                                            {request, converted, written, stringConstant(ast::StringExpr{type, {}}),
+                                            {request, status, written, stringConstant(ast::StringExpr{type, {}}),
                                              builder_.getInt32(static_cast<std::uint32_t>(type.size()))});
         answered->setName("http_reply_written");
-        return {answered, ast::Type::Int};
-    }
-
-    // The bytes not yet in an operation, as one: `0, offset, count` of the description's bytes.
-    void Lowering::JsonPlan::flush()
-    {
-        if (pending.empty())
-            return;
-        code.insert(code.end(),
-                    {0, static_cast<std::int32_t>(bytes.size()), static_cast<std::int32_t>(pending.size())});
-        bytes += pending;
-        pending.clear();
-    }
-
-    // A JSON literal's value added to `plan`: an object's and an array's text and its keys, escaped, as bytes, and each
-    // value an operation of its own, `1, slot, shape`, its value lowered in the order written and kept with its slot (a
-    // float 1, a double 2, an int 3, a bool 4, each one slot; a string 5, its pointer and its length two). A literal is
-    // a string here (lowerAs). Each error once, where it is; false after one.
-    bool Lowering::jsonDescribe(const ast::JsonValue& value, JsonPlan& plan)
-    {
-        switch (value.kind)
-        {
-        case ast::JsonValue::Kind::Value:
-        {
-            const ast::Expr& expr = *value.value;
-            const std::optional<ast::Type> declared = staticType(expr);
-            const auto later = [&](const std::string& what, const std::string& instead) {
-                error(begin(expr), "a JSON literal does not take " + what + " yet, which a later version writes"
-                                       + instead);
-                return false;
-            };
-            if (declared && ast::isArray(*declared))
-                return later("an array", ": write its elements, [a[0], a[1], ...]");
-            const Value lowered = lowerAs(expr, ast::Type::String);
-            if (lowered.failed)
-                return false;
-            if (lowered.type.enumeration != 0)
-                return later("a value of an enumerated type", " as its constant's name: cast it to int for its "
-                                                              "number");
-            if (ast::isVector(lowered.type))
-                return later("a vector", ": write its lanes, [v.x, v.y, ...]");
-            if (ast::isModule(lowered.type))
-                return later("a module", ": write its fields, { \"name\": m.name, ... }");
-            std::int32_t shape = 0;
-            if (lowered.type == ast::Type::Float)
-                shape = 1;
-            else if (lowered.type == ast::Type::Double)
-                shape = 2;
-            else if (lowered.type == ast::Type::Int)
-                shape = 3;
-            else if (lowered.type == ast::Type::Bool)
-                shape = 4;
-            else if (lowered.type == ast::Type::String)
-                shape = 5;
-            else
-            {
-                error(begin(expr), "a JSON literal's value is a float, a double, an int, a bool, a string, an object "
-                                   "or an array, not " + quoted(ast::typeName(lowered.type)));
-                return false;
-            }
-            plan.flush();
-            plan.code.insert(plan.code.end(), {1, plan.slots, shape});
-            plan.values.emplace_back(plan.slots, lowered);
-            plan.slots += shape == 5 ? 2 : 1;
-            return true;
-        }
-        case ast::JsonValue::Kind::Object:
-        {
-            bool fine = true;
-            plan.pending += '{';
-            std::map<std::string, SourceLocation> seen;
-            for (std::size_t i = 0; i < value.elements.size(); ++i)
-            {
-                const ast::StringExpr& key = value.keys[i];
-                const SourceLocation where = value.keyLocations[i];
-                if (const auto [previous, added] = seen.try_emplace(key.value, where); !added)
-                {
-                    diagnostics_.error(where, "duplicate key " + quoted(key.value) + " in a JSON object",
-                                       {Diagnostic{previous->second, "previous key is here", {}}});
-                    fine = false;
-                }
-                plan.pending += i > 0 ? ",\"" : "\"";
-                if (const std::optional<std::size_t> bad = jsonKey(key.value, plan.pending))
-                {
-                    error(byteAt(key, *bad, where), "a JSON key is UTF-8 text, and this byte is no part of any");
-                    fine = false;
-                }
-                plan.pending += "\":";
-                fine = jsonDescribe(value.elements[i], plan) && fine;
-            }
-            plan.pending += '}';
-            return fine;
-        }
-        case ast::JsonValue::Kind::Array:
-        {
-            bool fine = true;
-            plan.pending += '[';
-            for (std::size_t i = 0; i < value.elements.size(); ++i)
-            {
-                if (i > 0)
-                    plan.pending += ',';
-                fine = jsonDescribe(value.elements[i], plan) && fine;
-            }
-            plan.pending += ']';
-            return fine;
-        }
-        }
-        return false;
+        return answered;
     }
 } // namespace fminus::ir::detail

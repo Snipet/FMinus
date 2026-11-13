@@ -110,6 +110,7 @@ them.
 | `void file_close(h)` | frees a file's bytes, or a listing | allocates |
 | `int file_write("name", data, bytes, ...)` | writes `bytes` bytes at `data` as the whole file, replacing it in one step or not at all ([writing](#writing)); `FMINUS_FILES_WRITE` | allocates |
 | `int file_append("name", data, bytes, ...)` | adds them at the file's end, creating it if need be; `FMINUS_FILES_WRITE` | allocates |
+| `int file_write("name", json ..., ...)`, `int file_append("name", json ..., ...)` | the same, of a JSON literal's text ([below](#a-json-literal-as-a-file)); `file_append` adds a newline after it (JSON Lines); `FMINUS_FILES_WRITE` and `FMINUS_JSON` | allocates |
 
 - **A name is a string literal**, a format whose `%d`s are the `int`s after every other argument, as a URL's are
   (`file_write("takes/take%d.f32", data, bytes, n)`), checked where it is written ([below](#names-and-what-the-compiler-refuses))
@@ -310,6 +311,29 @@ absolute one):
   `maxFilesWritten` every `file_write` that got as far as its temporary file and every `file_append` that created its
   file. Neither is ever given back, for the life of the program's context (its `Program`, or an executable's run). A
   write refused before the walk, or over `maxFileBytes`, counts nothing.
+
+### A JSON literal as a file
+
+```c
+module Day { int sensor; float mean; float peak; };
+
+Day day[8];
+file_write("out/summary.json", json { "days": day });          // {"days":[{"sensor":0,"mean":0.25,"peak":1},...]}
+file_write("presets/{name}.json", json (preset));               // a module: an object of its fields
+file_append("log/days.jsonl", json { "day": k, "mean": mean });  // one line of JSON Lines, a newline after it
+```
+
+`file_write` and `file_append` take a JSON literal in place of their `data` and `bytes`
+([web.md](web.md), "The JSON literal", says what a literal holds and how each value is written): the name as any (with
+`%d`s after the literal, or holes), and the file's bytes the literal's text, **and, for `file_append`, one newline
+after it**, so that appends make JSON Lines (<https://jsonlines.org>: a file a line a value). The text is measured
+first (a pass of the runtime's writer that writes nothing), and its size meets every check `bytes` meets, in the same
+order: over `maxFileBytes` (the newline counted) is `FILE_LIMIT`, and the quotas count it as they count bytes. Only
+then is it written, once, into a buffer of exactly its size, which the file is written from as `data` is: the values
+are evaluated once, before either pass. The statuses are the plain form's. It needs the JSON writer too: in a build
+without `FMINUS_JSON` the literal is that option's error, and in one without `FMINUS_FILES_WRITE` the call is this
+one's. The runtime's functions are `fminus_rt_file_write_json` and `fminus_rt_file_append_json` (`Runtime.h`), which
+take the name's strings, none or some, the literal's description and its values' slots.
 
 ## The audio thread
 
@@ -625,6 +649,14 @@ Recipe 43 in [extending.md](extending.md) walks through it as a change to the co
   nonblocking function reading a listing's names allocates nothing and makes no system call
   (`tests/unit/DocumentTextTest.cpp`). `examples/presets/` writes and reads its files by names with holes, in a
   directory its check makes.
+- **A JSON literal as a file** (2026-11-13): built and tested in the default tree (whose build has no writing: the
+  option's error) and in one with the web library, its server, writing and absolute names, not in one without
+  `FMINUS_JSON` (whose errors are written and not run), nor with `FMINUS_FILES=OFF` or `FMINUS_FILES_TYPES` set.
+  `fminus_rt_file_write_json` and `_append_json` from C++ (`tests/unit/JsonFileTest.cpp`: the text, JSON Lines, the
+  size limit with the newline, the quota, the refusals, a description the writer refuses), and through the JIT every
+  kind of value written and read back (`tests/unit/JsonLiteralTest.cpp`), as an executable (`json-literal.fm`); the
+  runtime's sources and those tests under GCC 13's AddressSanitizer with UndefinedBehaviorSanitizer and under
+  ThreadSanitizer ([extending.md](extending.md), recipe 51). `examples/presets/` stores each preset as `json (preset)`.
 - **Not run anywhere yet:** macOS (the `O_RDONLY` walk, `O_NOFOLLOW_ANY`, `F_BARRIERFSYNC`, `EMLINK`'s meaning,
   `fstatfs`'s type names, the tests' non-Linux paths) and Windows (all of `FilesWindows.cpp`: `NtCreateFile` with and
   without `OBJ_DONT_REPARSE`, `FILE_ID_INFO`, ancestors by the final path, the long-name check, listing by

@@ -8,8 +8,9 @@
 //
 // --check makes a directory of its own beside bin/ (the build tree), maps it, listens on 127.0.0.1 on a port the
 // system picks, and drives the program with the library's own client, a second Program in the same process, whose
-// URLs have holes: presets stored by name and read back byte for byte, the files they are, a body out of range, a name
-// no file may have and a body of another type refused, the listing's count and names; then the host closes the
+// URLs have holes: presets stored by name, each the file of its preset written back as JSON, and read back; a body out
+// of range, without a field or with a wave no constant names, a name no file may have and a body of another type
+// refused; the listing's count and names; then the host closes the
 // program's network, and run() returns. It removes its directory. Then it compiles the program again with the default
 // policy, under which it listens nowhere. Nothing binds anything but 127.0.0.1, no request leaves the machine, and
 // nothing is written outside the directory it made. In a build without the web server, the JSON parser or file
@@ -50,8 +51,11 @@ namespace
     // filled into the URL by a hole, and gives its status, or what it read of the body.
     constexpr const char* kClient = R"(
 const string NAMES[6] = {"warm-pad", "bright.2", "missing", ".hidden", "bad name", "con"};
-const string BODIES[3] = {"{\"gain\": 0.5, \"cutoff\": 1200}", "{\"gain\": 0.75, \"cutoff\": 20000}",
-                          "{\"gain\": 2, \"cutoff\": 1200}"};
+const string BODIES[5] = {"{\"gain\": 0.5, \"cutoff\": 1200, \"wave\": \"SAW\", \"note\": \"not a field\"}",
+                          "{\"wave\": 2, \"gain\": 0.75, \"cutoff\": 2e4}",
+                          "{\"gain\": 2, \"cutoff\": 1200, \"wave\": \"SAW\"}",
+                          "{\"gain\": 0.5, \"cutoff\": 1200}",
+                          "{\"gain\": 0.5, \"cutoff\": 1200, \"wave\": \"TRIANGLE\"}"};
 
 int finish(http_response r)
 {
@@ -270,14 +274,25 @@ int name(int port, int i, char* out, int cap)
                 return std::format("storing warm-pad: {}, not 204", status);
             if (const int status = put(port, 1, 1, true); status != 204)
                 return std::format("storing bright.2: {}, not 204", status);
-            if (readFile(scratch.path() / "warm-pad.json") != "{\"gain\": 0.5, \"cutoff\": 1200}")
-                return "warm-pad.json is not the body that was sent";
+            // What is stored is the preset, written back as JSON (json (preset)): its fields in their order, an
+            // enumeration by its constant's name, and nothing the module has no field for.
+            if (const auto stored = readFile(scratch.path() / "warm-pad.json");
+                stored != "{\"gain\":0.5,\"cutoff\":1200,\"wave\":\"SAW\"}")
+                return "warm-pad.json is not the preset: " + stored.value_or("<none>");
+            if (const auto stored = readFile(scratch.path() / "bright.2.json");
+                stored != "{\"gain\":0.75,\"cutoff\":20000,\"wave\":\"SQUARE\"}")
+                return "bright.2.json is not the preset: " + stored.value_or("<none>");
             if (gain(port, 0) != 0.5f || gain(port, 1) != 0.75f)
                 return std::format("read back: {} and {}, not 0.5 and 0.75", gain(port, 0), gain(port, 1));
-            // Refused: a gain out of its range (and warm-pad is as it was), a name no file may have (a leading '.', a
-            // device's), a name the server holds no path of (a space), a body that says it is no JSON; none there.
+            // Refused: a gain out of its range, a wave missing, a wave no constant names (and warm-pad is as it
+            // was), a name no file may have (a leading '.', a device's), a name the server holds no path of (a
+            // space), a body that says it is no JSON; none there.
             if (const int status = put(port, 0, 2, true); status != 400)
                 return std::format("a gain of 2: {}, not 400", status);
+            if (const int status = put(port, 0, 3, true); status != 400)
+                return std::format("no wave: {}, not 400", status);
+            if (const int status = put(port, 0, 4, true); status != 400)
+                return std::format("a wave TRIANGLE: {}, not 400", status);
             if (gain(port, 0) != 0.5f)
                 return "a refused body changed warm-pad";
             if (const int status = put(port, 3, 0, true); status != 400)
@@ -306,8 +321,8 @@ int name(int port, int i, char* out, int cap)
             return fail(check);
         if (stored != 2)
             return fail(std::format("run() stored {}, not 2", stored));
-        std::printf("stored warm-pad and bright.2, read back byte for byte; refused a gain of 2, .hidden, con, a space "
-                    "and text/plain; listed 2\n");
+        std::printf("stored warm-pad and bright.2 as presets, read back; refused a gain of 2, no wave, a wave "
+                    "TRIANGLE, .hidden, con, a space and text/plain; listed 2\n");
 
         // The default policy: it listens nowhere, and reaches no file.
         auto closed = compileStore(path, "", "", errors);

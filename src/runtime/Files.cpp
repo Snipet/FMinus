@@ -872,18 +872,56 @@ namespace fminus::files
         }
 
 #if FMINUS_HAS_FILES_WRITE
-        // file_write and file_append.
-        std::int32_t write(std::string_view text, const void* data, std::int32_t bytes, bool append)
+        // A JSON literal to write as a file's bytes (fminus_rt_file_write_json): its description and its values.
+        struct Literal
         {
-            if (bytes < 0 || (data == nullptr && bytes > 0))
+            const void* description;
+            const void* values;
+        };
+
+        // file_write and file_append; with `json`, of a JSON literal's text (and a newline after it, appended), whose
+        // size the writer measures first, `data` and `bytes` unused.
+        std::int32_t write(std::string_view text, const void* data, std::int32_t bytes, bool append,
+                           const Literal* json = nullptr)
+        {
+            std::int64_t size = bytes;
+            if (json != nullptr)
+            {
+#if FMINUS_HAS_JSON
+                const std::int32_t measured = fminus_rt_json_write(nullptr, 0, json->description, json->values);
+                if (measured < 0)
+                    return FMINUS_FILE_INVALID;
+                size = std::int64_t{measured} + (append ? 1 : 0);
+#else
+                return FMINUS_FILE_INVALID;   // never: only fminus_rt_file_write_json passes one
+#endif
+            }
+            else if (bytes < 0 || (data == nullptr && bytes > 0))
                 return FMINUS_FILE_INVALID;
             Name name;
             Reached reached;
             if (const std::int32_t status = reach(append ? Op::Append : Op::Write, text, false, name, reached);
                 status != FMINUS_FILE_OK)
                 return status;
-            if (bytes > policy.maxFileBytes)
+            if (size > policy.maxFileBytes)
                 return FMINUS_FILE_LIMIT;
+            // A literal's text, written once into a buffer of its size: what the file is written from.
+            std::unique_ptr<char[]> made;
+#if FMINUS_HAS_JSON
+            if (json != nullptr)
+            {
+                made.reset(new (std::nothrow) char[static_cast<std::size_t>(size > 0 ? size : 1)]);
+                if (made == nullptr)
+                    return FMINUS_FILE_FAILED;
+                const auto textBytes = static_cast<std::int32_t>(size - (append ? 1 : 0));
+                if (fminus_rt_json_write(made.get(), textBytes, json->description, json->values) != textBytes)
+                    return FMINUS_FILE_FAILED;   // the values changed between the two passes
+                if (append)
+                    made[static_cast<std::size_t>(textBytes)] = '\n';
+                data = made.get();
+                bytes = static_cast<std::int32_t>(size);
+            }
+#endif
             // The quotas count what is attempted: bytes and files are never given back.
             bool mayCreate = false;
             {
@@ -1361,6 +1399,58 @@ extern "C"
             return FMINUS_FILE_FAILED;
         }
     }
+
+#if FMINUS_HAS_JSON
+    std::int32_t fminus_rt_file_write_json(void* context, const char* name, std::int32_t length,
+                                           const std::int32_t* ints, std::int32_t count, const char* const* texts,
+                                           const std::int32_t* lengths, std::int32_t textCount,
+                                           const void* description, const void* values) noexcept
+    {
+        using namespace fminus::files;
+        if (context == nullptr)
+            return FMINUS_FILE_REFUSED;
+        try
+        {
+            char buffer[kMostNameBytes + 1];
+            std::string_view text;
+            const std::int32_t status =
+                prepareText(name, length, ints, count, texts, lengths, textCount, false, buffer, text);
+            if (status != FMINUS_FILE_OK)
+                return status;
+            const Context::State::Literal json{description, values};
+            return stateOf(context)->write(text, nullptr, 0, false, &json);
+        }
+        catch (const std::exception&)
+        {
+            return FMINUS_FILE_FAILED;
+        }
+    }
+
+    std::int32_t fminus_rt_file_append_json(void* context, const char* name, std::int32_t length,
+                                            const std::int32_t* ints, std::int32_t count, const char* const* texts,
+                                            const std::int32_t* lengths, std::int32_t textCount,
+                                            const void* description, const void* values) noexcept
+    {
+        using namespace fminus::files;
+        if (context == nullptr)
+            return FMINUS_FILE_REFUSED;
+        try
+        {
+            char buffer[kMostNameBytes + 1];
+            std::string_view text;
+            const std::int32_t status =
+                prepareText(name, length, ints, count, texts, lengths, textCount, false, buffer, text);
+            if (status != FMINUS_FILE_OK)
+                return status;
+            const Context::State::Literal json{description, values};
+            return stateOf(context)->write(text, nullptr, 0, true, &json);
+        }
+        catch (const std::exception&)
+        {
+            return FMINUS_FILE_FAILED;
+        }
+    }
+#endif
 #endif
 }
 

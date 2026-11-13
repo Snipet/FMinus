@@ -6,9 +6,14 @@
 // types.
 //
 // json_read(doc, "path", ..., &preset) passes its module type's table (moduleShape): one private constant a type,
-// json.shape.Preset, made at the first call that names the type. A JSON literal's values (a later step's) take the
-// same shapes from appendShape: the table of a module type is the same words for both, but for a string field, which
-// the writer takes and the reader leaves out (ShapeUse).
+// json.shape.Preset, made at the first call that names the type. A JSON literal (lowerJsonLiteral) is described from
+// the same shapes, appendShape's, for the runtime's writer: its keys and punctuation as bytes, and each value an
+// operation of its own, the value in 8-byte slots of the frame (a number, a bool, an enumeration's value, a string, a
+// vector), or its address there with a pointer shape around its own (an array, a module), or an address and a count
+// with a span shape (json_slice). So the table of a module type is the same words whether it is read into or written
+// from, but for a string field, which the writer takes and the reader leaves out (ShapeUse). A module's parameter is
+// the host's value, which only the module's own methods read: a literal writes one as *this, in such a method, each
+// field an operation of its own and each parameter its value there (describeJsonThis), and refuses one elsewhere.
 //
 // What a module's table holds, and under what name (appendField): each field the runtime can fill or write (a float, a
 // double, an int, a bool, an enumerated type's value, a char array, a float2, float4 or float8, a module, and arrays of
@@ -22,6 +27,8 @@
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/DataLayout.h>
 #include <llvm/IR/GlobalVariable.h>
+
+#include <algorithm>
 
 #include <bit>
 #include <cstdint>
@@ -45,9 +52,18 @@ namespace fminus::ir::detail
             ShapeString = 5,
             ShapeChars = 6,
             ShapeEnum = 7,
+            ShapePointer = 8,
             ShapeArray = 9,
+            ShapeSpan = 10,
             ShapeVector = 11,
             ShapeModule = 12,
+        };
+
+        // A JSON literal's operations (runtime/Runtime.h, fminus_rt_json_write): bytes as they are, and a value.
+        enum : std::int32_t
+        {
+            WriteBytes = 0,
+            WriteValue = 1,
         };
 
         // A field record's flags: a range follows, a default follows.
@@ -155,6 +171,74 @@ namespace fminus::ir::detail
                 return std::nullopt;
             return attribute.args[0].text;
         }
+
+        // A key of a JSON literal (or a field's JSON name, in a module written field by field), appended to `out` as
+        // a JSON string's contents (RFC 8259, §7: '"', '\\' and the control characters escaped, as the writer escapes
+        // a string value and a module's names). The offset of a byte that is no part of UTF-8 text, which no JSON
+        // string may hold, or none, and then nothing appended.
+        std::optional<std::size_t> jsonKey(std::string_view key, std::string& out)
+        {
+            if (const std::optional<std::size_t> bad = notUtf8(key))
+                return bad;
+            constexpr std::string_view kHex = "0123456789abcdef";
+            for (const char c : key)
+            {
+                const auto byte = static_cast<unsigned char>(c);
+                switch (c)
+                {
+                case '"':
+                    out += "\\\"";
+                    break;
+                case '\\':
+                    out += "\\\\";
+                    break;
+                case '\b':
+                    out += "\\b";
+                    break;
+                case '\f':
+                    out += "\\f";
+                    break;
+                case '\n':
+                    out += "\\n";
+                    break;
+                case '\r':
+                    out += "\\r";
+                    break;
+                case '\t':
+                    out += "\\t";
+                    break;
+                default:
+                    if (byte < 0x20)
+                    {
+                        out += "\\u00";
+                        out += kHex[byte >> 4];
+                        out += kHex[byte & 15];
+                    }
+                    else
+                        out += c;
+                    break;
+                }
+            }
+            return std::nullopt;
+        }
+
+        // Where the `offset`-th byte of a literal is spelt, or `where`.
+        SourceLocation byteAt(const ast::StringExpr& literal, std::size_t offset, SourceLocation where)
+        {
+            return offset < literal.at.size() ? literal.at[offset] : where;
+        }
+
+        // Whether `expr` is `*this`.
+        bool isThis(const ast::Expr& expr)
+        {
+            const auto* unary = std::get_if<ast::UnaryExpr>(&expr.node);
+            return unary != nullptr && unary->op == ast::UnaryOp::Dereference
+                   && std::holds_alternative<ast::ThisExpr>(unary->operand->node);
+        }
+
+        constexpr const char* kJsonValues = "a JSON literal's value is a float, a double, an int, a bool, a string, an "
+                                            "enumeration's value, a float2, float4 or float8, an array or a module, or "
+                                            "an object or an array of them, not ";
     } // namespace
 
     // Appends the shape of a value of `type` in memory to `table` (its words, and its names' bytes), `depth` levels
@@ -491,5 +575,409 @@ namespace fminus::ir::detail
                 diagnostics_.error(where, "duplicate JSON name " + quoted(name) + " in module " + quoted(module.name),
                                    {Diagnostic{previous->second, "previous field of that JSON name is here", {}}});
         }
+    }
+
+    // A parameter in a value of `type` that a JSON literal would write: a module's field that is one (and has no
+    // [[json::skip]]), in it, in a module of its fields or in the modules an array holds, named "'cutoff' of 'Osc'";
+    // or none. Only a method of its module reads a parameter (cutoff[i]: Modules.cpp), so a literal writes one only
+    // there (describeJsonThis).
+    std::optional<std::string> Lowering::parameterIn(ast::Type type) const
+    {
+        if (ast::isArray(type))
+            return parameterIn(ast::elementOf(type));
+        if (!ast::isModule(type) || type.module == nullptr)
+            return std::nullopt;
+        for (const ast::Field& field : type.module->fields)
+        {
+            if (lastNamed(field, "json::skip") != nullptr)
+                continue;
+            if (field.isParam)
+                return quoted(field.name) + " of " + quoted(type.module->name);
+            if (std::optional<std::string> inner = parameterIn(fieldType(field)))
+                return inner;
+        }
+        return std::nullopt;
+    }
+
+    // A JSON literal lowered where it is written: its description (describeJson), a private constant laid out as a
+    // shape's table, `.json`, and its values stored into 8-byte slots of the frame, `json.values`, in the order they
+    // were lowered, the order written. Nothing for a literal in error, which reported why.
+    std::optional<Lowering::JsonLiteral> Lowering::lowerJsonLiteral(const ast::Expr& literal)
+    {
+        JsonPlan plan;
+        const bool fine = describeJson(std::get<ast::JsonExpr>(literal.node).value, plan);
+        plan.flush();
+        if (!fine)
+            return std::nullopt;
+        llvm::Value* values = llvm::ConstantPointerNull::get(builder_.getPtrTy());
+        if (plan.slots > 0)
+        {
+            llvm::AllocaInst* slots =
+                allocate(llvm::ArrayType::get(builder_.getInt64Ty(), static_cast<std::uint64_t>(plan.slots)),
+                         "json.values");
+            slots->setAlignment(llvm::Align(8));
+            const auto at = [&](std::int32_t slot, unsigned offset) {
+                return builder_.CreateConstInBoundsGEP1_32(builder_.getInt8Ty(), slots,
+                                                           static_cast<unsigned>(8 * slot) + offset);
+            };
+            for (const JsonPlan::Slot& value : plan.values)
+            {
+                llvm::Value* first = at(value.slot, 0);
+                if (value.count != nullptr)   // a span's address and its count
+                {
+                    tag(builder_.CreateStore(value.ir, first), value.type);
+                    llvm::Value* second = at(value.slot, 8);
+                    tag(builder_.CreateStore(value.count, second), ast::Type::Int);
+                }
+                else if (value.type == ast::Type::String)   // its pointer and its length
+                {
+                    llvm::Value* data = builder_.CreateExtractValue(value.ir, 0);
+                    tag(builder_.CreateStore(data, first), ast::Type::pointerTo(ast::Kind::Char, true));
+                    llvm::Value* size = builder_.CreateExtractValue(value.ir, 1);
+                    llvm::Value* second = at(value.slot, 8);
+                    tag(builder_.CreateStore(size, second), ast::Type::Int);
+                }
+                else if (value.type.kind == ast::Kind::Bool)   // one byte, 0 or 1 (an enumeration of bool's too)
+                {
+                    llvm::Value* byte = builder_.CreateZExt(value.ir, builder_.getInt8Ty());
+                    tag(builder_.CreateStore(byte, first), value.type);
+                }
+                else if (ast::isVector(value.type))   // its lanes, at a slot's alignment
+                    tag(builder_.CreateAlignedStore(value.ir, first, llvm::Align(8)), value.type);
+                else
+                    tag(builder_.CreateStore(value.ir, first), value.type);
+            }
+            values = slots;
+        }
+        return JsonLiteral{shapeConstant(plan.table, ".json"), values};
+    }
+
+    // The bytes not yet in an operation, as one: `0, offset, count` of the description's bytes.
+    void Lowering::JsonPlan::flush()
+    {
+        if (pending.empty())
+            return;
+        table.code.insert(table.code.end(), {WriteBytes, static_cast<std::int32_t>(table.bytes.size()),
+                                             static_cast<std::int32_t>(pending.size())});
+        table.bytes += pending;
+        pending.clear();
+    }
+
+    // A JSON literal's value added to `plan`: an object's and an array's text and its keys, escaped, as bytes, and each
+    // value an operation of its own (describeJsonValue), lowered in the order written. Each error once, where it is;
+    // false after one.
+    bool Lowering::describeJson(const ast::JsonValue& value, JsonPlan& plan)
+    {
+        switch (value.kind)
+        {
+        case ast::JsonValue::Kind::Value:
+            return describeJsonValue(*value.value, plan);
+        case ast::JsonValue::Kind::Object:
+        {
+            bool fine = true;
+            plan.pending += '{';
+            std::map<std::string, SourceLocation> seen;
+            for (std::size_t i = 0; i < value.elements.size(); ++i)
+            {
+                const ast::StringExpr& key = value.keys[i];
+                const SourceLocation where = value.keyLocations[i];
+                if (const auto [previous, added] = seen.try_emplace(key.value, where); !added)
+                {
+                    diagnostics_.error(where, "duplicate key " + quoted(key.value) + " in a JSON object",
+                                       {Diagnostic{previous->second, "previous key is here", {}}});
+                    fine = false;
+                }
+                plan.pending += i > 0 ? ",\"" : "\"";
+                if (const std::optional<std::size_t> bad = jsonKey(key.value, plan.pending))
+                {
+                    error(byteAt(key, *bad, where), "a JSON key is UTF-8 text, and this byte is no part of any");
+                    fine = false;
+                }
+                plan.pending += "\":";
+                fine = describeJson(value.elements[i], plan) && fine;
+            }
+            plan.pending += '}';
+            return fine;
+        }
+        case ast::JsonValue::Kind::Array:
+        {
+            bool fine = true;
+            plan.pending += '[';
+            for (std::size_t i = 0; i < value.elements.size(); ++i)
+            {
+                if (i > 0)
+                    plan.pending += ',';
+                fine = describeJson(value.elements[i], plan) && fine;
+            }
+            plan.pending += ']';
+            return fine;
+        }
+        }
+        return false;
+    }
+
+    // One value of a JSON literal, lowered where it is written: its operation, `1, slot, shape`, and its slots. A
+    // float, a double, an int, a bool, an enumeration's value (written as its constant's name), a string (a literal is
+    // one here), a float2, float4 or float8 (its lanes), each its own shape (appendShape), in slots of its own; an
+    // array (a char array a string), or a module (a value, or *p), by its address in a slot and a pointer shape around
+    // its own; json_slice(array, count) (describeJsonSlice). A module with a parameter only as *this in its own method
+    // (describeJsonThis). A pointer, a handle, a poly type or a bool vector is an error, as is an array of them.
+    bool Lowering::describeJsonValue(const ast::Expr& expr, JsonPlan& plan)
+    {
+        const ast::Module* module = function_ != nullptr ? function_->module : nullptr;
+        if (const auto* call = std::get_if<ast::CallExpr>(&expr.node);
+            call != nullptr && call->callee == "json_slice"
+            && !(module != nullptr && functions_.contains(module->name + "::" + call->callee)))
+            return describeJsonSlice(expr.location, *call, plan);
+        const std::optional<ast::Type> declared = staticType(expr);
+        if (declared && ast::isArray(*declared))
+        {
+            const Value array = lower(expr);   // its first element's address, the array's own
+            if (array.failed)
+                return false;
+            if (const std::optional<std::string> parameter = parameterIn(*declared))
+            {
+                error(begin(expr), "a JSON literal writes a parameter's value only where a method of its module reads "
+                                   "it, as *this: " + *parameter + " is one (leave it out with [[json::skip]])");
+                return false;
+            }
+            const std::int32_t slot = plan.slots;
+            if (!addJsonShape(begin(expr), *declared, true, plan))
+                return false;
+            plan.values.push_back({slot, array.ir, ast::Type::pointerTo(ast::Kind::Void, true)});
+            plan.slots += 1;
+            return true;
+        }
+        const Value lowered = lowerAs(expr, ast::Type::String);
+        if (lowered.failed)
+            return false;
+        const ast::Type type = lowered.type;
+        if (ast::isModule(type))
+        {
+            if (const std::optional<std::string> parameter = parameterIn(type))
+            {
+                if (isThis(expr) && type.module == module)
+                    return describeJsonThis(begin(expr), *module, plan);
+                error(begin(expr), "a JSON literal writes a parameter's value only where a method of its module reads "
+                                   "it, as *this: " + *parameter + " is one (leave it out with [[json::skip]])");
+                return false;
+            }
+            const std::int32_t slot = plan.slots;
+            if (!addJsonShape(begin(expr), type, true, plan))
+                return false;
+            plan.values.push_back({slot, lowered.ir, ast::Type::pointerTo(ast::Kind::Void, true)});
+            plan.slots += 1;
+            return true;
+        }
+        if (ast::isPointer(type))
+        {
+            error(begin(expr), "a JSON literal does not write a pointer, " + quoted(ast::typeName(type))
+                                   + ": write what it points to, *p, or its first elements, json_slice(p, count)");
+            return false;
+        }
+        const bool vector =
+            type.kind == ast::Kind::Float2 || type.kind == ast::Kind::Float4 || type.kind == ast::Kind::Float8;
+        const bool scalar = type.kind == ast::Kind::Float || type.kind == ast::Kind::Double
+                            || type.kind == ast::Kind::Int || type.kind == ast::Kind::Bool
+                            || type == ast::Type::String;
+        if (!vector && !scalar)
+        {
+            error(begin(expr), kJsonValues + quoted(ast::typeName(type)));
+            return false;
+        }
+        const std::int32_t slot = plan.slots;
+        if (!addJsonShape(begin(expr), type, false, plan))
+            return false;
+        plan.values.push_back({slot, lowered.ir, type});
+        const std::uint64_t bytes = sizeOf(type).value_or(8);
+        plan.slots += type == ast::Type::String ? 2 : static_cast<std::int32_t>(std::max<std::uint64_t>(1, bytes / 8));
+        return true;
+    }
+
+    // Appends `1, slot, shape` for a value of `type` at the plan's next slot, with a pointer shape around its own when
+    // the slot holds its `address` (an array's, a module's). An error at `location` for a type with no shape or one
+    // the writer cannot take, and false.
+    bool Lowering::addJsonShape(SourceLocation location, ast::Type type, bool address, JsonPlan& plan)
+    {
+        plan.flush();
+        std::vector<std::int32_t>& code = plan.table.code;
+        const std::size_t codeAt = code.size();
+        const std::size_t bytesAt = plan.table.bytes.size();
+        code.insert(code.end(), {WriteValue, plan.slots});
+        if (address)
+            code.push_back(ShapePointer);
+        const ShapeProblem problem = appendShape(type, ShapeUse::Write, plan.table, address ? 1 : 0);
+        if (problem == ShapeProblem::None)
+            return true;
+        code.resize(codeAt);
+        plan.table.bytes.resize(bytesAt);
+        const std::string cannot = "a JSON literal cannot write " + quoted(ast::typeName(type));
+        switch (problem)
+        {
+        case ShapeProblem::NoShape:
+            error(location, kJsonValues + quoted(ast::typeName(type)));
+            break;
+        case ShapeProblem::TooDeep:
+            error(location, cannot + ": its modules and arrays nest more than 16 deep, the most the writer takes");
+            break;
+        case ShapeProblem::TooManyFields:
+            error(location, cannot + ": a module in it has more than 1024 fields to write, the most the writer takes");
+            break;
+        case ShapeProblem::TooLarge:
+            error(location, cannot + ": it is larger than its description can say, 2 GB");
+            break;
+        case ShapeProblem::None:
+            break;
+        }
+        return false;
+    }
+
+    // `json_slice(array, count)`, a JSON literal's value: the array's first `count` elements, a span (an address and
+    // a count in two slots, the count clamped by the writer to [0, capacity]). Of an array, its size is the capacity;
+    // of a pointer, the program vouches for the elements, as it does for bytes_floats', and the capacity is an int's
+    // greatest, so that the count alone bounds them. Its elements are anything a literal writes but a char (a char
+    // array is a string, written whole).
+    bool Lowering::describeJsonSlice(SourceLocation location, const ast::CallExpr& call, JsonPlan& plan)
+    {
+        if (call.args.size() != 2)
+        {
+            wrongArity(location, call.args.size(), 2);
+            return false;
+        }
+        const ast::Expr& base = *call.args[0];
+        if (isString(base))
+        {
+            error(begin(base), "'json_slice' takes an array or a pointer, and a count: not a string literal");
+            return false;
+        }
+        const std::optional<ast::Type> declared = staticType(base);
+        const Value elements = lower(base);
+        if (elements.failed)
+            return false;
+        ast::Type element;
+        std::int32_t capacity = std::numeric_limits<std::int32_t>::max();
+        if (declared && ast::isArray(*declared))
+        {
+            element = ast::pointee(*declared);
+            capacity = declared->count;
+        }
+        else if (ast::isPointer(elements.type) && elements.type.pointee != ast::Kind::Void)
+            element = ast::pointee(elements.type);
+        else
+        {
+            error(begin(base), "'json_slice' takes an array or a pointer, and a count: not "
+                                   + quoted(ast::typeName(elements.type)));
+            return false;
+        }
+        if (element.kind == ast::Kind::Char)
+        {
+            error(begin(base), "'json_slice' writes elements a JSON literal writes, and a char is none: a char array "
+                               "is a string, written whole");
+            return false;
+        }
+        const Value count = isString(*call.args[1])
+                                ? refuseString(*call.args[1], ast::Type::Int, Use::Passing, begin(*call.args[1]))
+                                : lowerAs(*call.args[1], ast::Type::Int);
+        if (count.failed)
+            return false;
+        llvm::Value* counted = convert(count, ast::Type::Int, begin(*call.args[1]), Use::Passing);
+        if (const std::optional<std::string> parameter = parameterIn(element))
+        {
+            error(begin(base), "a JSON literal writes a parameter's value only where a method of its module reads it, "
+                               "as *this: " + *parameter + " is one (leave it out with [[json::skip]])");
+            return false;
+        }
+        const std::optional<std::uint64_t> stride = sizeOf(element);
+        if (!stride || *stride > kMostWord)
+        {
+            error(begin(base), "a JSON literal cannot write " + quoted(ast::typeName(element))
+                                   + ": it is larger than its description can say, 2 GB");
+            return false;
+        }
+        plan.flush();
+        std::vector<std::int32_t>& code = plan.table.code;
+        const std::size_t codeAt = code.size();
+        code.insert(code.end(), {WriteValue, plan.slots, ShapeSpan, capacity, static_cast<std::int32_t>(*stride)});
+        const std::size_t bytesAt = plan.table.bytes.size();
+        if (const ShapeProblem problem = appendShape(element, ShapeUse::Write, plan.table, 1);
+            problem != ShapeProblem::None)
+        {
+            code.resize(codeAt);
+            plan.table.bytes.resize(bytesAt);
+            if (problem == ShapeProblem::NoShape)
+                error(begin(base), kJsonValues + quoted(ast::typeName(element)));
+            else
+                error(begin(base), "a JSON literal cannot write " + quoted(ast::typeName(element))
+                                       + ": its modules and arrays nest more deeply, or it has more fields, than the "
+                                         "writer takes");
+            return false;
+        }
+        plan.values.push_back({plan.slots, elements.ir, ast::Type::pointerTo(ast::Kind::Void, true), counted});
+        plan.slots += 2;
+        return true;
+    }
+
+    // `*this`, in a method of a module that has a parameter: an object of its fields, in their order, under their
+    // JSON names, each an operation of its own, since the writer reads memory and a parameter's value is not in the
+    // module's (a knob's is the host's to change, a frozen one's a constant, a stream's a sample of the call): each
+    // field that a module's shape has, by its address and a pointer shape around its own; each parameter as the
+    // method reads it at its first sample, name[0] (Modules.cpp, lowerParameter). The same fields as the module's
+    // shape, and the same text the writer would make of them, with the parameters among them.
+    bool Lowering::describeJsonThis(SourceLocation location, const ast::Module& module, JsonPlan& plan)
+    {
+        bool fine = true;
+        bool first = true;
+        plan.pending += '{';
+        for (std::size_t i = 0; i < module.fields.size(); ++i)
+        {
+            const ast::Field& field = module.fields[i];
+            if (lastNamed(field, "json::skip") != nullptr)
+                continue;
+            const ast::Type type = fieldType(field);
+            if (!field.isParam)
+            {
+                ShapeTable probe;   // a field the module's shape leaves out (a pointer, a handle) is left out here
+                if (appendShape(type, ShapeUse::Write, probe, 1) == ShapeProblem::NoShape)
+                    continue;
+            }
+            plan.pending += first ? "\"" : ",\"";
+            first = false;
+            jsonKey(jsonName(field), plan.pending);   // a json::name is UTF-8, or not used (checkJsonAttribute)
+            plan.pending += "\":";
+            if (field.isParam)
+            {
+                const ast::IndexExpr index{ast::makeExpr(location, ast::VariableExpr{field.name}),
+                                           ast::makeExpr(location, ast::NumberExpr{"0"})};
+                const Value value = lowerParameter(location, static_cast<unsigned>(i), index);
+                const std::int32_t slot = plan.slots;
+                if (value.failed || !addJsonShape(location, value.type, false, plan))
+                {
+                    fine = false;
+                    continue;
+                }
+                plan.values.push_back({slot, value.ir, value.type});
+                plan.slots += 1;
+                continue;
+            }
+            if (const std::optional<std::string> parameter = parameterIn(type))
+            {
+                error(location, "a JSON literal writes a parameter's value only where a method of its module reads "
+                                "it, as *this: " + *parameter + " is one (leave it out with [[json::skip]])");
+                fine = false;
+                continue;
+            }
+            llvm::Value* address = builder_.CreateStructGEP(structs_.at(&module), self(), static_cast<unsigned>(i),
+                                                            field.name);
+            const std::int32_t slot = plan.slots;
+            if (!addJsonShape(location, type, true, plan))
+            {
+                fine = false;
+                continue;
+            }
+            plan.values.push_back({slot, address, ast::Type::pointerTo(ast::Kind::Void, true)});
+            plan.slots += 1;
+        }
+        plan.pending += '}';
+        return fine;
     }
 } // namespace fminus::ir::detail

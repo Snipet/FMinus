@@ -126,6 +126,11 @@ namespace fminus::ir::detail
         // until json_free; the fallback when there is none, or what is there is no string. Wait-free.
         RuntimeBuiltin{"json_string", "fminus_rt_json_text", {Param::JsonRead, Param::Path, Param::Text}, 3,
                        RuntimeEffect::WaitFree, Feature::Json, Result::String},
+        // json_slice(array, count): the first `count` elements of an array (clamped to its size), or of what a pointer
+        // points to (the program vouching for them), as a JSON literal's value, and nowhere else: it has no function,
+        // and a call of it anywhere but in a literal is an error (Shapes.cpp writes it).
+        RuntimeBuiltin{"json_slice", "", {Param::Elements, Param::Int}, 2, RuntimeEffect::WaitFree, Feature::Json,
+                       Result::Void},
         // The XML parser (runtime/Xml.cpp), in a build with FMINUS_XML, made as the JSON parser's are. xml_parse(data,
         // bytes) gives a document, an xml_doc (null for a text that is no XML, too large or nested too deeply), and
         // xml_free(doc) frees it: both allocate. The reads take the document, an XML path with places for ints
@@ -219,6 +224,11 @@ namespace fminus::ir::detail
         RuntimeBuiltin{"http_reply_text", "fminus_web_http_reply_text",
                        {Param::Request, Param::Int, Param::ContentType, Param::ReplyFormat}, 4, RuntimeEffect::WaitFree,
                        Feature::WebServer, Result::Int},
+        // http_reply_json(r, status, json { ... }): a JSON literal written by the runtime's writer straight into the
+        // request's reply buffer and published as application/json (Serve.cpp, replyJson), what `reply status, json
+        // { ... };` is; wait-free, as the other replies.
+        RuntimeBuiltin{"http_reply_json", "fminus_web_http_reply_written", {Param::Request, Param::Int, Param::Json}, 3,
+                       RuntimeEffect::WaitFree, Feature::WebServer, Result::Int},
         // A request's text, each valid until the request is answered and wait-free: http_header(r, "name") its first
         // header field of that name (a literal, an HTTP token, compared without regard to ASCII case), its value
         // without the white space around it, empty when there is none; http_path(r) its path as sent, without its
@@ -295,6 +305,17 @@ namespace fminus::ir::detail
                        RuntimeEffect::WaitFree, Feature::None, Result::Int},
         RuntimeBuiltin{"string_of", "", {Param::CharData, Param::Int}, 2, RuntimeEffect::WaitFree, Feature::None,
                        Result::String},
+        // The JSON forms of http_post, file_write and file_append, which a call takes when its second argument is a
+        // JSON literal (lowerRuntimeBuiltin): the literal is the POST's body, sent as application/json, or the file's
+        // bytes (and a newline after them, appended: JSON Lines). Each library function measures the text, checks it
+        // against the policy's limit and writes it into a buffer of its own (Web.h, Runtime.h). The same names,
+        // effects and options as the plain forms, found by name after them (findJsonForm); and the JSON writer too.
+        RuntimeBuiltin{"http_post", "fminus_web_http_post_json", {Param::Url, Param::Json}, 2, RuntimeEffect::Allocates,
+                       Feature::Web, Result::Response},
+        RuntimeBuiltin{"file_write", "fminus_rt_file_write_json", {Param::FileName, Param::Json}, 2,
+                       RuntimeEffect::Allocates, Feature::FilesWrite, Result::Int},
+        RuntimeBuiltin{"file_append", "fminus_rt_file_append_json", {Param::FileName, Param::Json}, 2,
+                       RuntimeEffect::Allocates, Feature::FilesWrite, Result::Int},
     };
 
     std::optional<ast::Type> paramType(Param param)
@@ -352,6 +373,8 @@ namespace fminus::ir::detail
         case Param::FileName:
         case Param::FilePattern:
         case Param::HeaderName:
+        case Param::Json:       // a literal only
+        case Param::Elements:   // an array or a pointer to anything a literal writes: no one type
             break;
         }
         return std::nullopt;
@@ -399,6 +422,8 @@ namespace fminus::ir::detail
         case Param::Text:
         case Param::Chars:
         case Param::CharData:
+        case Param::Json:
+        case Param::Elements:
             break;
         }
         return std::nullopt;
@@ -469,6 +494,8 @@ namespace fminus::ir::detail
             return quoted(name) + " needs the file interface, which this build of FMinus leaves out (FMINUS_FILES=OFF)";
         if (feature == Feature::FilesWrite)
             return quoted(name) + " needs file writing, which this build of FMinus leaves out (FMINUS_FILES_WRITE=OFF)";
+        if (name == "json_slice")
+            return quoted(name) + " needs the JSON writer, which this build of FMinus leaves out (FMINUS_JSON=OFF)";
         const char* what = feature == Feature::Json        ? "the JSON parser"
                            : feature == Feature::Xml       ? "the XML parser"
                            : feature == Feature::WebServer ? "the web server"
@@ -581,6 +608,7 @@ namespace fminus::ir::detail
             RuntimeFacts{"fminus_web_http_post", RuntimeKind::WebStart},
             RuntimeFacts{"fminus_web_http_get_s", RuntimeKind::WebStart},
             RuntimeFacts{"fminus_web_http_post_s", RuntimeKind::WebStart},
+            RuntimeFacts{"fminus_web_http_post_json", RuntimeKind::WebStart},
             RuntimeFacts{"fminus_web_http_wait", RuntimeKind::WebWait},
             RuntimeFacts{"fminus_web_http_status", RuntimeKind::WebRead},
             RuntimeFacts{"fminus_web_http_size", RuntimeKind::WebRead},
@@ -626,6 +654,8 @@ namespace fminus::ir::detail
             RuntimeFacts{"fminus_rt_file_append", RuntimeKind::FileWrite},
             RuntimeFacts{"fminus_rt_file_write_s", RuntimeKind::FileWrite},
             RuntimeFacts{"fminus_rt_file_append_s", RuntimeKind::FileWrite},
+            RuntimeFacts{"fminus_rt_file_write_json", RuntimeKind::FileWrite},
+            RuntimeFacts{"fminus_rt_file_append_json", RuntimeKind::FileWrite},
             RuntimeFacts{"fminus_rt_string_equal", RuntimeKind::TextRead},
             RuntimeFacts{"fminus_rt_string_find", RuntimeKind::TextRead},
             RuntimeFacts{"fminus_rt_string_float", RuntimeKind::TextRead},
@@ -1060,9 +1090,14 @@ namespace fminus::ir::detail
             }
             // A function that takes strings in arrays (an address's, file_read_s, http_get_s, ...) reads each string's
             // bytes through a pointer the arrays hold, not one it was given: memory no argument points to, which it
-            // only reads (and keeps no pointer to: what it keeps it copies).
-            if (std::string_view(function.getName()).ends_with("_s")
-                && function.getMemoryEffects() != llvm::MemoryEffects::unknown())
+            // only reads (and keeps no pointer to: what it keeps it copies). One that writes a JSON literal
+            // (http_post_json, file_write_json, file_append_json) takes the strings so too, and reads what the
+            // literal's slots point to besides (its arrays, its modules, its strings' bytes: through the writer, whose
+            // address is an argument): any memory, read only.
+            const std::string_view name(function.getName());
+            if (name.ends_with("_json") && function.getMemoryEffects() != llvm::MemoryEffects::unknown())
+                function.setMemoryEffects(function.getMemoryEffects() | llvm::MemoryEffects::readOnly());
+            else if (name.ends_with("_s") && function.getMemoryEffects() != llvm::MemoryEffects::unknown())
                 function.setMemoryEffects(function.getMemoryEffects()
                                           | llvm::MemoryEffects::otherMemOnly(llvm::ModRefInfo::Ref));
         }
@@ -1126,6 +1161,22 @@ namespace fminus::ir::detail
         }
         return nullptr;
     }
+
+    namespace
+    {
+        // The JSON form of the builtin `name` (http_post, file_write, file_append): its row that takes a JSON literal
+        // in place of its bytes, after its plain one; or null for a builtin that has none.
+        const RuntimeBuiltin* findJsonForm(std::string_view name)
+        {
+            for (const RuntimeBuiltin& builtin : kRuntimeBuiltins)
+            {
+                if (builtin.name == name && name != "http_reply_json"
+                    && std::ranges::find(builtin.params, Param::Json) != builtin.params.end())
+                    return &builtin;
+            }
+            return nullptr;
+        }
+    } // namespace
 
     // What the effects refuse a nonallocating function (Effects.cpp): a builtin that allocates or frees.
     bool allocates(std::string_view name)
@@ -1437,6 +1488,12 @@ namespace fminus::ir::detail
         std::vector<const ast::Expr*> args;
         for (const ast::ExprPtr& arg : call.args)
             args.push_back(arg.get());
+        // http_post, file_write and file_append with a JSON literal second: their JSON forms.
+        if (args.size() >= 2 && std::holds_alternative<ast::JsonExpr>(args[1]->node))
+        {
+            if (const RuntimeBuiltin* form = findJsonForm(builtin.name))
+                return lowerRuntimeCall(location, *form, args, std::nullopt);
+        }
         return lowerRuntimeCall(location, builtin, args, std::nullopt);
     }
 
@@ -1449,6 +1506,12 @@ namespace fminus::ir::detail
         if (!isBuilt(builtin.feature))
         {
             error(location, notBuilt(builtin.name, builtin.feature));
+            return recovery(type);
+        }
+        if (builtin.name == "json_slice")   // a JSON literal's value only (Shapes.cpp, describeJsonSlice)
+        {
+            error(location, "'json_slice' is a JSON literal's value, the first elements of an array written there, and "
+                            "nothing anywhere else");
             return recovery(type);
         }
         if (builtin.effect != RuntimeEffect::WaitFree)
@@ -1495,6 +1558,7 @@ namespace fminus::ir::detail
         std::vector<llvm::Value*> irArgs;
         bool fine = true;
         bool texts = false;                             // an address with a string's hole: the symbol's _s function
+        bool jsonBody = false;                          // a JSON literal's: its own function, strings or none
         std::optional<llvm::Value*> fallback;           // a string's, of a builtin that gives one from the runtime
         for (std::size_t i = 0; i < params.size(); ++i)
         {
@@ -1525,6 +1589,44 @@ namespace fminus::ir::detail
             if (param == Param::Module)   // json_read's: its type's table, then its address (Shapes.cpp)
             {
                 fine = lowerFilled(location, builtin, arg, irArgs) && fine;
+                continue;
+            }
+            if (param == Param::Json)   // a JSON literal: its description and its values' slots (Shapes.cpp)
+            {
+                jsonBody = true;
+                if (!std::holds_alternative<ast::JsonExpr>(arg.node))
+                {
+                    error(begin(arg), quoted(builtin.name) + " takes a JSON literal here: json { ... }, json [ ... ] "
+                                                             "or json (value)");
+                    fine = false;
+                    continue;
+                }
+                if (!isBuilt(Feature::Json))
+                {
+                    error(begin(arg), "a JSON literal needs the JSON writer, which this build of FMinus leaves out "
+                                      "(FMINUS_JSON=OFF)");
+                    fine = false;
+                    continue;
+                }
+                const std::optional<JsonLiteral> json = lowerJsonLiteral(arg);
+                if (!json)
+                {
+                    fine = false;
+                    continue;
+                }
+                if (builtin.name != "http_reply_json")
+                {
+                    if (!texts)   // the address's strings: none
+                    {
+                        irArgs.push_back(llvm::ConstantPointerNull::get(builder_.getPtrTy()));
+                        irArgs.push_back(llvm::ConstantPointerNull::get(builder_.getPtrTy()));
+                        irArgs.push_back(builder_.getInt32(0));
+                    }
+                    if (builtin.name == "http_post")   // the web library reaches the writer by its address (Web.h)
+                        irArgs.push_back(jsonWriter());
+                }
+                irArgs.push_back(json->description);
+                irArgs.push_back(json->values);
                 continue;
             }
             if (param == Param::String || param == Param::Format || param == Param::Path || param == Param::XmlPath
@@ -1706,12 +1808,14 @@ namespace fminus::ir::detail
             return lowerText(location, builtin, irArgs);
         if (builtin.result == Result::String)   // a pointer from the runtime, and a length it writes
             return textResult(builtin, std::move(irArgs), fallback);
+        if (builtin.name == "http_reply_json")   // the request, the status, the literal (Serve.cpp)
+            return {replyJson(irArgs[0], irArgs[1], {irArgs[2], irArgs[3]}), type};
         const bool listen = builtin.symbol == "fminus_web_http_listen";
         if (listen)
             irArgs = listenArguments(location);
         llvm::Type* returned = builtin.result == Result::Bool ? builder_.getInt32Ty() : typeOf(type);
         llvm::CallInst* result =
-            callRuntime(std::string(builtin.symbol) + (texts ? "_s" : ""), returned, irArgs);
+            callRuntime(std::string(builtin.symbol) + (texts && !jsonBody ? "_s" : ""), returned, irArgs);
         if (listen)
             webListens_.push_back(result);   // its route table, once every route is known (finishWebRoutes)
         if (builtin.result == Result::Void)
@@ -1852,6 +1956,21 @@ namespace fminus::ir::detail
             declared != nullptr && !functions_.contains(name))
             describeRuntime(*declared);
         return builder_.CreateCall(function, args);
+    }
+
+    // The runtime's JSON writer, fminus_rt_json_write, as an address: what the web library's POST of a JSON literal
+    // calls to measure and write its body (Web.h), since the library does not link the runtime. Declared as a call of
+    // it would declare it, with what it does (describeRuntime).
+    llvm::Value* Lowering::jsonWriter()
+    {
+        llvm::Type* i32 = builder_.getInt32Ty();
+        llvm::Type* ptr = builder_.getPtrTy();
+        llvm::FunctionCallee function = module_.getOrInsertFunction(
+            "fminus_rt_json_write", llvm::FunctionType::get(i32, {ptr, i32, ptr, ptr}, false));
+        if (auto* declared = llvm::dyn_cast<llvm::Function>(function.getCallee());
+            declared != nullptr && !functions_.contains("fminus_rt_json_write"))
+            describeRuntime(*declared);
+        return function.getCallee();
     }
 
     Lowering::Value Lowering::wrongArity(SourceLocation location, std::size_t have, std::size_t expected)

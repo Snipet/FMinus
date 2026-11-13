@@ -1,0 +1,91 @@
+// A JSON literal as a file's bytes (Shapes.cpp, Calls.cpp; runtime/Files.cpp's fminus_rt_file_write_json and
+// _append_json): its description a private constant, the writer's operations and shapes, appendShape's words for each
+// value (a span of modules for json_slice, a pointer to an array, an enumeration with its constants' names, a vector)
+// and the literal's own bytes; its values stored into 8-byte slots of the frame in the order written; the call with
+// the name's strings (none: null, null, 0) and the description and the slots. Its declaration says it reads any
+// memory (what the slots point to), so at -O2 the stores into the arrays the literal writes stay before the call. Run
+// through the JIT and as an executable, in a directory the test makes: the file and a line of JSON Lines.
+// REQUIRES: json, files-write
+// RUN: fminus %s -O0 | FileCheck %s
+// RUN: fminus %s -O2 | FileCheck %s --check-prefix=OPT
+// RUN: fminus %s --emit ast | FileCheck %s --check-prefix=AST
+// RUN: rm -rf %t && mkdir -p %t/out %t/tmp
+// RUN: fminus %s --run main 2 --files-write out=%t/out | FileCheck %s --check-prefix=RESULT
+// RUN: cat %t/out/week.json | FileCheck %s --check-prefix=WEEK
+// RUN: cat %t/out/log.jsonl | FileCheck %s --check-prefix=LOG
+// RUN: env TMPDIR=%t/tmp fminus %s --emit exe -o %t/main
+// RUN: env FMINUS_FILES_WRITE=out=%t/out %t/main 1 | FileCheck %s --check-prefix=RESULT
+// RUN: cat %t/out/week.json | FileCheck %s --check-prefix=EXE
+// RUN: cat %t/out/log.jsonl | FileCheck %s --check-prefix=LOGS
+// RUN: rm -rf %t
+
+enum Wave { SINE, SAW, SQUARE };
+
+module Day { int sensor; float mean; float peak [[json::name("most")]]; };
+
+float main(float count)
+{
+    const int n = (int)count;
+    Day day[3];
+    float taps[4];
+    for (int k = 0; k < 3; ++k)
+    {
+        day[k].sensor = k;
+        day[k].mean = 0.5f * (float)k;
+        day[k].peak = (float)(k + 1);
+    }
+    taps[0] = 0.25f;
+    const string label = "week";
+    enum Wave wave = SAW;
+    const int written = file_write("out/{label}.json", json { "days": json_slice(day, n), "taps": taps, "wave": wave,
+                                                            "v": (float4)(1, 2, 3, 4) });
+    return (float)(written * 10 + file_append("out/log.jsonl", json (day[1])));
+}
+
+// The literal's description: `0, a, b` its bytes, `1, slot, shape` a value. "days": a span (10) of at most 3 modules
+// (12) 12 bytes apart, its fields' records (size, name, offset, flags, shape); "taps": a pointer (8) to an array (9) of
+// 4 floats; "wave": an enumeration (7) of an int (4) and its three constants; "v": a vector (11) of 4 lanes, in slots 4
+// and 5. Then json (day[1]): a pointer to the module.
+// CHECK: @.json = private unnamed_addr constant { i32, i32, [65 x i32], [57 x i8] } { i32 65, i32 57, [65 x i32] [i32 0, i32 0, i32 8, i32 1, i32 0, i32 10, i32 3, i32 12, i32 12, i32 3, i32 6, i32 8, i32 6, i32 0, i32 0, i32 3, i32 6, i32 14, i32 4, i32 4, i32 0, i32 1, i32 6, i32 18, i32 4, i32 8, i32 0, i32 1, i32 0, i32 22, i32 8, i32 1, i32 2, i32 8, i32 9, i32 4, i32 4, i32 1, i32 0, i32 30, i32 8, i32 1, i32 3, i32 7, i32 4, i32 3, i32 0, i32 38, i32 4, i32 1, i32 42, i32 3, i32 2, i32 45, i32 6, i32 0, i32 51, i32 5, i32 1, i32 4, i32 11, i32 4, i32 0, i32 56, i32 1], [57 x i8] c"{\22days\22:sensormeanmost,\22taps\22:,\22wave\22:SINESAWSQUARE,\22v\22:}" }, align 4
+// CHECK: @.json.3 = private unnamed_addr constant { i32, i32, [23 x i32], [14 x i8] } { i32 23, i32 14, [23 x i32] [i32 1, i32 0, i32 8, i32 12, i32 3, i32 6, i32 0, i32 6, i32 0, i32 0, i32 3, i32 6, i32 6, i32 4, i32 4, i32 0, i32 1, i32 6, i32 10, i32 4, i32 8, i32 0, i32 1], [14 x i8] c"sensormeanmost" }, align 4
+// CHECK-LABEL: define float @main(
+// CHECK:         %json.values = alloca [6 x i64], align 8
+// CHECK:         %files.context = load ptr, ptr @fminus_rt_files_context
+// CHECK:         %[[DAYS:[a-z0-9]+]] = getelementptr inbounds [3 x %Day], ptr %day, i64 0, i64 0
+// CHECK-NEXT:    %[[N:[a-z0-9]+]] = load i32, ptr %n
+// CHECK-NEXT:    %[[TAPS:[a-z0-9]+]] = getelementptr inbounds [4 x float], ptr %taps, i64 0, i64 0
+// CHECK-NEXT:    %[[WAVE:[a-z0-9]+]] = load i32, ptr %wave
+// CHECK-NEXT:    %[[S0:[0-9]+]] = getelementptr inbounds i8, ptr %json.values, i32 0
+// CHECK-NEXT:    store ptr %[[DAYS]], ptr %[[S0]], align 8
+// CHECK-NEXT:    %[[S1:[0-9]+]] = getelementptr inbounds i8, ptr %json.values, i32 8
+// CHECK-NEXT:    store i32 %[[N]], ptr %[[S1]], align 4
+// CHECK-NEXT:    %[[S2:[0-9]+]] = getelementptr inbounds i8, ptr %json.values, i32 16
+// CHECK-NEXT:    store ptr %[[TAPS]], ptr %[[S2]], align 8
+// CHECK-NEXT:    %[[S3:[0-9]+]] = getelementptr inbounds i8, ptr %json.values, i32 24
+// CHECK-NEXT:    store i32 %[[WAVE]], ptr %[[S3]], align 4
+// CHECK-NEXT:    %[[S4:[0-9]+]] = getelementptr inbounds i8, ptr %json.values, i32 32
+// CHECK-NEXT:    store <4 x float> <float 1.000000e+00, float 2.000000e+00, float 3.000000e+00, float 4.000000e+00>, ptr %[[S4]], align 8
+// CHECK-NEXT:    %file_write = call i32 @fminus_rt_file_write_json(ptr %files.context, ptr @.str.1, i32 11, ptr null, i32 0, ptr %format.texts, ptr %format.lengths, i32 1, ptr @.json, ptr %json.values)
+// CHECK:         %file_append = call i32 @fminus_rt_file_append_json(ptr %files.context{{[0-9]+}}, ptr @.str.2, i32 13, ptr null, i32 0, ptr null, ptr null, i32 0, ptr @.json.3, ptr %json.values{{[0-9]+}})
+// CHECK: declare i32 @fminus_rt_file_write_json(ptr, ptr readonly captures(none), i32, ptr readonly captures(none), i32, ptr readonly captures(none), ptr readonly captures(none), i32, ptr readonly captures(none), ptr readonly captures(none)) [[WRITE:#[0-9]+]]
+// CHECK: declare i32 @fminus_rt_file_append_json(ptr, ptr readonly captures(none), i32, ptr readonly captures(none), i32, ptr readonly captures(none), ptr readonly captures(none), i32, ptr readonly captures(none), ptr readonly captures(none)) [[WRITE]]
+// CHECK: attributes [[WRITE]] = { nounwind willreturn memory(read, argmem: readwrite, inaccessiblemem: readwrite, errnomem: readwrite) }
+
+// At -O2 the modules' fields and the array's element, which only the writer reads, through the slots, are stored all
+// the same, before the call.
+// OPT-LABEL: define float @main(
+// OPT:         store float 3.000000e+00, ptr %peak.2
+// OPT:         store float 2.500000e-01, ptr %taps
+// OPT:         store ptr %day, ptr %json.values
+// OPT:         call i32 @fminus_rt_file_write_json(
+// OPT:         store ptr %arrayidx.1, ptr %json.values{{[0-9]+}}
+// OPT:         call i32 @fminus_rt_file_append_json(
+
+// AST: (call file_append "out/log.jsonl" (json ([] day 1)))
+
+// RESULT: 0
+// WEEK: {"days":[{"sensor":0,"mean":0,"most":1},{"sensor":1,"mean":0.5,"most":2}],"taps":[0.25,0,0,0],"wave":"SAW","v":[1,2,3,4]}
+// LOG: {"sensor":1,"mean":0.5,"most":2}
+// EXE: {"days":[{"sensor":0,"mean":0,"most":1}],"taps":[0.25,0,0,0],"wave":"SAW","v":[1,2,3,4]}
+// LOGS: {"sensor":1,"mean":0.5,"most":2}
+// LOGS-NEXT: {"sensor":1,"mean":0.5,"most":2}

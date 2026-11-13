@@ -141,9 +141,9 @@ namespace fminus::ir::detail
                 [&](const ast::StringExpr& literal) {   // a string where one is wanted, else a builtin's argument only
                     return text ? stringValue(literal) : notAValue(expr);   // (Text.cpp, Strings.cpp)
                 },
-                [&](const ast::JsonExpr&) {   // a reply's body only (Serve.cpp)
-                    error(expr.location, "FMinus has no JSON values: a JSON literal is only a reply's body, 'reply "
-                                         "status, json { ... };'");
+                [&](const ast::JsonExpr&) {   // a sink's argument only (Calls.cpp, Shapes.cpp)
+                    error(expr.location, "FMinus has no JSON values: a JSON literal is only the body of a reply, "
+                                         "http_reply_json, http_post, file_write or file_append");
                     return recovery(ast::Type::Float);
                 },
             },
