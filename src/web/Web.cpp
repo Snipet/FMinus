@@ -19,6 +19,11 @@
 //   under it when its last user goes; a context arriving meanwhile waits for the join and starts a new one.
 // - Every handle a program is given begins with its kind (Handle.h), and each C function here reads it first: a
 //   request made is a Request; a server and a request it received are Server.cpp's, whose functions these call.
+// - A deadline scope (fminus_web_http_within_begin) is a context's, under its mutex, with the thread that began it:
+//   a request records the id of the innermost one its starting thread had open there (under the mutex, as it joins
+//   the list), and a scope's end waits on the context's condition variable, as fminus_web_http_wait does, for those of
+//   its requests still in the list to end, then queues an Expire for each left (FMINUS_WEB_TIMEOUT), under the mutex
+//   as Context::stop queues its cancels, and waits for the I/O thread to have handled them.
 // - With the server (FMINUS_WEB_SERVER), a context has at most one, made by its first fminus_web_http_listen under its
 //   mutex, attached to the I/O thread by a command (Serve) queued under that mutex, and detached by another (Unserve)
 //   when it is closed, the context stopped or destroyed (stopServer), before it is marked closed. The I/O thread turns
@@ -79,6 +84,19 @@ namespace fminus::web
 
         CURLSH* share = nullptr;   // the I/O thread's
 
+        // The deadline scopes open (fminus_web_http_within_begin), every thread's, in the order they were begun, under
+        // the mutex. A thread's innermost is its last here; a request it starts joins that one (Request::scope).
+        struct Scope
+        {
+            std::uint64_t id = 0;            // never 0, never reused
+            std::thread::id owner;           // the thread that began it, the only one that sees it
+            bool bounded = false;            // it has a deadline: its own, or an enclosing one's
+            Clock::time_point deadline;      // the earlier of its own and the enclosing scope's
+        };
+        std::vector<Scope> scopes;
+        std::uint64_t scopesBegun = 0;
+        bool destroying = false;   // ~Context has begun (under the mutex): a scope's end says so
+
 #if FMINUS_HAS_WEB_SERVER
         Server* server = nullptr;   // its first listen's, under the mutex; freed by ~Context
 #endif
@@ -101,6 +119,8 @@ namespace fminus::web
             std::int32_t size = 0;
 
             Context::State* context = nullptr;   // null: the shared refused request
+            std::uint64_t scope = 0;             // the deadline scope it joined (State::Scope::id), under the context's
+                                                 // mutex; 0: none
 
             // The I/O thread's while in flight.
             Target target;
@@ -151,6 +171,7 @@ namespace fminus::web
             {
                 Start,
                 Cancel,
+                Expire,   // a cancel by a deadline scope's end: the request ends as FMINUS_WEB_TIMEOUT
                 Forget,
 #if FMINUS_HAS_WEB_SERVER
                 Serve,     // the I/O thread starts driving `server`
@@ -419,6 +440,10 @@ namespace fminus::web
                 if (command.request->easy != nullptr)
                     finish(command.request, FMINUS_WEB_CANCELLED);
                 break;
+            case Command::Expire:
+                if (command.request->easy != nullptr)
+                    finish(command.request, FMINUS_WEB_TIMEOUT);
+                break;
             case Command::Forget:
                 if (command.context->share != nullptr)
                 {
@@ -672,6 +697,19 @@ namespace fminus::web
             context.changed.notify_all();
         }
 
+        // The calling thread's innermost deadline scope under the context, or null. Under the context's mutex; the
+        // pointer only until the mutex is let go (another thread's begin may move the scopes).
+        Context::State::Scope* innermost(Context::State& context)
+        {
+            const std::thread::id me = std::this_thread::get_id();
+            for (auto scope = context.scopes.rbegin(); scope != context.scopes.rend(); ++scope)
+            {
+                if (scope->owner == me)
+                    return &*scope;
+            }
+            return nullptr;
+        }
+
         // A request under `context`, checked, and started unless the check or a limit ended it.
         Request* start(Context::State* context, std::string url, bool post, const void* data, std::int32_t bytes,
                        std::string_view type)
@@ -724,6 +762,8 @@ namespace fminus::web
                     delete request;
                     return nullptr;
                 }
+                if (const Context::State::Scope* scope = innermost(*context))
+                    request->scope = scope->id;
                 if (status == 0 && context->inFlight >= policy.maxRequests)
                     status = FMINUS_WEB_LIMIT;
                 if (status == 0 && context->stopped.load(std::memory_order_relaxed))
@@ -787,6 +827,18 @@ namespace fminus::web
         }
     } // namespace
 
+#if FMINUS_HAS_WEB_SERVER
+    bool scopeDeadline(Context::State* context, Clock::time_point& deadline) noexcept
+    {
+        std::lock_guard lock(context->mutex);
+        const Context::State::Scope* scope = innermost(*context);
+        if (scope == nullptr || !scope->bounded)
+            return false;
+        deadline = scope->deadline;
+        return true;
+    }
+#endif
+
     std::string checkPolicy(const Policy& policy)
     {
         CompiledPolicy compiled;
@@ -817,6 +869,10 @@ namespace fminus::web
     Context::~Context()
     {
         State& state = *state_;
+        {
+            std::lock_guard lock(state.mutex);
+            state.destroying = true;
+        }
         stopServer(state);
         if (state.usesEngine)
         {
@@ -997,20 +1053,120 @@ extern "C"
         if (now != FMINUS_WEB_PENDING || timeoutMs == 0 || request->context == nullptr)
             return now;
         Context::State& context = *request->context;
+        const auto started = fminus::web::Clock::now();
         std::unique_lock lock(context.mutex);
         ++context.waiters;
         const auto ready = [&]
         {
             return context.dying || request->status.load(std::memory_order_acquire) != FMINUS_WEB_PENDING;
         };
-        if (timeoutMs < 0)
+        // The calling thread's innermost deadline scope bounds the wait as its own timeout does.
+        bool bounded = timeoutMs >= 0;
+        auto deadline =
+            bounded ? started + std::chrono::milliseconds(timeoutMs) : fminus::web::Clock::time_point::max();
+        if (const Context::State::Scope* scope = fminus::web::innermost(context); scope != nullptr && scope->bounded)
+        {
+            deadline = bounded ? std::min(deadline, scope->deadline) : scope->deadline;
+            bounded = true;
+        }
+        if (!bounded)
             context.changed.wait(lock, ready);
         else
-            context.changed.wait_for(lock, std::chrono::milliseconds(timeoutMs), ready);
+            context.changed.wait_until(lock, deadline, ready);
         const std::int32_t status = request->status.load(std::memory_order_acquire);
         if (--context.waiters == 0 && context.dying)
             context.changed.notify_all();
         return status;
+    }
+
+    std::int32_t fminus_web_http_within_begin(void* context, std::int32_t timeoutMs) noexcept
+    {
+        if (context == nullptr)
+            return 0;   // a program given no network: its requests are refused at once, and nothing waits
+        Context::State& state = *static_cast<Context::State*>(context);
+        const auto now = fminus::web::Clock::now();
+        std::lock_guard lock(state.mutex);
+        Context::State::Scope scope;
+        scope.owner = std::this_thread::get_id();
+        scope.bounded = timeoutMs >= 0;
+        if (scope.bounded)
+            scope.deadline = now + std::chrono::milliseconds(timeoutMs);
+        if (const Context::State::Scope* outer = fminus::web::innermost(state); outer != nullptr && outer->bounded)
+        {
+            if (!scope.bounded || outer->deadline < scope.deadline)
+                scope.deadline = outer->deadline;
+            scope.bounded = true;
+        }
+        scope.id = state.scopesBegun + 1;
+        try
+        {
+            state.scopes.push_back(scope);
+        }
+        catch (const std::bad_alloc&)
+        {
+            return FMINUS_WEB_FAILED;
+        }
+        state.scopesBegun = scope.id;
+        return 0;
+    }
+
+    // Counted among the context's waiters from its first look to its last (as fminus_web_http_wait is), so that
+    // ~Context waits for it, and wakes it. The scope is found again by its id after each wait: another thread's begin
+    // may have moved the scopes meanwhile. Each expiry is queued under the mutex, as Context::stop's cancels are, so a
+    // thread closing one of the requests meanwhile frees it only once the expiry has been handled.
+    std::int32_t fminus_web_http_within_end(void* context) noexcept
+    {
+        if (context == nullptr)
+            return 0;
+        Context::State& state = *static_cast<Context::State*>(context);
+        std::unique_lock lock(state.mutex);
+        const Context::State::Scope* found = fminus::web::innermost(state);
+        if (found == nullptr)
+            return FMINUS_WEB_INVALID;
+        const Context::State::Scope scope = *found;
+        const auto joined = [&](const fminus::web::Request* request)
+        {
+            return request->scope == scope.id &&
+                   request->status.load(std::memory_order_acquire) == FMINUS_WEB_PENDING;
+        };
+        const auto ready = [&]
+        {
+            return state.dying || std::none_of(state.requests.begin(), state.requests.end(), joined);
+        };
+        ++state.waiters;
+        if (scope.bounded)
+            state.changed.wait_until(lock, scope.deadline, ready);
+        else
+            state.changed.wait(lock, ready);
+        std::int32_t result = 0;
+        if (state.dying)
+            result = FMINUS_WEB_CANCELLED;   // its requests were cancelled; the scope goes with the context
+        else
+        {
+            std::uint64_t sequence = 0;
+            if (state.usesEngine)
+            {
+                for (fminus::web::Request* request : state.requests)
+                {
+                    if (joined(request))
+                        sequence = fminus::web::engine().postSurely(
+                            {fminus::web::Command::Expire, request, &state, 0});
+                }
+            }
+            std::erase_if(state.scopes, [&](const Context::State::Scope& open) { return open.id == scope.id; });
+            if (sequence != 0)
+            {
+                result = FMINUS_WEB_TIMEOUT;
+                lock.unlock();
+                fminus::web::engine().wait(sequence);
+                lock.lock();
+            }
+            if (state.stopped.load(std::memory_order_acquire) || state.destroying)
+                result = FMINUS_WEB_CANCELLED;
+        }
+        if (--state.waiters == 0 && state.dying)
+            state.changed.notify_all();
+        return result;
     }
 
     std::int32_t fminus_web_http_status(const void* handle) noexcept

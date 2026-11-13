@@ -58,7 +58,6 @@ namespace fminus::web
 
         constexpr std::int32_t kMaxHeadBytes = 16384;   // a request's head: rule 2
         constexpr std::int32_t kMaxFields = 64;
-        constexpr std::int32_t kMaxArgs = 8;            // %d's a route may have
         constexpr std::size_t kReadChunk = 16384;
         constexpr std::size_t kMaxBuffered = 32768;     // bytes held unparsed while a request is being answered
         constexpr std::size_t kKeptBody = 65536;        // a free slot keeps a body's memory up to this much
@@ -135,6 +134,8 @@ namespace fminus::web
         {
             Method method;
             std::string pattern;
+            std::int32_t index = 0;            // in the table fminus_web_http_listen was given
+            std::vector<std::uint8_t> ranks;   // each segment's (rankSegments): how specific it is
         };
 
         bool isDigit(char c)
@@ -209,6 +210,18 @@ namespace fminus::web
         constexpr std::string_view kHeaderNames[kHeaders] = {
             "host", "origin", "sec-fetch-site", "authorization", "content-type", "expect", "upgrade", "transfer-encoding"};
 
+        // A header field of a request, for the program (fminus_web_http_header): its name's and its value's bytes, as
+        // offsets into the text that holds them (the connection's fieldText while it is read; the slot's target buffer,
+        // after the target, once published). The whole head is at most kMaxHeadBytes, so every offset fits.
+        static_assert(kMaxHeadBytes < 65536);
+        struct FieldSpan
+        {
+            std::uint16_t nameOffset = 0;
+            std::uint16_t nameLength = 0;
+            std::uint16_t valueOffset = 0;
+            std::uint16_t valueLength = 0;
+        };
+
         struct Connection
         {
             enum class Stage
@@ -245,6 +258,13 @@ namespace fminus::web
             std::string value;
             std::array<std::string, kHeaders> headers;
             std::array<std::uint8_t, kHeaders> counts{};
+            std::string fieldText;            // every field's name and value, one after another, for the program
+            std::vector<FieldSpan> spans;     // at most kMaxFields (a request with more is refused: 431)
+            bool inName = false;              // between a field's first name byte and its name's end
+            bool recording = false;           // this field has a span
+            std::int32_t route = -1;          // the most specific route the request matched (rule 6), its index
+            Place routePlaces[kMaxPlaces];    // and the places it filled
+            std::int32_t routePlaceCount = 0;
             std::vector<char> body;
             std::int32_t status = 0;   // the library's answer, set by a callback that refused the request
             std::string allow;         // a 405's
@@ -270,15 +290,23 @@ namespace fminus::web
         // The request: written by the I/O thread while the slot is free, unchanged while it is published, claimed or
         // abandoned. Its buffers are made with the slot, so that a taker never reads memory that moves.
         Method method = Method::Get;
-        std::unique_ptr<char[]> target;   // the path, and "?" and the query: kMaxHeadBytes
+        std::unique_ptr<char[]> target;   // kMaxHeadBytes: the path, and "?" and the query; then the header fields'
+                                          // names and values (fields), which the head bounds with the target
         std::int32_t pathLength = 0;
         std::int32_t targetLength = 0;
+        FieldSpan fields[kMaxFields];     // offsets into target
+        std::int32_t fieldCount = 0;
         std::vector<char> body;           // with a 0 byte after its last
         std::int32_t bodySize = 0;
+        std::int32_t route = -1;          // the route the request was published for (rule 6), its table index
+        Place routePlaces[kMaxPlaces];    // and the places that route filled
+        std::int32_t routePlaceCount = 0;
+        std::atomic<std::int32_t> routeSeen{-1};   // route, for a taker by route set to read before it claims the
+                                                   // slot (stored before the slot is published)
 
-        // The taker's.
-        std::int32_t args[kMaxArgs] = {};
-        std::int32_t argCount = 0;
+        // The taker's: the places of the last fminus_web_http_is that matched, or of fminus_web_http_route.
+        Place places[kMaxPlaces];
+        std::int32_t placeCount = 0;
 
         // The reply: the taker's to write while it holds the slot, the I/O thread's once it is answered.
         std::int32_t replyStatus = 0;
@@ -432,12 +460,28 @@ namespace fminus::web
             Connection& c = connectionOf(parser);
             if (c.field.size() < 32)   // no header the rules read has a longer name
                 c.field.append(at, std::min<std::size_t>(length, 32 - c.field.size() + 1));
+            // The whole field, for the program: a span of its own, unless kMaxFields have one (it is then refused).
+            if (!c.inName)
+            {
+                c.inName = true;
+                c.recording = c.spans.size() < static_cast<std::size_t>(kMaxFields);
+                if (c.recording)
+                    c.spans.push_back({static_cast<std::uint16_t>(c.fieldText.size()), 0, 0, 0});
+            }
+            if (c.recording)
+            {
+                c.fieldText.append(at, length);   // within the head's bytes, which the caller bounds
+                c.spans.back().nameLength = static_cast<std::uint16_t>(c.spans.back().nameLength + length);
+            }
             return 0;
         }
 
         int onHeaderFieldComplete(llhttp_t* parser)
         {
             Connection& c = connectionOf(parser);
+            c.inName = false;
+            if (c.recording)
+                c.spans.back().valueOffset = static_cast<std::uint16_t>(c.fieldText.size());
             if (++c.fields > kMaxFields)
                 return refuse(c, 431);
             c.current = Header::Other;
@@ -456,12 +500,35 @@ namespace fminus::web
             Connection& c = connectionOf(parser);
             if (c.current != Header::Other)
                 c.value.append(at, length);
+            if (c.recording)
+            {
+                c.fieldText.append(at, length);
+                c.spans.back().valueLength = static_cast<std::uint16_t>(c.spans.back().valueLength + length);
+            }
             return 0;
+        }
+
+        bool isSpace(char c)
+        {
+            return c == ' ' || c == '\t';
         }
 
         int onHeaderValueComplete(llhttp_t* parser)
         {
             Connection& c = connectionOf(parser);
+            if (c.recording)
+            {
+                // The value without the white space around it.
+                FieldSpan& span = c.spans.back();
+                while (span.valueLength > 0 && isSpace(c.fieldText[span.valueOffset + span.valueLength - 1u]))
+                    --span.valueLength;
+                while (span.valueLength > 0 && isSpace(c.fieldText[span.valueOffset]))
+                {
+                    ++span.valueOffset;
+                    --span.valueLength;
+                }
+                c.recording = false;
+            }
             if (c.current == Header::Other)
                 return 0;
             while (!c.value.empty() && (c.value.back() == ' ' || c.value.back() == '\t'))
@@ -531,22 +598,34 @@ namespace fminus::web
             if (countOf(c, Header::ContentType) > 1 ||
                 (countOf(c, Header::ContentType) == 1 && formType(headerOf(c, Header::ContentType))))
                 return refuse(c, 415);
-            // Rule 6.
+            // Rule 6. The request is published for the most specific route that matches it (Web.h), the first of the
+            // table among those that rank the same.
             bool pathKnown = false;
             bool methodKnown = false;
             std::uint32_t allowed = 0;
-            std::int32_t args[kMaxArgs];
+            Place places[kMaxPlaces];
             std::int32_t count = 0;
+            const Route* best = nullptr;
             for (const Route& route : s.routes)
             {
-                if (!matchPath(route.pattern, path, args, count))
+                if (!matchRoute(route.pattern, path, places, count))
                     continue;
                 pathKnown = true;
                 allowed |= 1u << static_cast<unsigned>(route.method);
                 if (route.method == Method::Get)
                     allowed |= 1u << static_cast<unsigned>(Method::Head);
-                methodKnown = methodKnown || admits(route.method, c.method);
+                if (!admits(route.method, c.method))
+                    continue;
+                methodKnown = true;
+                if (best == nullptr || std::lexicographical_compare(route.ranks.begin(), route.ranks.end(),
+                                                                    best->ranks.begin(), best->ranks.end()))
+                {
+                    best = &route;
+                    std::copy_n(places, count, c.routePlaces);
+                    c.routePlaceCount = count;
+                }
             }
+            c.route = best == nullptr ? -1 : best->index;
             if (fileFor(s, path) != nullptr)
             {
                 pathKnown = true;
@@ -738,6 +817,12 @@ namespace fminus::web
             for (std::string& header : c.headers)
                 header.clear();
             c.counts.fill(0);
+            c.fieldText.clear();
+            c.spans.clear();
+            c.inName = false;
+            c.recording = false;
+            c.route = -1;
+            c.routePlaceCount = 0;
             c.body.clear();
             if (c.body.capacity() > kKeptBody)
                 c.body.shrink_to_fit();
@@ -824,9 +909,35 @@ namespace fminus::web
             std::memcpy(slot->target.get(), c.target.data(), c.target.size());   // within the head: kMaxHeadBytes
             slot->targetLength = static_cast<std::int32_t>(c.target.size());
             slot->pathLength = static_cast<std::int32_t>(pathOf(c).size());
+            // The header fields, after the target in the same buffer (the target and the fields' bytes are parts of
+            // the head, so they fit together; a field that would not is left out all the same). With a token, its
+            // Authorization is the host's secret, and left out.
+            slot->fieldCount = 0;
+            std::size_t at = c.target.size();
+            for (const FieldSpan& span : c.spans)
+            {
+                const std::string_view name(c.fieldText.data() + span.nameOffset, span.nameLength);
+                if (!s.limits->token.empty() && equalsIgnoringCase(name, "authorization"))
+                    continue;
+                if (at + span.nameLength + span.valueLength > static_cast<std::size_t>(kMaxHeadBytes))
+                    break;
+                FieldSpan& kept = slot->fields[slot->fieldCount++];
+                kept.nameOffset = static_cast<std::uint16_t>(at);
+                kept.nameLength = span.nameLength;
+                std::memcpy(slot->target.get() + at, name.data(), name.size());
+                at += span.nameLength;
+                kept.valueOffset = static_cast<std::uint16_t>(at);
+                kept.valueLength = span.valueLength;
+                std::memcpy(slot->target.get() + at, c.fieldText.data() + span.valueOffset, span.valueLength);
+                at += span.valueLength;
+            }
+            slot->route = c.route;
+            std::copy_n(c.routePlaces, c.routePlaceCount, slot->routePlaces);
+            slot->routePlaceCount = c.routePlaceCount;
+            slot->routeSeen.store(c.route, std::memory_order_relaxed);   // published by the store below
             slot->body.swap(c.body);
             slot->bodySize = static_cast<std::int32_t>(slot->body.size()) - 1;
-            slot->argCount = 0;
+            slot->placeCount = 0;
             slot->replyStatus = 0;
             slot->replyBytes = 0;
             slot->typeLength = 0;
@@ -1167,7 +1278,8 @@ namespace fminus::web
                 const std::size_t equals = field.find('=');
                 if (field.substr(0, equals) != wanted)
                     continue;
-                value = equals == std::string_view::npos ? std::string_view() : field.substr(equals + 1);
+                // A field without "=" is there, its value empty (at the field's end: an address all the same).
+                value = equals == std::string_view::npos ? field.substr(field.size()) : field.substr(equals + 1);
                 return true;
             }
             return false;
@@ -1339,7 +1451,46 @@ namespace fminus::web
 
     // ---- matching ---------------------------------------------------------------------------------------------------
 
-    bool matchPath(std::string_view pattern, std::string_view path, std::int32_t* args, std::int32_t& count) noexcept
+    namespace
+    {
+        // A byte rule 2 lets a request's path segment hold.
+        bool segmentByte(char c)
+        {
+            return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || isDigit(c) || c == '-' || c == '.' ||
+                   c == '_' || c == '~';
+        }
+
+        // Each segment's rank, in the order of the segments: 0 for a literal one, 1 to 8 for one with that many %d,
+        // 255 for a %s (anything else with a %s, which never matches, ranks as a %s). Lower is more specific.
+        std::vector<std::uint8_t> rankSegments(std::string_view pattern)
+        {
+            std::vector<std::uint8_t> ranks;
+            std::size_t begin = pattern.empty() || pattern.front() != '/' ? 0 : 1;
+            for (;;)
+            {
+                const std::size_t end = std::min(pattern.find('/', begin), pattern.size());
+                const std::string_view segment = pattern.substr(begin, end - begin);
+                unsigned numbers = 0;
+                bool text = false;
+                for (std::size_t i = 0; i + 1 < segment.size(); ++i)
+                {
+                    if (segment[i] != '%')
+                        continue;
+                    if (segment[i + 1] == 'd')
+                        ++numbers;
+                    else if (segment[i + 1] == 's')
+                        text = true;
+                    ++i;   // "%%" is one percent sign; "%d" and "%s" one place
+                }
+                ranks.push_back(text ? 255 : static_cast<std::uint8_t>(std::min(numbers, 254u)));
+                if (end == pattern.size())
+                    return ranks;
+                begin = end + 1;
+            }
+        }
+    } // namespace
+
+    bool matchRoute(std::string_view pattern, std::string_view path, Place* places, std::int32_t& count) noexcept
     {
         count = 0;
         std::size_t j = 0;
@@ -1353,9 +1504,30 @@ namespace fminus::web
                     value = value * 10 + (path[j++] - '0');
                 const std::size_t digits = j - start;
                 if (digits == 0 || digits > 10 || value > std::numeric_limits<std::int32_t>::max() ||
-                    count == kMaxArgs)
+                    count == kMaxPlaces || start > 0xffff)
                     return false;
-                args[count++] = static_cast<std::int32_t>(value);
+                places[count++] = {static_cast<std::int32_t>(value), static_cast<std::uint16_t>(start),
+                                   static_cast<std::uint16_t>(digits), false};
+                i += 2;
+                continue;
+            }
+            if (pattern[i] == '%' && i + 1 < pattern.size() && pattern[i + 1] == 's')
+            {
+                // A segment by itself: right after a '/' of the pattern, and before its next '/' or its end.
+                if (i == 0 || pattern[i - 1] != '/' || (i + 2 < pattern.size() && pattern[i + 2] != '/') ||
+                    count == kMaxPlaces)
+                    return false;
+                const std::size_t start = j;
+                while (j < path.size() && path[j] != '/')
+                {
+                    if (!segmentByte(path[j]))
+                        return false;
+                    ++j;
+                }
+                const std::string_view segment = path.substr(start, j - start);
+                if (segment.empty() || segment == "." || segment == ".." || j > 0xffff)
+                    return false;
+                places[count++] = {0, static_cast<std::uint16_t>(start), static_cast<std::uint16_t>(j - start), true};
                 i += 2;
                 continue;
             }
@@ -1368,6 +1540,34 @@ namespace fminus::web
             ++j;
         }
         return j == path.size();
+    }
+
+    bool matchPath(std::string_view pattern, std::string_view path, std::int32_t* args, std::int32_t& count) noexcept
+    {
+        Place places[kMaxPlaces];
+        if (!matchRoute(pattern, path, places, count))
+            return false;
+        for (std::int32_t i = 0; i < count; ++i)
+            args[i] = places[i].value;
+        return true;
+    }
+
+    int compareSpecificity(std::string_view a, std::string_view b) noexcept
+    {
+        try
+        {
+            const std::vector<std::uint8_t> ra = rankSegments(a);
+            const std::vector<std::uint8_t> rb = rankSegments(b);
+            if (std::lexicographical_compare(ra.begin(), ra.end(), rb.begin(), rb.end()))
+                return -1;
+            if (std::lexicographical_compare(rb.begin(), rb.end(), ra.begin(), ra.end()))
+                return 1;
+            return 0;
+        }
+        catch (const std::bad_alloc&)
+        {
+            return 0;
+        }
     }
 
     // ---- the server's life --------------------------------------------------------------------------------------------
@@ -1395,7 +1595,7 @@ namespace fminus::web
                 Method method = Method::None;
                 std::string_view pattern;
                 if (readRoute(std::string_view(routes[i], static_cast<std::size_t>(lengths[i])), method, pattern))
-                    server->routes.push_back({method, std::string(pattern)});
+                    server->routes.push_back({method, std::string(pattern), i, rankSegments(pattern)});
             }
         }
         server->slots.reserve(static_cast<std::size_t>(limits.maxPending));
@@ -1683,6 +1883,128 @@ namespace fminus::web
     }
 } // namespace fminus::web
 
+namespace fminus::web
+{
+    namespace
+    {
+        // Whether route `index` is in the set of `words` 64-bit words at `routes` (Web.h).
+        bool inSet(std::int32_t index, const std::uint64_t* routes, std::int32_t words)
+        {
+            if (routes == nullptr || index < 0 || words <= 0)
+                return false;
+            const auto word = static_cast<std::uint32_t>(index) / 64u;
+            return word < static_cast<std::uint32_t>(words) && ((routes[word] >> (index % 64)) & 1u) != 0;
+        }
+
+        // The oldest request the server has published, of a route in the set (or of any, with `every`), claimed; or
+        // null. Wait-free: a scan of the slots, tried at most twice their number of times.
+        void* takeOldest(void* handle, const std::uint64_t* routes, std::int32_t words, bool every)
+        {
+            Server* server = as<Server>(handle);
+            if (server == nullptr)
+                return nullptr;
+            const std::size_t slots = server->slots.size();
+            for (std::size_t attempt = 0; attempt < 2 * slots; ++attempt)
+            {
+                Slot* oldest = nullptr;
+                std::uint64_t oldestWord = 0;
+                for (const std::unique_ptr<Slot>& slot : server->slots)
+                {
+                    const std::uint64_t word = slot->state.load(std::memory_order_acquire);
+                    // A slot's route is stored before it is published: read after its word, it is that request's
+                    // or a later one's, and a later one's word is another, which the claim below then fails on.
+                    if (phaseOf(word) == Published && (oldest == nullptr || (word >> 8) < (oldestWord >> 8)) &&
+                        (every || inSet(slot->routeSeen.load(std::memory_order_relaxed), routes, words)))
+                    {
+                        oldest = slot.get();
+                        oldestWord = word;
+                    }
+                }
+                if (oldest == nullptr)
+                    return nullptr;
+                if (oldest->state.compare_exchange_strong(oldestWord, withPhase(oldestWord, Claimed),
+                                                          std::memory_order_acq_rel))
+                    return toHandle(oldest);
+            }
+            return nullptr;
+        }
+
+        // fminus_web_http_accept, for the set or for every route. The thread counts itself in first, and out last,
+        // under the server's mutex, whatever path it takes: freeServer waits for the count to be 0, so a thread in
+        // here is never left touching a server being freed. The calling thread's innermost deadline scope under the
+        // server's context (Web.cpp), if it has one, bounds the wait as its own timeout does.
+        void* acceptOldest(void* handle, const std::uint64_t* routes, std::int32_t words, bool every,
+                           std::int32_t timeoutMs)
+        {
+            Server* server = as<Server>(handle);
+            if (server == nullptr)
+                return nullptr;
+            server->waiters.fetch_add(1, std::memory_order_seq_cst);
+            bool bounded = timeoutMs >= 0;
+            Clock::time_point deadline =
+                bounded ? Clock::now() + std::chrono::milliseconds(timeoutMs) : Clock::time_point::max();
+            Clock::time_point scope;
+            if (timeoutMs != 0 && server->context != nullptr && scopeDeadline(server->context, scope))
+            {
+                deadline = bounded ? std::min(deadline, scope) : scope;
+                bounded = true;
+            }
+            void* request = nullptr;
+            std::unique_lock lock(server->mutex);
+            if (!server->closed && !server->dying && server->port.load(std::memory_order_acquire) > 0)
+            {
+                for (;;)
+                {
+                    request = takeOldest(handle, routes, words, every);
+                    if (request != nullptr || server->closed || server->dying || timeoutMs == 0)
+                        break;
+                    if (!bounded)
+                        server->changed.wait(lock);
+                    else if (server->changed.wait_until(lock, deadline) == std::cv_status::timeout)
+                    {
+                        request = takeOldest(handle, routes, words, every);
+                        break;
+                    }
+                }
+            }
+            if (server->waiters.fetch_sub(1, std::memory_order_seq_cst) == 1 && server->dying)
+                server->changed.notify_all();
+            return request;
+        }
+
+        std::string_view pathOf(const Slot& slot)
+        {
+            return std::string_view(slot.target.get(), static_cast<std::size_t>(slot.pathLength));
+        }
+
+        // A text's bytes for the program: its address, and its length in `*length` (when not null).
+        const char* giveText(const char* bytes, std::size_t size, std::int32_t* length)
+        {
+            if (length != nullptr)
+                *length = static_cast<std::int32_t>(size);
+            return bytes;
+        }
+
+        const char* noText(std::int32_t* length)
+        {
+            return giveText(nullptr, 0, length);
+        }
+
+        // Whether the bytes are an HTTP token (RFC 9110, 5.6.2), which a field's name is.
+        bool isToken(const char* bytes, std::int32_t length)
+        {
+            for (std::int32_t i = 0; i < length; ++i)
+            {
+                const char c = bytes[i];
+                if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || isDigit(c) ||
+                      std::string_view("!#$%&'*+-.^_`|~").find(c) != std::string_view::npos))
+                    return false;
+            }
+            return true;
+        }
+    } // namespace
+} // namespace fminus::web
+
 using fminus::web::Server;
 using fminus::web::Slot;
 
@@ -1696,64 +2018,23 @@ extern "C"
 
     void* fminus_web_http_next(void* handle) noexcept
     {
-        Server* server = fminus::web::as<Server>(handle);
-        if (server == nullptr)
-            return nullptr;
-        const std::size_t slots = server->slots.size();
-        for (std::size_t attempt = 0; attempt < 2 * slots; ++attempt)
-        {
-            Slot* oldest = nullptr;
-            std::uint64_t oldestWord = 0;
-            for (const std::unique_ptr<Slot>& slot : server->slots)
-            {
-                const std::uint64_t word = slot->state.load(std::memory_order_acquire);
-                if (fminus::web::phaseOf(word) == fminus::web::Published &&
-                    (oldest == nullptr || (word >> 8) < (oldestWord >> 8)))
-                {
-                    oldest = slot.get();
-                    oldestWord = word;
-                }
-            }
-            if (oldest == nullptr)
-                return nullptr;
-            if (oldest->state.compare_exchange_strong(oldestWord,
-                                                      fminus::web::withPhase(oldestWord, fminus::web::Claimed),
-                                                      std::memory_order_acq_rel))
-                return fminus::web::toHandle(oldest);
-        }
-        return nullptr;
+        return fminus::web::takeOldest(handle, nullptr, 0, true);
     }
 
-    // The thread counts itself in first, and out last, under the server's mutex, whatever path it takes: freeServer
-    // waits for the count to be 0, so a thread in here is never left touching a server being freed.
+    void* fminus_web_http_next_in(void* handle, const std::uint64_t* routes, std::int32_t words) noexcept
+    {
+        return fminus::web::takeOldest(handle, routes, words, false);
+    }
+
     void* fminus_web_http_accept(void* handle, std::int32_t timeoutMs) noexcept
     {
-        Server* server = fminus::web::as<Server>(handle);
-        if (server == nullptr)
-            return nullptr;
-        server->waiters.fetch_add(1, std::memory_order_seq_cst);
-        void* request = nullptr;
-        std::unique_lock lock(server->mutex);
-        if (!server->closed && !server->dying && server->port.load(std::memory_order_acquire) > 0)
-        {
-            const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
-            for (;;)
-            {
-                request = fminus_web_http_next(handle);
-                if (request != nullptr || server->closed || server->dying || timeoutMs == 0)
-                    break;
-                if (timeoutMs < 0)
-                    server->changed.wait(lock);
-                else if (server->changed.wait_until(lock, deadline) == std::cv_status::timeout)
-                {
-                    request = fminus_web_http_next(handle);
-                    break;
-                }
-            }
-        }
-        if (server->waiters.fetch_sub(1, std::memory_order_seq_cst) == 1 && server->dying)
-            server->changed.notify_all();
-        return request;
+        return fminus::web::acceptOldest(handle, nullptr, 0, true, timeoutMs);
+    }
+
+    void* fminus_web_http_accept_in(void* handle, const std::uint64_t* routes, std::int32_t words,
+                                    std::int32_t timeoutMs) noexcept
+    {
+        return fminus::web::acceptOldest(handle, routes, words, false, timeoutMs);
     }
 
     std::int32_t fminus_web_http_is(void* handle, const char* route, std::int32_t length) noexcept
@@ -1766,23 +2047,78 @@ extern "C"
         if (!fminus::web::readRoute(std::string_view(route, static_cast<std::size_t>(length)), method, pattern) ||
             !fminus::web::admits(method, slot->method))
             return 0;
-        std::int32_t args[fminus::web::kMaxArgs];
+        fminus::web::Place places[fminus::web::kMaxPlaces];
         std::int32_t count = 0;
-        if (!fminus::web::matchPath(pattern,
-                                    std::string_view(slot->target.get(), static_cast<std::size_t>(slot->pathLength)),
-                                    args, count))
+        if (!fminus::web::matchRoute(pattern, fminus::web::pathOf(*slot), places, count))
             return 0;
-        std::copy_n(args, count, slot->args);
-        slot->argCount = count;
+        std::copy_n(places, count, slot->places);
+        slot->placeCount = count;
         return 1;
     }
 
     std::int32_t fminus_web_http_arg(const void* handle, std::int32_t index) noexcept
     {
         const Slot* slot = fminus::web::held(handle);
-        if (slot == nullptr || index < 0 || index >= slot->argCount)
+        if (slot == nullptr || index < 0 || index >= slot->placeCount)
             return 0;
-        return slot->args[index];
+        return slot->places[index].value;
+    }
+
+    std::int32_t fminus_web_http_route(void* handle) noexcept
+    {
+        Slot* slot = fminus::web::held(handle);
+        if (slot == nullptr)
+            return FMINUS_WEB_INVALID;
+        std::copy_n(slot->routePlaces, slot->routePlaceCount, slot->places);
+        slot->placeCount = slot->routePlaceCount;
+        return slot->route;
+    }
+
+    const char* fminus_web_http_text(const void* handle, std::int32_t index, std::int32_t* length) noexcept
+    {
+        const Slot* slot = fminus::web::held(handle);
+        if (slot == nullptr || index < 0 || index >= slot->placeCount)
+            return fminus::web::noText(length);
+        const fminus::web::Place& place = slot->places[index];
+        return fminus::web::giveText(slot->target.get() + place.offset, place.length, length);
+    }
+
+    const char* fminus_web_http_path(const void* handle, std::int32_t* length) noexcept
+    {
+        const Slot* slot = fminus::web::held(handle);
+        if (slot == nullptr)
+            return fminus::web::noText(length);
+        return fminus::web::giveText(slot->target.get(), static_cast<std::size_t>(slot->pathLength), length);
+    }
+
+    const char* fminus_web_http_header(const void* handle, const char* name, std::int32_t nameLength,
+                                       std::int32_t* length) noexcept
+    {
+        const Slot* slot = fminus::web::held(handle);
+        if (slot == nullptr)
+            return fminus::web::noText(length);
+        if (name != nullptr && nameLength > 0 && fminus::web::isToken(name, nameLength))
+        {
+            const std::string_view wanted(name, static_cast<std::size_t>(nameLength));
+            for (std::int32_t i = 0; i < slot->fieldCount; ++i)
+            {
+                const fminus::web::FieldSpan& field = slot->fields[i];
+                if (fminus::web::equalsIgnoringCase(
+                        std::string_view(slot->target.get() + field.nameOffset, field.nameLength), wanted))
+                    return fminus::web::giveText(slot->target.get() + field.valueOffset, field.valueLength, length);
+            }
+        }
+        return fminus::web::giveText(slot->target.get(), 0, length);   // none: empty
+    }
+
+    const char* fminus_web_http_query_text(const void* handle, const char* name, std::int32_t nameLength,
+                                           std::int32_t* length) noexcept
+    {
+        const Slot* slot = fminus::web::held(handle);
+        std::string_view value;
+        if (slot == nullptr || !fminus::web::queryValue(*slot, name, nameLength, value))
+            return fminus::web::noText(length);
+        return fminus::web::giveText(value.data(), value.size(), length);
     }
 
     float fminus_web_http_query_float(const void* handle, const char* name, std::int32_t length,
