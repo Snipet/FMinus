@@ -841,10 +841,10 @@ TEST_CASE("a path's errors are at its own bytes, and its ints are a format's", "
                    "void o(const void* d) { json_free(d); }\n"
                    "int p(const void* d) { return json_floats(d, \"/a\"); }\n"
                    "void* q(const void* d) { return json_parse(d); }\n")
-          == "test.fm:1:27: error: passing 'float' to parameter of incompatible type 'const void *'\n"
+          == "test.fm:1:27: error: passing 'float' to parameter of incompatible type 'json_doc'\n"
              "test.fm:2:43: error: passing 'float *' to parameter of incompatible type 'float'\n"
              "test.fm:3:39: error: incompatible pointer types passing 'int *' to parameter of type 'float *'\n"
-             "test.fm:4:25: error: passing 'const void *' to parameter of type 'void *' discards qualifiers\n"
+             "test.fm:4:25: error: passing 'const void *' to parameter of type 'json_doc' discards qualifiers\n"
              "test.fm:5:31: error: too few arguments to function call, expected at least 4, have 2\n"
              "test.fm:6:33: error: too few arguments to function call, expected 2, have 1\n");
 }

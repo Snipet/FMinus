@@ -12,7 +12,7 @@
 #ifdef __FMINUS_WEB_SERVER__
 module Remote
 {
-    void* server;
+    http_server server;
     float rate;       // the sample rate, Hz
     float gain;       // as the page last set it: 0 to 1
     float pitch;      // Hz: 20 to 20000
@@ -41,7 +41,7 @@ module Remote
     // One request, answered at once. Only the routes below reach it: the library answers 404 for a path none of them
     // has and 405 for a method none has for its path. A number that is out of range, or not a number at all (?value=nan
     // gives the fallback), is the program's to refuse: 400, and nothing changes.
-    void answer(void* r) [[clang::nonblocking]]
+    void answer(http_request r) [[clang::nonblocking]]
     {
         if (http_is(r, "POST /gain"))                                    // POST /gain?value=0.5
         {
@@ -89,7 +89,7 @@ module Remote
     // On the audio thread: the requests waiting, answered, then the block, with gain and pitch as they now are.
     void process(float* out, int n) [[clang::nonblocking]]
     {
-        for (void* r = http_next(server); r; r = http_next(server))
+        for (http_request r = http_next(server); r; r = http_next(server))
             answer(r);
         const float step = pitch / rate;
         float peak = 0.0f;
@@ -116,7 +116,7 @@ module Remote
         const int blocks = (int)(seconds * 100.0f);
         for (int b = 0; b < blocks && http_port(server) > 0; ++b)
         {
-            void* r = http_accept(server, 10);
+            http_request r = http_accept(server, 10);
             if (r)
                 answer(r);
             process(block, 480);

@@ -39,7 +39,7 @@ module Wavetable
     // isn't there; the document says how many tables there are (1 to 256) and how long each is (2 to 65536 samples).
     bool init(const void* data, int bytes, float sampleRate)
     {
-        void* doc = json_parse(data, bytes);
+        json_doc doc = json_parse(data, bytes);
         count = json_count(doc, "/tables");
         size = json_int(doc, "/size", 0);
         gain = json_float(doc, "/gain", 1.0f);
@@ -68,7 +68,7 @@ module Wavetable
     // Pointer's does (XPath's would count from 1): "/pack/table[0]" is the first table.
     bool initXml(const void* data, int bytes, float sampleRate)
     {
-        void* doc = xml_parse(data, bytes);
+        xml_doc doc = xml_parse(data, bytes);
         count = xml_count(doc, "/pack/table");
         size = xml_int(doc, "/pack/@size", 0);
         gain = xml_float(doc, "/pack/@gain", 1.0f);

@@ -1,6 +1,8 @@
 // src/ir/Statements.cpp: statements. Blocks, declarations and return, and C's control flow: if, while, for, switch and
 // its labels, break and continue, in blocks named as clang names them (if.then, while.cond, for.inc, sw.bb, ...). A
-// loop whose condition is not a constant expression must make progress, as in C11 (llvm.loop.mustprogress).
+// loop whose condition is not a constant expression must make progress, as in C11 (llvm.loop.mustprogress). And
+// TS 25755's defer, a rewrite as the program is compiled: each exit of a block lowers the deferred statements of the
+// blocks it leaves, where it leaves them.
 #include "ir/Lowering.h"
 
 #include <llvm/IR/Constants.h>
@@ -131,7 +133,8 @@ namespace fminus::ir::detail
         const bool ownBlock = std::holds_alternative<ast::CaseStmt>(stmt.node)
                               || std::holds_alternative<ast::DefaultStmt>(stmt.node)
                               || std::holds_alternative<ast::BlockStmt>(stmt.node)
-                              || std::holds_alternative<ast::EnumStmt>(stmt.node);   // no code
+                              || std::holds_alternative<ast::EnumStmt>(stmt.node)     // no code
+                              || std::holds_alternative<ast::DeferStmt>(stmt.node);   // none where it is
         if (builder_.GetInsertBlock()->hasTerminator() && !ownBlock)
         {
             llvm::Function* function = builder_.GetInsertBlock()->getParent();
@@ -141,25 +144,31 @@ namespace fminus::ir::detail
                        [&](const ast::DeclStmt& decl) { declareVariable(stmt.location, decl); },
                        [&](const ast::ExprStmt& statement) { lower(*statement.expr); },
                        [&](const ast::ReturnStmt& ret) { lowerReturn(stmt.location, ret); },
-                       [&](const ast::BlockStmt& block) {
-                           scopes_.emplace_back();
-                           lowerStatements(block.items);
-                           scopes_.pop_back();
-                       },
+                       [&](const ast::BlockStmt& block) { lowerBlock(block.items); },
                        [&](const ast::EmptyStmt&) {},
                        [&](const ast::IfStmt& branch) { lowerIf(branch); },
                        [&](const ast::WhileStmt& loop) { lowerWhile(loop); },
                        [&](const ast::ForStmt& loop) { lowerFor(loop); },
                        [&](const ast::BreakStmt&) {
-                           if (breakables_.empty())
+                           // A deferred statement is no loop either, and no break leaves it (TS 25755).
+                           const bool inLoop = std::ranges::any_of(breakables_, [](const Breakable& around) {
+                               return around.kind != Breakable::Kind::Defer;
+                           });
+                           if (!inLoop)
                                error(stmt.location, "'break' statement not in loop or switch statement");
+                           else if (breakables_.back().kind == Breakable::Kind::Defer)
+                               error(stmt.location, "cannot break out of a defer statement");
                            else if (breakables_.back().kind == Breakable::Kind::Region)   // its body (Parallel.cpp)
                                error(stmt.location, regions_.back().loop
                                                         ? "'break' cannot leave a parallel for: its iterations run "
                                                           "at once, and none can end the others"
                                                         : "'break' cannot leave a statement of a parallel block");
                            else
-                               builder_.CreateBr(breakables_.back().breakTarget);
+                           {
+                               const Breakable target = breakables_.back();   // runDefers lowers code
+                               runDefers(target.defers);
+                               builder_.CreateBr(target.breakTarget);
+                           }
                        },
                        [&](const ast::ContinueStmt&) {
                            // A switch is no loop: continue goes to the next iteration of the loop around it.
@@ -167,12 +176,21 @@ namespace fminus::ir::detail
                                                                   [](const Breakable& around) {
                                                                       return around.kind != Breakable::Kind::Switch;
                                                                   });
-                           if (loop == breakables_.rend())
+                           const bool inLoop = std::ranges::any_of(breakables_, [](const Breakable& around) {
+                               return around.kind == Breakable::Kind::Loop || around.kind == Breakable::Kind::Region;
+                           });
+                           if (!inLoop)
                                error(stmt.location, "'continue' statement not in loop statement");
+                           else if (loop->kind == Breakable::Kind::Defer)
+                               error(stmt.location, "cannot continue loop outside of enclosing defer statement");
                            else if (loop->continueTarget == nullptr)
                                error(stmt.location, "'continue' cannot leave a statement of a parallel block");
                            else
-                               builder_.CreateBr(loop->continueTarget);
+                           {
+                               const Breakable target = *loop;   // runDefers lowers code
+                               runDefers(target.defers);
+                               builder_.CreateBr(target.continueTarget);
+                           }
                        },
                        [&](const ast::SwitchStmt& branch) { lowerSwitch(branch); },
                        [&](const ast::CaseStmt& label) { lowerLabel(stmt.location, label.value.get(), label.body); },
@@ -180,22 +198,159 @@ namespace fminus::ir::detail
                        [&](const ast::EnumStmt& statement) { declareEnum(statement.enumeration); },
                        [&](const ast::ParallelForStmt& loop) { lowerParallelFor(stmt.location, loop); },
                        [&](const ast::ParallelBlockStmt& block) { lowerParallelBlock(stmt.location, block); },
+                       [&](const ast::DeferStmt& deferred) { reachDefer(stmt.location, deferred); },
                    },
                    stmt.node);
     }
 
-    // A sub-statement (a branch, a loop body) has a scope of its own, as in C.
+    // A sub-statement (a branch, a loop body) has a scope of its own, as in C, and is a block, C's secondary block: a
+    // defer in it is its own, and its deferred statement runs when the sub-statement ends (each iteration, for a
+    // loop's body).
     void Lowering::lowerScoped(const ast::Stmt& stmt)
     {
         scopes_.emplace_back();
+        openDefers();
         lowerStatement(stmt);
+        closeDefers();
         scopes_.pop_back();
+    }
+
+    // `{ ... }`: a scope, and a block whose defers run at its end.
+    void Lowering::lowerBlock(const std::vector<ast::Stmt>& items)
+    {
+        scopes_.emplace_back();
+        openDefers();
+        lowerStatements(items);
+        closeDefers();
+        scopes_.pop_back();
+    }
+
+    // A block begins: the defers reached in it are its own.
+    void Lowering::openDefers()
+    {
+        deferScopes_.emplace_back();
+    }
+
+    // A block ends: when control reaches its end, its deferred statements run there, the last reached first. A defer
+    // whose deferred statement no exit lowered (its block ended in a return, a break or a continue that was an error,
+    // or before any could reach it) is lowered once all the same, for its errors, in a block nothing reaches.
+    void Lowering::closeDefers()
+    {
+        const std::size_t block = deferScopes_.size() - 1;
+        if (!builder_.GetInsertBlock()->hasTerminator())
+            runDefers(block);
+        const std::vector<Deferred> reached = deferScopes_[block].reached;
+        for (const Deferred& deferred : reached)
+        {
+            if (deferLowered_.contains(deferred.statement))
+                continue;
+            const llvm::IRBuilderBase::InsertPointGuard resume(builder_);
+            builder_.SetInsertPoint(newBlock("defer.unreachable"));
+            lowerDeferred(deferred);
+            if (!builder_.GetInsertBlock()->hasTerminator())
+                builder_.CreateUnreachable();
+        }
+        deferScopes_.pop_back();
+    }
+
+    // `defer s;` reached: nothing runs, and its block's exits run s. What s sees is what is in scope here (a later
+    // declaration of its block is not), and the loops and switches around it.
+    void Lowering::reachDefer(SourceLocation location, const ast::DeferStmt& statement)
+    {
+        deferScopes_.back().reached.push_back(Deferred{&statement, location, scopes_.size() - 1, scopes_.back(),
+                                                       breakables_.size(), switches_.size()});
+    }
+
+    // An exit that leaves the blocks from `from` on, the innermost first, lowers each one's deferred statements, the
+    // last reached first, where it leaves them (TS 25755): clang's way, no flag and no list at run time, the code of
+    // each deferred statement at each exit. With no goto, every path to an exit has reached the same defers.
+    void Lowering::runDefers(std::size_t from)
+    {
+        for (std::size_t block = deferScopes_.size(); block-- > from;)
+        {
+            const std::vector<Deferred> reached = deferScopes_[block].reached;   // lowering one opens blocks
+            for (auto deferred = reached.rbegin(); deferred != reached.rend(); ++deferred)
+                lowerDeferred(*deferred);
+        }
+        // A deferred statement that ended in an error's return (one it may not make) left nothing to go on from.
+        if (builder_.GetInsertBlock()->hasTerminator())
+            builder_.SetInsertPoint(newBlock("unreachable"));
+    }
+
+    // A deferred statement, lowered here, as a block of its own, in the code around its defer: the names in scope
+    // there (Deferred::visible; a variable is read when the statement runs, nothing is captured), and its loops and
+    // switches, which a break, a continue or a label in the statement may not reach past it (a Breakable of its own).
+    // Lowered once, it reported its errors, and recorded its calls (Effects.cpp) and its literals for the host; lowered
+    // again, at another exit, it does the same, and what it reported and recorded is dropped. A variable of the
+    // function around a parallel region that the statement captured stays captured.
+    void Lowering::lowerDeferred(const Deferred& deferred)
+    {
+        const bool again = !deferLowered_.insert(deferred.statement).second;
+        if (builder_.GetInsertBlock()->hasTerminator())   // after another's error (runDefers)
+            builder_.SetInsertPoint(newBlock("unreachable"));
+        const Diagnostics::Mark mark = diagnostics_.mark();
+        const std::size_t calls = calls_[function_->name].size();
+        if (again)
+            ++relowering_;
+
+        using Scope = std::unordered_map<std::string, Binding>;
+        const auto at = [](auto& stack, std::size_t from) { return stack.begin() + static_cast<std::ptrdiff_t>(from); };
+        std::vector<Scope> later(std::make_move_iterator(at(scopes_, deferred.scope)),
+                                 std::make_move_iterator(scopes_.end()));
+        scopes_.erase(at(scopes_, deferred.scope), scopes_.end());
+        scopes_.push_back(deferred.visible);
+        std::vector<Breakable> breakables(at(breakables_, deferred.breakables), breakables_.end());
+        breakables_.erase(at(breakables_, deferred.breakables), breakables_.end());
+        std::vector<Switch> switches(std::make_move_iterator(at(switches_, deferred.switches)),
+                                     std::make_move_iterator(switches_.end()));
+        switches_.erase(at(switches_, deferred.switches), switches_.end());
+
+        breakables_.push_back({Breakable::Kind::Defer, nullptr, nullptr, deferScopes_.size(), deferred.location});
+        lowerScoped(*deferred.statement->body);
+        breakables_.pop_back();
+
+        for (auto& [name, binding] : scopes_.back())
+            later.front().try_emplace(name, binding);   // a capture (Parallel.cpp): the region's from now on
+        scopes_.pop_back();
+        scopes_.insert(scopes_.end(), std::make_move_iterator(later.begin()), std::make_move_iterator(later.end()));
+        breakables_.insert(breakables_.end(), breakables.begin(), breakables.end());
+        switches_.insert(switches_.end(), std::make_move_iterator(switches.begin()),
+                         std::make_move_iterator(switches.end()));
+
+        if (again)
+        {
+            --relowering_;
+            diagnostics_.rewind(mark);
+            std::vector<CallSite>& sites = calls_[function_->name];
+            sites.erase(at(sites, calls), sites.end());
+        }
+    }
+
+    // The deferred statement being lowered that the code being lowered is in, if any: what a return may not leave.
+    const Lowering::Breakable* Lowering::deferAround() const
+    {
+        const auto found = std::ranges::find_if(breakables_, [](const Breakable& around) {
+            return around.kind == Breakable::Kind::Defer;
+        });
+        return found != breakables_.end() ? &*found : nullptr;
     }
 
     // `return value;` converts the value to the function's result type; a void function's is `return;`, and each
     // kind of function refuses the other's, as C does.
     void Lowering::lowerReturn(SourceLocation location, const ast::ReturnStmt& ret)
     {
+        const ast::Type result = function_->returnType;
+        if (deferAround() != nullptr)   // TS 25755: a deferred statement runs on the way out, and cannot return
+        {
+            error(location, "cannot return from a defer statement");
+            if (ret.value != nullptr)
+                lower(*ret.value);   // for its own errors
+            if (!regions_.empty() || result == ast::Type::Void)
+                builder_.CreateRetVoid();
+            else
+                builder_.CreateRet(poison(result).ir);
+            return;
+        }
         if (!regions_.empty())   // in a parallel region's body, a function of its own (Parallel.cpp)
         {
             error(location, regions_.back().loop
@@ -207,12 +362,14 @@ namespace fminus::ir::detail
             builder_.CreateRetVoid();
             return;
         }
-        const ast::Type result = function_->returnType;
+        // The value is computed, and converted, before the deferred statements of every block it leaves run (TS
+        // 25755): a deferred statement that changes a variable the value read changes nothing it returns.
         const bool returnsVoid = result == ast::Type::Void;
         if (ret.value == nullptr)
         {
             if (!returnsVoid)
                 error(location, "non-void function " + quoted(function_->name) + " should return a value");
+            runDefers(0);
             if (returnsVoid)
                 builder_.CreateRetVoid();
             else
@@ -224,10 +381,13 @@ namespace fminus::ir::detail
         if (returnsVoid)
         {
             error(location, "void function " + quoted(function_->name) + " should not return a value");
+            runDefers(0);
             builder_.CreateRetVoid();
             return;
         }
-        builder_.CreateRet(convert(value, result, location, Use::Returning));
+        llvm::Value* returned = convert(value, result, location, Use::Returning);
+        runDefers(0);
+        builder_.CreateRet(returned);
     }
 
     llvm::BasicBlock* Lowering::newBlock(const char* name)
@@ -260,9 +420,16 @@ namespace fminus::ir::detail
     }
 
     // if.then and if.else join at if.end. A branch that returns never gets there; when neither does, if.end
-    // is unreachable, and so is what follows. A constant condition takes one branch (branchOn()).
+    // is unreachable, and so is what follows. A constant condition takes one branch (branchOn()). C2y's declarations
+    // in its head are a scope around the whole statement, declared before the condition is computed.
     void Lowering::lowerIf(const ast::IfStmt& branch)
     {
+        const bool declares = !branch.init.empty();
+        if (declares)
+        {
+            scopes_.emplace_back();
+            lowerStatements(branch.init);
+        }
         llvm::Value* condition =
             convert(lower(*branch.condition), ast::Type::Bool, branch.condition->location, Use::Condition);
         llvm::BasicBlock* thenBlock = newBlock("if.then");
@@ -280,6 +447,8 @@ namespace fminus::ir::detail
             fallThrough(endBlock);
         }
         builder_.SetInsertPoint(endBlock);
+        if (declares)
+            scopes_.pop_back();
     }
 
     // while.cond tests and branches to while.body or while.end; the body goes back to while.cond. break goes
@@ -299,7 +468,7 @@ namespace fminus::ir::detail
                  endBlock);
 
         builder_.SetInsertPoint(bodyBlock);
-        breakables_.push_back({Breakable::Kind::Loop, endBlock, condBlock});
+        breakables_.push_back({Breakable::Kind::Loop, endBlock, condBlock, deferScopes_.size()});
         lowerScoped(*loop.body);
         breakables_.pop_back();
         fallThrough(condBlock);
@@ -332,7 +501,7 @@ namespace fminus::ir::detail
             builder_.CreateBr(bodyBlock);   // no condition: until a break or a return
 
         builder_.SetInsertPoint(bodyBlock);
-        breakables_.push_back({Breakable::Kind::Loop, endBlock, incBlock});
+        breakables_.push_back({Breakable::Kind::Loop, endBlock, incBlock, deferScopes_.size()});
         lowerScoped(*loop.body);
         breakables_.pop_back();
         fallThrough(incBlock);
@@ -357,6 +526,14 @@ namespace fminus::ir::detail
     // -Wswitch for the constants no case has (unhandled()).
     void Lowering::lowerSwitch(const ast::SwitchStmt& branch)
     {
+        // C2y's declarations in its head, a scope around the whole statement (lowerIf), made before the jump: no
+        // label's sw.zero zeroes them (bypass), since the scopes it zeroes are the body's.
+        const bool declares = !branch.init.empty();
+        if (declares)
+        {
+            scopes_.emplace_back();
+            lowerStatements(branch.init);
+        }
         const Value value = lower(*branch.value);
         llvm::Value* condition = poison(ast::Type::Int).ir;
         if (ast::arithmeticOf(value.type) == ast::Type::Int)
@@ -366,8 +543,8 @@ namespace fminus::ir::detail
                                               + quoted(ast::typeName(value.type)) + " invalid)");
         llvm::BasicBlock* endBlock = newBlock("sw.epilog");
         llvm::SwitchInst* instruction = builder_.CreateSwitch(condition, endBlock);
-        breakables_.push_back({Breakable::Kind::Switch, endBlock, nullptr});
-        switches_.push_back({instruction, scopes_.size(), {}, std::nullopt});
+        breakables_.push_back({Breakable::Kind::Switch, endBlock, nullptr, deferScopes_.size()});
+        switches_.push_back({instruction, scopes_.size(), {}, std::nullopt, false, deferScopes_.size()});
         lowerScoped(*branch.body);
         const Switch lowered = std::move(switches_.back());
         switches_.pop_back();
@@ -378,6 +555,8 @@ namespace fminus::ir::detail
         builder_.SetInsertPoint(endBlock);
         if (!value.failed && ast::arithmeticOf(value.type) == ast::Type::Int && !folds(*branch.value))
             unhandled(begin(*branch.value), value.type.enumeration, lowered);
+        if (declares)
+            scopes_.pop_back();
     }
 
     // Where `expr` begins: its opening parenthesis when it has one (`(e)`), and its first operand's beginning for an
@@ -495,8 +674,26 @@ namespace fminus::ir::detail
         else if (around->kind == Breakable::Kind::Region)
             error(location, keyword + (regions_.back().loop ? " cannot jump into a parallel for"
                                                              : " cannot jump into a statement of a parallel block"));
+        else if (around->kind == Breakable::Kind::Defer)   // TS 25755: no switch jumps into a deferred statement
+            diagnostics_.error(location, "cannot jump from switch statement to this case label",
+                               {Diagnostic{around->location, "jump enters a defer statement", {}}});
         else
             branch = &switches_.back();
+        // Nor into a defer's scope, the rest of its block after it: past a defer reached in a block of the switch's
+        // body that holds the label, clang's error, and a note at each defer, the last reached first.
+        if (branch != nullptr)
+        {
+            std::vector<Diagnostic> bypassed;
+            for (std::size_t block = deferScopes_.size(); block-- > branch->defers;)
+            {
+                const std::vector<Deferred>& reached = deferScopes_[block].reached;
+                for (auto deferred = reached.rbegin(); deferred != reached.rend(); ++deferred)
+                    bypassed.push_back(Diagnostic{deferred->location, "jump bypasses defer statement", {}});
+            }
+            if (!bypassed.empty())
+                diagnostics_.error(location, "cannot jump from switch statement to this case label",
+                                   std::move(bypassed));
+        }
 
         llvm::BasicBlock* block = newBlock(value != nullptr ? "sw.bb" : "sw.default");
         fallThrough(block);

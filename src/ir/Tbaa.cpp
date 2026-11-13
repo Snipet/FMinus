@@ -13,12 +13,15 @@
 //       !{!"double", root, i64 0}         double: a store of a double changes no float, and a float's no double
 //       !{!"int", root, i64 0}
 //       !{!"bool", root, i64 0}           bool, and the lane masks
-//       !{!"any pointer", root, i64 0}    every pointer, whatever it points to, void* too
+//       !{!"any pointer", root, i64 0}    every pointer, whatever it points to, void* too, and every handle
 //
 // A float vector is its elements' type, so a float4* over a float buffer, poly_load and poly_store, and the FFT's
 // float2 bins reach float memory and back, as they must. One pointer type is enough: FMinus has no pointer to a
-// pointer, so a pointer in memory is only ever reached as itself. Each tag is a scalar access tag, its base type its
-// access type, at offset 0; struct-path tags, which would also tell one float field from another, are not emitted.
+// pointer, so a pointer in memory is only ever reached as itself. A handle is a pointer (C's, to a struct the program
+// never sees), tagged as one: a field that was a void* and is now an http_server aliases as it did, and an element of
+// an array of handles, the one pointer FMinus reaches through another, is reached only as a handle. Each tag is a
+// scalar access tag, its base type its access type, at offset 0; struct-path tags, which would also tell one float
+// field from another, are not emitted.
 //
 // What is tagged: every load and store of a value: read() and write() (Memory.cpp: variables, elements and fields),
 // an array's initialiser list, poly_load and poly_store (Calls.cpp; LLVM reads a masked load's or store's tag as it
@@ -58,6 +61,7 @@ namespace fminus::ir::detail
             case ast::Kind::PolyBool:
                 return "bool";
             case ast::Kind::Pointer:
+            case ast::Kind::Handle:   // a pointer, to a struct the program never sees
                 return "any pointer";
             case ast::Kind::Void:
             case ast::Kind::Module:   // its fields are loaded and stored, each as its own type

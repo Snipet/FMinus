@@ -315,6 +315,17 @@ namespace fminus::ast
                    + (decl.hasList ? " " + list(decl.list, decl.braces) : "") + ")";
         }
 
+        std::string dump(const Stmt& stmt, const std::string& indent);
+
+        // A selection statement's declarations (C2y's), each followed by a space: `(decl int n 1) `.
+        std::string declarations(const std::vector<Stmt>& init)
+        {
+            std::string text;
+            for (const Stmt& item : init)
+                text += dump(item, "") + " ";
+            return text;
+        }
+
         // One statement per line, `indent` spaces in; a block's items one level further in.
         std::string dump(const Stmt& stmt, const std::string& indent)
         {
@@ -331,8 +342,9 @@ namespace fminus::ast
                                       return text + ")";
                                   },
                                   [&](const EmptyStmt&) { return indent + "(empty)"; },
-                                  [&](const IfStmt& branch) {
-                                      std::string text = indent + "(if " + dump(*branch.condition) + "\n"
+                                  [&](const IfStmt& branch) {   // (if (decl int n 1) (> n 0)\n  s): C2y's head
+                                      std::string text = indent + "(if " + declarations(branch.init)
+                                                         + dump(*branch.condition) + "\n"
                                                          + dump(*branch.thenBranch, indent + "  ");
                                       if (branch.elseBranch)
                                           text += "\n" + dump(*branch.elseBranch, indent + "  ");
@@ -354,7 +366,8 @@ namespace fminus::ast
                                   [&](const BreakStmt&) { return indent + "(break)"; },
                                   [&](const ContinueStmt&) { return indent + "(continue)"; },
                                   [&](const SwitchStmt& branch) {   // (switch x\n  (block ...))
-                                      return indent + "(switch " + dump(*branch.value) + "\n"
+                                      return indent + "(switch " + declarations(branch.init) + dump(*branch.value)
+                                             + "\n"
                                              + dump(*branch.body, indent + "  ") + ")";
                                   },
                                   [&](const CaseStmt& label) {   // (case 1), or (case 1\n  s) with a body
@@ -380,6 +393,9 @@ namespace fminus::ast
                                       for (const Stmt& task : block.tasks)
                                           text += "\n" + dump(task, indent + "  ");
                                       return text + ")";
+                                  },
+                                  [&](const DeferStmt& deferred) {   // (defer\n  s)
+                                      return indent + "(defer\n" + dump(*deferred.body, indent + "  ") + ")";
                                   },
                               },
                               stmt.node);
@@ -470,8 +486,41 @@ namespace fminus::ast
                 return typeName(elementOf(type)) + "[" + std::to_string(type.count) + "]["
                        + std::to_string(type.rowCount) + "]";
             return typeName(pointee(type)) + "[" + std::to_string(type.count) + "]";
+        case Kind::Handle:   // its typedef's name, as clang writes one: http_response
+            return handleName(type.handle);
         }
         return "?";
+    }
+
+    const char* handleName(Handle handle)
+    {
+        switch (handle)
+        {
+        case Handle::HttpResponse:
+            return "http_response";
+        case Handle::HttpRequest:
+            return "http_request";
+        case Handle::HttpServer:
+            return "http_server";
+        case Handle::JsonDoc:
+            return "json_doc";
+        case Handle::XmlDoc:
+            return "xml_doc";
+        case Handle::FileContent:
+            return "file_content";
+        case Handle::FileListing:
+            return "file_listing";
+        case Handle::FftPlan:
+            return "fft_plan";
+        case Handle::None:
+            break;
+        }
+        return "?";
+    }
+
+    std::string handleStruct(Handle handle)
+    {
+        return std::string("struct fminus_") + handleName(handle);
     }
 
     std::string dump(const Program& program)

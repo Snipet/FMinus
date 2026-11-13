@@ -89,7 +89,7 @@ namespace fminus::ir::detail
         RuntimeBuiltin{"__fminus_string_hash_blocking", "fminus_rt_string_hash", {Param::Format}, 1,
                        RuntimeEffect::Blocks},
         // The JSON parser (runtime/Json.cpp), in a build with FMINUS_JSON. json_parse(data, bytes) gives a document, a
-        // void* (null for a text that is no JSON, too large or nested too deeply), and json_free(doc) frees it: both
+        // json_doc (null for a text that is no JSON, too large or nested too deeply), and json_free(doc) frees it: both
         // allocate. The reads take the document, a JSON Pointer with places for ints (a path, Paths.cpp) and its
         // ints, and give what is there: json_float, json_double, json_int and json_bool the value, or their last
         // argument, the fallback, when there is none of that kind; json_count an array's or an object's size;
@@ -97,29 +97,29 @@ namespace fminus::ir::detail
         // ...) the index of the literal a string equals, or -1; json_base64_floats(doc, path, out, cap) a base64
         // string's float32s. A null document is an empty one. Every read is wait-free.
         RuntimeBuiltin{"json_parse", "fminus_rt_json_parse", {Param::Bytes, Param::Int}, 2, RuntimeEffect::Allocates,
-                       Feature::Json, Result::Pointer},
-        RuntimeBuiltin{"json_free", "fminus_rt_json_free", {Param::Handle}, 1, RuntimeEffect::Allocates, Feature::Json,
+                       Feature::Json, Result::JsonDoc},
+        RuntimeBuiltin{"json_free", "fminus_rt_json_free", {Param::JsonDoc}, 1, RuntimeEffect::Allocates, Feature::Json,
                        Result::Void},
-        RuntimeBuiltin{"json_float", "fminus_rt_json_float", {Param::Document, Param::Path, Param::Float}, 3,
+        RuntimeBuiltin{"json_float", "fminus_rt_json_float", {Param::JsonRead, Param::Path, Param::Float}, 3,
                        RuntimeEffect::WaitFree, Feature::Json, Result::Float},
-        RuntimeBuiltin{"json_double", "fminus_rt_json_double", {Param::Document, Param::Path, Param::Double}, 3,
+        RuntimeBuiltin{"json_double", "fminus_rt_json_double", {Param::JsonRead, Param::Path, Param::Double}, 3,
                        RuntimeEffect::WaitFree, Feature::Json, Result::Double},
-        RuntimeBuiltin{"json_int", "fminus_rt_json_int", {Param::Document, Param::Path, Param::Int}, 3,
+        RuntimeBuiltin{"json_int", "fminus_rt_json_int", {Param::JsonRead, Param::Path, Param::Int}, 3,
                        RuntimeEffect::WaitFree, Feature::Json, Result::Int},
-        RuntimeBuiltin{"json_bool", "fminus_rt_json_bool", {Param::Document, Param::Path, Param::Bool}, 3,
+        RuntimeBuiltin{"json_bool", "fminus_rt_json_bool", {Param::JsonRead, Param::Path, Param::Bool}, 3,
                        RuntimeEffect::WaitFree, Feature::Json, Result::Bool},
-        RuntimeBuiltin{"json_count", "fminus_rt_json_count", {Param::Document, Param::Path}, 2, RuntimeEffect::WaitFree,
+        RuntimeBuiltin{"json_count", "fminus_rt_json_count", {Param::JsonRead, Param::Path}, 2, RuntimeEffect::WaitFree,
                        Feature::Json, Result::Int},
         RuntimeBuiltin{"json_floats", "fminus_rt_json_floats",
-                       {Param::Document, Param::Path, Param::Floats, Param::Int}, 4, RuntimeEffect::WaitFree,
+                       {Param::JsonRead, Param::Path, Param::Floats, Param::Int}, 4, RuntimeEffect::WaitFree,
                        Feature::Json, Result::Int},
-        RuntimeBuiltin{"json_choice", "fminus_rt_json_choice", {Param::Document, Param::Path, Param::Choices}, 3,
+        RuntimeBuiltin{"json_choice", "fminus_rt_json_choice", {Param::JsonRead, Param::Path, Param::Choices}, 3,
                        RuntimeEffect::WaitFree, Feature::Json, Result::Int},
         RuntimeBuiltin{"json_base64_floats", "fminus_rt_json_base64_floats",
-                       {Param::Document, Param::Path, Param::Floats, Param::Int}, 4, RuntimeEffect::WaitFree,
+                       {Param::JsonRead, Param::Path, Param::Floats, Param::Int}, 4, RuntimeEffect::WaitFree,
                        Feature::Json, Result::Int},
         // The XML parser (runtime/Xml.cpp), in a build with FMINUS_XML, made as the JSON parser's are. xml_parse(data,
-        // bytes) gives a document, a void* (null for a text that is no XML, too large or nested too deeply), and
+        // bytes) gives a document, an xml_doc (null for a text that is no XML, too large or nested too deeply), and
         // xml_free(doc) frees it: both allocate. The reads take the document, an XML path with places for ints
         // (Paths.cpp: "/preset/osc[%d]/@detune", an index from 0) and its ints, and read the attribute's value or the
         // element's text: xml_float, xml_double, xml_int and xml_bool the value, or their fallback; xml_count how many
@@ -127,54 +127,55 @@ namespace fminus::ir::detail
         // "a", "b", ...) the index of the literal it equals, or -1. A null document is an empty one. Every read is
         // wait-free.
         RuntimeBuiltin{"xml_parse", "fminus_rt_xml_parse", {Param::Bytes, Param::Int}, 2, RuntimeEffect::Allocates,
-                       Feature::Xml, Result::Pointer},
-        RuntimeBuiltin{"xml_free", "fminus_rt_xml_free", {Param::Handle}, 1, RuntimeEffect::Allocates, Feature::Xml,
+                       Feature::Xml, Result::XmlDoc},
+        RuntimeBuiltin{"xml_free", "fminus_rt_xml_free", {Param::XmlDoc}, 1, RuntimeEffect::Allocates, Feature::Xml,
                        Result::Void},
-        RuntimeBuiltin{"xml_float", "fminus_rt_xml_float", {Param::Document, Param::XmlPath, Param::Float}, 3,
+        RuntimeBuiltin{"xml_float", "fminus_rt_xml_float", {Param::XmlRead, Param::XmlPath, Param::Float}, 3,
                        RuntimeEffect::WaitFree, Feature::Xml, Result::Float},
-        RuntimeBuiltin{"xml_double", "fminus_rt_xml_double", {Param::Document, Param::XmlPath, Param::Double}, 3,
+        RuntimeBuiltin{"xml_double", "fminus_rt_xml_double", {Param::XmlRead, Param::XmlPath, Param::Double}, 3,
                        RuntimeEffect::WaitFree, Feature::Xml, Result::Double},
-        RuntimeBuiltin{"xml_int", "fminus_rt_xml_int", {Param::Document, Param::XmlPath, Param::Int}, 3,
+        RuntimeBuiltin{"xml_int", "fminus_rt_xml_int", {Param::XmlRead, Param::XmlPath, Param::Int}, 3,
                        RuntimeEffect::WaitFree, Feature::Xml, Result::Int},
-        RuntimeBuiltin{"xml_bool", "fminus_rt_xml_bool", {Param::Document, Param::XmlPath, Param::Bool}, 3,
+        RuntimeBuiltin{"xml_bool", "fminus_rt_xml_bool", {Param::XmlRead, Param::XmlPath, Param::Bool}, 3,
                        RuntimeEffect::WaitFree, Feature::Xml, Result::Bool},
-        RuntimeBuiltin{"xml_count", "fminus_rt_xml_count", {Param::Document, Param::XmlPath}, 2,
+        RuntimeBuiltin{"xml_count", "fminus_rt_xml_count", {Param::XmlRead, Param::XmlPath}, 2,
                        RuntimeEffect::WaitFree, Feature::Xml, Result::Int},
         RuntimeBuiltin{"xml_floats", "fminus_rt_xml_floats",
-                       {Param::Document, Param::XmlPath, Param::Floats, Param::Int}, 4, RuntimeEffect::WaitFree,
+                       {Param::XmlRead, Param::XmlPath, Param::Floats, Param::Int}, 4, RuntimeEffect::WaitFree,
                        Feature::Xml, Result::Int},
-        RuntimeBuiltin{"xml_choice", "fminus_rt_xml_choice", {Param::Document, Param::XmlPath, Param::Choices}, 3,
+        RuntimeBuiltin{"xml_choice", "fminus_rt_xml_choice", {Param::XmlRead, Param::XmlPath, Param::Choices}, 3,
                        RuntimeEffect::WaitFree, Feature::Xml, Result::Int},
         // The web library (src/web/Web.h), in a build with FMINUS_WEB. http_get(url, ...) and http_post(url, data,
-        // bytes, content_type, ...) start a request under the program's web context (Web.cpp) and give its handle, a
-        // void*, at once: the URL a literal with places for the ints after every other argument, content_type a
-        // literal. http_wait(r, timeout_ms) blocks until it is done or the time is up and gives its status;
+        // bytes, content_type, ...) start a request under the program's web context (Web.cpp) and give its handle, an
+        // http_response, at once: the URL a literal with places for the ints after every other argument, content_type
+        // a literal. http_wait(r, timeout_ms) blocks until it is done or the time is up and gives its status;
         // http_status, http_size, http_body (a const void*) and http_progress read it, wait-free; http_cancel stops it
         // and http_close frees it, which allocate (they wait for the library's I/O thread, and close frees). A null
         // handle does nothing, and reads as a failed request (HTTP_INVALID, 0, null).
         RuntimeBuiltin{"http_get", "fminus_web_http_get", {Param::Url}, 1, RuntimeEffect::Allocates, Feature::Web,
-                       Result::Pointer},
+                       Result::Response},
         RuntimeBuiltin{"http_post", "fminus_web_http_post", {Param::Url, Param::Bytes, Param::Int, Param::ContentType},
-                       4, RuntimeEffect::Allocates, Feature::Web, Result::Pointer},
-        RuntimeBuiltin{"http_wait", "fminus_web_http_wait", {Param::Handle, Param::Int}, 2, RuntimeEffect::Blocks,
+                       4, RuntimeEffect::Allocates, Feature::Web, Result::Response},
+        RuntimeBuiltin{"http_wait", "fminus_web_http_wait", {Param::Response, Param::Int}, 2, RuntimeEffect::Blocks,
                        Feature::Web, Result::Int},
-        RuntimeBuiltin{"http_status", "fminus_web_http_status", {Param::Handle}, 1, RuntimeEffect::WaitFree,
+        RuntimeBuiltin{"http_status", "fminus_web_http_status", {Param::Response}, 1, RuntimeEffect::WaitFree,
                        Feature::Web, Result::Int},
-        RuntimeBuiltin{"http_size", "fminus_web_http_size", {Param::Handle}, 1, RuntimeEffect::WaitFree, Feature::Web,
+        RuntimeBuiltin{"http_size", "fminus_web_http_size", {Param::Message}, 1, RuntimeEffect::WaitFree, Feature::Web,
                        Result::Int},
-        RuntimeBuiltin{"http_body", "fminus_web_http_body", {Param::Handle}, 1, RuntimeEffect::WaitFree, Feature::Web,
+        RuntimeBuiltin{"http_body", "fminus_web_http_body", {Param::Message}, 1, RuntimeEffect::WaitFree, Feature::Web,
                        Result::Bytes},
-        RuntimeBuiltin{"http_progress", "fminus_web_http_progress", {Param::Handle}, 1, RuntimeEffect::WaitFree,
+        RuntimeBuiltin{"http_progress", "fminus_web_http_progress", {Param::Response}, 1, RuntimeEffect::WaitFree,
                        Feature::Web, Result::Int},
-        RuntimeBuiltin{"http_cancel", "fminus_web_http_cancel", {Param::Handle}, 1, RuntimeEffect::Allocates,
+        RuntimeBuiltin{"http_cancel", "fminus_web_http_cancel", {Param::Response}, 1, RuntimeEffect::Allocates,
                        Feature::Web, Result::Void},
-        RuntimeBuiltin{"http_close", "fminus_web_http_close", {Param::Handle}, 1, RuntimeEffect::Allocates,
+        RuntimeBuiltin{"http_close", "fminus_web_http_close", {Param::Closable}, 1, RuntimeEffect::Allocates,
                        Feature::Web, Result::Void},
         // The web library's server (src/web/Web.h), in a build with FMINUS_WEB_SERVER too. http_listen() starts the
         // program's server where its host's policy says, with the table of every route literal the program has
-        // (WebServer.cpp), and gives it, a void*, at once: it allocates, as http_close of it does (the client's, above,
-        // which closes a server too). http_port(server) is its port or why it has none, http_next(server) the oldest
-        // request waiting or null, and http_accept(server, timeout_ms) the same after waiting for one: it blocks. On a
+        // (WebServer.cpp), and gives it, an http_server, at once: it allocates, as http_close of it does (the client's,
+        // above, which closes a server too). http_port(server) is its port or why it has none, http_next(server) the
+        // oldest request waiting (an http_request) or null, and http_accept(server, timeout_ms) the same after waiting
+        // for one: it blocks. On a
         // request: http_is(r, "METHOD /path/%d") whether it is the route, a literal, which keeps the numbers its %d
         // took for http_arg(r, i); http_query_float(r, "name", fallback) and http_query_int a number of its query, the
         // name a literal; http_size and http_body (the client's, above) its body; and the replies, http_reply(r,
@@ -182,53 +183,53 @@ namespace fminus::ir::detail
         // "content/type", "format", ...), whose format's values follow it. Everything on a request, and http_port and
         // http_next, is wait-free.
         RuntimeBuiltin{"http_listen", "fminus_web_http_listen", {}, 0, RuntimeEffect::Allocates, Feature::WebServer,
-                       Result::Pointer},
-        RuntimeBuiltin{"http_port", "fminus_web_http_port", {Param::Handle}, 1, RuntimeEffect::WaitFree,
+                       Result::Server},
+        RuntimeBuiltin{"http_port", "fminus_web_http_port", {Param::Server}, 1, RuntimeEffect::WaitFree,
                        Feature::WebServer, Result::Int},
-        RuntimeBuiltin{"http_next", "fminus_web_http_next", {Param::Handle}, 1, RuntimeEffect::WaitFree,
-                       Feature::WebServer, Result::Pointer},
-        RuntimeBuiltin{"http_accept", "fminus_web_http_accept", {Param::Handle, Param::Int}, 2, RuntimeEffect::Blocks,
-                       Feature::WebServer, Result::Pointer},
-        RuntimeBuiltin{"http_is", "fminus_web_http_is", {Param::Handle, Param::Route}, 2, RuntimeEffect::WaitFree,
+        RuntimeBuiltin{"http_next", "fminus_web_http_next", {Param::Server}, 1, RuntimeEffect::WaitFree,
+                       Feature::WebServer, Result::Request},
+        RuntimeBuiltin{"http_accept", "fminus_web_http_accept", {Param::Server, Param::Int}, 2, RuntimeEffect::Blocks,
+                       Feature::WebServer, Result::Request},
+        RuntimeBuiltin{"http_is", "fminus_web_http_is", {Param::Request, Param::Route}, 2, RuntimeEffect::WaitFree,
                        Feature::WebServer, Result::Bool},
-        RuntimeBuiltin{"http_arg", "fminus_web_http_arg", {Param::Handle, Param::Int}, 2, RuntimeEffect::WaitFree,
+        RuntimeBuiltin{"http_arg", "fminus_web_http_arg", {Param::Request, Param::Int}, 2, RuntimeEffect::WaitFree,
                        Feature::WebServer, Result::Int},
         RuntimeBuiltin{"http_query_float", "fminus_web_http_query_float",
-                       {Param::Handle, Param::QueryName, Param::Float}, 3, RuntimeEffect::WaitFree, Feature::WebServer,
+                       {Param::Request, Param::QueryName, Param::Float}, 3, RuntimeEffect::WaitFree, Feature::WebServer,
                        Result::Float},
-        RuntimeBuiltin{"http_query_int", "fminus_web_http_query_int", {Param::Handle, Param::QueryName, Param::Int}, 3,
+        RuntimeBuiltin{"http_query_int", "fminus_web_http_query_int", {Param::Request, Param::QueryName, Param::Int}, 3,
                        RuntimeEffect::WaitFree, Feature::WebServer, Result::Int},
-        RuntimeBuiltin{"http_reply", "fminus_web_http_reply", {Param::Handle, Param::Int}, 2, RuntimeEffect::WaitFree,
+        RuntimeBuiltin{"http_reply", "fminus_web_http_reply", {Param::Request, Param::Int}, 2, RuntimeEffect::WaitFree,
                        Feature::WebServer, Result::Int},
         RuntimeBuiltin{"http_reply_bytes", "fminus_web_http_reply_bytes",
-                       {Param::Handle, Param::Int, Param::Bytes, Param::Int, Param::ContentType}, 5,
+                       {Param::Request, Param::Int, Param::Bytes, Param::Int, Param::ContentType}, 5,
                        RuntimeEffect::WaitFree, Feature::WebServer, Result::Int},
         RuntimeBuiltin{"http_reply_text", "fminus_web_http_reply_text",
-                       {Param::Handle, Param::Int, Param::ContentType, Param::ReplyFormat}, 4, RuntimeEffect::WaitFree,
+                       {Param::Request, Param::Int, Param::ContentType, Param::ReplyFormat}, 4, RuntimeEffect::WaitFree,
                        Feature::WebServer, Result::Int},
         // The file interface (runtime/Files.h, Runtime.h's fminus_rt_file_*), in a build with FMINUS_FILES. file_read(
         // "folder/name.ext", ...) opens the file the name says under the program's file context (Files.cpp) and reads
-        // it whole into memory, and gives a handle, a void*, which says why when it could not (a shared handle: never
-        // null); file_list("folder/*.ext", ...) gives a snapshot of a folder's files whose names fit, in their names'
-        // order, and file_read_nth(list, i) reads the i-th; file_close frees either. Each touches the disk, waits on
-        // it and allocates: never on the audio thread. The name a literal with places for the ints after every other
-        // argument, as a URL's. file_status, file_size, file_data (a const void*: the bytes, until the file is closed)
-        // and file_count read a handle's fields, which never change once it was given: wait-free.
+        // it whole into memory, and gives a handle, a file_content, which says why when it could not (a shared handle:
+        // never null); file_list("folder/*.ext", ...) gives a file_listing, a snapshot of a folder's files whose names
+        // fit, in their names' order, and file_read_nth(list, i) reads the i-th; file_close frees either. Each touches
+        // the disk, waits on it and allocates: never on the audio thread. The name a literal with places for the ints
+        // after every other argument, as a URL's. file_status, file_size, file_data (a const void*: the bytes, until
+        // the file is closed) and file_count read a handle's fields, which never change once it was given: wait-free.
         RuntimeBuiltin{"file_read", "fminus_rt_file_read", {Param::FileName}, 1, RuntimeEffect::Allocates,
-                       Feature::Files, Result::Pointer},
-        RuntimeBuiltin{"file_status", "fminus_rt_file_status", {Param::Handle}, 1, RuntimeEffect::WaitFree,
+                       Feature::Files, Result::FileContent},
+        RuntimeBuiltin{"file_status", "fminus_rt_file_status", {Param::FileHandle}, 1, RuntimeEffect::WaitFree,
                        Feature::Files, Result::Int},
-        RuntimeBuiltin{"file_size", "fminus_rt_file_size", {Param::Handle}, 1, RuntimeEffect::WaitFree, Feature::Files,
-                       Result::Int},
-        RuntimeBuiltin{"file_data", "fminus_rt_file_data", {Param::Handle}, 1, RuntimeEffect::WaitFree, Feature::Files,
-                       Result::Bytes},
+        RuntimeBuiltin{"file_size", "fminus_rt_file_size", {Param::FileContent}, 1, RuntimeEffect::WaitFree,
+                       Feature::Files, Result::Int},
+        RuntimeBuiltin{"file_data", "fminus_rt_file_data", {Param::FileContent}, 1, RuntimeEffect::WaitFree,
+                       Feature::Files, Result::Bytes},
         RuntimeBuiltin{"file_list", "fminus_rt_file_list", {Param::FilePattern}, 1, RuntimeEffect::Allocates,
-                       Feature::Files, Result::Pointer},
-        RuntimeBuiltin{"file_count", "fminus_rt_file_count", {Param::Handle}, 1, RuntimeEffect::WaitFree,
+                       Feature::Files, Result::FileListing},
+        RuntimeBuiltin{"file_count", "fminus_rt_file_count", {Param::FileListing}, 1, RuntimeEffect::WaitFree,
                        Feature::Files, Result::Int},
-        RuntimeBuiltin{"file_read_nth", "fminus_rt_file_read_nth", {Param::Handle, Param::Int}, 2,
-                       RuntimeEffect::Allocates, Feature::Files, Result::Pointer},
-        RuntimeBuiltin{"file_close", "fminus_rt_file_close", {Param::Handle}, 1, RuntimeEffect::Allocates,
+        RuntimeBuiltin{"file_read_nth", "fminus_rt_file_read_nth", {Param::FileListing, Param::Int}, 2,
+                       RuntimeEffect::Allocates, Feature::Files, Result::FileContent},
+        RuntimeBuiltin{"file_close", "fminus_rt_file_close", {Param::FileHandle}, 1, RuntimeEffect::Allocates,
                        Feature::Files, Result::Void},
         // Its writing, in a build with FMINUS_FILES_WRITE too: file_write("folder/name.ext", data, bytes, ...) writes
         // the bytes as the whole file, replacing it whole or not at all, and file_append adds them at its end; each
@@ -246,10 +247,26 @@ namespace fminus::ir::detail
         case Param::Int:
             return ast::Type::Int;
         case Param::Bytes:
-        case Param::Document:
             return ast::Type::pointerTo(ast::Kind::Void, true);
-        case Param::Handle:
-            return ast::Type::pointerTo(ast::Kind::Void, false);
+        case Param::Response:
+        case Param::Message:
+        case Param::Closable:
+            return ast::Type::handleType(ast::Handle::HttpResponse);
+        case Param::Request:
+            return ast::Type::handleType(ast::Handle::HttpRequest);
+        case Param::Server:
+            return ast::Type::handleType(ast::Handle::HttpServer);
+        case Param::JsonDoc:
+        case Param::JsonRead:
+            return ast::Type::handleType(ast::Handle::JsonDoc);
+        case Param::XmlDoc:
+        case Param::XmlRead:
+            return ast::Type::handleType(ast::Handle::XmlDoc);
+        case Param::FileContent:
+        case Param::FileHandle:
+            return ast::Type::handleType(ast::Handle::FileContent);
+        case Param::FileListing:
+            return ast::Type::handleType(ast::Handle::FileListing);
         case Param::Floats:
             return ast::Type::pointerTo(ast::Kind::Float, false);
         case Param::Float:
@@ -260,6 +277,48 @@ namespace fminus::ir::detail
             return ast::Type::Bool;
         case Param::String:
         case Param::Format:
+        case Param::Path:
+        case Param::Choices:
+        case Param::XmlPath:
+        case Param::Url:
+        case Param::ContentType:
+        case Param::Route:
+        case Param::QueryName:
+        case Param::ReplyFormat:
+        case Param::FileName:
+        case Param::FilePattern:
+            break;
+        }
+        return std::nullopt;
+    }
+
+    std::optional<ast::Type> otherType(Param param)
+    {
+        switch (param)
+        {
+        case Param::Message:
+            return ast::Type::handleType(ast::Handle::HttpRequest);
+        case Param::Closable:
+            return ast::Type::handleType(ast::Handle::HttpServer);
+        case Param::FileHandle:
+            return ast::Type::handleType(ast::Handle::FileListing);
+        case Param::Int:
+        case Param::Bytes:
+        case Param::Floats:
+        case Param::String:
+        case Param::Format:
+        case Param::Response:
+        case Param::Request:
+        case Param::Server:
+        case Param::JsonDoc:
+        case Param::JsonRead:
+        case Param::XmlDoc:
+        case Param::XmlRead:
+        case Param::FileContent:
+        case Param::FileListing:
+        case Param::Float:
+        case Param::Double:
+        case Param::Bool:
         case Param::Path:
         case Param::Choices:
         case Param::XmlPath:
@@ -287,8 +346,20 @@ namespace fminus::ir::detail
             return ast::Type::Double;
         case Result::Bool:
             return ast::Type::Bool;
-        case Result::Pointer:
-            return ast::Type::pointerTo(ast::Kind::Void, false);
+        case Result::Response:
+            return ast::Type::handleType(ast::Handle::HttpResponse);
+        case Result::Request:
+            return ast::Type::handleType(ast::Handle::HttpRequest);
+        case Result::Server:
+            return ast::Type::handleType(ast::Handle::HttpServer);
+        case Result::JsonDoc:
+            return ast::Type::handleType(ast::Handle::JsonDoc);
+        case Result::XmlDoc:
+            return ast::Type::handleType(ast::Handle::XmlDoc);
+        case Result::FileContent:
+            return ast::Type::handleType(ast::Handle::FileContent);
+        case Result::FileListing:
+            return ast::Type::handleType(ast::Handle::FileListing);
         case Result::Bytes:
             return ast::Type::pointerTo(ast::Kind::Void, true);
         case Result::Void:
@@ -525,8 +596,8 @@ namespace fminus::ir::detail
             case RuntimeKind::Transform:
                 // Reads the plan and `in` and writes `out` (where it reads only what it wrote), keeping no pointer to
                 // any of them. Beyond them it touches only the plan's own memory, PFFFT's setup and the plan's three
-                // buffers, which only the plan points to: inaccessible memory, since a plan is opaque, a void* that a
-                // program hands to the FFT's builtins and reads nothing through. (One that converted it to a module
+                // buffers, which only the plan points to: inaccessible memory, since a plan is opaque, an fft_plan that
+                // a program hands to the FFT's builtins and reads nothing through. (One that converted it to a module
                 // pointer and read the runtime's struct through that would read an object as a type it is not, which
                 // C leaves undefined.) It allocates, frees and waits for nothing (the effects let it run on the audio
                 // thread), so it is nofree and nosync too.
@@ -1076,16 +1147,16 @@ namespace fminus::ir::detail
         return {allocate, voidPointer};
     }
 
-    // fft_create(n) and fft_create_complex(n): a plan, a void* (null when the library takes no plan of that size);
-    // fft_destroy(plan). fft_forward(plan, in, out) and fft_inverse(plan, in, out) are overloaded on their buffers, as
-    // a math builtin is on its arguments: a forward transform of floats is a real one, of float2s a complex one, and
-    // an inverse one is real when it gives floats. Each buffer converts as a parameter of its type would, const added
-    // to the input's.
+    // fft_create(n) and fft_create_complex(n): a plan, an fft_plan (null when the library takes no plan of that size),
+    // to which a void* converts, as to any handle; fft_destroy(plan). fft_forward(plan, in, out) and fft_inverse(plan,
+    // in, out) are overloaded on their buffers, as a math builtin is on its arguments: a forward transform of floats is
+    // a real one, of float2s a complex one, and an inverse one is real when it gives floats. Each buffer converts as a
+    // parameter of its type would, const added to the input's.
     Lowering::Value Lowering::lowerFft(SourceLocation location, const Fft& fft, const std::vector<Value>& args)
     {
         if (args.size() != fft.arity)
             return wrongArity(location, args.size(), fft.arity);
-        const ast::Type plan = ast::Type::pointerTo(ast::Kind::Void, false);
+        const ast::Type plan = ast::Type::handleType(ast::Handle::FftPlan);
         if (fft.name == "fft_create" || fft.name == "fft_create_complex")
         {
             llvm::Value* n = convert(args[0], ast::Type::Int, location, Use::Passing);
@@ -1108,10 +1179,10 @@ namespace fminus::ir::detail
         if (!real && !pointsTo(decides, ast::Kind::Float2))
         {
             error(location, "no matching function for call to " + quoted(fft.name) + ": it takes "
-                                + (forward ? "(void *, const float *, float2 *) for a real plan, or (void *, const "
-                                             "float2 *, float2 *) for a complex one"
-                                           : "(void *, const float2 *, float *) for a real plan, or (void *, const "
-                                             "float2 *, float2 *) for a complex one"));
+                                + (forward ? "(fft_plan, const float *, float2 *) for a real plan, or (fft_plan, "
+                                             "const float2 *, float2 *) for a complex one"
+                                           : "(fft_plan, const float2 *, float *) for a real plan, or (fft_plan, "
+                                             "const float2 *, float2 *) for a complex one"));
             return poison(ast::Type::Void);
         }
         const ast::Type in = ast::Type::pointerTo(forward && real ? ast::Kind::Float : ast::Kind::Float2, true);
@@ -1275,10 +1346,25 @@ namespace fminus::ir::detail
                 irArgs.push_back(builder_.getInt32(static_cast<std::uint32_t>(values->size())));
                 continue;
             }
-            const ast::Type to = *paramType(param);
+            ast::Type to = *paramType(param);
+            const std::optional<ast::Type> other = otherType(param);
             const Value value = isString(arg) ? refuseString(arg, to, Use::Passing, arg.location) : lowerAs(arg, to);
             fine = fine && !value.failed;
-            llvm::Value* converted = convert(value, to, location, Use::Passing);
+            if (other && value.type == *other)
+                to = *other;   // the second of the two handles it takes
+            else if (other && !value.failed && ast::isHandle(value.type) && value.type != to)
+            {
+                // A handle of a third kind: C's warning for it, with both the types it takes.
+                error(location, "incompatible pointer types passing " + quoted(ast::typeName(value.type))
+                                    + " to parameter of type " + quoted(ast::typeName(to)) + " or "
+                                    + quoted(ast::typeName(*other)));
+                fine = false;
+                continue;
+            }
+            // A read's document may be a const void*, as it was before FMinus had handles: the read only reads it.
+            const bool readOnly = (param == Param::JsonRead || param == Param::XmlRead) && ast::isPointer(value.type)
+                                  && value.type.pointee == ast::Kind::Void;
+            llvm::Value* converted = readOnly ? value.ir : convert(value, to, location, Use::Passing);
             if (param == Param::Bool)   // to the runtime as an int, 0 or 1
                 converted = builder_.CreateZExt(converted, builder_.getInt32Ty());
             irArgs.push_back(converted);

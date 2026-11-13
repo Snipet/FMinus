@@ -154,6 +154,7 @@ positional. What crosses:
 | `float*`, `int*`, `double*` | a buffer of C floats, ints or doubles: an `array.array` (`"f"`, `"i"`, `"d"`), a NumPy array (`float32`, `int32`, `float64`), a `memoryview`, a ctypes array. `None` is a null pointer | |
 | `const float*`, ... | the same, and a read-only buffer too | |
 | `void*` | any buffer, an instance, or `None` | |
+| `http_response`, `json_doc`, `fft_plan`, ... (a handle) | as a `void*` takes | |
 | `Osc*` (a module's pointer) | an `Instance` of that module, of the same `Program` | |
 
 A buffer is lent for the call: FMinus reads and writes Python's memory in place, and nothing is copied. It must be

@@ -85,6 +85,14 @@ namespace fminus::ir::detail
                 return std::nullopt;
             }
             Value offset = lower(*index->index);
+            // C's handle points to a struct the program never sees (Ast.h): clang's words for its element
+            const Value* handle = ast::isHandle(base.type) ? &base : ast::isHandle(offset.type) ? &offset : nullptr;
+            if (handle != nullptr && !base.failed && !offset.failed)
+            {
+                error(expr.location,
+                      "subscript of pointer to incomplete type " + quoted(ast::handleStruct(handle->type.handle)));
+                return std::nullopt;
+            }
             const bool swapped = !ast::isPointer(base.type) && ast::isPointer(offset.type);
             if (swapped)
                 std::swap(base, offset);   // C's i[p] is p[i]
@@ -122,6 +130,12 @@ namespace fminus::ir::detail
             const Value pointer = lower(*unary->operand);
             if (pointer.failed && !ast::isPointer(pointer.type))
                 return std::nullopt;   // its own error says why (Value)
+            if (ast::isHandle(pointer.type))   // what it points to, the program never sees (Ast.h): clang's words
+            {
+                error(expr.location, "incomplete type " + quoted(ast::handleStruct(pointer.type.handle))
+                                         + " where a complete type is required");
+                return std::nullopt;
+            }
             if (!ast::isPointer(pointer.type))
             {
                 error(expr.location,
@@ -138,6 +152,12 @@ namespace fminus::ir::detail
             const Value pointer = lower(*member.base);
             if (pointer.failed && (!ast::isPointer(pointer.type) || pointer.type.pointee != ast::Kind::Module))
                 return std::nullopt;   // its own error says why (Value)
+            if (ast::isHandle(pointer.type))   // a struct the program never sees (Ast.h): clang's words
+            {
+                error(expr.location,
+                      "incomplete definition of type " + quoted(ast::handleStruct(pointer.type.handle)));
+                return std::nullopt;
+            }
             if (!ast::isPointer(pointer.type))
             {
                 error(expr.location, "member reference type " + quoted(ast::typeName(pointer.type))
@@ -202,7 +222,7 @@ namespace fminus::ir::detail
             return std::nullopt;
         }
         const bool row = ast::isArray(type);
-        if (!ast::canPointTo(type.kind) && !row)
+        if (!ast::canPointTo(type.kind) && !row && !ast::isHandle(type))   // an array of handles' element is one
             return std::nullopt;
         if (row)
             address = false;
@@ -559,6 +579,49 @@ namespace fminus::ir::detail
         return llvm::ConstantStruct::getAnon(contents, true);
     }
 
+    // What a binary operator does with a handle (Ast.h): two of one kind, or one and a void*, compare with == and !=,
+    // as C's pointers do, and nothing else. C's handle points to an incomplete struct, so p + i, p - i and p - q are
+    // clang's error for arithmetic on one, naming the struct; two of different kinds are distinct pointer types, as
+    // in C; anything else is an invalid operand. (C would order two handles with < too; FMinus does not: they are
+    // the runtime's objects, whose addresses mean nothing to a program.)
+    Lowering::Value Lowering::handleOperands(SourceLocation location, ast::BinaryOp op, Value lhs, Value rhs)
+    {
+        const auto isVoidPointer = [](const Value& value) {
+            return ast::isPointer(value.type) && value.type.pointee == ast::Kind::Void;
+        };
+        const auto pointerLike = [](const Value& value) {
+            return ast::isPointer(value.type) || ast::isHandle(value.type);
+        };
+        const auto integer = [](const Value& value) {
+            return value.type == ast::Type::Int || value.type == ast::Type::Bool;
+        };
+        const Value& handle = ast::isHandle(lhs.type) ? lhs : rhs;
+        const bool equality = op == ast::BinaryOp::Equal || op == ast::BinaryOp::NotEqual;
+        if (equality && pointerLike(lhs) && pointerLike(rhs))
+        {
+            if (lhs.type == rhs.type || isVoidPointer(lhs) || isVoidPointer(rhs))
+            {
+                const auto predicate = op == ast::BinaryOp::Equal ? llvm::CmpInst::ICMP_EQ : llvm::CmpInst::ICMP_NE;
+                return {builder_.CreateICmp(predicate, lhs.ir, rhs.ir, "cmp"), ast::Type::Bool};
+            }
+            error(location, "comparison of distinct pointer types (" + quoted(ast::typeName(lhs.type)) + " and "
+                                + quoted(ast::typeName(rhs.type)) + ")");
+            return poison(ast::Type::Bool);
+        }
+        const bool arithmetic =
+            (op == ast::BinaryOp::Add && (integer(lhs) || integer(rhs)))
+            || (op == ast::BinaryOp::Subtract && ast::isHandle(lhs.type) && (integer(rhs) || pointerLike(rhs)));
+        if (arithmetic)
+            error(location, "arithmetic on a pointer to an incomplete type "
+                                + quoted(ast::handleStruct(handle.type.handle)));
+        else
+            error(location, "invalid operands to binary expression (" + quoted(ast::typeName(lhs.type)) + " and "
+                                + quoted(ast::typeName(rhs.type)) + ")");
+        return poison(isComparison(op) ? ast::Type::Bool
+                      : op == ast::BinaryOp::Subtract && pointerLike(rhs) ? ast::Type::Int
+                                                                          : handle.type);
+    }
+
     // C's arithmetic on pointers. p + i and i + p are the element i after p (i may be negative), and p - i the one i
     // before; p - q is how many elements apart two pointers of one type are, an int (C's is a ptrdiff_t, which
     // FMinus does not have); and two pointers of one type compare as addresses. const does not matter to any of
@@ -582,7 +645,8 @@ namespace fminus::ir::detail
             // A void* compares with any pointer, as in C: it converts to the void* first.
             const bool samePointee = ast::samePointee(lhs.type, rhs.type) || voidPointee;
             if (samePointee && op == ast::BinaryOp::Subtract
-                && (ast::canPointTo(lhs.type.pointee) || ast::hasRows(lhs.type)))
+                && (ast::canPointTo(lhs.type.pointee) || ast::hasRows(lhs.type)
+                    || lhs.type.pointee == ast::Kind::Handle))
             {
                 llvm::Value* difference =
                     builder_.CreatePtrDiff(typeOf(ast::pointee(lhs.type)), lhs.ir, rhs.ir, "sub.ptr.div");
@@ -630,7 +694,9 @@ namespace fminus::ir::detail
             error(location, "invalid operands to binary expression " + operands);
             return poison(isComparison(op) ? ast::Type::Bool : pointer.type);
         }
-        if (!ast::canPointTo(pointer.type.pointee) && !ast::hasRows(pointer.type))
+        // A pointer to a handle is an array of handles' name: its elements are pointers.
+        if (!ast::canPointTo(pointer.type.pointee) && !ast::hasRows(pointer.type)
+            && pointer.type.pointee != ast::Kind::Handle)
             return recovery(pointer.type);   // its declaration reported it
         llvm::Value* index = builder_.CreateSExt(convert(offset, ast::Type::Int, location, Use::Initializing),
                                                  builder_.getInt64Ty(), "idx.ext");

@@ -53,7 +53,7 @@ path, copies the tables to the heap, and frees the document:
 ```c
 bool init(const void* data, int bytes, float sampleRate)
 {
-    void* doc = json_parse(data, bytes);                       // null for a text that is no JSON
+    json_doc doc = json_parse(data, bytes);                    // null for a text that is no JSON
     count = json_count(doc, "/tables");
     size = json_int(doc, "/size", 0);                          // 0 when absent, or not an integer an int holds
     gain = json_float(doc, "/gain", 1.0f);
@@ -85,7 +85,7 @@ bool init(const void* data, int bytes, float sampleRate)
 `initXml` is the same loader for the XML, its paths a small part of XPath:
 
 ```c
-void* doc = xml_parse(data, bytes);                        // null for a text that is no XML document
+xml_doc doc = xml_parse(data, bytes);                      // null for a text that is no XML document
 count = xml_count(doc, "/pack/table");                     // how many <table>s
 size = xml_int(doc, "/pack/@size", 0);                     // an attribute
 ...

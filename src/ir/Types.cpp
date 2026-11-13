@@ -39,6 +39,7 @@ namespace fminus::ir::detail
         case ast::Kind::PolyBool:
             return llvm::FixedVectorType::get(builder_.getInt1Ty(), lanes(type));
         case ast::Kind::Pointer:
+        case ast::Kind::Handle:   // C's pointer to a struct the program never sees
             return builder_.getPtrTy();   // opaque: what it points to rides on each load, store and GEP
         case ast::Kind::Module:
             return structs_.at(type.module);   // layOut() made one for every module (Modules.cpp)
@@ -77,7 +78,7 @@ namespace fminus::ir::detail
             incompatible(location, use, value.type, type);
             return poison(type).ir;
         }
-        if (ast::isPointer(value.type) || ast::isPointer(type))
+        if (ast::isPointer(value.type) || ast::isPointer(type) || ast::isHandle(value.type) || ast::isHandle(type))
             return convertPointer(value, type, location, use);
         if (!ast::isVector(value.type))
         {
@@ -119,11 +120,26 @@ namespace fminus::ir::detail
 
     // A pointer converts to a bool (whether it is not null), and to a pointer to the same type with const added
     // (float* to const float*), as in C. Nothing else converts to or from a pointer: C would convert another pointer
-    // or an integer, with a warning; FMinus refuses, in the warning's words.
+    // or an integer, with a warning; FMinus refuses, in the warning's words. A handle is C's pointer to a struct the
+    // program never sees: it converts to a bool, and to a void* (const or not); a void* converts to it, but a const
+    // void* only with the const discarded, an error; and another pointer, or a handle of another kind, does not.
     llvm::Value* Lowering::convertPointer(Value value, ast::Type type, SourceLocation location, Use use)
     {
-        if (ast::isPointer(value.type) && type == ast::Type::Bool)
+        if ((ast::isPointer(value.type) || ast::isHandle(value.type)) && type == ast::Type::Bool)
             return builder_.CreateIsNotNull(value.ir, "tobool");
+        if (ast::isHandle(value.type) || ast::isHandle(type))
+        {
+            const bool fromVoid = ast::isPointer(value.type) && value.type.pointee == ast::Kind::Void;
+            const bool toVoid = ast::isPointer(type) && type.pointee == ast::Kind::Void;
+            if ((ast::isHandle(value.type) && toVoid) || (fromVoid && ast::isHandle(type) && !value.type.pointeeConst))
+                return value.ir;
+            if ((ast::isHandle(value.type) || ast::isPointer(value.type))
+                && (ast::isHandle(type) || ast::isPointer(type)))
+                pointerMismatch(location, use, value.type, type, fromVoid && ast::isHandle(type));
+            else
+                incompatible(location, use, value.type, type);
+            return poison(type).ir;
+        }
         if (ast::isPointer(value.type) && ast::isPointer(type))
         {
             // C converts any pointer to a void* and back (what malloc's result needs), without a cast.
@@ -175,10 +191,10 @@ namespace fminus::ir::detail
     bool Lowering::checkType(SourceLocation location, ast::Type type)
     {
         const ast::Type element = ast::elementOf(type);
-        if (ast::isArray(type) && (!ast::canPointTo(element.kind) || element == ast::Type::Void))
+        if (ast::isArray(type) && !ast::canBeElement(element.kind))
         {
-            error(location, "FMinus has arrays of float, double, int, float2, float4, float8 and modules, not of "
-                                + quoted(ast::typeName(element)));
+            error(location, "FMinus has arrays of float, double, int, float2, float4, float8, modules and handles, "
+                            "not of " + quoted(ast::typeName(element)));
             return false;
         }
         if (!ast::isPointer(type) || ast::canPointTo(type.pointee))
@@ -222,6 +238,7 @@ namespace fminus::ir::detail
         case ast::Kind::PolyBool:
             return lanes(type);
         case ast::Kind::Pointer:
+        case ast::Kind::Handle:
             return 8;
         case ast::Kind::Module:
         case ast::Kind::Array:

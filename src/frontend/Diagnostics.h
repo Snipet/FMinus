@@ -1,6 +1,8 @@
 // src/frontend/Diagnostics.h: source locations, and the errors the front end and the code generator report.
 #pragma once
 
+#include <algorithm>
+#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -61,6 +63,27 @@ namespace fminus
         const std::string& fileName() const
         {
             return files_.front().name;
+        }
+
+        // How many errors and warnings there are so far: where rewind() goes back to.
+        struct Mark
+        {
+            std::size_t errors = 0;
+            std::size_t warnings = 0;
+        };
+        Mark mark() const
+        {
+            return {errors_.size(), warnings_.size()};
+        }
+        // Drops every error and warning reported since `mark`. For the code generator, which lowers a deferred
+        // statement again at each of its block's exits (ir/Statements.cpp): its errors were reported the first time,
+        // and each is reported once.
+        void rewind(Mark mark)
+        {
+            errors_.erase(errors_.begin() + static_cast<std::ptrdiff_t>(std::min(errors_.size(), mark.errors)),
+                          errors_.end());
+            warnings_.erase(warnings_.begin() + static_cast<std::ptrdiff_t>(std::min(warnings_.size(), mark.warnings)),
+                            warnings_.end());
         }
 
         // A file an #include at `includedFrom` read, named `name`: its index, for its locations' `file`.

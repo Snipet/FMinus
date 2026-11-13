@@ -20,21 +20,21 @@ module Kit
 
     int load()                                               // the host calls it off the audio thread
     {
-        void* kit = file_list("kit/*.f32");                  // a snapshot of the folder "kit", in its names' order
+        file_listing kit = file_list("kit/*.f32");           // a snapshot of the folder "kit", in its names' order
+        defer file_close(kit);                               // when load returns
         const int status = file_status(kit);                 // FILE_REFUSED unless the host granted "kit"
         count = 0;
         for (int i = 0; i < file_count(kit) && count < 8; ++i)
         {
-            void* f = file_read_nth(kit, i);                 // read whole into memory: refused in a nonblocking function
+            file_content f = file_read_nth(kit, i);          // read whole into memory: refused in a nonblocking function
+            defer file_close(f);                             // at the end of each iteration
             if (file_status(f) == FILE_OK)
             {
                 const int n = bytes_floats(file_data(f), file_size(f), sample[count], 12000);
                 length[count] = n < 12000 ? n : 12000;
                 count += 1;
             }
-            file_close(f);
         }
-        file_close(kit);
         return status == FILE_OK ? count : status;
     }
 };
@@ -100,12 +100,12 @@ them.
 
 | Builtin | Does | Effect |
 |---|---|---|
-| `void* file_read("name", ...)` | opens the file under the host's policy, reads all of it into memory, closes it, and gives a handle | allocates |
+| `file_content file_read("name", ...)` | opens the file under the host's policy, reads all of it into memory, closes it, and gives a handle | allocates |
 | `int file_status(h)` | `FILE_OK`, or why not ([below](#the-status-codes)), of a file or a listing | wait-free |
 | `int file_size(f)`, `const void* file_data(f)` | the bytes read and their address, until `file_close`; one 0 byte follows the last, not counted. 0 and null for a file that was not read | wait-free |
-| `void* file_list("folder/*.ext", ...)` | the regular files of one directory whose names fit the pattern, in the order of their names' bytes, as of now ([listings](#listings)) | allocates |
+| `file_listing file_list("folder/*.ext", ...)` | the regular files of one directory whose names fit the pattern, in the order of their names' bytes, as of now ([listings](#listings)) | allocates |
 | `int file_count(list)` | how many | wait-free |
-| `void* file_read_nth(list, i)` | reads the `i`-th (from 0), as `file_read` does | allocates |
+| `file_content file_read_nth(list, i)` | reads the `i`-th (from 0), as `file_read` does | allocates |
 | `void file_close(h)` | frees a file's bytes, or a listing | allocates |
 | `int file_write("name", data, bytes, ...)` | writes `bytes` bytes at `data` as the whole file, replacing it in one step or not at all ([writing](#writing)); `FMINUS_FILES_WRITE` | allocates |
 | `int file_append("name", data, bytes, ...)` | adds them at the file's end, creating it if need be; `FMINUS_FILES_WRITE` | allocates |
@@ -113,7 +113,9 @@ them.
 - **A name is a string literal**, a format whose `%d`s are the `int`s after every other argument, as a URL's are
   (`file_write("takes/take%d.f32", data, bytes, n)`), checked where it is written ([below](#names-and-what-the-compiler-refuses))
   and recorded for the host: `Program::files()` lists every call, before anything runs.
-- **A handle is an opaque `void*` that knows its kind**: a file, or a listing. `file_read`, `file_list` and
+- **A handle is opaque, and knows its kind**: a file, a `file_content`, or a listing, a `file_listing`, C's handles,
+  which the compiler keeps apart (`file_count(f)` of a file is an error) while a `void*` converts to either, as in C,
+  so a program that says `void*` compiles as before ([extending.md](extending.md), recipe 44). `file_read`, `file_list` and
   `file_read_nth` never return null: a file that could not be read, or a folder that could not be listed, is a handle
   too, one the runtime shares among every failure of its kind and status, which says why (`file_status`), has size 0,
   data null and count 0, and which `file_close` leaves alone. Even when memory runs out the answer is such a handle
@@ -122,8 +124,8 @@ them.
   until then its status is `FILE_INVALID`, its size, data and count 0 and null, and closing it again does nothing,
   whatever allocator the host has. Afterwards it is that next handle, as a closed file descriptor's number is a later
   file's: a program that uses a handle after closing it has a bug these rules only keep from being a crash.
-- **A wrong handle reads as no file.** A null handle, or one of the other kind (`file_size` of a listing, `file_count`
-  of a file), gives `FILE_INVALID`, 0 or null. `file_read_nth` with an index outside 0 to `file_count - 1`, or of
+- **A wrong handle reads as no file.** A null handle, or one of the other kind that reached the builtin as a `void*`
+  (`file_size` of a listing, `file_count` of a file), gives `FILE_INVALID`, 0 or null. `file_read_nth` with an index outside 0 to `file_count - 1`, or of
   something that is not a listing, gives a handle whose status is `FILE_INVALID`. `file_close` of null does nothing.
 - **What was read is in memory**, all of it, before the handle is returned: allocated and read into, never mapped. A
   handle's fields never change once it is returned, so the reads are plain loads, and a table may be read straight

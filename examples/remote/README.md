@@ -82,7 +82,7 @@ On the LAN the page is not a secure context and the token crosses the network in
 ## The program
 
 ```c
-void answer(void* r) [[clang::nonblocking]]
+void answer(http_request r) [[clang::nonblocking]]
 {
     if (http_is(r, "POST /gain"))                                    // POST /gain?value=0.5
     {
@@ -98,7 +98,7 @@ void answer(void* r) [[clang::nonblocking]]
 
 void process(float* out, int n) [[clang::nonblocking]]
 {
-    for (void* r = http_next(server); r; r = http_next(server))
+    for (http_request r = http_next(server); r; r = http_next(server))
         answer(r);
     // ... the block, with gain and pitch as they now are
 }

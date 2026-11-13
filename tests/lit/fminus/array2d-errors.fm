@@ -37,7 +37,7 @@ float f(float* out)
 // CHECK: array2d-errors.fm:22:25: error: braces around scalar initializer
 // CHECK: array2d-errors.fm:23:11: error: array has incomplete element type 'float[]'
 // CHECK: array2d-errors.fm:24:11: error: array has incomplete element type 'float[]'
-// CHECK: array2d-errors.fm:25:10: error: FMinus has arrays of float, double, int, float2, float4, float8 and modules, not of 'bool'
+// CHECK: array2d-errors.fm:25:10: error: FMinus has arrays of float, double, int, float2, float4, float8, modules and handles, not of 'bool'
 // CHECK: array2d-errors.fm:27:9: error: incompatible pointer types assigning to 'float *' from 'float (*)[3]'
 // CHECK: array2d-errors.fm:28:10: error: array type 'float[3]' is not assignable
 // CHECK: array2d-errors.fm:29:18: error: cannot assign to variable 'kTable' with const-qualified type 'const float[2][2]'

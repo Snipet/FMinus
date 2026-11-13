@@ -50,8 +50,9 @@ namespace fminus::ast
     // pointer to a module is C's, and `p->y` its field.
     //
     // An array is C's: `float history[16];`, a fixed number of elements side by side, of a type FMinus can point to
-    // (a float, a double, an int, a float vector or a module). Its name stands for a pointer to its first element, which p[i]
-    // indexes; it cannot be assigned, and a parameter declared as one is that pointer. Its size is an integer constant
+    // (a float, a double, an int, a float vector or a module), or of a handle (below). Its name stands for a pointer to
+    // its first element, which p[i] indexes; it cannot be assigned, and a parameter declared as one is that pointer
+    // (of handles none may be: a pointer to a handle is no parameter's type). Its size is an integer constant
     // expression, `float buf[ROWS * COLS]` (C11 6.6p6: enumeration constants are, a const variable is not), which the
     // code generator works out where the array is declared (the declaration keeps it as written, and the parser's
     // type has a count of 0); `float t[] = {1, 2, 3}` takes its size from its list.
@@ -74,7 +75,36 @@ namespace fminus::ast
     // warning). It is no part of the type's identity, which == compares without it, so every rule for an int holds for
     // an `enum Mode` as it did, and messages say 'int'. A value keeps it where C keeps the enumerated type (a variable,
     // a field, a parameter, a result, a cast, an assignment), and loses it where C promotes it: `mode + 1` is an int.
+    //
+    // A handle is one of the runtime's objects, which a builtin gives and others take: `http_response`, a request the
+    // program made; `http_request`, one it received; `http_server`; `json_doc` and `xml_doc`, parsed documents;
+    // `file_content`, a file read whole; `file_listing`, a folder's files; and `fft_plan`. Each is C's opaque handle,
+    // `typedef struct fminus_http_response* http_response;`, a pointer to a struct the program never sees: a ptr in
+    // LLVM, as the void* it replaces was. A handle converts to a void* and a void* to any handle, as C's void* does;
+    // two kinds of handle convert to neither. A program declares one, assigns it, compares two of a kind with == and
+    // != (or one with a void*), tests one as a condition (null is false) and keeps one in an array; it has no
+    // arithmetic, no element and no field, and no pointer to one (FMinus has no pointers to pointers). `handle` says
+    // which, for a handle's type, or a pointer's or an array's whose pointee is one (an array of handles' name stands
+    // for a pointer to its first, which only that array gives).
     struct Module;
+
+    enum class Handle
+    {
+        None,
+        HttpResponse,   // http_response: http_get's and http_post's
+        HttpRequest,    // http_request: http_next's and http_accept's
+        HttpServer,     // http_server: http_listen's
+        JsonDoc,        // json_doc: json_parse's
+        XmlDoc,         // xml_doc: xml_parse's
+        FileContent,    // file_content: file_read's and file_read_nth's
+        FileListing,    // file_listing: file_list's
+        FftPlan,        // fft_plan: fft_create's and fft_create_complex's
+    };
+
+    // A handle type's name, as a program writes it ("http_response"), and the struct C's typedef would point to, as
+    // clang names it in a message about an incomplete type ("struct fminus_http_response").
+    const char* handleName(Handle handle);
+    std::string handleStruct(Handle handle);
 
     enum class Kind
     {
@@ -94,6 +124,7 @@ namespace fminus::ast
         Pointer,
         Module,
         Array,
+        Handle,
     };
 
     struct Type
@@ -109,12 +140,14 @@ namespace fminus::ast
                                // for none (above: not part of the type's identity)
         Kind rowKind = Kind::Void;   // when the pointee is a row (Kind::Array): what the row's elements are
         int rowCount = 0;            // and how many it has (0 in the syntax tree, as `count`)
+        Handle handle = Handle::None;   // a handle's: which; or the handles' a pointer, an array or a row holds
 
         constexpr Type() = default;
         constexpr Type(Kind kind) : kind(kind) {}   // implicit: Kind::Float is the type float
 
-        // A pointer to `pointee`, which is a kind or a module type, or a row: a one-dimensional array, what a 2-D
-        // array's name stands for a pointer to (FMinus has no pointers to pointers).
+        // A pointer to `pointee`, which is a kind, a module type or a handle type, or a row: a one-dimensional array,
+        // what a 2-D array's name stands for a pointer to (FMinus has no pointers to pointers, and a pointer to a
+        // handle is only what an array of handles' name stands for).
         static constexpr Type pointerTo(Type pointee, bool isConst)
         {
             Type type(Kind::Pointer);
@@ -122,11 +155,20 @@ namespace fminus::ast
             type.module = pointee.module;
             type.pointeeConst = isConst;
             type.enumeration = pointee.enumeration;
+            type.handle = pointee.handle;
             if (pointee.kind == Kind::Array)
             {
                 type.rowKind = pointee.pointee;
                 type.rowCount = pointee.count;
             }
+            return type;
+        }
+
+        // The handle type `handle` (http_response, ...).
+        static constexpr Type handleType(Handle handle)
+        {
+            Type type(Kind::Handle);
+            type.handle = handle;
             return type;
         }
 
@@ -153,6 +195,7 @@ namespace fminus::ast
             type.module = element.module;
             type.count = count;
             type.enumeration = element.enumeration;
+            type.handle = element.handle;
             if (element.kind == Kind::Array)
             {
                 type.rowKind = element.pointee;
@@ -166,7 +209,7 @@ namespace fminus::ast
         {
             return a.kind == b.kind && a.pointee == b.pointee && a.pointeeConst == b.pointeeConst
                    && a.module == b.module && a.count == b.count && a.rowKind == b.rowKind
-                   && a.rowCount == b.rowCount;
+                   && a.rowCount == b.rowCount && a.handle == b.handle;
         }
 
         static const Type Void, Float, Double, Bool, Int, Float2, Float4, Float8, Bool2, Bool4, Bool8, PolyFloat,
@@ -209,6 +252,7 @@ namespace fminus::ast
         case Kind::Pointer:
         case Kind::Module:
         case Kind::Array:
+        case Kind::Handle:
             return 1;
         case Kind::Float2:
         case Kind::Bool2:
@@ -243,6 +287,11 @@ namespace fminus::ast
         return type.kind == Kind::Array;
     }
 
+    inline bool isHandle(Type type)
+    {
+        return type.kind == Kind::Handle;
+    }
+
     // What a pointer of `type` points to, or what the elements of an array of `type` are: a row, for a 2-D array's.
     inline Type pointee(Type type)
     {
@@ -253,11 +302,14 @@ namespace fminus::ast
             row.count = type.rowCount;
             row.module = type.module;
             row.enumeration = type.enumeration;
+            row.handle = type.handle;
             return row;
         }
         Type element(type.pointee);
         if (type.pointee == Kind::Module)
             element.module = type.module;
+        if (type.pointee == Kind::Handle)
+            element.handle = type.handle;
         element.enumeration = type.enumeration;
         return element;
     }
@@ -283,6 +335,13 @@ namespace fminus::ast
                || kind == Kind::Float4 || kind == Kind::Float8 || kind == Kind::Void || kind == Kind::Module;
     }
 
+    // Whether an array may hold elements of `kind`: what FMinus can point to but void, and handles, which no program
+    // can point to but an array's name stands for a pointer to (FMinus's one way to keep several).
+    inline bool canBeElement(Kind kind)
+    {
+        return (canPointTo(kind) && kind != Kind::Void) || kind == Kind::Handle;
+    }
+
     // Whether `type` is one of C's floating types, float or double: what `x != 0` tests as a float, and what converts
     // to an int by truncating toward zero.
     inline bool isFloating(Type type)
@@ -294,14 +353,15 @@ namespace fminus::ast
     // same row for rows.
     inline bool samePointee(Type a, Type b)
     {
-        return a.pointee == b.pointee && a.module == b.module && a.rowKind == b.rowKind && a.rowCount == b.rowCount;
+        return a.pointee == b.pointee && a.module == b.module && a.rowKind == b.rowKind && a.rowCount == b.rowCount
+               && a.handle == b.handle;
     }
 
     // Whether a value of `type` takes part in arithmetic: every type's but void's, a pointer's (whose arithmetic is
-    // its own), a module's and an array's.
+    // its own), a module's, an array's and a handle's (which has none).
     inline bool isArithmetic(Type type)
     {
-        return type != Type::Void && !isPointer(type) && !isModule(type) && !isArray(type);
+        return type != Type::Void && !isPointer(type) && !isModule(type) && !isArray(type) && !isHandle(type);
     }
 
     inline bool isMask(Type type)
@@ -664,12 +724,17 @@ namespace fminus::ast
 
     using StmtPtr = std::unique_ptr<Stmt>;
 
-    // `if (condition) thenBranch [else elseBranch]`. A float condition is `!= 0`, as in C.
+    // `if (condition) thenBranch [else elseBranch]`. A float condition is `!= 0`, as in C. C2y's (N3356) declaration in
+    // its head, `if (int n = count(); n > 0)`, is `init`, its names in scope from their declaration to the end of the
+    // whole statement, the else branch included, and no further. Its third form, `if (json_doc doc = json_parse(...))`,
+    // one declarator with an initialiser, is the second with the declared name for its condition, as C2y rewrites it
+    // (N3580): `if (json_doc doc = json_parse(...); doc)`.
     struct IfStmt
     {
         ExprPtr condition;
         StmtPtr thenBranch;
         StmtPtr elseBranch;   // null without an else
+        std::vector<Stmt> init;   // its head's declarations, in order, or none
     };
 
     struct WhileStmt
@@ -699,11 +764,13 @@ namespace fminus::ast
     // `switch (value) body`: C's. The value is an int (a bool is one, as C promotes it), and the body, usually a
     // block, holds the labels the switch jumps to by the value: `case 1:` and `default:`, wherever they are in it (in
     // a block or a loop inside it too). From one label's statements, control falls into the next's; `break` leaves
-    // the switch, and `continue` goes to the loop around it.
+    // the switch, and `continue` goes to the loop around it. Its head may declare, as an if's (IfStmt): `switch (int k
+    // = next(); k)`, or `switch (int k = next())`.
     struct SwitchStmt
     {
         ExprPtr value;
         StmtPtr body;
+        std::vector<Stmt> init;   // its head's declarations, in order, or none
     };
 
     // `case value:`, a label of the switch around it, whose value is an integer constant expression (C11 6.6p6:
@@ -778,11 +845,23 @@ namespace fminus::ast
         std::vector<Stmt> tasks;
     };
 
+    // `defer statement;`, ISO/IEC TS 25755's (`_Defer`, which FMinus also spells `defer`): reaching it runs nothing;
+    // its statement, the deferred block, runs when control leaves the block the defer is in: at its end, or by
+    // return, break or continue, the defers of a block in the reverse of the order they were reached, the innermost
+    // block's first. A return's value is computed, and converted, before any of them runs; nothing is captured, so the
+    // deferred statement reads its variables when it runs. The statement is a block of its own, which may hold
+    // another defer, and which no return, and no break or continue to outside it, may leave.
+    struct DeferStmt
+    {
+        StmtPtr body;
+    };
+
     struct Stmt
     {
         SourceLocation location;
         std::variant<DeclStmt, ExprStmt, ReturnStmt, BlockStmt, EmptyStmt, IfStmt, WhileStmt, ForStmt, BreakStmt,
-                     ContinueStmt, SwitchStmt, CaseStmt, DefaultStmt, EnumStmt, ParallelForStmt, ParallelBlockStmt>
+                     ContinueStmt, SwitchStmt, CaseStmt, DefaultStmt, EnumStmt, ParallelForStmt, ParallelBlockStmt,
+                     DeferStmt>
             node;
     };
 

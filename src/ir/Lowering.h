@@ -3,7 +3,8 @@
 //     CodeGen.cpp       ir::lower(), and the two passes: declare every function, then define each body
 //     Types.cpp         FMinus's types as LLVM's, the conversions between them, the errors' helpers
 //     Functions.cpp     declarations and prototypes (libm's attributes), bodies and parameters, stack slots and scopes
-//     Statements.cpp    blocks, declarations, return, if, while, for, switch and its labels, break and continue
+//     Statements.cpp    blocks, declarations, return, if, while, for, switch and its labels, break and continue, and
+//                       defer, each block's deferred statements lowered at each of its exits
 //     Expressions.cpp   constants, variables, operators, &&, ||, ?:, casts, assignment, ++ and --
 //     Constants.cpp     C's integer constant expressions, worked out where they are written (a case label's value,
 //                       an enumerator's, an array's size), enumerations: their constants, in a block's scope or the
@@ -140,8 +141,13 @@ namespace fminus::ir::detail
     // to C's); floats it writes, a float*; a string, which must be a string literal, passed as its address and its
     // length in bytes (Strings.cpp: no NUL ends it, and it may hold one); or a format, a string literal with places for
     // ints (%d, and %% for a percent sign), checked when the program is compiled (formatArguments), after which the
-    // call gives an int for each place, passed as their address and their count. Then the JSON parser's: a document,
-    // a const void* (json_parse's, read); a handle, a void* (json_free's); a float, a double or a bool (a read's
+    // call gives an int for each place, passed as their address and their count. Then the handles (Ast.h), each a ptr:
+    // an http_response, an http_request, an http_server, a json_doc, an xml_doc, a file_content or a file_listing, or
+    // either of two of them (http_size's and http_body's message, an http_response or an http_request; http_close's, an
+    // http_response or an http_server; file_status's and file_close's, a file_content or a file_listing), to which a
+    // void* converts as C's does; and a document a read takes, a json_doc or an xml_doc that the read only reads, to
+    // which a const void* converts too, as it did when a document was one (C's `const struct fminus_json_doc*`). Then
+    // the JSON parser's: a float, a double or a bool (a read's
     // fallback; a bool goes to the runtime as an int, 0 or 1); a path, a format that is a JSON Pointer, prepared when
     // the program is compiled into a table of steps (Paths.cpp), passed as its address and then its ints' address and
     // count, as a format's; and choices, every argument after the path's ints, string literals (at least one),
@@ -166,8 +172,18 @@ namespace fminus::ir::detail
         Floats,
         String,
         Format,
-        Document,
-        Handle,
+        Response,
+        Request,
+        Server,
+        Message,
+        Closable,
+        JsonDoc,
+        JsonRead,
+        XmlDoc,
+        XmlRead,
+        FileContent,
+        FileListing,
+        FileHandle,
         Float,
         Double,
         Bool,
@@ -183,15 +199,22 @@ namespace fminus::ir::detail
         FilePattern,
     };
 
-    // What a builtin of the runtime gives: an int, a float, a double, a bool (an int from the runtime, 0 or 1), a void*,
-    // a const void* (bytes the program may only read: http_body's) or nothing.
+    // What a builtin of the runtime gives: an int, a float, a double, a bool (an int from the runtime, 0 or 1), a
+    // handle (an http_response, an http_request, an http_server, a json_doc, an xml_doc, a file_content or a
+    // file_listing), a const void* (bytes the program may only read: http_body's) or nothing.
     enum class Result
     {
         Int,
         Float,
         Double,
         Bool,
-        Pointer,
+        Response,
+        Request,
+        Server,
+        JsonDoc,
+        XmlDoc,
+        FileContent,
+        FileListing,
         Bytes,
         Void,
     };
@@ -213,8 +236,10 @@ namespace fminus::ir::detail
 
     // The C type of a runtime builtin's parameter or result, as its prototype would write it (Calls.cpp): what a
     // prototype of the builtin must say (Functions.cpp), and what an argument converts to. A string, a format, a path
-    // and choices have none (std::nullopt): FMinus has no char.
+    // and choices have none (std::nullopt): FMinus has no char. A parameter that takes either of two handles has the
+    // first here, and the second as otherType (none for any other parameter).
     std::optional<ast::Type> paramType(Param param);
+    std::optional<ast::Type> otherType(Param param);
     ast::Type resultType(Result result);
 
     // A format's places for ints (Strings.cpp, scanFormat): the offset in the literal's bytes of each %d's '%', in
@@ -409,6 +434,8 @@ namespace fminus::ir::detail
         // which switch a case label is of. break leaves the innermost of either, continue goes to the innermost loop's
         // next iteration, and a label belongs to the innermost switch. A parallel region's body is one too, whose
         // break (and a parallel { }'s continue) goes nowhere, and which no label reaches from outside: an error.
+        // A deferred statement being lowered is one too, which break, continue and a label of a switch around it may
+        // not cross (TS 25755).
         struct Breakable
         {
             enum class Kind
@@ -416,10 +443,34 @@ namespace fminus::ir::detail
                 Loop,
                 Switch,   // switches_.back(): a label's
                 Region,
+                Defer,    // the deferred statement of the defer at `location`
             };
             Kind kind;
-            llvm::BasicBlock* breakTarget;      // a loop's end, or a switch's; null for a region
+            llvm::BasicBlock* breakTarget;      // a loop's end, or a switch's; null for a region and a defer
             llvm::BasicBlock* continueTarget;   // a loop's next iteration, a parallel for's too; null otherwise
+            std::size_t defers = 0;             // deferScopes_.size() where it begins: the blocks a jump to it leaves
+                                                // are those after
+            SourceLocation location = {};       // a defer's
+        };
+
+        // A defer statement reached in a block being lowered (Statements.cpp), whose deferred statement each of the
+        // block's exits lowers: the statement and where it is, and what the code around it was, which its deferred
+        // statement sees wherever it is lowered: the names of its block declared before it (the scope `scope`, as it
+        // was), and the loops and switches around it.
+        struct Deferred
+        {
+            const ast::DeferStmt* statement;
+            SourceLocation location;
+            std::size_t scope;
+            std::unordered_map<std::string, Binding> visible;
+            std::size_t breakables;
+            std::size_t switches;
+        };
+
+        // A block that may hold defer statements, and those of them reached so far, in order (Statements.cpp).
+        struct DeferScope
+        {
+            std::vector<Deferred> reached;
         };
 
         // A label a switch has (Statements.cpp): where its value is written, and the name it is written as when it is
@@ -440,6 +491,7 @@ namespace fminus::ir::detail
             std::map<std::int32_t, CaseLabel> cases;
             std::optional<SourceLocation> defaultLabel;
             bool erroneous = false;
+            std::size_t defers = 0;   // deferScopes_.size() where it begins: its body's blocks are those after
         };
 
         // A constant expression's value, as fold() works it out (Constants.cpp): an int's or a bool's (0 or 1), and
@@ -560,7 +612,14 @@ namespace fminus::ir::detail
         void lowerStatements(const std::vector<ast::Stmt>& statements);
         void lowerStatement(const ast::Stmt& stmt);
         void lowerScoped(const ast::Stmt& stmt);
+        void lowerBlock(const std::vector<ast::Stmt>& items);
         void lowerReturn(SourceLocation location, const ast::ReturnStmt& ret);
+        void openDefers();
+        void closeDefers();
+        void reachDefer(SourceLocation location, const ast::DeferStmt& statement);
+        void runDefers(std::size_t from);
+        void lowerDeferred(const Deferred& deferred);
+        const Breakable* deferAround() const;
         llvm::BasicBlock* newBlock(const char* name);
         void fallThrough(llvm::BasicBlock* target);
         void branchOn(const ast::Expr& test, llvm::Value* condition, llvm::BasicBlock* whenTrue,
@@ -641,6 +700,7 @@ namespace fminus::ir::detail
         llvm::Value* write(SourceLocation location, const LValue& target, Value value, Use use);
         Value lowerAddressOf(SourceLocation location, const ast::Expr& operand);
         Value pointerArithmetic(SourceLocation location, ast::BinaryOp op, Value lhs, Value rhs);
+        Value handleOperands(SourceLocation location, ast::BinaryOp op, Value lhs, Value rhs);
         void zero(llvm::Value* address, ast::Type type);
         Placed placeList(ast::Type type, const ast::DeclStmt& decl, bool report);
         llvm::Value* elementAt(ast::Type array, llvm::Value* address, std::uint64_t at, const char* name);
@@ -783,6 +843,13 @@ namespace fminus::ir::detail
         const ast::Function topLevel_{};   // what function_ is while a top-level constant's initialiser is lowered
         std::vector<Breakable> breakables_;                                // the loops and switches around
         std::vector<Switch> switches_;                                     // the switches around, inner last
+        std::vector<DeferScope> deferScopes_;   // the function's blocks being lowered, inner last (Statements.cpp)
+        // The defer statements whose deferred statement was lowered once: it reported its errors then, and each later
+        // lowering of it, at another exit of its block, reports none.
+        std::unordered_set<const ast::DeferStmt*> deferLowered_;
+        // How many deferred statements around the code being lowered are lowered again: while any is, what the code
+        // records for the host (its URLs, routes and files) it recorded the first time, and records nothing.
+        unsigned relowering_ = 0;
         std::unordered_map<std::string, Effect> effects_;                  // each name's, from all its declarations
         std::unordered_map<std::string, std::vector<CallSite>> calls_;     // each definition's calls, in order
         std::unordered_map<const ast::Module*, llvm::StructType*> structs_;   // each module's layout

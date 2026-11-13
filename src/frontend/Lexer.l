@@ -68,6 +68,12 @@ namespace
     // byte's offset in the token (its character's, or its escape's backslash's). Throws an escape's error.
     fminus::frontend::StringToken stringValue(const fminus::frontend::location& where, std::string_view literal);
 
+    // A handle type's word (Ast.h's Handle): a type, as a vector type's is.
+    Parser::symbol_type handleType(fminus::ast::Handle handle, const fminus::frontend::location& where)
+    {
+        return Parser::make_HANDLE_TYPE(fminus::ast::Type::handleType(handle), where);
+    }
+
     // The error of a # after a comment that begins its line, where C reads a directive.
     constexpr const char* kCommentBeforeDirective = "a comment before a directive's '#' is not supported: a directive "
                                                     "begins its line, after spaces only";
@@ -162,6 +168,14 @@ IDENTIFIER  [A-Za-z_][A-Za-z0-9_]*
 "float4"                    { return Parser::make_VECTOR_TYPE(fminus::ast::Type::Float4, yyextra->where); }
 "float8"                    { return Parser::make_VECTOR_TYPE(fminus::ast::Type::Float8, yyextra->where); }
 "poly"                      { return Parser::make_POLY(yyextra->where); }
+"http_response"             { return handleType(fminus::ast::Handle::HttpResponse, yyextra->where); }
+"http_request"              { return handleType(fminus::ast::Handle::HttpRequest, yyextra->where); }
+"http_server"               { return handleType(fminus::ast::Handle::HttpServer, yyextra->where); }
+"json_doc"                  { return handleType(fminus::ast::Handle::JsonDoc, yyextra->where); }
+"xml_doc"                   { return handleType(fminus::ast::Handle::XmlDoc, yyextra->where); }
+"file_content"              { return handleType(fminus::ast::Handle::FileContent, yyextra->where); }
+"file_listing"              { return handleType(fminus::ast::Handle::FileListing, yyextra->where); }
+"fft_plan"                  { return handleType(fminus::ast::Handle::FftPlan, yyextra->where); }
 "true"                      { return Parser::make_TRUE(yyextra->where); }
 "false"                     { return Parser::make_FALSE(yyextra->where); }
 "if"                        { return Parser::make_IF(yyextra->where); }
@@ -178,6 +192,8 @@ IDENTIFIER  [A-Za-z_][A-Za-z0-9_]*
 "module"                    { return Parser::make_MODULE(yyextra->where); }
 "this"                      { return Parser::make_THIS(yyextra->where); }
 "param"                     { return Parser::make_PARAM(yyextra->where); }
+"defer"                     { return Parser::make_DEFER(yyextra->where); }
+"_Defer"                    { return Parser::make_DEFER_TS(yyextra->where); }
 
 {DIGITS}"."[0-9]*{EXPONENT}?[fF]?   |
 "."{DIGITS}{EXPONENT}?[fF]?         |

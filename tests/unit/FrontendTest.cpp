@@ -163,6 +163,96 @@ TEST_CASE("switch parses as C's, and case and default as C23's labels: block ite
           == "test.fm:1:11: error: syntax error, unexpected default, expecting * or ) or , or identifier\n");
 }
 
+TEST_CASE("defer and _Defer parse as TS 25755's defer statement: a statement after the keyword", "[frontend]")
+{
+    CHECK(parsed("void f(int* p, int k)\n"
+                 "{\n"
+                 "    defer *p = 1;\n"
+                 "    _Defer { int x = k; defer *p += x; }\n"
+                 "    if (k) defer if (k > 1) *p = 2; else *p = 3;\n"
+                 "    for (;;) defer defer k++;\n"
+                 "    switch (k) { default: defer break; }\n"
+                 "}\n")
+          == "(function void f ((int * p) (int k))\n"
+             "  (defer\n"
+             "    (= (* p) 1))\n"
+             "  (defer\n"
+             "    (block\n"
+             "      (decl int x k)\n"
+             "      (defer\n"
+             "        (+= (* p) x))))\n"
+             "  (if k\n"
+             "    (defer\n"
+             "      (if (> k 1)\n"
+             "        (= (* p) 2)\n"
+             "        (= (* p) 3))))\n"
+             "  (for () () ()\n"
+             "    (defer\n"
+             "      (defer\n"
+             "        (post++ k))))\n"
+             "  (switch k\n"
+             "    (block\n"
+             "      (default)\n"
+             "      (defer\n"
+             "        (break)))))\n");
+    // A label after it parses, as clang parses one (a switch's jump into it is the code generator's error); a
+    // declaration does not, for the TS defers a statement.
+    CHECK(parsed("void f(int k) { switch (k) { defer case 1: k = 2; } }")
+          == "(function void f ((int k))\n"
+             "  (switch k\n"
+             "    (block\n"
+             "      (defer\n"
+             "        (case 1\n"
+             "          (= k 2))))))\n");
+    CHECK(parsed("void f() { defer int x = 1; }") == "test.fm:1:18: error: syntax error, unexpected int\n");
+    CHECK(parsed("void f() { int defer = 1; }")
+          == "test.fm:1:16: error: syntax error, unexpected defer, expecting * or identifier\n");
+    CHECK(parsed("module M { float x [[_Defer::_Defer]] [[ui::_Defer]]; };")
+          == "(module M\n  (field float x [[_Defer::_Defer]] [[ui::_Defer]]))\n");
+    CHECK(parsed("#define _Defer 1\n")
+          == "test.fm:1:9: error: '_Defer' cannot be used as a macro name: it is one of FMinus's keywords\n");
+}
+
+TEST_CASE("if and switch parse C2y's declaration in their head, and its third form as the second", "[frontend]")
+{
+    CHECK(parsed("int f(int x)\n"
+                 "{\n"
+                 "    if (int n = g(x), *p; n > 0) return n; else return -n;\n"
+                 "    if (const json_doc doc = parse(x)) x = 1;\n"
+                 "    switch (int k = x; k) { default: break; }\n"
+                 "    switch (float4 v = x) ;\n"
+                 "    return x;\n"
+                 "}\n")
+          == "(function int f ((int x))\n"
+             "  (if (decl int n (call g x)) (decl int * p) (> n 0)\n"
+             "    (return n)\n"
+             "    (return (- n)))\n"
+             "  (if (decl const json_doc doc (call parse x)) doc\n"
+             "    (= x 1))\n"
+             "  (switch (decl int k x) k\n"
+             "    (block\n"
+             "      (default)\n"
+             "      (break)))\n"
+             "  (switch (decl float4 v x) v\n"
+             "    (empty))\n"
+             "  (return x))\n");
+    // What C2y refuses, in clang's words: a second declarator in the third form, at its comma; none with no
+    // initialiser; a second declaration where the condition goes; and a first clause that is no declaration.
+    CHECK(parsed("void f(int x)\n"
+                 "{\n"
+                 "    if (int a = 1, b = 2) x = 1;\n"
+                 "    if (int c) x = 2;\n"
+                 "    if (int d = 1; int e = 2) x = 3;\n"
+                 "    switch (x = 1; x) {}\n"
+                 "    if (; x) x = 4;\n"
+                 "}\n")
+          == "test.fm:3:18: error: multiple declarations are not allowed\n"
+             "test.fm:4:13: error: variable declaration in condition must have an initializer\n"
+             "test.fm:5:20: error: expected expression\n"
+             "test.fm:6:13: error: first clause in condition must be a declaration\n"
+             "test.fm:7:9: error: first clause in condition must be a declaration\n");
+}
+
 TEST_CASE("enumerations parse as C's, where they are among the functions and modules, and `enum Mode` is int",
           "[frontend]")
 {
@@ -302,6 +392,38 @@ TEST_CASE("double parses as C's: a type, a pointer's and an array's, and a cast;
           == "test.fm:1:6: error: FMinus has poly float and poly bool, not 'poly double': a double is no vector lane\n"
              "test.fm:1:20: error: FMinus has poly float and poly bool, not 'poly double': a double is no vector "
              "lane\n");
+}
+
+TEST_CASE("the handle types are type words, as float4 is: a declaration's, a parameter's, a field's, an array's",
+          "[frontend]")
+{
+    CHECK(parsed("json_doc f(http_response r, const http_request q, xml_doc x[4]) { http_server s, t[2][3]; "
+                 "file_content c = g(file_listing_n); fft_plan p; return x[0]; }\n"
+                 "module M { file_listing l; http_response pending[16]; };\n")
+          == "(function json_doc f ((http_response r) (const http_request q) (xml_doc * x))\n"
+             "  (decl http_server s)\n"
+             "  (decl http_server[2][3] t)\n"
+             "  (decl file_content c (call g file_listing_n))\n"
+             "  (decl fft_plan p)\n"
+             "  (return ([] x 0)))\n"
+             "(module M\n"
+             "  (field file_listing l)\n"
+             "  (field http_response[16] pending))\n");
+    // A pointer to one parses, as C's would; the code generator refuses it (HandleTest.cpp). Each word is a keyword,
+    // and so no name of a variable, nor of a macro, but an attribute's name, as C23 reads a keyword there.
+    CHECK(parsed("void f() { json_doc* p; }") == "(function void f ()\n  (decl json_doc * p))\n");
+    CHECK(parsed("void f() { int json_doc = 1; }")
+          == "test.fm:1:16: error: syntax error, unexpected handle type, expecting * or identifier\n");
+    for (const char* word : {"http_response", "http_request", "http_server", "json_doc", "xml_doc", "file_content",
+                             "file_listing", "fft_plan"})
+    {
+        const std::string attributes = std::string("[[") + word + "::" + word + "]] [[ui::" + word + "]]";
+        CHECK(parsed("module M { float x " + attributes + "; };")
+              == "(module M\n  (field float x " + attributes + "))\n");
+        CHECK(parsed(std::string("#define ") + word + " 1\n")
+              == "test.fm:1:9: error: '" + std::string(word)
+                     + "' cannot be used as a macro name: it is one of FMinus's keywords\n");
+    }
 }
 
 TEST_CASE("constants keep their spelling: C's decimal, hex and integer forms", "[frontend]")

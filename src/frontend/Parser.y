@@ -9,12 +9,12 @@
 //     method       : "const"? type pointer IDENTIFIER "(" params ")" attributes block
 //     attributes   : ("[" "[" attribute ("," attribute)* "]" "]")*
 //     attribute    : attribute_word ("::" attribute_word)? ("(" attribute_arg ("," attribute_arg)* ")")?
-//     attribute_word: IDENTIFIER | MODULE_NAME | a keyword                  C23 reads a keyword there as a name
+//     attribute_word: IDENTIFIER | MODULE_NAME | a keyword or a type's word  C23 reads a keyword there as a name
 //     attribute_arg: "-"? NUMBER | STRING+                 a number, or a string (C's adjacent literals are one)
 //     params       : (param ("," param)*)? | "void"                                  (void) is none, as in C
 //     param        : "const"? type pointer IDENTIFIER? | "const"? type IDENTIFIER array_sizes       a pointer
 //     type         : "float" | "double" | "bool" | "int" | "void" | VECTOR_TYPE | "poly" ("float" | "bool")
-//                  | MODULE_NAME
+//                  | MODULE_NAME | HANDLE_TYPE              http_response, json_doc, ...: the runtime's handles
 //                  | "enum" IDENTIFIER                  int (or its fixed type), the name a tag declared before
 //     pointer      : ("*" ("const" | "restrict")*)?        with a *, the first const is the pointee's (const float*),
 //                                                          and one after it the pointer's own (float* const)
@@ -36,8 +36,11 @@
 //                  | "if" "(" expr ")" statement ("else" statement)? | "while" "(" expr ")" statement
 //                  | "for" "(" (declaration | expr? ";") expr? ";" expr? ")" statement | "break" ";" | "continue" ";"
 //                  | "switch" "(" expr ")" statement
+//                  | ("if" | "switch") "(" (declaration expr | "const"? type declarator) ")" ...   C2y's: names
+//                                                        in scope to the statement's end, the else's too
 //                  | "parallel" "for" "(" (declaration | expr? ";") expr? ";" expr? ")" statement
 //                  | "parallel" block                    FMinus's: the iterations, or the statements, at once
+//                  | ("defer" | "_Defer") statement      TS 25755's: run when the block it is in is left
 //     label        : "case" expr ":" | "default" ":"                         the expr an integer constant expression
 //     expr         : NUMBER | "true" | "false" | IDENTIFIER | IDENTIFIER "(" (expr ("," expr)*)? ")" | "(" expr ")"
 //                  | STRING+          a string literal: the code generator takes one only as a builtin's argument
@@ -145,6 +148,14 @@
             ast::ExprPtr rowSize = nullptr;   // its rows' size, as written; null for `[]`, which C refuses
             std::vector<ast::Brace> braces = {};
             std::vector<ast::Attribute> attributes = {};   // C23's, after the name: `level [[ui::unit("dB")]]`
+            SourceLocation comma = {};   // the comma before it, in a declaration's list after the first
+        };
+
+        // An if's or a switch's head (C2y's, N3356): the declarations before its condition, and the condition.
+        struct SelectionHead
+        {
+            std::vector<ast::Stmt> init;
+            ast::ExprPtr condition;
         };
 
         // An array's sizes as written: `[size]`, or a 2-D array's `[size][rowSize]` (`rows`). Null for `[]`.
@@ -527,8 +538,10 @@
 %token IF "if" ELSE "else" WHILE "while" FOR "for" BREAK "break" CONTINUE "continue" PARALLEL "parallel"
 %token SWITCH "switch" CASE "case" DEFAULT "default" ENUM "enum"
 %token MODULE "module" THIS "this" ARROW "->" PARAM "param"
+%token DEFER "defer" DEFER_TS "_Defer"
 %token <ast::Type> MODULE_NAME "module name"
 %token <ast::Type> VECTOR_TYPE "vector type"
+%token <ast::Type> HANDLE_TYPE "handle type"
 %token DOT "." POLY "poly"
 %token PLUS "+" MINUS "-" STAR "*" SLASH "/" PERCENT "%" INCREMENT "++" DECREMENT "--"
 %token PIPE "|" CARET "^" TILDE "~" SHL "<<" SHR ">>"
@@ -570,6 +583,7 @@
 %nterm <ast::ExprPtr> optional_expr
 %nterm <std::vector<Declarator>> declarators
 %nterm <Declarator> declarator
+%nterm <SelectionHead> selection_head
 %nterm <ast::ExprPtr> expr
 %nterm <std::vector<ast::ExprPtr>> args arg_list
 
@@ -767,6 +781,7 @@ attribute_word
     : IDENTIFIER                            { $$ = $1; }
     | MODULE_NAME                           { const ast::Type type = $1; $$ = type.module->name; }
     | VECTOR_TYPE                           { $$ = ast::typeName($1); }
+    | HANDLE_TYPE                           { $$ = ast::typeName($1); }
     | "float"                               { $$ = "float"; }
     | "double"                              { $$ = "double"; }
     | "bool"                                { $$ = "bool"; }
@@ -793,6 +808,8 @@ attribute_word
     | "module"                              { $$ = "module"; }
     | "this"                                { $$ = "this"; }
     | "param"                               { $$ = "param"; }
+    | "defer"                               { $$ = "defer"; }
+    | "_Defer"                              { $$ = "_Defer"; }
     ;
 
 // An attribute's arguments: numbers, a minus before any of them, and strings (C23's balanced tokens, of which FMinus
@@ -883,6 +900,7 @@ type
     | "int"                                 { $$ = ast::Type::Int; }
     | "void"                                { $$ = ast::Type::Void; }
     | VECTOR_TYPE                           { $$ = $1; }
+    | HANDLE_TYPE                           { $$ = $1; }
     | "poly" "float"                        { $$ = ast::Type::PolyFloat; }
     | "poly" "bool"                         { $$ = ast::Type::PolyBool; }
     | "poly" "double"                       {
@@ -995,7 +1013,7 @@ declaration
 
 declarators
     : declarator                            { $$.push_back($1); }
-    | declarators "," declarator            { $$ = $1; $$.push_back($3); }
+    | declarators "," declarator            { $$ = $1; $$.push_back($3); $$.back().comma = at(@2); }
     ;
 
 // C23's attributes after a declarator's name appertain to what it declares: a field's are the host's
@@ -1103,20 +1121,93 @@ unlabeled
     | "return" ";"                          { $$ = ast::Stmt{at(@1), ast::ReturnStmt{nullptr}}; }
     | ";"                                   { $$ = ast::Stmt{at(@1), ast::EmptyStmt{}}; }
     | "if" "(" expr ")" statement %prec THEN
-                                            { $$ = ast::Stmt{at(@1), ast::IfStmt{$3, ast::own($5), nullptr}}; }
+                                            { $$ = ast::Stmt{at(@1), ast::IfStmt{$3, ast::own($5), nullptr, {}}}; }
     | "if" "(" expr ")" statement "else" statement
-                                            { $$ = ast::Stmt{at(@1), ast::IfStmt{$3, ast::own($5), ast::own($7)}}; }
+                                            { $$ = ast::Stmt{at(@1), ast::IfStmt{$3, ast::own($5), ast::own($7), {}}}; }
+    | "if" "(" selection_head ")" statement %prec THEN
+                                            {
+                                                SelectionHead head = $3;
+                                                $$ = ast::Stmt{at(@1), ast::IfStmt{std::move(head.condition),
+                                                                                   ast::own($5), nullptr,
+                                                                                   std::move(head.init)}};
+                                            }
+    | "if" "(" selection_head ")" statement "else" statement
+                                            {
+                                                SelectionHead head = $3;
+                                                $$ = ast::Stmt{at(@1), ast::IfStmt{std::move(head.condition),
+                                                                                   ast::own($5), ast::own($7),
+                                                                                   std::move(head.init)}};
+                                            }
     | "while" "(" expr ")" statement        { $$ = ast::Stmt{at(@1), ast::WhileStmt{$3, ast::own($5)}}; }
     | "for" "(" for_init optional_expr ";" optional_expr ")" statement
                                             { $$ = ast::Stmt{at(@1), ast::ForStmt{$3, $4, $6, ast::own($8)}}; }
     | "break" ";"                           { $$ = ast::Stmt{at(@1), ast::BreakStmt{}}; }
     | "continue" ";"                        { $$ = ast::Stmt{at(@1), ast::ContinueStmt{}}; }
-    | "switch" "(" expr ")" statement       { $$ = ast::Stmt{at(@1), ast::SwitchStmt{$3, ast::own($5)}}; }
+    | "switch" "(" expr ")" statement       { $$ = ast::Stmt{at(@1), ast::SwitchStmt{$3, ast::own($5), {}}}; }
+    | "switch" "(" selection_head ")" statement
+                                            {
+                                                SelectionHead head = $3;
+                                                $$ = ast::Stmt{at(@1), ast::SwitchStmt{std::move(head.condition),
+                                                                                       ast::own($5),
+                                                                                       std::move(head.init)}};
+                                            }
     | "parallel" "for" "(" for_init optional_expr ";" optional_expr ")" statement
                                             {
                                                 $$ = ast::Stmt{at(@1), ast::ParallelForStmt{$4, $5, $7, ast::own($9)}};
                                             }
     | "parallel" block                      { $$ = ast::Stmt{at(@1), ast::ParallelBlockStmt{$2}}; }
+    | defer statement                       { $$ = ast::Stmt{at(@1), ast::DeferStmt{ast::own($2)}}; }
+    ;
+
+// TS 25755's keyword, and the spelling it encourages, which FMinus takes as a keyword too. Its statement is an
+// unlabeled one in the TS; a case or default label there parses, as clang parses it, and is the code generator's error:
+// a switch would jump into the deferred statement (ir/Statements.cpp).
+defer
+    : "defer"
+    | "_Defer"
+    ;
+
+// C2y's head of an if or a switch with a declaration (N3356, N3580): a declaration, its ; included, and the condition;
+// or one declarator with an initialiser, whose name is then the condition, as C2y rewrites `if (T x = e)` to
+// `if (T x = e; x)`. clang's errors for what C2y refuses: more than one declarator in that form, at the comma; none
+// with no initialiser, at the name; and a first clause that is no declaration, at its start.
+selection_head
+    : declaration expr                      { $$.init = $1; $$.condition = $2; }
+    | qualifier type declarators            {
+                                                std::vector<Declarator> declarators = $3;
+                                                if (declarators.size() > 1)
+                                                    parseContext.diagnostics.error(declarators[1].comma, "multiple "
+                                                                                   "declarations are not allowed");
+                                                declarators.resize(1);
+                                                Declarator& d = declarators.front();
+                                                if (!d.init && !d.hasList)
+                                                    parseContext.diagnostics.error(d.location, "variable declaration "
+                                                                                   "in condition must have an "
+                                                                                   "initializer");
+                                                const SourceLocation where = d.location;
+                                                std::string name = d.name;
+                                                $$.init = declarationsOf($1, $2, std::move(declarators), parseContext);
+                                                $$.condition = ast::makeExpr(where, ast::VariableExpr{std::move(name)});
+                                            }
+    | declaration qualifier type declarator {
+                                                // A second declaration: C2y's condition is an expression.
+                                                const bool isConst = $2;
+                                                parseContext.diagnostics.error(at(isConst ? @2 : @3),
+                                                                               "expected expression");
+                                                $$.init = $1;
+                                                $$.condition = ast::makeExpr(at(@4), ast::BoolExpr{false});
+                                            }
+    | expr ";" expr                         {
+                                                parseContext.diagnostics.error(at(@1), "first clause in condition "
+                                                                                       "must be a declaration");
+                                                $$.init.push_back(ast::Stmt{at(@1), ast::ExprStmt{$1}});
+                                                $$.condition = $3;
+                                            }
+    | ";" expr                              {
+                                                parseContext.diagnostics.error(at(@1), "first clause in condition "
+                                                                                       "must be a declaration");
+                                                $$.condition = $2;
+                                            }
     ;
 
 // The first clause of a for: a declaration (its ; included), an expression and ;, or just ;.

@@ -190,7 +190,7 @@
         },
         "keywords": {
             "patterns": [
-                { "name": "keyword.control.fminus", "match": "\\b(?:if|else|while|for|switch|case|default|break|continue|return|parallel)\\b" },
+                { "name": "keyword.control.fminus", "match": "\\b(?:if|else|while|for|switch|case|default|break|continue|return|parallel|defer|_Defer)\\b" },
                 { "name": "variable.language.this.fminus", "match": "\\bthis\\b" }
             ]
         },
@@ -199,7 +199,7 @@
                 { "name": "storage.modifier.fminus", "match": "\\b(?:const|restrict|poly|param)\\b" },
                 { "name": "keyword.operator.sizeof.fminus", "match": "\\bsizeof\\b" },
                 { "name": "storage.type.enum.fminus", "match": "\\benum\\b" },
-                { "name": "storage.type.fminus", "match": "\\b(?:void|float|double|int|bool|float2|float4|float8)\\b" }
+                { "name": "storage.type.fminus", "match": "\\b(?:void|float|double|int|bool|float2|float4|float8|http_response|http_request|http_server|json_doc|xml_doc|file_content|file_listing|fft_plan)\\b" }
             ]
         },
         "constants": {

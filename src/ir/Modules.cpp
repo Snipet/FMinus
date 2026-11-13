@@ -593,6 +593,11 @@ namespace fminus::ir::detail
             const Value pointer = lower(*call.object);
             if (pointer.failed && (!ast::isPointer(pointer.type) || pointer.type.pointee != ast::Kind::Module))
                 return recovery(ast::Type::Float);   // its own error says why (Value)
+            if (ast::isHandle(pointer.type))   // a struct the program never sees (Ast.h): clang's words
+            {
+                error(location, "incomplete definition of type " + quoted(ast::handleStruct(pointer.type.handle)));
+                return poison(ast::Type::Float);
+            }
             if (!ast::isPointer(pointer.type))
             {
                 error(location, "member reference type " + quoted(ast::typeName(pointer.type)) + " is not a pointer"

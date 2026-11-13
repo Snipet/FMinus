@@ -221,10 +221,14 @@ namespace fminus::ir::detail
                                },
                                [](const ast::EmptyStmt&) {},
                                [&](const ast::IfStmt& branch) {
-                                   expression(*branch.condition, Access::Kind::Read);
-                                   scoped([&] { statement(*branch.thenBranch); });
-                                   if (branch.elseBranch)
-                                       scoped([&] { statement(*branch.elseBranch); });
+                                   scoped([&] {   // C2y's declarations in its head, the statement's
+                                       for (const ast::Stmt& item : branch.init)
+                                           statement(item);
+                                       expression(*branch.condition, Access::Kind::Read);
+                                       scoped([&] { statement(*branch.thenBranch); });
+                                       if (branch.elseBranch)
+                                           scoped([&] { statement(*branch.elseBranch); });
+                                   });
                                },
                                [&](const ast::WhileStmt& loop) {
                                    expression(*loop.condition, Access::Kind::Read);
@@ -234,8 +238,12 @@ namespace fminus::ir::detail
                                [](const ast::BreakStmt&) {},
                                [](const ast::ContinueStmt&) {},
                                [&](const ast::SwitchStmt& branch) {
-                                   expression(*branch.value, Access::Kind::Read);
-                                   scoped([&] { statement(*branch.body); });
+                                   scoped([&] {
+                                       for (const ast::Stmt& item : branch.init)
+                                           statement(item);
+                                       expression(*branch.value, Access::Kind::Read);
+                                       scoped([&] { statement(*branch.body); });
+                                   });
                                },
                                [&](const ast::CaseStmt& label) {   // its value is a constant: it reads nothing
                                    if (label.body)
@@ -256,6 +264,9 @@ namespace fminus::ir::detail
                                    for (const ast::Stmt& task : block.tasks)
                                        scoped([&] { statement(task); });
                                },
+                               // What the deferred statement reaches, it reaches at the block's exits, as part of the
+                               // code: its accesses are the code's.
+                               [&](const ast::DeferStmt& deferred) { scoped([&] { statement(*deferred.body); }); },
                            },
                            stmt.node);
             }
@@ -611,6 +622,10 @@ namespace fminus::ir::detail
             if (std::holds_alternative<ast::EnumStmt>(task.node))
                 error(task.location, "a statement of a parallel block cannot declare an enumeration (its constants "
                                      "would end with it): declare it before the block");
+            if (std::holds_alternative<ast::DeferStmt>(task.node))
+                error(task.location, "a statement of a parallel block cannot be a defer statement (each statement is a "
+                                     "task, which would run it as soon as it began): defer it before the block, or "
+                                     "inside a statement's braces");
             Walker walker(regionSurroundings(
                 function_,
                 [this](const std::string& name) -> std::optional<ast::Type> {
@@ -752,7 +767,7 @@ namespace fminus::ir::detail
         llvm::Value* at = builder_.CreateLoad(i32, slot, name);
         builder_.CreateCondBr(builder_.CreateICmpSLT(at, body->getArg(2), "parallel.more"), bodyBlock, endBlock);
         builder_.SetInsertPoint(bodyBlock);
-        breakables_.push_back({Breakable::Kind::Region, nullptr, incBlock});
+        breakables_.push_back({Breakable::Kind::Region, nullptr, incBlock, deferScopes_.size()});
         lowerScoped(*loop.body);
         breakables_.pop_back();
         fallThrough(incBlock);
@@ -793,7 +808,7 @@ namespace fminus::ir::detail
             llvm::BasicBlock* task = newBlock("parallel.statement");
             which->addCase(builder_.getInt32(static_cast<std::uint32_t>(i)), task);
             builder_.SetInsertPoint(task);
-            breakables_.push_back({Breakable::Kind::Region, nullptr, nullptr});
+            breakables_.push_back({Breakable::Kind::Region, nullptr, nullptr, deferScopes_.size()});
             lowerScoped(block.tasks[i]);
             breakables_.pop_back();
             fallThrough(incBlock);

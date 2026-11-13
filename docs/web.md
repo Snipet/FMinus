@@ -16,20 +16,20 @@ runs, and the library answers everything else itself. [The server](#the-server) 
 ```c
 module Loader
 {
-    void* request;
+    http_response request;
     float table[2048];
     int length;
 
     void load(int preset)                                      // the host calls it off the audio thread
     {
         request = http_get("https://example.com/presets/%d.json", preset);
+        defer http_close(request);                             // however load ends
         if (http_wait(request, 10000) == 200)                  // blocks: refused in a nonblocking function
         {
-            void* doc = json_parse(http_body(request), http_size(request));
+            json_doc doc = json_parse(http_body(request), http_size(request));
+            defer json_free(doc);
             length = json_floats(doc, "/table", table, 2048);
-            json_free(doc);
         }
-        http_close(request);
     }
 };
 ```
@@ -95,8 +95,8 @@ fetches.
 
 | Builtin | Does | Effect |
 |---|---|---|
-| `void* http_get(url, ...)` | starts a GET of the URL and returns its request, a handle, at once | allocates |
-| `void* http_post(url, data, bytes, content_type, ...)` | starts a POST of `bytes` bytes at `data` (copied: the buffer is free again when it returns) | allocates |
+| `http_response http_get(url, ...)` | starts a GET of the URL and returns its request, a handle, at once | allocates |
+| `http_response http_post(url, data, bytes, content_type, ...)` | starts a POST of `bytes` bytes at `data` (copied: the buffer is free again when it returns) | allocates |
 | `int http_wait(r, timeout_ms)` | blocks until the request is done or `timeout_ms` has passed (0: not at all; negative: until done, which the policy's timeout bounds), and gives its status then, 0 if still pending | blocks |
 | `int http_status(r)` | 0 while pending, the HTTP status once a response arrived, or a failure (below) | wait-free |
 | `int http_size(r)`, `const void* http_body(r)` | the body's bytes and its address, once the status is an HTTP status (0 and null before, and after a failure); valid until `http_close`. A NUL follows the last byte, not counted | wait-free |
@@ -110,7 +110,11 @@ fetches.
   backslash (so no CR or LF: nothing a program writes adds a header to a request), its scheme `http` or `https`, and
   it carries no credentials (no `@` before its path); each mistake is an error at its byte. The content type is a
   literal too, printable ASCII, at most 255 bytes (empty: `application/octet-stream`).
-- **A request is an opaque `void*`**, as an FFT plan is. A refused request is a request too, its status already set:
+- **A request is an opaque `http_response`**, as an FFT plan is an `fft_plan`: C's handle, a pointer to a struct the
+  program never sees, which the compiler keeps apart from the other handles (`http_status(doc)` of a `json_doc` is an
+  error), while a `void*` converts to it and back, as in C, so a program that says `void*` compiles as before
+  ([extending.md](extending.md), recipe 44). `defer http_close(r);` closes it on every path out of its block. A
+  refused request is a request too, its status already set:
   `http_get` returns null only when memory ran out. A null handle does nothing and reads as a failed request:
   `http_status` and `http_wait` give `HTTP_INVALID`, `http_size` 0, `http_body` null, and `http_cancel` and
   `http_close` nothing.
@@ -353,7 +357,7 @@ the program's state:
 ```c
 module Synth
 {
-    void* server;
+    http_server server;
     float gain;
     float level;                                          // a meter process() keeps
 
@@ -361,7 +365,7 @@ module Synth
 
     void process(float* out, int n) [[clang::nonblocking]]
     {
-        for (void* r = http_next(server); r; r = http_next(server))     // wait-free: each request waiting, or none
+        for (http_request r = http_next(server); r; r = http_next(server))   // wait-free: each one waiting, or none
         {
             if (http_is(r, "POST /gain"))                                // a route literal, checked when compiled
             {
@@ -437,10 +441,10 @@ with `FMINUS_WEB`.
 
 | Builtin | Does | Effect |
 |---|---|---|
-| `void* http_listen()` | starts the program's server where its host's policy says, with the program's routes, and returns it at once. A program listens once: a second call returns the same server | allocates |
+| `http_server http_listen()` | starts the program's server where its host's policy says, with the program's routes, and returns it at once. A program listens once: a second call returns the same server | allocates |
 | `int http_port(server)` | the port it listens on (1 to 65535), or why it does not: `HTTP_REFUSED` (its host allowed no listen: the default), `HTTP_TRANSPORT` (the address could not be bound: taken, not this machine's, or a sandbox forbids it), `HTTP_CANCELLED` (closed, or the host stopped the program), `HTTP_FAILED` | wait-free |
-| `void* http_next(server)` | the oldest request waiting, now the caller's to answer, or null | wait-free |
-| `void* http_accept(server, timeout_ms)` | the same, waiting up to `timeout_ms` for one (0: not at all; negative: until one comes or the server closes); null at once for a server that does not listen | blocks |
+| `http_request http_next(server)` | the oldest request waiting, now the caller's to answer, or null | wait-free |
+| `http_request http_accept(server, timeout_ms)` | the same, waiting up to `timeout_ms` for one (0: not at all; negative: until one comes or the server closes); null at once for a server that does not listen | blocks |
 | `bool http_is(r, "METHOD /path/%d")` | whether the request is the route's: its method and its path, each `%d` a decimal number of the path; when it is, it keeps the numbers for `http_arg` | wait-free |
 | `int http_arg(r, i)` | the `i`-th number (from 0) the last `http_is` that matched took, or 0 | wait-free |
 | `float http_query_float(r, "name", fallback)`, `int http_query_int(r, "name", fallback)` | a number of the request's query (`?name=0.5`), or the fallback | wait-free |
@@ -467,9 +471,12 @@ with `FMINUS_WEB`.
   range give the fallback, so nothing a stranger types into a URL puts a NaN into a filter's state. An int is an
   optional `-` and digits whose value an `int` holds (`7.0` is not one). The range is the program's to check: a gain
   of 7 is a number.
-- **Handles know what they are.** A request made, a request received and a server are all `void*`, and each carries
-  its kind: a builtin given the wrong one does nothing and says `HTTP_INVALID` (or 0, or null). `http_close` of a
-  request the program received does nothing; `http_status` and `http_wait` of a server say `HTTP_INVALID`.
+- **Handles know what they are.** A request made, a request received and a server are an `http_response`, an
+  `http_request` and an `http_server`, and the compiler refuses one where another is wanted (`http_close` takes a
+  request made or a server, `http_size` and `http_body` a request made or received). One that reaches a builtin as a
+  `void*`, which converts to any, is checked again in the library, as it always was: each carries its kind, and a
+  builtin given the wrong one does nothing and says `HTTP_INVALID` (or 0, or null). `http_close` of a request the
+  program received does nothing; `http_status` and `http_wait` of a server say `HTTP_INVALID`.
 - **The effects** ([extending.md](extending.md), recipe 11): `http_listen` and `http_close` are refused in a
   `[[clang::nonallocating]]` function and in a `[[clang::nonblocking]]` one; `http_accept` blocks (a lock and a
   condition variable), refused in a nonblocking function and allowed in a nonallocating one; everything else is

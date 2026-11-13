@@ -480,7 +480,8 @@ namespace fminus
             {
                 std::string name;
                 std::string type;          // as FMinus writes it: "float", "double", "float4", "float[16]",
-                                           // "double[8]", "float[4][16]", "Osc", "Osc *"; a parameter's "param float"
+                                           // "double[8]", "float[4][16]", "Osc", "Osc *", a handle's "json_doc" (laid
+                                           // out as a void* is); a parameter's "param float"
                                            // (its slot). A "double" is 8 bytes, C++'s double, aligned to 8: a host
                                            // that reads fields by type reads one as a double, not as a float
                                            // (docs/extending.md, recipe 33)
@@ -958,7 +959,8 @@ namespace fminus
             struct Param
             {
                 std::string name;   // as declared: "x"; "this" for a method's instance; empty for one with no name
-                std::string type;   // as FMinus writes it: "float", "const float *", "Osc *", "void *"
+                std::string type;   // as FMinus writes it: "float", "const float *", "Osc *", "void *", a handle's
+                                    // "json_doc" (which takes what a "void *" takes)
                 Value::Kind kind = Value::Kind::Float;     // Bool, Int, Float, Double or Pointer
                 Value::Kind element = Value::Kind::Void;   // a Pointer's elements: Int, Float or Double; Void for a
                                                            // module's instances, or for void*, which takes any

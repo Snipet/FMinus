@@ -128,6 +128,8 @@ namespace fminus::ir::detail
     // metadata, which ir::webRequests reads.
     void Lowering::recordWebRequest(SourceLocation location, std::string_view method, const ast::StringExpr& literal)
     {
+        if (relowering_ > 0)
+            return;   // a deferred statement lowered again: recorded the first time (Statements.cpp)
         std::string pattern;
         const std::string& text = literal.value;
         for (std::size_t i = 0; i < text.size(); ++i)

@@ -28,7 +28,9 @@ on it, a document read by paths the compiler prepares, each number correctly rou
 made the same way; recipe 41 is the web library, an HTTP(S) client a program reaches only under its host's policy;
 recipe 42 is its server, a program's requests taken on the audio thread, wait-free, its routes literals the host
 lists before anything runs; and recipe 43 is the file interface, files a program reaches only through the folders its
-host maps, each directory opened beneath the last and compared by identity with the denied ones. Then the pitfalls
+host maps, each directory opened beneath the last and compared by identity with the denied ones; and recipe 44 is C's
+own again, the first step of a report on syntax for networked programs: a type for each kind of handle, TS 25755's
+`defer`, and C2y's `if` and `switch` with a declaration. Then the pitfalls
 those recipes ran into, and design notes for what comes next. [simd.md](simd.md) has recipes 7 to 9, for vectors.
 
 Recipes 1 to 4 are in the compiler now (`tanhf` and `%`; `bool` and its operators; `if`, `while` and `for`), and so are
@@ -41,11 +43,11 @@ sizes of constant expressions), recipe 29 (the loop budget), recipe 30 (bounds c
 recipe 32 (one error a mistake, enumerated types, `-Wswitch`), recipe 33 (`double`), recipe 34 (2-D arrays), recipe 35
 (field attributes), recipe 36 (calls by name), recipe 37 (code ranges, for a profiler), recipe 38 (string literals as
 builtins' arguments, bytes to numbers, and the build options of builtins), recipe 39 (the JSON parser, and paths
-the compiler prepares), recipe 40 (the XML parser), recipe 41 (the web library), recipe 42 (its server) and recipe 43
-(the file interface), so their sections describe how the code you have got there: read a section beside the files it
+the compiler prepares), recipe 40 (the XML parser), recipe 41 (the web library), recipe 42 (its server), recipe 43
+(the file interface) and recipe 44 (typed handles, `defer`, and `if` and `switch` with a declaration), so their sections describe how the code you have got there: read a section beside the files it
 names. Recipes 5 and 6, a runtime function and a pass, are not part of the language; they live in [recipes/](recipes/)
 as a patch, so you can apply them to see them work. None of these are sketches: each was applied to this repository, built with `-Werror`, and
-tested in the dev and asan presets, every test passing (recipes 38 to 43 in the release preset only: each says where).
+tested in the dev and asan presets, every test passing (recipes 38 to 44 in the release preset only: each says where).
 [architecture.md](architecture.md) describes the stages they touch.
 
 FMinus follows C. When a recipe has a semantic choice to make, it makes C's: conversions, short-circuiting, which
@@ -65,7 +67,8 @@ Most language features touch the same places, in this order:
 | 5 | `src/ir/` | its conversions and checks, and its lowering to LLVM IR, in the file its kind belongs to (`Lowering.h` lists them: types, functions, statements, expressions, calls, the math modes, vectors, memory, modules, effects, parallel regions, TBAA, denormals); a load or store of memory gets its type's tag (`tag`, recipe 17); a statement that holds code walks it in `Parallel.cpp`'s `Walker` too |
 | 6 | `src/runtime/` | if it needs C++ at run time, a runtime function (recipe 5); if a builtin calls it, its facts: in `kRuntimeFacts`, through `callRuntime` (recipe 19), or for a math builtin's, in `mathFunction` (`Math.cpp`, recipe 15) |
 | 7 | `src/jit/Call.cpp`, `src/support/Aot.cpp` | for a new type: whether a call by name, `Program::call` and `--run`, passes and returns it (`callType`'s `switch`, recipe 36), and whether an executable's `main` may take or return it (`addEntryPoint`) |
-| 8 | `tests/` | a dump in `FrontendTest.cpp`; results in `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `SwitchTest.cpp`, `EnumTest.cpp`, `IntTest.cpp`, `BitwiseTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `TableTest.cpp`, `TopLevelTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `HashTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`, `ParallelTest.cpp`, `DoubleTest.cpp`, `Array2DTest.cpp`, `FieldAttributeTest.cpp`, `StringTest.cpp`, `BytesTest.cpp`, `JsonTest.cpp` or `XmlTest.cpp` (their helpers are in `Compile.h`; a runtime function that must not allocate is counted with `HeapCalls.h`); IR or errors in `tests/lit/fminus/` |
+| 8 | `tests/` | a dump in `FrontendTest.cpp`; results in `CodeGenTest.cpp`, `ControlFlowTest.cpp`, `SwitchTest.cpp`, `EnumTest.cpp`, `IntTest.cpp`, `BitwiseTest.cpp`, `PointerTest.cpp`, `HeapTest.cpp`, `EffectTest.cpp`, `ArrayTest.cpp`, `TableTest.cpp`, `TopLevelTest.cpp`, `ModuleTest.cpp`, `FftTest.cpp`, `HashTest.cpp`, `VectorTest.cpp`, `PolyTest.cpp`, `ParallelTest.cpp`, `DoubleTest.cpp`, `Array2DTest.cpp`, `FieldAttributeTest.cpp`, `StringTest.cpp`, `BytesTest.cpp`, `JsonTest.cpp`, `XmlTest.cpp`, `HandleTest.cpp`,
+`DeferTest.cpp` or `SelectionDeclarationTest.cpp` (their helpers are in `Compile.h`; a runtime function that must not allocate is counted with `HeapCalls.h`); IR or errors in `tests/lit/fminus/` |
 | 9 | `examples/` | a program that uses it, and a line in `tests/lit/fminus/examples.test` that runs it |
 | 10 | `editors/vscode/syntaxes/fminus.tmLanguage.json` | a new keyword, type or builtin, so VSCode highlights it (its README says where) |
 | 11 | `README.md` | the language table, and the deviations from C if any |
@@ -1893,7 +1896,7 @@ transforms on it there, and frees it at the end:
 ```c
 module Spectrum
 {
-    void* plan;
+    fft_plan plan;                                             // a void* before recipe 44: either works
 
     void init(int n) { plan = fft_create(n); }                 // allocates: off the audio thread
 
@@ -6780,6 +6783,7 @@ looks the `Callable` up first.
 | `array(const float*)` | `float *` | `Mismatch`: "is 'const float *', not 'float *'", C's "discards qualifiers". A `float*` for a `const float *` is fine |
 | `array(int*)` | `float *` | `Mismatch`: "is 'int *', not 'float *'" |
 | any pointer | `void *`, `const void *` | taken, as C converts it (a `const` one only for a `const void *`) |
+| any pointer but a `const` one | a handle, `json_doc` and the rest (recipe 44) | taken, as for a `void *` |
 | `instance(memory, module)`, `module` this Program's `Osc` (`program->module("Osc")`) | `Osc *` | taken: the module is the host's word for how the memory is laid out, which `call()` cannot see |
 | an instance of another Program's `Osc`, of the same source or not | `Osc *` | `Mismatch`: "is an instance of another program's module 'Osc'". Its own fields may match this one's while a module it holds by value, in an array or through a pointer does not (two `Line`s of one size, their fields swapped), and comparing layouts deeply would be a second definition of a module's type; a host that keeps an instance across a recompile, knowing its layout is the same, passes it with the new Program's `Module` |
 | a null instance | a method's `this` | `Mismatch`: "is a null 'Osc *': a method runs on an instance". Another pointer may be null, as in C |
@@ -7298,7 +7302,7 @@ document, a preset or a wavetable pack, and the program reads what it needs by p
 each number correctly rounded:
 
 ```c
-void* doc = json_parse(data, bytes);                       // allocates; null for a text that is no JSON
+json_doc doc = json_parse(data, bytes);                    // allocates; null for a text that is no JSON
 float cutoff = json_float(doc, "/filter/cutoff", 1000.0f); // a JSON Pointer (RFC 6901); the fallback when absent
 int   voices = json_int(doc, "/master/voices", 8);
 int   wave   = json_choice(doc, "/osc/%d/wave", k, "sine", "saw", "square");   // which literal, or -1
@@ -7344,8 +7348,8 @@ that file and nothing else.
 
 | Builtin | Gives | Effect |
 |---|---|---|
-| `json_parse(const void* data, int bytes)` | a document, a `void*`: null for a text that is no JSON, larger than `FMINUS_JSON_MAX_BYTES` (64 MiB), or nested deeper than `FMINUS_JSON_MAX_DEPTH` (1024) | allocates |
-| `json_free(void* doc)` | frees it (null: nothing) | allocates |
+| `json_parse(const void* data, int bytes)` | a document, a `json_doc` (recipe 44; a `void*` before it): null for a text that is no JSON, larger than `FMINUS_JSON_MAX_BYTES` (64 MiB), or nested deeper than `FMINUS_JSON_MAX_DEPTH` (1024) | allocates |
+| `json_free(json_doc doc)` | frees it (null: nothing) | allocates |
 | `json_float(doc, path, ..., float fallback)`, `json_double(..., double fallback)` | the number at the path, correctly rounded; past the type's range an infinity, below its least subnormal a zero | wait-free |
 | `json_int(doc, path, ..., int fallback)` | the number, when it is an integer an `int` holds | wait-free |
 | `json_bool(doc, path, ..., bool fallback)` | `true` or `false` | wait-free |
@@ -7359,11 +7363,14 @@ nothing, or the value is not of its kind, so a program never checks before it re
 once, that every table had its size. A null document is an empty one, as a null FFT plan does nothing. There is no
 way to get a string out: `json_choice` turns one into an index, an enumeration's value, which is all FMinus can hold.
 
-Their table entries are `RuntimeBuiltin`s, as recipe 38's are, with more `Param`s (a document is a `const void*`,
-json_free's handle a `void*`, the fallbacks a `float`, a `double` or a `bool`) and a `Result`, so `lowerRuntimeBuiltin`
-returns what each gives. A `bool` goes to the runtime as an `int`, 0 or 1, both ways: C's `bool` in a register is an
-ABI detail (`zeroext i1`) that an `int` avoids. A prototype with the builtin's own types (`void* json_parse(const void*
-data, int bytes);`) declares nothing new; `paramType` and `resultType` are what `declare` compares it with.
+Their table entries are `RuntimeBuiltin`s, as recipe 38's are, with more `Param`s (a read's document a `json_doc`,
+`Param::JsonRead`, which a `const void*` converts to too, json_free's `Param::JsonDoc`, the fallbacks a `float`, a
+`double` or a `bool`) and a `Result`, so `lowerRuntimeBuiltin` returns what each gives. (Before recipe 44 a document was
+a `const void*` and json_free's handle a `void*`; a program that says so still compiles.) A `bool` goes to the runtime
+as an `int`, 0 or 1, both ways: C's `bool` in a register is an ABI detail (`zeroext i1`) that an `int` avoids. A
+prototype with the builtin's own types (`json_doc json_parse(const void* data, int bytes);`, or `void*` for the
+document, as before) declares nothing new; `paramType`, `otherType` and `resultType` are what `declare` compares it
+with.
 
 ### Paths, prepared when the program is compiled
 
@@ -7530,7 +7537,7 @@ The second family of recipe 39's kind. A host that keeps its presets as XML hand
 program reads it as it would read JSON:
 
 ```c
-void* xml = xml_parse(data, bytes);                               // allocates; null for a text that is no XML
+xml_doc xml = xml_parse(data, bytes);                             // allocates; null for a text that is no XML
 float c  = xml_float(xml, "/preset/filter/@cutoff", 1000.0f);     // an attribute; the fallback when absent
 int   k  = xml_count(xml, "/preset/osc");                         // how many <osc> the preset has
 int   w  = xml_choice(xml, "/preset/osc[%d]/@wave", i, "sine", "saw");   // the i-th <osc>, from 0
@@ -7592,8 +7599,8 @@ the filter works.
 
 | Builtin | Gives | Effect |
 |---|---|---|
-| `xml_parse(const void* data, int bytes)` | a document, a `void*`: null for a text that is no XML document (malformed, no root element or two), larger than 64 MiB, or nested deeper than 1024 | allocates |
-| `xml_free(void* doc)` | frees it (null: nothing) | allocates |
+| `xml_parse(const void* data, int bytes)` | a document, an `xml_doc` (recipe 44; a `void*` before it): null for a text that is no XML document (malformed, no root element or two), larger than 64 MiB, or nested deeper than 1024 | allocates |
+| `xml_free(xml_doc doc)` | frees it (null: nothing) | allocates |
 | `xml_float(doc, path, ..., float fallback)`, `xml_double(..., double fallback)` | the value as a number, correctly rounded | wait-free |
 | `xml_int(doc, path, ..., int fallback)` | the value when it is an integer an `int` holds | wait-free |
 | `xml_bool(doc, path, ..., bool fallback)` | `true` for `true` or `1`, `false` for `false` or `0` | wait-free |
@@ -7747,10 +7754,10 @@ The third family of recipe 38's kind, and the one the strings were for. A progra
 thread, from a URL its host allows:
 
 ```c
-void* r = http_get("https://example.com/presets/%d.json", k);   // a request, at once; refused unless allowed
+http_response r = http_get("https://example.com/presets/%d.json", k);   // at once; refused unless allowed
 if (http_wait(r, 10000) == 200)                                 // blocks: not in a nonblocking function
 {
-    void* doc = json_parse(http_body(r), http_size(r));
+    json_doc doc = json_parse(http_body(r), http_size(r));
     gain = json_float(doc, "/gain", 1.0f);
     json_free(doc);
 }
@@ -7811,7 +7818,8 @@ built the third class, `Blocks`, for `http_wait`, which is the first real builti
 And a result, **`Result::Bytes`**, a `const void*`: `http_body`'s, which the program may only read.
 
 A null handle is the library's to handle: every function takes null and does nothing (`http_status` gives
-`HTTP_INVALID`). There is no null pointer constant in FMinus, but a `void*` parameter or field may be one.
+`HTTP_INVALID`). There is no null pointer constant in FMinus, but an `http_response` parameter or field may be one,
+and one declared without an initialiser is.
 
 ### What the library's functions touch, told to LLVM
 
@@ -7951,7 +7959,7 @@ two blocks:
 ```c
 void process(float* out, int n) [[clang::nonblocking]]
 {
-    for (void* r = http_next(server); r; r = http_next(server))    // the requests waiting, or none
+    for (http_request r = http_next(server); r; r = http_next(server))   // the requests waiting, or none
     {
         if (http_is(r, "POST /osc/%d/gain"))                         // a route literal, checked here
         {
@@ -8213,11 +8221,11 @@ folder its host maps, off the audio thread, and plays it from memory:
 ```c
 int load()                                               // off the audio thread
 {
-    void* kit = file_list("kit/*.f32");                  // the folder "kit" is wherever the host says
+    file_listing kit = file_list("kit/*.f32");           // the folder "kit" is wherever the host says
     const int status = file_status(kit);
     for (int i = 0; i < file_count(kit) && i < 8; ++i)
     {
-        void* f = file_read_nth(kit, i);                 // the whole file, in memory: refused in a nonblocking function
+        file_content f = file_read_nth(kit, i);          // the whole file, in memory: refused in a nonblocking function
         length[i] = bytes_floats(file_data(f), file_size(f), table[i], 4096);
         file_close(f);
     }
@@ -8447,6 +8455,271 @@ executable links nothing new: the code is in `libfminus_runtime.a`.
   policy read nothing, and, with writing, that a take is saved byte for byte and refused in a folder granted for
   reading alone.
 
+## Recipe 44: typed handles, `defer`, and `if` and `switch` with a declaration
+
+*In the compiler. Code: the handles, the `HANDLE_TYPE` token and its eight words (`src/frontend/Lexer.l`,
+`Parser.y`), `Kind::Handle`, `ast::Handle`, `Type::handle`, `Type::handleType`, `isHandle`, `canBeElement`,
+`handleName` and `handleStruct` (`src/frontend/Ast.h`, `Ast.cpp`), their type, size, tag and conversions
+(`src/ir/Types.cpp`, `Tbaa.cpp`), their operators and the incomplete type's errors (`handleOperands` and `lvalue` in
+`Memory.cpp`, `binary` and `lowerConditional` in `Expressions.cpp`, `lowerMethodCall` in `Modules.cpp`), the builtins'
+handle `Param`s and `Result`s, `otherType` and the plan's type (`src/ir/Lowering.h`, `Calls.cpp`), a builtin's
+prototype (`Functions.cpp`), and a call by name (`jit::callType`, `src/jit/Call.cpp`). `defer`: its two tokens and its
+rule, `DeferStmt` and its dump, `Diagnostics::mark` and `rewind` (`src/frontend/Diagnostics.h`), and its lowering in
+`src/ir/Statements.cpp` (`lowerBlock`, `openDefers`, `closeDefers`, `reachDefer`, `runDefers`, `lowerDeferred`,
+`deferAround`; `Deferred`, `DeferScope` and `Breakable::Kind::Defer` in `Lowering.h`), the function body's block
+(`Functions.cpp`), a parallel block's refusal and the race checks' walk (`Parallel.cpp`), and the host's records left
+alone while a deferred statement is lowered again (`relowering_`: `Web.cpp`, `WebServer.cpp`, `Files.cpp`). `if` and
+`switch` with a declaration: `selection_head` and `Declarator::comma` (`Parser.y`), `IfStmt::init` and
+`SwitchStmt::init`, their lowering (`lowerIf`, `lowerSwitch`) and their walk (`Parallel.cpp`). Tests:
+`tests/unit/HandleTest.cpp`, `DeferTest.cpp`, `SelectionDeclarationTest.cpp`, three cases of `FrontendTest.cpp`,
+`tests/library/HandleTest.cpp`, `tests/lit/fminus/handles.fm`, `defer.fm` and `selection-declarations.fm`. The
+examples that hold handles say their types (`remote/`, `fetch/`, `kit/`, `wavetable/`, `convolver/`). Built with
+`-Werror` and tested in the `release` preset on Linux x86-64 only, in two trees, the default and one with the web
+library, its server, file writing and absolute names, every test passing but the one this machine cannot run (the smoke
+test of LLVM's own `opt`, as for recipes 38 to 43); not yet in `dev` or `asan`, nor on macOS or Windows.
+[research/syntax/README.md](research/syntax/README.md) is the report; this is its first step, its §3.*
+
+Three of C's features, none of them FMinus's invention and none needing a change to the runtime: a type for each kind
+of handle, C's opaque handles in place of `void*`; ISO/IEC TS 25755's `defer`; and C2y's declaration in an `if`'s or a
+`switch`'s head. Together they make a loader's cleanup one line a resource, on every path:
+
+```c
+module Loader
+{
+    float gain;
+
+    int load(int preset)                                         // off the audio thread
+    {
+        http_response r = http_get("https://example.com/presets/%d.json", preset);
+        defer http_close(r);                                     // on every way out of load
+        if (http_wait(r, 10000) != 200)
+            return -1;
+        if (json_doc doc = json_parse(http_body(r), http_size(r)))   // C2y: the condition is doc
+        {
+            defer json_free(doc);
+            gain = json_float(doc, "/gain", 1.0f);
+            return 0;
+        }
+        return -2;                                               // doc is out of scope here
+    }
+};
+```
+
+`http_size(doc)` there would be an error where it was `HTTP_INVALID` at run time, and the program would mean the same to
+a C compiler that has the TS and C2y's declarations (clang's `-fdefer-ts`, and its `-std=c2y` once a release carries
+them), given a header of the builtins' prototypes and eight typedefs.
+
+### Handles: a kind of type, eight of them
+
+**Each word is a type, as `float4` is**: `http_response` (a request the program made), `http_request` (one it
+received), `http_server`, `json_doc`, `xml_doc`, `file_content`, `file_listing` and `fft_plan`. The scanner returns each
+as `HANDLE_TYPE`, a token whose value is its `ast::Type`, as `VECTOR_TYPE`'s is; `type` takes it, and so does
+`attribute_word`, where C23 reads a keyword as a name. Being rules of the scanner, they are keywords that no macro may
+be named (`macroNameError` reads a name with the scanner), and no variable either: of the tree's 786 programs the
+report measured, none used one (its §2).
+
+**In the tree, a handle is a kind with a field beside it**: `Kind::Handle`, and `Type::handle`, an `ast::Handle`, which
+says which. Eight kinds would have been eight cases in every `switch` over a kind; one kind and a field are one, and
+`-Wswitch` found each place that needed it (`typeOf`, `sizeOf`, `tbaaTypeName`, `typeName`, `callType`). The field
+rides along wherever a kind does: `pointerTo`, `arrayOf` and `pointee` carry it, `==` and `samePointee` compare it, so an
+array of `json_doc` is not an array of `xml_doc`. `isArithmetic` is false for a handle, so every operator that takes
+numbers refuses one with its own error, and `canPointTo` stays without it: a handle is a pointer, and FMinus has no
+pointers to pointers.
+
+**C's handle is a pointer to an incomplete struct**, `typedef struct fminus_json_doc* json_doc;`, and FMinus's does what
+C lets one do, in clang's words where it refuses:
+
+| The program writes | FMinus |
+|---|---|
+| `json_doc d = json_parse(...)`, `void* v = d;`, `d = v;` | a `ptr`, as the `void*` was; a `void*` converts to any handle and any handle to a `void*` (`convertPointer`) |
+| `xml_doc x = d;`, `xml_float(d, ...)` | C's warning, FMinus's error: "incompatible pointer types initializing 'xml_doc' with an expression of type 'json_doc'" |
+| `d = c;` of a `const void* c` | "... discards qualifiers", as C has it |
+| `d == e`, `d != v`, `if (d)`, `!d`, `d && e`, `c ? d : v` | a pointer comparison, a test against null, a `void*` when `?:` meets one |
+| `d < e` | "invalid operands to binary expression ('json_doc' and 'json_doc')": C orders two pointers of a kind, FMinus refuses, since their order means nothing |
+| `d + 1`, `d++`, `d - e` | "arithmetic on a pointer to an incomplete type 'struct fminus_json_doc'" |
+| `d[0]`, `*d`, `d->size` | "subscript of pointer to incomplete type ...", "incomplete type ... where a complete type is required", "incomplete definition of type ..." |
+| `json_doc* p;`, `&d`, a parameter `json_doc docs[]` | "FMinus has pointers to float, ..., not to 'json_doc'": a pointer to a pointer |
+| `json_doc docs[8];`, a field `http_response pending[4][4];` | an array of `ptr`s, zeroed, `docs[i]` a handle |
+
+`handleStruct` names the struct as C's typedef would, for the four messages that name it. The arrays are the one
+place a pointer to a handle exists: an array's name stands for a pointer to its first element, which `element()` and
+`pointerArithmetic` (`Memory.cpp`) now take for a handle, though no variable can hold one. `checkType`'s message for an
+array of what cannot be an element names handles among what can, and `void*` stays what cannot ("FMinus has no arrays
+of pointers").
+
+**In memory a handle is a pointer**: `typeOf` is `ptr`, `sizeOf` 8, and its TBAA tag is "any pointer" (recipe 17), so
+a field that was a `void*` and is now an `http_server` aliases as it did. A declaration without an initialiser stores
+null, as a pointer's does.
+
+**The builtins say which handle each takes and gives.** `Param::Handle` and `Param::Document` became a parameter for
+each kind (`Response`, `Request`, `Server`, `JsonDoc`, `XmlDoc`, `FileContent`, `FileListing`) and three for the
+builtins that take either of two: `Message` (`http_size` and `http_body`: a request made or received), `Closable`
+(`http_close`: a request made or a server) and `FileHandle` (`file_status` and `file_close`); `Result::Pointer` became a
+result for each kind. `paramType` gives the first of an either-parameter's two, `otherType` the second, and
+`lowerRuntimeBuiltin` passes the argument as whichever it is; a third kind is C's error with both named ("passing
+'json_doc' to parameter of type 'http_response' or 'http_request'"). A JSON or XML read's document is
+`Param::JsonRead` or `XmlRead`: a document, which a `const void*` converts to as well, since that is what a document was
+before (the read only reads it: C would declare it `const struct fminus_json_doc*`). The FFT's plan, outside the table
+(`lowerFft`), is an `fft_plan`. A prototype of a builtin may say the handle, or `void*` as before, or either of an
+either-parameter's two (`declare`, `Functions.cpp`). Nothing in the runtime or the web library changed: their functions
+take and give pointers, as they did, and still check a handle's kind, for one that reaches them as a `void*`.
+
+**The host sees what it saw for a `void*`.** `jit::callType` passes a handle as a pointer, so `call()` describes a
+handle parameter as a `Pointer` to `Void` that takes any non-`const` pointer, `--run` refuses one as it refuses a
+`void*`, and a handle result is no value `call()` returns; `Module::Field` gives a handle field's type by its name
+(`"json_doc"`, `"json_doc[4]"`, element `"json_doc"`). The documentation's hosts change nothing.
+
+### `defer`: a rewrite when the program is compiled
+
+The TS's rules, which FMinus takes whole where it has what they speak of (it has no `goto` and no `longjmp`):
+
+| | TS 25755 |
+|---|---|
+| Form | `_Defer` and a statement, its deferred block; FMinus spells it `defer` too, which the TS encourages |
+| When | reaching it runs nothing; the statement runs when control leaves the enclosing block, at its end or by `return`, `break` or `continue` |
+| Block | the nearest: a compound statement, or an `if`'s or a loop's body without braces, which C11 6.8p3 makes a block of its own, so `for (...) defer f(i);` runs `f` at the end of each iteration |
+| Order | the reverse of the order reached; leaving several blocks, the innermost's first |
+| Values | nothing captured: the statement reads its variables when it runs; a `return`'s value is computed and converted first |
+| Refused | `return`, and a `break` or `continue` that would leave the statement; a `switch` jumping into the statement, or past a `defer` of a block it jumps into |
+
+**The grammar is one rule**, `unlabeled: defer statement`, with `defer: "defer" | "_Defer"` (two tokens, so that an
+attribute keeps the spelling it was written in). The TS says an unlabeled statement; clang parses any statement and
+reports a `case` label there as the jump it is, and so does FMinus. `DeferStmt` holds the statement, and dumps as
+`(defer s)`.
+
+**Each block keeps the defers reached in it.** `lowerBlock` (a `{ }`), `lowerScoped` (a branch, a loop's body, a
+switch's) and `define` (a function's body) open a `DeferScope` and close it, as they open and close a scope of names.
+`reachDefer` records a `Deferred`: the statement, and what it will see wherever it is lowered, the names of its block
+declared so far (a copy of the innermost scope) and the loops and switches around it (how many). An exit lowers what
+it leaves: `runDefers(from)` walks the `DeferScope`s from the innermost down to `from`, each one's defers last first,
+and `lowerDeferred` lowers each statement there, in its own block, with the scopes after its defer's set aside and its
+block's scope as it was at the defer, so `{ defer f(x); float x = 2; }` reads the `x` outside. A block's end runs its
+own when control reaches it (`closeDefers`); `return` runs all of the function's, after its value is converted
+(`lowerReturn`); `break` and `continue` run those of the blocks inside their target, which each `Breakable` now knows
+(`defers`: how many `DeferScope`s were open where it began). With no `goto`, every path to an exit has reached the
+same defers, so this needs no flag and no list at run time: the code of each deferred statement is at each exit, as
+clang emits it.
+
+```llvm
+if.then:                                    ; return -1; after defer close_(1); defer close_(2);
+  call void @close_(i32 2)
+  call void @close_(i32 1)
+  ret i32 -1
+if.end:                                     ; return k;
+  %k2 = load i32, ptr %k.addr, align 4, !tbaa !2
+  call void @close_(i32 2)
+  call void @close_(i32 1)
+  ret i32 %k2
+```
+
+At `-O2`, LLVM merges the copies when it can (`tests/lit/fminus/defer.fm`).
+
+**Lowered once a place, reported once.** A deferred statement is lowered at every exit of its block, and FMinus checks
+as it lowers, so a mistake in it would be reported at each. The first lowering of each `DeferStmt` (`deferLowered_`)
+reports its errors, records its calls for the effects (`calls_`) and its literals for the host (URLs, routes, files);
+each later one is the same code again, so `lowerDeferred` drops what it reported (`Diagnostics::mark` and `rewind`) and
+the calls it recorded, and `relowering_` keeps the three recorders from recording again. A defer whose statement no exit
+lowered, because its block ended in an error's jump, is lowered once anyway, for its errors, in a block nothing reaches
+(`closeDefers`). The effects need nothing else: a deferred call is a call of its function, at the place it is written,
+so `defer free(p);` in a `[[clang::nonblocking]]` function is the error `free(p);` is, once.
+
+**The constraints are clang's errors** (`-fdefer-ts`, clang 22's `err_jump_out_of_defer_stmt` and
+`err_switch_into_protected_scope`). A deferred statement being lowered is a `Breakable` of its own, `Kind::Defer`, at
+the defer's place, on top of the loops and switches around its defer (those after it are set aside too):
+
+| The program writes | FMinus, at |
+|---|---|
+| `defer return;` | "cannot return from a defer statement", the `return` |
+| `for (;;) { defer break; }`, `defer continue;` | "cannot break out of a defer statement", "cannot continue loop outside of enclosing defer statement" (a loop inside the deferred statement may break and continue as it likes) |
+| `defer break;` with no loop or switch at all | "'break' statement not in loop or switch statement", which clang checks first |
+| `switch (k) { defer f(); case 1: ... }` | "cannot jump from switch statement to this case label", the label, and a note, "jump bypasses defer statement", at each defer reached in a block of the switch's body that holds the label, the last first |
+| `switch (k) { default: defer { case 1: ...; } }` | the same error, its note "jump enters a defer statement" |
+| `parallel { defer f(); ... }` | FMinus's: each statement of the block is a task, which would run it as soon as it began |
+
+`lowerLabel` finds the second kind of jump from the `DeferScope`s open since its switch began (`Switch::defers`); the
+first from the `Breakable` around the label. A `defer` inside a statement's braces in a `parallel { }`, or in a
+`parallel for`'s body, is that task's or that iteration's, and runs at its end, by `continue` too; `return` and `break`
+out of a region were errors already, and run nothing. The race checks walk a deferred statement as part of the code
+around it (`Parallel.cpp`'s `Walker`).
+
+**What a deferred statement ending in an error's `return` leaves**: a block that already ends, which the exit's own
+`ret` or `br` must not follow. `runDefers` and `lowerDeferred` move on to a fresh block when it does, as
+`lowerStatement` does after a `return`, or the verifier reports a terminator in the middle of a block.
+
+**The loop budget and bounds checks are not exits of a block.** A call that one of them stops returns at once, as it
+did, and runs no deferred statement on the way, as the TS says of `exit`, an abort and a signal. They could not: both are
+made in the optimised code (recipes 29 and 30), the budget's checks put at the loops' branches back after every other
+pass, a failed bounds check's trap made a return there too, and each caller made to return after the call; by then the
+blocks the deferred statements belonged to are gone, merged and moved, and code to run there would change what the
+optimiser decided, which those passes are built not to do. So what such a statement would have released (a request,
+a document) stays held: a stopped call is a program's bug, whose instance its host re-initialises or discards (recipe
+29). Whether to change that is open.
+
+### `if` and `switch` with a declaration
+
+C2y's (N3356, as N3473 and N3580 refine it), and C++17's before it: the head of an `if` or a `switch` may declare,
+`if (int n = count(); n > 0)`, and its names are in scope from their declaration to the end of the whole statement,
+the `else` branch included. Its third form, one declarator with an initialiser, `if (json_doc doc = json_parse(...))`,
+is the second with the declared name for its condition, which N3580 says it is "exactly as if" written:
+`if (json_doc doc = json_parse(...); doc)`.
+
+**The grammar** is `selection_head`, in the parentheses of `if` and `switch` beside the plain expression:
+`declaration expr` (the declaration ends at its `;`, and may declare several names), or `qualifier type declarators`,
+whose action keeps the first declarator and makes its name the condition, a `VariableExpr` at the name. Bison takes it
+with no conflict (428 states, against 400 before this recipe and 408 with the handles and `defer`), because after
+`qualifier type declarators` the next token decides: `)` ends the third form, `;` a declaration, `,` another
+declarator. Three more alternatives exist only for clang's errors, each also without a conflict:
+
+| The program writes | clang's error, at |
+|---|---|
+| `if (int a = 1, b = 2)` | "multiple declarations are not allowed", the comma (`Declarator::comma`, which `declarators` now records) |
+| `if (int c)` | "variable declaration in condition must have an initializer", the name |
+| `if (int d = 1; int e = 2)` | "expected expression", the second declaration |
+| `if (x = 1; x)`, `if (; x)` | "first clause in condition must be a declaration", the clause |
+
+N3580's constraint, on storage-class specifiers, has nothing to check: FMinus has none.
+
+**The tree** keeps the declarations as `IfStmt::init` and `SwitchStmt::init` (empty for a plain head), the condition as
+the condition, and dumps them before it: `(if (decl int n (call count x)) (> n 0) ...)`. **The lowering** opens a scope
+around the whole statement, lowers the declarations there, then the statement as before, and closes it: a name of the
+head is gone after the statement ("use of undeclared identifier"), and one of a branch's block may shadow it. A
+switch's head is declared before its jump, outside the body's scopes, so no label's `sw.zero` zeroes it (recipe 27). No
+`DeferScope` is needed: a `defer` in a branch is the branch's, and has run before the statement ends.
+
+### What it changes for programs and hosts
+
+- **Programs** that say `void*` for a handle compile as they did, to the same IR, unchecked as they were. Error
+  messages that named a builtin's `void *` parameter name its handle now (`passing 'float' to parameter of
+  incompatible type 'json_doc'`), the FFT's overloads say `fft_plan`, and the message for an array of what FMinus
+  cannot keep in one lists handles. `defer`, `_Defer` and the eight handle words are keywords: a program that named a
+  variable so must rename it (none in the tree did).
+- **Hosts** see a handle where they saw a `void*`, by its name.
+- **The VS Code grammar** (0.20.0) colours `defer`, `_Defer` and the handle types.
+
+### Tests
+
+- `tests/unit/HandleTest.cpp` (`[handles]`): through the JIT, an `fft_plan` in a local, a parameter, a result, a
+  field, a 1-D and a 2-D array, null until set, compared and tested, chosen by `?:`, and to and from a `void*`; with
+  the JSON parser, a `json_doc` read and freed, and the same program with `void*` and `const void*` documents and
+  prototypes of the builtins written both ways; the errors of the table above, each once at its column, a `void*`
+  array still refused, the wrong kind in a builtin's argument, an either-parameter's message, and a prototype that
+  conflicts.
+- `tests/unit/DeferTest.cpp` (`[defer]`): the order within a block and across nested ones, TS 25755's examples 2, 4
+  and 5, a `return` whose value a deferred statement then changes (and a conversion before it), `break` and `continue`
+  from loops and from a switch's block, an unreached `defer`, an unbraced `if`'s and loop's body, a deferred block that
+  declares and reads the names its defer saw, a `defer` closing a `json_doc` on every path of a function with three
+  exits, a `parallel for` iteration's, each constraint's error at its column, an error and a nonblocking function's
+  `free` reported once though lowered at several exits, and a non-void function's missing `return` still found.
+- `tests/unit/SelectionDeclarationTest.cpp` (`[selection]`): both forms for `if` and `switch`, several names, the
+  `else` branch's view, shadowing, an `fft_plan` as the declared variable, a `defer` in a branch, and the names gone
+  after the statement.
+- `tests/unit/FrontendTest.cpp`: each form's dump, the handle words as types, as attributes' names and as no macro's
+  name, `defer` with a label and with a declaration, and clang's errors for C2y's refusals.
+- `tests/library/HandleTest.cpp`: a handle field and arrays of them as `module()` describes them, and a handle
+  parameter as `callable()` describes it and `call()` passes it.
+- `tests/lit/fminus/handles.fm`, `defer.fm` and `selection-declarations.fm`: the IR at `-O0` (a handle's tag, the
+  copies of a deferred call at each exit, a declaration stored before its condition) and at `-O2`, and errors.
+
 ## Pitfalls
 
 Each of these was hit while writing the language or its recipes. [simd.md](simd.md) has the vector ones.
@@ -8478,6 +8751,10 @@ Each of these was hit while writing the language or its recipes. [simd.md](simd.
 | The JIT crashes on a `void` value, or the verifier on a `void` phi | `PoisonValue` of `void`, or a `?:` that joins two `void` calls | `poison(Type::Void)` has no IR; `lowerConditional` builds no phi for `void` |
 | An invalid program compiles, to `undef`, with no error (`float x = c ? f() : g();` of two `void` calls) | a stand-in with no error behind it was failed (recipe 32), and every use of a failed value is silent | `poison()` is not failed; only `lower`'s count and `recovery()`, where an operand's or a declaration's error is behind it, fail a value |
 | A program compiles with a frozen parameter and is refused with a knob | a decision taken on the IR, where a frozen parameter's read is a constant (`branchOn` on a `ConstantInt`) | decide on the tree (`folds()`), and take only the value from the IR |
+| The verifier: "Terminator found in the middle of a basic block" at a `return` after a `defer return;` | the deferred statement ended the block with its error's `ret`, and the exit added its own | after the deferred statements, a fresh block when the last one ended its own (`runDefers`, recipe 44) |
+| An error in a deferred statement is reported once for each `return` | it is lowered at every exit of its block, and lowering checks | the first lowering reports; the others `Diagnostics::rewind` what they reported (`lowerDeferred`) |
+| `json_float(d, ...)` of a `const void* d` "discards qualifiers" once documents are `json_doc`s | a read's document was a `const void*`, and C converts none to a pointer to a struct that is not `const` | the reads take a `const void*` as well (`Param::JsonRead`, `XmlRead`) |
+| "arithmetic on a pointer to an incomplete type 'fminus::ast::Stmt'" in `<vector>`, after adding a field to a node | `std::vector<Stmt> init = {};`: a default member initialiser instantiates the vector where `Stmt` is incomplete | no initialiser, as `ForStmt::init` has none; the parser's aggregates pass `{}` |
 | The compiler crashes on `p->y`, and `--emit ast` prints a `OnePole*` as `? *` | a pointer built from a type's kind, `pointerTo(type.kind, ...)`, lost its module | pass the `Type`: `pointerTo(type, ...)` keeps `module` |
 | A C++ reference differs from FMinus in the last bit, though the formulas match | clang's default `-ffp-contract=on` fuses `y + k * (x - y)` written as one expression into a multiply-add; FMinus never fuses | build the reference with `-ffp-contract=off` (the examples are), or round once a statement (`ModuleTest.cpp`'s `next`) |
 | A double accumulator drifts as a float would | what it adds was computed in float before it widened: `float step = 1.0 / rate;`, then `t += step;` (the constant's arithmetic ends at the float `step`) | compute it where it goes to the double, `t += 1.0 / rate;`, whose arithmetic has the double `t` (recipe 33) |

@@ -313,6 +313,8 @@ namespace fminus::ir::detail
                                 + quoted(ast::typeName(rhs.type)) + ")");
             return poison(ast::Type::Int);
         }
+        if (ast::isHandle(lhs.type) || ast::isHandle(rhs.type))
+            return handleOperands(location, op, lhs, rhs);      // Memory.cpp
         if (ast::isPointer(lhs.type) || ast::isPointer(rhs.type))
             return pointerArithmetic(location, op, lhs, rhs);   // Memory.cpp
         ast::Type type = ast::Type::Float;
@@ -335,7 +337,7 @@ namespace fminus::ir::detail
         if (isComparison(op))
             return other != nullptr && ast::isVector(other->type) ? ast::maskOf(ast::arithmeticOf(other->type))
                                                                   : ast::Type::Bool;
-        if (other != nullptr && ast::isPointer(other->type))
+        if (other != nullptr && (ast::isPointer(other->type) || ast::isHandle(other->type)))
             return other->type;
         if (other != nullptr && ast::isArithmetic(other->type))
             return ast::arithmeticOf(other->type);
@@ -513,13 +515,25 @@ namespace fminus::ir::detail
             builder_.SetInsertPoint(endBlock);
             return poison(ast::isModule(thenValue.type) ? thenValue.type : elseValue.type);   // its fields still read
         }
-        const bool pointers = ast::isPointer(thenValue.type) || ast::isPointer(elseValue.type);
+        const bool pointers = ast::isPointer(thenValue.type) || ast::isPointer(elseValue.type)
+                              || ast::isHandle(thenValue.type) || ast::isHandle(elseValue.type);
         ast::Type type = thenValue.type;
         bool meet = thenValue.type == elseValue.type;
         if (thenVoid != elseVoid)
             error(location, std::string(thenVoid ? "left" : "right") + " operand to ? is void, but "
                                 + (thenVoid ? "right" : "left") + " operand is of type "
                                 + quoted(ast::typeName(thenVoid ? elseValue.type : thenValue.type)));
+        else if (pointers && !meet && (ast::isHandle(thenValue.type) || ast::isHandle(elseValue.type)))
+        {
+            // A handle and a void*, which the handle converts to (C's); const if the void* is.
+            const Value& other = ast::isHandle(thenValue.type) ? elseValue : thenValue;
+            meet = ast::isPointer(other.type) && other.type.pointee == ast::Kind::Void;
+            if (meet)
+                type = other.type;
+            else
+                error(location, "incompatible operand types (" + quoted(ast::typeName(thenValue.type)) + " and "
+                                    + quoted(ast::typeName(elseValue.type)) + ")");
+        }
         else if (pointers && !meet)
         {
             // Two pointers to one type, or one a void*, which the other converts to (C's); const if either is.
@@ -538,7 +552,7 @@ namespace fminus::ir::detail
             meet = commonType(location, thenValue.type, elseValue.type, type);
         if (!meet)
             type = ast::Type::Float;
-        if (!ast::isPointer(type))
+        if (!ast::isPointer(type) && !ast::isHandle(type))
             type.enumeration = 0;   // two of an enumerated type give its integer type, as C's conversions do
         builder_.SetInsertPoint(thenEnd);
         llvm::Value* thenIR = meet ? convert(thenValue, type, location, Use::Initializing) : poison(type).ir;

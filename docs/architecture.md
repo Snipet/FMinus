@@ -57,6 +57,8 @@ see the whole flow. For a host, the public API strings parse, lower and the JIT 
 - The sort matters because the code generator reports in two passes (declarations, then bodies), so its errors
   arrive out of order. Source order is the order the text is read in: an included file's lines sort where its
   `#include` is. `errors()` keeps the order of reporting, for tests that care about it.
+- `mark()` and `rewind(mark)` drop what was reported since a point: the code generator lowers a deferred statement
+  again at each exit of its block (`defer`, below), and its errors, reported the first time, are reported once.
 
 Errors are values, not exceptions. The parser stops at the first syntax error (Bison has no error recovery rules
 yet), but the code generator carries on after each error with a placeholder value (below). So one run of `fminus`
@@ -202,7 +204,8 @@ on it without the code generator.
     `MethodCallExpr` (`m.tick(x)`), `ThisExpr`;
   - statements: `DeclStmt`, `ExprStmt`, `ReturnStmt`, `BlockStmt`, `EmptyStmt`, `IfStmt`, `WhileStmt`, `ForStmt`,
     `BreakStmt`, `ContinueStmt`, `SwitchStmt`, `CaseStmt` and `DefaultStmt` (a label, with a body only as a labelled
-    statement), `EnumStmt` (an `Enum` in a block), `ParallelForStmt`, `ParallelBlockStmt`.
+    statement), `EnumStmt` (an `Enum` in a block), `ParallelForStmt`, `ParallelBlockStmt`, `DeferStmt` (TS 25755's
+    `defer s`). An `IfStmt`'s and a `SwitchStmt`'s `init` are C2y's declarations in their head, none without.
 - **Enumerations.** An `Enum` is a tag (or none) and its `Enumerator`s, a name and a value as written (or none). The
   program holds the top level's and the modules' in `Program::enums`, in source order, each with how many functions
   and modules come before it and the module it is in. A module's `Field` records how many of its module's
@@ -213,14 +216,17 @@ on it without the code generator.
 - **Types.** A `Type` is a `Kind` and, for a pointer, what it points to and whether that is `const`; for an array,
   its elements and how many; for a module, which (a pointer to its `Module`). The kinds are `void`, `float`, `bool`,
   `int`, the vectors `float2`, `float4`, `float8`, their lane masks `bool2`, `bool4`, `bool8`, `poly float` and
-  `poly bool`, whose width the target decides, `Pointer`, `Module` and `Array`. `Type::Float` and the rest name the
+  `poly bool`, whose width the target decides, `Pointer`, `Module`, `Array` and `Handle`, one of the runtime's
+  objects, which `handle` says (`http_response`, `json_doc`, ...: C's opaque handles, each a ptr in LLVM; a pointer
+  or an array whose elements are handles carries it too). `Type::Float` and the rest name the
   types that are only a kind, and a `Kind` converts to its `Type`, so `type == Type::Float` reads as it says;
   `Type::pointerTo(Kind::Float, true)` is `const float*`, `Type::arrayOf(Kind::Float, 16)` is `float[16]` (in the
   tree an array's count is 0, its declaration's size the expression that gives it). A 2-D array's elements are rows:
   its pointee is `Array`, and `rowKind` and `rowCount` say what a row is, so `float[4][16]` is an array of 4 rows of
   16 floats, and the pointer its name stands for, `float (*)[16]`, a pointer to rows. Helpers answer the questions the
-  rules ask: `lanes`, `isVector`, `isMask`, `isPoly`, `isPointer`, `isModule`, `isArray`, `pointee` (a row, for a 2-D
-  array's), `hasRows`, `elementOf`, `samePointee`, `canPointTo`, `isArithmetic`, `vectorOf`, `maskOf`, `arithmeticOf`
+  rules ask: `lanes`, `isVector`, `isMask`, `isPoly`, `isPointer`, `isModule`, `isArray`, `isHandle`, `pointee` (a
+  row, for a 2-D array's), `hasRows`, `elementOf`, `samePointee`, `canPointTo`, `canBeElement`, `isArithmetic`,
+  `vectorOf`, `maskOf`, `arithmeticOf`
   ([simd.md](simd.md)).
 - **Modules.** A `Module` is a name, its `Field`s (a name, a type and attributes each, `AttributeArg`s the numbers and
   strings of each; a parameter's, `param float cutoff;`, is marked) and its methods' names. Its methods are `Function`s
@@ -262,7 +268,7 @@ they lower:
 | `CodeGen.cpp` | `ir::lower()`, the constructor, and the passes: where the parts combine, the file's declarations in source order |
 | `Types.cpp` | FMinus's types as LLVM's (`typeOf`, `lanes`), the conversions (`convert`, `convertPointer`, `commonType`), errors and poison values (`poison`, and `recovery` after an error) |
 | `Functions.cpp` | declarations and prototypes (`declare`), a method's `this` once its module is laid out (`describeThis`), libm's prototypes' attributes (`describeLibm`), bodies and parameters (`define`), stack slots and scopes (`find`, which captures a variable for a parallel region, `lookup`, which does not, and `named`, C++'s lookup in a method: the blocks', the module's members, the file's) |
-| `Statements.cpp` | blocks, declarations, `return`, `if`, `while`, `for`, `switch` and its labels (`lowerSwitch`, `lowerLabel`; a jump past a declaration zeroes it, `bypass`), `break` and `continue` (`Breakable`: loops, switches and parallel regions, none of which a jump leaves or enters); a loop's `llvm.loop.mustprogress` when its condition is not a constant expression (`isConstant`, `mustProgress`); a condition that folds to a constant branches one way (`folds`, `branchOn`); a redefinition's error by the kinds of the two names (`redefinition`); a local's or a constant's attributes refused (`refuseAttributes`) |
+| `Statements.cpp` | blocks, declarations, `return`, `if`, `while`, `for`, `switch` and its labels (`lowerSwitch`, `lowerLabel`; a jump past a declaration zeroes it, `bypass`), C2y's declarations in an `if`'s or a `switch`'s head, `break` and `continue` (`Breakable`: loops, switches, parallel regions and deferred statements, none of which a jump leaves or enters); `defer` (`reachDefer`, `runDefers`, `lowerDeferred`: each block's defers reached so far, `DeferScope`, whose deferred statements each exit lowers where it leaves the block, the first lowering reporting their errors and the others none); a loop's `llvm.loop.mustprogress` when its condition is not a constant expression (`isConstant`, `mustProgress`); a condition that folds to a constant branches one way (`folds`, `branchOn`); a redefinition's error by the kinds of the two names (`redefinition`); a local's or a constant's attributes refused (`refuseAttributes`) |
 | `Constants.cpp` | C's integer constant expressions, folded over the tree as FMinus computes (`integerConstant`, `fold`): a case's value, an enumerator's, an array's size (`sized`; a parameter's, `checkSizes`); enumerations (`declareEnum`), their constants bound in the block's scope or the file's (`fileScope_`), and a name's lookup as one (`enumerator`); the top level's constants (`defineConstant`), constant globals of the file's scope, their initialisers lowered as a function's would be (`atTopLevel`); a name of the file's that is a function's or a module's too (`fileNameClash`) |
 | `Expressions.cpp` | the expression `std::visit` (`lower`), constants, operators (`binary`, `arithmetic`; the bitwise ones on ints, `isBitwise`), `&&` and `\|\|`, `?:`, casts, assignment, `++` and `--` |
 | `Calls.cpp` | the builtin tables, calls, the runtime's other builtins (`kRuntimeBuiltins`, `lowerRuntimeBuiltin`: `bytes_floats`, `bytes_pcm16`, those that take strings, a build option's: the JSON and XML parsers', and the web library's `http_*`, which call `fminus_web` rather than the runtime), reductions, `poly_lanes` and `poly_index`, `poly_load` and `poly_store`, the heap's `malloc`, `calloc` and `free`, the FFT's `fft_*` (`lowerFft`, on the runtime's), `hash` and `randf` (to `Hash.cpp`), and `ir::builtins()`; the heap's and the FFT's runtime calls through `callRuntime`, whose declaration says what the function does (`kRuntimeFacts`, `describeRuntime`) |
@@ -795,14 +801,15 @@ pivots, so the float code computes what the reference computes, operation for op
   (`-z force-bti`, say) would be.)
 - **Semantics follow C unless a deviation is documented.** The README lists the deviations: `float` and `int` are the
   only arithmetic types, an unsuffixed `1.5` is a `float`, pointers point to six types and convert only through `void*`
-  or by adding `const`, the heap's memory is aligned and zeroed, `%` works on floats, calls may precede definitions,
-  uninitialised variables are 0 (one a switch's jump passes too), an enumerated type is `int` (or its fixed type),
-  the top level holds constants and no variables, falling off a non-void function's end is an error, a broken function
-  effect is an error, C's strict aliasing is a little stricter (allocated memory keeps one type, there is no character
-  type, a vector is its elements' type), the math builtins' results are their math mode's (by default one result for a
-  float wherever it is computed), subnormals are flushed if the host asks, threads are `parallel` regions, structured
-  and checked for what would race, and `main` returns a `float` or a `bool` and takes floats. As in C11 under clang, a
-  loop whose condition is not a constant may be assumed to end, and a heap block the program never uses may be removed.
+  or by adding `const`, a handle type is a keyword, `defer` is TS 25755's and an `if`'s declaration C2y's, the heap's
+  memory is aligned and zeroed, `%` works on floats, calls may precede definitions, uninitialised variables are 0 (one a
+  switch's jump passes too), an enumerated type is `int` (or its fixed type), the top level holds constants and no
+  variables, falling off a non-void function's end is an error, a broken function effect is an error, C's strict
+  aliasing is a little stricter (allocated memory keeps one type, there is no character type, a vector is its elements'
+  type), the math builtins' results are their math mode's (by default one result for a float wherever it is computed),
+  subnormals are flushed if the host asks, threads are `parallel` regions, structured and checked for what would race,
+  and `main` returns a `float` or a `bool` and takes floats. As in C11 under clang, a loop whose condition is not a
+  constant may be assumed to end, and a heap block the program never uses may be removed.
 - **The runtime stays free of LLVM and real-time safe.** It runs inside the audio thread's call tree. The pool's
   `fminus_rt_parallel_for` is too: it waits for nothing but the chunks it handed out, never for the pool, and its
   system calls, one for each sleeping thread the region has a seat for, wake threads without blocking; making and

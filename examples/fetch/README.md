@@ -48,7 +48,7 @@ server with `kill %1`.
 #if defined(__FMINUS_WEB__) && defined(__FMINUS_JSON__)
 module Download
 {
-    void* request;
+    http_response request;
 
     void start(int port, int pack)
     {

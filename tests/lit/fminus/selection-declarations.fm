@@ -1,0 +1,52 @@
+// C2y's if and switch with a declaration in their head: the declaration is a local of its own, stored before the
+// condition is computed, and the third form's condition is the declared variable's value, loaded and tested, as if it
+// were written `if (int n = count(); n)`. Using the name after the statement is clang's error.
+// RUN: sed '/^\/\/ ERRORS$/,$d' %s | fminus - -O0 | FileCheck %s
+// RUN: sed -n '/^\/\/ ERRORS$/,$p' %s | not fminus - 2>&1 | FileCheck %s --check-prefix=ERR --implicit-check-not=error:
+
+int count(int x);
+
+int head(int x)
+{
+    if (int n = count(x); n > 2)
+        return n;
+    if (int m = count(x))
+        return m;
+    switch (int k = count(x))
+    {
+    case 1:
+        return k;
+    }
+    return 0;
+}
+
+// CHECK-LABEL: define i32 @head(i32 %x)
+// CHECK:         [[N:%.*]] = call i32 @count(i32
+// CHECK-NEXT:    store i32 [[N]], ptr %n
+// CHECK-NEXT:    [[READ:%.*]] = load i32, ptr %n
+// CHECK-NEXT:    %cmp = icmp sgt i32 [[READ]], 2
+// CHECK-NEXT:    br i1 %cmp, label %if.then, label %if.end
+// CHECK:       if.end:
+// CHECK:         [[M:%.*]] = call i32 @count(i32
+// CHECK-NEXT:    store i32 [[M]], ptr %m
+// CHECK-NEXT:    [[TEST:%.*]] = load i32, ptr %m
+// CHECK-NEXT:    %tobool = icmp ne i32 [[TEST]], 0
+// CHECK-NEXT:    br i1 %tobool, label %if.then{{[0-9]+}}, label %if.end{{[0-9]+}}
+// CHECK:         [[K:%.*]] = call i32 @count(i32
+// CHECK-NEXT:    store i32 [[K]], ptr %k
+// CHECK-NEXT:    [[VALUE:%.*]] = load i32, ptr %k
+// CHECK-NEXT:    switch i32 [[VALUE]], label %sw.epilog [
+// CHECK-NEXT:      i32 1, label %sw.bb
+// CHECK-NEXT:    ]
+
+// ERRORS
+int after(int x)
+{
+    if (int n = x; n > 0)
+        x = n;
+    else
+        x = -n;
+    return n;
+}
+
+// ERR: <stdin>:8:12: error: use of undeclared identifier 'n'

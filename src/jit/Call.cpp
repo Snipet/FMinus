@@ -142,6 +142,7 @@ namespace fminus::jit
         case ast::Kind::Double:
             return CallType::Double;
         case ast::Kind::Pointer:
+        case ast::Kind::Handle:   // C's pointer to a struct the program never sees: a void* to a host
             return CallType::Pointer;
         case ast::Kind::Float2:
         case ast::Kind::Float4:

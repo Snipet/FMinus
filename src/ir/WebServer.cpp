@@ -399,6 +399,10 @@ namespace fminus::ir::detail
             else
                 pattern += text[i];
         }
+        if (std::ranges::find(webRoutes_, text) == webRoutes_.end())
+            webRoutes_.push_back(text);
+        if (relowering_ > 0)
+            return;   // a deferred statement lowered again: recorded the first time (Statements.cpp)
         llvm::LLVMContext& context = module_.getContext();
         llvm::Type* i32 = llvm::Type::getInt32Ty(context);
         llvm::NamedMDNode* routes = module_.getOrInsertNamedMetadata(kWebRoutesMetadata);
@@ -407,8 +411,6 @@ namespace fminus::ir::detail
                       llvm::MDString::get(context, diagnostics_.file(location.file).name),
                       llvm::ConstantAsMetadata::get(llvm::ConstantInt::getSigned(i32, location.line)),
                       llvm::ConstantAsMetadata::get(llvm::ConstantInt::getSigned(i32, location.column))}));
-        if (std::ranges::find(webRoutes_, text) == webRoutes_.end())
-            webRoutes_.push_back(text);
     }
 
     // What http_listen passes the library: the program's web context (Web.cpp), and its route table, which

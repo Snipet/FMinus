@@ -10,7 +10,7 @@
 #if defined(__FMINUS_WEB__) && defined(__FMINUS_JSON__)
 module Download
 {
-    void* request;
+    http_response request;
 
     // Off the audio thread: starts fetching pack `pack` from the server at 127.0.0.1:`port`, and returns at once.
     void start(int port, int pack)

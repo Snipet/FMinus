@@ -340,8 +340,8 @@ TEST_CASE("2-D arrays' errors are clang's", "[codegen][array2d]")
              "test.fm:2:63: error: 'e' declared as an array with a negative size\n"
              "test.fm:3:20: error: invalid application of 'sizeof' to an incomplete type 'float[][3]'\n"
              "test.fm:3:41: error: array has incomplete element type 'float[]'\n"
-             "test.fm:3:62: error: FMinus has arrays of float, double, int, float2, float4, float8 and modules, not of "
-             "'bool'\n"
+             "test.fm:3:62: error: FMinus has arrays of float, double, int, float2, float4, float8, modules "
+             "and handles, not of 'bool'\n"
              "test.fm:3:96: error: array size is negative\n"
              "test.fm:7:12: error: incompatible pointer types initializing 'float *' with an expression of type "
              "'float (*)[3]'\n"
@@ -349,8 +349,8 @@ TEST_CASE("2-D arrays' errors are clang's", "[codegen][array2d]")
              "test.fm:9:13: error: cannot assign to variable 't' with const-qualified type 'const float[2][3]'\n"
              "test.fm:10:16: error: FMinus has pointers to float, double, int, float2, float4, float8, void and "
              "modules, not to 'float[3]'\n"
-             "test.fm:11:10: error: FMinus has arrays of float, double, int, float2, float4, float8 and modules, not "
-             "of 'bool'\n"
+             "test.fm:11:10: error: FMinus has arrays of float, double, int, float2, float4, float8, modules and "
+             "handles, not of 'bool'\n"
              "test.fm:12:17: error: array is too large: FMinus's arrays have at most 2^30 elements, and this one has "
              "2147483648\n");
     // An initialiser list's errors, where the excess value or the brace is; after a row's size's own error, the list
