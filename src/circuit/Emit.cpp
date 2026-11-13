@@ -513,11 +513,15 @@ namespace fminus::circuit
     bool isFMinusKeyword(std::string_view name)
     {
         static constexpr auto kWords =
-            std::to_array<std::string_view>({// keywords (src/frontend/Lexer.l)
+            std::to_array<std::string_view>({// keywords and the types' words (src/frontend/Lexer.l, in its order;
+                                             // CircuitTest.cpp checks each word the scanner makes a token of is here)
                                              "float", "double", "const", "return", "bool", "int", "void", "restrict",
-                                             "sizeof", "float2", "float4", "float8", "poly", "true", "false", "if",
+                                             "sizeof", "float2", "float4", "float8", "poly", "http_response",
+                                             "http_request", "http_server", "json_doc", "xml_doc", "file_content",
+                                             "file_listing", "fft_plan", "char", "string", "true", "false", "if",
                                              "else", "while", "for", "break", "continue", "switch", "case", "default",
-                                             "enum", "parallel", "module", "this", "param",
+                                             "enum", "parallel", "module", "this", "param", "defer", "_Defer",
+                                             "serve", "route", "reply", "json", "when", "within",
                                              // builtins (src/ir/Calls.cpp), and main, a program's entry
                                              "fabsf", "sqrtf", "sinf", "cosf", "expf", "logf", "floorf", "fminf",
                                              "fmaxf", "tanhf", "tanf", "sqrt", "fabs", "floor", "fmin", "fmax", "fma",
