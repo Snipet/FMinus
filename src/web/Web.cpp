@@ -1104,10 +1104,13 @@ namespace fminus::web
 #endif
         }
 
+#if FMINUS_HAS_WEB_SERVER
+        // http_close's: its only caller, and a server's only in a build with one.
         void stopServer(Context::State& state)
         {
             endClosingServer(beginClosingServer(state));
         }
+#endif
     } // namespace
 
 #if FMINUS_HAS_WEB_SERVER
