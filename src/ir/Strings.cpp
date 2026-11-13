@@ -198,8 +198,20 @@ namespace fminus::ir::detail
                                {{literal.at[wrong.offset], "a format here takes %d, an int, and %%, a percent sign",
                                  {}}});
         std::vector<llvm::Value*> values;
-        for (const ast::Expr* arg : ints)
+        bool extraFine = true;   // the arguments past the last place, lowered for their own errors alone
+        for (std::size_t k = 0; k < ints.size(); ++k)
         {
+            const ast::Expr* arg = ints[k];
+            if (k >= scan.places.size())
+            {
+                // No place reads it, so it has no type to be wrong in (clang checks an argument against its
+                // conversion, and there is none): its own errors, and then "data argument not used" if it has none.
+                // A string literal is C's char*, which a variadic argument may be.
+                if (!isString(*arg))
+                    extraFine = !lower(*arg).failed && extraFine;
+                values.push_back(poison(ast::Type::Int).ir);
+                continue;
+            }
             // C passes a variadic argument as it is, promoted: an int (an enumeration's, a bool's 0 or 1) is one, and
             // anything else is not what %d reads, clang's -Wformat, which FMinus refuses.
             if (isString(*arg))   // C's char array, passed as a char*
@@ -226,9 +238,12 @@ namespace fminus::ir::detail
             error(literal.at[scan.places[ints.size()] + 1], "more '%' conversions than data arguments");   // at d
             fine = false;
         }
-        else if (ints.size() > scan.places.size() && scan.errors.empty())   // clang counts one an error was about
+        else if (ints.size() > scan.places.size())
         {
-            error(begin(*ints[scan.places.size()]), "data argument not used by format string");
+            // clang says it of a call whose arguments are all well formed; one with an error of its own has had its
+            // one error.
+            if (scan.errors.empty() && extraFine)
+                error(begin(*ints[scan.places.size()]), "data argument not used by format string");
             fine = false;
         }
         if (!fine)

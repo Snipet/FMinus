@@ -7171,7 +7171,7 @@ w`), then the conversion:
 | `"%f"`, `"%5d"`, `"%ld"`, `"%s"` | "invalid conversion specifier 'f'" (`'5d'`, `'ld'`, `'s'`), at the byte after the `%`, and the note: C's specifiers that are not a plain `%d`, which clang takes and FMinus has no meaning for, in clang's words for one it would not take |
 | `"ab%"`, `"%q"`, `"%5"`, `"%l"` | "incomplete format specifier", at the `%`: the text ends before a conversion (`q` is a length modifier, BSD's `long long`) |
 | fewer ints than places | "more '%' conversions than data arguments", at the `d` of the first place without one |
-| more ints than places | "data argument not used by format string", at the first one left over (none when the format had an error: clang counts an int an invalid place was to take) |
+| more ints than places | "data argument not used by format string", at the first one left over (none when the format had an error: clang counts an int an invalid place was to take; nor when one left over has an error of its own, which is its one error). One left over is no type error, whatever it is: no place reads it |
 | a float, a pointer, a literal | "format specifies type 'int' but the argument has type 'float'" (`'char *'` for a literal), at the argument |
 
 An `int`, an enumeration's value and a `bool` (0 or 1) are what `%d` reads, as C promotes them for a variadic

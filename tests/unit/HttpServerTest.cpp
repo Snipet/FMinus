@@ -277,6 +277,11 @@ TEST_CASE("a reply's format is printf's %d, %g, %.Ng, %s and %%, checked as clan
           == "test.fm:1:65: error: more '%' conversions than data arguments\n");
     CHECK(errorsOf("int f(void* r, int x) { return http_reply_text(r, 200, \"\", \"%d\", x, x); }\n")
           == "test.fm:1:69: error: data argument not used by format string\n");
+    // One left over is "not used" whatever it is, once; one with an error of its own has that error alone.
+    CHECK(errorsOf("int f2(void* r, int x) { return http_reply_text(r, 200, \"\", \"%d\", x, \"x\"); }\n")
+          == "test.fm:1:70: error: data argument not used by format string\n");
+    CHECK(errorsOf("int f3(void* r, int x) { return http_reply_text(r, 200, \"\", \"%d\", x, nope); }\n")
+          == "test.fm:1:70: error: use of undeclared identifier 'nope'\n");
     CHECK(errorsOf("int g(void* r, double x) { return http_reply_text(r, 200, \"\", \"%.18g\", x); }\n")
           == "test.fm:1:65: error: a reply's %.Ng takes a precision N of 1 to 17\ntest.fm:1:65: " + note);
     CHECK(errorsOf("int h(void* r, double x) { return http_reply_text(r, 200, \"\", \"x=%f\", x); }\n")

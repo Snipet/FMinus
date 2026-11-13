@@ -439,6 +439,7 @@ namespace fminus::ir::detail
                                  {}}});
         const ast::Type real = ast::Type::Double;
         std::vector<llvm::Value*> converted;
+        bool extraFine = true;   // the values past the last place, lowered for their own errors alone
         for (std::size_t k = 0; k < values.size(); ++k)
         {
             const ast::Expr& arg = *values[k];
@@ -469,6 +470,8 @@ namespace fminus::ir::detail
             }
             const Value value = wantsReal ? lowerAs(arg, real) : lower(arg);
             fine = fine && !value.failed;
+            if (!placed)
+                extraFine = extraFine && !value.failed;
             if (!placed || value.failed)
             {
                 converted.push_back(poison(real).ir);
@@ -495,9 +498,12 @@ namespace fminus::ir::detail
             error(at(scan.places[values.size()].offset + 1), "more '%' conversions than data arguments");
             fine = false;
         }
-        else if (values.size() > scan.places.size() && scan.errors.empty())
+        else if (values.size() > scan.places.size())
         {
-            error(begin(*values[scan.places.size()]), "data argument not used by format string");
+            // clang says it of a call whose arguments are all well formed; one with an error of its own has had its
+            // one error.
+            if (scan.errors.empty() && extraFine)
+                error(begin(*values[scan.places.size()]), "data argument not used by format string");
             fine = false;
         }
         if (!fine)
